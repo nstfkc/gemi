@@ -1,0 +1,172 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["driverAdapters"]
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Organization {
+  id          String  @id @default(cuid())
+  name        String
+  description String?
+  domain      String?
+
+  allowSameDomain      Boolean @default(false)
+  autoAcceptSameDomain Boolean @default(false)
+
+  createdAt DateTime @default(now())
+
+  Account                Account[]
+  OrganisationInvitation OrganisationInvitation[]
+  Host                   Host[]
+  Product                Product[]
+}
+
+model OrganisationInvitation {
+  id             String       @id @default(cuid())
+  email          String
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  role           String?      @default("USER") // USER, ADMIN, OWNER
+
+  status    String   @default("PENDING") // PENDING, ACCEPTED, REJECTED
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Account {
+  id             String       @id @default(cuid())
+  name           String
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  role           String       @default("USER") // USER, ADMIN, OWNER
+
+  User   User   @relation(fields: [userId], references: [id])
+  userId String
+
+  status String @default("INACTIVE") // ACTIVE, INACTIVE
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([organizationId, userId])
+}
+
+model User {
+  id       String    @id @default(cuid())
+  email    String    @unique
+  name     String?
+  password String?
+  accounts Account[]
+
+  globalRole String   @default("USER") // USER, ADMIN, SUPERADMIN
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+model Product {
+  id          String  @id @default(cuid())
+  name        String
+  description String?
+  image       String?
+
+  sku String
+
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+  organizationId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  Appointment  Appointment[]
+  HostProducts HostProducts[]
+}
+
+model HostProducts {
+  id String @id @default(cuid())
+
+  hostId    String
+  productId String
+
+  Host    Host    @relation(fields: [hostId], references: [id])
+  Product Product @relation(fields: [productId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model HostAddress {
+  id String @id @default(cuid())
+
+  lat Float
+  lng Float
+
+  street  String
+  city    String
+  state   String?
+  country String
+  zip     String
+  Host    Host[]
+}
+
+model Host {
+  id String @id @default(cuid())
+
+  name        String
+  email       String
+  phone       String
+  description String?
+  address     HostAddress @relation(fields: [hostAddressId], references: [id])
+
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  organizationId String
+
+  hostAddressId String
+  Appointment   Appointment[]
+  HostProducts  HostProducts[]
+}
+
+model Visitor {
+  id String @id @default(cuid())
+
+  firstName String
+  lastName  String
+  email     String
+  phone     String
+  zipCode   String
+
+  communityLetterAccepted Boolean @default(false)
+
+  Appointment Appointment[]
+
+  @@unique([email, phone, zipCode])
+}
+
+model Appointment {
+  id String @id @default(cuid())
+
+  visitorId String
+  visitor   Visitor @relation(fields: [visitorId], references: [id])
+
+  hostId String
+  host   Host   @relation(fields: [hostId], references: [id])
+
+  product Product @relation(fields: [productId], references: [id])
+
+  status Int @default(0) // 0 - pending, 1 - confirmed by host, 2 - cancelled by host, 3 - cancelled by visitor, 4 - completed, 5 - rescheduled, 6 - rejected, 7 - cancelled by admin, 8 - processed (host is paid)
+
+  date                DateTime
+  alternativeDate     DateTime
+  preferredTimeWindow String // morning, afternoon, evening
+
+  productId String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
