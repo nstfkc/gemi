@@ -1,3 +1,3 @@
-import { startDevServer } from "../dist/server";
+import { startDevServer } from "../server/dev";
 
 startDevServer();

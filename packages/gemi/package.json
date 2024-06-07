@@ -13,24 +13,21 @@
     "typescript": "^5.3.3"
   },
   "bin": {
-    "gemi": "./bin/gemi"
+    "gemi": "./dist/bin/gemi"
   },
   "exports": {
-    "./http": "./dist/http/index.js",
-    "./client": "./dist/client/index.js",
-    "./server": "./dist/server/index.js"
+    "./http": "./dist/http/index.js"
   },
   "files": [
-    "bin/**/*",
     "dist/**/*"
   ],
   "private": false,
   "module": true,
   "scripts": {
     "lint": "eslint . --max-warnings 0",
-    "build": "bun ./scripts/build.ts",
+    "build": "bun run build:core && bun run build:bin && bun run build:types",
     "build:core": "bun ./scripts/build.ts",
-    "build:bin": "bun ./scripts/build-bin.ts",
+    "build:bin": "bun build --compile ./bin/gemi.ts --external vite --external react-dom --outfile ./dist/bin/gemi",
     "build:types": "tsc"
   },
   "dependencies": {
