@@ -4,6 +4,8 @@ import { RootViewRouter } from "./http/router/RootViewRouter";
 import { AuthMiddleware } from "./http/middlewares/AuthMiddleware";
 import { UserMiddleware } from "./http/middlewares/UserMiddleware";
 
+import { Form } from "gemi/client";
+
 export const app = new App({
   apiRouter: RootApiRouter,
   viewRouter: RootViewRouter,

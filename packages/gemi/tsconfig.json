@@ -1,0 +1,10 @@
+{
+  "extends": "@repo/typescript-config/react-library.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "emitDeclarationOnly": true,
+    "moduleResolution": "nodenext"
+  },
+  "include": ["http", "client", "server"],
+  "exclude": ["node_modules", "dist"]
+}
