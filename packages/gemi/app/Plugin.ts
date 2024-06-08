@@ -1,5 +1,5 @@
-import { ApiRouter } from "../ApiRouter";
-import { ViewRouter } from "../ViewRouter";
+import { ApiRouter } from "../http/ApiRouter";
+import { ViewRouter } from "../http/ViewRouter";
 
 export class Plugin {
   public name = Symbol("Plugin");

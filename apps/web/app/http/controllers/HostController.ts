@@ -1,7 +1,6 @@
 import { prisma } from "@/app/database/prisma";
 import { AppointmentConfirmedByHostEmail } from "@/app/emails/AppointmentConfirmedByHostEmail";
-import { Controller } from "@/framework/Controller";
-import type { HttpRequest } from "@/framework/http/HttpRequest";
+import { Controller, type HttpRequest } from "gemi/http";
 import { format } from "date-fns";
 
 export class HostController extends Controller {

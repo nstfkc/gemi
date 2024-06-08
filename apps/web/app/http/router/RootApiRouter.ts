@@ -1,4 +1,4 @@
-import { ApiRouter } from "@/framework/ApiRouter";
+import { ApiRouter } from "gemi/http";
 import { AuthController } from "../controllers/AuthController";
 import { OrganisationController } from "../controllers/OrganisationController";
 import { AppointmentController } from "../controllers/AppointmentController";

@@ -45,34 +45,3 @@ export class Email {
     return createElement(Fragment);
   }
 }
-
-type InferArgs<T> = T extends Email_<infer Args> ? Args : never;
-
-class Email_<Args = NonNullable<unknown>> {
-  protected to = "johndoe@acme.com";
-  protected from = "admin@gemi.dev";
-  protected subject = "Hello from Gemi";
-
-  constructor(private args: Args) {}
-
-  send() {
-    //
-  }
-}
-
-interface TestEmailArgs {
-  name: string;
-}
-
-class TestEmail extends Email_ {
-  constructor(args: TestEmailArgs) {
-    super(args);
-  }
-}
-
-async function SendEmail<T>(email: new (args: T) => Email_, props: T) {
-  const e = new email(props);
-  await e.send();
-}
-
-await SendEmail(TestEmail, { name: "enes" });

@@ -1,4 +1,4 @@
-import { requestContext } from "../context/requestContext";
+import { requestContext } from "../http/requestContext";
 
 export class Auth {
   static user() {

@@ -1,19 +1,25 @@
-import type { ApiRouteChildren, ApiRouteExec, ApiRouter } from "./ApiRouter";
+//@ts-nocheck
+
+import type {
+  ApiRouteChildren,
+  ApiRouteExec,
+  ApiRouter,
+} from "../http/ApiRouter";
 import {
   ViewRouter,
   type ViewChildren,
   type ViewRouteExec,
-} from "./ViewRouter";
+} from "../http/ViewRouter";
 import { URLPattern } from "urlpattern-polyfill";
-import { generateETag } from "./server/generateEtag";
-import { uuid } from "uuidv4";
-import type { ComponentTree } from "./types";
-import { type RouterMiddleware } from "./Router";
-import type { UnwrapPromise } from "./utils/type";
-import { RequestBreakerError } from "./Error";
-import type { Plugin } from "./plugins/Plugin";
-import type { Middleware } from "./http/Middleware";
-import { requestContext } from "./context/requestContext";
+import { generateETag } from "../server/generateEtag";
+import { v4 } from "uuid";
+import type { ComponentTree } from "../client/types";
+import { type RouterMiddleware } from "../http/Router";
+import type { UnwrapPromise } from "../utils/type";
+import { RequestBreakerError } from "../http/Error";
+import type { Plugin } from "./Plugin";
+import type { Middleware } from "../http/Middleware";
+import { requestContext } from "../http/requestContext";
 import type { ServerWebSocket } from "bun";
 
 const defaultHead = {
@@ -435,7 +441,7 @@ export class App {
       const visitorIdExist = req.headers.get("cookie")?.includes("visitor_id");
       if (!visitorIdExist) {
         cookieHeaders = {
-          "Set-Cookie": `visitor_id=${uuid()}; HttpOnly; SameSite=Strict; Path=/`,
+          "Set-Cookie": `visitor_id=${v4()}; HttpOnly; SameSite=Strict; Path=/`,
         };
       }
 

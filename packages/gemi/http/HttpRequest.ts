@@ -1,4 +1,4 @@
-import { ValidationError } from "../Router";
+import { ValidationError } from "./Router";
 
 class Input<T> extends Map {
   constructor() {

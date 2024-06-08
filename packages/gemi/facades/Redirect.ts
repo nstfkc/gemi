@@ -1,4 +1,4 @@
-import { RequestBreakerError } from "../Error";
+import { RequestBreakerError } from "../http/Error";
 
 class RedirectError extends RequestBreakerError {
   constructor(path: string) {

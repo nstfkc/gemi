@@ -1,5 +1,5 @@
 import { prisma } from "@/app/database/prisma";
-import { Controller } from "@/framework/Controller";
+import { Controller } from "gemi/http";
 
 export class MapController extends Controller {
   async organisationMap(req: Request, params: { organizationId: string }) {

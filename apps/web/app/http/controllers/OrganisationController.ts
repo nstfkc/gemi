@@ -1,7 +1,6 @@
 import { prisma } from "@/app/database/prisma";
-import { Controller } from "@/framework/Controller";
-import { Auth } from "@/framework/facades/Auth";
-import { HttpRequest } from "@/framework/http/HttpRequest";
+import { Controller, HttpRequest } from "gemi/http";
+import { Auth } from "gemi/facades";
 
 class CreateOrganisationRequest extends HttpRequest<{ name: string }> {
   schema = {

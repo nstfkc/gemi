@@ -1,6 +1,5 @@
 import { prisma } from "@/app/database/prisma";
-import { Controller } from "@/framework/Controller";
-import type { HttpRequest } from "@/framework/http/HttpRequest";
+import { Controller, type HttpRequest } from "gemi/http";
 
 export class VisitorController extends Controller {
   async appointment(req: HttpRequest, params: { appointmentId: string }) {

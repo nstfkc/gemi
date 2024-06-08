@@ -1,7 +1,14 @@
 const result = await Bun.build({
-  entrypoints: ["./http/index.ts", "./client/index.ts"],
+  entrypoints: [
+    "./http/index.ts",
+    "./client/index.ts",
+    "./app/index.ts",
+    "./facades/index.ts",
+    "./email/index.ts",
+  ],
   outdir: "./dist",
   external: ["vite", "react", "react-dom"],
+  target: "node",
   format: "esm",
   minify: false,
   splitting: false,

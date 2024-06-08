@@ -1,7 +1,6 @@
 import { prisma } from "@/app/database/prisma";
 import { NewAppointmentEmail } from "@/app/emails/NewAppointmentEmail";
-import { Controller } from "@/framework/Controller";
-import { HttpRequest } from "@/framework/http/HttpRequest";
+import { Controller, HttpRequest } from "gemi/http";
 import { format } from "date-fns";
 
 type CreateAppointmentInput = {
@@ -118,7 +117,7 @@ export class AppointmentController extends Controller {
           date: format(new Date(appointment.date), "dd/MM/yyyy"),
           alternativeDate: format(
             new Date(appointment.alternativeDate),
-            "dd/MM/yyyy"
+            "dd/MM/yyyy",
           ),
           url: `${process.env.HOST_NAME}/host/appointment/${appointment.id}`,
         },

@@ -1,8 +1,6 @@
 import { verify, decode } from "jsonwebtoken";
 
-import { getCookies } from "@/framework/http/helpers/getCookies";
-import { AuthenticationError } from "@/framework/Router";
-import { Middleware } from "@/framework/http/Middleware";
+import { AuthenticationError, Middleware, getCookies } from "gemi/http";
 import { prisma } from "@/app/database/prisma";
 
 export class AuthMiddleware extends Middleware {

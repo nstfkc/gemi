@@ -1,4 +1,4 @@
-import { ViewRouter } from "@/framework/ViewRouter";
+import { ViewRouter } from "gemi/http";
 import { OrganisationController } from "../controllers/OrganisationController";
 import { HostController } from "../controllers/HostController";
 import { MapController } from "../controllers/MapController";

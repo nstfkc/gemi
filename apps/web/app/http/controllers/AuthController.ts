@@ -1,11 +1,8 @@
 import { sign } from "jsonwebtoken";
 
 import { prisma } from "@/app/database/prisma";
-import { Controller } from "@/framework/Controller";
-import { Auth } from "@/framework/facades/Auth";
-import { HttpRequest } from "@/framework/http/HttpRequest";
-import { ValidationError } from "@/framework/Router";
-import { Redirect } from "@/framework/facades/Redirect";
+import { Controller, ValidationError, HttpRequest } from "gemi/http";
+import { Auth, Redirect } from "gemi/facades";
 
 type SignUpRequestInput = {
   email: string;

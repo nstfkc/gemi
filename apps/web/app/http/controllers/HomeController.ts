@@ -1,4 +1,4 @@
-import { Controller } from "@/framework/Controller";
+import { Controller } from "gemi/http";
 
 export class HomeController extends Controller {
   public async index() {
