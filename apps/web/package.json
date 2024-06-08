@@ -39,7 +39,7 @@
     "@vis.gl/react-google-maps": "^1.0.1",
     "date-fns": "^3.6.0",
     "framer-motion": "^11.2.6",
-    "gemi": "^0.1.2",
+    "gemi": "workspace:*",
     "history": "^5.3.0",
     "jsonwebtoken": "^9.0.2",
     "lucide-react": "^0.379.0",

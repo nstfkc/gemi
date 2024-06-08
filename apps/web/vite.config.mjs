@@ -13,7 +13,7 @@ export default defineConfig({
   build: {
     manifest: true,
     rollupOptions: {
-      input,
+      input: "app/client.tsx",
     },
     ssrEmitAssets: true,
   },

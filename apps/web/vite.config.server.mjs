@@ -1,5 +1,5 @@
 import path from "node:path";
-import { defineConfig } from "vite";
+import { defineConfig, mergeConfig } from "vite";
 
 const rootDir = path.resolve(process.cwd());
 const frameworkDir = path.join(rootDir, "framework");

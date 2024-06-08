@@ -3,6 +3,8 @@ import path from "path";
 import { Server } from "./Server";
 import { createElement } from "react";
 import { renderToReadableStream } from "react-dom/server.browser";
+import { imageHandler } from "./imageHandler";
+import { log } from "console";
 
 const rootDir = process.cwd();
 
@@ -52,6 +54,23 @@ export async function startDevServer() {
       await vite.reloadModule(m);
     }
   });
+  server.use("/__gemi/image", imageHandler);
+  server.use("/refresh.js", async () => {
+    return new Response(
+      `
+      import RefreshRuntime from "http://localhost:5173/@react-refresh";
+      RefreshRuntime.injectIntoGlobalHook(window);
+      window.$RefreshReg$ = () => {};
+      window.$RefreshSig$ = () => (type) => type;
+      window.__vite_plugin_react_preamble_installed__ = true;
+    `,
+      {
+        headers: {
+          "Content-Type": "application/javascript",
+        },
+      },
+    );
+  });
 
   server.use(
     "*",
@@ -66,27 +85,6 @@ export async function startDevServer() {
     },
 
     async (req) => {
-      const styles = [];
-      for (const [file, modules] of vite.moduleGraph.fileToModulesMap) {
-        for (const mod of modules) {
-          if (
-            mod.file &&
-            mod.file.includes(".css") &&
-            !mod.file.includes("app.css")
-          ) {
-            const { default: css } = await vite.ssrLoadModule(file);
-            const currentFiles: string[] = styles.map((s) => s.file);
-            if (currentFiles.includes(mod.file)) {
-              continue;
-            }
-            styles.push({
-              file: mod.file,
-              css,
-            });
-          }
-        }
-      }
-
       const result = await app.handleRequest(req);
 
       if (result.kind === "viewError") {
@@ -107,8 +105,6 @@ export async function startDevServer() {
         return new Response("Not found", { status: 404 });
       }
 
-      const { default: Root } = await vite.ssrLoadModule("framework/Root.tsx");
-
       if (result.kind === "viewData") {
         const { data, headers, head } = result;
         return new Response(
@@ -126,23 +122,30 @@ export async function startDevServer() {
       }
 
       if (result.kind === "view") {
-        const { data, headers, head, status = 200 } = result;
-        const stream = await renderToReadableStream(
-          createElement(Root, { data, styles: [], head }),
-          {
-            bootstrapScriptContent: `window.__GEMI_DATA__ = ${JSON.stringify(data)};`,
-            bootstrapModules: [
-              "/framework/refresh.js",
-              "/framework/main.tsx",
-              "http://localhost:5173/@vite/client",
-            ],
-          },
-        );
+        try {
+          const { default: Root } = await vite.ssrLoadModule(
+            path.join(rootDir, "app/server.tsx"),
+          );
+          const { data, headers, head, status = 200 } = result;
+          const stream = await renderToReadableStream(
+            createElement(Root, { data, styles: [], head }),
+            {
+              bootstrapScriptContent: `window.__GEMI_DATA__ = ${JSON.stringify(data)};`,
+              bootstrapModules: [
+                "/refresh.js",
+                "/app/client.tsx",
+                "http://localhost:5173/@vite/client",
+              ],
+            },
+          );
 
-        return new Response(stream, {
-          status,
-          headers: { ...headers, "Content-Type": "text/html" },
-        });
+          return new Response(stream, {
+            status,
+            headers: { ...headers, "Content-Type": "text/html" },
+          });
+        } catch (err) {
+          return new Response(err.stack, { status: 500 });
+        }
       } else if (result.kind === "api") {
         const { data, headers, status } = result;
         return new Response(JSON.stringify(data), {

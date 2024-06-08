@@ -16,7 +16,8 @@
     "gemi": "./dist/bin/gemi"
   },
   "exports": {
-    "./http": "./dist/http/index.js"
+    "./http": "./dist/http/index.js",
+    "./client": "./dist/client/index.js"
   },
   "files": [
     "dist/**/*"
@@ -25,12 +26,15 @@
   "module": true,
   "scripts": {
     "lint": "eslint . --max-warnings 0",
-    "build": "bun run build:core && bun run build:bin && bun run build:types",
+    "build": "bun run build:core && bun run build:bin && bun run build:types && bun run build:client && bun run build:client-types",
     "build:core": "bun ./scripts/build.ts",
     "build:bin": "bun build --compile ./bin/gemi.ts --external vite --external react-dom --outfile ./dist/bin/gemi",
-    "build:types": "tsc"
+    "build:client": "vite build -c vite.config.js",
+    "build:types": "tsc",
+    "build:client-types": "tsc -p tsconfig.browser.json"
   },
   "dependencies": {
+    "history": "^5.3.0",
     "urlpattern-polyfill": "^10.0.0"
   }
 }

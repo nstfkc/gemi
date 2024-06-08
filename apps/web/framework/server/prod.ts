@@ -6,15 +6,16 @@ import Root from "../Root";
 import { imageHandler } from "./imageHandler";
 import { generateETag } from "./generateEtag";
 
-const modules = import.meta.glob("/app/bootstrap.ts", {
-  eager: true,
-});
+const rootDir = process.cwd();
+process.env.ROOT_DIR = rootDir;
+process.env.APP_DIR = path.join(rootDir, "app");
 
-const app = modules["/app/bootstrap.ts"].app;
+const appDir = path.join(rootDir, "app");
+const distDir = path.join(rootDir, "dist");
 
-const manifest = import.meta.glob("/dist/client/.vite/manifest.json", {
-  eager: true,
-})["/dist/client/.vite/manifest.json"].default;
+const { app } = await import(path.join(appDir, "bootstrap.ts"));
+
+const manifest = await import(path.join(distDir, "client/.vite/manifest.json"));
 
 const s = new Server();
 
@@ -126,10 +127,6 @@ s.use("*", async (req) => {
     return new Response("Not found", { status: 404 });
   }
 });
-
-const rootDir = process.cwd();
-process.env.ROOT_DIR = rootDir;
-process.env.APP_DIR = path.join(rootDir, "app");
 
 Bun.serve({
   fetch: (req) => s.fetch.call(s, req),
