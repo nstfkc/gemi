@@ -1,10 +1,9 @@
 import path from "node:path";
 import { defineConfig } from "vite";
+import { input } from "gemi/vite";
 import react from "@vitejs/plugin-react-swc";
-import input from "./rollupInput";
 
 const rootDir = path.resolve(process.cwd());
-const frameworkDir = path.join(rootDir, "framework");
 const appDir = path.join(rootDir, "app");
 
 export default defineConfig({
@@ -13,13 +12,12 @@ export default defineConfig({
   build: {
     manifest: true,
     rollupOptions: {
-      input: "app/client.tsx",
+      input: input(),
     },
     ssrEmitAssets: true,
   },
   resolve: {
     alias: {
-      "@/framework": frameworkDir,
       "@/app": appDir,
     },
   },

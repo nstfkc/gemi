@@ -1,4 +1,4 @@
-import { Email } from "@/framework/Email";
+import { Email } from "gemi/email";
 import { Html, Button, Text, Heading } from "@react-email/components";
 
 export class NewAppointmentEmail extends Email {

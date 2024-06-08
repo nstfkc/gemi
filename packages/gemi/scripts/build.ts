@@ -5,6 +5,7 @@ const result = await Bun.build({
     "./app/index.ts",
     "./facades/index.ts",
     "./email/index.ts",
+    "./vite/index.ts",
   ],
   outdir: "./dist",
   external: ["vite", "react", "react-dom"],

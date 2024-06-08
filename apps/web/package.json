@@ -1,12 +1,14 @@
 {
   "name": "gemi-app",
   "scripts": {
-    "build": "NODE_ENV=production bun run build:client && bun run build:server",
+    "build:all": "NODE_ENV=production bun run build:client && bun run build:server",
     "build:client": "vite build --outDir dist/client",
     "build:server": "vite build -c vite.config.server.mjs",
-    "prebuild": "bun run ./framework/scripts/prebuild.ts",
+    "prebuildx": "bun run ./framework/scripts/prebuild.ts",
     "dev": "gemi dev",
-    "start": "NODE_ENV=production bun ./dist/server/prod.mjs",
+    "build": "gemi build",
+    "start": "gemi start",
+    "startx": "NODE_ENV=production bun ./dist/server/prod.mjs",
     "test": "vitest"
   },
   "devDependencies": {
@@ -39,7 +41,7 @@
     "@vis.gl/react-google-maps": "^1.0.1",
     "date-fns": "^3.6.0",
     "framer-motion": "^11.2.6",
-    "gemi": "workspace:*",
+    "gemi": "*",
     "history": "^5.3.0",
     "jsonwebtoken": "^9.0.2",
     "lucide-react": "^0.379.0",

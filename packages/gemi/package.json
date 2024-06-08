@@ -20,7 +20,8 @@
     "./client": "./dist/client/index.js",
     "./app": "./dist/app/index.js",
     "./facades": "./dist/facades/index.js",
-    "./email": "./dist/email/index.js"
+    "./email": "./dist/email/index.js",
+    "./vite": "./dist/vite/index.js"
   },
   "files": [
     "dist/**/*"
@@ -38,6 +39,7 @@
   },
   "dependencies": {
     "@react-email/components": "^0.0.19",
+    "commander": "^12.1.0",
     "history": "^5.3.0",
     "react-email": "^2.1.4",
     "resend": "^3.2.0",
