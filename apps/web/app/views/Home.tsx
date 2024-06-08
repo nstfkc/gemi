@@ -1,4 +1,4 @@
-import { Link } from "@/framework/ClientRouterContext";
+import { Link } from "gemi/client";
 
 const Home = (props: { message: string }) => {
   return (

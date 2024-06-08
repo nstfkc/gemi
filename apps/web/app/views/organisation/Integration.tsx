@@ -1,4 +1,4 @@
-import { Link, useParams } from "@/framework/ClientRouterContext";
+import { Link, useParams } from "gemi/client";
 
 export default function Integration() {
   const params = useParams();

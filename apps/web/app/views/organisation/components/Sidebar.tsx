@@ -1,4 +1,4 @@
-import { Link, useLocation, useRouter } from "@/framework/ClientRouterContext";
+import { Link, useLocation, useRouter } from "gemi/client";
 import type { Organization } from "@prisma/client";
 import type { ComponentProps } from "react";
 
@@ -10,9 +10,8 @@ import {
   WorkflowIcon,
   SettingsIcon,
 } from "lucide-react";
-import { useUser } from "@/framework/client/useUser";
 import { Button, Spacer } from "@nextui-org/react";
-import { useMutation } from "@/framework/client/useMutation";
+import { useMutation, useUser } from "gemi/client";
 
 const linkClassName = [
   "flex items-center gap-2",

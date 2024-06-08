@@ -1,4 +1,4 @@
-import { useMutation } from "@/framework/client/useMutation";
+import { useMutation } from "gemi/client";
 import { Button } from "@nextui-org/react";
 import type { Appointment, Host, Product } from "@prisma/client";
 import { useState } from "react";
