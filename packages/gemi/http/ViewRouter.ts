@@ -52,12 +52,16 @@ export class ViewRouter {
     // TODO: type middleware
     function prepare(middlewares: any[] = []) {
       return {
-        exec: async (req: Request, params: Record<string, string>) => {
+        exec: async (
+          req: Request,
+          params: Record<string, string>,
+          app: App,
+        ) => {
           if (!handler) {
             return { data: { [viewPath]: {} }, headers: {}, head: {} };
           }
           const [controller, methodName] = handler;
-          const instance = new controller();
+          const instance = new controller(app);
           const method = instance[methodName].bind(instance);
           const { data, headers = {}, head = {} } = await method(req, params);
           return { data: { [viewPath]: data }, headers, head };

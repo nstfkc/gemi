@@ -51,7 +51,6 @@ export class AppointmentController extends Controller {
     return {
       data: {
         appointments,
-        test: "hi",
       },
     };
   }

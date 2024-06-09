@@ -37,7 +37,7 @@ class OrganisationRouter extends ViewRouter {
   };
 }
 
-export class RootViewRouter extends ViewRouter {
+export default class extends ViewRouter {
   override routes = {
     "/": this.view("Home"),
     "/map/:organizationId": this.view("Map", [

@@ -15,7 +15,6 @@ import {
   type PropsWithChildren,
 } from "react";
 import { Subject } from "../utils/Subject";
-import { URLPattern } from "urlpattern-polyfill";
 
 interface ClientRouterContextValue {
   viewEntriesSubject: Subject<string[]>;
@@ -87,26 +86,28 @@ export const ClientRouterProvider = (
   };
 
   useEffect(() => {
-    history?.listen(({ location }) => {
-      locationSubject.current.next(structuredClone(location));
-      viewEntriesSubject.current.next(
-        (() => {
-          if ((location.state as any)?.status === 404) {
-            return ["404"];
-          }
-          for (const [route, views] of Object.entries(routeManifest)) {
-            const urlPattern = new URLPattern({ pathname: route });
-            if (urlPattern.test({ pathname: location.pathname })) {
-              setParameters(
-                urlPattern.exec({ pathname: location.pathname })?.pathname
-                  .groups!,
-              );
-              return views;
+    import("urlpattern-polyfill").then(({ URLPattern }) => {
+      history?.listen(({ location }) => {
+        locationSubject.current.next(structuredClone(location));
+        viewEntriesSubject.current.next(
+          (() => {
+            if ((location.state as any)?.status === 404) {
+              return ["404"];
             }
-          }
-          return [];
-        })(),
-      );
+            for (const [route, views] of Object.entries(routeManifest)) {
+              const urlPattern = new URLPattern({ pathname: route });
+              if (urlPattern.test({ pathname: location.pathname })) {
+                setParameters(
+                  urlPattern.exec({ pathname: location.pathname })?.pathname
+                    .groups!,
+                );
+                return views;
+              }
+            }
+            return [];
+          })(),
+        );
+      });
     });
 
     window.addEventListener("scrollend", handleScroll);
@@ -159,7 +160,7 @@ function useLocationChange(cb: (location: Location) => void) {
 
 export function useLocation() {
   const { locationSubject } = useContext(ClientRouterContext);
-  const [location, setLocation] = useState(locationSubject.getValue());
+  const [location, setLocation] = useState(locationSubject?.getValue());
 
   useLocationChange((newLocation) => {
     setLocation(newLocation);

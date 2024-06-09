@@ -3,7 +3,8 @@
   "compilerOptions": {
     "outDir": "dist",
     "emitDeclarationOnly": true,
-    "moduleResolution": "nodenext"
+    "moduleResolution": "nodenext",
+    "downlevelIteration": true
   },
   "include": ["http"],
   "exclude": ["node_modules", "dist"]

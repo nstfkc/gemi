@@ -19,8 +19,7 @@ export default function Appointments(props: {
     product: Product;
   })[];
 }) {
-  const { appointments, test } = props;
-  console.log({ test });
+  const { appointments } = props;
   return (
     <div>
       <h1 className="font-semibold text-lg">Appointments</h1>

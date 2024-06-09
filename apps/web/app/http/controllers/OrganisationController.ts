@@ -17,14 +17,15 @@ export class OrganisationController extends Controller {
   };
 
   public async show(req: Request, params: { organisationId: string }) {
-    const organisation = await prisma.organization.findFirst({
-      where: {
-        id: params.organisationId,
-      },
-    });
     return {
       data: {
-        organisation,
+        organisation: {
+          ...(await prisma.organization.findFirst({
+            where: {
+              id: params.organisationId,
+            },
+          })),
+        },
       },
     };
   }

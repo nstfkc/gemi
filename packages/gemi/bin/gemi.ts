@@ -6,6 +6,7 @@ import createRollupInput from "./createRollupInput";
 import { program } from "commander";
 
 program.command("dev").action(async () => {
+  console.log("Starting dev server...");
   await startDevServer();
 });
 

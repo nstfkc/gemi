@@ -65,8 +65,9 @@ export class ApiRouter {
         exec: async (
           req: Request,
           params: Record<string, string>,
+          app: App,
         ): Promise<DataResponse | ErrorResponse> => {
-          const controllerInstance = new controller();
+          const controllerInstance = new controller(app);
           const handler =
             controllerInstance[methodName].bind(controllerInstance);
           const Req = controllerInstance.requests[methodName] ?? HttpRequest;

@@ -46,7 +46,7 @@ class VisitorRouter extends ApiRouter {
   };
 }
 
-export class RootApiRouter extends ApiRouter {
+export default class extends ApiRouter {
   override routes = {
     "/auth": AuthApiRouter,
     "/organisation": OrganisationApiRouter,

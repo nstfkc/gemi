@@ -2,7 +2,7 @@ import { createElement } from "react";
 import path from "path";
 import { Server } from "./Server";
 import { renderToReadableStream } from "react-dom/server.browser";
-import Root from "../client-internal/Root";
+import { Root } from "../client/Root";
 import { imageHandler } from "./imageHandler";
 import { generateETag } from "./generateEtag";
 
@@ -90,7 +90,7 @@ export async function startProdServer() {
             .map((componentPath: string) => [
               `app/views/${componentPath}.tsx`,
               ...manifest[`app/views/${componentPath}.tsx`].imports.filter(
-                (p: string) => p !== "framework/main.tsx",
+                (p: string) => p !== "app/client.tsx",
               ),
             ])
             .flat()
@@ -108,7 +108,7 @@ export async function startProdServer() {
         {
           bootstrapScriptContent: `window.__GEMI_DATA__ = ${JSON.stringify(data)};`,
           bootstrapModules: [
-            `/${manifest["framework/main.tsx"].file}`,
+            `/${manifest["app/client.tsx"].file}`,
             ...preloadModules,
           ],
         },

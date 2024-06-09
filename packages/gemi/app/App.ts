@@ -1,4 +1,4 @@
-//@ts-nocheck
+// @ts-nocheck
 
 import type {
   ApiRouteChildren,
@@ -21,6 +21,11 @@ import type { Plugin } from "./Plugin";
 import type { Middleware } from "../http/Middleware";
 import { requestContext } from "../http/requestContext";
 import type { ServerWebSocket } from "bun";
+import { renderToReadableStream } from "react-dom/server.browser";
+import { createElement } from "react";
+
+import { imageHandler } from "../server/imageHandler";
+import { Root } from "../client/Root";
 
 const defaultHead = {
   title: "The UI Agents",
@@ -70,6 +75,14 @@ function prepareViewData(
   };
 }
 
+interface AppParams {
+  viewRouter: new (app: App) => ViewRouter;
+  apiRouter: new (app: App) => ApiRouter;
+  plugins?: (new () => Plugin)[];
+  middlewareAliases?: Record<string, new () => Middleware>;
+  components: Record<string, any>;
+}
+
 export class App {
   private flatViewRoutes: Record<
     string,
@@ -81,20 +94,33 @@ export class App {
   private appId: string;
   private componentTree: ComponentTree;
   private middlewareAliases: Record<string, new () => Middleware> = {};
+  private components: Record<string, any>;
+  public devVersion = 0;
+  private params: AppParams;
+  private apiRouter: ApiRouter;
+  private viewRouter: ViewRouter;
 
-  constructor(params: {
-    viewRouter: new (app: App) => ViewRouter;
-    apiRouter: new (app: App) => ApiRouter;
-    plugins?: (new () => Plugin)[];
-    middlewareAliases?: Record<string, new () => Middleware>;
-  }) {
+  constructor(params: AppParams) {
+    console.log("App created");
+    this.components = params.components;
+    this.params = params;
+    this.apiRouter = params.apiRouter;
+    this.viewRouter = params.viewRouter;
+
+    this.prepare();
+
+    this.appId = generateETag(Date.now());
+  }
+
+  private prepare() {
+    const params = this.params;
     this.middlewareAliases = params.middlewareAliases ?? {};
 
     let viewRouters = {
-      "/": params.viewRouter,
+      "/": this.viewRouter,
     };
     let apiRouters = {
-      "/": params.apiRouter,
+      "/": this.apiRouter,
     };
     for (const Plugin of params.plugins ?? []) {
       const plugin = new Plugin();
@@ -119,8 +145,18 @@ export class App {
     this.flatViewRoutes = flatRoutes;
     // Handle api routes
     this.flatApiRoutes = this.flattenApiRoutes(apiRouters);
+  }
 
-    this.appId = generateETag(Date.now());
+  public setApiRouter(apiRouter: ApiRouter) {
+    this.apiRouter = apiRouter;
+  }
+
+  public setViewRouter(viewRouter: ViewRouter) {
+    this.viewRouter = viewRouter;
+  }
+
+  public incrementDevVersion() {
+    this.devVersion += 1;
   }
 
   public printName() {
@@ -305,7 +341,7 @@ export class App {
 
     const result = await requestContext.run(reqCtx, async () => {
       await reqWithMiddlewares(req, reqCtx);
-      return await Promise.all(handlers.map((fn) => fn(req, params)));
+      return await Promise.all(handlers.map((fn) => fn(req, params, this)));
     });
 
     let is404 = false;
@@ -365,7 +401,7 @@ export class App {
             if (exec) {
               let result = {};
               try {
-                result = await exec(req, params);
+                result = await exec(req, params, this);
               } catch (err) {
                 if (err instanceof RequestBreakerError) {
                   return {
@@ -475,6 +511,183 @@ export class App {
         buildId: this.appId,
       };
     }
+  }
+
+  async fetch(req: Request) {
+    const url = new URL(req.url);
+    if (process.env.NODE_ENV === "production") {
+      const pattern = new URLPattern({
+        pathname: "/*.:filetype(png|txt|js|css|jpg|svg|jpeg|ico|ttf)",
+      });
+      if (pattern.test({ pathname: url.pathname })) {
+        const url = new URL(req.url);
+        const filePath = req.url.replace(url.origin, "").split("?")[0];
+        const file = Bun.file(`dist/client${filePath}`);
+        if (!file) {
+          return new Response("Not found", { status: 404 });
+        }
+        const etag = generateETag(file.lastModified);
+        return new Response(file.stream(), {
+          headers: {
+            "Content-Type": file.type,
+            "Cache-Control": "public, max-age=31536000, must-revalidate",
+            "Content-Length": String(file.size),
+            ETag: etag,
+          },
+        });
+      }
+    }
+    if (url.pathname === "/refresh.js") {
+      return new Response(
+        `
+          import RefreshRuntime from "http://localhost:5173/@react-refresh";
+          RefreshRuntime.injectIntoGlobalHook(window);
+          window.$RefreshReg$ = () => {};
+          window.$RefreshSig$ = () => (type) => type;
+          window.__vite_plugin_react_preamble_installed__ = true;
+        `,
+        {
+          headers: {
+            "Content-Type": "application/javascript",
+          },
+        },
+      );
+    }
+
+    if (url.pathname === "__gemi/image") {
+      return imageHandler(req);
+    }
+
+    if (process.env.NODE_ENV === "development") {
+      const res = await fetch(`http://localhost:5174${url.pathname}`);
+      if (res.ok) {
+        return res;
+      }
+    }
+
+    const result = await this.handleRequest(req);
+
+    if (result.kind === "viewError") {
+      const { kind, ...payload } = result;
+      return new Response(null, {
+        ...payload,
+      });
+    }
+
+    if (result.kind === "apiError") {
+      const { kind, data, ...payload } = result;
+      return new Response(JSON.stringify(data), {
+        ...payload,
+      });
+    }
+
+    if (!result) {
+      return new Response("Not found", { status: 404 });
+    }
+
+    if (result.kind === "viewData") {
+      const { data, headers, head } = result;
+      return new Response(
+        JSON.stringify({
+          data,
+          head,
+        }),
+        {
+          headers: {
+            ...headers,
+            "Content-Type": "application/json",
+          },
+        },
+      );
+    }
+
+    if (result.kind === "view") {
+      try {
+        const { data, headers, head, status = 200 } = result;
+        const stream = await renderToReadableStream(
+          createElement(Root, {
+            data,
+            styles: [],
+            head,
+            components: this.components,
+          }),
+          {
+            bootstrapScriptContent: `window.__GEMI_DATA__ = ${JSON.stringify(data)};`,
+            bootstrapModules: [
+              "/refresh.js",
+              "/app/client.tsx",
+              "http://localhost:5173/@vite/client",
+            ],
+          },
+        );
+
+        return new Response(stream, {
+          status,
+          headers: { ...headers, "Content-Type": "text/html" },
+        });
+      } catch (err) {
+        return new Response(err.stack, { status: 500 });
+      }
+    } else if (result.kind === "api") {
+      const { data, headers, status } = result;
+      return new Response(JSON.stringify(data), {
+        status,
+        headers: {
+          "Content-Type": "application/json",
+          ...headers,
+        },
+      });
+    } else if (result.kind === "api_404") {
+      return new Response("Not found", { status: 404 });
+    }
+  }
+
+  createFetchHandler() {
+    return async (req: Request) => this.fetch(req);
+  }
+
+  fetchHandler = this.createFetchHandler();
+
+  serveOptions() {
+    return {
+      fetch: (req, s) => {
+        if (s.upgrade(req)) {
+          return;
+        }
+
+        return this.fetchHandler(req);
+      },
+      port: process.env.PORT || 5173,
+      websocket: this.websocket,
+    };
+  }
+
+  bunServer = null;
+
+  public reloadCount = 0;
+
+  async reload() {
+    this.reloadCount += 1;
+    this.prepare();
+    const fetchHandler = this.createFetchHandler();
+    if (this.bunServer) {
+      await this.bunServer.reload({
+        fetch: (req, s) => {
+          if (s.upgrade(req)) {
+            return;
+          }
+
+          return fetchHandler(req);
+        },
+        port: process.env.PORT || 5173,
+        websocket: this.websocket,
+      });
+      console.log("reloaded", this.reloadCount);
+    }
+  }
+
+  async serve() {
+    this.server = Bun.serve(this.serveOptions());
   }
 
   private handleWebSocketMessage = (
