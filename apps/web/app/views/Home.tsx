@@ -1,10 +1,15 @@
+import { NextUIProvider, Button } from "@nextui-org/react";
 import { Link } from "gemi/client";
 
 const Home = (props: { message: string }) => {
   return (
-    <div className="">
-      <Link href="/auth/sign-in">Sign in xxx</Link>
-    </div>
+    <NextUIProvider>
+      <div className="">
+        <Button>
+          <Link href="/auth/sign-in">Sign in xxx</Link>
+        </Button>
+      </div>
+    </NextUIProvider>
   );
 };
 

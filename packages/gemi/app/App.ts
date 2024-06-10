@@ -25,7 +25,6 @@ import { renderToReadableStream } from "react-dom/server.browser";
 import { createElement } from "react";
 
 import { imageHandler } from "../server/imageHandler";
-import { Root } from "../client/Root";
 
 const defaultHead = {
   title: "The UI Agents",
@@ -80,7 +79,7 @@ interface AppParams {
   apiRouter: new (app: App) => ApiRouter;
   plugins?: (new () => Plugin)[];
   middlewareAliases?: Record<string, new () => Middleware>;
-  components: Record<string, any>;
+  views: Record<string, any>;
 }
 
 export class App {
@@ -94,18 +93,18 @@ export class App {
   private appId: string;
   private componentTree: ComponentTree;
   private middlewareAliases: Record<string, new () => Middleware> = {};
-  private components: Record<string, any>;
   public devVersion = 0;
   private params: AppParams;
   private apiRouter: ApiRouter;
   private viewRouter: ViewRouter;
+  private views: Record<string, any>;
 
   constructor(params: AppParams) {
     console.log("App created");
-    this.components = params.components;
     this.params = params;
     this.apiRouter = params.apiRouter;
     this.viewRouter = params.viewRouter;
+    this.views = params.views;
 
     this.prepare();
 
@@ -513,7 +512,7 @@ export class App {
     }
   }
 
-  async fetch(req: Request) {
+  async fetch(req: Request, Root: any) {
     const url = new URL(req.url);
     if (process.env.NODE_ENV === "production") {
       const pattern = new URLPattern({
@@ -609,7 +608,7 @@ export class App {
             data,
             styles: [],
             head,
-            components: this.components,
+            views: this.views,
           }),
           {
             bootstrapScriptContent: `window.__GEMI_DATA__ = ${JSON.stringify(data)};`,

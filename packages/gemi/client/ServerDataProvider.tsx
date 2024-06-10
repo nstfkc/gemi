@@ -44,6 +44,7 @@ export const ServerDataProvider = (
     // Client
     _value = (window as any).__GEMI_DATA__;
   }
+
   return (
     <ServerDataContext.Provider value={_value}>
       {props.children}

@@ -11,8 +11,7 @@ export const app = new App({
     auth: AuthMiddleware,
     user: UserMiddleware,
   },
-  components: import.meta.glob([
-    "./views/**/*.tsx",
-    "!./views/**/components/**",
-  ]),
+  views: import.meta.glob(["./views/**/*.tsx", "!./views/**/components/**"], {
+    eager: true,
+  }),
 });

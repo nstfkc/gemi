@@ -7,8 +7,9 @@ import {
   createContext,
   type ComponentType,
   type PropsWithChildren,
+  startTransition,
 } from "react";
-import { ServerDataContext } from "./ServerDataProvider";
+import { ServerDataContext, ServerDataProvider } from "./ServerDataProvider";
 import {
   ClientRouterContext,
   ClientRouterProvider,
@@ -27,10 +28,11 @@ const Route = (props: PropsWithChildren<RouteProps>) => {
 
   const { viewEntriesSubject, getPageData, history } =
     useContext(ClientRouterContext);
-  const [render, setRender] = useState(
+
+  const [render, setRender] = useState(() =>
     viewEntriesSubject.getValue().includes(componentPath),
   );
-  const [data, setData] = useState(getPageData(componentPath));
+  const [data, setData] = useState(() => getPageData(componentPath));
 
   useEffect(() => {
     return viewEntriesSubject.subscribe((viewEntries) => {
@@ -46,7 +48,8 @@ const Route = (props: PropsWithChildren<RouteProps>) => {
 
   if (!render) return null;
 
-  const Component: ComponentType = components?.[`./views/${componentPath}.tsx`];
+  const file = components?.[`./views/${componentPath}.tsx`];
+  const Component = typeof window === "undefined" ? file.default : file;
 
   return <Component {...data}>{props.children}</Component>;
 };
@@ -55,7 +58,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
   const { componentTree } = props;
 
   return (
-    <>
+    <Suspense>
       {componentTree.map((node, i) => {
         if (typeof node === "undefined") {
           return null;
@@ -86,27 +89,16 @@ const Routes = (props: { componentTree: ComponentTree }) => {
           </Route>
         );
       })}
-    </>
+    </Suspense>
   );
 };
 
-export const ClientRouter = (props: { components: any }) => {
-  const { routeManifest, router, componentTree, pageData } =
+export const ClientRouter = (props: any) => {
+  const { routeManifest, router, componentTree, pageData, auth } =
     useContext(ServerDataContext);
 
-  const components = Object.entries(props.components).reduce(
-    (acc, [path, importer]) => {
-      return {
-        ...acc,
-        [path]: lazy(
-          importer as () => Promise<{ default: ComponentType<unknown> }>,
-        ),
-      };
-    },
-    {},
-  );
-
-  const RootLayout = components["./views/RootLayout.tsx"];
+  const file = props.views["./views/RootLayout.tsx"];
+  const RootLayout = typeof window === "undefined" ? file.default : file;
 
   return (
     <ClientRouterProvider
@@ -117,7 +109,11 @@ export const ClientRouter = (props: { components: any }) => {
       currentPath={router.currentPath}
       routeManifest={routeManifest}
     >
-      <ComponentsContext.Provider value={{ components }}>
+      <ComponentsContext.Provider
+        value={{
+          components: props.views,
+        }}
+      >
         <Suspense fallback={<div>Loading...</div>}>
           <RootLayout>
             <Routes componentTree={componentTree} />

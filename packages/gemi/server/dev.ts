@@ -18,7 +18,7 @@ export async function startDevServer() {
       watch: {
         usePolling: true,
         interval: 100,
-        cwd: root,
+        // ignored: (str) => str.includes("app/http"),
       },
       hmr: {
         clientPort: 5174,
@@ -35,15 +35,15 @@ export async function startDevServer() {
   process.env.APP_DIR = appDir;
 
   const appPath = path.join(appDir, "bootstrap.ts");
-
   async function requestHandler(req: Request) {
     const { app } = await vite.ssrLoadModule(appPath);
-    return app.fetch.call(app, req);
+    const { Root } = await vite.ssrLoadModule("gemi/client");
+    return app.fetch.call(app, req, Root);
   }
 
   const server = Bun.serve({
     fetch: async (req) => {
-      return requestHandler(req);
+      return await requestHandler(req);
     },
     port: process.env.PORT || 5173,
   });
@@ -53,10 +53,12 @@ export async function startDevServer() {
       return;
     }
 
+    console.log(`[vite] ${file} changed. Updating...`);
+
     const mod = await vite.moduleGraph.getModuleByUrl(`/${file}`);
     if (mod) {
       console.log(`[vite] ${file} changed. Updating...`);
-      await vite.reloadModule(mod);
+      // await vite.reloadModule(mod);
     }
   });
 

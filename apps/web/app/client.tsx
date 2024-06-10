@@ -1,9 +1,8 @@
 import { hydrateRoot } from "react-dom/client";
 import { Main } from "gemi/client";
-
 import { lazy, type ComponentType } from "react";
 
-globalThis.components = Object.entries(
+(window as any).views = Object.entries(
   import.meta.glob(["./views/**/*.tsx", "!./views/**/components/**"]),
 ).reduce((acc, [path, importer]) => {
   return {
@@ -14,13 +13,4 @@ globalThis.components = Object.entries(
   };
 }, {});
 
-const components = import.meta.glob([
-  "./views/**/*.tsx",
-  "!./views/**/components/**",
-]);
-
-hydrateRoot(
-  document.getElementById("root")!,
-  <Main components={components} />,
-  {},
-);
+hydrateRoot(document.getElementById("root")!, <Main />, {});

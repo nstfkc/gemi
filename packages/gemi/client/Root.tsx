@@ -20,7 +20,7 @@ export const Root = (props: any) => {
       <body>
         <div id="root">
           <ServerDataProvider value={props.data}>
-            <ClientRouter components={props.components} />
+            <ClientRouter views={props.views} />
           </ServerDataProvider>
         </div>
       </body>
