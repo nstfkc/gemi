@@ -1,15 +1,12 @@
 import {
   Suspense,
-  lazy,
   useContext,
   useEffect,
   useState,
   createContext,
-  type ComponentType,
   type PropsWithChildren,
-  startTransition,
 } from "react";
-import { ServerDataContext, ServerDataProvider } from "./ServerDataProvider";
+import { ServerDataContext } from "./ServerDataProvider";
 import {
   ClientRouterContext,
   ClientRouterProvider,
