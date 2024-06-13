@@ -97,10 +97,19 @@ export async function startDevServer() {
       }, {});
 
       const { Root } = await vite.ssrLoadModule("gemi/client");
+      const styles = [];
+
+      const { default: css } = await vite.ssrLoadModule(`${appDir}/app.css`);
+      styles.push({
+        isDev: true,
+        id: `${appDir}/app.css`,
+        content: css,
+      });
+
       const stream = await renderToReadableStream(
         createElement(Root, {
           data,
-          styles: [],
+          styles,
           head,
           views,
         }),

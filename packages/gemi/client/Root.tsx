@@ -7,7 +7,13 @@ export const Root = (props: any) => {
     <html>
       <head>
         {props.styles.map((style) => {
-          return <link key={style} rel="stylesheet" href={`/${style}`} />;
+          if (style.isDev) {
+            return (
+              <style key={style.id} type="text/css" data-vite-dev-id={style.id}>
+                {style.content}
+              </style>
+            );
+          }
         })}
         <title>{title}</title>
         {meta.map((meta, i) => {
