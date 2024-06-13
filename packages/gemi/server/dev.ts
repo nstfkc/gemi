@@ -1,5 +1,5 @@
-import "react";
-
+import { createElement } from "react";
+import { renderToReadableStream } from "react-dom/server.browser";
 import path from "path";
 
 const rootDir = process.cwd();
@@ -36,9 +36,91 @@ export async function startDevServer() {
 
   const appPath = path.join(appDir, "bootstrap.ts");
   async function requestHandler(req: Request) {
+    const { pathname } = new URL(req.url);
+
+    if (pathname.startsWith("/refresh.js")) {
+      return new Response(
+        `
+          import RefreshRuntime from "http://localhost:5173/@react-refresh";
+          RefreshRuntime.injectIntoGlobalHook(window);
+          window.$RefreshReg$ = () => {};
+          window.$RefreshSig$ = () => (type) => type;
+          window.__vite_plugin_react_preamble_installed__ = true;
+        `,
+        {
+          headers: {
+            "Content-Type": "application/javascript",
+          },
+        },
+      );
+    }
+
+    try {
+      const res = await fetch(`http://localhost:5174${pathname}`);
+
+      if (res.ok) {
+        return res;
+      }
+    } catch (err) {
+      console.log(err);
+    }
+
     const { app } = await vite.ssrLoadModule(appPath);
-    const { Root } = await vite.ssrLoadModule("gemi/client");
-    return app.fetch.call(app, req, Root);
+    const response = await app.fetch.call(app, req);
+    if (response instanceof Response) {
+      return response;
+    }
+
+    try {
+      const { data, headers, head, status = 200 } = response;
+      let viewPaths: string[] = ["RootLayout"];
+      for (const [, d] of Object.entries(data.pageData)) {
+        viewPaths.push(...Object.keys(d));
+      }
+
+      const viewsResult = viewPaths.map((viewPath) => {
+        return (async function () {
+          const mod = await vite.ssrLoadModule(
+            `${appDir}/views/${viewPath}.tsx`,
+          );
+          return {
+            [`./views/${viewPath}.tsx`]: mod,
+          };
+        })();
+      });
+
+      const views = (await Promise.all(viewsResult)).reduce((acc, next) => {
+        return {
+          ...acc,
+          ...next,
+        };
+      }, {});
+
+      const { Root } = await vite.ssrLoadModule("gemi/client");
+      const stream = await renderToReadableStream(
+        createElement(Root, {
+          data,
+          styles: [],
+          head,
+          views,
+        }),
+        {
+          bootstrapScriptContent: `window.__GEMI_DATA__ = ${JSON.stringify(data)};`,
+          bootstrapModules: [
+            "/refresh.js",
+            "/app/client.tsx",
+            "http://localhost:5173/@vite/client",
+          ],
+        },
+      );
+
+      return new Response(stream, {
+        status,
+        headers: { ...headers, "Content-Type": "text/html" },
+      });
+    } catch (err) {
+      return new Response(err.stack, { status: 500 });
+    }
   }
 
   const server = Bun.serve({

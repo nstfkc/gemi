@@ -21,8 +21,6 @@ import type { Plugin } from "./Plugin";
 import type { Middleware } from "../http/Middleware";
 import { requestContext } from "../http/requestContext";
 import type { ServerWebSocket } from "bun";
-import { renderToReadableStream } from "react-dom/server.browser";
-import { createElement } from "react";
 
 import { imageHandler } from "../server/imageHandler";
 
@@ -79,7 +77,6 @@ interface AppParams {
   apiRouter: new (app: App) => ApiRouter;
   plugins?: (new () => Plugin)[];
   middlewareAliases?: Record<string, new () => Middleware>;
-  views: Record<string, any>;
 }
 
 export class App {
@@ -97,17 +94,15 @@ export class App {
   private params: AppParams;
   private apiRouter: ApiRouter;
   private viewRouter: ViewRouter;
-  private views: Record<string, any>;
 
   constructor(params: AppParams) {
-    console.log("App created");
+    console.log("[App] initialized");
     this.params = params;
     this.apiRouter = params.apiRouter;
     this.viewRouter = params.viewRouter;
-    this.views = params.views;
 
     this.prepare();
-
+    console.log("[App] routes are prepared");
     this.appId = generateETag(Date.now());
   }
 
@@ -512,8 +507,13 @@ export class App {
     }
   }
 
-  async fetch(req: Request, Root: any) {
+  async fetch(req: Request) {
     const url = new URL(req.url);
+
+    if (url.pathname.startsWith("__gemi/image")) {
+      return imageHandler(req);
+    }
+
     if (process.env.NODE_ENV === "production") {
       const pattern = new URLPattern({
         pathname: "/*.:filetype(png|txt|js|css|jpg|svg|jpeg|ico|ttf)",
@@ -534,33 +534,6 @@ export class App {
             ETag: etag,
           },
         });
-      }
-    }
-    if (url.pathname === "/refresh.js") {
-      return new Response(
-        `
-          import RefreshRuntime from "http://localhost:5173/@react-refresh";
-          RefreshRuntime.injectIntoGlobalHook(window);
-          window.$RefreshReg$ = () => {};
-          window.$RefreshSig$ = () => (type) => type;
-          window.__vite_plugin_react_preamble_installed__ = true;
-        `,
-        {
-          headers: {
-            "Content-Type": "application/javascript",
-          },
-        },
-      );
-    }
-
-    if (url.pathname === "__gemi/image") {
-      return imageHandler(req);
-    }
-
-    if (process.env.NODE_ENV === "development") {
-      const res = await fetch(`http://localhost:5174${url.pathname}`);
-      if (res.ok) {
-        return res;
       }
     }
 
@@ -601,33 +574,10 @@ export class App {
     }
 
     if (result.kind === "view") {
-      try {
-        const { data, headers, head, status = 200 } = result;
-        const stream = await renderToReadableStream(
-          createElement(Root, {
-            data,
-            styles: [],
-            head,
-            views: this.views,
-          }),
-          {
-            bootstrapScriptContent: `window.__GEMI_DATA__ = ${JSON.stringify(data)};`,
-            bootstrapModules: [
-              "/refresh.js",
-              "/app/client.tsx",
-              "http://localhost:5173/@vite/client",
-            ],
-          },
-        );
+      return result;
+    }
 
-        return new Response(stream, {
-          status,
-          headers: { ...headers, "Content-Type": "text/html" },
-        });
-      } catch (err) {
-        return new Response(err.stack, { status: 500 });
-      }
-    } else if (result.kind === "api") {
+    if (result.kind === "api") {
       const { data, headers, status } = result;
       return new Response(JSON.stringify(data), {
         status,
@@ -636,9 +586,9 @@ export class App {
           ...headers,
         },
       });
-    } else if (result.kind === "api_404") {
-      return new Response("Not found", { status: 404 });
     }
+
+    return new Response("Not found", { status: 404 });
   }
 
   createFetchHandler() {
