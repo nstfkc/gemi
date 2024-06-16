@@ -1,15 +1,16 @@
-import { NextUIProvider, Button } from "@nextui-org/react";
-import { Link } from "gemi/client";
+import { Link, useLocation } from "gemi/client";
+import { useId } from "react";
 
 const Home = (props: { message: string }) => {
+  const id = useId();
+  const location = useLocation();
   return (
-    <NextUIProvider>
-      <div className="">
-        <Button>
-          <Link href="/auth/sign-in">Sign in xxx</Link>
-        </Button>
+    <div className="">
+      <Link href="/auth/sign-in">Sign in</Link>
+      <div>
+        {location.pathname} - {id}
       </div>
-    </NextUIProvider>
+    </div>
   );
 };
 

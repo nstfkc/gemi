@@ -22,11 +22,12 @@ const linkClassName = [
 ].join(" ");
 
 const SidebarLink = (props: ComponentProps<typeof Link>) => {
-  const { pathname } = useLocation();
+  const location = useLocation();
 
+  console.log({ location });
   return (
     <Link
-      data-active={pathname === props.href}
+      data-active={location?.pathname === props.href}
       {...props}
       className={linkClassName}
     />

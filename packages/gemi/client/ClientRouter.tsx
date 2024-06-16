@@ -45,8 +45,7 @@ const Route = (props: PropsWithChildren<RouteProps>) => {
 
   if (!render) return null;
 
-  const file = components?.[`./views/${componentPath}.tsx`];
-  const Component = typeof window === "undefined" ? file.default : file;
+  const Component = components?.[`./${componentPath}.tsx`];
 
   return <Component {...data}>{props.children}</Component>;
 };
@@ -94,9 +93,6 @@ export const ClientRouter = (props: any) => {
   const { routeManifest, router, componentTree, pageData, auth } =
     useContext(ServerDataContext);
 
-  const file = props.views["./views/RootLayout.tsx"];
-  const RootLayout = typeof window === "undefined" ? file.default : file;
-
   return (
     <ClientRouterProvider
       params={router.params}
@@ -112,9 +108,7 @@ export const ClientRouter = (props: any) => {
         }}
       >
         <Suspense fallback={<div>Loading...</div>}>
-          <RootLayout>
-            <Routes componentTree={componentTree} />
-          </RootLayout>
+          <Routes componentTree={componentTree} />
         </Suspense>
       </ComponentsContext.Provider>
     </ClientRouterProvider>

@@ -10,7 +10,7 @@ export type MiddlewareReturnType =
   | Promise<MiddlewareResult>
   | MiddlewareResult;
 
-export type RouterMiddleware = (req: Request) => MiddlewareReturnType;
+export type RouterMiddleware = (req: Request, ctx: any) => MiddlewareReturnType;
 
 export class AuthenticationError extends RequestBreakerError {
   constructor() {

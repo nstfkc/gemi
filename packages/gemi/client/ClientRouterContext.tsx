@@ -58,14 +58,15 @@ export const ClientRouterProvider = (
     ? ["404"]
     : routeManifest[pathname] ?? ["404"];
   const viewEntriesSubject = useRef(new Subject<string[]>(initalViewEntries));
-  const locationSubject = useRef(
-    new Subject<Location>({
-      hash: "",
-      pathname: currentPath,
-      search: "",
-      state: {},
-      key: "",
-    }),
+  const [locationSubject] = useState(
+    () =>
+      new Subject<Location>({
+        hash: "",
+        pathname: currentPath,
+        search: "",
+        state: {},
+        key: "",
+      }),
   );
 
   const [history] = useState<History | null>(() => {
@@ -80,7 +81,7 @@ export const ClientRouterProvider = (
 
   const handleScroll = () => {
     scrollHistoryRef.current.set(
-      locationSubject.current.getValue().pathname,
+      locationSubject.getValue().pathname,
       window.scrollY,
     );
   };
@@ -88,7 +89,7 @@ export const ClientRouterProvider = (
   useEffect(() => {
     import("urlpattern-polyfill").then(({ URLPattern }) => {
       history?.listen(({ location }) => {
-        locationSubject.current.next(structuredClone(location));
+        locationSubject.next(structuredClone(location));
         viewEntriesSubject.current.next(
           (() => {
             if ((location.state as any)?.status === 404) {
@@ -126,9 +127,7 @@ export const ClientRouterProvider = (
   };
 
   const getPageData = (key: string) => {
-    return pageDataRef.current[locationSubject.current.getValue().pathname][
-      key
-    ];
+    return pageDataRef.current[locationSubject.getValue().pathname][key];
   };
 
   return (
@@ -136,7 +135,7 @@ export const ClientRouterProvider = (
       value={{
         history,
         params: parameters,
-        locationSubject: locationSubject.current,
+        locationSubject,
         getScrollPosition: (path: string) => {
           return scrollHistoryRef.current.get(path) || 0;
         },
@@ -159,7 +158,8 @@ function useLocationChange(cb: (location: Location) => void) {
 }
 
 export function useLocation() {
-  const { locationSubject } = useContext(ClientRouterContext);
+  const ctx = useContext(ClientRouterContext);
+  const { locationSubject } = ctx;
   const [location, setLocation] = useState(locationSubject?.getValue());
 
   useLocationChange((newLocation) => {

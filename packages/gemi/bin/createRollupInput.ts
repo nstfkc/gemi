@@ -30,6 +30,7 @@ export default async function () {
     JSON.stringify(
       [
         "/app/client.tsx",
+        "/app/views/RootLayout.tsx",
         ...getEntries(entries).map((item) => `/app/views/${item}.tsx`),
       ],
       null,

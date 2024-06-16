@@ -35,6 +35,7 @@ export type ViewChildren = Record<
 export type ViewRouteExec = (
   req: Request,
   params: Record<string, string>,
+  app: App,
 ) => any;
 
 export class ViewRouter {

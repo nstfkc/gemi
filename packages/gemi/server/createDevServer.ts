@@ -1,10 +1,16 @@
+import { type App } from "../app/App";
 import path from "path";
 
-const rootDir = process.cwd();
+interface Params {
+  app: App;
+  RootLayout: () => JSX.Element;
+}
 
-const appDir = path.join(rootDir, "app");
+export async function createDevServer(params: Params) {
+  const { app, RootLayout } = params;
+  const rootDir = process.cwd();
 
-export async function startDevServer() {
+  const appDir = path.join(rootDir, "app");
   const root = process.cwd();
 
   const vite = await (
@@ -35,10 +41,6 @@ export async function startDevServer() {
   async function requestHandler(req: Request) {
     const { pathname } = new URL(req.url);
 
-    if (pathname.startsWith("/manifest.js")) {
-      return new Response(``);
-    }
-
     if (pathname.startsWith("/refresh.js")) {
       return new Response(
         `
@@ -66,39 +68,19 @@ export async function startDevServer() {
       console.log(err);
     }
 
-    const { app } = await vite.ssrLoadModule(path.join(appDir, "bootstrap.ts"));
     const handler = app.fetch.bind(app);
 
-    try {
-      const { default: css } = await vite.ssrLoadModule(`${appDir}/app.css`);
-
-      const styles = [];
-      styles.push({
-        isDev: true,
-        id: `${appDir}/app.css`,
-        content: css,
-      });
-
-      return await handler(req, {
-        styles,
+    return await handler(req, {
+      RootLayout,
+      options: {
         bootstrapModules: [
           "/refresh.js",
           "/app/client.tsx",
           "http://localhost:5173/@vite/client",
         ],
-      });
-    } catch (err) {
-      return new Response(err.stack, { status: 500 });
-    }
+      },
+    });
   }
-  await vite.listen(5174);
-
-  const server = Bun.serve({
-    fetch: async (req) => {
-      return await requestHandler(req);
-    },
-    port: process.env.PORT || 5173,
-  });
 
   vite.watcher.on("change", async (file) => {
     if (file.includes("app/views")) {
@@ -112,6 +94,15 @@ export async function startDevServer() {
       console.log(`[vite] ${file} changed. Updating...`);
       // await vite.reloadModule(mod);
     }
+  });
+
+  await vite.listen(5174);
+
+  const server = Bun.serve({
+    fetch: async (req) => {
+      return await requestHandler(req);
+    },
+    port: process.env.PORT || 5173,
   });
 
   return server;

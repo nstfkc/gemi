@@ -1,13 +1,10 @@
 import { ClientRouter } from "./ClientRouter";
 import { ServerDataProvider } from "./ServerDataProvider";
 
-export const Main = () => {
+export const Main = (props: any) => {
   return (
-    <>
-      <></>
-      <ServerDataProvider>
-        <ClientRouter views={(window as any).views} />
-      </ServerDataProvider>
-    </>
+    <ServerDataProvider value={props.data}>
+      <ClientRouter views={props.views} />
+    </ServerDataProvider>
   );
 };

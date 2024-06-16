@@ -1,8 +1,4 @@
 import { hydrateRoot } from "react-dom/client";
-import { Main, registerViews } from "gemi/client";
+import RootLayout from "./views/RootLayout";
 
-registerViews(
-  import.meta.glob(["./views/**/*.tsx", "!./views/**/components/**"]),
-);
-
-hydrateRoot(document.getElementById("root")!, <Main />, {});
+hydrateRoot(document.body, <RootLayout />, {});

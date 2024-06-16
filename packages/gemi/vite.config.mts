@@ -11,9 +11,7 @@ export default defineConfig({
     minify: false,
     outDir: "dist/client",
     rollupOptions: {
-      // make sure to externalize deps that shouldn't be bundled
-      // into your library
-      external: ["react", "react-dom", "react/jsx-runtime"],
+      external: ["react", "react-dom", "react/jsx-runtime", "gemi"],
     },
   },
 });
