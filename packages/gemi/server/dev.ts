@@ -1,5 +1,7 @@
 import path from "path";
 
+import type { App } from "../app/App";
+
 const rootDir = process.cwd();
 
 const appDir = path.join(rootDir, "app");
@@ -35,9 +37,9 @@ export async function startDevServer() {
   async function requestHandler(req: Request) {
     const { pathname } = new URL(req.url);
 
-    if (pathname.startsWith("/manifest.js")) {
-      return new Response(``);
-    }
+    const { app } = (await vite.ssrLoadModule(
+      path.join(appDir, "bootstrap.ts"),
+    )) as { app: App };
 
     if (pathname.startsWith("/refresh.js")) {
       return new Response(
@@ -66,12 +68,10 @@ export async function startDevServer() {
       console.log(err);
     }
 
-    const { app } = await vite.ssrLoadModule(path.join(appDir, "bootstrap.ts"));
     const handler = app.fetch.bind(app);
 
     try {
       const { default: css } = await vite.ssrLoadModule(`${appDir}/app.css`);
-
       const styles = [];
       styles.push({
         isDev: true,
@@ -81,6 +81,7 @@ export async function startDevServer() {
 
       return await handler(req, {
         styles,
+        views: {},
         bootstrapModules: [
           "/refresh.js",
           "/app/client.tsx",

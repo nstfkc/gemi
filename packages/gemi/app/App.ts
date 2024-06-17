@@ -20,13 +20,16 @@ import type { Plugin } from "./Plugin";
 import type { Middleware } from "../http/Middleware";
 import { requestContext } from "../http/requestContext";
 import type { ServerWebSocket } from "bun";
+import { flattenViewRoutes } from "./flattenViewRoutes";
+import { flattenComponentTree } from "../client/helpers/flattenComponentTree";
 
 // @ts-ignore
 import { renderToReadableStream } from "react-dom/server.browser";
-import { Fragment, createElement } from "react";
+import { lazy, createElement } from "react";
 
 interface RenderParams {
   styles: string[];
+  views: Record<string, string>;
 }
 
 const defaultHead = {
@@ -95,7 +98,7 @@ export class App {
   public name = "APP";
   private appId: string;
   private componentTree: ComponentTree;
-  private middlewareAliases: Record<string, new () => Middleware> = {};
+  public middlewareAliases: Record<string, new () => Middleware> = {};
   public devVersion = 0;
   private params: AppParams;
   private apiRouter: new (app: App) => ApiRouter;
@@ -140,8 +143,10 @@ export class App {
       }
     }
     // Handle view routes
-    const { flatRoutes, routeManifest, componentTree } =
-      this.flattenViewRoutes(viewRouters);
+    const { flatRoutes, routeManifest, componentTree } = flattenViewRoutes(
+      viewRouters,
+      this,
+    );
     this.componentTree = componentTree;
     this.routeManifest = routeManifest;
     this.flatViewRoutes = flatRoutes;
@@ -542,12 +547,19 @@ export class App {
 
     if (result.kind === "view") {
       const { data, headers, head, status } = result as any;
-      const { styles, ...renderOptions } = renderParams;
+      const { styles, views, ...renderOptions } = renderParams;
+      const viewImportMap = {};
+      for (const file of flattenComponentTree(this.componentTree)) {
+        viewImportMap[file] = lazy(
+          () => import(`${process.env.APP_DIR}/views/${file}.tsx`),
+        );
+      }
       const stream = await renderToReadableStream(
         createElement(this.RootLayout, {
           data,
           styles,
           head,
+          viewImportMap,
         }),
         {
           bootstrapScriptContent: `window.__GEMI_DATA__ = ${JSON.stringify(data)};`,

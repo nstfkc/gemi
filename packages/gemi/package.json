@@ -20,7 +20,8 @@
     "./app": "./dist/app/index.js",
     "./facades": "./dist/facades/index.js",
     "./email": "./dist/email/index.js",
-    "./vite": "./dist/vite/index.js"
+    "./vite": "./dist/vite/index.js",
+    "./runtime": "./dist/client/runtime.js"
   },
   "files": [
     "dist/**/*"

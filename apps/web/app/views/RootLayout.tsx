@@ -2,19 +2,9 @@ import "../app.css";
 import { StrictMode, lazy, type ComponentType } from "react";
 import { Main } from "gemi/client";
 
-const views = Object.entries(
-  import.meta.glob(["./**/*.tsx", "!./**/components/**"]),
-).reduce((acc, [path, importer]) => {
-  return {
-    ...acc,
-    [path]: lazy(
-      importer as () => Promise<{ default: ComponentType<unknown> }>,
-    ),
-  };
-}, {});
-
 const RootLayout = (props: any) => {
   const { styles = [] } = props;
+
   return (
     <html>
       <head>
@@ -33,7 +23,11 @@ const RootLayout = (props: any) => {
       </head>
       <body>
         <StrictMode>
-          <Main views={views} data={props.data} />
+          <Main
+            viewImportMap={props.viewImportMap}
+            views={{}}
+            data={props.data}
+          />
         </StrictMode>
       </body>
     </html>

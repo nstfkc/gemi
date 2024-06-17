@@ -5,23 +5,39 @@ import {
   useState,
   createContext,
   type PropsWithChildren,
+  lazy,
 } from "react";
-import { ServerDataContext } from "./ServerDataProvider";
+import {
+  ServerDataContext,
+  type ServerDataContextValue,
+} from "./ServerDataProvider";
 import {
   ClientRouterContext,
   ClientRouterProvider,
 } from "./ClientRouterContext";
 import type { ComponentTree } from "./types";
+import { flattenComponentTree } from "./helpers/flattenComponentTree";
 
 interface RouteProps {
   componentPath: string;
 }
 
-const ComponentsContext = createContext({ components: {} });
+let viewImportMap: Record<string, any> | null = null;
+if (typeof window !== "undefined") {
+  viewImportMap = {};
+  const { componentTree } = (window as any)
+    .__GEMI_DATA__ as ServerDataContextValue;
+
+  for (const file of flattenComponentTree(componentTree)) {
+    viewImportMap[file] = lazy(() => import(`./app/views/${file}.tsx`));
+  }
+}
+
+const ComponentsContext = createContext({ components: {}, viewImportMap });
 
 const Route = (props: PropsWithChildren<RouteProps>) => {
   const { componentPath } = props;
-  const { components } = useContext(ComponentsContext);
+  const { components, viewImportMap } = useContext(ComponentsContext);
 
   const { viewEntriesSubject, getPageData, history } =
     useContext(ClientRouterContext);
@@ -44,6 +60,11 @@ const Route = (props: PropsWithChildren<RouteProps>) => {
   }, []);
 
   if (!render) return null;
+
+  if (viewImportMap) {
+    const Component = viewImportMap[componentPath];
+    return <Component {...data}>{props.children}</Component>;
+  }
 
   const Component = components?.[`./${componentPath}.tsx`];
 
@@ -105,6 +126,7 @@ export const ClientRouter = (props: any) => {
       <ComponentsContext.Provider
         value={{
           components: props.views,
+          viewImportMap: props.viewImportMap ?? viewImportMap,
         }}
       >
         <Suspense fallback={<div>Loading...</div>}>

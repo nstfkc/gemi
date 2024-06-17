@@ -3,7 +3,7 @@ import type { ComponentTree } from "./types";
 
 type Data = Record<string, any>;
 
-interface ServerDataContextValue {
+export interface ServerDataContextValue {
   routeManifest: Record<string, string[]>;
   pageData: Record<string, Record<string, Data>>;
   router: {
