@@ -11,10 +11,7 @@ export default defineConfig({
   build: {
     manifest: true,
     rollupOptions: {
-      input: {
-        main: "/app/client.tsx",
-        home: "/app/views/Home.tsx",
-      },
+      input,
     },
     ssrEmitAssets: true,
     minify: false,

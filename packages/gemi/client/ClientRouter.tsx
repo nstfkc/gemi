@@ -65,7 +65,7 @@ const Route = (props: PropsWithChildren<RouteProps>) => {
 
   if (viewImportMap) {
     const Component = viewImportMap[componentPath];
-    return <Component {...data}>{props.children}</Component>;
+    return <div>{componentPath}</div>;
   }
   return <div>Not found</div>;
 };
@@ -86,7 +86,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
         if (Array.isArray(node)) {
           const [path, subtree] = node;
           return (
-            <Suspense>
+            <Suspense key={path}>
               <Route componentPath={path} key={i}>
                 <Routes componentTree={subtree as any} />
               </Route>
@@ -96,7 +96,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
 
         const [[first, subtree]] = Object.entries(node);
         return (
-          <Suspense>
+          <Suspense key={first}>
             <Route componentPath={String(first)} key={i}>
               <Routes componentTree={subtree} />
             </Route>

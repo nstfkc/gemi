@@ -18,7 +18,6 @@ export async function startDevServer() {
       watch: {
         usePolling: true,
         interval: 100,
-        // ignored: (str) => str.includes("app/http"),
       },
       hmr: {
         clientPort: 5174,

@@ -1,5 +1,6 @@
 import "../app.css";
 import { StrictMode } from "react";
+import { Main } from "gemi/client";
 
 const RootLayout = (props: any) => {
   const { styles = [] } = props;
@@ -22,7 +23,7 @@ const RootLayout = (props: any) => {
       </head>
       <body>
         <StrictMode>
-          <div>Hello</div>
+          <Main viewImportMap={props.viewImportMap} data={props.data} />
         </StrictMode>
       </body>
     </html>

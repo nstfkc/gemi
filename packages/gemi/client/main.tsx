@@ -4,7 +4,7 @@ import { ServerDataProvider } from "./ServerDataProvider";
 export const Main = (props: any) => {
   return (
     <ServerDataProvider value={props.data}>
-      <ClientRouter viewImportMap={props.viewImportMap} views={props.views} />
+      <ClientRouter viewImportMap={props.viewImportMap} />
     </ServerDataProvider>
   );
 };

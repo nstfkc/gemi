@@ -1,13 +1,13 @@
 import { Link } from "gemi/client";
 
-export default function Home() {
+export default function About() {
   return (
     <div>
       <div>
-        <h1>Home1</h1>
+        <h1>About </h1>
       </div>
       <div>
-        <Link href="/about">About</Link>
+        <Link href="/">Home</Link>
       </div>
     </div>
   );
