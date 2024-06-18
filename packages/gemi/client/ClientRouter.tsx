@@ -31,8 +31,6 @@ if (typeof window !== "undefined") {
   for (const viewName of flattenComponentTree(componentTree)) {
     viewImportMap[viewName] = lazy((window as any).loaders[viewName]);
   }
-
-  console.log({ viewImportMap });
 }
 
 const ComponentsContext = createContext({ viewImportMap });
@@ -85,21 +83,36 @@ const Routes = (props: { componentTree: ComponentTree }) => {
 
         if (Array.isArray(node)) {
           const [path, subtree] = node;
+          if (subtree) {
+            return (
+              <Suspense key={path}>
+                <Route componentPath={path} key={i}>
+                  <Routes componentTree={subtree as any} />
+                </Route>
+              </Suspense>
+            );
+          } else {
+            return (
+              <Suspense key={path}>
+                <Route componentPath={path} key={i} />
+              </Suspense>
+            );
+          }
+        }
+
+        const [[first, subtree]] = Object.entries(node);
+        if (subtree) {
           return (
-            <Suspense key={path}>
-              <Route componentPath={path} key={i}>
+            <Suspense key={first}>
+              <Route componentPath={String(first)} key={i}>
                 <Routes componentTree={subtree as any} />
               </Route>
             </Suspense>
           );
         }
-
-        const [[first, subtree]] = Object.entries(node);
         return (
           <Suspense key={first}>
-            <Route componentPath={String(first)} key={i}>
-              <Routes componentTree={subtree} />
-            </Route>
+            <Route componentPath={String(first)} key={i} />
           </Suspense>
         );
       })}
@@ -125,9 +138,7 @@ export const ClientRouter = (props: any) => {
           viewImportMap: props.viewImportMap ?? viewImportMap,
         }}
       >
-        <Suspense fallback={<div>Loading...</div>}>
-          <Routes componentTree={componentTree} />
-        </Suspense>
+        <Routes componentTree={componentTree} />
       </ComponentsContext.Provider>
     </ClientRouterProvider>
   );
