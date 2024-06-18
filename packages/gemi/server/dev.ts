@@ -1,6 +1,7 @@
 import path from "path";
 
 import type { App } from "../app/App";
+import { createStyles } from "./styles";
 
 const rootDir = process.cwd();
 
@@ -79,7 +80,7 @@ export async function startDevServer() {
       });
 
       return await handler(req, {
-        styles,
+        styles: createStyles(styles),
         views: {},
         manifest: null,
         serverManifest: null,

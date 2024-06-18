@@ -2,6 +2,7 @@ import { join } from "path";
 import { imageHandler } from "./imageHandler";
 import { generateETag } from "./generateEtag";
 import { URLPattern } from "urlpattern-polyfill";
+import { createStyles } from "./styles";
 
 const rootDir = process.cwd();
 
@@ -12,6 +13,11 @@ export async function startProdServer() {
   const { app } = await import(`${distDir}/server/bootstrap.mjs`);
   const manifest = await import(`${distDir}/client/.vite/manifest.json`);
   const serverManifest = await import(`${distDir}/server/.vite/manifest.json`);
+
+  const cssFile = Bun.file(
+    `${distDir}/client/${manifest["app/client.tsx"].css}`,
+  );
+  const cssContent = await cssFile.text();
 
   process.env.ROOT_DIR = rootDir;
   process.env.APP_DIR = appDir;
@@ -50,9 +56,13 @@ export async function startProdServer() {
 
     const handler = app.fetch.bind(app);
 
+    const styles = [];
+    styles.push({
+      content: cssContent,
+    });
     try {
       return await handler(req, {
-        styles: [],
+        styles: createStyles(styles),
         views: {},
         manifest,
         serverManifest,

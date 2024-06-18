@@ -25,7 +25,7 @@ import { flattenComponentTree } from "../client/helpers/flattenComponentTree";
 
 // @ts-ignore
 import { renderToReadableStream } from "react-dom/server.browser";
-import { lazy, createElement } from "react";
+import { lazy, createElement, Fragment } from "react";
 
 interface RenderParams {
   styles: string[];
@@ -576,11 +576,15 @@ export class App {
       const loaders = `{${templates.join(",")}}`;
 
       const stream = await renderToReadableStream(
-        createElement(this.RootLayout, {
-          data,
-          styles,
-          head,
-          viewImportMap,
+        createElement(Fragment, {
+          children: [
+            styles,
+            createElement(this.RootLayout, {
+              data,
+              head,
+              viewImportMap,
+            }),
+          ],
         }),
         {
           bootstrapScriptContent: `window.__GEMI_DATA__ = ${JSON.stringify(data)}; window.loaders=${loaders}`,

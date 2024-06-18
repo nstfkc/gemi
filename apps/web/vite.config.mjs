@@ -7,6 +7,7 @@ const rootDir = path.resolve(process.cwd());
 const appDir = path.join(rootDir, "app");
 
 export default defineConfig({
+  plugins: [react()],
   assetsInclude: ["/public"],
   build: {
     manifest: true,
@@ -14,7 +15,6 @@ export default defineConfig({
       input,
     },
     ssrEmitAssets: true,
-    minify: false,
   },
   resolve: {
     alias: {
