@@ -45,7 +45,7 @@ export class ViewRouter {
 
   public middleware(req: Request): MiddlewareReturnType {}
 
-  protected view<T extends new () => Controller>(
+  protected view<T extends new (app: App) => Controller>(
     viewPath: string,
     handler?: ViewHandler<T>,
     children: ViewChildren = {},

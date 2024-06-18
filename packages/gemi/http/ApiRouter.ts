@@ -5,7 +5,7 @@ import { type MiddlewareReturnType } from "./Router";
 import type { App } from "../app/App";
 import { HttpRequest } from "./HttpRequest";
 
-type ControllerMethods<T extends new () => Controller> = {
+type ControllerMethods<T extends new (app: App) => Controller> = {
   [K in keyof InstanceType<T>]: InstanceType<T>[K] extends Function ? K : never;
 }[keyof InstanceType<T>];
 
@@ -55,7 +55,7 @@ export class ApiRouter {
 
   public middleware(req: Request): MiddlewareReturnType {}
 
-  private handleRequest<T extends new () => Controller>(
+  private handleRequest<T extends new (app: App) => Controller>(
     controller: T,
     methodName: ControllerMethods<T>,
   ) {
@@ -89,7 +89,7 @@ export class ApiRouter {
     };
   }
 
-  protected get<T extends new () => Controller>(
+  protected get<T extends new (app: App) => Controller>(
     controller: T,
     methodName: ControllerMethods<T>,
   ) {
@@ -97,7 +97,7 @@ export class ApiRouter {
     return handler("get");
   }
 
-  protected post<T extends new () => Controller>(
+  protected post<T extends new (app: App) => Controller>(
     controller: T,
     methodName: ControllerMethods<T>,
   ) {
@@ -105,7 +105,7 @@ export class ApiRouter {
     return handler("post");
   }
 
-  protected patch<T extends new () => Controller>(
+  protected patch<T extends new (app: App) => Controller>(
     controller: T,
     methodName: ControllerMethods<T>,
   ) {
@@ -113,7 +113,7 @@ export class ApiRouter {
     return handler("patch");
   }
 
-  protected put<T extends new () => Controller>(
+  protected put<T extends new (app: App) => Controller>(
     controller: T,
     methodName: ControllerMethods<T>,
   ) {
@@ -121,7 +121,7 @@ export class ApiRouter {
     return handler("put");
   }
 
-  protected delete<T extends new () => Controller>(
+  protected delete<T extends new (app: App) => Controller>(
     controller: T,
     methodName: ControllerMethods<T>,
   ) {
