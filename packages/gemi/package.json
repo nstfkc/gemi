@@ -32,7 +32,7 @@
     "lint": "eslint . --max-warnings 0",
     "build": "bun run build:core && bun run build:bin && bun run build:types && bun run build:client && bun run build:client-types",
     "build:core": "bun ./scripts/build.ts",
-    "build:bin": "bun build --compile ./bin/gemi.ts --external vite --external react-dom --outfile ./dist/bin/gemi",
+    "build:bin": "bun build --compile ./bin/gemi.ts --external vite --external react-dom --external react/jsx-runtime --outfile ./dist/bin/gemi",
     "build:client": "vite build",
     "build:types": "tsc",
     "build:client-types": "tsc -p tsconfig.browser.json"

@@ -6,6 +6,7 @@ import {
   createContext,
   type PropsWithChildren,
   lazy,
+  StrictMode,
 } from "react";
 import {
   ServerDataContext,
@@ -138,7 +139,9 @@ export const ClientRouter = (props: any) => {
           viewImportMap: props.viewImportMap ?? viewImportMap,
         }}
       >
-        <Routes componentTree={componentTree} />
+        <StrictMode>
+          <Routes componentTree={componentTree} />
+        </StrictMode>
       </ComponentsContext.Provider>
     </ClientRouterProvider>
   );

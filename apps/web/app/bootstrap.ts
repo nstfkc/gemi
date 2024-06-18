@@ -1,4 +1,5 @@
 import { App } from "gemi/app";
+import { createRoot } from "gemi/client";
 
 import ApiRouter from "./http/router/api";
 import ViewRouter from "./http/router/view";
@@ -9,7 +10,7 @@ import { AuthMiddleware } from "./http/middlewares/AuthMiddleware";
 import { UserMiddleware } from "./http/middlewares/UserMiddleware";
 
 export const app = new App({
-  RootLayout,
+  root: createRoot(RootLayout),
   //
   apiRouter: ApiRouter,
   viewRouter: ViewRouter,

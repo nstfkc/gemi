@@ -11,3 +11,6 @@ export {
   ValidationErrors,
 } from "./Mutation";
 export { Link, useLocation, useParams, useRouter } from "./ClientRouterContext";
+
+export { init } from "./init";
+export { createRoot } from "./createRoot";

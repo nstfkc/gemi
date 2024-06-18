@@ -30,7 +30,7 @@ program.command("build").action(async () => {
         outDir: "dist/server",
         rollupOptions: {
           input: "app/bootstrap.ts",
-          external: ["bun", "react", "react-dom", "gemi"],
+          external: ["bun", "react", "react-dom", "react/jsx-runtime", "gemi"],
         },
       },
       resolve: {

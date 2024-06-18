@@ -1,5 +1,5 @@
 import RootLayout from "./views/RootLayout";
-import { hydrateRoot } from "react-dom/client";
+import { init } from "gemi/client";
 
 // This is a hack to make vite bundle the views
 // Will be removed later
@@ -11,4 +11,4 @@ if (typeof window !== "undefined") {
   ]);
 }
 
-hydrateRoot(document, <RootLayout />, {});
+init(RootLayout);

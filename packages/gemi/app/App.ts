@@ -3,11 +3,7 @@ import type {
   ApiRouteExec,
   ApiRouter,
 } from "../http/ApiRouter";
-import {
-  ViewRouter,
-  type ViewChildren,
-  type ViewRouteExec,
-} from "../http/ViewRouter";
+import { ViewRouter, type ViewRouteExec } from "../http/ViewRouter";
 // @ts-ignore
 import { URLPattern } from "urlpattern-polyfill";
 import { generateETag } from "../server/generateEtag";
@@ -25,7 +21,7 @@ import { flattenComponentTree } from "../client/helpers/flattenComponentTree";
 
 // @ts-ignore
 import { renderToReadableStream } from "react-dom/server.browser";
-import { lazy, createElement, Fragment } from "react";
+import { ComponentType, createElement, Fragment } from "react";
 
 interface RenderParams {
   styles: string[];
@@ -33,20 +29,6 @@ interface RenderParams {
   manifest: Record<string, any>;
   serverManifest: Record<string, any>;
 }
-
-const defaultHead = {
-  title: "The UI Agents",
-  meta: [
-    { charSet: "utf-8" },
-    { name: "viewport", content: "width=device-width, initial-scale=1" },
-    {
-      name: "description",
-      content:
-        "Fastest way to start your B2B SaaS journey. Immediately access to high quality templates and slingshot your startup into the future.",
-    },
-  ],
-  link: [{ rel: "icon", href: "/favicon.ico" }],
-};
 
 function prepareViewData(
   result: Array<{
@@ -69,12 +51,12 @@ function prepareViewData(
         head: {
           ...acc.head,
           title: next?.head?.title ?? acc.head?.title ?? "Gemi App",
-          meta: [...acc.head.meta, ...(next?.head?.meta ?? [])],
-          link: [...acc.head.link, ...(next?.head?.link ?? [])],
+          meta: [...(acc.head?.meta ?? []), ...(next?.head?.meta ?? [])],
+          link: [...(acc.head?.link ?? []), ...(next?.head?.link ?? [])],
         },
       };
     },
-    { pageData: {}, headers: {}, head: defaultHead },
+    { pageData: {}, headers: {}, head: {} as any },
   ) as {
     pageData: Record<string, any>;
     headers: Record<string, any>;
@@ -87,7 +69,7 @@ interface AppParams {
   apiRouter: new (app: App) => ApiRouter;
   plugins?: (new () => Plugin)[];
   middlewareAliases?: Record<string, new () => Middleware>;
-  RootLayout: () => JSX.Element;
+  root: ComponentType;
 }
 
 export class App {
@@ -105,14 +87,14 @@ export class App {
   private params: AppParams;
   private apiRouter: new (app: App) => ApiRouter;
   private viewRouter: new (app: App) => ViewRouter;
-  private RootLayout: () => JSX.Element;
+  private Root: ComponentType;
 
   constructor(params: AppParams) {
     console.log("[App] initialized");
     this.params = params;
     this.apiRouter = params.apiRouter;
     this.viewRouter = params.viewRouter;
-    this.RootLayout = params.RootLayout;
+    this.Root = params.root;
 
     this.prepare();
     console.log("[App] routes are prepared");
@@ -223,83 +205,6 @@ export class App {
     }
 
     return flatApiRoutes;
-  }
-
-  private flattenViewRoutes(routes: ViewChildren) {
-    const flatRoutes: Record<
-      string,
-      { exec: ViewRouteExec[]; middleware: any[] }
-    > = {};
-    const routeManifest: Record<string, string[]> = {};
-    const componentTree: ComponentTree = [];
-
-    for (const [rootPath, viewConfigOrViewRouter] of Object.entries(routes)) {
-      let children;
-      let rootHandler: ViewRouteExec = async () => ({});
-      let rootMiddleware: any[] = [];
-      let layoutViewPath: string | null = null;
-      if ("prepare" in viewConfigOrViewRouter) {
-        const result = viewConfigOrViewRouter.prepare();
-        children = result.children;
-        rootHandler = result.exec;
-        flatRoutes[rootPath] = {
-          exec: [rootHandler],
-          middleware: result.middlewares,
-        };
-        if (Object.keys(children).length > 0) {
-          layoutViewPath = result.viewPath;
-        } else {
-          routeManifest[rootPath] = [result.viewPath];
-          componentTree.push([result.viewPath]);
-        }
-      } else {
-        const router = new viewConfigOrViewRouter(this);
-        const middlewares = router.middlewares
-          .map((alias) => {
-            if (this.middlewareAliases?.[alias]) {
-              const middleware = new this.middlewareAliases[alias]();
-              return middleware.run;
-            }
-          })
-          .filter(Boolean);
-
-        rootMiddleware.push(router.middleware, ...middlewares);
-        children = router.routes;
-      }
-
-      const result = this.flattenViewRoutes(children);
-
-      if (layoutViewPath) {
-        componentTree.push({ [layoutViewPath]: result.componentTree });
-      } else {
-        componentTree.push(...result.componentTree);
-      }
-
-      for (const [path, handlers] of Object.entries(result.flatRoutes)) {
-        const subPath = path === "/" ? "" : path;
-        const _rootPath = rootPath === "/" ? "" : rootPath;
-        const finalPath =
-          `${_rootPath}${subPath}` === "" ? "/" : `${_rootPath}${subPath}`;
-        flatRoutes[finalPath] = {
-          exec: [rootHandler, ...handlers.exec],
-          middleware: [...rootMiddleware, ...handlers.middleware],
-        };
-        if (layoutViewPath) {
-          routeManifest[finalPath] = [
-            layoutViewPath,
-            ...(result.routeManifest[path] ?? []),
-          ];
-        } else {
-          routeManifest[finalPath] = [...(result.routeManifest[path] ?? [])];
-        }
-      }
-    }
-
-    return {
-      flatRoutes,
-      routeManifest,
-      componentTree,
-    };
   }
 
   private async resolvePageData(req: Request) {
@@ -579,9 +484,9 @@ export class App {
         createElement(Fragment, {
           children: [
             styles,
-            createElement(this.RootLayout, {
-              data,
+            createElement(this.Root as any, {
               head,
+              data,
               viewImportMap,
             }),
           ],
