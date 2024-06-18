@@ -28,16 +28,18 @@ if (typeof window !== "undefined") {
   const { componentTree } = (window as any)
     .__GEMI_DATA__ as ServerDataContextValue;
 
-  for (const file of flattenComponentTree(componentTree)) {
-    viewImportMap[file] = lazy(() => import(`./app/views/${file}.tsx`));
+  for (const viewName of flattenComponentTree(componentTree)) {
+    viewImportMap[viewName] = lazy((window as any).loaders[viewName]);
   }
+
+  console.log({ viewImportMap });
 }
 
-const ComponentsContext = createContext({ components: {}, viewImportMap });
+const ComponentsContext = createContext({ viewImportMap });
 
 const Route = (props: PropsWithChildren<RouteProps>) => {
   const { componentPath } = props;
-  const { components, viewImportMap } = useContext(ComponentsContext);
+  const { viewImportMap } = useContext(ComponentsContext);
 
   const { viewEntriesSubject, getPageData, history } =
     useContext(ClientRouterContext);
@@ -65,33 +67,26 @@ const Route = (props: PropsWithChildren<RouteProps>) => {
     const Component = viewImportMap[componentPath];
     return <Component {...data}>{props.children}</Component>;
   }
-
-  const Component = components?.[`./${componentPath}.tsx`];
-
-  return <Component {...data}>{props.children}</Component>;
+  return <div>Not found</div>;
 };
 
 const Routes = (props: { componentTree: ComponentTree }) => {
   const { componentTree } = props;
 
   return (
-    <Suspense>
+    <>
       {componentTree.map((node, i) => {
         if (typeof node === "undefined") {
           return null;
         }
         if (typeof node === "string") {
-          return (
-            <Suspense>
-              <Route key={node} componentPath={node} />;
-            </Suspense>
-          );
+          return <Route key={node} componentPath={node} />;
         }
 
         if (Array.isArray(node)) {
           const [path, subtree] = node;
           return (
-            <Suspense key={i}>
+            <Suspense>
               <Route componentPath={path} key={i}>
                 <Routes componentTree={subtree as any} />
               </Route>
@@ -101,12 +96,14 @@ const Routes = (props: { componentTree: ComponentTree }) => {
 
         const [[first, subtree]] = Object.entries(node);
         return (
-          <Route componentPath={String(first)} key={i}>
-            <Routes componentTree={subtree} />
-          </Route>
+          <Suspense>
+            <Route componentPath={String(first)} key={i}>
+              <Routes componentTree={subtree} />
+            </Route>
+          </Suspense>
         );
       })}
-    </Suspense>
+    </>
   );
 };
 
@@ -125,7 +122,6 @@ export const ClientRouter = (props: any) => {
     >
       <ComponentsContext.Provider
         value={{
-          components: props.views,
           viewImportMap: props.viewImportMap ?? viewImportMap,
         }}
       >

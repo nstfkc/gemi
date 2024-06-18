@@ -2,6 +2,7 @@ import { $ } from "bun";
 
 import path from "node:path";
 import { startDevServer } from "../server/dev";
+import { startProdServer } from "../server/prod";
 import createRollupInput from "./createRollupInput";
 import { build } from "vite";
 
@@ -28,7 +29,7 @@ program.command("build").action(async () => {
         ssr: true,
         outDir: "dist/server",
         rollupOptions: {
-          input: "prod.ts",
+          input: "app/bootstrap.ts",
           external: ["bun", "react", "react-dom", "gemi"],
         },
       },
@@ -46,7 +47,9 @@ program.command("build").action(async () => {
 
 program.command("start").action(async () => {
   process.env.NODE_ENV = "production";
+
   await $`echo "Starting server..."`;
+  await startProdServer();
 });
 
 program.parse();

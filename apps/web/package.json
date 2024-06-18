@@ -4,11 +4,9 @@
     "build:all": "NODE_ENV=production bun run build:client && bun run build:server",
     "build:client": "vite build --outDir dist/client",
     "build:server": "vite build -c vite.config.server.mjs",
-    "prebuildx": "bun run ./framework/scripts/prebuild.ts",
     "dev": "gemi dev",
     "build": "gemi build",
     "start": "gemi start",
-    "startx": "NODE_ENV=production bun ./dist/server/prod.mjs",
     "test": "vitest"
   },
   "devDependencies": {
@@ -28,7 +26,7 @@
     "prisma": "^5.14.0",
     "tailwindcss": "^3.4.3",
     "typescript": "^5.4.4",
-    "vite": "^5.2.8",
+    "vite": "6.0.0-alpha.18",
     "vitest": "^1.5.0"
   },
   "dependencies": {
@@ -47,8 +45,8 @@
     "jsonwebtoken": "^9.0.2",
     "lucide-react": "^0.379.0",
     "nodemailer": "^6.9.13",
-    "react": "19.0.0-rc-dfd30974ab-20240613",
-    "react-dom": "19.0.0-rc-dfd30974ab-20240613",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
     "react-email": "^2.1.4",
     "resend": "^3.2.0",
     "sharp": "^0.33.3",

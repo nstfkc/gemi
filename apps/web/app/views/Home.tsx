@@ -1,13 +1,11 @@
-import { Link, useLocation } from "gemi/client";
-import { useId } from "react";
+import { useState } from "react";
 
-const Home = (props: { message: string }) => {
-  const id = useId();
-  return (
-    <div className="">
-      <Link href="/auth/sign-in">Sign in</Link>
-    </div>
-  );
-};
+console.log("Hello");
+export function useHome() {
+  return "Hello";
+}
 
-export default Home;
+export default function Home() {
+  const [state, setState] = useState("");
+  return <div>{state}</div>;
+}

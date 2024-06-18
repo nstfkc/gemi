@@ -7,15 +7,17 @@ const rootDir = path.resolve(process.cwd());
 const appDir = path.join(rootDir, "app");
 
 export default defineConfig({
-  plugins: [react()],
   assetsInclude: ["/public"],
   build: {
     manifest: true,
     rollupOptions: {
-      input,
+      input: {
+        main: "/app/client.tsx",
+        home: "/app/views/Home.tsx",
+      },
     },
     ssrEmitAssets: true,
-    external: ["react", "react-dom", "gemi"],
+    minify: false,
   },
   resolve: {
     alias: {

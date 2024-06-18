@@ -30,6 +30,8 @@ import { lazy, createElement } from "react";
 interface RenderParams {
   styles: string[];
   views: Record<string, string>;
+  manifest: Record<string, any>;
+  serverManifest: Record<string, any>;
 }
 
 const defaultHead = {
@@ -547,13 +549,32 @@ export class App {
 
     if (result.kind === "view") {
       const { data, headers, head, status } = result as any;
-      const { styles, views, ...renderOptions } = renderParams;
+      const { styles, views, manifest, serverManifest, ...renderOptions } =
+        renderParams;
       const viewImportMap = {};
-      for (const file of flattenComponentTree(this.componentTree)) {
-        viewImportMap[file] = lazy(
-          () => import(`${process.env.APP_DIR}/views/${file}.tsx`),
-        );
+      let appDir: string | null = null;
+      const template = (viewName: string, path: string) =>
+        `"${viewName}": () => import("${path}")`;
+      const templates = [];
+      for (const fileName of flattenComponentTree(this.componentTree)) {
+        if (!manifest) {
+          appDir = `${process.env.APP_DIR}`;
+          const mod = await import(`${appDir}/views/${fileName}.tsx`);
+          viewImportMap[fileName] = mod.default;
+          templates.push(template(fileName, `${appDir}/views/${fileName}.tsx`));
+        } else {
+          const { file } = serverManifest[`app/views/${fileName}.tsx`];
+          const mod = await import(`${process.env.DIST_DIR}/server/${file}`);
+          viewImportMap[fileName] = mod.default;
+          const clientFile = manifest[`app/views/${fileName}.tsx`];
+          if (clientFile) {
+            templates.push(template(fileName, `/${clientFile.file}`));
+          }
+        }
       }
+
+      const loaders = `{${templates.join(",")}}`;
+
       const stream = await renderToReadableStream(
         createElement(this.RootLayout, {
           data,
@@ -562,7 +583,7 @@ export class App {
           viewImportMap,
         }),
         {
-          bootstrapScriptContent: `window.__GEMI_DATA__ = ${JSON.stringify(data)};`,
+          bootstrapScriptContent: `window.__GEMI_DATA__ = ${JSON.stringify(data)}; window.loaders=${loaders}`,
           ...renderOptions,
         },
       );

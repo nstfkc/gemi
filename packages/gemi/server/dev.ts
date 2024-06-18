@@ -82,6 +82,8 @@ export async function startDevServer() {
       return await handler(req, {
         styles,
         views: {},
+        manifest: null,
+        serverManifest: null,
         bootstrapModules: [
           "/refresh.js",
           "/app/client.tsx",

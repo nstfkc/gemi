@@ -1,8 +1,4 @@
-import { Link, useLocation, useRouter } from "gemi/client";
-import { FormError, Mutation } from "gemi/client";
-import { Root } from "@radix-ui/react-accordion";
-import { motion, useAnimate } from "framer-motion";
-import { AArrowDown } from "lucide-react";
+import { Link, useRouter } from "gemi/client";
 
 export default function SignIn() {
   const { push } = useRouter();
