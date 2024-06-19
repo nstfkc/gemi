@@ -1,0 +1,25 @@
+{
+  "name": "create-gemi-app",
+  "description": "Create gemi app with one command",
+  "version": "1.0.0",
+  "author": "Enes Tufekci <enesxtufekci@gmail.com>",
+  "license": "MIT",
+  "scripts": {
+    "build": "bun build index.ts"
+  },
+  "files": [
+    "bin"
+  ],
+  "bin": {
+    "create-gemi-app": "./bin/create-gemi-app.js"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "prompts": "^2.4.2",
+    "tar": "^7.4.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.1.4",
+    "@types/prompts": "^2.4.9"
+  }
+}

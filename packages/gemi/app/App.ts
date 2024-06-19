@@ -90,14 +90,12 @@ export class App {
   private Root: ComponentType;
 
   constructor(params: AppParams) {
-    console.log("[App] initialized");
     this.params = params;
     this.apiRouter = params.apiRouter;
     this.viewRouter = params.viewRouter;
     this.Root = params.root;
 
     this.prepare();
-    console.log("[App] routes are prepared");
     this.appId = generateETag(Date.now());
   }
 
