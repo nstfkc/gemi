@@ -4,9 +4,10 @@ import {
   useEffect,
   useState,
   createContext,
-  type PropsWithChildren,
   lazy,
   StrictMode,
+  type PropsWithChildren,
+  type ComponentType,
 } from "react";
 import {
   ServerDataContext,
@@ -61,9 +62,9 @@ const Route = (props: PropsWithChildren<RouteProps>) => {
   }, []);
 
   if (!render) return null;
+  const Component = viewImportMap[componentPath];
 
-  if (viewImportMap) {
-    const Component = viewImportMap[componentPath];
+  if (Component) {
     return <Component {...data}>{props.children}</Component>;
   }
   return <div>Not found</div>;
@@ -123,7 +124,9 @@ const Routes = (props: { componentTree: ComponentTree }) => {
 
 export const ClientRouter = (props: {
   viewImportMap?: Record<string, any>;
+  RootLayout: ComponentType<any>;
 }) => {
+  const { RootLayout } = props;
   const { routeManifest, router, componentTree, pageData, auth } =
     useContext(ServerDataContext);
 
@@ -142,7 +145,9 @@ export const ClientRouter = (props: {
         }}
       >
         <StrictMode>
-          <Routes componentTree={componentTree} />
+          <RootLayout>
+            <Routes componentTree={componentTree} />
+          </RootLayout>
         </StrictMode>
       </ComponentsContext.Provider>
     </ClientRouterProvider>

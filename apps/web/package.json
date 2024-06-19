@@ -1,9 +1,6 @@
 {
   "name": "gemi-app",
   "scripts": {
-    "build:all": "NODE_ENV=production bun run build:client && bun run build:server",
-    "build:client": "vite build --outDir dist/client",
-    "build:server": "vite build -c vite.config.server.mjs",
     "dev": "gemi dev",
     "build": "gemi build",
     "start": "gemi start",

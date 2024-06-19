@@ -5,10 +5,11 @@ import { ServerDataProvider } from "./ServerDataProvider";
 
 export function createRoot(RootLayout: ComponentType<any>) {
   return (props: any) => (
-    <RootLayout>
-      <ServerDataProvider value={props.data}>
-        <ClientRouter viewImportMap={props.viewImportMap} />
-      </ServerDataProvider>
-    </RootLayout>
+    <ServerDataProvider value={props.data}>
+      <ClientRouter
+        RootLayout={RootLayout}
+        viewImportMap={props.viewImportMap}
+      />
+    </ServerDataProvider>
   );
 }
