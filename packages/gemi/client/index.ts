@@ -1,5 +1,3 @@
-export { Main } from "./main";
-export { Root } from "./Root";
 export { useUser } from "./useUser";
 export { useQuery } from "./useQuery";
 export { useMutation } from "./useMutation";

@@ -1,7 +1,7 @@
 import "../app.css";
 
 interface Props {
-  styles?: JSX.Element;
+  children: React.ReactNode;
 }
 
 const RootLayout = (props: Props) => {

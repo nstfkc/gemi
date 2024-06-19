@@ -1,12 +1,15 @@
 import { type ComponentType } from "react";
 import { hydrateRoot } from "react-dom/client";
-import { Main } from "./main";
+import { ServerDataProvider } from "./ServerDataProvider";
+import { ClientRouter } from "./ClientRouter";
 
 export function init(RootLayout: ComponentType<any>) {
   hydrateRoot(
     document,
     <RootLayout>
-      <Main />
+      <ServerDataProvider>
+        <ClientRouter />
+      </ServerDataProvider>
     </RootLayout>,
   );
 }

@@ -121,7 +121,9 @@ const Routes = (props: { componentTree: ComponentTree }) => {
   );
 };
 
-export const ClientRouter = (props: any) => {
+export const ClientRouter = (props: {
+  viewImportMap?: Record<string, any>;
+}) => {
   const { routeManifest, router, componentTree, pageData, auth } =
     useContext(ServerDataContext);
 

@@ -1,6 +1,8 @@
-import { Link } from "gemi/client";
+import { Link, useLocation } from "gemi/client";
 
 export default function Home(props) {
+  const location = useLocation();
+  console.log({ location });
   return (
     <div>
       <div>
