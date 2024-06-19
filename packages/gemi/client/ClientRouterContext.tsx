@@ -52,7 +52,7 @@ export const ClientRouterProvider = (
     params,
   } = props;
   const [parameters, setParameters] = useState(params);
-  const pageDataRef = useRef(pageData);
+  const pageDataRef = useRef(structuredClone(pageData));
   const scrollHistoryRef = useRef<Map<string, number>>(new Map());
   const initalViewEntries = is404
     ? ["404"]
@@ -173,6 +173,8 @@ export function useParams() {
   const { params } = useContext(ClientRouterContext);
   return params;
 }
+
+export function useViewData() {}
 
 export function useRouter() {
   const { updatePageData, history } = useContext(ClientRouterContext);

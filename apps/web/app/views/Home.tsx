@@ -1,15 +1,12 @@
-import { Link, useLocation } from "gemi/client";
+import { Link } from "gemi/client";
+import { useState } from "react";
 
-export default function Home(props) {
-  const location = useLocation();
-  console.log({ location });
+export default function Home(props: { count: number }) {
+  const [count, setCount] = useState(props.count);
   return (
-    <div>
+    <div className="py-4">
       <div>
-        <h1 className="font-bold text-4xl">Home1</h1>
-      </div>
-      <div>{props.message}</div>
-      <div>
+        <h1 className="font-bold text-4xl">Gemi</h1>
         <Link href="/about">About</Link>
       </div>
     </div>

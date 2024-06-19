@@ -1,3 +1,4 @@
+import { $ } from "bun";
 import path from "path";
 
 import type { App } from "../app/App";
@@ -102,6 +103,9 @@ export async function startDevServer() {
     },
     port: process.env.PORT || 5173,
   });
+
+  console.log(`Server started on http://localhost:${process.env.PORT || 5173}`);
+  await $`open http://localhost:${process.env.PORT || 5173}`;
 
   vite.watcher.on("change", async (file) => {
     if (file.includes("app/views")) {

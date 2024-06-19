@@ -9,10 +9,14 @@ import { resolve } from "node:path";
 async function downloadTar(root: string) {
   const url = "https://codeload.github.com/nstfkc/gemi/tar.gz/main";
   const response = await fetch(url);
+  const filePath = "packages/create-gemi-app/template";
   response.body?.pipe(
     x({
-      strip: 1,
+      strip: filePath.split("/").length + 1,
       cwd: root,
+      filter: (path) => {
+        return path.startsWith(`gemi-main/packages/create-gemi-app/template/`);
+      },
     }),
   );
   return new Promise((resolve) => {
@@ -21,10 +25,6 @@ async function downloadTar(root: string) {
     });
   });
 }
-
-console.log("Installing dependencies...");
-
-// await downloadTar();
 
 program.option("-p, --project-name <projectName>", "Project name");
 
@@ -36,8 +36,12 @@ program.action(async (options) => {
       type: "text",
       name: "projectName",
       message: "Enter project name:",
+      initial: "my-app",
     });
     projectName = response.projectName;
+  }
+  if (!projectName) {
+    process.exit(1);
   }
 
   console.log(`Extracting to ${process.cwd()}/${projectName}`);
@@ -58,7 +62,6 @@ program.action(async (options) => {
 
   const file = Bun.file(`${root}/package.json`);
   const packageJSON = await file.json();
-  console.log(packageJSON);
 
   let updatedPackageJSON = structuredClone(packageJSON);
   updatedPackageJSON.name = projectName;
@@ -69,14 +72,18 @@ program.action(async (options) => {
     JSON.stringify(updatedPackageJSON, null, 2),
   );
 
-  console.log({ email, name });
   console.log("Installing dependencies...");
-  return;
   await $`bun i --cwd ${root}`;
 
   await $`git init ${root} -b main`;
   await $`echo Happy coding`;
-  await $`echo visit "https://github.com/nstfkc/gemi/README.md for documentation"`;
+  await $`echo visit "https://github.com/nstfkc/gemi for documentation"`;
+
+  console.log("");
+  console.log("");
+  console.log("");
+
+  await $`echo run cd \`${projectName}\` and run \`bun dev\` to start the development server`;
 });
 
 program.parse();

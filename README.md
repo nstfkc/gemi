@@ -41,16 +41,16 @@ In a fresh project, you will find a `RootViewRouter` for your view routes and a 
 
 You can define your routes by adding a new entry to the `routes` property in both routers. They keys represents the urls segments and the values represents the handler logic.
 
-#### ViewRouter
+#### View routes
 
 The most basic view route definition is passing a view name to the `view` method. View names are the file path and the names relative to the `app/views` directory without the extension. For example, if you have a react component in `/app/views/Home.tsx` you can create a route like in the the following example.
 
 ```ts
-// app/http/routes/RootViewRouter.ts
+// app/http/routes/view.ts
 
-import { ViewRouter } from 'gemi/http/ViewRouter'
+import { ViewRouter } from 'gemi/http'
 
-export class RootViewRouter extends ViewRouter {
+export default class extends ViewRouter {
 
   routes = {
      '/': this.view('Home')
@@ -64,13 +64,13 @@ If you want to pass data to your react component, you can pass a function as a s
 e.g
 
 ```ts
-// app/http/routes/RootViewRouter.ts
+// app/http/routes/view.ts
 
-import { ViewRouter } from 'gemi/http/ViewRouter'
+import { ViewRouter } from 'gemi/http'
 
-export class RootViewRouter extends ViewRouter {
+export default class extends ViewRouter {
 
-  override routes = {
+  routes = {
      '/': this.view('Home', async (req) => {
         // here you can fetch data from the database
         // or extract data from the request and pass it to the view.
@@ -96,12 +96,12 @@ You can pass a controller and a method name that exist in that controller in a t
 
 E.g
 ```ts
-// app/http/routes/RootViewRouter.ts
+// app/http/routes/view.ts
 
-import { ViewRouter } from 'gemi/http/ViewRouter'
+import { ViewRouter } from 'gemi/http'
 import { HomeController } from '@/app/http/controllers/HomeController'
 
-export class RootViewRouter extends ViewRouter {
+export default class extends ViewRouter {
 
   routes = {
      '/': this.view('Home', [HomeController, 'index']),
@@ -111,14 +111,14 @@ export class RootViewRouter extends ViewRouter {
 ```
 
 
-**Nested routes**
+**Nested view routes**
 
 If you want to share componets (header, footer etc.) between your routes, you can use `ViewRouter.layout` method like in the following example.
 
 ```ts
-// app/http/routes/RootViewRouter.ts
+// app/http/routes/view.ts
 
-import { ViewRouter } from 'gemi/http/ViewRouter'
+import { ViewRouter } from 'gemi/http'
 
 
 export class RootViewRouter extends ViewRouter {
@@ -188,14 +188,14 @@ Note: All the data fetching for the nested routes handled in parallel. Based on 
 **Basic usage**
 
 ```ts
-// app/http/routes/RootApiRouter.ts
+// app/http/routes/api.ts
 
-import { ApiRouter } from 'gemi/http/ApiRouter'
+import { ApiRouter } from 'gemi/http'
 import { OrderController } from '@/app/http/controllers/OrderController'
 
-export class RootApiRouter extends ApiRouter {
+export default class extends ApiRouter {
 
-  override routes = {
+  routes = {
     '/orders': this.get(OrderController, 'list'),
   }
 }
@@ -208,14 +208,14 @@ If you are folling REST API specification, you might want to handle multiple met
 For example;
 
 ```ts
-// app/http/routes/RootApiRouter.ts
+// app/http/routes/api.ts
 
-import { ApiRouter } from 'gemi/http/ApiRouter'
+import { ApiRouter } from 'gemi/http'
 import { OrderController } from '@/app/http/controllers/OrderController'
 
-export class RootApiRouter extends ApiRouter {
+export default class extends ApiRouter {
 
-  override routes = {
+  routes = {
     '/orders': [
       this.get(OrderController, 'list'),
       this.post(OrderController, 'create')
@@ -232,14 +232,14 @@ export class RootApiRouter extends ApiRouter {
 For this specific case you can use a ResourceController (more on this later) to define all the REST routes. A resource contoller has to have `list`, `create`, `show`,`update` and `delete` methods.
 
 ```ts
-// app/http/routes/RootApiRouter.ts
+// app/http/routes/api.ts
 
-import { ApiRouter } from 'gemi/http/ApiRouter'
+import { ApiRouter } from 'gemi/http'
 import { OrderController } from '@/app/http/controllers/OrderController'
 
-export class RootApiRouter extends ApiRouter {
+export default class extends ApiRouter {
 
-  override routes = {
+  routes = {
     '/orders': OrderController
   }
 }
@@ -258,7 +258,7 @@ In your controllers you can access to the parameters via `request.parameters`
 Examples;
 ```ts
 
-class RootViewRouter extends ViewRouter {
+export default class extends ViewRouter {
   '/orders': this.view('OrdersOverview', [OrdersController, 'overview']),
   '/orders/:orderId': this.view('OrderDetails', [OrdersController, 'details']),
   '/orders/:orderId/customer/:customerId?': this.view('OrderCustomerDetails', [OrdersController, 'customerDetails']),
@@ -271,15 +271,15 @@ class RootViewRouter extends ViewRouter {
 For complex apps with a lot of routes, it would be pretty messy to handle all the routes in a single file. You can compose your routers like following example;
 
 ```ts
-// app/http/routes/RootApiRouter.ts
+// app/http/routes/api.ts
 
 import { ApiRouter } from 'gemi/http/ApiRouter'
 import { OrderApiRouter } from './OrderApiRouter'
 import { ProductApiRouter } from './ProductApiRouter'
 
-export class RootApiRouter extends ApiRouter {
+export default class extends ApiRouter {
 
-  override routes = {
+  routes = {
     '/orders': OrderApiRouter,
     '/products': ProductApiRouter,
   }
@@ -298,16 +298,16 @@ If its a view route, server redirects the user to the sign in page.
 If its an api route, server returns a json response with `401 Unauthorized Access` status code. 
 
 ```ts
-// app/http/routes/RootViewRouter.ts
+// app/http/routes/view.ts
 
 import { ViewRouter } from 'gemi/http/ViewRouter'
 import { OrderController } from '@/app/http/controllers/OrderController'
 import { DashboardController } from '@/app/http/controllers/DashboardController'
 
 class AppViewRouter extends ViewRouter {
-   override middlewares = ['auth']
+   middlewares = ['auth']
 
-   override routes = {
+   routes = {
      '/': this.layout('AppLayout', {
         '/': this.view('Dashboard', [DashboardController, 'home']),
         '/orders': this.view('OrdersOverview', [OrderController, 'overview']),
@@ -317,9 +317,9 @@ class AppViewRouter extends ViewRouter {
    }
 }
 
-export class RootViewRouter extends ViewRouter {
+export default class extends ViewRouter {
 
-  override routes = {
+  routes = {
      '/': this.view('Home'),
      '/pricing': this.view('Pricing'),
      '/contact': this.view('Contact'),
@@ -337,9 +337,9 @@ Let's say you only want to allow admins to be able to access to certain pages;
 
 ```ts
 class AppViewRouter extends ViewRouter {
-   override middlewares = ['auth']
+   middlewares = ['auth']
 
-   override routes = {
+   routes = {
      '/': this.layout('AppLayout', {
         '/': this.view('Dashboard', [DashboardController, 'home']),
         '/orders': this.view('OrdersOverview', [OrderController, 'overview']),

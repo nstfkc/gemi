@@ -1,4 +1,3 @@
-import { Link, useLocation } from "gemi/client";
 import "../app.css";
 
 interface Props {
@@ -6,7 +5,6 @@ interface Props {
 }
 
 const RootLayout = (props: Props) => {
-  const location = useLocation();
   return (
     <html>
       <head>
@@ -15,13 +13,9 @@ const RootLayout = (props: Props) => {
         <title>My app</title>
       </head>
       <body>
-        <header>
-          <nav>
-            <Link href="/">Home</Link>
-            <Link href="/about">About</Link>
-          </nav>
-        </header>
-        <main>{props.children}</main>
+        <main className="container max-w-2xl mx-auto px-4">
+          {props.children}
+        </main>
       </body>
     </html>
   );
