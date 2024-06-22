@@ -10,7 +10,8 @@
     "@types/react": "^18.2.61",
     "@types/react-dom": "^18.2.19",
     "eslint": "^8.57.0",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "vitest": "^1.6.0"
   },
   "bin": {
     "gemi": "./dist/bin/gemi"
@@ -36,7 +37,8 @@
     "build:bin": "bun build --compile ./bin/gemi.ts --external vite --external react-dom --external react/jsx-runtime --outfile ./dist/bin/gemi",
     "build:client": "vite build",
     "build:types": "tsc",
-    "build:client-types": "tsc -p tsconfig.browser.json"
+    "build:client-types": "tsc -p tsconfig.browser.json",
+    "test": "vitest"
   },
   "dependencies": {
     "@react-email/components": "^0.0.19",

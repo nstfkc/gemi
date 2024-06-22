@@ -22,15 +22,10 @@ type ViewPrepare = {
 
 type ViewConfig = {
   prepare: (_middlewares?: any[]) => ViewPrepare;
-  middlewares: (middlewares: any[]) => {
-    prepare: () => ViewPrepare;
-  };
+  middleware: (middlewares: any[]) => ViewConfig;
 };
 
-export type ViewChildren = Record<
-  string,
-  ViewConfig | (new (app: App) => ViewRouter)
->;
+export type ViewChildren = Record<string, ViewConfig | (new () => ViewRouter)>;
 
 export type ViewRouteExec = (
   req: Request,
@@ -41,7 +36,6 @@ export type ViewRouteExec = (
 export class ViewRouter {
   public routes: ViewChildren = {};
   public middlewares: string[] = [];
-  constructor() {}
 
   public middleware(req: Request): MiddlewareReturnType {}
 
@@ -74,9 +68,9 @@ export class ViewRouter {
     }
     return {
       prepare,
-      middlewares: (middlewares: any[]) => {
-        prepare: () => prepare(middlewares);
-      },
+      middleware: (middlewares: any[]) => ({
+        prepare: () => prepare(middlewares),
+      }),
     };
   }
 }

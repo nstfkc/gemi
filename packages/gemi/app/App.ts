@@ -16,8 +16,11 @@ import type { Plugin } from "./Plugin";
 import type { Middleware } from "../http/Middleware";
 import { requestContext } from "../http/requestContext";
 import type { ServerWebSocket } from "bun";
-import { flattenViewRoutes } from "./flattenViewRoutes";
 import { flattenComponentTree } from "../client/helpers/flattenComponentTree";
+
+import { createComponentTree } from "./createComponentTree";
+import { createFlatViewRoutes } from "./createFlatViewRoutes";
+import { createRouteManifest } from "./createRouteManifest";
 
 // @ts-ignore
 import { renderToReadableStream } from "react-dom/server.browser";
@@ -65,8 +68,8 @@ function prepareViewData(
 }
 
 interface AppParams {
-  viewRouter: new (app: App) => ViewRouter;
-  apiRouter: new (app: App) => ApiRouter;
+  viewRouter: new () => ViewRouter;
+  apiRouter: new () => ApiRouter;
   plugins?: (new () => Plugin)[];
   middlewareAliases?: Record<string, new () => Middleware>;
   root: ComponentType;
@@ -85,8 +88,8 @@ export class App {
   public middlewareAliases: Record<string, new () => Middleware> = {};
   public devVersion = 0;
   private params: AppParams;
-  private apiRouter: new (app: App) => ApiRouter;
-  private viewRouter: new (app: App) => ViewRouter;
+  private apiRouter: new () => ApiRouter;
+  private viewRouter: new () => ViewRouter;
   private Root: ComponentType;
 
   constructor(params: AppParams) {
@@ -124,14 +127,11 @@ export class App {
         };
       }
     }
+    this.flatViewRoutes = createFlatViewRoutes(viewRouters);
+    this.componentTree = createComponentTree(viewRouters);
+    this.routeManifest = createRouteManifest(viewRouters);
     // Handle view routes
-    const { flatRoutes, routeManifest, componentTree } = flattenViewRoutes(
-      viewRouters,
-      this,
-    );
-    this.componentTree = componentTree;
-    this.routeManifest = routeManifest;
-    this.flatViewRoutes = flatRoutes;
+
     // Handle api routes
     this.flatApiRoutes = this.flattenApiRoutes(apiRouters);
   }
@@ -208,7 +208,7 @@ export class App {
   private async resolvePageData(req: Request) {
     const url = new URL(req.url);
     let handlers: ViewRouteExec[] = [];
-    let middlewares: RouterMiddleware[] = [];
+    let middlewares: (RouterMiddleware | string)[] = [];
     let currentPathName = "";
     let params: Record<string, any> = {};
     const sortedEntries = Object.entries(this.flatViewRoutes).sort(
@@ -225,17 +225,24 @@ export class App {
       }
     }
 
-    const reqWithMiddlewares = middlewares.reduce(
-      (acc, middleware) => {
-        return async (req: Request, ctx: any) => {
-          return {
-            ...(await acc(req, ctx)),
-            ...(await middleware(req, ctx)),
+    const reqWithMiddlewares = middlewares
+      .map((middleware) => {
+        if (typeof middleware === "string") {
+          return new this.middlewareAliases[middleware]().run;
+        }
+        return middleware;
+      })
+      .reduce(
+        (acc, middleware) => {
+          return async (req: Request, ctx: any) => {
+            return {
+              ...(await acc(req, ctx)),
+              ...(await middleware(req, ctx)),
+            };
           };
-        };
-      },
-      (_req: Request, _ctx: any) => Promise.resolve({}),
-    );
+        },
+        (_req: Request, _ctx: any) => Promise.resolve({}),
+      );
 
     const reqCtx = new Map();
 
@@ -396,7 +403,7 @@ export class App {
             currentPath: url.pathname,
             is404,
           },
-          componentTree: [["404"], ...this.componentTree],
+          componentTree: [["404", []], ...this.componentTree],
         },
         head: data.head,
         headers: {
@@ -459,7 +466,11 @@ export class App {
       const template = (viewName: string, path: string) =>
         `"${viewName}": () => import("${path}")`;
       const templates = [];
-      for (const fileName of flattenComponentTree(this.componentTree)) {
+
+      for (const fileName of [
+        "404",
+        ...flattenComponentTree(this.componentTree),
+      ]) {
         if (!manifest) {
           appDir = `${process.env.APP_DIR}`;
           const mod = await import(`${appDir}/views/${fileName}.tsx`);

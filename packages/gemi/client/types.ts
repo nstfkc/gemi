@@ -1,2 +1,2 @@
-type ComponentTreeBranch = Record<string, ComponentTree>;
-export type ComponentTree = (string[] | ComponentTreeBranch)[];
+type ComponentBranch = [string, ComponentBranch[]];
+export type ComponentTree = ComponentBranch[];

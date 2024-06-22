@@ -75,48 +75,16 @@ const Routes = (props: { componentTree: ComponentTree }) => {
 
   return (
     <Suspense>
-      {componentTree.map((node, i) => {
-        if (typeof node === "undefined") {
-          return null;
-        }
-        if (typeof node === "string") {
-          return <Route key={node} componentPath={node} />;
-        }
-
-        if (Array.isArray(node)) {
-          const [path, subtree] = node;
-          if (subtree) {
-            return (
-              <Suspense key={path}>
-                <Route componentPath={path} key={i}>
-                  <Routes componentTree={subtree as any} />
-                </Route>
-              </Suspense>
-            );
-          } else {
-            return (
-              <Suspense key={path}>
-                <Route componentPath={path} key={i} />
-              </Suspense>
-            );
-          }
-        }
-
-        const [[first, subtree]] = Object.entries(node);
-        if (subtree) {
+      {componentTree.map((node) => {
+        const [path, subtree] = node;
+        if (subtree.length > 0) {
           return (
-            <Suspense key={first}>
-              <Route componentPath={String(first)} key={i}>
-                <Routes componentTree={subtree as any} />
-              </Route>
-            </Suspense>
+            <Route key={path} componentPath={path}>
+              <Routes componentTree={subtree} />
+            </Route>
           );
         }
-        return (
-          <Suspense key={first}>
-            <Route componentPath={String(first)} key={i} />
-          </Suspense>
-        );
+        return <Route key={path} componentPath={path} />;
       })}
     </Suspense>
   );
