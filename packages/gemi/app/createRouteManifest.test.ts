@@ -44,6 +44,16 @@ class DeeplyNestedRouter extends ViewRouter {
       "/about": this.view("About", [TestController, "test"]),
       "/pricing": this.view("Pricing", [TestController, "test"]),
       "/products": ProductsRouter,
+      "/foo": this.view("Foo", [TestController, "test"], {
+        "/bar": this.view("Bar", [TestController, "test"], {
+          "/baz": this.view("Baz", [TestController, "test"]),
+          "/cux": this.view("Cux", [TestController, "test"]),
+        }),
+      }),
+      "/app": this.layout("PrivateLayout", [TestController, "test"], {
+        "/": this.view("Dashboard", [TestController, "test"]),
+        "/settings": this.view("Settings", [TestController, "test"]),
+      }),
     }),
   };
 }
@@ -82,6 +92,12 @@ describe("createRouteManifest()", () => {
         "ProductsLayout",
         "ProductProviders",
       ],
+      "/foo": ["Layout", "Foo"],
+      "/foo/bar": ["Layout", "Foo", "Bar"],
+      "/foo/bar/baz": ["Layout", "Foo", "Bar", "Baz"],
+      "/foo/bar/cux": ["Layout", "Foo", "Bar", "Cux"],
+      "/app": ["Layout", "PrivateLayout", "Dashboard"],
+      "/app/settings": ["Layout", "PrivateLayout", "Settings"],
     });
   });
 });

@@ -4,8 +4,12 @@ export function createRouteManifest(routes: ViewChildren) {
   const routeManifest: Record<string, string[]> = {};
   for (const [routePath, routeHandler] of Object.entries(routes)) {
     if ("prepare" in routeHandler) {
-      const { viewPath, children } = routeHandler.prepare();
-      // viewPath => ProductsLayout
+      const { viewPath, children, kind } = routeHandler.prepare();
+
+      if (kind === "view") {
+        routeManifest[routePath] = [viewPath];
+      }
+
       if (Object.entries(children).length > 0) {
         const manifest = createRouteManifest(children);
         for (const [path, viewPaths] of Object.entries(manifest)) {

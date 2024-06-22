@@ -12,6 +12,14 @@ export function createFlatViewRoutes(routes: ViewChildren) {
 
       if (Object.entries(route.children).length > 0) {
         const result = createFlatViewRoutes(route.children);
+
+        if (route.kind === "view") {
+          flatRoutes[routePath] = {
+            exec: [route.exec],
+            middleware: route.middlewares,
+          };
+        }
+
         for (const [path, { exec, middleware }] of Object.entries(result)) {
           const key = routePath === "/" ? path : `${routePath}${path}`;
           const _key = path === "/" && routePath !== "/" ? routePath : key;

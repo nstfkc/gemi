@@ -18,6 +18,7 @@ type ViewPrepare = {
   viewPath: string;
   children: ViewChildren;
   middlewares: any[];
+  kind: "view" | "layout";
 };
 
 type ViewConfig = {
@@ -39,13 +40,13 @@ export class ViewRouter {
 
   public middleware(req: Request): MiddlewareReturnType {}
 
-  protected view<T extends new (app: App) => Controller>(
+  protected layout<T extends new (app: App) => Controller>(
     viewPath: string,
     handler?: ViewHandler<T>,
     children: ViewChildren = {},
   ): ViewConfig {
     // TODO: type middleware
-    function prepare(middlewares: any[] = []) {
+    function prepare(middlewares: any[] = []): ViewPrepare {
       return {
         exec: async (
           req: Request,
@@ -64,6 +65,43 @@ export class ViewRouter {
         children,
         viewPath,
         middlewares,
+        kind: "layout",
+      };
+    }
+    return {
+      prepare,
+      middleware: (middlewares: any[]) => ({
+        prepare: () => prepare(middlewares),
+      }),
+    };
+  }
+
+  protected view<T extends new (app: App) => Controller>(
+    viewPath: string,
+    handler?: ViewHandler<T>,
+    children: ViewChildren = {},
+  ): ViewConfig {
+    // TODO: type middleware
+    function prepare(middlewares: any[] = []): ViewPrepare {
+      return {
+        exec: async (
+          req: Request,
+          params: Record<string, string>,
+          app: App,
+        ) => {
+          if (!handler) {
+            return { data: { [viewPath]: {} }, headers: {}, head: {} };
+          }
+          const [controller, methodName] = handler;
+          const instance = new controller(app);
+          const method = instance[methodName].bind(instance);
+          const { data, headers = {}, head = {} } = await method(req, params);
+          return { data: { [viewPath]: data }, headers, head };
+        },
+        children,
+        viewPath,
+        middlewares,
+        kind: "view",
       };
     }
     return {
