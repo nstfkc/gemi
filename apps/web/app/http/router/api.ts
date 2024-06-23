@@ -19,7 +19,9 @@ class OrganisationApiRouter extends ApiRouter {
   override routes = {
     "/": [
       this.get(OrganisationController, "index"),
-      this.post(OrganisationController, "create"),
+      this.post((req) => {
+        return { data: { message: req.rawRequest.url } };
+      }),
     ],
     "/:organisationId/appointment/:hostId": this.post(
       AppointmentController,
@@ -47,10 +49,10 @@ class VisitorRouter extends ApiRouter {
 }
 
 export default class extends ApiRouter {
-  override routes = {
-    "/auth": AuthApiRouter,
-    "/organisation": OrganisationApiRouter,
-    "/host": HostRouter,
-    "/visitor": VisitorRouter,
+  routes = {
+    "/test": this.get((req) => {
+      console.log("test");
+      return { data: { message: "HI" } };
+    }),
   };
 }

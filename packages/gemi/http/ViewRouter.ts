@@ -8,10 +8,9 @@ type ControllerMethods<T extends new () => Controller> = {
   [K in keyof InstanceType<T>]: InstanceType<T>[K] extends Function ? K : never;
 }[keyof InstanceType<T>];
 
-type ViewHandler<T extends new () => Controller> = [
-  controller: T,
-  method: ControllerMethods<T>,
-];
+type ViewHandler<T extends new () => Controller> =
+  | [controller: T, method: ControllerMethods<T>]
+  | ((req: Request) => Promise<any> | any);
 
 type ViewPrepare = {
   exec: (req: Request, params: Record<string, string>) => any;
@@ -42,27 +41,52 @@ export class ViewRouter {
 
   protected layout<T extends new (app: App) => Controller>(
     viewPath: string,
-    handler?: ViewHandler<T>,
+  ): ViewConfig;
+  protected layout<T extends new (app: App) => Controller>(
+    viewPath: string,
+    children: ViewChildren = {},
+  ): ViewConfig;
+  protected layout<T extends new (app: App) => Controller>(
+    viewPath: string,
+    handler: ViewHandler<T>,
+  ): ViewConfig;
+  protected layout<T extends new (app: App) => Controller>(
+    viewPath: string,
+    handler: ViewHandler<T> | ViewChildren,
     children: ViewChildren = {},
   ): ViewConfig {
     // TODO: type middleware
     function prepare(middlewares: any[] = []): ViewPrepare {
+      let _children = children;
+      if (handler.constructor === Object) {
+        _children = handler;
+      }
       return {
         exec: async (
           req: Request,
           params: Record<string, string>,
           app: App,
         ) => {
-          if (!handler) {
-            return { data: { [viewPath]: {} }, headers: {}, head: {} };
+          let _handler = () =>
+            Promise.resolve({
+              data: { [viewPath]: {} },
+              headers: {},
+              head: {},
+            });
+          if (typeof handler === "function") {
+            _handler = handler;
           }
-          const [controller, methodName] = handler;
-          const instance = new controller(app);
-          const method = instance[methodName].bind(instance);
-          const { data, headers = {}, head = {} } = await method(req, params);
+
+          if (Array.isArray(handler)) {
+            const [controller, methodName] = handler;
+            const instance = new controller(app);
+            _handler = instance[methodName].bind(instance);
+          }
+
+          const { data, headers = {}, head = {} } = await _handler(req, params);
           return { data: { [viewPath]: data }, headers, head };
         },
-        children,
+        children: _children,
         viewPath,
         middlewares,
         kind: "layout",
@@ -78,27 +102,52 @@ export class ViewRouter {
 
   protected view<T extends new (app: App) => Controller>(
     viewPath: string,
-    handler?: ViewHandler<T>,
+  ): ViewConfig;
+  protected view<T extends new (app: App) => Controller>(
+    viewPath: string,
+    children: ViewChildren = {},
+  ): ViewConfig;
+  protected view<T extends new (app: App) => Controller>(
+    viewPath: string,
+    handler: ViewHandler<T>,
+  ): ViewConfig;
+  protected view<T extends new (app: App) => Controller>(
+    viewPath: string,
+    handler: ViewHandler<T> | ViewChildren,
     children: ViewChildren = {},
   ): ViewConfig {
     // TODO: type middleware
     function prepare(middlewares: any[] = []): ViewPrepare {
+      let _children = children;
+      if (handler.constructor === Object) {
+        _children = handler;
+      }
       return {
         exec: async (
           req: Request,
           params: Record<string, string>,
           app: App,
         ) => {
-          if (!handler) {
-            return { data: { [viewPath]: {} }, headers: {}, head: {} };
+          let _handler = () =>
+            Promise.resolve({
+              data: { [viewPath]: {} },
+              headers: {},
+              head: {},
+            });
+          if (typeof handler === "function") {
+            _handler = handler;
           }
-          const [controller, methodName] = handler;
-          const instance = new controller(app);
-          const method = instance[methodName].bind(instance);
-          const { data, headers = {}, head = {} } = await method(req, params);
+
+          if (Array.isArray(handler)) {
+            const [controller, methodName] = handler;
+            const instance = new controller(app);
+            _handler = instance[methodName].bind(instance);
+          }
+
+          const { data, headers = {}, head = {} } = await _handler(req, params);
           return { data: { [viewPath]: data }, headers, head };
         },
-        children,
+        children: _children,
         viewPath,
         middlewares,
         kind: "view",

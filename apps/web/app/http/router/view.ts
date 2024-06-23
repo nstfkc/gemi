@@ -13,10 +13,13 @@ class AuthViewRouter extends ViewRouter {
 export default class extends ViewRouter {
   override routes = {
     "/": this.view("Home", [HomeController, "index"]),
-    "/foo": this.layout("FooLayout", [HomeController, "foo"], {
+    "/foo": this.layout("FooLayout", {
       "/": this.view("Foo", [HomeController, "foo"]),
-      "/bar": this.view("Bar", [HomeController, "bar"]),
+      "/bar": this.view("Bar", (req) => {
+        return {
+          data: { message: req.url },
+        };
+      }),
     }),
-    "/about": this.view("About"),
   };
 }

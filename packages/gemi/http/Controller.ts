@@ -4,5 +4,7 @@ import type { HttpRequest } from "./HttpRequest";
 export class Controller {
   requests: Record<string, typeof HttpRequest<any>> = {};
 
-  constructor(public app: App) {}
+  static kind = "controller" as const;
+
+  constructor(private app: App) {}
 }

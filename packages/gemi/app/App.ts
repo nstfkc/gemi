@@ -304,6 +304,7 @@ export class App {
                   ...err.payload.api,
                 };
               }
+              throw err;
             }
 
             if (exec) {
@@ -317,6 +318,8 @@ export class App {
                     ...err.payload.api,
                   };
                 }
+
+                throw err;
               }
               const { data, cookies = {}, headers, status } = result as any;
 
