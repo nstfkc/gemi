@@ -7,17 +7,9 @@ type ControllerMethods<T extends new (app: App) => Controller> = {
   [K in keyof InstanceType<T>]: InstanceType<T>[K] extends Function ? K : never;
 }[keyof InstanceType<T>];
 
-type DataResponse = {
-  data: any;
-  status: number;
-  headers: Record<string, string>;
-  cookies: Record<string, string>;
-};
+type DataResponse = any;
 type ErrorResponse = {
   error: any;
-  status: number;
-  headers: Record<string, string>;
-  cookies: Record<string, string>;
 };
 
 type ApiHandler<T extends new (app: App) => Controller, U = {}> = {
@@ -85,13 +77,8 @@ export class ApiRouter {
           params: Record<string, string>,
           app: App,
         ): Promise<DataResponse | ErrorResponse> => {
-          let _handler = (_req: Request | HttpRequest, params: any) =>
-            Promise.resolve({
-              data: { message: "hello" },
-              status: 200,
-              headers: {},
-              cookies: {},
-            });
+          let handler = (_req: Request | HttpRequest, params: any) =>
+            Promise.resolve({});
 
           let httpRequest = new HttpRequest(req);
           if (isController(controller)) {
@@ -99,27 +86,13 @@ export class ApiRouter {
             const Req =
               controllerInstance.requests[methodName as any] ?? HttpRequest;
             httpRequest = new Req(req);
-            _handler =
+            handler =
               controllerInstance[methodName as any].bind(controllerInstance);
           } else if (typeof controller === "function") {
-            console.log("here");
-            _handler = (req: Request) =>
-              controller(new HttpRequest(req)) as any;
+            handler = (req: Request) => controller(new HttpRequest(req)) as any;
           }
 
-          const {
-            data,
-            status = method === "post" ? 201 : 200,
-            headers = {},
-            cookies = {},
-          } = await _handler(httpRequest, params);
-
-          return {
-            data,
-            status,
-            headers,
-            cookies,
-          };
+          return await handler(httpRequest, params);
         },
       };
     };

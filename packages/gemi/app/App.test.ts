@@ -11,19 +11,19 @@ import { HttpRequest } from "../http/HttpRequest";
 
 class TestController extends Controller {
   test() {
-    return { data: { message: "test" } };
+    return { message: "test" };
   }
   async foo(req: HttpRequest) {
     const body = await req.input();
 
-    return { data: { success: true, body: body.toJSON() } };
+    return body.toJSON();
   }
 }
 
 class RootApiRouter extends ApiRouter {
   routes = {
     "/test": this.get(() => {
-      return { data: { message: "hi" } };
+      return { message: "hi" };
     }),
     "/foo": this.post(TestController, "foo"),
   };
@@ -31,7 +31,7 @@ class RootApiRouter extends ApiRouter {
 class RootViewRouter extends ViewRouter {
   routes = {
     "/": this.view("Home", () => {
-      return { data: { message: "Home" } };
+      return { message: "Home" };
     }),
     "/about": this.view("About", [TestController, "test"]),
   };
@@ -46,14 +46,6 @@ const app = new App({
 });
 
 describe("App", () => {
-  test("api callback handler", async () => {
-    const request = new Request("http://gemi.dev/api/test", {
-      method: "GET",
-    });
-    const res = await app.handleRequest(request);
-    expect(res.data).toEqual({ message: "hi" });
-  });
-
   test("view data callback handler", async () => {
     const request = new Request("http://gemi.dev?json=true", {
       method: "GET",
@@ -70,6 +62,14 @@ describe("App", () => {
     expect(res.data).toEqual({ "/about": { About: { message: "test" } } });
   });
 
+  test("api callback handler", async () => {
+    const request = new Request("http://gemi.dev/api/test", {
+      method: "GET",
+    });
+    const res = await app.handleRequest(request);
+    expect(res.data).toEqual({ message: "hi" });
+  });
+
   test("api controller handler", async () => {
     const request = new Request("http://gemi.dev/api/foo", {
       method: "POST",
@@ -79,6 +79,6 @@ describe("App", () => {
       },
     });
     const res = await app.handleRequest(request);
-    expect(res.data).toEqual({ success: true, body: { data: 1 } });
+    expect(res.data).toEqual({ data: 1 });
   });
 });

@@ -83,8 +83,8 @@ export class ViewRouter {
             _handler = instance[methodName].bind(instance);
           }
 
-          const { data, headers = {}, head = {} } = await _handler(req, params);
-          return { data: { [viewPath]: data }, headers, head };
+          const data = await _handler(req, params);
+          return { [viewPath]: data };
         },
         children: _children,
         viewPath,
@@ -144,8 +144,8 @@ export class ViewRouter {
             _handler = instance[methodName].bind(instance);
           }
 
-          const { data, headers = {}, head = {} } = await _handler(req, params);
-          return { data: { [viewPath]: data }, headers, head };
+          const data = await _handler(req, params);
+          return { [viewPath]: data };
         },
         children: _children,
         viewPath,

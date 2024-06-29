@@ -82,7 +82,6 @@ export async function startDevServer() {
 
       return await handler(req, {
         styles: createStyles(styles),
-        views: {},
         manifest: null,
         serverManifest: null,
         bootstrapModules: [

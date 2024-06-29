@@ -33,40 +33,6 @@ interface RenderParams {
   serverManifest: Record<string, any>;
 }
 
-function prepareViewData(
-  result: Array<{
-    data: Record<string, any>;
-    headers: Record<string, any>;
-    head: Record<string, Record<string, any>[]>;
-  }>,
-) {
-  return result.reduce(
-    (acc, next) => {
-      return {
-        pageData: {
-          ...acc.pageData,
-          ...next.data,
-        },
-        headers: {
-          ...acc.headers,
-          ...next.headers,
-        },
-        head: {
-          ...acc.head,
-          title: next?.head?.title ?? acc.head?.title ?? "Gemi App",
-          meta: [...(acc.head?.meta ?? []), ...(next?.head?.meta ?? [])],
-          link: [...(acc.head?.link ?? []), ...(next?.head?.link ?? [])],
-        },
-      };
-    },
-    { pageData: {}, headers: {}, head: {} as any },
-  ) as {
-    pageData: Record<string, any>;
-    headers: Record<string, any>;
-    head: Record<string, Record<string, any>[]>;
-  };
-}
-
 interface AppParams {
   viewRouter: new () => ViewRouter;
   apiRouter: new () => ApiRouter;
@@ -246,23 +212,13 @@ export class App {
 
     const reqCtx = new Map();
 
-    const result = await requestContext.run(reqCtx, async () => {
+    const data = await requestContext.run(reqCtx, async () => {
       await reqWithMiddlewares(req, reqCtx);
       return await Promise.all(handlers.map((fn) => fn(req, params, this)));
     });
 
-    let is404 = false;
-    for (const res of result) {
-      const [data] = Object.values(res.data ?? {});
-      if ((data as any)?.status === 404) {
-        is404 = true;
-        break;
-      }
-    }
-
     return {
-      is404,
-      result,
+      data,
       currentPathName,
       params,
       user: reqCtx.get("user") ?? null,
@@ -308,9 +264,9 @@ export class App {
             }
 
             if (exec) {
-              let result = {};
+              let data = {};
               try {
-                result = await exec(req, params, this);
+                data = await exec(req, params, this);
               } catch (err) {
                 if (err instanceof RequestBreakerError) {
                   return {
@@ -321,20 +277,17 @@ export class App {
 
                 throw err;
               }
-              const { data, cookies = {}, headers, status } = result as any;
 
               return {
                 kind: "api",
-                data: data,
+                data,
                 headers: {
-                  ...headers,
-                  "Set-Cookie": Object.entries(cookies)
+                  "Set-Cookie": Object.entries({})
                     .map(([name, config]) => {
                       return `${name}=${(config as any).value}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${(config as any).maxAge}`;
                     })
                     .join(", "),
                 },
-                status,
               };
             }
           });
@@ -369,18 +322,23 @@ export class App {
         };
       }
 
-      const { result, params, currentPathName, is404, user } = pageData;
+      const { data, params, currentPathName, user } = pageData;
 
-      const data = prepareViewData(result);
+      const viewData = data.reduce((acc, data) => {
+        return {
+          ...acc,
+          ...data,
+        };
+      }, {});
 
       if (url.searchParams.get("json")) {
         return {
           kind: "viewData",
           data: {
-            [url.pathname]: data.pageData,
+            [url.pathname]: viewData,
           },
           meta: [],
-          headers: data.headers,
+          headers: {},
         };
       }
 
@@ -396,7 +354,7 @@ export class App {
         kind: "view",
         data: {
           pageData: {
-            [url.pathname]: data.pageData,
+            [url.pathname]: viewData,
           },
           auth: { user },
           routeManifest: this.routeManifest,
@@ -404,13 +362,12 @@ export class App {
             pathname: currentPathName,
             params,
             currentPath: url.pathname,
-            is404,
+            is404: false,
           },
           componentTree: [["404", []], ...this.componentTree],
         },
-        head: data.head,
+        head: {},
         headers: {
-          ...data.headers,
           "Content-Type": "text/html",
           "Cache-Control": user
             ? "private, no-cache, no-store, max-age=0, must-revalidate"
@@ -418,7 +375,7 @@ export class App {
           ETag: this.appId,
           ...cookieHeaders,
         },
-        status: is404 ? 404 : 200,
+        status: 200,
       };
     }
   }
@@ -497,7 +454,6 @@ export class App {
           children: [
             styles,
             createElement(this.Root as any, {
-              head,
               data,
               viewImportMap,
             }),
@@ -519,9 +475,8 @@ export class App {
     }
 
     if (result.kind === "api") {
-      const { data, headers, status } = result;
+      const { data, headers } = result;
       return new Response(JSON.stringify(data), {
-        status,
         headers: {
           "Content-Type": "application/json",
           ...headers,

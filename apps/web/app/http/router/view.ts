@@ -17,7 +17,7 @@ export default class extends ViewRouter {
       "/": this.view("Foo", [HomeController, "foo"]),
       "/bar": this.view("Bar", (req) => {
         return {
-          data: { message: req.url },
+          message: req.url,
         };
       }),
     }),

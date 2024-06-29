@@ -63,7 +63,6 @@ export async function startProdServer() {
     try {
       return await handler(req, {
         styles: createStyles(styles),
-        views: {},
         manifest,
         serverManifest,
         bootstrapModules: [`/${manifest["app/client.tsx"].file}`],
