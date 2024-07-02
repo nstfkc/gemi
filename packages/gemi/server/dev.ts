@@ -3,6 +3,7 @@ import path from "path";
 
 import type { App } from "../app/App";
 import { createStyles } from "./styles";
+import { imageHandler } from "./imageHandler";
 
 const rootDir = process.cwd();
 
@@ -41,6 +42,10 @@ export async function startDevServer() {
     const { app } = (await vite.ssrLoadModule(
       path.join(appDir, "bootstrap.ts"),
     )) as { app: App };
+
+    if (pathname.startsWith("/__gemi/image")) {
+      return await imageHandler(req);
+    }
 
     if (pathname.startsWith("/refresh.js")) {
       return new Response(

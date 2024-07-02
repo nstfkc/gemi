@@ -70,5 +70,5 @@ export const Image = (props: ComponentProps<"img"> & ImageProps) => {
     quality,
   );
 
-  return <img {...srcProps} width={width} loading="lazy" {...rest} />;
+  return <img {...srcProps} width={width} {...rest} />;
 };
