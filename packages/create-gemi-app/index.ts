@@ -9,13 +9,13 @@ import { resolve } from "node:path";
 async function downloadTar(root: string) {
   const url = "https://codeload.github.com/nstfkc/gemi/tar.gz/main";
   const response = await fetch(url);
-  const filePath = "packages/create-gemi-app/template";
+  const filePath = "templates/default";
   response.body?.pipe(
     x({
       strip: filePath.split("/").length + 1,
       cwd: root,
       filter: (path) => {
-        return path.startsWith(`gemi-main/packages/create-gemi-app/template/`);
+        return path.startsWith(`gemi-main/templates/default/`);
       },
     }),
   );

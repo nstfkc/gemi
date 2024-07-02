@@ -58,7 +58,7 @@ export class ViewRouter {
     // TODO: type middleware
     function prepare(middlewares: any[] = []): ViewPrepare {
       let _children = children;
-      if (handler.constructor === Object) {
+      if (handler && handler.constructor === Object) {
         _children = handler;
       }
       return {
@@ -119,7 +119,7 @@ export class ViewRouter {
     // TODO: type middleware
     function prepare(middlewares: any[] = []): ViewPrepare {
       let _children = children;
-      if (handler.constructor === Object) {
+      if (handler && handler.constructor === Object) {
         _children = handler;
       }
       return {
