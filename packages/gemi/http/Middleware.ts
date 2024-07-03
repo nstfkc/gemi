@@ -1,5 +1,7 @@
+import { HttpRequest } from "./HttpRequest";
+
 export class Middleware {
-  async run(_req: Request, ctx: Map<string, any>) {
+  async run(_req: HttpRequest, ctx: Map<string, any>) {
     return {};
   }
 }

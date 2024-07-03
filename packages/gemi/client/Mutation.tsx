@@ -22,10 +22,12 @@ const MutationContext = createContext({
 
 interface MutationProps {
   url: string;
+  method?: "POST" | "GET" | "PUT" | "DELETE" | "PATCH";
   onSuccess?: (result: any) => void;
 }
 
 export const Mutation = (props: PropsWithChildren<MutationProps>) => {
+  const { method = "POST" } = props;
   const [isPending, setIsPending] = useState(false);
   const formRef = useRef<HTMLFormElement>(null);
   const [result, setResult] = useState(null);
@@ -41,7 +43,7 @@ export const Mutation = (props: PropsWithChildren<MutationProps>) => {
     setResult(null);
     try {
       const res = await fetch(`/api${props.url}`, {
-        method: "POST",
+        method,
         body: formData,
       });
 

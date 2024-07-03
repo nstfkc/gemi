@@ -1,6 +1,6 @@
 {
   "name": "gemi",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "devDependencies": {
     "@repo/eslint-config": "*",
     "@repo/typescript-config": "*",

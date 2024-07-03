@@ -1,4 +1,5 @@
 import { RequestBreakerError } from "./Error";
+import { HttpRequest } from "./HttpRequest";
 
 type MiddlewareResult = Partial<{
   headers: Record<string, string>;
@@ -10,7 +11,10 @@ export type MiddlewareReturnType =
   | Promise<MiddlewareResult>
   | MiddlewareResult;
 
-export type RouterMiddleware = (req: Request, ctx: any) => MiddlewareReturnType;
+export type RouterMiddleware = (
+  req: HttpRequest,
+  ctx: any,
+) => MiddlewareReturnType;
 
 export class AuthenticationError extends RequestBreakerError {
   constructor() {

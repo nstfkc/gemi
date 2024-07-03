@@ -2,6 +2,7 @@ import { Controller } from "./Controller";
 import { type MiddlewareReturnType } from "./Router";
 import type { App } from "../app/App";
 import { HttpRequest } from "./HttpRequest";
+import { Middleware } from "./Middleware";
 
 type ControllerMethods<T extends new (app: App) => Controller> = {
   [K in keyof InstanceType<T>]: InstanceType<T>[K] extends Function ? K : never;
@@ -12,13 +13,21 @@ type ErrorResponse = {
   error: any;
 };
 
-type ApiHandler<T extends new (app: App) => Controller, U = {}> = {
+type Prepare = (middleware?: (Middleware | string)[]) => {
+  middleware: string[];
   method: string;
   exec: (
     req: Request,
     params: Record<string, any>,
     app: App,
   ) => Promise<Partial<DataResponse> | ErrorResponse>;
+};
+
+type ApiHandler<T extends new (app: App) => Controller, U = {}> = {
+  prepare: Prepare;
+  middleware: (middleware: string[]) => {
+    prepare: Prepare;
+  };
 };
 
 type RequestHandlerFactory<T extends new (app: App) => Controller> = (
@@ -28,18 +37,18 @@ type RequestHandlerFactory<T extends new (app: App) => Controller> = (
 export type ApiRouteExec = (
   req: Request,
   params: Record<string, string>,
+  app: App,
 ) => Promise<DataResponse | ErrorResponse>;
 
 type ApiRouteConfig = {
-  method: string;
-  exec: ApiRouteExec;
+  prepare: Prepare;
 };
 
 type CallbackHandler<T> = (req: HttpRequest) => Promise<T> | T;
 
 export type ApiRouteChildren = Record<
   string,
-  ApiRouteConfig | ApiRouteConfig[] | (new (app: App) => ApiRouter)
+  ApiRouteConfig | ApiRouteConfig[] | (new () => ApiRouter)
 >;
 
 function isController<T extends new (app: App) => Controller>(
@@ -56,7 +65,7 @@ export class ApiRouter {
 
   constructor() {}
 
-  public middleware(_req: Request): MiddlewareReturnType {}
+  public middleware(_req: HttpRequest): MiddlewareReturnType {}
 
   private handleRequest<T>(
     controller: CallbackHandler<T>,
@@ -70,29 +79,41 @@ export class ApiRouter {
     methodName?: ControllerMethods<T>,
   ): RequestHandlerFactory<T> {
     return (method: string): ApiHandler<T> => {
+      const prepare = (middleware: string[] = []) => {
+        return {
+          middleware,
+          method,
+          exec: async (
+            req: Request,
+            params: Record<string, string>,
+            app: App,
+          ): Promise<DataResponse | ErrorResponse> => {
+            let handler = (_req: Request | HttpRequest, params: any) =>
+              Promise.resolve({});
+
+            let httpRequest = new HttpRequest(req);
+            if (isController(controller)) {
+              const controllerInstance = new controller(app);
+              const Req =
+                controllerInstance.requests[methodName as any] ?? HttpRequest;
+              httpRequest = new Req(req);
+              handler =
+                controllerInstance[methodName as any].bind(controllerInstance);
+            } else if (typeof controller === "function") {
+              handler = (req: Request) =>
+                controller(new HttpRequest(req)) as any;
+            }
+
+            return await handler(httpRequest, params);
+          },
+        };
+      };
       return {
-        method,
-        exec: async (
-          req: Request,
-          params: Record<string, string>,
-          app: App,
-        ): Promise<DataResponse | ErrorResponse> => {
-          let handler = (_req: Request | HttpRequest, params: any) =>
-            Promise.resolve({});
-
-          let httpRequest = new HttpRequest(req);
-          if (isController(controller)) {
-            const controllerInstance = new controller(app);
-            const Req =
-              controllerInstance.requests[methodName as any] ?? HttpRequest;
-            httpRequest = new Req(req);
-            handler =
-              controllerInstance[methodName as any].bind(controllerInstance);
-          } else if (typeof controller === "function") {
-            handler = (req: Request) => controller(new HttpRequest(req)) as any;
-          }
-
-          return await handler(httpRequest, params);
+        prepare,
+        middleware: (middlware: string[]) => {
+          return {
+            prepare: () => prepare(middlware),
+          };
         },
       };
     };

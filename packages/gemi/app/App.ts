@@ -21,10 +21,14 @@ import { flattenComponentTree } from "../client/helpers/flattenComponentTree";
 import { createComponentTree } from "./createComponentTree";
 import { createFlatViewRoutes } from "./createFlatViewRoutes";
 import { createRouteManifest } from "./createRouteManifest";
+import { createFlatApiRoutes } from "./createFlatApiRoutes";
 
 // @ts-ignore
 import { renderToReadableStream } from "react-dom/server.browser";
 import { ComponentType, createElement, Fragment } from "react";
+
+import { isConstructor } from "../internal/isConstructor";
+import { HttpRequest } from "../http";
 
 interface RenderParams {
   styles: string[];
@@ -46,7 +50,16 @@ export class App {
     string,
     { exec: ViewRouteExec[]; middleware: any[] }
   > = {};
-  private flatApiRoutes: Record<string, any> = {};
+  private flatApiRoutes: Record<
+    string,
+    Record<
+      string,
+      {
+        exec: ApiRouteExec;
+        middleware: (string | (new () => Middleware) | RouterMiddleware)[];
+      }
+    >
+  > = {};
   private routeManifest: Record<string, string[]> = {};
   public name = "APP";
   private appId: string;
@@ -99,7 +112,7 @@ export class App {
     // Handle view routes
 
     // Handle api routes
-    this.flatApiRoutes = this.flattenApiRoutes(apiRouters);
+    this.flatApiRoutes = createFlatApiRoutes(apiRouters);
   }
 
   public printName() {
@@ -108,67 +121,6 @@ export class App {
 
   public getComponentTree() {
     return this.componentTree;
-  }
-
-  private flattenApiRoutes(routes: ApiRouteChildren) {
-    const flatApiRoutes: Record<
-      string,
-      Record<string, { exec: ApiRouteExec; middleware: any[] }>
-    > = {};
-    for (const [rootPath, apiConfigOrApiRouter] of Object.entries(routes)) {
-      if ("exec" in apiConfigOrApiRouter) {
-        if (!flatApiRoutes[rootPath]) {
-          flatApiRoutes[rootPath] = {};
-        }
-        flatApiRoutes[rootPath][apiConfigOrApiRouter.method] = {
-          exec: apiConfigOrApiRouter.exec,
-          middleware: [],
-        };
-      } else if (Array.isArray(apiConfigOrApiRouter)) {
-        for (const apiConfig of apiConfigOrApiRouter) {
-          if (!flatApiRoutes[rootPath]) {
-            flatApiRoutes[rootPath] = {};
-          }
-          flatApiRoutes[rootPath][apiConfig.method] = {
-            exec: apiConfig.exec,
-            middleware: [],
-          };
-        }
-      } else {
-        const router = new apiConfigOrApiRouter(this);
-        const middlewares = router.middlewares
-          .map((alias) => {
-            if (this.middlewareAliases?.[alias]) {
-              const middleware = new this.middlewareAliases[alias]();
-              return middleware.run;
-            }
-          })
-          .filter(Boolean);
-
-        const result = this.flattenApiRoutes(router.routes);
-        for (const [path, handlers] of Object.entries(result)) {
-          const subPath = path === "/" ? "" : path;
-          const _rootPath = rootPath === "/" ? "" : rootPath;
-          const finalPath =
-            `${_rootPath}${subPath}` === "" ? "/" : `${_rootPath}${subPath}`;
-          if (!flatApiRoutes[finalPath]) {
-            flatApiRoutes[finalPath] = {};
-          }
-          for (const [method, handler] of Object.entries(handlers)) {
-            flatApiRoutes[finalPath][method] = {
-              exec: handler.exec,
-              middleware: [
-                router.middleware,
-                ...middlewares,
-                ...handler.middleware,
-              ],
-            };
-          }
-        }
-      }
-    }
-
-    return flatApiRoutes;
   }
 
   private async resolvePageData(req: Request) {
@@ -200,20 +152,20 @@ export class App {
       })
       .reduce(
         (acc, middleware) => {
-          return async (req: Request, ctx: any) => {
+          return async (req: HttpRequest, ctx: any) => {
             return {
               ...(await acc(req, ctx)),
               ...(await middleware(req, ctx)),
             };
           };
         },
-        (_req: Request, _ctx: any) => Promise.resolve({}),
+        (_req: HttpRequest, _ctx: any) => Promise.resolve({}),
       );
 
     const reqCtx = new Map();
 
     const data = await requestContext.run(reqCtx, async () => {
-      await reqWithMiddlewares(req, reqCtx);
+      await reqWithMiddlewares(new HttpRequest(req), reqCtx);
       return await Promise.all(handlers.map((fn) => fn(req, params, this)));
     });
 
@@ -234,19 +186,44 @@ export class App {
         const pattern = new URLPattern({ pathname: path });
         if (pattern.test({ pathname: apiPath })) {
           const params = pattern.exec({ pathname: apiPath })?.pathname.groups!;
+          if (!handler[req.method.toLowerCase()]) {
+            return {
+              kind: "api_404",
+            };
+          }
           const exec = handler[req.method.toLowerCase()].exec;
           const middlewares = handler[req.method.toLowerCase()].middleware;
-          const reqWithMiddlewares = middlewares.reduce(
-            (acc: any, middleware: any) => {
-              return async (req: Request, ctx: any) => {
-                return {
-                  ...(await acc(req, ctx)),
-                  ...(await middleware(req, ctx)),
+
+          const reqWithMiddlewares = middlewares
+            .map((aliasOrTest) => {
+              if (typeof aliasOrTest === "string") {
+                const alias = aliasOrTest;
+                if (this.middlewareAliases?.[alias]) {
+                  const middleware = new this.middlewareAliases[alias]();
+                  return middleware.run;
+                }
+              } else {
+                if (isConstructor(aliasOrTest)) {
+                  // TODO: fix type
+                  // @ts-ignore
+                  const middleware = new aliasOrTest();
+                  return middleware.run;
+                }
+                return aliasOrTest;
+              }
+            })
+            .filter(Boolean)
+            .reduce(
+              (acc: any, middleware: any) => {
+                return async (req: Request, ctx: any) => {
+                  return {
+                    ...(await acc(req, ctx)),
+                    ...(await middleware(req, ctx)),
+                  };
                 };
-              };
-            },
-            (req: Request) => Promise.resolve({}),
-          );
+              },
+              (req: Request) => Promise.resolve({}),
+            );
 
           const reqCtx = new Map();
 
@@ -418,7 +395,7 @@ export class App {
     }
 
     if (result.kind === "view") {
-      const { data, headers, head, status } = result as any;
+      const { data, headers, status } = result as any;
       const { styles, views, manifest, serverManifest, ...renderOptions } =
         renderParams;
       const viewImportMap = {};
