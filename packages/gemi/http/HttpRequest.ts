@@ -1,3 +1,4 @@
+import { RequestBreakerError } from "./Error";
 import { ValidationError } from "./Router";
 
 class Input<T> extends Map {
@@ -165,4 +166,19 @@ export class HttpRequest<T = {}> {
       };
     }
   }
+
+  // TODO implement this method
+  public async terminate(params: TerminateParams) {
+    const { message, status, headers, payload } = params;
+    const error = new RequestBreakerError(message);
+
+    throw "not implemented";
+  }
 }
+
+type TerminateParams = {
+  message: string;
+  status: number;
+  headers?: Record<string, string>;
+  payload?: Record<string, any>;
+};

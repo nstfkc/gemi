@@ -41,7 +41,6 @@ export class AuthenticationError extends RequestBreakerError {
 export class ValidationError extends RequestBreakerError {
   errors: Record<string, string[]> = {};
   constructor(errors: Record<string, string[]>) {
-    console.log("ValidationError", { errors });
     super("Validation error");
     this.name = "ValidationError";
     this.errors = errors;

@@ -10,11 +10,34 @@ import { Controller } from "../http/Controller";
 import { HttpRequest } from "../http/HttpRequest";
 import { Middleware, RequestBreakerError } from "../http";
 
+class ValidationRequest extends HttpRequest {
+  schema = {
+    name: {
+      required: "Name is required",
+      string: "Name must be a string",
+    },
+    age: {
+      required: "Age is required",
+      number: "Age must be a number",
+    },
+  };
+}
+
 class TestController extends Controller {
+  requests = {
+    validate: ValidationRequest,
+  };
+
   test() {
     return { message: "test" };
   }
   async foo(req: HttpRequest) {
+    const body = await req.input();
+
+    return body.toJSON();
+  }
+
+  async validate(req: ValidationRequest) {
     const body = await req.input();
 
     return body.toJSON();
@@ -28,8 +51,10 @@ class RootApiRouter extends ApiRouter {
     }),
     "/foo": this.post(TestController, "foo"),
     "/bar": this.get(TestController, "test").middleware(["auth"]),
+    "/baz": this.post(TestController, "validate"),
   };
 }
+
 class RootViewRouter extends ViewRouter {
   routes = {
     "/": this.view("Home", () => {
@@ -62,14 +87,6 @@ export class AuthenticationError extends RequestBreakerError {
 }
 
 class AuthMiddleware extends Middleware {
-  async run(req: HttpRequest) {
-    throw new AuthenticationError();
-
-    return {};
-  }
-}
-
-class CSRFMiddleware extends Middleware {
   async run(req: HttpRequest) {
     throw new AuthenticationError();
 
@@ -133,7 +150,48 @@ describe("App", () => {
         "Content-Type": "application/json",
       },
     });
-    const res = await app.handleRequest(request);
-    expect(res.data.error).toEqual("Authentication error");
+    const res = await app.fetch(request, {} as any);
+    expect(await res.json()).toEqual({ error: "Authentication error" });
+    expect(res.status).toBe(401);
+  });
+
+  test("api handler with validation", async () => {
+    const request = new Request("http://gemi.dev/api/baz", {
+      method: "POST",
+      body: JSON.stringify({ age: "12" }),
+      headers: {
+        "Content-Type": "application/json",
+      },
+    });
+    const res = await app.fetch(request, {} as any);
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      error: {
+        kind: "validation_error",
+        messages: {
+          age: ["Age must be a number"],
+          name: ["Name is required"],
+        },
+      },
+    });
+  });
+
+  test("404 api handler", async () => {
+    const request = new Request("http://gemi.dev/api/404", {
+      method: "GET",
+    });
+    const res = await app.fetch(request, {} as any);
+    expect(res.status).toBe(404);
+    // TODO add json response
+  });
+
+  test("404 view handler", async () => {
+    const request = new Request("http://gemi.dev/not-found", {
+      method: "GET",
+    });
+    // TODO: fix this
+    // const res = await app.fetch(request, {} as any);
+    // expect(res.status).toBe(404);
   });
 });

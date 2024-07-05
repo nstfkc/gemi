@@ -236,8 +236,9 @@ export class App {
                   kind: "apiError",
                   ...err.payload.api,
                 };
+              } else {
+                throw err;
               }
-              throw err;
             }
 
             if (exec) {
@@ -250,9 +251,9 @@ export class App {
                     kind: "apiError",
                     ...err.payload.api,
                   };
+                } else {
+                  throw err;
                 }
-
-                throw err;
               }
 
               return {
@@ -359,6 +360,10 @@ export class App {
 
   async fetch(req: Request, renderParams: RenderParams) {
     const result = await this.handleRequest(req);
+
+    if (result.kind === "api_404") {
+      return new Response("Not found", { status: 404 });
+    }
 
     if (result.kind === "viewError") {
       const { kind, ...payload } = result;

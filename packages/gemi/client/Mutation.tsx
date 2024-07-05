@@ -75,7 +75,12 @@ export const Mutation = (props: PropsWithChildren<MutationProps>) => {
     <MutationContext.Provider
       value={{ isPending, result, validationErrors, formError }}
     >
-      <form ref={formRef} onSubmit={action}>
+      <form
+        className="group"
+        data-pending={isPending}
+        ref={formRef}
+        onSubmit={action}
+      >
         {props.children}
       </form>
     </MutationContext.Provider>
