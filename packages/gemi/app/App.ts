@@ -215,21 +215,21 @@ export class App {
             .filter(Boolean)
             .reduce(
               (acc: any, middleware: any) => {
-                return async (req: Request, ctx: any) => {
+                return async (req: HttpRequest, ctx: any) => {
                   return {
                     ...(await acc(req, ctx)),
                     ...(await middleware(req, ctx)),
                   };
                 };
               },
-              (req: Request) => Promise.resolve({}),
+              (req: HttpRequest) => Promise.resolve({}),
             );
 
           const reqCtx = new Map();
 
           return await requestContext.run(reqCtx, async () => {
             try {
-              await reqWithMiddlewares(req, reqCtx);
+              await reqWithMiddlewares(new HttpRequest(req), reqCtx);
             } catch (err) {
               if (err instanceof RequestBreakerError) {
                 return {

@@ -1,6 +1,6 @@
 {
   "name": "gemi",
-  "version": "0.3.6",
+  "version": "0.3.7",
   "devDependencies": {
     "@repo/eslint-config": "*",
     "@repo/typescript-config": "*",
@@ -41,7 +41,6 @@
     "test": "vitest"
   },
   "dependencies": {
-    "@react-email/components": "^0.0.19",
     "commander": "^12.1.0",
     "history": "^5.3.0",
     "react-email": "^2.1.4",
