@@ -11,7 +11,7 @@ import { v4 } from "uuid";
 import type { ComponentTree } from "../client/types";
 import { type RouterMiddleware } from "../http/Router";
 import type { UnwrapPromise } from "../utils/type";
-import { RequestBreakerError } from "../http/Error";
+import { GEMI_REQUEST_BREAKER_ERROR, RequestBreakerError } from "../http/Error";
 import type { Plugin } from "./Plugin";
 import type { Middleware } from "../http/Middleware";
 import { requestContext } from "../http/requestContext";
@@ -231,7 +231,7 @@ export class App {
             try {
               await reqWithMiddlewares(new HttpRequest(req), reqCtx);
             } catch (err) {
-              if (err instanceof RequestBreakerError) {
+              if (err.kind === GEMI_REQUEST_BREAKER_ERROR) {
                 return {
                   kind: "apiError",
                   ...err.payload.api,
@@ -246,7 +246,7 @@ export class App {
               try {
                 data = await exec(req, params, this);
               } catch (err) {
-                if (err instanceof RequestBreakerError) {
+                if (err.kind === GEMI_REQUEST_BREAKER_ERROR) {
                   return {
                     kind: "apiError",
                     ...err.payload.api,
