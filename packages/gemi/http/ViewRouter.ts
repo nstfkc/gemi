@@ -44,7 +44,7 @@ export class ViewRouter {
   ): ViewConfig;
   protected layout<T extends new (app: App) => Controller>(
     viewPath: string,
-    children: ViewChildren = {},
+    children: ViewChildren,
   ): ViewConfig;
   protected layout<T extends new (app: App) => Controller>(
     viewPath: string,
@@ -53,11 +53,11 @@ export class ViewRouter {
   protected layout<T extends new (app: App) => Controller>(
     viewPath: string,
     handler: ViewHandler<T> | ViewChildren,
-    children: ViewChildren = {},
+    children: ViewChildren,
   ): ViewConfig {
     // TODO: type middleware
     function prepare(middlewares: any[] = []): ViewPrepare {
-      let _children = children;
+      let _children = children ?? {};
       if (handler && handler.constructor === Object) {
         _children = handler;
       }
@@ -105,7 +105,7 @@ export class ViewRouter {
   ): ViewConfig;
   protected view<T extends new (app: App) => Controller>(
     viewPath: string,
-    children: ViewChildren = {},
+    children: ViewChildren,
   ): ViewConfig;
   protected view<T extends new (app: App) => Controller>(
     viewPath: string,
@@ -114,11 +114,11 @@ export class ViewRouter {
   protected view<T extends new (app: App) => Controller>(
     viewPath: string,
     handler: ViewHandler<T> | ViewChildren,
-    children: ViewChildren = {},
+    children: ViewChildren,
   ): ViewConfig {
     // TODO: type middleware
     function prepare(middlewares: any[] = []): ViewPrepare {
-      let _children = children;
+      let _children = children ?? {};
       if (handler && handler.constructor === Object) {
         _children = handler;
       }

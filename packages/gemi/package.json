@@ -1,6 +1,6 @@
 {
   "name": "gemi",
-  "version": "0.3.9",
+  "version": "0.4.0",
   "devDependencies": {
     "@repo/eslint-config": "*",
     "@repo/typescript-config": "*",
@@ -38,7 +38,9 @@
     "build:client": "vite build",
     "build:types": "tsc",
     "build:client-types": "tsc -p tsconfig.browser.json",
-    "test": "vitest"
+    "test": "vitest",
+    "prepublishOnly": "bun run build && bun scripts/setupExports.ts prod",
+    "postpublish": "bun scripts/setupExports.ts dev"
   },
   "dependencies": {
     "commander": "^12.1.0",
