@@ -1,4 +1,4 @@
-export const GEMI_REQUEST_BREAKER_ERROR = Symbol("GEMI_REQUEST_BREAKER_ERROR");
+export const GEMI_REQUEST_BREAKER_ERROR = "GEMI_REQUEST_BREAKER_ERROR";
 
 export class RequestBreakerError extends Error {
   public kind = GEMI_REQUEST_BREAKER_ERROR;
