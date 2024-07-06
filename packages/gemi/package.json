@@ -17,13 +17,13 @@
     "gemi": "./dist/bin/gemi"
   },
   "exports": {
-    "./http": "./dist/http/index.js",
-    "./client": "./dist/client/index.js",
-    "./app": "./dist/app/index.js",
-    "./facades": "./dist/facades/index.js",
-    "./email": "./dist/email/index.js",
-    "./vite": "./dist/vite/index.js",
-    "./runtime": "./dist/client/runtime.js"
+    "./http": "./http/index.ts",
+    "./client": "./client/index.ts",
+    "./app": "./app/index.ts",
+    "./facades": "./facades/index.ts",
+    "./email": "./email/index.ts",
+    "./vite": "./vite/index.ts",
+    "./runtime": "./client/runtime.ts"
   },
   "files": [
     "dist/**/*"
