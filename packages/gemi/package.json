@@ -1,6 +1,6 @@
 {
   "name": "gemi",
-  "version": "0.4.6",
+  "version": "0.4.7",
   "devDependencies": {
     "@happy-dom/global-registrator": "^14.12.3",
     "@repo/eslint-config": "*",
@@ -27,7 +27,8 @@
     "./facades": "./facades/index.ts",
     "./email": "./email/index.ts",
     "./vite": "./vite/index.ts",
-    "./runtime": "./client/runtime.ts"
+    "./runtime": "./client/runtime.ts",
+    "./server": "./server/index.ts"
   },
   "files": [
     "dist/**/*"
@@ -38,7 +39,7 @@
     "lint": "eslint . --max-warnings 0",
     "build": "bun run build:core && bun run build:bin && bun run build:types && bun run build:client && bun run build:client-types",
     "build:core": "bun ./scripts/build.ts",
-    "build:bin": "bun build --compile --target bun ./bin/gemi.ts --external vite --external react-dom --external react/jsx-runtime --outfile ./dist/bin/gemi",
+    "build:bin": "bun build --compile ./bin/gemi.ts --external vite --external react-dom --external react/jsx-runtime --outfile ./dist/bin/gemi",
     "build:client": "vite build",
     "build:types": "tsc",
     "build:client-types": "tsc -p tsconfig.browser.json",
