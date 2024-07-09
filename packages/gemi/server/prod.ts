@@ -54,19 +54,22 @@ export async function startProdServer() {
       });
     }
 
-    const handler = app.fetch.bind(app);
-
     const styles = [];
     styles.push({
       content: cssContent,
     });
+
+    app.setRenderParams({
+      styles: createStyles(styles),
+      manifest,
+      serverManifest,
+      bootstrapModules: [`/${manifest["app/client.tsx"].file}`],
+    });
+
+    const handler = app.fetch.bind(app);
+
     try {
-      return await handler(req, {
-        styles: createStyles(styles),
-        manifest,
-        serverManifest,
-        bootstrapModules: [`/${manifest["app/client.tsx"].file}`],
-      });
+      return await handler(req);
     } catch (err) {
       return new Response(err.stack, { status: 500 });
     }

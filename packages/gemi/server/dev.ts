@@ -39,8 +39,6 @@ export async function startDevServer() {
   async function requestHandler(req: Request) {
     const { pathname } = new URL(req.url);
 
-    console.log("fetching", req.url);
-
     if (pathname.startsWith("/__gemi/image")) {
       return await imageHandler(req);
     }
