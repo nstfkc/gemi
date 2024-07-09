@@ -39,9 +39,7 @@ export async function startDevServer() {
   async function requestHandler(req: Request) {
     const { pathname } = new URL(req.url);
 
-    const { app } = (await vite.ssrLoadModule(
-      path.join(appDir, "bootstrap.ts"),
-    )) as { app: App };
+    console.log("fetching", req.url);
 
     if (pathname.startsWith("/__gemi/image")) {
       return await imageHandler(req);
@@ -74,27 +72,33 @@ export async function startDevServer() {
       console.log(err);
     }
 
+    const { app } = (await vite.ssrLoadModule(
+      path.join(appDir, "bootstrap.ts"),
+    )) as { app: App };
+
+    const { default: css } = await vite.ssrLoadModule(`${appDir}/app.css`);
+    const styles = [];
+    styles.push({
+      isDev: true,
+      id: `${appDir}/app.css`,
+      content: css,
+    });
+
+    app.setRenderParams({
+      styles: createStyles(styles),
+      manifest: null,
+      serverManifest: null,
+      bootstrapModules: [
+        "/refresh.js",
+        "/app/client.tsx",
+        "http://localhost:5173/@vite/client",
+      ],
+    });
+
     const handler = app.fetch.bind(app);
 
     try {
-      const { default: css } = await vite.ssrLoadModule(`${appDir}/app.css`);
-      const styles = [];
-      styles.push({
-        isDev: true,
-        id: `${appDir}/app.css`,
-        content: css,
-      });
-
-      return await handler(req, {
-        styles: createStyles(styles),
-        manifest: null,
-        serverManifest: null,
-        bootstrapModules: [
-          "/refresh.js",
-          "/app/client.tsx",
-          "http://localhost:5173/@vite/client",
-        ],
-      });
+      return await handler(req);
     } catch (err) {
       return new Response(err.stack, { status: 500 });
     }

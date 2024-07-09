@@ -1,4 +1,5 @@
 import { describe, test, expect } from "vitest";
+import { JSDOM } from "jsdom";
 
 import { App } from "./App";
 import { ApiRouter } from "../http/ApiRouter";
@@ -94,10 +95,8 @@ class AuthMiddleware extends Middleware {
   }
 }
 
-const Root = () => createElement("div");
-
 const app = new App({
-  root: createRoot(Root),
+  root: createRoot(() => createElement("div")),
   apiRouter: RootApiRouter,
   viewRouter: RootViewRouter,
   middlewareAliases: {
@@ -105,29 +104,44 @@ const app = new App({
   },
 });
 
-describe("App", () => {
-  test("view data callback handler", async () => {
-    const request = new Request("http://gemi.dev?json=true", {
-      method: "GET",
-    });
-    const res = await app.handleRequest(request);
-    expect(res.data).toEqual({ "/": { Home: { message: "Home" } } });
+describe("App fetch()", () => {
+  test("view", async () => {
+    const res1 = await app.fetch(
+      new Request("http://gemi.dev", {
+        method: "GET",
+      }),
+    );
+
+    expect(await res1.text()).toMatchSnapshot();
+  });
+
+  test("api", async () => {
+    const res = await app.fetch(
+      new Request("http://gemi.dev/api/test", {
+        method: "GET",
+      }),
+    );
+
+    expect(await res.json()).toEqual({ message: "hi" });
   });
 
   test("view controller handler", async () => {
     const request = new Request("http://gemi.dev/about?json=true", {
       method: "GET",
     });
-    const res = await app.handleRequest(request);
-    expect(res.data).toEqual({ "/about": { About: { message: "test" } } });
+    const res = await app.fetch(request);
+    expect(await res.json()).toEqual({
+      data: { "/about": { About: { message: "test" } } },
+      head: {},
+    });
   });
 
   test("api callback handler", async () => {
     const request = new Request("http://gemi.dev/api/test", {
       method: "GET",
     });
-    const res = await app.handleRequest(request);
-    expect(res.data).toEqual({ message: "hi" });
+    const res = await app.fetch(request);
+    expect(await res.json()).toEqual({ message: "hi" });
   });
 
   test("api controller handler", async () => {
@@ -138,8 +152,8 @@ describe("App", () => {
         "Content-Type": "application/json",
       },
     });
-    const res = await app.handleRequest(request);
-    expect(res.data).toEqual({ data: 1 });
+    const res = await app.fetch(request);
+    expect(await res.json()).toEqual({ data: 1 });
   });
 
   test("api handler with middleware", async () => {
@@ -150,7 +164,8 @@ describe("App", () => {
         "Content-Type": "application/json",
       },
     });
-    const res = await app.fetch(request, {} as any);
+    const res = await app.fetch(request);
+
     expect(await res.json()).toEqual({ error: "Authentication error" });
     expect(res.status).toBe(401);
   });
@@ -163,7 +178,7 @@ describe("App", () => {
         "Content-Type": "application/json",
       },
     });
-    const res = await app.fetch(request, {} as any);
+    const res = await app.fetch(request);
 
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({
@@ -181,17 +196,16 @@ describe("App", () => {
     const request = new Request("http://gemi.dev/api/404", {
       method: "GET",
     });
-    const res = await app.fetch(request, {} as any);
+    const res = await app.fetch(request);
     expect(res.status).toBe(404);
-    // TODO add json response
+    expect(await res.json()).toEqual({ error: { message: "Not found" } });
   });
 
   test("404 view handler", async () => {
     const request = new Request("http://gemi.dev/not-found", {
       method: "GET",
     });
-    // TODO: fix this
-    // const res = await app.fetch(request, {} as any);
-    // expect(res.status).toBe(404);
+    const res = await app.fetch(request);
+    expect(res.status).toBe(404);
   });
 });

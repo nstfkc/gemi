@@ -25,7 +25,7 @@ interface RouteProps {
 }
 
 let viewImportMap: Record<string, any> | null = null;
-if (typeof window !== "undefined") {
+if (typeof window !== "undefined" && process.env.NODE_ENV !== "test") {
   viewImportMap = {};
   const { componentTree } = (window as any)
     .__GEMI_DATA__ as ServerDataContextValue;

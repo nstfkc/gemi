@@ -17,7 +17,7 @@ type Prepare = (middleware?: (Middleware | string)[]) => {
   middleware: string[];
   method: string;
   exec: (
-    req: Request,
+    req: HttpRequest,
     params: Record<string, any>,
     app: App,
   ) => Promise<Partial<DataResponse> | ErrorResponse>;
@@ -35,7 +35,7 @@ type RequestHandlerFactory<T extends new (app: App) => Controller> = (
 ) => ApiHandler<T>;
 
 export type ApiRouteExec = (
-  req: Request,
+  req: HttpRequest,
   params: Record<string, string>,
   app: App,
 ) => Promise<DataResponse | ErrorResponse>;
@@ -84,24 +84,23 @@ export class ApiRouter {
           middleware,
           method,
           exec: async (
-            req: Request,
+            req: HttpRequest,
             params: Record<string, string>,
             app: App,
           ): Promise<DataResponse | ErrorResponse> => {
-            let handler = (_req: Request | HttpRequest, params: any) =>
+            let handler = (_req: HttpRequest, params: any) =>
               Promise.resolve({});
 
-            let httpRequest = new HttpRequest(req);
+            let httpRequest = new HttpRequest(req.rawRequest);
             if (isController(controller)) {
               const controllerInstance = new controller(app);
               const Req =
                 controllerInstance.requests[methodName as any] ?? HttpRequest;
-              httpRequest = new Req(req);
+              httpRequest = new Req(req.rawRequest);
               handler =
                 controllerInstance[methodName as any].bind(controllerInstance);
             } else if (typeof controller === "function") {
-              handler = (req: Request) =>
-                controller(new HttpRequest(req)) as any;
+              handler = (req: HttpRequest) => controller(req) as any;
             }
 
             return await handler(httpRequest, params);
