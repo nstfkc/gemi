@@ -38,11 +38,13 @@ program.command("build").action(async () => {
           "@/app": appDir,
         },
       },
+    }).then(() => {
+      console.log("Build succeeded");
     });
   } catch (err) {
     console.log(err);
   }
-  await $`exit 0`;
+  process.exit();
 });
 
 program.command("start").action(async () => {
