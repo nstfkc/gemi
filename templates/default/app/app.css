@@ -1,3 +1,13 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+@font-face {
+  font-family: 'geist-mono';
+  src: url(/GeistMonoVF.ttf) format('truetype');
+  font-display: swap;
+}
+
+body {
+  font-family: 'geist-mono', monospace;
+}

@@ -208,6 +208,7 @@ export const Link = (
 ) => {
   const { href, onClick, ...rest } = props;
   const { push } = useRouter();
+  const { pathname } = useLocation();
   let path = "";
   if (typeof href === "string") {
     path = `${href}`;
@@ -217,8 +218,11 @@ export const Link = (
     path = `${pathname}${urlSearchParams.toString()}${hash}`;
   }
 
+  const p = typeof href === "string" ? href : href.pathname;
+
   return (
     <a
+      data-active={p === pathname}
       href={path}
       onClick={(e) => {
         e.preventDefault();

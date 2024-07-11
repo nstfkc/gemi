@@ -1,10 +1,8 @@
-import { Link } from "gemi/client";
-
-export default function Home(props: { count: number }) {
+export default function Home() {
   return (
     <div className="py-4">
-      <div>
-        <h1 className="font-bold text-4xl">Gemi</h1>
+      <div className="py-8">
+        Update <code>/app/views/Home.tsx to update this page</code>
       </div>
     </div>
   );

@@ -6,7 +6,7 @@ import prompts from "prompts";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 
-const GEMI_VERSION = "0.4.8";
+const GEMI_VERSION = "0.4.9";
 
 async function downloadTar(root: string) {
   const url = "https://codeload.github.com/nstfkc/gemi/tar.gz/main";
@@ -55,19 +55,12 @@ program.action(async (options) => {
 
   await downloadTar(root);
 
-  const email = (await $`git config --global user.email`)
-    .text()
-    .replaceAll("\n", "");
-  const name = (await $`git config --global user.name`)
-    .text()
-    .replaceAll("\n", "");
-
   const file = Bun.file(`${root}/package.json`);
   const packageJSON = await file.json();
 
   let updatedPackageJSON = structuredClone(packageJSON);
   updatedPackageJSON.name = projectName;
-  updatedPackageJSON.author = `${name} <${email}>`;
+  updatedPackageJSON.author = `Your name <your@email.com>`;
   updatedPackageJSON.dependencies.gemi = `${GEMI_VERSION}`;
 
   await Bun.write(
