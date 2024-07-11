@@ -1,54 +1,39 @@
-# syntax = docker/dockerfile:1
+# use the official Bun image
+# see all versions at https://hub.docker.com/r/oven/bun/tags
+FROM oven/bun:1 AS base
+WORKDIR /usr/src/app
 
-# Adjust BUN_VERSION as desired
-ARG BUN_VERSION=1.1.9
-FROM oven/bun:${BUN_VERSION}-slim as base
+# install dependencies into temp directory
+# this will cache them and speed up future builds
+FROM base AS install
+RUN mkdir -p /temp/dev
+COPY package.json bun.lockb /temp/dev/
+RUN cd /temp/dev && bun install --frozen-lockfile
 
-LABEL fly_launch_runtime="Bun/Prisma"
+# install with --production (exclude devDependencies)
+RUN mkdir -p /temp/prod
+COPY package.json bun.lockb /temp/prod/
+RUN cd /temp/prod && bun install --frozen-lockfile --production
 
-# Bun/Prisma app lives here
-WORKDIR /app
-
-# Set production environment
-ENV NODE_ENV="production"
-
-
-# Throw-away build stage to reduce size of final image
-FROM base as build
-
-# Install packages needed to build node modules
-RUN apt-get update -qq && \
-    apt-get install --no-install-recommends -y build-essential openssl pkg-config python-is-python3
-
-# Install node modules
-COPY --link bun.lockb package.json ./
-RUN bun install
-
-# Generate Prisma Client
-COPY --link prisma .
+# copy node_modules from temp directory
+# then copy all (non-ignored) project files into the image
+FROM base AS prerelease
+COPY --from=install /temp/dev/node_modules node_modules
+COPY . .
+RUN ls -a
+# [optional] tests & build
+ENV NODE_ENV=production
+RUN bun run build
+ENV PRISMA_SKIP_POSTINSTALL_GENERATE=true
 RUN bunx prisma generate
 
-# Copy application code
-COPY --link . .
-RUN ls -a
-
-# Build application
-RUN bun run build
-
-# Remove development dependencies
-RUN rm -rf node_modules && \
-    bun install --ci
+# copy production dependencies and source code into final image
+FROM base AS release
+COPY --from=install /temp/prod/node_modules node_modules
+COPY --from=prerelease /usr/src/app .
+COPY --from=prerelease /usr/src/app/package.json .
 
 
-# Final stage for app image
-FROM base
-
-# Install packages needed for deployment
-RUN apt-get update -qq && \
-    apt-get install --no-install-recommends -y openssl && \
-    rm -rf /var/lib/apt/lists /var/cache/apt/archives
-
-# Copy built application
-COPY --from=build /app /app
-
-CMD [ "bun", "run", "start" ]
+# run the app
+USER bun
+ENTRYPOINT [ "bun", "run", "start" ]
