@@ -4,6 +4,7 @@ import path from "path";
 import type { App } from "../app/App";
 import { createStyles } from "./styles";
 import { imageHandler } from "./imageHandler";
+import { renderErrorPage } from "./renderErrorPage";
 
 const rootDir = process.cwd();
 
@@ -70,9 +71,16 @@ export async function startDevServer() {
       console.log(err);
     }
 
-    const { app } = (await vite.ssrLoadModule(
-      path.join(appDir, "bootstrap.ts"),
-    )) as { app: App };
+    let app: App | null = null;
+
+    try {
+      app = (await vite.ssrLoadModule(path.join(appDir, "bootstrap.ts"))).app;
+    } catch (err) {
+      return new Response(renderErrorPage(err), {
+        status: 500,
+        headers: { "Content-Type": "text/html" },
+      });
+    }
 
     const { default: css } = await vite.ssrLoadModule(`${appDir}/app.css`);
     const styles = [];
@@ -98,6 +106,7 @@ export async function startDevServer() {
     try {
       return await handler(req);
     } catch (err) {
+      console.log("ERROR", err);
       return new Response(err.stack, { status: 500 });
     }
   }
