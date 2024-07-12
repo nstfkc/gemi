@@ -1,5 +1,5 @@
 # Gemi
-Batteries included full-stack MVC web framework
+Batteries included full-stack MVC web framework with server side rendering and soft navigation
 
 ## Tech stack
 - React (view layer)
@@ -8,7 +8,7 @@ Batteries included full-stack MVC web framework
 - Prisma (database and orm)
 
 ## Motivation
-Gemi, aims to be a Laravel (or Rails) equavalent framework for the JS ecosystem. Whereas the popular js frameworks like next.js, remix etc are focusing on providing the best UX for data fetching, Gemi is more focused on providing all the fundamental features that are required to build a full-stack web application.
+Gemi, aims to be a Laravel (or Rails) equavalent framework for the JS ecosystem.
 
 ## Features
 - Routing
@@ -30,8 +30,338 @@ Gemi, aims to be a Laravel (or Rails) equavalent framework for the JS ecosystem.
 
 > Note: Gemi is currently developed in a private repo and the npm package is not publicly accessible, this repo only includes the documentation. We will open-source the repo and release the npm package when the v0.1.0 is ready. Following documentation is not final, any feedback will be greatly appreciated. Please create an issue for your suggestions.
 
+## Getting started
 
-## API overview
+### Prerequisites
+
+Gemi is built on top of [bun](https://bun.sh). Bun needs to be installed on your computer to be able to use `gemi`. 
+
+Install bun
+
+Linux & macOS
+
+```
+curl -fsSL https://bun.sh/install | bash
+```
+
+Windows
+
+```
+powershell -c "irm bun.sh/install.ps1 | iex"
+```
+
+### Installation
+
+After you install bun, you can now run
+
+```
+bunx create-gemi-app
+```
+
+After the prompts `create-gemi-app` will create a folder with your project name and install dependencies.
+
+## Basics
+
+### Directory structure
+
+├── app
+│   ├── emails
+│   ├── http
+│   │   ├── controllers
+│   │   ├── middlewares
+│   │   ├── router
+│   │   │   ├── api.ts
+│   │   │   ├── view.ts
+│   ├── views
+│   │   ├── RootLayout.tsx
+│   ├── app.css
+│   ├── bootstrap.ts
+│   ├── client.tsx
+├── public
+│   ├── favicon.ico
+│   ├── customfont.ttf
+│   ├── images
+├── package.json
+
+
+### Routing
+
+Gemi comes with a declarative router where you use `ViewRouter` or `ApiRouter` classes to declare your routes. On the initial load the page is rendered on the server, after that client router takes over and works like an SPA.
+
+#### Creating your first page
+
+The simplest way to create a view route looks like this.
+
+```ts
+// app/router/view.ts
+
+import { ViewRouter } from 'gemi/http'
+
+export default class extends ViewRouter {
+
+  routes = {
+    '/': this.view('Home')
+  }
+}
+
+```
+
+`.view` method takes a string of a component path without the extension relative to the `app/views` directory. To make this example work, you need to have a component exported as default from `app/views/Home.tsx` file.
+
+#### Client side routing
+
+If you want to navigate between two pages you can either use built in `Link` component or `useRouter` hook.
+
+```tsx
+
+import { Link } from 'gemi/client'
+
+export const Navigation = () => {
+  return (
+    <nav>
+      <Link href="/">Home</Link>
+      <Link href="/about">About</Link>
+    </nav>
+  )
+}
+
+```
+
+```tsx
+import { useRouter } from 'gemi/client'
+
+export const CallToAction = () => {
+  const { push } = useRouter()
+  return (
+    <button onClick={() => push('/contact')}>Call to action</button>
+  )
+}
+
+```
+
+### Views
+
+Views are normal React components. You can name them however, and they can be placed in any depth in the `views` folder. The only exception is if you want to use a react component as a page, you need to export them as default. E.g
+
+```
+const Home = () => {
+  return (
+    <div>Hello world!</div>
+  )
+}
+
+export default Home
+```
+
+### Loading data on the server and passing them to the view component
+
+`ViewRouter.view` method accepts a callback function as a second argument where you can access to your database and what you return from that function will be passed to your view component as a prop.
+
+
+E.g
+
+```ts
+// app/router/view.ts
+
+import { ViewRouter } from 'gemi/http'
+
+export default class extends ViewRouter {
+
+  routes = {
+    '/': this.view('Home', async () => {
+      const posts = await db.posts.findAll();
+      
+      return { posts }
+    })
+  }
+}
+
+```
+
+Then you can access to the `posts` via props of your view component.
+
+```
+
+import { Post } from './components/Post'
+
+const Home = (props) => {
+  const { posts } = props;
+  return (
+    <div>
+      {posts.map(post => <Post key={post.id} post={post} />)}
+    </div>
+  )
+}
+
+export default Home
+```
+
+While this approach is good for prototyping and trying things out, it is better to use a `controller` to handle data fetching logic to keep everything organized.
+
+Alternatively, you can pass a controller and method tuple as a second argument to `ViewRouter.view` method. E.g.
+
+```ts
+// app/router/view.ts
+
+import { ViewRouter } from 'gemi/http'
+import { HomeController } from '@/app/http/controllers/HomeController'
+
+export default class extends ViewRouter {
+
+  routes = {
+    '/posts': this.view("Posts", [PostController, 'index'])
+  }
+}
+
+```
+
+```ts
+// app/http/controllers/PostController.ts
+
+import { Controller } from 'gemi/http'
+import { db } from '@/app/db'
+
+export class PostController extends Controller {
+  async index() {
+    const posts = await db.posts.findAll();
+    
+    return { posts }
+  }
+}
+
+```
+
+#### Creating your first api endpoint
+
+`ApiRouter` class provides you `get`, `post`, `put`, `patch` and `delete` methods which you can limit access to your endpoint with certain http methods. A simplest way to create a `get` endpoint would look like this.
+
+```ts
+
+// app/http/router/api.ts
+
+import { ApiRouter } from 'gemi/router'
+
+export default class extends ApiRouter {
+
+  routes = {
+    '/posts': this.get(async () => {
+       const posts = await db.posts.findAll();
+    
+       return { posts } 
+    })
+  }
+}
+
+```
+
+> Note: Api routes are automatically prefixed with `/api`.
+
+Again, you can use `controllers` to handle your business logic to keep things organized. E.g.
+
+
+```ts
+// app/http/controllers/PostController.ts
+
+import { Controller } from 'gemi/http'
+import { db } from '@/app/db'
+
+export class PostController extends Controller {
+  async list() {
+    const posts = await db.posts.findAll();
+    
+    return { posts }
+  }
+}
+
+```
+
+### Data fetching and mutations
+
+Gemi provides two hooks for data fetching and mutations, `useQuery` and `useMutation`.
+
+```ts
+
+const { data, loading, error } = useQuery('/posts');
+
+const { trigger } = useMutation('/posts', { method: "POST" })
+
+trigger({
+  body: 'Hello world!'
+})
+```
+
+### Forms and validations
+
+Gemi comes with a built-in form components to make a request to your apis and handle validations.
+
+```tsx
+import { useState } from 'react'
+import { Form, Input, TextArea, ValidationError } from 'gemi/client'
+
+export const ContactForm = () => {
+  const [isSuccessful, setIsSuccessful] = useState(false)
+  if(isSuccessful) {
+    return <div>Thank you! We have received your message!</div>
+  }
+  return (
+    <Form action="/contact-form" method="POST" onSuccess={}>
+      <div>
+        <label htmlFor="email">Email</label>
+        <Input type="email" name="email" id="email" />
+        <ValidationError name="email" />
+      </div>
+      <div>
+        <label htmlFor="message">Message</label>
+        <Textarea name="message" id="message" />
+        <ValidationError name="message" />
+      </div>
+      <button>Send</button>
+    </Form>
+  )
+}
+```
+
+`ValidationError` components will be rendered if server returns a validation error associated with the respective field.
+
+Gemi provides built in server side validation, you can validate the requests hit to your endpoints using `HttpRequest` class. E.g.
+
+```ts
+// app/http/controllers/PostController.ts
+
+import { Controller, HttpRequest } from 'gemi/http'
+
+class CreatePostRequest extends HttpRequest {
+  schema = {
+    'email': {
+      'email': "Not a valid email",
+      'required': 'Email is required'
+    },
+    'message': {
+      'min:100': "Message is too short"
+    }
+  }
+}
+
+export class PostController extends Controller {
+  requests = {
+    create: CreatePostRequest
+  }
+
+  async create(req: CreatePostRequest) {
+     const input = await req.input();
+     const body = input.toJSON();
+     
+     //...
+  }
+}
+
+```
+ 
+If the request body fails the validation, the request will be terminated and it will return `400 Bad Request` status and the validation errors.
+
+
+
+## Deep dive
 
 ### Routing
 
