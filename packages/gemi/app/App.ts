@@ -312,13 +312,6 @@ export class App {
         }
       }
 
-      if (!currentPathName) {
-        // TODO: return 404 view
-        return new Response(null, {
-          status: 404,
-        });
-      }
-
       const reqWithMiddlewares = this.runMiddleware(middlewares);
 
       const reqCtx = new Map();
@@ -340,11 +333,6 @@ export class App {
           ...err.payload.view,
         });
       }
-    }
-
-    // TODO: handle 404
-    if (!pageData) {
-      return new Response("<div>404</div>");
     }
 
     const { data, params, currentPathName, user } = pageData;
@@ -436,7 +424,7 @@ export class App {
           pathname: currentPathName,
           params,
           currentPath: url.pathname,
-          is404: false,
+          is404: !currentPathName ? true : false,
         },
         componentTree: [["404", []], ...this.componentTree],
       },
@@ -449,7 +437,7 @@ export class App {
         ETag: this.appId,
         ...cookieHeaders,
       },
-      status: 200,
+      status: !currentPathName ? 404 : 200,
     };
 
     const stream = await renderToReadableStream(
@@ -467,6 +455,8 @@ export class App {
         bootstrapModules,
       },
     );
+
+    console.log("result", result.status);
 
     return new Response(stream, {
       status: result.status,
