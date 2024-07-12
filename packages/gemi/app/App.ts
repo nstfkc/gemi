@@ -7,7 +7,7 @@ import { v4 } from "uuid";
 import type { ComponentTree } from "../client/types";
 import { type RouterMiddleware } from "../http/Router";
 import type { UnwrapPromise } from "../utils/type";
-import { GEMI_REQUEST_BREAKER_ERROR, RequestBreakerError } from "../http/Error";
+import { GEMI_REQUEST_BREAKER_ERROR } from "../http/Error";
 import type { Plugin } from "./Plugin";
 import type { Middleware } from "../http/Middleware";
 import { requestContext } from "../http/requestContext";
@@ -25,7 +25,6 @@ import { ComponentType, createElement, Fragment } from "react";
 
 import { isConstructor } from "../internal/isConstructor";
 import { HttpRequest } from "../http";
-import { error } from "console";
 
 interface RenderParams {
   styles: string[];
@@ -455,8 +454,6 @@ export class App {
         bootstrapModules,
       },
     );
-
-    console.log("result", result.status);
 
     return new Response(stream, {
       status: result.status,

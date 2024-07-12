@@ -6,7 +6,7 @@ import prompts from "prompts";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 
-const GEMI_VERSION = "0.4.9";
+const GEMI_VERSION = "0.4.10";
 
 async function downloadTar(root: string) {
   const url = "https://codeload.github.com/nstfkc/gemi/tar.gz/main";
