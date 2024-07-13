@@ -8,6 +8,13 @@ import { resolve } from "node:path";
 
 const GEMI_VERSION = "0.4.10";
 
+async function fetchGemiVersion() {
+  const url =
+    "https://raw.githubusercontent.com/nstfkc/gemi/main/packages/gemi/package.json";
+  const packageJson = await fetch(url).then((response) => response.json());
+  return (packageJson as any).version;
+}
+
 async function downloadTar(root: string) {
   const url = "https://codeload.github.com/nstfkc/gemi/tar.gz/main";
   const response = await fetch(url);
@@ -61,7 +68,7 @@ program.action(async (options) => {
   let updatedPackageJSON = structuredClone(packageJSON);
   updatedPackageJSON.name = projectName;
   updatedPackageJSON.author = `Your name <your@email.com>`;
-  updatedPackageJSON.dependencies.gemi = `${GEMI_VERSION}`;
+  updatedPackageJSON.dependencies.gemi = await fetchGemiVersion();
 
   await Bun.write(
     `${root}/package.json`,
