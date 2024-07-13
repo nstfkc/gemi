@@ -739,33 +739,21 @@ You don't have to wrap `await Auth.user()` in a try/catch block, If this call fa
 #### Defining email templates
 
 ```tsx
-// app/emails/WelcomeEmail.tsx
+// app/emails/WelcomeEmailTemplate.tsx
 
 import { Html, Button, Text, Heading } from "@react-email/components";
-import { Email } from 'gemi/mailer/Email'
-
-interface WelcomeEmailArgs {
-  username: string;
-  email: string; 
-}
+import { EmailTemplate } from 'gemi/email
 
 export class WelcomeEmail extends Email {
    subject = 'Welcome to Gemi'
    from = 'hi@gemi.dev'
-   constructor(args: WelcomeEmailArgs) {
-     super(args);
+   
 
-     this.to = args.email
-     this.data = {
-       username: args.username,
-     }
-   }
-
-   render() {
+   render(props: { username: string }) {
      return (
        <Html lang="en">
          <Heading>Welcome<Heading>
-         <Text>{this.data.username}</Text>
+         <Text>{props.username}</Text>
        <Html>
      )
    }
@@ -775,22 +763,15 @@ export class WelcomeEmail extends Email {
 
 #### Sending emails
 
-You can either instantiate your email template class and call `.send` method.
 
 ```ts
+import { Email } from 'gemi/email' 
 
-const welcomeEmail = new WelcomeEmail({ username: 'John Doe', email: 'john@acme.com' });
-await welcomeEmail.send()
+
+Email.send(WelcomeEmailTemplate, { data: { username: 'johndoe' } })
 
 ```
 
-or you can use the `SendEmail` facade
-
-```ts
-
-await SendEmail(WelcomeEmail, { username: 'John Doe', email: 'john@acme.com' })
-
-```
 
 ### Broadcasting (Concept - Not implemented)
 
