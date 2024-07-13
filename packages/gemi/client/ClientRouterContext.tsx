@@ -15,6 +15,8 @@ import {
   type PropsWithChildren,
 } from "react";
 import { Subject } from "../utils/Subject";
+import { ComponentsContext } from "./ComponentContext";
+import { URLPattern } from "urlpattern-polyfill";
 
 interface ClientRouterContextValue {
   viewEntriesSubject: Subject<string[]>;
@@ -24,6 +26,7 @@ interface ClientRouterContextValue {
   locationSubject: Subject<Location>;
   getScrollPosition: (path: string) => number;
   params: Record<string, string>;
+  getViewPathsFromPathname: (pathname: string) => string[];
 }
 
 export const ClientRouterContext = createContext(
@@ -86,29 +89,27 @@ export const ClientRouterProvider = (
     );
   };
 
+  const getViewPathsFromPathname = (pathname: string) => {
+    for (const [route, views] of Object.entries(routeManifest)) {
+      const urlPattern = new URLPattern({ pathname: route });
+      if (urlPattern.test({ pathname })) {
+        return views;
+      }
+    }
+    return [];
+  };
+
   useEffect(() => {
-    import("urlpattern-polyfill").then(({ URLPattern }) => {
-      history?.listen(({ location }) => {
-        locationSubject.next(structuredClone(location));
-        viewEntriesSubject.current.next(
-          (() => {
-            if ((location.state as any)?.status === 404) {
-              return ["404"];
-            }
-            for (const [route, views] of Object.entries(routeManifest)) {
-              const urlPattern = new URLPattern({ pathname: route });
-              if (urlPattern.test({ pathname: location.pathname })) {
-                setParameters(
-                  urlPattern.exec({ pathname: location.pathname })?.pathname
-                    .groups!,
-                );
-                return views;
-              }
-            }
-            return [];
-          })(),
-        );
-      });
+    history?.listen(({ location }) => {
+      locationSubject.next(structuredClone(location));
+      viewEntriesSubject.current.next(
+        (() => {
+          if ((location.state as any)?.status === 404) {
+            return ["404"];
+          }
+          return getViewPathsFromPathname(location.pathname);
+        })(),
+      );
     });
 
     window.addEventListener("scrollend", handleScroll);
@@ -133,6 +134,7 @@ export const ClientRouterProvider = (
   return (
     <ClientRouterContext.Provider
       value={{
+        getViewPathsFromPathname,
         history,
         params: parameters,
         locationSubject,
@@ -177,19 +179,35 @@ export function useParams() {
 export function useViewData() {}
 
 export function useRouter() {
-  const { updatePageData, history } = useContext(ClientRouterContext);
+  const { updatePageData, history, getViewPathsFromPathname } =
+    useContext(ClientRouterContext);
+  const { viewImportMap } = useContext(ComponentsContext);
   return {
     push: async (to: To, state?: any) => {
       let path = "";
+      let urlSearchParams: URLSearchParams;
+      let hash = "";
+
       if (typeof to === "string") {
-        path = `${to}?json=true`;
-      } else {
-        const { hash, pathname, search } = to;
-        const urlSearchParams = new URLSearchParams(search);
+        const [_path, search = ""] = to.split("?");
+        path = _path;
+        urlSearchParams = new URLSearchParams(search);
         urlSearchParams.set("json", "true");
-        path = `${pathname}${urlSearchParams.toString()}${hash}`;
+      } else {
+        const { hash: _hash, pathname, search } = to;
+        urlSearchParams = new URLSearchParams(search);
+        urlSearchParams.set("json", "true");
+        path = pathname;
+        hash = _hash;
       }
-      const res = await fetch(path);
+
+      const components = getViewPathsFromPathname(path);
+
+      const fetchPath = `${path}?${urlSearchParams.toString()}${hash}`;
+      const [res] = await Promise.all([
+        fetch(fetchPath),
+        ...components.map((component) => (window as any).loaders[component]()),
+      ]);
 
       if (res.ok) {
         const { data } = await res.json();

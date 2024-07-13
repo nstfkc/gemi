@@ -34,6 +34,7 @@ export async function startDevServer() {
       },
     },
   });
+
   process.env.ROOT_DIR = rootDir;
   process.env.APP_DIR = appDir;
 
@@ -106,8 +107,9 @@ export async function startDevServer() {
     try {
       return await handler(req);
     } catch (err) {
-      console.log("ERROR", err);
-      return new Response(err.stack, { status: 500 });
+      return new Response(renderErrorPage(err), {
+        headers: { "Content-Type": "text/html" },
+      });
     }
   }
   await vite.listen(5174);
