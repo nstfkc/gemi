@@ -334,6 +334,11 @@ export class App {
       }
     }
 
+    // TODO: handle 404
+    if (!pageData) {
+      return new Response("<div>404</div>");
+    }
+
     const { data, params, currentPathName, user } = pageData;
 
     const viewData = data.reduce((acc, data) => {

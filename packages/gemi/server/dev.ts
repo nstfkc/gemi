@@ -1,6 +1,5 @@
-import { $ } from "bun";
 import path from "path";
-
+import open from 'open';
 import type { App } from "../app/App";
 import { createStyles } from "./styles";
 import { imageHandler } from "./imageHandler";
@@ -48,7 +47,7 @@ export async function startDevServer() {
     if (pathname.startsWith("/refresh.js")) {
       return new Response(
         `
-          import RefreshRuntime from "http://localhost:5173/@react-refresh";
+          import RefreshRuntime from "http://localhost:${process.env.PORT || 5173}/@react-refresh";
           RefreshRuntime.injectIntoGlobalHook(window);
           window.$RefreshReg$ = () => {};
           window.$RefreshSig$ = () => (type) => type;
@@ -63,7 +62,7 @@ export async function startDevServer() {
     }
 
     try {
-      const res = await fetch(`http://localhost:5174${pathname}`);
+      const res = await fetch(`http://localhost:${process.env.PORT || 5173}${pathname}`);
 
       if (res.ok) {
         return res;
@@ -98,7 +97,7 @@ export async function startDevServer() {
       bootstrapModules: [
         "/refresh.js",
         "/app/client.tsx",
-        "http://localhost:5173/@vite/client",
+        `http://localhost:${process.env.PORT || 5173}/@vite/client`,
       ],
     });
 
@@ -122,7 +121,7 @@ export async function startDevServer() {
   });
 
   console.log(`Server started on http://localhost:${process.env.PORT || 5173}`);
-  await $`open http://localhost:${process.env.PORT || 5173}`;
+  await open(`http://localhost:${process.env.PORT || 5173}`);
 
   vite.watcher.on("change", async (file) => {
     if (file.includes("app/views")) {
