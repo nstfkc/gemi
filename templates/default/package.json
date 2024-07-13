@@ -10,7 +10,8 @@
     "@libsql/client": "^0.6.0",
     "@prisma/adapter-libsql": "^5.14.0",
     "@prisma/client": "5.14.0",
-    "@react-email/components": "^0.0.19",
+    "@react-email/components": "^0.0.21-canary.0",
+    "@react-email/render": "^0.0.17-canary.0",
     "gemi": "*",
     "react": "19.0.0-rc-dfd30974ab-20240613",
     "react-dom": "19.0.0-rc-dfd30974ab-20240613",
@@ -32,5 +33,9 @@
     "typescript": "^5.4.4",
     "vite": "^5.3.1",
     "vitest": "^1.5.0"
+  },
+  "resolution": {
+    "react": "19.0.0-rc-dfd30974ab-20240613",
+    "react-dom": "19.0.0-rc-dfd30974ab-20240613"
   }
 }

@@ -1,13 +1,8 @@
-import { Email } from "gemi/email";
+import { EmailTemplate } from "gemi/email";
 import { Html, Button, Text, Heading } from "@react-email/components";
 
-export class WelcomeEmail extends Email {
-  render(props: {
-    url: string;
-    date: string;
-    name: string;
-    alternativeDate: string;
-  }) {
+export class WelcomeEmail extends EmailTemplate {
+  render(props: { url: string }) {
     return (
       <Html lang="en">
         <Text>

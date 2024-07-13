@@ -25,6 +25,7 @@ import { ComponentType, createElement, Fragment } from "react";
 
 import { isConstructor } from "../internal/isConstructor";
 import { HttpRequest } from "../http";
+import { Kernel } from "../kernel";
 
 interface RenderParams {
   styles: string[];
@@ -39,6 +40,7 @@ interface AppParams {
   plugins?: (new () => Plugin)[];
   middlewareAliases?: Record<string, new () => Middleware>;
   root: ComponentType;
+  kernel: new () => Kernel;
 }
 
 export class App {
@@ -72,12 +74,14 @@ export class App {
   private apiRouter: new () => ApiRouter;
   private viewRouter: new () => ViewRouter;
   private Root: ComponentType;
+  private kernel: Kernel;
 
   constructor(params: AppParams) {
     this.params = params;
     this.apiRouter = params.apiRouter;
     this.viewRouter = params.viewRouter;
     this.Root = params.root;
+    this.kernel = new params.kernel();
 
     this.prepare();
     this.appId = generateETag(Date.now());
@@ -467,11 +471,13 @@ export class App {
   async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url);
 
-    if (url.pathname.startsWith("/api")) {
-      return await this.handleApiRequest(req);
-    } else {
-      return await this.handleViewRequest(req);
-    }
+    return this.kernel.run(async () => {
+      if (url.pathname.startsWith("/api")) {
+        return await this.handleApiRequest(req);
+      } else {
+        return await this.handleViewRequest(req);
+      }
+    });
   }
 
   private handleWebSocketMessage = (

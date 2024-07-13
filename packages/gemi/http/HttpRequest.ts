@@ -1,7 +1,7 @@
 import { RequestBreakerError } from "./Error";
 import { ValidationError } from "./Router";
 
-class Input<T> extends Map {
+class Input<T = Record<string, any>> extends Map {
   constructor() {
     super();
   }

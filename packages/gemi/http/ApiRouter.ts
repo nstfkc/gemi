@@ -35,7 +35,7 @@ type RequestHandlerFactory<T extends new (app: App) => Controller> = (
 ) => ApiHandler<T>;
 
 export type ApiRouteExec = (
-  req: HttpRequest,
+  req: HttpRequest<unknown>,
   params: Record<string, string>,
   app: App,
 ) => Promise<DataResponse | ErrorResponse>;

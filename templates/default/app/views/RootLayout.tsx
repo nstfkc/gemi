@@ -14,7 +14,7 @@ const RootLayout = (props: Props) => {
         <title>My app</title>
       </head>
       <body>
-        <div className="container max-w-2xl mx-auto">
+        <div className="container max-w-2xl mx-auto px-4">
           <header className="py-8">
             <nav className="flex gap-4 items-center">
               <Link className="data-[active=true]:underline" href="/">
