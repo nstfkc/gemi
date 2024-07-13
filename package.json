@@ -15,6 +15,7 @@
     "build": "turbo build",
     "dev": "turbo dev",
     "lint": "turbo lint",
+    "start": "cd apps/web && bun run start",
     "format": "prettier --write \"**/*.{ts,tsx,md}\""
   },
   "workspaces": [
