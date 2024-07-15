@@ -3,7 +3,7 @@ import { HttpRequest } from "./HttpRequest";
 type Method = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
 type Handler<M extends Method, Input, Output> = (input: Input) => Output;
-type Handlers = Handler<any, any, any>[];
+type Handlers = Array<Handler<any, any, any>>;
 
 class ApiRouter {
   routes: Record<string, Handler<any, any, any> | Handlers | typeof ApiRouter> =
@@ -11,11 +11,11 @@ class ApiRouter {
 
   handleRequest() {}
 
-  get<T, U>(fn: (i: T) => U): Handler<"GET", T, U> {
-    return fn;
+  get<T, U>(fn: (i: HttpRequest<T>) => U): Handler<"GET", T, U> {
+    return fn as any;
   }
-  post<T, U>(fn: (i: T) => U): Handler<"POST", T, U> {
-    return fn;
+  post<T, U>(fn: (i: HttpRequest<T>) => U): Handler<"POST", T, U> {
+    return fn as any;
   }
 }
 
@@ -47,11 +47,17 @@ class NestedRouter extends ApiRouter {
 class TestRouter extends ApiRouter {
   routes = {
     "/all": NestedRouter,
-    "/foo": this.get(async (req: TestRequest) => {
-      const input = await req.input();
-      input.get("id");
-      return { foo: "foo" };
-    }),
+    "/foo": [
+      this.get(async (req: TestRequest) => {
+        const input = await req.input();
+        input.get("id");
+        return { foo: "foo" };
+      }),
+      this.post(async (req: HttpRequest<{ age: number }>) => {
+        const input = await req.input();
+        return { age: input.get("age") };
+      }),
+    ],
   };
 }
 
@@ -77,6 +83,12 @@ type Extract<Key, T, U> = KeyAndValue<
   }
 >;
 
+type _HandleHandlers<T extends Handlers, Prefix extends PropertyKey = ""> = {
+  [K in keyof T]: T[K] extends Handler<infer M, infer TInput, infer TOutput>
+    ? Extract<`${M}:${Prefix & string}${K & string}`, TInput, TOutput>
+    : never;
+}[number];
+
 type RouteParserInner<
   T extends ApiRouter,
   Prefix extends PropertyKey = "",
@@ -84,17 +96,17 @@ type RouteParserInner<
 > = K extends any
   ? T["routes"][K] extends Handler<infer M, infer TInput, infer TOutput>
     ? Extract<`${M}:${Prefix & string}${K & string}`, TInput, TOutput>
-    : // : T["routes"][K] extends Handlers
-      //   ? {
-      //       [K in keyof Handlers]: Handlers[K] extends Handler<
-      //         infer M,
-      //         infer TInput,
-      //         infer TOutput
-      //       >
-      //         ? Extract<`${M}:${Prefix & string}${K & string}`, TInput, TOutput>
-      //         : never;
-      //     }[number]
-      _HandleRouter<T["routes"][K], `${Prefix & string}${K & string}`>
+    : T["routes"][K] extends Handlers
+      ? {
+          [K1 in keyof T["routes"][K]]: T["routes"][K][K1] extends Handler<
+            infer M,
+            infer I,
+            infer O
+          >
+            ? Extract<`${M}:${Prefix & string}${K & string}`, I, O>
+            : never;
+        }[number]
+      : _HandleRouter<T["routes"][K], `${Prefix & string}${K & string}`>
   : TrulyNever;
 
 type RouteParser<T extends ApiRouter> = KeyAndValueToObject<
