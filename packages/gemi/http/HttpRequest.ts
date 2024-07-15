@@ -1,13 +1,15 @@
 import { RequestBreakerError } from "./Error";
 import { ValidationError } from "./Router";
 
-class Input<T = Record<string, any>> extends Map {
-  constructor() {
-    super();
+class Input<T extends Record<string, any>> {
+  constructor(private data: T) {}
+
+  public get(key: keyof T): T[keyof T] {
+    return this.data[key];
   }
 
   public toJSON(): T {
-    return Object.fromEntries(this);
+    return this.data;
   }
 }
 
@@ -53,12 +55,33 @@ function validate(ruleName: string) {
   }
 }
 
-export class HttpRequest<T = {}> {
+type StringType = "string";
+type NumberType = "number";
+type BooleanType = "boolean";
+type MinLengthType = `min:${number}`;
+type MaxLengthType = `max:${number}`;
+type RequiredType = "required";
+type SchemaKey =
+  | StringType
+  | NumberType
+  | BooleanType
+  | MinLengthType
+  | MaxLengthType
+  | RequiredType;
+
+type Body = Record<string, any>;
+
+type Schema<T extends Body> = Record<
+  keyof T,
+  Partial<Record<SchemaKey, string>>
+>;
+
+export class HttpRequest<T extends Body> {
   public rawRequest: Request;
   public headers: Headers;
   public cookies: Map<string, string>;
 
-  protected schema: Partial<Record<keyof T, Record<string, string>>> = {};
+  public schema: Schema<T> = {} as Schema<T>;
 
   constructor(req: Request) {
     this.rawRequest = req;
@@ -182,3 +205,29 @@ type TerminateParams = {
   headers?: Record<string, string>;
   payload?: Record<string, any>;
 };
+
+class TestRequest extends HttpRequest<{ name: string; age?: number }> {
+  schema = {
+    name: {
+      string: "hi",
+    },
+    age: {
+      number: "must be number",
+    },
+  };
+}
+
+const req = new TestRequest(
+  new Request("http://localhost:3000", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ name: "hello" }),
+  }),
+);
+
+req.input().then((input) => {
+  input.get("name");
+  const { name, age } = input.toJSON();
+});

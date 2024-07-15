@@ -14,3 +14,5 @@ export { init } from "./init";
 export { createRoot } from "./createRoot";
 
 export { Image } from "./Image";
+
+export { QueryInput } from "./rpc";

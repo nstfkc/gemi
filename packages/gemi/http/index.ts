@@ -1,5 +1,5 @@
 export { Controller } from "./Controller";
-export { ApiRouter } from "./ApiRouter";
+export { ApiRouter, type Handler } from "./ApiRouter";
 export { ViewRouter } from "./ViewRouter";
 export { ValidationError, AuthenticationError } from "./Router";
 export { HttpRequest } from "./HttpRequest";

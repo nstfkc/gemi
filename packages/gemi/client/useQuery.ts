@@ -1,6 +1,10 @@
 import { useEffect, useState } from "react";
+import { QueryInput } from "./rpc";
 
-export function useQuery(url: string) {
+export function useQuery<T extends keyof QueryInput>(
+  url: T,
+  params: QueryInput[T],
+) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);

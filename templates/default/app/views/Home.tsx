@@ -1,3 +1,6 @@
+import { useQuery } from "gemi/client";
+import type { ComponentProps } from "react";
+
 export default function Home() {
   return (
     <div className="py-4">

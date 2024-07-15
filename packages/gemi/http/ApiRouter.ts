@@ -1,7 +1,7 @@
 import { Controller } from "./Controller";
 import { type MiddlewareReturnType } from "./Router";
 import type { App } from "../app/App";
-import { HttpRequest } from "./HttpRequest";
+import { HttpRequest, IHttpRequest } from "./HttpRequest";
 import { Middleware } from "./Middleware";
 
 type ControllerMethods<T extends new (app: App) => Controller> = {
@@ -17,13 +17,32 @@ type Prepare = (middleware?: (Middleware | string)[]) => {
   middleware: string[];
   method: string;
   exec: (
-    req: HttpRequest,
+    req: HttpRequest<{}>,
     params: Record<string, any>,
     app: App,
   ) => Promise<Partial<DataResponse> | ErrorResponse>;
 };
 
-type ApiHandler<T extends new (app: App) => Controller, U = {}> = {
+type JSONLike = Record<
+  string,
+  string | number | boolean | { [x: string]: JSONLike } | Array<JSONLike>
+>;
+
+type InferCallBackHandlerType<T> = T extends (
+  req: HttpRequest<infer Input>,
+) => Promise<infer Output> | infer Output
+  ? { input: Input; output: Output }
+  : never;
+
+type ControllerHandlerType = new (app: App) => Controller;
+type CallbackHandlerType<T extends JSONLike> = <U extends Record<string, any>>(
+  req: HttpRequest<U>,
+) => Promise<T> | T;
+
+type ApiHandler<
+  U extends JSONLike = {},
+  T extends ControllerHandlerType | CallbackHandlerType<U>,
+> = {
   prepare: Prepare;
   middleware: (middleware: string[]) => {
     prepare: Prepare;
@@ -44,15 +63,19 @@ type ApiRouteConfig = {
   prepare: Prepare;
 };
 
-type CallbackHandler<T> = (req: HttpRequest) => Promise<T> | T;
+type CallbackHandler<T, R extends HttpRequest<any>> = (
+  req: R,
+) => Promise<T> | T;
 
 export type ApiRouteChildren = Record<
   string,
   ApiRouteConfig | ApiRouteConfig[] | (new () => ApiRouter)
 >;
 
+export type Handler<Input, Output> = (input: Input) => Output;
+
 function isController<T extends new (app: App) => Controller>(
-  controller: T | CallbackHandler<any>,
+  controller: T | CallbackHandler<any, any>,
   // TODO: fix this
   // @ts-ignore
 ): controller is new (app: App) => Controller {
@@ -60,15 +83,15 @@ function isController<T extends new (app: App) => Controller>(
 }
 
 export class ApiRouter {
-  public routes: Record<string, any> = {};
+  public routes: Record<string, Handler<any, any> | typeof ApiRouter> = {};
   public middlewares: string[] = [];
 
   constructor() {}
 
   public middleware(_req: HttpRequest): MiddlewareReturnType {}
 
-  private handleRequest<T>(
-    controller: CallbackHandler<T>,
+  private handleRequest<T, R extends HttpRequest>(
+    controller: CallbackHandler<T, R>,
   ): RequestHandlerFactory<any>;
   private handleRequest<T extends new (app: App) => Controller>(
     controller: T,
@@ -118,15 +141,9 @@ export class ApiRouter {
     };
   }
 
-  protected get<T>(controller: CallbackHandler<T>): ApiHandler<any>;
-  protected get<T extends new (app: App) => Controller>(
-    controller: T,
-    methodName: ControllerMethods<T>,
-  ): ApiHandler<T>;
-  protected get<T extends new (app: App) => Controller>(
-    controller: T,
-    methodName?: ControllerMethods<T>,
-  ): ApiHandler<T> {
+  protected get<T, U extends HttpRequest<any>>(
+    controller: CallbackHandler<T, U>,
+  ): Handler<T, U> {
     const handler = this.handleRequest(controller, methodName);
     return handler("get");
   }
