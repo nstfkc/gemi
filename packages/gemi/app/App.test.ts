@@ -1,5 +1,4 @@
 import { describe, test, expect } from "vitest";
-import { JSDOM } from "jsdom";
 
 import { App } from "./App";
 import { ApiRouter } from "../http/ApiRouter";
@@ -10,8 +9,9 @@ import { createElement } from "react";
 import { Controller } from "../http/Controller";
 import { HttpRequest } from "../http/HttpRequest";
 import { Middleware, RequestBreakerError } from "../http";
+import { Kernel } from "../kernel";
 
-class ValidationRequest extends HttpRequest {
+class ValidationRequest extends HttpRequest<{ name: string; age: number }, {}> {
   schema = {
     name: {
       required: "Name is required",
@@ -99,6 +99,7 @@ const app = new App({
   root: createRoot(() => createElement("div")),
   apiRouter: RootApiRouter,
   viewRouter: RootViewRouter,
+  kernel: Kernel,
   middlewareAliases: {
     auth: AuthMiddleware,
   },
@@ -141,6 +142,7 @@ describe("App fetch()", () => {
       method: "GET",
     });
     const res = await app.fetch(request);
+
     expect(await res.json()).toEqual({ message: "hi" });
   });
 

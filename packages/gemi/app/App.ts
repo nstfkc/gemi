@@ -154,7 +154,7 @@ export class App {
     const reqCtx = new Map();
 
     const data = await requestContext.run(reqCtx, async () => {
-      await reqWithMiddlewares(new HttpRequest(req), reqCtx);
+      await reqWithMiddlewares(new HttpRequest(req, params), reqCtx);
       return await Promise.all(handlers.map((fn) => fn(req, params, this)));
     });
 
@@ -190,38 +190,39 @@ export class App {
       .filter(Boolean)
       .reduce(
         (acc: any, middleware: any) => {
-          return async (req: HttpRequest, ctx: any) => {
+          return async (req: HttpRequest<any, any>, ctx: any) => {
             return {
               ...(await acc(req, ctx)),
               ...(await middleware(req, ctx)),
             };
           };
         },
-        (_req: HttpRequest) => Promise.resolve({}),
+        (_req: HttpRequest<any, any>) => Promise.resolve({}),
       );
   }
 
   async handleApiRequest(req: Request) {
     const url = new URL(req.url);
+
     const apiPath = url.pathname.replace("/api", "");
     for (const [path, handler] of Object.entries(this.flatApiRoutes)) {
       const pattern = new URLPattern({ pathname: path });
       if (pattern.test({ pathname: apiPath })) {
         const params = pattern.exec({ pathname: apiPath })?.pathname.groups!;
-        if (!handler[req.method.toLowerCase()]) {
+        if (!handler[req.method]) {
           return new Response(
             JSON.stringify({ error: { message: "Not found" } }),
           );
         }
-        const exec = handler[req.method.toLowerCase()].exec;
-        const middlewares = handler[req.method.toLowerCase()].middleware;
+        const exec = handler[req.method].exec;
+        const middlewares = handler[req.method].middleware;
 
         const reqWithMiddlewares = this.runMiddleware(middlewares);
 
         const reqCtx = new Map();
 
         return await requestContext.run(reqCtx, async () => {
-          const httpRequest = new HttpRequest(req);
+          const httpRequest = new HttpRequest(req, params);
           let handler = exec
             ? () => exec(httpRequest, params, this)
             : () => Promise.resolve({});
@@ -320,7 +321,7 @@ export class App {
       const reqCtx = new Map();
 
       const data = await requestContext.run(reqCtx, async () => {
-        await reqWithMiddlewares(new HttpRequest(req), reqCtx);
+        await reqWithMiddlewares(new HttpRequest(req, params), reqCtx);
         return await Promise.all(handlers.map((fn) => fn(req, params, this)));
       });
 

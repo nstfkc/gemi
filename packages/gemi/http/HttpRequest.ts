@@ -76,14 +76,17 @@ type Schema<T extends Body> = Record<
   Partial<Record<SchemaKey, string>>
 >;
 
-export class HttpRequest<T extends Body> {
+export class HttpRequest<T extends Body = {}, Params = {}> {
   public rawRequest: Request;
   public headers: Headers;
   public cookies: Map<string, string>;
 
   public schema: Schema<T> = {} as Schema<T>;
 
-  constructor(req: Request) {
+  public params: Params;
+
+  constructor(req: Request, params: Params) {
+    this.params = params;
     this.rawRequest = req;
     this.headers = req.headers;
     const cookie = this.rawRequest.headers.get("Cookie");
@@ -205,29 +208,3 @@ type TerminateParams = {
   headers?: Record<string, string>;
   payload?: Record<string, any>;
 };
-
-class TestRequest extends HttpRequest<{ name: string; age?: number }> {
-  schema = {
-    name: {
-      string: "hi",
-    },
-    age: {
-      number: "must be number",
-    },
-  };
-}
-
-const req = new TestRequest(
-  new Request("http://localhost:3000", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ name: "hello" }),
-  }),
-);
-
-req.input().then((input) => {
-  input.get("name");
-  const { name, age } = input.toJSON();
-});

@@ -1,5 +1,5 @@
 export { Controller } from "./Controller";
-export { ApiRouter, type Handler } from "./ApiRouter";
+export { ApiRouter, type CreateRPC } from "./ApiRouter";
 export { ViewRouter } from "./ViewRouter";
 export { ValidationError, AuthenticationError } from "./Router";
 export { HttpRequest } from "./HttpRequest";

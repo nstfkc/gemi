@@ -15,4 +15,4 @@ export { createRoot } from "./createRoot";
 
 export { Image } from "./Image";
 
-export { QueryInput } from "./rpc";
+export { RPC } from "./rpc";

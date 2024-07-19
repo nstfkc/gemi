@@ -1,10 +1,28 @@
 import { useEffect, useState } from "react";
-import { QueryInput } from "./rpc";
+import { RPC } from "./rpc";
+import type { ApiRouterHandler } from "../http/ApiRouter";
 
-export function useQuery<T extends keyof QueryInput>(
-  url: T,
-  params: QueryInput[T],
-) {
+interface Options<Input, Params> {
+  input: Input;
+  params: Params;
+}
+
+type QueryOptions<T> =
+  T extends ApiRouterHandler<infer Input, any, infer Params>
+    ? Options<Input, Params>
+    : never;
+
+type Error = {};
+
+type QueryReturn<T> =
+  T extends ApiRouterHandler<any, infer Output, any>
+    ? { data: Output; loading: boolean; error: Error }
+    : never;
+
+export function useQuery<T extends keyof RPC>(
+  url: T extends `GET:${string}` ? T : never,
+  options: QueryOptions<RPC[T]>,
+): QueryReturn<RPC[T]> {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -13,6 +31,7 @@ export function useQuery<T extends keyof QueryInput>(
     async function execute() {
       setLoading(true);
       try {
+        const [, _url] = String(url).split(":");
         const res = await fetch(`/api${url}`);
         if (res.ok) {
           const json = await res.json();
@@ -23,10 +42,10 @@ export function useQuery<T extends keyof QueryInput>(
       } finally {
         setLoading(false);
       }
-
-      execute();
     }
-  }, [url]);
+
+    execute();
+  }, [url, options]);
 
   return { data, loading, error };
 }

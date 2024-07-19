@@ -1,202 +1,202 @@
-import { Controller } from "./Controller";
-import { type MiddlewareReturnType } from "./Router";
-import type { App } from "../app/App";
-import { HttpRequest, IHttpRequest } from "./HttpRequest";
-import { Middleware } from "./Middleware";
+import { isConstructor } from "../internal/isConstructor";
+import { KeyAndValue, KeyAndValueToObject } from "../internal/type-utils";
+import { Controller, ControllerMethods } from "./Controller";
+import type { HttpRequest } from "./HttpRequest";
+import { MiddlewareReturnType } from "./Router";
 
-type ControllerMethods<T extends new (app: App) => Controller> = {
-  [K in keyof InstanceType<T>]: InstanceType<T>[K] extends Function ? K : never;
-}[keyof InstanceType<T>];
+type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
-type DataResponse = any;
-type ErrorResponse = {
-  error: any;
-};
+export type ApiRouterHandler<Input, Output, Params> = (
+  req: HttpRequest<Input, Params>,
+) => Output;
 
-type Prepare = (middleware?: (Middleware | string)[]) => {
-  middleware: string[];
-  method: string;
-  exec: (
-    req: HttpRequest<{}>,
-    params: Record<string, any>,
-    app: App,
-  ) => Promise<Partial<DataResponse> | ErrorResponse>;
-};
+type CallbackHandler<Input, Output, Params> = (
+  req: HttpRequest<Input, Params>,
+) => Promise<Output> | Output;
 
-type JSONLike = Record<
-  string,
-  string | number | boolean | { [x: string]: JSONLike } | Array<JSONLike>
->;
-
-type InferCallBackHandlerType<T> = T extends (
-  req: HttpRequest<infer Input>,
-) => Promise<infer Output> | infer Output
-  ? { input: Input; output: Output }
+type ParseRouteHandler<
+  T extends new () => Controller,
+  K extends ControllerMethods<T>,
+  M extends HttpMethod,
+> = InstanceType<T>[K] extends (
+  req: HttpRequest<infer Input, infer Params>,
+) => infer Output
+  ? RouteHandler<M, Input, Output, Params>
   : never;
 
-type ControllerHandlerType = new (app: App) => Controller;
-type CallbackHandlerType<T extends JSONLike> = <U extends Record<string, any>>(
-  req: HttpRequest<U>,
-) => Promise<T> | T;
+function isController(
+  candidate: CallbackHandler<any, any, any> | (new () => Controller),
+): candidate is new () => Controller {
+  return isConstructor(candidate);
+}
 
-type ApiHandler<
-  U extends JSONLike = {},
-  T extends ControllerHandlerType | CallbackHandlerType<U>,
-> = {
-  prepare: Prepare;
-  middleware: (middleware: string[]) => {
-    prepare: Prepare;
-  };
-};
+export class RouteHandler<M extends HttpMethod, Input, Output, Params> {
+  middlewares: string[] = [];
 
-type RequestHandlerFactory<T extends new (app: App) => Controller> = (
-  method: string,
-) => ApiHandler<T>;
+  constructor(
+    public method: M,
+    private handler:
+      | CallbackHandler<Input, Output, Params>
+      | (new () => Controller),
+    private methodName?: any,
+  ) {}
 
-export type ApiRouteExec = (
-  req: HttpRequest<unknown>,
-  params: Record<string, string>,
-  app: App,
-) => Promise<DataResponse | ErrorResponse>;
+  run(req: HttpRequest<Input, Params>) {
+    let httpRequest = req;
+    if (isController(this.handler)) {
+      const controller = new this.handler();
+      const handler = controller[this.methodName].bind(controller);
+      httpRequest = controller.requests[this.methodName]
+        ? new controller.requests[this.methodName](req.rawRequest, req.params)
+        : httpRequest;
+      return handler(httpRequest);
+    } else {
+      return this.handler(req);
+    }
+  }
 
-type ApiRouteConfig = {
-  prepare: Prepare;
-};
+  middleware(middlewareList: string[]) {
+    this.middlewares = middlewareList;
+    return this;
+  }
+}
 
-type CallbackHandler<T, R extends HttpRequest<any>> = (
-  req: R,
-) => Promise<T> | T;
+type RouteHandlers = RouteHandler<any, any, any, any>[];
 
-export type ApiRouteChildren = Record<
+export type ApiRoutes = Record<
   string,
-  ApiRouteConfig | ApiRouteConfig[] | (new () => ApiRouter)
+  RouteHandler<any, any, any, any> | RouteHandlers | typeof ApiRouter
 >;
 
-export type Handler<Input, Output> = (input: Input) => Output;
-
-function isController<T extends new (app: App) => Controller>(
-  controller: T | CallbackHandler<any, any>,
-  // TODO: fix this
-  // @ts-ignore
-): controller is new (app: App) => Controller {
-  return "kind" in controller && controller.kind === "controller";
-}
-
 export class ApiRouter {
-  public routes: Record<string, Handler<any, any> | typeof ApiRouter> = {};
+  public routes: ApiRoutes = {};
   public middlewares: string[] = [];
+  public middleware(_req: HttpRequest<any, any>): MiddlewareReturnType {}
 
-  constructor() {}
-
-  public middleware(_req: HttpRequest): MiddlewareReturnType {}
-
-  private handleRequest<T, R extends HttpRequest>(
-    controller: CallbackHandler<T, R>,
-  ): RequestHandlerFactory<any>;
-  private handleRequest<T extends new (app: App) => Controller>(
-    controller: T,
-    methodName: ControllerMethods<T>,
-  ): RequestHandlerFactory<T>;
-  private handleRequest<T extends new (app: App) => Controller, U>(
-    controller: T | CallbackHandler<U>,
-    methodName?: ControllerMethods<T>,
-  ): RequestHandlerFactory<T> {
-    return (method: string): ApiHandler<T> => {
-      const prepare = (middleware: string[] = []) => {
-        return {
-          middleware,
-          method,
-          exec: async (
-            req: HttpRequest,
-            params: Record<string, string>,
-            app: App,
-          ): Promise<DataResponse | ErrorResponse> => {
-            let handler = (_req: HttpRequest, params: any) =>
-              Promise.resolve({});
-
-            let httpRequest = new HttpRequest(req.rawRequest);
-            if (isController(controller)) {
-              const controllerInstance = new controller(app);
-              const Req =
-                controllerInstance.requests[methodName as any] ?? HttpRequest;
-              httpRequest = new Req(req.rawRequest);
-              handler =
-                controllerInstance[methodName as any].bind(controllerInstance);
-            } else if (typeof controller === "function") {
-              handler = (req: HttpRequest) => controller(req) as any;
-            }
-
-            return await handler(httpRequest, params);
-          },
-        };
-      };
-      return {
-        prepare,
-        middleware: (middlware: string[]) => {
-          return {
-            prepare: () => prepare(middlware),
-          };
-        },
-      };
-    };
+  protected get<Input, Output, Params>(
+    handler: CallbackHandler<Input, Output, Params>,
+  ): RouteHandler<"GET", Input, Output, Params>;
+  protected get<T extends new () => Controller, K extends ControllerMethods<T>>(
+    handler: T,
+    methodName: K,
+  ): ParseRouteHandler<T, K, "GET">;
+  protected get<
+    T extends CallbackHandler<any, any, any> | (new () => Controller),
+    K extends ControllerMethods<any>,
+  >(handler: T, methodName?: K) {
+    return new RouteHandler("GET", handler, methodName);
   }
 
-  protected get<T, U extends HttpRequest<any>>(
-    controller: CallbackHandler<T, U>,
-  ): Handler<T, U> {
-    const handler = this.handleRequest(controller, methodName);
-    return handler("get");
+  protected post<Input, Output, Params>(
+    handler: CallbackHandler<Input, Output, Params>,
+  ): RouteHandler<"POST", Input, Output, Params>;
+  protected post<
+    T extends new () => Controller,
+    K extends ControllerMethods<T>,
+  >(handler: T, methodName: K): ParseRouteHandler<T, K, "POST">;
+  protected post<
+    T extends CallbackHandler<any, any, any> | (new () => Controller),
+    K extends ControllerMethods<any>,
+  >(handler: T, methodName?: K) {
+    return new RouteHandler("POST", handler, methodName);
   }
 
-  protected post<T>(controller: CallbackHandler<T>): ApiHandler<any>;
-  protected post<T extends new (app: App) => Controller>(
-    controller: T,
-    methodName: ControllerMethods<T>,
-  ): ApiHandler<T>;
-  protected post<T extends new (app: App) => Controller>(
-    controller: T,
-    methodName?: ControllerMethods<T>,
-  ): ApiHandler<T> {
-    const handler = this.handleRequest(controller, methodName);
-    return handler("post");
+  protected put<Input, Output, Params>(
+    handler: CallbackHandler<Input, Output, Params>,
+  ): RouteHandler<"PUT", Input, Output, Params>;
+  protected put<T extends new () => Controller, K extends ControllerMethods<T>>(
+    handler: T,
+    methodName: K,
+  ): ParseRouteHandler<T, K, "PUT">;
+  protected put<
+    T extends CallbackHandler<any, any, any> | (new () => Controller),
+    K extends ControllerMethods<any>,
+  >(handler: T, methodName?: K) {
+    return new RouteHandler("PUT", handler, methodName);
   }
 
-  protected put<T>(controller: CallbackHandler<T>): ApiHandler<any>;
-  protected put<T extends new (app: App) => Controller>(
-    controller: T,
-    methodName: ControllerMethods<T>,
-  ): ApiHandler<T>;
-  protected put<T extends new (app: App) => Controller>(
-    controller: T,
-    methodName?: ControllerMethods<T>,
-  ): ApiHandler<T> {
-    const handler = this.handleRequest(controller, methodName);
-    return handler("put");
+  protected patch<Input, Output, Params>(
+    handler: CallbackHandler<Input, Output, Params>,
+  ): RouteHandler<"PATCH", Input, Output, Params>;
+  protected patch<
+    T extends new () => Controller,
+    K extends ControllerMethods<T>,
+  >(handler: T, methodName: K): ParseRouteHandler<T, K, "PATCH">;
+  protected patch<
+    T extends CallbackHandler<any, any, any> | (new () => Controller),
+    K extends ControllerMethods<any>,
+  >(handler: T, methodName?: K) {
+    return new RouteHandler("PATCH", handler, methodName);
   }
 
-  protected delete<T>(controller: CallbackHandler<T>): ApiHandler<any>;
-  protected delete<T extends new (app: App) => Controller>(
-    controller: T,
-    methodName: ControllerMethods<T>,
-  ): ApiHandler<T>;
-  protected delete<T extends new (app: App) => Controller>(
-    controller: T,
-    methodName?: ControllerMethods<T>,
-  ): ApiHandler<T> {
-    const handler = this.handleRequest(controller, methodName);
-    return handler("delete");
-  }
-
-  protected patch<T>(controller: CallbackHandler<T>): ApiHandler<any>;
-  protected patch<T extends new (app: App) => Controller>(
-    controller: T,
-    methodName: ControllerMethods<T>,
-  ): ApiHandler<T>;
-  protected patch<T extends new (app: App) => Controller>(
-    controller: T,
-    methodName?: ControllerMethods<T>,
-  ): ApiHandler<T> {
-    const handler = this.handleRequest(controller, methodName);
-    return handler("patch");
+  protected delete<Input, Output, Params>(
+    handler: CallbackHandler<Input, Output, Params>,
+  ): RouteHandler<"DELETE", Input, Output, Params>;
+  protected delete<
+    T extends new () => Controller,
+    K extends ControllerMethods<T>,
+  >(handler: T, methodName: K): ParseRouteHandler<T, K, "DELETE">;
+  protected delete<
+    T extends CallbackHandler<any, any, any> | (new () => Controller),
+    K extends ControllerMethods<any>,
+  >(handler: T, methodName?: K) {
+    return new RouteHandler("DELETE", handler, methodName);
   }
 }
+
+type RouteHandlerParser<T, Prefix extends string = ""> =
+  T extends RouteHandler<infer Method, infer Input, infer Output, infer Params>
+    ? KeyAndValue<
+        `${Method & string}:${Prefix & string}`,
+        ApiRouterHandler<Input, Output, Params>
+      >
+    : never;
+
+type RouteHandlersParser<
+  T,
+  Prefix extends string = "",
+> = T extends RouteHandlers
+  ? {
+      [K in keyof RouteHandlers]: T[K] extends RouteHandler<
+        infer Method,
+        infer Input,
+        infer Output,
+        infer Params
+      >
+        ? KeyAndValue<
+            `${Method & string}:${Prefix & string}`,
+            ApiRouterHandler<Input, Output, Params>
+          >
+        : never;
+    }[number]
+  : never;
+
+type RouterInstanceParser<
+  T extends new () => ApiRouter,
+  Prefix extends string,
+> = T extends new () => ApiRouter
+  ? RouteParser<InstanceType<T>, `${Prefix & string}`>
+  : never;
+
+type RouteParser<T extends ApiRouter, Prefix extends PropertyKey = ""> = {
+  [K in keyof T["routes"]]: T["routes"][K] extends RouteHandler<
+    any,
+    any,
+    any,
+    any
+  >
+    ? RouteHandlerParser<T["routes"][K], `${Prefix & string}${K & string}`>
+    : T["routes"][K] extends RouteHandlers
+      ? RouteHandlersParser<T["routes"][K], `${Prefix & string}${K & string}`>
+      : T["routes"][K] extends new () => ApiRouter
+        ? RouterInstanceParser<
+            T["routes"][K],
+            `${Prefix & string}${K & string}`
+          >
+        : never;
+}[keyof T["routes"]];
+
+export type CreateRPC<
+  T extends ApiRouter,
+  Prefix extends PropertyKey = "",
+> = KeyAndValueToObject<RouteParser<T, Prefix>>;
