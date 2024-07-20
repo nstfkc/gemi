@@ -17,6 +17,7 @@
     "./facades": "./dist/facades/index.js",
     "./email": "./dist/email/index.js",
     "./vite": "./dist/vite/index.js",
+    "./runtime": "./dist/runtime/index.js",
     "./server": "./dist/server/index.js",
     "./kernel": "./dist/kernel/index.js"
   }
