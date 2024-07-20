@@ -13,6 +13,6 @@ export { Link, useLocation, useParams, useRouter } from "./ClientRouterContext";
 export { init } from "./init";
 export { createRoot } from "./createRoot";
 
-export { Image } from "./Image";
+export type { RPC } from "./rpc";
 
-export { RPC } from "./rpc";
+export { Image } from "./Image";

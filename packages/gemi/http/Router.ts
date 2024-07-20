@@ -1,5 +1,5 @@
 import { RequestBreakerError } from "./Error";
-import { HttpRequest } from "./HttpRequest";
+import type { HttpRequest } from "./HttpRequest";
 
 type MiddlewareResult = Partial<{
   headers: Record<string, string>;

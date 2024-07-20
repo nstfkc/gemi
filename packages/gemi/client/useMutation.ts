@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { RPC } from "./rpc";
+import type { RPC } from "./rpc";
 import type { ApiRouterHandler } from "../http/ApiRouter";
 
 function applyParams(url: string, params: Record<string, any> = {}) {

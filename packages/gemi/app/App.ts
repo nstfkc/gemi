@@ -1,4 +1,4 @@
-import type { ApiRouteExec, ApiRouter } from "../http/ApiRouter";
+import type { ApiRouter } from "../http/ApiRouter";
 import { ViewRouter, type ViewRouteExec } from "../http/ViewRouter";
 // @ts-ignore
 import { URLPattern } from "urlpattern-polyfill";
@@ -26,6 +26,8 @@ import { ComponentType, createElement, Fragment } from "react";
 import { isConstructor } from "../internal/isConstructor";
 import { HttpRequest } from "../http";
 import { Kernel } from "../kernel";
+
+type ApiRouteExec = any; // TODO: fix type
 
 interface RenderParams {
   styles: string[];

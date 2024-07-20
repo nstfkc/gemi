@@ -1,8 +1,8 @@
 import { isConstructor } from "../internal/isConstructor";
-import { KeyAndValue, KeyAndValueToObject } from "../internal/type-utils";
-import { Controller, ControllerMethods } from "./Controller";
+import type { KeyAndValue, KeyAndValueToObject } from "../internal/type-utils";
+import { Controller, type ControllerMethods } from "./Controller";
 import { HttpRequest } from "./HttpRequest";
-import { MiddlewareReturnType } from "./Router";
+import type { MiddlewareReturnType } from "./Router";
 
 type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 

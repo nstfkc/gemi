@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { RPC } from "./rpc";
+import type { RPC } from "./rpc";
 import type { ApiRouterHandler } from "../http/ApiRouter";
 
 interface Options<Input, Params> {
@@ -47,5 +47,5 @@ export function useQuery<T extends keyof RPC>(
     execute();
   }, [url, options]);
 
-  return { data, loading, error };
+  return { data, loading, error } as QueryReturn<RPC[T]>;
 }

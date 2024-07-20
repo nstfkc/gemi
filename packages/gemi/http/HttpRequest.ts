@@ -8,6 +8,14 @@ class Input<T extends Record<string, any>> {
     return this.data[key];
   }
 
+  public set(key: keyof T, value: T[keyof T]) {
+    this.data[key] = value;
+  }
+
+  public has(key: keyof T) {
+    return this.data[key] !== undefined;
+  }
+
   public toJSON(): T {
     return this.data;
   }
@@ -69,12 +77,12 @@ type SchemaKey =
   | MaxLengthType
   | RequiredType;
 
-export type Body = Record<string, any>;
-
-type Schema<T extends Body> = Record<
+export type Schema<T extends Body> = Record<
   keyof T,
   Partial<Record<SchemaKey, string>>
 >;
+
+export type Body = Record<string, any>;
 
 export class HttpRequest<T extends Body = {}, Params = Record<string, never>> {
   public rawRequest: Request;
@@ -102,21 +110,21 @@ export class HttpRequest<T extends Body = {}, Params = Record<string, never>> {
   }
 
   private async parseBody() {
-    const inputMap = new Input<T>();
+    const inputMap = new Input<T>({} as T);
     if (this.rawRequest.headers.get("Content-Type") === "application/json") {
       const body = await this.rawRequest.json();
       for (const [key, value] of Object.entries(body)) {
-        inputMap.set(key, value);
+        inputMap.set(key, value as T[keyof T]);
       }
     }
     if (
       this.rawRequest.headers.get("Content-Type") ===
       "application/x-www-form-urlencoded"
     ) {
-      const body = await this.rawRequest.formData();
+      const body = (await this.rawRequest.formData()) as any; // TODO: fix type
       for (const [key, value] of body) {
         console.log(key, value);
-        inputMap.set(key, value);
+        inputMap.set(key, value as T[keyof T]);
       }
     }
     if (
@@ -124,7 +132,7 @@ export class HttpRequest<T extends Body = {}, Params = Record<string, never>> {
         .get("Content-Type")
         .startsWith("multipart/form-data")
     ) {
-      const body = await this.rawRequest.formData();
+      const body = (await this.rawRequest.formData()) as any; // TODO: fix type
       for (const [key, value] of body) {
         if (inputMap.has(key)) {
           const currentValue = inputMap.get(key);
@@ -132,10 +140,10 @@ export class HttpRequest<T extends Body = {}, Params = Record<string, never>> {
             currentValue.push(value);
             inputMap.set(key, currentValue);
           } else {
-            inputMap.set(key, [currentValue, value]);
+            inputMap.set(key, [currentValue, value] as any);
           }
         } else {
-          inputMap.set(key, value);
+          inputMap.set(key, value as T[keyof T]);
         }
       }
     }
