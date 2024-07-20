@@ -12,16 +12,13 @@ function applyParams(url: string, params: Record<string, any> = {}) {
   return out;
 }
 
-type Options<Params, Query = {}> = {
-  params: Params;
-  query: Query;
+type Options = {
+  autoInvalidate?: boolean;
 };
 
-type EmptyOptions = {};
-
-type MutationOptions<T> =
-  T extends ApiRouterHandler<infer Input, any, infer Params>
-    ? Options<Params>
+type MutationInputs<T> =
+  T extends ApiRouterHandler<any, any, infer Params>
+    ? { params: Params; query?: Record<string, any> }
     : never;
 
 type Error = {};
@@ -41,13 +38,14 @@ type Mutation<T> =
 type ParseParams<T> =
   T extends ApiRouterHandler<any, any, infer Params> ? Params : never;
 
-type NotEmptyObject<T> = keyof T extends never ? never : T;
-
 export function useMutation<T extends keyof RPC>(
   url: T extends `GET:${string}` ? never : T,
   ...args: ParseParams<RPC[T]> extends Record<string, never>
-    ? [options?: Omit<MutationOptions<RPC[T]>, "params">]
-    : [options: MutationOptions<RPC[T]>]
+    ? [
+        inputs?: Omit<MutationInputs<RPC[T]>, "params">,
+        options?: Partial<Options>,
+      ]
+    : [inputs: MutationInputs<RPC[T]>, options?: Partial<Options>]
 ): Mutation<RPC[T]> {
   const [loading, setIsPending] = useState(false);
   const [data, setData] = useState(null);
@@ -57,9 +55,13 @@ export function useMutation<T extends keyof RPC>(
     error: {},
     trigger: async (input?: any) => {
       setIsPending(true);
-      const [options] = args;
+      const [inputs, _options] = args;
+      const {
+        query: {},
+      } = inputs;
+      const params = "params" in inputs ? inputs.params : {};
       const [method, _url] = String(url).split(":");
-      const finalUrl = applyParams(_url, options.params);
+      const finalUrl = applyParams(_url, params);
       const response = await fetch(`/api${finalUrl}`, {
         method,
         headers: {
