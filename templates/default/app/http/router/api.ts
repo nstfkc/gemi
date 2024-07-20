@@ -1,10 +1,4 @@
-import { ApiRouter, HttpRequest } from "gemi/http";
-
-class TestRequest extends HttpRequest<{ id: string }> {
-  schema = {
-    id: {},
-  };
-}
+import { ApiRouter, Controller, HttpRequest } from "gemi/http";
 
 export default class extends ApiRouter {
   routes = {
@@ -27,13 +21,30 @@ class NestedRouter extends ApiRouter {
   };
 }
 
+type Product = {
+  id: string;
+  name: string;
+};
+
+class ProductController extends Controller {
+  async update(req: HttpRequest<{ name: string }>) {
+    const product = {} as Product;
+    return { product };
+  }
+}
+class TestRequest extends HttpRequest<{
+  id: string;
+}> {
+  schema = {
+    id: { string: "hi" },
+  };
+}
 class TestRouter extends ApiRouter {
   routes = {
     "/all": NestedRouter,
-    "/foo": this.post(async (req: TestRequest) => {
-      const input = await req.input();
-      input.get("id");
+    "/foo": this.post((req: TestRequest) => {
       return { foo: "foo" };
     }),
+    "/products/:productId": this.put(ProductController, "update"),
   };
 }

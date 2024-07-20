@@ -69,19 +69,19 @@ type SchemaKey =
   | MaxLengthType
   | RequiredType;
 
-type Body = Record<string, any>;
+export type Body = Record<string, any>;
 
 type Schema<T extends Body> = Record<
   keyof T,
   Partial<Record<SchemaKey, string>>
 >;
 
-export class HttpRequest<T extends Body = {}, Params = {}> {
+export class HttpRequest<T extends Body = {}, Params = Record<string, never>> {
   public rawRequest: Request;
   public headers: Headers;
   public cookies: Map<string, string>;
 
-  public schema: Schema<T> = {} as Schema<T>;
+  public schema: any; // TODO implement type
 
   public params: Params;
 

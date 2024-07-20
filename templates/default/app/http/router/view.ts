@@ -1,4 +1,4 @@
-import { ViewRouter } from "gemi/http";
+import { HttpRequest, ViewRouter } from "gemi/http";
 
 export default class extends ViewRouter {
   override routes = {

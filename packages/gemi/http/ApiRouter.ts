@@ -1,7 +1,7 @@
 import { isConstructor } from "../internal/isConstructor";
 import { KeyAndValue, KeyAndValueToObject } from "../internal/type-utils";
 import { Controller, ControllerMethods } from "./Controller";
-import type { HttpRequest } from "./HttpRequest";
+import { HttpRequest } from "./HttpRequest";
 import { MiddlewareReturnType } from "./Router";
 
 type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
