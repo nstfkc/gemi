@@ -64,6 +64,7 @@ After the prompts `create-gemi-app` will create a folder with your project name 
 
 ### Directory structure
 
+```
 ├── app
 │   ├── emails
 │   ├── http
@@ -82,6 +83,8 @@ After the prompts `create-gemi-app` will create a folder with your project name 
 │   ├── customfont.ttf
 │   ├── images
 ├── package.json
+
+```
 
 
 ### Routing
