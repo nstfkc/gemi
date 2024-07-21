@@ -11,24 +11,27 @@ Batteries included full-stack MVC web framework with server side rendering and s
 Gemi, aims to be a Laravel (or Rails) equavalent framework for the JS ecosystem.
 
 ## Features
-- Routing
-- Server side rendering with streaming
-- Soft navigation
-- Image optimisations
-- RPC for http and websockets
-- JWT based multi-tenant authentication and authorization
-- ORM and database migrations (based on prisma)
-- Emails (based on react-email)
-- Events (based on WebSocket)
-- Job Queues
-- Task scheduling (e.g cron jobs)
-- Validations
+- Routing ✅
+- Server side rendering with streaming ✅
+- Soft navigation ✅
+- Image optimisations ✅
+- RPC layer for http requests (type-safe useQuery, useMutation and Form) ✅
+- Request validations 🚧
+- Session based multi-tenant authentication and authorization 🚧
+- ORM and database migrations (based on prisma) ✅
+- Emails (based on react-email) ✅
+- Events (based on WebSocket) 🚧
+- Job Queues 🚧
+- Task scheduling (e.g cron jobs) 🚧
 
-- CMS (Plugin)
-- Analytics (Plugin)
-- A/B tests and feature flags (Plugin)
+- CMS (Plugin) 💡
+- Analytics (Plugin) 💡
+- A/B tests and feature flags (Plugin) 💡
 
-> Note: Gemi is currently developed in a private repo and the npm package is not publicly accessible, this repo only includes the documentation. We will open-source the repo and release the npm package when the v0.1.0 is ready. Following documentation is not final, any feedback will be greatly appreciated. Please create an issue for your suggestions.
+✅: Ready
+🚧: In progress
+💡: Planning
+
 
 ## Getting started
 
@@ -146,7 +149,7 @@ export const CallToAction = () => {
 
 Views are normal React components. You can name them however, and they can be placed in any depth in the `views` folder. The only exception is if you want to use a react component as a page, you need to export them as default. E.g
 
-```
+```tsx
 const Home = () => {
   return (
     <div>Hello world!</div>
@@ -183,7 +186,7 @@ export default class extends ViewRouter {
 
 Then you can access to the `posts` via props of your view component.
 
-```
+```tsx
 
 import { Post } from './components/Post'
 
