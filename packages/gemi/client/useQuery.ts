@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { RPC } from "./rpc";
 import type { ApiRouterHandler } from "../http/ApiRouter";
+import { UnwrapPromise } from "../utils/type";
 
 interface Options<Input, Params> {
   input: Input;
@@ -16,7 +17,7 @@ type Error = {};
 
 type QueryReturn<T> =
   T extends ApiRouterHandler<any, infer Output, any>
-    ? { data: Output; loading: boolean; error: Error }
+    ? { data: UnwrapPromise<Output>; loading: boolean; error: Error }
     : never;
 
 export function useQuery<T extends keyof RPC>(

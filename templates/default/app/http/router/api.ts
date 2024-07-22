@@ -1,4 +1,5 @@
 import { ApiRouter, Controller, HttpRequest } from "gemi/http";
+import { ResourceController } from "gemi/http/Controller";
 
 export default class extends ApiRouter {
   routes = {
@@ -26,12 +27,25 @@ type Product = {
   name: string;
 };
 
-class ProductController extends Controller {
-  async update(req: HttpRequest<{ name: string }>) {
+class ProductController extends ResourceController {
+  async update(req: HttpRequest<{ name: string }, { id: string }>) {
     const product = {} as Product;
     return { product };
   }
+  async create(
+    req: HttpRequest<{ id: string; name: string }, { name: string }>,
+  ) {
+    const product = {} as Product;
+    return { product };
+  }
+
+  async list() {
+    return { posts: [] };
+  }
+  async delete(req: HttpRequest<{}, { id: string }>) {}
+  async show() {}
 }
+
 class TestRequest extends HttpRequest<{
   id: string;
 }> {
@@ -39,12 +53,9 @@ class TestRequest extends HttpRequest<{
     id: { string: "hi" },
   };
 }
+
 class TestRouter extends ApiRouter {
   routes = {
-    "/all": NestedRouter,
-    "/foo": this.post((req: TestRequest) => {
-      return { foo: "foo" };
-    }),
-    "/products/:productId": this.put(ProductController, "update"),
+    "/products": this.resource(ProductController),
   };
 }

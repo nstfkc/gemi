@@ -1,13 +1,13 @@
 import { useState } from "react";
 import type { RPC } from "./rpc";
 import type { ApiRouterHandler } from "../http/ApiRouter";
+import { UnwrapPromise } from "../utils/type";
 
 function applyParams(url: string, params: Record<string, any> = {}) {
   let out = url;
 
   for (const [key, value] of Object.entries(params)) {
-    out.replace(`:${key}?`, value);
-    out.replace(`:${key}`, value);
+    out.replace(`:${key}?`, value).replace(`:${key}`, value);
   }
   return out;
 }
@@ -23,15 +23,15 @@ type MutationInputs<T> =
 
 type Error = {};
 
-type UnwrapPromise<T> = T extends Promise<infer U> ? U : T;
-
 type Mutation<T> =
   T extends ApiRouterHandler<infer Input, infer Output, any>
     ? {
         data: UnwrapPromise<Output>;
         loading: boolean;
         error: Error;
-        trigger: (input: Input) => Promise<UnwrapPromise<Output>>;
+        trigger: (
+          ...args: Input extends Record<string, never> ? [] : [input: Input]
+        ) => Promise<UnwrapPromise<Output>>;
       }
     : never;
 
