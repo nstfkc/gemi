@@ -3,14 +3,15 @@ import type { RPC } from "./rpc";
 import type { ApiRouterHandler } from "../http/ApiRouter";
 import { UnwrapPromise } from "../utils/type";
 
-interface Options<Input, Params> {
-  input: Input;
+interface Options<Params> {
   params: Params;
 }
 
 type QueryOptions<T> =
-  T extends ApiRouterHandler<infer Input, any, infer Params>
-    ? Options<Input, Params>
+  T extends ApiRouterHandler<any, any, infer Params>
+    ? Params extends Record<string, any>
+      ? Options<Params>
+      : never
     : never;
 
 type Error = {};
@@ -22,7 +23,9 @@ type QueryReturn<T> =
 
 export function useQuery<T extends keyof RPC>(
   url: T extends `GET:${string}` ? T : never,
-  options: QueryOptions<RPC[T]>,
+  ...args: QueryOptions<RPC[T]> extends never
+    ? []
+    : [options: QueryOptions<RPC[T]>]
 ): QueryReturn<RPC[T]> {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);

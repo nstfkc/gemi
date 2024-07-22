@@ -1,4 +1,4 @@
-export { Controller } from "./Controller";
+export { Controller, ResourceController } from "./Controller";
 export { ApiRouter, type CreateRPC } from "./ApiRouter";
 export { ViewRouter } from "./ViewRouter";
 export { ValidationError, AuthenticationError } from "./Router";

@@ -172,8 +172,8 @@ export class ApiRouter {
         "/:id": {
           show: this.get(
             Controller,
-            "list" as ControllerMethods<T>,
-          ) as ParseRouteHandler<T, TestControllerMethod<T, "list">, "GET">,
+            "show" as ControllerMethods<T>,
+          ) as ParseRouteHandler<T, TestControllerMethod<T, "show">, "GET">,
           update: this.put(
             Controller,
             "update" as ControllerMethods<T>,

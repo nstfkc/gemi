@@ -84,7 +84,10 @@ export type Schema<T extends Body> = Record<
 
 export type Body = Record<string, any>;
 
-export class HttpRequest<T extends Body = {}, Params = Record<string, never>> {
+export class HttpRequest<
+  T extends Body = Record<string, never>,
+  Params = Record<string, never>,
+> {
   public rawRequest: Request;
   public headers: Headers;
   public cookies: Map<string, string>;
