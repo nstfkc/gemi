@@ -1,8 +1,20 @@
 import { Middleware } from "../http";
-import { RouteHandler, ApiRoutes } from "../http/ApiRouter";
+import {
+  RouteHandler,
+  ApiRoutes,
+  RouteHandlers,
+  ApiRouter,
+} from "../http/ApiRouter";
 import { RouterMiddleware } from "../http/Router";
+import { isConstructor } from "../internal/isConstructor";
 
 type ApiRouteExec = any;
+
+function isRouter(
+  routeHandlers: RouteHandlers | (new () => ApiRouter),
+): routeHandlers is new () => ApiRouter {
+  return isConstructor(routeHandlers);
+}
 
 export function createFlatApiRoutes(routes: ApiRoutes) {
   const flatApiRoutes: Record<
@@ -28,20 +40,7 @@ export function createFlatApiRoutes(routes: ApiRoutes) {
         exec,
         middleware: [...middleware],
       };
-    } else if (Array.isArray(apiRouteHandlerOrApiRouter)) {
-      for (const routeHandler of apiRouteHandlerOrApiRouter) {
-        if (!flatApiRoutes[rootPath]) {
-          flatApiRoutes[rootPath] = {};
-        }
-        const method = routeHandler.method;
-        const middleware = routeHandler.middlewares;
-        const exec = routeHandler.run;
-        flatApiRoutes[rootPath][method] = {
-          exec,
-          middleware,
-        };
-      }
-    } else {
+    } else if (isRouter(apiRouteHandlerOrApiRouter)) {
       const router = new apiRouteHandlerOrApiRouter();
 
       const result = createFlatApiRoutes(router.routes);
@@ -63,6 +62,19 @@ export function createFlatApiRoutes(routes: ApiRoutes) {
             ],
           };
         }
+      }
+    } else {
+      for (const routeHandler of Object.values(apiRouteHandlerOrApiRouter)) {
+        if (!flatApiRoutes[rootPath]) {
+          flatApiRoutes[rootPath] = {};
+        }
+        const method = routeHandler.method;
+        const middleware = routeHandler.middlewares;
+        const exec = routeHandler.run;
+        flatApiRoutes[rootPath][method] = {
+          exec,
+          middleware,
+        };
       }
     }
   }

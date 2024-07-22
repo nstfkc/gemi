@@ -1,6 +1,10 @@
 import { isConstructor } from "../internal/isConstructor";
 import type { KeyAndValue, KeyAndValueToObject } from "../internal/type-utils";
-import { Controller, type ControllerMethods } from "./Controller";
+import {
+  Controller,
+  ResourceController,
+  type ControllerMethods,
+} from "./Controller";
 import { HttpRequest } from "./HttpRequest";
 import type { MiddlewareReturnType } from "./Router";
 
@@ -61,7 +65,16 @@ export class RouteHandler<M extends HttpMethod, Input, Output, Params> {
   }
 }
 
-type RouteHandlers = RouteHandler<any, any, any, any>[];
+export type RouteHandlers =
+  | {
+      create: RouteHandler<"POST", any, any, any>;
+      list: RouteHandler<"GET", any, any, any>;
+    }
+  | {
+      update: RouteHandler<"PUT", any, any, any>;
+      show: RouteHandler<"GET", any, any, any>;
+      delete: RouteHandler<"DELETE", any, any, any>;
+    };
 
 export type ApiRoutes = Record<
   string,
@@ -73,76 +86,115 @@ export class ApiRouter {
   public middlewares: string[] = [];
   public middleware(_req: HttpRequest<any, any>): MiddlewareReturnType {}
 
-  protected get<Input, Output, Params>(
+  public get<Input, Output, Params>(
     handler: CallbackHandler<Input, Output, Params>,
   ): RouteHandler<"GET", Input, Output, Params>;
-  protected get<T extends new () => Controller, K extends ControllerMethods<T>>(
+  public get<T extends new () => Controller, K extends ControllerMethods<T>>(
     handler: T,
     methodName: K,
   ): ParseRouteHandler<T, K, "GET">;
-  protected get<
+  public get<
     T extends CallbackHandler<any, any, any> | (new () => Controller),
     K extends ControllerMethods<any>,
   >(handler: T, methodName?: K) {
     return new RouteHandler("GET", handler, methodName);
   }
 
-  protected post<Input, Output, Params>(
+  public post<Input, Output, Params>(
     handler: CallbackHandler<Input, Output, Params>,
   ): RouteHandler<"POST", Input, Output, Params>;
-  protected post<
-    T extends new () => Controller,
-    K extends ControllerMethods<T>,
-  >(handler: T, methodName: K): ParseRouteHandler<T, K, "POST">;
-  protected post<
+  public post<T extends new () => Controller, K extends ControllerMethods<T>>(
+    handler: T,
+    methodName: K,
+  ): ParseRouteHandler<T, K, "POST">;
+  public post<
     T extends CallbackHandler<any, any, any> | (new () => Controller),
     K extends ControllerMethods<any>,
   >(handler: T, methodName?: K) {
     return new RouteHandler("POST", handler, methodName);
   }
 
-  protected put<Input, Output, Params>(
+  public put<Input, Output, Params>(
     handler: CallbackHandler<Input, Output, Params>,
   ): RouteHandler<"PUT", Input, Output, Params>;
-  protected put<T extends new () => Controller, K extends ControllerMethods<T>>(
+  public put<T extends new () => Controller, K extends ControllerMethods<T>>(
     handler: T,
     methodName: K,
   ): ParseRouteHandler<T, K, "PUT">;
-  protected put<
+  public put<
     T extends CallbackHandler<any, any, any> | (new () => Controller),
     K extends ControllerMethods<any>,
   >(handler: T, methodName?: K) {
     return new RouteHandler("PUT", handler, methodName);
   }
 
-  protected patch<Input, Output, Params>(
+  public patch<Input, Output, Params>(
     handler: CallbackHandler<Input, Output, Params>,
   ): RouteHandler<"PATCH", Input, Output, Params>;
-  protected patch<
-    T extends new () => Controller,
-    K extends ControllerMethods<T>,
-  >(handler: T, methodName: K): ParseRouteHandler<T, K, "PATCH">;
-  protected patch<
+  public patch<T extends new () => Controller, K extends ControllerMethods<T>>(
+    handler: T,
+    methodName: K,
+  ): ParseRouteHandler<T, K, "PATCH">;
+  public patch<
     T extends CallbackHandler<any, any, any> | (new () => Controller),
     K extends ControllerMethods<any>,
   >(handler: T, methodName?: K) {
     return new RouteHandler("PATCH", handler, methodName);
   }
 
-  protected delete<Input, Output, Params>(
+  public delete<Input, Output, Params>(
     handler: CallbackHandler<Input, Output, Params>,
   ): RouteHandler<"DELETE", Input, Output, Params>;
-  protected delete<
-    T extends new () => Controller,
-    K extends ControllerMethods<T>,
-  >(handler: T, methodName: K): ParseRouteHandler<T, K, "DELETE">;
-  protected delete<
+  public delete<T extends new () => Controller, K extends ControllerMethods<T>>(
+    handler: T,
+    methodName: K,
+  ): ParseRouteHandler<T, K, "DELETE">;
+  public delete<
     T extends CallbackHandler<any, any, any> | (new () => Controller),
     K extends ControllerMethods<any>,
   >(handler: T, methodName?: K) {
     return new RouteHandler("DELETE", handler, methodName);
   }
+
+  public resource<T extends new () => ResourceController>(Controller: T) {
+    class ResourceRouter extends ApiRouter {
+      routes = {
+        "/": {
+          list: this.get(
+            Controller,
+            "list" as ControllerMethods<T>,
+          ) as ParseRouteHandler<T, TestControllerMethod<T, "list">, "GET">,
+          create: this.post(
+            Controller,
+            "create" as ControllerMethods<T>,
+          ) as ParseRouteHandler<T, TestControllerMethod<T, "create">, "POST">,
+        },
+        "/:id": {
+          show: this.get(
+            Controller,
+            "list" as ControllerMethods<T>,
+          ) as ParseRouteHandler<T, TestControllerMethod<T, "list">, "GET">,
+          update: this.put(
+            Controller,
+            "update" as ControllerMethods<T>,
+          ) as ParseRouteHandler<T, TestControllerMethod<T, "update">, "PUT">,
+          delete: this.delete(
+            Controller,
+            "delete" as ControllerMethods<T>,
+          ) as ParseRouteHandler<
+            T,
+            TestControllerMethod<T, "delete">,
+            "DELETE"
+          >,
+        },
+      };
+    }
+    return ResourceRouter;
+  }
 }
+
+type TestControllerMethod<T extends new () => Controller, K extends string> =
+  K extends ControllerMethods<T> ? K : never;
 
 type RouteHandlerParser<T, Prefix extends string = ""> =
   T extends RouteHandler<infer Method, infer Input, infer Output, infer Params>
@@ -157,7 +209,7 @@ type RouteHandlersParser<
   Prefix extends string = "",
 > = T extends RouteHandlers
   ? {
-      [K in keyof RouteHandlers]: T[K] extends RouteHandler<
+      [K in keyof T]: T[K] extends RouteHandler<
         infer Method,
         infer Input,
         infer Output,
@@ -168,7 +220,7 @@ type RouteHandlersParser<
             ApiRouterHandler<Input, Output, Params>
           >
         : never;
-    }[number]
+    }[keyof T]
   : never;
 
 type RouterInstanceParser<
@@ -186,12 +238,12 @@ type RouteParser<T extends ApiRouter, Prefix extends PropertyKey = ""> = {
     any
   >
     ? RouteHandlerParser<T["routes"][K], `${Prefix & string}${K & string}`>
-    : T["routes"][K] extends RouteHandlers
-      ? RouteHandlersParser<T["routes"][K], `${Prefix & string}${K & string}`>
-      : T["routes"][K] extends new () => ApiRouter
-        ? RouterInstanceParser<
+    : T["routes"][K] extends new () => ApiRouter
+      ? RouterInstanceParser<T["routes"][K], `${Prefix & string}${K & string}`>
+      : T["routes"][K] extends RouteHandlers
+        ? RouteHandlersParser<
             T["routes"][K],
-            `${Prefix & string}${K & string}`
+            `${Prefix & string}${K extends "/" ? "" : K & string}`
           >
         : never;
 }[keyof T["routes"]];
