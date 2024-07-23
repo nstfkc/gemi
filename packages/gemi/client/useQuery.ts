@@ -3,6 +3,7 @@ import type { RPC } from "./rpc";
 import type { ApiRouterHandler } from "../http/ApiRouter";
 import { UnwrapPromise } from "../utils/type";
 import { QueryManagerContext } from "./QueryManagerContext";
+import { log } from "console";
 
 interface Options<Params> {
   params: Params;
@@ -19,8 +20,15 @@ type QueryOptions<T> =
 type Error = {};
 
 type QueryReturn<T> =
-  T extends ApiRouterHandler<any, infer Output, any>
-    ? { data: UnwrapPromise<Output>; loading: boolean; error: Error }
+  T extends ApiRouterHandler<infer Input, infer Data, any>
+    ? {
+        data: UnwrapPromise<Data>;
+        loading: boolean;
+        error: Error;
+        mutate: (
+          fn: (input: UnwrapPromise<Data>) => UnwrapPromise<Data>,
+        ) => void;
+      }
     : never;
 
 export function useQuery<T extends keyof RPC>(
@@ -29,36 +37,24 @@ export function useQuery<T extends keyof RPC>(
     ? []
     : [options: QueryOptions<RPC[T]>]
 ): QueryReturn<RPC[T]> {
+  const defaultOptions: QueryOptions<any> = {
+    params: {},
+    query: {},
+  };
+  const options = args?.[0] ?? defaultOptions;
   const { manager } = useContext(QueryManagerContext);
-  const [resource] = useState(() => manager.getResource(key));
-  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-  const _data = useSyncExternalStore(
-    resource.data.subscribe,
-    resource.data.getValue,
-    resource.data.getValue,
+  const [resource] = useState(() => manager.fetch(url, options));
+
+  const state: any = useSyncExternalStore(
+    resource.state.subscribe.bind(resource.state),
+    resource.state.getValue.bind(resource.state),
+    resource.state.getValue.bind(resource.state),
   );
 
-  useEffect(() => {
-    async function execute() {
-      setLoading(true);
-      try {
-        const [, _url] = String(key).split(":");
-        const res = await fetch(`/api${key}`);
-        if (res.ok) {
-          const json = await res.json();
-          setData(json);
-        }
-      } catch (err) {
-        setError(JSON.stringify(err));
-      } finally {
-        setLoading(false);
-      }
-    }
-
-    execute();
-  }, [key, options]);
-
-  return { data, loading, error } as QueryReturn<RPC[T]>;
+  return {
+    data: state.data,
+    loading: state.loading,
+    error: state.error,
+    mutate: resource.mutate.bind(resource),
+  } as QueryReturn<RPC[T]>;
 }

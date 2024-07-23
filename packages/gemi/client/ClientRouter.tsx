@@ -19,6 +19,7 @@ import {
 } from "./ClientRouterContext";
 import type { ComponentTree } from "./types";
 import { ComponentsContext, ComponentsProvider } from "./ComponentContext";
+import { QueryManagerProvider } from "./QueryManagerContext";
 
 interface RouteProps {
   componentPath: string;
@@ -87,21 +88,23 @@ export const ClientRouter = (props: {
     useContext(ServerDataContext);
 
   return (
-    <ComponentsProvider viewImportMap={props.viewImportMap}>
-      <ClientRouterProvider
-        params={router.params}
-        pageData={pageData}
-        is404={router.is404}
-        pathname={router.pathname}
-        currentPath={router.currentPath}
-        routeManifest={routeManifest}
-      >
-        <StrictMode>
-          <RootLayout>
-            <Routes componentTree={componentTree} />
-          </RootLayout>
-        </StrictMode>
-      </ClientRouterProvider>
-    </ComponentsProvider>
+    <QueryManagerProvider>
+      <ComponentsProvider viewImportMap={props.viewImportMap}>
+        <ClientRouterProvider
+          params={router.params}
+          pageData={pageData}
+          is404={router.is404}
+          pathname={router.pathname}
+          currentPath={router.currentPath}
+          routeManifest={routeManifest}
+        >
+          <StrictMode>
+            <RootLayout>
+              <Routes componentTree={componentTree} />
+            </RootLayout>
+          </StrictMode>
+        </ClientRouterProvider>
+      </ComponentsProvider>
+    </QueryManagerProvider>
   );
 };

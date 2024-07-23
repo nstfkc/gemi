@@ -10,24 +10,58 @@ function applyParams(url: string, params: Record<string, any> = {}) {
   return out;
 }
 
+type State = {
+  data: any;
+  error: any;
+  loading: boolean;
+};
+
 class Resource {
   key: string;
-  state: "stale" | "fresh" = "stale";
-  data: Subject<any | null> = new Subject(null);
+  state: Subject<State> = new Subject({
+    data: null,
+    error: null,
+    loading: false,
+  });
+  stale = true;
 
   constructor(key: string) {
     this.key = key;
   }
 
-  mutate(data: any) {
-    this.state = "fresh";
-    this.data.next(data);
+  mutate<T>(fn: (data: T) => T) {
+    const data = fn(this.state.getValue().data);
+    this.state.next({
+      data,
+      error: null,
+      loading: false,
+    });
+  }
+
+  fetch() {
+    const { loading, data, error } = this.state.getValue();
+    if (!stale) {
+      return this.state;
+    }
+    if (!loading && this.stale) {
+      this.state.next({
+        data,
+        error,
+        loading: true,
+      });
+      this.resolve();
+    }
+
+    return this.state;
   }
 
   resolve() {
-    const { url, query, params } = JSON.parse(this.key);
+    const { key, query, params } = JSON.parse(this.key);
+    const url = key.split(":")[1];
     const searchParams = new URLSearchParams(query);
-    const finalUrl = `${applyParams(url, params)}?${searchParams.toString()}`;
+    const finalUrl = [applyParams(url, params), searchParams.toString()]
+      .filter((s) => s.length > 0)
+      .join("?");
 
     fetch(`/api${finalUrl}`, {
       method: "GET",
@@ -43,10 +77,14 @@ class Resource {
         }
       })
       .then((data) => {
-        this.mutate(data);
+        this.mutate(() => data);
       })
       .catch((err) => {
-        console.error(err);
+        this.state.next({
+          data: null,
+          error: err,
+          loading: false,
+        });
       });
   }
 }
@@ -60,12 +98,17 @@ export class QueryManager {
     return JSON.stringify({ key, options });
   }
 
-  getResource(key: string, options: Record<string, any> = {}) {
+  fetch(key: string, options: Record<string, any> = {}) {
     const resourceKey = this.createResourceKey(key, options);
+
     if (!this.resources.has(resourceKey)) {
-      this.resources.set(key, new Resource(resourceKey));
+      this.resources.set(resourceKey, new Resource(resourceKey));
     }
 
-    return this.resources.get(key);
+    const resource = this.resources.get(resourceKey);
+
+    resource.fetch.call(resource);
+
+    return resource;
   }
 }

@@ -5,7 +5,9 @@ import { HttpRequest, ResourceController } from "gemi/http";
 
 export class PostController extends ResourceController {
   async list() {
-    return await prisma.post.findMany({ include: { author: true } });
+    console.log("Waiting for 1 second...");
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    return { message: "Hello world!" };
   }
 
   async show(req: HttpRequest<{}, { id: string }>) {

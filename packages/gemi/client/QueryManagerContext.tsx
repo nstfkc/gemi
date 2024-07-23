@@ -2,7 +2,7 @@ import { createContext, useState } from "react";
 import { QueryManager } from "./QueryManager";
 
 export const QueryManagerContext = createContext<{ manager: QueryManager }>(
-  null,
+  {} as any,
 );
 
 export const QueryManagerProvider = ({ children }) => {

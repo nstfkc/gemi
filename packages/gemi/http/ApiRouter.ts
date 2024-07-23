@@ -43,7 +43,12 @@ export class RouteHandler<M extends HttpMethod, Input, Output, Params> {
       | CallbackHandler<Input, Output, Params>
       | (new () => Controller),
     private methodName?: any,
-  ) {}
+  ) {
+    console.log({ handler });
+    this.handler = handler;
+    this.methodName = methodName;
+    this.method = method;
+  }
 
   run(req: HttpRequest<Input, Params>) {
     let httpRequest = req;

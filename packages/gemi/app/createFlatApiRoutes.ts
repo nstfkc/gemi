@@ -70,7 +70,7 @@ export function createFlatApiRoutes(routes: ApiRoutes) {
         }
         const method = routeHandler.method;
         const middleware = routeHandler.middlewares;
-        const exec = routeHandler.run;
+        const exec = routeHandler.run.bind(routeHandler);
         flatApiRoutes[rootPath][method] = {
           exec,
           middleware,

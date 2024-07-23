@@ -243,6 +243,7 @@ export class App {
                 },
               });
             } else {
+              console.error(err);
               throw err;
             }
           }
@@ -262,6 +263,7 @@ export class App {
                 },
               });
             } else {
+              console.error(err);
               throw err;
             }
           }
