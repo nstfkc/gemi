@@ -40,7 +40,7 @@ class Resource {
 
   fetch() {
     const { loading, data, error } = this.state.getValue();
-    if (!stale) {
+    if (!this.stale) {
       return this.state;
     }
     if (!loading && this.stale) {
@@ -77,6 +77,7 @@ class Resource {
         }
       })
       .then((data) => {
+        this.stale = false;
         this.mutate(() => data);
       })
       .catch((err) => {
