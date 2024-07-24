@@ -92,7 +92,7 @@ export class HttpRequest<
   public headers: Headers;
   public cookies: Map<string, string>;
 
-  public schema: any; // TODO implement type
+  public schema: any = {};
 
   public params: Params;
 

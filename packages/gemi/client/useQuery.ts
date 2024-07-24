@@ -7,7 +7,7 @@ import { log } from "console";
 
 interface Options<Params> {
   params: Params;
-  query: Record<string, any>;
+  query?: Record<string, any>;
 }
 
 type QueryOptions<T> =

@@ -3,10 +3,13 @@ import { Subject } from "../utils/Subject";
 function applyParams(url: string, params: Record<string, any> = {}) {
   let out = url;
 
-  for (const [key, value] of Object.entries(params)) {
-    out.replace(`:${key}?`, value);
-    out.replace(`:${key}`, value);
+  for (const segment of url.split("/")) {
+    if (segment.includes(":")) {
+      const key = segment.split(":")[1];
+      out = out.replace(`:${key}`, params[key]);
+    }
   }
+
   return out;
 }
 
@@ -24,8 +27,10 @@ class Resource {
     loading: false,
   });
   stale = true;
+  staleTimer: Timer | null = null;
 
   constructor(key: string) {
+    console.log(key);
     this.key = key;
   }
 
@@ -40,25 +45,33 @@ class Resource {
 
   fetch() {
     const { loading, data, error } = this.state.getValue();
-    if (!this.stale) {
+    if (loading) {
       return this.state;
     }
-    if (!loading && this.stale) {
+
+    if (!data) {
       this.state.next({
         data,
         error,
         loading: true,
       });
       this.resolve();
+    } else {
+      if (this.stale) {
+        this.resolve();
+        return this.state;
+      }
     }
 
     return this.state;
   }
 
   resolve() {
-    const { key, query, params } = JSON.parse(this.key);
-    const url = key.split(":")[1];
+    const { key, options } = JSON.parse(this.key);
+    const { query, params } = options;
+    const url = key.split("GET:")[1];
     const searchParams = new URLSearchParams(query);
+    console.log(applyParams(url, params));
     const finalUrl = [applyParams(url, params), searchParams.toString()]
       .filter((s) => s.length > 0)
       .join("?");
@@ -79,6 +92,10 @@ class Resource {
       .then((data) => {
         this.stale = false;
         this.mutate(() => data);
+        clearTimeout(this.staleTimer);
+        this.staleTimer = setTimeout(() => {
+          this.stale = true;
+        }, 1000 * 60);
       })
       .catch((err) => {
         this.state.next({

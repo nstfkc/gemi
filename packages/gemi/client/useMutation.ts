@@ -7,13 +7,17 @@ function applyParams(url: string, params: Record<string, any> = {}) {
   let out = url;
 
   for (const [key, value] of Object.entries(params)) {
-    out.replace(`:${key}?`, value).replace(`:${key}`, value);
+    out = out.replace(`:${key}?`, value).replace(`:${key}`, value);
   }
   return out;
 }
 
 type Options = {
   autoInvalidate?: boolean;
+};
+
+const defaultOptions: Options = {
+  autoInvalidate: false,
 };
 
 type MutationInputs<T> =
@@ -55,10 +59,11 @@ export function useMutation<T extends keyof RPC>(
     error: {},
     trigger: async (input?: any) => {
       setIsPending(true);
-      const [inputs, _options] = args;
+      const [inputs = { params: {}, query: {} }, _options = defaultOptions] =
+        args ?? [];
       const {
         query: {},
-      } = inputs;
+      } = inputs ?? {};
       const params = "params" in inputs ? inputs.params : {};
       const [method, _url] = String(url).split(":");
       const finalUrl = applyParams(_url, params);

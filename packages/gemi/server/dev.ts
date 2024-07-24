@@ -107,6 +107,12 @@ export async function startDevServer() {
     try {
       return await handler(req);
     } catch (err) {
+      if (pathname.startsWith("/api")) {
+        return new Response(JSON.stringify({ error: err.message }), {
+          status: 500,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
       return new Response(renderErrorPage(err), {
         headers: { "Content-Type": "text/html" },
       });
