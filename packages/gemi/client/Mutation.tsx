@@ -1,12 +1,15 @@
 import {
   type PropsWithChildren,
   createContext,
-  useState,
   useContext,
   type ComponentProps,
   type FormEvent,
   useRef,
 } from "react";
+import type { RPC } from "./rpc";
+import type { ApiRouterHandler } from "../http/ApiRouter";
+import { useMutation } from "./useMutation";
+import type { UnwrapPromise } from "../utils/type";
 
 interface MutationContextValue {
   isPending: boolean;
@@ -20,72 +23,68 @@ const MutationContext = createContext({
   result: null,
 } as MutationContextValue);
 
-interface MutationProps {
-  url: string;
-  method?: "POST" | "GET" | "PUT" | "DELETE" | "PATCH";
-  onSuccess?: (result: any) => void;
-}
+type GetParams<T> =
+  T extends ApiRouterHandler<any, any, infer Params> ? Params : never;
 
-export const Mutation = (props: PropsWithChildren<MutationProps>) => {
-  const { method = "POST" } = props;
-  const [isPending, setIsPending] = useState(false);
+type GetResult<T> =
+  T extends ApiRouterHandler<any, infer Result, any>
+    ? UnwrapPromise<Result>
+    : never;
+
+type FormPropsWithParams<T extends keyof RPC> = {
+  action: T extends `GET:${string}` ? never : T;
+  params: GetParams<RPC[T]>;
+  onSuccess?: (result: GetResult<RPC[T]>) => void;
+  onError?: (error: any) => void;
+};
+
+type FormPropsWithoutParams<T extends keyof RPC> = {
+  action: T extends `GET:${string}` ? never : T;
+  onSuccess?: (result: GetResult<RPC[T]>) => void;
+  onError?: (error: any) => void;
+};
+
+type FormProps<T extends keyof RPC> =
+  GetParams<RPC[T]> extends Record<string, never>
+    ? FormPropsWithoutParams<T>
+    : FormPropsWithParams<T>;
+
+export function Form<T extends keyof RPC>(
+  props: PropsWithChildren<FormProps<T>>,
+) {
+  const { action } = props;
   const formRef = useRef<HTMLFormElement>(null);
-  const [result, setResult] = useState(null);
-  const [formError, setFormError] = useState<null | string>(null);
-  const [validationErrors, setValidationErrors] = useState<
-    Record<string, string[]>
-  >({});
 
-  const action = async (e: FormEvent) => {
+  const params = "params" in props ? props.params : {};
+  const { trigger, data, error, loading } = useMutation(action, {
+    params,
+  } as any);
+
+  const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    const formData = new FormData(formRef.current!);
-    setIsPending(true);
-    setResult(null);
-    try {
-      const res = await fetch(`/api${props.url}`, {
-        method,
-        body: formData,
-      });
-
-      const data = await res.json();
-      if (!res.ok) {
-        if ("error" in data) {
-          if (data.error.kind === "validation_error") {
-            setValidationErrors(data.error.messages);
-          }
-          if (data.error.kind === "form_error") {
-            console.log(data.error.message);
-            setFormError(data.error.message);
-          }
-        }
-      } else {
-        if (props.onSuccess) {
-          props.onSuccess(data);
-        }
-        setResult(data);
-      }
-    } catch (err) {
-      console.log(err);
-    }
-
-    setIsPending(false);
+    trigger(new FormData(formRef.current!));
   };
+
+  const validationErrors =
+    error?.kind === "validation_error" ? error.messages : {};
+
+  const formError = error?.kind === "form_error" ? error.message : null;
 
   return (
     <MutationContext.Provider
-      value={{ isPending, result, validationErrors, formError }}
+      value={{ isPending: loading, result: data, validationErrors, formError }}
     >
       <form
         className="group"
-        data-pending={isPending}
+        data-loading={loading}
         ref={formRef}
-        onSubmit={action}
+        onSubmit={handleSubmit}
       >
         {props.children}
       </form>
     </MutationContext.Provider>
   );
-};
+}
 
 export function useMutationStatus() {
   const { isPending } = useContext(MutationContext);
@@ -121,6 +120,17 @@ export const ValidationErrors = (props: {
   }
 
   return null;
+};
+
+export const FormField = (props: ComponentProps<"div"> & { name: string }) => {
+  const { name, children, ...rest } = props;
+  const { validationErrors } = useContext(MutationContext);
+  const errors = validationErrors[name] || [];
+  return (
+    <div data-hasError={errors.length > 0} {...rest}>
+      {children}
+    </div>
+  );
 };
 
 export const FormError = (props: ComponentProps<"div">) => {

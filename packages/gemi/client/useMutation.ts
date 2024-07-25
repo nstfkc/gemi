@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { RPC } from "./rpc";
 import type { ApiRouterHandler } from "../http/ApiRouter";
-import { UnwrapPromise } from "../utils/type";
+import type { UnwrapPromise } from "../utils/type";
 
 function applyParams(url: string, params: Record<string, any> = {}) {
   let out = url;
@@ -25,7 +25,15 @@ type MutationInputs<T> =
     ? { params: Params; query?: Record<string, any> }
     : never;
 
-type Error = {};
+type Error =
+  | {
+      kind: "validation_error";
+      messages: Record<string, any>;
+    }
+  | {
+      kind: "form_error";
+      message: string;
+    };
 
 type Mutation<T> =
   T extends ApiRouterHandler<infer Input, infer Output, any>
@@ -51,34 +59,73 @@ export function useMutation<T extends keyof RPC>(
       ]
     : [inputs: MutationInputs<RPC[T]>, options?: Partial<Options>]
 ): Mutation<RPC[T]> {
-  const [loading, setIsPending] = useState(false);
-  const [data, setData] = useState(null);
+  const [state, setState] = useState({
+    data: null,
+    error: null,
+    loading: false,
+  });
   return {
-    data,
-    loading,
-    error: {},
-    trigger: async (input?: any) => {
-      setIsPending(true);
+    ...state,
+    trigger: async (input?: Record<string, any> | FormData) => {
+      setState((state) => ({
+        data: state.data,
+        error: state.error,
+        loading: true,
+      }));
       const [inputs = { params: {}, query: {} }, _options = defaultOptions] =
         args ?? [];
-      const {
-        query: {},
-      } = inputs ?? {};
+      const { query = {} } = inputs ?? {};
       const params = "params" in inputs ? inputs.params : {};
-      const [method, _url] = String(url).split(":");
-      const finalUrl = applyParams(_url, params);
+      const [method] = String(url).split(":");
+      const finalUrl = [
+        applyParams(String(url).replace(`${method}:`, ""), params),
+        new URLSearchParams(query).toString(),
+      ].join("?");
+
+      let body = null;
+
+      const contentType =
+        input instanceof FormData ? {} : { "Content-Type": "application/json" };
+
+      if (input instanceof FormData) {
+        body = input;
+      } else if (input) {
+        body = JSON.stringify(input);
+      }
+
       const response = await fetch(`/api${finalUrl}`, {
         method,
         headers: {
-          "Content-Type": "application/json",
+          ...contentType,
         },
-        ...(input ? { body: JSON.stringify(input) } : {}),
+        ...(body ? { body } : {}),
       });
 
-      const data = await response.json();
-      setData(data);
-      setIsPending(false);
-      return data as any;
+      try {
+        const data = await response.json();
+
+        if (!response.ok) {
+          setState(() => ({
+            data: null,
+            error: data.error,
+            loading: false,
+          }));
+          return;
+        }
+
+        setState({
+          data,
+          error: null,
+          loading: false,
+        });
+        return data as any;
+      } catch (error) {
+        setState((state) => ({
+          data: state.data,
+          error,
+          loading: false,
+        }));
+      }
     },
   } as Mutation<RPC[T]>;
 }

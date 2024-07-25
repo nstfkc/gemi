@@ -1,9 +1,8 @@
 import { useContext, useEffect, useState, useSyncExternalStore } from "react";
 import type { RPC } from "./rpc";
 import type { ApiRouterHandler } from "../http/ApiRouter";
-import { UnwrapPromise } from "../utils/type";
+import type { UnwrapPromise } from "../utils/type";
 import { QueryManagerContext } from "./QueryManagerContext";
-import { log } from "console";
 
 interface Options<Params> {
   params: Params;
