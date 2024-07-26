@@ -2,7 +2,7 @@
 
 import { Controller } from "./Controller";
 import type { MiddlewareReturnType } from "./Router";
-import type { App } from "../app/App";
+import { HttpRequest } from "./HttpRequest";
 
 type ControllerMethods<T extends new () => Controller> = {
   [K in keyof InstanceType<T>]: InstanceType<T>[K] extends Function ? K : never;
@@ -10,10 +10,10 @@ type ControllerMethods<T extends new () => Controller> = {
 
 type ViewHandler<T extends new () => Controller> =
   | [controller: T, method: ControllerMethods<T>]
-  | ((req: Request) => Promise<any> | any);
+  | ((req: HttpRequest) => Promise<any> | any);
 
 type ViewPrepare = {
-  exec: (req: Request, params: Record<string, string>) => any;
+  exec: (req: HttpRequest) => any;
   viewPath: string;
   children: ViewChildren;
   middlewares: any[];
@@ -27,11 +27,7 @@ type ViewConfig = {
 
 export type ViewChildren = Record<string, ViewConfig | (new () => ViewRouter)>;
 
-export type ViewRouteExec = (
-  req: Request,
-  params: Record<string, string>,
-  app: App,
-) => any;
+export type ViewRouteExec = (req: HttpRequest) => any;
 
 export class ViewRouter {
   public routes: ViewChildren = {};
@@ -39,18 +35,18 @@ export class ViewRouter {
 
   public middleware(req: Request): MiddlewareReturnType {}
 
-  protected layout<T extends new (app: App) => Controller>(
+  protected layout<T extends new () => Controller>(
     viewPath: string,
   ): ViewConfig;
-  protected layout<T extends new (app: App) => Controller>(
+  protected layout<T extends new () => Controller>(
     viewPath: string,
     children: ViewChildren,
   ): ViewConfig;
-  protected layout<T extends new (app: App) => Controller>(
+  protected layout<T extends new () => Controller>(
     viewPath: string,
     handler: ViewHandler<T>,
   ): ViewConfig;
-  protected layout<T extends new (app: App) => Controller>(
+  protected layout<T extends new () => Controller>(
     viewPath: string,
     handler: ViewHandler<T> | ViewChildren,
     children: ViewChildren,
@@ -62,11 +58,7 @@ export class ViewRouter {
         _children = handler;
       }
       return {
-        exec: async (
-          req: Request,
-          params: Record<string, string>,
-          app: App,
-        ) => {
+        exec: async (req: HttpRequest) => {
           let _handler = () =>
             Promise.resolve({
               data: { [viewPath]: {} },
@@ -83,7 +75,7 @@ export class ViewRouter {
             _handler = instance[methodName].bind(instance);
           }
 
-          const data = await _handler(req, params);
+          const data = await _handler(req);
           return { [viewPath]: data };
         },
         children: _children,
@@ -100,18 +92,16 @@ export class ViewRouter {
     };
   }
 
-  protected view<T extends new (app: App) => Controller>(
-    viewPath: string,
-  ): ViewConfig;
-  protected view<T extends new (app: App) => Controller>(
+  protected view<T extends new () => Controller>(viewPath: string): ViewConfig;
+  protected view<T extends new () => Controller>(
     viewPath: string,
     children: ViewChildren,
   ): ViewConfig;
-  protected view<T extends new (app: App) => Controller>(
+  protected view<T extends new () => Controller>(
     viewPath: string,
     handler: ViewHandler<T>,
   ): ViewConfig;
-  protected view<T extends new (app: App) => Controller>(
+  protected view<T extends new () => Controller>(
     viewPath: string,
     handler: ViewHandler<T> | ViewChildren,
     children: ViewChildren,
@@ -123,11 +113,7 @@ export class ViewRouter {
         _children = handler;
       }
       return {
-        exec: async (
-          req: Request,
-          params: Record<string, string>,
-          app: App,
-        ) => {
+        exec: async (req: HttpRequest) => {
           let _handler = () =>
             Promise.resolve({
               data: { [viewPath]: {} },
@@ -144,7 +130,7 @@ export class ViewRouter {
             _handler = instance[methodName].bind(instance);
           }
 
-          const data = await _handler(req, params);
+          const data = await _handler(req);
           return { [viewPath]: data };
         },
         children: _children,

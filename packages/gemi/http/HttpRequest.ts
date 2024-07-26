@@ -1,4 +1,5 @@
 import { RequestBreakerError } from "./Error";
+import { RequestContext } from "./requestContext";
 import { ValidationError } from "./Router";
 
 class Input<T extends Record<string, any>> {
@@ -95,6 +96,7 @@ export class HttpRequest<
   public schema: any = {};
 
   public params: Params;
+  public ctx = RequestContext.getStore();
 
   constructor(req: Request, params: Params) {
     this.params = params;

@@ -1,16 +1,13 @@
 import type { ApiRouter } from "../http/ApiRouter";
 import { ViewRouter, type ViewRouteExec } from "../http/ViewRouter";
-// @ts-ignore
 import { URLPattern } from "urlpattern-polyfill";
 import { generateETag } from "../server/generateEtag";
-import { v4 } from "uuid";
 import type { ComponentTree } from "../client/types";
 import { type RouterMiddleware } from "../http/Router";
-import type { UnwrapPromise } from "../utils/type";
 import { GEMI_REQUEST_BREAKER_ERROR } from "../http/Error";
 import type { Plugin } from "./Plugin";
 import type { Middleware } from "../http/Middleware";
-import { requestContext } from "../http/requestContext";
+import { Cookie, RequestContext } from "../http/requestContext";
 import type { ServerWebSocket } from "bun";
 import { flattenComponentTree } from "../client/helpers/flattenComponentTree";
 
@@ -131,43 +128,6 @@ export class App {
     this.renderParams = params;
   }
 
-  private async resolvePageData(req: Request) {
-    const url = new URL(req.url);
-    let handlers: ViewRouteExec[] = [];
-    let middlewares: (RouterMiddleware | string)[] = [];
-    let currentPathName = "";
-    let params: Record<string, any> = {};
-    const sortedEntries = Object.entries(this.flatViewRoutes).sort(
-      ([pathA], [pathB]) => pathB.length - pathA.length,
-    );
-
-    for (const [pathname, handler] of sortedEntries) {
-      const pattern = new URLPattern({ pathname });
-      if (pattern.test({ pathname: url.pathname })) {
-        currentPathName = pathname;
-        params = pattern.exec({ pathname: url.pathname })?.pathname.groups!;
-        handlers = handler.exec;
-        middlewares = handler.middleware;
-      }
-    }
-
-    const reqWithMiddlewares = this.runMiddleware(middlewares);
-
-    const reqCtx = new Map();
-
-    const data = await requestContext.run(reqCtx, async () => {
-      await reqWithMiddlewares(new HttpRequest(req, params), reqCtx);
-      return await Promise.all(handlers.map((fn) => fn(req, params, this)));
-    });
-
-    return {
-      data,
-      currentPathName,
-      params,
-      user: reqCtx.get("user") ?? null,
-    };
-  }
-
   private runMiddleware(
     middleware: (string | RouterMiddleware | (new () => Middleware))[],
   ) {
@@ -221,16 +181,14 @@ export class App {
 
         const reqWithMiddlewares = this.runMiddleware(middlewares);
 
-        const reqCtx = new Map();
-
-        return await requestContext.run(reqCtx, async () => {
+        return await RequestContext.run(async () => {
           const httpRequest = new HttpRequest(req, params);
           let handler = exec
-            ? () => exec(httpRequest, params, this)
+            ? () => exec(httpRequest, params)
             : () => Promise.resolve({});
 
           try {
-            await reqWithMiddlewares(httpRequest, reqCtx);
+            await reqWithMiddlewares(httpRequest);
           } catch (err) {
             if (err.kind === GEMI_REQUEST_BREAKER_ERROR) {
               const { status = 400, data, headers } = err.payload.api;
@@ -268,22 +226,17 @@ export class App {
             }
           }
 
-          const result = {
-            kind: "api",
-            data,
-            headers: {
-              "Set-Cookie": Object.entries({})
-                .map(([name, config]) => {
-                  return `${name}=${(config as any).value}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${(config as any).maxAge}`;
-                })
-                .join(", "),
-            },
-          };
-          return new Response(JSON.stringify(result.data), {
-            headers: {
-              "Content-Type": "application/json",
-              ...result.headers,
-            },
+          const headers = new Headers();
+
+          const ctx = RequestContext.getStore();
+
+          headers.append("Content-Type", "application/json");
+          ctx.cookies.forEach((cookie) =>
+            headers.append("Set-Cookie", cookie.toString()),
+          );
+
+          return new Response(JSON.stringify(data), {
+            headers,
           });
         });
       }
@@ -297,9 +250,13 @@ export class App {
   async handleViewRequest(req: Request) {
     const url = new URL(req.url);
 
-    let pageData: UnwrapPromise<
-      ReturnType<typeof this.resolvePageData>
-    > | null = null;
+    let pageData: {
+      cookies: Set<Cookie>;
+      currentPathName: string;
+      data: Record<string, any>;
+      user: any; // TODO: fix type
+      params: Record<string, any>;
+    } | null = null;
 
     try {
       let handlers: ViewRouteExec[] = [];
@@ -322,28 +279,40 @@ export class App {
 
       const reqWithMiddlewares = this.runMiddleware(middlewares);
 
-      const reqCtx = new Map();
+      const { data, cookies, user } = await RequestContext.run(async () => {
+        const httpRequest = new HttpRequest(req, params);
+        await reqWithMiddlewares(httpRequest);
 
-      const data = await requestContext.run(reqCtx, async () => {
-        await reqWithMiddlewares(new HttpRequest(req, params), reqCtx);
-        return await Promise.all(handlers.map((fn) => fn(req, params, this)));
+        const data = await Promise.all(
+          // TODO: fix type
+          handlers.map((fn) => fn(httpRequest as any)),
+        );
+        const ctx = RequestContext.getStore();
+        return {
+          data,
+          cookies: ctx.cookies,
+          user: ctx.user,
+        };
       });
 
       pageData = {
         data,
         currentPathName,
+        user,
         params,
-        user: reqCtx.get("user") ?? null,
+        cookies,
       };
     } catch (err) {
       if (err.kind === GEMI_REQUEST_BREAKER_ERROR) {
         return new Response(null, {
           ...err.payload.view,
         });
+      } else {
+        throw err;
       }
     }
 
-    const { data, params, currentPathName, user } = pageData;
+    const { data, params, currentPathName, user, cookies } = pageData;
 
     const viewData = data.reduce((acc, data) => {
       return {
@@ -353,35 +322,23 @@ export class App {
     }, {});
 
     if (url.searchParams.get("json")) {
-      const result = {
-        kind: "viewData",
-        data: {
-          [url.pathname]: viewData,
-        },
-        meta: [],
-        headers: {},
-      };
+      const headers = new Headers();
+      headers.set("Content-Type", "application/json");
+
+      cookies.forEach((cookie) =>
+        headers.append("Set-Cookie", cookie.toString()),
+      );
 
       return new Response(
         JSON.stringify({
-          data: result.data,
-          head: {},
+          data: {
+            [url.pathname]: viewData,
+          },
         }),
         {
-          headers: {
-            ...result.headers,
-            "Content-Type": "application/json",
-          },
+          headers,
         },
       );
-    }
-
-    let cookieHeaders = {};
-    const visitorIdExist = req.headers.get("cookie")?.includes("visitor_id");
-    if (!visitorIdExist) {
-      cookieHeaders = {
-        "Set-Cookie": `visitor_id=${v4()}; HttpOnly; SameSite=Strict; Path=/`,
-      };
     }
 
     const { styles, manifest, serverManifest, bootstrapModules } =
@@ -420,6 +377,20 @@ export class App {
 
     const loaders = `{${templates.join(",")}}`;
 
+    const headers = new Headers();
+    headers.set("Content-Type", "text/html");
+    headers.set(
+      "Cache-Control",
+      user
+        ? "private, no-cache, no-store, max-age=0, must-revalidate"
+        : "public, max-age=864000, must-revalidate",
+    );
+    headers.set("ETag", this.appId);
+
+    pageData.cookies.forEach((cookie) =>
+      headers.append("Set-Cookie", cookie.toString()),
+    );
+
     const result = {
       kind: "view",
       data: {
@@ -437,15 +408,6 @@ export class App {
         componentTree: [["404", []], ...this.componentTree],
       },
       head: {},
-      headers: {
-        "Content-Type": "text/html",
-        "Cache-Control": user
-          ? "private, no-cache, no-store, max-age=0, must-revalidate"
-          : "public, max-age=864000, must-revalidate",
-        ETag: this.appId,
-        ...cookieHeaders,
-      },
-      status: !currentPathName ? 404 : 200,
     };
 
     const stream = await renderToReadableStream(
@@ -465,11 +427,8 @@ export class App {
     );
 
     return new Response(stream, {
-      status: result.status,
-      headers: {
-        "Content-Type": "text/html",
-        ...result.headers,
-      },
+      status: !currentPathName ? 404 : 200,
+      headers,
     });
   }
 
