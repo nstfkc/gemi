@@ -90,12 +90,19 @@ export class App {
     const params = this.params;
     this.middlewareAliases = params.middlewareAliases ?? {};
 
+    const kernelServices = this.kernel.getServices.call(this.kernel);
+
+    const authBasePath = kernelServices.authenticationServiceProvider.basePath;
+
     let viewRouters = {
       "/": this.viewRouter,
+      [authBasePath]: kernelServices.authenticationServiceProvider.routers.view,
     };
     let apiRouters = {
       "/": this.apiRouter,
+      [authBasePath]: kernelServices.authenticationServiceProvider.routers.api,
     };
+
     for (const Plugin of params.plugins ?? []) {
       const plugin = new Plugin();
       if (plugin.viewRouter) {
@@ -435,7 +442,9 @@ export class App {
   async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url);
 
-    return this.kernel.run(async () => {
+    const kernelRun = this.kernel.run.bind(this.kernel);
+
+    return kernelRun(async () => {
       if (url.pathname.startsWith("/api")) {
         return await this.handleApiRequest(req);
       } else {

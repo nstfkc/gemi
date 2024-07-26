@@ -12,8 +12,6 @@ export const providers = {
       throw error;
     }
 
-    console.log({ data });
-
     if (data) {
       return true;
     }

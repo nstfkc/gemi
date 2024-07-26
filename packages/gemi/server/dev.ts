@@ -107,6 +107,7 @@ export async function startDevServer() {
     try {
       return await handler(req);
     } catch (err) {
+      console.log(err);
       if (pathname.startsWith("/api")) {
         return new Response(JSON.stringify({ error: err.message }), {
           status: 500,

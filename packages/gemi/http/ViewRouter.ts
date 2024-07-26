@@ -20,7 +20,7 @@ type ViewPrepare = {
   kind: "view" | "layout";
 };
 
-type ViewConfig = {
+export type ViewConfig = {
   prepare: (_middlewares?: any[]) => ViewPrepare;
   middleware: (middlewares: any[]) => ViewConfig;
 };

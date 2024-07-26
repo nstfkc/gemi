@@ -11,19 +11,64 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model User {
-  id    Int     @id @default(autoincrement())
-  email String  @unique
-  name  String?
-  posts Post[]
+model Organization {
+  id          Int                      @id @default(autoincrement())
+  name        String
+  logoUrl     String?
+  description String?
+  users       User[]
+  accounts    Account[]
+  invitations OrganizationInvitation[]
 }
 
-model Post {
-  id        Int     @id @default(autoincrement())
-  publicId  String  @unique @default(cuid())
-  title     String
-  content   String?
-  published Boolean @default(false)
-  author    User?   @relation(fields: [authorId], references: [id])
-  authorId  Int?
+model OrganizationInvitation {
+  id             Int          @id @default(autoincrement())
+  publicId       String       @unique @default(cuid())
+  organizationId Int
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  email          String
+  role           Int          @default(2) // 0 = Owner, 1 = Admin, 2 = User
+  acceptedAt     DateTime?
+}
+
+model User {
+  id              Int           @id @default(autoincrement())
+  publicId        String        @unique @default(cuid())
+  name            String?
+  email           String?       @unique
+  emailVerifiedAt DateTime?
+  globalRole      Int           @default(2) // 0 = Owner, 1 = Admin, 2 = User
+  password        String?
+  organization    Organization? @relation(fields: [organizationId], references: [id])
+  organizationId  Int?
+  accounts        Account[]
+  session         Session[]
+}
+
+model Account {
+  id               Int           @id @default(autoincrement())
+  publicId         String        @unique @default(cuid())
+  organization     Organization? @relation(fields: [organizationId], references: [id])
+  organizationId   Int?
+  organizationRole Int           @default(2) // 0 = Owner, 1 = Admin, 2 = User
+
+  userId Int?
+  user   User? @relation(fields: [userId], references: [id])
+}
+
+model Session {
+  id           Int            @id @default(autoincrement())
+  token        String         @unique @default(cuid())
+  userId       Int
+  user         User           @relation(fields: [userId], references: [id])
+  expiresAt    DateTime
+  refreshToken RefreshToken[]
+}
+
+model RefreshToken {
+  id        Int      @id @default(autoincrement())
+  token     String   @unique @default(cuid())
+  sessionId Int
+  session   Session  @relation(fields: [sessionId], references: [id])
+  expiresAt DateTime
 }

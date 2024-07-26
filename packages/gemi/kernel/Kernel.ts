@@ -1,23 +1,30 @@
-import { AsyncLocalStorage } from "async_hooks";
 import { EmailServiceProvider } from "../email/EmailServiceProvider";
-
-interface KernelContext {
-  emailServiceProvider: EmailServiceProvider;
-}
-
-const context = new AsyncLocalStorage<KernelContext>();
+import { AuthenticationServiceProvider } from "../auth/AuthenticationServiceProvider";
+import { kernelContext } from "./context";
 
 export class Kernel {
   protected emailServiceProvider = EmailServiceProvider;
+  protected authenticationServiceProvider = AuthenticationServiceProvider;
 
-  static getContext = () => context.getStore();
+  services: {
+    emailServiceProvider: EmailServiceProvider;
+    authenticationServiceProvider: AuthenticationServiceProvider;
+  };
+
+  getServices = () => {
+    if (!this.services) {
+      this.services = {
+        emailServiceProvider: new this.emailServiceProvider(),
+        authenticationServiceProvider: new this.authenticationServiceProvider(),
+      };
+    }
+    return this.services;
+  };
+
+  static getContext = () => kernelContext.getStore();
 
   run<T>(cb: () => T) {
-    return context.run(
-      {
-        emailServiceProvider: new this.emailServiceProvider(),
-      },
-      cb,
-    );
+    const services = this.getServices();
+    return kernelContext.run(services, cb);
   }
 }
