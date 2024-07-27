@@ -48,11 +48,11 @@ function validate(ruleName: string) {
       };
     case "min":
       return (value: any) => {
-        return value.length >= parseInt(param);
+        return value?.length >= parseInt(param);
       };
     case "max":
       return (value: any) => {
-        return value.length <= parseInt(param);
+        return value?.length <= parseInt(param);
       };
     case "email":
       return (value: any) => {
@@ -208,12 +208,22 @@ export class HttpRequest<
 
   // TODO implement this method
   public async terminate(params: TerminateParams) {
-    const { message, status, headers, payload } = params;
-    const error = new RequestBreakerError(message);
-
     throw "not implemented";
   }
 }
+
+// class TerminateError extends RequestBreakerError {
+//   constructor(
+//     private requestKind: "api" | "view",
+//     private payload: Record<string, any>,
+//   ) {
+//     super();
+//     const api = requestKind === "view" ? {} : payload;
+//     const view = requestKind === "api" ? {} : payload;
+
+//     this.payload = { api, view };
+//   }
+// }
 
 type TerminateParams = {
   message: string;

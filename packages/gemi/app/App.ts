@@ -1,5 +1,6 @@
 import type { ApiRouter } from "../http/ApiRouter";
 import { ViewRouter, type ViewRouteExec } from "../http/ViewRouter";
+// @ts-ignore
 import { URLPattern } from "urlpattern-polyfill";
 import { generateETag } from "../server/generateEtag";
 import type { ComponentTree } from "../client/types";
@@ -7,7 +8,8 @@ import { type RouterMiddleware } from "../http/Router";
 import { GEMI_REQUEST_BREAKER_ERROR } from "../http/Error";
 import type { Plugin } from "./Plugin";
 import type { Middleware } from "../http/Middleware";
-import { Cookie, RequestContext } from "../http/requestContext";
+import { RequestContext } from "../http/requestContext";
+import { type Cookie } from "../http/Cookie";
 import type { ServerWebSocket } from "bun";
 import { flattenComponentTree } from "../client/helpers/flattenComponentTree";
 
@@ -188,8 +190,8 @@ export class App {
 
         const reqWithMiddlewares = this.runMiddleware(middlewares);
 
+        const httpRequest = new HttpRequest(req, params);
         return await RequestContext.run(async () => {
-          const httpRequest = new HttpRequest(req, params);
           let handler = exec
             ? () => exec(httpRequest, params)
             : () => Promise.resolve({});
@@ -286,15 +288,17 @@ export class App {
 
       const reqWithMiddlewares = this.runMiddleware(middlewares);
 
+      const httpRequest = new HttpRequest(req, params);
+
       const { data, cookies, user } = await RequestContext.run(async () => {
-        const httpRequest = new HttpRequest(req, params);
+        const ctx = RequestContext.getStore();
+
         await reqWithMiddlewares(httpRequest);
 
         const data = await Promise.all(
           // TODO: fix type
           handlers.map((fn) => fn(httpRequest as any)),
         );
-        const ctx = RequestContext.getStore();
         return {
           data,
           cookies: ctx.cookies,

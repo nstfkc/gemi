@@ -15,7 +15,8 @@
     "gemi": "*",
     "react": "19.0.0-rc-dfd30974ab-20240613",
     "react-dom": "19.0.0-rc-dfd30974ab-20240613",
-    "sharp": "^0.33.3"
+    "sharp": "^0.33.3",
+    "temporal-polyfill": "^0.2.5"
   },
   "devDependencies": {
     "@types/react": "^18.2.75",

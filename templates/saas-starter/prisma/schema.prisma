@@ -59,8 +59,8 @@ model Account {
 model Session {
   id           Int            @id @default(autoincrement())
   token        String         @unique @default(cuid())
-  userId       Int
-  user         User           @relation(fields: [userId], references: [id])
+  userId       Int?
+  user         User?          @relation(fields: [userId], references: [id])
   expiresAt    DateTime
   refreshToken RefreshToken[]
 }
