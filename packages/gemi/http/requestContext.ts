@@ -31,7 +31,11 @@ export class RequestContext {
     return requestContext.getStore()!;
   }
 
-  static run<T>(fn: () => T): T {
+  static setRequest(req: HttpRequest<any, any>) {
+    requestContext.getStore().req = req;
+  }
+
+  static async run<T>(fn: () => T): Promise<T> {
     return requestContext.run(new Store(), fn);
   }
 }

@@ -32,17 +32,18 @@ model OrganizationInvitation {
 }
 
 model User {
-  id              Int           @id @default(autoincrement())
-  publicId        String        @unique @default(cuid())
-  name            String?
-  email           String?       @unique
-  emailVerifiedAt DateTime?
-  globalRole      Int           @default(2) // 0 = Owner, 1 = Admin, 2 = User
-  password        String?
-  organization    Organization? @relation(fields: [organizationId], references: [id])
-  organizationId  Int?
-  accounts        Account[]
-  session         Session[]
+  id                 Int                  @id @default(autoincrement())
+  publicId           String               @unique @default(cuid())
+  name               String?
+  email              String?              @unique
+  emailVerifiedAt    DateTime?
+  globalRole         Int                  @default(2) // 0 = Owner, 1 = Admin, 2 = User
+  password           String?
+  organization       Organization?        @relation(fields: [organizationId], references: [id])
+  organizationId     Int?
+  accounts           Account[]
+  session            Session[]
+  PasswordResetToken PasswordResetToken[]
 }
 
 model Account {
@@ -57,18 +58,23 @@ model Account {
 }
 
 model Session {
-  id           Int            @id @default(autoincrement())
-  token        String         @unique @default(cuid())
-  userId       Int?
-  user         User?          @relation(fields: [userId], references: [id])
-  expiresAt    DateTime
-  refreshToken RefreshToken[]
+  id                Int       @id @default(autoincrement())
+  token             String    @unique
+  userId            Int?
+  user              User?     @relation(fields: [userId], references: [id])
+  expiresAt         DateTime
+  updatedAt         DateTime? @updatedAt
+  absoluteExpiresAt DateTime
+
+  location  String? // approximated location
+  userAgent String? // user agent
 }
 
-model RefreshToken {
-  id        Int      @id @default(autoincrement())
-  token     String   @unique @default(cuid())
-  sessionId Int
-  session   Session  @relation(fields: [sessionId], references: [id])
-  expiresAt DateTime
+model PasswordResetToken {
+  id     Int    @id @default(autoincrement())
+  token  String @unique
+  userId Int
+  user   User   @relation(fields: [userId], references: [id])
+
+  createdAt DateTime @default(now())
 }

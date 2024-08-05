@@ -45,18 +45,13 @@ CREATE TABLE "Account" (
 CREATE TABLE "Session" (
     "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
     "token" TEXT NOT NULL,
-    "userId" INTEGER NOT NULL,
+    "userId" INTEGER,
     "expiresAt" DATETIME NOT NULL,
-    CONSTRAINT "Session_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User" ("id") ON DELETE RESTRICT ON UPDATE CASCADE
-);
-
--- CreateTable
-CREATE TABLE "RefreshToken" (
-    "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-    "token" TEXT NOT NULL,
-    "sessionId" INTEGER NOT NULL,
-    "expiresAt" DATETIME NOT NULL,
-    CONSTRAINT "RefreshToken_sessionId_fkey" FOREIGN KEY ("sessionId") REFERENCES "Session" ("id") ON DELETE RESTRICT ON UPDATE CASCADE
+    "updatedAt" DATETIME,
+    "absoluteExpiresAt" DATETIME NOT NULL,
+    "location" TEXT,
+    "userAgent" TEXT,
+    CONSTRAINT "Session_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User" ("id") ON DELETE SET NULL ON UPDATE CASCADE
 );
 
 -- CreateIndex
@@ -73,6 +68,3 @@ CREATE UNIQUE INDEX "Account_publicId_key" ON "Account"("publicId");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "Session_token_key" ON "Session"("token");
-
--- CreateIndex
-CREATE UNIQUE INDEX "RefreshToken_token_key" ON "RefreshToken"("token");

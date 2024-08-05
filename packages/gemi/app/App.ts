@@ -190,8 +190,12 @@ export class App {
 
         const reqWithMiddlewares = this.runMiddleware(middlewares);
 
-        const httpRequest = new HttpRequest(req, params);
         return await RequestContext.run(async () => {
+          const httpRequest = new HttpRequest(req, params);
+
+          const ctx = RequestContext.getStore();
+          ctx.setRequest(httpRequest);
+
           let handler = exec
             ? () => exec(httpRequest, params)
             : () => Promise.resolve({});
@@ -236,8 +240,6 @@ export class App {
           }
 
           const headers = new Headers();
-
-          const ctx = RequestContext.getStore();
 
           headers.append("Content-Type", "application/json");
           ctx.cookies.forEach((cookie) =>
@@ -288,10 +290,10 @@ export class App {
 
       const reqWithMiddlewares = this.runMiddleware(middlewares);
 
-      const httpRequest = new HttpRequest(req, params);
-
       const { data, cookies, user } = await RequestContext.run(async () => {
+        const httpRequest = new HttpRequest(req, params);
         const ctx = RequestContext.getStore();
+        ctx.setRequest(httpRequest);
 
         await reqWithMiddlewares(httpRequest);
 

@@ -6,10 +6,19 @@ export class Auth {
     const requestContextStore = RequestContext.getStore();
     const accessToken = requestContextStore.req.cookies.get("access_token");
 
-    const user =
-      await KernelContext.getStore().authenticationServiceProvider.verifySession(
-        accessToken,
-      );
+    let user = requestContextStore.user;
+
+    if (!user) {
+      const session =
+        await KernelContext.getStore().authenticationServiceProvider.adapter.findSession(
+          {
+            token: accessToken,
+            userAgent: requestContextStore.req.headers.get("User-Agent"),
+          },
+        );
+      user = session?.user;
+      requestContextStore.setUser(user);
+    }
 
     if (user) {
       return user;
