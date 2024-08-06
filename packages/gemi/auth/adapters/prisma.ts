@@ -35,11 +35,31 @@ export class PrismaAuthenticationAdapter implements IAuthenticationAdapter {
     return await this.prisma.user.findUnique({ where: { email } });
   }
 
-  async findSession(args: FindSessionArgs): Promise<SessionWithUser> {
-    return await this.prisma.session.findUnique({
-      where: { token: args.token, userAgent: args.userAgent },
-      include: { user: true },
-    });
+  // TODO: extend the session until absolute expiration
+  async findSession(args: FindSessionArgs): Promise<SessionWithUser | null> {
+    if (!args.token) return null;
+    try {
+      const session = await this.prisma.session.findUnique({
+        where: { token: args.token, userAgent: args.userAgent },
+        include: {
+          user: {
+            select: {
+              email: true,
+              globalRole: true,
+              name: true,
+              publicId: true,
+              accounts: true,
+              organization: true,
+            },
+          },
+        },
+      });
+
+      return session;
+    } catch (err) {
+      console.log(err);
+      return null;
+    }
   }
 
   async updateSession(args: UpdateSessionArgs): Promise<SessionWithUser> {

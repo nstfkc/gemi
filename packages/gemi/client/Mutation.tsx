@@ -36,12 +36,14 @@ type FormPropsWithParams<T extends keyof RPC> = {
   params: GetParams<RPC[T]>;
   onSuccess?: (result: GetResult<RPC[T]>) => void;
   onError?: (error: any) => void;
+  pathPrefix?: string;
 };
 
 type FormPropsWithoutParams<T extends keyof RPC> = {
   action: T extends `GET:${string}` ? never : T;
   onSuccess?: (result: GetResult<RPC[T]>) => void;
   onError?: (error: any) => void;
+  pathPrefix?: string;
 };
 
 type FormProps<T extends keyof RPC> =
@@ -56,9 +58,16 @@ export function Form<T extends keyof RPC>(
   const formRef = useRef<HTMLFormElement>(null);
 
   const params = "params" in props ? props.params : {};
-  const { trigger, data, error, loading } = useMutation(action, {
-    params,
-  } as any);
+  const { trigger, data, error, loading } = useMutation(
+    action as any,
+    {
+      params,
+    } as any,
+    {
+      pathPrefix: props.pathPrefix,
+      onSuccess: props.onSuccess,
+    },
+  );
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();

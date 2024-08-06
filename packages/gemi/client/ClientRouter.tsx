@@ -91,6 +91,7 @@ export const ClientRouter = (props: {
     <QueryManagerProvider>
       <ComponentsProvider viewImportMap={props.viewImportMap}>
         <ClientRouterProvider
+          searchParams={router.searchParams}
           params={router.params}
           pageData={pageData}
           is404={router.is404}

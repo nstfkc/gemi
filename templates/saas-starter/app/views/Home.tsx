@@ -1,4 +1,4 @@
-import { useMutation, useQuery } from "gemi/client";
+import { useMutation, useQuery, useRouter } from "gemi/client";
 
 const Component = () => {
   const { data, loading, error, mutate } = useQuery("GET:/posts");
@@ -16,9 +16,12 @@ const Component = () => {
 
 export default function Home() {
   const { data, loading, error } = useQuery("GET:/posts");
-
+  const { push } = useRouter();
   return (
     <div>
+      <div>
+        <button onClick={() => push("/auth/sign-in")}>Sign in</button>
+      </div>
       <Component />
       <Component />
     </div>

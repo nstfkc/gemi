@@ -1,4 +1,4 @@
-import { useContext, useEffect, useState, useSyncExternalStore } from "react";
+import { useContext, useState, useSyncExternalStore } from "react";
 import type { RPC } from "./rpc";
 import type { ApiRouterHandler } from "../http/ApiRouter";
 import type { UnwrapPromise } from "../utils/type";
@@ -8,6 +8,21 @@ interface Options<Params> {
   params: Params;
   query?: Record<string, any>;
 }
+
+interface Config<T> {
+  pathPrefix?: string;
+  fallbackData?: T;
+}
+
+const defaultConfig: Config<any> = {
+  pathPrefix: "",
+  fallbackData: null,
+};
+
+type Data<T> =
+  T extends ApiRouterHandler<any, infer Data, any>
+    ? UnwrapPromise<Data>
+    : never;
 
 type QueryOptions<T> =
   T extends ApiRouterHandler<any, any, infer Params>
@@ -19,7 +34,7 @@ type QueryOptions<T> =
 type Error = {};
 
 type QueryReturn<T> =
-  T extends ApiRouterHandler<infer Input, infer Data, any>
+  T extends ApiRouterHandler<any, infer Data, any>
     ? {
         data: UnwrapPromise<Data>;
         loading: boolean;
@@ -33,16 +48,23 @@ type QueryReturn<T> =
 export function useQuery<T extends keyof RPC>(
   url: T extends `GET:${string}` ? T : never,
   ...args: QueryOptions<RPC[T]> extends never
-    ? []
-    : [options: QueryOptions<RPC[T]>]
+    ? [
+        options?: Omit<QueryOptions<RPC[T]>, "params">,
+        config?: Config<Data<RPC[T]>>,
+      ]
+    : [options: QueryOptions<RPC[T]>, config?: Config<Data<RPC[T]>>]
 ): QueryReturn<RPC[T]> {
   const defaultOptions: QueryOptions<any> = {
     params: {},
     query: {},
   };
-  const options = args?.[0] ?? defaultOptions;
+  const [options = defaultOptions, config = defaultConfig] = args;
   const { manager } = useContext(QueryManagerContext);
-  const [resource] = useState(() => manager.fetch(url, options));
+  const [, path] = url.split("GET:");
+  const fullUrl = ["GET:", config.pathPrefix, path].join("");
+  const [resource] = useState(() =>
+    manager.fetch(fullUrl, options, { fallbackData: config.fallbackData }),
+  );
 
   const state: any = useSyncExternalStore(
     resource.state.subscribe.bind(resource.state),

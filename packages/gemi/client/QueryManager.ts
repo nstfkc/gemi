@@ -21,17 +21,20 @@ type State = {
 
 class Resource {
   key: string;
-  state: Subject<State> = new Subject({
-    data: null,
-    error: null,
-    loading: false,
-  });
+  state: Subject<State>;
   stale = true;
   staleTimer: Timer | null = null;
 
-  constructor(key: string) {
-    console.log(key);
+  constructor(key: string, fallbackData: any = null) {
     this.key = key;
+    this.state = new Subject({
+      data: fallbackData,
+      error: null,
+      loading: false,
+    });
+    if (fallbackData) {
+      this.stale = false;
+    }
   }
 
   mutate<T>(fn: (data: T) => T) {
@@ -45,6 +48,7 @@ class Resource {
 
   fetch() {
     const { loading, data, error } = this.state.getValue();
+
     if (loading) {
       return this.state;
     }
@@ -71,7 +75,6 @@ class Resource {
     const { query, params } = options;
     const url = key.split("GET:")[1];
     const searchParams = new URLSearchParams(query);
-    console.log(applyParams(url, params));
     const finalUrl = [applyParams(url, params), searchParams.toString()]
       .filter((s) => s.length > 0)
       .join("?");
@@ -116,11 +119,18 @@ export class QueryManager {
     return JSON.stringify({ key, options });
   }
 
-  fetch(key: string, options: Record<string, any> = {}) {
+  fetch(
+    key: string,
+    options: Record<string, any> = {},
+    config: Record<string, any> = {},
+  ) {
     const resourceKey = this.createResourceKey(key, options);
 
     if (!this.resources.has(resourceKey)) {
-      this.resources.set(resourceKey, new Resource(resourceKey));
+      this.resources.set(
+        resourceKey,
+        new Resource(resourceKey, config.fallbackData),
+      );
     }
 
     const resource = this.resources.get(resourceKey);

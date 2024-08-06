@@ -1,11 +1,17 @@
-import { User } from "../auth/adapters/types";
-import { RequestContext } from "../http/requestContext";
+import { HttpRequest } from "./HttpRequest";
+import { Middleware } from "./Middleware";
+import { RequestContext } from "./requestContext";
+import { AuthenticationError } from "./Router";
 import { KernelContext } from "../kernel/KernelContext";
 
-export class Auth {
-  static async user(): Promise<User | null> {
+export class AuthenticationMiddleware extends Middleware {
+  async run(req: HttpRequest) {
     const requestContextStore = RequestContext.getStore();
     const accessToken = requestContextStore.req.cookies.get("access_token");
+
+    if (!accessToken) {
+      throw new AuthenticationError();
+    }
 
     let user = requestContextStore.user;
 
@@ -17,14 +23,13 @@ export class Auth {
             userAgent: requestContextStore.req.headers.get("User-Agent"),
           },
         );
+      if (!session) {
+        throw new AuthenticationError();
+      }
       user = session?.user;
       requestContextStore.setUser(user);
     }
 
-    if (user) {
-      return user;
-    }
-
-    return null;
+    return {};
   }
 }

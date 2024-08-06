@@ -27,7 +27,7 @@ function validate(ruleName: string) {
   switch (rule) {
     case "required":
       return (value: any) => {
-        return value !== null && value !== undefined;
+        return value !== null && value !== undefined && value?.length > 0;
       };
     case "password":
       return (value: any) => {
@@ -128,7 +128,6 @@ export class HttpRequest<
     ) {
       const body = (await this.rawRequest.formData()) as any; // TODO: fix type
       for (const [key, value] of body) {
-        console.log(key, value);
         inputMap.set(key, value as T[keyof T]);
       }
     }
@@ -165,7 +164,12 @@ export class HttpRequest<
           if (!errors[key]) {
             errors[key] = [];
           }
-          errors[key].push(String(message));
+          if (rule === "required") {
+            errors[key] = [String(message)];
+            break;
+          } else {
+            errors[key].push(String(message));
+          }
         }
       }
     }

@@ -6,3 +6,6 @@ export { HttpRequest } from "./HttpRequest";
 export { Middleware } from "./Middleware";
 export { getCookies } from "./getCookies";
 export { RequestBreakerError } from "./Error";
+
+export { MiddlewareServiceProvider } from "./MiddlewareServiceProvider";
+export { AuthenticationMiddleware } from "./AuthenticationMiddlware";

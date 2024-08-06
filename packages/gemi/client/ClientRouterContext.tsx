@@ -39,6 +39,7 @@ interface ClientRouterProviderProps {
   pageData: Record<string, any>;
   currentPath: string;
   params: Record<string, string>;
+  searchParams: string;
   is404: boolean;
 }
 
@@ -53,20 +54,21 @@ export const ClientRouterProvider = (
     routeManifest,
     pageData,
     params,
+    searchParams,
   } = props;
   const [parameters, setParameters] = useState(params);
   const pageDataRef = useRef(structuredClone(pageData));
   const scrollHistoryRef = useRef<Map<string, number>>(new Map());
   const initalViewEntries = is404
     ? ["404"]
-    : routeManifest[pathname] ?? ["404"];
+    : (routeManifest[pathname] ?? ["404"]);
   const viewEntriesSubject = useRef(new Subject<string[]>(initalViewEntries));
   const [locationSubject] = useState(
     () =>
       new Subject<Location>({
         hash: "",
         pathname: currentPath,
-        search: "",
+        search: searchParams,
         state: {},
         key: "",
       }),
@@ -176,6 +178,33 @@ export function useParams() {
   return params;
 }
 
+export function useSearchParams() {
+  const { locationSubject, history } = useContext(ClientRouterContext);
+  const location = useLocation();
+  const searchParams = new URLSearchParams(location.search);
+  const setSearchParams = (
+    newSearchParams:
+      | URLSearchParams
+      | ((searchParams: URLSearchParams) => URLSearchParams),
+  ) => {
+    let nextSearchParams = newSearchParams;
+    if (typeof newSearchParams === "function") {
+      nextSearchParams = newSearchParams(searchParams);
+    }
+
+    locationSubject.next({
+      ...locationSubject.getValue(),
+      search: nextSearchParams.toString(),
+    });
+
+    history?.push({
+      search: nextSearchParams.toString(),
+    });
+  };
+
+  return [searchParams, setSearchParams] as const;
+}
+
 export function useViewData() {}
 
 export function useRouter() {
@@ -210,9 +239,8 @@ export function useRouter() {
       ]);
 
       if (res.ok) {
-        const { data } = await res.json();
-        const is404 =
-          (Object.values(data[to as any]) as any)[0]?.status === 404;
+        const { data, is404 = false } = await res.json();
+
         updatePageData(data);
         history?.push(to, is404 ? { status: 404 } : state);
         window.scrollTo(0, 0);

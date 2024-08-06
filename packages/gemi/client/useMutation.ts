@@ -14,10 +14,14 @@ function applyParams(url: string, params: Record<string, any> = {}) {
 
 type Options = {
   autoInvalidate?: boolean;
+  pathPrefix?: string;
+  onSuccess: (data: any) => void;
 };
 
 const defaultOptions: Options = {
   autoInvalidate: false,
+  pathPrefix: "",
+  onSuccess: () => {},
 };
 
 type MutationInputs<T> =
@@ -72,8 +76,9 @@ export function useMutation<T extends keyof RPC>(
         error: state.error,
         loading: true,
       }));
-      const [inputs = { params: {}, query: {} }, _options = defaultOptions] =
+      const [inputs = { params: {}, query: {} }, options = defaultOptions] =
         args ?? [];
+      const { pathPrefix } = options;
       const { query = {} } = inputs ?? {};
       const params = "params" in inputs ? inputs.params : {};
       const [method] = String(url).split(":");
@@ -93,7 +98,7 @@ export function useMutation<T extends keyof RPC>(
         body = JSON.stringify(input);
       }
 
-      const response = await fetch(`/api${finalUrl}`, {
+      const response = await fetch(`/api${pathPrefix}${finalUrl}`, {
         method,
         headers: {
           ...contentType,
@@ -112,6 +117,8 @@ export function useMutation<T extends keyof RPC>(
           }));
           return;
         }
+
+        options.onSuccess(data);
 
         setState({
           data,

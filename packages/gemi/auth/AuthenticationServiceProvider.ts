@@ -16,10 +16,16 @@ class AuthenticationError extends RequestBreakerError {
     super("Authentication error");
     this.name = "AuthenticationError";
     this.error = error;
+
     this.payload = {
       api: {
         status: 401,
-        data: { error: this.error },
+        data: {
+          error: {
+            kind: "form_error",
+            message: this.error,
+          },
+        },
       },
       view: {},
     };
@@ -44,7 +50,6 @@ class AuthorizationError extends RequestBreakerError {
 
 class SignInRequest extends HttpRequest<
   {
-    name: string;
     email: string;
     password: string;
   },
@@ -52,13 +57,12 @@ class SignInRequest extends HttpRequest<
 > {
   schema = {
     email: {
+      required: "Email is required",
       string: "Invalid email",
-      required: true,
       email: "Invalid email",
     },
     password: {
-      required: true,
-      "min:8": "Password must be at least 8 characters",
+      required: "Password is required",
     },
   };
 }
@@ -92,12 +96,12 @@ class SignUpRequest extends HttpRequest<
 class AuthController extends Controller {
   requests = {
     signUp: SignUpRequest,
+    signIn: SignInRequest,
   };
 
   provider = KernelContext.getStore().authenticationServiceProvider;
 
   async me() {
-    await Auth.user();
     const user = await Auth.user();
 
     if (!user) {
@@ -108,7 +112,7 @@ class AuthController extends Controller {
   }
 
   async signIn(req: SignInRequest) {
-    const input = await req.input();
+    const input = await req.input.call(req);
     const { email, password } = input.toJSON();
 
     const user = await this.provider.adapter.findUserByEmailAddress(email);
@@ -153,7 +157,7 @@ class AuthController extends Controller {
 
     await this.provider.onSignIn(user);
 
-    return {};
+    return { user };
   }
 
   async signUp(req: SignUpRequest) {
@@ -265,7 +269,7 @@ class AuthController extends Controller {
   }
 }
 
-class AuthApiRouter extends ApiRouter {
+export class AuthApiRouter extends ApiRouter {
   routes = {
     "/sign-in": this.post(AuthController, "signIn"),
     "/sign-up": this.post(AuthController, "signUp"),

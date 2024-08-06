@@ -11,6 +11,7 @@ export interface ServerDataContextValue {
     params: Record<string, any>;
     currentPath: string;
     is404: boolean;
+    searchParams: string;
   };
   componentTree: ComponentTree;
   auth: {

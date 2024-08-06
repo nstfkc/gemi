@@ -144,8 +144,11 @@ export class App {
       .map((aliasOrTest) => {
         if (typeof aliasOrTest === "string") {
           const alias = aliasOrTest;
-          if (this.middlewareAliases?.[alias]) {
-            const middleware = new this.middlewareAliases[alias]();
+          const kernelServices = this.kernel.getServices.call(this.kernel);
+          const Middleware =
+            kernelServices.middlewareServiceProvider.aliases[alias];
+          if (Middleware) {
+            const middleware = new Middleware();
             return middleware.run;
           }
         } else {
@@ -347,6 +350,7 @@ export class App {
           data: {
             [url.pathname]: viewData,
           },
+          is404: !currentPathName,
         }),
         {
           headers,
@@ -416,6 +420,7 @@ export class App {
           pathname: currentPathName,
           params,
           currentPath: url.pathname,
+          searchParams: url.search,
           is404: !currentPathName ? true : false,
         },
         componentTree: [["404", []], ...this.componentTree],
