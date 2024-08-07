@@ -1,4 +1,4 @@
-import { SendEmailParams } from "./types";
+import type { SendEmailParams } from "./types";
 import { providers } from "./providers";
 
 export class EmailServiceProvider {

@@ -1,4 +1,4 @@
-import { IAuthenticationAdapter } from "./types";
+import type { IAuthenticationAdapter } from "./types";
 
 class AdapterNotFound extends Error {
   constructor() {

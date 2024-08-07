@@ -1,4 +1,4 @@
-import { SendEmailParams } from "./types";
+import type { SendEmailParams } from "./types";
 import { Resend } from "resend";
 
 export const providers = {

@@ -24,5 +24,5 @@ export function autobind<T extends any>(self: new () => T): T {
       self[key] = self[key].bind(self);
     }
   }
-  return self;
+  return self as any;
 }

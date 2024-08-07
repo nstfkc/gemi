@@ -23,16 +23,16 @@ async function fetchCreateGemiAppVersion() {
   return (packageJson as any).version;
 }
 
-async function downloadTar(root: string) {
+async function downloadTar(root: string, template = "default") {
   const url = "https://codeload.github.com/nstfkc/gemi/tar.gz/main";
   const response = await fetch(url);
-  const filePath = "templates/default";
+  const filePath = `templates/${template}`;
   response.body?.pipe(
     x({
       strip: filePath.split("/").length + 1,
       cwd: root,
       filter: (path) => {
-        return path.startsWith(`gemi-main/templates/default/`);
+        return path.startsWith(`gemi-main/templates/${template}/`);
       },
     }),
   );
@@ -61,6 +61,20 @@ program.action(async (options) => {
     process.exit(1);
   }
 
+  let template = "default";
+
+  const { value: _template } = await prompts({
+    type: "select",
+    name: "value",
+    message: "Select a template",
+    choices: [
+      { title: "Default", value: "default" },
+      { title: "SaaS Starter", value: "saas-starter" },
+    ],
+  });
+
+  template = _template;
+
   console.log(`Extracting to ${process.cwd()}/${projectName}`);
   console.log("Downloading template...");
 
@@ -76,7 +90,7 @@ program.action(async (options) => {
 
   const root = resolve(process.cwd(), projectName);
 
-  await downloadTar(root);
+  await downloadTar(root, template);
 
   const file = Bun.file(`${root}/package.json`);
   const packageJSON = await file.json();

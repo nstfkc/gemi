@@ -1,4 +1,4 @@
-import { User } from "../auth/adapters/types";
+import type { User } from "../auth/adapters/types";
 import { RequestContext } from "../http/requestContext";
 import { KernelContext } from "../kernel/KernelContext";
 
