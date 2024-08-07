@@ -16,28 +16,6 @@ export type RouterMiddleware = (
   ctx: any,
 ) => MiddlewareReturnType;
 
-export class AuthenticationError extends RequestBreakerError {
-  constructor() {
-    super("Authentication error");
-    this.name = "AuthenticationError";
-  }
-
-  payload = {
-    api: {
-      status: 401,
-      data: { error: "Authentication error" },
-    },
-    view: {
-      status: 302,
-      headers: {
-        "Cache-Control":
-          "private, no-cache, no-store, max-age=0, must-revalidate",
-        Location: "/auth/sign-in",
-      },
-    },
-  };
-}
-
 export class ValidationError extends RequestBreakerError {
   errors: Record<string, string[]> = {};
   constructor(errors: Record<string, string[]>) {

@@ -7,46 +7,8 @@ import { ViewRouter } from "../http/ViewRouter";
 import { KernelContext } from "../kernel/KernelContext";
 import { Auth } from "../facades";
 import type { IAuthenticationAdapter, User } from "./adapters/types";
-import { RequestBreakerError } from "../http";
 import { BlankAdapter } from "./adapters/blank";
-
-class AuthenticationError extends RequestBreakerError {
-  private error: string;
-  constructor(error: string = "Invalid credentials") {
-    super("Authentication error");
-    this.name = "AuthenticationError";
-    this.error = error;
-
-    this.payload = {
-      api: {
-        status: 401,
-        data: {
-          error: {
-            kind: "form_error",
-            message: this.error,
-          },
-        },
-      },
-      view: {},
-    };
-  }
-}
-
-class AuthorizationError extends RequestBreakerError {
-  private error: string;
-  constructor(error: string = "Not authorized") {
-    super("Authentication error");
-    this.name = "AuthenticationError";
-    this.error = error;
-    this.payload = {
-      api: {
-        status: 401,
-        data: { error: this.error },
-      },
-      view: {},
-    };
-  }
-}
+import { AuthorizationError, AuthenticationError } from "../http/errors";
 
 class SignInRequest extends HttpRequest<
   {

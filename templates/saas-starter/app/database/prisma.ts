@@ -1,6 +1,7 @@
 import { PrismaClient } from "@prisma/client";
 import { PrismaLibSQL } from "@prisma/adapter-libsql";
 import { createClient } from "@libsql/client";
+import { prismaExtension } from "gemi/app";
 
 const libsql = createClient({
   url: `${process.env.TURSO_DATABASE_URL}`,
@@ -13,7 +14,7 @@ const prismaGlobal = global as typeof global & {
   prisma?: PrismaClient;
 };
 
-export const prisma: PrismaClient =
+const client: PrismaClient =
   prismaGlobal.prisma ??
   new PrismaClient({
     adapter,
@@ -21,6 +22,10 @@ export const prisma: PrismaClient =
     log: process.env.NODE_ENV === "development" ? ["error", "warn"] : ["error"],
   });
 
+const prisma = client.$extends(prismaExtension);
+
 if (process.env.NODE_ENV !== "production") {
-  prismaGlobal.prisma = prisma;
+  prismaGlobal.prisma = prisma as any;
 }
+
+export { prisma };

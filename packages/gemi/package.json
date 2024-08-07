@@ -49,6 +49,7 @@
     "postpublish": "bun scripts/setupExports.ts dev"
   },
   "dependencies": {
+    "@prisma/client": "5.17.0",
     "@react-email/components": "^0.0.21",
     "@react-email/render": "0.0.17-canary.0",
     "commander": "^12.1.0",
