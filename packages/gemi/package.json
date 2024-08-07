@@ -1,6 +1,6 @@
 {
   "name": "gemi",
-  "version": "0.4.14",
+  "version": "0.4.15",
   "devDependencies": {
     "@happy-dom/global-registrator": "^14.12.3",
     "@repo/eslint-config": "*",
