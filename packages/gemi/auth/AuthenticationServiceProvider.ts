@@ -298,7 +298,7 @@ export class AuthApiRouter extends ApiRouter {
   };
 }
 
-class AuthViewRouter extends ViewRouter {
+export class AuthViewRouter extends ViewRouter {
   routes = {
     "/sign-in": this.view("auth/SignIn"),
     "/sign-up": this.view("auth/SignUp"),
