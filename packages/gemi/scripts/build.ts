@@ -10,10 +10,10 @@ const result = await Bun.build({
   ],
   outdir: "./dist",
   external: ["vite", "react", "react-dom", "react/jsx-runtime", "bun"],
-  target: "node",
+  target: "bun",
   format: "esm",
   minify: false,
-  splitting: false,
+  splitting: true,
 });
 
 if (!result.success) {
