@@ -12,7 +12,7 @@ const result = await Bun.build({
   external: ["vite", "react", "react-dom", "react/jsx-runtime", "bun"],
   target: "bun",
   format: "esm",
-  minify: false,
+  minify: true,
   splitting: true,
 });
 

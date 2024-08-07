@@ -6,6 +6,6 @@
     "moduleResolution": "nodenext",
     "downlevelIteration": true
   },
-  "include": ["http", "utils", "kernel", "facades", "email"],
+  "include": ["app/index.ts", "http", "utils", "kernel", "facades", "email"],
   "exclude": ["node_modules", "dist"]
 }
