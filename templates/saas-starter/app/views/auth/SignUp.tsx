@@ -8,16 +8,37 @@ export default function SignUp() {
       action="POST:/sign-up"
       onSuccess={({ user }) => push(`/auth/sign-in?email=${user.email}`)}
     >
-      <div>
-        <input type="name" name="name" placeholder="Name" />
-        <ValidationErrors name="name" />
-      </div>
-      <div>
-        <input type="email" name="email" placeholder="Email" />
+      <div className="flex flex-col">
+        <label htmlFor="name">Name</label>
+        <input
+          className="bg-slate-50 p-1 rounded-md"
+          id="name"
+          type="name"
+          name="name"
+          placeholder="Name"
+        />
         <ValidationErrors name="email" />
       </div>
-      <div>
-        <input type="password" name="password" placeholder="Password" />
+      <div className="flex flex-col">
+        <label htmlFor="email">Email</label>
+        <input
+          className="bg-slate-50 p-1 rounded-md"
+          id="email"
+          type="email"
+          name="email"
+          placeholder="Email"
+        />
+        <ValidationErrors name="email" />
+      </div>
+
+      <div className="flex flex-col">
+        <label htmlFor="password">Password</label>
+        <input
+          className="bg-slate-50 p-1 rounded-md"
+          type="password"
+          name="password"
+          placeholder="Password"
+        />
         <ValidationErrors name="password" />
       </div>
       <button type="submit">

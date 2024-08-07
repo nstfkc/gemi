@@ -1,5 +1,4 @@
 import {
-  type PropsWithChildren,
   createContext,
   useContext,
   type ComponentProps,
@@ -31,6 +30,8 @@ type GetResult<T> =
     ? UnwrapPromise<Result>
     : never;
 
+type CommonFormProps = Omit<ComponentProps<"form">, "action">;
+
 type FormPropsWithParams<T extends keyof RPC> = {
   action: T extends `GET:${string}` ? never : T;
   params: GetParams<RPC[T]>;
@@ -52,20 +53,28 @@ type FormProps<T extends keyof RPC> =
     : FormPropsWithParams<T>;
 
 export function Form<T extends keyof RPC>(
-  props: PropsWithChildren<FormProps<T>>,
+  props: FormProps<T> & CommonFormProps,
 ) {
-  const { action } = props;
+  const {
+    action,
+    pathPrefix,
+    onSuccess,
+    onError,
+    params,
+    className,
+    ...formProps
+  } = "params" in props ? props : { ...props, params: {} };
   const formRef = useRef<HTMLFormElement>(null);
 
-  const params = "params" in props ? props.params : {};
   const { trigger, data, error, loading } = useMutation(
     action as any,
     {
       params,
     } as any,
     {
-      pathPrefix: props.pathPrefix,
-      onSuccess: props.onSuccess,
+      pathPrefix,
+      onSuccess,
+      onError,
     },
   );
 
@@ -84,10 +93,11 @@ export function Form<T extends keyof RPC>(
       value={{ isPending: loading, result: data, validationErrors, formError }}
     >
       <form
-        className="group"
+        className={["group", className].filter(Boolean).join(" ")}
         data-loading={loading}
         ref={formRef}
         onSubmit={handleSubmit}
+        {...formProps}
       >
         {props.children}
       </form>

@@ -4,17 +4,20 @@ class AppRouter extends ViewRouter {
   middlewares = ["auth"];
 
   routes = {
-    "/dashboard": this.view("Dashboard"),
+    "/": this.layout("app/AppLayout", {
+      "/dashboard": this.view("Dashboard"),
+    }),
   };
 }
 
 export default class extends ViewRouter {
   override routes = {
-    "/": this.view("Home", (req: HttpRequest) => {
-      req.ctx.setCookie("test", "test");
-      return { data: {} };
+    "/": this.layout("PublicLayout", {
+      "/": this.view("Home", (req: HttpRequest) => {
+        req.ctx.setCookie("test", "test");
+        return { data: {} };
+      }),
     }),
-    "/about": this.view("About"),
     "/app": AppRouter,
   };
 }

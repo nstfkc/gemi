@@ -28,7 +28,9 @@ export class PrismaAuthenticationAdapter implements IAuthenticationAdapter {
   }
 
   async deleteSession(args: DeleteSessionArgs): Promise<void> {
-    return await this.prisma.session.delete({ where: { token: args.token } });
+    return await this.prisma.session.deleteMany({
+      where: { token: args.token },
+    });
   }
 
   async findUserByEmailAddress(email: string): Promise<User> {
@@ -66,7 +68,18 @@ export class PrismaAuthenticationAdapter implements IAuthenticationAdapter {
     return await this.prisma.session.update({
       where: { token: args.token },
       data: { expiresAt: args.expiresAt },
-      include: { user: true },
+      include: {
+        user: {
+          select: {
+            email: true,
+            globalRole: true,
+            name: true,
+            publicId: true,
+            accounts: true,
+            organization: true,
+          },
+        },
+      },
     });
   }
 

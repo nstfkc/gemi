@@ -1,6 +1,7 @@
 import {
   Form,
   FormError,
+  Link,
   useRouter,
   useSearchParams,
   useUser,
@@ -10,7 +11,7 @@ import { useEffect } from "react";
 
 export default function SignIn() {
   const { push } = useRouter();
-  const [searchParams, setSearchParams] = useSearchParams();
+  const [searchParams] = useSearchParams();
   const user = useUser();
 
   useEffect(() => {
@@ -20,24 +21,18 @@ export default function SignIn() {
   }, [user]);
 
   return (
-    <div>
-      <button
-        onClick={() =>
-          setSearchParams((s) => {
-            s.set("test", "test");
-            return s;
-          })
-        }
-      >
-        Update
-      </button>
+    <div className="container max-w-sm mx-auto h-screen flex flex-col justify-center items-center">
       <Form
         pathPrefix="/auth"
         action="POST:/sign-in"
         onSuccess={() => push("/app/dashboard")}
+        className="flex flex-col gap-4 w-full"
       >
-        <div>
+        <div className="flex flex-col">
+          <label htmlFor="email">Email</label>
           <input
+            className="bg-slate-50 p-1 rounded-md"
+            id="email"
             type="email"
             defaultValue={searchParams.get("email") ?? ""}
             name="email"
@@ -45,24 +40,41 @@ export default function SignIn() {
           />
           <ValidationErrors name="email" />
         </div>
-        <div>
+
+        <div className="flex flex-col">
+          <label htmlFor="password">Password</label>
           <input
+            className="bg-slate-50 p-1 rounded-md"
             type="password"
-            defaultValue={searchParams.get("test") ?? ""}
             name="password"
             placeholder="Password"
           />
           <ValidationErrors name="password" />
         </div>
-        <button type="submit">
-          Sign In{" "}
-          <span className="hidden group-data-[loading=true]:inline">...</span>
-        </button>
+        <div className="flex justify-between items-center">
+          <div>
+            <p className="text-sm">
+              You don&apos;t have an account?
+              <br />
+              <Link className="font-semibold" href="/auth/sign-up">
+                Sign Up
+              </Link>
+            </p>
+          </div>
+          <div>
+            <button
+              className="bg-slate-800 shrink-0 text-white rounded-lg px-4 py-3"
+              type="submit"
+            >
+              Sign In{" "}
+              <span className="hidden group-data-[loading=true]:inline">
+                ...
+              </span>
+            </button>
+          </div>
+        </div>
         <FormError />
       </Form>
-      <div>
-        <a href="/auth/sign-up">Sign Up</a>
-      </div>
     </div>
   );
 }

@@ -16,12 +16,14 @@ type Options = {
   autoInvalidate?: boolean;
   pathPrefix?: string;
   onSuccess: (data: any) => void;
+  onError: (error: any) => void;
 };
 
 const defaultOptions: Options = {
   autoInvalidate: false,
   pathPrefix: "",
   onSuccess: () => {},
+  onError: () => {},
 };
 
 type MutationInputs<T> =

@@ -58,16 +58,17 @@ model Account {
 }
 
 model Session {
-  id                Int       @id @default(autoincrement())
-  token             String    @unique
-  userId            Int?
-  user              User?     @relation(fields: [userId], references: [id])
-  expiresAt         DateTime
-  updatedAt         DateTime? @updatedAt
-  absoluteExpiresAt DateTime
-
+  id        Int     @id @default(autoincrement())
+  token     String  @unique
+  userId    Int?
+  user      User?   @relation(fields: [userId], references: [id])
   location  String? // approximated location
   userAgent String? // user agent
+
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime? @updatedAt
+  expiresAt         DateTime
+  absoluteExpiresAt DateTime
 }
 
 model PasswordResetToken {

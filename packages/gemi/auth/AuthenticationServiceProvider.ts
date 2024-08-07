@@ -135,21 +135,39 @@ class AuthController extends Controller {
     const hasher = new Bun.CryptoHasher("sha256");
     hasher.update(`${user.email}${userAgent}`);
 
-    const session = await this.provider.adapter.createSession({
-      token: hasher.digest("hex"),
-      userId: user.id,
-      userAgent: req.headers.get("User-Agent"),
-      expiresAt: new Date(
-        Temporal.Now.instant()
-          .add({ hours: this.provider.sessionExpiresInHours })
-          .toString(),
-      ),
-      absoluteExpiresAt: new Date(
-        Temporal.Now.instant()
-          .add({ hours: this.provider.sessionAbsoluteExpiresInHours })
-          .toString(),
-      ),
+    const token = hasher.digest("hex");
+
+    let session = await this.provider.adapter.findSession({
+      token,
+      userAgent,
     });
+
+    if (!session) {
+      session = await this.provider.adapter.createSession({
+        token,
+        userId: user.id,
+        userAgent: req.headers.get("User-Agent"),
+        expiresAt: new Date(
+          Temporal.Now.instant()
+            .add({ hours: this.provider.sessionExpiresInHours })
+            .toString(),
+        ),
+        absoluteExpiresAt: new Date(
+          Temporal.Now.instant()
+            .add({ hours: this.provider.sessionAbsoluteExpiresInHours })
+            .toString(),
+        ),
+      });
+    } else {
+      session = await this.provider.adapter.updateSession({
+        token,
+        expiresAt: new Date(
+          Temporal.Now.instant()
+            .add({ hours: this.provider.sessionExpiresInHours })
+            .toString(),
+        ),
+      });
+    }
 
     req.ctx.setCookie("access_token", session.token, {
       expires: session.expiresAt,
