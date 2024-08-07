@@ -1,10 +1,5 @@
 import { Middleware } from "../http";
-import {
-  RouteHandler,
-  ApiRoutes,
-  RouteHandlers,
-  ApiRouter,
-} from "../http/ApiRouter";
+import { ApiRoutes, RouteHandlers, ApiRouter } from "../http/ApiRouter";
 import { RouterMiddleware } from "../http/Router";
 import { isConstructor } from "../internal/isConstructor";
 
@@ -28,7 +23,7 @@ export function createFlatApiRoutes(routes: ApiRoutes) {
     >
   > = {};
   for (const [rootPath, apiRouteHandlerOrApiRouter] of Object.entries(routes)) {
-    if (apiRouteHandlerOrApiRouter instanceof RouteHandler) {
+    if ("run" in apiRouteHandlerOrApiRouter) {
       const routeHandler = apiRouteHandlerOrApiRouter;
       if (!flatApiRoutes[rootPath]) {
         flatApiRoutes[rootPath] = {};

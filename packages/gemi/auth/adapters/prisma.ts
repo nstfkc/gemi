@@ -64,7 +64,9 @@ export class PrismaAuthenticationAdapter implements IAuthenticationAdapter {
     }
   }
 
-  async updateSession(args: UpdateSessionArgs): Promise<SessionWithUser> {
+  async updateSession(
+    args: UpdateSessionArgs,
+  ): Promise<SessionWithUser | null> {
     return await this.prisma.session.update({
       where: { token: args.token },
       data: { expiresAt: args.expiresAt },

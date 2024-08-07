@@ -2,8 +2,8 @@ export interface IAuthenticationAdapter {
   createUser: (args: CreateUserArgs) => Promise<User>;
   updateUserPassword: (args: UpdateUserPasswordArgs) => Promise<User>;
   createSession: (args: CreateSessionArgs) => Promise<SessionWithUser>;
-  updateSession: (args: UpdateSessionArgs) => Promise<SessionWithUser>;
-  findSession: (args: FindSessionArgs) => Promise<SessionWithUser>;
+  updateSession: (args: UpdateSessionArgs) => Promise<SessionWithUser | null>;
+  findSession: (args: FindSessionArgs) => Promise<SessionWithUser | null>;
   deleteSession: (args: DeleteSessionArgs) => Promise<void>;
   findUserByEmailAddress: (email: string) => Promise<User>;
   createPasswordResetToken: (
