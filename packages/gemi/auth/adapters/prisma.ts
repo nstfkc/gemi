@@ -50,8 +50,15 @@ export class PrismaAuthenticationAdapter implements IAuthenticationAdapter {
               globalRole: true,
               name: true,
               publicId: true,
-              accounts: true,
-              organization: true,
+              accounts: {
+                select: {
+                  id: true,
+                  name: true,
+                  publicId: true,
+                  organization: true,
+                  organizationRole: true,
+                },
+              },
             },
           },
         },
