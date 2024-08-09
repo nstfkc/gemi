@@ -53,7 +53,6 @@ export class PrismaAuthenticationAdapter implements IAuthenticationAdapter {
               accounts: {
                 select: {
                   id: true,
-                  name: true,
                   publicId: true,
                   organization: true,
                   organizationRole: true,
