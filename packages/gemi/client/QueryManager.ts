@@ -32,9 +32,8 @@ class Resource {
       error: null,
       loading: false,
     });
-    if (fallbackData) {
-      this.stale = false;
-    }
+
+    this.stale = !!fallbackData;
   }
 
   mutate<T>(fn: (data: T) => T) {
@@ -63,7 +62,6 @@ class Resource {
     } else {
       if (this.stale) {
         this.resolve();
-        return this.state;
       }
     }
 
@@ -78,6 +76,14 @@ class Resource {
     const finalUrl = [applyParams(url, params), searchParams.toString()]
       .filter((s) => s.length > 0)
       .join("?");
+
+    const { data, error } = this.state.getValue();
+
+    this.state.next({
+      data,
+      error,
+      loading: true,
+    });
 
     fetch(`/api${finalUrl}`, {
       method: "GET",

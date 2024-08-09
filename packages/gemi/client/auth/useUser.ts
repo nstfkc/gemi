@@ -8,12 +8,15 @@ export function useUser() {
   const { data, loading } = useQuery(
     "GET:/me",
     { params: {}, query: {} },
-    { fallbackData: { user: auth.user } as any, pathPrefix: "/auth" },
+    {
+      pathPrefix: "/auth",
+      fallbackData: auth.user ? { user: auth?.user as any } : null,
+    },
   );
 
   if (loading) {
     return null;
   }
 
-  return data.user;
+  return data?.user;
 }

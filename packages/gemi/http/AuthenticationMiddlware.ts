@@ -1,8 +1,8 @@
 import { HttpRequest } from "./HttpRequest";
 import { Middleware } from "./Middleware";
 import { RequestContext } from "./requestContext";
-import { AuthenticationError } from "./Router";
 import { KernelContext } from "../kernel/KernelContext";
+import { AuthenticationError } from "./errors";
 
 export class AuthenticationMiddleware extends Middleware {
   async run(req: HttpRequest) {
