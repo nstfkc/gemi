@@ -96,10 +96,12 @@ export class ViewRouter {
   protected view<T extends new () => Controller>(
     viewPath: string,
     children: ViewChildren,
+    _children: never,
   ): ViewConfig;
   protected view<T extends new () => Controller>(
     viewPath: string,
     handler: ViewHandler<T>,
+    children?: ViewChildren,
   ): ViewConfig;
   protected view<T extends new () => Controller>(
     viewPath: string,
