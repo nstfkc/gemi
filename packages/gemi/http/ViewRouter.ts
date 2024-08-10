@@ -71,7 +71,7 @@ export class ViewRouter {
 
           if (Array.isArray(handler)) {
             const [controller, methodName] = handler;
-            const instance = new controller(app);
+            const instance = new controller();
             _handler = instance[methodName].bind(instance);
           }
 
@@ -126,7 +126,7 @@ export class ViewRouter {
 
           if (Array.isArray(handler)) {
             const [controller, methodName] = handler;
-            const instance = new controller(app);
+            const instance = new controller();
             _handler = instance[methodName].bind(instance);
           }
 

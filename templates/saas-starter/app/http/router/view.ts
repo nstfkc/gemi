@@ -1,4 +1,5 @@
 import { HttpRequest, ViewRouter } from "gemi/http";
+import { HomeController } from "../controllers/HomeController";
 
 class AppRouter extends ViewRouter {
   middlewares = ["auth"];
@@ -13,10 +14,7 @@ class AppRouter extends ViewRouter {
 export default class extends ViewRouter {
   override routes = {
     "/": this.layout("PublicLayout", {
-      "/": this.view("Home", (req: HttpRequest) => {
-        req.ctx.setCookie("test", "test");
-        return { data: {} };
-      }),
+      "/": this.view("Home", [HomeController, "index"]),
     }),
     "/app": AppRouter,
   };

@@ -1,7 +1,4 @@
-import { useMutation } from "gemi/client";
-
 export default function Home() {
-  const {} = useMutation("");
   return (
     <div className="py-4">
       <div className="py-8">
