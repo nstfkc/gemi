@@ -1,5 +1,4 @@
 import path from "path";
-import open from "open";
 
 import type { App } from "../app/App";
 import { createStyles } from "./styles";
@@ -129,7 +128,6 @@ export async function startDevServer() {
   });
 
   console.log(`Server started on http://localhost:${process.env.PORT || 5173}`);
-  await open(`http://localhost:${process.env.PORT || 5173}`);
 
   vite.watcher.on("change", async (file) => {
     if (file.includes("app/views")) {
