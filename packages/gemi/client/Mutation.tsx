@@ -57,7 +57,7 @@ export function Form<T extends keyof RPC>(
 ) {
   const {
     action,
-    pathPrefix,
+    pathPrefix = "",
     onSuccess,
     onError,
     params,
@@ -79,6 +79,9 @@ export function Form<T extends keyof RPC>(
   );
 
   const handleSubmit = async (e: FormEvent) => {
+    if (loading) {
+      return;
+    }
     e.preventDefault();
     trigger(new FormData(formRef.current!));
   };
