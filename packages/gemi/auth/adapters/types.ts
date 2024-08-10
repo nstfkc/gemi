@@ -38,6 +38,20 @@ export interface CreatePasswordResetTokenArgs {
   token: string;
 }
 
+export type Organization = {
+  id: number;
+  publicId: string;
+  name: string;
+};
+
+export type Account = {
+  id: number;
+  publicId: string;
+  name: string;
+  organizationRole: number;
+  organization: Organization;
+};
+
 export interface User {
   id: number;
   publicId: string;
@@ -47,6 +61,7 @@ export interface User {
   globalRole: number;
   password: string | null;
   organizationId: number | null;
+  accounts: Account[];
 }
 
 export interface CreateSessionArgs {

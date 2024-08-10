@@ -37,25 +37,17 @@ export class ViewRouter {
 
   protected layout<T extends new () => Controller>(
     viewPath: string,
-  ): ViewConfig;
-  protected layout<T extends new () => Controller>(
-    viewPath: string,
-    children: ViewChildren,
-  ): ViewConfig;
-  protected layout<T extends new () => Controller>(
-    viewPath: string,
-    handler: ViewHandler<T>,
-  ): ViewConfig;
-  protected layout<T extends new () => Controller>(
-    viewPath: string,
-    handler: ViewHandler<T> | ViewChildren,
-    children: ViewChildren,
+    ...args: [
+      handlerOrChildren?: ViewHandler<T> | ViewChildren,
+      children?: ViewChildren,
+    ]
   ): ViewConfig {
     // TODO: type middleware
     function prepare(middlewares: any[] = []): ViewPrepare {
-      let _children = children ?? {};
-      if (handler && handler.constructor === Object) {
-        _children = handler;
+      const [handlerOrChildren, maybeChildren] = args;
+      let _children = maybeChildren ?? {};
+      if (handlerOrChildren && handlerOrChildren.constructor === Object) {
+        _children = handlerOrChildren;
       }
       return {
         exec: async (req: HttpRequest) => {
@@ -65,12 +57,12 @@ export class ViewRouter {
               headers: {},
               head: {},
             });
-          if (typeof handler === "function") {
-            _handler = handler;
+          if (typeof handlerOrChildren === "function") {
+            _handler = handlerOrChildren;
           }
 
-          if (Array.isArray(handler)) {
-            const [controller, methodName] = handler;
+          if (Array.isArray(handlerOrChildren)) {
+            const [controller, methodName] = handlerOrChildren;
             const instance = new controller();
             _handler = instance[methodName].bind(instance);
           }
@@ -92,27 +84,19 @@ export class ViewRouter {
     };
   }
 
-  protected view<T extends new () => Controller>(viewPath: string): ViewConfig;
   protected view<T extends new () => Controller>(
     viewPath: string,
-    children: ViewChildren,
-    _children: never,
-  ): ViewConfig;
-  protected view<T extends new () => Controller>(
-    viewPath: string,
-    handler: ViewHandler<T>,
-    children?: ViewChildren,
-  ): ViewConfig;
-  protected view<T extends new () => Controller>(
-    viewPath: string,
-    handler: ViewHandler<T> | ViewChildren,
-    children: ViewChildren,
+    ...args: [
+      handlerOrChildren?: ViewHandler<T> | ViewChildren,
+      children?: ViewChildren,
+    ]
   ): ViewConfig {
     // TODO: type middleware
     function prepare(middlewares: any[] = []): ViewPrepare {
-      let _children = children ?? {};
-      if (handler && handler.constructor === Object) {
-        _children = handler;
+      const [handlerOrChildren, maybeChildren] = args;
+      let _children = maybeChildren ?? {};
+      if (handlerOrChildren && handlerOrChildren.constructor === Object) {
+        _children = handlerOrChildren;
       }
       return {
         exec: async (req: HttpRequest) => {
@@ -126,8 +110,8 @@ export class ViewRouter {
             _handler = handler;
           }
 
-          if (Array.isArray(handler)) {
-            const [controller, methodName] = handler;
+          if (Array.isArray(handlerOrChildren)) {
+            const [controller, methodName] = handlerOrChildren;
             const instance = new controller();
             _handler = instance[methodName].bind(instance);
           }
