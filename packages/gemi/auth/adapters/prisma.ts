@@ -46,6 +46,7 @@ export class PrismaAuthenticationAdapter implements IAuthenticationAdapter {
         include: {
           user: {
             select: {
+              id: true,
               email: true,
               globalRole: true,
               name: true,

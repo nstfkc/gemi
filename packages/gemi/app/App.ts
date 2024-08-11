@@ -277,9 +277,12 @@ export class App {
       let middlewares: (RouterMiddleware | string)[] = [];
       let currentPathName: null | string = null;
       let params: Record<string, any> = {};
-      const sortedEntries = Object.entries(this.flatViewRoutes).sort(
-        ([pathA], [pathB]) => pathB.length - pathA.length,
-      );
+      const sortedEntries = Object.entries(this.flatViewRoutes)
+        .sort(([pathA], [pathB]) => pathB.length - pathA.length)
+        .sort(
+          ([pathA], [pathB]) =>
+            pathB.split(":").length - pathA.split(":").length,
+        );
 
       for (const [pathname, handler] of sortedEntries) {
         const pattern = new URLPattern({ pathname });

@@ -80,7 +80,7 @@ export function useMutation<T extends keyof RPC>(
       }));
       const [inputs = { params: {}, query: {} }, options = defaultOptions] =
         args ?? [];
-      const { pathPrefix } = options;
+      const { pathPrefix = "" } = options;
       const { query = {} } = inputs ?? {};
       const params = "params" in inputs ? inputs.params : {};
       const [method] = String(url).split(":");
