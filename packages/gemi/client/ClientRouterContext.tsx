@@ -100,10 +100,20 @@ export const ClientRouterProvider = (
     }
     return [];
   };
+  const getParams = (pathname: string) => {
+    for (const route of Object.keys(routeManifest)) {
+      const urlPattern = new URLPattern({ pathname: route });
+      if (urlPattern.test({ pathname })) {
+        return urlPattern.exec({ pathname })?.pathname.groups!;
+      }
+    }
+    return {};
+  };
 
   useEffect(() => {
     history?.listen(({ location }) => {
       locationSubject.next(structuredClone(location));
+      setParameters(getParams(location.pathname));
       viewEntriesSubject.current.next(
         (() => {
           if ((location.state as any)?.status === 404) {
