@@ -278,7 +278,7 @@ export const Link = (
 
   return (
     <a
-      data-active={pathname.startsWith(p)}
+      data-active={p === "/" ? pathname === p : pathname.startsWith(p)}
       href={path}
       onClick={(e) => {
         e.preventDefault();
