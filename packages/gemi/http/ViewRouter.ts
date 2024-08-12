@@ -53,9 +53,7 @@ export class ViewRouter {
         exec: async (req: HttpRequest) => {
           let _handler = () =>
             Promise.resolve({
-              data: { [viewPath]: {} },
-              headers: {},
-              head: {},
+              [viewPath]: {},
             });
           if (typeof handlerOrChildren === "function") {
             _handler = handlerOrChildren;
@@ -100,14 +98,9 @@ export class ViewRouter {
       }
       return {
         exec: async (req: HttpRequest) => {
-          let _handler = () =>
-            Promise.resolve({
-              data: { [viewPath]: {} },
-              headers: {},
-              head: {},
-            });
-          if (typeof handler === "function") {
-            _handler = handler;
+          let _handler = () => Promise.resolve({ [viewPath]: {} });
+          if (typeof handlerOrChildren === "function") {
+            _handler = handlerOrChildren;
           }
 
           if (Array.isArray(handlerOrChildren)) {

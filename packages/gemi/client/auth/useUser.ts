@@ -1,11 +1,10 @@
 import { useContext } from "react";
 import { ServerDataContext } from "../ServerDataProvider";
-
 import { useQuery } from "../useQuery";
 
 export function useUser() {
   const { auth } = useContext(ServerDataContext);
-  const { data, loading } = useQuery(
+  const { data, loading, error } = useQuery(
     "GET:/me",
     { params: {}, query: {} },
     {
@@ -18,5 +17,5 @@ export function useUser() {
     return null;
   }
 
-  return data?.user;
+  return { user: data?.user, loading, error };
 }

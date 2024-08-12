@@ -114,6 +114,10 @@ export class HttpRequest<
     this.cookies = cookies;
   }
 
+  public refine(input: T): Record<string, string> {
+    return {};
+  }
+
   private async parseBody() {
     const inputMap = new Input<T>({} as T);
     if (this.rawRequest.headers.get("Content-Type") === "application/json") {
@@ -172,6 +176,15 @@ export class HttpRequest<
           }
         }
       }
+    }
+
+    for (const [key, value] of Object.entries(
+      this.refine(input.toJSON()) ?? {},
+    )) {
+      if (!errors[key]) {
+        errors[key] = [];
+      }
+      errors[key] = [...errors[key], value];
     }
 
     if (Object.keys(errors).length > 0) {
