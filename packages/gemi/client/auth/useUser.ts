@@ -14,7 +14,7 @@ export function useUser() {
   );
 
   if (loading) {
-    return null;
+    return { user: null, loading, error };
   }
 
   return { user: data?.user, loading, error };
