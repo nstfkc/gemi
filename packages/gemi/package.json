@@ -1,6 +1,6 @@
 {
   "name": "gemi",
-  "version": "0.4.28",
+  "version": "0.4.29",
   "devDependencies": {
     "@happy-dom/global-registrator": "^14.12.3",
     "@repo/eslint-config": "*",
@@ -21,15 +21,15 @@
     "gemi": "./dist/bin/index.js"
   },
   "exports": {
-    "./http": "./dist/http/index.js",
-    "./client": "./dist/client/index.js",
-    "./app": "./dist/app/index.js",
-    "./facades": "./dist/facades/index.js",
-    "./email": "./dist/email/index.js",
-    "./vite": "./dist/vite/index.js",
-    "./runtime": "./dist/runtime/index.js",
-    "./server": "./dist/server/index.js",
-    "./kernel": "./dist/kernel/index.js"
+    "./http": "./http/index.ts",
+    "./client": "./client/index.ts",
+    "./app": "./app/index.ts",
+    "./facades": "./facades/index.ts",
+    "./email": "./email/index.ts",
+    "./vite": "./vite/index.ts",
+    "./runtime": "./client/runtime.ts",
+    "./server": "./server/index.ts",
+    "./kernel": "./kernel/index.ts"
   },
   "files": [
     "dist/**/*"
