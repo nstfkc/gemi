@@ -260,9 +260,9 @@ export function useRouter() {
 }
 
 export const Link = (
-  props: Omit<ComponentProps<"a">, "href"> & { href: To },
+  props: Omit<ComponentProps<"a">, "href"> & { href: To; active?: boolean },
 ) => {
-  const { href, onClick, ...rest } = props;
+  const { href, onClick, active = false, ...rest } = props;
   const { push } = useRouter();
   const { pathname } = useLocation();
   let path = "";
@@ -278,7 +278,7 @@ export const Link = (
 
   return (
     <a
-      data-active={p === "/" ? pathname === p : pathname.startsWith(p)}
+      data-active={active || pathname === p}
       href={path}
       onClick={(e) => {
         e.preventDefault();
