@@ -69,7 +69,7 @@ export class RouteHandler<M extends HttpMethod, Input, Output, Params> {
   }
 }
 
-class FileHandler {
+export class FileHandler {
   constructor(...args: ConstructorParameters<typeof RouteHandler>) {
     return new RouteHandler(...args) as any;
   }

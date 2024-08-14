@@ -1,12 +1,17 @@
 import { Middleware } from "../http";
-import { ApiRoutes, RouteHandlers, ApiRouter } from "../http/ApiRouter";
+import {
+  ApiRoutes,
+  RouteHandlers,
+  FileHandler,
+  ApiRouter,
+} from "../http/ApiRouter";
 import { RouterMiddleware } from "../http/Router";
 import { isConstructor } from "../internal/isConstructor";
 
 type ApiRouteExec = any;
 
 function isRouter(
-  routeHandlers: RouteHandlers | (new () => ApiRouter),
+  routeHandlers: RouteHandlers | FileHandler | (new () => ApiRouter),
 ): routeHandlers is new () => ApiRouter {
   return isConstructor(routeHandlers);
 }
