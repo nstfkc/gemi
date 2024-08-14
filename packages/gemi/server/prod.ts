@@ -34,7 +34,9 @@ export async function startProdServer() {
       pathname: "/*.:filetype(png|txt|js|css|jpg|svg|jpeg|ico|ttf)",
     });
 
-    if (pattern.test({ pathname })) {
+    const isApi = pathname.startsWith("/api");
+
+    if (pattern.test({ pathname }) && !isApi) {
       const url = new URL(req.url);
       const filePath = req.url.replace(url.origin, "").split("?")[0];
       const file = Bun.file(

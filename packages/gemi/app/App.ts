@@ -242,6 +242,10 @@ export class App {
             }
           }
 
+          if (data instanceof Response) {
+            return data;
+          }
+
           const headers = new Headers();
 
           headers.append("Content-Type", "application/json");
@@ -346,6 +350,13 @@ export class App {
 
       cookies.forEach((cookie) =>
         headers.append("Set-Cookie", cookie.toString()),
+      );
+
+      headers.append(
+        "Cache-Control",
+        user
+          ? "private, max-age=1200, must-revalidate"
+          : "public, max-age=864000, must-revalidate",
       );
 
       return new Response(

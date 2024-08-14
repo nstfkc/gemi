@@ -1,6 +1,6 @@
 {
   "name": "gemi",
-  "version": "0.4.32",
+  "version": "0.4.33",
   "devDependencies": {
     "@happy-dom/global-registrator": "^14.12.3",
     "@repo/eslint-config": "*",
@@ -29,7 +29,8 @@
     "./vite": "./vite/index.ts",
     "./runtime": "./client/runtime.ts",
     "./server": "./server/index.ts",
-    "./kernel": "./kernel/index.ts"
+    "./kernel": "./kernel/index.ts",
+    "./storage": "./storage/index.ts"
   },
   "files": [
     "dist/**/*"
@@ -49,6 +50,8 @@
     "postpublish": "bun scripts/setupExports.ts dev"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.629.0",
+    "@aws-sdk/s3-request-presigner": "^3.629.0",
     "@prisma/client": "5.17.0",
     "@react-email/components": "^0.0.21",
     "@react-email/render": "0.0.17-canary.0",

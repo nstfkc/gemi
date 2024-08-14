@@ -69,6 +69,12 @@ export class RouteHandler<M extends HttpMethod, Input, Output, Params> {
   }
 }
 
+class FileHandler {
+  constructor(...args: ConstructorParameters<typeof RouteHandler>) {
+    return new RouteHandler(...args) as any;
+  }
+}
+
 export type RouteHandlers =
   | {
       create: RouteHandler<"POST", any, any, any>;
@@ -82,7 +88,10 @@ export type RouteHandlers =
 
 export type ApiRoutes = Record<
   string,
-  RouteHandler<any, any, any, any> | RouteHandlers | typeof ApiRouter
+  | RouteHandler<any, any, any, any>
+  | FileHandler
+  | RouteHandlers
+  | typeof ApiRouter
 >;
 
 export class ApiRouter {
@@ -194,6 +203,20 @@ export class ApiRouter {
       };
     }
     return ResourceRouter;
+  }
+
+  public file<Input, Output, Params>(
+    handler: CallbackHandler<Input, Output, Params>,
+  ): FileHandler;
+  public file<T extends new () => Controller, K extends ControllerMethods<T>>(
+    handler: T,
+    methodName: K,
+  ): FileHandler;
+  public file<
+    T extends CallbackHandler<any, any, any> | (new () => Controller),
+    K extends ControllerMethods<any>,
+  >(handler: T, methodName?: K) {
+    return new FileHandler("GET", handler, methodName);
   }
 }
 
