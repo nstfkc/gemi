@@ -5,7 +5,7 @@ import { ClientRouter } from "./ClientRouter";
 
 export function init(RootLayout: ComponentType<any>) {
   hydrateRoot(
-    document.body,
+    document,
     <ServerDataProvider>
       <ClientRouter RootLayout={RootLayout} />
     </ServerDataProvider>,
