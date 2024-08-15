@@ -4,8 +4,10 @@ import {
   S3Client,
 } from "@aws-sdk/client-s3";
 import { v4 } from "uuid";
+import sharp from "sharp";
 
 import { Buffer } from "node:buffer";
+import { Prettify } from "../utils/type";
 
 interface PutParams {
   name: string;
@@ -18,6 +20,8 @@ interface ReadParams {
   name: string;
   bucket?: string;
 }
+
+type Metadata = Prettify<sharp.Metadata>;
 
 const S3 = new S3Client();
 
@@ -95,6 +99,16 @@ export class Storage {
 
     return name;
   }
+
+  static async metadata(obj: Blob | File): Promise<Partial<Metadata>> {
+    const buffer = Buffer.from(await obj.arrayBuffer());
+    try {
+      return await sharp(buffer).metadata();
+    } catch {
+      return {};
+    }
+  }
+
   static async fetch(params: ReadParams | string) {
     let bucket = process.env.BUCKET_NAME;
     let name: string | undefined;

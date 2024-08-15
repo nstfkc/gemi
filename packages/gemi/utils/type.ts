@@ -7,3 +7,7 @@ export type ToSingular<T extends Plural> = T extends `${infer R}${PluralSuffix}`
   : T;
 
 export type WithId<T extends string> = `${T}Id`;
+
+export type Prettify<T> = {
+  [P in keyof T]: T[P];
+} & {};
