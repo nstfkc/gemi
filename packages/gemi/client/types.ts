@@ -1,11 +1,11 @@
-import { UnwrapPromise } from "@prisma/client/runtime/library";
 import type { ViewHandler } from "../http";
+import type { UnwrapPromise } from "../utils/type";
 import type { ViewRPC } from "./rpc";
 
 type ComponentBranch = [string, ComponentBranch[]];
 export type ComponentTree = ComponentBranch[];
 
-export type ViewProps<T extends keyof ViewRPC> =
-  ViewRPC[T] extends ViewHandler<infer I, infer O, infer P>
-    ? UnwrapPromise<O>
-    : never;
+type ViewKeys = keyof ViewRPC;
+
+export type ViewProps<T extends ViewKeys> =
+  ViewRPC[T] extends ViewHandler<any, infer O, any> ? UnwrapPromise<O> : never;

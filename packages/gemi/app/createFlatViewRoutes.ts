@@ -1,9 +1,11 @@
-import { ViewRoutes, ViewHandler } from "../http/ViewRouter";
+import { HttpRequest } from "../http";
+import { ViewRoutes } from "../http/ViewRouter";
 
+export type ViewRouteExec = (req: HttpRequest<any, any>) => any; // TODO: fix type
 export function createFlatViewRoutes(routes: ViewRoutes) {
   const flatRoutes: Record<
     string,
-    { exec: ViewHandler<any, any, any>[]; middleware: (string | any)[] }
+    { exec: ViewRouteExec[]; middleware: (string | any)[] }
   > = {};
 
   for (const [routePath, viewConfigOrViewRouter] of Object.entries(routes)) {

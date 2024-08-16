@@ -14,7 +14,10 @@ import type { ServerWebSocket } from "bun";
 import { flattenComponentTree } from "../client/helpers/flattenComponentTree";
 
 import { createComponentTree } from "./createComponentTree";
-import { createFlatViewRoutes } from "./createFlatViewRoutes";
+import {
+  createFlatViewRoutes,
+  type ViewRouteExec,
+} from "./createFlatViewRoutes";
 import { createRouteManifest } from "./createRouteManifest";
 import { createFlatApiRoutes } from "./createFlatApiRoutes";
 
@@ -25,8 +28,6 @@ import { ComponentType, createElement, Fragment } from "react";
 import { isConstructor } from "../internal/isConstructor";
 import { HttpRequest } from "../http";
 import { Kernel } from "../kernel";
-
-type ViewRouteExec = (req: HttpRequest<any, any>) => any; // TODO: fix type
 
 type ApiRouteExec = any; // TODO: fix type
 

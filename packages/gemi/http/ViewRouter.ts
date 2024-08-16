@@ -1,4 +1,4 @@
-import { KeyAndValue, KeyAndValueToObject } from "../internal/type-utils";
+import type { KeyAndValue, KeyAndValueToObject } from "../internal/type-utils";
 import { Controller } from "./Controller";
 import { HttpRequest } from "./HttpRequest";
 
@@ -72,7 +72,9 @@ export class ViewRoute<Input, Output, Params> {
   }
 
   async run(req: HttpRequest<Input, Params>) {
-    return this.handler(req);
+    return {
+      [this.viewPath]: await this.handler(req),
+    };
   }
 
   middleware(middlewares: string[]) {
@@ -125,8 +127,10 @@ export class LayoutRoute<T extends ViewRoutes, Input, Output, Params> {
     }
   }
 
-  run(req: HttpRequest<Input, Params>) {
-    return this.handler(req);
+  async run(req: HttpRequest<Input, Params>) {
+    return {
+      [this.viewPath]: await this.handler(req),
+    };
   }
 
   middleware(middlewares: string[]) {
@@ -198,7 +202,14 @@ type LayoutRouteParser<T, Prefix extends PropertyKey = ""> =
         | KeyAndValue<`layout:${Prefix & string}`, ViewHandler<I, O, P>>
     : never;
 
-type ParsePrefixAndKey<P extends string, K extends string> = `${P}${K}`;
+type ParsePrefixAndKey<
+  P extends PropertyKey,
+  K extends PropertyKey,
+> = `${P & string}${K & string}` extends "//"
+  ? "/"
+  : `${P & string}${K & string}` extends `${infer U}//${infer T}`
+    ? `${U}/${T}`
+    : `${P & string}${K & string}`;
 
 type RouterInstanceParser<
   T extends new () => ViewRouter,
@@ -211,11 +222,11 @@ type RoutesParser<
   K extends keyof T = keyof T,
 > = K extends any
   ? T[K] extends new () => ViewRouter
-    ? RouterInstanceParser<T[K], `${Prefix & string}${K & string}`>
+    ? RouterInstanceParser<T[K], ParsePrefixAndKey<Prefix, K>>
     : T[K] extends LayoutRoute<any, any, any, any>
-      ? LayoutRouteParser<T[K], `${Prefix & string}${K & string}`>
+      ? LayoutRouteParser<T[K], ParsePrefixAndKey<Prefix, K>>
       : T[K] extends ViewRoute<any, any, any>
-        ? ViewRouteParser<T[K], `${Prefix & string}${K & string}`>
+        ? ViewRouteParser<T[K], ParsePrefixAndKey<Prefix, K>>
         : never
   : never;
 

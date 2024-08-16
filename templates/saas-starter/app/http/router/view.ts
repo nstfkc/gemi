@@ -6,7 +6,9 @@ class AppRouter extends ViewRouter {
 
   routes = {
     "/": this.layout("app/AppLayout", {
-      "/dashboard": this.view("Dashboard"),
+      "/dashboard": this.view("Dashboard", () => {
+        return { title: "Dashboard" };
+      }),
     }),
   };
 }
