@@ -1,17 +1,5 @@
 import { Subject } from "../utils/Subject";
-
-function applyParams(url: string, params: Record<string, any> = {}) {
-  let out = url;
-
-  for (const segment of url.split("/")) {
-    if (segment.includes(":")) {
-      const key = segment.split(":")[1];
-      out = out.replace(`:${key}`, params[key]);
-    }
-  }
-
-  return out;
-}
+import { applyParams } from "../utils/applyParams";
 
 type State = {
   data: any;

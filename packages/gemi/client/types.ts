@@ -6,6 +6,8 @@ import type { ViewRPC } from "./rpc";
 type ComponentBranch = [string, ComponentBranch[]];
 export type ComponentTree = ComponentBranch[];
 
+export type ViewPaths = ViewKeys<keyof ViewRPC>;
+
 type ViewKeys<T> = T extends keyof ViewRPC
   ? T extends `view:${infer K}`
     ? K
@@ -27,3 +29,13 @@ export type LayoutProps<T extends LayoutKeys<keyof ViewRPC>> =
   ViewRPC[`layout:${T}`] extends ViewHandler<any, infer O, any>
     ? PropsWithChildren<UnwrapPromise<O>>
     : never;
+
+export type UrlParser<T extends string> = string extends T
+  ? Record<string, string>
+  : T extends `${infer _Start}/:${infer Param}?/${infer Rest}`
+    ? { [K in Param]?: string } & UrlParser<`/${Rest}`>
+    : T extends `${infer _Start}/:${infer Param}/${infer Rest}`
+      ? { [K in Param]: string } & UrlParser<`/${Rest}`>
+      : T extends `${infer _Start}/:${infer Param}`
+        ? { [K in Param]: string }
+        : never;

@@ -7,14 +7,10 @@ export {
   ValidationErrors,
   FormField,
 } from "./Mutation";
-export {
-  Link,
-  useLocation,
-  useParams,
-  useRouter,
-  useSearchParams,
-} from "./ClientRouterContext";
-
+export { useLocation, useParams } from "./ClientRouterContext";
+export { useSearchParams } from "./useSearchParams";
+export { useRouter } from "./useRouter";
+export { Link } from "./Link";
 export { init } from "./init";
 export { createRoot } from "./createRoot";
 
