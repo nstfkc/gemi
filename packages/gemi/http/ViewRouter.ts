@@ -205,13 +205,14 @@ type LayoutRouteParser<T, Prefix extends PropertyKey = ""> =
 type ParsePrefixAndKey<
   P extends PropertyKey,
   K extends PropertyKey,
-> = `${P & string}${K & string}` extends "//"
+  U = `${P & string}${K & string}`,
+> = U extends "//"
   ? "/"
-  : `${P & string}${K & string}` extends `${infer U}//${infer T}`
-    ? `${U}/${T}`
-    : `${P & string}${K & string}` extends `${infer U}/`
-      ? U
-      : `${P & string}${K & string}`;
+  : U extends `${infer T1}//${infer T2}`
+    ? `${T1}/${T2}`
+    : U extends `${infer T1}/${infer T2}/`
+      ? `${T1}/${T2}`
+      : U;
 
 type RouterInstanceParser<
   T extends new () => ViewRouter,

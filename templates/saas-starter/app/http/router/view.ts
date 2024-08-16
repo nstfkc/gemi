@@ -5,7 +5,8 @@ class AppRouter extends ViewRouter {
   middlewares = ["auth"];
 
   routes = {
-    "/": this.layout("app/AppLayout", {
+    "/": this.layout("app/AppLayout", [HomeController, "index"], {
+      "/": this.view("Dashboard", [HomeController, "index"]),
       "/dashboard": this.view("Dashboard", () => {
         return { title: "Dashboard" };
       }),

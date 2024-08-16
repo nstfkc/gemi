@@ -5,7 +5,10 @@ async function main(mode = "dev") {
   const packageJSONContent = await packageJSON.json();
   packageJSONContent.exports = packageJSONExportsContent[mode];
 
-  await Bun.write("package.json", JSON.stringify(packageJSONContent, null, 2));
+  await Bun.write(
+    "package.json",
+    `${JSON.stringify(packageJSONContent, null, 2)}\n`,
+  );
 }
 
 const args = process.argv.slice(2);
