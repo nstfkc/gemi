@@ -209,7 +209,9 @@ type ParsePrefixAndKey<
   ? "/"
   : `${P & string}${K & string}` extends `${infer U}//${infer T}`
     ? `${U}/${T}`
-    : `${P & string}${K & string}`;
+    : `${P & string}${K & string}` extends `${infer U}/`
+      ? U
+      : `${P & string}${K & string}`;
 
 type RouterInstanceParser<
   T extends new () => ViewRouter,
