@@ -1,37 +1,31 @@
-import { ViewChildren, ViewRouteExec } from "../http/ViewRouter";
+import { ViewRoutes, ViewHandler } from "../http/ViewRouter";
 
-export function createFlatViewRoutes(routes: ViewChildren) {
+export function createFlatViewRoutes(routes: ViewRoutes) {
   const flatRoutes: Record<
     string,
-    { exec: ViewRouteExec[]; middleware: (string | any)[] }
+    { exec: ViewHandler<any, any, any>[]; middleware: (string | any)[] }
   > = {};
 
   for (const [routePath, viewConfigOrViewRouter] of Object.entries(routes)) {
-    if ("prepare" in viewConfigOrViewRouter) {
-      const route = viewConfigOrViewRouter.prepare();
+    if ("run" in viewConfigOrViewRouter) {
+      const route = viewConfigOrViewRouter;
 
-      if (Object.entries(route.children).length > 0) {
-        const result = createFlatViewRoutes(route.children);
-
-        if (route.kind === "view") {
-          flatRoutes[routePath] = {
-            exec: [route.exec],
-            middleware: route.middlewares,
-          };
-        }
+      if ("children" in route) {
+        const children = new route.children();
+        const result = createFlatViewRoutes(children.routes);
 
         for (const [path, { exec, middleware }] of Object.entries(result)) {
           const key = routePath === "/" ? path : `${routePath}${path}`;
           const _key = path === "/" && routePath !== "/" ? routePath : key;
 
           flatRoutes[_key] = {
-            exec: [route.exec, ...exec],
+            exec: [route.run.bind(route), ...exec],
             middleware: [...route.middlewares, ...middleware],
           };
         }
       } else {
         flatRoutes[routePath] = {
-          exec: [route.exec],
+          exec: [route.run.bind(route)],
           middleware: route.middlewares,
         };
       }

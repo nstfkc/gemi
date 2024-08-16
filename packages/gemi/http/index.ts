@@ -1,6 +1,6 @@
 export { Controller, ResourceController } from "./Controller";
 export { ApiRouter, type CreateRPC } from "./ApiRouter";
-export { ViewRouter } from "./ViewRouter";
+export { ViewRouter, type CreateViewRPC, type ViewHandler } from "./ViewRouter";
 export { ValidationError } from "./Router";
 export { HttpRequest } from "./HttpRequest";
 export { Middleware } from "./Middleware";

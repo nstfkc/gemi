@@ -1,5 +1,5 @@
 import type { ApiRouter } from "../http/ApiRouter";
-import { ViewRouter, type ViewRouteExec } from "../http/ViewRouter";
+import { ViewRouter } from "../http/ViewRouter";
 // @ts-ignore
 import { URLPattern } from "urlpattern-polyfill";
 import { generateETag } from "../server/generateEtag";
@@ -25,6 +25,8 @@ import { ComponentType, createElement, Fragment } from "react";
 import { isConstructor } from "../internal/isConstructor";
 import { HttpRequest } from "../http";
 import { Kernel } from "../kernel";
+
+type ViewRouteExec = (req: HttpRequest<any, any>) => any; // TODO: fix type
 
 type ApiRouteExec = any; // TODO: fix type
 

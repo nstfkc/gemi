@@ -18,7 +18,8 @@ export {
 export { init } from "./init";
 export { createRoot } from "./createRoot";
 
-export type { RPC } from "./rpc";
+export type { RPC, ViewRPC } from "./rpc";
+export { type ViewProps } from "./types";
 
 export { Image } from "./Image";
 

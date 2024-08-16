@@ -1,17 +1,18 @@
-import { ViewChildren } from "../http/ViewRouter";
+import { ViewRoutes } from "../http/ViewRouter";
 
-export function createRouteManifest(routes: ViewChildren) {
+export function createRouteManifest(routes: ViewRoutes) {
   const routeManifest: Record<string, string[]> = {};
   for (const [routePath, routeHandler] of Object.entries(routes)) {
-    if ("prepare" in routeHandler) {
-      const { viewPath, children, kind } = routeHandler.prepare();
+    if ("run" in routeHandler) {
+      const viewPath = routeHandler.viewPath;
 
-      if (kind === "view") {
+      if ("children" in routeHandler) {
         routeManifest[routePath] = [viewPath];
       }
 
-      if (Object.entries(children).length > 0) {
-        const manifest = createRouteManifest(children);
+      if ("children" in routeHandler) {
+        const children = new routeHandler.children();
+        const manifest = createRouteManifest(children.routes);
         for (const [path, viewPaths] of Object.entries(manifest)) {
           const key = routePath === "/" ? path : `${routePath}${path}`;
           const _key = path === "/" && routePath !== "/" ? routePath : key;
