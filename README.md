@@ -44,7 +44,7 @@ Install bun
 Linux & macOS
 
 ```
-curl -fsSL https://bun.sh/install | bash
+sudo apt install unzip && curl -fsSL https://bun.sh/install | bash
 ```
 
 Windows
