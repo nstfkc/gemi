@@ -1,4 +1,3 @@
-import { RequestBreakerError } from "./Error";
 import { RequestContext } from "./requestContext";
 import { ValidationError } from "./Router";
 
@@ -22,11 +21,67 @@ class Input<T extends Record<string, any>> {
   }
 }
 
+// Formats B KB MB GB TB
+// e.g parseFileSizeString("1MB") => 1024 * 1024
+function parseFileSizeString(size: string) {
+  const [number, unit] = size.match(/\d+|\D+/g) ?? [];
+  if (!number || !unit) {
+    return 0;
+  }
+  const fileSize = parseInt(number);
+  switch (unit) {
+    case "B":
+      return fileSize;
+    case "KB":
+      return fileSize * 1024;
+    case "MB":
+      return fileSize * 1024 * 1024;
+    case "GB":
+      return fileSize * 1024 * 1024 * 1024;
+    case "TB":
+      return fileSize * 1024 * 1024 * 1024 * 1024;
+    default:
+      return 0;
+  }
+}
+
+// Formats png, jpg, ttf, excel, csv, word, pdf, json
+// Eg. png => image/png
+function parseFileTypeString(type: string) {
+  switch (type) {
+    case "image":
+      return "image";
+    case "png":
+      return "image/png";
+    case "jpg":
+      return "image/jpeg";
+    case "jpeg":
+      return "image/jpeg";
+    case "ttf":
+      return "font/ttf";
+    case "excel":
+      return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+    case "csv":
+      return "text/csv";
+    case "word":
+      return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    case "pdf":
+      return "application/pdf";
+    case "json":
+      return "application/json";
+    default:
+      return type;
+  }
+}
+
 function validate(ruleName: string) {
   const [rule, param] = ruleName.split(":");
   switch (rule) {
     case "required":
       return (value: any) => {
+        if (value instanceof Blob) {
+          return value.size > 0;
+        }
         return value !== null && value !== undefined && value?.length > 0;
       };
     case "password":
@@ -59,6 +114,25 @@ function validate(ruleName: string) {
         const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
         return emailRegex.test(value);
       };
+    case "file":
+      return (value: any) => {
+        return value instanceof Blob;
+      };
+    case "fileType":
+      return (value: Blob) => {
+        if (value instanceof Blob) {
+          const parsedType = parseFileTypeString(param);
+          return value.type.startsWith(parsedType);
+        }
+      };
+
+    case "fileSize":
+      return (value: Blob) => {
+        if (value instanceof Blob) {
+          const absoluteSize = parseFileSizeString(param);
+          return value.size <= absoluteSize;
+        }
+      };
     default:
       return () => true;
   }
@@ -70,13 +144,19 @@ type BooleanType = "boolean";
 type MinLengthType = `min:${number}`;
 type MaxLengthType = `max:${number}`;
 type RequiredType = "required";
+type FileType = "file";
+type FileTypeType = "fileType:${string}";
+type FileSizeType = "fileSize:${string}";
 type SchemaKey =
   | StringType
   | NumberType
   | BooleanType
   | MinLengthType
   | MaxLengthType
-  | RequiredType;
+  | RequiredType
+  | FileType
+  | FileTypeType
+  | FileSizeType;
 
 export type Schema<T extends Body> = Record<
   keyof T,
@@ -164,16 +244,27 @@ export class HttpRequest<
       for (const [rule, message] of Object.entries(rules)) {
         const validator = validate(rule);
 
-        if (!validator(input.get(key))) {
-          if (!errors[key]) {
-            errors[key] = [];
-          }
-          if (rule === "required") {
-            errors[key] = [String(message)];
-            break;
-          } else {
-            errors[key].push(String(message));
-          }
+        let _message = message;
+        let _isValid = false;
+        if (typeof message === "function") {
+          _message = message(input.get(key));
+          _isValid = typeof _message === "undefined";
+        } else {
+          _isValid = validator(input.get(key));
+        }
+
+        if (_isValid) {
+          continue;
+        }
+
+        if (!errors[key]) {
+          errors[key] = [];
+        }
+        if (rule === "required") {
+          errors[key] = [String(_message)];
+          break;
+        } else {
+          errors[key].push(String(_message));
         }
       }
     }

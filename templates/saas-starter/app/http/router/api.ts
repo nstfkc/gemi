@@ -1,5 +1,5 @@
 import { prisma } from "@/app/database/prisma";
-import { ApiRouter, HttpRequest } from "gemi/http";
+import { ApiRouter, Controller, HttpRequest } from "gemi/http";
 import { Storage } from "gemi/storage";
 
 class TestRouter extends ApiRouter {
@@ -8,6 +8,34 @@ class TestRouter extends ApiRouter {
       return {};
     }),
   };
+}
+
+class FileRequest extends HttpRequest<{ file: Blob }> {
+  schema = {
+    file: {
+      "fileType:jsonx": "File must be a JSON",
+      custom: (file: Blob) => {
+        if (file.size > 500) {
+          return "File size must be less than 0.5KB";
+        }
+      },
+    },
+  };
+}
+
+class TestController extends Controller {
+  requests = {
+    file: FileRequest,
+  };
+  async file(req: FileRequest) {
+    const input = await req.input();
+
+    const file = input.get("file");
+    return {
+      type: file.type,
+      size: file.size,
+    };
+  }
 }
 
 export default class extends ApiRouter {
@@ -24,16 +52,6 @@ export default class extends ApiRouter {
     }),
     "/test": TestRouter,
 
-    "/file": this.post(async (req: HttpRequest<{ file: Blob }>) => {
-      const input = await req.input();
-      const file = input.get("file");
-      const { width = 0, height = 0 } = await Storage.metadata(file);
-
-      return { width, height, type: file.type, size: file.size };
-
-      const data = await Storage.put(file);
-
-      return { data };
-    }),
+    "/file": this.post(TestController, "file"),
   };
 }
