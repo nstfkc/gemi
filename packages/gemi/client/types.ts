@@ -7,6 +7,7 @@ type ComponentBranch = [string, ComponentBranch[]];
 export type ComponentTree = ComponentBranch[];
 
 export type ViewPaths = ViewKeys<keyof ViewRPC>;
+export type ViewRoute = keyof ViewRPC;
 
 type ViewKeys<T> = T extends keyof ViewRPC
   ? T extends `view:${infer K}`

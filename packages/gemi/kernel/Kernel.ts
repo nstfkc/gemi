@@ -3,18 +3,22 @@ import { AuthenticationServiceProvider } from "../auth/AuthenticationServiceProv
 import { kernelContext } from "./context";
 import { MiddlewareServiceProvider } from "../http/MiddlewareServiceProvider";
 import { PoliciesServiceProvider } from "../http/PoliciesServiceProvider";
+import { I18nServiceProvider } from "../http/I18nServiceProvider";
+import { I18nServiceContainer } from "../http/I18nServiceContainer";
 
 export class Kernel {
   protected emailServiceProvider = EmailServiceProvider;
   protected authenticationServiceProvider = AuthenticationServiceProvider;
   protected middlewareServiceProvider = MiddlewareServiceProvider;
   protected policiesServiceProvider = PoliciesServiceProvider;
+  protected i18nServiceProvider = I18nServiceProvider;
 
   services: {
     emailServiceProvider: EmailServiceProvider;
     authenticationServiceProvider: AuthenticationServiceProvider;
     middlewareServiceProvider: MiddlewareServiceProvider;
     policiesServiceProvider: PoliciesServiceProvider;
+    i18nServiceContainer: I18nServiceContainer;
   };
 
   getServices = () => {
@@ -24,6 +28,9 @@ export class Kernel {
         authenticationServiceProvider: new this.authenticationServiceProvider(),
         middlewareServiceProvider: new this.middlewareServiceProvider(),
         policiesServiceProvider: new this.policiesServiceProvider(),
+        i18nServiceContainer: new I18nServiceContainer(
+          new this.i18nServiceProvider(),
+        ),
       };
     }
     return this.services;

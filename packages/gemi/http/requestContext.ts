@@ -6,6 +6,7 @@ const requestContext = new AsyncLocalStorage<Store>();
 
 class Store {
   cookies: Set<Cookie> = new Set();
+  headers: Headers = new Headers();
   user: any = null;
   req: HttpRequest | null = null;
 
@@ -15,6 +16,10 @@ class Store {
 
   setCookie(name: string, value: string, options: CreateCookieOptions = {}) {
     this.cookies.add(new Cookie(name, value, options));
+  }
+
+  setHeaders(name: string, value: string) {
+    this.headers.set(name, value);
   }
 
   setUser(user: any) {

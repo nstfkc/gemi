@@ -2,6 +2,7 @@ import { useContext } from "react";
 import { ClientRouterContext } from "./ClientRouterContext";
 import type { UrlParser, ViewPaths } from "./types";
 import { applyParams } from "../utils/applyParams";
+import { I18nContext } from "./i18n/I18nContext";
 
 type Options<T extends ViewPaths> =
   UrlParser<T> extends never
@@ -16,8 +17,14 @@ type Options<T extends ViewPaths> =
       };
 
 export function useRouter() {
-  const { updatePageData, history, getViewPathsFromPathname } =
-    useContext(ClientRouterContext);
+  const {
+    updatePageData,
+    history,
+    getViewPathsFromPathname,
+    getRoutePathnameFromHref,
+  } = useContext(ClientRouterContext);
+
+  const { fetchTranslations } = useContext(I18nContext);
 
   function action(pushOrReplace: "push" | "replace") {
     return async <T extends ViewPaths>(
@@ -58,8 +65,11 @@ export function useRouter() {
         return;
       }
 
+      const routePathname = getRoutePathnameFromHref(path);
+
       const [res] = await Promise.all([
         fetch(fetchPath),
+        fetchTranslations(routePathname),
         ...components.map((component) => (window as any).loaders[component]()),
       ]);
 

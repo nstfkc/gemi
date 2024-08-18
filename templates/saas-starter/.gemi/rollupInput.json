@@ -1,5 +1,13 @@
 [
   "/app/client.tsx",
+  "/app/views/PublicLayout.tsx",
   "/app/views/Home.tsx",
-  "/app/views/About.tsx"
+  "/app/views/Test.tsx",
+  "/app/views/About.tsx",
+  "/app/views/app/AppLayout.tsx",
+  "/app/views/Dashboard.tsx",
+  "/app/views/auth/SignIn.tsx",
+  "/app/views/auth/SignUp.tsx",
+  "/app/views/auth/ResetPassword.tsx",
+  "/app/views/auth/ForgotPassword.tsx"
 ]

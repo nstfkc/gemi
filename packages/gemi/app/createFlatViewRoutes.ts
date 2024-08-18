@@ -45,5 +45,11 @@ export function createFlatViewRoutes(routes: ViewRoutes) {
     }
   }
 
-  return flatRoutes;
+  return Object.fromEntries(
+    Object.entries(flatRoutes).sort(([a], [b]) => {
+      const x = a.split("/").length + a.split(":").length;
+      const y = b.split("/").length + b.split(":").length;
+      return x - y;
+    }),
+  );
 }

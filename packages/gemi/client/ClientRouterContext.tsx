@@ -1,21 +1,13 @@
-import {
-  type History,
-  type To,
-  type Location,
-  createBrowserHistory,
-} from "history";
+import { type History, type Location, createBrowserHistory } from "history";
 import {
   createContext,
-  startTransition,
   useContext,
   useEffect,
   useRef,
   useState,
-  type ComponentProps,
   type PropsWithChildren,
 } from "react";
 import { Subject } from "../utils/Subject";
-import { ComponentsContext } from "./ComponentContext";
 import { URLPattern } from "urlpattern-polyfill";
 
 interface ClientRouterContextValue {
@@ -27,6 +19,7 @@ interface ClientRouterContextValue {
   getScrollPosition: (path: string) => number;
   params: Record<string, string>;
   getViewPathsFromPathname: (pathname: string) => string[];
+  getRoutePathnameFromHref: (href: string) => string | null;
 }
 
 export const ClientRouterContext = createContext(
@@ -91,23 +84,38 @@ export const ClientRouterProvider = (
     );
   };
 
-  const getViewPathsFromPathname = (pathname: string) => {
-    for (const [route, views] of Object.entries(routeManifest)) {
-      const urlPattern = new URLPattern({ pathname: route });
-      if (urlPattern.test({ pathname })) {
-        return views;
-      }
-    }
-    return [];
-  };
-  const getParams = (pathname: string) => {
+  const findMatchingRouteFromParams = (pathname: string) => {
+    const candidates: string[] = [];
     for (const route of Object.keys(routeManifest)) {
       const urlPattern = new URLPattern({ pathname: route });
       if (urlPattern.test({ pathname })) {
-        return urlPattern.exec({ pathname })?.pathname.groups!;
+        candidates.push(route);
       }
     }
-    return {};
+    const sortedCandidates = candidates.sort((a, b) => {
+      const x = a.split("/").length + a.split(":").length;
+      const y = b.split("/").length + b.split(":").length;
+      return x - y;
+    });
+
+    const [route] = sortedCandidates ?? [];
+    return route;
+  };
+
+  const getViewPathsFromPathname = (pathname: string) => {
+    const route = findMatchingRouteFromParams(pathname);
+    return routeManifest[route] ?? [];
+  };
+
+  const getRoutePathnameFromHref = (href: string) => {
+    const route = findMatchingRouteFromParams(href);
+    return route;
+  };
+
+  const getParams = (pathname: string) => {
+    const route = findMatchingRouteFromParams(pathname);
+    const urlPattern = new URLPattern({ pathname: route });
+    return urlPattern.exec({ pathname })?.pathname.groups!;
   };
 
   useEffect(() => {
@@ -156,6 +164,7 @@ export const ClientRouterProvider = (
         viewEntriesSubject: viewEntriesSubject.current,
         updatePageData,
         getPageData,
+        getRoutePathnameFromHref,
       }}
     >
       {children}

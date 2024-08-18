@@ -195,6 +195,11 @@ export class HttpRequest<
   }
 
   public async input(): Promise<Input<T>> {
+    if (this.rawRequest.method === "GET") {
+      const url = new URL(this.rawRequest.url);
+      const params = Object.fromEntries(url.searchParams.entries());
+      return this.validateInput(new Input<T>(params as T));
+    }
     return this.validateInput(await this.parseBody());
   }
 

@@ -1,4 +1,5 @@
 import { createContext, type PropsWithChildren } from "react";
+import type { Translations } from "./i18n/I18nContext";
 import type { ComponentTree } from "./types";
 
 type Data = Record<string, any>;
@@ -13,6 +14,7 @@ export interface ServerDataContextValue {
     is404: boolean;
     searchParams: string;
   };
+  i18n: Translations;
   componentTree: ComponentTree;
   auth: {
     user: {

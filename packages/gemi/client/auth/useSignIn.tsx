@@ -10,16 +10,11 @@ const defaultArgs: UseSignInArgs = {
 };
 
 export function useSignIn(args: UseSignInArgs = defaultArgs) {
-  const { mutate } = useQuery(
-    "GET:/me",
-    { params: {}, query: {} },
-    { pathPrefix: "/auth" },
-  );
+  const { mutate } = useQuery("GET:/auth/me", { params: {}, query: {} });
   return useMutation(
-    "POST:/sign-in",
+    "POST:/auth/sign-in",
     {},
     {
-      pathPrefix: "/auth",
       onSuccess: ({ user }) => {
         args.onSuccess(user);
         mutate(user);

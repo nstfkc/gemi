@@ -28,6 +28,7 @@ import { ComponentType, createElement, Fragment } from "react";
 import { isConstructor } from "../internal/isConstructor";
 import { HttpRequest } from "../http";
 import { Kernel } from "../kernel";
+import { I18nServiceContainer } from "../http/I18nServiceContainer";
 
 type ApiRouteExec = any; // TODO: fix type
 
@@ -79,6 +80,7 @@ export class App {
   private viewRouter: new () => ViewRouter;
   private Root: ComponentType;
   private kernel: Kernel;
+  private i18nServiceContainer: I18nServiceContainer;
 
   constructor(params: AppParams) {
     this.params = params;
@@ -89,13 +91,16 @@ export class App {
 
     this.prepare();
     this.appId = generateETag(Date.now());
+
+    this.i18nServiceContainer = this.kernel.getServices().i18nServiceContainer;
+    this.i18nServiceContainer.boot();
   }
 
   private prepare() {
     const params = this.params;
     this.middlewareAliases = params.middlewareAliases ?? {};
 
-    const kernelServices = this.kernel.getServices.call(this.kernel);
+    const kernelServices = this.kernel.getServices();
 
     const authBasePath = kernelServices.authenticationServiceProvider.basePath;
 
@@ -106,6 +111,8 @@ export class App {
     let apiRouters = {
       "/": this.apiRouter,
       [authBasePath]: kernelServices.authenticationServiceProvider.routers.api,
+      "/__gemi__/services/i18n":
+        kernelServices.i18nServiceContainer.routers.api,
     };
 
     for (const Plugin of params.plugins ?? []) {
@@ -126,9 +133,6 @@ export class App {
     this.flatViewRoutes = createFlatViewRoutes(viewRouters);
     this.componentTree = createComponentTree(viewRouters);
     this.routeManifest = createRouteManifest(viewRouters);
-    // Handle view routes
-
-    // Handle api routes
     this.flatApiRoutes = createFlatApiRoutes(apiRouters);
   }
 
@@ -147,7 +151,7 @@ export class App {
       .map((aliasOrTest) => {
         if (typeof aliasOrTest === "string") {
           const alias = aliasOrTest;
-          const kernelServices = this.kernel.getServices.call(this.kernel);
+          const kernelServices = this.kernel.getServices();
           const Middleware =
             kernelServices.middlewareServiceProvider.aliases[alias];
           if (Middleware) {
@@ -182,89 +186,92 @@ export class App {
     const url = new URL(req.url);
 
     const apiPath = url.pathname.replace("/api", "");
-    for (const [path, handler] of Object.entries(this.flatApiRoutes)) {
+
+    let handler: (typeof this.flatApiRoutes)[string];
+    let params: Record<string, any> = {};
+    for (const [path] of Object.entries(this.flatApiRoutes)) {
       const pattern = new URLPattern({ pathname: path });
       if (pattern.test({ pathname: apiPath })) {
-        const params = pattern.exec({ pathname: apiPath })?.pathname.groups!;
-        if (!handler[req.method]) {
-          return new Response(
-            JSON.stringify({ error: { message: "Not found" } }),
-          );
-        }
-        const exec = handler[req.method].exec;
-        const middlewares = handler[req.method].middleware;
-
-        const reqWithMiddlewares = this.runMiddleware(middlewares);
-
-        return await RequestContext.run(async () => {
-          const httpRequest = new HttpRequest(req, params);
-
-          const ctx = RequestContext.getStore();
-          ctx.setRequest(httpRequest);
-
-          let handler = exec
-            ? () => exec(httpRequest, params)
-            : () => Promise.resolve({});
-
-          try {
-            await reqWithMiddlewares(httpRequest);
-          } catch (err) {
-            if (err.kind === GEMI_REQUEST_BREAKER_ERROR) {
-              const { status = 400, data, headers } = err.payload.api;
-
-              return new Response(JSON.stringify(data), {
-                status,
-                headers: {
-                  "Content-Type": "application/json",
-                  ...headers,
-                },
-              });
-            } else {
-              console.error(err);
-              throw err;
-            }
-          }
-
-          let data = {};
-          try {
-            data = await handler();
-          } catch (err) {
-            if (err.kind === GEMI_REQUEST_BREAKER_ERROR) {
-              const { status = 400, data, headers } = err.payload.api;
-
-              return new Response(JSON.stringify(data), {
-                status,
-                headers: {
-                  "Content-Type": "application/json",
-                  ...headers,
-                },
-              });
-            } else {
-              console.error(err);
-              throw err;
-            }
-          }
-
-          if (data instanceof Response) {
-            return data;
-          }
-
-          const headers = new Headers();
-
-          headers.append("Content-Type", "application/json");
-          ctx.cookies.forEach((cookie) =>
-            headers.append("Set-Cookie", cookie.toString()),
-          );
-
-          return new Response(JSON.stringify(data), {
-            headers,
-          });
-        });
+        handler = this.flatApiRoutes[path];
+        params = pattern.exec({ pathname: apiPath })?.pathname.groups!;
+        break;
       }
     }
 
-    return new Response(JSON.stringify({ error: { message: "Not found" } }), {
-      status: 404,
+    if (!handler || !handler[req.method]) {
+      return new Response(JSON.stringify({ error: { message: "Not found" } }), {
+        status: 404,
+      });
+    }
+
+    const exec = handler[req.method].exec;
+    const middlewares = handler[req.method].middleware;
+
+    const reqWithMiddlewares = this.runMiddleware(middlewares);
+
+    return await RequestContext.run(async () => {
+      const httpRequest = new HttpRequest(req, params);
+
+      const ctx = RequestContext.getStore();
+      ctx.setRequest(httpRequest);
+
+      let handler = exec
+        ? () => exec(httpRequest, params)
+        : () => Promise.resolve({});
+
+      try {
+        await reqWithMiddlewares(httpRequest);
+      } catch (err) {
+        if (err.kind === GEMI_REQUEST_BREAKER_ERROR) {
+          const { status = 400, data, headers } = err.payload.api;
+
+          return new Response(JSON.stringify(data), {
+            status,
+            headers: {
+              "Content-Type": "application/json",
+              ...headers,
+            },
+          });
+        } else {
+          console.error(err);
+          throw err;
+        }
+      }
+
+      let data = {};
+      try {
+        data = await handler();
+      } catch (err) {
+        if (err.kind === GEMI_REQUEST_BREAKER_ERROR) {
+          const { status = 400, data, headers } = err.payload.api;
+
+          return new Response(JSON.stringify(data), {
+            status,
+            headers: {
+              "Content-Type": "application/json",
+              ...headers,
+            },
+          });
+        } else {
+          console.error(err);
+          throw err;
+        }
+      }
+
+      if (data instanceof Response) {
+        return data;
+      }
+
+      const headers = ctx.headers;
+
+      headers.append("Content-Type", "application/json");
+      ctx.cookies.forEach((cookie) =>
+        headers.append("Set-Cookie", cookie.toString()),
+      );
+
+      return new Response(JSON.stringify(data), {
+        headers,
+      });
     });
   }
 
@@ -284,14 +291,8 @@ export class App {
       let middlewares: (RouterMiddleware | string)[] = [];
       let currentPathName: null | string = null;
       let params: Record<string, any> = {};
-      const sortedEntries = Object.entries(this.flatViewRoutes)
-        .sort(([pathA], [pathB]) => pathB.length - pathA.length)
-        .sort(
-          ([pathA], [pathB]) =>
-            pathB.split(":").length - pathA.split(":").length,
-        );
 
-      for (const [pathname, handler] of sortedEntries) {
+      for (const [pathname, handler] of Object.entries(this.flatViewRoutes)) {
         const pattern = new URLPattern({ pathname });
         if (pattern.test({ pathname: url.pathname })) {
           currentPathName = pathname;
@@ -347,6 +348,15 @@ export class App {
       };
     }, {});
 
+    const locale = this.i18nServiceContainer.detectLocale(
+      new HttpRequest(req, params as any),
+    );
+
+    const translations = this.i18nServiceContainer.getPageTranslations(
+      locale,
+      currentPathName,
+    );
+
     if (url.searchParams.get("json")) {
       const headers = new Headers();
       headers.set("Content-Type", "application/json");
@@ -366,6 +376,9 @@ export class App {
         JSON.stringify({
           data: {
             [url.pathname]: viewData,
+          },
+          i18n: {
+            [locale]: translations,
           },
           is404: !currentPathName,
         }),
@@ -430,6 +443,9 @@ export class App {
       data: {
         pageData: {
           [url.pathname]: viewData,
+        },
+        i18n: {
+          [locale]: translations,
         },
         auth: { user },
         routeManifest: this.routeManifest,

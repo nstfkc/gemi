@@ -10,10 +10,9 @@ const defaultArgs: UseForgotPasswordArgs = {
 
 export function useForgotPassword(args: UseForgotPasswordArgs = defaultArgs) {
   return useMutation(
-    "POST:/forgot-password",
+    "POST:/auth/forgot-password",
     {},
     {
-      pathPrefix: "/auth",
       onSuccess: () => {
         args.onSuccess();
       },

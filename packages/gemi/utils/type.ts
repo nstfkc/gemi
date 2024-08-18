@@ -11,3 +11,5 @@ export type WithId<T extends string> = `${T}Id`;
 export type Prettify<T> = {
   [P in keyof T]: T[P];
 } & {};
+
+export type IsEmptyObject<T> = T extends Record<string, never> ? true : false;

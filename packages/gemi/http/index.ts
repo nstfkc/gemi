@@ -18,3 +18,5 @@ export {
   AuthorizationError,
   InsufficientPermissionsError,
 } from "./errors";
+
+export { I18nServiceProvider } from "./I18nServiceProvider";

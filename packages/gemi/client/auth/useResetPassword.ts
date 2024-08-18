@@ -10,10 +10,9 @@ const defaultArgs: UseResetPasswordArgs = {
 
 export function useResetPassword(args: UseResetPasswordArgs = defaultArgs) {
   return useMutation(
-    "POST:/reset-password",
+    "POST:/auth/reset-password",
     {},
     {
-      pathPrefix: "/auth",
       onSuccess: () => {
         args.onSuccess();
       },

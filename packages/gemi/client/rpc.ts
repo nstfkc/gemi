@@ -1,16 +1,12 @@
-import { type AuthApiRouter } from "../auth/AuthenticationServiceProvider";
 import {
-  ViewRouter,
-  type ViewHandler,
-  type CreateViewRPC,
-} from "../http/ViewRouter";
+  type AuthApiRouter,
+  type AuthViewRouter,
+} from "../auth/AuthenticationServiceProvider";
 import type { CreateRPC } from "../http/ApiRouter";
+import type { CreateViewRPC } from "../http/ViewRouter";
 
-class V extends ViewRouter {}
+export interface RPC extends CreateRPC<AuthApiRouter, "/auth"> {}
 
-export interface RPC extends CreateRPC<AuthApiRouter> {}
+export interface ViewRPC extends CreateViewRPC<AuthViewRouter, "/auth"> {}
 
-export interface ViewRPC {}
-
-export type ViewProps<T extends keyof ViewRPC> =
-  ViewRPC[T] extends ViewHandler<infer I, infer O, infer P> ? O : never;
+export interface I18nDictionary {}

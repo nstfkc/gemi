@@ -11,6 +11,9 @@ export default class extends ApiRouter {
         users,
       };
     }),
+    "/users/:id": this.get(async (req: HttpRequest<{}, { id: string }>) => {
+      return { params: req.params };
+    }),
 
     "/file": this.post(async (req: HttpRequest<{ file: Blob }>) => {
       const input = await req.input();
@@ -19,7 +22,7 @@ export default class extends ApiRouter {
 
       return { width, height, type: file.type, size: file.size };
 
-      // const data = await Storage.put(file);
+      const data = await Storage.put(file);
 
       return { data };
     }),

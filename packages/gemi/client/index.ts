@@ -14,7 +14,7 @@ export { Link } from "./Link";
 export { init } from "./init";
 export { createRoot } from "./createRoot";
 
-export type { RPC, ViewRPC } from "./rpc";
+export type { RPC, ViewRPC, I18nDictionary } from "./rpc";
 export { type ViewProps, type LayoutProps } from "./types";
 
 export { Image } from "./Image";
@@ -25,3 +25,6 @@ export { useSignUp } from "./auth/useSignUp";
 export { useSignOut } from "./auth/useSignOut";
 export { useResetPassword } from "./auth/useResetPassword";
 export { useUser } from "./auth/useUser";
+
+export { useScopedTranslator } from "./i18n/useScopedTranslator";
+export { useLocale } from "./i18n/useLocale";

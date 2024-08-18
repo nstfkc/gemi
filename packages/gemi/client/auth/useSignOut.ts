@@ -10,16 +10,11 @@ const defaultArgs: UseSignOutArgs = {
 };
 
 export function useSignOut(args: UseSignOutArgs = defaultArgs) {
-  const { mutate } = useQuery(
-    "GET:/me",
-    { params: {}, query: {} },
-    { pathPrefix: "/auth" },
-  );
+  const { mutate } = useQuery("GET:/auth/me", { params: {}, query: {} });
   return useMutation(
-    "POST:/sign-out",
+    "POST:/auth/sign-out",
     {},
     {
-      pathPrefix: "/auth",
       onSuccess: () => {
         args.onSuccess();
         mutate(null);

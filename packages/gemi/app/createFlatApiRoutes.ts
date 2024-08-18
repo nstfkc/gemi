@@ -79,5 +79,11 @@ export function createFlatApiRoutes(routes: ApiRoutes) {
     }
   }
 
-  return flatApiRoutes;
+  return Object.fromEntries(
+    Object.entries(flatApiRoutes).sort(([a], [b]) => {
+      const x = a.split("/").length + a.split(":").length;
+      const y = b.split("/").length + b.split(":").length;
+      return x - y;
+    }),
+  );
 }
