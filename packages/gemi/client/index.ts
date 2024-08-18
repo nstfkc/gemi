@@ -9,6 +9,7 @@ export {
 } from "./Mutation";
 export { useLocation, useParams } from "./ClientRouterContext";
 export { useSearchParams } from "./useSearchParams";
+export { usePathname } from "./usePathname";
 export { useRouter } from "./useRouter";
 export { Link } from "./Link";
 export { init } from "./init";

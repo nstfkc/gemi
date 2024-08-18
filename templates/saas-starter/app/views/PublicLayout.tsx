@@ -1,4 +1,4 @@
-import { Link, useLocale, useScopedTranslator } from "gemi/client";
+import { Link, useLocale, usePathname, useScopedTranslator } from "gemi/client";
 
 export default function PublicLayout({
   children,
@@ -7,6 +7,7 @@ export default function PublicLayout({
 }) {
   const st = useScopedTranslator("layout:/");
   const [locale, setLocale] = useLocale();
+  const pathname = usePathname();
   return (
     <div className="container max-w-2xl mx-auto px-4">
       <header className="py-8">
@@ -24,7 +25,7 @@ export default function PublicLayout({
           <button onClick={() => setLocale("es-ES")}>Espanol</button>
         </div>
       </header>
-      <div></div>
+      <div>{pathname}</div>
       {children}
     </div>
   );
