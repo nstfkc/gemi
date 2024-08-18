@@ -3,16 +3,11 @@ import {
   useContext,
   useEffect,
   useState,
-  createContext,
-  lazy,
   StrictMode,
   type PropsWithChildren,
   type ComponentType,
 } from "react";
-import {
-  ServerDataContext,
-  type ServerDataContextValue,
-} from "./ServerDataProvider";
+import { ServerDataContext } from "./ServerDataProvider";
 import {
   ClientRouterContext,
   ClientRouterProvider,

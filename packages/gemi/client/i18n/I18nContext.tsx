@@ -17,7 +17,11 @@ interface I18nContextValue {
     translations: Record<string, Record<string, Record<string, string>>>,
   ) => void;
   translations: TranslationScopes;
-  fetchTranslations: (pathname: string, locale?: string) => Promise<void>;
+  fetchTranslations: (
+    pathname: string,
+    locale?: string,
+    signal?: AbortSignal,
+  ) => Promise<void>;
 }
 
 export const I18nContext = createContext({} as I18nContextValue);
@@ -82,11 +86,18 @@ export const I18nProvider = (props: PropsWithChildren<I18nProviderProps>) => {
     }
   };
 
-  const fetchTranslations = async (pathname: string, locale?: string) => {
+  const fetchTranslations = async (
+    pathname: string,
+    locale?: string,
+    signal?: AbortSignal,
+  ) => {
     const response = await fetch(
       `/api/__gemi__/services/i18n/translations?scope=${pathname}&locale=${
         locale || currentLocale
       }`,
+      {
+        signal,
+      },
     );
     const translations = await response.json();
     updateDictionary(translations);

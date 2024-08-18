@@ -21,7 +21,9 @@ export default class extends ViewRouter {
       "/:testId": this.view("Test", (req: HttpRequest) => {
         return { testId: req.params.testId };
       }),
-      "/about": this.view("About"),
+      "/about": this.view("About", async () => {
+        return { title: "About" };
+      }),
     }),
     "/app": AppRouter,
   };

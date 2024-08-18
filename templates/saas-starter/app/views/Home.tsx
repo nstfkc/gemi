@@ -7,7 +7,11 @@ export default function Home(props: ViewProps<"/">) {
     <div>
       <div>{st("hi", { name: "Enes" })}</div>
       <div>
-        <Link href="/:testId" params={{ testId: "hi-enes" }}>
+        <Link
+          href="/:testId"
+          search={{ foo: "bar" }}
+          params={{ testId: "hi-enes" }}
+        >
           HI ENES
         </Link>
         <Form action="POST:/users/:id" params={{ id: 1 }}></Form>

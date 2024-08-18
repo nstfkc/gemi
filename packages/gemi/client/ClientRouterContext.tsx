@@ -9,6 +9,7 @@ import {
 } from "react";
 import { Subject } from "../utils/Subject";
 import { URLPattern } from "urlpattern-polyfill";
+import { ProgressManager } from "./ProgressManager";
 
 interface ClientRouterContextValue {
   viewEntriesSubject: Subject<string[]>;
@@ -20,6 +21,9 @@ interface ClientRouterContextValue {
   params: Record<string, string>;
   getViewPathsFromPathname: (pathname: string) => string[];
   getRoutePathnameFromHref: (href: string) => string | null;
+  isNavigatingSubject: Subject<boolean>;
+  setNavigationAbortController: (controller: AbortController) => void;
+  progressManager: ProgressManager;
 }
 
 export const ClientRouterContext = createContext(
@@ -50,6 +54,12 @@ export const ClientRouterProvider = (
     searchParams,
   } = props;
   const [parameters, setParameters] = useState(params);
+  const navigationAbortControllerRef = useRef(new AbortController());
+  const [isNavigatingSubject] = useState(() => {
+    return new Subject<boolean>(false);
+  });
+
+  const [progressManager] = useState(new ProgressManager(isNavigatingSubject));
   const pageDataRef = useRef(structuredClone(pageData));
   const scrollHistoryRef = useRef<Map<string, number>>(new Map());
   const initalViewEntries = is404
@@ -151,9 +161,15 @@ export const ClientRouterProvider = (
     return pageDataRef.current[locationSubject.getValue().pathname][key];
   };
 
+  const setNavigationAbortController = (controller: AbortController) => {
+    navigationAbortControllerRef.current.abort();
+    navigationAbortControllerRef.current = controller;
+  };
+
   return (
     <ClientRouterContext.Provider
       value={{
+        isNavigatingSubject,
         getViewPathsFromPathname,
         history,
         params: parameters,
@@ -165,6 +181,8 @@ export const ClientRouterProvider = (
         updatePageData,
         getPageData,
         getRoutePathnameFromHref,
+        setNavigationAbortController,
+        progressManager,
       }}
     >
       {children}

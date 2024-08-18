@@ -22,8 +22,9 @@ export function useNavigate() {
     history,
     getViewPathsFromPathname,
     getRoutePathnameFromHref,
+    isNavigatingSubject,
+    setNavigationAbortController,
   } = useContext(ClientRouterContext);
-
   const { fetchTranslations } = useContext(I18nContext);
 
   function action(pushOrReplace: "push" | "replace") {
@@ -33,6 +34,9 @@ export function useNavigate() {
         ? [options?: Options<T>]
         : [options: Options<T>]
     ) => {
+      const navigationAbortController = new AbortController();
+      setNavigationAbortController(navigationAbortController);
+
       const [options = {}] = args;
       const {
         search = {},
@@ -67,19 +71,37 @@ export function useNavigate() {
 
       const routePathname = getRoutePathnameFromHref(path);
 
-      const [res] = await Promise.all([
-        fetch(fetchPath),
-        fetchTranslations(routePathname),
-        ...components.map((component) => (window as any).loaders[component]()),
-      ]);
+      isNavigatingSubject.next(true);
 
-      if (res.ok) {
-        const { data, is404 = false } = await res.json();
+      try {
+        const [res] = await Promise.all([
+          fetch(fetchPath, { signal: navigationAbortController.signal }),
+          fetchTranslations(
+            routePathname,
+            undefined,
+            navigationAbortController.signal,
+          ),
+          ...components.map((component) =>
+            (window as any).loaders[component](),
+          ),
+        ]);
 
-        updatePageData(data);
-        history?.[pushOrReplace](navigationPath, is404 ? { status: 404 } : {});
-        window.scrollTo(0, 0);
+        if (res.ok) {
+          const { data, is404 = false } = await res.json();
+
+          updatePageData(data);
+          history?.[pushOrReplace](
+            navigationPath,
+            is404 ? { status: 404 } : {},
+          );
+          window.scrollTo(0, 0);
+        }
+      } catch (err) {
+        isNavigatingSubject.next(false);
+        // Do something
       }
+
+      isNavigatingSubject.next(false);
     };
   }
 

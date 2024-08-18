@@ -299,6 +299,7 @@ export class App {
           params = pattern.exec({ pathname: url.pathname })?.pathname.groups!;
           handlers = handler.exec;
           middlewares = handler.middleware;
+          break;
         }
       }
 

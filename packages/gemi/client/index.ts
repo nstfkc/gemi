@@ -10,6 +10,8 @@ export {
 export { useLocation, useParams } from "./ClientRouterContext";
 export { useSearchParams } from "./useSearchParams";
 export { useRoute } from "./useRoute";
+export { useIsNavigationPending } from "./useIsNavigationPending";
+export { useNavigationProgress } from "./useNavigationProgress";
 export { useNavigate } from "./useNavigate";
 export { Link } from "./Link";
 export { init } from "./init";
