@@ -2,6 +2,14 @@ import { prisma } from "@/app/database/prisma";
 import { ApiRouter, HttpRequest } from "gemi/http";
 import { Storage } from "gemi/storage";
 
+class TestRouter extends ApiRouter {
+  routes = {
+    "/": this.post(() => {
+      return {};
+    }),
+  };
+}
+
 export default class extends ApiRouter {
   routes = {
     "/users": this.get(async () => {
@@ -11,9 +19,10 @@ export default class extends ApiRouter {
         users,
       };
     }),
-    "/users/:id": this.get(async (req: HttpRequest<{}, { id: string }>) => {
+    "/users/:id": this.post(async (req: HttpRequest<{}, { id: number }>) => {
       return { params: req.params };
     }),
+    "/test": TestRouter,
 
     "/file": this.post(async (req: HttpRequest<{ file: Blob }>) => {
       const input = await req.input();

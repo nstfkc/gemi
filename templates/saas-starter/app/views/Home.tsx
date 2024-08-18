@@ -1,4 +1,4 @@
-import { Link, useScopedTranslator, type ViewProps } from "gemi/client";
+import { Form, Link, useScopedTranslator, type ViewProps } from "gemi/client";
 
 export default function Home(props: ViewProps<"/">) {
   const st = useScopedTranslator("view:/");
@@ -10,6 +10,7 @@ export default function Home(props: ViewProps<"/">) {
         <Link href="/:testId" params={{ testId: "hi-enes" }}>
           HI ENES
         </Link>
+        <Form action="POST:/users/:id" params={{ id: 1 }}></Form>
       </div>
     </div>
   );

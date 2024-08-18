@@ -254,28 +254,39 @@ type RouterInstanceParser<
   T extends new () => ApiRouter,
   Prefix extends string,
 > = T extends new () => ApiRouter
-  ? RouteParser<InstanceType<T>, `${Prefix & string}`>
+  ? RouteParser<InstanceType<T>["routes"], `${Prefix & string}`>
   : never;
 
-type RouteParser<T extends ApiRouter, Prefix extends PropertyKey = ""> = {
-  [K in keyof T["routes"]]: T["routes"][K] extends RouteHandler<
-    any,
-    any,
-    any,
-    any
-  >
-    ? RouteHandlerParser<T["routes"][K], `${Prefix & string}${K & string}`>
-    : T["routes"][K] extends new () => ApiRouter
-      ? RouterInstanceParser<T["routes"][K], `${Prefix & string}${K & string}`>
-      : T["routes"][K] extends RouteHandlers
+type ParsePrefixAndKey<
+  P extends PropertyKey,
+  K extends PropertyKey,
+  U = `${P & string}${K & string}`,
+> = U extends "//"
+  ? "/"
+  : U extends `${infer T1}//${infer T2}`
+    ? `${T1}/${T2}`
+    : U extends `${infer T1}/${infer T2}/`
+      ? `${T1}/${T2}`
+      : U;
+
+type RouteParser<
+  T extends ApiRoutes,
+  Prefix extends PropertyKey = "",
+  K extends keyof T = keyof T,
+> = K extends any
+  ? T[K] extends RouteHandler<any, any, any, any>
+    ? RouteHandlerParser<T[K], ParsePrefixAndKey<Prefix, K>>
+    : T[K] extends new () => ApiRouter
+      ? RouterInstanceParser<T[K], ParsePrefixAndKey<Prefix, K>>
+      : T[K] extends RouteHandlers
         ? RouteHandlersParser<
-            T["routes"][K],
+            T[K],
             `${Prefix & string}${K extends "/" ? "" : K & string}`
           >
-        : never;
-}[keyof T["routes"]];
+        : never
+  : never;
 
 export type CreateRPC<
   T extends ApiRouter,
   Prefix extends PropertyKey = "",
-> = KeyAndValueToObject<RouteParser<T, Prefix>>;
+> = KeyAndValueToObject<RouteParser<T["routes"], Prefix>>;

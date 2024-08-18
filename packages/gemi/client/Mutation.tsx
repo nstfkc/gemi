@@ -8,7 +8,8 @@ import {
 import type { RPC } from "./rpc";
 import type { ApiRouterHandler } from "../http/ApiRouter";
 import { useMutation } from "./useMutation";
-import type { UnwrapPromise } from "../utils/type";
+import type { IsEmptyObject, UnwrapPromise } from "../utils/type";
+import type { UrlParser } from "./types";
 
 interface MutationContextValue {
   isPending: boolean;
@@ -23,38 +24,31 @@ const MutationContext = createContext({
 } as MutationContextValue);
 
 type GetParams<T> =
-  T extends ApiRouterHandler<any, any, infer Params> ? Params : never;
+  T extends ApiRouterHandler<any, any, infer Params> ? Params : {};
 
 type GetResult<T> =
   T extends ApiRouterHandler<any, infer Result, any>
     ? UnwrapPromise<Result>
     : never;
 
-type CommonFormProps = Omit<ComponentProps<"form">, "action">;
+type WithoutMethod<T extends string> = T extends `${string}:${infer Path}`
+  ? Path
+  : never;
 
-type FormPropsWithParams<T extends keyof RPC> = {
-  action: T extends `GET:${string}` ? never : T;
-  params: GetParams<RPC[T]>;
-  onSuccess?: (result: GetResult<RPC[T]>) => void;
-  onError?: (error: any) => void;
-  pathPrefix?: string;
-};
-
-type FormPropsWithoutParams<T extends keyof RPC> = {
+interface FormBaseProps<T extends keyof RPC>
+  extends Omit<ComponentProps<"form">, "action"> {
   action: T extends `GET:${string}` ? never : T;
   onSuccess?: (result: GetResult<RPC[T]>) => void;
   onError?: (error: any) => void;
   pathPrefix?: string;
-};
+}
 
-type FormProps<T extends keyof RPC> =
-  GetParams<RPC[T]> extends Record<string, never>
-    ? FormPropsWithoutParams<T>
-    : FormPropsWithParams<T>;
+type FormProps<T extends keyof RPC, U = UrlParser<WithoutMethod<T>>> =
+  IsEmptyObject<U> extends true
+    ? FormBaseProps<T>
+    : FormBaseProps<T> & { params: GetParams<RPC[T]> };
 
-export function Form<T extends keyof RPC>(
-  props: FormProps<T> & CommonFormProps,
-) {
+export function Form<T extends keyof RPC>(props: FormProps<T>) {
   const {
     action,
     pathPrefix = "",

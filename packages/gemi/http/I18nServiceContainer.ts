@@ -80,7 +80,6 @@ export class I18nServiceContainer {
     }
 
     const forcedLocale = req.cookies.get("i18n-locale");
-    console.log({ forcedLocale });
 
     const locale =
       forcedLocale ?? (req.headers.get("accept-language") || "en-US");
