@@ -10,7 +10,7 @@ import {
 import { useEffect } from "react";
 
 export default function SignIn() {
-  const { push } = useRouter();
+  const { push } = useNavigate();
   const [searchParams] = useSearchParams();
   const user = useUser();
 

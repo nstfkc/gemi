@@ -3,7 +3,7 @@ import type { ComponentProps } from "react";
 import { applyParams } from "../utils/applyParams";
 import { useLocation } from "./ClientRouterContext";
 import type { ViewPaths, UrlParser } from "./types";
-import { useRouter } from "./useRouter";
+import { useNavigate } from "./useNavigate";
 
 type BaseLinkProps<T extends ViewPaths> = Omit<ComponentProps<"a">, "href"> & {
   active?: boolean;
@@ -25,7 +25,7 @@ export const Link = <T extends ViewPaths>(props: LinkProps<T>) => {
     search = {},
     ...rest
   } = { params: {}, ...props };
-  const { push } = useRouter();
+  const { push } = useNavigate();
   const { pathname } = useLocation();
 
   const path = applyParams(href, params);

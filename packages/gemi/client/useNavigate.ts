@@ -16,7 +16,7 @@ type Options<T extends ViewPaths> =
         shallow?: boolean;
       };
 
-export function useRouter() {
+export function useNavigate() {
   const {
     updatePageData,
     history,

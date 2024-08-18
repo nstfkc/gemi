@@ -137,7 +137,7 @@ export const Navigation = () => {
 import { useRouter } from 'gemi/client'
 
 export const CallToAction = () => {
-  const { push } = useRouter()
+  const { push } = useNavigate()
   return (
     <button onClick={() => push('/contact')}>Call to action</button>
   )

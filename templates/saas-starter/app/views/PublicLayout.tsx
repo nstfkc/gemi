@@ -1,4 +1,4 @@
-import { Link, useLocale, usePathname, useScopedTranslator } from "gemi/client";
+import { Link, useLocale, useRoute, useScopedTranslator } from "gemi/client";
 
 export default function PublicLayout({
   children,
@@ -7,7 +7,7 @@ export default function PublicLayout({
 }) {
   const st = useScopedTranslator("layout:/");
   const [locale, setLocale] = useLocale();
-  const pathname = usePathname();
+  const { pathname } = useRoute();
   return (
     <div className="container max-w-2xl mx-auto px-4">
       <header className="py-8">

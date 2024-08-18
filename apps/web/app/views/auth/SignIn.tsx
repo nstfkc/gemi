@@ -1,7 +1,7 @@
 import { Link, useRouter } from "gemi/client";
 
 export default function SignIn() {
-  const { push } = useRouter();
+  const { push } = useNavigate();
   return (
     <div>
       <div>Sign In</div>

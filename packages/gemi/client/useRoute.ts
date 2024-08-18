@@ -4,9 +4,14 @@ import type { ViewPaths } from "./types";
 
 type Pathname = ViewPaths;
 
-export function usePathname(): Pathname {
+export function useRoute() {
   const { getRoutePathnameFromHref } = useContext(ClientRouterContext);
   const location = useLocation();
-
-  return getRoutePathnameFromHref(location.pathname) as Pathname;
+  const routePath = getRoutePathnameFromHref(location.pathname) as Pathname;
+  return {
+    pathname: routePath,
+    startsWith: (pathname: Pathname) => {
+      return routePath.startsWith(pathname);
+    },
+  };
 }

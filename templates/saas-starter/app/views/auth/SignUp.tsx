@@ -7,7 +7,7 @@ import {
 } from "gemi/client";
 
 export default function SignUp() {
-  const { push } = useRouter();
+  const { push } = useNavigate();
   return (
     <div className="container max-w-sm mx-auto h-screen flex flex-col justify-center items-center">
       <Form

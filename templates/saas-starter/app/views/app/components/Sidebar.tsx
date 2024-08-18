@@ -2,7 +2,7 @@ import { Link, useRouter, useSignOut, useUser } from "gemi/client";
 
 export const Sidebar = () => {
   const user = useUser();
-  const { push } = useRouter();
+  const { push } = useNavigate();
   const { trigger } = useSignOut({ onSuccess: () => push("/auth/sign-in") });
   return (
     <aside className="w-[240px] h-full bg-neutral-50 flex flex-col justify-between">

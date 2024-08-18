@@ -11,7 +11,7 @@ import {
 } from "@nextui-org/react";
 
 export default function SignUp() {
-  const { push } = useRouter();
+  const { push } = useNavigate();
   return (
     <div>
       <div className="container max-w-md mx-auto h-dvh flex flex-col justify-center">

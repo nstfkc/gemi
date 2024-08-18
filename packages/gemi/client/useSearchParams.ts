@@ -1,5 +1,5 @@
 import { useLocation } from "./ClientRouterContext";
-import { useRouter } from "./useRouter";
+import { useNavigate } from "./useNavigate";
 
 type SearchParamsCallback = (
   search: Record<string, any>,
@@ -68,7 +68,7 @@ class SearchParams {
 }
 
 export function useSearchParams() {
-  const { push } = useRouter();
+  const { push } = useNavigate();
   const location = useLocation();
   const callback = (search: Record<string, any>, shallow: boolean) =>
     push(location.pathname as never, {

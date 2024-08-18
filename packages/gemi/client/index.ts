@@ -9,8 +9,8 @@ export {
 } from "./Mutation";
 export { useLocation, useParams } from "./ClientRouterContext";
 export { useSearchParams } from "./useSearchParams";
-export { usePathname } from "./usePathname";
-export { useRouter } from "./useRouter";
+export { useRoute } from "./useRoute";
+export { useNavigate } from "./useNavigate";
 export { Link } from "./Link";
 export { init } from "./init";
 export { createRoot } from "./createRoot";
