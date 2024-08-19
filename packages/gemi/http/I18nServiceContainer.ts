@@ -41,6 +41,7 @@ class Router extends ApiRouter {
 export class I18nServiceContainer {
   constructor(private service: I18nServiceProvider) {}
 
+  isEnabled = false;
   translations = new Map();
   supportedLocales: string[] = [];
   routers = {
@@ -56,11 +57,14 @@ export class I18nServiceContainer {
       this.service.dictionary,
     )) {
       for (const [key, translation] of Object.entries(translations)) {
-        for (const [locale, value] of Object.entries(translation)) {
+        for (const [_locale, value] of Object.entries(translation)) {
+          const locale =
+            _locale === "default" ? this.service.defaultLocale : _locale;
           if (!tmpStore.has(`${locale}.${scope}`)) {
             tmpStore.set(`${locale}.${scope}`, new Map());
           }
           tmpStore.get(`${locale}.${scope}`)?.set(key, value);
+          this.isEnabled = true;
         }
       }
     }

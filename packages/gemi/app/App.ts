@@ -349,14 +349,21 @@ export class App {
       };
     }, {});
 
-    const locale = this.i18nServiceContainer.detectLocale(
-      new HttpRequest(req, params as any),
-    );
+    const isI18nEnabled = this.i18nServiceContainer.isEnabled;
+    let i18n: Record<string, any> = {};
+    if (isI18nEnabled) {
+      const locale = this.i18nServiceContainer.detectLocale(
+        new HttpRequest(req, params as any),
+      );
+      const translations = this.i18nServiceContainer.getPageTranslations(
+        locale,
+        currentPathName,
+      );
 
-    const translations = this.i18nServiceContainer.getPageTranslations(
-      locale,
-      currentPathName,
-    );
+      i18n = {
+        [locale]: translations,
+      };
+    }
 
     if (url.searchParams.get("json")) {
       const headers = new Headers();
@@ -378,9 +385,7 @@ export class App {
           data: {
             [url.pathname]: viewData,
           },
-          i18n: {
-            [locale]: translations,
-          },
+          i18n,
           is404: !currentPathName,
         }),
         {
@@ -445,9 +450,7 @@ export class App {
         pageData: {
           [url.pathname]: viewData,
         },
-        i18n: {
-          [locale]: translations,
-        },
+        i18n,
         auth: { user },
         routeManifest: this.routeManifest,
         router: {

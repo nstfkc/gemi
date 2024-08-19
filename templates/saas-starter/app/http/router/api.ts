@@ -1,4 +1,5 @@
 import { prisma } from "@/app/database/prisma";
+import { I18n } from "gemi/facades";
 import { ApiRouter, Controller, HttpRequest } from "gemi/http";
 import { Storage } from "gemi/storage";
 
@@ -16,7 +17,9 @@ class FileRequest extends HttpRequest<{ file: Blob }> {
       "fileType:jsonx": "File must be a JSON",
       custom: (file: Blob) => {
         if (file.size > 500) {
-          return "File size must be less than 0.5KB";
+          return I18n.translate("validation.fileTooLarge", {
+            unit: "KB",
+          });
         }
       },
     },

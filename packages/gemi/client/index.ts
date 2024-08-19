@@ -29,5 +29,5 @@ export { useSignOut } from "./auth/useSignOut";
 export { useResetPassword } from "./auth/useResetPassword";
 export { useUser } from "./auth/useUser";
 
-export { useScopedTranslator } from "./i18n/useScopedTranslator";
+export { useScopedTranslator, useTranslator } from "./i18n/useScopedTranslator";
 export { useLocale } from "./i18n/useLocale";

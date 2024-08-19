@@ -1,7 +1,14 @@
-import { Form, Link, useScopedTranslator, type ViewProps } from "gemi/client";
+import {
+  Form,
+  Link,
+  useScopedTranslator,
+  useTranslator,
+  type ViewProps,
+} from "gemi/client";
 
 export default function Home(props: ViewProps<"/">) {
   const st = useScopedTranslator("view:/");
+  const t = useTranslator();
 
   return (
     <div>

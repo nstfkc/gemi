@@ -13,3 +13,8 @@ export type Prettify<T> = {
 } & {};
 
 export type IsEmptyObject<T> = T extends Record<string, never> ? true : false;
+
+export type ParseTranslationParams<T extends string> =
+  T extends `${infer _Start}{{${infer Param}}}${infer Rest}`
+    ? { [K in Param]: string } & ParseTranslationParams<Rest>
+    : {};

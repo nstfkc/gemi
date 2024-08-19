@@ -91,6 +91,9 @@ export const I18nProvider = (props: PropsWithChildren<I18nProviderProps>) => {
     locale?: string,
     signal?: AbortSignal,
   ) => {
+    if (Object.keys(i18n).length === 0) {
+      return;
+    }
     const response = await fetch(
       `/api/__gemi__/services/i18n/translations?scope=${pathname}&locale=${
         locale || currentLocale

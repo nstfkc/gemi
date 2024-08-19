@@ -1,20 +1,18 @@
 import type { I18nDictionary } from "../rpc";
-import type { IsEmptyObject } from "../../utils/type";
+import type { IsEmptyObject, ParseTranslationParams } from "../../utils/type";
+import { applyTranslationParams } from "../../utils/applyTranslationParams";
 import { useContext } from "react";
 import { I18nContext } from "./I18nContext";
 
-type ParseTranslationParams<T extends string> =
-  T extends `${infer _Start}{${infer Param}}${infer Rest}`
-    ? { [K in Param]: string } & ParseTranslationParams<Rest>
-    : {};
-
-export function useScopedTranslator<T extends keyof I18nDictionary>(scope: T) {
+export function useScopedTranslator<T extends keyof I18nDictionary>(
+  scope: T extends "server" ? never : T,
+) {
   const { translations } = useContext(I18nContext);
 
   return <
     K extends keyof I18nDictionary[T],
     U extends Record<string, string> = ParseTranslationParams<
-      I18nDictionary[T][K]["en"]
+      I18nDictionary[T][K]["default"]
     >,
   >(
     key: K,
@@ -27,21 +25,11 @@ export function useScopedTranslator<T extends keyof I18nDictionary>(scope: T) {
     if (!translation) {
       return key;
     }
-    return applyParams(translation, params);
+    return applyTranslationParams(translation, params);
   };
 }
 
-function applyParams<T extends string>(
-  str: T,
-  params: Record<string, string>,
-): string {
-  return str.replace(/{([^}]+)}/g, (_, key) => {
-    const value = params[key];
-
-    if (value === undefined) {
-      throw new Error(`Missing parameter: ${key}`);
-    }
-
-    return value;
-  });
+export function useTranslator() {
+  // @ts-ignore
+  return useScopedTranslator("global");
 }

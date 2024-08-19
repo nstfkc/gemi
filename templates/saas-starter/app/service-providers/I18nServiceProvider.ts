@@ -5,8 +5,4 @@ export default class extends I18nServiceProvider {
   defaultLocale = "en-US";
   supportedLocales = ["en-US", "es-ES"];
   dictionary = dictionary;
-
-  init() {
-    console.log("hi");
-  }
 }

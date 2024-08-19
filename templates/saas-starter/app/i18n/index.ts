@@ -1,28 +1,36 @@
 import { I18n } from "gemi/facades";
 
-const home = {
-  hi: {
-    "en-US": "Hello {name}",
-    "es-ES": "Hola {name}",
-  },
-  bye: {
-    "en-US": "Goodbye",
-    "es-ES": "Adios",
-  },
-} as const;
+export type Dictionary = typeof dictionary;
 
 export const dictionary = {
+  [I18n.scope("server")]: {
+    "validation.fileTooLarge": {
+      default: "File must be less than {{maxSize}} {{unit}}",
+    },
+  },
+  [I18n.scope("global")]: {
+    test: {
+      default: "Test {{name}}",
+    },
+  },
   [I18n.scope("layout:/")]: {
     home: {
-      "en-US": "Home",
+      default: "Home",
       "es-ES": "Inicio",
     },
     about: {
-      "en-US": "About",
+      default: "About",
       "es-ES": "Acerca de",
     },
   },
-  [I18n.scope("view:/")]: home,
+  [I18n.scope("view:/")]: {
+    hi: {
+      default: "Hello {{name}}",
+      "es-ES": "Hola {{name}}",
+    },
+    bye: {
+      default: "Goodbye",
+      "es-ES": "Adios",
+    },
+  },
 } as const;
-
-export type Dictionary = typeof dictionary;
