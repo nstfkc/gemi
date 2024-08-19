@@ -6,6 +6,7 @@ import {
   useScopedTranslator,
 } from "gemi/client";
 import { useState } from "react";
+import { LoadingBar } from "./components/LoadingBar";
 
 export default function PublicLayout({
   children,
@@ -14,31 +15,10 @@ export default function PublicLayout({
 }) {
   const st = useScopedTranslator("layout:/");
   const [locale, setLocale] = useLocale();
-  const progress = useNavigationProgress();
   const { pathname } = useRoute();
   return (
     <div>
-      <div
-        style={{ opacity: progress === 100 ? 0 : 1 }}
-        className="transition-opacity delay-200"
-      >
-        {progress !== 100 && (
-          <div
-            style={{
-              width: `${progress + 1}%`,
-            }}
-            className={[
-              "transition-[width] ease-linear",
-              "fixed top-0 h-1",
-            ].join(" ")}
-          >
-            <div className="h-1 bg-slate-800 animate-pulse w-full"></div>
-          </div>
-        )}
-      </div>
-      {/* <div>
-          <button onClick={() => setProgress((s) => s + 15)}>Inc</button>
-          </div> */}
+      <LoadingBar />
       <div className="container max-w-2xl mx-auto px-4">
         <header className="py-8">
           <nav className="flex gap-4 items-center">
