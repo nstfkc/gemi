@@ -194,7 +194,7 @@ export class HttpRequest<
     this.cookies = cookies;
   }
 
-  public refine(input: any): Record<string, string> {
+  public refine(input: any): Record<string, string> | undefined {
     return {};
   }
 

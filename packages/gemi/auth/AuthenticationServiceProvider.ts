@@ -108,7 +108,10 @@ class AuthController extends Controller {
       session = await this.provider.adapter.createSession({
         token,
         userId: user.id,
-        userAgent: req.headers.get("User-Agent"),
+        userAgent:
+          process.env.NODE_ENV === "development"
+            ? "local"
+            : req.headers.get("User-Agent"),
         expiresAt: new Date(
           Temporal.Now.instant()
             .add({ hours: this.provider.sessionExpiresInHours })
