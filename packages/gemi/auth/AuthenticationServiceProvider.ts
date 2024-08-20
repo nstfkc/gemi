@@ -101,7 +101,10 @@ class AuthController extends Controller {
 
     let session = await this.provider.adapter.findSession({
       token,
-      userAgent,
+      userAgent:
+        process.env.NODE_ENV === "development"
+          ? "local"
+          : req.headers.get("User-Agent"),
     });
 
     if (!session) {

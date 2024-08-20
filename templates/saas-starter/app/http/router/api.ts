@@ -41,6 +41,27 @@ class TestController extends Controller {
   }
 }
 
+class TestRequest extends HttpRequest<{ id: number }> {
+  schema = {
+    test: {
+      required: "asdasd",
+    },
+  };
+  refine(input: {}) {
+    return {};
+  }
+}
+
+class FooController extends Controller {
+  requests = {
+    create: TestRequest,
+  };
+
+  async create(req: TestRequest) {
+    return {};
+  }
+}
+
 export default class extends ApiRouter {
   routes = {
     "/users": this.get(async () => {
@@ -50,9 +71,7 @@ export default class extends ApiRouter {
         users,
       };
     }),
-    "/users/:id": this.post(async (req: HttpRequest<{}, { id: number }>) => {
-      return { params: req.params };
-    }),
+    "/test/:1234": this.post(FooController, "create"),
     "/test": TestRouter,
 
     "/file": this.post(TestController, "file"),
