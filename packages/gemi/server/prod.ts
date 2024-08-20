@@ -90,5 +90,7 @@ export async function startProdServer() {
     port: process.env.PORT || 5173,
   });
 
+  console.log("Production server running on", server.url);
+
   return server;
 }
