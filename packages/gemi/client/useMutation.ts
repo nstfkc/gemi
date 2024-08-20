@@ -108,50 +108,35 @@ export function useMutation<T extends keyof RPC>(
         ...(body ? { body } : {}),
       });
 
-      if (response.ok) {
-        try {
-          const data = await response.json();
+      try {
+        const data = await response.json();
 
-          if (!response.ok) {
-            setState(() => ({
-              data: null,
-              error: data.error,
-              loading: false,
-            }));
-            return;
-          }
-
-          options.onSuccess(data);
-
+        if (!response.ok) {
           setState({
-            data,
-            error: null,
-            loading: false,
-          });
-          return data as any;
-        } catch (error) {
-          setState((state) => ({
-            data: state.data,
-            error,
-            loading: false,
-          }));
-        }
-      } else {
-        try {
-          const data = await response.json();
-          options.onError(data);
-          setState(() => ({
             data: null,
             error: data.error,
             loading: false,
-          }));
-        } catch (error) {
-          setState((state) => ({
-            data: state.data,
-            error: { message: "Server error" },
-            loading: false,
-          }));
+          });
+
+          options.onError(data);
+          return;
         }
+
+        options.onSuccess(data);
+
+        setState({
+          data,
+          error: null,
+          loading: false,
+        });
+        return data as any;
+      } catch (error) {
+        options.onError(error);
+        setState({
+          data: null,
+          error,
+          loading: false,
+        });
       }
     },
   } as Mutation<RPC[T]>;
