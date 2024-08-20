@@ -18,3 +18,23 @@ export type ParseTranslationParams<T extends string> =
   T extends `${infer _Start}{{${infer Param}}}${infer Rest}`
     ? { [K in Param]: string } & ParseTranslationParams<Rest>
     : {};
+
+type JSONValue =
+  | string
+  | number
+  | boolean
+  | null
+  | Partial<JSONLike>
+  | JSONValue[];
+
+export type JSONLike = {
+  [key: string]: JSONValue;
+};
+
+export type UnNullable<T> = T extends null | undefined ? never : T;
+
+export type NestedUnNullable<T extends JSONLike> = {
+  [K in keyof T]: T[K] extends JSONLike
+    ? NestedUnNullable<T[K]>
+    : UnNullable<T[K]>;
+};

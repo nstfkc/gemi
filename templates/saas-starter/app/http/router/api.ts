@@ -65,10 +65,12 @@ class FooController extends Controller {
 export default class extends ApiRouter {
   routes = {
     "/users": this.get(async () => {
-      prisma.user.createMany;
-      const users = await prisma.user.findMany();
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      return await prisma.user.findFirst();
+    }),
+    "/home": this.get(async () => {
       return {
-        users,
+        message: "Hello, World!",
       };
     }),
     "/test/:1234": this.post(FooController, "create"),

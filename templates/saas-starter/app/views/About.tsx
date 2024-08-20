@@ -1,4 +1,15 @@
+import { useNavigate } from "gemi/client";
+import { useEffect } from "react";
+
 export default function About() {
+  const { push } = useNavigate();
+  useEffect(() => {
+    console.log("About page");
+    push("/:testId", { params: { testId: "hello-enes" } });
+  }, []);
+
+  return <div>Hi</div>;
+
   return (
     <div className="py-4">
       <div className="py-8">

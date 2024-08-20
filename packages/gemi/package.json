@@ -1,6 +1,6 @@
 {
   "name": "gemi",
-  "version": "0.4.52",
+  "version": "0.4.53",
   "devDependencies": {
     "@happy-dom/global-registrator": "^14.12.3",
     "@repo/eslint-config": "*",
@@ -14,7 +14,7 @@
     "eslint": "^8.57.0",
     "happy-dom": "^14.12.3",
     "jsdom": "^24.1.0",
-    "typescript": "^5.3.3",
+    "typescript": "^5.5.4",
     "vitest": "^1.6.0"
   },
   "bin": {

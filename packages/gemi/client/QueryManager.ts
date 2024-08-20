@@ -10,8 +10,8 @@ type State = {
 class Resource {
   key: string;
   state: Subject<State>;
-  stale = true;
-  staleTimer: Timer | null = null;
+  lastFetchedAt: number;
+  stale: boolean = false;
 
   constructor(key: string, fallbackData: any = null) {
     this.key = key;
@@ -21,7 +21,7 @@ class Resource {
       loading: false,
     });
 
-    this.stale = !!fallbackData;
+    this.lastFetchedAt = fallbackData ? Date.now() : 0;
   }
 
   mutate<T>(fn: (data: T) => T) {
@@ -31,11 +31,13 @@ class Resource {
       error: null,
       loading: false,
     });
+    this.stale = true;
+    this.fetch();
   }
 
   fetch() {
     const { loading, data, error } = this.state.getValue();
-
+    const expired = Date.now() - this.lastFetchedAt > 1000 * 10;
     if (loading) {
       return this.state;
     }
@@ -48,7 +50,7 @@ class Resource {
       });
       this.resolve();
     } else {
-      if (this.stale) {
+      if (this.stale || expired) {
         this.resolve();
       }
     }
@@ -87,12 +89,13 @@ class Resource {
         }
       })
       .then((data) => {
+        this.state.next({
+          data,
+          error: null,
+          loading: false,
+        });
+        this.lastFetchedAt = Date.now();
         this.stale = false;
-        this.mutate(() => data);
-        clearTimeout(this.staleTimer);
-        this.staleTimer = setTimeout(() => {
-          this.stale = true;
-        }, 1000 * 60);
       })
       .catch((err) => {
         this.state.next({

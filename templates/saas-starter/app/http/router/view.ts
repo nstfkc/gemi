@@ -22,6 +22,7 @@ export default class extends ViewRouter {
         return { testId: req.params.testId };
       }),
       "/about": this.view("About", async () => {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
         return { title: "About" };
       }),
     }),

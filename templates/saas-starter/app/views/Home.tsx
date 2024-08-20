@@ -1,27 +1,25 @@
-import {
-  Form,
-  Link,
-  useScopedTranslator,
-  useTranslator,
-  type ViewProps,
-} from "gemi/client";
+import { useQuery, type ViewProps } from "gemi/client";
 
 export default function Home(props: ViewProps<"/">) {
-  const st = useScopedTranslator("view:/");
-  const t = useTranslator();
+  const { data: user, mutate } = useQuery(
+    "GET:/users",
+    {},
+    { fallbackData: props.user },
+  );
+
+  if (!user) return <div>Loading...</div>;
 
   return (
     <div>
-      <div>{st("hi", { name: "Enes" })}</div>
+      <div>{user?.name}</div>
       <div>
-        <Link
-          href="/:testId"
-          search={{ foo: "bar" }}
-          params={{ testId: "hi-enes" }}
+        <button
+          onClick={() =>
+            mutate((user) => (user ? { ...user, name: "Tucker" } : user))
+          }
         >
-          HI ENES
-        </Link>
-        <Form action="POST:/users/:id" params={{ id: 1 }}></Form>
+          Mutate
+        </button>
       </div>
     </div>
   );

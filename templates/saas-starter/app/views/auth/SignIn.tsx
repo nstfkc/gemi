@@ -2,7 +2,7 @@ import {
   Form,
   FormError,
   Link,
-  useRouter,
+  useNavigate,
   useSearchParams,
   useUser,
   ValidationErrors,
@@ -11,20 +11,19 @@ import { useEffect } from "react";
 
 export default function SignIn() {
   const { push } = useNavigate();
-  const [searchParams] = useSearchParams();
+  const searchParams = useSearchParams();
   const user = useUser();
 
   useEffect(() => {
     if (user) {
-      push("/app/dashboard");
+      push("/hello");
     }
   }, [user]);
 
   return (
     <div className="container max-w-sm mx-auto h-screen flex flex-col justify-center items-center">
       <Form
-        pathPrefix="/auth"
-        action="POST:/sign-in"
+        action="POST:/auth/sign-in"
         onSuccess={() => push("/app/dashboard")}
         className="flex flex-col gap-4 w-full"
       >
