@@ -190,11 +190,15 @@ export class App {
     let handler: (typeof this.flatApiRoutes)[string];
     let params: Record<string, any> = {};
     for (const [path] of Object.entries(this.flatApiRoutes)) {
-      const pattern = new URLPattern({ pathname: path });
-      if (pattern.test({ pathname: apiPath })) {
-        handler = this.flatApiRoutes[path];
-        params = pattern.exec({ pathname: apiPath })?.pathname.groups!;
-        break;
+      try {
+        const pattern = new URLPattern({ pathname: path });
+        if (pattern.test({ pathname: apiPath })) {
+          handler = this.flatApiRoutes[path];
+          params = pattern.exec({ pathname: apiPath })?.pathname.groups!;
+          break;
+        }
+      } catch (err) {
+        // Do something
       }
     }
 
@@ -376,7 +380,7 @@ export class App {
       headers.append(
         "Cache-Control",
         user
-          ? "private, max-age=1200, must-revalidate"
+          ? "private, no-cache, no-store, max-age=0, must-revalidate"
           : "public, max-age=864000, must-revalidate",
       );
 

@@ -110,6 +110,7 @@ export class ProgressManager {
   }
 
   destroy() {
+    this.end();
     this.unsubscribe();
   }
 }
