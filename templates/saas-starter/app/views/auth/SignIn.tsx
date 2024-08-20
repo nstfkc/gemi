@@ -7,24 +7,19 @@ import {
   useUser,
   ValidationErrors,
 } from "gemi/client";
-import { useEffect } from "react";
 
 export default function SignIn() {
   const { push } = useNavigate();
   const searchParams = useSearchParams();
-  const user = useUser();
-
-  useEffect(() => {
-    if (user) {
-      push("/hello");
-    }
-  }, [user]);
 
   return (
     <div className="container max-w-sm mx-auto h-screen flex flex-col justify-center items-center">
       <Form
         action="POST:/auth/sign-in"
         onSuccess={() => push("/app/dashboard")}
+        onError={(error) => {
+          console.log({ error });
+        }}
         className="flex flex-col gap-4 w-full"
       >
         <div className="flex flex-col">
@@ -72,7 +67,7 @@ export default function SignIn() {
             </button>
           </div>
         </div>
-        <FormError />
+        <ValidationErrors name="invalid_credentials" />
       </Form>
     </div>
   );

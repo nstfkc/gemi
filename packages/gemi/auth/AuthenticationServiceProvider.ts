@@ -9,6 +9,7 @@ import { Auth } from "../facades";
 import type { IAuthenticationAdapter, User } from "./adapters/types";
 import { BlankAdapter } from "./adapters/blank";
 import { AuthorizationError, AuthenticationError } from "../http/errors";
+import { ValidationError } from "../http";
 
 class SignInRequest extends HttpRequest<
   {
@@ -80,7 +81,9 @@ class AuthController extends Controller {
     const user = await this.provider.adapter.findUserByEmailAddress(email);
 
     if (!user) {
-      throw new AuthenticationError();
+      throw new ValidationError({
+        invalid_credentials: ["Invalid credentials"],
+      });
     }
 
     const isPasswordValid = await this.provider.verifyPassword(

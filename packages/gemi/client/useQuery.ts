@@ -166,7 +166,7 @@ export function useQuery<T extends keyof RPC>(
   }
 
   return {
-    data: state.data as Data<RPC[T]>,
+    data: state.data as Prettify<Data<RPC[T]>>,
     loading: state.loading as boolean,
     error: state.error as Error,
     mutate,
