@@ -92,7 +92,9 @@ class AuthController extends Controller {
     );
 
     if (!isPasswordValid) {
-      throw new AuthenticationError();
+      throw new ValidationError({
+        invalid_credentials: ["Invalid credentials"],
+      });
     }
 
     const userAgent = req.headers.get("User-Agent");
@@ -156,7 +158,9 @@ class AuthController extends Controller {
     const user = await this.provider.adapter.findUserByEmailAddress(email);
 
     if (user) {
-      throw new Error("User already exists");
+      throw new ValidationError({
+        email: ["Email address already exists"],
+      });
     }
 
     const hashedPassword = await this.provider.hashPassword(password);
@@ -220,7 +224,9 @@ class AuthController extends Controller {
       await this.provider.adapter.findPasswordResetToken({ token });
 
     if (!passwordResetToken) {
-      throw new Error("Invalid token");
+      throw new ValidationError({
+        token: ["Invalid token"],
+      });
     }
 
     const isTokenExpired = Temporal.Now.instant().until(
@@ -230,7 +236,9 @@ class AuthController extends Controller {
     ).sign;
 
     if (isTokenExpired) {
-      throw new Error("Token expired");
+      throw new ValidationError({
+        token: ["Token expired"],
+      });
     }
 
     await this.provider.adapter.deletePasswordResetToken({ token });
@@ -240,7 +248,9 @@ class AuthController extends Controller {
     );
 
     if (!user) {
-      throw new Error("User not found");
+      throw new ValidationError({
+        email: ["User not found"],
+      });
     }
 
     const hashedPassword = await this.provider.hashPassword(password);
