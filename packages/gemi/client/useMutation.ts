@@ -73,11 +73,14 @@ export function useMutation<T extends keyof RPC>(
   return {
     ...state,
     trigger: async (input?: Record<string, any> | FormData) => {
-      setState((state) => ({
-        data: state.data,
-        error: state.error,
-        loading: true,
-      }));
+      const timer = setTimeout(() => {
+        setState((state) => ({
+          data: state.data,
+          error: state.error,
+          loading: true,
+        }));
+      }, 300);
+
       const [inputs = { params: {}, query: {} }, options = defaultOptions] =
         args ?? [];
       const { pathPrefix = "" } = options;
@@ -100,15 +103,14 @@ export function useMutation<T extends keyof RPC>(
         body = JSON.stringify(input);
       }
 
-      const response = await fetch(`/api${pathPrefix}${finalUrl}`, {
-        method,
-        headers: {
-          ...contentType,
-        },
-        ...(body ? { body } : {}),
-      });
-
       try {
+        const response = await fetch(`/api${pathPrefix}${finalUrl}`, {
+          method,
+          headers: {
+            ...contentType,
+          },
+          ...(body ? { body } : {}),
+        });
         const data = await response.json();
 
         if (!response.ok) {
@@ -138,6 +140,8 @@ export function useMutation<T extends keyof RPC>(
           loading: false,
         });
       }
+
+      clearTimeout(timer);
     },
   } as Mutation<RPC[T]>;
 }

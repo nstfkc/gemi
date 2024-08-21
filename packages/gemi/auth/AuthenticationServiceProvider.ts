@@ -8,7 +8,7 @@ import { KernelContext } from "../kernel/KernelContext";
 import { Auth } from "../facades";
 import type { IAuthenticationAdapter, User } from "./adapters/types";
 import { BlankAdapter } from "./adapters/blank";
-import { AuthorizationError, AuthenticationError } from "../http/errors";
+import { AuthorizationError } from "../http/errors";
 import { ValidationError } from "../http";
 
 class SignInRequest extends HttpRequest<
@@ -41,16 +41,16 @@ class SignUpRequest extends HttpRequest<
   schema = {
     name: {
       string: "Invalid name",
-      required: true,
+      required: "Name is required",
       "min:2": "Name must be at least 3 characters",
     },
     email: {
       string: "Invalid email",
-      required: true,
+      required: "Email is required",
       email: "Invalid email",
     },
     password: {
-      required: true,
+      required: "Password is required",
       "min:8": "Password must be at least 8 characters",
     },
   };
