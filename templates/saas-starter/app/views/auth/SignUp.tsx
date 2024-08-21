@@ -2,7 +2,7 @@ import {
   Form,
   FormError,
   Link,
-  useRouter,
+  useNavigate,
   ValidationErrors,
 } from "gemi/client";
 
@@ -11,10 +11,13 @@ export default function SignUp() {
   return (
     <div className="container max-w-sm mx-auto h-screen flex flex-col justify-center items-center">
       <Form
-        pathPrefix="/auth"
-        action="POST:/sign-up"
+        action="POST:/auth/sign-up"
         className="flex flex-col gap-4 w-full"
-        onSuccess={({ user }) => push(`/auth/sign-in?email=${user.email}`)}
+        onSuccess={({ user }) =>
+          push(`/auth/sign-in`, {
+            search: { email: user.email },
+          })
+        }
       >
         <div className="flex flex-col">
           <label htmlFor="name">Name</label>
@@ -25,7 +28,7 @@ export default function SignUp() {
             name="name"
             placeholder="Name"
           />
-          <ValidationErrors name="email" />
+          <ValidationErrors name="name" />
         </div>
         <div className="flex flex-col">
           <label htmlFor="email">Email</label>

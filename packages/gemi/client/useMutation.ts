@@ -73,6 +73,11 @@ export function useMutation<T extends keyof RPC>(
   return {
     ...state,
     trigger: async (input?: Record<string, any> | FormData) => {
+      setState({
+        data: state.data,
+        error: state.error,
+        loading: true,
+      });
       const [inputs = { params: {}, query: {} }, options = defaultOptions] =
         args ?? [];
       const { pathPrefix = "" } = options;
@@ -123,6 +128,7 @@ export function useMutation<T extends keyof RPC>(
           error: null,
           loading: false,
         });
+
         return data as any;
       } catch (error) {
         options.onError(error);
