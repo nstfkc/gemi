@@ -70,17 +70,18 @@ const defaultOptions: QueryOptions<any> & { params: Record<string, any> } = {
   search: {} as Record<string, string>,
 };
 
-export function useQuery<
-  T extends keyof GetRPC,
-  Output = Data<T>,
-  Search = Input<T>,
->(
+export function useQuery<T extends keyof GetRPC>(
   url: T,
   ...args: UrlParser<`${T & string}`> extends Record<string, never>
-    ? [options?: { search?: Search }, config?: Config<Output>]
+    ? [
+        options?: { search?: WithOptionalValues<Input<T>> },
+        config?: Config<Data<T>>,
+      ]
     : [
-        options: { search?: Search } & { params: UrlParser<`${T & string}`> },
-        config?: Config<Output>,
+        options: { search?: WithOptionalValues<Input<T>> } & {
+          params: UrlParser<`${T & string}`>;
+        },
+        config?: Config<Data<T>>,
       ]
 ) {
   const [_options = defaultOptions, _config = defaultConfig] = args;
@@ -145,9 +146,9 @@ export function useQuery<
     };
   }, [variantKey]);
 
-  function mutate(fn: Output): void;
-  function mutate(fn: (data: Output) => Output): void;
-  function mutate<K extends NestedKeyof<Output>, V = ValueAtPath<Output, K>>(
+  function mutate(fn: Data<T>): void;
+  function mutate(fn: (data: Data<T>) => Data<T>): void;
+  function mutate<K extends NestedKeyof<Data<T>>, V = ValueAtPath<Data<T>, K>>(
     key: K,
     value: V | ((value: V) => V),
   ): void;
@@ -189,7 +190,7 @@ export function useQuery<
   }
 
   return {
-    data: state?.data as Prettify<Output>,
+    data: state?.data as Prettify<Data<T>>,
     loading: state?.loading as boolean,
     error: state?.error as Error,
     mutate,
