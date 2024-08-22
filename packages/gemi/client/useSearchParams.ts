@@ -16,17 +16,25 @@ class SearchParams {
     return this.searchParams.get(key);
   }
 
-  set(key: Record<string, string>): SearchParams;
-  set(key: string, value: string): SearchParams;
+  set(key: Record<string, string | ((state: string) => string)>): SearchParams;
+  set(key: string, value: string | ((state: string) => string)): SearchParams;
   set(key: any, value?: any) {
     let entries: Record<string, any> = {};
     if (typeof key === "string") {
-      entries[key] = value;
+      let _value: string = value;
+      if (typeof value === "function") {
+        _value = value(this.get(key) ?? "");
+      }
+      entries[key] = _value;
     } else {
       entries = (key as any) ?? {};
     }
     for (const [key, value] of Object.entries(entries)) {
-      this.searchParams.set(key, value);
+      let _value: string = value;
+      if (typeof value === "function") {
+        _value = value(this.get(key) ?? "");
+      }
+      this.searchParams.set(key, _value);
     }
     return this;
   }

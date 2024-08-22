@@ -10,7 +10,7 @@ const defaultArgs: UseSignOutArgs = {
 };
 
 export function useSignOut(args: UseSignOutArgs = defaultArgs) {
-  const { mutate } = useQuery("GET:/auth/me", { params: {}, query: {} });
+  const { mutate } = useQuery("GET:/auth/me", { params: {}, search: {} });
   return useMutation(
     "POST:/auth/sign-out",
     {},

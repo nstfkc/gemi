@@ -1,21 +1,26 @@
-import { createContext, useEffect, useState } from "react";
-import { QueryManager } from "./QueryManager";
+import { createContext, useRef } from "react";
+import { QueryResource } from "./QueryResource";
 
-export const QueryManagerContext = createContext<{ manager: QueryManager }>(
-  {} as any,
-);
+export const QueryManagerContext = createContext({
+  getResource: (key: string, initialState: Record<string, any> = {}) => {
+    return new QueryResource(key, initialState);
+  },
+});
 
 export const QueryManagerProvider = ({ children }) => {
-  const [manager] = useState(() => new QueryManager());
-
-  useEffect(() => {
-    if (typeof window !== undefined) {
-      (window as any).qm = manager;
-    }
-  }, [manager]);
+  const resourcesRef = useRef<Map<string, QueryResource>>(new Map());
 
   return (
-    <QueryManagerContext.Provider value={{ manager }}>
+    <QueryManagerContext.Provider
+      value={{
+        getResource: (key: string, initialState: Record<string, any> = {}) => {
+          if (!resourcesRef.current.has(key)) {
+            resourcesRef.current.set(key, new QueryResource(key, initialState));
+          }
+          return resourcesRef.current.get(key);
+        },
+      }}
+    >
       {children}
     </QueryManagerContext.Provider>
   );

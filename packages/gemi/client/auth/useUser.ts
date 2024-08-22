@@ -6,7 +6,7 @@ export function useUser() {
   const { auth } = useContext(ServerDataContext);
   const { data, loading, error } = useQuery(
     "GET:/auth/me",
-    { params: {}, query: {} },
+    { params: {}, search: {} },
     {
       fallbackData: auth.user ? { user: auth?.user as any } : null,
     },

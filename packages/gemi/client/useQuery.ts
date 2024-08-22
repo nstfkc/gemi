@@ -1,14 +1,15 @@
-import { useContext, useEffect, useState, useSyncExternalStore } from "react";
+import { useContext, useEffect, useState } from "react";
 import type { RPC } from "./rpc";
 import type { JSONLike, Prettify } from "../utils/type";
 
 import type { ApiRouterHandler } from "../http/ApiRouter";
 import type { UnwrapPromise } from "../utils/type";
 import { QueryManagerContext } from "./QueryManagerContext";
+import { applyParams } from "../utils/applyParams";
 
 interface Config<T> {
-  pathPrefix?: string;
   fallbackData?: T;
+  keepPreviousData?: boolean;
 }
 
 type WithOptionalValues<T> = {
@@ -16,8 +17,8 @@ type WithOptionalValues<T> = {
 };
 
 const defaultConfig: Config<any> = {
-  pathPrefix: "",
   fallbackData: null,
+  keepPreviousData: false,
 };
 
 type Data<T> =
@@ -57,6 +58,11 @@ type ValueAtPath<T, Path extends string> = T extends JSONLike
       : never
   : never;
 
+const defaultOptions: QueryOptions<any> = {
+  params: {} as Record<string, any>,
+  search: {} as Record<string, string>,
+};
+
 export function useQuery<T extends keyof RPC>(
   url: T extends `GET:${string}` ? T : never,
   ...args: QueryOptions<RPC[T]> extends never
@@ -66,29 +72,34 @@ export function useQuery<T extends keyof RPC>(
       ]
     : [options: QueryOptions<RPC[T]>, config?: Config<Data<RPC[T]>>]
 ) {
-  const defaultOptions: QueryOptions<any> = {
-    params: {},
-    search: {},
-  };
   const [options = defaultOptions, config = defaultConfig] = args;
-  const { manager } = useContext(QueryManagerContext);
+  const { getResource } = useContext(QueryManagerContext);
   const [, path] = url.split("GET:");
-  const fullUrl = ["GET:", config.pathPrefix, path].join("");
-  const [resource, setResource] = useState(() =>
-    manager.fetch(fullUrl, options, { fallbackData: config.fallbackData }),
+  const normalPath = applyParams(path, options.params as any);
+  const searchParams = new URLSearchParams(options.search);
+  searchParams.sort();
+  const variantKey = searchParams.toString();
+  const [resource] = useState(() =>
+    getResource(normalPath, { [variantKey]: config.fallbackData }),
   );
+
+  const [state, setState] = useState(() => resource.getVariant(variantKey));
 
   useEffect(() => {
-    setResource(() => {
-      return manager.fetch(fullUrl, options);
+    const state = resource.getVariant(variantKey);
+    if (config.keepPreviousData) {
+      if (state.loading) {
+        setState((s) => ({ ...s, loading: true }));
+      } else {
+        setState(state);
+      }
+    } else {
+      setState(state);
+    }
+    return resource.store.subscribe.call(resource.store, () => {
+      setState(resource.getVariant(variantKey));
     });
-  }, [options]);
-
-  const state: any = useSyncExternalStore(
-    resource.state.subscribe.bind(resource.state),
-    resource.state.getValue.bind(resource.state),
-    resource.state.getValue.bind(resource.state),
-  );
+  }, [variantKey, config.keepPreviousData]);
 
   function mutate(fn: Data<RPC[T]>): void;
   function mutate(fn: (data: Data<RPC[T]>) => Data<RPC[T]>): void;
@@ -97,7 +108,7 @@ export function useQuery<T extends keyof RPC>(
     U = ValueAtPath<Data<RPC[T]>, K>,
   >(key: K, value: U | ((value: U) => U)): void;
   function mutate(fn: any, value?: any) {
-    return resource.mutate.call(resource, (data: any) => {
+    return resource.mutate.call(resource, variantKey, (data: any) => {
       try {
         if (typeof fn === "function") {
           return fn(data);

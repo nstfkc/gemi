@@ -4,8 +4,7 @@ import { applyParams } from "../utils/applyParams";
 import { useLocation } from "./ClientRouterContext";
 import type { UrlParser, ViewResult } from "./types";
 import { useNavigate } from "./useNavigate";
-import { ViewRPC } from "./rpc";
-import { IsEmptyObject } from "../utils/type";
+import type { ViewRPC } from "./rpc";
 
 type Views = {
   [K in keyof ViewRPC as K extends `view:${infer P}`

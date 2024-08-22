@@ -10,7 +10,7 @@ const defaultArgs: UseSignInArgs = {
 };
 
 export function useSignIn(args: UseSignInArgs = defaultArgs) {
-  const { mutate } = useQuery("GET:/auth/me", { params: {}, query: {} });
+  const { mutate } = useQuery("GET:/auth/me", { params: {}, search: {} });
   return useMutation(
     "POST:/auth/sign-in",
     {},
