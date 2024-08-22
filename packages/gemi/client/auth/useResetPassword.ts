@@ -1,4 +1,4 @@
-import { useMutation } from "../useMutation";
+import { usePost } from "../useMutation";
 
 interface UseResetPasswordArgs {
   onSuccess: () => void;
@@ -9,8 +9,8 @@ const defaultArgs: UseResetPasswordArgs = {
 };
 
 export function useResetPassword(args: UseResetPasswordArgs = defaultArgs) {
-  return useMutation(
-    "POST:/auth/reset-password",
+  return usePost(
+    "/auth/reset-password",
     {},
     {
       onSuccess: () => {

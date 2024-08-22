@@ -1,6 +1,5 @@
 import {
   Form,
-  FormError,
   Link,
   useNavigate,
   useSearchParams,
@@ -15,7 +14,8 @@ export default function SignIn() {
   return (
     <div className="container max-w-sm mx-auto h-screen flex flex-col justify-center items-center">
       <Form
-        action="POST:/auth/sign-in"
+        method="POST"
+        action="/auth/sign-in"
         onSuccess={() => push("/app/dashboard")}
         onError={(error) => {
           console.log({ error });

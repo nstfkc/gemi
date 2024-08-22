@@ -1,4 +1,4 @@
-import { useMutation } from "../useMutation";
+import { usePost } from "../useMutation";
 import { useQuery } from "../useQuery";
 
 interface UseSignInArgs {
@@ -10,12 +10,12 @@ const defaultArgs: UseSignInArgs = {
 };
 
 export function useSignIn(args: UseSignInArgs = defaultArgs) {
-  const { mutate } = useQuery("GET:/auth/me", { params: {}, search: {} });
-  return useMutation(
-    "POST:/auth/sign-in",
+  const { mutate } = useQuery("/auth/me");
+  return usePost(
+    "/auth/sign-in",
     {},
     {
-      onSuccess: ({ user }) => {
+      onSuccess: (user) => {
         args.onSuccess(user);
         mutate(user);
       },

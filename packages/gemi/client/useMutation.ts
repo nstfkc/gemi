@@ -2,7 +2,7 @@ import { useState } from "react";
 import type { RPC } from "./rpc";
 import type { ApiRouterHandler } from "../http/ApiRouter";
 import type { UnwrapPromise } from "../utils/type";
-import { UrlParser } from "./types";
+import type { UrlParser } from "./types";
 
 type Methods = {
   POST: {

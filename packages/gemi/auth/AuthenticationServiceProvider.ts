@@ -71,7 +71,7 @@ class AuthController extends Controller {
       throw new AuthorizationError();
     }
 
-    return { user };
+    return user;
   }
 
   async signIn(req: SignInRequest) {
@@ -148,7 +148,7 @@ class AuthController extends Controller {
 
     await this.provider.onSignIn(user);
 
-    return { user };
+    return user;
   }
 
   async signUp(req: SignUpRequest) {
@@ -173,7 +173,7 @@ class AuthController extends Controller {
 
     await this.provider.onSignUp(newUser);
 
-    return { user: newUser };
+    return newUser;
   }
 
   async signOut(req: HttpRequest) {

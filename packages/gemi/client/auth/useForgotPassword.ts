@@ -1,4 +1,4 @@
-import { useMutation } from "../useMutation";
+import { usePost } from "../useMutation";
 
 interface UseForgotPasswordArgs {
   onSuccess: () => void;
@@ -9,8 +9,8 @@ const defaultArgs: UseForgotPasswordArgs = {
 };
 
 export function useForgotPassword(args: UseForgotPasswordArgs = defaultArgs) {
-  return useMutation(
-    "POST:/auth/forgot-password",
+  return usePost(
+    "/auth/forgot-password",
     {},
     {
       onSuccess: () => {

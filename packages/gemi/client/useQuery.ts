@@ -6,7 +6,7 @@ import type { ApiRouterHandler } from "../http/ApiRouter";
 import type { UnwrapPromise } from "../utils/type";
 import { QueryManagerContext } from "./QueryManagerContext";
 import { applyParams } from "../utils/applyParams";
-import { UrlParser } from "./types";
+import type { UrlParser } from "./types";
 
 interface Config<T> {
   fallbackData?: T;

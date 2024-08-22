@@ -4,9 +4,13 @@ import { useQuery } from "../useQuery";
 
 export function useUser() {
   const { auth } = useContext(ServerDataContext);
-  const { data, loading, error } = useQuery(
-    "GET:/auth/me",
-    { params: {}, search: {} },
+  const {
+    data: user,
+    loading,
+    error,
+  } = useQuery(
+    "/auth/me",
+    {},
     {
       fallbackData: auth.user ? { user: auth?.user as any } : null,
     },
@@ -16,5 +20,5 @@ export function useUser() {
     return { user: null, loading, error };
   }
 
-  return { user: data?.user, loading, error };
+  return { user, loading, error };
 }

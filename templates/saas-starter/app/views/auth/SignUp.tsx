@@ -11,7 +11,8 @@ export default function SignUp() {
   return (
     <div className="container max-w-sm mx-auto h-screen flex flex-col justify-center items-center">
       <Form
-        action="POST:/auth/sign-up"
+        method="POST"
+        action="/auth/sign-up"
         className="flex flex-col gap-4 w-full"
         onSuccess={({ user }) =>
           push(`/auth/sign-in`, {

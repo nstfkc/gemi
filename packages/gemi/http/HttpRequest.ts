@@ -194,7 +194,7 @@ export class HttpRequest<
     this.cookies = cookies;
   }
 
-  public refine(input: any): any {
+  public refine(_input: any): any {
     return {};
   }
 
@@ -275,7 +275,7 @@ export class HttpRequest<
       if (!errors[key]) {
         errors[key] = [];
       }
-      errors[key] = [...errors[key], value];
+      errors[key] = [...(errors[key] ?? []), value as string];
     }
 
     if (Object.keys(errors).length > 0) {
@@ -320,7 +320,7 @@ export class HttpRequest<
   }
 
   // TODO implement this method
-  public async terminate(params: TerminateParams) {
+  public async terminate(_params: TerminateParams) {
     throw "not implemented";
   }
 }
