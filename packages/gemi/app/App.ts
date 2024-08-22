@@ -294,6 +294,7 @@ export class App {
 
   async handleViewRequest(req: Request) {
     const url = new URL(req.url);
+    const isViewDataRequest = url.searchParams.get("json");
 
     let pageData: {
       cookies: Set<Cookie>;
@@ -349,6 +350,13 @@ export class App {
       };
     } catch (err) {
       if (err.kind === GEMI_REQUEST_BREAKER_ERROR) {
+        if (isViewDataRequest) {
+          const { status = 400, data, directive, headers } = err.payload.api;
+          return new Response(JSON.stringify({ data, directive }), {
+            headers,
+            status,
+          });
+        }
         return new Response(null, {
           ...err.payload.view,
         });
@@ -382,7 +390,7 @@ export class App {
       };
     }
 
-    if (url.searchParams.get("json")) {
+    if (isViewDataRequest) {
       const headers = new Headers();
       headers.set("Content-Type", "application/json");
 

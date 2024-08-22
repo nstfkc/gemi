@@ -87,8 +87,13 @@ export function useNavigate() {
         ]);
 
         if (res.ok) {
-          const { data, is404 = false } = await res.json();
-
+          const { data, directive = {}, is404 = false } = await res.json();
+          if (directive?.kind === "Redirect") {
+            if (directive?.path) {
+              history.replace(directive.path);
+            }
+            return;
+          }
           updatePageData(data);
           history?.[pushOrReplace](
             navigationPath,

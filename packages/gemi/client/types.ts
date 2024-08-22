@@ -1,6 +1,6 @@
 import type { PropsWithChildren } from "react";
 import type { ViewHandler } from "../http";
-import type { UnwrapPromise } from "../utils/type";
+import type { Prettify, UnwrapPromise } from "../utils/type";
 import type { ViewRPC } from "./rpc";
 
 type ComponentBranch = [string, ComponentBranch[]];
@@ -29,7 +29,7 @@ type LayoutKeys<T> = T extends keyof ViewRPC
 
 export type ViewProps<T extends ViewKeys<keyof ViewRPC>> =
   ViewRPC[`view:${T}`] extends ViewHandler<any, infer O, any>
-    ? UnwrapPromise<O>
+    ? Prettify<UnwrapPromise<O>>
     : never;
 
 export type LayoutProps<T extends LayoutKeys<keyof ViewRPC>> =
@@ -37,12 +37,14 @@ export type LayoutProps<T extends LayoutKeys<keyof ViewRPC>> =
     ? PropsWithChildren<UnwrapPromise<O>>
     : never;
 
-export type UrlParser<T extends string> = string extends T
+type UrlParserInternal<T extends string> = string extends T
   ? Record<string, string>
   : T extends `${infer _Start}/:${infer Param}?/${infer Rest}`
-    ? { [K in Param]?: string } & UrlParser<`/${Rest}`>
+    ? { [K in Param]?: string | number } & UrlParser<`/${Rest}`>
     : T extends `${infer _Start}/:${infer Param}/${infer Rest}`
-      ? { [K in Param]: string } & UrlParser<`/${Rest}`>
+      ? { [K in Param]: string | number } & UrlParser<`/${Rest}`>
       : T extends `${infer _Start}/:${infer Param}`
-        ? { [K in Param]: string }
+        ? { [K in Param]: string | number }
         : Record<string, never>;
+
+export type UrlParser<T extends string> = Prettify<UrlParserInternal<T>>;

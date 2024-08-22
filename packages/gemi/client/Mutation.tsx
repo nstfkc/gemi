@@ -66,7 +66,7 @@ type Methods = {
 
 interface FormBaseProps<M extends keyof Methods, K extends keyof Methods[M]>
   extends Omit<ComponentProps<"form">, "action"> {
-  method: M;
+  method?: M;
   action: K;
   onSuccess?: (result: Methods[M][K]) => void;
   onError?: (error: any) => void;
@@ -80,11 +80,12 @@ type FormProps<
     ? { params?: never }
     : { params: UrlParser<`${K & string}`> });
 
-export function Form<T extends keyof Methods, K extends keyof Methods[T]>(
-  props: FormProps<T, K>,
-) {
+export function Form<
+  K extends keyof Methods[T],
+  T extends keyof Methods = "POST",
+>(props: FormProps<T, K>) {
   const {
-    method,
+    method = "POST",
     action,
     onSuccess = () => {},
     onError = () => {},

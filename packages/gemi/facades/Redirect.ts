@@ -1,4 +1,6 @@
+import type { UrlParser, ViewPaths } from "../client/types";
 import { RequestBreakerError } from "../http/Error";
+import { applyParams } from "../utils/applyParams";
 
 class RedirectError extends RequestBreakerError {
   constructor(path: string) {
@@ -6,8 +8,9 @@ class RedirectError extends RequestBreakerError {
     this.name = "RedirectError";
     this.payload = {
       api: {
-        status: 302,
-        data: { error: "Redirect error" },
+        status: 200,
+        data: {},
+        directive: { kind: "Redirect", path },
       },
       view: {
         status: 302,
@@ -22,7 +25,14 @@ class RedirectError extends RequestBreakerError {
 }
 
 export class Redirect {
-  static to(path: string) {
+  static to<T extends ViewPaths>(
+    path: T,
+    ...args: UrlParser<`${T & string}`> extends Record<string, never>
+      ? []
+      : [params: UrlParser<`${T & string}`>]
+  ) {
+    const [params = {}] = args;
+    applyParams(path, params);
     throw new RedirectError(path);
   }
 }
