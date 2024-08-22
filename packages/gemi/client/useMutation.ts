@@ -2,6 +2,22 @@ import { useState } from "react";
 import type { RPC } from "./rpc";
 import type { ApiRouterHandler } from "../http/ApiRouter";
 import type { UnwrapPromise } from "../utils/type";
+import { UrlParser } from "./types";
+
+type Methods = {
+  POST: {
+    [K in keyof RPC as K extends `POST:${infer P}` ? P : never]: RPC[K];
+  };
+  PUT: {
+    [K in keyof RPC as K extends `PUT:${infer P}` ? P : never]: RPC[K];
+  };
+  PATCH: {
+    [K in keyof RPC as K extends `PATCH:${infer P}` ? P : never]: RPC[K];
+  };
+  DELETE: {
+    [K in keyof RPC as K extends `DELETE:${infer P}` ? P : never]: RPC[K];
+  };
+};
 
 function applyParams(url: string, params: Record<string, any> = {}) {
   let out = url;
@@ -12,24 +28,25 @@ function applyParams(url: string, params: Record<string, any> = {}) {
   return out;
 }
 
-type Options = {
+type Config<T> = {
   autoInvalidate?: boolean;
-  pathPrefix?: string;
-  onSuccess: (data: any) => void;
-  onError: (error: any) => void;
+  onSuccess: (data: T) => void;
+  onError: (error: Error) => void;
 };
 
-const defaultOptions: Options = {
+const defaultOptions: Config<any> = {
   autoInvalidate: false,
-  pathPrefix: "",
   onSuccess: () => {},
-  onError: () => {},
+  onError: (_: Error) => {},
 };
 
-type MutationInputs<T> =
-  T extends ApiRouterHandler<any, any, infer Params>
-    ? { params: Params; query?: Record<string, any> }
+type Data<M extends keyof Methods, K extends keyof Methods[M]> =
+  Methods[M][K] extends ApiRouterHandler<any, infer T, any>
+    ? UnwrapPromise<T>
     : never;
+
+type Body<M extends keyof Methods, K extends keyof Methods[M]> =
+  Methods[M][K] extends ApiRouterHandler<infer T, any, any> ? T : never;
 
 type Error =
   | {
@@ -41,53 +58,49 @@ type Error =
       message: string;
     };
 
-type Mutation<T> =
-  T extends ApiRouterHandler<infer Input, infer Output, any>
-    ? {
-        data: UnwrapPromise<Output>;
-        loading: boolean;
-        error: Error;
-        trigger: (
-          ...args: Input extends Record<string, never> ? [] : [input: Input]
-        ) => Promise<UnwrapPromise<Output>>;
-      }
-    : never;
+type ParseParams<T> = UrlParser<`${T & string}`>;
 
-type ParseParams<T> =
-  T extends ApiRouterHandler<any, any, infer Params> ? Params : never;
+type State<T> = {
+  data: T | null;
+  error: Error | null;
+  loading: boolean;
+};
 
-export function useMutation<T extends keyof RPC>(
-  url: T extends `GET:${string}` ? never : T,
-  ...args: ParseParams<RPC[T]> extends Record<string, never>
-    ? [
-        inputs?: Omit<MutationInputs<RPC[T]>, "params">,
-        options?: Partial<Options>,
-      ]
-    : [inputs: MutationInputs<RPC[T]>, options?: Partial<Options>]
-): Mutation<RPC[T]> {
-  const [state, setState] = useState({
+export function useMutation<
+  M extends keyof Methods,
+  K extends keyof Methods[M],
+  T = Data<M, K>,
+  U = Body<M, K>,
+>(
+  method: M,
+  url: K,
+  ...args: ParseParams<K> extends Record<string, never>
+    ? [options?: {}, config?: Partial<Config<T>>]
+    : [options: { params: ParseParams<K> }, config?: Partial<Config<T>>]
+) {
+  const [state, setState] = useState<State<T>>({
     data: null,
     error: null,
     loading: false,
   });
+
   return {
-    ...state,
-    trigger: async (input?: Record<string, any> | FormData) => {
+    data: state.data as T,
+    error: state.error as any,
+    loading: state.loading,
+    trigger: async (input: U): Promise<T> => {
       setState({
         data: state.data,
         error: state.error,
         loading: true,
       });
-      const [inputs = { params: {}, query: {} }, options = defaultOptions] =
-        args ?? [];
-      const { pathPrefix = "" } = options;
-      const { query = {} } = inputs ?? {};
+      const [inputs = { params: {} }, options = defaultOptions] = args ?? [];
+      const {} = options;
       const params = "params" in inputs ? inputs.params : {};
-      const [method] = String(url).split(":");
-      const finalUrl = [
-        applyParams(String(url).replace(`${method}:`, ""), params),
-        new URLSearchParams(query).toString(),
-      ].join("?");
+      const finalUrl = applyParams(
+        String(url).replace(`${method}:`, ""),
+        params,
+      );
 
       let body = null;
 
@@ -101,7 +114,7 @@ export function useMutation<T extends keyof RPC>(
       }
 
       try {
-        const response = await fetch(`/api${pathPrefix}${finalUrl}`, {
+        const response = await fetch(`/api${finalUrl}`, {
           method,
           headers: {
             ...contentType,
@@ -139,5 +152,47 @@ export function useMutation<T extends keyof RPC>(
         });
       }
     },
-  } as Mutation<RPC[T]>;
+  };
+}
+
+export function usePost<K extends keyof Methods["POST"], T = Data<"POST", K>>(
+  url: K,
+  ...args: ParseParams<K> extends Record<string, never>
+    ? [options?: {}, config?: Partial<Config<T>>]
+    : [options: { params: ParseParams<K> }, config?: Partial<Config<T>>]
+) {
+  return useMutation("POST", url, ...(args as any));
+}
+
+export function usePut<K extends keyof Methods["PUT"], T = Data<"PUT", K>>(
+  url: K,
+  ...args: ParseParams<K> extends Record<string, never>
+    ? [options?: {}, config?: Partial<Config<T>>]
+    : [options: { params: ParseParams<K> }, config?: Partial<Config<T>>]
+) {
+  return useMutation("PUT", url, ...(args as any));
+}
+
+export function usePatch<
+  K extends keyof Methods["PATCH"],
+  T = Data<"PATCH", K>,
+>(
+  url: K,
+  ...args: ParseParams<K> extends Record<string, never>
+    ? [options?: {}, config?: Partial<Config<T>>]
+    : [options: { params: ParseParams<K> }, config?: Partial<Config<T>>]
+) {
+  return useMutation("PATCH", url, ...(args as any));
+}
+
+export function useDelete<
+  K extends keyof Methods["DELETE"],
+  T = Data<"DELETE", K>,
+>(
+  url: K,
+  ...args: ParseParams<K> extends Record<string, never>
+    ? [options?: {}, config?: Partial<Config<T>>]
+    : [options: { params: ParseParams<K> }, config?: Partial<Config<T>>]
+) {
+  return useMutation("DELETE", url, ...(args as any));
 }

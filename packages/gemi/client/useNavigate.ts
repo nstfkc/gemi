@@ -5,7 +5,7 @@ import { applyParams } from "../utils/applyParams";
 import { I18nContext } from "./i18n/I18nContext";
 
 type Options<T extends ViewPaths> =
-  UrlParser<T> extends never
+  UrlParser<T> extends Record<string, never>
     ? {
         search?: Record<string, string | number | boolean | undefined | null>;
         shallow?: boolean;

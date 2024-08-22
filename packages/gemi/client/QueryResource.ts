@@ -18,7 +18,11 @@ export class QueryResource {
     const now = Date.now();
     for (const [variantKey, data] of Object.entries(initialState)) {
       if (data) {
-        store.set(variantKey, { loading: false, data, error: null });
+        store.set(variantKey, {
+          loading: false,
+          data,
+          error: null,
+        });
         this.lastFetchRecord.set(variantKey, now);
       }
     }
@@ -28,18 +32,18 @@ export class QueryResource {
 
   getVariant(variantKey: string) {
     const store = this.store.getValue();
-
     if (!store.has(variantKey)) {
-      console.log("no entry");
       this.resolveVariant(variantKey);
     } else {
       const variant = store.get(variantKey);
-      if (!variant.loading && !variant.data) {
-        console.log("initial");
-        this.resolveVariant(variantKey);
-      }
+
       if (!variant.loading) {
-        if (variant.data) {
+        // Don't have data
+        if (!variant.data) {
+          this.resolveVariant(variantKey);
+          return store.get(variantKey);
+          //
+        } else if (variant.data) {
           const stale = this.staleVariants.has(variantKey);
           const now = Date.now();
           // TODO: age must be dynamic
@@ -48,6 +52,8 @@ export class QueryResource {
           if (stale || old) {
             this.lastFetchRecord.set(variantKey, now);
             this.resolveVariant(variantKey, true);
+            return store.get(variantKey);
+            //
           }
         }
       }
@@ -65,6 +71,10 @@ export class QueryResource {
       store.set(variantKey, { loading: false, data, error: null }),
     );
     this.resolveVariant(variantKey);
+    const cacheKey = [window.location.origin, this.key, variantKey]
+      .filter((s) => s.length > 0)
+      .join("?");
+    caches.delete(cacheKey);
   }
 
   private async resolveVariant(variantKey: string, silent = false) {
@@ -78,7 +88,7 @@ export class QueryResource {
       store.set(variantKey, {
         loading: true,
         data: previousState?.data,
-        error: previousState?.error,
+        error: previousState?.data,
       });
     }
 
@@ -99,13 +109,15 @@ export class QueryResource {
     }
 
     if (response.ok) {
+      console.log("OK");
       this.store.next(
         store.set(variantKey, { loading: false, data, error: null }),
       );
       this.staleVariants.delete(variantKey);
       this.lastFetchRecord.set(variantKey, Date.now());
     } else {
-      this.lastFetchRecord.set(variantKey, 0);
+      console.log("Not OK");
+      // this.lastFetchRecord.set(variantKey, 0);
       this.store.next(
         store.set(variantKey, {
           loading: false,

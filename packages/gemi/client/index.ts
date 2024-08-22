@@ -1,5 +1,11 @@
 export { useQuery } from "./useQuery";
-export { useMutation } from "./useMutation";
+export {
+  useMutation,
+  useDelete,
+  usePatch,
+  usePost,
+  usePut,
+} from "./useMutation";
 export {
   Form,
   FormError,

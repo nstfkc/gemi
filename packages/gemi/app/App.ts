@@ -269,6 +269,19 @@ export class App {
       const headers = ctx.headers;
 
       headers.append("Content-Type", "application/json");
+      if (!headers.get("Cache-Control")) {
+        if (ctx.user) {
+          headers.set(
+            "Cache-Control",
+            "private, no-cache, no-store, max-age=0, must-revalidate",
+          );
+        } else {
+          headers.set(
+            "Cache-Control",
+            "public, no-cache, no-store, max-age=0, must-revalidate",
+          );
+        }
+      }
       ctx.cookies.forEach((cookie) =>
         headers.append("Set-Cookie", cookie.toString()),
       );
