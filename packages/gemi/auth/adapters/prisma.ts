@@ -50,6 +50,7 @@ export class PrismaAuthenticationAdapter implements IAuthenticationAdapter {
         include: {
           user: {
             select: {
+              password: false,
               id: true,
               email: true,
               globalRole: true,
@@ -84,11 +85,19 @@ export class PrismaAuthenticationAdapter implements IAuthenticationAdapter {
       include: {
         user: {
           select: {
+            password: false,
             email: true,
             globalRole: true,
             name: true,
             publicId: true,
-            accounts: true,
+            accounts: {
+              select: {
+                id: true,
+                publicId: true,
+                organization: true,
+                organizationRole: true,
+              },
+            },
             organization: true,
           },
         },

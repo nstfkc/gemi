@@ -70,7 +70,6 @@ interface FormBaseProps<M extends keyof Methods, K extends keyof Methods[M]>
   action: K;
   onSuccess?: (result: Methods[M][K]) => void;
   onError?: (error: any) => void;
-  pathPrefix?: string;
 }
 
 type FormProps<
@@ -88,7 +87,6 @@ export function Form<T extends keyof Methods, K extends keyof Methods[T]>(
   const {
     method,
     action,
-    pathPrefix = "",
     onSuccess = () => {},
     onError = () => {},
     params,
@@ -98,12 +96,12 @@ export function Form<T extends keyof Methods, K extends keyof Methods[T]>(
   const formRef = useRef<HTMLFormElement>(null);
 
   const { trigger, data, error, loading } = useMutation(
-    `${method}:${String(action)}` as any,
+    method,
+    String(action) as any,
     {
       params,
     } as any,
     {
-      pathPrefix,
       onSuccess,
       onError,
     },
@@ -114,7 +112,7 @@ export function Form<T extends keyof Methods, K extends keyof Methods[T]>(
       return;
     }
     e.preventDefault();
-    trigger(new FormData(formRef.current!));
+    trigger(new FormData(formRef.current!) as any);
   };
 
   const validationErrors =

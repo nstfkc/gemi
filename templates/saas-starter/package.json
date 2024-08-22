@@ -9,7 +9,7 @@
   "dependencies": {
     "@libsql/client": "^0.6.0",
     "@prisma/adapter-libsql": "^5.14.0",
-    "@prisma/client": "^5.17.0",
+    "@prisma/client": "5.14.0",
     "@react-email/components": "^0.0.21-canary.0",
     "@react-email/render": "^0.0.17-canary.0",
     "gemi": "*",

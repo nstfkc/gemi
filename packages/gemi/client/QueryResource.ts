@@ -109,14 +109,12 @@ export class QueryResource {
     }
 
     if (response.ok) {
-      console.log("OK");
       this.store.next(
         store.set(variantKey, { loading: false, data, error: null }),
       );
       this.staleVariants.delete(variantKey);
       this.lastFetchRecord.set(variantKey, Date.now());
     } else {
-      console.log("Not OK");
       // this.lastFetchRecord.set(variantKey, 0);
       this.store.next(
         store.set(variantKey, {

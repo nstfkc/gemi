@@ -1,6 +1,7 @@
 import { createContext, type PropsWithChildren } from "react";
 import type { Translations } from "./i18n/I18nContext";
 import type { ComponentTree } from "./types";
+import type { User } from "../auth/adapters/types";
 
 type Data = Record<string, any>;
 
@@ -17,16 +18,7 @@ export interface ServerDataContextValue {
   i18n: Translations;
   componentTree: ComponentTree;
   auth: {
-    user: {
-      name: string;
-      email: string;
-      accounts: Array<{
-        organizationId: string;
-        role: string;
-      }>;
-      globalRole: string;
-      id: string;
-    };
+    user: User;
   };
 }
 

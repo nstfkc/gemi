@@ -21,7 +21,7 @@ type WithOptionalValues<T> = {
 const defaultConfig: Config<any> = {
   fallbackData: null,
   keepPreviousData: false,
-  retryIntervalOnError: Infinity,
+  retryIntervalOnError: 10000,
 };
 
 type GetRPC = {
@@ -83,7 +83,9 @@ export function useQuery<
         config?: Config<Output>,
       ]
 ) {
-  const [options = defaultOptions, config = defaultConfig] = args;
+  const [_options = defaultOptions, _config = defaultConfig] = args;
+  const options = { ...defaultOptions, ..._options };
+  const config = { ...defaultConfig, ..._config };
   const params = "params" in options ? (options.params ?? {}) : {};
   const search = "search" in options ? (options.search ?? {}) : {};
   const { getResource } = useContext(QueryManagerContext);
@@ -104,7 +106,7 @@ export function useQuery<
   const retryingMap = useRef<Map<string, boolean>>(new Map());
   const [state, setState] = useState(() => resource.getVariant(variantKey));
 
-  const retry = useCallback((variantKey: string) => {
+  const retry = (variantKey: string) => {
     if (!retryingMap.current.get(variantKey)) {
       retryingMap.current.set(variantKey, true);
       retryIntervalRef.current = setTimeout(() => {
@@ -112,7 +114,7 @@ export function useQuery<
         retryingMap.current.set(variantKey, false);
       }, config.retryIntervalOnError);
     }
-  }, []);
+  };
 
   const handleStateUpdate = useCallback(
     (nextState) => {
@@ -139,6 +141,7 @@ export function useQuery<
     });
     return () => {
       unsub();
+      clearInterval(retryIntervalRef.current);
     };
   }, [variantKey]);
 
