@@ -60,9 +60,10 @@ class Resource {
 
   resolve() {
     const { key, options } = JSON.parse(this.key);
-    const { query, params } = options;
+    const { search, params } = options;
     const url = key.split("GET:")[1];
-    const searchParams = new URLSearchParams(query);
+    const searchParams = new URLSearchParams(search);
+    searchParams.sort();
     const finalUrl = [applyParams(url, params), searchParams.toString()]
       .filter((s) => s.length > 0)
       .join("?");

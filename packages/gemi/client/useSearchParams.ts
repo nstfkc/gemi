@@ -62,7 +62,7 @@ class SearchParams {
     return this.searchParams.toString();
   }
 
-  push(mode: "soft" | "hard" = "hard") {
+  push(mode: "soft" | "hard" = "soft") {
     this.callback(this.toJSON(), mode === "soft");
   }
 }
@@ -70,11 +70,12 @@ class SearchParams {
 export function useSearchParams() {
   const { push } = useNavigate();
   const location = useLocation();
-  const callback = (search: Record<string, any>, shallow: boolean) =>
+  const callback = (search: Record<string, any>, shallow: boolean) => {
     push(location.pathname as never, {
       search,
       shallow,
     });
+  };
 
   const searchParams = new SearchParams(
     new URLSearchParams(location.search),

@@ -1,25 +1,19 @@
-import { useContext, useState, useSyncExternalStore } from "react";
+import { useContext, useEffect, useState, useSyncExternalStore } from "react";
 import type { RPC } from "./rpc";
-import type {
-  JSONLike,
-  NestedUnNullable,
-  Prettify,
-  UnNullable,
-} from "../utils/type";
+import type { JSONLike, Prettify } from "../utils/type";
 
 import type { ApiRouterHandler } from "../http/ApiRouter";
 import type { UnwrapPromise } from "../utils/type";
 import { QueryManagerContext } from "./QueryManagerContext";
 
-interface Options<Params> {
-  params: Params;
-  query?: Record<string, any>;
-}
-
 interface Config<T> {
   pathPrefix?: string;
   fallbackData?: T;
 }
+
+type WithOptionalValues<T> = {
+  [K in keyof T]: T[K] | null;
+};
 
 const defaultConfig: Config<any> = {
   pathPrefix: "",
@@ -32,50 +26,23 @@ type Data<T> =
     : never;
 
 type QueryOptions<T> =
-  T extends ApiRouterHandler<any, any, infer Params>
-    ? Params extends Record<string, any>
-      ? Options<Params>
-      : never
+  T extends ApiRouterHandler<infer Input, any, infer Params>
+    ? Params extends Record<string, never>
+      ? { search: Partial<WithOptionalValues<Input>> }
+      : { params: Params; search: Partial<WithOptionalValues<Input>> }
     : never;
 
 type Error = {};
 
-type IsJSONLike<T> = T extends JSONLike ? true : false;
-
-type CombileKeys<
+type CombineKeys<
   T extends PropertyKey,
   K extends PropertyKey,
 > = `${T & string}.${K & string}`;
 
-type D = {
-  user:
-    | ({
-        posts: ({
-          author: {
-            name: string | null;
-            id: number;
-            email: string;
-          } | null;
-        } & {
-          id: number;
-          publicId: string;
-          title: string;
-          content: string | null;
-          published: boolean;
-          authorId: number | null;
-        })[];
-      } & {
-        name: string | null;
-        id: number;
-        email: string;
-      })
-    | null;
-};
-
 type NestedKeyof<T> = T extends JSONLike
   ? {
       [K in keyof T]: K extends string
-        ? K | CombileKeys<K, NestedKeyof<T[K]>>
+        ? K | CombineKeys<K, NestedKeyof<T[K]>>
         : never;
     }[keyof T]
   : never;
@@ -90,11 +57,6 @@ type ValueAtPath<T, Path extends string> = T extends JSONLike
       : never
   : never;
 
-type Mutator<T> = <K extends NestedKeyof<T>, U = ValueAtPath<T, K>>(
-  key: K,
-  value: U | ((value: U) => U),
-) => void;
-
 export function useQuery<T extends keyof RPC>(
   url: T extends `GET:${string}` ? T : never,
   ...args: QueryOptions<RPC[T]> extends never
@@ -106,15 +68,21 @@ export function useQuery<T extends keyof RPC>(
 ) {
   const defaultOptions: QueryOptions<any> = {
     params: {},
-    query: {},
+    search: {},
   };
   const [options = defaultOptions, config = defaultConfig] = args;
   const { manager } = useContext(QueryManagerContext);
   const [, path] = url.split("GET:");
   const fullUrl = ["GET:", config.pathPrefix, path].join("");
-  const [resource] = useState(() =>
+  const [resource, setResource] = useState(() =>
     manager.fetch(fullUrl, options, { fallbackData: config.fallbackData }),
   );
+
+  useEffect(() => {
+    setResource(() => {
+      return manager.fetch(fullUrl, options);
+    });
+  }, [options]);
 
   const state: any = useSyncExternalStore(
     resource.state.subscribe.bind(resource.state),

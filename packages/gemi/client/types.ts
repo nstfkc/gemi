@@ -7,6 +7,12 @@ type ComponentBranch = [string, ComponentBranch[]];
 export type ComponentTree = ComponentBranch[];
 
 export type ViewPaths = ViewKeys<keyof ViewRPC>;
+
+export type ViewResult<T extends keyof ViewRPC> =
+  ViewRPC[T] extends ViewHandler<infer I, infer O, infer P>
+    ? { input: I; output: O; params: P }
+    : never;
+
 export type ViewRoute = keyof ViewRPC;
 
 type ViewKeys<T> = T extends keyof ViewRPC
@@ -39,4 +45,4 @@ export type UrlParser<T extends string> = string extends T
       ? { [K in Param]: string } & UrlParser<`/${Rest}`>
       : T extends `${infer _Start}/:${infer Param}`
         ? { [K in Param]: string }
-        : never;
+        : Record<string, never>;

@@ -104,6 +104,9 @@ export class I18nServiceContainer {
   }
 
   getPageTranslations(locale: string, scope: string) {
+    if (!scope) {
+      return {};
+    }
     const viewTranslations =
       this.translations.get(`${locale}.view:${scope}`) ?? {};
     const out = {
@@ -118,7 +121,7 @@ export class I18nServiceContainer {
       }
       const layoutScope = layoutKey.split(":")[1];
 
-      if (scope.startsWith(layoutScope)) {
+      if (scope?.startsWith(layoutScope)) {
         out[layoutKey] = this.translations.get(`${locale}.${layoutKey}`) ?? {};
       }
     }

@@ -35,25 +35,62 @@ type WithoutMethod<T extends string> = T extends `${string}:${infer Path}`
   ? Path
   : never;
 
-interface FormBaseProps<T extends keyof RPC>
+type PostRequests = {
+  [K in keyof RPC as K extends `POST:${infer P}` ? P : never]: GetResult<
+    RPC[K]
+  >;
+};
+
+type PutRequests = {
+  [K in keyof RPC as K extends `PUT:${infer P}` ? P : never]: GetResult<RPC[K]>;
+};
+
+type DeleteRequests = {
+  [K in keyof RPC as K extends `DELETE:${infer P}` ? P : never]: GetResult<
+    RPC[K]
+  >;
+};
+
+type PatchRequests = {
+  [K in keyof RPC as K extends `PATCH:${infer P}` ? P : never]: GetResult<
+    RPC[K]
+  >;
+};
+
+type Methods = {
+  POST: PostRequests;
+  PUT: PutRequests;
+  DELETE: DeleteRequests;
+  PATCH: PatchRequests;
+};
+
+interface FormBaseProps<M extends keyof Methods, K extends keyof Methods[M]>
   extends Omit<ComponentProps<"form">, "action"> {
-  action: T extends `GET:${string}` ? never : T;
-  onSuccess?: (result: GetResult<RPC[T]>) => void;
+  method: M;
+  action: K;
+  onSuccess?: (result: Methods[M][K]) => void;
   onError?: (error: any) => void;
   pathPrefix?: string;
 }
 
-type FormProps<T extends keyof RPC, U = UrlParser<WithoutMethod<T>>> =
+type FormProps<
+  T extends keyof Methods,
+  K extends keyof Methods[T],
+  U = UrlParser<WithoutMethod<T>>,
+> =
   IsEmptyObject<U> extends true
-    ? FormBaseProps<T>
-    : FormBaseProps<T> & { params: GetParams<RPC[T]> };
+    ? FormBaseProps<T, K>
+    : FormBaseProps<T, K> & { params: GetParams<Methods[T][K]> };
 
-export function Form<T extends keyof RPC>(props: FormProps<T>) {
+export function Form<T extends keyof Methods, K extends keyof Methods[T]>(
+  props: FormProps<T, K>,
+) {
   const {
+    method,
     action,
     pathPrefix = "",
-    onSuccess,
-    onError,
+    onSuccess = () => {},
+    onError = () => {},
     params,
     className,
     ...formProps
@@ -61,7 +98,7 @@ export function Form<T extends keyof RPC>(props: FormProps<T>) {
   const formRef = useRef<HTMLFormElement>(null);
 
   const { trigger, data, error, loading } = useMutation(
-    action as any,
+    `${method}:${String(action)}` as any,
     {
       params,
     } as any,
