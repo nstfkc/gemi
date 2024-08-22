@@ -75,11 +75,10 @@ interface FormBaseProps<M extends keyof Methods, K extends keyof Methods[M]>
 type FormProps<
   T extends keyof Methods,
   K extends keyof Methods[T],
-  U = UrlParser<WithoutMethod<T>>,
-> =
-  IsEmptyObject<U> extends true
-    ? FormBaseProps<T, K>
-    : FormBaseProps<T, K> & { params: GetParams<Methods[T][K]> };
+> = FormBaseProps<T, K> &
+  (UrlParser<`${K & string}`> extends Record<string, never>
+    ? { params?: never }
+    : { params: UrlParser<`${K & string}`> });
 
 export function Form<T extends keyof Methods, K extends keyof Methods[T]>(
   props: FormProps<T, K>,
