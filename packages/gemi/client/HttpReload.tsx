@@ -24,7 +24,6 @@ export const HttpReload = () => {
           .catch(console.log)
           .finally(() => {
             setReloading(false);
-            console.log("Reloading finished");
           });
       });
     }

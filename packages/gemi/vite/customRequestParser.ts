@@ -7,13 +7,16 @@ export async function customRequestParser(original: string) {
       (body.type === "ExportNamedDeclaration" ||
         body.type === "ExportDefaultDeclaration") &&
       body.declaration.type === "ClassDeclaration" &&
-      body.declaration.superClass.name === "Controller"
+      (body.declaration.superClass.name === "Controller" ||
+        body.declaration.superClass.name === "ResourceController")
     );
   }
 
   function isController(body: any) {
     return (
-      body.type === "ClassDeclaration" && body.superClass.name === "Controller"
+      body.type === "ClassDeclaration" &&
+      (body.superClass.name === "Controller" ||
+        body.superClass.name === "ResourceController")
     );
   }
 
