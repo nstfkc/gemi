@@ -1,3 +1,7 @@
+import { rmdir } from "node:fs/promises";
+
+await rmdir("dist", { recursive: true });
+
 const result = await Bun.build({
   entrypoints: [
     "./http/index.ts",

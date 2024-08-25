@@ -187,7 +187,8 @@ export const ClientRouterProvider = (
       }}
     >
       {children}
-      <HttpReload />
+      {/* @ts-ignore */}
+      {import.meta.hot && <HttpReload />}
     </ClientRouterContext.Provider>
   );
 };

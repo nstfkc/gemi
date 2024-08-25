@@ -14,4 +14,6 @@ export default defineConfig({
       external: ["react", "react-dom", "react/jsx-runtime", "gemi"],
     },
   },
+  mode: process.env.NODE_ENV,
+  define: { "import.meta.hot": "import.meta.hot" },
 });

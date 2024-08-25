@@ -8,7 +8,6 @@ const gemi = (): PluginOption[] => {
       enforce: "pre",
       config: async () => {
         const appPath = `${process.cwd()}/app`;
-
         return {
           assetsInclude: ["/public"],
           build: {
