@@ -4,7 +4,8 @@ import { builders } from "ast-types";
 export async function customRequestParser(original: string) {
   function isExportedControllerClassDeclaration(body: any) {
     return (
-      body.type === "ExportNamedDeclaration" &&
+      (body.type === "ExportNamedDeclaration" ||
+        body.type === "ExportDefaultDeclaration") &&
       body.declaration.type === "ClassDeclaration" &&
       body.declaration.superClass.name === "Controller"
     );
@@ -26,7 +27,8 @@ export async function customRequestParser(original: string) {
 
   function isRouterExportedClassDeclaration(body: any) {
     return (
-      body.type === "ExportNamedDeclaration" &&
+      (body.type === "ExportNamedDeclaration" ||
+        body.type === "ExportDefaultDeclaration") &&
       body.declaration.type === "ClassDeclaration" &&
       (body.declaration.superClass.name === "ApiRouter" ||
         body.declaration.superClass.name === "ViewRouter")
@@ -72,7 +74,10 @@ export async function customRequestParser(original: string) {
         node.value.type === "ObjectExpression"
       ) {
         for (const property of node.value.properties) {
-          for (const arg of property.value?.arguments) {
+          if (property?.value?.type === "Identifier") {
+            continue;
+          }
+          for (const arg of property?.value?.arguments ?? []) {
             if (
               !(
                 arg.type === "ArrowFunctionExpression" ||

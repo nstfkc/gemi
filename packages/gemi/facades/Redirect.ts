@@ -32,7 +32,6 @@ export class Redirect {
       : [params: UrlParser<`${T & string}`>]
   ) {
     const [params = {}] = args;
-    applyParams(path, params);
-    throw new RedirectError(path);
+    throw new RedirectError(applyParams(path, params));
   }
 }

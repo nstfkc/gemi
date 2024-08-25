@@ -1,12 +1,13 @@
+import { Redirect } from "gemi/facades";
 import { Controller, HttpRequest } from "gemi/http";
 
 export class HomeController extends Controller {
   public async about() {
+    Redirect.to("/:testId", { testId: "1234" });
     return { title: "EnesXxxx!!" };
   }
 
   public async index(req: HttpRequest<{ color: string }>) {
-    console.log("test");
     const input = await req.input();
     const items = [
       { id: 1, name: "Red", hex: "#FF0000", color: "red" },
