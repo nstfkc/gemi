@@ -13,7 +13,8 @@ export {
   ValidationErrors,
   FormField,
 } from "./Mutation";
-export { useLocation, useParams } from "./ClientRouterContext";
+export { useLocation } from "./ClientRouterContext";
+export { useParams } from "./useParams";
 export { useSearchParams } from "./useSearchParams";
 export { useRoute } from "./useRoute";
 export { useIsNavigationPending } from "./useIsNavigationPending";

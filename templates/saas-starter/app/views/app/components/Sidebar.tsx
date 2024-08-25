@@ -1,4 +1,4 @@
-import { Link, useRouter, useSignOut, useUser } from "gemi/client";
+import { Link, useNavigate, useSignOut, useUser } from "gemi/client";
 
 export const Sidebar = () => {
   const user = useUser();
@@ -16,7 +16,7 @@ export const Sidebar = () => {
       </div>
       <div className="p-4">
         <div>{user?.name}</div>
-        <button className="font-semibold" onClick={() => trigger()}>
+        <button className="font-semibold" onClick={() => trigger({})}>
           Sign out
         </button>
       </div>

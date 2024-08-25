@@ -5,36 +5,37 @@ import { I18nServiceProvider } from "./I18nServiceProvider";
 
 class Router extends ApiRouter {
   routes = {
-    "/translations": this.get(
-      async (req: HttpRequest<{ scope: string; locale?: string }>) => {
-        const input = await req.input();
-        const { scope, locale: forcedLocale } = input.toJSON();
-        const locale =
-          forcedLocale ??
-          KernelContext.getStore().i18nServiceContainer.detectLocale(req);
+    "/translations": this.get(async (req = new HttpRequest()) => {
+      const input = await req.input();
+      const { scope, locale: forcedLocale } = input.toJSON() as {
+        scope: string;
+        locale: string;
+      };
+      const locale =
+        forcedLocale ??
+        KernelContext.getStore().i18nServiceContainer.detectLocale(req);
 
-        const translations =
-          KernelContext.getStore().i18nServiceContainer.getPageTranslations(
-            locale,
-            scope,
-          );
-
-        req.ctx.setHeaders(
-          "Cache-Control",
-          req.ctx.user
-            ? "private, max-age=1200, must-revalidate"
-            : "public, max-age=864000, must-revalidate",
+      const translations =
+        KernelContext.getStore().i18nServiceContainer.getPageTranslations(
+          locale,
+          scope,
         );
 
-        req.ctx.setCookie("i18n-locale", locale, {
-          expires: new Date(Date.now() + 1000 * 60 * 60 * 24 * 365),
-        });
+      req.ctx.setHeaders(
+        "Cache-Control",
+        req.ctx.user
+          ? "private, max-age=1200, must-revalidate"
+          : "public, max-age=864000, must-revalidate",
+      );
 
-        return {
-          [locale]: translations,
-        };
-      },
-    ),
+      req.ctx.setCookie("i18n-locale", locale, {
+        expires: new Date(Date.now() + 1000 * 60 * 60 * 24 * 365),
+      });
+
+      return {
+        [locale]: translations,
+      };
+    }),
   };
 }
 

@@ -50,14 +50,10 @@ export class RouteHandler<M extends HttpMethod, Input, Output, Params> {
   }
 
   run(req: HttpRequest<Input, Params>) {
-    let httpRequest = req;
     if (isController(this.handler)) {
       const controller = new this.handler();
       const handler = controller[this.methodName].bind(controller);
-      httpRequest = controller.requests[this.methodName]
-        ? new controller.requests[this.methodName](req.rawRequest, req.params)
-        : httpRequest;
-      return handler(httpRequest);
+      return handler();
     } else {
       return this.handler(req);
     }

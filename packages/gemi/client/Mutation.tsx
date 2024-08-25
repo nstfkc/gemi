@@ -65,11 +65,11 @@ type Methods = {
 };
 
 interface FormBaseProps<M extends keyof Methods, K extends keyof Methods[M]>
-  extends Omit<ComponentProps<"form">, "action"> {
+  extends Omit<ComponentProps<"form">, "action" | "onError"> {
   method?: M;
   action: K;
-  onSuccess?: (result: Methods[M][K]) => void;
-  onError?: (error: any) => void;
+  onSuccess?: (result: Methods[M][K], form: HTMLFormElement) => void;
+  onError?: (error: any, form: HTMLFormElement) => void;
 }
 
 type FormProps<
@@ -102,8 +102,8 @@ export function Form<
       params,
     } as any,
     {
-      onSuccess,
-      onError,
+      onSuccess: (data) => onSuccess(data as any, formRef.current),
+      onError: (error) => onError(error, formRef.current),
     },
   );
 

@@ -1,5 +1,6 @@
 import { HttpRequest, ViewRouter } from "gemi/http";
 import { HomeController } from "../controllers/HomeController";
+import { Redirect } from "gemi/facades";
 
 class AppRouter extends ViewRouter {
   middlewares = ["auth"];
@@ -21,10 +22,7 @@ export default class extends ViewRouter {
       "/:testId": this.view("Test", (req: HttpRequest) => {
         return { testId: req.params.testId };
       }),
-      "/about": this.view("About", async () => {
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-        return { title: "About" };
-      }),
+      "/about": this.view("About", [HomeController, "about"]),
     }),
     "/app": AppRouter,
   };

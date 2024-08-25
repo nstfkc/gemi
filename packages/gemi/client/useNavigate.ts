@@ -90,8 +90,10 @@ export function useNavigate() {
           const { data, directive = {}, is404 = false } = await res.json();
           if (directive?.kind === "Redirect") {
             if (directive?.path) {
-              history.replace(directive.path);
+              isNavigatingSubject.next(false);
+              action("replace").call(directive.path);
             }
+
             return;
           }
           updatePageData(data);

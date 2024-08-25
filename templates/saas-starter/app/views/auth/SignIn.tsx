@@ -10,6 +10,11 @@ import {
 export default function SignIn() {
   const { push } = useNavigate();
   const searchParams = useSearchParams();
+  const { loading } = useUser();
+
+  if (loading) {
+    return <div>...</div>;
+  }
 
   return (
     <div className="container max-w-sm mx-auto h-screen flex flex-col justify-center items-center">
@@ -59,6 +64,7 @@ export default function SignIn() {
             <button
               className="bg-slate-800 shrink-0 text-white rounded-lg px-4 py-3"
               type="submit"
+              onClick={() => console.log("hi")}
             >
               Sign In{" "}
               <span className="hidden group-data-[loading=true]:inline">

@@ -8,7 +8,7 @@ export default async function () {
   const entries = app.getComponentTree();
 
   function getEntries(componentTree: ComponentTree) {
-    const out: string[] = [];
+    const out: string[] = ["/app/client.tsx"];
     if (!componentTree) {
       return out;
     }
@@ -16,15 +16,10 @@ export default async function () {
     return Array.from(new Set(flattenComponentTree(componentTree)));
   }
 
-  Bun.write(
-    "./.gemi/rollupInput.json",
-    JSON.stringify(
-      [
-        "/app/client.tsx",
-        ...getEntries(entries).map((item) => `/app/views/${item}.tsx`),
-      ],
-      null,
-      2,
-    ),
+  return Array.from(
+    new Set([
+      "/app/client.tsx",
+      ...getEntries(entries).map((item) => `/app/views/${item}.tsx`),
+    ]),
   );
 }

@@ -1,18 +1,11 @@
-import { useNavigate } from "gemi/client";
+import { useNavigate, type ViewProps } from "gemi/client";
 import { useEffect } from "react";
 
-export default function About() {
-  const { push } = useNavigate();
-  useEffect(() => {
-    console.log("About page");
-    push("/:testId", { params: { testId: "hello-enes" } });
-  }, []);
-
-  return <div>Hi</div>;
-
+export default function About(props: ViewProps<"/about">) {
   return (
     <div className="py-4">
       <div className="py-8">
+        <div>{props.title}</div>
         <p>
           Gemi, is a batteries included framework for building web applications.
           You can create server side rendered applications and create APIs.

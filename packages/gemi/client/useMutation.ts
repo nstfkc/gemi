@@ -31,13 +31,13 @@ function applyParams(url: string, params: Record<string, any> = {}) {
 type Config<T> = {
   autoInvalidate?: boolean;
   onSuccess: (data: T) => void;
-  onError: (error: Error) => void;
+  onError: (error: MutationError) => void;
 };
 
 const defaultOptions: Config<any> = {
   autoInvalidate: false,
   onSuccess: () => {},
-  onError: (_: Error) => {},
+  onError: (_: MutationError) => {},
 };
 
 type Data<M extends keyof Methods, K extends keyof Methods[M]> =
@@ -48,7 +48,7 @@ type Data<M extends keyof Methods, K extends keyof Methods[M]> =
 type Body<M extends keyof Methods, K extends keyof Methods[M]> =
   Methods[M][K] extends ApiRouterHandler<infer T, any, any> ? T : never;
 
-type Error =
+type MutationError =
   | {
       kind: "validation_error";
       messages: Record<string, any>;
@@ -56,13 +56,25 @@ type Error =
   | {
       kind: "form_error";
       message: string;
+    }
+  | {
+      kind: "server_error";
+      message: string;
+    }
+  | {
+      kind: "not_authorized";
+      message: string;
+    }
+  | {
+      kind: "insufficient_permissions";
+      message: string;
     };
 
 type ParseParams<T> = UrlParser<`${T & string}`>;
 
 type State<T> = {
   data: T | null;
-  error: Error | null;
+  error: MutationError | null;
   loading: boolean;
 };
 

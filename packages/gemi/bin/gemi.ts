@@ -15,15 +15,17 @@ program.command("dev").action(async () => {
 
 program.command("build").action(async () => {
   process.env.NODE_ENV = "production";
-  await createRollupInput();
+  const input = await createRollupInput();
   const rootDir = path.resolve(process.cwd());
   const appDir = path.join(rootDir, "app");
 
   console.log("Building client...");
-  await $`vite build --outDir dist/client`;
+
+  await $`GEMI_INPUT=${JSON.stringify(input)} vite build --outDir dist/client`;
 
   console.log("Building server...");
   try {
+    process.env.GEMI_INPUT = JSON.stringify(input);
     await build({
       build: {
         ssr: true,

@@ -10,6 +10,7 @@ import {
 import { Subject } from "../utils/Subject";
 import { URLPattern } from "urlpattern-polyfill";
 import { ProgressManager } from "./ProgressManager";
+import { HttpReload } from "./HttpReload";
 
 interface ClientRouterContextValue {
   viewEntriesSubject: Subject<string[]>;
@@ -186,6 +187,7 @@ export const ClientRouterProvider = (
       }}
     >
       {children}
+      <HttpReload />
     </ClientRouterContext.Provider>
   );
 };
@@ -208,9 +210,4 @@ export function useLocation() {
   });
 
   return location;
-}
-
-export function useParams() {
-  const { params } = useContext(ClientRouterContext);
-  return params;
 }

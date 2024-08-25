@@ -178,10 +178,18 @@ export class HttpRequest<
   public params: Params;
   public ctx = RequestContext.getStore();
 
-  constructor(req: Request, params: Params) {
-    this.params = params;
-    this.rawRequest = req;
-    this.headers = req.headers;
+  constructor(req?: Request, params?: any) {
+    if (!req) {
+      const _req = RequestContext.getStore().req;
+      this.params = _req.params as any;
+      this.rawRequest = _req.rawRequest;
+    } else {
+      this.params = params;
+      this.rawRequest = req;
+    }
+
+    this.headers = this.rawRequest.headers;
+
     const cookie = this.rawRequest.headers.get("Cookie");
     const cookies = new Map();
     if (cookie) {

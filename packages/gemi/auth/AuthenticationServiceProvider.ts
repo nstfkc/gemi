@@ -57,11 +57,6 @@ class SignUpRequest extends HttpRequest<
 }
 
 class AuthController extends Controller {
-  requests = {
-    signUp: SignUpRequest,
-    signIn: SignInRequest,
-  };
-
   provider = KernelContext.getStore().authenticationServiceProvider;
 
   async me() {
@@ -74,7 +69,7 @@ class AuthController extends Controller {
     return user;
   }
 
-  async signIn(req: SignInRequest) {
+  async signIn(req = new SignInRequest()) {
     const input = await req.input.call(req);
     const { email, password } = input.toJSON();
 
@@ -151,7 +146,7 @@ class AuthController extends Controller {
     return user;
   }
 
-  async signUp(req: SignUpRequest) {
+  async signUp(req = new SignUpRequest()) {
     const input = await req.input();
     const { email, password, name } = input.toJSON();
 
@@ -176,7 +171,7 @@ class AuthController extends Controller {
     return newUser;
   }
 
-  async signOut(req: HttpRequest) {
+  async signOut(req = new HttpRequest()) {
     const token = req.cookies.get("access_token");
 
     const user = await Auth.user();
@@ -192,7 +187,7 @@ class AuthController extends Controller {
     return {};
   }
 
-  async forgotPassword(req: HttpRequest) {
+  async forgotPassword(req = new HttpRequest()) {
     const input = await req.input();
     const { email } = input.toJSON();
 
@@ -216,7 +211,7 @@ class AuthController extends Controller {
     return {};
   }
 
-  async resetPassword(req: HttpRequest) {
+  async resetPassword(req = new HttpRequest()) {
     const input = await req.input();
     const { password, token } = input.toJSON();
 
