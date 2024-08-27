@@ -29,7 +29,7 @@ export function useNavigate() {
 
   function action(pushOrReplace: "push" | "replace") {
     return async <T extends ViewPaths>(
-      path: T,
+      path: T | (string & {}),
       ...args: UrlParser<T> extends Record<string, never>
         ? [options?: Options<T>]
         : [options: Options<T>]

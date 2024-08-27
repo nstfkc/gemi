@@ -1,6 +1,6 @@
 import { useCallback, useContext, useEffect, useRef, useState } from "react";
 import type { RPC } from "./rpc";
-import type { JSONLike, Prettify } from "../utils/type";
+import type { JSONLike } from "../utils/type";
 
 import type { ApiRouterHandler } from "../http/ApiRouter";
 import type { UnwrapPromise } from "../utils/type";
@@ -190,7 +190,7 @@ export function useQuery<T extends keyof GetRPC>(
   }
 
   return {
-    data: state?.data as Prettify<Data<T>>,
+    data: state?.data as Data<T>,
     loading: state?.loading as boolean,
     error: state?.error as Error,
     mutate,

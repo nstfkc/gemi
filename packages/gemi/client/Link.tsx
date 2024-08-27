@@ -5,6 +5,7 @@ import { useLocation } from "./ClientRouterContext";
 import type { UrlParser, ViewResult } from "./types";
 import { useNavigate } from "./useNavigate";
 import type { ViewRPC } from "./rpc";
+import { Prettify } from "../utils/type";
 
 type Views = {
   [K in keyof ViewRPC as K extends `view:${infer P}`
@@ -14,14 +15,18 @@ type Views = {
 
 type Search = Record<string, string | number | boolean | undefined | null>;
 
-type LinkBaseProps<T extends keyof Views, S = Views[T]["input"]> = Omit<
+type LinkBaseProps<T extends keyof Views> = Omit<
   ComponentProps<"a">,
   "href"
 > & {
   active?: boolean;
-  href: T;
-  search?: S;
+  href: T | (string & {});
   params: UrlParser<T>;
+  search?: T extends keyof Views
+    ? Views[T]["input"] extends Record<string, never>
+      ? Search
+      : Prettify<Partial<Views[T]["input"]> & Search>
+    : Search;
 };
 
 type LinkProps<T extends keyof Views, U = UrlParser<T>> =
