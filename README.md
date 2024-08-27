@@ -1,5 +1,5 @@
 # Gemi
-Batteries included full-stack MVC web framework with server side rendering and soft navigation
+Full-stack MVC web framework with SSR React 
 
 ## Tech stack
 - React (view layer)
@@ -7,8 +7,7 @@ Batteries included full-stack MVC web framework with server side rendering and s
 - Vite (bundler)
 - Prisma (database and orm)
 
-## Motivation
-Gemi, aims to be a Laravel (or Rails) equavalent framework for the JS ecosystem.
+## Why you should use gemi?
 
 ## Features
 - Routing ✅
@@ -501,23 +500,6 @@ export default function AppLayout(props: { children: ReactNode }) {
 
 When you navigate between the child routes of a `layout`, the data you fetch for the Layout component will be cached in the browser and the `Layout` component won't be re-rendered.
 
-If that's not what you want, you can use the `ViewRouter.view` method in a same way but differently all the data you fetch for your views will be re-fetched when you navigate between the child routes. To make the navigation snappy, the data for your routes will be fetched using "stale while revalidate" method.
-
-
-E.g
-```ts
-{
-  '/': this.view('Root', [RootController, 'index'], {
-    '/foo': this.view('Foo', [FooController, 'index'], {
-      '/bar': this.view('Bar', [BarController, 'index'])
-    })
-  })
-}
-
-```
-
-Note: All the data fetching for the nested routes handled in parallel. Based on the given example above. When you navigate to `/foo` `RootController.index` and `FooController.index` will be called then if you navigate to `/foo/bar` `RootController.index`, `FooController.index` and `BarController.index` will be called. 
-
 
 #### Api routes
 
@@ -537,9 +519,9 @@ export default class extends ApiRouter {
 }
 ```
 
-Note: All api routes defined in the root level are automatically prefixed with `/api`. For this example you can access to the order list endpoint via `GET:/api/orders`
+Note: All api routes defined in the root level are automatically prefixed with `/api`. For this example you can access to the order list endpoint via `/api/orders` using `GET` method
 
-If you are folling REST API specification, you might want to handle multiple methods in the same url. In this case you can pass an array of handlers.
+If you are following REST API spec, you might want to handle multiple methods in the same url. In this case you can pass a list of handlers.
 
 For example;
 
@@ -552,15 +534,15 @@ import { OrderController } from '@/app/http/controllers/OrderController'
 export default class extends ApiRouter {
 
   routes = {
-    '/orders': [
-      this.get(OrderController, 'list'),
-      this.post(OrderController, 'create')
-    ],
-    '/orders/:orderId': [
-      this.get(OrderController, 'show'),
-      this.put(OrderController, 'update'),
-      this.delete(OrderController, 'delete'),
-    ],
+    '/orders': {
+      list: this.get(OrderController, 'list'),
+      create: this.post(OrderController, 'create')
+    },
+    '/orders/:orderId': {
+      show: this.get(OrderController, 'show'),
+      update: this.put(OrderController, 'update'),
+      delete: this.delete(OrderController, 'delete'),
+    },
   }
 }
 ```
