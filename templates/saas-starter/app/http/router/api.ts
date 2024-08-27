@@ -1,5 +1,6 @@
 import { prisma } from "@/app/database/prisma";
 import { ApiRouter, HttpRequest } from "gemi/http";
+import { FileStorage } from "gemi/facades";
 
 export default class extends ApiRouter {
   routes = {
@@ -22,6 +23,14 @@ export default class extends ApiRouter {
       );
 
       return filteredItems;
+    }),
+    "/upload": this.post(async (req: HttpRequest<{ file: Blob }>) => {
+      const input = await req.input();
+      const url = await FileStorage.put(input.get("file"));
+      return { url };
+    }),
+    "/file/:path*": this.get(async (req: HttpRequest<{ path: string }>) => {
+      return await FileStorage.fetch(req.params.path);
     }),
   };
 }

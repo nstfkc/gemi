@@ -1,6 +1,5 @@
 import { v4 } from "uuid";
 import type { PutFileParams, ReadFileParams } from "./types";
-import { Temporal, Intl } from "temporal-polyfill";
 import { FileStorageDriver } from "./FileStorageDriver";
 
 export class FileSystemDriver extends FileStorageDriver {
@@ -48,14 +47,7 @@ export class FileSystemDriver extends FileStorageDriver {
     const path = `${this.folderPath}/${name}`;
     const file = Bun.file(path);
     const result = Bun.file(path).stream();
-    const time = Temporal.Instant.fromEpochMilliseconds(
-      file.lastModified,
-    ).toZonedDateTime({
-      calendar: "iso8601",
-      timeZone: new Temporal.TimeZone(
-        Intl.DateTimeFormat().resolvedOptions().timeZone,
-      ),
-    });
+    const date = new Date(file.lastModified).toUTCString();
 
     return new Response(result, {
       headers: {
@@ -63,11 +55,7 @@ export class FileSystemDriver extends FileStorageDriver {
         "Content-Length": String(file.size),
         "Cache-Control": "private, max-age=12000, must-revalidate",
         // TODO: fix this.
-        "Last-Modified": Intl.DateTimeFormat("en", {
-          dateStyle: "medium",
-        })
-          .format(time.toInstant())
-          .toString(),
+        "Last-Modified": date,
       },
     });
   }
