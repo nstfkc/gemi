@@ -5,6 +5,8 @@ import { MiddlewareServiceProvider } from "../http/MiddlewareServiceProvider";
 import { PoliciesServiceProvider } from "../http/PoliciesServiceProvider";
 import { I18nServiceProvider } from "../http/I18nServiceProvider";
 import { I18nServiceContainer } from "../http/I18nServiceContainer";
+import { FileStorageServiceContainer } from "../services/file-storage/FileStorageServiceContainer";
+import { FileStorageServiceProvider } from "../services/file-storage/FileStorageServiceProvider";
 
 export class Kernel {
   protected emailServiceProvider = EmailServiceProvider;
@@ -12,6 +14,7 @@ export class Kernel {
   protected middlewareServiceProvider = MiddlewareServiceProvider;
   protected policiesServiceProvider = PoliciesServiceProvider;
   protected i18nServiceProvider = I18nServiceProvider;
+  protected fileStorageServiceProvider = FileStorageServiceProvider;
 
   services: {
     emailServiceProvider: EmailServiceProvider;
@@ -19,6 +22,7 @@ export class Kernel {
     middlewareServiceProvider: MiddlewareServiceProvider;
     policiesServiceProvider: PoliciesServiceProvider;
     i18nServiceContainer: I18nServiceContainer;
+    fileStorageServiceContainer: FileStorageServiceContainer;
   };
 
   getServices = () => {
@@ -30,6 +34,9 @@ export class Kernel {
         policiesServiceProvider: new this.policiesServiceProvider(),
         i18nServiceContainer: new I18nServiceContainer(
           new this.i18nServiceProvider(),
+        ),
+        fileStorageServiceContainer: new FileStorageServiceContainer(
+          new this.fileStorageServiceProvider(),
         ),
       };
     }

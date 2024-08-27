@@ -13,7 +13,7 @@
     "kernel",
     "facades",
     "email",
-    "storage"
+    "services"
   ],
   "exclude": ["node_modules", "dist"]
 }

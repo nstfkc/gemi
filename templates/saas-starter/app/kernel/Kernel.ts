@@ -4,6 +4,7 @@ import AuthenticationServiceProvider from "../service-providers/AuthenticationSe
 import MiddlewareServiceProvider from "../service-providers/MiddlewareServiceProvider";
 import PoliciesServiceProvider from "../service-providers/PoliciesServiceProvider";
 import I18nServiceProvider from "../service-providers/I18nServiceProvider";
+import FileStorageServiceProvider from "../service-providers/FileStorageServiceProvider";
 
 export default class extends Kernel {
   emailServiceProvider = EmailServiceProvider;
@@ -11,4 +12,5 @@ export default class extends Kernel {
   middlewareServiceProvider = MiddlewareServiceProvider;
   policiesServiceProvider = PoliciesServiceProvider;
   i18nServiceProvider = I18nServiceProvider;
+  fileStorageServiceProvider = FileStorageServiceProvider;
 }

@@ -4,6 +4,7 @@ import { AuthenticationServiceProvider } from "../auth/AuthenticationServiceProv
 import { PoliciesServiceProvider } from "../http/PoliciesServiceProvider";
 import { MiddlewareServiceProvider } from "../http";
 import { I18nServiceContainer } from "../http/I18nServiceContainer";
+import { FileStorageServiceContainer } from "../services/file-storage/FileStorageServiceContainer";
 
 export interface KernelContextValue {
   emailServiceProvider: EmailServiceProvider;
@@ -11,6 +12,7 @@ export interface KernelContextValue {
   middlewareServiceProvider: MiddlewareServiceProvider;
   policiesServiceProvider: PoliciesServiceProvider;
   i18nServiceContainer: I18nServiceContainer;
+  fileStorageServiceContainer: FileStorageServiceContainer;
 }
 
 export const kernelContext = new AsyncLocalStorage<KernelContextValue>();

@@ -1,6 +1,6 @@
 {
   "name": "gemi",
-  "version": "0.4.72",
+  "version": "0.4.73",
   "devDependencies": {
     "@babel/parser": "^7.25.4",
     "@repo/eslint-config": "*",
@@ -27,7 +27,7 @@
     "./runtime": "./client/runtime.ts",
     "./server": "./server/index.ts",
     "./kernel": "./kernel/index.ts",
-    "./storage": "./storage/index.ts"
+    "./services": "./services/index.ts"
   },
   "files": [
     "dist/**/*"

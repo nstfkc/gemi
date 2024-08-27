@@ -9,7 +9,7 @@
     "./runtime": "./client/runtime.ts",
     "./server": "./server/index.ts",
     "./kernel": "./kernel/index.ts",
-    "./storage": "./storage/index.ts"
+    "./services": "./services/index.ts"
   },
   "prod": {
     "./http": "./dist/http/index.js",
@@ -21,6 +21,6 @@
     "./runtime": "./dist/runtime/index.js",
     "./server": "./dist/server/index.js",
     "./kernel": "./dist/kernel/index.js",
-    "./storage": "./dist/storage/index.js"
+    "./services": "./dist/services/index.js"
   }
 }
