@@ -25,7 +25,6 @@ export const QueryManagerProvider = ({ children }: PropsWithChildren) => {
       value={{
         updatePrefecthedData,
         getResource: (key: string, initialState?: Record<string, any>) => {
-          console.log(key, prefetchedDataRef.current);
           let _initialState = initialState;
           if (!_initialState && prefetchedDataRef.current[key]) {
             _initialState = prefetchedDataRef.current[key];

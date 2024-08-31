@@ -192,6 +192,7 @@ export class App {
 
     let pageData: {
       cookies: Set<Cookie>;
+      headers: Headers;
       currentPathName: string;
       data: Record<string, any>;
       prefetchedData: Record<string, any>;
@@ -219,28 +220,31 @@ export class App {
       const reqWithMiddlewares = this.runMiddleware(middlewares);
 
       const httpRequest = new HttpRequest(req, params);
-      const { data, cookies, user, prefetchedData } = await RequestContext.run(
-        httpRequest,
-        async () => {
+      const { data, cookies, headers, user, prefetchedData } =
+        await RequestContext.run(httpRequest, async () => {
           const ctx = RequestContext.getStore();
           ctx.setRequest(httpRequest);
 
           await reqWithMiddlewares(httpRequest);
 
-          const data = await Promise.all(
-            // TODO: fix type
-            handlers.map((fn) => fn(httpRequest as any)),
-          );
+          const data = await Promise.all([
+            ...handlers.map((fn) => fn(httpRequest as any)),
+            ...Array.from(ctx.prefetchPromiseQueue).map((fn) => fn()),
+          ]);
+
+          const cookies = ctx.cookies;
+          const headers = ctx.headers;
+          const prefetchedResources = ctx.prefetchedResources;
+          ctx.destroy();
+
           return {
             data,
-            cookies: ctx.cookies,
+            cookies,
+            headers,
             user: ctx.user,
-            prefetchedData: Object.fromEntries(
-              ctx.prefetchedResources.entries(),
-            ),
+            prefetchedData: Object.fromEntries(prefetchedResources.entries()),
           };
-        },
-      );
+        });
 
       pageData = {
         data,
@@ -249,6 +253,7 @@ export class App {
         user,
         params,
         cookies,
+        headers,
       };
     } catch (err) {
       if (err.kind === GEMI_REQUEST_BREAKER_ERROR) {
@@ -293,6 +298,7 @@ export class App {
     }
 
     if (isViewDataRequest) {
+      const ctx = RequestContext.getStore();
       const headers = new Headers();
       headers.set("Content-Type", "application/json");
 
@@ -306,6 +312,8 @@ export class App {
           ? "private, no-cache, no-store, max-age=0, must-revalidate"
           : "public, max-age=864000, must-revalidate",
       );
+
+      RequestContext.getStore().destroy();
 
       return new Response(
         JSON.stringify({

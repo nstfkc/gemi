@@ -19,15 +19,16 @@ type Data<T extends keyof GetRPC> =
 type Input<T extends keyof GetRPC> =
   GetRPC[T] extends ApiRouterHandler<infer Input, any, any> ? Input : never;
 
-export class Prefetch {
-  static single<T extends keyof GetRPC>(
+export class Query {
+  private static prepare<T extends keyof GetRPC>(
     path: T,
     ...args: UrlParser<T> extends Record<string, never>
       ? [options?: { search: Partial<Input<T>> }]
       : [options: { search?: Partial<Input<T>>; params: UrlParser<T> }]
   ) {
-    const [options] = args;
-    const { search, params } = { params: {}, ...options };
+    const defaultOptions = { params: {}, search: {} };
+    const [options = {}] = args;
+    const { search, params } = { ...defaultOptions, ...options };
     const ctx = RequestContext.getStore();
     const req = ctx.req.rawRequest;
     const url = new URL(req.url);
@@ -40,6 +41,7 @@ export class Prefetch {
     ]
       .filter((s) => s.length > 0)
       .join("?");
+
     const urlStr = `${url.origin}/${pathnameWithSearchParams}`;
     const newReq = new Request(urlStr, { headers: req.headers });
     const httpRequest = new HttpRequest(newReq, params);
@@ -48,13 +50,41 @@ export class Prefetch {
         [searchParams.toString()]: data,
       });
     };
-    return RequestContext.run(httpRequest, async () => {
-      const data: Data<T> =
-        await KernelContext.getStore().apiRouterServiceContainer.getRouteData(
-          path,
-        );
-      store(data);
-      return data;
-    });
+
+    const trigger = () => {
+      return RequestContext.run(httpRequest, async () => {
+        const data: Data<T> =
+          await KernelContext.getStore().apiRouterServiceContainer.getRouteData(
+            path,
+          );
+        store(data);
+        return data;
+      });
+    };
+
+    return {
+      instant: trigger,
+      prefetch: () => {
+        ctx.prefetchPromiseQueue.add(trigger);
+      },
+    };
+  }
+
+  static instant<T extends keyof GetRPC>(
+    path: T,
+    ...args: UrlParser<T> extends Record<string, never>
+      ? [options?: { search: Partial<Input<T>> }]
+      : [options: { search?: Partial<Input<T>>; params: UrlParser<T> }]
+  ) {
+    return Query.prepare(path, ...args).instant();
+  }
+
+  static prefetch<T extends keyof GetRPC>(
+    path: T,
+    ...args: UrlParser<T> extends Record<string, never>
+      ? [options?: { search: Partial<Input<T>> }]
+      : [options: { search?: Partial<Input<T>>; params: UrlParser<T> }]
+  ) {
+    return Query.prepare(path, ...args).prefetch();
   }
 }

@@ -172,7 +172,7 @@ export class HttpRequest<
   public rawRequest: Request;
   public headers: Headers;
   public cookies: Map<string, string>;
-
+  public search: Input<T>;
   public schema: any = {};
 
   public params: Params;
@@ -199,6 +199,11 @@ export class HttpRequest<
         cookies.set(key.trim(), value.trim());
       }
     }
+    if (this.rawRequest.method === "GET") {
+      const url = new URL(this.rawRequest.url);
+      const params = Object.fromEntries(url.searchParams.entries());
+      this.search = new Input<T>(params as T);
+    }
     this.cookies = cookies;
   }
 
@@ -223,10 +228,11 @@ export class HttpRequest<
         inputMap.set(key, value as T[keyof T]);
       }
     }
+
     if (
       this.rawRequest.headers
         .get("Content-Type")
-        .startsWith("multipart/form-data")
+        ?.startsWith("multipart/form-data")
     ) {
       const body = (await this.rawRequest.formData()) as any; // TODO: fix type
       for (const [key, value] of body) {
@@ -294,11 +300,6 @@ export class HttpRequest<
   }
 
   public async input(): Promise<Input<T>> {
-    if (this.rawRequest.method === "GET") {
-      const url = new URL(this.rawRequest.url);
-      const params = Object.fromEntries(url.searchParams.entries());
-      return this.validateInput(new Input<T>(params as T));
-    }
     return this.validateInput(await this.parseBody());
   }
 

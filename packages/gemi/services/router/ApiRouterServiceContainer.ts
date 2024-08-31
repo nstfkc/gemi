@@ -134,6 +134,8 @@ export class ApiRouterServiceContainer {
         headers.append("Set-Cookie", cookie.toString()),
       );
 
+      ctx.destroy();
+
       return new Response(JSON.stringify(data), {
         headers,
       });

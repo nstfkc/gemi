@@ -8,6 +8,7 @@ class Store {
   cookies: Set<Cookie> = new Set();
   headers: Headers = new Headers();
   prefetchedResources = new Map<string, Record<string, any>>();
+  prefetchPromiseQueue = new Set<() => Promise<any>>();
   user: any = null;
 
   constructor(public req: HttpRequest) {}
@@ -26,6 +27,14 @@ class Store {
 
   setRequest(req: HttpRequest<any, any>) {
     this.req = req;
+  }
+
+  destroy() {
+    delete this.cookies;
+    delete this.headers;
+    delete this.prefetchedResources;
+    delete this.prefetchPromiseQueue;
+    delete this.user;
   }
 }
 
