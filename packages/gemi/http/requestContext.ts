@@ -7,12 +7,10 @@ const requestContext = new AsyncLocalStorage<Store>();
 class Store {
   cookies: Set<Cookie> = new Set();
   headers: Headers = new Headers();
+  prefetchedResources = new Map<string, Record<string, any>>();
   user: any = null;
-  req: HttpRequest | null = null;
 
-  constructor() {
-    //autobind(this as any);
-  }
+  constructor(public req: HttpRequest) {}
 
   setCookie(name: string, value: string, options: CreateCookieOptions = {}) {
     this.cookies.add(new Cookie(name, value, options));
@@ -40,7 +38,7 @@ export class RequestContext {
     requestContext.getStore().req = req;
   }
 
-  static async run<T>(fn: () => T): Promise<T> {
-    return requestContext.run(new Store(), fn);
+  static run<T>(httpRequest: HttpRequest, fn: () => T): T {
+    return requestContext.run(new Store(httpRequest), fn);
   }
 }

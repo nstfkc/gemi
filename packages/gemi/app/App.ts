@@ -30,7 +30,7 @@ import { HttpRequest } from "../http";
 import { Kernel } from "../kernel";
 import { I18nServiceContainer } from "../http/I18nServiceContainer";
 
-type ApiRouteExec = any; // TODO: fix type
+type ApiRouteExec = <T>() => T | Promise<T>;
 
 interface RenderParams {
   styles: string[];
@@ -130,6 +130,10 @@ export class App {
         };
       }
     }
+
+    this.kernel
+      .getServices()
+      .apiRouterServiceContainer.service.boot(apiRouters);
     this.flatViewRoutes = createFlatViewRoutes(viewRouters);
     this.componentTree = createComponentTree(viewRouters);
     this.routeManifest = createRouteManifest(viewRouters);
@@ -153,7 +157,7 @@ export class App {
           const alias = aliasOrTest;
           const kernelServices = this.kernel.getServices();
           const Middleware =
-            kernelServices.middlewareServiceProvider.aliases[alias];
+            kernelServices.middlewareServiceContainer.service.aliases[alias];
           if (Middleware) {
             const middleware = new Middleware();
             return middleware.run;
@@ -182,116 +186,6 @@ export class App {
       );
   }
 
-  async handleApiRequest(req: Request) {
-    const url = new URL(req.url);
-
-    const apiPath = url.pathname.replace("/api", "");
-
-    let handler: (typeof this.flatApiRoutes)[string];
-    let params: Record<string, any> = {};
-    for (const [path] of Object.entries(this.flatApiRoutes)) {
-      try {
-        const pattern = new URLPattern({ pathname: path });
-        if (pattern.test({ pathname: apiPath })) {
-          handler = this.flatApiRoutes[path];
-          params = pattern.exec({ pathname: apiPath })?.pathname.groups!;
-          break;
-        }
-      } catch (err) {
-        // Do something
-      }
-    }
-
-    if (!handler || !handler[req.method]) {
-      return new Response(JSON.stringify({ error: { message: "Not found" } }), {
-        status: 404,
-      });
-    }
-
-    const exec = handler[req.method].exec;
-    const middlewares = handler[req.method].middleware;
-
-    const reqWithMiddlewares = this.runMiddleware(middlewares);
-
-    return await RequestContext.run(async () => {
-      const httpRequest = new HttpRequest(req, params);
-
-      const ctx = RequestContext.getStore();
-      ctx.setRequest(httpRequest);
-
-      let handler = exec
-        ? () => exec(httpRequest, params)
-        : () => Promise.resolve({});
-
-      try {
-        await reqWithMiddlewares(httpRequest);
-      } catch (err) {
-        if (err.kind === GEMI_REQUEST_BREAKER_ERROR) {
-          const { status = 400, data, headers } = err.payload.api;
-
-          return new Response(JSON.stringify(data), {
-            status,
-            headers: {
-              "Content-Type": "application/json",
-              ...headers,
-            },
-          });
-        } else {
-          console.error(err);
-          throw err;
-        }
-      }
-
-      let data = {};
-      try {
-        data = await handler();
-      } catch (err) {
-        if (err.kind === GEMI_REQUEST_BREAKER_ERROR) {
-          const { status = 400, data, headers } = err.payload.api;
-
-          return new Response(JSON.stringify(data), {
-            status,
-            headers: {
-              "Content-Type": "application/json",
-              ...headers,
-            },
-          });
-        } else {
-          console.error(err);
-          throw err;
-        }
-      }
-
-      if (data instanceof Response) {
-        return data;
-      }
-
-      const headers = ctx.headers;
-
-      headers.append("Content-Type", "application/json");
-      if (!headers.get("Cache-Control")) {
-        if (ctx.user) {
-          headers.set(
-            "Cache-Control",
-            "private, no-cache, no-store, max-age=0, must-revalidate",
-          );
-        } else {
-          headers.set(
-            "Cache-Control",
-            "public, no-cache, no-store, max-age=0, must-revalidate",
-          );
-        }
-      }
-      ctx.cookies.forEach((cookie) =>
-        headers.append("Set-Cookie", cookie.toString()),
-      );
-
-      return new Response(JSON.stringify(data), {
-        headers,
-      });
-    });
-  }
-
   async handleViewRequest(req: Request) {
     const url = new URL(req.url);
     const isViewDataRequest = url.searchParams.get("json");
@@ -300,6 +194,7 @@ export class App {
       cookies: Set<Cookie>;
       currentPathName: string;
       data: Record<string, any>;
+      prefetchedData: Record<string, any>;
       user: any; // TODO: fix type
       params: Record<string, any>;
     } | null = null;
@@ -323,26 +218,33 @@ export class App {
 
       const reqWithMiddlewares = this.runMiddleware(middlewares);
 
-      const { data, cookies, user } = await RequestContext.run(async () => {
-        const httpRequest = new HttpRequest(req, params);
-        const ctx = RequestContext.getStore();
-        ctx.setRequest(httpRequest);
+      const httpRequest = new HttpRequest(req, params);
+      const { data, cookies, user, prefetchedData } = await RequestContext.run(
+        httpRequest,
+        async () => {
+          const ctx = RequestContext.getStore();
+          ctx.setRequest(httpRequest);
 
-        await reqWithMiddlewares(httpRequest);
+          await reqWithMiddlewares(httpRequest);
 
-        const data = await Promise.all(
-          // TODO: fix type
-          handlers.map((fn) => fn(httpRequest as any)),
-        );
-        return {
-          data,
-          cookies: ctx.cookies,
-          user: ctx.user,
-        };
-      });
+          const data = await Promise.all(
+            // TODO: fix type
+            handlers.map((fn) => fn(httpRequest as any)),
+          );
+          return {
+            data,
+            cookies: ctx.cookies,
+            user: ctx.user,
+            prefetchedData: Object.fromEntries(
+              ctx.prefetchedResources.entries(),
+            ),
+          };
+        },
+      );
 
       pageData = {
         data,
+        prefetchedData,
         currentPathName,
         user,
         params,
@@ -410,6 +312,7 @@ export class App {
           data: {
             [url.pathname]: viewData,
           },
+          prefetchedData: pageData.prefetchedData,
           i18n,
           is404: !currentPathName,
         }),
@@ -475,6 +378,7 @@ export class App {
         pageData: {
           [url.pathname]: viewData,
         },
+        prefetchedData: pageData.prefetchedData,
         i18n,
         auth: { user },
         routeManifest: this.routeManifest,
@@ -519,7 +423,9 @@ export class App {
 
     return kernelRun(async () => {
       if (url.pathname.startsWith("/api")) {
-        return await this.handleApiRequest(req);
+        return await this.kernel.services.apiRouterServiceContainer.handleApiRequest(
+          req,
+        );
       } else {
         return await this.handleViewRequest(req);
       }

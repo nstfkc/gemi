@@ -20,7 +20,7 @@ type WithOptionalValues<T> = {
 
 const defaultConfig: Config<any> = {
   fallbackData: null,
-  keepPreviousData: false,
+  keepPreviousData: true,
   retryIntervalOnError: 10000,
 };
 
@@ -101,7 +101,10 @@ export function useQuery<T extends keyof GetRPC>(
   searchParams.sort();
   const variantKey = searchParams.toString();
   const [resource] = useState(() =>
-    getResource(normalPath, { [variantKey]: config.fallbackData }),
+    getResource(
+      normalPath,
+      config.fallbackData ? { [variantKey]: config.fallbackData } : null,
+    ),
   );
   const retryIntervalRef = useRef<ReturnType<typeof setTimeout>>();
   const retryingMap = useRef<Map<string, boolean>>(new Map());

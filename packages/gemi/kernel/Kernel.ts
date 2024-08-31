@@ -7,6 +7,9 @@ import { I18nServiceProvider } from "../http/I18nServiceProvider";
 import { I18nServiceContainer } from "../http/I18nServiceContainer";
 import { FileStorageServiceContainer } from "../services/file-storage/FileStorageServiceContainer";
 import { FileStorageServiceProvider } from "../services/file-storage/FileStorageServiceProvider";
+import { ApiRouterServiceContainer } from "../services/router/ApiRouterServiceContainer";
+import { ApiRouterServiceProvider } from "../services/router/ApiRouterServiceProvider";
+import { MiddlewareServiceContainer } from "../services/middleware/MiddlewareServiceContainer";
 
 export class Kernel {
   protected emailServiceProvider = EmailServiceProvider;
@@ -15,14 +18,16 @@ export class Kernel {
   protected policiesServiceProvider = PoliciesServiceProvider;
   protected i18nServiceProvider = I18nServiceProvider;
   protected fileStorageServiceProvider = FileStorageServiceProvider;
+  protected apiRouterServiceProvider = ApiRouterServiceProvider;
 
   services: {
     emailServiceProvider: EmailServiceProvider;
     authenticationServiceProvider: AuthenticationServiceProvider;
-    middlewareServiceProvider: MiddlewareServiceProvider;
     policiesServiceProvider: PoliciesServiceProvider;
     i18nServiceContainer: I18nServiceContainer;
     fileStorageServiceContainer: FileStorageServiceContainer;
+    apiRouterServiceContainer: ApiRouterServiceContainer;
+    middlewareServiceContainer: MiddlewareServiceContainer;
   };
 
   getServices = () => {
@@ -30,13 +35,18 @@ export class Kernel {
       this.services = {
         emailServiceProvider: new this.emailServiceProvider(),
         authenticationServiceProvider: new this.authenticationServiceProvider(),
-        middlewareServiceProvider: new this.middlewareServiceProvider(),
+        middlewareServiceContainer: new MiddlewareServiceContainer(
+          new this.middlewareServiceProvider(),
+        ),
         policiesServiceProvider: new this.policiesServiceProvider(),
         i18nServiceContainer: new I18nServiceContainer(
           new this.i18nServiceProvider(),
         ),
         fileStorageServiceContainer: new FileStorageServiceContainer(
           new this.fileStorageServiceProvider(),
+        ),
+        apiRouterServiceContainer: new ApiRouterServiceContainer(
+          new this.apiRouterServiceProvider(),
         ),
       };
     }

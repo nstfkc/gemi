@@ -8,6 +8,7 @@ type Data = Record<string, any>;
 export interface ServerDataContextValue {
   routeManifest: Record<string, string[]>;
   pageData: Record<string, Record<string, Data>>;
+  prefetchedData: Record<string, Data>;
   router: {
     pathname: string;
     params: Record<string, any>;

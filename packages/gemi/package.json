@@ -23,7 +23,7 @@
     "./app": "./app/index.ts",
     "./facades": "./facades/index.ts",
     "./email": "./email/index.ts",
-    "./vite": "./vite/index.ts",
+    "./vite": "./dist/vite/index.mjs",
     "./runtime": "./client/runtime.ts",
     "./server": "./server/index.ts",
     "./kernel": "./kernel/index.ts",

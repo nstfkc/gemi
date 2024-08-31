@@ -3,6 +3,7 @@ import { ClientRouterContext } from "./ClientRouterContext";
 import type { UrlParser, ViewPaths } from "./types";
 import { applyParams } from "../utils/applyParams";
 import { I18nContext } from "./i18n/I18nContext";
+import { QueryManagerContext } from "./QueryManagerContext";
 
 type Options<T extends ViewPaths> =
   UrlParser<T> extends Record<string, never>
@@ -25,6 +26,7 @@ export function useNavigate() {
     isNavigatingSubject,
     setNavigationAbortController,
   } = useContext(ClientRouterContext);
+  const { updatePrefecthedData } = useContext(QueryManagerContext);
   const { fetchTranslations } = useContext(I18nContext);
 
   function action(pushOrReplace: "push" | "replace") {
@@ -87,7 +89,12 @@ export function useNavigate() {
         ]);
 
         if (res.ok) {
-          const { data, directive = {}, is404 = false } = await res.json();
+          const {
+            data,
+            prefetchedData,
+            directive = {},
+            is404 = false,
+          } = await res.json();
           if (directive?.kind === "Redirect") {
             if (directive?.path) {
               isNavigatingSubject.next(false);
@@ -97,6 +104,7 @@ export function useNavigate() {
             return;
           }
           updatePageData(data);
+          updatePrefecthedData(prefetchedData);
           history?.[pushOrReplace](
             navigationPath,
             is404 ? { status: 404 } : {},

@@ -1,0 +1,10 @@
+import { createFlatApiRoutes, FlatApiRoutes } from "./createFlatApiRoutes";
+import { ApiRoutes } from "../../http/ApiRouter";
+import { ServiceProvider } from "../ServiceProvider";
+
+export class ApiRouterServiceProvider extends ServiceProvider {
+  flatRoutes: FlatApiRoutes = {};
+  boot(routes: ApiRoutes) {
+    this.flatRoutes = createFlatApiRoutes(routes);
+  }
+}
