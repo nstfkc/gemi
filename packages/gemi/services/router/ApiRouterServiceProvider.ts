@@ -1,5 +1,5 @@
-import { createFlatApiRoutes, FlatApiRoutes } from "./createFlatApiRoutes";
-import { ApiRoutes } from "../../http/ApiRouter";
+import { createFlatApiRoutes, type FlatApiRoutes } from "./createFlatApiRoutes";
+import type { ApiRoutes } from "../../http/ApiRouter";
 import { ServiceProvider } from "../ServiceProvider";
 
 export class ApiRouterServiceProvider extends ServiceProvider {

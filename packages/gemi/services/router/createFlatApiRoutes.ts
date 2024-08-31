@@ -1,11 +1,11 @@
 import { Middleware } from "../../http";
 import {
-  ApiRoutes,
-  RouteHandlers,
-  FileHandler,
-  ApiRouter,
+  type ApiRoutes,
+  type RouteHandlers,
+  type FileHandler,
+  type ApiRouter,
 } from "../../http/ApiRouter";
-import { RouterMiddleware } from "../../http/Router";
+import type { RouterMiddleware } from "../../http/Router";
 import { isConstructor } from "../../internal/isConstructor";
 
 type ApiRouteExec = any;

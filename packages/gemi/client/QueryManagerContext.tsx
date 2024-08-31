@@ -1,4 +1,9 @@
-import { createContext, PropsWithChildren, useContext, useRef } from "react";
+import {
+  createContext,
+  type PropsWithChildren,
+  useContext,
+  useRef,
+} from "react";
 import { QueryResource } from "./QueryResource";
 import { ServerDataContext } from "./ServerDataProvider";
 

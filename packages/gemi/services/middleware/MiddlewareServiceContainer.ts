@@ -1,6 +1,6 @@
 import { HttpRequest, Middleware, MiddlewareServiceProvider } from "../../http";
 import { RequestContext } from "../../http/requestContext";
-import { RouterMiddleware } from "../../http/Router";
+import type { RouterMiddleware } from "../../http/Router";
 import { isConstructor } from "../../internal/isConstructor";
 
 export class MiddlewareServiceContainer {

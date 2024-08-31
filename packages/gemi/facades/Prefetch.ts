@@ -1,7 +1,7 @@
-import { RPC } from "../client/rpc";
-import { UrlParser } from "../client/types";
+import type { RPC } from "../client/rpc";
+import type { UrlParser } from "../client/types";
+import type { ApiRouterHandler } from "../http/ApiRouter";
 import { HttpRequest } from "../http";
-import { ApiRouterHandler } from "../http/ApiRouter";
 import { RequestContext } from "../http/requestContext";
 import { KernelContext } from "../kernel/KernelContext";
 import { applyParams } from "../utils/applyParams";
