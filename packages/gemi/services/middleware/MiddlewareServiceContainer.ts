@@ -7,7 +7,12 @@ export class MiddlewareServiceContainer {
   constructor(public service: MiddlewareServiceProvider) {}
 
   public runMiddleware(
-    middleware: (string | RouterMiddleware | (new () => Middleware))[],
+    middleware: (
+      | string
+      | RouterMiddleware
+      | (new (routePath: string) => Middleware)
+    )[],
+    routePath: string,
   ) {
     const req = RequestContext.getStore().req;
 
@@ -17,15 +22,15 @@ export class MiddlewareServiceContainer {
           const alias = aliasOrTest;
           const Middleware = this.service.aliases[alias];
           if (Middleware) {
-            const middleware = new Middleware();
-            return middleware.run;
+            const middleware = new Middleware(routePath);
+            return middleware.run.bind(middleware);
           }
         } else {
           if (isConstructor(aliasOrTest)) {
             // TODO: fix type
             // @ts-ignore
-            const middleware = new aliasOrTest();
-            return middleware.run;
+            const middleware = new aliasOrTest(routePath);
+            return middleware.run.bind(middleware);
           }
           return aliasOrTest;
         }

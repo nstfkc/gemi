@@ -9,4 +9,7 @@ export type {
 } from "./file-storage/drivers/types";
 export { FileStorageDriver } from "./file-storage/drivers/FileStorageDriver";
 
-//
+// Ratelimiter
+export { RateLimiterServiceProvider } from "./rate-limiter/RateLimiterServiceProvider";
+export { InMemoryRateLimiter } from "./rate-limiter/drivers/InMemoryRateLimiterDriver";
+export { RateLimiterDriver } from "./rate-limiter/drivers/RateLimiterDriver";

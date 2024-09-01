@@ -10,6 +10,8 @@ import { FileStorageServiceProvider } from "../services/file-storage/FileStorage
 import { ApiRouterServiceContainer } from "../services/router/ApiRouterServiceContainer";
 import { ApiRouterServiceProvider } from "../services/router/ApiRouterServiceProvider";
 import { MiddlewareServiceContainer } from "../services/middleware/MiddlewareServiceContainer";
+import { RateLimiterServiceContainer } from "../services/rate-limiter/RateLimiterServiceContainer";
+import { RateLimiterServiceProvider } from "../services";
 
 export class Kernel {
   protected emailServiceProvider = EmailServiceProvider;
@@ -19,6 +21,7 @@ export class Kernel {
   protected i18nServiceProvider = I18nServiceProvider;
   protected fileStorageServiceProvider = FileStorageServiceProvider;
   protected apiRouterServiceProvider = ApiRouterServiceProvider;
+  protected rateLimiterServiceProvider = RateLimiterServiceProvider;
 
   services: {
     emailServiceProvider: EmailServiceProvider;
@@ -28,6 +31,7 @@ export class Kernel {
     fileStorageServiceContainer: FileStorageServiceContainer;
     apiRouterServiceContainer: ApiRouterServiceContainer;
     middlewareServiceContainer: MiddlewareServiceContainer;
+    rateLimiterServiceContainer: RateLimiterServiceContainer;
   };
 
   getServices = () => {
@@ -47,6 +51,9 @@ export class Kernel {
         ),
         apiRouterServiceContainer: new ApiRouterServiceContainer(
           new this.apiRouterServiceProvider(),
+        ),
+        rateLimiterServiceContainer: new RateLimiterServiceContainer(
+          new this.rateLimiterServiceProvider(),
         ),
       };
     }

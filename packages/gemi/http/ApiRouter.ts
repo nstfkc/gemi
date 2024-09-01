@@ -6,6 +6,7 @@ import {
   type ControllerMethods,
 } from "./Controller";
 import { HttpRequest } from "./HttpRequest";
+import { RequestContext } from "./requestContext";
 import type { MiddlewareReturnType } from "./Router";
 
 type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
@@ -49,19 +50,24 @@ export class RouteHandler<M extends HttpMethod, Input, Output, Params> {
     this.method = method;
   }
 
-  run(req: HttpRequest<Input, Params>) {
+  run(_req: HttpRequest<Input, Params>) {
     if (isController(this.handler)) {
       const controller = new this.handler();
       const handler = controller[this.methodName].bind(controller);
       return handler();
     } else {
-      return this.handler(req);
+      return this.handler(RequestContext.getStore().req as any);
     }
   }
 
   middleware(middlewareList: string[]) {
-    this.middlewares = middlewareList;
-    return this;
+    const handler = new RouteHandler(
+      this.method,
+      this.handler,
+      this.methodName,
+    );
+    handler.middlewares = middlewareList;
+    return handler;
   }
 }
 

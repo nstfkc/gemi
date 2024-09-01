@@ -150,6 +150,7 @@ export class App {
 
   private runMiddleware(
     middleware: (string | RouterMiddleware | (new () => Middleware))[],
+    requestPath: string,
   ) {
     return middleware
       .map((aliasOrTest) => {
@@ -159,15 +160,15 @@ export class App {
           const Middleware =
             kernelServices.middlewareServiceContainer.service.aliases[alias];
           if (Middleware) {
-            const middleware = new Middleware();
-            return middleware.run;
+            const middleware = new Middleware(requestPath);
+            return middleware.run.bind(middleware);
           }
         } else {
           if (isConstructor(aliasOrTest)) {
             // TODO: fix type
             // @ts-ignore
-            const middleware = new aliasOrTest();
-            return middleware.run;
+            const middleware = new aliasOrTest(requestPath);
+            return middleware.run.bind(middleware);
           }
           return aliasOrTest;
         }
@@ -217,7 +218,10 @@ export class App {
         }
       }
 
-      const reqWithMiddlewares = this.runMiddleware(middlewares);
+      const reqWithMiddlewares = this.runMiddleware(
+        middlewares,
+        currentPathName,
+      );
 
       const httpRequest = new HttpRequest(req, params);
       const { data, cookies, headers, user, prefetchedData } =

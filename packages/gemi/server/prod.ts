@@ -84,7 +84,11 @@ export async function startProdServer() {
   }
 
   const server = Bun.serve({
-    fetch: async (req) => {
+    fetch: async (req, server) => {
+      if (!req.headers.get("x-forwarded-for")) {
+        const ip = server.requestIP(req);
+        req.headers.set("x-forwarded-for", ip.address);
+      }
       return await requestHandler(req);
     },
     port: process.env.PORT || 5173,

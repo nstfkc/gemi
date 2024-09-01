@@ -37,6 +37,7 @@ export class ApiRouterServiceContainer {
     try {
       await Kernel.getContext().middlewareServiceContainer.runMiddleware(
         middlewares,
+        path,
       );
     } catch (err) {
       if (err.kind === GEMI_REQUEST_BREAKER_ERROR) {
