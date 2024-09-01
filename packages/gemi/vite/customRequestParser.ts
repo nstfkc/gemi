@@ -80,7 +80,12 @@ export async function customRequestParser(original: string) {
           if (property?.value?.type === "Identifier") {
             continue;
           }
-          for (const arg of property?.value?.arguments ?? []) {
+
+          const args =
+            property.value.callee.object.arguments ??
+            property?.value?.arguments;
+
+          for (const arg of args ?? []) {
             if (
               !(
                 arg.type === "ArrowFunctionExpression" ||

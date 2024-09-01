@@ -56,18 +56,14 @@ export class RouteHandler<M extends HttpMethod, Input, Output, Params> {
       const handler = controller[this.methodName].bind(controller);
       return handler();
     } else {
-      return this.handler(RequestContext.getStore().req as any);
+      // @ts-ignore
+      return this.handler();
     }
   }
 
   middleware(middlewareList: string[]) {
-    const handler = new RouteHandler(
-      this.method,
-      this.handler,
-      this.methodName,
-    );
-    handler.middlewares = middlewareList;
-    return handler;
+    this.middlewares = middlewareList;
+    return this;
   }
 }
 
