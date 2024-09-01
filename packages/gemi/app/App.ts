@@ -29,6 +29,7 @@ import { isConstructor } from "../internal/isConstructor";
 import { HttpRequest } from "../http";
 import { Kernel } from "../kernel";
 import { I18nServiceContainer } from "../http/I18nServiceContainer";
+import { KernelContext } from "../kernel/KernelContext";
 
 type ApiRouteExec = <T>() => T | Promise<T>;
 
@@ -218,18 +219,16 @@ export class App {
         }
       }
 
-      const reqWithMiddlewares = this.runMiddleware(
-        middlewares,
-        currentPathName,
-      );
-
       const httpRequest = new HttpRequest(req, params);
       const { data, cookies, headers, user, prefetchedData } =
         await RequestContext.run(httpRequest, async () => {
           const ctx = RequestContext.getStore();
           ctx.setRequest(httpRequest);
 
-          await reqWithMiddlewares(httpRequest);
+          await KernelContext.getStore().middlewareServiceContainer.runMiddleware(
+            middlewares,
+            currentPathName,
+          );
 
           const data = await Promise.all([
             ...handlers.map((fn) => fn(httpRequest as any)),
@@ -239,7 +238,6 @@ export class App {
           const cookies = ctx.cookies;
           const headers = ctx.headers;
           const prefetchedResources = ctx.prefetchedResources;
-          ctx.destroy();
 
           return {
             data,
@@ -267,10 +265,13 @@ export class App {
             headers,
             status,
           });
+        } else {
+          const { status = 400, error } = err.payload.view;
+          return new Response(error?.message, {
+            ...err.payload.view,
+            status,
+          });
         }
-        return new Response(null, {
-          ...err.payload.view,
-        });
       } else {
         throw err;
       }
@@ -302,7 +303,6 @@ export class App {
     }
 
     if (isViewDataRequest) {
-      const ctx = RequestContext.getStore();
       const headers = new Headers();
       headers.set("Content-Type", "application/json");
 
@@ -316,8 +316,6 @@ export class App {
           ? "private, no-cache, no-store, max-age=0, must-revalidate"
           : "public, max-age=864000, must-revalidate",
       );
-
-      RequestContext.getStore().destroy();
 
       return new Response(
         JSON.stringify({

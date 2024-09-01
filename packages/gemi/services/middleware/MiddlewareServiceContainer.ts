@@ -35,9 +35,6 @@ export class MiddlewareServiceContainer {
   ) {
     const req = RequestContext.getStore().req;
 
-    console.log(middleware);
-    console.log(Array.from(transformMiddleware(middleware).entries()));
-
     return Array.from(transformMiddleware(middleware).entries())
       .map(([key, params]) => {
         if (typeof key === "string") {

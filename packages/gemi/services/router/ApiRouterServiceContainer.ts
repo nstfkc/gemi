@@ -41,15 +41,16 @@ export class ApiRouterServiceContainer {
       );
     } catch (err) {
       if (err.kind === GEMI_REQUEST_BREAKER_ERROR) {
-        const { status = 400, data, headers } = err.payload.api;
-
-        return new Response(JSON.stringify(data), {
-          status,
-          headers: {
-            "Content-Type": "application/json",
-            ...headers,
-          },
-        });
+        if (ctx.req.rawRequest.url.includes("/api")) {
+          const { status = 400, data, headers } = err.payload.api;
+          return new Response(JSON.stringify(data), {
+            status,
+            headers: {
+              "Content-Type": "application/json",
+              ...headers,
+            },
+          });
+        }
       } else {
         console.error(err);
         throw err;

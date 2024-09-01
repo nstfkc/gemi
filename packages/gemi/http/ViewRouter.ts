@@ -58,7 +58,7 @@ export class ViewRoute<Input, Output, Params> {
       const controllerInstance = new controller();
       const controllerHandler =
         controllerInstance[methodName].bind(controllerInstance);
-      this.handler = (req: HttpRequest<Input, Params>): Output => {
+      this.handler = (_req: HttpRequest<Input, Params>): Output => {
         return controllerHandler();
       };
     }
