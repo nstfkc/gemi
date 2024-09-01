@@ -3,6 +3,25 @@ import { RequestContext } from "../../http/requestContext";
 import type { RouterMiddleware } from "../../http/Router";
 import { isConstructor } from "../../internal/isConstructor";
 
+function transformMiddleware(input: (string | Function)[]) {
+  const map = new Map();
+  for (const middleware of input) {
+    if (typeof middleware === "string") {
+      const [alias, params = ""] = middleware.split(":");
+      if (alias.startsWith("-")) {
+        if (map.has(alias.replace("-", ""))) {
+          map.delete(alias.replace("-", ""));
+        }
+      } else {
+        map.set(alias, params.split(","));
+      }
+    } else {
+      map.set(middleware, []);
+    }
+  }
+  return map;
+}
+
 export class MiddlewareServiceContainer {
   constructor(public service: MiddlewareServiceProvider) {}
 
@@ -16,23 +35,26 @@ export class MiddlewareServiceContainer {
   ) {
     const req = RequestContext.getStore().req;
 
-    return middleware
-      .map((aliasOrTest) => {
-        if (typeof aliasOrTest === "string") {
-          const alias = aliasOrTest;
-          const Middleware = this.service.aliases[alias];
+    console.log(middleware);
+    console.log(Array.from(transformMiddleware(middleware).entries()));
+
+    return Array.from(transformMiddleware(middleware).entries())
+      .map(([key, params]) => {
+        if (typeof key === "string") {
+          const Middleware = this.service.aliases[key];
           if (Middleware) {
             const middleware = new Middleware(routePath);
-            return middleware.run.bind(middleware);
+            return (req: HttpRequest) =>
+              middleware.run.call(middleware, req, ...params);
           }
         } else {
-          if (isConstructor(aliasOrTest)) {
+          if (isConstructor(key)) {
             // TODO: fix type
             // @ts-ignore
             const middleware = new aliasOrTest(routePath);
             return middleware.run.bind(middleware);
           }
-          return aliasOrTest;
+          return key;
         }
       })
       .filter(Boolean)

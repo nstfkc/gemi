@@ -26,12 +26,12 @@ class RateLimitExceededError extends RequestBreakerError {
 }
 
 export class RateLimitMiddleware extends Middleware {
-  async run(req: HttpRequest) {
+  async run(req: HttpRequest, limit: number) {
     const userId = req.headers.get("x-forwarded-for");
     const driver =
       KernelContext.getStore().rateLimiterServiceContainer.service.driver;
     const result = driver.consume.call(driver, userId, this.routePath);
-    if (result > 10) {
+    if (result > limit) {
       throw new RateLimitExceededError();
     }
 
