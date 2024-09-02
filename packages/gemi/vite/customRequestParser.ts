@@ -82,7 +82,7 @@ export async function customRequestParser(original: string) {
           }
 
           const args =
-            property.value.callee.object.arguments ??
+            property?.value?.callee?.object?.arguments ??
             property?.value?.arguments;
 
           for (const arg of args ?? []) {
