@@ -11,30 +11,32 @@ export const HttpReload = () => {
   const { pathname } = useRoute();
   const params = useParams();
   const [reloading, setReloading] = useState(false);
+  const handleReload = () => {
+    setReloading(true);
+    replace(pathname, {
+      params: params,
+      search: searchParams.toJSON(),
+    } as any)
+      .catch(console.log)
+      .finally(() => {
+        setReloading(false);
+      });
+  };
   useEffect(() => {
     // @ts-ignore
     if (import.meta.hot) {
       // @ts-ignore
-      import.meta.hot.on("http-reload", () => {
-        setReloading(true);
-        replace(pathname, {
-          params: params,
-          search: searchParams.toJSON(),
-        } as any)
-          .catch(console.log)
-          .finally(() => {
-            setReloading(false);
-          });
-      });
+      import.meta.hot.on("http-reload", handleReload);
     }
     return () => {
       // @ts-ignore
       if (import.meta.hot) {
         // @ts-ignore
-        import.meta.hot.off("http-reload");
+        import.meta.hot.off("http-reload", handleReload);
       }
     };
-  }, []);
+  }, [handleReload]);
+
   if (!reloading || typeof document === "undefined") {
     return null;
   }
