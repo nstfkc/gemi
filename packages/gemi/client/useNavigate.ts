@@ -1,4 +1,4 @@
-import { useContext } from "react";
+import { useContext, startTransition } from "react";
 import { ClientRouterContext } from "./ClientRouterContext";
 import type { UrlParser, ViewPaths } from "./types";
 import { applyParams } from "../utils/applyParams";
@@ -58,6 +58,11 @@ export function useNavigate() {
         urlSearchParams.toString(),
       ].join("?");
 
+      if (shallow) {
+        history?.[pushOrReplace](navigationPath);
+        return;
+      }
+
       const components = getViewPathsFromPathname(path);
 
       const fetchUrlSearchParams = new URLSearchParams(urlSearchParams);
@@ -65,11 +70,6 @@ export function useNavigate() {
       const fetchPath = [basePath, fetchUrlSearchParams.toString()].join("?");
 
       urlSearchParams.set("json", "true");
-
-      if (shallow) {
-        history?.[pushOrReplace](navigationPath);
-        return;
-      }
 
       const routePathname = getRoutePathnameFromHref(path);
 
@@ -105,10 +105,13 @@ export function useNavigate() {
           }
           updatePageData(data);
           updatePrefecthedData(prefetchedData);
-          history?.[pushOrReplace](
-            navigationPath,
-            is404 ? { status: 404 } : {},
-          );
+
+          startTransition(() => {
+            history?.[pushOrReplace](
+              navigationPath,
+              is404 ? { status: 404 } : {},
+            );
+          });
           window.scrollTo(0, 0);
         }
       } catch (err) {

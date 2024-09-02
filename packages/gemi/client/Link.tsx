@@ -1,4 +1,4 @@
-import type { ComponentProps } from "react";
+import { type ComponentProps } from "react";
 
 import { applyParams } from "../utils/applyParams";
 import { useLocation } from "./ClientRouterContext";
