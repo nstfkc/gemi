@@ -89,10 +89,13 @@ export const ClientRouterProvider = (
   });
 
   const handleScroll = () => {
-    scrollHistoryRef.current.set(
-      locationSubject.getValue().pathname,
-      window.scrollY,
-    );
+    const key = [
+      `${locationSubject.getValue().pathname}?${locationSubject.getValue().search}`,
+    ]
+      .filter((item) => item.length > 0)
+      .join("");
+
+    scrollHistoryRef.current.set(key, window.scrollY);
   };
 
   const findMatchingRouteFromParams = (pathname: string) => {

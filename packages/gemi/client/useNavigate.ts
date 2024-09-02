@@ -25,6 +25,7 @@ export function useNavigate() {
     getRoutePathnameFromHref,
     isNavigatingSubject,
     setNavigationAbortController,
+    getScrollPosition,
   } = useContext(ClientRouterContext);
   const { updatePrefecthedData } = useContext(QueryManagerContext);
   const { fetchTranslations } = useContext(I18nContext);
@@ -106,13 +107,13 @@ export function useNavigate() {
           updatePageData(data);
           updatePrefecthedData(prefetchedData);
 
-          startTransition(() => {
-            history?.[pushOrReplace](
-              navigationPath,
-              is404 ? { status: 404 } : {},
-            );
-          });
-          window.scrollTo(0, 0);
+          history?.[pushOrReplace](
+            navigationPath,
+            is404 ? { status: 404 } : {},
+          );
+          setTimeout(() => {
+            window.scrollTo(0, getScrollPosition(navigationPath));
+          }, 1);
         }
       } catch (err) {
         isNavigatingSubject.next(false);
