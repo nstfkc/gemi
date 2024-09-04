@@ -7,6 +7,7 @@ import type { UnwrapPromise } from "../utils/type";
 import { QueryManagerContext } from "./QueryManagerContext";
 import { applyParams } from "../utils/applyParams";
 import type { UrlParser } from "./types";
+import { omitNullishValues } from "../utils/omitNullishValues";
 
 interface Config<T> {
   fallbackData?: T;
@@ -91,13 +92,7 @@ export function useQuery<T extends keyof GetRPC>(
   const search = "search" in options ? (options.search ?? {}) : {};
   const { getResource } = useContext(QueryManagerContext);
   const normalPath = applyParams(url, params);
-  const searchParams = new URLSearchParams(
-    Object.fromEntries(
-      Object.entries(search).filter(
-        ([_k, v]) => v !== null && v !== undefined,
-      ) as [],
-    ),
-  );
+  const searchParams = new URLSearchParams(omitNullishValues(search));
   searchParams.sort();
   const variantKey = searchParams.toString();
   const [resource] = useState(() =>

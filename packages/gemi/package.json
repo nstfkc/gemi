@@ -1,6 +1,6 @@
 {
   "name": "gemi",
-  "version": "0.4.78",
+  "version": "0.4.79",
   "devDependencies": {
     "@babel/parser": "^7.25.4",
     "@repo/eslint-config": "*",
@@ -51,6 +51,7 @@
     "@aws-sdk/client-s3": "^3.629.0",
     "@aws-sdk/s3-request-presigner": "^3.629.0",
     "@prisma/client": "5.17.0",
+    "@react-email/render": "1.0.0-canary.1",
     "ast-types": "^0.14.2",
     "commander": "^12.1.0",
     "history": "^5.3.0",

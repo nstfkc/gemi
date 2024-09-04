@@ -1,6 +1,7 @@
 import { prisma } from "@/app/database/prisma";
 import { ApiRouter, HttpRequest } from "gemi/http";
 import { FileStorage } from "gemi/facades";
+import { WelcomeEmail } from "@/app/email/WelcomeEmail";
 
 export default class extends ApiRouter {
   routes = {
@@ -8,7 +9,7 @@ export default class extends ApiRouter {
       return await prisma.user.findFirst();
     }),
     "/home": this.get(async (req: HttpRequest<{ color: string }>) => {
-      const input = await req.input();
+      const input = req.search;
       const items = [
         { id: 1, name: "Red", hex: "#FF0000", color: "red" },
         { id: 2, name: "Green", hex: "#00FF00", color: "green" },
@@ -23,6 +24,14 @@ export default class extends ApiRouter {
       );
 
       return filteredItems;
+    }),
+    "/test/:testId": this.get((req: HttpRequest) => {
+      console.log("seARCH", req.search.toJSON());
+      return { testId: req.params.testId };
+    }),
+    "/email": this.get(async () => {
+      await WelcomeEmail.send({ data: { name: "Enes" } });
+      return true;
     }),
     "/upload": this.post(async (req: HttpRequest<{ file: Blob }>) => {
       const input = await req.input();

@@ -1,4 +1,4 @@
-type Attachment = {
+export type EmailAttachment = {
   filename: string;
   content: Buffer;
 };
@@ -9,6 +9,6 @@ export interface SendEmailParams {
   subject: string;
   cc: string[];
   bcc: string[];
-  attachments: Attachment[];
+  attachments: EmailAttachment[];
   html: string;
 }

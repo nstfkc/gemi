@@ -1,40 +1,40 @@
-import { Kernel } from "../kernel";
-import { EmailTemplate, ExtractRenderPropsType } from "./EmailTemplate";
-import { SendEmailParams } from "./types";
-import { renderToStaticMarkup } from "react-dom/server";
+import { ComponentType } from "react";
+import { render } from "@react-email/render";
+import { EmailServiceContainer } from "../services/email/EmailServiceContainer";
+import { SendEmailParams } from "../services/email/drivers/types";
 
-export const render = (component: React.ReactElement) => {
-  const doctype =
-    '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">';
-  const markup = renderToStaticMarkup(component);
-  const document = `${doctype}${markup}`;
-
-  return document;
-};
-
-interface EmailTemplateParams<T>
-  extends Partial<Omit<SendEmailParams, "html">> {
+interface SendEmailArgs<T> extends Partial<Omit<SendEmailParams, "html">> {
   data: T;
 }
 
 export class Email {
-  static async send<T extends new () => EmailTemplate>(
-    Template: T,
-    params: EmailTemplateParams<ExtractRenderPropsType<T>>,
+  from = "";
+  to = [];
+  subject = "No Subject";
+  cc = [];
+  bcc = [];
+  attachments = [];
+  template: ComponentType<any>;
+
+  static async send<T extends Email>(
+    this: new () => T,
+    args: SendEmailArgs<
+      T["template"] extends (p: infer P) => JSX.Element ? P : never
+    >,
   ) {
-    const template = new Template();
+    const instance = new this();
 
     const {
-      to = template.to,
-      from = template.from,
-      subject = template.subject,
-      cc = template.cc,
-      bcc = template.bcc,
-      attachments = template.attachments,
+      to = instance.to,
+      from = instance.from,
+      subject = instance.subject,
+      cc = instance.cc,
+      bcc = instance.bcc,
+      attachments = instance.attachments,
       data,
-    } = params;
+    } = args;
 
-    const html = render(template.render(data));
+    const html = await instance.render(data);
 
     if (process.env.EMAIL_DEBUG) {
       const fileName = `${process.env.ROOT_DIR}/.debug/emails/${new Date().toISOString()}${subject}.html`;
@@ -43,7 +43,7 @@ export class Email {
       return;
     }
 
-    await Kernel.getContext().emailServiceProvider.send({
+    await EmailServiceContainer.use().driver.send({
       bcc,
       cc,
       from,
@@ -52,5 +52,12 @@ export class Email {
       attachments,
       html,
     });
+  }
+
+  protected async render<T extends Record<string, any>>(props: T) {
+    const Template = this.template;
+    const markup = await render(<Template {...props} />);
+
+    return markup;
   }
 }

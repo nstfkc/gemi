@@ -1,4 +1,3 @@
-import { EmailServiceProvider } from "../email/EmailServiceProvider";
 import { AuthenticationServiceProvider } from "../auth/AuthenticationServiceProvider";
 import { kernelContext } from "./context";
 import { MiddlewareServiceProvider } from "../http/MiddlewareServiceProvider";
@@ -12,6 +11,8 @@ import { ApiRouterServiceProvider } from "../services/router/ApiRouterServicePro
 import { MiddlewareServiceContainer } from "../services/middleware/MiddlewareServiceContainer";
 import { RateLimiterServiceContainer } from "../services/rate-limiter/RateLimiterServiceContainer";
 import { RateLimiterServiceProvider } from "../services";
+import { EmailServiceProvider } from "../services/email/EmailServiceProvider";
+import { EmailServiceContainer } from "../services/email/EmailServiceContainer";
 
 export class Kernel {
   protected emailServiceProvider = EmailServiceProvider;
@@ -24,7 +25,7 @@ export class Kernel {
   protected rateLimiterServiceProvider = RateLimiterServiceProvider;
 
   services: {
-    emailServiceProvider: EmailServiceProvider;
+    emailServiceContainer: EmailServiceContainer;
     authenticationServiceProvider: AuthenticationServiceProvider;
     policiesServiceProvider: PoliciesServiceProvider;
     i18nServiceContainer: I18nServiceContainer;
@@ -37,7 +38,9 @@ export class Kernel {
   getServices = () => {
     if (!this.services) {
       this.services = {
-        emailServiceProvider: new this.emailServiceProvider(),
+        emailServiceContainer: new EmailServiceContainer(
+          new this.emailServiceProvider(),
+        ),
         authenticationServiceProvider: new this.authenticationServiceProvider(),
         middlewareServiceContainer: new MiddlewareServiceContainer(
           new this.middlewareServiceProvider(),

@@ -1,14 +1,18 @@
-import { Redirect } from "gemi/facades";
+import { Query, Redirect } from "gemi/facades";
 import { Controller, HttpRequest } from "gemi/http";
 
 export class HomeController extends Controller {
   public async about() {
-    Redirect.to("/:testId", { testId: "1234" });
     return { title: "EnesXxxx!!" };
   }
 
   public async index(req: HttpRequest<{ color: string }>) {
-    const input = await req.input();
+    Query.prefetch("/home", { search: req.search.toJSON() });
+    Query.prefetch("/test/:testId", {
+      params: { testId: "1234" },
+      search: { test: "1234" },
+    });
+    // await new Promise((res) => setTimeout(res, 2000));
     const items = [
       { id: 1, name: "Red", hex: "#FF0000", color: "red" },
       { id: 2, name: "Green", hex: "#00FF00", color: "green" },
@@ -19,8 +23,8 @@ export class HomeController extends Controller {
 
     const filters = items.map((item) => item.color);
     const colors = items.filter((item) =>
-      input.get("color")
-        ? input.get("color").split(".").includes(item.color)
+      req.search.get("color")
+        ? req.search.get("color").split(".").includes(item.color)
         : true,
     );
     return { colors, filters };

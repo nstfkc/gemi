@@ -35,6 +35,7 @@ export class Query {
     const searchParams = new URLSearchParams(
       omitNullishValues(search as Record<string, string>),
     );
+    searchParams.sort();
     const pathnameWithSearchParams = [
       `${applyParams(path, params)}`,
       searchParams.toString(),

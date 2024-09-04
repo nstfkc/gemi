@@ -13,3 +13,9 @@ export { FileStorageDriver } from "./file-storage/drivers/FileStorageDriver";
 export { RateLimiterServiceProvider } from "./rate-limiter/RateLimiterServiceProvider";
 export { InMemoryRateLimiter } from "./rate-limiter/drivers/InMemoryRateLimiterDriver";
 export { RateLimiterDriver } from "./rate-limiter/drivers/RateLimiterDriver";
+
+// Email
+export { EmailServiceProvider } from "./email/EmailServiceProvider";
+export { EmailDriver } from "./email/drivers/EmailDriver";
+export { ResendDriver } from "./email/drivers/ResendDriver";
+export type { EmailAttachment, SendEmailParams } from "./email/drivers/types";

@@ -20,7 +20,7 @@ export default function PublicLayout({
     <div>
       <LoadingBar />
       <div className="container max-w-2xl mx-auto px-4">
-        <header className="py-8">
+        <header className="py-8 sticky top-0 bg-white z-[100]">
           <nav className="flex gap-4 items-center">
             <Link className="data-[active=true]:underline" href="/">
               {st("home")}
