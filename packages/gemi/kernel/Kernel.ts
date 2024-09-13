@@ -13,6 +13,8 @@ import { RateLimiterServiceContainer } from "../services/rate-limiter/RateLimite
 import { RateLimiterServiceProvider } from "../services";
 import { EmailServiceProvider } from "../services/email/EmailServiceProvider";
 import { EmailServiceContainer } from "../services/email/EmailServiceContainer";
+import { BroadcastingServiceContainer } from "../services/pubsub/BroadcastingServiceContainer";
+import { BroadcastingServiceProvider } from "../services/pubsub/BroadcastingServiceProvider";
 
 export class Kernel {
   protected emailServiceProvider = EmailServiceProvider;
@@ -23,6 +25,7 @@ export class Kernel {
   protected fileStorageServiceProvider = FileStorageServiceProvider;
   protected apiRouterServiceProvider = ApiRouterServiceProvider;
   protected rateLimiterServiceProvider = RateLimiterServiceProvider;
+  protected broadcastingsServiceProvider = BroadcastingServiceProvider;
 
   services: {
     emailServiceContainer: EmailServiceContainer;
@@ -33,6 +36,7 @@ export class Kernel {
     apiRouterServiceContainer: ApiRouterServiceContainer;
     middlewareServiceContainer: MiddlewareServiceContainer;
     rateLimiterServiceContainer: RateLimiterServiceContainer;
+    broadcastingServiceContainer: BroadcastingServiceContainer;
   };
 
   getServices = () => {
@@ -57,6 +61,9 @@ export class Kernel {
         ),
         rateLimiterServiceContainer: new RateLimiterServiceContainer(
           new this.rateLimiterServiceProvider(),
+        ),
+        broadcastingServiceContainer: new BroadcastingServiceContainer(
+          new this.broadcastingsServiceProvider(),
         ),
       };
     }

@@ -12,6 +12,7 @@ const result = await Bun.build({
     "./server/index.ts",
     "./kernel/index.ts",
     "./services/index.ts",
+    "./broadcasting/index.ts",
   ],
   outdir: "./dist",
   external: ["vite", "react", "react-dom", "react/jsx-runtime", "bun"],

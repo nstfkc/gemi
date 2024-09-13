@@ -16,6 +16,7 @@ import type { ComponentTree } from "./types";
 import { ComponentsContext, ComponentsProvider } from "./ComponentContext";
 import { QueryManagerProvider } from "./QueryManagerContext";
 import { I18nProvider } from "./i18n/I18nContext";
+import { WebSocketContextProvider } from "./WebsocketContext";
 
 interface RouteProps {
   componentPath: string;
@@ -85,25 +86,27 @@ export const ClientRouter = (props: {
 
   return (
     <I18nProvider>
-      <QueryManagerProvider>
-        <ComponentsProvider viewImportMap={props.viewImportMap}>
-          <ClientRouterProvider
-            searchParams={router.searchParams}
-            params={router.params}
-            pageData={pageData}
-            is404={router.is404}
-            pathname={router.pathname}
-            currentPath={router.currentPath}
-            routeManifest={routeManifest}
-          >
-            <StrictMode>
-              <RootLayout>
-                <Routes componentTree={componentTree} />
-              </RootLayout>
-            </StrictMode>
-          </ClientRouterProvider>
-        </ComponentsProvider>
-      </QueryManagerProvider>
+      <WebSocketContextProvider>
+        <QueryManagerProvider>
+          <ComponentsProvider viewImportMap={props.viewImportMap}>
+            <ClientRouterProvider
+              searchParams={router.searchParams}
+              params={router.params}
+              pageData={pageData}
+              is404={router.is404}
+              pathname={router.pathname}
+              currentPath={router.currentPath}
+              routeManifest={routeManifest}
+            >
+              <StrictMode>
+                <RootLayout>
+                  <Routes componentTree={componentTree} />
+                </RootLayout>
+              </StrictMode>
+            </ClientRouterProvider>
+          </ComponentsProvider>
+        </QueryManagerProvider>
+      </WebSocketContextProvider>
     </I18nProvider>
   );
 };

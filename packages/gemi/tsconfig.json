@@ -13,7 +13,8 @@
     "kernel",
     "facades",
     "email",
-    "services"
+    "services",
+    "broadcating"
   ],
   "exclude": ["node_modules", "dist"]
 }

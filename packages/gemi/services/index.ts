@@ -19,3 +19,7 @@ export { EmailServiceProvider } from "./email/EmailServiceProvider";
 export { EmailDriver } from "./email/drivers/EmailDriver";
 export { ResendDriver } from "./email/drivers/ResendDriver";
 export type { EmailAttachment, SendEmailParams } from "./email/drivers/types";
+
+// Broadcasting
+
+export { BroadcastingServiceProvider } from "./pubsub/BroadcastingServiceProvider";

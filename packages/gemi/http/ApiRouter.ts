@@ -6,7 +6,6 @@ import {
   type ControllerMethods,
 } from "./Controller";
 import { HttpRequest } from "./HttpRequest";
-import { RequestContext } from "./requestContext";
 import type { MiddlewareReturnType } from "./Router";
 
 type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";

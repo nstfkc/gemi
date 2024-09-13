@@ -7,6 +7,7 @@ import { ApiRouterServiceContainer } from "../services/router/ApiRouterServiceCo
 import { MiddlewareServiceContainer } from "../services/middleware/MiddlewareServiceContainer";
 import { RateLimiterServiceContainer } from "../services/rate-limiter/RateLimiterServiceContainer";
 import { EmailServiceContainer } from "../services/email/EmailServiceContainer";
+import { BroadcastingServiceContainer } from "../services/pubsub/BroadcastingServiceContainer";
 
 export interface KernelContextValue {
   emailServiceContainer: EmailServiceContainer;
@@ -17,6 +18,7 @@ export interface KernelContextValue {
   apiRouterServiceContainer: ApiRouterServiceContainer;
   middlewareServiceContainer: MiddlewareServiceContainer;
   rateLimiterServiceContainer: RateLimiterServiceContainer;
+  broadcastingServiceContainer: BroadcastingServiceContainer;
 }
 
 export const kernelContext = new AsyncLocalStorage<KernelContextValue>();

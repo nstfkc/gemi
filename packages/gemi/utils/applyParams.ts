@@ -1,6 +1,6 @@
 export function applyParams<T extends string>(
   url: T,
-  params: Record<string, string | undefined>,
+  params: Record<string, string | number | undefined>,
 ): string {
   return url
     .replace(/:([^/]+)/g, (_, key) => {
@@ -15,7 +15,7 @@ export function applyParams<T extends string>(
         throw new Error(`Missing parameter: ${paramName}`);
       }
 
-      return value;
+      return String(value);
     })
     .replace(/\/\//g, "/"); // Remove any double slashes caused by optional parameters
 }

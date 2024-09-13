@@ -1,13 +1,12 @@
 import { HttpRequest, ViewRouter } from "gemi/http";
 import { HomeController } from "../controllers/HomeController";
-import { Redirect } from "gemi/facades";
 
 class AppRouter extends ViewRouter {
   middlewares = ["auth"];
 
   routes = {
     "/": this.layout("app/AppLayout", {
-      "/": this.view("Dashboard", [HomeController, "index"]),
+      "/": this.view("Home", [HomeController, "index"]),
       "/dashboard": this.view("Dashboard", () => {
         return { title: "Dashboard" };
       }),

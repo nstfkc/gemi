@@ -1,6 +1,6 @@
 import { prisma } from "@/app/database/prisma";
 import { ApiRouter, HttpRequest } from "gemi/http";
-import { FileStorage } from "gemi/facades";
+import { Broadcast, FileStorage } from "gemi/facades";
 import { WelcomeEmail } from "@/app/email/WelcomeEmail";
 
 export default class extends ApiRouter {
@@ -25,8 +25,16 @@ export default class extends ApiRouter {
 
       return filteredItems;
     }),
-    "/test/:testId": this.get((req: HttpRequest) => {
-      console.log("seARCH", req.search.toJSON());
+    "/inc": this.get((req: HttpRequest) => {
+      Broadcast.publish("/foo/:id", { id: req.search.get("id") }).publish(
+        "increment",
+      );
+      return { testId: req.params.testId };
+    }),
+    "/dec": this.get((req: HttpRequest) => {
+      Broadcast.publish("/foo/:id", { id: req.search.get("id") }).publish(
+        "decrement",
+      );
       return { testId: req.params.testId };
     }),
     "/email": this.get(async () => {

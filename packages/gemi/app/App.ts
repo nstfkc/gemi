@@ -10,7 +10,11 @@ import type { Plugin } from "./Plugin";
 import type { Middleware } from "../http/Middleware";
 import { RequestContext } from "../http/requestContext";
 import { type Cookie } from "../http/Cookie";
-import type { ServerWebSocket } from "bun";
+import type {
+  ServerWebSocket,
+  WebSocketHandler,
+  WebSocketServeOptions,
+} from "bun";
 import { flattenComponentTree } from "../client/helpers/flattenComponentTree";
 
 import { createComponentTree } from "./createComponentTree";
@@ -147,45 +151,6 @@ export class App {
 
   public setRenderParams(params: RenderParams) {
     this.renderParams = params;
-  }
-
-  private runMiddleware(
-    middleware: (string | RouterMiddleware | (new () => Middleware))[],
-    requestPath: string,
-  ) {
-    return middleware
-      .map((aliasOrTest) => {
-        if (typeof aliasOrTest === "string") {
-          const alias = aliasOrTest;
-          const kernelServices = this.kernel.getServices();
-          const Middleware =
-            kernelServices.middlewareServiceContainer.service.aliases[alias];
-          if (Middleware) {
-            const middleware = new Middleware(requestPath);
-            return middleware.run.bind(middleware);
-          }
-        } else {
-          if (isConstructor(aliasOrTest)) {
-            // TODO: fix type
-            // @ts-ignore
-            const middleware = new aliasOrTest(requestPath);
-            return middleware.run.bind(middleware);
-          }
-          return aliasOrTest;
-        }
-      })
-      .filter(Boolean)
-      .reduce(
-        (acc: any, middleware: any) => {
-          return async (req: HttpRequest<any, any>, ctx: any) => {
-            return {
-              ...(await acc(req, ctx)),
-              ...(await middleware(req, ctx)),
-            };
-          };
-        },
-        (_req: HttpRequest<any, any>) => Promise.resolve({}),
-      );
   }
 
   async handleViewRequest(req: Request) {
@@ -442,24 +407,35 @@ export class App {
     });
   }
 
-  private handleWebSocketMessage = (
-    ws: ServerWebSocket,
-    message: string | Buffer,
-  ) => {};
-  private handleWebSocketOpen = (ws: ServerWebSocket) => {
-    console.log("socket opened");
-  };
-  private handleWebSocketClose = (
-    ws: ServerWebSocket,
-    code: number,
-    reason: string,
-  ) => {
-    console.log("socket closed");
+  public websocket: WebSocketHandler<{ headers: Headers }> = {
+    message: (ws, message) => {
+      const kernelRun = this.kernel.run.bind(this.kernel);
+      kernelRun(() => {
+        KernelContext.getStore().broadcastingServiceContainer.run(
+          ws.data.headers,
+          () => {
+            KernelContext.getStore().broadcastingServiceContainer.handleMessage(
+              ws,
+              message,
+            );
+          },
+        );
+      });
+    },
+    open: (ws) => {},
+    close: (ws) => {
+      console.log("closed ws");
+      ws.terminate();
+    },
   };
 
-  websocket = {
-    message: this.handleWebSocketMessage,
-    open: this.handleWebSocketOpen,
-    close: this.handleWebSocketClose,
-  };
+  public onPublish(
+    fn: (
+      topic: string,
+      data: string | ArrayBufferView | ArrayBuffer | SharedArrayBuffer,
+      compress?: boolean,
+    ) => void,
+  ) {
+    this.kernel.services.broadcastingServiceContainer.onPublish(fn);
+  }
 }

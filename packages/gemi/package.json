@@ -27,7 +27,8 @@
     "./runtime": "./client/runtime.ts",
     "./server": "./server/index.ts",
     "./kernel": "./kernel/index.ts",
-    "./services": "./services/index.ts"
+    "./services": "./services/index.ts",
+    "./broadcasting": "./broadcasting/index.ts"
   },
   "files": [
     "dist/**/*"

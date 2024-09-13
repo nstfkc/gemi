@@ -6,9 +6,23 @@ import { KernelContext } from "../kernel/KernelContext";
 export class Auth {
   static async user(): Promise<User | null> {
     const requestContextStore = RequestContext.getStore();
-    const accessToken = requestContextStore.req.cookies.get("access_token");
+    const broadcastingContextStore =
+      KernelContext.getStore().broadcastingServiceContainer.context.getStore();
 
-    let user = requestContextStore.user;
+    let accessToken = "";
+    let userAgent = "";
+
+    if (requestContextStore?.req) {
+      accessToken = requestContextStore.req.cookies.get("access_token");
+      userAgent = requestContextStore.req.headers.get("User-Agent");
+    }
+
+    if (broadcastingContextStore?.cookies) {
+      userAgent = broadcastingContextStore.headers.get("User-Agent");
+      accessToken = broadcastingContextStore.cookies.get("access_token");
+    }
+
+    let user = requestContextStore?.user;
 
     if (!user) {
       const adapter =
@@ -16,11 +30,11 @@ export class Auth {
       // TODO: extend session if its expired
       const session = await adapter.findSession({
         token: accessToken,
-        userAgent: requestContextStore.req.headers.get("User-Agent"),
+        userAgent,
       });
 
       user = session?.user;
-      requestContextStore.setUser(user);
+      requestContextStore?.setUser(user);
     }
 
     if (user) {

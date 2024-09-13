@@ -8,11 +8,7 @@ export class HomeController extends Controller {
 
   public async index(req: HttpRequest<{ color: string }>) {
     Query.prefetch("/home", { search: req.search.toJSON() });
-    Query.prefetch("/test/:testId", {
-      params: { testId: "1234" },
-      search: { test: "1234" },
-    });
-    // await new Promise((res) => setTimeout(res, 2000));
+
     const items = [
       { id: 1, name: "Red", hex: "#FF0000", color: "red" },
       { id: 2, name: "Green", hex: "#00FF00", color: "green" },

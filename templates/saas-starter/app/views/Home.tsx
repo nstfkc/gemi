@@ -7,10 +7,12 @@ import {
   usePost,
   useQuery,
   useSearchParams,
+  useSubscription,
   useUser,
   type ViewProps,
 } from "gemi/client";
 import { motion, AnimatePresence } from "framer-motion";
+import { useEffect, useState } from "react";
 
 export default function Home(props: ViewProps<"/">) {
   const searchParams = useSearchParams();
@@ -26,6 +28,11 @@ export default function Home(props: ViewProps<"/">) {
     },
     { keepPreviousData: true },
   );
+
+  useSubscription("/foo/:id", {
+    params: { id: 1 },
+    cb: (data) => console.log(data),
+  });
 
   return (
     <AnimatePresence>
@@ -47,7 +54,6 @@ export default function Home(props: ViewProps<"/">) {
           ))}
         </div>
 
-        <div>Test</div>
         <div>
           {colors?.map((color) => (
             <div
