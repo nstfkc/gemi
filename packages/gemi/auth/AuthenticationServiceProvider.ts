@@ -56,6 +56,35 @@ class SignUpRequest extends HttpRequest<
   };
 }
 
+class ForgotPasswordRequest extends HttpRequest<
+  {
+    email: string;
+  },
+  {}
+> {
+  schema = {
+    email: {
+      required: "Email is required",
+      email: "Invalid email",
+    },
+  };
+}
+
+class ResetPasswordRequest extends HttpRequest<
+  {
+    password: string;
+    token: string;
+  },
+  {}
+> {
+  schema = {
+    password: {
+      required: "Password is required",
+      password: "Invalid password",
+    },
+  };
+}
+
 class AuthController extends Controller {
   provider = KernelContext.getStore().authenticationServiceProvider;
 
@@ -187,7 +216,7 @@ class AuthController extends Controller {
     return {};
   }
 
-  async forgotPassword(req = new HttpRequest()) {
+  async forgotPassword(req = new ForgotPasswordRequest()) {
     const input = await req.input();
     const { email } = input.toJSON();
 
@@ -211,7 +240,7 @@ class AuthController extends Controller {
     return {};
   }
 
-  async resetPassword(req = new HttpRequest()) {
+  async resetPassword(req = new ResetPasswordRequest()) {
     const input = await req.input();
     const { password, token } = input.toJSON();
 
