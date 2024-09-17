@@ -1,6 +1,6 @@
 import { ServiceProvider } from "../ServiceProvider";
 import { BroadcastingChannel } from "../../broadcasting/BroadcastingChannel";
-import { UrlParser } from "../../client/types";
+import type { UrlParser } from "../../client/types";
 
 type Channels = Record<string, new () => BroadcastingChannel>;
 

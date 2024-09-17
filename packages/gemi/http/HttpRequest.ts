@@ -201,7 +201,21 @@ export class HttpRequest<
     }
     if (this.rawRequest.method === "GET") {
       const url = new URL(this.rawRequest.url);
-      const params = Object.fromEntries(url.searchParams.entries());
+      const map = new Map<string, string | string[]>();
+      for (const [key, value] of url.searchParams) {
+        if (map.has(key)) {
+          const currentValue = map.get(key);
+          if (Array.isArray(currentValue)) {
+            currentValue.push(value);
+            map.set(key, currentValue);
+          } else {
+            map.set(key, [currentValue, value]);
+          }
+        } else {
+          map.set(key, value);
+        }
+      }
+      const params = Object.fromEntries(map.entries());
       this.search = new Input<T>(params as T);
     }
     this.cookies = cookies;

@@ -63,7 +63,23 @@ class SearchParams {
   }
 
   toJSON() {
-    return Object.fromEntries(this.searchParams.entries());
+    const map = new Map<string, string | string[]>();
+    // @ts-ignore
+    for (const [key, value] of this.searchParams) {
+      if (map.has(key)) {
+        const currentValue = map.get(key);
+        if (Array.isArray(currentValue)) {
+          currentValue.push(value);
+          map.set(key, currentValue);
+        } else {
+          map.set(key, [currentValue, value]);
+        }
+      } else {
+        map.set(key, value);
+      }
+    }
+
+    return Object.fromEntries(map.entries());
   }
 
   toString() {

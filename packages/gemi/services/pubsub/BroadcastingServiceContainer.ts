@@ -1,7 +1,7 @@
-import { ServerWebSocket } from "bun";
+import type { ServerWebSocket } from "bun";
 import { ServiceContainer } from "../ServiceContainer";
 import { BroadcastingServiceProvider } from "./BroadcastingServiceProvider";
-import { PublishArgs } from "./types";
+import type { PublishArgs } from "./types";
 import { AsyncLocalStorage } from "async_hooks";
 
 type PublishCallback = (...args: PublishArgs) => void;
