@@ -89,18 +89,20 @@ export function useQuery<T extends keyof GetRPC>(
   const options = { ...defaultOptions, ..._options };
   const config = { ...defaultConfig, ..._config };
   const params = "params" in options ? (options.params ?? {}) : {};
+  const paramsRef = useRef(JSON.stringify(params));
   const search = "search" in options ? (options.search ?? {}) : {};
   const { getResource } = useContext(QueryManagerContext);
   const normalPath = applyParams(url, params);
   const searchParams = new URLSearchParams(omitNullishValues(search));
   searchParams.sort();
   const variantKey = searchParams.toString();
-  const [resource] = useState(() =>
+  const [resource, setResource] = useState(() =>
     getResource(
       normalPath,
       config.fallbackData ? { [variantKey]: config.fallbackData } : null,
     ),
   );
+
   const retryIntervalRef = useRef<ReturnType<typeof setTimeout>>();
   const retryingMap = useRef<Map<string, boolean>>(new Map());
   const [state, setState] = useState(() => resource.getVariant(variantKey));
@@ -114,6 +116,15 @@ export function useQuery<T extends keyof GetRPC>(
       }, config.retryIntervalOnError);
     }
   };
+
+  useEffect(() => {
+    const key = JSON.stringify(params);
+    if (key !== paramsRef.current) {
+      setResource(getResource(applyParams(url, params)));
+      setState(resource.getVariant(variantKey));
+      paramsRef.current = key;
+    }
+  }, [params]);
 
   const handleStateUpdate = useCallback(
     (nextState) => {
@@ -142,7 +153,7 @@ export function useQuery<T extends keyof GetRPC>(
       unsub();
       clearInterval(retryIntervalRef.current);
     };
-  }, [variantKey]);
+  }, [variantKey, resource]);
 
   function mutate(fn: Data<T>): void;
   function mutate(fn: (data: Data<T>) => Data<T>): void;

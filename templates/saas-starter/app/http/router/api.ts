@@ -25,22 +25,11 @@ export default class extends ApiRouter {
 
       return filteredItems;
     }),
-    "/inc": this.get((req: HttpRequest) => {
-      Broadcast.publish("/foo/:id", { id: req.search.get("id") }).publish(
-        "increment",
-      );
-      return { testId: req.params.testId };
+
+    "/test/:id": this.get((req: HttpRequest) => {
+      return req.params.id;
     }),
-    "/dec": this.get((req: HttpRequest) => {
-      Broadcast.publish("/foo/:id", { id: req.search.get("id") }).publish(
-        "decrement",
-      );
-      return { testId: req.params.testId };
-    }),
-    "/email": this.get(async () => {
-      await WelcomeEmail.send({ data: { name: "Enes" } });
-      return true;
-    }),
+
     "/upload": this.post(async (req: HttpRequest<{ file: Blob }>) => {
       const input = await req.input();
       const url = await FileStorage.put(input.get("file"));
