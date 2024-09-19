@@ -73,6 +73,7 @@ export async function startProdServer() {
     try {
       return await handler(req);
     } catch (err) {
+      console.error(err);
       if (pathname.startsWith("/api")) {
         return new Response(JSON.stringify({ error: err.message }), {
           status: 500,
