@@ -290,6 +290,39 @@ class AuthController extends Controller {
 
     return {};
   }
+
+  async changePassword(
+    req = new HttpRequest<{ oldPassword: string; newPassword: string }>(),
+  ) {
+    const user = await Auth.user();
+    const input = await req.input();
+    const { oldPassword, newPassword } = input.toJSON();
+
+    const { password } = await this.provider.adapter.findUserByEmailAddress(
+      user.email,
+    );
+
+    const isPasswordValid = await this.provider.verifyPassword(
+      oldPassword,
+      password,
+    );
+
+    if (!isPasswordValid) {
+      throw new ValidationError({
+        oldPassword: ["Incorrect password"],
+      });
+    }
+
+    const hashedPassword = await this.provider.hashPassword(newPassword);
+
+    await this.provider.adapter.updateUserPassword({
+      id: user.id,
+      password: hashedPassword,
+    });
+
+    await this.provider.adapter.deleteAllUserSessions(user.id);
+    return {};
+  }
 }
 
 export class AuthApiRouter extends ApiRouter {
@@ -299,6 +332,7 @@ export class AuthApiRouter extends ApiRouter {
     "/sign-out": this.post(AuthController, "signOut"),
     "/forgot-password": this.post(AuthController, "forgotPassword"),
     "/reset-password": this.post(AuthController, "resetPassword"),
+    "/change-password": this.post(AuthController, "changePassword"),
     "/me": this.get(AuthController, "me"),
   };
 }
