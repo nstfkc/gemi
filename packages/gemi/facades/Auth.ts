@@ -25,13 +25,9 @@ export class Auth {
     let user = requestContextStore?.user;
 
     if (!user) {
-      const adapter =
-        KernelContext.getStore().authenticationServiceProvider.adapter;
+      const container = KernelContext.getStore().authenticationServiceContainer;
       // TODO: extend session if its expired
-      const session = await adapter.findSession({
-        token: accessToken,
-        userAgent,
-      });
+      const session = await container.getSession(accessToken, userAgent);
 
       user = session?.user;
       requestContextStore?.setUser(user);

@@ -1,4 +1,5 @@
 import { AuthenticationServiceProvider } from "../auth/AuthenticationServiceProvider";
+import { AuthenticationServiceContianer } from "../auth/AuthenticationServiceContainer";
 import { kernelContext } from "./context";
 import { MiddlewareServiceProvider } from "../http/MiddlewareServiceProvider";
 import { PoliciesServiceProvider } from "../http/PoliciesServiceProvider";
@@ -29,7 +30,7 @@ export class Kernel {
 
   services: {
     emailServiceContainer: EmailServiceContainer;
-    authenticationServiceProvider: AuthenticationServiceProvider;
+    authenticationServiceContainer: AuthenticationServiceContianer;
     policiesServiceProvider: PoliciesServiceProvider;
     i18nServiceContainer: I18nServiceContainer;
     fileStorageServiceContainer: FileStorageServiceContainer;
@@ -45,7 +46,9 @@ export class Kernel {
         emailServiceContainer: new EmailServiceContainer(
           new this.emailServiceProvider(),
         ),
-        authenticationServiceProvider: new this.authenticationServiceProvider(),
+        authenticationServiceContainer: new AuthenticationServiceContianer(
+          new this.authenticationServiceProvider(),
+        ),
         middlewareServiceContainer: new MiddlewareServiceContainer(
           new this.middlewareServiceProvider(),
         ),

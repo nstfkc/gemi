@@ -62,6 +62,8 @@ export interface User {
   password: string | null;
   organizationId: number | null;
   accounts: Account[];
+  // TODO: Add type
+  extension: Record<string, any>;
 }
 
 export interface CreateSessionArgs {

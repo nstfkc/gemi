@@ -17,11 +17,9 @@ export class AuthenticationMiddleware extends Middleware {
 
     if (!user) {
       const session =
-        await KernelContext.getStore().authenticationServiceProvider.adapter.findSession(
-          {
-            token: accessToken,
-            userAgent: requestContextStore.req.headers.get("User-Agent"),
-          },
+        await KernelContext.getStore().authenticationServiceContainer.getSession(
+          accessToken,
+          requestContextStore.req.headers.get("User-Agent"),
         );
       if (!session) {
         throw new AuthenticationError();

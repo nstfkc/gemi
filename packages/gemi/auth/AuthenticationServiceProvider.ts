@@ -86,7 +86,7 @@ class ResetPasswordRequest extends HttpRequest<
 }
 
 class AuthController extends Controller {
-  provider = KernelContext.getStore().authenticationServiceProvider;
+  provider = KernelContext.getStore().authenticationServiceContainer.provider;
 
   async me() {
     const user = await Auth.user();
@@ -371,6 +371,10 @@ export class AuthenticationServiceProvider {
     const hasher = new Bun.CryptoHasher("sha256");
     hasher.update(`${user.email}${Date.now()}`);
     return hasher.digest("hex");
+  }
+
+  extendSession<T extends User>(_user: T): Promise<any> | any {
+    return {};
   }
 
   onSignUp<T extends User>(_user: T): Promise<void> | void {}

@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "async_hooks";
-import { AuthenticationServiceProvider } from "../auth/AuthenticationServiceProvider";
+import { AuthenticationServiceContianer } from "../auth/AuthenticationServiceContainer";
 import { PoliciesServiceProvider } from "../http/PoliciesServiceProvider";
 import { I18nServiceContainer } from "../http/I18nServiceContainer";
 import { FileStorageServiceContainer } from "../services/file-storage/FileStorageServiceContainer";
@@ -11,7 +11,7 @@ import { BroadcastingServiceContainer } from "../services/pubsub/BroadcastingSer
 
 export interface KernelContextValue {
   emailServiceContainer: EmailServiceContainer;
-  authenticationServiceProvider: AuthenticationServiceProvider;
+  authenticationServiceContainer: AuthenticationServiceContianer;
   policiesServiceProvider: PoliciesServiceProvider;
   i18nServiceContainer: I18nServiceContainer;
   fileStorageServiceContainer: FileStorageServiceContainer;

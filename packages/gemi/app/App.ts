@@ -91,15 +91,18 @@ export class App {
 
     const kernelServices = this.kernel.getServices();
 
-    const authBasePath = kernelServices.authenticationServiceProvider.basePath;
+    const authBasePath =
+      kernelServices.authenticationServiceContainer.provider.basePath;
 
     let viewRouters = {
       "/": this.viewRouter,
-      [authBasePath]: kernelServices.authenticationServiceProvider.routers.view,
+      [authBasePath]:
+        kernelServices.authenticationServiceContainer.provider.routers.view,
     };
     let apiRouters = {
       "/": this.apiRouter,
-      [authBasePath]: kernelServices.authenticationServiceProvider.routers.api,
+      [authBasePath]:
+        kernelServices.authenticationServiceContainer.provider.routers.api,
       "/__gemi__/services/i18n":
         kernelServices.i18nServiceContainer.routers.api,
     };

@@ -1,6 +1,6 @@
 import { prisma } from "@/app/database/prisma";
 import { ApiRouter, HttpRequest } from "gemi/http";
-import { Broadcast, FileStorage } from "gemi/facades";
+import { Auth, Broadcast, FileStorage } from "gemi/facades";
 import { WelcomeEmail } from "@/app/email/WelcomeEmail";
 
 export default class extends ApiRouter {
