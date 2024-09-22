@@ -304,6 +304,10 @@ export class App {
         if (!serverFile?.file) {
           console.log(`Server file not found for ${fileName}`);
           console.log(serverFile);
+          const files = Object.keys(serverManifest);
+          const path = `app/views/${fileName}.tsx`;
+          console.log(`${path} not found in server manifest`);
+          console.log(files);
         }
         const mod = await import(
           `${process.env.DIST_DIR}/server/${serverFile?.file}`
