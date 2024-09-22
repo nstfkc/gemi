@@ -253,13 +253,13 @@ class AuthController extends Controller {
       });
     }
 
-    const isTokenExpired = Temporal.Now.instant().until(
-      Temporal.Instant.from(passwordResetToken.createdAt.toISOString())
-        .add({ hours: 24 })
-        .toString(),
-    ).sign;
+    const isTokenExpired = Temporal.Instant.from(
+      passwordResetToken.createdAt.toISOString(),
+    )
+      .add({ hours: 24 })
+      .until(Temporal.Now.instant()).sign;
 
-    if (isTokenExpired) {
+    if (isTokenExpired >= 0) {
       throw new ValidationError({
         token: ["Token expired"],
       });
