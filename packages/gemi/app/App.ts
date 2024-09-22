@@ -10,11 +10,7 @@ import type { Plugin } from "./Plugin";
 import type { Middleware } from "../http/Middleware";
 import { RequestContext } from "../http/requestContext";
 import { type Cookie } from "../http/Cookie";
-import type {
-  ServerWebSocket,
-  WebSocketHandler,
-  WebSocketServeOptions,
-} from "bun";
+import type { WebSocketHandler } from "bun";
 import { flattenComponentTree } from "../client/helpers/flattenComponentTree";
 
 import { createComponentTree } from "./createComponentTree";
@@ -23,19 +19,15 @@ import {
   type ViewRouteExec,
 } from "./createFlatViewRoutes";
 import { createRouteManifest } from "./createRouteManifest";
-import { createFlatApiRoutes } from "./createFlatApiRoutes";
 
 // @ts-ignore
 import { renderToReadableStream } from "react-dom/server.browser";
 import { ComponentType, createElement, Fragment } from "react";
 
-import { isConstructor } from "../internal/isConstructor";
 import { HttpRequest } from "../http";
 import { Kernel } from "../kernel";
 import { I18nServiceContainer } from "../http/I18nServiceContainer";
 import { KernelContext } from "../kernel/KernelContext";
-
-type ApiRouteExec = <T>() => T | Promise<T>;
 
 interface RenderParams {
   styles: string[];
@@ -64,16 +56,7 @@ export class App {
     string,
     { exec: ViewRouteExec[]; middleware: any[] }
   > = {};
-  private flatApiRoutes: Record<
-    string,
-    Record<
-      string,
-      {
-        exec: ApiRouteExec;
-        middleware: (string | (new () => Middleware) | RouterMiddleware)[];
-      }
-    >
-  > = {};
+
   private routeManifest: Record<string, string[]> = {};
   public name = "APP";
   private appId: string;
@@ -142,7 +125,6 @@ export class App {
     this.flatViewRoutes = createFlatViewRoutes(viewRouters);
     this.componentTree = createComponentTree(viewRouters);
     this.routeManifest = createRouteManifest(viewRouters);
-    this.flatApiRoutes = createFlatApiRoutes(apiRouters);
   }
 
   public getComponentTree() {
@@ -320,6 +302,10 @@ export class App {
         templates.push(template(fileName, `${appDir}/views/${fileName}.tsx`));
       } else {
         const serverFile = serverManifest[`app/views/${fileName}.tsx`];
+        if (!serverFile?.file) {
+          console.log(`Server file not found for ${fileName}`);
+          console.log(serverManifest);
+        }
         const mod = await import(
           `${process.env.DIST_DIR}/server/${serverFile?.file}`
         );
@@ -422,7 +408,7 @@ export class App {
         );
       });
     },
-    open: (ws) => {},
+    open: (_ws) => {},
     close: (ws) => {
       console.log("closed ws");
       ws.terminate();
