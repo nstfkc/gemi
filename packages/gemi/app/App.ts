@@ -296,9 +296,13 @@ export class App {
       }
       if (!manifest) {
         appDir = `${process.env.APP_DIR}`;
-        const mod = await import(`${appDir}/views/${fileName}.tsx`);
+        const mod = await import(
+          `${appDir}/views/${fileName}.tsx?t=${this.appId}`
+        );
         viewImportMap[fileName] = mod.default;
-        templates.push(template(fileName, `${appDir}/views/${fileName}.tsx`));
+        templates.push(
+          template(fileName, `${appDir}/views/${fileName}.tsx?t=${this.appId}`),
+        );
       } else {
         const serverFile = serverManifest[`app/views/${fileName}.tsx`];
         if (!serverFile?.file) {
@@ -310,13 +314,15 @@ export class App {
           console.log(files);
         }
         const mod = await import(
-          `${process.env.DIST_DIR}/server/${serverFile?.file}`
+          `${process.env.DIST_DIR}/server/${serverFile?.file}?t=${this.appId}`
         );
 
         viewImportMap[fileName] = mod.default;
         const clientFile = manifest[`app/views/${fileName}.tsx`];
         if (clientFile) {
-          templates.push(template(fileName, `/${clientFile?.file}`));
+          templates.push(
+            template(fileName, `/${clientFile?.file}?t=${this.appId}`),
+          );
         }
       }
     }

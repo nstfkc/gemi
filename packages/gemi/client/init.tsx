@@ -12,10 +12,5 @@ export function init(RootLayout: ComponentType<any>) {
         <ClientRouter RootLayout={RootLayout} />
       </ServerDataProvider>
     </>,
-    {
-      onRecoverableError: (error, errorInfo) => {
-        console.log({ error, errorInfo });
-      },
-    },
   );
 }
