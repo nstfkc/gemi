@@ -69,6 +69,7 @@ export class App {
   private Root: ComponentType;
   private kernel: Kernel;
   private i18nServiceContainer: I18nServiceContainer;
+  private flatComponentTree: string[] = [];
 
   constructor(params: AppParams) {
     this.params = params;
@@ -124,6 +125,7 @@ export class App {
       .apiRouterServiceContainer.service.boot(apiRouters);
     this.flatViewRoutes = createFlatViewRoutes(viewRouters);
     this.componentTree = createComponentTree(viewRouters);
+    this.flatComponentTree = flattenComponentTree(this.componentTree);
     this.routeManifest = createRouteManifest(viewRouters);
   }
 
@@ -288,10 +290,7 @@ export class App {
       `"${viewName}": () => import("${path}")`;
     const templates = [];
 
-    for (const fileName of [
-      "404",
-      ...flattenComponentTree(this.componentTree),
-    ]) {
+    for (const fileName of ["404", ...this.flatComponentTree]) {
       if (process.env.NODE_ENV === "test") {
         break;
       }
@@ -304,11 +303,12 @@ export class App {
         const serverFile = serverManifest[`app/views/${fileName}.tsx`];
         if (!serverFile?.file) {
           console.log(`Server file not found for ${fileName}`);
-          console.log(serverManifest);
+          console.log(serverFile);
         }
         const mod = await import(
           `${process.env.DIST_DIR}/server/${serverFile?.file}`
         );
+
         viewImportMap[fileName] = mod.default;
         const clientFile = manifest[`app/views/${fileName}.tsx`];
         if (clientFile) {

@@ -13,8 +13,8 @@
     "@react-email/components": "^0.0.21-canary.0",
     "@react-email/render": "^0.0.17-canary.0",
     "gemi": "*",
-    "react": "19.0.0-rc-dfd30974ab-20240613",
-    "react-dom": "19.0.0-rc-dfd30974ab-20240613",
+    "react": "19.0.0-rc-fb9a90fa48-20240614",
+    "react-dom": "19.0.0-rc-fb9a90fa48-20240614",
     "sharp": "^0.33.3"
   },
   "devDependencies": {
@@ -35,7 +35,7 @@
     "vitest": "^1.5.0"
   },
   "resolution": {
-    "react": "19.0.0-rc-dfd30974ab-20240613",
-    "react-dom": "19.0.0-rc-dfd30974ab-20240613"
+    "react": "19.0.0-rc-fb9a90fa48-20240614",
+    "react-dom": "19.0.0-rc-fb9a90fa48-20240614"
   }
 }
