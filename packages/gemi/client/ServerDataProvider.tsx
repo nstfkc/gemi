@@ -16,7 +16,11 @@ export interface ServerDataContextValue {
     is404: boolean;
     searchParams: string;
   };
-  i18n: Translations;
+  i18n: {
+    dictionary: Translations;
+    currentLocale: string;
+    supportedLocales: string[];
+  };
   componentTree: ComponentTree;
   auth: {
     user: User;

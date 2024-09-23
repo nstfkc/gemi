@@ -33,13 +33,11 @@ export type Dictionary = Map<string, Map<string, Record<string, string>>>;
 export const I18nProvider = (props: PropsWithChildren<I18nProviderProps>) => {
   const { i18n } = useContext(ServerDataContext);
 
-  const locale = Object.keys(i18n)[0];
-
-  const [currentLocale, setCurrentLocale] = useState(locale);
+  const [currentLocale, setCurrentLocale] = useState(i18n.currentLocale);
 
   const [dictionary] = useState<Dictionary>(() => {
     const dictionary = new Map();
-    for (const [locale, value] of Object.entries(i18n)) {
+    for (const [locale, value] of Object.entries(i18n.dictionary)) {
       const scopes = new Map();
       for (const [scope, translations] of Object.entries(value)) {
         scopes.set(scope, translations);

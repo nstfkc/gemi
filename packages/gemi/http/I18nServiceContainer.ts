@@ -6,11 +6,11 @@ import { I18nServiceProvider } from "./I18nServiceProvider";
 class Router extends ApiRouter {
   routes = {
     "/translations": this.get(async (req = new HttpRequest()) => {
-      const input = await req.input();
-      const { scope, locale: forcedLocale } = input.toJSON() as {
+      const { scope, locale: forcedLocale } = req.search.toJSON() as {
         scope: string;
         locale: string;
       };
+
       const locale =
         forcedLocale ??
         KernelContext.getStore().i18nServiceContainer.detectLocale(req);

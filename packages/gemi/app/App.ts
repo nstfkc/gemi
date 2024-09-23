@@ -250,7 +250,11 @@ export class App {
       );
 
       i18n = {
-        [locale]: translations,
+        supportedLocales: this.i18nServiceContainer.supportedLocales,
+        currentLocale: locale,
+        dictionary: {
+          [locale]: translations,
+        },
       };
     }
 
