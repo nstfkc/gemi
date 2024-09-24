@@ -1,6 +1,5 @@
 import { AsyncLocalStorage } from "async_hooks";
 import { AuthenticationServiceContianer } from "../auth/AuthenticationServiceContainer";
-import { PoliciesServiceProvider } from "../http/PoliciesServiceProvider";
 import { I18nServiceContainer } from "../http/I18nServiceContainer";
 import { FileStorageServiceContainer } from "../services/file-storage/FileStorageServiceContainer";
 import { ApiRouterServiceContainer } from "../services/router/ApiRouterServiceContainer";
@@ -13,7 +12,6 @@ import { ViewRouterServiceContainer } from "../services/router/ViewRouterService
 export interface KernelContextValue {
   emailServiceContainer: EmailServiceContainer;
   authenticationServiceContainer: AuthenticationServiceContianer;
-  policiesServiceProvider: PoliciesServiceProvider;
   i18nServiceContainer: I18nServiceContainer;
   fileStorageServiceContainer: FileStorageServiceContainer;
   apiRouterServiceContainer: ApiRouterServiceContainer;

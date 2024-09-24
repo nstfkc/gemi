@@ -7,18 +7,18 @@ export const prismaExtension = Prisma.defineExtension({
 
   query: {
     async $allOperations({ args, operation, query, model }) {
-      const provider = KernelContext.getStore().policiesServiceProvider;
+      // const provider = KernelContext.getStore().policiesServiceProvider;
 
-      const policies = provider.policiesList[`${model}Policies`];
+      // const policies = provider.policiesList[`${model}Policies`];
 
-      if (!policies) {
-        return await query(args);
-      }
+      // if (!policies) {
+      //   return await query(args);
+      // }
 
-      const isPassed = await policies.all.call(policies, operation, args);
-      if (!isPassed) {
-        throw new InsufficientPermissionsError();
-      }
+      // const isPassed = await policies.all.call(policies, operation, args);
+      // if (!isPassed) {
+      //   throw new InsufficientPermissionsError();
+      // }
 
       return await query(args);
     },

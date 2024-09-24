@@ -2,7 +2,6 @@ import { AuthenticationServiceProvider } from "../auth/AuthenticationServiceProv
 import { AuthenticationServiceContianer } from "../auth/AuthenticationServiceContainer";
 import { kernelContext } from "./context";
 import { MiddlewareServiceProvider } from "../http/MiddlewareServiceProvider";
-import { PoliciesServiceProvider } from "../http/PoliciesServiceProvider";
 import { I18nServiceProvider } from "../http/I18nServiceProvider";
 import { I18nServiceContainer } from "../http/I18nServiceContainer";
 import { FileStorageServiceContainer } from "../services/file-storage/FileStorageServiceContainer";
@@ -23,7 +22,6 @@ export class Kernel {
   protected emailServiceProvider = EmailServiceProvider;
   protected authenticationServiceProvider = AuthenticationServiceProvider;
   protected middlewareServiceProvider = MiddlewareServiceProvider;
-  protected policiesServiceProvider = PoliciesServiceProvider;
   protected i18nServiceProvider = I18nServiceProvider;
   protected fileStorageServiceProvider = FileStorageServiceProvider;
   protected apiRouterServiceProvider = ApiRouterServiceProvider;
@@ -34,7 +32,6 @@ export class Kernel {
   services: {
     emailServiceContainer: EmailServiceContainer;
     authenticationServiceContainer: AuthenticationServiceContianer;
-    policiesServiceProvider: PoliciesServiceProvider;
     i18nServiceContainer: I18nServiceContainer;
     fileStorageServiceContainer: FileStorageServiceContainer;
     apiRouterServiceContainer: ApiRouterServiceContainer;
@@ -56,7 +53,6 @@ export class Kernel {
         middlewareServiceContainer: new MiddlewareServiceContainer(
           new this.middlewareServiceProvider(),
         ),
-        policiesServiceProvider: new this.policiesServiceProvider(),
         i18nServiceContainer: new I18nServiceContainer(
           new this.i18nServiceProvider(),
         ),
