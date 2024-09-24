@@ -1,8 +1,8 @@
 import { describe, test, expect } from "vitest";
 
 import { createFlatViewRoutes } from "./createFlatViewRoutes";
-import { ViewRouter } from "../http/ViewRouter";
-import { Controller } from "../http/Controller";
+import { Controller } from "../../http/Controller";
+import { ViewRouter } from "../../http/ViewRouter";
 
 class TestController extends Controller {
   test() {
@@ -19,12 +19,6 @@ class FlatRouter extends ViewRouter {
     ]),
     "/about": this.view("About", [TestController, "test"]),
     "/pricing": this.view("Pricing", [TestController, "test"]),
-    "/foo": this.view("Foo", [TestController, "test"], {
-      "/bar": this.view("Bar", [TestController, "test"], {
-        "/baz": this.view("Baz", [TestController, "test"]),
-        "/cux": this.view("Cux", [TestController, "test"]),
-      }),
-    }),
     "/app": this.layout("PrivateLayout", [TestController, "test"], {
       "/": this.view("Dashboard", [TestController, "test"]),
       "/settings": this.view("Settings", [TestController, "test"]),

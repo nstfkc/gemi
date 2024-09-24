@@ -2,9 +2,9 @@ import { HttpRequest } from "../../http";
 import { Cookie } from "../../http/Cookie";
 import { GEMI_REQUEST_BREAKER_ERROR } from "../../http/Error";
 import { RequestContext } from "../../http/requestContext";
-import { RouterMiddleware } from "../../http/Router";
+import type { RouterMiddleware } from "../../http/Router";
 import { KernelContext } from "../../kernel/KernelContext";
-import { ViewRouteExec } from "./createFlatViewRoutes";
+import type { ViewRouteExec } from "./createFlatViewRoutes";
 import { ViewRouterServiceProvider } from "./ViewRouterServiceProvider";
 // @ts-ignore
 import { renderToReadableStream } from "react-dom/server.browser";

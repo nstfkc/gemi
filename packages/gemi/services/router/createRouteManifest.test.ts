@@ -1,7 +1,7 @@
 import { describe, test, expect } from "vitest";
 import { createRouteManifest } from "./createRouteManifest";
-import { ViewRouter } from "../http/ViewRouter";
-import { Controller } from "../http/Controller";
+import { ViewRouter } from "../../http/ViewRouter";
+import { Controller } from "../../http/Controller";
 
 class TestController extends Controller {
   test() {
@@ -19,7 +19,7 @@ class FlatRouter extends ViewRouter {
 
 class NestedRouter extends ViewRouter {
   routes = {
-    "/": this.view("Layout", [TestController, "test"], {
+    "/": this.layout("Layout", [TestController, "test"], {
       "/": this.view("Home", [TestController, "test"]),
       "/about": this.view("About", [TestController, "test"]),
       "/pricing": this.view("Pricing", [TestController, "test"]),
@@ -29,7 +29,7 @@ class NestedRouter extends ViewRouter {
 
 class ProductsRouter extends ViewRouter {
   routes = {
-    "/": this.view("ProductsLayout", [TestController, "test"], {
+    "/": this.layout("ProductsLayout", [TestController, "test"], {
       "/": this.view("Products"),
       "/:productId": this.view("Product"),
       "/:productId/providers": this.view("ProductProviders"),
@@ -39,13 +39,13 @@ class ProductsRouter extends ViewRouter {
 
 class DeeplyNestedRouter extends ViewRouter {
   routes = {
-    "/": this.view("Layout", [TestController, "test"], {
+    "/": this.layout("Layout", [TestController, "test"], {
       "/": this.view("Home", [TestController, "test"]),
       "/about": this.view("About", [TestController, "test"]),
       "/pricing": this.view("Pricing", [TestController, "test"]),
       "/products": ProductsRouter,
-      "/foo": this.view("Foo", [TestController, "test"], {
-        "/bar": this.view("Bar", [TestController, "test"], {
+      "/foo": this.layout("Foo", [TestController, "test"], {
+        "/bar": this.layout("Bar", [TestController, "test"], {
           "/baz": this.view("Baz", [TestController, "test"]),
           "/cux": this.view("Cux", [TestController, "test"]),
         }),

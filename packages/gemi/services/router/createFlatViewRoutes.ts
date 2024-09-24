@@ -1,5 +1,5 @@
 import { HttpRequest } from "../../http";
-import { ViewRoutes } from "../../http/ViewRouter";
+import type { ViewRoutes } from "../../http/ViewRouter";
 
 export type ViewRouteExec = (req: HttpRequest<any, any>) => any; // TODO: fix type
 

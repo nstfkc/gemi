@@ -1,4 +1,4 @@
-import { ViewRoutes } from "../http/ViewRouter";
+import type { ViewRoutes } from "../../http/ViewRouter";
 
 export function createRouteManifest(routes: ViewRoutes) {
   const routeManifest: Record<string, string[]> = {};

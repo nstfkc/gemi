@@ -3,7 +3,6 @@ import { ViewRouter } from "../http/ViewRouter";
 import type { WebSocketHandler } from "bun";
 import { ComponentType } from "react";
 import { Kernel } from "../kernel";
-import { I18nServiceContainer } from "../http/I18nServiceContainer";
 import { KernelContext } from "../kernel/KernelContext";
 
 interface AppParams {
@@ -20,7 +19,6 @@ export class App {
   private viewRouter: new () => ViewRouter;
   private Root: ComponentType;
   private kernel: Kernel;
-  private i18nServiceContainer: I18nServiceContainer;
 
   constructor(params: AppParams) {
     this.apiRouter = params.apiRouter;
@@ -28,24 +26,18 @@ export class App {
     this.Root = params.root;
     this.kernel = new params.kernel();
 
-    this.prepare();
-
-    this.i18nServiceContainer = this.kernel.getServices().i18nServiceContainer;
-    this.i18nServiceContainer.boot();
-  }
-
-  private prepare() {
     const kernelServices = this.kernel.getServices();
 
     const authBasePath =
       kernelServices.authenticationServiceContainer.provider.basePath;
 
-    let viewRouters = {
+    const viewRouters = {
       "/": this.viewRouter,
       [authBasePath]:
         kernelServices.authenticationServiceContainer.provider.routers.view,
     };
-    let apiRouters = {
+
+    const apiRouters = {
       "/": this.apiRouter,
       [authBasePath]:
         kernelServices.authenticationServiceContainer.provider.routers.api,
@@ -53,13 +45,14 @@ export class App {
         kernelServices.i18nServiceContainer.routers.api,
     };
 
-    this.kernel
-      .getServices()
-      .apiRouterServiceContainer.service.boot(apiRouters);
+    kernelServices.apiRouterServiceContainer.service.boot(apiRouters);
 
-    this.kernel
-      .getServices()
-      .viewRouterServiceContainer.service.boot(viewRouters, this.Root);
+    kernelServices.viewRouterServiceContainer.service.boot(
+      viewRouters,
+      this.Root,
+    );
+
+    kernelServices.i18nServiceContainer.boot();
   }
 
   public getComponentTree() {
@@ -72,12 +65,10 @@ export class App {
       .flatComponentTree;
   }
 
-  async fetch(req: Request): Promise<Response> {
+  public async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url);
 
-    const kernelRun = this.kernel.run.bind(this.kernel);
-
-    return kernelRun(async () => {
+    return this.kernel.run.call(this.kernel, async () => {
       if (url.pathname.startsWith("/api")) {
         return await this.kernel.services.apiRouterServiceContainer.handleApiRequest(
           req,

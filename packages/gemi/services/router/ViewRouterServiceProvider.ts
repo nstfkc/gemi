@@ -1,6 +1,6 @@
 import { flattenComponentTree } from "../../client/helpers/flattenComponentTree";
-import { ComponentTree } from "../../client/types";
-import { ViewRoutes } from "../../http/ViewRouter";
+import type { ComponentTree } from "../../client/types";
+import type { ViewRoutes } from "../../http/ViewRouter";
 import { ServiceProvider } from "../ServiceProvider";
 import { createComponentTree } from "./createComponentTree";
 import {

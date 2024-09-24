@@ -1,5 +1,5 @@
-import { ComponentTree } from "../client/types";
-import { ViewRoutes } from "../http/ViewRouter";
+import type { ComponentTree } from "../../client/types";
+import type { ViewRoutes } from "../../http/ViewRouter";
 
 export function createComponentTree(routes: ViewRoutes): ComponentTree {
   const componentTree: ComponentTree = [];

@@ -5,7 +5,8 @@ import { I18nServiceProvider } from "./I18nServiceProvider";
 
 class Router extends ApiRouter {
   routes = {
-    "/translations": this.get(async (req = new HttpRequest()) => {
+    "/translations": this.get(async () => {
+      const req = new HttpRequest<any, any>();
       const { scope, locale: forcedLocale } = req.search.toJSON() as {
         scope: string;
         locale: string;
@@ -50,8 +51,6 @@ export class I18nServiceContainer {
   };
 
   boot() {
-    // await this.service.init();
-
     const tmpStore = new Map<string, Map<string, string>>();
 
     for (const [scope, translations] of Object.entries(
