@@ -22,6 +22,7 @@ export default function Home(props: ViewProps<"/">) {
 
   return (
     <div>
+      <div>Test</div>
       <div>Id: {id}</div>
       <div>Data: {data}</div>
       <div>

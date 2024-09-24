@@ -44,12 +44,6 @@ interface AppParams {
 }
 
 export class App {
-  private renderParams: RenderParams = {
-    styles: [],
-    manifest: {},
-    serverManifest: {},
-    bootstrapModules: [],
-  };
   private flatViewRoutes: Record<
     string,
     { exec: ViewRouteExec[]; middleware: any[] }
@@ -116,10 +110,6 @@ export class App {
 
   public getComponentTree() {
     return this.componentTree;
-  }
-
-  public setRenderParams(params: RenderParams) {
-    this.renderParams = params;
   }
 
   async handleViewRequest(req: Request) {
@@ -313,7 +303,6 @@ export class App {
       loaders: string;
     }) => {
       const { bootstrapModules, loaders, styles, viewImportMap } = params;
-      console.log({ bootstrapModules });
       const stream = await renderToReadableStream(
         createElement(Fragment, {
           children: [

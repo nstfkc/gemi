@@ -84,7 +84,6 @@ export const ClientRouter = (props: {
   const { routeManifest, router, componentTree, pageData, auth } =
     useContext(ServerDataContext);
 
-  console.log("ClientRouter");
   return (
     <I18nProvider>
       <WebSocketContextProvider>

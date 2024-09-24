@@ -12,7 +12,7 @@
     "@prisma/client": "5.14.0",
     "@react-email/components": "0.0.23-canary.3",
     "@react-email/render": "^0.0.17-canary.0",
-    "framer-motion": "^11.3.31",
+    "framer-motion": "12.0.0-alpha.1",
     "gemi": "*",
     "react": "19.0.0-rc-fb9a90fa48-20240614",
     "react-dom": "19.0.0-rc-fb9a90fa48-20240614",
