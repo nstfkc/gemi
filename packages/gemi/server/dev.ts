@@ -108,7 +108,10 @@ export async function startDevServer() {
               `"${viewName}": () => import("${path}")`;
             const templates = [];
 
-            for (const fileName of ["404", ...app.flatComponentTree]) {
+            for (const fileName of [
+              "404",
+              ...app.getFlatComponentTree.call(app),
+            ]) {
               if (process.env.NODE_ENV === "test") {
                 break;
               }

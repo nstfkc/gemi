@@ -8,6 +8,7 @@ import { MiddlewareServiceContainer } from "../services/middleware/MiddlewareSer
 import { RateLimiterServiceContainer } from "../services/rate-limiter/RateLimiterServiceContainer";
 import { EmailServiceContainer } from "../services/email/EmailServiceContainer";
 import { BroadcastingServiceContainer } from "../services/pubsub/BroadcastingServiceContainer";
+import { ViewRouterServiceContainer } from "../services/router/ViewRouterServiceContainer";
 
 export interface KernelContextValue {
   emailServiceContainer: EmailServiceContainer;
@@ -16,6 +17,7 @@ export interface KernelContextValue {
   i18nServiceContainer: I18nServiceContainer;
   fileStorageServiceContainer: FileStorageServiceContainer;
   apiRouterServiceContainer: ApiRouterServiceContainer;
+  viewRouterServiceContainer: ViewRouterServiceContainer;
   middlewareServiceContainer: MiddlewareServiceContainer;
   rateLimiterServiceContainer: RateLimiterServiceContainer;
   broadcastingServiceContainer: BroadcastingServiceContainer;

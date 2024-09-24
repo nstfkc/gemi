@@ -1,86 +1,40 @@
 import type { ApiRouter } from "../http/ApiRouter";
 import { ViewRouter } from "../http/ViewRouter";
-// @ts-ignore
-import { URLPattern } from "urlpattern-polyfill";
-import { generateETag } from "../server/generateEtag";
-import type { ComponentTree } from "../client/types";
-import { type RouterMiddleware } from "../http/Router";
-import { GEMI_REQUEST_BREAKER_ERROR } from "../http/Error";
-import type { Middleware } from "../http/Middleware";
-import { RequestContext } from "../http/requestContext";
-import { type Cookie } from "../http/Cookie";
 import type { WebSocketHandler } from "bun";
-import { flattenComponentTree } from "../client/helpers/flattenComponentTree";
-
-import { createComponentTree } from "./createComponentTree";
-import {
-  createFlatViewRoutes,
-  type ViewRouteExec,
-} from "./createFlatViewRoutes";
-import { createRouteManifest } from "./createRouteManifest";
-
-// @ts-ignore
-import { renderToReadableStream } from "react-dom/server.browser";
-import { ComponentType, createElement, Fragment } from "react";
-
-import { HttpRequest } from "../http";
+import { ComponentType } from "react";
 import { Kernel } from "../kernel";
 import { I18nServiceContainer } from "../http/I18nServiceContainer";
 import { KernelContext } from "../kernel/KernelContext";
 
-interface RenderParams {
-  styles: string[];
-  manifest: Record<string, any>;
-  serverManifest: Record<string, any>;
-  bootstrapModules?: string[];
-}
-
 interface AppParams {
   viewRouter: new () => ViewRouter;
   apiRouter: new () => ApiRouter;
-  middlewareAliases?: Record<string, new () => Middleware>;
   root: ComponentType;
   kernel: new () => Kernel;
 }
 
 export class App {
-  private flatViewRoutes: Record<
-    string,
-    { exec: ViewRouteExec[]; middleware: any[] }
-  > = {};
-
-  private routeManifest: Record<string, string[]> = {};
   public name = "APP";
-  private appId: string;
-  private componentTree: ComponentTree;
-  public middlewareAliases: Record<string, new () => Middleware> = {};
   public devVersion = 0;
-  private params: AppParams;
   private apiRouter: new () => ApiRouter;
   private viewRouter: new () => ViewRouter;
   private Root: ComponentType;
   private kernel: Kernel;
   private i18nServiceContainer: I18nServiceContainer;
-  public flatComponentTree: string[] = [];
 
   constructor(params: AppParams) {
-    this.params = params;
     this.apiRouter = params.apiRouter;
     this.viewRouter = params.viewRouter;
     this.Root = params.root;
     this.kernel = new params.kernel();
 
     this.prepare();
-    this.appId = generateETag(Date.now());
 
     this.i18nServiceContainer = this.kernel.getServices().i18nServiceContainer;
     this.i18nServiceContainer.boot();
   }
 
   private prepare() {
-    const params = this.params;
-    this.middlewareAliases = params.middlewareAliases ?? {};
-
     const kernelServices = this.kernel.getServices();
 
     const authBasePath =
@@ -102,228 +56,20 @@ export class App {
     this.kernel
       .getServices()
       .apiRouterServiceContainer.service.boot(apiRouters);
-    this.flatViewRoutes = createFlatViewRoutes(viewRouters);
-    this.componentTree = createComponentTree(viewRouters);
-    this.flatComponentTree = flattenComponentTree(this.componentTree);
-    this.routeManifest = createRouteManifest(viewRouters);
+
+    this.kernel
+      .getServices()
+      .viewRouterServiceContainer.service.boot(viewRouters, this.Root);
   }
 
   public getComponentTree() {
-    return this.componentTree;
+    return this.kernel.getServices().viewRouterServiceContainer.service
+      .componentTree;
   }
 
-  async handleViewRequest(req: Request) {
-    const url = new URL(req.url);
-    const isViewDataRequest = url.searchParams.get("json");
-
-    let pageData: {
-      cookies: Set<Cookie>;
-      headers: Headers;
-      currentPathName: string;
-      data: Record<string, any>;
-      prefetchedData: Record<string, any>;
-      user: any; // TODO: fix type
-      params: Record<string, any>;
-    } | null = null;
-
-    try {
-      let handlers: ViewRouteExec[] = [];
-      let middlewares: (RouterMiddleware | string)[] = [];
-      let currentPathName: null | string = null;
-      let params: Record<string, any> = {};
-
-      for (const [pathname, handler] of Object.entries(this.flatViewRoutes)) {
-        const pattern = new URLPattern({ pathname });
-        if (pattern.test({ pathname: url.pathname })) {
-          currentPathName = pathname;
-          params = pattern.exec({ pathname: url.pathname })?.pathname.groups!;
-          handlers = handler.exec;
-          middlewares = handler.middleware;
-          break;
-        }
-      }
-
-      const httpRequest = new HttpRequest(req, params);
-      const { data, cookies, headers, user, prefetchedData } =
-        await RequestContext.run(httpRequest, async () => {
-          const ctx = RequestContext.getStore();
-          ctx.setRequest(httpRequest);
-
-          await KernelContext.getStore().middlewareServiceContainer.runMiddleware(
-            middlewares,
-            currentPathName,
-          );
-
-          const data = await Promise.all([
-            ...handlers.map((fn) => fn(httpRequest as any)),
-            ...Array.from(ctx.prefetchPromiseQueue).map((fn) => fn()),
-          ]);
-
-          const cookies = ctx.cookies;
-          const headers = ctx.headers;
-          const prefetchedResources = ctx.prefetchedResources;
-
-          return {
-            data,
-            cookies,
-            headers,
-            user: ctx.user,
-            prefetchedData: Object.fromEntries(prefetchedResources.entries()),
-          };
-        });
-
-      pageData = {
-        data,
-        prefetchedData,
-        currentPathName,
-        user,
-        params,
-        cookies,
-        headers,
-      };
-    } catch (err) {
-      if (err.kind === GEMI_REQUEST_BREAKER_ERROR) {
-        if (isViewDataRequest) {
-          const { status = 400, data, directive, headers } = err.payload.api;
-          return new Response(JSON.stringify({ data, directive }), {
-            headers,
-            status,
-          });
-        } else {
-          const { status = 400, error } = err.payload.view;
-          return new Response(error?.message, {
-            ...err.payload.view,
-            status,
-          });
-        }
-      } else {
-        throw err;
-      }
-    }
-
-    const { data, params, currentPathName, user, cookies } = pageData;
-
-    const viewData = data.reduce((acc, data) => {
-      return {
-        ...acc,
-        ...data,
-      };
-    }, {});
-
-    const isI18nEnabled = this.i18nServiceContainer.isEnabled;
-    let i18n: Record<string, any> = {};
-    if (isI18nEnabled) {
-      const locale = this.i18nServiceContainer.detectLocale(
-        new HttpRequest(req, params as any),
-      );
-      const translations = this.i18nServiceContainer.getPageTranslations(
-        locale,
-        currentPathName,
-      );
-
-      i18n = {
-        supportedLocales: this.i18nServiceContainer.supportedLocales,
-        currentLocale: locale,
-        dictionary: {
-          [locale]: translations,
-        },
-      };
-    }
-
-    if (isViewDataRequest) {
-      const headers = new Headers();
-      headers.set("Content-Type", "application/json");
-
-      cookies.forEach((cookie) =>
-        headers.append("Set-Cookie", cookie.toString()),
-      );
-
-      headers.append(
-        "Cache-Control",
-        user
-          ? "private, no-cache, no-store, max-age=0, must-revalidate"
-          : "public, max-age=864000, must-revalidate",
-      );
-
-      return new Response(
-        JSON.stringify({
-          data: {
-            [url.pathname]: viewData,
-          },
-          prefetchedData: pageData.prefetchedData,
-          i18n,
-          is404: !currentPathName,
-        }),
-        {
-          headers,
-        },
-      );
-    }
-
-    const headers = new Headers();
-    headers.set("Content-Type", "text/html");
-    headers.set(
-      "Cache-Control",
-      user
-        ? "private, no-cache, no-store, max-age=0, must-revalidate"
-        : "public, max-age=864000, must-revalidate",
-    );
-    headers.set("ETag", this.appId);
-
-    pageData.cookies.forEach((cookie) =>
-      headers.append("Set-Cookie", cookie.toString()),
-    );
-
-    const result = {
-      kind: "view",
-      data: {
-        pageData: {
-          [url.pathname]: viewData,
-        },
-        prefetchedData: pageData.prefetchedData,
-        i18n,
-        auth: { user },
-        routeManifest: this.routeManifest,
-        router: {
-          pathname: currentPathName,
-          params,
-          currentPath: url.pathname,
-          searchParams: url.search,
-          is404: !currentPathName ? true : false,
-        },
-        componentTree: [["404", []], ...this.componentTree],
-      },
-      head: {},
-    };
-    const Root = this.Root;
-    return async (params: {
-      styles: any[];
-      viewImportMap: any;
-      bootstrapModules: string[];
-      loaders: string;
-    }) => {
-      const { bootstrapModules, loaders, styles, viewImportMap } = params;
-      const stream = await renderToReadableStream(
-        createElement(Fragment, {
-          children: [
-            styles,
-            createElement(Root as any, {
-              data: result.data,
-              viewImportMap,
-            }),
-          ],
-        }),
-        {
-          bootstrapScriptContent: `window.__GEMI_DATA__ = ${JSON.stringify(result.data)}; window.loaders=${loaders}`,
-          bootstrapModules,
-        },
-      );
-
-      return new Response(stream, {
-        status: !currentPathName ? 404 : 200,
-        headers,
-      });
-    };
+  public getFlatComponentTree() {
+    return this.kernel.getServices().viewRouterServiceContainer.service
+      .flatComponentTree;
   }
 
   async fetch(req: Request): Promise<Response> {
@@ -337,7 +83,9 @@ export class App {
           req,
         );
       } else {
-        return await this.handleViewRequest(req);
+        return await this.kernel.services.viewRouterServiceContainer.handleViewRequest(
+          req,
+        );
       }
     });
   }

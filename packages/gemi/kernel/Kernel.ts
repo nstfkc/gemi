@@ -16,6 +16,8 @@ import { EmailServiceProvider } from "../services/email/EmailServiceProvider";
 import { EmailServiceContainer } from "../services/email/EmailServiceContainer";
 import { BroadcastingServiceContainer } from "../services/pubsub/BroadcastingServiceContainer";
 import { BroadcastingServiceProvider } from "../services/pubsub/BroadcastingServiceProvider";
+import { ViewRouterServiceContainer } from "../services/router/ViewRouterServiceContainer";
+import { ViewRouterServiceProvider } from "../services/router/ViewRouterServiceProvider";
 
 export class Kernel {
   protected emailServiceProvider = EmailServiceProvider;
@@ -25,6 +27,7 @@ export class Kernel {
   protected i18nServiceProvider = I18nServiceProvider;
   protected fileStorageServiceProvider = FileStorageServiceProvider;
   protected apiRouterServiceProvider = ApiRouterServiceProvider;
+  protected viewRouterServiceProvider = ViewRouterServiceProvider;
   protected rateLimiterServiceProvider = RateLimiterServiceProvider;
   protected broadcastingsServiceProvider = BroadcastingServiceProvider;
 
@@ -35,6 +38,7 @@ export class Kernel {
     i18nServiceContainer: I18nServiceContainer;
     fileStorageServiceContainer: FileStorageServiceContainer;
     apiRouterServiceContainer: ApiRouterServiceContainer;
+    viewRouterServiceContainer: ViewRouterServiceContainer;
     middlewareServiceContainer: MiddlewareServiceContainer;
     rateLimiterServiceContainer: RateLimiterServiceContainer;
     broadcastingServiceContainer: BroadcastingServiceContainer;
@@ -61,6 +65,9 @@ export class Kernel {
         ),
         apiRouterServiceContainer: new ApiRouterServiceContainer(
           new this.apiRouterServiceProvider(),
+        ),
+        viewRouterServiceContainer: new ViewRouterServiceContainer(
+          new this.viewRouterServiceProvider(),
         ),
         rateLimiterServiceContainer: new RateLimiterServiceContainer(
           new this.rateLimiterServiceProvider(),

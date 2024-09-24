@@ -65,7 +65,7 @@ export async function startProdServer() {
       `"${viewName}": () => import("${path}")`;
     const templates = [];
 
-    for (const fileName of ["404", ...app.flatComponentTree]) {
+    for (const fileName of ["404", ...app.getFlatComponentTree.call(app)]) {
       const serverFile = serverManifest[`app/views/${fileName}.tsx`];
       if (!serverFile?.file) {
         console.log(`Server file not found for ${fileName}`);
