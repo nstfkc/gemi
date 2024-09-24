@@ -6,7 +6,6 @@ import { generateETag } from "../server/generateEtag";
 import type { ComponentTree } from "../client/types";
 import { type RouterMiddleware } from "../http/Router";
 import { GEMI_REQUEST_BREAKER_ERROR } from "../http/Error";
-import type { Plugin } from "./Plugin";
 import type { Middleware } from "../http/Middleware";
 import { RequestContext } from "../http/requestContext";
 import { type Cookie } from "../http/Cookie";
@@ -39,7 +38,6 @@ interface RenderParams {
 interface AppParams {
   viewRouter: new () => ViewRouter;
   apiRouter: new () => ApiRouter;
-  plugins?: (new () => Plugin)[];
   middlewareAliases?: Record<string, new () => Middleware>;
   root: ComponentType;
   kernel: new () => Kernel;
@@ -69,7 +67,7 @@ export class App {
   private Root: ComponentType;
   private kernel: Kernel;
   private i18nServiceContainer: I18nServiceContainer;
-  private flatComponentTree: string[] = [];
+  public flatComponentTree: string[] = [];
 
   constructor(params: AppParams) {
     this.params = params;
@@ -106,22 +104,6 @@ export class App {
       "/__gemi__/services/i18n":
         kernelServices.i18nServiceContainer.routers.api,
     };
-
-    for (const Plugin of params.plugins ?? []) {
-      const plugin = new Plugin();
-      if (plugin.viewRouter) {
-        viewRouters = {
-          ...viewRouters,
-          [plugin.viewRoutesBasePath]: plugin.viewRouter,
-        };
-      }
-      if (plugin.apiRouter) {
-        apiRouters = {
-          ...apiRouters,
-          [plugin.apiRoutesBasePath]: plugin.apiRouter,
-        };
-      }
-    }
 
     this.kernel
       .getServices()
@@ -288,54 +270,6 @@ export class App {
       );
     }
 
-    const { styles, manifest, serverManifest, bootstrapModules } =
-      this.renderParams;
-
-    const viewImportMap = {};
-    let appDir: string | null = null;
-    const template = (viewName: string, path: string) =>
-      `"${viewName}": () => import("${path}")`;
-    const templates = [];
-
-    for (const fileName of ["404", ...this.flatComponentTree]) {
-      if (process.env.NODE_ENV === "test") {
-        break;
-      }
-      if (!manifest) {
-        appDir = `${process.env.APP_DIR}`;
-        const mod = await import(
-          `${appDir}/views/${fileName}.tsx?t=${this.appId}`
-        );
-        viewImportMap[fileName] = mod.default;
-        templates.push(
-          template(fileName, `${appDir}/views/${fileName}.tsx?t=${this.appId}`),
-        );
-      } else {
-        const serverFile = serverManifest[`app/views/${fileName}.tsx`];
-        if (!serverFile?.file) {
-          console.log(`Server file not found for ${fileName}`);
-          console.log(serverFile);
-          const files = Object.keys(serverManifest);
-          const path = `app/views/${fileName}.tsx`;
-          console.log(`${path} not found in server manifest`);
-          console.log(files);
-        }
-        const mod = await import(
-          `${process.env.DIST_DIR}/server/${serverFile?.file}?t=${this.appId}`
-        );
-
-        viewImportMap[fileName] = mod.default;
-        const clientFile = manifest[`app/views/${fileName}.tsx`];
-        if (clientFile) {
-          templates.push(
-            template(fileName, `/${clientFile?.file}?t=${this.appId}`),
-          );
-        }
-      }
-    }
-
-    const loaders = `{${templates.join(",")}}`;
-
     const headers = new Headers();
     headers.set("Content-Type", "text/html");
     headers.set(
@@ -371,27 +305,36 @@ export class App {
       },
       head: {},
     };
+    const Root = this.Root;
+    return async (params: {
+      styles: any[];
+      viewImportMap: any;
+      bootstrapModules: string[];
+      loaders: string;
+    }) => {
+      const { bootstrapModules, loaders, styles, viewImportMap } = params;
+      console.log({ bootstrapModules });
+      const stream = await renderToReadableStream(
+        createElement(Fragment, {
+          children: [
+            styles,
+            createElement(Root as any, {
+              data: result.data,
+              viewImportMap,
+            }),
+          ],
+        }),
+        {
+          bootstrapScriptContent: `window.__GEMI_DATA__ = ${JSON.stringify(result.data)}; window.loaders=${loaders}`,
+          bootstrapModules,
+        },
+      );
 
-    const stream = await renderToReadableStream(
-      createElement(Fragment, {
-        children: [
-          styles,
-          createElement(this.Root as any, {
-            data: result.data,
-            viewImportMap,
-          }),
-        ],
-      }),
-      {
-        bootstrapScriptContent: `window.__GEMI_DATA__ = ${JSON.stringify(result.data)}; window.loaders=${loaders}`,
-        bootstrapModules,
-      },
-    );
-
-    return new Response(stream, {
-      status: !currentPathName ? 404 : 200,
-      headers,
-    });
+      return new Response(stream, {
+        status: !currentPathName ? 404 : 200,
+        headers,
+      });
+    };
   }
 
   async fetch(req: Request): Promise<Response> {

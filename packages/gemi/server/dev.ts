@@ -67,30 +67,8 @@ export async function startDevServer() {
   }
 
   async function getApp(): Promise<App> {
-    let app: App;
     try {
-      app = (await vite.ssrLoadModule(join(appDir, "bootstrap.ts"))).app;
-      const { default: css } = await vite.ssrLoadModule(`${appDir}/app.css`);
-
-      const styles = [];
-      styles.push({
-        isDev: true,
-        id: `${appDir}/app.css`,
-        content: css,
-      });
-
-      app.setRenderParams({
-        styles: createStyles(styles),
-        manifest: null,
-        serverManifest: null,
-        bootstrapModules: [
-          "/refresh.js",
-          "/app/client.tsx",
-          "http://localhost:5173/@vite/client",
-        ],
-      });
-
-      return app;
+      return (await vite.ssrLoadModule(join(appDir, "bootstrap.ts"))).app;
     } catch (err) {
       console.log("Can't load bootstrap.ts");
       console.error(err);
@@ -121,7 +99,51 @@ export async function startDevServer() {
         }
 
         try {
-          return await handler(req);
+          const result = await handler(req);
+          if (result instanceof Response) {
+            return result;
+          } else {
+            const viewImportMap = {};
+            const template = (viewName: string, path: string) =>
+              `"${viewName}": () => import("${path}")`;
+            const templates = [];
+
+            for (const fileName of ["404", ...app.flatComponentTree]) {
+              if (process.env.NODE_ENV === "test") {
+                break;
+              }
+              const appDir = `${process.env.APP_DIR}`;
+              const mod = await vite.ssrLoadModule(
+                `${appDir}/views/${fileName}.tsx`,
+              );
+              viewImportMap[fileName] = mod.default;
+              templates.push(
+                template(fileName, `${appDir}/views/${fileName}.tsx`),
+              );
+            }
+
+            const loaders = `{${templates.join(",")}}`;
+            const { default: css } = await vite.ssrLoadModule(
+              `${appDir}/app.css`,
+            );
+
+            const styles = [];
+            styles.push({
+              isDev: true,
+              id: `${appDir}/app.css`,
+              content: css,
+            });
+            return await result({
+              styles: createStyles(styles),
+              bootstrapModules: [
+                "/refresh.js",
+                "/app/client.tsx",
+                "http://localhost:5173/@vite/client",
+              ],
+              viewImportMap,
+              loaders,
+            });
+          }
         } catch (err) {
           console.error(err);
           if (pathname.startsWith("/api")) {

@@ -206,6 +206,9 @@ function useLocationChange(cb: (location: Location) => void) {
 
 export function useLocation() {
   const ctx = useContext(ClientRouterContext);
+  if (!ctx) {
+    throw new Error("useLocation must be used within a ClientRouterProvider");
+  }
   const { locationSubject } = ctx;
   const [location, setLocation] = useState(locationSubject?.getValue());
 

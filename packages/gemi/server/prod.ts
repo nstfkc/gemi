@@ -14,11 +14,6 @@ export async function startProdServer() {
   const manifest = await import(`${distDir}/client/.vite/manifest.json`);
   const serverManifest = await import(`${distDir}/server/.vite/manifest.json`);
 
-  const cssFile = Bun.file(
-    `${distDir}/client/${manifest["app/client.tsx"].css}`,
-  );
-  const cssContent = await cssFile.text();
-
   process.env.ROOT_DIR = rootDir;
   process.env.APP_DIR = appDir;
   process.env.DIST_DIR = distDir;
@@ -57,21 +52,55 @@ export async function startProdServer() {
     }
 
     const styles = [];
+    const cssFile = Bun.file(
+      `${distDir}/client/${manifest["app/client.tsx"].css}`,
+    );
+    const cssContent = await cssFile.text();
     styles.push({
       content: cssContent,
     });
 
-    app.setRenderParams({
-      styles: createStyles(styles),
-      manifest,
-      serverManifest,
-      bootstrapModules: [`/${manifest["app/client.tsx"].file}`],
-    });
+    const viewImportMap = {};
+    const template = (viewName: string, path: string) =>
+      `"${viewName}": () => import("${path}")`;
+    const templates = [];
+
+    for (const fileName of ["404", ...app.flatComponentTree]) {
+      const serverFile = serverManifest[`app/views/${fileName}.tsx`];
+      if (!serverFile?.file) {
+        console.log(`Server file not found for ${fileName}`);
+        console.log(serverFile);
+        const files = Object.keys(serverManifest);
+        const path = `app/views/${fileName}.tsx`;
+        console.log(`${path} not found in server manifest`);
+        console.log(files);
+      }
+      const mod = await import(
+        `${process.env.DIST_DIR}/server/${serverFile?.file}`
+      );
+      viewImportMap[fileName] = mod.default;
+      const clientFile = manifest[`app/views/${fileName}.tsx`];
+      if (clientFile) {
+        templates.push(template(fileName, `/${clientFile?.file}`));
+      }
+    }
+
+    const loaders = `{${templates.join(",")}}`;
 
     const handler = app.fetch.bind(app);
 
     try {
-      return await handler(req);
+      const result = await handler(req);
+      if (result instanceof Response) {
+        return result;
+      } else {
+        return await result({
+          styles: createStyles(styles),
+          bootstrapModules: [`/${manifest["app/client.tsx"].file}`],
+          loaders,
+          viewImportMap,
+        });
+      }
     } catch (err) {
       console.error(err);
       if (pathname.startsWith("/api")) {

@@ -11,8 +11,8 @@ export class AuthenticationServiceContianer {
     let sessionExtension = null;
     if (session?.user) {
       sessionExtension = await this.provider.extendSession(session.user);
+      session.user["extension"] = sessionExtension;
     }
-    session.user["extension"] = sessionExtension;
     return session;
   }
 }
