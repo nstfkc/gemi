@@ -20,6 +20,7 @@ const result = await Bun.build({
   format: "esm",
   minify: true,
   splitting: true,
+  sourcemap: "external",
 });
 
 if (!result.success) {

@@ -55,6 +55,8 @@ export class Kernel {
   }
 
   run<T>(cb: () => T) {
-    return kernelContext.run(this.services, cb);
+    const services = this.services;
+    console.log("services", Object.keys(services));
+    return kernelContext.run(services, cb);
   }
 }

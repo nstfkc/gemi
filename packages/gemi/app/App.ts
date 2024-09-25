@@ -1,6 +1,5 @@
 import type { WebSocketHandler } from "bun";
 import { Kernel } from "../kernel";
-import { KernelContext } from "../kernel/KernelContext";
 import { ApiRouterServiceContainer } from "../services/router/ApiRouterServiceContainer";
 import { ViewRouterServiceContainer } from "../services/router/ViewRouterServiceContainer";
 
@@ -9,8 +8,6 @@ interface AppParams {
 }
 
 export class App {
-  public name = "APP";
-  public devVersion = 0;
   private kernel: Kernel;
 
   constructor(params: AppParams) {
