@@ -1,12 +1,11 @@
 import { KernelContext } from "../kernel/KernelContext";
+import { BroadcastingServiceContainer } from "../services/pubsub/BroadcastingServiceContainer";
 import { applyParams } from "../utils/applyParams";
 
 export class Broadcast {
   static publish<T>(route: T, params: any) {
     const channel =
-      KernelContext.getStore().broadcastingServiceContainer.service.channels[
-        route as any
-      ];
+      BroadcastingServiceContainer.use().service.channels[route as any];
     if (!channel) {
       throw new Error(`Channel ${route} not found`);
     }
@@ -17,7 +16,7 @@ export class Broadcast {
         compress: boolean = false,
       ) => {
         const topic = applyParams(route as any, params);
-        KernelContext.getStore().broadcastingServiceContainer.publish(
+        BroadcastingServiceContainer.use().publish(
           topic,
           JSON.stringify({ topic, data: instance.publish(data) }),
           compress,

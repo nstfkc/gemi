@@ -14,14 +14,12 @@ export class I18nRouter extends ApiRouter {
       };
 
       const locale =
-        forcedLocale ??
-        KernelContext.getStore().i18nServiceContainer.detectLocale(req);
+        forcedLocale ?? I18nServiceContainer.use().detectLocale(req);
 
-      const translations =
-        KernelContext.getStore().i18nServiceContainer.getPageTranslations(
-          locale,
-          scope,
-        );
+      const translations = I18nServiceContainer.use().getPageTranslations(
+        locale,
+        scope,
+      );
 
       req.ctx.setHeaders(
         "Cache-Control",
@@ -42,7 +40,7 @@ export class I18nRouter extends ApiRouter {
 }
 
 export class I18nServiceContainer extends ServiceContainer {
-  name = "i18nServiceContainer";
+  name = "I18nServiceContainer";
   isEnabled = false;
   translations = new Map();
   supportedLocales: string[] = [];

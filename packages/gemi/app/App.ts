@@ -1,6 +1,8 @@
 import type { WebSocketHandler } from "bun";
 import { Kernel } from "../kernel";
 import { KernelContext } from "../kernel/KernelContext";
+import { ApiRouterServiceContainer } from "../services/router/ApiRouterServiceContainer";
+import { ViewRouterServiceContainer } from "../services/router/ViewRouterServiceContainer";
 
 interface AppParams {
   kernel: new () => Kernel;
@@ -13,15 +15,19 @@ export class App {
 
   constructor(params: AppParams) {
     this.kernel = new params.kernel();
+    this.kernel.boot.call(this.kernel);
   }
 
   public getComponentTree() {
-    return this.kernel.getServices().viewRouterServiceContainer.componentTree;
+    return this.kernel.run.call(this.kernel, () => {
+      return ViewRouterServiceContainer.use().componentTree;
+    });
   }
 
   public getFlatComponentTree() {
-    return this.kernel.getServices().viewRouterServiceContainer
-      .flatComponentTree;
+    return this.kernel.run.call(this.kernel, () => {
+      return ViewRouterServiceContainer.use().flatComponentTree;
+    });
   }
 
   public async fetch(req: Request): Promise<Response> {
@@ -29,13 +35,9 @@ export class App {
 
     return this.kernel.run.call(this.kernel, async () => {
       if (url.pathname.startsWith("/api")) {
-        return await this.kernel.services.apiRouterServiceContainer.handleApiRequest(
-          req,
-        );
+        return await ApiRouterServiceContainer.use().handleApiRequest(req);
       } else {
-        return await this.kernel.services.viewRouterServiceContainer.handleViewRequest(
-          req,
-        );
+        return await ViewRouterServiceContainer.use().handleViewRequest(req);
       }
     });
   }
@@ -43,17 +45,17 @@ export class App {
   public websocket: WebSocketHandler<{ headers: Headers }> = {
     message: (ws, message) => {
       const kernelRun = this.kernel.run.bind(this.kernel);
-      kernelRun(() => {
-        KernelContext.getStore().broadcastingServiceContainer.run(
-          ws.data.headers,
-          () => {
-            KernelContext.getStore().broadcastingServiceContainer.handleMessage(
-              ws,
-              message,
-            );
-          },
-        );
-      });
+      // kernelRun(() => {
+      //   KernelContext.getStore().broadcastingServiceContainer.run(
+      //     ws.data.headers,
+      //     () => {
+      //       KernelContext.getStore().broadcastingServiceContainer.handleMessage(
+      //         ws,
+      //         message,
+      //       );
+      //     },
+      //   );
+      // });
     },
     open: (_ws) => {},
     close: (ws) => {

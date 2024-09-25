@@ -1,4 +1,5 @@
 import type { ViewRPC, I18nDictionary } from "../client/rpc";
+import { I18nServiceContainer } from "../http/I18nServiceContainer";
 import { RequestContext } from "../http/requestContext";
 import { KernelContext } from "../kernel/KernelContext";
 import { applyTranslationParams } from "../utils/applyTranslationParams";
@@ -14,7 +15,7 @@ export class I18n {
     // @ts-ignore
     U = ParseTranslationParams<I18nDictionary["server"][T]["default"]>,
   >(key: T, ...args: IsEmptyObject<U> extends true ? [] : [params: U]) {
-    const container = KernelContext.getStore().i18nServiceContainer;
+    const container = I18nServiceContainer.use();
     const locale = container.detectLocale(RequestContext.getStore().req);
 
     const translation = container.translations.get(`${locale}.server`)?.[key];

@@ -1,13 +1,15 @@
 import type { User } from "../auth/adapters/types";
+import { AuthenticationServiceContainer } from "../auth/AuthenticationServiceContainer";
 import { InsufficientPermissionsError } from "../http";
 import { RequestContext } from "../http/requestContext";
 import { KernelContext } from "../kernel/KernelContext";
+import { BroadcastingServiceContainer } from "../services/pubsub/BroadcastingServiceContainer";
 
 export class Auth {
   static async user(): Promise<User | null> {
     const requestContextStore = RequestContext.getStore();
     const broadcastingContextStore =
-      KernelContext.getStore().broadcastingServiceContainer.context.getStore();
+      BroadcastingServiceContainer.use().context.getStore();
 
     let accessToken = "";
     let userAgent = "";
@@ -25,7 +27,7 @@ export class Auth {
     let user = requestContextStore?.user;
 
     if (!user) {
-      const container = KernelContext.getStore().authenticationServiceContainer;
+      const container = AuthenticationServiceContainer.use();
       // TODO: extend session if its expired
       const session = await container.getSession(accessToken, userAgent);
 

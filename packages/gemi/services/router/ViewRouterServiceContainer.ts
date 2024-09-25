@@ -5,7 +5,6 @@ import { Cookie } from "../../http/Cookie";
 import { GEMI_REQUEST_BREAKER_ERROR } from "../../http/Error";
 import { RequestContext } from "../../http/requestContext";
 import type { RouterMiddleware } from "../../http/Router";
-import { KernelContext } from "../../kernel/KernelContext";
 import {
   createFlatViewRoutes,
   FlatViewRoutes,
@@ -14,24 +13,29 @@ import {
 import { ViewRouterServiceProvider } from "./ViewRouterServiceProvider";
 // @ts-ignore
 import { renderToReadableStream } from "react-dom/server.browser";
-import { ComponentType, createElement, Fragment } from "react";
+import { createElement, Fragment } from "react";
 
 // @ts-ignore
 import { URLPattern } from "urlpattern-polyfill/urlpattern";
 import { ServiceContainer } from "../ServiceContainer";
-import { ViewRouter, ViewRoutes } from "../../http/ViewRouter";
+import type { ViewRoutes } from "../../http/ViewRouter";
 import { AuthViewRouter } from "../../auth/AuthenticationServiceProvider";
 import { createRouteManifest } from "./createRouteManifest";
 import { createComponentTree } from "./createComponentTree";
 import { flattenComponentTree } from "../../client/helpers/flattenComponentTree";
-import { ComponentTree } from "../../client/types";
+import type { ComponentTree } from "../../client/types";
+import { I18nServiceContainer } from "../../http/I18nServiceContainer";
+import { MiddlewareServiceContainer } from "../middleware/MiddlewareServiceContainer";
 
 export class ViewRouterServiceContainer extends ServiceContainer {
+  name = "ViewRouterServiceContainer";
+
   flatViewRoutes: FlatViewRoutes = {};
   routeManifest: Record<string, string[]> = {};
   componentTree: ComponentTree = [];
   flatComponentTree: string[] = [];
   RootLayout: any = null;
+
   constructor(public service: ViewRouterServiceProvider) {
     super();
     const routes: ViewRoutes = {
@@ -84,7 +88,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           const ctx = RequestContext.getStore();
           ctx.setRequest(httpRequest);
 
-          await KernelContext.getStore().middlewareServiceContainer.runMiddleware(
+          await MiddlewareServiceContainer.use().runMiddleware(
             middlewares,
             currentPathName,
           );
@@ -144,9 +148,8 @@ export class ViewRouterServiceContainer extends ServiceContainer {
         ...data,
       };
     }, {});
-    const i18nServiceContainer = KernelContext.getStore().i18nServiceContainer;
-    const isI18nEnabled =
-      KernelContext.getStore().i18nServiceContainer.isEnabled;
+    const i18nServiceContainer = I18nServiceContainer.use();
+    const isI18nEnabled = i18nServiceContainer.isEnabled;
     let i18n: Record<string, any> = {};
     if (isI18nEnabled) {
       const locale = i18nServiceContainer.detectLocale(

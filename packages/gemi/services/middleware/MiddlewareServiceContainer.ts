@@ -24,6 +24,7 @@ function transformMiddleware(input: (string | Function)[]) {
 }
 
 export class MiddlewareServiceContainer extends ServiceContainer {
+  public name = "MiddlewareServiceContainer";
   constructor(public service: MiddlewareServiceProvider) {
     super();
   }

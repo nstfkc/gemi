@@ -6,6 +6,7 @@ import { RequestContext } from "../http/requestContext";
 import { KernelContext } from "../kernel/KernelContext";
 import { applyParams } from "../utils/applyParams";
 import { omitNullishValues } from "../utils/omitNullishValues";
+import { ApiRouterServiceContainer } from "../services/router/ApiRouterServiceContainer";
 
 type GetRPC = {
   [K in keyof RPC as K extends `GET:${infer P}` ? P : never]: RPC[K];
@@ -56,9 +57,7 @@ export class Query {
     const trigger = () => {
       return RequestContext.run(httpRequest, async () => {
         const data: Data<T> =
-          await KernelContext.getStore().apiRouterServiceContainer.getRouteData(
-            path,
-          );
+          await ApiRouterServiceContainer.use().getRouteData(path);
         store(data);
         return data;
       });

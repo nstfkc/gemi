@@ -3,6 +3,7 @@ import { Middleware } from "./Middleware";
 import { RequestContext } from "./requestContext";
 import { KernelContext } from "../kernel/KernelContext";
 import { AuthenticationError } from "./errors";
+import { AuthenticationServiceContainer } from "../auth/AuthenticationServiceContainer";
 
 export class AuthenticationMiddleware extends Middleware {
   async run(req: HttpRequest) {
@@ -16,11 +17,10 @@ export class AuthenticationMiddleware extends Middleware {
     let user = requestContextStore.user;
 
     if (!user) {
-      const session =
-        await KernelContext.getStore().authenticationServiceContainer.getSession(
-          accessToken,
-          requestContextStore.req.headers.get("User-Agent"),
-        );
+      const session = await AuthenticationServiceContainer.use().getSession(
+        accessToken,
+        requestContextStore.req.headers.get("User-Agent"),
+      );
       if (!session) {
         throw new AuthenticationError();
       }

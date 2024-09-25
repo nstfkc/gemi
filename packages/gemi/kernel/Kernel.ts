@@ -1,5 +1,5 @@
 import { AuthenticationServiceProvider } from "../auth/AuthenticationServiceProvider";
-import { AuthenticationServiceContianer } from "../auth/AuthenticationServiceContainer";
+import { AuthenticationServiceContainer } from "../auth/AuthenticationServiceContainer";
 import { kernelContext } from "./context";
 import { MiddlewareServiceProvider } from "../http/MiddlewareServiceProvider";
 import { I18nServiceProvider } from "../http/I18nServiceProvider";
@@ -30,69 +30,31 @@ export class Kernel {
   protected rateLimiterServiceProvider = RateLimiterServiceProvider;
   protected broadcastingsServiceProvider = BroadcastingServiceProvider;
 
-  services: {
-    emailServiceContainer: EmailServiceContainer;
-    authenticationServiceContainer: AuthenticationServiceContianer;
-    i18nServiceContainer: I18nServiceContainer;
-    fileStorageServiceContainer: FileStorageServiceContainer;
-    apiRouterServiceContainer: ApiRouterServiceContainer;
-    viewRouterServiceContainer: ViewRouterServiceContainer;
-    middlewareServiceContainer: MiddlewareServiceContainer;
-    rateLimiterServiceContainer: RateLimiterServiceContainer;
-    broadcastingServiceContainer: BroadcastingServiceContainer;
-  };
+  services: Record<string, ServiceContainer> = {};
 
-  // constructor() {
-  //   this.registerServiceContainers(
-  //     new EmailServiceContainer(new this.emailServiceProvider()),
-  //   );
-  // }
+  boot() {
+    this.registerServiceContainers(
+      new EmailServiceContainer(new this.emailServiceProvider()),
+      new AuthenticationServiceContainer(
+        new this.authenticationServiceProvider(),
+      ),
+      new MiddlewareServiceContainer(new this.middlewareServiceProvider()),
+      new I18nServiceContainer(new this.i18nServiceProvider()),
+      new FileStorageServiceContainer(new this.fileStorageServiceProvider()),
+      new ApiRouterServiceContainer(new this.apiRouterServiceProvider()),
+      new ViewRouterServiceContainer(new this.viewRouterServiceProvider()),
+      new RateLimiterServiceContainer(new this.rateLimiterServiceProvider()),
+      new BroadcastingServiceContainer(new this.broadcastingsServiceProvider()),
+    );
+  }
 
-  // registerServiceContainers(...containers: ServiceContainer[]) {
-  //   for (const container of containers) {
-  //     this.services[container.name] = container;
-  //   }
-  // }
-
-  getServices = () => {
-    if (!this.services) {
-      this.services = {
-        emailServiceContainer: new EmailServiceContainer(
-          new this.emailServiceProvider(),
-        ),
-        authenticationServiceContainer: new AuthenticationServiceContianer(
-          new this.authenticationServiceProvider(),
-        ),
-        middlewareServiceContainer: new MiddlewareServiceContainer(
-          new this.middlewareServiceProvider(),
-        ),
-        i18nServiceContainer: new I18nServiceContainer(
-          new this.i18nServiceProvider(),
-        ),
-        fileStorageServiceContainer: new FileStorageServiceContainer(
-          new this.fileStorageServiceProvider(),
-        ),
-        apiRouterServiceContainer: new ApiRouterServiceContainer(
-          new this.apiRouterServiceProvider(),
-        ),
-        viewRouterServiceContainer: new ViewRouterServiceContainer(
-          new this.viewRouterServiceProvider(),
-        ),
-        rateLimiterServiceContainer: new RateLimiterServiceContainer(
-          new this.rateLimiterServiceProvider(),
-        ),
-        broadcastingServiceContainer: new BroadcastingServiceContainer(
-          new this.broadcastingsServiceProvider(),
-        ),
-      };
+  registerServiceContainers(...containers: ServiceContainer[]) {
+    for (const container of containers) {
+      this.services[container.name] = container;
     }
-    return this.services;
-  };
-
-  static getContext = () => kernelContext.getStore();
+  }
 
   run<T>(cb: () => T) {
-    const services = this.getServices();
-    return kernelContext.run(services, cb);
+    return kernelContext.run(this.services, cb);
   }
 }

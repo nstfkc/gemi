@@ -10,6 +10,8 @@ import type { IAuthenticationAdapter, User } from "./adapters/types";
 import { BlankAdapter } from "./adapters/blank";
 import { AuthorizationError } from "../http/errors";
 import { ValidationError } from "../http";
+import { ServiceProvider } from "../services/ServiceProvider";
+import { AuthenticationServiceContainer } from "./AuthenticationServiceContainer";
 
 class SignInRequest extends HttpRequest<
   {
@@ -86,7 +88,7 @@ class ResetPasswordRequest extends HttpRequest<
 }
 
 class AuthController extends Controller {
-  provider = KernelContext.getStore().authenticationServiceContainer.provider;
+  provider = AuthenticationServiceContainer.use().provider;
 
   async me() {
     const user = await Auth.user();
@@ -346,7 +348,7 @@ export class AuthViewRouter extends ViewRouter {
   };
 }
 
-export class AuthenticationServiceProvider {
+export class AuthenticationServiceProvider extends ServiceProvider {
   basePath = "/auth";
 
   sessionExpiresInHours = 24;
@@ -354,6 +356,8 @@ export class AuthenticationServiceProvider {
 
   // @ts-ignore
   adapter: IAuthenticationAdapter = new BlankAdapter();
+
+  boot() {}
 
   async verifyPassword(password: string, hash: string): Promise<boolean> {
     return await Bun.password.verify(password, hash);

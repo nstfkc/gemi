@@ -1,4 +1,4 @@
-import { KernelContext } from "../kernel/KernelContext";
+import { kernelContext } from "../kernel/context";
 import { ServiceProvider } from "./ServiceProvider";
 
 export class ServiceContainer {
@@ -7,7 +7,7 @@ export class ServiceContainer {
 
   static use<T extends ServiceContainer>(
     this: new (service: ServiceProvider) => T,
-  ): T["service"] {
-    return KernelContext.getStore()[this.name].service;
+  ): T {
+    return kernelContext.getStore()[this.name];
   }
 }

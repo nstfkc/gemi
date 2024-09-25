@@ -8,6 +8,7 @@ import {
   type PropsWithChildren,
 } from "react";
 import { Subject } from "../utils/Subject";
+// @ts-ignore
 import { URLPattern } from "urlpattern-polyfill";
 import { ProgressManager } from "./ProgressManager";
 import { HttpReload } from "./HttpReload";

@@ -3,19 +3,19 @@ import { HttpRequest } from "../../http";
 import { GEMI_REQUEST_BREAKER_ERROR } from "../../http/Error";
 import { I18nRouter } from "../../http/I18nServiceContainer";
 import { RequestContext } from "../../http/requestContext";
-import { Kernel } from "../../kernel";
+import { MiddlewareServiceContainer } from "../middleware/MiddlewareServiceContainer";
 import { ServiceContainer } from "../ServiceContainer";
 import { ApiRouterServiceProvider } from "./ApiRouterServiceProvider";
-import { createFlatApiRoutes, FlatApiRoutes } from "./createFlatApiRoutes";
+import { createFlatApiRoutes, type FlatApiRoutes } from "./createFlatApiRoutes";
 
 export class ApiRouterServiceContainer extends ServiceContainer {
-  name = "apiRouterServiceContainer";
+  name = "ApiRouterServiceContainer";
   flatRoutes: FlatApiRoutes = {};
 
   constructor(public service: ApiRouterServiceProvider) {
     super();
     this.flatRoutes = createFlatApiRoutes({
-      "/": this.service.rootRouter,
+      "/": this.service.rootRouter.bind(this.service),
       "/auth": AuthApiRouter,
       "/__gemi__/services/i18n": I18nRouter,
     });
@@ -49,10 +49,7 @@ export class ApiRouterServiceContainer extends ServiceContainer {
     const routeHandler = this.flatRoutes[path];
     const middlewares = routeHandler[ctx.req.rawRequest.method].middleware;
     try {
-      await Kernel.getContext().middlewareServiceContainer.runMiddleware(
-        middlewares,
-        path,
-      );
+      await MiddlewareServiceContainer.use().runMiddleware(middlewares, path);
     } catch (err) {
       if (err.kind === GEMI_REQUEST_BREAKER_ERROR) {
         if (ctx.req.rawRequest.url.includes("/api")) {

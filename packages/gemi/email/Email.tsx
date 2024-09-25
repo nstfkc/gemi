@@ -43,7 +43,7 @@ export class Email {
       return;
     }
 
-    await EmailServiceContainer.use().driver.send({
+    await EmailServiceContainer.use().service.driver.send({
       bcc,
       cc,
       from,

@@ -30,6 +30,8 @@ export const HttpReload = () => {
         console.log("HELLO");
         throw "(skipping full reload)";
       });
+
+      // @ts-ignore
       import.meta.hot.on("beforeFullReload", () => {
         console.log("HELLO");
         throw "(skipping full reload)";

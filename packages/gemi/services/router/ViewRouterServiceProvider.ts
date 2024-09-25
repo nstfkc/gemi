@@ -1,4 +1,3 @@
-import { ComponentType } from "react";
 import type { ViewRouter } from "../../http/ViewRouter";
 import { ServiceProvider } from "../ServiceProvider";
 

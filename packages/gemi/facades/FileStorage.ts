@@ -9,14 +9,13 @@ import type {
   PutFileParams,
   ReadFileParams,
 } from "../services/file-storage/drivers/types";
+import { FileStorageServiceContainer } from "../services/file-storage/FileStorageServiceContainer";
 
 type Metadata = Prettify<sharp.Metadata>;
 
 export class FileStorage {
   static async put(params: PutFileParams | Blob) {
-    return KernelContext.getStore().fileStorageServiceContainer.service.driver.put(
-      params,
-    );
+    return FileStorageServiceContainer.use().service.driver.put(params);
   }
 
   static async metadata(obj: Blob | File): Promise<Partial<Metadata>> {
@@ -29,9 +28,7 @@ export class FileStorage {
   }
 
   static async fetch(params: ReadFileParams | string) {
-    return KernelContext.getStore().fileStorageServiceContainer.service.driver.fetch(
-      params,
-    );
+    return FileStorageServiceContainer.use().service.driver.fetch(params);
   }
   static delete() {}
 }
