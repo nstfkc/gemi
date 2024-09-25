@@ -17,6 +17,7 @@ import { BroadcastingServiceContainer } from "../services/pubsub/BroadcastingSer
 import { BroadcastingServiceProvider } from "../services/pubsub/BroadcastingServiceProvider";
 import { ViewRouterServiceContainer } from "../services/router/ViewRouterServiceContainer";
 import { ViewRouterServiceProvider } from "../services/router/ViewRouterServiceProvider";
+import { ServiceContainer } from "../services/ServiceContainer";
 
 export class Kernel {
   protected emailServiceProvider = EmailServiceProvider;
@@ -40,6 +41,18 @@ export class Kernel {
     rateLimiterServiceContainer: RateLimiterServiceContainer;
     broadcastingServiceContainer: BroadcastingServiceContainer;
   };
+
+  // constructor() {
+  //   this.registerServiceContainers(
+  //     new EmailServiceContainer(new this.emailServiceProvider()),
+  //   );
+  // }
+
+  // registerServiceContainers(...containers: ServiceContainer[]) {
+  //   for (const container of containers) {
+  //     this.services[container.name] = container;
+  //   }
+  // }
 
   getServices = () => {
     if (!this.services) {

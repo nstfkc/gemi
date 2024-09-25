@@ -2,7 +2,7 @@ import { KernelContext } from "../kernel/KernelContext";
 import { ServiceProvider } from "./ServiceProvider";
 
 export class ServiceContainer {
-  static name: string;
+  public name: string;
   service: ServiceProvider;
 
   static use<T extends ServiceContainer>(

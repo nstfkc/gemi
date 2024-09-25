@@ -1,11 +1,25 @@
+import { AuthApiRouter } from "../../auth/AuthenticationServiceProvider";
 import { HttpRequest } from "../../http";
 import { GEMI_REQUEST_BREAKER_ERROR } from "../../http/Error";
+import { I18nRouter } from "../../http/I18nServiceContainer";
 import { RequestContext } from "../../http/requestContext";
 import { Kernel } from "../../kernel";
+import { ServiceContainer } from "../ServiceContainer";
 import { ApiRouterServiceProvider } from "./ApiRouterServiceProvider";
+import { createFlatApiRoutes, FlatApiRoutes } from "./createFlatApiRoutes";
 
-export class ApiRouterServiceContainer {
-  constructor(public service: ApiRouterServiceProvider) {}
+export class ApiRouterServiceContainer extends ServiceContainer {
+  name = "apiRouterServiceContainer";
+  flatRoutes: FlatApiRoutes = {};
+
+  constructor(public service: ApiRouterServiceProvider) {
+    super();
+    this.flatRoutes = createFlatApiRoutes({
+      "/": this.service.rootRouter,
+      "/auth": AuthApiRouter,
+      "/__gemi__/services/i18n": I18nRouter,
+    });
+  }
 
   public getRouteHandlerAndParams(req: Request) {
     const url = new URL(req.url);
@@ -14,7 +28,7 @@ export class ApiRouterServiceContainer {
 
     let params: Record<string, any> = {};
     let path: string;
-    for (const [_path] of Object.entries(this.service.flatRoutes)) {
+    for (const [_path] of Object.entries(this.flatRoutes)) {
       try {
         const pattern = new URLPattern({ pathname: _path });
         if (pattern.test({ pathname: apiPath })) {
@@ -32,7 +46,7 @@ export class ApiRouterServiceContainer {
 
   async runRouteMiddleware(path: string) {
     const ctx = RequestContext.getStore();
-    const routeHandler = this.service.flatRoutes[path];
+    const routeHandler = this.flatRoutes[path];
     const middlewares = routeHandler[ctx.req.rawRequest.method].middleware;
     try {
       await Kernel.getContext().middlewareServiceContainer.runMiddleware(
@@ -59,7 +73,7 @@ export class ApiRouterServiceContainer {
   }
 
   async getRouteData(path: string): Promise<any> {
-    const routeHandler = this.service.flatRoutes[path];
+    const routeHandler = this.flatRoutes[path];
 
     const ctx = RequestContext.getStore();
     const exec =
@@ -92,7 +106,7 @@ export class ApiRouterServiceContainer {
   async handleApiRequest(req: Request) {
     const { params, path } = this.getRouteHandlerAndParams(req);
 
-    const routeHandler = this.service.flatRoutes[path];
+    const routeHandler = this.flatRoutes[path];
 
     if (!routeHandler || !routeHandler[req.method]) {
       return new Response(JSON.stringify({ error: { message: "Not found" } }), {

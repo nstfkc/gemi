@@ -1,67 +1,26 @@
-import type { ApiRouter } from "../http/ApiRouter";
-import { ViewRouter } from "../http/ViewRouter";
 import type { WebSocketHandler } from "bun";
-import { ComponentType } from "react";
 import { Kernel } from "../kernel";
 import { KernelContext } from "../kernel/KernelContext";
 
 interface AppParams {
-  viewRouter: new () => ViewRouter;
-  apiRouter: new () => ApiRouter;
-  root: ComponentType;
   kernel: new () => Kernel;
 }
 
 export class App {
   public name = "APP";
   public devVersion = 0;
-  private apiRouter: new () => ApiRouter;
-  private viewRouter: new () => ViewRouter;
-  private Root: ComponentType;
   private kernel: Kernel;
 
   constructor(params: AppParams) {
-    this.apiRouter = params.apiRouter;
-    this.viewRouter = params.viewRouter;
-    this.Root = params.root;
     this.kernel = new params.kernel();
-
-    const kernelServices = this.kernel.getServices();
-
-    const authBasePath =
-      kernelServices.authenticationServiceContainer.provider.basePath;
-
-    const viewRouters = {
-      "/": this.viewRouter,
-      [authBasePath]:
-        kernelServices.authenticationServiceContainer.provider.routers.view,
-    };
-
-    const apiRouters = {
-      "/": this.apiRouter,
-      [authBasePath]:
-        kernelServices.authenticationServiceContainer.provider.routers.api,
-      "/__gemi__/services/i18n":
-        kernelServices.i18nServiceContainer.routers.api,
-    };
-
-    kernelServices.apiRouterServiceContainer.service.boot(apiRouters);
-
-    kernelServices.viewRouterServiceContainer.service.boot(
-      viewRouters,
-      this.Root,
-    );
-
-    kernelServices.i18nServiceContainer.boot();
   }
 
   public getComponentTree() {
-    return this.kernel.getServices().viewRouterServiceContainer.service
-      .componentTree;
+    return this.kernel.getServices().viewRouterServiceContainer.componentTree;
   }
 
   public getFlatComponentTree() {
-    return this.kernel.getServices().viewRouterServiceContainer.service
+    return this.kernel.getServices().viewRouterServiceContainer
       .flatComponentTree;
   }
 
@@ -110,6 +69,6 @@ export class App {
       compress?: boolean,
     ) => void,
   ) {
-    this.kernel.services.broadcastingServiceContainer.onPublish(fn);
+    // this.kernel.services.broadcastingServiceContainer.onPublish(fn);
   }
 }

@@ -1,10 +1,11 @@
 import { createFlatApiRoutes, type FlatApiRoutes } from "./createFlatApiRoutes";
-import type { ApiRoutes } from "../../http/ApiRouter";
+import type { ApiRouter } from "../../http/ApiRouter";
 import { ServiceProvider } from "../ServiceProvider";
+import { AuthApiRouter } from "../../auth/AuthenticationServiceProvider";
+import { I18nRouter } from "../../http/I18nServiceContainer";
 
 export class ApiRouterServiceProvider extends ServiceProvider {
-  flatRoutes: FlatApiRoutes = {};
-  boot(routes: ApiRoutes) {
-    this.flatRoutes = createFlatApiRoutes(routes);
-  }
+  rootRouter: new () => ApiRouter;
+
+  boot() {}
 }

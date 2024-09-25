@@ -23,3 +23,7 @@ export type { EmailAttachment, SendEmailParams } from "./email/drivers/types";
 // Broadcasting
 
 export { BroadcastingServiceProvider } from "./pubsub/BroadcastingServiceProvider";
+
+// Router
+export { ViewRouterServiceProvider } from "./router/ViewRouterServiceProvider";
+export { ApiRouterServiceProvider } from "./router/ApiRouterServiceProvider";

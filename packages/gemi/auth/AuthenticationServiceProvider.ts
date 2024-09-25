@@ -348,10 +348,6 @@ export class AuthViewRouter extends ViewRouter {
 
 export class AuthenticationServiceProvider {
   basePath = "/auth";
-  routers = {
-    api: AuthApiRouter,
-    view: AuthViewRouter,
-  };
 
   sessionExpiresInHours = 24;
   sessionAbsoluteExpiresInHours = 24 * 7 * 4;

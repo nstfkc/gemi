@@ -1,7 +1,12 @@
+import { ServiceContainer } from "../services/ServiceContainer";
 import { AuthenticationServiceProvider } from "./AuthenticationServiceProvider";
 
-export class AuthenticationServiceContianer {
-  constructor(public provider: AuthenticationServiceProvider) {}
+export class AuthenticationServiceContianer extends ServiceContainer {
+  name = "authenticationServiceContainer";
+
+  constructor(public provider: AuthenticationServiceProvider) {
+    super();
+  }
 
   async getSession(token: string, userAgent: string) {
     const session = await this.provider.adapter.findSession({

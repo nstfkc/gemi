@@ -2,6 +2,7 @@ import { HttpRequest, Middleware, MiddlewareServiceProvider } from "../../http";
 import { RequestContext } from "../../http/requestContext";
 import type { RouterMiddleware } from "../../http/Router";
 import { isConstructor } from "../../internal/isConstructor";
+import { ServiceContainer } from "../ServiceContainer";
 
 function transformMiddleware(input: (string | Function)[]) {
   const map = new Map();
@@ -22,8 +23,10 @@ function transformMiddleware(input: (string | Function)[]) {
   return map;
 }
 
-export class MiddlewareServiceContainer {
-  constructor(public service: MiddlewareServiceProvider) {}
+export class MiddlewareServiceContainer extends ServiceContainer {
+  constructor(public service: MiddlewareServiceProvider) {
+    super();
+  }
 
   public runMiddleware(
     middleware: (

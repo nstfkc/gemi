@@ -1,20 +1,51 @@
 import { HttpRequest } from "../../http";
+import { createRoot } from "../../client/createRoot";
+
 import { Cookie } from "../../http/Cookie";
 import { GEMI_REQUEST_BREAKER_ERROR } from "../../http/Error";
 import { RequestContext } from "../../http/requestContext";
 import type { RouterMiddleware } from "../../http/Router";
 import { KernelContext } from "../../kernel/KernelContext";
-import type { ViewRouteExec } from "./createFlatViewRoutes";
+import {
+  createFlatViewRoutes,
+  FlatViewRoutes,
+  type ViewRouteExec,
+} from "./createFlatViewRoutes";
 import { ViewRouterServiceProvider } from "./ViewRouterServiceProvider";
 // @ts-ignore
 import { renderToReadableStream } from "react-dom/server.browser";
-import { createElement, Fragment } from "react";
+import { ComponentType, createElement, Fragment } from "react";
 
 // @ts-ignore
 import { URLPattern } from "urlpattern-polyfill/urlpattern";
+import { ServiceContainer } from "../ServiceContainer";
+import { ViewRouter, ViewRoutes } from "../../http/ViewRouter";
+import { AuthViewRouter } from "../../auth/AuthenticationServiceProvider";
+import { createRouteManifest } from "./createRouteManifest";
+import { createComponentTree } from "./createComponentTree";
+import { flattenComponentTree } from "../../client/helpers/flattenComponentTree";
+import { ComponentTree } from "../../client/types";
 
-export class ViewRouterServiceContainer {
-  constructor(public service: ViewRouterServiceProvider) {}
+export class ViewRouterServiceContainer extends ServiceContainer {
+  flatViewRoutes: FlatViewRoutes = {};
+  routeManifest: Record<string, string[]> = {};
+  componentTree: ComponentTree = [];
+  flatComponentTree: string[] = [];
+  RootLayout: any = null;
+  constructor(public service: ViewRouterServiceProvider) {
+    super();
+    const routes: ViewRoutes = {
+      "/": service.rootRouter,
+      "/auth": AuthViewRouter,
+    };
+    this.flatViewRoutes = createFlatViewRoutes(routes);
+    this.routeManifest = createRouteManifest(routes);
+    this.componentTree = createComponentTree(routes);
+    this.flatComponentTree = flattenComponentTree(this.componentTree);
+    this.RootLayout = createRoot(service.rootLayout);
+  }
+
+  boot() {}
 
   async handleViewRequest(req: Request) {
     const url = new URL(req.url);
@@ -36,9 +67,7 @@ export class ViewRouterServiceContainer {
       let currentPathName: null | string = null;
       let params: Record<string, any> = {};
 
-      for (const [pathname, handler] of Object.entries(
-        this.service.flatViewRoutes,
-      )) {
+      for (const [pathname, handler] of Object.entries(this.flatViewRoutes)) {
         const pattern = new URLPattern({ pathname });
         if (pattern.test({ pathname: url.pathname })) {
           currentPathName = pathname;
@@ -190,7 +219,7 @@ export class ViewRouterServiceContainer {
         prefetchedData: pageData.prefetchedData,
         i18n,
         auth: { user },
-        routeManifest: this.service.routeManifest,
+        routeManifest: this.routeManifest,
         router: {
           pathname: currentPathName,
           params,
@@ -198,11 +227,11 @@ export class ViewRouterServiceContainer {
           searchParams: url.search,
           is404: !currentPathName ? true : false,
         },
-        componentTree: [["404", []], ...this.service.componentTree],
+        componentTree: [["404", []], ...this.componentTree],
       },
       head: {},
     };
-    const Root = this.service.RootLayout;
+    const Root = this.RootLayout;
     return async (params: {
       styles: any[];
       viewImportMap: any;

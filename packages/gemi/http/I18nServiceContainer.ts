@@ -1,9 +1,10 @@
 import { KernelContext } from "../kernel/KernelContext";
+import { ServiceContainer } from "../services/ServiceContainer";
 import { ApiRouter } from "./ApiRouter";
 import { HttpRequest } from "./HttpRequest";
 import { I18nServiceProvider } from "./I18nServiceProvider";
 
-class Router extends ApiRouter {
+export class I18nRouter extends ApiRouter {
   routes = {
     "/translations": this.get(async () => {
       const req = new HttpRequest<any, any>();
@@ -40,17 +41,14 @@ class Router extends ApiRouter {
   };
 }
 
-export class I18nServiceContainer {
-  constructor(private service: I18nServiceProvider) {}
-
+export class I18nServiceContainer extends ServiceContainer {
+  name = "i18nServiceContainer";
   isEnabled = false;
   translations = new Map();
   supportedLocales: string[] = [];
-  routers = {
-    api: Router,
-  };
 
-  boot() {
+  constructor(public service: I18nServiceProvider) {
+    super();
     const tmpStore = new Map<string, Map<string, string>>();
 
     for (const [scope, translations] of Object.entries(
