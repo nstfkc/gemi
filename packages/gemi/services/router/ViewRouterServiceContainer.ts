@@ -28,7 +28,7 @@ import { I18nServiceContainer } from "../../http/I18nServiceContainer";
 import { MiddlewareServiceContainer } from "../middleware/MiddlewareServiceContainer";
 
 export class ViewRouterServiceContainer extends ServiceContainer {
-  name = "ViewRouterServiceContainer";
+  static _name = "ViewRouterServiceContainer";
 
   flatViewRoutes: FlatViewRoutes = {};
   routeManifest: Record<string, string[]> = {};

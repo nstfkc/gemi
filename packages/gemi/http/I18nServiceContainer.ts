@@ -40,7 +40,8 @@ export class I18nRouter extends ApiRouter {
 }
 
 export class I18nServiceContainer extends ServiceContainer {
-  name = "I18nServiceContainer";
+  static _name = "I18nServiceContainer";
+
   isEnabled = false;
   translations = new Map();
   supportedLocales: string[] = [];

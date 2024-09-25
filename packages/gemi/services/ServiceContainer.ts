@@ -2,17 +2,21 @@ import { kernelContext } from "../kernel/context";
 import { ServiceProvider } from "./ServiceProvider";
 
 export class ServiceContainer {
-  public name: string;
+  static _name: string;
   service: ServiceProvider;
 
   static use<T extends ServiceContainer>(
     this: new (service: ServiceProvider) => T,
   ): T {
     const store = kernelContext.getStore();
-    if (!store[this.name]) {
-      console.log("Container is not registered", this.name);
+    // @ts-ignore
+    if (!store[this._name]) {
+      // @ts-ignore
+      console.log("Container is not registered", this._name);
       console.log("Available containers", Object.keys(store));
     }
-    return store[this.name];
+
+    // @ts-ignore
+    return store[this._name];
   }
 }

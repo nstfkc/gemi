@@ -2,7 +2,7 @@ import { ServiceContainer } from "../ServiceContainer";
 import { RateLimiterServiceProvider } from "./RateLimiterServiceProvider";
 
 export class RateLimiterServiceContainer extends ServiceContainer {
-  name = "RateLimiterServiceContainer";
+  static _name = "RateLimiterServiceContainer";
 
   constructor(public service: RateLimiterServiceProvider) {
     super();

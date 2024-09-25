@@ -2,7 +2,7 @@ import { ServiceContainer } from "../services/ServiceContainer";
 import { AuthenticationServiceProvider } from "./AuthenticationServiceProvider";
 
 export class AuthenticationServiceContainer extends ServiceContainer {
-  name = "AuthenticationServiceContainer";
+  static _name = "AuthenticationServiceContainer";
 
   constructor(public provider: AuthenticationServiceProvider) {
     super();

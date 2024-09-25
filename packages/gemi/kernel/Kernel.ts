@@ -33,30 +33,40 @@ export class Kernel {
   services: Record<string, ServiceContainer> = {};
 
   boot() {
-    this.registerServiceContainers(
-      new EmailServiceContainer(new this.emailServiceProvider()),
-      new AuthenticationServiceContainer(
-        new this.authenticationServiceProvider(),
+    this.services = {
+      [EmailServiceContainer._name]: new EmailServiceContainer(
+        new this.emailServiceProvider(),
       ),
-      new MiddlewareServiceContainer(new this.middlewareServiceProvider()),
-      new I18nServiceContainer(new this.i18nServiceProvider()),
-      new FileStorageServiceContainer(new this.fileStorageServiceProvider()),
-      new ApiRouterServiceContainer(new this.apiRouterServiceProvider()),
-      new ViewRouterServiceContainer(new this.viewRouterServiceProvider()),
-      new RateLimiterServiceContainer(new this.rateLimiterServiceProvider()),
-      new BroadcastingServiceContainer(new this.broadcastingsServiceProvider()),
-    );
-  }
-
-  registerServiceContainers(...containers: ServiceContainer[]) {
-    for (const container of containers) {
-      this.services[container.name] = container;
-    }
+      [AuthenticationServiceContainer._name]:
+        new AuthenticationServiceContainer(
+          new this.authenticationServiceProvider(),
+        ),
+      [MiddlewareServiceContainer._name]: new MiddlewareServiceContainer(
+        new this.middlewareServiceProvider(),
+      ),
+      [I18nServiceContainer._name]: new I18nServiceContainer(
+        new this.i18nServiceProvider(),
+      ),
+      [FileStorageServiceContainer._name]: new FileStorageServiceContainer(
+        new this.fileStorageServiceProvider(),
+      ),
+      [ApiRouterServiceContainer._name]: new ApiRouterServiceContainer(
+        new this.apiRouterServiceProvider(),
+      ),
+      [ViewRouterServiceContainer._name]: new ViewRouterServiceContainer(
+        new this.viewRouterServiceProvider(),
+      ),
+      [RateLimiterServiceContainer._name]: new RateLimiterServiceContainer(
+        new this.rateLimiterServiceProvider(),
+      ),
+      [BroadcastingServiceContainer._name]: new BroadcastingServiceContainer(
+        new this.broadcastingsServiceProvider(),
+      ),
+    };
   }
 
   run<T>(cb: () => T) {
     const services = this.services;
-    console.log("services", Object.keys(services));
     return kernelContext.run(services, cb);
   }
 }

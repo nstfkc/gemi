@@ -7,7 +7,8 @@ import { AsyncLocalStorage } from "async_hooks";
 type PublishCallback = (...args: PublishArgs) => void;
 
 export class BroadcastingServiceContainer extends ServiceContainer {
-  name = "BroadcastingServiceContainer";
+  static _name = "BroadcastingServiceContainer";
+
   publishCb: PublishCallback;
   context = new AsyncLocalStorage<{
     headers: Headers;

@@ -2,7 +2,7 @@ import { ServiceContainer } from "../ServiceContainer";
 import { FileStorageServiceProvider } from "./FileStorageServiceProvider";
 
 export class FileStorageServiceContainer extends ServiceContainer {
-  name = "FileStorageServiceContainer";
+  static _name = "FileStorageServiceContainer";
 
   constructor(public service: FileStorageServiceProvider) {
     super();

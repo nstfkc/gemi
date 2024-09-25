@@ -9,7 +9,8 @@ import { ApiRouterServiceProvider } from "./ApiRouterServiceProvider";
 import { createFlatApiRoutes, type FlatApiRoutes } from "./createFlatApiRoutes";
 
 export class ApiRouterServiceContainer extends ServiceContainer {
-  name = "ApiRouterServiceContainer";
+  static _name = "ApiRouterServiceContainer";
+
   flatRoutes: FlatApiRoutes = {};
 
   constructor(public service: ApiRouterServiceProvider) {
