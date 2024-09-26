@@ -34,7 +34,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
   routeManifest: Record<string, string[]> = {};
   componentTree: ComponentTree = [];
   flatComponentTree: string[] = [];
-  RootLayout: any = null;
+  root: any = null;
 
   constructor(public service: ViewRouterServiceProvider) {
     super();
@@ -46,7 +46,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
     this.routeManifest = createRouteManifest(routes);
     this.componentTree = createComponentTree(routes);
     this.flatComponentTree = flattenComponentTree(this.componentTree);
-    this.RootLayout = createRoot(service.rootLayout);
+    this.root = service.root;
   }
 
   boot() {}
@@ -234,7 +234,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
       },
       head: {},
     };
-    const Root = this.RootLayout;
+    const Root = this.root;
     return async (params: {
       styles: any[];
       viewImportMap: any;
@@ -246,7 +246,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
         createElement(Fragment, {
           children: [
             styles,
-            createElement(Root as any, {
+            createElement(Root, {
               data: result.data,
               viewImportMap,
             }),
