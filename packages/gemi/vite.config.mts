@@ -13,6 +13,7 @@ export default defineConfig({
     rollupOptions: {
       external: ["react", "react-dom", "react/jsx-runtime", "gemi"],
     },
+    sourcemap: true,
   },
   mode: process.env.NODE_ENV,
   define: { "import.meta.hot": "import.meta.hot" },
