@@ -117,6 +117,26 @@ export function useQuery<T extends keyof GetRPC>(
     }
   };
 
+  const handleReload = useCallback(() => {
+    console.log("reloading");
+    setResource(getResource(applyParams(url, params)));
+  }, [url, params]);
+
+  useEffect(() => {
+    // @ts-ignore
+    if (import.meta.hot) {
+      // @ts-ignore
+      import.meta.hot.on("http-reload", mutate);
+    }
+    return () => {
+      // @ts-ignore
+      if (import.meta.hot) {
+        // @ts-ignore
+        import.meta.hot.off("http-reload", mutate);
+      }
+    };
+  }, [handleReload]);
+
   useEffect(() => {
     const key = JSON.stringify(params);
     if (key !== paramsRef.current) {
@@ -200,7 +220,7 @@ export function useQuery<T extends keyof GetRPC>(
 
   return {
     data: state?.data as Data<T>,
-    loading: state?.loading as boolean,
+    loading: state?.loading ?? true,
     error: state?.error as Error,
     mutate,
   };

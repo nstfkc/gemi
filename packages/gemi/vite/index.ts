@@ -29,13 +29,13 @@ const gemi = (): PluginOption[] => {
       name: "gemi-plugin-hot-reload",
       handleHotUpdate({ server, modules }) {
         if (modules[0].id.includes("/app/http/")) {
-          server.ws.send({
-            type: "custom",
-            event: "http-reload",
-            data: {
-              id: modules[0].id,
-            },
-          });
+          // server.ws.send({
+          //   type: "custom",
+          //   event: "http-reload",
+          //   data: {
+          //     id: modules[0].id,
+          //   },
+          // });
 
           return [];
         }

@@ -4,5 +4,4 @@ import gemi from "gemi/vite";
 
 export default defineConfig({
   plugins: [react(), gemi()],
-  assetsInclude: ["/public"],
 });

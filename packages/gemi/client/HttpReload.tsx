@@ -26,16 +26,7 @@ export const HttpReload = () => {
     // @ts-ignore
     if (import.meta.hot) {
       // @ts-ignore
-      import.meta.hot.on("vite:beforeFullReload", () => {
-        console.log("HELLO");
-        throw "(skipping full reload)";
-      });
-
-      // @ts-ignore
-      import.meta.hot.on("beforeFullReload", () => {
-        console.log("HELLO");
-        throw "(skipping full reload)";
-      });
+      import.meta.hot.on("http-reload", handleReload);
     }
     return () => {
       // @ts-ignore

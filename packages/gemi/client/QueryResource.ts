@@ -19,7 +19,7 @@ export class QueryResource {
     for (const [variantKey, data] of Object.entries(initialState)) {
       if (data) {
         store.set(variantKey, {
-          loading: false,
+          loading: true,
           data,
           error: null,
         });

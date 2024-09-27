@@ -190,9 +190,9 @@ export async function startDevServer() {
     }
 
     console.log(`[vite] ${fileRelativePath} changed. Reloading...`);
-    const modules = vite.moduleGraph.getModulesByFile(file);
+    const modules = vite.moduleGraph.getModulesByFile(file) ?? [];
     for (const mod of Array.from(modules)) {
-      await vite.reloadModule(mod);
+      vite.moduleGraph.invalidateModule(mod);
     }
 
     try {
@@ -208,6 +208,10 @@ export async function startDevServer() {
         },
       );
       server.reload(serve);
+      vite.ws.send({
+        type: "custom",
+        event: "http-reload",
+      });
     } catch (err) {
       console.log("Error on server reload");
       console.log(err);

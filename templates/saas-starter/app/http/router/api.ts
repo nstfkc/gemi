@@ -27,7 +27,7 @@ export default class extends ApiRouter {
     }),
 
     "/test/:id": this.get((req: HttpRequest) => {
-      return req.params.id;
+      return `${req.params.id}asdasd`;
     }),
 
     "/upload": this.post(async (req: HttpRequest<{ file: Blob }>) => {

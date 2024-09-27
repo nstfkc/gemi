@@ -18,9 +18,7 @@ export default class extends ViewRouter {
   override routes = {
     "/": this.layout("PublicLayout", {
       "/": this.view("Home", [HomeController, "index"]),
-      "/:testId": this.view("Test", (req: HttpRequest) => {
-        return { testId: req.params.testId };
-      }),
+      "/:testId": this.view("Test"),
       "/about": this.view("About", [HomeController, "about"]),
     }),
     "/app": AppRouter,
