@@ -26,9 +26,7 @@ export class Email {
 
     const {
       to = instance.to,
-      from = instance.from.length
-        ? instance.from
-        : EmailServiceContainer.use().service.defaultFrom,
+      from = instance.from,
       subject = instance.subject,
       cc = instance.cc,
       bcc = instance.bcc,
