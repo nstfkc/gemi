@@ -11,7 +11,7 @@ export class I18nServiceProvider extends ServiceProvider {
   async init() {}
 
   detectLocale(_req: HttpRequest) {
-    return this.defaultLocale;
+    return "";
   }
 
   boot() {}
