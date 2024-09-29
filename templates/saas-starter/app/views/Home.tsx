@@ -34,6 +34,16 @@ export default function Home(props: ViewProps<"/">) {
             </div>
           );
         })}
+        <div>
+          <button onClick={() => searchParams.set("color", "indigo").push()}>
+            Indigo
+          </button>
+        </div>
+        <div>
+          <button onClick={() => searchParams.delete("color").push()}>
+            Clear
+          </button>
+        </div>
       </div>
       <div>
         {data.map((item) => {

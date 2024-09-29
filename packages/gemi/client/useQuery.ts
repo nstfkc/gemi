@@ -13,6 +13,7 @@ interface Config<T> {
   fallbackData?: T;
   keepPreviousData?: boolean;
   retryIntervalOnError?: number;
+  debug?: boolean;
 }
 
 type WithOptionalValues<T> = {
@@ -23,6 +24,7 @@ const defaultConfig: Config<any> = {
   fallbackData: null,
   keepPreviousData: true,
   retryIntervalOnError: 10000,
+  debug: false,
 };
 
 type GetRPC = {
@@ -109,6 +111,7 @@ export function useQuery<T extends keyof GetRPC>(
 
   const retry = (variantKey: string) => {
     if (!retryingMap.current.get(variantKey)) {
+      if (config.debug) console.log("retrying", variantKey);
       retryingMap.current.set(variantKey, true);
       retryIntervalRef.current = setTimeout(() => {
         resource.getVariant(variantKey);
@@ -118,7 +121,6 @@ export function useQuery<T extends keyof GetRPC>(
   };
 
   const handleReload = useCallback(() => {
-    console.log("reloading");
     setResource(getResource(applyParams(url, params)));
   }, [url, params]);
 
@@ -140,6 +142,9 @@ export function useQuery<T extends keyof GetRPC>(
   useEffect(() => {
     const key = JSON.stringify(params);
     if (key !== paramsRef.current) {
+      if (config.debug) {
+        console.log("refetching - params changed", key, paramsRef.current);
+      }
       setResource(getResource(applyParams(url, params)));
       setState(resource.getVariant(variantKey));
       paramsRef.current = key;
@@ -148,6 +153,10 @@ export function useQuery<T extends keyof GetRPC>(
 
   const handleStateUpdate = useCallback(
     (nextState) => {
+      if (config.debug) {
+        console.log("state updating due to url update", variantKey);
+        console.log(nextState);
+      }
       if (nextState.error) {
         retry(variantKey);
       }

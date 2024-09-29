@@ -2,6 +2,7 @@ import {
   createContext,
   type PropsWithChildren,
   useContext,
+  useEffect,
   useRef,
 } from "react";
 import { QueryResource } from "./QueryResource";
@@ -24,6 +25,10 @@ export const QueryManagerProvider = ({ children }: PropsWithChildren) => {
       prefetchedDataRef.current[key] = value;
     }
   };
+
+  useEffect(() => {
+    (window as any).qr = resourcesRef.current;
+  }, []);
 
   return (
     <QueryManagerContext.Provider
