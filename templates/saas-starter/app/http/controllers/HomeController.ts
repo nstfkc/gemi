@@ -7,7 +7,7 @@ export class HomeController extends Controller {
   }
 
   public async index(req: HttpRequest<{ color: string }>) {
-    Query.prefetch("/home", { search: req.search.toJSON() });
+    // Query.prefetch("/home", { search: req.search.toJSON() });
 
     const items = [
       { id: 1, name: "Red", hex: "#FF0000", color: "red" },
@@ -18,11 +18,7 @@ export class HomeController extends Controller {
     ];
 
     const filters = items.map((item) => item.color);
-    const colors = items.filter((item) =>
-      req.search.get("color")
-        ? req.search.get("color").split(".").includes(item.color)
-        : true,
-    );
-    return { colors, filters };
+
+    return { filters };
   }
 }
