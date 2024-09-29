@@ -16,7 +16,7 @@ export function useUser() {
     },
   );
 
-  if (loading) {
+  if (loading && !user) {
     return { user: null, loading, error };
   }
 
