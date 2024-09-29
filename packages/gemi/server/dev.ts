@@ -68,9 +68,13 @@ export async function startDevServer() {
 
   async function getApp(): Promise<App> {
     try {
-      return (await vite.ssrLoadModule(join(appDir, "bootstrap.ts"))).app;
+      return (
+        await vite.ssrLoadModule(join(appDir, "bootstrap.ts"), {
+          fixStacktrace: true,
+        })
+      ).app;
     } catch (err) {
-      console.log("Can't load bootstrap.ts");
+      vite.ws.send({ type: "error", err });
       console.error(err);
     }
   }
@@ -215,6 +219,10 @@ export async function startDevServer() {
     } catch (err) {
       console.log("Error on server reload");
       console.log(err);
+      vite.ws.send({
+        type: "error",
+        err,
+      });
     }
   });
 

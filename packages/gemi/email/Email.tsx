@@ -26,7 +26,9 @@ export class Email {
 
     const {
       to = instance.to,
-      from = instance.from,
+      from = instance.from.length
+        ? instance.from
+        : EmailServiceContainer.use().service.defaultFrom,
       subject = instance.subject,
       cc = instance.cc,
       bcc = instance.bcc,
@@ -36,7 +38,7 @@ export class Email {
 
     const html = await instance.render(data);
 
-    if (process.env.EMAIL_DEBUG) {
+    if (process.env.EMAIL_DEBUG === "true") {
       const fileName = `${process.env.ROOT_DIR}/.debug/emails/${new Date().toISOString()}${subject}.html`;
       await Bun.write(fileName, html);
       Bun.spawnSync(["open", fileName]);
