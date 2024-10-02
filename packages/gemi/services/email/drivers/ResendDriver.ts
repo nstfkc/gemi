@@ -9,7 +9,6 @@ export class ResendDriver extends EmailDriver {
 
   async send(params: SendEmailParams) {
     const resend = new Resend(this.apiKey);
-    console.log(params);
     const { data, error } = await resend.emails.send({
       ...params,
     });
