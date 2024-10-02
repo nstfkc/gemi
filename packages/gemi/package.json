@@ -1,11 +1,11 @@
 {
   "name": "gemi",
-  "version": "0.4.106",
+  "version": "0.4.107",
   "devDependencies": {
     "@babel/parser": "^7.25.4",
     "@repo/eslint-config": "*",
     "@repo/typescript-config": "*",
-    "@types/bun": "^1.1.4",
+    "@types/bun": "^1.1.10",
     "@types/eslint": "^8.56.5",
     "@types/node": "^20.11.24",
     "@types/react": "^18.2.61",

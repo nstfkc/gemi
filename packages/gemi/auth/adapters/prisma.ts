@@ -16,6 +16,19 @@ import type {
 export class PrismaAuthenticationAdapter implements IAuthenticationAdapter {
   constructor(private prisma: any) {}
 
+  async findUserByVerificationToken(token: string): Promise<User | null> {
+    return await this.prisma.user.findFirst({
+      where: { verificationToken: token },
+    });
+  }
+
+  async verifyUser(userId: number): Promise<User> {
+    return await this.prisma.user.update({
+      where: { id: userId },
+      data: { emailVerifiedAt: new Date() },
+    });
+  }
+
   async createSession(args: CreateSessionArgs): Promise<SessionWithUser> {
     return await this.prisma.session.create({
       data: args,
@@ -33,7 +46,13 @@ export class PrismaAuthenticationAdapter implements IAuthenticationAdapter {
     });
   }
 
-  async findUserByEmailAddress(email: string): Promise<User> {
+  async findUserByEmailAddress(email: string, verify: boolean): Promise<User> {
+    if (verify) {
+      return await this.prisma.user.findUnique({
+        where: { email, emailVerifiedAt: { not: null } },
+      });
+    }
+
     return await this.prisma.user.findUnique({ where: { email } });
   }
 

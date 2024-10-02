@@ -4,7 +4,6 @@ import { Controller } from "../http/Controller";
 import { HttpRequest } from "../http/HttpRequest";
 import { ApiRouter } from "../http/ApiRouter";
 import { ViewRouter } from "../http/ViewRouter";
-import { KernelContext } from "../kernel/KernelContext";
 import { Auth } from "../facades";
 import type { IAuthenticationAdapter, User } from "./adapters/types";
 import { BlankAdapter } from "./adapters/blank";
@@ -12,6 +11,7 @@ import { AuthorizationError } from "../http/errors";
 import { ValidationError } from "../http";
 import { ServiceProvider } from "../services/ServiceProvider";
 import { AuthenticationServiceContainer } from "./AuthenticationServiceContainer";
+import { I18nServiceContainer } from "../http/I18nServiceContainer";
 
 class SignInRequest extends HttpRequest<
   {
@@ -100,11 +100,36 @@ class AuthController extends Controller {
     return user;
   }
 
+  async verifyEmail(req = new HttpRequest<{ token: string }>()) {
+    const input = await req.input();
+
+    const user = await this.provider.adapter.findUserByVerificationToken(
+      input.get("token"),
+    );
+
+    if (!user) {
+      return { email: null };
+    }
+
+    await this.provider.adapter.verifyUser(user.id);
+
+    if (user) {
+      return {
+        email: user.email,
+      };
+    }
+
+    return { email: null };
+  }
+
   async signIn(req = new SignInRequest()) {
     const input = await req.input.call(req);
     const { email, password } = input.toJSON();
 
-    const user = await this.provider.adapter.findUserByEmailAddress(email);
+    const user = await this.provider.adapter.findUserByEmailAddress(
+      email,
+      this.provider.verifyEmail,
+    );
 
     if (!user) {
       throw new ValidationError({
@@ -181,7 +206,10 @@ class AuthController extends Controller {
     const input = await req.input();
     const { email, password, name } = input.toJSON();
 
-    const user = await this.provider.adapter.findUserByEmailAddress(email);
+    const user = await this.provider.adapter.findUserByEmailAddress(
+      email,
+      false,
+    );
 
     if (user) {
       throw new ValidationError({
@@ -190,14 +218,20 @@ class AuthController extends Controller {
     }
 
     const hashedPassword = await this.provider.hashPassword(password);
+    const verificationToken =
+      await this.provider.generateEmailVerificationToken(email);
+
+    const locale = I18nServiceContainer.use().detectLocale(req);
 
     const newUser = await this.provider.adapter.createUser({
       email,
       name,
       password: hashedPassword,
+      verificationToken,
+      locale,
     });
 
-    await this.provider.onSignUp(newUser);
+    await this.provider.onSignUp(newUser, verificationToken);
 
     return newUser;
   }
@@ -222,7 +256,10 @@ class AuthController extends Controller {
     const input = await req.input();
     const { email } = input.toJSON();
 
-    const user = await this.provider.adapter.findUserByEmailAddress(email);
+    const user = await this.provider.adapter.findUserByEmailAddress(
+      email,
+      this.provider.verifyEmail,
+    );
 
     if (!user) {
       return {};
@@ -271,6 +308,7 @@ class AuthController extends Controller {
 
     const user = await this.provider.adapter.findUserByEmailAddress(
       passwordResetToken.user.email,
+      this.provider.verifyEmail,
     );
 
     if (!user) {
@@ -302,6 +340,7 @@ class AuthController extends Controller {
 
     const { password } = await this.provider.adapter.findUserByEmailAddress(
       user.email,
+      this.provider.verifyEmail,
     );
 
     const isPasswordValid = await this.provider.verifyPassword(
@@ -335,6 +374,7 @@ export class AuthApiRouter extends ApiRouter {
     "/forgot-password": this.post(AuthController, "forgotPassword"),
     "/reset-password": this.post(AuthController, "resetPassword"),
     "/change-password": this.post(AuthController, "changePassword"),
+    "/verify-email": this.post(AuthController, "verifyEmail"),
     "/me": this.get(AuthController, "me"),
   };
 }
@@ -350,6 +390,7 @@ export class AuthViewRouter extends ViewRouter {
 
 export class AuthenticationServiceProvider extends ServiceProvider {
   basePath = "/auth";
+  verifyEmail = true;
 
   sessionExpiresInHours = 24;
   sessionAbsoluteExpiresInHours = 24 * 7 * 4;
@@ -373,11 +414,23 @@ export class AuthenticationServiceProvider extends ServiceProvider {
     return hasher.digest("hex");
   }
 
+  generateEmailVerificationToken(email: string): Promise<string> | string {
+    if (!this.verifyEmail) {
+      return "";
+    }
+    const hasher = new Bun.CryptoHasher("sha256");
+    hasher.update(`${email}${Date.now()}`);
+    return hasher.digest("hex");
+  }
+
   extendSession<T extends User>(_user: T): Promise<any> | any {
     return {};
   }
 
-  onSignUp<T extends User>(_user: T): Promise<void> | void {}
+  onSignUp<T extends User>(
+    _user: T,
+    _verificationToken?: string,
+  ): Promise<void> | void {}
   onSignIn<T extends User>(_user: T): Promise<void> | void {}
   onSignOut<T extends User>(_user: T): Promise<void> | void {}
   onForgotPassword<T extends User>(

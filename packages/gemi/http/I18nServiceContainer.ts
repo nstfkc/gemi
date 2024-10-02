@@ -1,3 +1,4 @@
+import { log } from "util";
 import { KernelContext } from "../kernel/KernelContext";
 import { ServiceContainer } from "../services/ServiceContainer";
 import { ApiRouter } from "./ApiRouter";
@@ -66,10 +67,13 @@ export class I18nServiceContainer extends ServiceContainer {
       }
     }
 
-    let supportedLocales = new Set<string>();
+    const supportedLocales = new Set<string>(service.supportedLocales);
     for (const [key, value] of tmpStore.entries()) {
       this.translations.set(key, Object.fromEntries(value.entries()));
-      supportedLocales.add(key.split(".")[0]);
+      const [locale] = key.split(".");
+      if (!supportedLocales.has(locale)) {
+        supportedLocales.add(locale);
+      }
     }
     this.supportedLocales = Array.from(supportedLocales);
   }
@@ -87,9 +91,12 @@ export class I18nServiceContainer extends ServiceContainer {
 
     const [l] = locale.split(",");
 
-    if (this.supportedLocales.includes(l)) {
-      return l;
+    const _locale = l.length === 2 ? `${l}-${l.toUpperCase()}` : l;
+
+    if (this.supportedLocales.includes(_locale)) {
+      return _locale;
     }
+
     const fallbackLocale =
       this.service.defaultLocale ?? this.supportedLocales[0];
 

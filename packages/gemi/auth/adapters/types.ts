@@ -5,7 +5,10 @@ export interface IAuthenticationAdapter {
   updateSession: (args: UpdateSessionArgs) => Promise<SessionWithUser | null>;
   findSession: (args: FindSessionArgs) => Promise<SessionWithUser | null>;
   deleteSession: (args: DeleteSessionArgs) => Promise<void>;
-  findUserByEmailAddress: (email: string) => Promise<User>;
+  findUserByEmailAddress: (
+    email: string,
+    verifyEmail: boolean,
+  ) => Promise<User>;
   createPasswordResetToken: (
     args: CreatePasswordResetTokenArgs,
   ) => Promise<string>;
@@ -16,6 +19,8 @@ export interface IAuthenticationAdapter {
     args: FindPasswordResetTokenArgs,
   ) => Promise<PasswordResetToken | null>;
   deleteAllUserSessions: (userId: number) => Promise<void>;
+  findUserByVerificationToken: (token: string) => Promise<User | null>;
+  verifyUser: (userId: number) => Promise<User>;
 }
 
 export interface PasswordResetToken {
@@ -89,6 +94,8 @@ export interface CreateUserArgs {
   name: string;
   email: string;
   password: string;
+  verificationToken: string;
+  locale?: string;
 }
 
 export interface UpdateUserPasswordArgs {

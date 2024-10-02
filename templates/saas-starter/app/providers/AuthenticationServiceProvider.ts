@@ -14,6 +14,10 @@ export default class extends AuthenticationServiceProvider {
     };
   }
 
+  onSignUp(user: User, token: string) {
+    console.log("User sign up", user.email, user.locale, token);
+  }
+
   onForgotPassword(user: User, token: string) {
     console.log("Forgot password email sent", user.email, token);
   }
