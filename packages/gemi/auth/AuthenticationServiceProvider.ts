@@ -5,7 +5,11 @@ import { HttpRequest } from "../http/HttpRequest";
 import { ApiRouter } from "../http/ApiRouter";
 import { ViewRouter } from "../http/ViewRouter";
 import { Auth } from "../facades";
-import type { IAuthenticationAdapter, User } from "./adapters/types";
+import type {
+  IAuthenticationAdapter,
+  Invitation,
+  User,
+} from "./adapters/types";
 import { BlankAdapter } from "./adapters/blank";
 import { AuthorizationError } from "../http/errors";
 import { ValidationError } from "../http";
@@ -37,6 +41,7 @@ class SignUpRequest extends HttpRequest<
     name: string;
     email: string;
     password: string;
+    invitationId?: string;
   },
   {}
 > {
@@ -204,7 +209,7 @@ class AuthController extends Controller {
 
   async signUp(req = new SignUpRequest()) {
     const input = await req.input();
-    const { email, password, name } = input.toJSON();
+    const { email, password, name, invitationId } = input.toJSON();
 
     const user = await this.provider.adapter.findUserByEmailAddress(
       email,
@@ -218,18 +223,49 @@ class AuthController extends Controller {
     }
 
     const hashedPassword = await this.provider.hashPassword(password);
-    const verificationToken =
-      await this.provider.generateEmailVerificationToken(email);
 
     const locale = I18nServiceContainer.use().detectLocale(req);
 
-    const newUser = await this.provider.adapter.createUser({
-      email,
-      name,
-      password: hashedPassword,
-      verificationToken,
-      locale,
-    });
+    let invitation: Invitation;
+    if (invitationId) {
+      invitation = await this.provider.adapter.findInvitation(
+        invitationId,
+        email,
+      );
+
+      if (invitation) {
+        await this.provider.adapter.deleteInvitationById(invitationId);
+      }
+    }
+
+    let newUser: User;
+    let verificationToken: string;
+
+    if (invitation) {
+      newUser = await this.provider.adapter.createUser({
+        email,
+        name,
+        password: hashedPassword,
+        emailVerifiedAt: new Date(),
+        locale,
+      });
+      await this.provider.adapter.createAccount({
+        organizationId: invitation.organizationId,
+        userId: newUser.id,
+        organizationRole: invitation.role,
+      });
+    } else {
+      verificationToken =
+        await this.provider.generateEmailVerificationToken(email);
+
+      newUser = await this.provider.adapter.createUser({
+        email,
+        name,
+        password: hashedPassword,
+        verificationToken,
+        locale,
+      });
+    }
 
     await this.provider.onSignUp(newUser, verificationToken);
 

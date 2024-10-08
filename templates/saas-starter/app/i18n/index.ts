@@ -3,16 +3,6 @@ import { I18n } from "gemi/facades";
 export type Dictionary = typeof dictionary;
 
 export const dictionary = {
-  [I18n.scope("server")]: {
-    "validation.fileTooLarge": {
-      default: "File must be less than {{maxSize}} {{unit}}",
-    },
-  },
-  [I18n.scope("global")]: {
-    test: {
-      default: "Test {{name}}",
-    },
-  },
   [I18n.scope("layout:/")]: {
     home: {
       default: "Home",
@@ -21,6 +11,10 @@ export const dictionary = {
     about: {
       default: "About",
       "es-ES": "Acerca de",
+    },
+    greeting: {
+      default: "Hello, {{name}}",
+      "es-ES": "Hola, {{name}}",
     },
   },
   [I18n.scope("view:/")]: {

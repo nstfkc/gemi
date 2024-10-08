@@ -11,6 +11,7 @@ import type {
   PasswordResetToken,
   FindPasswordResetTokenArgs,
   DeletePasswordResetTokenArgs,
+  CreateAccountArgs,
 } from "./types";
 
 export class PrismaAuthenticationAdapter implements IAuthenticationAdapter {
@@ -160,5 +161,27 @@ export class PrismaAuthenticationAdapter implements IAuthenticationAdapter {
   async deletePasswordResetToken(args: DeletePasswordResetTokenArgs) {
     const { token } = args;
     return await this.prisma.passwordResetToken.delete({ where: { token } });
+  }
+
+  async createAccount(args: CreateAccountArgs) {
+    return await this.prisma.account.create({
+      data: {
+        organizationId: args.organizationId,
+        organizationRole: args.organizationRole,
+        userId: args.userId,
+      },
+    });
+  }
+
+  async deleteInvitationById(invitationId: string) {
+    return await this.prisma.organizationInvitation.delete({
+      where: { publicId: invitationId },
+    });
+  }
+
+  async findInvitation(invitationId: string, email: string) {
+    return await this.prisma.organizationInvitation.findFirst({
+      where: { publicId: invitationId, email },
+    });
   }
 }

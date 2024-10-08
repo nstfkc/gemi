@@ -3,11 +3,13 @@ import {
   FormError,
   Link,
   useNavigate,
+  useSearchParams,
   ValidationErrors,
 } from "gemi/client";
 
 export default function SignUp() {
   const { push } = useNavigate();
+  const searchParams = useSearchParams();
   return (
     <div className="container max-w-sm mx-auto h-screen flex flex-col justify-center items-center">
       <Form
@@ -20,6 +22,11 @@ export default function SignUp() {
           })
         }
       >
+        <input
+          type="hidden"
+          name="invitationId"
+          defaultValue={searchParams.get("invitationId")!}
+        />
         <div className="flex flex-col">
           <label htmlFor="name">Name</label>
           <input

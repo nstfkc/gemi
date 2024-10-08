@@ -44,5 +44,21 @@ export default class extends ApiRouter {
     "/file/:path*": this.get(async (req: HttpRequest<{ path: string }>) => {
       return await FileStorage.fetch(req.params.path);
     }),
+    "/invite": this.get(async () => {
+      return await prisma.organizationInvitation.create({
+        data: {
+          email: "enesxtufekci+2@gmail.com",
+          organizationId: 1,
+          role: 0,
+        },
+      });
+    }),
+    "/organization": this.get(async () => {
+      return await prisma.organization.create({
+        data: {
+          name: "Enes org",
+        },
+      });
+    }),
   };
 }

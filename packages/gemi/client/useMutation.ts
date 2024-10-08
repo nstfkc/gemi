@@ -32,12 +32,14 @@ type Config<T> = {
   autoInvalidate?: boolean;
   onSuccess: (data: T) => void;
   onError: (error: MutationError) => void;
+  onCanceled?: () => void;
 };
 
 const defaultOptions: Config<any> = {
   autoInvalidate: false,
   onSuccess: () => {},
   onError: (_: MutationError) => {},
+  onCanceled: () => {},
 };
 
 type Data<M extends keyof Methods, K extends keyof Methods[M]> =
@@ -96,10 +98,25 @@ export function useMutation<
     loading: false,
   });
 
+  const [abortController, setAbortController] = useState(
+    () => new AbortController(),
+  );
+
   return {
     data: state.data as T,
     error: state.error as any,
     loading: state.loading,
+    cancel: () => {
+      const [, options = defaultOptions] = args ?? [];
+      abortController.abort();
+      setAbortController(new AbortController());
+      setState({
+        data: state.data,
+        error: state.error,
+        loading: false,
+      });
+      options.onCanceled();
+    },
     trigger: async (input: U): Promise<T> => {
       setState({
         data: state.data,
@@ -107,7 +124,6 @@ export function useMutation<
         loading: true,
       });
       const [inputs = { params: {} }, options = defaultOptions] = args ?? [];
-      const {} = options;
       const params = "params" in inputs ? inputs.params : {};
       const finalUrl = applyParams(
         String(url).replace(`${method}:`, ""),
@@ -132,6 +148,7 @@ export function useMutation<
             ...contentType,
           },
           ...(body ? { body } : {}),
+          signal: abortController.signal,
         });
         const data = await response.json();
 

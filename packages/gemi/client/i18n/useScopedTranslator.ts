@@ -28,8 +28,3 @@ export function useScopedTranslator<T extends keyof I18nDictionary>(
     return applyTranslationParams(translation, params);
   };
 }
-
-export function useTranslator() {
-  // @ts-ignore
-  return useScopedTranslator("global");
-}

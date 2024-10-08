@@ -21,7 +21,21 @@ export interface IAuthenticationAdapter {
   deleteAllUserSessions: (userId: number) => Promise<void>;
   findUserByVerificationToken: (token: string) => Promise<User | null>;
   verifyUser: (userId: number) => Promise<User>;
+  findInvitation: (invitationId: string, email: string) => Promise<Invitation>;
+  deleteInvitationById: (invitationId: string) => Promise<void>;
+  createAccount: (args: CreateAccountArgs) => Promise<Account | null>;
 }
+
+export type Invitation = {
+  organizationId: number;
+  role: number;
+};
+
+export type CreateAccountArgs = {
+  userId: number;
+  organizationId: number;
+  organizationRole: number;
+};
 
 export interface PasswordResetToken {
   token: string;
@@ -94,7 +108,8 @@ export interface CreateUserArgs {
   name: string;
   email: string;
   password: string;
-  verificationToken: string;
+  verificationToken?: string;
+  emailVerifiedAt?: Date;
   locale?: string;
 }
 

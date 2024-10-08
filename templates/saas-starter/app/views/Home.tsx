@@ -8,6 +8,7 @@ import {
   useQuery,
   useSearchParams,
   useSubscription,
+  useTranslator,
   useUser,
   type ViewProps,
 } from "gemi/client";
@@ -21,8 +22,11 @@ export default function Home(props: ViewProps<"/">) {
     search: { color: searchParams.get("color") },
   });
 
+  const t = useTranslator();
+
   return (
     <div>
+      <span>{t("greeting", { name: "Enes" })}</span>
       <div>{loading ? "Loading..." : ""}</div>
       <div className="flex gap-2">
         {filters.map((filter) => {
@@ -34,6 +38,7 @@ export default function Home(props: ViewProps<"/">) {
             </div>
           );
         })}
+
         <div>
           <button onClick={() => searchParams.set("color", "indigo").push()}>
             Indigo
