@@ -117,7 +117,7 @@ export function useMutation<
       });
       options.onCanceled();
     },
-    trigger: async (input: U): Promise<T> => {
+    trigger: async (input: U | FormData): Promise<T> => {
       setState({
         data: state.data,
         error: state.error,
