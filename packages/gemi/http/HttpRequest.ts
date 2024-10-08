@@ -1,15 +1,11 @@
 import { RequestContext } from "./requestContext";
 import { ValidationError } from "./Router";
 
-class Input<T extends Record<string, any>> {
+class Input<T> {
   constructor(private data: T) {}
 
-  public get(key: keyof T): T[keyof T] {
+  public get<K extends keyof T>(key: K): T[K] {
     return this.data[key];
-  }
-
-  public set(key: keyof T, value: T[keyof T]) {
-    this.data[key] = value;
   }
 
   public has(key: keyof T) {
@@ -226,21 +222,17 @@ export class HttpRequest<
   }
 
   private async parseBody() {
-    const inputMap = new Input<T>({} as T);
+    let inputMap = new Input<T>({} as T);
     if (this.rawRequest.headers.get("Content-Type") === "application/json") {
       const body = await this.rawRequest.json();
-      for (const [key, value] of Object.entries(body)) {
-        inputMap.set(key, value as T[keyof T]);
-      }
+      inputMap = new Input<T>(body as T);
     }
     if (
       this.rawRequest.headers.get("Content-Type") ===
       "application/x-www-form-urlencoded"
     ) {
       const body = (await this.rawRequest.formData()) as any; // TODO: fix type
-      for (const [key, value] of body) {
-        inputMap.set(key, value as T[keyof T]);
-      }
+      inputMap = new Input<T>(body as T);
     }
 
     if (
@@ -249,19 +241,21 @@ export class HttpRequest<
         ?.startsWith("multipart/form-data")
     ) {
       const body = (await this.rawRequest.formData()) as any; // TODO: fix type
+      const _inputMap = new Map<string, any>();
       for (const [key, value] of body) {
         if (inputMap.has(key)) {
           const currentValue = inputMap.get(key);
           if (Array.isArray(currentValue)) {
             currentValue.push(value);
-            inputMap.set(key, currentValue);
+            _inputMap.set(key, currentValue);
           } else {
-            inputMap.set(key, [currentValue, value] as any);
+            _inputMap.set(key, [currentValue, value] as any);
           }
         } else {
-          inputMap.set(key, value as T[keyof T]);
+          _inputMap.set(key, value as T[keyof T]);
         }
       }
+      inputMap = new Input<T>(Object.fromEntries(_inputMap.entries()) as T);
     }
     return inputMap;
   }
