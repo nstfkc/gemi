@@ -242,9 +242,9 @@ export class HttpRequest<
     ) {
       const body = (await this.rawRequest.formData()) as any; // TODO: fix type
       const _inputMap = new Map<string, any>();
-      for (const [key, value] of body) {
-        if (inputMap.has(key)) {
-          const currentValue = inputMap.get(key);
+      for (const [key, value] of body.entries()) {
+        if (_inputMap.has(key)) {
+          const currentValue = _inputMap.get(key);
           if (Array.isArray(currentValue)) {
             currentValue.push(value);
             _inputMap.set(key, currentValue);
