@@ -1,7 +1,19 @@
 import { prisma } from "@/app/database/prisma";
-import { ApiRouter, HttpRequest } from "gemi/http";
+import { ApiRouter, HttpRequest, ResourceController } from "gemi/http";
 import { Auth, Broadcast, FileStorage } from "gemi/facades";
 import { WelcomeEmail } from "@/app/email/WelcomeEmail";
+
+class FooController extends ResourceController {
+  list() {}
+  edit() {}
+
+  create() {}
+  show() {}
+  update(req: HttpRequest) {
+    return req.params;
+  }
+  delete() {}
+}
 
 export default class extends ApiRouter {
   routes = {
@@ -26,8 +38,8 @@ export default class extends ApiRouter {
       return filteredItems;
     }),
 
-    "/test/:id": this.get((req: HttpRequest) => {
-      return `${req.params.id}`;
+    "/test/:testId": this.get((req: HttpRequest) => {
+      return `${req.params.testId}`;
     }),
 
     "/email": this.get(async () => {
@@ -35,12 +47,12 @@ export default class extends ApiRouter {
       return { success: result };
     }),
 
-    "/upload": this.post(async (req: HttpRequest<{ file: Blob }>) => {
+    "/upload": this.post(async (req: HttpRequest<{ images: Blob[] }>) => {
       const input = await req.input();
-      const url = await FileStorage.put(input.get("file"));
-      return { url };
+      console.log(input.get("images"));
+      return {};
     }),
-
+    "/foo": this.resource(FooController),
     "/file/:path*": this.get(async (req: HttpRequest<{ path: string }>) => {
       return await FileStorage.fetch(req.params.path);
     }),

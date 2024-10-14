@@ -8,8 +8,9 @@ import {
 import type { RPC } from "./rpc";
 import type { ApiRouterHandler } from "../http/ApiRouter";
 import { useMutation } from "./useMutation";
-import type { IsEmptyObject, UnwrapPromise } from "../utils/type";
+import type { UnwrapPromise } from "../utils/type";
 import type { UrlParser } from "./types";
+import { useParams } from "./useParams";
 
 interface MutationContextValue {
   isPending: boolean;
@@ -23,17 +24,10 @@ const MutationContext = createContext({
   result: null,
 } as MutationContextValue);
 
-type GetParams<T> =
-  T extends ApiRouterHandler<any, any, infer Params> ? Params : {};
-
 type GetResult<T> =
   T extends ApiRouterHandler<any, infer Result, any>
     ? UnwrapPromise<Result>
     : never;
-
-type WithoutMethod<T extends string> = T extends `${string}:${infer Path}`
-  ? Path
-  : never;
 
 type PostRequests = {
   [K in keyof RPC as K extends `POST:${infer P}` ? P : never]: GetResult<
@@ -64,26 +58,20 @@ type Methods = {
   PATCH: PatchRequests;
 };
 
-interface FormBaseProps<M extends keyof Methods, K extends keyof Methods[M]>
+interface FormProps<M extends keyof Methods, K extends keyof Methods[M]>
   extends Omit<ComponentProps<"form">, "action" | "onError"> {
   method?: M;
   action: K;
   onSuccess?: (result: Methods[M][K], form: HTMLFormElement) => void;
   onError?: (error: any, form: HTMLFormElement) => void;
+  params?: UrlParser<`${K & string}`>;
 }
-
-type FormProps<
-  T extends keyof Methods,
-  K extends keyof Methods[T],
-> = FormBaseProps<T, K> &
-  (UrlParser<`${K & string}`> extends Record<string, never>
-    ? { params?: never }
-    : { params: UrlParser<`${K & string}`> });
 
 export function Form<
   K extends keyof Methods[T],
   T extends keyof Methods = "POST",
 >(props: FormProps<T, K>) {
+  const _params = useParams();
   const {
     method = "POST",
     action,
@@ -92,7 +80,9 @@ export function Form<
     params,
     className,
     ...formProps
-  } = "params" in props ? props : { ...props, params: {} };
+  } = "params" in props
+    ? { ...props, params: { ..._params, ...props.params } }
+    : { ...props, params: _params };
   const formRef = useRef<HTMLFormElement>(null);
 
   const { trigger, data, error, loading } = useMutation(

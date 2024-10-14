@@ -8,6 +8,7 @@ import { QueryManagerContext } from "./QueryManagerContext";
 import { applyParams } from "../utils/applyParams";
 import type { UrlParser } from "./types";
 import { omitNullishValues } from "../utils/omitNullishValues";
+import { useParams } from "./useParams";
 
 interface Config<T> {
   fallbackData?: T;
@@ -68,8 +69,8 @@ type ValueAtPath<T, Path extends string> = T extends JSONLike
       : never
   : never;
 
-const defaultOptions: QueryOptions<any> & { params: Record<string, any> } = {
-  params: {} as Record<string, any>,
+const defaultOptions: QueryOptions<any> & { params?: Record<string, any> } = {
+  params: {} as Record<string, string>,
   search: {} as Record<string, string>,
 };
 
@@ -81,16 +82,18 @@ export function useQuery<T extends keyof GetRPC>(
         config?: Config<Data<T>>,
       ]
     : [
-        options: { search?: WithOptionalValues<Input<T>> } & {
-          params: UrlParser<`${T & string}`>;
+        options?: { search?: WithOptionalValues<Input<T>> } & {
+          params?: UrlParser<`${T & string}`>;
         },
         config?: Config<Data<T>>,
       ]
 ) {
+  const _params = useParams();
   const [_options = defaultOptions, _config = defaultConfig] = args;
   const options = { ...defaultOptions, ..._options };
   const config = { ...defaultConfig, ..._config };
-  const params = "params" in options ? (options.params ?? {}) : {};
+  const params =
+    "params" in options ? { ..._params, ...options.params } : _params;
   const paramsRef = useRef(JSON.stringify(params));
   const search = "search" in options ? (options.search ?? {}) : {};
   const { getResource } = useContext(QueryManagerContext);

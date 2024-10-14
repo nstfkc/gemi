@@ -19,6 +19,8 @@ export default class extends ViewRouter {
     "/": this.layout("PublicLayout", {
       "/": this.view("Home", [HomeController, "index"]),
       "/:testId": this.view("Test"),
+      "/foo": this.view("FooList"),
+      "/foo/:id": this.view("FooEdit"),
       "/about": this.view("About", [HomeController, "about"]),
     }),
     "/app": AppRouter,

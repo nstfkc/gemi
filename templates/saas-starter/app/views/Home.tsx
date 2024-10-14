@@ -5,6 +5,7 @@ import {
   useMutation,
   usePatch,
   usePost,
+  usePut,
   useQuery,
   useSearchParams,
   useSubscription,
@@ -17,7 +18,6 @@ import { useEffect, useState } from "react";
 export default function Home(props: ViewProps<"/">) {
   const searchParams = useSearchParams();
   const { filters } = props;
-  const [id, setId] = useState(0);
   const { data = [], loading } = useQuery("/home", {
     search: { color: searchParams.get("color") },
   });
@@ -28,6 +28,10 @@ export default function Home(props: ViewProps<"/">) {
     <div>
       <span>{t("greeting", { name: "Enes" })}</span>
       <div>{loading ? "Loading..." : ""}</div>
+      <Form method="POST" action="/upload">
+        <input type="file" name="images" multiple={true} />
+        <button type="submit">Upload</button>
+      </Form>
       <div className="flex gap-2">
         {filters.map((filter) => {
           return (

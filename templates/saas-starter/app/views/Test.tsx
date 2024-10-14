@@ -1,8 +1,11 @@
-import { useParams, useQuery, type ViewProps } from "gemi/client";
+import { useMutation, useParams, useQuery, type ViewProps } from "gemi/client";
 
 export default function Test(props: ViewProps<"/:testId">) {
-  const { testId } = useParams();
-  const { data, loading } = useQuery("/test/:id", { params: { id: testId } });
+  const { data, loading } = useQuery("/test/:testId", {
+    params: { testId: "Enes 3218!" },
+  });
+
+  const {} = useQuery("/foo/:id");
 
   return (
     <div>

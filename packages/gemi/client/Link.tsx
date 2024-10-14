@@ -6,6 +6,7 @@ import type { UrlParser, ViewResult } from "./types";
 import { useNavigate } from "./useNavigate";
 import type { ViewRPC } from "./rpc";
 import type { Prettify } from "../utils/type";
+import { useParams } from "./useParams";
 
 type Views = {
   [K in keyof ViewRPC as K extends `view:${infer P}`
@@ -43,6 +44,7 @@ function normalizeSearch(search: Search): Record<string, string> {
 }
 
 export const Link = <T extends keyof Views>(props: LinkProps<T>) => {
+  const _params = useParams();
   const {
     href,
     onClick,
@@ -50,7 +52,7 @@ export const Link = <T extends keyof Views>(props: LinkProps<T>) => {
     params = {},
     search = {},
     ...rest
-  } = { params: {}, search: {}, ...props };
+  } = { params: _params, search: {}, ...props };
   const { push } = useNavigate();
   const location = useLocation();
   const searchParams = new URLSearchParams(normalizeSearch(search));

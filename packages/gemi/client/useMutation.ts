@@ -3,6 +3,7 @@ import type { RPC } from "./rpc";
 import type { ApiRouterHandler } from "../http/ApiRouter";
 import type { UnwrapPromise } from "../utils/type";
 import type { UrlParser } from "./types";
+import { useParams } from "./useParams";
 
 type Methods = {
   POST: {
@@ -89,9 +90,10 @@ export function useMutation<
   method: M,
   url: K,
   ...args: ParseParams<K> extends Record<string, never>
-    ? [options?: {}, config?: Partial<Config<T>>]
-    : [options: { params: ParseParams<K> }, config?: Partial<Config<T>>]
+    ? [options?: { params?: {} }, config?: Partial<Config<T>>]
+    : [options: { params?: ParseParams<K> }, config?: Partial<Config<T>>]
 ) {
+  const _params = useParams();
   const [state, setState] = useState<State<T>>({
     data: null,
     error: null,
@@ -123,8 +125,9 @@ export function useMutation<
         error: state.error,
         loading: true,
       });
-      const [inputs = { params: {} }, options = defaultOptions] = args ?? [];
-      const params = "params" in inputs ? inputs.params : {};
+      const [inputs = {}, options = defaultOptions] = args ?? [];
+      const params =
+        "params" in inputs ? { ..._params, ...inputs.params } : _params;
       const finalUrl = applyParams(
         String(url).replace(`${method}:`, ""),
         params,
@@ -188,7 +191,7 @@ export function usePost<K extends keyof Methods["POST"], T = Data<"POST", K>>(
   url: K,
   ...args: ParseParams<K> extends Record<string, never>
     ? [options?: {}, config?: Partial<Config<T>>]
-    : [options: { params: ParseParams<K> }, config?: Partial<Config<T>>]
+    : [options?: { params?: ParseParams<K> }, config?: Partial<Config<T>>]
 ) {
   return useMutation("POST", url, ...(args as any));
 }
@@ -197,7 +200,7 @@ export function usePut<K extends keyof Methods["PUT"], T = Data<"PUT", K>>(
   url: K,
   ...args: ParseParams<K> extends Record<string, never>
     ? [options?: {}, config?: Partial<Config<T>>]
-    : [options: { params: ParseParams<K> }, config?: Partial<Config<T>>]
+    : [options?: { params?: ParseParams<K> }, config?: Partial<Config<T>>]
 ) {
   return useMutation("PUT", url, ...(args as any));
 }
@@ -209,7 +212,7 @@ export function usePatch<
   url: K,
   ...args: ParseParams<K> extends Record<string, never>
     ? [options?: {}, config?: Partial<Config<T>>]
-    : [options: { params: ParseParams<K> }, config?: Partial<Config<T>>]
+    : [options?: { params?: ParseParams<K> }, config?: Partial<Config<T>>]
 ) {
   return useMutation("PATCH", url, ...(args as any));
 }
@@ -221,7 +224,7 @@ export function useDelete<
   url: K,
   ...args: ParseParams<K> extends Record<string, never>
     ? [options?: {}, config?: Partial<Config<T>>]
-    : [options: { params: ParseParams<K> }, config?: Partial<Config<T>>]
+    : [options?: { params?: ParseParams<K> }, config?: Partial<Config<T>>]
 ) {
   return useMutation("DELETE", url, ...(args as any));
 }
