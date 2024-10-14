@@ -89,9 +89,10 @@ export function useMutation<
 >(
   method: M,
   url: K,
-  ...args: ParseParams<K> extends Record<string, never>
-    ? [options?: { params?: {} }, config?: Partial<Config<T>>]
-    : [options: { params?: ParseParams<K> }, config?: Partial<Config<T>>]
+  ...args: [
+    options?: { params?: Partial<ParseParams<K>> },
+    config?: Partial<Config<T>>,
+  ]
 ) {
   const _params = useParams();
   const [state, setState] = useState<State<T>>({
@@ -189,18 +190,20 @@ export function useMutation<
 
 export function usePost<K extends keyof Methods["POST"], T = Data<"POST", K>>(
   url: K,
-  ...args: ParseParams<K> extends Record<string, never>
-    ? [options?: {}, config?: Partial<Config<T>>]
-    : [options?: { params?: ParseParams<K> }, config?: Partial<Config<T>>]
+  ...args: [
+    options?: { params?: Partial<ParseParams<K>> },
+    config?: Partial<Config<T>>,
+  ]
 ) {
   return useMutation("POST", url, ...(args as any));
 }
 
 export function usePut<K extends keyof Methods["PUT"], T = Data<"PUT", K>>(
   url: K,
-  ...args: ParseParams<K> extends Record<string, never>
-    ? [options?: {}, config?: Partial<Config<T>>]
-    : [options?: { params?: ParseParams<K> }, config?: Partial<Config<T>>]
+  ...args: [
+    options?: { params?: Partial<ParseParams<K>> },
+    config?: Partial<Config<T>>,
+  ]
 ) {
   return useMutation("PUT", url, ...(args as any));
 }
@@ -210,9 +213,10 @@ export function usePatch<
   T = Data<"PATCH", K>,
 >(
   url: K,
-  ...args: ParseParams<K> extends Record<string, never>
-    ? [options?: {}, config?: Partial<Config<T>>]
-    : [options?: { params?: ParseParams<K> }, config?: Partial<Config<T>>]
+  ...args: [
+    options?: { params?: Partial<ParseParams<K>> },
+    config?: Partial<Config<T>>,
+  ]
 ) {
   return useMutation("PATCH", url, ...(args as any));
 }
@@ -222,9 +226,10 @@ export function useDelete<
   T = Data<"DELETE", K>,
 >(
   url: K,
-  ...args: ParseParams<K> extends Record<string, never>
-    ? [options?: {}, config?: Partial<Config<T>>]
-    : [options?: { params?: ParseParams<K> }, config?: Partial<Config<T>>]
+  ...args: [
+    options?: { params?: Partial<ParseParams<K>> },
+    config?: Partial<Config<T>>,
+  ]
 ) {
   return useMutation("DELETE", url, ...(args as any));
 }

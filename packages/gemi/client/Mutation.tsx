@@ -64,7 +64,7 @@ interface FormProps<M extends keyof Methods, K extends keyof Methods[M]>
   action: K;
   onSuccess?: (result: Methods[M][K], form: HTMLFormElement) => void;
   onError?: (error: any, form: HTMLFormElement) => void;
-  params?: UrlParser<`${K & string}`>;
+  params?: Partial<UrlParser<`${K & string}`>>;
 }
 
 export function Form<

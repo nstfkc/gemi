@@ -76,17 +76,13 @@ const defaultOptions: QueryOptions<any> & { params?: Record<string, any> } = {
 
 export function useQuery<T extends keyof GetRPC>(
   url: T,
-  ...args: UrlParser<`${T & string}`> extends Record<string, never>
-    ? [
-        options?: { search?: WithOptionalValues<Input<T>> },
-        config?: Config<Data<T>>,
-      ]
-    : [
-        options?: { search?: WithOptionalValues<Input<T>> } & {
-          params?: UrlParser<`${T & string}`>;
-        },
-        config?: Config<Data<T>>,
-      ]
+  ...args: [
+    options?: {
+      search?: WithOptionalValues<Input<T>>;
+      params?: Partial<UrlParser<`${T & string}`>>;
+    },
+    config?: Config<Data<T>>,
+  ]
 ) {
   const _params = useParams();
   const [_options = defaultOptions, _config = defaultConfig] = args;
