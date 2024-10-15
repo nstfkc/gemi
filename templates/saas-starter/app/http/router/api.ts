@@ -2,18 +2,7 @@ import { prisma } from "@/app/database/prisma";
 import { ApiRouter, HttpRequest, ResourceController } from "gemi/http";
 import { Auth, Broadcast, FileStorage } from "gemi/facades";
 import { WelcomeEmail } from "@/app/email/WelcomeEmail";
-
-class FooController extends ResourceController {
-  list() {}
-  edit() {}
-
-  create() {}
-  show() {}
-  update(req: HttpRequest) {
-    return req.params;
-  }
-  delete() {}
-}
+import { FooController } from "../controllers/FooController";
 
 export default class extends ApiRouter {
   routes = {

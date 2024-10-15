@@ -112,7 +112,7 @@ export class ApiRouterServiceContainer extends ServiceContainer {
       });
     }
 
-    const httpRequest = new HttpRequest(req, params);
+    const httpRequest = new HttpRequest(req, params, "api");
     return await RequestContext.run(httpRequest, async () => {
       const middlewareResponse = await this.runRouteMiddleware(path);
 

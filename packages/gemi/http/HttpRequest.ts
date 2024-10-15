@@ -160,11 +160,13 @@ export type Schema<T extends Body> = Record<
 >;
 
 export type Body = Record<string, any>;
+export type HttpRequestKind = "view" | "api";
 
 export class HttpRequest<
   T extends Body = Record<string, never>,
   Params = Record<string, never>,
 > {
+  public kind: HttpRequestKind;
   public rawRequest: Request;
   public headers: Headers;
   public cookies: Map<string, string>;
@@ -174,14 +176,16 @@ export class HttpRequest<
   public params: Params;
   public ctx = RequestContext.getStore();
 
-  constructor(req?: Request, params?: any) {
+  constructor(req?: Request, params?: any, kind?: HttpRequestKind) {
     if (!req) {
       const _req = RequestContext.getStore().req;
       this.params = _req.params as any;
       this.rawRequest = _req.rawRequest;
+      this.kind = _req.kind;
     } else {
       this.params = params;
       this.rawRequest = req;
+      this.kind = kind ?? "api";
     }
 
     this.headers = this.rawRequest.headers;

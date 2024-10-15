@@ -1,5 +1,6 @@
 import { HttpRequest, ViewRouter } from "gemi/http";
 import { HomeController } from "../controllers/HomeController";
+import { FooController } from "../controllers/FooController";
 
 class AppRouter extends ViewRouter {
   middlewares = ["auth"];
@@ -19,8 +20,8 @@ export default class extends ViewRouter {
     "/": this.layout("PublicLayout", {
       "/": this.view("Home", [HomeController, "index"]),
       "/:testId": this.view("Test"),
-      "/foo": this.view("FooList"),
-      "/foo/:id": this.view("FooEdit"),
+      "/foo": this.view("FooList", [FooController, "index"]),
+      "/foo/:id": this.view("FooEdit", [FooController, "details"]),
       "/about": this.view("About", [HomeController, "about"]),
     }),
     "/app": AppRouter,

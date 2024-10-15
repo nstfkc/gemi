@@ -82,7 +82,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
         }
       }
 
-      const httpRequest = new HttpRequest(req, params);
+      const httpRequest = new HttpRequest(req, params, "view");
       const { data, cookies, headers, user, prefetchedData } =
         await RequestContext.run(httpRequest, async () => {
           const ctx = RequestContext.getStore();

@@ -3,7 +3,6 @@ import type { UrlParser } from "../client/types";
 import type { ApiRouterHandler } from "../http/ApiRouter";
 import { HttpRequest } from "../http";
 import { RequestContext } from "../http/requestContext";
-import { KernelContext } from "../kernel/KernelContext";
 import { applyParams } from "../utils/applyParams";
 import { omitNullishValues } from "../utils/omitNullishValues";
 import { ApiRouterServiceContainer } from "../services/router/ApiRouterServiceContainer";
@@ -23,14 +22,22 @@ type Input<T extends keyof GetRPC> =
 export class Query {
   private static prepare<T extends keyof GetRPC>(
     path: T,
-    ...args: UrlParser<T> extends Record<string, never>
-      ? [options?: { search: Partial<Input<T>> }]
-      : [options: { search?: Partial<Input<T>>; params: UrlParser<T> }]
+    ...args: [
+      options?: {
+        search?: Partial<Input<T>>;
+        params?: Partial<UrlParser<T>>;
+      },
+    ]
   ) {
     const defaultOptions = { params: {}, search: {} };
     const [options = {}] = args;
     const { search, params } = { ...defaultOptions, ...options };
     const ctx = RequestContext.getStore();
+
+    if (ctx.req.kind === "api") {
+      throw new Error("Query.prefetch() cannot be called from an API request");
+    }
+
     const req = ctx.req.rawRequest;
     const url = new URL(req.url);
     const searchParams = new URLSearchParams(
@@ -73,18 +80,18 @@ export class Query {
 
   static instant<T extends keyof GetRPC>(
     path: T,
-    ...args: UrlParser<T> extends Record<string, never>
-      ? [options?: { search: Partial<Input<T>> }]
-      : [options: { search?: Partial<Input<T>>; params: UrlParser<T> }]
+    ...args: [
+      options?: { search?: Partial<Input<T>>; params?: Partial<UrlParser<T>> },
+    ]
   ) {
     return Query.prepare(path, ...args).instant();
   }
 
   static prefetch<T extends keyof GetRPC>(
     path: T,
-    ...args: UrlParser<T> extends Record<string, never>
-      ? [options?: { search: Partial<Input<T>> }]
-      : [options: { search?: Partial<Input<T>>; params: UrlParser<T> }]
+    ...args: [
+      options?: { search?: Partial<Input<T>>; params?: Partial<UrlParser<T>> },
+    ]
   ) {
     return Query.prepare(path, ...args).prefetch();
   }
