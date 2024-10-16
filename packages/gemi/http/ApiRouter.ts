@@ -83,6 +83,8 @@ export type RouteHandlers =
       delete: RouteHandler<"DELETE", any, any, any>;
     };
 
+type IdKey<T> = `/:${T & string}`;
+
 export type ApiRoutes = Record<
   string,
   | RouteHandler<any, any, any, any>
@@ -90,6 +92,25 @@ export type ApiRoutes = Record<
   | RouteHandlers
   | typeof ApiRouter
 >;
+
+type ResourceRoutes<
+  T extends new () => ResourceController,
+  U extends PropertyKey,
+> = Record<
+  "/",
+  {
+    list: ParseRouteHandler<T, TestControllerMethod<T, "list">, "GET">;
+    create: ParseRouteHandler<T, TestControllerMethod<T, "create">, "POST">;
+  }
+> &
+  Record<
+    IdKey<U>,
+    {
+      show: ParseRouteHandler<T, TestControllerMethod<T, "show">, "GET">;
+      update: ParseRouteHandler<T, TestControllerMethod<T, "update">, "PUT">;
+      delete: ParseRouteHandler<T, TestControllerMethod<T, "delete">, "DELETE">;
+    }
+  >;
 
 export class ApiRouter {
   public routes: ApiRoutes = {};
@@ -166,7 +187,10 @@ export class ApiRouter {
     return new RouteHandler("DELETE", handler, methodName);
   }
 
-  public resource<T extends new () => ResourceController>(Controller: T) {
+  public resource<
+    T extends new () => ResourceController,
+    U extends PropertyKey,
+  >(Controller: T, id: U) {
     class ResourceRouter extends ApiRouter {
       routes = {
         "/": {
@@ -179,7 +203,7 @@ export class ApiRouter {
             "create" as ControllerMethods<T>,
           ) as ParseRouteHandler<T, TestControllerMethod<T, "create">, "POST">,
         },
-        "/:id": {
+        [`/:${String(id)}`]: {
           show: this.get(
             Controller,
             "show" as ControllerMethods<T>,
@@ -197,7 +221,7 @@ export class ApiRouter {
             "DELETE"
           >,
         },
-      };
+      } as ResourceRoutes<T, U>;
     }
     return ResourceRouter;
   }
@@ -287,3 +311,32 @@ export type CreateRPC<
   T extends ApiRouter,
   Prefix extends PropertyKey = "",
 > = KeyAndValueToObject<RouteParser<T["routes"], Prefix>>;
+
+// type Test<T> = IdKey<T> extends PropertyKey ? { [key: IdKey<T>]: true } : {};
+
+// function createIdKey<T>(id: T): IdKey<T> {
+//   return `/:${id}` as IdKey<T>;
+// }
+
+// function readKey<T extends PropertyKey>(key: T): Test<T> {
+//   return {
+//     "/": true,
+//     [createIdKey(key)]: false,
+//   } as any as Test<T>;
+// }
+
+// const x = readKey("y");
+
+// x["/:y"];
+
+// {
+//     "/": {
+//         list: ParseRouteHandler<T, TestControllerMethod<T, "list">, "GET">;
+//         create: ParseRouteHandler<T, TestControllerMethod<T, "create">, "POST">;
+//     };
+//     "/:id": {
+//         show: ParseRouteHandler<T, TestControllerMethod<T, "show">, "GET">;
+//         update: ParseRouteHandler<T, TestControllerMethod<T, "update">, "PUT">;
+//         delete: ParseRouteHandler<T, TestControllerMethod<T, "delete">, "DELETE">;
+//     };
+// }

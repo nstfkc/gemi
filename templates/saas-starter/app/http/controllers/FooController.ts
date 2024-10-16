@@ -2,12 +2,11 @@ import { Query } from "gemi/facades";
 import { HttpRequest, ResourceController } from "gemi/http";
 
 export class FooController extends ResourceController {
-  index() {
-    Query.prefetch("/foo/:id", { params: { id: "Enes" } });
+  async index() {
+    const x = await Query.instant("/foo/:fooId", { params: { fooId: "1234" } });
     return {};
   }
   details(req: HttpRequest) {
-    Query.prefetch("/foo/:id", { params: req.params });
     return {};
   }
 
@@ -18,7 +17,7 @@ export class FooController extends ResourceController {
     ];
   }
   show(req: HttpRequest) {
-    return { id: req.params.id };
+    return { id: "ENES" };
   }
   create() {}
   update(req: HttpRequest) {
