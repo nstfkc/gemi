@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { RPC } from "./rpc";
 import type { ApiRouterHandler } from "../http/ApiRouter";
 import type { UnwrapPromise } from "../utils/type";
@@ -105,10 +105,13 @@ export function useMutation<
     () => new AbortController(),
   );
 
+  const formData = useRef(new FormData());
+
   return {
     data: state.data as T,
     error: state.error as any,
     loading: state.loading,
+    formData: formData.current,
     cancel: () => {
       const [, options = defaultOptions] = args ?? [];
       abortController.abort();
@@ -118,9 +121,11 @@ export function useMutation<
         error: state.error,
         loading: false,
       });
+
+      formData.current = new FormData();
       options.onCanceled();
     },
-    trigger: async (input: U | FormData): Promise<T> => {
+    trigger: async (input?: U): Promise<T> => {
       setState({
         data: state.data,
         error: state.error,
@@ -137,10 +142,12 @@ export function useMutation<
       let body = null;
 
       const contentType =
-        input instanceof FormData ? {} : { "Content-Type": "application/json" };
+        typeof input === "undefined"
+          ? {}
+          : { "Content-Type": "application/json" };
 
-      if (input instanceof FormData) {
-        body = input;
+      if (typeof input === "undefined") {
+        body = formData.current;
       } else if (input) {
         body = JSON.stringify(input);
       }
@@ -154,6 +161,9 @@ export function useMutation<
           ...(body ? { body } : {}),
           signal: abortController.signal,
         });
+
+        formData.current = new FormData();
+
         const data = await response.json();
 
         if (!response.ok) {
@@ -177,6 +187,7 @@ export function useMutation<
 
         return data as any;
       } catch (error) {
+        formData.current = new FormData();
         options.onError(error);
         setState({
           data: null,
