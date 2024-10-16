@@ -1,3 +1,3 @@
 export function isConstructor(value: any) {
-  return typeof value === "function" && typeof value.constructor === "function";
+  return typeof value === "function" && value.prototype !== undefined;
 }

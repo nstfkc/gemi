@@ -6,6 +6,7 @@ export class FooController extends ResourceController {
     const x = await Query.instant("/foo/:fooId", { params: { fooId: "1234" } });
     return {};
   }
+
   details(req: HttpRequest) {
     return {};
   }
@@ -16,12 +17,20 @@ export class FooController extends ResourceController {
       { id: "2", uuid: req.params.id },
     ];
   }
+
   show(req: HttpRequest) {
     return { id: "ENES" };
   }
-  create() {}
+
+  async create(req: HttpRequest<{ name: string; age: number }>) {
+    const input = await req.input();
+    console.log(input);
+    return {};
+  }
+
   update(req: HttpRequest) {
     return req.params;
   }
+
   delete() {}
 }

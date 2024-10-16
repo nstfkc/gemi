@@ -273,29 +273,29 @@ type LastUrlSegment<T extends string> =
   T extends `${infer _}/${infer LastSegment}` ? LastUrlSegment<LastSegment> : T;
 
 type ResourceRoutesParser<
-  T extends (resourceId: string) => ResourceRoutes<any, string>,
+  T extends ResourceRoutes<new () => ResourceController, PropertyKey>,
   U extends PropertyKey,
-  R = ReturnType<T>,
-> = {
-  [K in keyof R]: R[K] extends RouteHandlers
-    ? K extends "/"
-      ? RouteHandlersParser<R[K], `${U & string}`>
-      : RouteHandlersParser<
-          R[K],
-          `${U & string}/:${LastUrlSegment<U & string>}Id`
-        >
-    : never;
-}[keyof R];
+  K extends keyof T = keyof T,
+> = T[K] extends RouteHandlers
+  ? K extends "/"
+    ? RouteHandlersParser<T[K], `${U & string}`>
+    : RouteHandlersParser<
+        T[K],
+        `${U & string}/:${LastUrlSegment<U & string>}Id`
+      >
+  : KeyAndValue<"YY", any>;
 
 type RouteParser<
   T extends ApiRoutes,
   Prefix extends PropertyKey = "",
   K extends keyof T = keyof T,
 > = K extends any
-  ? T[K] extends RouteHandler<any, any, any, any>
-    ? RouteHandlerParser<T[K], ParsePrefixAndKey<Prefix, K>>
-    : T[K] extends (resourceId: string) => ResourceRoutes<any, string>
-      ? ResourceRoutesParser<T[K], ParsePrefixAndKey<Prefix, K>>
+  ? T[K] extends (
+      res: string,
+    ) => ResourceRoutes<new () => ResourceController, PropertyKey>
+    ? ResourceRoutesParser<ReturnType<T[K]>, ParsePrefixAndKey<Prefix, K>>
+    : T[K] extends RouteHandler<any, any, any, any>
+      ? RouteHandlerParser<T[K], ParsePrefixAndKey<Prefix, K>>
       : T[K] extends new () => ApiRouter
         ? RouterInstanceParser<T[K], ParsePrefixAndKey<Prefix, K>>
         : T[K] extends RouteHandlers
@@ -310,35 +310,3 @@ export type CreateRPC<
   T extends ApiRouter,
   Prefix extends PropertyKey = "",
 > = KeyAndValueToObject<RouteParser<T["routes"], Prefix>>;
-
-// export class FooController extends ResourceController {
-//   async index() {
-//     return {};
-//   }
-//   details(req: HttpRequest) {
-//     return {};
-//   }
-
-//   list(req: HttpRequest) {
-//     return [
-//       { id: "1", uuid: req.params.id },
-//       { id: "2", uuid: req.params.id },
-//     ];
-//   }
-//   show(req: HttpRequest) {
-//     return { id: "ENES" };
-//   }
-//   create() {}
-//   update(req: HttpRequest) {
-//     return req.params;
-//   }
-//   delete() {}
-// }
-
-// class XX extends ApiRouter {
-//   routes = {
-//     "/foo": this.resource(FooController),
-//   };
-// }
-
-// type X = CreateRPC<XX>;

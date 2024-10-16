@@ -51,9 +51,7 @@ export class MiddlewareServiceContainer extends ServiceContainer {
           }
         } else {
           if (isConstructor(key)) {
-            // TODO: fix type
-            // @ts-ignore
-            const middleware = new aliasOrTest(routePath);
+            const middleware = new key(routePath);
             return middleware.run.bind(middleware);
           }
           return key;
