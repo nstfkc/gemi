@@ -142,11 +142,13 @@ export function useMutation<
       let body = null;
 
       const contentType =
-        typeof input === "undefined"
+        typeof input === "undefined" || input instanceof FormData
           ? {}
           : { "Content-Type": "application/json" };
 
-      if (typeof input === "undefined") {
+      if (input instanceof FormData) {
+        body = input;
+      } else if (typeof input === "undefined") {
         body = formData.current;
       } else if (input) {
         body = JSON.stringify(input);
