@@ -53,6 +53,14 @@ export function createFlatApiRoutes(routes: ApiRoutes) {
         routerMiddlewares = [router.middleware, ...router.middlewares];
       } else {
         const [lastSegment] = rootPath.split("/").reverse();
+        if (lastSegment === "") {
+          throw new Error(`"${rootPath}" is not valid for a resource route`);
+        }
+        if (lastSegment.includes(":")) {
+          throw new Error(
+            `Last segment of a resource route has to be static. See "${rootPath}"`,
+          );
+        }
         routes = apiRouteHandlerOrApiRouter(`${lastSegment}Id`);
       }
 
