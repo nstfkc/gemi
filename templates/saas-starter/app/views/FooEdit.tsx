@@ -1,7 +1,7 @@
-import { Form, usePut, useQuery } from "gemi/client";
+import { Form, useMutation, usePut, useQuery } from "gemi/client";
 
 export default function FooEdit() {
-  const { data } = useQuery("/foo/:fooId");
+  const { data } = useQuery("");
   console.log({ data });
   return (
     <div>

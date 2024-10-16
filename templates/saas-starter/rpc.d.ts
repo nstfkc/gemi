@@ -8,6 +8,8 @@ import type { CreateRPC } from "gemi/http";
 import type { CreateViewRPC } from "gemi/http";
 import { type Dictionary } from "./app/i18n";
 
+type X = CreateRPC<Api>;
+
 declare module "gemi/client" {
   export interface RPC extends CreateRPC<Api> {}
   export interface ViewRPC extends CreateViewRPC<View> {}

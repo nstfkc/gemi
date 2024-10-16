@@ -91,9 +91,10 @@ export type ApiRoutes = Record<
   | FileHandler
   | RouteHandlers
   | typeof ApiRouter
+  | ((resourceId: string) => ResourceRoutes<any, string>)
 >;
 
-type ResourceRoutes<
+export type ResourceRoutes<
   T extends new () => ResourceController,
   U extends PropertyKey,
 > = Record<
@@ -113,6 +114,7 @@ type ResourceRoutes<
   >;
 
 export class ApiRouter {
+  static __brand = "ApiRouter";
   public routes: ApiRoutes = {};
   public middlewares: string[] = [];
   public middleware(_req: HttpRequest<any, any>): MiddlewareReturnType {}
@@ -187,43 +189,20 @@ export class ApiRouter {
     return new RouteHandler("DELETE", handler, methodName);
   }
 
-  public resource<
-    T extends new () => ResourceController,
-    U extends PropertyKey,
-  >(Controller: T, id: U) {
-    class ResourceRouter extends ApiRouter {
-      routes = {
+  public resource<T extends new () => ResourceController>(Controller: T) {
+    return <U extends PropertyKey>(resourceId: U) => {
+      return {
         "/": {
-          list: this.get(
-            Controller,
-            "list" as ControllerMethods<T>,
-          ) as ParseRouteHandler<T, TestControllerMethod<T, "list">, "GET">,
-          create: this.post(
-            Controller,
-            "create" as ControllerMethods<T>,
-          ) as ParseRouteHandler<T, TestControllerMethod<T, "create">, "POST">,
+          list: new RouteHandler("GET", Controller, "list"),
+          create: new RouteHandler("POST", Controller, "create"),
         },
-        [`/:${String(id)}`]: {
-          show: this.get(
-            Controller,
-            "show" as ControllerMethods<T>,
-          ) as ParseRouteHandler<T, TestControllerMethod<T, "show">, "GET">,
-          update: this.put(
-            Controller,
-            "update" as ControllerMethods<T>,
-          ) as ParseRouteHandler<T, TestControllerMethod<T, "update">, "PUT">,
-          delete: this.delete(
-            Controller,
-            "delete" as ControllerMethods<T>,
-          ) as ParseRouteHandler<
-            T,
-            TestControllerMethod<T, "delete">,
-            "DELETE"
-          >,
+        [`/:${String(resourceId)}`]: {
+          show: new RouteHandler("GET", Controller, "show"),
+          update: new RouteHandler("PUT", Controller, "update"),
+          delete: new RouteHandler("DELETE", Controller, "delete"),
         },
       } as ResourceRoutes<T, U>;
-    }
-    return ResourceRouter;
+    };
   }
 
   public file<Input, Output, Params>(
@@ -290,6 +269,24 @@ type ParsePrefixAndKey<
       ? `${T1}/${T2}`
       : U;
 
+type LastUrlSegment<T extends string> =
+  T extends `${infer _}/${infer LastSegment}` ? LastUrlSegment<LastSegment> : T;
+
+type ResourceRoutesParser<
+  T extends (resourceId: string) => ResourceRoutes<any, string>,
+  U extends PropertyKey,
+  R = ReturnType<T>,
+> = {
+  [K in keyof R]: R[K] extends RouteHandlers
+    ? K extends "/"
+      ? RouteHandlersParser<R[K], `${U & string}`>
+      : RouteHandlersParser<
+          R[K],
+          `${U & string}/:${LastUrlSegment<U & string>}Id`
+        >
+    : never;
+}[keyof R];
+
 type RouteParser<
   T extends ApiRoutes,
   Prefix extends PropertyKey = "",
@@ -297,14 +294,16 @@ type RouteParser<
 > = K extends any
   ? T[K] extends RouteHandler<any, any, any, any>
     ? RouteHandlerParser<T[K], ParsePrefixAndKey<Prefix, K>>
-    : T[K] extends new () => ApiRouter
-      ? RouterInstanceParser<T[K], ParsePrefixAndKey<Prefix, K>>
-      : T[K] extends RouteHandlers
-        ? RouteHandlersParser<
-            T[K],
-            `${Prefix & string}${K extends "/" ? "" : K & string}`
-          >
-        : never
+    : T[K] extends (resourceId: string) => ResourceRoutes<any, string>
+      ? ResourceRoutesParser<T[K], ParsePrefixAndKey<Prefix, K>>
+      : T[K] extends new () => ApiRouter
+        ? RouterInstanceParser<T[K], ParsePrefixAndKey<Prefix, K>>
+        : T[K] extends RouteHandlers
+          ? RouteHandlersParser<
+              T[K],
+              `${Prefix & string}${K extends "/" ? "" : K & string}`
+            >
+          : never
   : never;
 
 export type CreateRPC<
@@ -312,31 +311,34 @@ export type CreateRPC<
   Prefix extends PropertyKey = "",
 > = KeyAndValueToObject<RouteParser<T["routes"], Prefix>>;
 
-// type Test<T> = IdKey<T> extends PropertyKey ? { [key: IdKey<T>]: true } : {};
+// export class FooController extends ResourceController {
+//   async index() {
+//     return {};
+//   }
+//   details(req: HttpRequest) {
+//     return {};
+//   }
 
-// function createIdKey<T>(id: T): IdKey<T> {
-//   return `/:${id}` as IdKey<T>;
+//   list(req: HttpRequest) {
+//     return [
+//       { id: "1", uuid: req.params.id },
+//       { id: "2", uuid: req.params.id },
+//     ];
+//   }
+//   show(req: HttpRequest) {
+//     return { id: "ENES" };
+//   }
+//   create() {}
+//   update(req: HttpRequest) {
+//     return req.params;
+//   }
+//   delete() {}
 // }
 
-// function readKey<T extends PropertyKey>(key: T): Test<T> {
-//   return {
-//     "/": true,
-//     [createIdKey(key)]: false,
-//   } as any as Test<T>;
+// class XX extends ApiRouter {
+//   routes = {
+//     "/foo": this.resource(FooController),
+//   };
 // }
 
-// const x = readKey("y");
-
-// x["/:y"];
-
-// {
-//     "/": {
-//         list: ParseRouteHandler<T, TestControllerMethod<T, "list">, "GET">;
-//         create: ParseRouteHandler<T, TestControllerMethod<T, "create">, "POST">;
-//     };
-//     "/:id": {
-//         show: ParseRouteHandler<T, TestControllerMethod<T, "show">, "GET">;
-//         update: ParseRouteHandler<T, TestControllerMethod<T, "update">, "PUT">;
-//         delete: ParseRouteHandler<T, TestControllerMethod<T, "delete">, "DELETE">;
-//     };
-// }
+// type X = CreateRPC<XX>;
