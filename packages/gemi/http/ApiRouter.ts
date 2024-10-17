@@ -272,6 +272,10 @@ type ParsePrefixAndKey<
 type LastUrlSegment<T extends string> =
   T extends `${infer _}/${infer LastSegment}` ? LastUrlSegment<LastSegment> : T;
 
+type ToCamelCase<T extends string> = T extends `${infer F}-${infer L}`
+  ? `${F}${Capitalize<ToCamelCase<L>>}`
+  : T;
+
 type ResourceRoutesParser<
   T extends ResourceRoutes<new () => ResourceController, PropertyKey>,
   U extends PropertyKey,
@@ -281,7 +285,7 @@ type ResourceRoutesParser<
     ? RouteHandlersParser<T[K], `${U & string}`>
     : RouteHandlersParser<
         T[K],
-        `${U & string}/:${LastUrlSegment<U & string>}Id`
+        `${U & string}/:${ToCamelCase<LastUrlSegment<U & string>>}Id`
       >
   : KeyAndValue<"YY", any>;
 

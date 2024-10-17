@@ -1,15 +1,13 @@
 import { usePost, useQuery } from "gemi/client";
 
 export default function FooList() {
-  const { trigger, formData } = usePost("/foo");
-  const handlePost = async () => {
-    formData.append("name", "foo");
-    await trigger();
-  };
+  const { data } = useQuery("/foo-bar-baz/:fooBarBazId", {
+    params: { fooBarBazId: "1234" },
+  });
 
   return (
     <div>
-      <button onClick={() => handlePost()}>Submit</button>
+      <h1>{data.id}</h1>
     </div>
   );
 }

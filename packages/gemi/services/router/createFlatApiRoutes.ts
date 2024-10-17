@@ -6,6 +6,7 @@ import {
   type ApiRouter,
 } from "../../http/ApiRouter";
 import type { RouterMiddleware } from "../../http/Router";
+import { toCamelCase } from "../../utils/toCamelCase";
 
 type ApiRouteExec = any;
 
@@ -61,7 +62,7 @@ export function createFlatApiRoutes(routes: ApiRoutes) {
             `Last segment of a resource route has to be static. See "${rootPath}"`,
           );
         }
-        routes = apiRouteHandlerOrApiRouter(`${lastSegment}Id`);
+        routes = apiRouteHandlerOrApiRouter(`${toCamelCase(lastSegment)}Id`);
       }
 
       const result = createFlatApiRoutes(routes);

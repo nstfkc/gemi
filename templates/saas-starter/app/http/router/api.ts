@@ -41,7 +41,7 @@ export default class extends ApiRouter {
       console.log(input.get("images"));
       return {};
     }),
-    "/foo": this.resource(FooController),
+    "/foo-bar-baz": this.resource(FooController),
     "/file/:path*": this.get(async (req: HttpRequest<{ path: string }>) => {
       return await FileStorage.fetch(req.params.path);
     }),

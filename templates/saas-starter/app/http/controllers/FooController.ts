@@ -3,7 +3,9 @@ import { HttpRequest, ResourceController } from "gemi/http";
 
 export class FooController extends ResourceController {
   async index() {
-    const x = await Query.instant("/foo/:fooId", { params: { fooId: "1234" } });
+    Query.prefetch("/foo-bar-baz/:fooBarBazId", {
+      params: { fooBarBazId: "1234" },
+    });
     return {};
   }
 
@@ -19,7 +21,7 @@ export class FooController extends ResourceController {
   }
 
   show(req: HttpRequest) {
-    return { id: "ENES" };
+    return { id: req.params.fooBarBazId };
   }
 
   async create(req: HttpRequest<{ name: string; age: number }>) {
