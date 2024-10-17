@@ -30,7 +30,7 @@ export type FlatApiRoutes = Record<
   >
 >;
 
-export function createFlatApiRoutes(routes: ApiRoutes) {
+export function createFlatApiRoutes(routes: ApiRoutes, prevPath: string = "") {
   const flatApiRoutes: FlatApiRoutes = {};
   for (const [rootPath, apiRouteHandlerOrApiRouter] of Object.entries(routes)) {
     if ("run" in apiRouteHandlerOrApiRouter) {
@@ -53,7 +53,10 @@ export function createFlatApiRoutes(routes: ApiRoutes) {
         routes = router.routes;
         routerMiddlewares = [router.middleware, ...router.middlewares];
       } else {
-        const [lastSegment] = rootPath.split("/").reverse();
+        const [lastSegment] = (rootPath === "/" ? prevPath : rootPath)
+          .split("/")
+          .reverse();
+
         if (lastSegment === "") {
           throw new Error(`"${rootPath}" is not valid for a resource route`);
         }
@@ -65,7 +68,7 @@ export function createFlatApiRoutes(routes: ApiRoutes) {
         routes = apiRouteHandlerOrApiRouter(`${toCamelCase(lastSegment)}Id`);
       }
 
-      const result = createFlatApiRoutes(routes);
+      const result = createFlatApiRoutes(routes, rootPath);
       for (const [path, handlers] of Object.entries(result)) {
         const subPath = path === "/" ? "" : path;
         const _rootPath = rootPath === "/" ? "" : rootPath;

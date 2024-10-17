@@ -1,8 +1,22 @@
 import { prisma } from "@/app/database/prisma";
-import { ApiRouter, HttpRequest } from "gemi/http";
+import { ApiRouter, HttpRequest, ResourceController } from "gemi/http";
 import { FileStorage } from "gemi/facades";
 import { WelcomeEmail } from "@/app/email/WelcomeEmail";
 import { FooController } from "../controllers/FooController";
+
+class BarController extends ResourceController {
+  create() {}
+  delete() {}
+  list() {}
+  show() {}
+  update() {}
+}
+
+class BarRouter extends ApiRouter {
+  routes = {
+    "/": this.resource(BarController),
+  };
+}
 
 export default class extends ApiRouter {
   routes = {
@@ -41,6 +55,7 @@ export default class extends ApiRouter {
       console.log(input.get("images"));
       return {};
     }),
+    "/bar": BarRouter,
     "/foo-bar-baz": this.resource(FooController),
     "/file/:path*": this.get(async (req: HttpRequest<{ path: string }>) => {
       return await FileStorage.fetch(req.params.path);
