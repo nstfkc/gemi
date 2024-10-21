@@ -56,8 +56,6 @@ export class Email {
 
   protected async render<T extends Record<string, any>>(props: T) {
     const Template = this.template;
-    const markup = await render(<Template {...props} />);
-
-    return markup;
+    return await render(<Template {...props} />);
   }
 }
