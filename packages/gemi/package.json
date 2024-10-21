@@ -1,6 +1,6 @@
 {
   "name": "gemi",
-  "version": "0.4.119",
+  "version": "0.4.120",
   "devDependencies": {
     "@babel/parser": "^7.25.4",
     "@repo/eslint-config": "*",
@@ -56,6 +56,7 @@
     "ast-types": "^0.14.2",
     "commander": "^12.1.0",
     "history": "^5.3.0",
+    "jsx-email": "2.0.0-rc2.1",
     "open": "^10.1.0",
     "recast": "^0.23.9",
     "resend": "^3.4.0",

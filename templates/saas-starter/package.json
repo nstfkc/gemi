@@ -14,6 +14,7 @@
     "@react-email/render": "^0.0.17-canary.0",
     "framer-motion": "12.0.0-alpha.1",
     "gemi": "*",
+    "jsx-email": "2.0.0-rc2.1",
     "react": "19.0.0-rc-fb9a90fa48-20240614",
     "react-dom": "19.0.0-rc-fb9a90fa48-20240614",
     "sharp": "^0.33.3",

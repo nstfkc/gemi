@@ -1,4 +1,4 @@
-import { Html, Button, Text, Heading, Tailwind } from "@react-email/components";
+import { Html, Button, Text, Heading, Tailwind } from "jsx-email";
 
 export default function Welcome(props: { name: string }) {
   return (

@@ -100,13 +100,6 @@ export class LayoutRoute<T extends ViewRoutes, Input, Output, Params> {
       const controllerHandler =
         controllerInstance[methodName].bind(controllerInstance);
       this.handler = (req: HttpRequest<Input, Params>): Output => {
-        let httpRequest = req;
-        httpRequest = controllerInstance.requests[methodName]
-          ? new controllerInstance.requests[methodName](
-              req.rawRequest,
-              req.params,
-            )
-          : httpRequest;
         return controllerHandler(req);
       };
       this.children = class extends ViewRouter {

@@ -35,6 +35,7 @@ function isController(
 }
 
 export class RouteHandler<M extends HttpMethod, Input, Output, Params> {
+  __internal_brand = "RouteHandler";
   middlewares: string[] = [];
 
   constructor(
@@ -47,6 +48,13 @@ export class RouteHandler<M extends HttpMethod, Input, Output, Params> {
     this.handler = handler;
     this.methodName = methodName;
     this.method = method;
+  }
+
+  __internal_use() {
+    return {
+      run: this.run.bind(this),
+      middlewares: this.middlewares,
+    };
   }
 
   run(_req: HttpRequest<Input, Params>) {

@@ -1,5 +1,5 @@
 import { ComponentType } from "react";
-import { render } from "@react-email/render";
+import { render } from "jsx-email";
 import { EmailServiceContainer } from "../services/email/EmailServiceContainer";
 import { SendEmailParams } from "../services/email/drivers/types";
 

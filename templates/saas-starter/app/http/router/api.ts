@@ -46,7 +46,10 @@ export default class extends ApiRouter {
     }),
 
     "/email": this.get(async () => {
-      const result = await WelcomeEmail.send({ data: { name: "Enes" } });
+      const result = await WelcomeEmail.send({
+        to: ["enesxtufekci@gmail.com"],
+        data: { name: "Enes" },
+      });
       return { success: result };
     }),
 

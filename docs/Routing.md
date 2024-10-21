@@ -222,9 +222,8 @@ export default class extends ViewRouter {
 
 > 💡 When you navigate between the sibling routes of a layout, the server data for the layout will be persisted and the callback handler or controller method won't be invoked. Currently there is no mechanism to opt-out this behaviour but there will be a new API to handle such scenarios in the future.
 
-## Composing routers
-
-
-
 ## Using middlewares
 
+
+
+## Composing routers
