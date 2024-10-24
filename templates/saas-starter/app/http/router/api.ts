@@ -1,6 +1,6 @@
 import { prisma } from "@/app/database/prisma";
 import { ApiRouter, HttpRequest, ResourceController } from "gemi/http";
-import { FileStorage } from "gemi/facades";
+import { FileStorage, Url } from "gemi/facades";
 import { WelcomeEmail } from "@/app/email/WelcomeEmail";
 import { FooController } from "../controllers/FooController";
 
@@ -42,7 +42,7 @@ export default class extends ApiRouter {
     }),
 
     "/test/:testId": this.get((req: HttpRequest) => {
-      return `${req.params.testId}`;
+      return Url.relative("/foo/:id", { id: "enes1-1234" });
     }),
 
     "/email": this.get(async () => {
