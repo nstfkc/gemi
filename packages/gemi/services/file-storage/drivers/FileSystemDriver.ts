@@ -1,6 +1,7 @@
 import { v4 } from "uuid";
 import type { PutFileParams, ReadFileParams } from "./types";
 import { FileStorageDriver } from "./FileStorageDriver";
+import { readdir } from "fs/promises";
 
 export class FileSystemDriver extends FileStorageDriver {
   constructor(private folderPath: string = `${process.env.ROOT_DIR}/storage`) {
@@ -58,5 +59,11 @@ export class FileSystemDriver extends FileStorageDriver {
         "Last-Modified": date,
       },
     });
+  }
+
+  async list() {
+    const files = await readdir(this.folderPath);
+
+    return files;
   }
 }
