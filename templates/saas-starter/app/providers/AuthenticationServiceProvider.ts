@@ -8,7 +8,7 @@ import type { User } from "@prisma/client";
 export default class extends AuthenticationServiceProvider {
   adapter = new PrismaAuthenticationAdapter(prisma);
 
-  extendSession(_user: User) {
+  extendSession(_user: any) {
     return {
       testId: "1234",
     };

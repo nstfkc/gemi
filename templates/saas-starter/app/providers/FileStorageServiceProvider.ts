@@ -5,5 +5,5 @@ import {
 } from "gemi/services";
 
 export default class extends FileStorageServiceProvider {
-  driver = new FileSystemDriver();
+  driver = new S3Driver();
 }

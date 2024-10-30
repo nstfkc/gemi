@@ -30,5 +30,8 @@ export class FileStorage {
   static async fetch(params: ReadFileParams | string) {
     return FileStorageServiceContainer.use().service.driver.fetch(params);
   }
+  static list(folder: string) {
+    return FileStorageServiceContainer.use().service.driver.list(folder);
+  }
   static delete() {}
 }

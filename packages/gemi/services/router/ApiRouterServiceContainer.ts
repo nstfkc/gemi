@@ -3,6 +3,7 @@ import { HttpRequest } from "../../http";
 import { GEMI_REQUEST_BREAKER_ERROR } from "../../http/Error";
 import { I18nRouter } from "../../http/I18nServiceContainer";
 import { RequestContext } from "../../http/requestContext";
+import { LoggingRouter } from "../logging/LoggingRouter";
 import { MiddlewareServiceContainer } from "../middleware/MiddlewareServiceContainer";
 import { ServiceContainer } from "../ServiceContainer";
 import { ApiRouterServiceProvider } from "./ApiRouterServiceProvider";
@@ -19,6 +20,7 @@ export class ApiRouterServiceContainer extends ServiceContainer {
       "/": this.service.rootRouter.bind(this.service),
       "/auth": AuthApiRouter,
       "/__gemi__/services/i18n": I18nRouter,
+      "/__gemi__/services/logs": LoggingRouter,
     });
   }
 
@@ -64,6 +66,7 @@ export class ApiRouterServiceContainer extends ServiceContainer {
           });
         }
       } else {
+        this.service.onRequestFail(ctx.req, err);
         console.error(err);
         throw err;
       }
@@ -93,6 +96,7 @@ export class ApiRouterServiceContainer extends ServiceContainer {
           },
         });
       } else {
+        this.service.onRequestFail(ctx.req, err);
         console.error(err);
         throw err;
       }
@@ -113,6 +117,9 @@ export class ApiRouterServiceContainer extends ServiceContainer {
     }
 
     const httpRequest = new HttpRequest(req, params, "api");
+    if (!req.url.includes("/__gemi__")) {
+      this.service.onRequestStart(httpRequest);
+    }
     return await RequestContext.run(httpRequest, async () => {
       const middlewareResponse = await this.runRouteMiddleware(path);
 
@@ -150,6 +157,9 @@ export class ApiRouterServiceContainer extends ServiceContainer {
 
       ctx.destroy();
 
+      if (!req.url.includes("/__gemi__")) {
+        this.service.onRequestEnd(httpRequest);
+      }
       return new Response(JSON.stringify(data), {
         headers,
       });

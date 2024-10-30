@@ -1,6 +1,4 @@
 import { HttpRequest } from "../../http";
-import { createRoot } from "../../client/createRoot";
-
 import { Cookie } from "../../http/Cookie";
 import { GEMI_REQUEST_BREAKER_ERROR } from "../../http/Error";
 import { RequestContext } from "../../http/requestContext";
@@ -65,6 +63,8 @@ export class ViewRouterServiceContainer extends ServiceContainer {
       params: Record<string, any>;
     } | null = null;
 
+    let httpRequest: HttpRequest | null = null;
+
     try {
       let handlers: ViewRouteExec[] = [];
       let middlewares: (RouterMiddleware | string)[] = [];
@@ -82,7 +82,8 @@ export class ViewRouterServiceContainer extends ServiceContainer {
         }
       }
 
-      const httpRequest = new HttpRequest(req, params, "view");
+      httpRequest = new HttpRequest(req, params, "view");
+      await this.service.onRequestStart(httpRequest);
       const { data, cookies, headers, user, prefetchedData } =
         await RequestContext.run(httpRequest, async () => {
           const ctx = RequestContext.getStore();
@@ -136,6 +137,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           });
         }
       } else {
+        this.service.onRequestFail(httpRequest, err);
         throw err;
       }
     }
@@ -148,6 +150,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
         ...data,
       };
     }, {});
+
     const i18nServiceContainer = I18nServiceContainer.use();
     const isI18nEnabled = i18nServiceContainer.isEnabled;
     let i18n: Record<string, any> = {};
@@ -183,6 +186,8 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           ? "private, no-cache, no-store, max-age=0, must-revalidate"
           : "public, max-age=864000, must-revalidate",
       );
+
+      await this.service.onRequestEnd(httpRequest);
 
       return new Response(
         JSON.stringify({
@@ -258,6 +263,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
         },
       );
 
+      await this.service.onRequestEnd(httpRequest);
       return new Response(stream, {
         status: !currentPathName ? 404 : 200,
         headers,

@@ -18,6 +18,8 @@ import { BroadcastingServiceProvider } from "../services/pubsub/BroadcastingServ
 import { ViewRouterServiceContainer } from "../services/router/ViewRouterServiceContainer";
 import { ViewRouterServiceProvider } from "../services/router/ViewRouterServiceProvider";
 import { ServiceContainer } from "../services/ServiceContainer";
+import { LoggingServiceContainer } from "../services/logging/LoggingServiceContainer";
+import { LoggingServiceProvider } from "../services/logging/LoggingServiceProvider";
 
 export class Kernel {
   protected emailServiceProvider = EmailServiceProvider;
@@ -29,6 +31,7 @@ export class Kernel {
   protected viewRouterServiceProvider = ViewRouterServiceProvider;
   protected rateLimiterServiceProvider = RateLimiterServiceProvider;
   protected broadcastingsServiceProvider = BroadcastingServiceProvider;
+  protected loggingServiceProvider = LoggingServiceProvider;
 
   services: Record<string, ServiceContainer> = {};
 
@@ -61,6 +64,9 @@ export class Kernel {
       ),
       [BroadcastingServiceContainer._name]: new BroadcastingServiceContainer(
         new this.broadcastingsServiceProvider(),
+      ),
+      [LoggingServiceContainer._name]: new LoggingServiceContainer(
+        new this.loggingServiceProvider(),
       ),
     };
   }

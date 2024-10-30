@@ -14,8 +14,15 @@ class FooChannel extends PrivateChannel {
   }
 }
 
+class LogsChannel extends BroadcastingChannel {
+  publish(message: string) {
+    return { message };
+  }
+}
+
 export default class extends BroadcastingServiceProvider {
   channels = {
     "/foo/:id": FooChannel,
+    "/logs/live": LogsChannel,
   };
 }

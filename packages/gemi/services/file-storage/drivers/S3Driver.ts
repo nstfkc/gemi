@@ -2,6 +2,7 @@ import type { PutFileParams, ReadFileParams } from "./types";
 
 import {
   GetObjectCommand,
+  ListObjectsV2Command,
   PutObjectCommand,
   S3Client,
 } from "@aws-sdk/client-s3";
@@ -31,6 +32,7 @@ export class S3Driver extends FileStorageDriver {
     } else {
       body = params.body;
       name = params.name;
+      bucket = params.bucket ?? bucket;
       contentType = params.contentType;
     }
 
@@ -50,6 +52,17 @@ export class S3Driver extends FileStorageDriver {
     );
 
     return name;
+  }
+
+  async list(folder: string) {
+    const result = await this.client.send(
+      new ListObjectsV2Command({
+        Bucket: process.env.BUCKET_NAME,
+        Prefix: folder,
+      }),
+    );
+
+    return result;
   }
 
   async fetch(params: ReadFileParams | string) {

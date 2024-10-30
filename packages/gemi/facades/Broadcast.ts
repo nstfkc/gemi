@@ -3,7 +3,7 @@ import { BroadcastingServiceContainer } from "../services/pubsub/BroadcastingSer
 import { applyParams } from "../utils/applyParams";
 
 export class Broadcast {
-  static publish<T>(route: T, params: any) {
+  static channel<T>(route: T, params: any) {
     const channel =
       BroadcastingServiceContainer.use().service.channels[route as any];
     if (!channel) {

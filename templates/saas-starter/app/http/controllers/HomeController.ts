@@ -1,4 +1,4 @@
-import { Query, Redirect } from "gemi/facades";
+import { Log, Query, Redirect } from "gemi/facades";
 import { Controller, HttpRequest } from "gemi/http";
 
 export class HomeController extends Controller {
@@ -18,6 +18,7 @@ export class HomeController extends Controller {
     ];
 
     const filters = items.map((item) => item.color);
+    Log.emergency("Hello World");
 
     return { filters };
   }

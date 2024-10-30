@@ -32,7 +32,9 @@ export const WebSocketContextProvider = (props: PropsWithChildren) => {
         const ws = new WebSocket("ws://localhost:5173/");
         ws.onopen = () => {
           wsRef.current = ws;
+          console.log("ws opened");
           ws.addEventListener("close", () => {
+            console.log("ws closed");
             wsRef.current = null;
           });
           resolve(ws);

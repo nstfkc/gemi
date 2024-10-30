@@ -2,6 +2,7 @@ import type { WebSocketHandler } from "bun";
 import { Kernel } from "../kernel";
 import { ApiRouterServiceContainer } from "../services/router/ApiRouterServiceContainer";
 import { ViewRouterServiceContainer } from "../services/router/ViewRouterServiceContainer";
+import { BroadcastingServiceContainer } from "../services/pubsub/BroadcastingServiceContainer";
 
 interface AppParams {
   kernel: new () => Kernel;
@@ -42,17 +43,11 @@ export class App {
   public websocket: WebSocketHandler<{ headers: Headers }> = {
     message: (ws, message) => {
       const kernelRun = this.kernel.run.bind(this.kernel);
-      // kernelRun(() => {
-      //   KernelContext.getStore().broadcastingServiceContainer.run(
-      //     ws.data.headers,
-      //     () => {
-      //       KernelContext.getStore().broadcastingServiceContainer.handleMessage(
-      //         ws,
-      //         message,
-      //       );
-      //     },
-      //   );
-      // });
+      kernelRun(() => {
+        BroadcastingServiceContainer.use().run(ws.data.headers, () => {
+          BroadcastingServiceContainer.use().handleMessage(ws, message);
+        });
+      });
     },
     open: (_ws) => {},
     close: (ws) => {
@@ -68,6 +63,9 @@ export class App {
       compress?: boolean,
     ) => void,
   ) {
-    // this.kernel.services.broadcastingServiceContainer.onPublish(fn);
+    const kernelRun = this.kernel.run.bind(this.kernel);
+    kernelRun(() => {
+      BroadcastingServiceContainer.use().onPublish(fn);
+    });
   }
 }

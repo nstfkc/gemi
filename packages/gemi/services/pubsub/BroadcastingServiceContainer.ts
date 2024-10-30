@@ -47,8 +47,9 @@ export class BroadcastingServiceContainer extends ServiceContainer {
           if (canSubscribe) {
             ws.subscribe(messageData.topic);
           }
+
+          break;
         }
-        break;
       }
     }
     if (messageData.type === "broadcast") {

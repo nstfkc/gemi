@@ -20,6 +20,7 @@ export async function startDevServer() {
       watch: {
         usePolling: true,
         interval: 100,
+        ignored: ["**/storage/**"],
       },
       hmr: {
         clientPort: 5174,
@@ -188,6 +189,9 @@ export async function startDevServer() {
 
   vite.watcher.on("change", async (file) => {
     const fileRelativePath = file.replace(rootDir, "");
+    if (fileRelativePath.startsWith("/logs")) {
+      return;
+    }
     if (fileRelativePath.startsWith("/app/views")) {
       console.log(`[vite] ${fileRelativePath} changed. 🍜 Hot reloading...`);
       return;
