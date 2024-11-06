@@ -14,7 +14,7 @@
     "facades",
     "email",
     "services",
-    "broadcating"
+    "broadcasting"
   ],
   "exclude": ["node_modules", "dist"]
 }

@@ -1,5 +1,5 @@
 import { ServiceProvider } from "../ServiceProvider";
-import { LogEntry } from "./types";
+import type { LogEntry } from "./types";
 
 export class LoggingServiceProvider extends ServiceProvider {
   maxFileSize = 1024 * 1024 * 10; // 10MB

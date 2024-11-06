@@ -7,7 +7,10 @@ export class Broadcast {
     const channel =
       BroadcastingServiceContainer.use().service.channels[route as any];
     if (!channel) {
-      throw new Error(`Channel ${route} not found`);
+      console.error(`Channel ${route} not found`);
+      return {
+        publish: () => {},
+      };
     }
     const instance = new channel();
     return {

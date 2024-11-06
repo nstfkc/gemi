@@ -4,7 +4,7 @@ import { mkdir, exists, readdir } from "fs/promises";
 import type { FileSink } from "bun";
 import { Broadcast } from "../../facades";
 import { RequestContext } from "../../http/requestContext";
-import { LogEntry, LogLevel } from "./types";
+import type { LogEntry, LogLevel } from "./types";
 
 export class LoggingServiceContainer extends ServiceContainer {
   _name = "LoggingServiceContainer";
