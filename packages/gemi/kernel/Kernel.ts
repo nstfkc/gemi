@@ -10,7 +10,7 @@ import { ApiRouterServiceContainer } from "../services/router/ApiRouterServiceCo
 import { ApiRouterServiceProvider } from "../services/router/ApiRouterServiceProvider";
 import { MiddlewareServiceContainer } from "../services/middleware/MiddlewareServiceContainer";
 import { RateLimiterServiceContainer } from "../services/rate-limiter/RateLimiterServiceContainer";
-import { RateLimiterServiceProvider } from "../services";
+import { QueueServiceProvider, RateLimiterServiceProvider } from "../services";
 import { EmailServiceProvider } from "../services/email/EmailServiceProvider";
 import { EmailServiceContainer } from "../services/email/EmailServiceContainer";
 import { BroadcastingServiceContainer } from "../services/pubsub/BroadcastingServiceContainer";
@@ -20,6 +20,7 @@ import { ViewRouterServiceProvider } from "../services/router/ViewRouterServiceP
 import { ServiceContainer } from "../services/ServiceContainer";
 import { LoggingServiceContainer } from "../services/logging/LoggingServiceContainer";
 import { LoggingServiceProvider } from "../services/logging/LoggingServiceProvider";
+import { QueueServiceContainer } from "../services/queue/QueueServiceContainer";
 
 export class Kernel {
   protected emailServiceProvider = EmailServiceProvider;
@@ -32,6 +33,7 @@ export class Kernel {
   protected rateLimiterServiceProvider = RateLimiterServiceProvider;
   protected broadcastingsServiceProvider = BroadcastingServiceProvider;
   protected loggingServiceProvider = LoggingServiceProvider;
+  protected queueServiceProvider = QueueServiceProvider;
 
   services: Record<string, ServiceContainer> = {};
 
@@ -67,6 +69,9 @@ export class Kernel {
       ),
       [LoggingServiceContainer._name]: new LoggingServiceContainer(
         new this.loggingServiceProvider(),
+      ),
+      [QueueServiceContainer._name]: new QueueServiceContainer(
+        new this.queueServiceProvider(),
       ),
     };
   }

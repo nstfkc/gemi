@@ -9,6 +9,7 @@ import BroadcastingServiceProvider from "../providers/BroadcastingServiceProvide
 import ViewRouterServiceProvider from "../providers/ViewRouterServiceProvider";
 import ApiRouterServiceProvider from "../providers/ApiRouterServiceProvider";
 import LoggingServiceProvider from "../providers/LoggingServiceProvider";
+import QueueServiceProvider from "../providers/QueueServiceProvider";
 
 export default class extends Kernel {
   authenticationServiceProvider = AuthenticationServiceProvider;
@@ -20,4 +21,5 @@ export default class extends Kernel {
   viewRouterServiceProvider = ViewRouterServiceProvider;
   apiRouterServiceProvider = ApiRouterServiceProvider;
   loggingServiceProvider = LoggingServiceProvider;
+  queueServiceProvider = QueueServiceProvider;
 }

@@ -7,7 +7,6 @@
     "./email": "./email/index.ts",
     "./vite": "./dist/vite/index.mjs",
     "./runtime": "./client/runtime.ts",
-    "./server": "./server/index.ts",
     "./kernel": "./kernel/index.ts",
     "./services": "./services/index.ts",
     "./broadcasting": "./broadcasting/index.ts"
@@ -20,7 +19,6 @@
     "./email": "./dist/email/index.js",
     "./vite": "./dist/vite/index.mjs",
     "./runtime": "./dist/runtime/index.js",
-    "./server": "./dist/server/index.js",
     "./kernel": "./dist/kernel/index.js",
     "./services": "./dist/services/index.js",
     "./broadcasting": "./dist/broadcasting/index.js"

@@ -3,6 +3,7 @@ import { Kernel } from "../kernel";
 import { ApiRouterServiceContainer } from "../services/router/ApiRouterServiceContainer";
 import { ViewRouterServiceContainer } from "../services/router/ViewRouterServiceContainer";
 import { BroadcastingServiceContainer } from "../services/pubsub/BroadcastingServiceContainer";
+import { QueueServiceContainer } from "../services/queue/QueueServiceContainer";
 
 interface AppParams {
   kernel: new () => Kernel;
@@ -66,6 +67,13 @@ export class App {
     const kernelRun = this.kernel.run.bind(this.kernel);
     kernelRun(() => {
       BroadcastingServiceContainer.use().onPublish(fn);
+    });
+  }
+
+  public dispatchJob(jobName: string, args: string) {
+    const kernelRun = this.kernel.run.bind(this.kernel);
+    return kernelRun(() => {
+      return QueueServiceContainer.use().dispatchJob(jobName, args);
     });
   }
 }

@@ -32,3 +32,7 @@ export { ApiRouterServiceProvider } from "./router/ApiRouterServiceProvider";
 
 export { LoggingServiceProvider } from "./logging/LoggingServiceProvider";
 export type { LogEntry } from "./logging/types";
+
+// Queue
+export { QueueServiceProvider } from "./queue/QueueServiceProvider";
+export { Job } from "./queue/Job";

@@ -7,7 +7,7 @@ import { RequestContext } from "../../http/requestContext";
 import type { LogEntry, LogLevel } from "./types";
 
 export class LoggingServiceContainer extends ServiceContainer {
-  _name = "LoggingServiceContainer";
+  static _name = "LoggingServiceContainer";
 
   writer: FileSink;
   isReady: boolean = false;

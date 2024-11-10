@@ -1,8 +1,10 @@
 import { prisma } from "@/app/database/prisma";
 import { ApiRouter, HttpRequest, ResourceController } from "gemi/http";
-import { Broadcast, FileStorage, Log, Url } from "gemi/facades";
+import { FileStorage, Log, Url } from "gemi/facades";
 import { WelcomeEmail } from "@/app/email/WelcomeEmail";
 import { FooController } from "../controllers/FooController";
+import { Job } from "gemi/services";
+import { TestJob } from "@/app/jobs/TestJob";
 
 class BarController extends ResourceController {
   create() {}
@@ -85,6 +87,10 @@ export default class extends ApiRouter {
           name: "Enes org",
         },
       });
+    }),
+    "/job-test": this.get(async () => {
+      TestJob.dispatch({ name: "Enes" });
+      return {};
     }),
   };
 }

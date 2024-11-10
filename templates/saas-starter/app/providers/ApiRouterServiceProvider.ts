@@ -9,13 +9,7 @@ export default class extends ApiRouterServiceProvider {
     return "test";
   }
 
-  onRequestStart(req: HttpRequest) {
-    console.time("API");
-    console.log(`Api start ${req.rawRequest.url}`);
-  }
+  onRequestStart(req: HttpRequest) {}
 
-  onRequestEnd(req: HttpRequest) {
-    console.timeEnd("API");
-    console.log(`Api end ${req.rawRequest.url}`);
-  }
+  onRequestEnd(req: HttpRequest) {}
 }
