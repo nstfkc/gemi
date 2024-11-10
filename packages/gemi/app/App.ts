@@ -76,4 +76,8 @@ export class App {
       return QueueServiceContainer.use().dispatchJob(jobName, args);
     });
   }
+
+  public destroy() {
+    this.kernel.destroy();
+  }
 }

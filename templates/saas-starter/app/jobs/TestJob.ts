@@ -5,8 +5,7 @@ export class TestJob extends Job {
   worker = true;
 
   run(args: any) {
-    throw new Error("TestJob failed");
-    return "Hello";
+    console.log("TestJob done", args);
   }
 
   onSuccess(result: any, args: any) {

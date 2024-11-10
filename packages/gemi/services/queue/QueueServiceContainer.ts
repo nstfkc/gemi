@@ -1,7 +1,7 @@
-import { log } from "console";
 import { ServiceContainer } from "../ServiceContainer";
 import { Job } from "./Job";
 import { QueueServiceProvider } from "./QueueServiceProvider";
+import { Worker } from "worker_threads";
 
 function createWorker() {
   const APP_DIR = process.env.APP_DIR;
@@ -15,13 +15,15 @@ function createWorker() {
   const file = new File(
     [
       `
+      import { parentPort } from 'worker_threads'
       self.onmessage = async (event) => {
-      const mod = await import("${appPath}");
+      const { app } = await import("${appPath}");
       try {
-        const result = await mod.app.dispatchJob(event.data.jobName, event.data.args)
-          self.postMessage({result});
+          const result = await app.dispatchJob.call(app, event.data.jobName, event.data.args);
+          app.destroy();
+          parentPort.postMessage({result});
         } catch (error) {
-          self.postMessage({error});
+          parentPort.postMessage({error});
         }
       };
     `,
@@ -35,15 +37,21 @@ function createWorker() {
 async function runInWorker(jobName: string, args: string) {
   const worker = createWorker();
   worker.postMessage({ jobName, args });
-  const result = await new Promise((resolve) => {
-    worker.onmessage = (e) => {
-      resolve(e.data);
-    };
+  return await new Promise((resolve, reject) => {
+    worker.on("message", (e) => {
+      const data = e;
+      try {
+        worker.terminate();
+      } catch (err) {
+        console.log("worker can not be terminated");
+      }
+      if ("error" in data) {
+        reject(data.error);
+      } else {
+        resolve(data.result);
+      }
+    });
   });
-  setTimeout(() => {
-    worker.terminate();
-  }, 100);
-  return result;
 }
 
 type JobDefinition = {
@@ -90,7 +98,10 @@ export class QueueServiceContainer extends ServiceContainer {
     const jobDefinition = this.queue.values().next().value as JobDefinition;
 
     if (this.jobs[jobDefinition?.class]) {
-      this.queue.delete(this.queue.values().next().value);
+      const { value } = this.queue.values().next();
+      if (value) {
+        this.queue.delete(value);
+      }
 
       this.run(jobDefinition);
     }
@@ -109,40 +120,30 @@ export class QueueServiceContainer extends ServiceContainer {
     const args = JSON.parse(jobDefinition.args);
 
     this.activeRunningJobsCount++;
-    if (jobInstance.worker) {
-      const workerResult: any = await runInWorker(
-        jobDefinition.class,
-        jobDefinition.args,
-      );
 
-      if ("error" in workerResult) {
-        jobInstance.onFail(workerResult.error, args);
-        if (jobDefinition.retries >= jobInstance.maxAttempts - 1) {
-          jobInstance.onDeadletter(workerResult.error);
-        } else {
-          this.push(Job, jobDefinition.args, jobDefinition.retries + 1);
-        }
+    try {
+      const result = await (jobInstance.worker
+        ? runInWorker(jobDefinition.class, jobDefinition.args)
+        : jobInstance.run(args));
+
+      jobInstance.onSuccess(result, args);
+    } catch (err) {
+      jobInstance.onFail(err, args);
+      if (jobDefinition.retries >= jobInstance.maxAttempts - 1) {
+        jobInstance.onDeadletter(err);
       } else {
-        jobInstance.onSuccess(workerResult.result, args);
-      }
-    } else {
-      try {
-        const result = await jobInstance.run(args);
-        jobInstance.onSuccess(result, args);
-      } catch (err) {
-        jobInstance.onFail(err, args);
-        if (jobDefinition.retries >= jobInstance.maxAttempts - 1) {
-          jobInstance.onDeadletter(err);
-        } else {
-          this.push(Job, jobDefinition.args, jobDefinition.retries + 1);
-        }
+        this.push(Job, jobDefinition.args, jobDefinition.retries + 1);
       }
     }
 
     this.activeRunningJobsCount--;
+    if (this.activeRunningJobsCount === 0) {
+      console.timeEnd("jobs");
+    }
   }
 
   push(job: new () => Job, args: string, retries = 0) {
+    console.time("jobs");
     this.queue.add({
       class: job.name,
       args,

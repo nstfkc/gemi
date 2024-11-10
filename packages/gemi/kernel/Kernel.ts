@@ -80,4 +80,9 @@ export class Kernel {
     const services = this.services;
     return kernelContext.run(services, cb);
   }
+
+  destroy() {
+    this.services = {};
+    kernelContext.disable();
+  }
 }
