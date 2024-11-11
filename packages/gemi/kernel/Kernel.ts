@@ -82,7 +82,10 @@ export class Kernel {
   }
 
   destroy() {
-    this.services = {};
+    for (const key of Object.keys(this.services)) {
+      delete this.services[key];
+    }
+
     kernelContext.disable();
   }
 }

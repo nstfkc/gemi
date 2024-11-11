@@ -1,7 +1,6 @@
 import { ServiceContainer } from "../ServiceContainer";
 import { Job } from "./Job";
 import { QueueServiceProvider } from "./QueueServiceProvider";
-import { Worker } from "worker_threads";
 
 function createWorker() {
   const APP_DIR = process.env.APP_DIR;
@@ -15,15 +14,21 @@ function createWorker() {
   const file = new File(
     [
       `
-      import { parentPort } from 'worker_threads'
+      import { app } from "${appPath}"
       self.onmessage = async (event) => {
-      const { app } = await import("${appPath}");
-      try {
-          const result = await app.dispatchJob.call(app, event.data.jobName, event.data.args);
-          app.destroy();
-          parentPort.postMessage({result});
-        } catch (error) {
-          parentPort.postMessage({error});
+        const clone = app.clone()
+        let result = null;
+        let error = null;
+        try {
+          result = clone.dispatchJob(event.data.jobName, event.data.args)
+        } catch (err) {
+          error = err
+        }
+        clone.destroy()
+        if(error) {
+          self.postMessage({error});
+        } else {
+          self.postMessage({result});
         }
       };
     `,
@@ -34,23 +39,19 @@ function createWorker() {
   return new Worker(url);
 }
 
+// TODO: terminate worker after the job is done
 async function runInWorker(jobName: string, args: string) {
   const worker = createWorker();
   worker.postMessage({ jobName, args });
   return await new Promise((resolve, reject) => {
-    worker.on("message", (e) => {
-      const data = e;
-      try {
-        worker.terminate();
-      } catch (err) {
-        console.log("worker can not be terminated");
-      }
+    worker.onmessage = (e) => {
+      const data = e.data;
       if ("error" in data) {
         reject(data.error);
       } else {
         resolve(data.result);
       }
-    });
+    };
   });
 }
 
@@ -66,9 +67,7 @@ export class QueueServiceContainer extends ServiceContainer {
 
   queue: Set<JobDefinition> = new Set();
   activeRunningJobsCount = 0;
-
   isRunning = false;
-
   jobs: Record<string, new () => Job> = {};
 
   constructor(public service: QueueServiceProvider) {
@@ -137,13 +136,9 @@ export class QueueServiceContainer extends ServiceContainer {
     }
 
     this.activeRunningJobsCount--;
-    if (this.activeRunningJobsCount === 0) {
-      console.timeEnd("jobs");
-    }
   }
 
   push(job: new () => Job, args: string, retries = 0) {
-    console.time("jobs");
     this.queue.add({
       class: job.name,
       args,

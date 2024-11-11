@@ -80,4 +80,8 @@ export class App {
   public destroy() {
     this.kernel.destroy();
   }
+
+  public clone() {
+    return Object.assign(Object.create(Object.getPrototypeOf(this)), this);
+  }
 }

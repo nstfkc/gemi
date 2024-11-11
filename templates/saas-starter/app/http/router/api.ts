@@ -89,7 +89,7 @@ export default class extends ApiRouter {
       });
     }),
     "/job-test": this.get(async () => {
-      TestJob.dispatch({ name: "Enes" });
+      TestJob.dispatch({ name: "HI" });
       return {};
     }),
   };
