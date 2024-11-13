@@ -3,10 +3,10 @@ import {
   PrismaAuthenticationAdapter,
 } from "gemi/kernel";
 import { prisma } from "../database/prisma";
-import type { User } from "@prisma/client";
 
 export default class extends AuthenticationServiceProvider {
   adapter = new PrismaAuthenticationAdapter(prisma);
+  verifyEmail = false;
 
   extendSession(_user: any) {
     return {
@@ -14,11 +14,11 @@ export default class extends AuthenticationServiceProvider {
     };
   }
 
-  onSignUp(user: User, token: string) {
+  onSignUp(user: any, token: string) {
     console.log("User sign up", user.email, user.locale, token);
   }
 
-  onForgotPassword(user: User, token: string) {
+  onForgotPassword(user: any, token: string) {
     console.log("Forgot password email sent", user.email, token);
   }
 }

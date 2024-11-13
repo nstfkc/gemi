@@ -403,6 +403,7 @@ class AuthController extends Controller {
 }
 
 export class AuthApiRouter extends ApiRouter {
+  middlewares = ["cache:private"];
   routes = {
     "/sign-in": this.post(AuthController, "signIn"),
     "/sign-up": this.post(AuthController, "signUp"),
@@ -411,11 +412,12 @@ export class AuthApiRouter extends ApiRouter {
     "/reset-password": this.post(AuthController, "resetPassword"),
     "/change-password": this.post(AuthController, "changePassword"),
     "/verify-email": this.post(AuthController, "verifyEmail"),
-    "/me": this.get(AuthController, "me"),
+    "/me": this.get(AuthController, "me").middleware(["auth"]),
   };
 }
 
 export class AuthViewRouter extends ViewRouter {
+  middlewares = ["cache:public"];
   routes = {
     "/sign-in": this.view("auth/SignIn"),
     "/sign-up": this.view("auth/SignUp"),

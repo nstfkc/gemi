@@ -1,10 +1,9 @@
-import { HttpRequest, ViewRouter } from "gemi/http";
+import { ViewRouter } from "gemi/http";
 import { HomeController } from "../controllers/HomeController";
 import { FooController } from "../controllers/FooController";
-import { FileStorage } from "gemi/facades";
 
 class AppRouter extends ViewRouter {
-  middlewares = ["auth"];
+  middlewares = ["auth", "cache"];
 
   routes = {
     "/": this.layout("app/AppLayout", {
@@ -16,7 +15,19 @@ class AppRouter extends ViewRouter {
   };
 }
 
+class AuthViewRouter extends ViewRouter {
+  middlewares = ["cache:public"];
+  routes = {
+    "/sign-in": this.view("auth/SignIn"),
+    "/sign-up": this.view("auth/SignUp"),
+    "/reset-password": this.view("auth/ResetPassword"),
+    "/forgot-password": this.view("auth/ForgotPassword"),
+  };
+}
+
 export default class extends ViewRouter {
+  middlewares = ["cache:public,12840,must-revalidate"];
+
   override routes = {
     "/": this.layout("PublicLayout", {
       "/": this.view("Home", [HomeController, "index"]),
@@ -24,21 +35,8 @@ export default class extends ViewRouter {
       "/foo": this.view("FooList", [FooController, "index"]),
       "/foo/:id": this.view("FooEdit", [FooController, "details"]),
       "/about": this.view("About", [HomeController, "about"]),
-      "/log": this.view("Logs", async () => {
-        const result = await FileStorage.list("logs/");
-        return { files: result.Contents.map((content) => content.Key) };
-      }),
-      "/log/:filePath*": this.view("Log", async (req: HttpRequest) => {
-        const response = await FileStorage.fetch(`logs/${req.params.filePath}`);
-        const logs = await response.text();
-        const lines = logs
-          .split("\n")
-          .filter((line) => line.length > 0)
-          .map((line) => JSON.parse(line));
-
-        return { lines };
-      }),
     }),
     "/app": AppRouter,
+    "/auth": AuthViewRouter,
   };
 }

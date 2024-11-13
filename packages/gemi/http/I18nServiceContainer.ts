@@ -6,6 +6,7 @@ import { HttpRequest } from "./HttpRequest";
 import { I18nServiceProvider } from "./I18nServiceProvider";
 
 export class I18nRouter extends ApiRouter {
+  middlewares = ["cache:private"];
   routes = {
     "/translations": this.get(async () => {
       const req = new HttpRequest<any, any>();
@@ -20,13 +21,6 @@ export class I18nRouter extends ApiRouter {
       const translations = I18nServiceContainer.use().getPageTranslations(
         locale,
         scope,
-      );
-
-      req.ctx.setHeaders(
-        "Cache-Control",
-        req.ctx.user
-          ? "private, max-age=1200, must-revalidate"
-          : "public, max-age=864000, must-revalidate",
       );
 
       req.ctx.setCookie("i18n-locale", locale, {

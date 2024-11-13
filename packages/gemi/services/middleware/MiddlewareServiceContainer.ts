@@ -1,5 +1,4 @@
 import { HttpRequest, Middleware, MiddlewareServiceProvider } from "../../http";
-import { RequestContext } from "../../http/requestContext";
 import type { RouterMiddleware } from "../../http/Router";
 import { isConstructor } from "../../internal/isConstructor";
 import { ServiceContainer } from "../ServiceContainer";
@@ -14,7 +13,7 @@ function transformMiddleware(input: (string | Function)[]) {
           map.delete(alias.replace("-", ""));
         }
       } else {
-        map.set(alias, params.split(","));
+        map.set(alias, params.split(",").filter(Boolean));
       }
     } else {
       map.set(middleware, []);
@@ -34,24 +33,21 @@ export class MiddlewareServiceContainer extends ServiceContainer {
     middleware: (
       | string
       | RouterMiddleware
-      | (new (routePath: string) => Middleware)
+      | (new (req: HttpRequest) => Middleware)
     )[],
-    routePath: string,
   ) {
-    const req = RequestContext.getStore().req;
-
+    const req = new HttpRequest();
     return Array.from(transformMiddleware(middleware).entries())
       .map(([key, params]) => {
         if (typeof key === "string") {
           const Middleware = this.service.aliases[key];
           if (Middleware) {
-            const middleware = new Middleware(routePath);
-            return (req: HttpRequest) =>
-              middleware.run.call(middleware, req, ...params);
+            const middleware = new Middleware(req);
+            return () => middleware.run.call(middleware, ...params);
           }
         } else {
           if (isConstructor(key)) {
-            const middleware = new key(routePath);
+            const middleware = new key(req);
             return middleware.run.bind(middleware);
           }
           return key;
@@ -60,14 +56,14 @@ export class MiddlewareServiceContainer extends ServiceContainer {
       .filter(Boolean)
       .reduce(
         (acc: any, middleware: any) => {
-          return async (req: HttpRequest<any, any>, ctx: any) => {
+          return async () => {
             return {
-              ...(await acc(req, ctx)),
-              ...(await middleware(req, ctx)),
+              ...(await acc()),
+              ...(await middleware()),
             };
           };
         },
-        (_req: HttpRequest<any, any>) => Promise.resolve({}),
-      )(req);
+        () => Promise.resolve({}),
+      )();
   }
 }

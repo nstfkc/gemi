@@ -9,6 +9,7 @@ export { RequestBreakerError } from "./Error";
 
 export { MiddlewareServiceProvider } from "./MiddlewareServiceProvider";
 export { AuthenticationMiddleware } from "./AuthenticationMiddlware";
+export { CacheMiddleware } from "./CacheMiddleware";
 export { RateLimitMiddleware } from "./RateLimitMiddleware";
 
 export { PoliciesServiceProvider } from "./PoliciesServiceProvider";

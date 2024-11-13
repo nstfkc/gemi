@@ -99,7 +99,7 @@ export function useNavigate() {
           if (directive?.kind === "Redirect") {
             if (directive?.path) {
               isNavigatingSubject.next(false);
-              action("replace")(directive.path, { params: {} });
+              action("replace")(directive.path, { params: {} } as any);
             }
 
             return;

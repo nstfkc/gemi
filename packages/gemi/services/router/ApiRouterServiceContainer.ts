@@ -47,15 +47,14 @@ export class ApiRouterServiceContainer extends ServiceContainer {
     return { params, path };
   }
 
-  async runRouteMiddleware(path: string) {
-    const ctx = RequestContext.getStore();
+  async runRouteMiddleware(path: string, httpRequest: HttpRequest) {
     const routeHandler = this.flatRoutes[path];
-    const middlewares = routeHandler[ctx.req.rawRequest.method].middleware;
+    const middlewares = routeHandler[httpRequest.rawRequest.method].middleware;
     try {
-      await MiddlewareServiceContainer.use().runMiddleware(middlewares, path);
+      await MiddlewareServiceContainer.use().runMiddleware(middlewares);
     } catch (err) {
       if (err.kind === GEMI_REQUEST_BREAKER_ERROR) {
-        if (ctx.req.rawRequest.url.includes("/api")) {
+        if (httpRequest.rawRequest.url.includes("/api")) {
           const { status = 400, data, headers } = err.payload.api;
           return new Response(JSON.stringify(data), {
             status,
@@ -66,7 +65,7 @@ export class ApiRouterServiceContainer extends ServiceContainer {
           });
         }
       } else {
-        this.service.onRequestFail(ctx.req, err);
+        this.service.onRequestFail(httpRequest, err);
         console.error(err);
         throw err;
       }
@@ -116,12 +115,17 @@ export class ApiRouterServiceContainer extends ServiceContainer {
       });
     }
 
-    const httpRequest = new HttpRequest(req, params, "api");
+    const httpRequest = new HttpRequest(req, params, "api", path);
     if (!req.url.includes("/__gemi__")) {
       this.service.onRequestStart(httpRequest);
     }
     return await RequestContext.run(httpRequest, async () => {
-      const middlewareResponse = await this.runRouteMiddleware(path);
+      const ctx = RequestContext.getStore();
+      ctx.setRequest(httpRequest);
+      const middlewareResponse = await this.runRouteMiddleware(
+        path,
+        httpRequest,
+      );
 
       if (middlewareResponse instanceof Response) {
         return middlewareResponse;
@@ -132,24 +136,9 @@ export class ApiRouterServiceContainer extends ServiceContainer {
         return data;
       }
 
-      const ctx = RequestContext.getStore();
-
       const headers = ctx.headers;
 
       headers.append("Content-Type", "application/json");
-      if (!headers.get("Cache-Control")) {
-        if (ctx.user) {
-          headers.set(
-            "Cache-Control",
-            "private, no-cache, no-store, max-age=0, must-revalidate",
-          );
-        } else {
-          headers.set(
-            "Cache-Control",
-            "public, no-cache, no-store, max-age=0, must-revalidate",
-          );
-        }
-      }
 
       ctx.cookies.forEach((cookie) =>
         headers.append("Set-Cookie", cookie.toString()),

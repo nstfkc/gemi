@@ -1,3 +1,5 @@
+import { RequestBreakerError } from "./Error";
+import { AuthenticationError } from "./errors";
 import { RequestContext } from "./requestContext";
 import { ValidationError } from "./Router";
 
@@ -172,19 +174,26 @@ export class HttpRequest<
   public cookies: Map<string, string>;
   public search: Input<T>;
   public schema: any = {};
-
+  public routePath: string;
   public params: Params;
   public ctx = RequestContext.getStore();
 
-  constructor(req?: Request, params?: any, kind?: HttpRequestKind) {
+  constructor(
+    req?: Request,
+    params?: any,
+    kind?: HttpRequestKind,
+    routePath?: string,
+  ) {
     if (!req) {
       const _req = RequestContext.getStore().req;
       this.params = _req.params as any;
       this.rawRequest = _req.rawRequest;
       this.kind = _req.kind;
+      this.routePath = _req.routePath;
     } else {
       this.params = params;
       this.rawRequest = req;
+      this.routePath = routePath;
       this.kind = kind ?? "api";
     }
 
@@ -339,29 +348,4 @@ export class HttpRequest<
       };
     }
   }
-
-  // TODO implement this method
-  public async terminate(_params: TerminateParams) {
-    throw "not implemented";
-  }
 }
-
-// class TerminateError extends RequestBreakerError {
-//   constructor(
-//     private requestKind: "api" | "view",
-//     private payload: Record<string, any>,
-//   ) {
-//     super();
-//     const api = requestKind === "view" ? {} : payload;
-//     const view = requestKind === "api" ? {} : payload;
-
-//     this.payload = { api, view };
-//   }
-// }
-
-type TerminateParams = {
-  message: string;
-  status: number;
-  headers?: Record<string, string>;
-  payload?: Record<string, any>;
-};

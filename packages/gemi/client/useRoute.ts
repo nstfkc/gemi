@@ -11,7 +11,7 @@ export function useRoute() {
   return {
     pathname: routePath,
     startsWith: (pathname: Pathname) => {
-      return routePath.startsWith(pathname);
+      return (routePath as string).startsWith(pathname);
     },
   };
 }

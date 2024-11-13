@@ -1,4 +1,3 @@
-import { Log, Query, Redirect } from "gemi/facades";
 import { Controller, HttpRequest } from "gemi/http";
 
 export class HomeController extends Controller {
@@ -7,7 +6,11 @@ export class HomeController extends Controller {
   }
 
   public async index(req: HttpRequest<{ color: string }>) {
-    // Query.prefetch("/home", { search: req.search.toJSON() });
+    try {
+    } catch (err) {
+      console.log(err);
+      // Do something
+    }
 
     const items = [
       { id: 1, name: "Red", hex: "#FF0000", color: "red" },
@@ -18,7 +21,6 @@ export class HomeController extends Controller {
     ];
 
     const filters = items.map((item) => item.color);
-    Log.emergency("Hello World");
 
     return { filters };
   }

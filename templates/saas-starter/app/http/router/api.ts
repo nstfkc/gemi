@@ -21,6 +21,7 @@ class BarRouter extends ApiRouter {
 }
 
 export default class extends ApiRouter {
+  middlewares = ["cache:private"];
   routes = {
     "/users": this.get(async () => {
       return await prisma.user.findFirst();

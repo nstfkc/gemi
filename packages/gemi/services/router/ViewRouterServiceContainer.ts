@@ -17,13 +17,13 @@ import { createElement, Fragment } from "react";
 import { URLPattern } from "urlpattern-polyfill/urlpattern";
 import { ServiceContainer } from "../ServiceContainer";
 import type { ViewRoutes } from "../../http/ViewRouter";
-import { AuthViewRouter } from "../../auth/AuthenticationServiceProvider";
 import { createRouteManifest } from "./createRouteManifest";
 import { createComponentTree } from "./createComponentTree";
 import { flattenComponentTree } from "../../client/helpers/flattenComponentTree";
 import type { ComponentTree } from "../../client/types";
 import { I18nServiceContainer } from "../../http/I18nServiceContainer";
 import { MiddlewareServiceContainer } from "../middleware/MiddlewareServiceContainer";
+import { Log } from "../../facades";
 
 export class ViewRouterServiceContainer extends ServiceContainer {
   static _name = "ViewRouterServiceContainer";
@@ -38,7 +38,6 @@ export class ViewRouterServiceContainer extends ServiceContainer {
     super();
     const routes: ViewRoutes = {
       "/": service.rootRouter,
-      "/auth": AuthViewRouter,
     };
     this.flatViewRoutes = createFlatViewRoutes(routes);
     this.routeManifest = createRouteManifest(routes);
@@ -82,17 +81,20 @@ export class ViewRouterServiceContainer extends ServiceContainer {
         }
       }
 
-      httpRequest = new HttpRequest(req, params, "view");
-      await this.service.onRequestStart(httpRequest);
+      httpRequest = new HttpRequest(req, params, "view", currentPathName);
+      try {
+        await this.service.onRequestStart(httpRequest);
+      } catch (err) {
+        Log.error(err?.message ?? 'Error in "onRequestStart" event handler', {
+          err: JSON.stringify(err),
+        });
+      }
       const { data, cookies, headers, user, prefetchedData } =
         await RequestContext.run(httpRequest, async () => {
           const ctx = RequestContext.getStore();
           ctx.setRequest(httpRequest);
 
-          await MiddlewareServiceContainer.use().runMiddleware(
-            middlewares,
-            currentPathName,
-          );
+          await MiddlewareServiceContainer.use().runMiddleware(middlewares);
 
           const data = await Promise.all([
             ...handlers.map((fn) => fn(httpRequest as any)),
@@ -122,6 +124,8 @@ export class ViewRouterServiceContainer extends ServiceContainer {
         headers,
       };
     } catch (err) {
+      console.log("ERROR", err);
+      console.log("ERROR KIND", err.kind);
       if (err.kind === GEMI_REQUEST_BREAKER_ERROR) {
         if (isViewDataRequest) {
           const { status = 400, data, directive, headers } = err.payload.api;
@@ -173,18 +177,12 @@ export class ViewRouterServiceContainer extends ServiceContainer {
     }
 
     if (isViewDataRequest) {
-      const headers = new Headers();
+      const headers = new Headers(pageData.headers);
+
       headers.set("Content-Type", "application/json");
 
       cookies.forEach((cookie) =>
         headers.append("Set-Cookie", cookie.toString()),
-      );
-
-      headers.append(
-        "Cache-Control",
-        user
-          ? "private, no-cache, no-store, max-age=0, must-revalidate"
-          : "public, max-age=864000, must-revalidate",
       );
 
       await this.service.onRequestEnd(httpRequest);
@@ -204,15 +202,8 @@ export class ViewRouterServiceContainer extends ServiceContainer {
       );
     }
 
-    const headers = new Headers();
+    const headers = new Headers(pageData.headers);
     headers.set("Content-Type", "text/html");
-    headers.set(
-      "Cache-Control",
-      user
-        ? "private, no-cache, no-store, max-age=0, must-revalidate"
-        : "public, max-age=864000, must-revalidate",
-    );
-    headers.set("ETag", 'W/"' + Math.random().toString(36).substring(7) + '"');
 
     pageData.cookies.forEach((cookie) =>
       headers.append("Set-Cookie", cookie.toString()),
@@ -263,7 +254,13 @@ export class ViewRouterServiceContainer extends ServiceContainer {
         },
       );
 
-      await this.service.onRequestEnd(httpRequest);
+      try {
+        await this.service.onRequestEnd(httpRequest);
+      } catch (err) {
+        Log.error(err?.message ?? 'Error in "onRequestEnd" event handler', {
+          err: JSON.stringify(err),
+        });
+      }
       return new Response(stream, {
         status: !currentPathName ? 404 : 200,
         headers,

@@ -1,7 +1,5 @@
-import { KernelContext } from "../kernel/KernelContext";
 import { RateLimiterServiceContainer } from "../services/rate-limiter/RateLimiterServiceContainer";
 import { RequestBreakerError } from "./Error";
-import { HttpRequest } from "./HttpRequest";
 import { Middleware } from "./Middleware";
 
 class RateLimitExceededError extends RequestBreakerError {
@@ -30,10 +28,10 @@ class RateLimitExceededError extends RequestBreakerError {
 }
 
 export class RateLimitMiddleware extends Middleware {
-  async run(req: HttpRequest, limit = 1000) {
-    const userId = req.headers.get("x-forwarded-for");
+  async run(limit = 1000) {
+    const userId = this.req.headers.get("x-forwarded-for");
     const driver = RateLimiterServiceContainer.use().service.driver;
-    const result = driver.consume.call(driver, userId, this.routePath);
+    const result = driver.consume.call(driver, userId, this.req.routePath);
     if (result > limit) {
       throw new RateLimitExceededError();
     }

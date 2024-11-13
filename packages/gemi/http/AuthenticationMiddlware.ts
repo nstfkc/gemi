@@ -1,12 +1,11 @@
 import { HttpRequest } from "./HttpRequest";
 import { Middleware } from "./Middleware";
 import { RequestContext } from "./requestContext";
-import { KernelContext } from "../kernel/KernelContext";
 import { AuthenticationError } from "./errors";
 import { AuthenticationServiceContainer } from "../auth/AuthenticationServiceContainer";
 
 export class AuthenticationMiddleware extends Middleware {
-  async run(req: HttpRequest) {
+  async run(_req: HttpRequest) {
     const requestContextStore = RequestContext.getStore();
     const accessToken = requestContextStore.req.cookies.get("access_token");
 
