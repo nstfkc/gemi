@@ -23,7 +23,7 @@ export class I18nRouter extends ApiRouter {
         scope,
       );
 
-      req.ctx.setCookie("i18n-locale", locale, {
+      req.ctx().setCookie("i18n-locale", locale, {
         expires: new Date(Date.now() + 1000 * 60 * 60 * 24 * 365),
       });
 

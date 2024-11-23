@@ -17,7 +17,7 @@ export class CacheMiddleware extends Middleware {
         "private, max-age=0, stale-while-revalidate=300, stale-if-error=600";
     }
     if (this.req.rawRequest.method === "GET") {
-      this.req.ctx.setHeaders("Cache-Control", value);
+      this.req.ctx().setHeaders("Cache-Control", value);
     }
 
     return {};

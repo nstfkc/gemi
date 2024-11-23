@@ -11,6 +11,7 @@ import { useMutation } from "./useMutation";
 import type { UnwrapPromise } from "../utils/type";
 import type { UrlParser } from "./types";
 import { useParams } from "./useParams";
+import { ServerDataContext } from "./ServerDataProvider";
 
 interface MutationContextValue {
   isPending: boolean;
@@ -84,6 +85,7 @@ export function Form<
     ? { ...props, params: { ..._params, ...props.params } }
     : { ...props, params: _params };
   const formRef = useRef<HTMLFormElement>(null);
+  const { __csrf } = useContext(ServerDataContext);
 
   const { trigger, data, error, loading } = useMutation(
     method,
@@ -121,6 +123,7 @@ export function Form<
         onSubmit={handleSubmit}
         {...formProps}
       >
+        <input type="hidden" name="__csrf" value={__csrf} />
         {props.children}
       </form>
     </MutationContext.Provider>

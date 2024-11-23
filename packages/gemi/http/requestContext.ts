@@ -10,8 +10,13 @@ class Store {
   prefetchedResources = new Map<string, Record<string, any>>();
   prefetchPromiseQueue = new Set<() => Promise<any>>();
   user: any = null;
+  csrfHmac: string | null = null;
 
   constructor(public req: HttpRequest) {}
+
+  setCSRFHmac(hmac: string) {
+    this.csrfHmac = hmac;
+  }
 
   setCookie(name: string, value: string, options: CreateCookieOptions = {}) {
     this.cookies.add(new Cookie(name, value, options));

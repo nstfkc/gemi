@@ -3,6 +3,7 @@ import {
   AuthenticationMiddleware,
   RateLimitMiddleware,
   CacheMiddleware,
+  CSRFMiddleware,
 } from "gemi/http";
 
 export default class extends MiddlewareServiceProvider {
@@ -10,5 +11,6 @@ export default class extends MiddlewareServiceProvider {
     auth: AuthenticationMiddleware,
     cache: CacheMiddleware,
     "rate-limit": RateLimitMiddleware,
+    csrf: CSRFMiddleware,
   };
 }

@@ -25,6 +25,7 @@ export interface ServerDataContextValue {
   auth: {
     user: User;
   };
+  __csrf: string;
 }
 
 export const ServerDataContext = createContext({} as ServerDataContextValue);

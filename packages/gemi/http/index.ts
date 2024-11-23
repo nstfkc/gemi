@@ -11,6 +11,7 @@ export { MiddlewareServiceProvider } from "./MiddlewareServiceProvider";
 export { AuthenticationMiddleware } from "./AuthenticationMiddlware";
 export { CacheMiddleware } from "./CacheMiddleware";
 export { RateLimitMiddleware } from "./RateLimitMiddleware";
+export { CSRFMiddleware } from "./CSRFMiddleware";
 
 export { PoliciesServiceProvider } from "./PoliciesServiceProvider";
 export { Policies } from "./Policy";

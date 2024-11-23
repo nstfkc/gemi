@@ -176,7 +176,6 @@ export class HttpRequest<
   public schema: any = {};
   public routePath: string;
   public params: Params;
-  public ctx = RequestContext.getStore();
 
   constructor(
     req?: Request,
@@ -228,6 +227,10 @@ export class HttpRequest<
       this.search = new Input<T>(params as T);
     }
     this.cookies = cookies;
+  }
+
+  public ctx() {
+    return RequestContext.getStore();
   }
 
   public refine(_input: any): any {

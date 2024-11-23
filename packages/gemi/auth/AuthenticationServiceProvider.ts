@@ -198,7 +198,7 @@ class AuthController extends Controller {
       });
     }
 
-    req.ctx.setCookie("access_token", session.token, {
+    req.ctx().setCookie("access_token", session.token, {
       expires: session.expiresAt,
     });
 
@@ -279,7 +279,7 @@ class AuthController extends Controller {
 
     await this.provider.adapter.deleteSession({ token });
 
-    req.ctx.setCookie("access_token", "", {
+    req.ctx().setCookie("access_token", "", {
       expires: new Date(0),
     });
 
