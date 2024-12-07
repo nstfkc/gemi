@@ -7,6 +7,7 @@ import createRollupInput from "./createRollupInput";
 import { build } from "vite";
 
 import { program } from "commander";
+import { ApiManifestGenerator } from "./ide/generateApiManifest";
 
 program.command("dev").action(async () => {
   console.log("Starting dev server...");
@@ -54,6 +55,12 @@ program.command("start").action(async () => {
 
   await $`echo "Starting server..."`;
   await startProdServer();
+});
+
+program.command("ide:generate-api-manifest").action(async () => {
+  const parser = new ApiManifestGenerator();
+
+  parser.parse("/app/http/router/api.ts");
 });
 
 program.parse();

@@ -1,4 +1,4 @@
-import { ResendDriver, EmailServiceProvider } from "gemi/services";
+import { EmailServiceProvider, ResendDriver } from "gemi/services";
 
 export default class extends EmailServiceProvider {
   driver = new ResendDriver();

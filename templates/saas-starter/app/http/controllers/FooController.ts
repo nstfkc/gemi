@@ -1,11 +1,8 @@
 import { Query } from "gemi/facades";
-import { HttpRequest, ResourceController } from "gemi/http";
+import { Controller, HttpRequest, ResourceController } from "gemi/http";
 
 export class FooController extends ResourceController {
   async index() {
-    Query.prefetch("/foo-bar-baz/:fooBarBazId", {
-      params: { fooBarBazId: "1234" },
-    });
     return {};
   }
 
@@ -35,4 +32,8 @@ export class FooController extends ResourceController {
   }
 
   delete() {}
+}
+
+export class TestController extends Controller {
+  test() {}
 }

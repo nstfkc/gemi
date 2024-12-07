@@ -13,7 +13,9 @@ import {
   useUser,
   type ViewProps,
 } from "gemi/client";
-import { useEffect, useState } from "react";
+
+import { useEffect, useState, lazy } from "react";
+import { Carousel } from "./components/Carousel";
 
 export default function Home(props: ViewProps<"/">) {
   const searchParams = useSearchParams();
@@ -26,12 +28,7 @@ export default function Home(props: ViewProps<"/">) {
 
   return (
     <div>
-      <span>{t("greeting", { name: "Enes" })}</span>
-      <div>{loading ? "Loading..." : ""}</div>
-      <Form method="POST" action="/upload">
-        <input type="file" name="images" multiple={true} />
-        <button type="submit">Upload</button>
-      </Form>
+      <Carousel />
       <div className="flex gap-2">
         {filters.map((filter) => {
           return (

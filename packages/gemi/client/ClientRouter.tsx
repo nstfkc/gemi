@@ -81,7 +81,7 @@ export const ClientRouter = (props: {
   RootLayout: ComponentType<any>;
 }) => {
   const { RootLayout } = props;
-  const { routeManifest, router, componentTree, pageData, auth } =
+  const { routeManifest, router, componentTree, pageData, cssManifest } =
     useContext(ServerDataContext);
 
   return (
@@ -90,6 +90,7 @@ export const ClientRouter = (props: {
         <QueryManagerProvider>
           <ComponentsProvider viewImportMap={props.viewImportMap}>
             <ClientRouterProvider
+              cssManifest={cssManifest}
               searchParams={router.searchParams}
               params={router.params}
               pageData={pageData}

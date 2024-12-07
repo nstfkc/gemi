@@ -26,6 +26,7 @@ export interface ServerDataContextValue {
     user: User;
   };
   __csrf: string;
+  cssManifest: Record<string, string[]>;
 }
 
 export const ServerDataContext = createContext({} as ServerDataContextValue);

@@ -26,6 +26,7 @@ export function useNavigate() {
     isNavigatingSubject,
     setNavigationAbortController,
     getScrollPosition,
+    fetchRouteCSS,
   } = useContext(ClientRouterContext);
   const { updatePrefecthedData } = useContext(QueryManagerContext);
   const { fetchTranslations } = useContext(I18nContext);
@@ -79,6 +80,7 @@ export function useNavigate() {
       try {
         const [res] = await Promise.all([
           fetch(fetchPath, { signal: navigationAbortController.signal }),
+          fetchRouteCSS(routePathname),
           fetchTranslations(
             routePathname,
             undefined,

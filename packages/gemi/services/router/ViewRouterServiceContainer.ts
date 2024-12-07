@@ -233,17 +233,27 @@ export class ViewRouterServiceContainer extends ServiceContainer {
         }
 
         const Root = this.root;
+        const currentViews = this.routeManifest[currentPathName];
         return async (params: {
-          styles: any[];
+          getStyles: (p: string[]) => Promise<any[]>;
           viewImportMap: any;
           bootstrapModules: string[];
           loaders: string;
+          cssManifest: Record<string, string[]>;
         }) => {
-          const { bootstrapModules, loaders, styles, viewImportMap } = params;
+          const {
+            bootstrapModules,
+            loaders,
+            getStyles,
+            viewImportMap,
+            cssManifest,
+          } = params;
+
+          result.data["cssManifest"] = cssManifest;
           const stream = await renderToReadableStream(
             createElement(Fragment, {
               children: [
-                styles,
+                await getStyles(currentViews),
                 createElement(Root, {
                   data: result.data,
                   viewImportMap,

@@ -8,7 +8,7 @@ export function createStyles(styles) {
       );
     } else {
       return (
-        <style key={i} type="text/css">
+        <style key={i} id={style?.id} type="text/css">
           {style.content}
         </style>
       );

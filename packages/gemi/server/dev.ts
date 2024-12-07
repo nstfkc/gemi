@@ -142,7 +142,7 @@ export async function startDevServer() {
               content: css,
             });
             return await result({
-              styles: createStyles(styles),
+              getStyles: () => createStyles(styles),
               bootstrapModules: [
                 "/refresh.js",
                 "/app/client.tsx",
@@ -150,6 +150,7 @@ export async function startDevServer() {
               ],
               viewImportMap,
               loaders,
+              cssManifest: {},
             });
           }
         } catch (err) {

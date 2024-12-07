@@ -18,6 +18,43 @@ export async function startProdServer() {
   process.env.APP_DIR = appDir;
   process.env.DIST_DIR = distDir;
 
+  const viewImportMap = {};
+  const cssManifest = {};
+  const template = (viewName: string, path: string) =>
+    `"${viewName}": () => import("${path}")`;
+  const templates = [];
+
+  for (const fileName of ["404", ...app.getFlatComponentTree.call(app)]) {
+    const serverFile = serverManifest[`app/views/${fileName}.tsx`];
+    if (!serverFile?.file) {
+      console.log(`Server file not found for ${fileName}`);
+      console.log(serverFile);
+      const files = Object.keys(serverManifest);
+      const path = `app/views/${fileName}.tsx`;
+      console.log(`${path} not found in server manifest`);
+      console.log(files);
+    }
+    const mod = await import(
+      `${process.env.DIST_DIR}/server/${serverFile?.file}`
+    );
+    viewImportMap[fileName] = mod.default;
+    const clientFile = manifest[`app/views/${fileName}.tsx`];
+
+    if (clientFile?.css && clientFile?.css.length > 0) {
+      cssManifest[fileName] = clientFile?.css;
+    }
+    if (clientFile) {
+      templates.push(template(fileName, `/${clientFile?.file}`));
+    }
+  }
+
+  const loaders = `{${templates.join(",")}}`;
+
+  const appCssFile = Bun.file(
+    `${distDir}/client/${manifest["app/client.tsx"].css}`,
+  );
+  const appCSSContent = await appCssFile.text();
+
   async function requestHandler(req: Request) {
     const { pathname } = new URL(req.url);
 
@@ -51,42 +88,6 @@ export async function startProdServer() {
       });
     }
 
-    const styles = [];
-    const cssFile = Bun.file(
-      `${distDir}/client/${manifest["app/client.tsx"].css}`,
-    );
-    const cssContent = await cssFile.text();
-    styles.push({
-      content: cssContent,
-    });
-
-    const viewImportMap = {};
-    const template = (viewName: string, path: string) =>
-      `"${viewName}": () => import("${path}")`;
-    const templates = [];
-
-    for (const fileName of ["404", ...app.getFlatComponentTree.call(app)]) {
-      const serverFile = serverManifest[`app/views/${fileName}.tsx`];
-      if (!serverFile?.file) {
-        console.log(`Server file not found for ${fileName}`);
-        console.log(serverFile);
-        const files = Object.keys(serverManifest);
-        const path = `app/views/${fileName}.tsx`;
-        console.log(`${path} not found in server manifest`);
-        console.log(files);
-      }
-      const mod = await import(
-        `${process.env.DIST_DIR}/server/${serverFile?.file}`
-      );
-      viewImportMap[fileName] = mod.default;
-      const clientFile = manifest[`app/views/${fileName}.tsx`];
-      if (clientFile) {
-        templates.push(template(fileName, `/${clientFile?.file}`));
-      }
-    }
-
-    const loaders = `{${templates.join(",")}}`;
-
     const handler = app.fetch.bind(app);
 
     try {
@@ -94,11 +95,32 @@ export async function startProdServer() {
       if (result instanceof Response) {
         return result;
       } else {
+        const styles = [];
+
+        styles.push({
+          content: appCSSContent,
+        });
+
+        const getStyles = async (currentViews: string[]) => {
+          for (const view of currentViews) {
+            const clientFile = manifest[`app/views/${view}.tsx`];
+            for (const cssFile of clientFile?.css ?? []) {
+              const css = Bun.file(`${process.env.DIST_DIR}/client/${cssFile}`);
+              styles.push({
+                id: cssFile,
+                content: await css.text(),
+              });
+            }
+          }
+          return createStyles(styles);
+        };
+
         return await result({
-          styles: createStyles(styles),
+          getStyles,
           bootstrapModules: [`/${manifest["app/client.tsx"].file}`],
           loaders,
           viewImportMap,
+          cssManifest,
         });
       }
     } catch (err) {

@@ -10,6 +10,7 @@ import ViewRouterServiceProvider from "../providers/ViewRouterServiceProvider";
 import ApiRouterServiceProvider from "../providers/ApiRouterServiceProvider";
 import LoggingServiceProvider from "../providers/LoggingServiceProvider";
 import QueueServiceProvider from "../providers/QueueServiceProvider";
+import EmailServiceProvider from "../providers/EmailServiceProvider";
 
 export default class extends Kernel {
   authenticationServiceProvider = AuthenticationServiceProvider;
@@ -22,4 +23,5 @@ export default class extends Kernel {
   apiRouterServiceProvider = ApiRouterServiceProvider;
   loggingServiceProvider = LoggingServiceProvider;
   queueServiceProvider = QueueServiceProvider;
+  emailServiceProvider = EmailServiceProvider;
 }

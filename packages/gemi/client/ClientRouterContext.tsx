@@ -26,6 +26,7 @@ interface ClientRouterContextValue {
   isNavigatingSubject: Subject<boolean>;
   setNavigationAbortController: (controller: AbortController) => void;
   progressManager: ProgressManager;
+  fetchRouteCSS: (routePath: string) => Promise<void>;
 }
 
 export const ClientRouterContext = createContext(
@@ -35,6 +36,7 @@ export const ClientRouterContext = createContext(
 interface ClientRouterProviderProps {
   pathname: string;
   routeManifest: Record<string, string[]>;
+  cssManifest: Record<string, string[]>;
   pageData: Record<string, any>;
   currentPath: string;
   params: Record<string, string>;
@@ -51,6 +53,7 @@ export const ClientRouterProvider = (
     currentPath,
     is404,
     routeManifest,
+    cssManifest,
     pageData,
     params,
     searchParams,
@@ -171,6 +174,37 @@ export const ClientRouterProvider = (
     navigationAbortControllerRef.current = controller;
   };
 
+  const fetchRouteCSS = async (routePath: string) => {
+    const views = routeManifest[routePath];
+    const cssFiles = views
+      .map((view) => {
+        return cssManifest?.[view];
+      })
+      .flat()
+      .filter(Boolean)
+      .filter((file) => !document.getElementById(file));
+
+    if (cssFiles.length === 0) {
+      return;
+    }
+
+    async function fetchCSS(path: string) {
+      const response = await fetch(`/${path}`);
+      const content = response.text();
+      return {
+        content,
+        id: path,
+      };
+    }
+    const result = await Promise.all(cssFiles.map((file) => fetchCSS(file)));
+    for (const { content, id } of result) {
+      const style = document.createElement("style");
+      style.id = id;
+      style.textContent = await content;
+      document.head.appendChild(style);
+    }
+  };
+
   return (
     <ClientRouterContext.Provider
       value={{
@@ -188,6 +222,7 @@ export const ClientRouterProvider = (
         getRoutePathnameFromHref,
         setNavigationAbortController,
         progressManager,
+        fetchRouteCSS,
       }}
     >
       {children}
