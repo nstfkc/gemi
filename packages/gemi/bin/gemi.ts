@@ -59,8 +59,7 @@ program.command("start").action(async () => {
 
 program.command("ide:generate-api-manifest").action(async () => {
   const parser = new ApiManifestGenerator();
-
-  parser.parse("/app/http/router/api.ts");
+  await parser.run("/app/http/router/api.ts");
 });
 
 program.parse();

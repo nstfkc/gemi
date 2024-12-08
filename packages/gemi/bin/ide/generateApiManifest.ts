@@ -1,8 +1,8 @@
 import { parse } from "recast";
 import { join } from "path";
-import { toCamelCase } from "../../utils/toCamelCase";
-import { stdout } from "bun";
 import { existsSync } from "fs";
+import { toCamelCase } from "../../utils/toCamelCase";
+import { generateGitDiffId } from "./generateGitDiffId";
 
 const ROOT = process.cwd();
 
@@ -32,9 +32,9 @@ export class ApiManifestGenerator {
 
   routerBodyCache: Map<string, any> = new Map();
   controllerCache: Map<string, any> = new Map();
-  private manifestFilePath = join(ROOT, ".gemi/cache/api-routes-manifest.json");
+  private manifestCacheDir = join(ROOT, ".gemi/cache/api-routes-manifest");
 
-  private async writeManifest() {
+  private async writeManifest(cacheFilePath: string) {
     const manifest: Record<
       string,
       Record<string, { file: string; line: number; column: number }>
@@ -56,7 +56,7 @@ export class ApiManifestGenerator {
     }
     const output = JSON.stringify(manifest, null, 2);
     console.log(output);
-    Bun.write(this.manifestFilePath, output);
+    Bun.write(cacheFilePath, output);
   }
 
   private async parseFile(filePath: string) {
@@ -303,14 +303,12 @@ export class ApiManifestGenerator {
     await this.parseRouterBody(this.rootRouterBody, rootApiRouterPath);
   }
 
-  public async parse(filePath: string, isRoot = true, name = "") {
-    if (existsSync(this.manifestFilePath)) {
-      console.log(await Bun.file(this.manifestFilePath).text());
-      return;
-    }
-    if (isRoot) {
-      console.time("parse");
-    }
+  public async parse(
+    cacheFilePath: string | null,
+    filePath: string,
+    isRoot = true,
+    name = "",
+  ) {
     const file = await this.parseFile(join(ROOT, filePath));
     for (const body of file.program.body) {
       if (!this.isNodeShouldBeParsed(body)) continue;
@@ -347,7 +345,17 @@ export class ApiManifestGenerator {
 
     if (isRoot) {
       await this.parseRootRouter(filePath);
-      await this.writeManifest();
+      await this.writeManifest(cacheFilePath);
+    }
+  }
+
+  public async run(filePath: string) {
+    const cacheId = generateGitDiffId();
+    const cacheFilePath = join(this.manifestCacheDir, `${cacheId}.json`);
+    if (existsSync(cacheFilePath)) {
+      console.log(await Bun.file(cacheFilePath).text());
+    } else {
+      await this.parse(cacheFilePath, filePath, true);
     }
   }
 }
