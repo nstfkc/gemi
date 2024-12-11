@@ -9,6 +9,7 @@ import {
 import { FooController, TestController } from "../controllers/FooController";
 import BarController from "@/app/http/controllers/BarController";
 import { TestApiRouter } from "./test";
+import { FileStorage } from "gemi/facades";
 
 class XXRouter extends ApiRouter {
   routes = {
@@ -42,6 +43,9 @@ export default class extends ApiRouter {
       create: this.post(InlineContoller, "create"),
       list: this.get(InlineContoller, "list"),
     },
+    "/image/:path*": this.file((req: HttpRequest) => {
+      return FileStorage.fetch(req.params.path);
+    }),
     // "/users": this.get(FooController, "index"),
     // "/home": this.get(async (req: HttpRequest<{ color: string }>) => {
     //   const input = req.search;

@@ -17,9 +17,9 @@ function generateImageProps(
   return {
     srcSet: [
       ...screen.map((size, i) => {
-        return `/__gemi/image?url=${baseUrl}&q=${quality}&w=${widths[i]} ${size}${isNaN(Number(size)) ? "" : "w"}`;
+        return `/api/__gemi__/services/image/resize?url=${baseUrl}&q=${quality}&w=${widths[i]} ${size}${isNaN(Number(size)) ? "" : "w"}`;
       }),
-      `/__gemi/image?url=${baseUrl}&q=${quality}&w=${width * 2} 2x`,
+      `/api/__gemi__/services/image/resize?url=${baseUrl}&q=${quality}&w=${width * 2} 2x`,
     ].join(", "),
     sources: [
       ...container.map((c, i) => {

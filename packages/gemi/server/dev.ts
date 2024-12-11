@@ -99,10 +99,6 @@ export async function startDevServer() {
           return devResponse;
         }
 
-        if (pathname.startsWith("/__gemi/image")) {
-          return await imageHandler(req);
-        }
-
         try {
           const result = await handler(req);
           if (result instanceof Response) {

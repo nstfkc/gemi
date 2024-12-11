@@ -21,6 +21,8 @@ import { ServiceContainer } from "../services/ServiceContainer";
 import { LoggingServiceContainer } from "../services/logging/LoggingServiceContainer";
 import { LoggingServiceProvider } from "../services/logging/LoggingServiceProvider";
 import { QueueServiceContainer } from "../services/queue/QueueServiceContainer";
+import { ImageOptimizationServiceProvider } from "../services/image-optimization/ImageOptimizationServiceProvider";
+import { ImageOptimizationServiceContainer } from "../services/image-optimization/ImageOptimizationServiceContainer";
 
 export class Kernel {
   protected emailServiceProvider = EmailServiceProvider;
@@ -34,6 +36,7 @@ export class Kernel {
   protected broadcastingsServiceProvider = BroadcastingServiceProvider;
   protected loggingServiceProvider = LoggingServiceProvider;
   protected queueServiceProvider = QueueServiceProvider;
+  protected imageServiceProvider = ImageOptimizationServiceProvider;
 
   services: Record<string, ServiceContainer> = {};
 
@@ -73,6 +76,8 @@ export class Kernel {
       [QueueServiceContainer._name]: new QueueServiceContainer(
         new this.queueServiceProvider(),
       ),
+      [ImageOptimizationServiceContainer._name]:
+        new ImageOptimizationServiceContainer(new this.imageServiceProvider()),
     };
   }
 

@@ -1,5 +1,6 @@
 import {
   Form,
+  Image,
   Link,
   useDelete,
   useMutation,
@@ -28,7 +29,10 @@ export default function Home(props: ViewProps<"/">) {
 
   return (
     <div>
-      <Carousel />
+      <Image
+        src="/api/image/007bd6e5-b10c-4f5c-95cc-2e68485caa37.webp"
+        width={200}
+      />
       <div className="flex gap-2">
         {filters.map((filter) => {
           return (

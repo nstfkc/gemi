@@ -36,3 +36,12 @@ export type { LogEntry } from "./logging/types";
 // Queue
 export { QueueServiceProvider } from "./queue/QueueServiceProvider";
 export { Job } from "./queue/Job";
+
+// Image optimization
+export { ImageOptimizationServiceProvider } from "./image-optimization/ImageOptimizationServiceProvider";
+export type {
+  FitEnum,
+  ResizeParameters,
+} from "./image-optimization/drivers/types";
+export { ImageOptimizationDriver } from "./image-optimization/drivers/ImageOptimizationDriver";
+export { Sharp } from "./image-optimization/drivers/SharpDriver";

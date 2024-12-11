@@ -3,6 +3,7 @@ import { HttpRequest } from "../../http";
 import { GEMI_REQUEST_BREAKER_ERROR } from "../../http/Error";
 import { I18nRouter } from "../../http/I18nServiceContainer";
 import { RequestContext } from "../../http/requestContext";
+import { ImageOptimizationRouter } from "../image-optimization/ImageOptimizationServiceContainer";
 import { LoggingRouter } from "../logging/LoggingRouter";
 import { MiddlewareServiceContainer } from "../middleware/MiddlewareServiceContainer";
 import { ServiceContainer } from "../ServiceContainer";
@@ -21,6 +22,7 @@ export class ApiRouterServiceContainer extends ServiceContainer {
       "/auth": AuthApiRouter,
       "/__gemi__/services/i18n": I18nRouter,
       "/__gemi__/services/logs": LoggingRouter,
+      "/__gemi__/services/image": ImageOptimizationRouter,
     });
   }
 

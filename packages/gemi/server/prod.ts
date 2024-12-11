@@ -1,5 +1,4 @@
 import { join } from "path";
-import { imageHandler } from "./imageHandler";
 import { generateETag } from "./generateEtag";
 import { URLPattern } from "urlpattern-polyfill";
 import { createStyles } from "./styles";
@@ -57,10 +56,6 @@ export async function startProdServer() {
 
   async function requestHandler(req: Request) {
     const { pathname } = new URL(req.url);
-
-    if (pathname.startsWith("/__gemi/image")) {
-      return await imageHandler(req);
-    }
 
     const pattern = new URLPattern({
       pathname: "/*.:filetype(png|txt|js|css|jpg|svg|jpeg|ico|ttf)",
