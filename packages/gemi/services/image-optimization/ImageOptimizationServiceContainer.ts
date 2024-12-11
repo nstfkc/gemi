@@ -13,8 +13,6 @@ export class ImageOptimizationRouter extends ApiRouter {
       const fit = url.searchParams.get("fit") ?? "cover";
       const quality = Number(url.searchParams.get("q"));
 
-      console.log({ rawImageUrl });
-
       if (!rawImageUrl) {
         return new Response(
           JSON.stringify({
@@ -32,8 +30,6 @@ export class ImageOptimizationRouter extends ApiRouter {
         ? ""
         : `http://localhost:${process.env.PORT || 5173}`;
       const fullImageUrl = `${prefix}${rawImageUrl}`;
-      console.log({ fullImageUrl });
-
       const res = await fetch(fullImageUrl);
       if (!res.ok) {
         return new Response(
