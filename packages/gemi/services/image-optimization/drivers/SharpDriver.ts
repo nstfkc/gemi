@@ -1,6 +1,7 @@
+// @ts-ignore
 import sharp from "sharp";
 import { ImageOptimizationDriver } from "./ImageOptimizationDriver";
-import { ResizeParameters } from "./types";
+import type { ResizeParameters } from "./types";
 
 export class Sharp extends ImageOptimizationDriver {
   async resize(buffer: Buffer, parameters: ResizeParameters) {

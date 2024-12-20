@@ -30,7 +30,7 @@ export function create(
     http,
   }: any,
 ) {
-  window.__GEMI_DATA__ = {
+  (window as any).__GEMI_DATA__ = {
     componentTree,
     loaders,
     routeManifest,

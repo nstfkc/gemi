@@ -1,4 +1,4 @@
-import { ResizeParameters } from "./types";
+import type { ResizeParameters } from "./types";
 
 export abstract class ImageOptimizationDriver {
   abstract resize(

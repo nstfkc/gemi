@@ -10,13 +10,8 @@ import { ServerDataContext } from "./ServerDataProvider";
 import { HttpClientContext } from "./HttpClientContext";
 
 export const QueryManagerContext = createContext({
-  getResource: (
-    key: string,
-    initialState: Record<string, any> = {},
-    fetch: typeof globalThis.fetch,
-    host: string,
-  ) => {
-    return new QueryResource(key, initialState, fetch, host);
+  getResource: (key: string, initialState: Record<string, any> = {}) => {
+    return new QueryResource(key, initialState, fetch, "");
   },
   updatePrefecthedData: (_data: Record<string, Record<string, any>>) => {},
 });
