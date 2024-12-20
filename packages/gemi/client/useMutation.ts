@@ -1,9 +1,10 @@
-import { useRef, useState } from "react";
+import { useContext, useRef, useState } from "react";
 import type { RPC } from "./rpc";
 import type { ApiRouterHandler } from "../http/ApiRouter";
 import type { UnwrapPromise } from "../utils/type";
 import type { UrlParser } from "./types";
 import { useParams } from "./useParams";
+import { HttpClientContext } from "./HttpClientContext";
 
 type Methods = {
   POST: {
@@ -95,6 +96,7 @@ export function useMutation<
   ]
 ) {
   const _params = useParams();
+  const { fetch, host } = useContext(HttpClientContext);
   const [state, setState] = useState<State<T>>({
     data: null,
     error: null,
@@ -155,7 +157,7 @@ export function useMutation<
       }
 
       try {
-        const response = await fetch(`/api${finalUrl}`, {
+        const response = await fetch(`${host}/api${finalUrl}`, {
           method,
           headers: {
             ...contentType,

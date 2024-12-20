@@ -62,4 +62,17 @@ program.command("ide:generate-api-manifest").action(async () => {
   await parser.run("/app/http/router/api.ts");
 });
 
+program.command("app:component-tree").action(async () => {
+  const rootDir = path.resolve(process.cwd());
+  const { app } = await import(`${rootDir}/app/bootstrap`);
+  console.log(app.getComponentTree());
+  process.exit();
+});
+
+program.command("app:route-manifest").action(async () => {
+  const rootDir = path.resolve(process.cwd());
+  const { app } = await import(`${rootDir}/app/bootstrap`);
+  console.log(app.getRouteManifest());
+  process.exit();
+});
 program.parse();

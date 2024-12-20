@@ -5,8 +5,8 @@ import { flattenComponentTree } from "./helpers/flattenComponentTree";
 let viewImportMap: Record<string, ReturnType<typeof lazy>> | null = null;
 if (typeof window !== "undefined" && process.env.NODE_ENV !== "test") {
   viewImportMap = {};
-  const { componentTree } = (window as any)
-    .__GEMI_DATA__ as ServerDataContextValue;
+  const { componentTree = [] } =
+    ((window as any)?.__GEMI_DATA__ as ServerDataContextValue) ?? {};
 
   for (const viewName of flattenComponentTree(componentTree)) {
     viewImportMap[viewName] = lazy((window as any).loaders[viewName]);

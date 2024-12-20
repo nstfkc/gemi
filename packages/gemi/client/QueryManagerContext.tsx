@@ -7,10 +7,16 @@ import {
 } from "react";
 import { QueryResource } from "./QueryResource";
 import { ServerDataContext } from "./ServerDataProvider";
+import { HttpClientContext } from "./HttpClientContext";
 
 export const QueryManagerContext = createContext({
-  getResource: (key: string, initialState: Record<string, any> = {}) => {
-    return new QueryResource(key, initialState);
+  getResource: (
+    key: string,
+    initialState: Record<string, any> = {},
+    fetch: typeof globalThis.fetch,
+    host: string,
+  ) => {
+    return new QueryResource(key, initialState, fetch, host);
   },
   updatePrefecthedData: (_data: Record<string, Record<string, any>>) => {},
 });
@@ -19,6 +25,7 @@ export const QueryManagerProvider = ({ children }: PropsWithChildren) => {
   const resourcesRef = useRef<Map<string, QueryResource>>(new Map());
   const { prefetchedData } = useContext(ServerDataContext);
   const prefetchedDataRef = useRef(prefetchedData);
+  const { fetch, host } = useContext(HttpClientContext);
 
   const updatePrefecthedData = (data: Record<string, Record<string, any>>) => {
     for (const [key, value] of Object.entries(data)) {
@@ -42,7 +49,7 @@ export const QueryManagerProvider = ({ children }: PropsWithChildren) => {
           if (!resourcesRef.current.has(key)) {
             resourcesRef.current.set(
               key,
-              new QueryResource(key, _initialState ?? {}),
+              new QueryResource(key, _initialState ?? {}, fetch, host),
             );
           }
           return resourcesRef.current.get(key);

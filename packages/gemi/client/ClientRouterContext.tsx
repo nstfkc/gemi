@@ -12,6 +12,7 @@ import { Subject } from "../utils/Subject";
 import { URLPattern } from "urlpattern-polyfill";
 import { ProgressManager } from "./ProgressManager";
 import { HttpReload } from "./HttpReload";
+import { HttpClientContext } from "./HttpClientContext";
 
 interface ClientRouterContextValue {
   viewEntriesSubject: Subject<string[]>;
@@ -63,6 +64,8 @@ export const ClientRouterProvider = (
   const [isNavigatingSubject] = useState(() => {
     return new Subject<boolean>(false);
   });
+
+  const { fetch, host } = useContext(HttpClientContext);
 
   const [progressManager] = useState(new ProgressManager(isNavigatingSubject));
   const pageDataRef = useRef(structuredClone(pageData));
@@ -166,7 +169,7 @@ export const ClientRouterProvider = (
   };
 
   const getPageData = (key: string) => {
-    return pageDataRef.current[locationSubject.getValue().pathname][key];
+    return pageDataRef.current[locationSubject.getValue().pathname]?.[key];
   };
 
   const setNavigationAbortController = (controller: AbortController) => {
@@ -189,7 +192,7 @@ export const ClientRouterProvider = (
     }
 
     async function fetchCSS(path: string) {
-      const response = await fetch(`/${path}`);
+      const response = await fetch(`${host}/${path}`);
       const content = response.text();
       return {
         content,

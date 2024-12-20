@@ -173,7 +173,7 @@ export class ApiManifestGenerator {
           specifier.type === "ImportDefaultSpecifier"
             ? specifier.local.name
             : specifier.imported.name;
-        await this.parse(normalizedPath, false, name);
+        await this.parse("", normalizedPath, false, name);
       }
     }
   }
@@ -309,6 +309,7 @@ export class ApiManifestGenerator {
     isRoot = true,
     name = "",
   ) {
+    console.log({ ROOT, filePath });
     const file = await this.parseFile(join(ROOT, filePath));
     for (const body of file.program.body) {
       if (!this.isNodeShouldBeParsed(body)) continue;

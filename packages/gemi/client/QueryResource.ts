@@ -11,8 +11,17 @@ export class QueryResource {
   staleVariants = new Set<string>();
   lastFetchRecord = new Map<string, number>();
   key: string;
+  fetch: typeof globalThis.fetch;
+  host: string;
 
-  constructor(key: string, initialState: Record<string, any> = {}) {
+  constructor(
+    key: string,
+    initialState: Record<string, any> = {},
+    fetch: typeof globalThis.fetch,
+    host: string,
+  ) {
+    this.fetch = fetch;
+    this.host = host;
     this.key = key;
     const store = new Map();
     const now = Date.now();
@@ -93,7 +102,7 @@ export class QueryResource {
     }
 
     const fullUrl = [this.key, variantKey].filter((s) => s.length).join("?");
-    const response = await fetch(`/api${fullUrl}`);
+    const response = await this.fetch(`${this.host}/api${fullUrl}`);
 
     let data = null;
     try {

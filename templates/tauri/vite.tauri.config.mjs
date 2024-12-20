@@ -1,7 +1,36 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react-swc";
+import { execSync } from "child_process";
 
 const host = process.env.TAURI_DEV_HOST;
+
+function myPlugin() {
+  const virtualModuleId = "virtual:gemi";
+  const resolvedVirtualModuleId = "\0" + virtualModuleId;
+
+  return {
+    name: "my-plugin", // required, will show up in warnings and errors
+    resolveId(id) {
+      if (id === virtualModuleId) {
+        return resolvedVirtualModuleId;
+      }
+    },
+    load(id) {
+      const componentTreeBuffer = execSync("gemi app:component-tree", {
+        cwd: process.cwd(),
+      });
+      const routeManifestBuffer = execSync("gemi app:route-manifest", {
+        cwd: process.cwd(),
+      });
+      if (id === resolvedVirtualModuleId) {
+        return `
+          export const componentTree = ${componentTreeBuffer.toString()};
+          export const routeManifest = ${routeManifestBuffer.toString()};
+        `;
+      }
+    },
+  };
+}
 
 export default defineConfig({
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
@@ -25,5 +54,10 @@ export default defineConfig({
       ignored: ["**/src-tauri/**"],
     },
   },
-  plugins: [react()],
+  plugins: [myPlugin(), react()],
+  resolve: {
+    alias: {
+      "@/app": `${process.cwd()}/app`,
+    },
+  },
 });

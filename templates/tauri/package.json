@@ -2,6 +2,7 @@
   "name": "gemi-template-tauri",
   "scripts": {
     "dev": "gemi dev",
+    "dev:tauri": "vite --mode development --config vite.tauri.config.mjs",
     "build": "gemi build",
     "start": "gemi start",
     "test": "vitest",
@@ -14,8 +15,9 @@
     "@react-email/components": "0.0.23-canary.3",
     "@react-email/render": "^0.0.17-canary.0",
     "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-http": "^2.2.0",
     "@tauri-apps/plugin-shell": "^2",
-    "framer-motion": "12.0.0-alpha.1",
+    "framer-motion": "^11.14.1",
     "gemi": "*",
     "jsx-email": "2.0.0-rc2.1",
     "react": "19.0.0-rc-fb9a90fa48-20240614",

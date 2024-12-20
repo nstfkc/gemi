@@ -29,6 +29,12 @@ export class App {
     });
   }
 
+  public getRouteManifest() {
+    return this.kernel.run.call(this.kernel, () => {
+      return ViewRouterServiceContainer.use().routeManifest;
+    });
+  }
+
   public async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url);
 

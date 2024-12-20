@@ -1,9 +1,10 @@
-import { useContext, startTransition } from "react";
+import { useContext } from "react";
 import { ClientRouterContext } from "./ClientRouterContext";
 import type { UrlParser, ViewPaths } from "./types";
 import { applyParams } from "../utils/applyParams";
 import { I18nContext } from "./i18n/I18nContext";
 import { QueryManagerContext } from "./QueryManagerContext";
+import { HttpClientContext } from "./HttpClientContext";
 
 type Options<T extends ViewPaths> =
   UrlParser<T> extends Record<string, never>
@@ -30,6 +31,7 @@ export function useNavigate() {
   } = useContext(ClientRouterContext);
   const { updatePrefecthedData } = useContext(QueryManagerContext);
   const { fetchTranslations } = useContext(I18nContext);
+  const { fetch, host } = useContext(HttpClientContext);
 
   function action(pushOrReplace: "push" | "replace") {
     return async <T extends ViewPaths>(
@@ -79,16 +81,19 @@ export function useNavigate() {
 
       try {
         const [res] = await Promise.all([
-          fetch(fetchPath, { signal: navigationAbortController.signal }),
+          fetch(`${host}${fetchPath}`, {
+            signal: navigationAbortController.signal,
+          }),
           fetchRouteCSS(routePathname),
           fetchTranslations(
             routePathname,
             undefined,
             navigationAbortController.signal,
           ),
-          ...components.map((component) =>
-            (window as any).loaders[component](),
-          ),
+          ...components.map((component) => {
+            if (!(window as any)?.loaders) return Promise.resolve();
+            return (window as any)?.loaders[component]();
+          }),
         ]);
 
         if (res.ok) {

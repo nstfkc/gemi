@@ -21,7 +21,7 @@ export { useIsNavigationPending } from "./useIsNavigationPending";
 export { useNavigationProgress } from "./useNavigationProgress";
 export { useNavigate } from "./useNavigate";
 export { Link } from "./Link";
-export { init } from "./init";
+export { init, create } from "./init";
 export { createRoot } from "./createRoot";
 
 export type { RPC, ViewRPC, I18nDictionary } from "./rpc";
@@ -43,3 +43,5 @@ export { useLocale } from "./i18n/useLocale";
 // Websocket
 export { useSubscription } from "./useSubscription";
 export { useBroadcast } from "./useBroadcast";
+
+export { HttpClientContext, HttpClientProvider } from "./HttpClientContext";
