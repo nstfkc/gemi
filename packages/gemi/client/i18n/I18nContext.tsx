@@ -58,7 +58,7 @@ export const I18nProvider = (props: PropsWithChildren<I18nProviderProps>) => {
     });
 
   function updateDictionary(
-    translations: Record<string, Record<string, Record<string, string>>>,
+    translations: Record<string, Record<string, Record<string, string>>> = {},
   ) {
     for (const [locale, value] of Object.entries(translations)) {
       if (!dictionary.has(locale)) {

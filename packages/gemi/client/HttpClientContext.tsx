@@ -1,7 +1,7 @@
 import { createContext } from "react";
 
 export const HttpClientContext = createContext({
-  fetch: globalThis.fetch,
+  fetch: (...params: any) => globalThis.fetch.bind(globalThis)(...params),
   host: "",
 });
 

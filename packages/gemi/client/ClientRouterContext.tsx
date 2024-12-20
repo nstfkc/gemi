@@ -13,6 +13,7 @@ import { URLPattern } from "urlpattern-polyfill";
 import { ProgressManager } from "./ProgressManager";
 import { HttpReload } from "./HttpReload";
 import { HttpClientContext } from "./HttpClientContext";
+import { log } from "node:util";
 
 interface ClientRouterContextValue {
   viewEntriesSubject: Subject<string[]>;
@@ -119,8 +120,7 @@ export const ClientRouterProvider = (
       return x - y;
     });
 
-    const [route] = sortedCandidates ?? [];
-    return route;
+    return (sortedCandidates ?? [])[0];
   };
 
   const getViewPathsFromPathname = (pathname: string) => {
@@ -248,8 +248,7 @@ export function useLocation() {
   if (!ctx) {
     throw new Error("useLocation must be used within a ClientRouterProvider");
   }
-  const { locationSubject } = ctx;
-  const [location, setLocation] = useState(locationSubject?.getValue());
+  const [location, setLocation] = useState(ctx?.locationSubject?.getValue());
 
   useLocationChange((newLocation) => {
     setLocation(newLocation);
