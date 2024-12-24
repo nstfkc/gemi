@@ -27,4 +27,8 @@ export default class extends AuthenticationServiceProvider {
   onForgotPassword(user: any, token: string) {
     console.log("Forgot password email sent", user.email, token);
   }
+
+  onMagicLinkCreated(user: any, args: any) {
+    console.log("Magic link created", user.email, args);
+  }
 }

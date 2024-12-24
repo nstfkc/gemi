@@ -10,6 +10,7 @@ import { FooController, TestController } from "../controllers/FooController";
 import BarController from "@/app/http/controllers/BarController";
 import { TestApiRouter } from "./test";
 import { FileStorage } from "gemi/facades";
+import { prisma } from "@/app/database/prisma";
 
 class XXRouter extends ApiRouter {
   routes = {

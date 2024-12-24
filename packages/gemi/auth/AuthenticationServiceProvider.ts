@@ -97,6 +97,56 @@ class ResetPasswordRequest extends HttpRequest<
 class AuthController extends Controller {
   provider = AuthenticationServiceContainer.use()?.provider;
 
+  private async createOrUpdateSession(user: User) {
+    const authProvider = AuthenticationServiceContainer.use().provider;
+    const req = new HttpRequest();
+
+    const userAgent = req.headers.get("User-Agent");
+
+    const hasher = new Bun.CryptoHasher("sha256");
+    hasher.update(`${user.email}${userAgent}`);
+
+    const token = hasher.digest("hex");
+    let session = await authProvider.adapter.findSession({
+      token,
+      userAgent:
+        process.env.NODE_ENV === "development"
+          ? "local"
+          : req.headers.get("User-Agent"),
+    });
+
+    if (!session) {
+      session = await authProvider.adapter.createSession({
+        token,
+        userId: user.id,
+        userAgent:
+          process.env.NODE_ENV === "development"
+            ? "local"
+            : req.headers.get("User-Agent"),
+        expiresAt: new Date(
+          Temporal.Now.instant()
+            .add({ hours: authProvider.sessionExpiresInHours })
+            .toString(),
+        ),
+        absoluteExpiresAt: new Date(
+          Temporal.Now.instant()
+            .add({ hours: authProvider.sessionAbsoluteExpiresInHours })
+            .toString(),
+        ),
+      });
+    } else {
+      session = await authProvider.adapter.updateSession({
+        token,
+        expiresAt: new Date(
+          Temporal.Now.instant()
+            .add({ hours: authProvider.sessionExpiresInHours })
+            .toString(),
+        ),
+      });
+    }
+    return session;
+  }
+
   async me() {
     const user = await Auth.user();
 
@@ -129,6 +179,70 @@ class AuthController extends Controller {
     return { email: null };
   }
 
+  async signInWithMagicLink(req = new HttpRequest()) {
+    const authProvider = AuthenticationServiceContainer.use().provider;
+    const token = req.search.get("token");
+    const email = req.search.get("email");
+
+    let user = null;
+
+    try {
+      user = await authProvider.adapter.findUserByMagicLinkToken({
+        email,
+        token,
+      });
+    } catch (err) {
+      return { error: "Invalid token" };
+    }
+
+    if (!user) {
+      return { error: "Invalid token" };
+    }
+
+    await authProvider.adapter.verifyUser(user.id);
+    await authProvider.adapter.deleteMagicLinkToken(email);
+    const session = await this.createOrUpdateSession(user);
+
+    req.ctx().setCookie("access_token", session.token, {
+      expires: session.expiresAt,
+    });
+
+    await authProvider.onSignIn(user);
+
+    return { session };
+  }
+
+  async signInWithPin(req = new HttpRequest<{ email: string; pin: string }>()) {
+    const authProvider = AuthenticationServiceContainer.use().provider;
+    const input = await req.input();
+    const { email, pin } = input.toJSON();
+
+    const user = await authProvider.adapter.findUserByMagicLinkToken({
+      email,
+      pin,
+    });
+
+    if (!user) {
+      throw new ValidationError({
+        pin: ["Invalid pin"],
+      });
+    }
+
+    await authProvider.adapter.deleteMagicLinkToken(email);
+
+    await this.provider.adapter.verifyUser(user.id);
+
+    const session = await this.createOrUpdateSession(user);
+
+    req.ctx().setCookie("access_token", session.token, {
+      expires: session.expiresAt,
+    });
+
+    await authProvider.onSignIn(user);
+
+    return { session };
+  }
+
   async signIn(req = new SignInRequest()) {
     const input = await req.input.call(req);
     const { email, password } = input.toJSON();
@@ -155,50 +269,7 @@ class AuthController extends Controller {
       });
     }
 
-    const userAgent = req.headers.get("User-Agent");
-
-    const hasher = new Bun.CryptoHasher("sha256");
-    hasher.update(`${user.email}${userAgent}`);
-
-    const token = hasher.digest("hex");
-
-    let session = await this.provider.adapter.findSession({
-      token,
-      userAgent:
-        process.env.NODE_ENV === "development"
-          ? "local"
-          : req.headers.get("User-Agent"),
-    });
-
-    if (!session) {
-      session = await this.provider.adapter.createSession({
-        token,
-        userId: user.id,
-        userAgent:
-          process.env.NODE_ENV === "development"
-            ? "local"
-            : req.headers.get("User-Agent"),
-        expiresAt: new Date(
-          Temporal.Now.instant()
-            .add({ hours: this.provider.sessionExpiresInHours })
-            .toString(),
-        ),
-        absoluteExpiresAt: new Date(
-          Temporal.Now.instant()
-            .add({ hours: this.provider.sessionAbsoluteExpiresInHours })
-            .toString(),
-        ),
-      });
-    } else {
-      session = await this.provider.adapter.updateSession({
-        token,
-        expiresAt: new Date(
-          Temporal.Now.instant()
-            .add({ hours: this.provider.sessionExpiresInHours })
-            .toString(),
-        ),
-      });
-    }
+    const session = await this.createOrUpdateSession(user);
 
     req.ctx().setCookie("access_token", session.token, {
       expires: session.expiresAt,
@@ -434,50 +505,7 @@ class AuthController extends Controller {
       });
     }
 
-    const userAgent = req.headers.get("User-Agent");
-
-    const hasher = new Bun.CryptoHasher("sha256");
-    hasher.update(`${user.email}${userAgent}`);
-
-    const token = hasher.digest("hex");
-
-    let session = await authProvider.adapter.findSession({
-      token,
-      userAgent:
-        process.env.NODE_ENV === "development"
-          ? "local"
-          : req.headers.get("User-Agent"),
-    });
-
-    if (!session) {
-      session = await authProvider.adapter.createSession({
-        token,
-        userId: user.id,
-        userAgent:
-          process.env.NODE_ENV === "development"
-            ? "local"
-            : req.headers.get("User-Agent"),
-        expiresAt: new Date(
-          Temporal.Now.instant()
-            .add({ hours: authProvider.sessionExpiresInHours })
-            .toString(),
-        ),
-        absoluteExpiresAt: new Date(
-          Temporal.Now.instant()
-            .add({ hours: authProvider.sessionAbsoluteExpiresInHours })
-            .toString(),
-        ),
-      });
-    } else {
-      session = await authProvider.adapter.updateSession({
-        token,
-        expiresAt: new Date(
-          Temporal.Now.instant()
-            .add({ hours: authProvider.sessionExpiresInHours })
-            .toString(),
-        ),
-      });
-    }
+    const session = await this.createOrUpdateSession(user);
 
     req.ctx().setCookie("access_token", session.token, {
       expires: session.expiresAt,
@@ -487,15 +515,56 @@ class AuthController extends Controller {
 
     return { session };
   }
+
+  async createMagicLinkToken(req = new HttpRequest<{ email: string }>()) {
+    const provider = AuthenticationServiceContainer.use()?.provider;
+    const input = await req.input();
+    const { email } = input.toJSON();
+
+    const user = await provider.adapter.findUserByEmailAddress(email, false);
+
+    if (!user) {
+      throw new ValidationError({
+        email: ["User not found"],
+      });
+    }
+
+    await provider.adapter.deleteMagicLinkToken(email);
+
+    const token = await provider.generateMagicLinkToken(email);
+    const pin = Math.floor(1000 + Math.random() * 9000).toString();
+
+    await provider.adapter.createMagicLinkToken({
+      email,
+      token,
+      pin,
+    });
+
+    await provider.onMagicLinkCreated(user, { email, pin, token });
+
+    return {
+      email,
+    };
+  }
 }
 
-export class OAuthViewRouter extends ViewRouter {
+class OAuthViewRouter extends ViewRouter {
   routes = {
     "/:provider": this.view("__", [AuthController, "oauthRedirect"]),
     "/:provider/callback": this.view("auth/OauthCallback", [
       AuthController,
       "oauthCallback",
     ]),
+  };
+}
+
+export class AuthViewRouter extends ViewRouter {
+  routes = {
+    "/sign-in/magic-link": this.view("auth/MagicLinkSignIn", [
+      AuthController,
+      "signInWithMagicLink",
+    ]),
+    "/oauth": OAuthViewRouter,
   };
 }
 
@@ -510,6 +579,8 @@ export class AuthApiRouter extends ApiRouter {
     "/change-password": this.post(AuthController, "changePassword"),
     "/verify-email": this.post(AuthController, "verifyEmail"),
     "/me": this.get(AuthController, "me").middleware(["auth"]),
+    "/magic-link": this.post(AuthController, "createMagicLinkToken"),
+    "/sign-in-with-pin": this.post(AuthController, "signInWithPin"),
   };
 }
 
@@ -550,6 +621,12 @@ export class AuthenticationServiceProvider extends ServiceProvider {
     return hasher.digest("hex");
   }
 
+  generateMagicLinkToken(email: string): Promise<string> | string {
+    const hasher = new Bun.CryptoHasher("sha256");
+    hasher.update(`${email}${Date.now()}`);
+    return hasher.digest("hex");
+  }
+
   extendSession<T extends User>(_user: T): Promise<any> | any {
     return {};
   }
@@ -565,4 +642,10 @@ export class AuthenticationServiceProvider extends ServiceProvider {
     _verificationToken: string,
   ): Promise<void> | void {}
   onResetPassword<T extends User>(_user: T): Promise<void> | void {}
+  onMagicLinkCreated(
+    _user: User,
+    _args: { email: string; token: string; pin: string },
+  ): Promise<void> | void {
+    return;
+  }
 }

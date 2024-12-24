@@ -24,6 +24,15 @@ export interface IAuthenticationAdapter {
   findInvitation: (invitationId: string, email: string) => Promise<Invitation>;
   deleteInvitationById: (invitationId: string) => Promise<void>;
   createAccount: (args: CreateAccountArgs) => Promise<Account | null>;
+  createMagicLinkToken: (
+    args: CreateMagicLinkTokenArgs,
+  ) => Promise<{ token: string; pin: string }>;
+  findUserByMagicLinkToken: (args: {
+    token?: string;
+    pin?: string;
+    email: string;
+  }) => Promise<User | null>;
+  deleteMagicLinkToken: (email: string) => Promise<void>;
 }
 
 export type Invitation = {
@@ -130,4 +139,10 @@ export interface FindSessionArgs {
 export interface UpdateSessionArgs {
   expiresAt: Date;
   token: string;
+}
+
+export interface CreateMagicLinkTokenArgs {
+  email: string;
+  token: string;
+  pin: string;
 }

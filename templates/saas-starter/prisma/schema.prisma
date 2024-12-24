@@ -82,3 +82,15 @@ model PasswordResetToken {
 
   createdAt DateTime @default(now())
 }
+
+model MagicLinkToken {
+  id    Int    @id @default(autoincrement())
+  token String
+  email String
+  pin   String
+
+  createdAt DateTime @default(now())
+
+  @@unique([token, email])
+  @@unique([pin, email])
+}

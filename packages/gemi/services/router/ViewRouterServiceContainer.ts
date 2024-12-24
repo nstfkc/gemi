@@ -26,7 +26,7 @@ import { MiddlewareServiceContainer } from "../middleware/MiddlewareServiceConta
 import { Log } from "../../facades";
 import { v4 } from "uuid";
 import { randomBytes, createHmac } from "crypto";
-import { OAuthViewRouter } from "../../auth/AuthenticationServiceProvider";
+import { AuthViewRouter } from "../../auth/AuthenticationServiceProvider";
 
 export class ViewRouterServiceContainer extends ServiceContainer {
   static _name = "ViewRouterServiceContainer";
@@ -41,7 +41,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
     super();
     const routes: ViewRoutes = {
       "/": service.rootRouter,
-      "/oauth": OAuthViewRouter,
+      "/auth": AuthViewRouter,
     };
     this.flatViewRoutes = createFlatViewRoutes(routes);
     this.routeManifest = createRouteManifest(routes);

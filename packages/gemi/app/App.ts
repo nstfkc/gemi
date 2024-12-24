@@ -18,21 +18,18 @@ export class App {
   }
 
   public getComponentTree() {
-    console.log("getComponentTree");
     return this.kernel.run.call(this.kernel, () => {
       return ViewRouterServiceContainer.use().componentTree;
     });
   }
 
   public getFlatComponentTree() {
-    console.log("getFlatComponentTree");
     return this.kernel.run.call(this.kernel, () => {
       return ViewRouterServiceContainer.use().flatComponentTree;
     });
   }
 
   public getRouteManifest() {
-    console.log("getRouteManifest");
     return this.kernel.run.call(this.kernel, () => {
       return ViewRouterServiceContainer.use().routeManifest;
     });
@@ -40,9 +37,6 @@ export class App {
 
   public async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url);
-
-    console.log(req.url);
-
     return this.kernel.run.call(this.kernel, async () => {
       if (url.pathname.startsWith("/api")) {
         return await ApiRouterServiceContainer.use().handleApiRequest(req);

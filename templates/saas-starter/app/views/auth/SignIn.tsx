@@ -6,6 +6,7 @@ import {
   useUser,
   ValidationErrors,
 } from "gemi/client";
+import { useState } from "react";
 
 export default function SignIn() {
   const { push } = useNavigate();
@@ -78,6 +79,47 @@ export default function SignIn() {
       <div>
         <a href="/oauth/google">Sign In with Google</a>
       </div>
+      <div>
+        <WithEmail />
+      </div>
     </div>
   );
 }
+
+const WithEmail = () => {
+  const [email, setEmail] = useState<null | string>(null);
+  const navigate = useNavigate();
+
+  if (email) {
+    return (
+      <Form
+        method="POST"
+        action="/auth/sign-in-with-pin"
+        onSuccess={() => {
+          navigate.replace("/app/dashboard");
+        }}
+      >
+        <input name="email" defaultValue={email} type="hidden" />
+        <input name="pin" />
+        <div>
+          <button>Sign in</button>
+        </div>
+      </Form>
+    );
+  }
+  return (
+    <Form
+      method="POST"
+      action="/auth/magic-link"
+      onSuccess={(data) => {
+        console.log({ data });
+        setEmail(data.email);
+      }}
+    >
+      <input name="email" />
+      <div>
+        <button>Continue with email</button>
+      </div>
+    </Form>
+  );
+};

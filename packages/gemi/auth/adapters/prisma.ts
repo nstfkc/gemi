@@ -184,4 +184,52 @@ export class PrismaAuthenticationAdapter implements IAuthenticationAdapter {
       where: { publicId: invitationId, email },
     });
   }
+
+  async createMagicLinkToken(args: {
+    email: string;
+    token: string;
+    pin: string;
+  }) {
+    return await this.prisma.magicLinkToken.create({
+      data: {
+        email: args.email,
+        token: args.token,
+        pin: args.pin,
+      },
+    });
+  }
+
+  async findUserByMagicLinkToken(args: {
+    token?: string;
+    pin?: string;
+    email: string;
+  }) {
+    const { token, pin, email } = args;
+
+    if (token) {
+      return this.prisma.magicLinkToken.findUnique({
+        where: {
+          token_email: {
+            email,
+            token,
+          },
+        },
+      });
+    } else {
+      return await this.prisma.magicLinkToken.findUnique({
+        where: {
+          pin_email: {
+            email,
+            pin,
+          },
+        },
+      });
+    }
+  }
+
+  async deleteMagicLinkToken(email: string) {
+    return await this.prisma.magicLinkToken.deleteMany({
+      where: { email },
+    });
+  }
 }
