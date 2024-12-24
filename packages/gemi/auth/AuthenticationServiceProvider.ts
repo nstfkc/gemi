@@ -4,7 +4,7 @@ import { Controller } from "../http/Controller";
 import { HttpRequest } from "../http/HttpRequest";
 import { ApiRouter } from "../http/ApiRouter";
 import { ViewRouter } from "../http/ViewRouter";
-import { Auth } from "../facades";
+import { Auth, Redirect } from "../facades";
 import type {
   IAuthenticationAdapter,
   Invitation,
@@ -16,6 +16,8 @@ import { ValidationError } from "../http";
 import { ServiceProvider } from "../services/ServiceProvider";
 import { AuthenticationServiceContainer } from "./AuthenticationServiceContainer";
 import { I18nServiceContainer } from "../http/I18nServiceContainer";
+import { OAuthProvider } from "./oauth/OAuthProvider";
+import { Cookie } from "../http/Cookie";
 
 class SignInRequest extends HttpRequest<
   {
@@ -93,7 +95,7 @@ class ResetPasswordRequest extends HttpRequest<
 }
 
 class AuthController extends Controller {
-  provider = AuthenticationServiceContainer.use().provider;
+  provider = AuthenticationServiceContainer.use()?.provider;
 
   async me() {
     const user = await Auth.user();
@@ -400,6 +402,101 @@ class AuthController extends Controller {
     await this.provider.adapter.deleteAllUserSessions(user.id);
     return {};
   }
+
+  async oauthRedirect(req = new HttpRequest()) {
+    const { provider } = req.params;
+    const oauthProvider =
+      AuthenticationServiceContainer.use().provider.oauthProviders[
+        provider as string
+      ];
+    if (!oauthProvider) {
+      throw new Error(`Invalid provider: ${provider}`);
+    }
+
+    return {
+      url: await oauthProvider.getRedirectUrl(req),
+    };
+  }
+
+  async oauthCallback(req = new HttpRequest()) {
+    const { provider } = req.params;
+    const authProvider = AuthenticationServiceContainer.use().provider;
+    const oauthProvider = authProvider.oauthProviders[provider as string];
+    const { email, name } = await oauthProvider.onCallback(req);
+
+    let user = await authProvider.adapter.findUserByEmailAddress(email, false);
+    const locale = I18nServiceContainer.use().detectLocale(req);
+    if (!user) {
+      user = await this.provider.adapter.createUser({
+        email,
+        name,
+        locale,
+      });
+    }
+
+    const userAgent = req.headers.get("User-Agent");
+
+    const hasher = new Bun.CryptoHasher("sha256");
+    hasher.update(`${user.email}${userAgent}`);
+
+    const token = hasher.digest("hex");
+
+    let session = await authProvider.adapter.findSession({
+      token,
+      userAgent:
+        process.env.NODE_ENV === "development"
+          ? "local"
+          : req.headers.get("User-Agent"),
+    });
+
+    if (!session) {
+      session = await authProvider.adapter.createSession({
+        token,
+        userId: user.id,
+        userAgent:
+          process.env.NODE_ENV === "development"
+            ? "local"
+            : req.headers.get("User-Agent"),
+        expiresAt: new Date(
+          Temporal.Now.instant()
+            .add({ hours: authProvider.sessionExpiresInHours })
+            .toString(),
+        ),
+        absoluteExpiresAt: new Date(
+          Temporal.Now.instant()
+            .add({ hours: authProvider.sessionAbsoluteExpiresInHours })
+            .toString(),
+        ),
+      });
+    } else {
+      session = await authProvider.adapter.updateSession({
+        token,
+        expiresAt: new Date(
+          Temporal.Now.instant()
+            .add({ hours: authProvider.sessionExpiresInHours })
+            .toString(),
+        ),
+      });
+    }
+
+    req.ctx().setCookie("access_token", session.token, {
+      expires: session.expiresAt,
+    });
+
+    await authProvider.onSignIn(user);
+
+    return { session };
+  }
+}
+
+export class OAuthViewRouter extends ViewRouter {
+  routes = {
+    "/:provider": this.view("__", [AuthController, "oauthRedirect"]),
+    "/:provider/callback": this.view("auth/OauthCallback", [
+      AuthController,
+      "oauthCallback",
+    ]),
+  };
 }
 
 export class AuthApiRouter extends ApiRouter {
@@ -416,16 +513,6 @@ export class AuthApiRouter extends ApiRouter {
   };
 }
 
-export class AuthViewRouter extends ViewRouter {
-  middlewares = ["cache:public"];
-  routes = {
-    "/sign-in": this.view("auth/SignIn"),
-    "/sign-up": this.view("auth/SignUp"),
-    "/reset-password": this.view("auth/ResetPassword"),
-    "/forgot-password": this.view("auth/ForgotPassword"),
-  };
-}
-
 export class AuthenticationServiceProvider extends ServiceProvider {
   basePath = "/auth";
   verifyEmail = true;
@@ -435,6 +522,8 @@ export class AuthenticationServiceProvider extends ServiceProvider {
 
   // @ts-ignore
   adapter: IAuthenticationAdapter = new BlankAdapter();
+
+  oauthProviders: Record<string, OAuthProvider> = {};
 
   boot() {}
 

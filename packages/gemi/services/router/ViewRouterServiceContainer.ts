@@ -25,7 +25,8 @@ import { I18nServiceContainer } from "../../http/I18nServiceContainer";
 import { MiddlewareServiceContainer } from "../middleware/MiddlewareServiceContainer";
 import { Log } from "../../facades";
 import { v4 } from "uuid";
-import { randomBytes, createHmac, timingSafeEqual } from "crypto";
+import { randomBytes, createHmac } from "crypto";
+import { OAuthViewRouter } from "../../auth/AuthenticationServiceProvider";
 
 export class ViewRouterServiceContainer extends ServiceContainer {
   static _name = "ViewRouterServiceContainer";
@@ -40,6 +41,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
     super();
     const routes: ViewRoutes = {
       "/": service.rootRouter,
+      "/oauth": OAuthViewRouter,
     };
     this.flatViewRoutes = createFlatViewRoutes(routes);
     this.routeManifest = createRouteManifest(routes);

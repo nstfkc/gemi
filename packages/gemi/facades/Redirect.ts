@@ -3,7 +3,7 @@ import { RequestBreakerError } from "../http/Error";
 import { applyParams } from "../utils/applyParams";
 
 class RedirectError extends RequestBreakerError {
-  constructor(path: string) {
+  constructor(path: string, headers: Record<string, string> = {}) {
     super("Redirect error");
     this.name = "RedirectError";
     this.payload = {
@@ -13,11 +13,12 @@ class RedirectError extends RequestBreakerError {
         directive: { kind: "Redirect", path },
       },
       view: {
-        status: 302,
+        status: 307,
         headers: {
           "Cache-Control":
             "private, no-cache, no-store, max-age=0, must-revalidate",
           Location: path,
+          ...headers,
         },
       },
     };
@@ -28,10 +29,10 @@ export class Redirect {
   static to<T extends ViewPaths>(
     path: T,
     ...args: UrlParser<`${T & string}`> extends Record<string, never>
-      ? []
-      : [params: UrlParser<`${T & string}`>]
+      ? [params: undefined, headers?: Record<string, string>]
+      : [params: UrlParser<`${T & string}`>, headers?: Record<string, string>]
   ) {
-    const [params = {}] = args;
-    throw new RedirectError(applyParams(path, params));
+    const [params = {}, headers = {}] = args;
+    throw new RedirectError(applyParams(path, params), headers);
   }
 }

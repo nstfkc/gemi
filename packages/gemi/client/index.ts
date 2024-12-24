@@ -21,6 +21,7 @@ export { useIsNavigationPending } from "./useIsNavigationPending";
 export { useNavigationProgress } from "./useNavigationProgress";
 export { useNavigate } from "./useNavigate";
 export { Link } from "./Link";
+export { Redirect } from "./Redirect";
 export { init, create } from "./init";
 export { createRoot } from "./createRoot";
 

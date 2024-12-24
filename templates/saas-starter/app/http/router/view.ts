@@ -3,7 +3,7 @@ import { HomeController } from "../controllers/HomeController";
 import { FooController } from "../controllers/FooController";
 
 class AppRouter extends ViewRouter {
-  middlewares = ["auth", "cache"];
+  // middlewares = ["auth", "cache"];
 
   routes = {
     "/": this.layout("app/AppLayout", {

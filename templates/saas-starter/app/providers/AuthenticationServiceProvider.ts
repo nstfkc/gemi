@@ -2,11 +2,17 @@ import {
   AuthenticationServiceProvider,
   PrismaAuthenticationAdapter,
 } from "gemi/kernel";
+import { GoogleOAuthProvider } from "gemi/services";
+
 import { prisma } from "../database/prisma";
 
 export default class extends AuthenticationServiceProvider {
   adapter = new PrismaAuthenticationAdapter(prisma);
   verifyEmail = false;
+
+  oauthProviders = {
+    google: new GoogleOAuthProvider(),
+  };
 
   extendSession(_user: any) {
     return {

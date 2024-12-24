@@ -107,7 +107,7 @@ export interface SessionWithUser {
 export interface CreateUserArgs {
   name: string;
   email: string;
-  password: string;
+  password?: string;
   verificationToken?: string;
   emailVerifiedAt?: Date;
   locale?: string;

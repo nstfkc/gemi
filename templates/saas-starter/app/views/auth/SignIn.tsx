@@ -75,6 +75,9 @@ export default function SignIn() {
         </div>
         <ValidationErrors name="invalid_credentials" />
       </Form>
+      <div>
+        <a href="/oauth/google">Sign In with Google</a>
+      </div>
     </div>
   );
 }

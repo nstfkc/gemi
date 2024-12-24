@@ -10,11 +10,11 @@ export default class extends ViewRouterServiceProvider {
   root = createRoot(RootLayout);
 
   onRequestStart(req: HttpRequest) {
-    console.log(`View start ${req.rawRequest.url}`);
+    // console.log(`View start ${req.rawRequest.url}`);
   }
 
   onRequestEnd(req: HttpRequest) {
-    console.log(`View end ${req.rawRequest.url}`);
+    // console.log(`View end ${req.rawRequest.url}`);
   }
 
   onRequestFail(req: HttpRequest, err: any) {
