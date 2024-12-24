@@ -1,4 +1,4 @@
-import { ComponentProps, useEffect } from "react";
+import { type ComponentProps, useEffect } from "react";
 import { Link } from "./Link";
 
 import { useNavigate } from "./useNavigate";

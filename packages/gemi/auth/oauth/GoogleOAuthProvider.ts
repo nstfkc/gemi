@@ -32,8 +32,6 @@ export class GoogleOAuthProvider extends OAuthProvider {
     const scope = this.config.scope;
     const clientId = this.config.clientId;
 
-    console.log({ scope });
-
     const url = new URL("https://accounts.google.com/o/oauth2/v2/auth");
     const params = {
       scope,
@@ -48,13 +46,12 @@ export class GoogleOAuthProvider extends OAuthProvider {
     }
 
     const str = url.toString();
-    Redirect.to(str);
+    Redirect.to(str as never);
 
     return str;
   }
 
   async onCallback(req: HttpRequest) {
-    console.log(req.search.get("code"));
     const url = new URL("https://oauth2.googleapis.com/token");
     url.searchParams.append("code", req.search.get("code")!);
     url.searchParams.append("client_id", this.config.clientId);
