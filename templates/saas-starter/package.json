@@ -16,16 +16,16 @@
     "framer-motion": "12.0.0-alpha.1",
     "gemi": "*",
     "jsx-email": "2.0.0-rc2.1",
-    "react": "19.0.0-rc-fb9a90fa48-20240614",
-    "react-dom": "19.0.0-rc-fb9a90fa48-20240614",
+    "react": "19.0.0",
+    "react-dom": "19.0.0",
     "sharp": "^0.33.3",
     "swiper": "^11.1.15",
     "temporal-polyfill": "^0.2.5"
   },
   "devDependencies": {
     "@types/bun": "^1.1.6",
-    "@types/react": "^18.2.75",
-    "@types/react-dom": "^18.2.24",
+    "@types/react": "19.0.2",
+    "@types/react-dom": "19.0.2",
     "@typescript-eslint/eslint-plugin": "^7.10.0",
     "@typescript-eslint/parser": "^7.10.0",
     "@vitejs/plugin-react-swc": "^3.6.0",
@@ -41,7 +41,7 @@
     "vitest": "^1.5.0"
   },
   "resolution": {
-    "react": "19.0.0-rc-fb9a90fa48-20240614",
-    "react-dom": "19.0.0-rc-fb9a90fa48-20240614"
+    "react": "19.0.0",
+    "react-dom": "19.0.0"
   }
 }
