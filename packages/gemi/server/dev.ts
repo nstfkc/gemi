@@ -38,11 +38,11 @@ export async function startDevServer() {
   process.env.APP_DIR = appDir;
 
   async function handleDevRequests(req: Request): Promise<Response> {
-    const { pathname } = new URL(req.url);
+    const { pathname, host } = new URL(req.url);
     if (pathname.startsWith("/refresh.js")) {
       return new Response(
         `
-          import RefreshRuntime from "http://localhost:5173/@react-refresh";
+          import RefreshRuntime from "http://${host}/@react-refresh";
           RefreshRuntime.injectIntoGlobalHook(window);
           window.$RefreshReg$ = () => {};
           window.$RefreshSig$ = () => (type) => type;
@@ -142,7 +142,7 @@ export async function startDevServer() {
               bootstrapModules: [
                 "/refresh.js",
                 "/app/client.tsx",
-                "http://localhost:5173/@vite/client",
+                "/@vite/client",
               ],
               viewImportMap,
               loaders,
