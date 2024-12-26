@@ -11,6 +11,7 @@ import BarController from "@/app/http/controllers/BarController";
 import { TestApiRouter } from "./test";
 import { FileStorage } from "gemi/facades";
 import { prisma } from "@/app/database/prisma";
+import { WelcomeEmail } from "@/app/email/WelcomeEmail";
 
 class XXRouter extends ApiRouter {
   routes = {
@@ -44,6 +45,10 @@ export default class extends ApiRouter {
       create: this.post(InlineContoller, "create"),
       list: this.get(InlineContoller, "list"),
     },
+    "/email": this.get(async () => {
+      await WelcomeEmail.send({ data: { name: "Enes" } });
+      return { success: true };
+    }),
     "/image/:path*": this.file((req: HttpRequest) => {
       return FileStorage.fetch(req.params.path);
     }),
