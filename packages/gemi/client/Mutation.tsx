@@ -139,7 +139,7 @@ export function useMutationStatus() {
 export const ValidationErrors = (props: {
   name: string;
   className?: string;
-  render?: (props: ComponentProps<"div">) => JSX.Element;
+  render?: (props: ComponentProps<"div">) => React.JSX.Element;
 }) => {
   const {
     render = (props: ComponentProps<"div">) => <div {...props} />,

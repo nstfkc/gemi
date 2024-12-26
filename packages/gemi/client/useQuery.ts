@@ -104,7 +104,7 @@ export function useQuery<T extends keyof GetRPC>(
     ),
   );
 
-  const retryIntervalRef = useRef<ReturnType<typeof setTimeout>>();
+  const retryIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const retryingMap = useRef<Map<string, boolean>>(new Map());
   const [state, setState] = useState(() => resource.getVariant(variantKey));
 
