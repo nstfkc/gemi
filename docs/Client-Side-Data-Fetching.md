@@ -1,4 +1,4 @@
-# Client side data fetching and mutations
+# Data fetching and mutations
 
 ## Hooks
 

@@ -39,3 +39,5 @@ yarn-error.log*
 
 # Gemi
 .gemi
+
+.obsidian

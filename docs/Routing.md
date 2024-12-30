@@ -1,5 +1,5 @@
 # Routing
-Gemi comes with config based routing that allows you to define your application routes declaratively using `ViewRouter` class. Routers can be composed and comes with built in middleware support. Middlewares can be applied to a router or a route. You will learn more about this in [middlewares](#Middlewares) section.
+Gemi comes with config based routing that allows you to define your application routes declaratively using `ViewRouter` class. Routers can be composed and comes with built in middleware support. Middleware can be applied to a router or a route. You will learn more about this in [middlewares](#Middlewares) section.
 
 ## Basics
 
@@ -167,7 +167,7 @@ export default function PublicLayout(props: LayoutProps<'/'>) {
   return (
     <>
       <Navigation />
-      {props.children}
+        {props.children}
       <Footer />
     </>
   )
@@ -182,7 +182,7 @@ In the code snippet above, you see how to implement a layout component. `props.c
 You can also pass server data to your layouts like you do for your view routes either using callback functions or controllers and access them via `props` from your layout component. In this case, the child routes will be passed as a third argument.
 
 For example using callback function would look like this
-```
+```ts
 // app/http/router/view.ts
 import { HomeController } from '@/app/http/controllers/HomeController'
 
@@ -202,7 +202,7 @@ export default class extends ViewRouter {
 
 Or like this if you use controllers
 
-```
+```ts
 // app/http/router/view.ts
 import { HomeController } from '@/app/http/controllers/HomeController'
 import { PublicLayoutController } from '@/app/http/controllers/PublicLayoutController'
