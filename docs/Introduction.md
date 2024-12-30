@@ -103,5 +103,10 @@ export default function HomePage(props) {
 
 ```
 
+#### Logging
+```tsx
+Log.info('User logged in', { user })
+```
+
 And more...
 
