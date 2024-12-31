@@ -21,5 +21,7 @@ export class ResendDriver extends EmailDriver {
     if (data) {
       return true;
     }
+
+    return false;
   }
 }

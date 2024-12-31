@@ -24,9 +24,8 @@
     "noUnusedParameters": false,
     "noPropertyAccessFromIndexSignature": false,
     "paths": {
-      "@/framework/*": ["./framework/*"],
       "@/app/*": ["./app/*"]
     },
-    "types": ["vite/client", "bun", "rpc.d.ts"]
+    "types": ["vite/client", "bun", "gemi.d.ts"]
   }
 }

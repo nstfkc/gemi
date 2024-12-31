@@ -1,3 +1,3 @@
-export default function Home(props: ViewProps<"">) {
+export default function Home() {
   return <div>Home</div>;
 }

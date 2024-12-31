@@ -1,7 +1,6 @@
 import { join } from "path";
 import type { App } from "../app/App";
 import { createStyles } from "./styles";
-import { imageHandler } from "./imageHandler";
 import { renderErrorPage } from "./renderErrorPage";
 import { Serve } from "bun";
 

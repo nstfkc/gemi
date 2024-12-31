@@ -4,21 +4,14 @@ import {
 } from "gemi/kernel";
 import { GoogleOAuthProvider } from "gemi/services";
 
-import { prisma } from "../database/prisma";
+import { prisma } from "@/app/database/prisma";
 
 export default class extends AuthenticationServiceProvider {
   adapter = new PrismaAuthenticationAdapter(prisma);
-  verifyEmail = false;
 
   oauthProviders = {
     google: new GoogleOAuthProvider(),
   };
-
-  extendSession(_user: any) {
-    return {
-      testId: "1234",
-    };
-  }
 
   onSignUp(user: any, token: string) {
     console.log("User sign up", user.email, user.locale, token);

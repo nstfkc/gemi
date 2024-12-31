@@ -1,4 +1,5 @@
 import { join } from "path";
+
 import { generateETag } from "./generateEtag";
 import { URLPattern } from "urlpattern-polyfill";
 import { createStyles } from "./styles";
