@@ -4,7 +4,7 @@ interface Props {
   children: React.ReactNode;
 }
 
-const RootLayout = (props: Props) => {
+export default function RootLayout(props: Props) {
   return (
     <html>
       <head>
@@ -15,6 +15,4 @@ const RootLayout = (props: Props) => {
       <body>{props.children}</body>
     </html>
   );
-};
-
-export default RootLayout;
+}

@@ -15,10 +15,7 @@ export default class extends ViewRouter {
   middlewares = ["cache:public,12840,must-revalidate"];
 
   override routes = {
-    "/": this.layout("PublicLayout", {
-      "/": this.view("Home", [HomeController, "index"]),
-      "/:testId": this.view("Test"),
-    }),
+    "/": this.view("Home", [HomeController, "index"]),
     "/auth": AuthViewRouter,
   };
 }

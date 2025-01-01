@@ -255,10 +255,11 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           const stream = await renderToReadableStream(
             createElement(Fragment, {
               children: [
-                await getStyles(currentViews),
+                ...(await getStyles(currentViews)),
                 createElement(Root, {
                   data: result.data,
                   viewImportMap,
+                  key: "root",
                 }),
               ],
             }),

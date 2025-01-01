@@ -1,8 +1,9 @@
-import { join } from "path";
-import type { App } from "../app/App";
-import { createStyles } from "./styles";
-import { renderErrorPage } from "./renderErrorPage";
 import { Serve } from "bun";
+import { join } from "path";
+
+import type { App } from "../app/App";
+import { createDevStyles } from "./styles";
+import { renderErrorPage } from "./renderErrorPage";
 
 const rootDir = process.cwd();
 const appDir = join(rootDir, "app");
@@ -126,18 +127,10 @@ export async function startDevServer() {
             }
 
             const loaders = `{${templates.join(",")}}`;
-            const { default: css } = await vite.ssrLoadModule(
-              `${appDir}/app.css`,
-            );
 
-            const styles = [];
-            styles.push({
-              isDev: true,
-              id: `${appDir}/app.css`,
-              content: css,
-            });
             return await result({
-              getStyles: () => createStyles(styles),
+              getStyles: async (currentViews: string[]) =>
+                await createDevStyles(appDir, vite, currentViews),
               bootstrapModules: [
                 "/refresh.js",
                 "/app/client.tsx",
