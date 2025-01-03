@@ -30,6 +30,8 @@ model OrganizationInvitation {
   email          String
   role           Int          @default(2) // 0 = Owner, 1 = Admin, 2 = User
   acceptedAt     DateTime?
+
+  createdAt DateTime @default(now())
 }
 
 model User {
@@ -47,6 +49,10 @@ model User {
   accounts           Account[]
   session            Session[]
   PasswordResetToken PasswordResetToken[]
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
 }
 
 model Account {
@@ -58,6 +64,10 @@ model Account {
 
   userId Int?
   user   User? @relation(fields: [userId], references: [id])
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
 }
 
 model Session {

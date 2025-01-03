@@ -17,7 +17,7 @@ export function useSignIn(args: UseSignInArgs = defaultArgs) {
     {
       onSuccess: (user) => {
         args.onSuccess(user);
-        mutate(user);
+        mutate(user as any);
       },
     },
   );

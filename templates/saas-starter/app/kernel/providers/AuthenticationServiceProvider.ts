@@ -13,7 +13,7 @@ export default class extends AuthenticationServiceProvider {
     google: new GoogleOAuthProvider(),
   };
 
-  onSignUp(user: any, token: string) {
+  async onSignUp(user: any, token: string) {
     console.log("User sign up", user.email, user.locale, token);
   }
 

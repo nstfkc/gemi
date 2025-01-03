@@ -11,11 +11,19 @@ class AuthViewRouter extends ViewRouter {
   };
 }
 
+class AppRouter extends ViewRouter {
+  middlewares = ["auth"];
+  routes = {
+    "/dashboard": this.view("Dashboard"),
+  };
+}
+
 export default class extends ViewRouter {
   middlewares = ["cache:public,12840,must-revalidate"];
 
   override routes = {
     "/": this.view("Home", [HomeController, "index"]),
     "/auth": AuthViewRouter,
+    "/app": AppRouter,
   };
 }

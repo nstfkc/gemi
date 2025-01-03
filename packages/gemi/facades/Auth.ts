@@ -2,7 +2,6 @@ import type { User } from "../auth/adapters/types";
 import { AuthenticationServiceContainer } from "../auth/AuthenticationServiceContainer";
 import { InsufficientPermissionsError } from "../http";
 import { RequestContext } from "../http/requestContext";
-import { KernelContext } from "../kernel/KernelContext";
 import { BroadcastingServiceContainer } from "../services/pubsub/BroadcastingServiceContainer";
 
 export class Auth {
@@ -73,5 +72,15 @@ export class Auth {
     } catch (err) {
       return false;
     }
+  }
+
+  static async authenticate(email: string) {
+    const container = AuthenticationServiceContainer.use();
+    await container.authenticate(email);
+  }
+
+  static async createMagicLink(email: string) {
+    const container = AuthenticationServiceContainer.use();
+    return await container.createMagicLinkToken(email);
   }
 }

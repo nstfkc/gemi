@@ -277,7 +277,9 @@ class AuthController extends Controller {
 
     await this.provider.onSignIn(user);
 
-    return user;
+    const { password: _, ...rest } = user;
+
+    return rest;
   }
 
   async signUp(req = new SignUpRequest()) {
@@ -517,28 +519,11 @@ class AuthController extends Controller {
   }
 
   async createMagicLinkToken(req = new HttpRequest<{ email: string }>()) {
-    const provider = AuthenticationServiceContainer.use()?.provider;
     const input = await req.input();
     const { email } = input.toJSON();
-
-    const user = await provider.adapter.findUserByEmailAddress(email, false);
-
-    if (!user) {
-      throw new ValidationError({
-        email: ["User not found"],
-      });
-    }
-
-    await provider.adapter.deleteMagicLinkToken(email);
-
-    const token = await provider.generateMagicLinkToken(email);
-    const pin = Math.floor(1000 + Math.random() * 9000).toString();
-
-    await provider.adapter.createMagicLinkToken({
-      email,
-      token,
-      pin,
-    });
+    const container = AuthenticationServiceContainer.use();
+    const provider = container.provider;
+    const { user, pin, token } = await container.createMagicLinkToken(email);
 
     await provider.onMagicLinkCreated(user, { email, pin, token });
 

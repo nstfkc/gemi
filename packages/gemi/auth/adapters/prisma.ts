@@ -54,7 +54,11 @@ export class PrismaAuthenticationAdapter implements IAuthenticationAdapter {
       });
     }
 
-    return await this.prisma.user.findUnique({ where: { email } });
+    const user = await this.prisma.user.findUnique({
+      where: { email },
+    });
+
+    return user;
   }
 
   // TODO: extend the session until absolute expiration

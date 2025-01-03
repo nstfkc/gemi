@@ -14,7 +14,7 @@ function replaceStrings(text: string, record: Record<string, string>): string {
 export async function createDevStyles(
   appDir: string,
   vite: ViteDevServer,
-  currentViews: string[],
+  currentViews: string[] = [],
 ) {
   const views = [
     ...currentViews.map((view) => `${appDir}/views/${view}.tsx`),
