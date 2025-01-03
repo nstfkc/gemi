@@ -6,21 +6,38 @@ import {
   useSearchParams,
   ValidationErrors,
 } from "gemi/client";
+import { useState } from "react";
 
 export default function SignUp() {
-  const { push } = useNavigate();
+  const { replace } = useNavigate();
+  const [email, setEmail] = useState<string | null>(null);
   const searchParams = useSearchParams();
   return (
     <div className="container max-w-sm mx-auto h-screen flex flex-col justify-center items-center">
+      <div>
+        {email && (
+          <Form
+            method="POST"
+            action="/auth/sign-in-with-pin"
+            onSuccess={() => {
+              replace("/app/dashboard");
+            }}
+          >
+            <input type="hidden" name="email" defaultValue={email} />
+            <input name="pin" />
+            <div>
+              <button>Submit</button>
+            </div>
+          </Form>
+        )}
+      </div>
       <Form
         method="POST"
         action="/auth/sign-up"
         className="flex flex-col gap-4 w-full"
-        onSuccess={({ user }) =>
-          push(`/auth/sign-in`, {
-            search: { email: user.email },
-          })
-        }
+        onSuccess={({ email }) => {
+          setEmail(email);
+        }}
       >
         <input
           type="hidden"

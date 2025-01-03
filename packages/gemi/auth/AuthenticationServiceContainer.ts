@@ -37,7 +37,7 @@ export class AuthenticationServiceContainer extends ServiceContainer {
         email,
         false,
       );
-      const session = await this.createOrUpdateSession(user);
+      const session = await this.createOrUpdateSession({ email, id: user.id });
       const req = new HttpRequest();
       req.ctx().setCookie("access_token", session.token, {
         expires: session.expiresAt,
@@ -50,7 +50,7 @@ export class AuthenticationServiceContainer extends ServiceContainer {
     return false;
   }
 
-  async createOrUpdateSession(user: User) {
+  async createOrUpdateSession(user: { email: string; id?: number }) {
     const authProvider = this.provider;
     const req = new HttpRequest();
 
@@ -69,9 +69,17 @@ export class AuthenticationServiceContainer extends ServiceContainer {
     });
 
     if (!session) {
+      let userId: number = user.id;
+      if (!userId) {
+        const { id } = await authProvider.adapter.findUserByEmailAddress(
+          user.email,
+          false,
+        );
+        userId = id;
+      }
       session = await authProvider.adapter.createSession({
         token,
-        userId: user.id,
+        userId,
         userAgent:
           process.env.NODE_ENV === "development"
             ? "local"
@@ -97,6 +105,7 @@ export class AuthenticationServiceContainer extends ServiceContainer {
         ),
       });
     }
+
     return session;
   }
 

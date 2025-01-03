@@ -97,56 +97,6 @@ class ResetPasswordRequest extends HttpRequest<
 class AuthController extends Controller {
   provider = AuthenticationServiceContainer.use()?.provider;
 
-  private async createOrUpdateSession(user: User) {
-    const authProvider = AuthenticationServiceContainer.use().provider;
-    const req = new HttpRequest();
-
-    const userAgent = req.headers.get("User-Agent");
-
-    const hasher = new Bun.CryptoHasher("sha256");
-    hasher.update(`${user.email}${userAgent}`);
-
-    const token = hasher.digest("hex");
-    let session = await authProvider.adapter.findSession({
-      token,
-      userAgent:
-        process.env.NODE_ENV === "development"
-          ? "local"
-          : req.headers.get("User-Agent"),
-    });
-
-    if (!session) {
-      session = await authProvider.adapter.createSession({
-        token,
-        userId: user.id,
-        userAgent:
-          process.env.NODE_ENV === "development"
-            ? "local"
-            : req.headers.get("User-Agent"),
-        expiresAt: new Date(
-          Temporal.Now.instant()
-            .add({ hours: authProvider.sessionExpiresInHours })
-            .toString(),
-        ),
-        absoluteExpiresAt: new Date(
-          Temporal.Now.instant()
-            .add({ hours: authProvider.sessionAbsoluteExpiresInHours })
-            .toString(),
-        ),
-      });
-    } else {
-      session = await authProvider.adapter.updateSession({
-        token,
-        expiresAt: new Date(
-          Temporal.Now.instant()
-            .add({ hours: authProvider.sessionExpiresInHours })
-            .toString(),
-        ),
-      });
-    }
-    return session;
-  }
-
   async me() {
     const user = await Auth.user();
 
@@ -168,7 +118,7 @@ class AuthController extends Controller {
       return { email: null };
     }
 
-    await this.provider.adapter.verifyUser(user.id);
+    await this.provider.adapter.verifyUser(user.email);
 
     if (user) {
       return {
@@ -180,14 +130,15 @@ class AuthController extends Controller {
   }
 
   async signInWithMagicLink(req = new HttpRequest()) {
-    const authProvider = AuthenticationServiceContainer.use().provider;
+    const container = AuthenticationServiceContainer.use();
+    const authProvider = container.provider;
     const token = req.search.get("token");
-    const email = req.search.get("email");
+    const email = decodeURIComponent(req.search.get("email"));
 
-    let user = null;
+    let magicLink = null;
 
     try {
-      user = await authProvider.adapter.findUserByMagicLinkToken({
+      magicLink = await authProvider.adapter.findUserMagicLinkToken({
         email,
         token,
       });
@@ -195,50 +146,50 @@ class AuthController extends Controller {
       return { error: "Invalid token" };
     }
 
-    if (!user) {
+    if (!magicLink) {
       return { error: "Invalid token" };
     }
 
-    await authProvider.adapter.verifyUser(user.id);
+    await authProvider.adapter.verifyUser(email);
     await authProvider.adapter.deleteMagicLinkToken(email);
-    const session = await this.createOrUpdateSession(user);
+    const session = await container.createOrUpdateSession({ email });
 
     req.ctx().setCookie("access_token", session.token, {
       expires: session.expiresAt,
     });
 
-    await authProvider.onSignIn(user);
+    await authProvider.onSignIn(session);
 
     return { session };
   }
 
   async signInWithPin(req = new HttpRequest<{ email: string; pin: string }>()) {
-    const authProvider = AuthenticationServiceContainer.use().provider;
+    const container = AuthenticationServiceContainer.use();
+    const authProvider = container.provider;
     const input = await req.input();
     const { email, pin } = input.toJSON();
 
-    const user = await authProvider.adapter.findUserByMagicLinkToken({
+    const magicLinkToken = await authProvider.adapter.findUserMagicLinkToken({
       email,
       pin,
     });
 
-    if (!user) {
+    if (!magicLinkToken) {
       throw new ValidationError({
         pin: ["Invalid pin"],
       });
     }
 
     await authProvider.adapter.deleteMagicLinkToken(email);
+    await authProvider.adapter.verifyUser(email);
 
-    await this.provider.adapter.verifyUser(user.id);
-
-    const session = await this.createOrUpdateSession(user);
+    const session = await container.createOrUpdateSession({ email });
 
     req.ctx().setCookie("access_token", session.token, {
       expires: session.expiresAt,
     });
 
-    await authProvider.onSignIn(user);
+    await authProvider.onSignIn(session);
 
     return { session };
   }
@@ -269,7 +220,11 @@ class AuthController extends Controller {
       });
     }
 
-    const session = await this.createOrUpdateSession(user);
+    const session =
+      await AuthenticationServiceContainer.use().createOrUpdateSession({
+        email: user.email,
+        id: user.id,
+      });
 
     req.ctx().setCookie("access_token", session.token, {
       expires: session.expiresAt,
@@ -493,7 +448,8 @@ class AuthController extends Controller {
 
   async oauthCallback(req = new HttpRequest()) {
     const { provider } = req.params;
-    const authProvider = AuthenticationServiceContainer.use().provider;
+    const container = AuthenticationServiceContainer.use();
+    const authProvider = container.provider;
     const oauthProvider = authProvider.oauthProviders[provider as string];
     const { email, name } = await oauthProvider.onCallback(req);
 
@@ -507,7 +463,10 @@ class AuthController extends Controller {
       });
     }
 
-    const session = await this.createOrUpdateSession(user);
+    const session = await container.createOrUpdateSession({
+      email: user.email,
+      id: user.id,
+    });
 
     req.ctx().setCookie("access_token", session.token, {
       expires: session.expiresAt,
@@ -620,15 +579,15 @@ export class AuthenticationServiceProvider extends ServiceProvider {
     _user: T,
     _verificationToken?: string,
   ): Promise<void> | void {}
-  onSignIn<T extends User>(_user: T): Promise<void> | void {}
-  onSignOut<T extends User>(_user: T): Promise<void> | void {}
-  onForgotPassword<T extends User>(
-    _user: T,
+  onSignIn(_session: any): Promise<void> | void {}
+  onSignOut(_session: any): Promise<void> | void {}
+  onForgotPassword(
+    _user: any,
     _verificationToken: string,
   ): Promise<void> | void {}
-  onResetPassword<T extends User>(_user: T): Promise<void> | void {}
+  onResetPassword(_session: any): Promise<void> | void {}
   onMagicLinkCreated(
-    _user: User,
+    _session: any,
     _args: { email: string; token: string; pin: string },
   ): Promise<void> | void {
     return;

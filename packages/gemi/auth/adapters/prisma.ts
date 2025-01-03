@@ -23,9 +23,9 @@ export class PrismaAuthenticationAdapter implements IAuthenticationAdapter {
     });
   }
 
-  async verifyUser(userId: number): Promise<User> {
+  async verifyUser(email: string): Promise<User> {
     return await this.prisma.user.update({
-      where: { id: userId },
+      where: { email },
       data: { emailVerifiedAt: new Date() },
     });
   }
@@ -203,10 +203,10 @@ export class PrismaAuthenticationAdapter implements IAuthenticationAdapter {
     });
   }
 
-  async findUserByMagicLinkToken(args: {
+  async findUserMagicLinkToken(args: {
+    email: string;
     token?: string;
     pin?: string;
-    email: string;
   }) {
     const { token, pin, email } = args;
 

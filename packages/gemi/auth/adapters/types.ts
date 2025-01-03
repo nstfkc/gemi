@@ -20,14 +20,14 @@ export interface IAuthenticationAdapter {
   ) => Promise<PasswordResetToken | null>;
   deleteAllUserSessions: (userId: number) => Promise<void>;
   findUserByVerificationToken: (token: string) => Promise<User | null>;
-  verifyUser: (userId: number) => Promise<User>;
+  verifyUser: (email: string) => Promise<User>;
   findInvitation: (invitationId: string, email: string) => Promise<Invitation>;
   deleteInvitationById: (invitationId: string) => Promise<void>;
   createAccount: (args: CreateAccountArgs) => Promise<Account | null>;
   createMagicLinkToken: (
     args: CreateMagicLinkTokenArgs,
   ) => Promise<{ token: string; pin: string }>;
-  findUserByMagicLinkToken: (args: {
+  findUserMagicLinkToken: (args: {
     token?: string;
     pin?: string;
     email: string;
