@@ -24,14 +24,30 @@ class RedirectError extends RequestBreakerError {
   }
 }
 
+type Options<T extends ViewPaths> =
+  UrlParser<T> extends Record<string, never>
+    ? {
+        search?: Record<string, string | number | boolean | undefined | null>;
+      }
+    : {
+        search?: Record<string, string | number | boolean | undefined | null>;
+        params: UrlParser<T>;
+      };
+
 export class Redirect {
   static to<T extends ViewPaths>(
     path: T,
-    ...args: UrlParser<`${T & string}`> extends Record<string, never>
-      ? []
-      : [params: UrlParser<`${T & string}`>, headers?: Record<string, string>]
+    ...args: UrlParser<T> extends Record<string, never>
+      ? [options?: Options<T>]
+      : [options: Options<T>]
   ) {
-    const [params = {}] = args;
-    throw new RedirectError(applyParams(path, params));
+    const [options = {}] = args;
+    const { search = {}, params = {} } = {
+      params: {},
+      ...options,
+    };
+    const url = new URL(applyParams(path, params));
+    url.search = new URLSearchParams(search).toString();
+    throw new RedirectError(url.toString());
   }
 }
