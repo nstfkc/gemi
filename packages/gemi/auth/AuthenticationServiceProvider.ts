@@ -4,7 +4,7 @@ import { Controller } from "../http/Controller";
 import { HttpRequest } from "../http/HttpRequest";
 import { ApiRouter } from "../http/ApiRouter";
 import { ViewRouter } from "../http/ViewRouter";
-import { Auth, Redirect } from "../facades";
+import { Auth } from "../facades";
 import type {
   IAuthenticationAdapter,
   Invitation,
@@ -17,7 +17,6 @@ import { ServiceProvider } from "../services/ServiceProvider";
 import { AuthenticationServiceContainer } from "./AuthenticationServiceContainer";
 import { I18nServiceContainer } from "../http/I18nServiceContainer";
 import { OAuthProvider } from "./oauth/OAuthProvider";
-import { Cookie } from "../http/Cookie";
 
 class SignInRequest extends HttpRequest<
   {
@@ -143,7 +142,8 @@ class AuthController extends Controller {
         token,
       });
     } catch (err) {
-      return { error: "Invalid token" };
+      console.log(err);
+      return { error: JSON.stringify(err) };
     }
 
     if (!magicLink) {
