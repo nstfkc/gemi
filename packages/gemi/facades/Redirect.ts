@@ -46,8 +46,11 @@ export class Redirect {
       params: {},
       ...options,
     };
-    const url = new URL(applyParams(path, params));
-    url.search = new URLSearchParams(search).toString();
-    throw new RedirectError(url.toString());
+    const searchParams = new URLSearchParams(search).toString();
+    throw new RedirectError(
+      [applyParams(path, params), searchParams.toString()]
+        .filter(Boolean)
+        .join("?"),
+    );
   }
 }
