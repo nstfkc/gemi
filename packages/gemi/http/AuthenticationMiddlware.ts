@@ -7,7 +7,12 @@ import { AuthenticationServiceContainer } from "../auth/AuthenticationServiceCon
 export class AuthenticationMiddleware extends Middleware {
   async run(_req: HttpRequest) {
     const requestContextStore = RequestContext.getStore();
-    const accessToken = requestContextStore.req.cookies.get("access_token");
+    const accessTokenCookie =
+      requestContextStore.req.cookies.get("access_token");
+    const accessTokenHeader =
+      requestContextStore.req.headers.get("access_token");
+
+    const accessToken = accessTokenCookie || accessTokenHeader;
 
     if (!accessToken) {
       throw new AuthenticationError();

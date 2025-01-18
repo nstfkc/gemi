@@ -1,7 +1,7 @@
 {
   "name": "create-gemi-app",
   "description": "Create gemi app with one command",
-  "version": "0.1.12",
+  "version": "0.2.0",
   "author": "Enes Tufekci <enesxtufekci@gmail.com>",
   "license": "MIT",
   "scripts": {

@@ -6,9 +6,6 @@ import prompts from "prompts";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 
-const GEMI_VERSION = "0.4.10";
-const CREATE_GEMI_APP_VERSION = "0.4.10";
-
 async function fetchGemiVersion() {
   const url =
     "https://raw.githubusercontent.com/nstfkc/gemi/main/packages/gemi/package.json";
