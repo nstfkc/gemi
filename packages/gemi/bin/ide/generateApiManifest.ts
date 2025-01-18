@@ -167,7 +167,7 @@ export class ApiManifestGenerator {
         );
       }
     }
-    if (normalizedPath.startsWith("/app/http/router")) {
+    if (normalizedPath.startsWith("/app/http/routes")) {
       for (const specifier of node.specifiers) {
         const name =
           specifier.type === "ImportDefaultSpecifier"
