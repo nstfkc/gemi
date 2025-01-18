@@ -1,4 +1,4 @@
-import { Middleware } from "../../http";
+import { HttpRequest, Middleware } from "../../http";
 import {
   type ApiRoutes,
   type RouteHandlers,
@@ -10,6 +10,15 @@ import { toCamelCase } from "../../utils/toCamelCase";
 
 type ApiRouteExec = any;
 
+function corsHandler() {
+  const req = new HttpRequest();
+
+  const headers = req.ctx().headers;
+
+  console.log(headers);
+
+  return new Response(null, { headers, status: 204 });
+}
 function isRouter(
   routeHandlers: RouteHandlers | FileHandler | (new () => ApiRouter),
 ): routeHandlers is new () => ApiRouter {
@@ -43,6 +52,10 @@ export function createFlatApiRoutes(routes: ApiRoutes, prevPath: string = "") {
       const exec = routeHandler.run.bind(routeHandler);
       flatApiRoutes[rootPath][method] = {
         exec,
+        middleware,
+      };
+      flatApiRoutes[rootPath]["OPTIONS"] = {
+        exec: () => corsHandler(),
         middleware,
       };
     } else if (typeof apiRouteHandlerOrApiRouter === "function") {
@@ -82,6 +95,10 @@ export function createFlatApiRoutes(routes: ApiRoutes, prevPath: string = "") {
             exec: handler.exec,
             middleware: [...routerMiddlewares, ...handler.middleware],
           };
+          flatApiRoutes[finalPath]["OPTIONS"] = {
+            exec: () => corsHandler(),
+            middleware: [...routerMiddlewares, ...handler.middleware],
+          };
         }
       }
     } else {
@@ -94,6 +111,10 @@ export function createFlatApiRoutes(routes: ApiRoutes, prevPath: string = "") {
         const exec = routeHandler.run.bind(routeHandler);
         flatApiRoutes[rootPath][method] = {
           exec,
+          middleware,
+        };
+        flatApiRoutes[rootPath]["OPTIONS"] = {
+          exec: () => corsHandler(),
           middleware,
         };
       }

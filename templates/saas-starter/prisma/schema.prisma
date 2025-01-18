@@ -34,6 +34,21 @@ model OrganizationInvitation {
   createdAt DateTime @default(now())
 }
 
+model Account {
+  id               Int           @id @default(autoincrement())
+  publicId         String        @unique @default(cuid())
+  organization     Organization? @relation(fields: [organizationId], references: [id])
+  organizationId   Int?
+  organizationRole Int           @default(2) // 0 = Owner, 1 = Admin, 2 = User
+
+  userId Int?
+  user   User? @relation(fields: [userId], references: [id])
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+}
+
 model User {
   id                 Int                  @id @default(autoincrement())
   publicId           String               @unique @default(cuid())
@@ -49,21 +64,6 @@ model User {
   accounts           Account[]
   session            Session[]
   PasswordResetToken PasswordResetToken[]
-
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
-  deletedAt DateTime?
-}
-
-model Account {
-  id               Int           @id @default(autoincrement())
-  publicId         String        @unique @default(cuid())
-  organization     Organization? @relation(fields: [organizationId], references: [id])
-  organizationId   Int?
-  organizationRole Int           @default(2) // 0 = Owner, 1 = Admin, 2 = User
-
-  userId Int?
-  user   User? @relation(fields: [userId], references: [id])
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
