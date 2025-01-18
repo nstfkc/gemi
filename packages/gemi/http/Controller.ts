@@ -9,7 +9,7 @@ export class Controller {
 type PromiseOrData<T> = T | Promise<T>;
 
 export abstract class ResourceController extends Controller {
-  abstract create(req: HttpRequest<any, any>): PromiseOrData<any>;
+  abstract store(req: HttpRequest<any, any>): PromiseOrData<any>;
   abstract update(req: HttpRequest<any, any>): PromiseOrData<any>;
   abstract delete(req: HttpRequest<any, any>): PromiseOrData<any>;
   abstract list(req: HttpRequest<any, any>): PromiseOrData<any>;

@@ -82,7 +82,7 @@ export class FileHandler {
 
 export type RouteHandlers =
   | {
-      create: RouteHandler<"POST", any, any, any>;
+      store: RouteHandler<"POST", any, any, any>;
       list: RouteHandler<"GET", any, any, any>;
     }
   | {
@@ -109,7 +109,7 @@ export type ResourceRoutes<
   "/",
   {
     list: ParseRouteHandler<T, TestControllerMethod<T, "list">, "GET">;
-    create: ParseRouteHandler<T, TestControllerMethod<T, "create">, "POST">;
+    store: ParseRouteHandler<T, TestControllerMethod<T, "store">, "POST">;
   }
 > &
   Record<
@@ -202,7 +202,7 @@ export class ApiRouter {
       return {
         "/": {
           list: new RouteHandler("GET", Controller, "list"),
-          create: new RouteHandler("POST", Controller, "create"),
+          store: new RouteHandler("POST", Controller, "store"),
         },
         [`/:${String(resourceId)}`]: {
           show: new RouteHandler("GET", Controller, "show"),

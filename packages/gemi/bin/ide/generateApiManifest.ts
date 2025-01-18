@@ -232,7 +232,7 @@ export class ApiManifestGenerator {
           : `${path}/:${toCamelCase(path.split("/").pop())}Id`;
       const resourceIdMap = [
         {
-          name: "create",
+          name: "store",
           httpMethod: "post",
           prefixer: (path: string) => path,
         },
