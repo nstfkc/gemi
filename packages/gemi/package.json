@@ -15,7 +15,7 @@
     "vitest": "^1.6.0"
   },
   "bin": {
-    "gemi": "./dist/bin/index.js"
+    "gemi": "./dist/bin/gemi.js"
   },
   "exports": {
     "./http": "./http/index.ts",
@@ -38,7 +38,7 @@
     "lint": "eslint . --max-warnings 0",
     "build": "NODE_ENV=production bun run build:core && bun run build:bin && bun run build:types && bun run build:client && bun run build:plugin && bun run build:client-types",
     "build:core": "bun ./scripts/build.ts",
-    "build:bin": "bun build ./bin/gemi.ts --target bun --external vite --external react-dom --external react/jsx-runtime --external bun --external sharp --sourcemap --outfile ./dist/bin/index.js && bun ./scripts/prepare-bin.ts",
+    "build:bin": "bun build --outdir=./dist/bin --target=bun --external=vite --external=react-dom --external=react/jsx-runtime --external=bun --external=sharp --sourcemap ./bin/gemi.ts && bun ./scripts/prepare-bin.ts",
     "build:client": "vite build",
     "build:plugin": "vite build -c vite.plugin.config.mts",
     "build:types": "tsc",

@@ -3,7 +3,7 @@
   "compilerOptions": {
     "outDir": "dist",
     "emitDeclarationOnly": true,
-    "moduleResolution": "bundler",
+    "moduleResolution": "nodenext",
     "downlevelIteration": true
   },
   "include": [

@@ -5,7 +5,7 @@
   "author": "Enes Tufekci <enesxtufekci@gmail.com>",
   "license": "MIT",
   "scripts": {
-    "build": "bun build index.ts --external bun --target bun --outfile bin/index.js && bun ./scripts/prepare-bin.ts",
+    "build": "bun build --external=bun --target=bun --outfile=bin/index.js index.ts && bun ./scripts/prepare-bin.ts",
     "prepublishOnly": "bun run build"
   },
   "files": [
