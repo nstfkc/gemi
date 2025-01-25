@@ -20,6 +20,7 @@ export { useRoute } from "./useRoute";
 export { useIsNavigationPending } from "./useIsNavigationPending";
 export { useNavigationProgress } from "./useNavigationProgress";
 export { useNavigate } from "./useNavigate";
+export { useBreadcrumbs } from "./useBreadcrumbs";
 export { Link } from "./Link";
 export { Redirect } from "./Redirect";
 export { init, create } from "./init";

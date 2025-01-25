@@ -100,6 +100,7 @@ export function useNavigate() {
           const {
             data,
             prefetchedData,
+            breadcrumbs,
             directive = {},
             is404 = false,
           } = await res.json();
@@ -111,7 +112,7 @@ export function useNavigate() {
 
             return;
           }
-          updatePageData(data);
+          updatePageData(data, breadcrumbs);
           updatePrefecthedData(prefetchedData);
 
           history?.[pushOrReplace](

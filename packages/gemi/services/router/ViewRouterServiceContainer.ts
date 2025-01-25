@@ -76,6 +76,99 @@ export class ViewRouterServiceContainer extends ServiceContainer {
     return await this.service.onRequestEnd(req);
   }
 
+  private async render(props: {
+    viewData: any;
+    pathname: string;
+    currentPathName: string;
+    csrfTokenHMAC: Buffer;
+    headers: any;
+    url: URL;
+    i18n: any;
+    user: any;
+    prefetchedData: any;
+    params: any;
+    breadcrumbs: any;
+  }) {
+    const {
+      csrfTokenHMAC,
+      currentPathName,
+      headers,
+      i18n,
+      params,
+      pathname,
+      prefetchedData,
+      url,
+      user,
+      viewData,
+      breadcrumbs,
+    } = props;
+
+    const result = {
+      kind: "view",
+      data: {
+        pageData: {
+          [pathname]: viewData,
+        },
+        __csrf: csrfTokenHMAC.toString("base64"),
+        prefetchedData,
+        i18n,
+        auth: { user },
+        routeManifest: this.routeManifest,
+        breadcrumbs,
+        router: {
+          pathname: currentPathName,
+          params,
+          currentPath: pathname,
+          searchParams: url.search,
+          is404: !currentPathName ? true : false,
+        },
+        componentTree: [["404", []], ...this.componentTree],
+      },
+      head: {},
+    };
+
+    const Root = this.root;
+    const currentViews = this.routeManifest[currentPathName];
+    return async (params: {
+      getStyles: (p: string[]) => Promise<any[]>;
+      viewImportMap: any;
+      bootstrapModules: string[];
+      loaders: string;
+      cssManifest: Record<string, string[]>;
+    }) => {
+      const {
+        bootstrapModules,
+        loaders,
+        getStyles,
+        viewImportMap,
+        cssManifest,
+      } = params;
+
+      result.data["cssManifest"] = cssManifest;
+      const stream = await renderToReadableStream(
+        createElement(Fragment, {
+          children: [
+            ...(await getStyles(currentViews)),
+            createElement(Root, {
+              data: result.data,
+              viewImportMap,
+              key: "root",
+            }),
+          ],
+        }),
+        {
+          bootstrapScriptContent: `window.__GEMI_DATA__ = ${JSON.stringify(result.data)}; window.loaders=${loaders}`,
+          bootstrapModules,
+        },
+      );
+
+      return new Response(stream, {
+        status: !currentPathName ? 404 : 200,
+        headers,
+      });
+    };
+  }
+
   async handleViewRequest(req: Request) {
     const url = new URL(req.url);
     const isViewDataRequest = url.searchParams.get("json");
@@ -139,12 +232,15 @@ export class ViewRouterServiceContainer extends ServiceContainer {
         };
         const { params, currentPathName, user } = pageData;
 
-        const viewData = data.reduce((acc, data) => {
-          return {
-            ...acc,
-            ...data,
-          };
-        }, {});
+        let viewData = {};
+        let breadcrumbs = {};
+        for (const part of data) {
+          const [key, value] = Object.entries(part)[0];
+          const { breadcrumb, ...rest } = value as any;
+          console.log({ breadcrumb });
+          breadcrumbs[`${key}:${currentPathName}`] = breadcrumb;
+          viewData[key] = value;
+        }
 
         const i18nServiceContainer = I18nServiceContainer.use();
         const isI18nEnabled = i18nServiceContainer.isEnabled;
@@ -181,6 +277,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
               data: {
                 [url.pathname]: viewData,
               },
+              breadcrumbs,
               prefetchedData: pageData.prefetchedData,
               i18n,
               is404: !currentPathName,
@@ -203,29 +300,6 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           `csrf_token=${csrfToken}; HttpOnly; Secure; SameSite=Strict; Expires=${new Date(Date.now() + 1000 * 60 * 60 * 24).toUTCString()}`,
         );
 
-        const result = {
-          kind: "view",
-          data: {
-            pageData: {
-              [url.pathname]: viewData,
-            },
-            __csrf: csrfTokenHMAC.toString("base64"),
-            prefetchedData: pageData.prefetchedData,
-            i18n,
-            auth: { user },
-            routeManifest: this.routeManifest,
-            router: {
-              pathname: currentPathName,
-              params,
-              currentPath: url.pathname,
-              searchParams: url.search,
-              is404: !currentPathName ? true : false,
-            },
-            componentTree: [["404", []], ...this.componentTree],
-          },
-          head: {},
-        };
-
         try {
           await this.onRequestEnd(httpRequest);
         } catch (err) {
@@ -234,46 +308,19 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           });
         }
 
-        const Root = this.root;
-        const currentViews = this.routeManifest[currentPathName];
-        return async (params: {
-          getStyles: (p: string[]) => Promise<any[]>;
-          viewImportMap: any;
-          bootstrapModules: string[];
-          loaders: string;
-          cssManifest: Record<string, string[]>;
-        }) => {
-          const {
-            bootstrapModules,
-            loaders,
-            getStyles,
-            viewImportMap,
-            cssManifest,
-          } = params;
-
-          result.data["cssManifest"] = cssManifest;
-          const stream = await renderToReadableStream(
-            createElement(Fragment, {
-              children: [
-                ...(await getStyles(currentViews)),
-                createElement(Root, {
-                  data: result.data,
-                  viewImportMap,
-                  key: "root",
-                }),
-              ],
-            }),
-            {
-              bootstrapScriptContent: `window.__GEMI_DATA__ = ${JSON.stringify(result.data)}; window.loaders=${loaders}`,
-              bootstrapModules,
-            },
-          );
-
-          return new Response(stream, {
-            status: !currentPathName ? 404 : 200,
-            headers,
-          });
-        };
+        return await this.render({
+          csrfTokenHMAC,
+          currentPathName,
+          headers,
+          i18n,
+          params,
+          pathname: url.pathname,
+          prefetchedData: pageData.prefetchedData,
+          url,
+          user,
+          viewData,
+          breadcrumbs,
+        });
       } catch (err) {
         if (err.kind === GEMI_REQUEST_BREAKER_ERROR) {
           if (isViewDataRequest) {

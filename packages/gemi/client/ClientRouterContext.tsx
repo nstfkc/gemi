@@ -13,12 +13,15 @@ import { URLPattern } from "urlpattern-polyfill";
 import { ProgressManager } from "./ProgressManager";
 import { HttpReload } from "./HttpReload";
 import { HttpClientContext } from "./HttpClientContext";
-import { log } from "node:util";
+import { type Breadcrumb } from "./useBreadcrumbs";
 
 interface ClientRouterContextValue {
   viewEntriesSubject: Subject<string[]>;
   history: History | null;
-  updatePageData: (pageData: Record<string, any>) => void;
+  updatePageData: (
+    pageData: Record<string, any>,
+    breadcrumbs: Record<string, Breadcrumb>,
+  ) => void;
   getPageData: (key: string) => any;
   locationSubject: Subject<Location>;
   getScrollPosition: (path: string) => number;
@@ -29,6 +32,7 @@ interface ClientRouterContextValue {
   setNavigationAbortController: (controller: AbortController) => void;
   progressManager: ProgressManager;
   fetchRouteCSS: (routePath: string) => Promise<void>;
+  breadcrumbsCache: Map<string, Breadcrumb>;
 }
 
 export const ClientRouterContext = createContext(
@@ -44,6 +48,7 @@ interface ClientRouterProviderProps {
   params: Record<string, string>;
   searchParams: string;
   is404: boolean;
+  breadcrumbs: Record<string, Breadcrumb>;
 }
 
 export const ClientRouterProvider = (
@@ -59,6 +64,7 @@ export const ClientRouterProvider = (
     pageData,
     params,
     searchParams,
+    breadcrumbs,
   } = props;
   const [parameters, setParameters] = useState(params);
   const navigationAbortControllerRef = useRef(new AbortController());
@@ -71,6 +77,10 @@ export const ClientRouterProvider = (
   const [progressManager] = useState(new ProgressManager(isNavigatingSubject));
   const pageDataRef = useRef(structuredClone(pageData));
   const scrollHistoryRef = useRef<Map<string, number>>(new Map());
+  const breadcrumbsCache = useRef<Map<string, Breadcrumb>>(
+    new Map(Object.entries(breadcrumbs)),
+  );
+
   const initalViewEntries = is404
     ? ["404"]
     : (routeManifest[pathname] ?? ["404"]);
@@ -159,10 +169,16 @@ export const ClientRouterProvider = (
     };
   }, []);
 
-  const updatePageData = (newPageData: Record<string, any>) => {
+  const updatePageData = (
+    newPageData: Record<string, any>,
+    breadcrumbs: Record<string, Breadcrumb>,
+  ) => {
     const [key, value] = Object.entries(newPageData)[0];
     if (!pageDataRef.current?.[key]) {
       pageDataRef.current[key] = {};
+    }
+    for (const b in breadcrumbs) {
+      breadcrumbsCache.current.set(b, breadcrumbs[b]);
     }
 
     pageDataRef.current[key] = value;
@@ -226,6 +242,7 @@ export const ClientRouterProvider = (
         setNavigationAbortController,
         progressManager,
         fetchRouteCSS,
+        breadcrumbsCache: breadcrumbsCache.current,
       }}
     >
       {children}

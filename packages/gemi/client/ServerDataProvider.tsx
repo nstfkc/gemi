@@ -8,6 +8,7 @@ type Data = Record<string, any>;
 export interface ServerDataContextValue {
   routeManifest: Record<string, string[]>;
   pageData: Record<string, Record<string, Data>>;
+  breadcrumbs: Record<string, { label: string; href: string }>;
   prefetchedData: Record<string, Data>;
   router: {
     pathname: string;

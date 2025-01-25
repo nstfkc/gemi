@@ -64,9 +64,17 @@ export class ViewRoute<Input, Output, Params> {
     }
   }
 
-  async run(req: HttpRequest<Input, Params>) {
+  async run(req: HttpRequest<Input, Params>, path: string) {
+    const data = await this.handler(req);
+
     return {
-      [this.viewPath]: await this.handler(req),
+      [this.viewPath]: {
+        ...data,
+        breadcrumb: {
+          label: (data as any)?.breadcrumb ?? "",
+          href: path,
+        },
+      },
     };
   }
 
@@ -113,9 +121,17 @@ export class LayoutRoute<T extends ViewRoutes, Input, Output, Params> {
     }
   }
 
-  async run(req: HttpRequest<Input, Params>) {
+  async run(req: HttpRequest<Input, Params>, path: string) {
+    const data = await this.handler(req);
+
     return {
-      [this.viewPath]: await this.handler(req),
+      [this.viewPath]: {
+        ...data,
+        breadcrumb: {
+          label: (data as any)?.breadcrumb ?? "",
+          href: path,
+        },
+      },
     };
   }
 

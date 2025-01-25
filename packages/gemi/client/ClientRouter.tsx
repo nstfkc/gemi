@@ -81,8 +81,14 @@ export const ClientRouter = (props: {
   RootLayout: ComponentType<any>;
 }) => {
   const { RootLayout } = props;
-  const { routeManifest, router, componentTree, pageData, cssManifest } =
-    useContext(ServerDataContext);
+  const {
+    routeManifest,
+    router,
+    componentTree,
+    pageData,
+    cssManifest,
+    breadcrumbs,
+  } = useContext(ServerDataContext);
 
   return (
     <I18nProvider>
@@ -98,6 +104,7 @@ export const ClientRouter = (props: {
               pathname={router.pathname}
               currentPath={router.currentPath}
               routeManifest={routeManifest}
+              breadcrumbs={breadcrumbs}
             >
               <StrictMode>
                 <RootLayout>

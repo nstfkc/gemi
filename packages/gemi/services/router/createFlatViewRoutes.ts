@@ -23,14 +23,19 @@ export function createFlatViewRoutes(routes: ViewRoutes) {
           const key = routePath === "/" ? path : `${routePath}${path}`;
           const _key = path === "/" && routePath !== "/" ? routePath : key;
 
+          const handler = (req: HttpRequest<any, any>) =>
+            route.run.call(route, req, routePath);
+
           flatRoutes[_key] = {
-            exec: [route.run.bind(route), ...exec],
+            exec: [handler, ...exec],
             middleware: [...route.middlewares, ...middleware],
           };
         }
       } else {
+        const handler = (req: HttpRequest<any, any>) =>
+          route.run.call(route, req, routePath);
         flatRoutes[routePath] = {
-          exec: [route.run.bind(route)],
+          exec: [handler],
           middleware: route.middlewares,
         };
       }

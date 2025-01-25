@@ -3,7 +3,7 @@
   "compilerOptions": {
     "outDir": "dist",
     "emitDeclarationOnly": true,
-    "moduleResolution": "nodenext",
+    "moduleResolution": "bundler",
     "downlevelIteration": true
   },
   "include": [
@@ -14,7 +14,8 @@
     "facades",
     "email",
     "services",
-    "broadcasting"
+    "broadcasting",
+    "client"
   ],
   "exclude": ["node_modules", "dist"]
 }

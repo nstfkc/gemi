@@ -1,17 +1,15 @@
-import { Link } from "gemi/client";
-import styles from "./test.module.css";
+import { Link, useBreadcrumbs } from "gemi/client";
 
 export default function Home() {
+  const breadcrumbs = useBreadcrumbs();
+  console.log(breadcrumbs);
   return (
     <div>
       <div>
         <h1>Home</h1>
       </div>
-      <div className={styles.awesome}>Hidden</div>
       <div>
-        <Link className={styles.bgRed} href="/auth/sign-in">
-          Sign In
-        </Link>
+        <Link href="/about">About</Link>
       </div>
     </div>
   );
