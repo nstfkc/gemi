@@ -1,6 +1,6 @@
 {
   "name": "gemi",
-  "version": "0.10.0",
+  "version": "0.10.2",
   "devDependencies": {
     "@babel/parser": "^7.25.4",
     "@repo/eslint-config": "*",

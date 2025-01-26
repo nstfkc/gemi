@@ -88,12 +88,13 @@ export const ClientRouter = (props: {
     pageData,
     cssManifest,
     breadcrumbs,
+    prefetchedData,
   } = useContext(ServerDataContext);
 
   return (
     <I18nProvider>
       <WebSocketContextProvider>
-        <QueryManagerProvider>
+        <QueryManagerProvider prefetchedData={prefetchedData}>
           <ComponentsProvider viewImportMap={props.viewImportMap}>
             <ClientRouterProvider
               cssManifest={cssManifest}

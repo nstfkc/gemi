@@ -2,11 +2,9 @@ import {
   createContext,
   type PropsWithChildren,
   useContext,
-  useEffect,
   useRef,
 } from "react";
 import { QueryResource } from "./QueryResource";
-import { ServerDataContext } from "./ServerDataProvider";
 import { HttpClientContext } from "./HttpClientContext";
 
 export const QueryManagerContext = createContext({
@@ -16,9 +14,13 @@ export const QueryManagerContext = createContext({
   updatePrefecthedData: (_data: Record<string, Record<string, any>>) => {},
 });
 
-export const QueryManagerProvider = ({ children }: PropsWithChildren) => {
+export const QueryManagerProvider = ({
+  children,
+  prefetchedData = {},
+}: PropsWithChildren<{
+  prefetchedData: Record<string, Record<string, any>>;
+}>) => {
   const resourcesRef = useRef<Map<string, QueryResource>>(new Map());
-  const { prefetchedData } = useContext(ServerDataContext);
   const prefetchedDataRef = useRef(prefetchedData);
   const { fetch, host } = useContext(HttpClientContext);
 
@@ -27,10 +29,6 @@ export const QueryManagerProvider = ({ children }: PropsWithChildren) => {
       prefetchedDataRef.current[key] = value;
     }
   };
-
-  useEffect(() => {
-    (window as any).qr = resourcesRef.current;
-  }, []);
 
   return (
     <QueryManagerContext.Provider
