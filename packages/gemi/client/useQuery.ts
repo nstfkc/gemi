@@ -119,24 +119,24 @@ export function useQuery<T extends keyof GetRPC>(
     }
   };
 
-  const handleReload = useCallback(() => {
-    setResource(getResource(applyParams(url, params)));
-  }, [url, params]);
+  // const handleReload = useCallback(() => {
+  //   setResource(getResource(applyParams(url, params)));
+  // }, [url, params]);
 
-  useEffect(() => {
-    // @ts-ignore
-    if (import.meta.hot) {
-      // @ts-ignore
-      import.meta.hot.on("http-reload", mutate);
-    }
-    return () => {
-      // @ts-ignore
-      if (import.meta.hot) {
-        // @ts-ignore
-        import.meta.hot.off("http-reload", mutate);
-      }
-    };
-  }, [handleReload]);
+  // useEffect(() => {
+  //   // @ts-ignore
+  //   if (import.meta.hot) {
+  //     // @ts-ignore
+  //     import.meta.hot.on("http-reload", mutate);
+  //   }
+  //   return () => {
+  //     // @ts-ignore
+  //     if (import.meta.hot) {
+  //       // @ts-ignore
+  //       import.meta.hot.off("http-reload", mutate);
+  //     }
+  //   };
+  // }, [handleReload]);
 
   useEffect(() => {
     const key = JSON.stringify(params);
