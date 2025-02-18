@@ -56,7 +56,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
     const secret = Buffer.from(process.env.SECRET, "utf8");
     const buffer = randomBytes(21);
     const csrfToken = buffer.toString("base64");
-    const mac = createHmac("sha256", secret);
+    const mac = createHmac("sha256", secret as any);
     mac.update(csrfToken);
     const csrfTokenHMAC = mac.digest();
 

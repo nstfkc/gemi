@@ -17,7 +17,7 @@ export class CSRFMiddleware extends Middleware {
 
     try {
       const secret = Buffer.from(process.env.SECRET, "utf8");
-      const mac = createHmac("sha256", secret);
+      const mac = createHmac("sha256", secret as any);
       mac.update(csrfToken);
       const expectedHMAC = mac.digest();
 
@@ -27,7 +27,7 @@ export class CSRFMiddleware extends Middleware {
 
       const csrfTokenHMAC = Buffer.from(input.get("__csrf"), "base64");
 
-      if (!timingSafeEqual(csrfTokenHMAC, expectedHMAC)) {
+      if (!timingSafeEqual(csrfTokenHMAC as any, expectedHMAC as any)) {
         throw new InvalidCSRFTokenError();
       }
     } catch (err) {

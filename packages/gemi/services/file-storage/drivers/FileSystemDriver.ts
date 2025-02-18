@@ -25,7 +25,7 @@ export class FileSystemDriver extends FileStorageDriver {
 
     const path = `${this.folderPath}/${name}`;
 
-    await Bun.write(path, buffer);
+    await Bun.write(path, buffer as any);
 
     return name;
   }
