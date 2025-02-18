@@ -235,7 +235,10 @@ export class ViewRouterServiceContainer extends ServiceContainer {
         let viewData = {};
         let breadcrumbs = {};
         for (const part of data) {
-          const [key, value] = Object.entries(part)[0];
+          const [key, value] = Object.entries(part)?.[0] ?? [];
+          if (!key || !value) {
+            continue;
+          }
           breadcrumbs[`${key}:${currentPathName}`] = (value as any).breadcrumb;
           viewData[key] = value;
         }
