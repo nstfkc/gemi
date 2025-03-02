@@ -171,7 +171,8 @@ export class ViewRouterServiceContainer extends ServiceContainer {
 
   async handleViewRequest(req: Request) {
     const url = new URL(req.url);
-    const isViewDataRequest = url.searchParams.get("json");
+    const isViewDataRequest = url.pathname.endsWith(".json");
+    const urlPathname = url.pathname.replace(".json", "");
 
     let handlers: ViewRouteExec[] = [];
     let middlewares: (RouterMiddleware | string)[] = [];
@@ -181,9 +182,9 @@ export class ViewRouterServiceContainer extends ServiceContainer {
     try {
       for (const [pathname, handler] of Object.entries(this.flatViewRoutes)) {
         const pattern = new URLPattern({ pathname });
-        if (pattern.test({ pathname: url.pathname })) {
+        if (pattern.test({ pathname: urlPathname })) {
           currentPathName = pathname;
-          params = pattern.exec({ pathname: url.pathname })?.pathname.groups!;
+          params = pattern.exec({ pathname: urlPathname })?.pathname.groups!;
           handlers = handler.exec;
           middlewares = handler.middleware;
           break;
@@ -276,7 +277,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           return new Response(
             JSON.stringify({
               data: {
-                [url.pathname]: viewData,
+                [urlPathname]: viewData,
               },
               breadcrumbs,
               prefetchedData: pageData.prefetchedData,

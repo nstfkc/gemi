@@ -95,9 +95,9 @@ export const I18nProvider = (props: PropsWithChildren<I18nProviderProps>) => {
       return;
     }
     const response = await fetch(
-      `${host}/api/__gemi__/services/i18n/translations?scope=${pathname}&locale=${
+      `${host}/api/__gemi__/services/i18n/translations/${
         locale || currentLocale
-      }`,
+      }${pathname === "/" ? "" : pathname}`,
       {
         signal,
       },

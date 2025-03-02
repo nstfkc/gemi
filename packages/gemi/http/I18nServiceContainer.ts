@@ -1,5 +1,3 @@
-import { log } from "util";
-import { KernelContext } from "../kernel/KernelContext";
 import { ServiceContainer } from "../services/ServiceContainer";
 import { ApiRouter } from "./ApiRouter";
 import { HttpRequest } from "./HttpRequest";
@@ -8,12 +6,11 @@ import { I18nServiceProvider } from "./I18nServiceProvider";
 export class I18nRouter extends ApiRouter {
   middlewares = ["cache:private"];
   routes = {
-    "/translations": this.get(async () => {
+    "/translations/:locale/:scope*": this.get(async () => {
       const req = new HttpRequest<any, any>();
-      const { scope, locale: forcedLocale } = req.search.toJSON() as {
-        scope: string;
-        locale: string;
-      };
+
+      const scope = `/${req.params.scope ?? ""}`;
+      const forcedLocale = req.params.locale;
 
       const locale =
         forcedLocale ?? I18nServiceContainer.use().detectLocale(req);

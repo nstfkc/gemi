@@ -70,10 +70,9 @@ export function useNavigate() {
       const components = getViewPathsFromPathname(path);
 
       const fetchUrlSearchParams = new URLSearchParams(urlSearchParams);
-      fetchUrlSearchParams.set("json", "true");
-      const fetchPath = [basePath, fetchUrlSearchParams.toString()].join("?");
-
-      urlSearchParams.set("json", "true");
+      const fetchPath = [basePath + ".json", fetchUrlSearchParams.toString()]
+        .filter((segment) => segment.length > 0)
+        .join("?");
 
       const routePathname = getRoutePathnameFromHref(path);
 

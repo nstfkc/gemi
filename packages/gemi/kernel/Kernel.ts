@@ -1,6 +1,6 @@
+import { kernelContext } from "./context";
 import { AuthenticationServiceProvider } from "../auth/AuthenticationServiceProvider";
 import { AuthenticationServiceContainer } from "../auth/AuthenticationServiceContainer";
-import { kernelContext } from "./context";
 import { MiddlewareServiceProvider } from "../http/MiddlewareServiceProvider";
 import { I18nServiceProvider } from "../http/I18nServiceProvider";
 import { I18nServiceContainer } from "../http/I18nServiceContainer";
