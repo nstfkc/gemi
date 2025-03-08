@@ -116,7 +116,7 @@ export class QueueServiceContainer extends ServiceContainer {
   private async run(jobDefinition: JobDefinition) {
     const Job = this.jobs[jobDefinition.class];
     const jobInstance = new Job();
-    const args = JSON.parse(jobDefinition.args);
+    const args: any[] = JSON.parse(jobDefinition.args);
 
     this.activeRunningJobsCount++;
 

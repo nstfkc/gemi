@@ -108,8 +108,9 @@ class AuthController extends Controller {
 
   async verifyEmail(req = new HttpRequest<{ token: string }>()) {
     const input = await req.input();
+    const authProvider = AuthenticationServiceContainer.use()?.provider;
 
-    const user = await this.provider.adapter.findUserByVerificationToken(
+    const user = await authProvider.adapter.findUserByVerificationToken(
       input.get("token"),
     );
 
@@ -117,7 +118,7 @@ class AuthController extends Controller {
       return { email: null };
     }
 
-    await this.provider.adapter.verifyUser(user.email);
+    await authProvider.adapter.verifyUser(user.email);
 
     if (user) {
       return {
@@ -198,9 +199,11 @@ class AuthController extends Controller {
     const input = await req.input.call(req);
     const { email, password } = input.toJSON();
 
-    const user = await this.provider.adapter.findUserByEmailAddress(
+    const authProvider = AuthenticationServiceContainer.use().provider;
+
+    const user = await authProvider.adapter.findUserByEmailAddress(
       email,
-      this.provider.verifyEmail,
+      authProvider.verifyEmail,
     );
 
     if (!user) {
@@ -209,7 +212,7 @@ class AuthController extends Controller {
       });
     }
 
-    const isPasswordValid = await this.provider.verifyPassword(
+    const isPasswordValid = await authProvider.verifyPassword(
       password,
       user.password,
     );
@@ -230,7 +233,7 @@ class AuthController extends Controller {
       expires: session.expiresAt,
     });
 
-    await this.provider.onSignIn(user);
+    await authProvider.onSignIn(user);
 
     const { password: _, ...rest } = user;
 
@@ -241,7 +244,8 @@ class AuthController extends Controller {
     const input = await req.input();
     const { email, password, name, invitationId } = input.toJSON();
 
-    const user = await this.provider.adapter.findUserByEmailAddress(
+    const authProvider = AuthenticationServiceContainer.use().provider;
+    const user = await authProvider.adapter.findUserByEmailAddress(
       email,
       false,
     );
@@ -252,19 +256,19 @@ class AuthController extends Controller {
       });
     }
 
-    const hashedPassword = await this.provider.hashPassword(password);
+    const hashedPassword = await authProvider.hashPassword(password);
 
     const locale = I18nServiceContainer.use().detectLocale(req);
 
     let invitation: Invitation;
     if (invitationId) {
-      invitation = await this.provider.adapter.findInvitation(
+      invitation = await authProvider.adapter.findInvitation(
         invitationId,
         email,
       );
 
       if (invitation) {
-        await this.provider.adapter.deleteInvitationById(invitationId);
+        await authProvider.adapter.deleteInvitationById(invitationId);
       }
     }
 
@@ -272,23 +276,23 @@ class AuthController extends Controller {
     let verificationToken: string;
 
     if (invitation) {
-      newUser = await this.provider.adapter.createUser({
+      newUser = await authProvider.adapter.createUser({
         email,
         name,
         password: hashedPassword,
         emailVerifiedAt: new Date(),
         locale,
       });
-      await this.provider.adapter.createAccount({
+      await authProvider.adapter.createAccount({
         organizationId: invitation.organizationId,
         userId: newUser.id,
         organizationRole: invitation.role,
       });
     } else {
       verificationToken =
-        await this.provider.generateEmailVerificationToken(email);
+        await authProvider.generateEmailVerificationToken(email);
 
-      newUser = await this.provider.adapter.createUser({
+      newUser = await authProvider.adapter.createUser({
         email,
         name,
         password: hashedPassword,
@@ -297,7 +301,7 @@ class AuthController extends Controller {
       });
     }
 
-    await this.provider.onSignUp(newUser, verificationToken);
+    await authProvider.onSignUp(newUser, verificationToken);
 
     return newUser;
   }
@@ -307,13 +311,15 @@ class AuthController extends Controller {
 
     const user = await Auth.user();
 
-    await this.provider.adapter.deleteSession({ token });
+    const authProvider = AuthenticationServiceContainer.use().provider;
+
+    await authProvider.adapter.deleteSession({ token });
 
     req.ctx().setCookie("access_token", "", {
       expires: new Date(0),
     });
 
-    await this.provider.onSignOut(user);
+    await authProvider.onSignOut(user);
 
     return {};
   }
@@ -322,35 +328,38 @@ class AuthController extends Controller {
     const input = await req.input();
     const { email } = input.toJSON();
 
-    const user = await this.provider.adapter.findUserByEmailAddress(
+    const authProvider = AuthenticationServiceContainer.use().provider;
+
+    const user = await authProvider.adapter.findUserByEmailAddress(
       email,
-      this.provider.verifyEmail,
+      authProvider.verifyEmail,
     );
 
     if (!user) {
       return {};
     }
 
-    const token = await this.provider.generateForgotPasswordToken(user);
+    const token = await authProvider.generateForgotPasswordToken(user);
 
     // TODO: Do not create token if already there is one that is valid
     // Prevent token spamming
-    await this.provider.adapter.createPasswordResetToken({
+    await authProvider.adapter.createPasswordResetToken({
       user,
       token,
     });
 
-    await this.provider.onForgotPassword(user, token);
+    await authProvider.onForgotPassword(user, token);
 
     return {};
   }
 
   async resetPassword(req = new ResetPasswordRequest()) {
+    const authProvider = AuthenticationServiceContainer.use().provider;
     const input = await req.input();
     const { password, token } = input.toJSON();
 
     const passwordResetToken =
-      await this.provider.adapter.findPasswordResetToken({ token });
+      await authProvider.adapter.findPasswordResetToken({ token });
 
     if (!passwordResetToken) {
       throw new ValidationError({
@@ -370,11 +379,11 @@ class AuthController extends Controller {
       });
     }
 
-    await this.provider.adapter.deletePasswordResetToken({ token });
+    await authProvider.adapter.deletePasswordResetToken({ token });
 
-    const user = await this.provider.adapter.findUserByEmailAddress(
+    const user = await authProvider.adapter.findUserByEmailAddress(
       passwordResetToken.user.email,
-      this.provider.verifyEmail,
+      authProvider.verifyEmail,
     );
 
     if (!user) {
@@ -383,16 +392,16 @@ class AuthController extends Controller {
       });
     }
 
-    const hashedPassword = await this.provider.hashPassword(password);
+    const hashedPassword = await authProvider.hashPassword(password);
 
-    await this.provider.adapter.updateUserPassword({
+    await authProvider.adapter.updateUserPassword({
       id: user.id,
       password: hashedPassword,
     });
 
-    await this.provider.adapter.deleteAllUserSessions(user.id);
+    await authProvider.adapter.deleteAllUserSessions(user.id);
 
-    await this.provider.onResetPassword(user);
+    await authProvider.onResetPassword(user);
 
     return {};
   }
@@ -400,16 +409,17 @@ class AuthController extends Controller {
   async changePassword(
     req = new HttpRequest<{ oldPassword: string; newPassword: string }>(),
   ) {
+    const authProvider = AuthenticationServiceContainer.use().provider;
     const user = await Auth.user();
     const input = await req.input();
     const { oldPassword, newPassword } = input.toJSON();
 
-    const { password } = await this.provider.adapter.findUserByEmailAddress(
+    const { password } = await authProvider.adapter.findUserByEmailAddress(
       user.email,
-      this.provider.verifyEmail,
+      authProvider.verifyEmail,
     );
 
-    const isPasswordValid = await this.provider.verifyPassword(
+    const isPasswordValid = await authProvider.verifyPassword(
       oldPassword,
       password,
     );
@@ -420,14 +430,14 @@ class AuthController extends Controller {
       });
     }
 
-    const hashedPassword = await this.provider.hashPassword(newPassword);
+    const hashedPassword = await authProvider.hashPassword(newPassword);
 
-    await this.provider.adapter.updateUserPassword({
+    await authProvider.adapter.updateUserPassword({
       id: user.id,
       password: hashedPassword,
     });
 
-    await this.provider.adapter.deleteAllUserSessions(user.id);
+    await authProvider.adapter.deleteAllUserSessions(user.id);
     return {};
   }
 
@@ -437,6 +447,7 @@ class AuthController extends Controller {
       AuthenticationServiceContainer.use().provider.oauthProviders[
         provider as string
       ];
+
     if (!oauthProvider) {
       throw new Error(`Invalid provider: ${provider}`);
     }
@@ -451,15 +462,40 @@ class AuthController extends Controller {
     const container = AuthenticationServiceContainer.use();
     const authProvider = container.provider;
     const oauthProvider = authProvider.oauthProviders[provider as string];
-    const { email, name } = await oauthProvider.onCallback(req);
+    const { email, name, username, providerId } =
+      await oauthProvider.onCallback(req);
 
-    let user = await authProvider.adapter.findUserByEmailAddress(email, false);
+    if (!username && !email) {
+      throw new Error("Email or username is required");
+    }
+
+    const identifier = email ?? `${username}:${provider}`;
+
+    let user = await authProvider.adapter.findUserByEmailAddress(
+      identifier,
+      false,
+    );
+
     const locale = I18nServiceContainer.use().detectLocale(req);
+
     if (!user) {
-      user = await this.provider.adapter.createUser({
-        email,
+      user = await authProvider.adapter.createUser({
+        email: identifier,
         name,
         locale,
+        emailVerifiedAt: new Date(),
+      });
+
+      // TODO: fix missing fields
+      await authProvider.adapter.createSocialAccount({
+        provider,
+        userId: user.id,
+        email: identifier,
+        username,
+        providerId,
+        expiresAt: new Date(),
+        accessToken: "",
+        refreshToken: "",
       });
     }
 

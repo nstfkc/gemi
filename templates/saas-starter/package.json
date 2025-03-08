@@ -8,18 +8,16 @@
     "ide": "gemi ide:generate-api-manifest"
   },
   "dependencies": {
-    "@libsql/client": "^0.6.0",
-    "@prisma/adapter-libsql": "^5.14.0",
-    "@prisma/client": "5.14.0",
-    "@react-email/components": "0.0.23-canary.3",
-    "@react-email/render": "^0.0.17-canary.0",
+    "@prisma/adapter-pg": "^6.4.1",
+    "@prisma/client": "^6.4.1",
     "framer-motion": "12.0.0-alpha.1",
     "gemi": "*",
     "jsx-email": "2.0.0-rc2.1",
+    "pg": "^8.13.3",
+    "prisma": "^6.4.1",
     "react": "19.0.0",
     "react-dom": "19.0.0",
     "sharp": "^0.33.3",
-    "swiper": "^11.1.15",
     "temporal-polyfill": "^0.2.5"
   },
   "devDependencies": {
@@ -34,7 +32,6 @@
     "eslint-plugin-react": "^7.34.1",
     "postcss": "^8.4.38",
     "prettier": "^3.2.5",
-    "prisma": "5.14.0",
     "tailwindcss": "^3.4.3",
     "typescript": "^5.5.4",
     "vite": "^5.3.1",

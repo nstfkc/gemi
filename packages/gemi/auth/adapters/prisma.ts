@@ -12,6 +12,7 @@ import type {
   FindPasswordResetTokenArgs,
   DeletePasswordResetTokenArgs,
   CreateAccountArgs,
+  CreateSocialAccountArgs,
 } from "./types";
 
 export class PrismaAuthenticationAdapter implements IAuthenticationAdapter {
@@ -234,6 +235,12 @@ export class PrismaAuthenticationAdapter implements IAuthenticationAdapter {
   async deleteMagicLinkToken(email: string) {
     return await this.prisma.magicLinkToken.deleteMany({
       where: { email },
+    });
+  }
+
+  async createSocialAccount(args: CreateSocialAccountArgs) {
+    return await this.prisma.socialAccount.create({
+      data: args,
     });
   }
 }

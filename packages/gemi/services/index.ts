@@ -48,4 +48,5 @@ export { Sharp } from "./image-optimization/drivers/SharpDriver";
 
 // Auth
 export { GoogleOAuthProvider } from "../auth/oauth/GoogleOAuthProvider";
+export { XOAuthProvider } from "../auth/oauth/XOAuthProvider";
 export { OAuthProvider } from "../auth/oauth/OAuthProvider";

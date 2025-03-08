@@ -6,7 +6,6 @@ import {
   PutObjectCommand,
   S3Client,
 } from "@aws-sdk/client-s3";
-import { v4 } from "uuid";
 
 import { Buffer } from "node:buffer";
 import { FileStorageDriver } from "./FileStorageDriver";
@@ -27,7 +26,7 @@ export class S3Driver extends FileStorageDriver {
 
     if (params instanceof Blob) {
       body = params;
-      name = `${v4()}.${params.type.split("/")[1].split(";")[0]}`;
+      name = `${Bun.randomUUIDv7()}.${params.type.split("/")[1].split(";")[0]}`;
       contentType = params.type;
     } else {
       body = params.body;
@@ -40,7 +39,11 @@ export class S3Driver extends FileStorageDriver {
       body instanceof Blob || body instanceof File ? body.type : undefined;
 
     const buffer =
-      body instanceof Buffer ? body : Buffer.from(await body.arrayBuffer());
+      body instanceof Buffer
+        ? body
+        : body instanceof Blob || body instanceof File
+          ? Buffer.from(await body.arrayBuffer())
+          : "";
 
     await this.client.send(
       new PutObjectCommand({

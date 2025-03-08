@@ -7,7 +7,7 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
@@ -50,24 +50,48 @@ model Account {
 }
 
 model User {
-  id                 Int                  @id @default(autoincrement())
-  publicId           String               @unique @default(cuid())
-  name               String?
-  email              String?              @unique
-  emailVerifiedAt    DateTime?
-  verificationToken  String?
-  locale             String?              @default("en-US")
-  globalRole         Int                  @default(2) // 0 = Owner, 1 = Admin, 2 = User
-  password           String?
-  organization       Organization?        @relation(fields: [organizationId], references: [id])
-  organizationId     Int?
-  accounts           Account[]
-  session            Session[]
-  PasswordResetToken PasswordResetToken[]
+  id                Int           @id @default(autoincrement())
+  publicId          String        @unique @default(cuid())
+  name              String?
+  email             String?       @unique
+  emailVerifiedAt   DateTime?
+  verificationToken String?
+  locale            String?       @default("en-US")
+  globalRole        Int           @default(2) // 0 = Owner, 1 = Admin, 2 = User
+  password          String?
+  organization      Organization? @relation(fields: [organizationId], references: [id])
+  organizationId    Int?
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
   deletedAt DateTime?
+
+  accounts           Account[]
+  session            Session[]
+  passwordResetToken PasswordResetToken[]
+  socialAccount      SocialAccount[]
+}
+
+model SocialAccount {
+  id Int @id @default(autoincrement())
+
+  userId Int
+  user   User @relation(fields: [userId], references: [id])
+
+  provider   String
+  providerId String
+
+  username String?
+  email   String?
+
+  accessToken  String
+  refreshToken String
+  expiresAt    DateTime
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, provider])
 }
 
 model Session {

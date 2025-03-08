@@ -1,6 +1,6 @@
 {
   "name": "gemi",
-  "version": "0.10.5",
+  "version": "0.11.0",
   "devDependencies": {
     "@babel/parser": "^7.25.4",
     "@repo/eslint-config": "*",
@@ -29,9 +29,7 @@
     "./services": "./services/index.ts",
     "./broadcasting": "./broadcasting/index.ts"
   },
-  "files": [
-    "dist/**/*"
-  ],
+  "files": ["dist/**/*"],
   "private": false,
   "module": true,
   "scripts": {
@@ -39,7 +37,7 @@
     "build": "NODE_ENV=production bun run build:core && bun run build:bin && bun run build:types && bun run build:client && bun run build:plugin && bun run build:client-types",
     "build:core": "bun ./scripts/build.ts",
     "build:bin": "bun build --outdir=./dist/bin --target=bun --external=vite --external=react-dom --external=react/jsx-runtime --external=bun --external=sharp --sourcemap ./bin/gemi.ts && bun ./scripts/prepare-bin.ts",
-    "build:client": "vite build",
+    "build:client": "vite build -c vite.client.config.mts",
     "build:plugin": "vite build -c vite.plugin.config.mts",
     "build:types": "tsc",
     "build:client-types": "tsc -p tsconfig.browser.json",
@@ -61,7 +59,9 @@
     "recast": "^0.23.9",
     "resend": "^3.4.0",
     "temporal-polyfill": "^0.2.5",
+    "twitter-api-v2": "^1.20.2",
     "urlpattern-polyfill": "^10.0.0",
-    "uuid": "^9.0.1"
+    "uuid": "^9.0.1",
+    "vite": "^6.2.1"
   }
 }

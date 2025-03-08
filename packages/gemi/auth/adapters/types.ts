@@ -33,7 +33,19 @@ export interface IAuthenticationAdapter {
     email: string;
   }) => Promise<User | null>;
   deleteMagicLinkToken: (email: string) => Promise<void>;
+  createSocialAccount: (args: CreateSocialAccountArgs) => Promise<any>;
 }
+
+export type CreateSocialAccountArgs = {
+  email?: string;
+  provider: string;
+  providerId: string;
+  username?: string;
+  accessToken?: string;
+  refreshToken?: string;
+  expiresAt?: Date;
+  userId?: number;
+};
 
 export type Invitation = {
   organizationId: number;
