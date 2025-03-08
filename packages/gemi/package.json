@@ -61,6 +61,7 @@
     "recast": "^0.23.9",
     "resend": "^3.4.0",
     "temporal-polyfill": "^0.2.5",
+    "twitter-api-v2": "^1.20.2",
     "urlpattern-polyfill": "^10.0.0",
     "uuid": "^9.0.1"
   }

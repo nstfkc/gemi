@@ -2,7 +2,7 @@ import {
   AuthenticationServiceProvider,
   PrismaAuthenticationAdapter,
 } from "gemi/kernel";
-import { GoogleOAuthProvider } from "gemi/services";
+import { GoogleOAuthProvider, XOAuthProvider } from "gemi/services";
 
 import { prisma } from "@/app/database/prisma";
 import { Auth } from "gemi/facades";
@@ -12,6 +12,7 @@ export default class extends AuthenticationServiceProvider {
 
   oauthProviders = {
     google: new GoogleOAuthProvider(),
+    x: new XOAuthProvider(),
   };
 
   async onSignUp(user: any, token: string) {

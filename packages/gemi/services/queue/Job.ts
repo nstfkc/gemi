@@ -5,7 +5,7 @@ export class Job {
   worker = false;
   maxAttempts = 3;
 
-  run(_args: any): Promise<any> | any {}
+  run(_args: unknown[]): Promise<any> | any {}
 
   onFail(_error: Error, _args: any): void {}
   onSuccess(_result: any, _args: any): void {}
