@@ -139,6 +139,7 @@ export async function startProdServer() {
       }
       return await requestHandler(req);
     },
+    idleTimeout: Number(process.env.SERVER_IDLE_TIMEOUT ?? 10),
     port: process.env.PORT || 5173,
   });
 

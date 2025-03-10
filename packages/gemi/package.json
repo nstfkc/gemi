@@ -1,6 +1,6 @@
 {
   "name": "gemi",
-  "version": "0.11.0",
+  "version": "0.11.1",
   "devDependencies": {
     "@babel/parser": "^7.25.4",
     "@repo/eslint-config": "*",
@@ -29,7 +29,9 @@
     "./services": "./services/index.ts",
     "./broadcasting": "./broadcasting/index.ts"
   },
-  "files": ["dist/**/*"],
+  "files": [
+    "dist/**/*"
+  ],
   "private": false,
   "module": true,
   "scripts": {

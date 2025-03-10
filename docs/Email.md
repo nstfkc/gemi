@@ -18,6 +18,7 @@ class WelcomeEmail extends Email {
 
 ```
 
+
 ## Sending emails
 
 ```ts
