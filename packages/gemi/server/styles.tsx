@@ -47,9 +47,7 @@ export async function createDevStyles(
   }
 
   for (const cssModulePath of cssModules) {
-    const transform = await vite.ssrLoadModule(cssModulePath, {
-      fixStacktrace: true,
-    });
+    const transform = await vite.transformRequest(cssModulePath + "?direct");
 
     const isCssModule = cssModulePath.includes("module.css");
 
@@ -65,7 +63,7 @@ export async function createDevStyles(
     styles.push({
       isDev: true,
       id: cssModulePath,
-      content: isCssModule ? transformedCssModule : transform.default,
+      content: isCssModule ? transformedCssModule : transform.code,
     });
   }
 

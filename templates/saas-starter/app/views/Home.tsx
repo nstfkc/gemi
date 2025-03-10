@@ -1,8 +1,6 @@
-import { Link, useBreadcrumbs } from "gemi/client";
+import { Link } from "gemi/client";
 
 export default function Home() {
-  const breadcrumbs = useBreadcrumbs();
-  console.log(breadcrumbs);
   return (
     <div>
       <div>
