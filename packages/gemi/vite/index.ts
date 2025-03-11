@@ -45,7 +45,7 @@ const gemi = (): PluginOption[] => {
       name: "gemi-plugin-custom-request",
       enforce: "pre",
       async transform(src, id) {
-        if (id.includes("/http/controllers/") || id.includes("/http/router/")) {
+        if (id.includes("/http/controllers/") || id.includes("/http/routes/")) {
           const code = await customRequestParser(src);
           return {
             code,
