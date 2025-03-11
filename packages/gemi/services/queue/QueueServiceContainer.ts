@@ -123,7 +123,7 @@ export class QueueServiceContainer extends ServiceContainer {
     try {
       const result = await (jobInstance.worker
         ? runInWorker(jobDefinition.class, jobDefinition.args)
-        : jobInstance.run(args));
+        : jobInstance.run(...args));
 
       jobInstance.onSuccess(result, args);
     } catch (err) {
