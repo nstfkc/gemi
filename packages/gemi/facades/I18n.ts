@@ -1,7 +1,6 @@
 import type { ViewRPC, I18nDictionary } from "../client/rpc";
 import { I18nServiceContainer } from "../http/I18nServiceContainer";
 import { RequestContext } from "../http/requestContext";
-import { KernelContext } from "../kernel/KernelContext";
 import { applyTranslationParams } from "../utils/applyTranslationParams";
 import type { IsEmptyObject, ParseTranslationParams } from "../utils/type";
 
@@ -25,5 +24,16 @@ export class I18n {
     }
 
     return applyTranslationParams(translation, args[0] as any);
+  }
+
+  static locale() {
+    const container = I18nServiceContainer.use();
+    return container.detectLocale(RequestContext.getStore().req);
+  }
+
+  static setLocale(locale: string) {
+    RequestContext.getStore().setCookie("i18n-locale", locale, {
+      expires: new Date(Date.now() + 1000 * 60 * 60 * 24 * 365),
+    });
   }
 }

@@ -1,5 +1,5 @@
-import { RequestBreakerError } from "./Error";
-import { AuthenticationError } from "./errors";
+import { I18n } from "../facades";
+import { I18nServiceContainer } from "./I18nServiceContainer";
 import { RequestContext } from "./requestContext";
 import { ValidationError } from "./Router";
 
@@ -227,6 +227,10 @@ export class HttpRequest<
       this.search = new Input<T>(params as T);
     }
     this.cookies = cookies;
+  }
+
+  public locale() {
+    return I18nServiceContainer.use().detectLocale(this);
   }
 
   public ctx() {

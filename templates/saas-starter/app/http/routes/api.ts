@@ -4,7 +4,10 @@ export default class extends ApiRouter {
   middlewares = ["cache:private", "cors"];
   routes = {
     "/health": this.get((req: HttpRequest) => {
-      return {};
+      const locale = req.locale();
+      return {
+        locale,
+      };
     }),
   };
 }
