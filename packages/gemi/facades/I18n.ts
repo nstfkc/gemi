@@ -32,7 +32,13 @@ export class I18n {
   }
 
   static setLocale(locale: string) {
-    RequestContext.getStore().setCookie("i18n-locale", locale, {
+    const container = I18nServiceContainer.use();
+    let _locale = locale;
+    if (!container.supportedLocales.includes(locale)) {
+      _locale = container.service.defaultLocale;
+    }
+
+    RequestContext.getStore().setCookie("i18n-locale", _locale, {
       expires: new Date(Date.now() + 1000 * 60 * 60 * 24 * 365),
     });
   }

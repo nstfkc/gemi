@@ -29,7 +29,9 @@
     "./services": "./services/index.ts",
     "./broadcasting": "./broadcasting/index.ts"
   },
-  "files": ["dist/**/*"],
+  "files": [
+    "dist/**/*"
+  ],
   "private": false,
   "module": true,
   "scripts": {
