@@ -65,7 +65,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
 
   async onRequestEnd(req: HttpRequest) {
     if (!req.cookies.has("session_id")) {
-      req.ctx().setCookie("session_id", v4(), {
+      req.ctx().setCookie("session_id", Bun.randomUUIDv7(), {
         httpOnly: true,
         secure: process.env.NODE_ENV === "production",
         sameSite: "Strict",

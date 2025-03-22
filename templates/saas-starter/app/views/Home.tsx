@@ -1,6 +1,7 @@
-import { Link } from "gemi/client";
+import { Link, usePost, usePut, useQuery } from "gemi/client";
 
 export default function Home() {
+  const {} = usePut("/orders/:orderId");
   return (
     <div>
       <div>
