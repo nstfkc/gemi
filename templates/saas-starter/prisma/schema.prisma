@@ -91,7 +91,7 @@ model SocialAccount {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@unique([userId, provider])
+  @@unique([username, provider])
 }
 
 model Session {

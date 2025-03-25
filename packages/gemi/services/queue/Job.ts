@@ -7,9 +7,9 @@ export class Job {
 
   run(..._args: any[]): Promise<any> | any {}
 
-  onFail(_error: Error, _args: any): void {}
-  onSuccess(_result: any, _args: any): void {}
-  onDeadletter(_error: Error): void {}
+  onFail(_error: Error, ..._args: any[]): void {}
+  onSuccess(_result: any, ..._args: any[]): void {}
+  onDeadletter(_error: Error, ..._args: any[]): void {}
 
   static dispatch<T extends Job>(
     this: new () => T,

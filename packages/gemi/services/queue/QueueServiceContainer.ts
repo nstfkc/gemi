@@ -125,11 +125,11 @@ export class QueueServiceContainer extends ServiceContainer {
         ? runInWorker(jobDefinition.class, jobDefinition.args)
         : jobInstance.run(...args));
 
-      jobInstance.onSuccess(result, args);
+      jobInstance.onSuccess(result, ...args);
     } catch (err) {
-      jobInstance.onFail(err, args);
+      jobInstance.onFail(err, ...args);
       if (jobDefinition.retries >= jobInstance.maxAttempts - 1) {
-        jobInstance.onDeadletter(err);
+        jobInstance.onDeadletter(err, ...args);
       } else {
         this.push(Job, jobDefinition.args, jobDefinition.retries + 1);
       }
