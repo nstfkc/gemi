@@ -8,14 +8,14 @@ import { resolve } from "node:path";
 
 async function fetchGemiVersion() {
   const url =
-    "https://raw.githubusercontent.com/nstfkc/gemi/main/packages/gemi/package.json";
+    "https://raw.githubusercontent.com/nstfkc/gemi/refs/heads/main/packages/gemi/package.json";
   const packageJson = await fetch(url).then((response) => response.json());
   return (packageJson as any).version;
 }
 
 async function fetchCreateGemiAppVersion() {
   const url =
-    "https://raw.githubusercontent.com/nstfkc/gemi/main/packages/create-gemi-app/package.json";
+    "https://raw.githubusercontent.com/nstfkc/gemi/refs/heads/main/packages/create-gemi-app/package.json";
   const packageJson = await fetch(url).then((response) => response.json());
   return (packageJson as any).version;
 }
