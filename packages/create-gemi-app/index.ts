@@ -115,8 +115,8 @@ program.action(async (options) => {
   console.log("");
 
   await $`echo 1. run cd \`${projectName}\``;
-  await $`echo 2. run \`bunx prisma migrate deploy\` to initialize the database and prisma client`;
-  await $`echo 3. run \`mv .env.example .env\` to create a .env file`;
+  await $`echo 2. run \`mv .env.example .env\` to create a .env file`;
+  await $`echo 3. run \`bunx prisma migrate deploy\` to initialize the database and prisma client`;
   await $`echo 4. run \`bun dev\` to start the development server`;
 });
 
