@@ -41,11 +41,11 @@ async function downloadTar(root: string, template = "default") {
 }
 
 program.option("-p, --project-name <projectName>", "Project name");
-program.option("-t, --template <template>", "Template", "blank");
+// program.option("-t, --template <template>", "Template", "blank");
 
 program.action(async (options) => {
   let projectName = options.projectName;
-  let template = options.template;
+  let template = "saas-starter";
 
   if (!projectName) {
     const response = await prompts({
@@ -61,17 +61,17 @@ program.action(async (options) => {
     process.exit(1);
   }
 
-  const { value: _template } = await prompts({
-    type: "select",
-    name: "value",
-    message: "Select a template",
-    choices: [
-      { title: "Blank", value: "blank" },
-      { title: "SaaS Starter", value: "saas-starter" },
-    ],
-  });
+  // const { value: _template } = await prompts({
+  //   type: "select",
+  //   name: "value",
+  //   message: "Select a template",
+  //   choices: [
+  //     { title: "Blank", value: "blank" },
+  //     { title: "SaaS Starter", value: "saas-starter" },
+  //   ],
+  // });
 
-  template = _template;
+  // template = _template;
 
   console.log(`Extracting to ${process.cwd()}/${projectName}`);
   console.log("Downloading template...");
