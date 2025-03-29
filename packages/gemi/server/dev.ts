@@ -183,6 +183,11 @@ export async function startDevServer() {
     if (fileRelativePath.startsWith("/logs")) {
       return;
     }
+
+    if (fileRelativePath.startsWith("/prisma")) {
+      return;
+    }
+
     if (fileRelativePath.startsWith("/app/views")) {
       console.log(`[vite] ${fileRelativePath} changed. 🍜 Hot reloading...`);
       return;
@@ -191,7 +196,9 @@ export async function startDevServer() {
     console.log(`[vite] ${fileRelativePath} changed. Reloading...`);
     const modules = vite.moduleGraph.getModulesByFile(file) ?? [];
     for (const mod of Array.from(modules)) {
-      vite.moduleGraph.invalidateModule(mod);
+      try {
+        vite.moduleGraph.invalidateModule(mod);
+      } catch (err) {}
     }
 
     try {

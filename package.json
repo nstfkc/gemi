@@ -17,9 +17,5 @@
     "lint": "turbo lint",
     "format": "prettier --write \"**/*.{ts,tsx,md}\""
   },
-  "workspaces": [
-    "apps/*",
-    "packages/*",
-    "templates/*"
-  ]
+  "workspaces": ["apps/*", "packages/*", "templates/*"]
 }

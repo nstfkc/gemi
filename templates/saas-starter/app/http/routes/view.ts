@@ -1,8 +1,6 @@
 import { ViewRouter } from "gemi/http";
-import { HomeController } from "@/app/http/controllers/HomeController";
 
 class AuthViewRouter extends ViewRouter {
-  middlewares = ["cache:public"];
   routes = {
     "/sign-in": this.view("auth/SignIn"),
     "/sign-up": this.view("auth/SignUp"),
@@ -12,11 +10,11 @@ class AuthViewRouter extends ViewRouter {
 }
 
 class AppRouter extends ViewRouter {
-  middlewares = ["auth"];
+  middlewares = ["auth", "cache:private"];
   routes = {
-    "/dashboard": this.view("Dashboard", () => ({
-      breadcrumb: "Dashboard",
-    })),
+    "/": this.layout("AppLayout", {
+      "/dashboard": this.view("Dashboard"),
+    }),
   };
 }
 
@@ -24,11 +22,10 @@ export default class extends ViewRouter {
   middlewares = ["cache:public,12840,must-revalidate"];
 
   override routes = {
-    "/": this.layout("AppLayout", () => ({ breadcrumb: "App layout" }), {
-      "/": this.view("Home", [HomeController, "index"]),
-      "/about": this.view("About", () => {
-        return { breadcrumb: "About" };
-      }),
+    "/": this.layout("PublicLayout", {
+      "/": this.view("Home"),
+      "/about": this.view("About"),
+      "/pricing": this.view("Pricing"),
     }),
     "/auth": AuthViewRouter,
     "/app": AppRouter,

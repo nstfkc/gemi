@@ -1,22 +1,13 @@
-import { ApiRouter, HttpRequest, ResourceController } from "gemi/http";
-
-class TestController extends ResourceController {
-  async list(req: HttpRequest<any, any>) {}
-  async show(req: HttpRequest<any, any>) {}
-  store(req: HttpRequest<any, any>) {}
-  delete(req: HttpRequest<any, any>) {}
-  update(req: HttpRequest<any, any>) {}
-}
+import { ApiRouter } from "gemi/http";
 
 export default class extends ApiRouter {
-  middlewares = ["cache:private", "cors"];
+  middlewares = ["cache:private"];
+
   routes = {
-    "/health": this.get((req: HttpRequest) => {
-      const locale = req.locale();
+    "/health": this.get(() => {
       return {
-        locale,
+        status: "ok",
       };
     }),
-    "/orders/:orderId": this.resource(TestController),
   };
 }
