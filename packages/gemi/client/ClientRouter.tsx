@@ -1,11 +1,12 @@
 import {
-  Suspense,
   useContext,
   useEffect,
   useState,
   StrictMode,
   type PropsWithChildren,
   type ComponentType,
+  memo,
+  useTransition,
 } from "react";
 import { ServerDataContext } from "./ServerDataProvider";
 import {
@@ -22,31 +23,14 @@ interface RouteProps {
   componentPath: string;
 }
 
-const Route = (props: PropsWithChildren<RouteProps>) => {
+const Route = memo((props: PropsWithChildren<RouteProps>) => {
   const { componentPath } = props;
   const { viewImportMap } = useContext(ComponentsContext);
 
-  const { viewEntriesSubject, getPageData, history } =
-    useContext(ClientRouterContext);
+  const { getPageData } = useContext(ClientRouterContext);
 
-  const [render, setRender] = useState(() =>
-    viewEntriesSubject.getValue().includes(componentPath),
-  );
-  const [data, setData] = useState(() => getPageData(componentPath));
+  const data = getPageData(componentPath);
 
-  useEffect(() => {
-    return viewEntriesSubject.subscribe((viewEntries) => {
-      setRender(viewEntries.includes(componentPath));
-    });
-  }, [componentPath]);
-
-  useEffect(() => {
-    return history?.listen(() => {
-      setData(getPageData(componentPath));
-    });
-  }, []);
-
-  if (!render) return null;
   const Component = viewImportMap[componentPath];
 
   if (Component) {
@@ -54,15 +38,28 @@ const Route = (props: PropsWithChildren<RouteProps>) => {
   }
   const NotFound = viewImportMap["404"];
   return <NotFound />;
-};
+});
 
 const Routes = (props: { componentTree: ComponentTree }) => {
   const { componentTree } = props;
+  const [, startTransition] = useTransition();
+
+  const { viewEntriesSubject } = useContext(ClientRouterContext);
+
+  const [entries, setEntries] = useState(viewEntriesSubject.getValue());
+  useEffect(() => {
+    return viewEntriesSubject.subscribe((viewEntries) => {
+      startTransition(() => {
+        setEntries(viewEntries);
+      });
+    });
+  }, []);
 
   return (
-    <Suspense>
+    <>
       {componentTree.map((node) => {
         const [path, subtree] = node;
+        if (!entries.includes(path)) return null;
         if (subtree.length > 0) {
           return (
             <Route key={path} componentPath={path}>
@@ -72,7 +69,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
         }
         return <Route key={path} componentPath={path} />;
       })}
-    </Suspense>
+    </>
   );
 };
 
