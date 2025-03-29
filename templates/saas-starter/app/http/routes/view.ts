@@ -24,8 +24,12 @@ export default class extends ViewRouter {
   override routes = {
     "/": this.layout("PublicLayout", {
       "/": this.view("Home"),
-      "/about": this.view("About"),
-      "/pricing": this.view("Pricing"),
+      "/about": this.view("About", () => {
+        return { title: "About", time: new Date().getTime() };
+      }),
+      "/pricing": this.view("Pricing", () => {
+        return { title: "Pricing", time: new Date().getTime() };
+      }),
     }),
     "/auth": AuthViewRouter,
     "/app": AppRouter,
