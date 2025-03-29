@@ -3,8 +3,8 @@ import {
   type ApiRoutes,
   type RouteHandlers,
   type ApiRouter,
+  type ResourceRoutes,
   RouteHandler,
-  ResourceRoutes,
 } from "../../http/ApiRouter";
 import type { RouterMiddleware } from "../../http/Router";
 

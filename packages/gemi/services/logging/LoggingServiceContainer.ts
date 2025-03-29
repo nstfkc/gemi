@@ -30,6 +30,9 @@ export class LoggingServiceContainer extends ServiceContainer {
     if (!process.env.ROOT_DIR) {
       return;
     }
+    if (!(await exists(`${process.env.ROOT_DIR}/storage`))) {
+      await mkdir(`${process.env.ROOT_DIR}/storage`);
+    }
     if (!(await exists(this.logsDirPath))) {
       await mkdir(this.logsDirPath);
     }
@@ -37,6 +40,9 @@ export class LoggingServiceContainer extends ServiceContainer {
   }
 
   async newLogFile() {
+    if (!(await exists(this.logsDirPath))) {
+      await mkdir(this.logsDirPath);
+    }
     this.isCreatingFile = true;
     if (this.currentLogFilePath) {
       this.writer.flush();

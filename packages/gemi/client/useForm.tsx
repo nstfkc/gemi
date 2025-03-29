@@ -1,4 +1,4 @@
-import { Component, ComponentProps, ComponentType, ReactNode } from "react";
+import { type ComponentProps, type ReactNode } from "react";
 
 export function useFormBuilder<T>(args: { fields: T }) {
   const Form = ({ children }: { children: ReactNode }) => {
@@ -9,8 +9,10 @@ export function useFormBuilder<T>(args: { fields: T }) {
     ...rest
   }: {
     name: K;
+    // @ts-expect-error
   } & ComponentProps<(typeof args.fields)[K]>) => {
     const Component = args.fields[name];
+    // @ts-expect-error
     return <Component name={name} {...rest} />;
   };
 

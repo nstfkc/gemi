@@ -1,6 +1,8 @@
 {
   "name": "gemi",
-  "version": "0.11.6",
+  "version": "0.11.7",
+  "author": "Enes Tufekci <enes@gemijs.dev>",
+  "license": "MIT",
   "devDependencies": {
     "@babel/parser": "^7.25.4",
     "@repo/eslint-config": "*",

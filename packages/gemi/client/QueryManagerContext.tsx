@@ -42,7 +42,7 @@ export const QueryManagerProvider = ({
           if (!resourcesRef.current.has(key)) {
             resourcesRef.current.set(
               key,
-              new QueryResource(key, _initialState ?? {}, fetch, host),
+              new QueryResource(key, _initialState ?? {}, fetch as any, host),
             );
           }
           return resourcesRef.current.get(key);

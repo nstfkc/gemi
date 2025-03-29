@@ -41,9 +41,11 @@ async function downloadTar(root: string, template = "default") {
 }
 
 program.option("-p, --project-name <projectName>", "Project name");
+program.option("-t, --template <template>", "Template", "blank");
 
 program.action(async (options) => {
   let projectName = options.projectName;
+  let template = options.template;
 
   if (!projectName) {
     const response = await prompts({
@@ -54,18 +56,17 @@ program.action(async (options) => {
     });
     projectName = response.projectName;
   }
+
   if (!projectName) {
     process.exit(1);
   }
-
-  let template = "default";
 
   const { value: _template } = await prompts({
     type: "select",
     name: "value",
     message: "Select a template",
     choices: [
-      { title: "Default", value: "default" },
+      { title: "Blank", value: "blank" },
       { title: "SaaS Starter", value: "saas-starter" },
     ],
   });
@@ -113,7 +114,10 @@ program.action(async (options) => {
   console.log("");
   console.log("");
 
-  await $`echo run cd \`${projectName}\` and run \`bun dev\` to start the development server`;
+  await $`echo 1. run cd \`${projectName}\``;
+  await $`echo 2. run \`bunx prisma migrate deploy\` to initialize the database and prisma client`;
+  await $`echo 3. run \`mv .env.example .env\` to create a .env file`;
+  await $`echo 4. run \`bun dev\` to start the development server`;
 });
 
 program.parse();
