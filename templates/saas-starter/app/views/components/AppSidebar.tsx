@@ -3,6 +3,7 @@ import { Calendar, Home, Inbox, Search, Settings } from "lucide-react";
 import {
   Sidebar,
   SidebarContent,
+  SidebarFooter,
   SidebarGroup,
   SidebarGroupContent,
   SidebarGroupLabel,
@@ -10,7 +11,8 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "./ui/sidebar";
-import { Link } from "gemi/client";
+import { Link, useNavigate, usePost, useUser } from "gemi/client";
+import { Button } from "./ui/button";
 
 // Menu items.
 const items = [
@@ -42,6 +44,9 @@ const items = [
 ];
 
 export function AppSidebar() {
+  const { trigger: logout } = usePost("/auth/sign-out");
+  const { replace } = useNavigate();
+  const { user } = useUser();
   return (
     <Sidebar>
       <SidebarContent>
@@ -63,6 +68,20 @@ export function AppSidebar() {
           </SidebarGroupContent>
         </SidebarGroup>
       </SidebarContent>
+      <SidebarFooter>
+        <span>{user?.name}</span>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() =>
+            logout().then(() => {
+              replace("/auth/sign-in");
+            })
+          }
+        >
+          Sign out
+        </Button>
+      </SidebarFooter>
     </Sidebar>
   );
 }
