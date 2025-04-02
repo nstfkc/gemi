@@ -3,7 +3,7 @@ import {
   PrismaAuthenticationAdapter,
 } from "gemi/kernel";
 import { WelcomeEmail } from "@/app/email/WelcomeEmail";
-
+import { Auth } from "gemi/facades";
 import { prisma } from "@/app/database/prisma";
 
 export default class extends AuthenticationServiceProvider {
@@ -20,7 +20,16 @@ export default class extends AuthenticationServiceProvider {
   async onSignUp(user: any, token: string) {
     // This hook will be called when a user signs up
     // You can send email verification here
-    WelcomeEmail.send({ data: { name: user.name }, to: [user.email] });
+    const magicLink = await Auth.createMagicLink(user.email);
+    if (magicLink) {
+      const url = new URL(`${process.env.HOST_NAME}/auth/sign-in/magic-link`);
+      url.searchParams.set("token", magicLink.token);
+      url.searchParams.set("email", user.email);
+      WelcomeEmail.send({
+        data: { name: user.name, magicLink: url.toString() },
+        to: [user.email],
+      });
+    }
   }
 
   async onForgotPassword(user: any, token: string) {
