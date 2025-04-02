@@ -2,6 +2,7 @@ import {
   AuthenticationServiceProvider,
   PrismaAuthenticationAdapter,
 } from "gemi/kernel";
+import { WelcomeEmail } from "@/app/email/WelcomeEmail";
 
 import { prisma } from "@/app/database/prisma";
 
@@ -19,6 +20,7 @@ export default class extends AuthenticationServiceProvider {
   async onSignUp(user: any, token: string) {
     // This hook will be called when a user signs up
     // You can send email verification here
+    WelcomeEmail.send({ data: { name: user.name }, to: [user.email] });
   }
 
   async onForgotPassword(user: any, token: string) {

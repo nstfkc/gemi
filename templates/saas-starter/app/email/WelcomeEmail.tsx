@@ -1,11 +1,9 @@
 import { Email } from "gemi/email";
-import Welcome from "./emails/Welcome";
 
 export class WelcomeEmail extends Email {
-  subject = {
-    "en-US": "Welcome to our platform",
-    "de-DE": "Bienvenue sur notre plateforme",
-  };
+  subject = "Welcome to our platform";
 
-  template = Welcome;
+  template = (props: { name: string }) => {
+    return <div>Welcome, {props.name}</div>;
+  };
 }
