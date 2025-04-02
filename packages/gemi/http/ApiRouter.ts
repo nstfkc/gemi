@@ -262,13 +262,6 @@ type ParsePrefixAndKey<
       ? `${T1}/${T2}`
       : U;
 
-type LastUrlSegment<T extends string> =
-  T extends `${infer _}/${infer LastSegment}` ? LastUrlSegment<LastSegment> : T;
-
-type ToCamelCase<T extends string> = T extends `${infer F}-${infer L}`
-  ? `${F}${Capitalize<ToCamelCase<L>>}`
-  : T;
-
 type WithoutId<T> = T extends `${infer Base}/:${string}` ? Base : T;
 
 type ResourceRoutesParser<
@@ -301,31 +294,3 @@ export type CreateRPC<
   T extends ApiRouter,
   Prefix extends PropertyKey = "",
 > = KeyAndValueToObject<RouteParser<T["routes"], Prefix>>;
-
-type List = any;
-class FooController extends ResourceController {
-  async list(req: HttpRequest<any, any>) {
-    return [] as List[];
-  }
-  async show(req: HttpRequest<any, any>) {}
-  store(req: HttpRequest<any, any>) {}
-  delete(req: HttpRequest<any, any>) {}
-  update(req: HttpRequest<any, any>) {}
-}
-
-class Router extends ApiRouter {
-  routes = {
-    // "/tests/:testId": this.resource(FooController),
-    // "/foo": this.get(FooController, "list"),
-    "/double": {
-      get: this.get(FooController, "list"),
-      post: this.post(FooController, "store"),
-    },
-  };
-}
-
-type X = KeyAndValueToObject<
-  RouteParser<{ "/tests/:testId": ResourceRoutes<new () => FooController> }>
->;
-
-type Rpc = CreateRPC<Router>;

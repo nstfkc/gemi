@@ -25,10 +25,10 @@ export default class extends ViewRouter {
     "/": this.layout("PublicLayout", {
       "/": this.view("Home"),
       "/about": this.view("About", () => {
-        return { title: "About", time: new Date().getTime() };
+        return { title: "About" };
       }),
       "/pricing": this.view("Pricing", () => {
-        return { title: "Pricing", time: new Date().getTime() };
+        return { title: "Pricing" };
       }),
     }),
     "/auth": AuthViewRouter,
