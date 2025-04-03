@@ -32,6 +32,6 @@ export default class extends ViewRouter {
       }),
     }),
     "/auth": AuthViewRouter,
-    "/app": AppRouter,
+    "(app)/": AppRouter,
   };
 }

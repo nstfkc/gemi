@@ -204,6 +204,8 @@ type LayoutRouteParser<T, Prefix extends PropertyKey = ""> =
         | KeyAndValue<`layout:${Prefix & string}`, ViewHandler<I, O, P>>
     : never;
 
+type RemoveGroupPrefix<T> = T extends `(${string})${infer U}` ? U : T;
+
 type ParsePrefixAndKey<
   P extends PropertyKey,
   K extends PropertyKey,
@@ -211,10 +213,10 @@ type ParsePrefixAndKey<
 > = U extends "//"
   ? "/"
   : U extends `${infer T1}//${infer T2}`
-    ? `${T1}/${T2}`
+    ? `${RemoveGroupPrefix<T1>}/${RemoveGroupPrefix<T2>}`
     : U extends `${infer T1}/${infer T2}/`
-      ? `${T1}/${T2}`
-      : U;
+      ? `${RemoveGroupPrefix<T1>}/${RemoveGroupPrefix<T2>}`
+      : RemoveGroupPrefix<U>;
 
 type RouterInstanceParser<
   T extends new () => ViewRouter,

@@ -24,7 +24,6 @@ import type { ComponentTree } from "../../client/types";
 import { I18nServiceContainer } from "../../http/I18nServiceContainer";
 import { MiddlewareServiceContainer } from "../middleware/MiddlewareServiceContainer";
 import { Log } from "../../facades";
-import { v4 } from "uuid";
 import { randomBytes, createHmac } from "crypto";
 import { AuthViewRouter } from "../../auth/AuthenticationServiceProvider";
 

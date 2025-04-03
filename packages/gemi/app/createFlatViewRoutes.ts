@@ -1,6 +1,17 @@
 import { HttpRequest } from "../http";
 import { ViewRoutes } from "../http/ViewRouter";
 
+function removeGroupPrefix(input: string) {
+  // Remove all (str) patterns
+  const withoutParentheses = input.replace(/\([^)]*\)/g, "");
+
+  // Remove all double slashes // by replacing with single slash
+  const withoutDoubleSlashes = withoutParentheses.replace(/\/\//g, "/");
+  console.log(input, withoutDoubleSlashes);
+
+  return withoutDoubleSlashes;
+}
+
 export type ViewRouteExec = (req: HttpRequest<any, any>) => any; // TODO: fix type
 export function createFlatViewRoutes(routes: ViewRoutes) {
   const flatRoutes: Record<
@@ -8,7 +19,8 @@ export function createFlatViewRoutes(routes: ViewRoutes) {
     { exec: ViewRouteExec[]; middleware: (string | any)[] }
   > = {};
 
-  for (const [routePath, viewConfigOrViewRouter] of Object.entries(routes)) {
+  for (const [_routePath, viewConfigOrViewRouter] of Object.entries(routes)) {
+    const routePath = removeGroupPrefix(_routePath);
     if ("run" in viewConfigOrViewRouter) {
       const route = viewConfigOrViewRouter;
 
@@ -18,7 +30,10 @@ export function createFlatViewRoutes(routes: ViewRoutes) {
 
         for (const [path, { exec, middleware }] of Object.entries(result)) {
           const key = routePath === "/" ? path : `${routePath}${path}`;
-          const _key = path === "/" && routePath !== "/" ? routePath : key;
+          const _key =
+            path === "/" && routePath !== "/"
+              ? routePath
+              : removeGroupPrefix(key);
 
           flatRoutes[_key] = {
             exec: [route.run.bind(route), ...exec],
@@ -26,7 +41,7 @@ export function createFlatViewRoutes(routes: ViewRoutes) {
           };
         }
       } else {
-        flatRoutes[routePath] = {
+        flatRoutes[removeGroupPrefix(routePath)] = {
           exec: [route.run.bind(route)],
           middleware: route.middlewares,
         };
@@ -34,9 +49,13 @@ export function createFlatViewRoutes(routes: ViewRoutes) {
     } else {
       const router = new viewConfigOrViewRouter();
       const result = createFlatViewRoutes(router.routes);
-      for (const [path, { exec, middleware }] of Object.entries(result)) {
+      for (const [_path, { exec, middleware }] of Object.entries(result)) {
+        const path = removeGroupPrefix(_path);
         const key = routePath === "/" ? path : `${routePath}${path}`;
-        const _key = path === "/" && routePath !== "/" ? routePath : key;
+        const _key =
+          path === "/" && routePath !== "/"
+            ? routePath
+            : removeGroupPrefix(key);
         flatRoutes[_key] = {
           exec,
           middleware: [...router.middlewares, ...middleware],

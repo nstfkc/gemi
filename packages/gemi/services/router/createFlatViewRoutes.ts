@@ -8,6 +8,15 @@ export type FlatViewRoutes = Record<
   { exec: ViewRouteExec[]; middleware: (string | any)[] }
 >;
 
+function removeGroupPrefix(input: string) {
+  // Remove all (str) patterns
+  const withoutParentheses = input.replace(/\([^)]*\)/g, "");
+
+  // Remove all double slashes // by replacing with single slash
+  const withoutDoubleSlashes = withoutParentheses.replace(/\/\//g, "/");
+  return withoutDoubleSlashes;
+}
+
 export function createFlatViewRoutes(routes: ViewRoutes) {
   const flatRoutes: FlatViewRoutes = {};
 
@@ -26,7 +35,7 @@ export function createFlatViewRoutes(routes: ViewRoutes) {
           const handler = (req: HttpRequest<any, any>) =>
             route.run.call(route, req, routePath);
 
-          flatRoutes[_key] = {
+          flatRoutes[removeGroupPrefix(_key)] = {
             exec: [handler, ...exec],
             middleware: [...route.middlewares, ...middleware],
           };
@@ -34,7 +43,7 @@ export function createFlatViewRoutes(routes: ViewRoutes) {
       } else {
         const handler = (req: HttpRequest<any, any>) =>
           route.run.call(route, req, routePath);
-        flatRoutes[routePath] = {
+        flatRoutes[removeGroupPrefix(routePath)] = {
           exec: [handler],
           middleware: route.middlewares,
         };
@@ -45,7 +54,7 @@ export function createFlatViewRoutes(routes: ViewRoutes) {
       for (const [path, { exec, middleware }] of Object.entries(result)) {
         const key = routePath === "/" ? path : `${routePath}${path}`;
         const _key = path === "/" && routePath !== "/" ? routePath : key;
-        flatRoutes[_key] = {
+        flatRoutes[removeGroupPrefix(_key)] = {
           exec,
           middleware: [...router.middlewares, ...middleware],
         };

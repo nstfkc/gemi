@@ -1,6 +1,7 @@
+import type { ViewProps } from "gemi/client";
 import { useState } from "react";
 
-export default function Home() {
+export default function Home(props: ViewProps<"/">) {
   const [count, setCount] = useState(0);
   return (
     <div className="h-dvh">
