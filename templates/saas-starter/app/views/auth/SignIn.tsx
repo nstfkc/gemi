@@ -11,7 +11,7 @@ export default function SignIn() {
       <Form
         method="POST"
         action="/auth/sign-in"
-        onSuccess={() => push("/app/dashboard")}
+        onSuccess={() => push("/dashboard")}
         className="flex flex-col gap-8 w-full"
       >
         <FormField name="email" label="Email">
