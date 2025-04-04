@@ -6,6 +6,8 @@ import {
   useRef,
   useState,
   type PropsWithChildren,
+  cache,
+  useMemo,
 } from "react";
 import { Subject } from "../utils/Subject";
 // @ts-ignore
@@ -14,6 +16,8 @@ import { ProgressManager } from "./ProgressManager";
 import { HttpReload } from "./HttpReload";
 import { HttpClientContext } from "./HttpClientContext";
 import { type Breadcrumb } from "./useBreadcrumbs";
+import { I18nContext } from "./i18n/I18nContext";
+import { applyParams } from "../utils/applyParams";
 
 interface ClientRouterContextValue {
   viewEntriesSubject: Subject<string[]>;
@@ -33,6 +37,12 @@ interface ClientRouterContextValue {
   progressManager: ProgressManager;
   fetchRouteCSS: (routePath: string) => Promise<void>;
   breadcrumbsCache: Map<string, Breadcrumb>;
+  getViewDataPromise: (
+    componentPath: string,
+  ) => (
+    params: Record<string, string>,
+    search: Record<string, string>,
+  ) => Promise<[any, any, any]>;
 }
 
 export const ClientRouterContext = createContext(
@@ -66,6 +76,7 @@ export const ClientRouterProvider = (
     searchParams,
     breadcrumbs,
   } = props;
+  const { fetchTranslations } = useContext(I18nContext);
   const [parameters, setParameters] = useState(params);
   const navigationAbortControllerRef = useRef(new AbortController());
   const [isNavigatingSubject] = useState(() => {
@@ -224,6 +235,54 @@ export const ClientRouterProvider = (
     }
   };
 
+  const getViewDataPromise = useMemo(() => {
+    if (typeof window === "undefined") {
+      return () => {
+        return () => {
+          return Promise.resolve([{}, {}, {}]) as any;
+        };
+      };
+    }
+    const viewsToRoutePath = new Map();
+    for (const [key, value] of Object.entries(routeManifest)) {
+      for (const view of value) {
+        // TODO: fix this, layout components can be here multiple times.
+        viewsToRoutePath.set(view, key);
+      }
+    }
+    console.log(viewsToRoutePath);
+    // TODO: this can have two arguments, layouts and view path
+    // Maybe generating a unique key for each view using
+    return (componentPath: string) =>
+      (params: Record<string, string>, search: Record<string, string>) => {
+        const routePathname = viewsToRoutePath.get(componentPath);
+        const fn = cache((routePathname: string) => {
+          const urlSearchParams = new URLSearchParams(search);
+
+          const basePath = applyParams(routePathname, params);
+
+          const fetchUrlSearchParams = new URLSearchParams(urlSearchParams);
+          const fetchPath = [
+            basePath + ".json",
+            fetchUrlSearchParams.toString(),
+          ]
+            .filter((segment) => segment.length > 0)
+            .join("?");
+          return Promise.all([
+            fetch(`${host}${fetchPath}`)
+              .then((res) => res.json())
+              .then(({ data }) => {
+                return data;
+              }),
+            // fetchRouteCSS(routePathname),
+            // fetchTranslations(routePathname, undefined),
+          ]);
+        });
+
+        return fn(routePathname);
+      };
+  }, []);
+
   return (
     <ClientRouterContext.Provider
       value={{
@@ -243,6 +302,7 @@ export const ClientRouterProvider = (
         progressManager,
         fetchRouteCSS,
         breadcrumbsCache: breadcrumbsCache.current,
+        getViewDataPromise,
       }}
     >
       {children}
