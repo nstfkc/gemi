@@ -1,4 +1,5 @@
 export { useQuery } from "./useQuery";
+export type { QueryResult } from "./useQuery";
 export {
   useMutation,
   useDelete,

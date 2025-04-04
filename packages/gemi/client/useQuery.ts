@@ -74,6 +74,8 @@ const defaultOptions: QueryOptions<any> & { params?: Record<string, any> } = {
   search: {} as Record<string, string>,
 };
 
+export type QueryResult<T extends keyof GetRPC> = Data<T>
+
 export function useQuery<T extends keyof GetRPC>(
   url: T,
   ...args: [
