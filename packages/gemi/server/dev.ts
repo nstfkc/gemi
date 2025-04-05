@@ -69,13 +69,12 @@ export async function startDevServer() {
 
   async function getApp(): Promise<App> {
     try {
-      return (
-        await vite.ssrLoadModule(join(appDir, "bootstrap.ts"), {
-          fixStacktrace: true,
-        })
-      ).app;
+      const module = await vite.ssrLoadModule(join(appDir, "bootstrap.ts"), {
+        fixStacktrace: true,
+      });
+      return module.app;
     } catch (err) {
-      vite.ws.send({ type: "error", err });
+      vite.ws.send({ type: "error", err: { ...err, message: "" } });
       console.error(err);
     }
   }
@@ -119,6 +118,7 @@ export async function startDevServer() {
               const appDir = `${process.env.APP_DIR}`;
               const mod = await vite.ssrLoadModule(
                 `${appDir}/views/${fileName}.tsx`,
+                { fixStacktrace: true },
               );
               viewImportMap[fileName] = mod.default;
               templates.push(
@@ -149,9 +149,16 @@ export async function startDevServer() {
               headers: { "Content-Type": "application/json" },
             });
           }
-          return new Response(renderErrorPage(err), {
-            headers: { "Content-Type": "text/html" },
-          });
+
+          return new Response(
+            renderErrorPage({
+              ...err,
+              message: "",
+            }),
+            {
+              headers: { "Content-Type": "text/html" },
+            },
+          );
         }
       },
 
@@ -218,13 +225,13 @@ export async function startDevServer() {
         type: "custom",
         event: "http-reload",
       });
+      vite.ws.send({
+        type: "update",
+        updates: [],
+      });
     } catch (err) {
       console.log("Error on server reload");
       console.log(err);
-      vite.ws.send({
-        type: "error",
-        err,
-      });
     }
   });
 

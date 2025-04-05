@@ -1,4 +1,3 @@
-import { log } from "util";
 import { RequestBreakerError } from "./Error";
 import { HttpRequest } from "./HttpRequest";
 import { Middleware } from "./Middleware";
