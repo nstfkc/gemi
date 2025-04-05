@@ -22,6 +22,10 @@ class Store {
     this.cookies.add(new Cookie(name, value, options));
   }
 
+  deleteCookie(name: string) {
+    this.cookies.add(new Cookie(name, "", { maxAge: -1 }));
+  }
+
   setHeaders(name: string, value: string) {
     this.headers.set(name, value);
   }

@@ -170,8 +170,8 @@ export class HttpRequest<
 > {
   public kind: HttpRequestKind;
   public rawRequest: Request;
-  public headers: Headers;
-  public cookies: Map<string, string>;
+  public headers: Omit<Headers, "set" | "delete">;
+  public cookies: Omit<Map<string, string>, "set" | "delete">;
   public search: Input<T>;
   public schema: any = {};
   public routePath: string;

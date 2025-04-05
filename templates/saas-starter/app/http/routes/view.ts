@@ -1,4 +1,4 @@
-import { ViewRouter } from "gemi/http";
+import { HttpRequest, ViewRouter } from "gemi/http";
 
 class AuthViewRouter extends ViewRouter {
   routes = {
@@ -27,7 +27,10 @@ export default class extends ViewRouter {
       "/about": this.view("About", () => {
         return { title: "About" };
       }),
-      "/pricing": this.view("Pricing", () => {
+      "/pricing": this.view("Pricing", (req: HttpRequest) => {
+        req.cookies.get("cookieName");
+        req.headers.get("headerName");
+        req.ctx().setCookie("foo", "bar", { httpOnly: true });
         return { title: "Pricing" };
       }),
     }),
