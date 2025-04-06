@@ -3,11 +3,12 @@ import {
   useEffect,
   useState,
   StrictMode,
-  type PropsWithChildren,
-  type ComponentType,
   memo,
   useTransition,
 } from "react";
+
+import type { PropsWithChildren, ReactNode, ComponentType, lazy } from "react";
+
 import { ServerDataContext } from "./ServerDataProvider";
 import {
   ClientRouterContext,
@@ -53,7 +54,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
         setEntries(viewEntries);
       });
     });
-  }, []);
+  }, [viewEntriesSubject]);
 
   return (
     <>
@@ -74,8 +75,8 @@ const Routes = (props: { componentTree: ComponentTree }) => {
 };
 
 export const ClientRouter = (props: {
-  viewImportMap?: Record<string, any>;
-  RootLayout: ComponentType<any>;
+  viewImportMap?: Record<string, ReturnType<typeof lazy>>;
+  RootLayout: ComponentType<{ children: ReactNode }>;
 }) => {
   const { RootLayout } = props;
   const {
