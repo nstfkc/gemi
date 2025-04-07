@@ -1,6 +1,6 @@
 import { ApiRouter, HttpRequest } from "../../http";
 import { ServiceContainer } from "../ServiceContainer";
-import { ImageOptimizationServiceProvider } from "./ImageOptimizationServiceProvider";
+import type { ImageOptimizationServiceProvider } from "./ImageOptimizationServiceProvider";
 
 export class ImageOptimizationRouter extends ApiRouter {
   routes = {

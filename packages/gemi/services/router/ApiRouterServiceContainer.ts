@@ -7,7 +7,7 @@ import { ImageOptimizationRouter } from "../image-optimization/ImageOptimization
 import { LoggingRouter } from "../logging/LoggingRouter";
 import { MiddlewareServiceContainer } from "../middleware/MiddlewareServiceContainer";
 import { ServiceContainer } from "../ServiceContainer";
-import { ApiRouterServiceProvider } from "./ApiRouterServiceProvider";
+import type { ApiRouterServiceProvider } from "./ApiRouterServiceProvider";
 import { createFlatApiRoutes, type FlatApiRoutes } from "./createFlatApiRoutes";
 
 export class ApiRouterServiceContainer extends ServiceContainer {
@@ -96,11 +96,10 @@ export class ApiRouterServiceContainer extends ServiceContainer {
             ...headers,
           },
         });
-      } else {
-        this.service.onRequestFail(ctx.req, err);
-        console.error(err);
-        throw err;
       }
+      this.service.onRequestFail(ctx.req, err);
+      console.error(err);
+      throw err;
     }
 
     return data;

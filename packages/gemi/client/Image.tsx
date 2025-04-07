@@ -8,7 +8,7 @@ function generateImageProps(
   width: number,
   container = defaultContainer,
   screen = defaultScreen,
-  quality: number,
+  quality = 80,
 ) {
   const baseUrl = src;
 

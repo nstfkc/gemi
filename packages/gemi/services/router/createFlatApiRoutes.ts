@@ -65,8 +65,9 @@ export function createFlatApiRoutes(
   ) {
     const subPath = path === "/" ? "" : path;
     const _rootPath = rootPath === "/" ? "" : rootPath;
-    const finalPath =
-      `${_rootPath}${subPath}` === "" ? "/" : `${_rootPath}${subPath}`;
+    const finalPath = (
+      `${_rootPath}${subPath}` === "" ? "/" : `${_rootPath}${subPath}`
+    ).replaceAll("//", "/");
     if (!flatApiRoutes[finalPath]) {
       flatApiRoutes[finalPath] = {};
     }

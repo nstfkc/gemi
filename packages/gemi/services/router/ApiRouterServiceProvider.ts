@@ -1,4 +1,4 @@
-import { HttpRequest } from "../../http";
+import type { HttpRequest } from "../../http";
 import type { ApiRouter } from "../../http/ApiRouter";
 import { ServiceProvider } from "../ServiceProvider";
 
