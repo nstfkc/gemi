@@ -110,7 +110,7 @@ export function createFlatApiRoutes(
         router.middlewares,
       );
       for (const [path, route] of Object.entries(routes)) {
-        flatApiRoutes[path] = route;
+        flatApiRoutes[path.replaceAll("//", "/")] = route;
       }
     }
 
