@@ -50,9 +50,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
   const [entries, setEntries] = useState(viewEntriesSubject.getValue());
   useEffect(() => {
     return viewEntriesSubject.subscribe((viewEntries) => {
-      startTransition(() => {
-        setEntries(viewEntries);
-      });
+      setEntries(viewEntries);
     });
   }, [viewEntriesSubject]);
 
