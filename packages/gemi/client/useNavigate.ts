@@ -78,50 +78,49 @@ export function useNavigate() {
 
       isNavigatingSubject.next(true);
 
+      history?.[pushOrReplace](navigationPath);
+
       try {
-        const [res] = await Promise.all([
-          fetch(`${host}${fetchPath}`, {
-            signal: navigationAbortController.signal,
-          }),
-          fetchRouteCSS(routePathname),
-          fetchTranslations(
-            routePathname,
-            undefined,
-            navigationAbortController.signal,
-          ),
-          ...components.map((component) => {
-            if (!(window as any)?.loaders) return Promise.resolve();
-            return (window as any)?.loaders[component]();
-          }),
-        ]);
-
-        if (res.ok) {
-          const {
-            data,
-            prefetchedData,
-            breadcrumbs,
-            directive = {},
-            is404 = false,
-          } = await res.json();
-          if (directive?.kind === "Redirect") {
-            if (directive?.path) {
-              isNavigatingSubject.next(false);
-              action("replace")(directive.path, { params: {} } as any);
-            }
-
-            return;
-          }
-          updatePageData(data, breadcrumbs);
-          updatePrefecthedData(prefetchedData);
-
-          history?.[pushOrReplace](
-            navigationPath,
-            is404 ? { status: 404 } : {},
-          );
-          setTimeout(() => {
-            window.scrollTo(0, getScrollPosition(navigationPath));
-          }, 1);
-        }
+        // const [res] = await Promise.all([
+        //   fetch(`${host}${fetchPath}`, {
+        //     signal: navigationAbortController.signal,
+        //   }),
+        //   fetchRouteCSS(routePathname),
+        //   fetchTranslations(
+        //     routePathname,
+        //     undefined,
+        //     navigationAbortController.signal,
+        //   ),
+        //   ...components.map((component) => {
+        //     if (!(window as any)?.loaders) return Promise.resolve();
+        //     return (window as any)?.loaders[component]();
+        //   }),
+        // ]);
+        // if (res.ok) {
+        //   const {
+        //     data,
+        //     prefetchedData,
+        //     breadcrumbs,
+        //     directive = {},
+        //     is404 = false,
+        //   } = await res.json();
+        //   if (directive?.kind === "Redirect") {
+        //     if (directive?.path) {
+        //       isNavigatingSubject.next(false);
+        //       action("replace")(directive.path, { params: {} } as any);
+        //     }
+        //     return;
+        //   }
+        //   updatePageData(data, breadcrumbs);
+        //   updatePrefecthedData(prefetchedData);
+        //   history?.[pushOrReplace](
+        //     navigationPath,
+        //     is404 ? { status: 404 } : {},
+        //   );
+        //   setTimeout(() => {
+        //     window.scrollTo(0, getScrollPosition(navigationPath));
+        //   }, 1);
+        // }
       } catch (err) {
         isNavigatingSubject.next(false);
         // Do something

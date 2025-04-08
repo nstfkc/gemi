@@ -3,6 +3,7 @@ import {
   createContext,
   useContext,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type PropsWithChildren,
@@ -22,7 +23,7 @@ interface ClientRouterContextValue {
     pageData: Record<string, any>,
     breadcrumbs: Record<string, Breadcrumb>,
   ) => void;
-  getPageData: (key: string) => any;
+  getPageData: (key: string, pathname: string) => any;
   locationSubject: Subject<Location>;
   getScrollPosition: (path: string) => number;
   params: Record<string, string>;
@@ -33,6 +34,13 @@ interface ClientRouterContextValue {
   progressManager: ProgressManager;
   fetchRouteCSS: (routePath: string) => Promise<void>;
   breadcrumbsCache: Map<string, Breadcrumb>;
+  routerSubject: Subject<{
+    views: string[];
+    params: Record<string, string>;
+    search: string;
+    state: Record<string, any>;
+    pathname: string;
+  }>;
 }
 
 export const ClientRouterContext = createContext(
@@ -96,6 +104,16 @@ export const ClientRouterProvider = (
       }),
   );
 
+  const [routerSubject] = useState(() => {
+    return new Subject({
+      views: initalViewEntries,
+      params: parameters,
+      search: searchParams,
+      state: {},
+      pathname,
+    });
+  });
+
   const [history] = useState<History | null>(() => {
     let history: History | null = null;
 
@@ -153,6 +171,13 @@ export const ClientRouterProvider = (
     history?.listen(({ location }) => {
       locationSubject.next(structuredClone(location));
       setParameters(getParams(location.pathname));
+      routerSubject.next({
+        views: getViewPathsFromPathname(location.pathname),
+        params: getParams(location.pathname),
+        search: location.search,
+        state: location.state,
+        pathname: location.pathname,
+      });
       viewEntriesSubject.current.next(
         (() => {
           if ((location.state as any)?.status === 404) {
@@ -184,8 +209,8 @@ export const ClientRouterProvider = (
     pageDataRef.current[key] = value;
   };
 
-  const getPageData = (key: string) => {
-    return pageDataRef.current[locationSubject.getValue().pathname]?.[key];
+  const getPageData = (key: string, pathname: string) => {
+    return pageDataRef.current[pathname]?.[key];
   };
 
   const setNavigationAbortController = (controller: AbortController) => {
@@ -243,6 +268,7 @@ export const ClientRouterProvider = (
         progressManager,
         fetchRouteCSS,
         breadcrumbsCache: breadcrumbsCache.current,
+        routerSubject,
       }}
     >
       {children}

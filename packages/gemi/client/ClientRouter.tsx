@@ -14,23 +14,29 @@ import {
   ClientRouterContext,
   ClientRouterProvider,
 } from "./ClientRouterContext";
-import type { ComponentTree } from "./types";
+import type { ComponentTree as Tree } from "./types";
 import { ComponentsContext, ComponentsProvider } from "./ComponentContext";
-import { QueryManagerProvider } from "./QueryManagerContext";
-import { I18nProvider } from "./i18n/I18nContext";
+import {
+  QueryManagerContext,
+  QueryManagerProvider,
+} from "./QueryManagerContext";
+import { I18nContext, I18nProvider } from "./i18n/I18nContext";
 import { WebSocketContextProvider } from "./WebsocketContext";
+import { HttpClientContext } from "./HttpClientContext";
+import { useNavigate } from "./useNavigate";
 
 interface RouteProps {
   componentPath: string;
+  pathname: string;
 }
 
 const Route = memo((props: PropsWithChildren<RouteProps>) => {
-  const { componentPath } = props;
+  const { componentPath, pathname } = props;
   const { viewImportMap } = useContext(ComponentsContext);
 
   const { getPageData } = useContext(ClientRouterContext);
 
-  const data = getPageData(componentPath);
+  const data = getPageData(componentPath, pathname);
 
   const Component = viewImportMap[componentPath];
 
@@ -41,35 +47,103 @@ const Route = memo((props: PropsWithChildren<RouteProps>) => {
   return <NotFound />;
 });
 
-const Routes = (props: { componentTree: ComponentTree }) => {
-  const { componentTree } = props;
-  const [, startTransition] = useTransition();
-
-  const { viewEntriesSubject } = useContext(ClientRouterContext);
-
-  const [entries, setEntries] = useState(viewEntriesSubject.getValue());
-  useEffect(() => {
-    return viewEntriesSubject.subscribe((viewEntries) => {
-      setEntries(viewEntries);
-    });
-  }, [viewEntriesSubject]);
-
+const Tree = memo((props: { tree: Tree; entries: string[], pathname: string }) => {
+  const { entries, tree, pathname } = props;
   return (
     <>
-      {componentTree.map((node) => {
+      {tree.map((node) => {
         const [path, subtree] = node;
         if (!entries.includes(path)) return null;
         if (subtree.length > 0) {
           return (
-            <Route key={path} componentPath={path}>
-              <Routes componentTree={subtree} />
+            <Route key={path} componentPath={path} pathname={pathname}>
+              <Tree tree={subtree} entries={entries} pathname={pathname} />
             </Route>
           );
         }
-        return <Route key={path} componentPath={path} />;
+        return <Route key={path} componentPath={path} pathname={pathname} />;
       })}
     </>
   );
+});
+
+const Routes = (props: { componentTree: Tree }) => {
+  const { componentTree } = props;
+  const [, startTransition] = useTransition();
+  const { fetch, host } = useContext(HttpClientContext);
+
+  const { updatePrefecthedData } = useContext(QueryManagerContext);
+  const { viewEntriesSubject, routerSubject, updatePageData, getRoutePathnameFromHref, fetchRouteCSS } =
+    useContext(ClientRouterContext);
+  const { fetchTranslations } = useContext(I18nContext)
+
+  const [entries, setEntries] = useState(viewEntriesSubject.getValue());
+  const [pathname, setPathname] = useState(routerSubject.getValue().pathname);
+  const { replace } = useNavigate();
+
+  useEffect(() => {
+    return routerSubject.subscribe(async (router) => {
+      console.log({ router });
+      const { params, pathname, search, state, views } = router;
+      if (state?.shallow) {
+        setPathname(pathname);
+        setEntries(views);
+        return;
+      }
+      const url = `${host}${pathname}.json${search}`;
+      const routePathname =  getRoutePathnameFromHref(pathname)
+      const [res] = await Promise.all([
+        fetch(url),
+        fetchRouteCSS(routePathname),
+        fetchTranslations(
+          routePathname,
+          undefined,
+        ),
+        ...views.map((component) => {
+          if (!(window as any)?.loaders) return Promise.resolve();
+          return (window as any)?.loaders[component]();
+        }),
+      ]);
+
+      if (res.ok) {
+        const {
+          data,
+          prefetchedData,
+          breadcrumbs,
+          directive = {},
+          is404 = false,
+        } = await res.json();
+        if (directive?.kind === "Redirect") {
+          if (directive?.path) {
+            // isNavigatingSubject.next(false);
+            replace(directive.path, { params: {} } as any);
+          }
+
+          return;
+        }
+        updatePageData(data, breadcrumbs);
+        updatePrefecthedData(prefetchedData);
+
+        if (is404) {
+          startTransition(() => {
+            setEntries(["404"]);
+          });
+        }
+
+        startTransition(() => {
+          setPathname(pathname);
+          setEntries(views);
+        });
+
+        // history?.[pushOrReplace](navigationPath, is404 ? { status: 404 } : {});
+        // setTimeout(() => {
+        //   window.scrollTo(0, getScrollPosition(navigationPath));
+        // }, 1);
+      }
+    });
+  }, [viewEntriesSubject]);
+
+  return <Tree pathname={pathname} tree={componentTree} entries={entries} />;
 };
 
 export const ClientRouter = (props: {
