@@ -1,17 +1,17 @@
 import { useContext } from "react";
 import { useLocation, ClientRouterContext } from "./ClientRouterContext";
 import type { ViewPaths } from "./types";
+import { RouteStateContext } from "./RouteStateContext";
 
 type Pathname = ViewPaths;
 
 export function useRoute() {
-  const { getRoutePathnameFromHref } = useContext(ClientRouterContext);
   const location = useLocation();
-  const routePath = getRoutePathnameFromHref(location.pathname) as Pathname;
+  const { pathname: _pathname } = useContext(RouteStateContext)
   return {
-    pathname: routePath,
+    pathname: _pathname,
     startsWith: (pathname: Pathname) => {
-      return (routePath as string).startsWith(pathname);
+      return _pathname.startsWith(pathname);
     },
   };
 }

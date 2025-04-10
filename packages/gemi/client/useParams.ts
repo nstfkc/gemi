@@ -1,7 +1,8 @@
 import { useContext } from "react";
 import { ClientRouterContext } from "./ClientRouterContext";
+import { RouteStateContext } from "./RouteStateContext";
 
 export function useParams() {
-  const { params = {} } = useContext(ClientRouterContext);
+  const { params = {} } = useContext(RouteStateContext);
   return params;
 }
