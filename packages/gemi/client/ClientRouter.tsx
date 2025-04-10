@@ -24,7 +24,7 @@ import { I18nContext, I18nProvider } from "./i18n/I18nContext";
 import { WebSocketContextProvider } from "./WebsocketContext";
 import { HttpClientContext } from "./HttpClientContext";
 import { useNavigate } from "./useNavigate";
-import { RouteState, RouteStateProvider } from "./RouteStateContext";
+import { type RouteState, RouteStateProvider } from "./RouteStateContext";
 
 interface RouteProps {
   componentPath: string;

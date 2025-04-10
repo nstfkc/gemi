@@ -1,4 +1,4 @@
-import { createContext, PropsWithChildren } from "react"
+import { createContext, type PropsWithChildren } from "react"
 
 export interface RouteState {
   search: string;

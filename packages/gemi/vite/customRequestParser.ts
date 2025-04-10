@@ -153,5 +153,5 @@ export async function customRequestParser(original: string) {
       continue;
     }
   }
-  return print(orgFile).code;
+  return print(orgFile).code.replace('type HttpRequest', 'HttpRequest');
 }
