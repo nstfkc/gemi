@@ -196,7 +196,10 @@ class AuthController extends Controller {
   }
 
   async signIn(req = new SignInRequest()) {
-    const input = await req.input.call(req);
+    const input = await req.input();
+    if (process.env.DEBUG === "verbose") {
+      console.log("signIn", input.toJSON());
+    }
     const { email, password } = input.toJSON();
 
     const authProvider = AuthenticationServiceContainer.use().provider;
