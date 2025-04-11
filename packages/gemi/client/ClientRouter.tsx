@@ -30,6 +30,7 @@ import { WebSocketContextProvider } from "./WebsocketContext";
 import { HttpClientContext } from "./HttpClientContext";
 import { useNavigate } from "./useNavigate";
 import { type RouteState, RouteStateProvider } from "./RouteStateContext";
+import { applyParams } from "../utils/applyParams";
 
 interface RouteProps {
   componentPath: string;
@@ -98,11 +99,21 @@ const Routes = (props: { componentTree: ComponentTree }) => {
     pathname: routerSubject.getValue().pathname,
     views: viewEntriesSubject.getValue(),
   });
+
   const { replace } = useNavigate();
 
   useEffect(() => {
     return routerSubject.subscribe(async (router) => {
       const { params, pathname, search, state, views } = router;
+      if (views.length === 0) {
+        setRouteState(() => ({
+          pathname,
+          params,
+          search,
+          views: ["404"],
+        }));
+        return;
+      }
       if (state?.shallow) {
         setRouteState(() => ({
           pathname,
@@ -112,12 +123,12 @@ const Routes = (props: { componentTree: ComponentTree }) => {
         }));
         return;
       }
+
       const url = `${host}${pathname}.json${search}`;
-      const routePathname = getRoutePathnameFromHref(pathname);
       const [res] = await Promise.all([
         fetch(url),
-        fetchRouteCSS(routePathname),
-        fetchTranslations(routePathname, undefined),
+        fetchRouteCSS(pathname),
+        fetchTranslations(pathname, undefined),
         ...views.map((component) => {
           if (!(window as any)?.loaders) return Promise.resolve();
           return (window as any)?.loaders[component]();
@@ -170,9 +181,9 @@ const Routes = (props: { componentTree: ComponentTree }) => {
   return (
     <RouteStateProvider state={routeState}>
       <Tree
-        pathname={routeState.pathname}
+        pathname={applyParams(routeState.pathname ?? "/", routeState.params)}
         tree={componentTree}
-        entries={routeState.views}
+        entries={routeState.pathname ? routeState.views : ["404"]}
       />
     </RouteStateProvider>
   );

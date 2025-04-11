@@ -220,6 +220,9 @@ export const ClientRouterProvider = (
 
   const fetchRouteCSS = async (routePath: string) => {
     const views = routeManifest[routePath];
+    if (!views) {
+      return;
+    }
     const cssFiles = views
       .map((view) => {
         return cssManifest?.[view];
@@ -240,7 +243,7 @@ export const ClientRouterProvider = (
         id: path,
       };
     }
-    const result = await Promise.all(cssFiles.map((file) => fetchCSS(file)));
+    const result = await Promise.all(cssFiles?.map((file) => fetchCSS(file)));
     for (const { content, id } of result) {
       const style = document.createElement("style");
       style.id = id;
