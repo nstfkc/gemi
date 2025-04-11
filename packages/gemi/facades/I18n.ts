@@ -26,6 +26,14 @@ export class I18n {
     return applyTranslationParams(translation, args[0] as any);
   }
 
+  static getSupportedLocales() {
+    return I18nServiceContainer.use().supportedLocales;
+  }
+
+  static getDefaultLocale() {
+    return I18nServiceContainer.use().service.defaultLocale;
+  }
+
   static locale() {
     const container = I18nServiceContainer.use();
     return container.detectLocale(RequestContext.getStore().req);
@@ -41,5 +49,7 @@ export class I18n {
     RequestContext.getStore().setCookie("i18n-locale", _locale, {
       expires: new Date(Date.now() + 1000 * 60 * 60 * 24 * 365),
     });
+
+    return _locale;
   }
 }

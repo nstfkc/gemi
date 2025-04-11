@@ -6,25 +6,25 @@ export const dictionary = {
   [I18n.scope("layout:/")]: {
     home: {
       default: "Home",
-      "es-ES": "Inicio",
+      es: "Inicio",
     },
     about: {
       default: "About",
-      "es-ES": "Acerca de",
+      es: "Acerca de",
     },
     greeting: {
       default: "Hello, {{name}}",
-      "es-ES": "Hola, {{name}}",
+      es: "Hola, {{name}}",
     },
   },
   [I18n.scope("view:/")]: {
     hi: {
       default: "Hello {{name}}",
-      "es-ES": "Hola {{name}}",
+      es: "Hola {{name}}",
     },
     bye: {
       default: "Goodbye",
-      "es-ES": "Adios",
+      es: "Adios",
     },
   },
 } as const;
