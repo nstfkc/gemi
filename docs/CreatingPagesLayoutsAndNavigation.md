@@ -1,6 +1,6 @@
 # Creating pages, layouts and navigation between them
 
-Gemi implements a config based router where you can define all of your routes within `ViewRouter` class in `view.ts` file under `/app/http/routes`. 
+Gemi implements a code based router where you can define all of your routes within `ViewRouter` class in `view.ts` file under `/app/http/routes`. 
 
 > A `view.ts` file will be created for you after you initialized your project.
 
@@ -59,7 +59,7 @@ export default class extends ViewRouter {
     }),
     // You can split your routes into different routers and compose them
     // Every route in this route will start with `/auth`
-    "/auth": AuthRouter,
+    "/auth": AuthRouter,
     // If you don't want to use a route prefix, you can use `(groupName)` annotation
     // This is useful when you want to use the same root route with other routes
     // but with additional middleware
