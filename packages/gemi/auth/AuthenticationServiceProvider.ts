@@ -156,7 +156,7 @@ class AuthController extends Controller {
     const session = await container.createOrUpdateSession({ email });
 
     req.ctx().setCookie("access_token", session.token, {
-      expires: session.expiresAt,
+      expires: session.absoluteExpiresAt,
     });
 
     await authProvider.onSignIn(session);
@@ -187,7 +187,7 @@ class AuthController extends Controller {
     const session = await container.createOrUpdateSession({ email });
 
     req.ctx().setCookie("access_token", session.token, {
-      expires: session.expiresAt,
+      expires: session.absoluteExpiresAt,
     });
 
     await authProvider.onSignIn(session);
@@ -233,7 +233,7 @@ class AuthController extends Controller {
       });
 
     req.ctx().setCookie("access_token", session.token, {
-      expires: session.expiresAt,
+      expires: session.absoluteExpiresAt,
     });
 
     await authProvider.onSignIn(user);

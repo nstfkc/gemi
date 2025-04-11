@@ -71,7 +71,7 @@ export function createFlatApiRoutes(
     if (!flatApiRoutes[finalPath]) {
       flatApiRoutes[finalPath] = {};
     }
-    flatApiRoutes[finalPath][method] = {
+    flatApiRoutes[finalPath][method.toUpperCase()] = {
       exec,
       middleware: [...rootMiddleware, ...middleware],
     };

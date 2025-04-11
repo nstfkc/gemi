@@ -1,5 +1,5 @@
 import { AuthApiRouter } from "../../auth/AuthenticationServiceProvider";
-import { HttpRequest } from "../../http";
+import { ApiRouter, HttpRequest } from "../../http";
 import { GEMI_REQUEST_BREAKER_ERROR } from "../../http/Error";
 import { I18nRouter } from "../../http/I18nServiceContainer";
 import { RequestContext } from "../../http/requestContext";
@@ -9,6 +9,33 @@ import { MiddlewareServiceContainer } from "../middleware/MiddlewareServiceConta
 import { ServiceContainer } from "../ServiceContainer";
 import type { ApiRouterServiceProvider } from "./ApiRouterServiceProvider";
 import { createFlatApiRoutes, type FlatApiRoutes } from "./createFlatApiRoutes";
+import { ViewRouterServiceContainer } from "./ViewRouterServiceContainer";
+
+class DebugRouter extends ApiRouter {
+  routes = {
+    "/api-routes": this.get(() => {
+      const flatroutes = ApiRouterServiceContainer.use().flatRoutes;
+      const out = [];
+      for (const [path, methods] of Object.entries(flatroutes)) {
+        for (const [method, handler] of Object.entries(methods)) {
+          const { exec, middleware } = handler;
+          out.push({ path, method, middleware });
+        }
+      }
+      return out;
+    }),
+    "/view-routes": this.get(() => {
+      const flatroutes = ViewRouterServiceContainer.use().flatViewRoutes;
+      const out = [];
+      for (const [path, { middleware, viewPath }] of Object.entries(
+        flatroutes,
+      )) {
+        out.push({ path, method: "GET", viewPath, middleware });
+      }
+      return out;
+    }),
+  };
+}
 
 export class ApiRouterServiceContainer extends ServiceContainer {
   static _name = "ApiRouterServiceContainer";
@@ -23,6 +50,7 @@ export class ApiRouterServiceContainer extends ServiceContainer {
       "/__gemi__/services/i18n": I18nRouter,
       "/__gemi__/services/logs": LoggingRouter,
       "/__gemi__/services/image": ImageOptimizationRouter,
+      "/__gemi__/debug": DebugRouter,
     });
   }
 

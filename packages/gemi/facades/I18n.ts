@@ -31,7 +31,7 @@ export class I18n {
     return container.detectLocale(RequestContext.getStore().req);
   }
 
-  static setLocale(locale: string) {
+  static setLocale(locale = I18n.locale()) {
     const container = I18nServiceContainer.use();
     let _locale = locale;
     if (!container.supportedLocales.includes(locale)) {

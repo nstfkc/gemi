@@ -5,7 +5,7 @@ import { RequestContext } from "../../http/requestContext";
 import type { RouterMiddleware } from "../../http/Router";
 import {
   createFlatViewRoutes,
-  FlatViewRoutes,
+  type FlatViewRoutes,
   type ViewRouteExec,
 } from "./createFlatViewRoutes";
 import { ViewRouterServiceProvider } from "./ViewRouterServiceProvider";
@@ -23,7 +23,7 @@ import { flattenComponentTree } from "../../client/helpers/flattenComponentTree"
 import type { ComponentTree } from "../../client/types";
 import { I18nServiceContainer } from "../../http/I18nServiceContainer";
 import { MiddlewareServiceContainer } from "../middleware/MiddlewareServiceContainer";
-import { Log } from "../../facades";
+import { I18n, Log } from "../../facades";
 import { randomBytes, createHmac } from "crypto";
 import { AuthViewRouter } from "../../auth/AuthenticationServiceProvider";
 
@@ -196,6 +196,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
 
     const httpRequest = new HttpRequest(req, params, "view", currentPathName);
     return await RequestContext.run(httpRequest, async () => {
+      I18n.setLocale();
       let pageData: {
         cookies: Set<Cookie>;
         headers: Headers;

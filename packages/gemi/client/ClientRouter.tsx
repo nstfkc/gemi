@@ -7,14 +7,19 @@ import {
   useTransition,
 } from "react";
 
-import type { PropsWithChildren, ReactNode, ComponentType, lazy } from "react";
+import {
+  type PropsWithChildren,
+  type ReactNode,
+  type ComponentType,
+  lazy,
+} from "react";
 
 import { ServerDataContext } from "./ServerDataProvider";
 import {
   ClientRouterContext,
   ClientRouterProvider,
 } from "./ClientRouterContext";
-import type { ComponentTree as Tree } from "./types";
+import type { ComponentTree } from "./types";
 import { ComponentsContext, ComponentsProvider } from "./ComponentContext";
 import {
   QueryManagerContext,
@@ -49,7 +54,7 @@ const Route = memo((props: PropsWithChildren<RouteProps>) => {
 });
 
 const Tree = memo(
-  (props: { tree: Tree; entries: string[]; pathname: string }) => {
+  (props: { tree: ComponentTree; entries: string[]; pathname: string }) => {
     const { entries, tree, pathname } = props;
     return (
       <>
@@ -70,7 +75,7 @@ const Tree = memo(
   },
 );
 
-const Routes = (props: { componentTree: Tree }) => {
+const Routes = (props: { componentTree: ComponentTree }) => {
   const { componentTree } = props;
   const [, startTransition] = useTransition();
   const { fetch, host } = useContext(HttpClientContext);
@@ -85,7 +90,9 @@ const Routes = (props: { componentTree: Tree }) => {
   } = useContext(ClientRouterContext);
   const { fetchTranslations } = useContext(I18nContext);
 
-  const [routeState, setRouteState] = useState<RouteState & { views: string[] }>({
+  const [routeState, setRouteState] = useState<
+    RouteState & { views: string[] }
+  >({
     params: routerSubject.getValue().params,
     search: routerSubject.getValue().search,
     pathname: routerSubject.getValue().pathname,
@@ -158,11 +165,15 @@ const Routes = (props: { componentTree: Tree }) => {
         // }, 1);
       }
     });
-  }, [viewEntriesSubject]);
+  }, []);
 
   return (
     <RouteStateProvider state={routeState}>
-      <Tree pathname={routeState.pathname} tree={componentTree} entries={routeState.views} />
+      <Tree
+        pathname={routeState.pathname}
+        tree={componentTree}
+        entries={routeState.views}
+      />
     </RouteStateProvider>
   );
 };

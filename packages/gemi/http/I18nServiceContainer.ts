@@ -80,9 +80,7 @@ export class I18nServiceContainer extends ServiceContainer {
     const locale =
       forcedLocale ?? (req.headers.get("accept-language") || "en-US");
 
-    const [l] = locale.split(",");
-
-    const _locale = l.length === 2 ? `${l}-${l.toUpperCase()}` : l;
+    const [_locale] = locale.split(",");
 
     if (this.supportedLocales.includes(_locale)) {
       return _locale;

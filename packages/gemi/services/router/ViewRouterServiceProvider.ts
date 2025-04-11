@@ -1,10 +1,10 @@
-import React from "react";
+import type { JSX } from "react";
 import { HttpRequest } from "../../http";
 import type { ViewRouter } from "../../http/ViewRouter";
 import { ServiceProvider } from "../ServiceProvider";
 
 export class ViewRouterServiceProvider extends ServiceProvider {
-  root: (props: any) => React.JSX.Element;
+  root: (props: any) => JSX.Element;
   rootRouter: new () => ViewRouter;
 
   boot() {}

@@ -5,7 +5,7 @@ export type ViewRouteExec = (req: HttpRequest<any, any>) => any; // TODO: fix ty
 
 export type FlatViewRoutes = Record<
   string,
-  { exec: ViewRouteExec[]; middleware: (string | any)[] }
+  { exec: ViewRouteExec[]; middleware: (string | any)[]; viewPath: string }
 >;
 
 function removeGroupPrefix(input: string) {
@@ -23,7 +23,6 @@ export function createFlatViewRoutes(routes: ViewRoutes) {
   for (const [routePath, viewConfigOrViewRouter] of Object.entries(routes)) {
     if ("run" in viewConfigOrViewRouter) {
       const route = viewConfigOrViewRouter;
-
       if ("children" in route) {
         const children = new route.children();
         const result = createFlatViewRoutes(children.routes);
@@ -38,6 +37,7 @@ export function createFlatViewRoutes(routes: ViewRoutes) {
           flatRoutes[removeGroupPrefix(_key)] = {
             exec: [handler, ...exec],
             middleware: [...route.middlewares, ...middleware],
+            viewPath: route.viewPath,
           };
         }
       } else {
@@ -46,17 +46,21 @@ export function createFlatViewRoutes(routes: ViewRoutes) {
         flatRoutes[removeGroupPrefix(routePath)] = {
           exec: [handler],
           middleware: route.middlewares,
+          viewPath: route.viewPath,
         };
       }
     } else {
       const router = new viewConfigOrViewRouter();
       const result = createFlatViewRoutes(router.routes);
-      for (const [path, { exec, middleware }] of Object.entries(result)) {
+      for (const [path, { exec, middleware, viewPath }] of Object.entries(
+        result,
+      )) {
         const key = routePath === "/" ? path : `${routePath}${path}`;
         const _key = path === "/" && routePath !== "/" ? routePath : key;
         flatRoutes[removeGroupPrefix(_key)] = {
           exec,
           middleware: [...router.middlewares, ...middleware],
+          viewPath,
         };
       }
     }

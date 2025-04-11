@@ -3,6 +3,6 @@ import { dictionary } from "@/app/i18n";
 
 export default class extends I18nServiceProvider {
   defaultLocale = "en-US";
-  supportedLocales = ["en-US", "es-ES", "de-DE"];
+  supportedLocales = ["en-US", "es", "de", "tr"];
   dictionary = dictionary;
 }
