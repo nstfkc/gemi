@@ -75,15 +75,23 @@ export class I18nServiceContainer extends ServiceContainer {
       return detectedLocale;
     }
 
-    const forcedLocale = req.cookies.get("i18n-locale");
+    const previousLocale = req.cookies.get("i18n-locale");
 
     const locale =
-      forcedLocale ?? (req.headers.get("accept-language") || "en-US");
+      previousLocale ?? (req.headers.get("accept-language") || "en-US");
 
     const [_locale] = locale.split(",");
 
     if (this.supportedLocales.includes(_locale)) {
       return _locale;
+    }
+
+    if (_locale.length === 2) {
+      for (const supportedLocale of this.supportedLocales) {
+        if (supportedLocale.startsWith(_locale)) {
+          return supportedLocale;
+        }
+      }
     }
 
     const fallbackLocale =
