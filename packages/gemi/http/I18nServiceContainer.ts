@@ -4,7 +4,7 @@ import { HttpRequest } from "./HttpRequest";
 import { I18nServiceProvider } from "./I18nServiceProvider";
 
 export class I18nRouter extends ApiRouter {
-  middlewares = ["cache:private"];
+  middlewares = ["cache:private,0,no-store"];
   routes = {
     "/translations/:locale/:scope*": this.get(async () => {
       const req = new HttpRequest<any, any>();
