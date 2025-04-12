@@ -10,6 +10,9 @@ export function createComponentTree(routes: ViewRoutes): ComponentTree {
       if (viewPath === "__") {
         continue;
       }
+      if (viewPath === "REDIRECT") {
+        continue;
+      }
 
       if ("children" in routeHandler) {
         const router = new routeHandler.children();

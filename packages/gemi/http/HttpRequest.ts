@@ -168,14 +168,14 @@ export class HttpRequest<
   T extends Body = Record<string, never>,
   Params = Record<string, never>,
 > {
-  public kind: HttpRequestKind;
-  public rawRequest: Request;
-  public headers: Omit<Headers, "set" | "delete">;
-  public cookies: Omit<Map<string, string>, "set" | "delete">;
-  public search: Input<T>;
-  public schema: any = {};
-  public routePath: string;
-  public params: Params;
+  kind: HttpRequestKind;
+  rawRequest: Request;
+  headers: Omit<Headers, "set" | "delete">;
+  cookies: Omit<Map<string, string>, "set" | "delete">;
+  search: Input<T>;
+  schema: any = {};
+  routePath: string;
+  params: Params;
 
   constructor(
     req?: Request,
@@ -229,15 +229,15 @@ export class HttpRequest<
     this.cookies = cookies;
   }
 
-  public locale() {
+  locale() {
     return I18nServiceContainer.use().detectLocale(this);
   }
 
-  public ctx() {
+  ctx() {
     return RequestContext.getStore();
   }
 
-  public refine(_input: any): any {
+  refine(_input: any): any {
     return {};
   }
 
@@ -327,11 +327,11 @@ export class HttpRequest<
     }
   }
 
-  public async input(): Promise<Input<T>> {
+  async input(): Promise<Input<T>> {
     return this.validateInput(await this.parseBody());
   }
 
-  public async safeInput(): Promise<{
+  async safeInput(): Promise<{
     isValid: boolean;
     errors: Record<string, string[]>;
     input: Input<T>;

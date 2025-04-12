@@ -218,6 +218,8 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           ...Array.from(ctx.prefetchPromiseQueue).map((fn) => fn()),
         ]);
 
+        console.log({ data });
+
         const cookies = ctx.cookies;
         const headers = ctx.headers;
         const prefetchedResources = ctx.prefetchedResources;

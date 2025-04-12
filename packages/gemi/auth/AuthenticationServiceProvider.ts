@@ -456,7 +456,7 @@ class AuthController extends Controller {
     }
 
     return {
-      url: await oauthProvider.getRedirectUrl(req),
+      destination: await oauthProvider.getRedirectUrl(req),
     };
   }
 
@@ -513,7 +513,9 @@ class AuthController extends Controller {
 
     await authProvider.onSignIn(user);
 
-    return { session };
+    return {
+      destination: authProvider.redirectPath,
+    };
   }
 
   async createMagicLinkToken(req = new HttpRequest<{ email: string }>()) {
@@ -533,11 +535,8 @@ class AuthController extends Controller {
 
 class OAuthViewRouter extends ViewRouter {
   routes = {
-    "/:provider": this.view("__", [AuthController, "oauthRedirect"]),
-    "/:provider/callback": this.view("auth/OauthCallback", [
-      AuthController,
-      "oauthCallback",
-    ]),
+    "/:provider": this.redirect([AuthController, "oauthRedirect"]),
+    "/:provider/callback": this.redirect([AuthController, "oauthCallback"]),
   };
 }
 
@@ -570,6 +569,7 @@ export class AuthApiRouter extends ApiRouter {
 export class AuthenticationServiceProvider extends ServiceProvider {
   basePath = "/auth";
   verifyEmail = true;
+  redirectPath = "/dashboard";
 
   sessionExpiresInHours = 24;
   sessionAbsoluteExpiresInHours = 24 * 7 * 4;

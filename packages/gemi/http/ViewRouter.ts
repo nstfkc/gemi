@@ -1,3 +1,4 @@
+import { Redirect } from "../facades";
 import type { KeyAndValue, KeyAndValueToObject } from "../internal/type-utils";
 import { Controller } from "./Controller";
 import { HttpRequest } from "./HttpRequest";
@@ -10,6 +11,7 @@ export type ViewRoutes = Record<
   string,
   | ViewRoute<any, any, any>
   | LayoutRoute<any, any, any, any>
+  | RedirectRoute<any, any, any>
   | (new () => ViewRouter)
 >;
 
@@ -39,6 +41,61 @@ type ParseLayoutControllerHandler<
 ) => infer Output
   ? LayoutRoute<T, Input, Output, Params>
   : never;
+
+type RedirectOutput = {
+  destination: string;
+  permanent?: boolean;
+  status?: number;
+};
+
+export class RedirectRoute<Input, Output, Params> {
+  kind = "redirect" as const;
+  viewPath = "REDIRECT";
+  middlewares: string[] = [];
+  private handler: (req: HttpRequest<Input, Params>) => Promise<RedirectOutput>;
+  constructor(
+    handler?:
+      | CallbackHandler<Input, RedirectOutput, Params>
+      | [new () => Controller, ControllerMethods<any>],
+  ) {
+    if (!handler) {
+      this.handler = (() => ({})) as any;
+    } else if (typeof handler === "function") {
+      this.handler = handler as any;
+    } else {
+      const [controller, methodName] = handler;
+      const controllerInstance = new controller();
+      const controllerHandler =
+        controllerInstance[methodName].bind(controllerInstance);
+      this.handler = (
+        _req: HttpRequest<Input, Params>,
+      ): Promise<RedirectOutput> => {
+        return controllerHandler();
+      };
+    }
+  }
+
+  async run(req: HttpRequest<Input, Params>, path: string) {
+    const {
+      destination,
+      permanent = false,
+      status = 307,
+    } = await this.handler(req);
+
+    if (!destination) {
+      throw new Error(`Redirect destination is required see ${path}`);
+    }
+
+    Redirect.to(destination as never, { permanent, status });
+
+    return {};
+  }
+
+  middleware(middlewares: string[]) {
+    this.middlewares = middlewares;
+    return this;
+  }
+}
 
 export class ViewRoute<Input, Output, Params> {
   middlewares: string[] = [];
@@ -158,6 +215,20 @@ export class ViewRouter {
     handler?: [C, M] | ViewHandler<any, any, any>,
   ) {
     return new ViewRoute(viewPath, handler as any);
+  }
+
+  public redirect<
+    C extends new () => Controller,
+    M extends ControllerMethods<C>,
+  >(handler?: [C, M]): ParseViewControllerHandler<C, M>;
+  public redirect<Input, Output, Params>(
+    handler?: ViewHandler<Input, Output, Params>,
+  ): ViewRoute<Input, Output, Params>;
+  public redirect<
+    C extends new () => Controller,
+    M extends ControllerMethods<C>,
+  >(handler?: [C, M] | ViewHandler<any, any, any>) {
+    return new RedirectRoute(handler as any);
   }
 
   public layout<T extends ViewRoutes>(

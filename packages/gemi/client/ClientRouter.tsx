@@ -131,7 +131,8 @@ const Routes = (props: { componentTree: ComponentTree }) => {
         fetchTranslations(pathname, undefined),
         ...views.map((component) => {
           if (!(window as any)?.loaders) return Promise.resolve();
-          return (window as any)?.loaders[component]();
+          const loader = (window as any)?.loaders?.[component] ?? (() => ({}));
+          loader();
         }),
       ]);
 

@@ -9,6 +9,9 @@ import { prisma } from "@/app/database/prisma";
 export default class extends AuthenticationServiceProvider {
   adapter = new PrismaAuthenticationAdapter(prisma);
 
+  // Path to redirect after successful login
+  redirectPath = "/app/dashboard";
+
   // Adapt these options to your needs
   sessionExpiresInHours = 24 * 30; // 30 days
   // Sessions will be renewed if the user logs in within this time frame
@@ -22,11 +25,11 @@ export default class extends AuthenticationServiceProvider {
     // You can send email verification here
     const magicLink = await Auth.createMagicLink(user.email);
     if (magicLink) {
-      const url = new URL(`${process.env.HOST_NAME}/auth/sign-in/magic-link`);
-      url.searchParams.set("token", magicLink.token);
-      url.searchParams.set("email", user.email);
       WelcomeEmail.send({
-        data: { name: user.name, magicLink: url.toString() },
+        data: {
+          name: user.name,
+          magicLink: `${process.env.HOST_NAME}/auth/sign-in/magic-link?token=${magicLink.token}&email=${user.email}`,
+        },
         to: [user.email],
       });
     }
