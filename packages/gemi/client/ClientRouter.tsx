@@ -31,21 +31,50 @@ import { HttpClientContext } from "./HttpClientContext";
 import { useNavigate } from "./useNavigate";
 import { type RouteState, RouteStateProvider } from "./RouteStateContext";
 import { applyParams } from "../utils/applyParams";
+import { Action } from "history";
+
+function restoreScroll(action: Action | null = null) {
+  if (action === null) {
+    return;
+  }
+
+  const { pathname, search } = window.location;
+
+  const key = [pathname, search].join("");
+  const sh = window.scrollHistory as Map<string, number>;
+
+  const scrollPosition = sh?.get(key);
+
+  if (!scrollPosition) {
+    return;
+  }
+  if (action !== Action.Pop) {
+    window.scrollTo(0, 0);
+  } else {
+    window.scrollTo(0, scrollPosition ?? 0);
+  }
+
+  sh?.delete(key);
+}
 
 interface RouteProps {
   componentPath: string;
   pathname: string;
+  action: Action | null;
 }
 
 const Route = memo((props: PropsWithChildren<RouteProps>) => {
-  const { componentPath, pathname } = props;
+  const { componentPath, pathname, action } = props;
   const { viewImportMap } = useContext(ComponentsContext);
-
   const { getPageData } = useContext(ClientRouterContext);
 
   const data = getPageData(componentPath, pathname);
 
   const Component = viewImportMap[componentPath];
+
+  useEffect(() => {
+    restoreScroll(action);
+  }, [action]);
 
   if (Component) {
     return <Component {...data}>{props.children}</Component>;
@@ -55,8 +84,14 @@ const Route = memo((props: PropsWithChildren<RouteProps>) => {
 });
 
 const Tree = memo(
-  (props: { tree: ComponentTree; entries: string[]; pathname: string }) => {
-    const { entries, tree, pathname } = props;
+  (props: {
+    action: Action;
+    tree: ComponentTree;
+    entries: string[];
+    pathname: string;
+  }) => {
+    const { entries, tree, pathname, action } = props;
+
     return (
       <>
         {tree.map((node) => {
@@ -64,12 +99,29 @@ const Tree = memo(
           if (!entries.includes(path)) return null;
           if (subtree.length > 0) {
             return (
-              <Route key={path} componentPath={path} pathname={pathname}>
-                <Tree tree={subtree} entries={entries} pathname={pathname} />
+              <Route
+                action={action}
+                key={path}
+                componentPath={path}
+                pathname={pathname}
+              >
+                <Tree
+                  action={action}
+                  tree={subtree}
+                  entries={entries}
+                  pathname={pathname}
+                />
               </Route>
             );
           }
-          return <Route key={path} componentPath={path} pathname={pathname} />;
+          return (
+            <Route
+              action={action}
+              key={path}
+              componentPath={path}
+              pathname={pathname}
+            />
+          );
         })}
       </>
     );
@@ -82,13 +134,8 @@ const Routes = (props: { componentTree: ComponentTree }) => {
   const { fetch, host } = useContext(HttpClientContext);
 
   const { updatePrefecthedData } = useContext(QueryManagerContext);
-  const {
-    viewEntriesSubject,
-    routerSubject,
-    updatePageData,
-    getRoutePathnameFromHref,
-    fetchRouteCSS,
-  } = useContext(ClientRouterContext);
+  const { routerSubject, updatePageData, fetchRouteCSS } =
+    useContext(ClientRouterContext);
   const { fetchTranslations } = useContext(I18nContext);
 
   const [routeState, setRouteState] = useState<
@@ -97,20 +144,22 @@ const Routes = (props: { componentTree: ComponentTree }) => {
     params: routerSubject.getValue().params,
     search: routerSubject.getValue().search,
     pathname: routerSubject.getValue().pathname,
-    views: viewEntriesSubject.getValue(),
+    views: routerSubject.getValue().views,
+    action: null,
   });
 
   const { replace } = useNavigate();
 
   useEffect(() => {
     return routerSubject.subscribe(async (router) => {
-      const { params, pathname, search, state, views } = router;
+      const { params, pathname, search, state, views, action } = router;
       if (views.length === 0) {
         setRouteState(() => ({
           pathname,
           params,
           search,
           views: ["404"],
+          action,
         }));
         return;
       }
@@ -120,6 +169,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
           params,
           search,
           views,
+          action,
         }));
         return;
       }
@@ -169,12 +219,9 @@ const Routes = (props: { componentTree: ComponentTree }) => {
             params,
             search,
             views,
+            action,
           });
         });
-
-        // setTimeout(() => {
-        //   window.scrollTo(0, getScrollPosition(navigationPath));
-        // }, 1);
       }
     });
   }, []);
@@ -182,6 +229,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
   return (
     <RouteStateProvider state={routeState}>
       <Tree
+        action={routeState.action}
         pathname={applyParams(routeState.pathname ?? "/", routeState.params)}
         tree={componentTree}
         entries={routeState.pathname ? routeState.views : ["404"]}

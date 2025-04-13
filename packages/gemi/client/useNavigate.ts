@@ -2,9 +2,6 @@ import { useContext } from "react";
 import { ClientRouterContext } from "./ClientRouterContext";
 import type { UrlParser, ViewPaths } from "./types";
 import { applyParams } from "../utils/applyParams";
-import { I18nContext } from "./i18n/I18nContext";
-import { QueryManagerContext } from "./QueryManagerContext";
-import { HttpClientContext } from "./HttpClientContext";
 
 type Options<T extends ViewPaths> =
   UrlParser<T> extends Record<string, never>
@@ -19,20 +16,8 @@ type Options<T extends ViewPaths> =
       };
 
 export function useNavigate() {
-  const {
-    updatePageData,
-    history,
-    getViewPathsFromPathname,
-    getRoutePathnameFromHref,
-    isNavigatingSubject,
-    setNavigationAbortController,
-    getScrollPosition,
-    fetchRouteCSS,
-  } = useContext(ClientRouterContext);
-  const { updatePrefecthedData } = useContext(QueryManagerContext);
-  const { fetchTranslations } = useContext(I18nContext);
-  const { fetch, host } = useContext(HttpClientContext);
-
+  const { history, setNavigationAbortController } =
+    useContext(ClientRouterContext);
   function action(pushOrReplace: "push" | "replace") {
     return async <T extends ViewPaths>(
       path: T | (string & {}),
@@ -55,8 +40,6 @@ export function useNavigate() {
       };
       const urlSearchParams = new URLSearchParams(search);
 
-      const basePath = applyParams(path, params);
-
       const navigationPath = [
         applyParams(path, params),
         urlSearchParams.toString(),
@@ -67,66 +50,7 @@ export function useNavigate() {
         return;
       }
 
-      const components = getViewPathsFromPathname(path);
-
-      const fetchUrlSearchParams = new URLSearchParams(urlSearchParams);
-      const fetchPath = [basePath + ".json", fetchUrlSearchParams.toString()]
-        .filter((segment) => segment.length > 0)
-        .join("?");
-
-      const routePathname = getRoutePathnameFromHref(path);
-
-      isNavigatingSubject.next(true);
-
       history?.[pushOrReplace](navigationPath);
-
-      try {
-        // const [res] = await Promise.all([
-        //   fetch(`${host}${fetchPath}`, {
-        //     signal: navigationAbortController.signal,
-        //   }),
-        //   fetchRouteCSS(routePathname),
-        //   fetchTranslations(
-        //     routePathname,
-        //     undefined,
-        //     navigationAbortController.signal,
-        //   ),
-        //   ...components.map((component) => {
-        //     if (!(window as any)?.loaders) return Promise.resolve();
-        //     return (window as any)?.loaders[component]();
-        //   }),
-        // ]);
-        // if (res.ok) {
-        //   const {
-        //     data,
-        //     prefetchedData,
-        //     breadcrumbs,
-        //     directive = {},
-        //     is404 = false,
-        //   } = await res.json();
-        //   if (directive?.kind === "Redirect") {
-        //     if (directive?.path) {
-        //       isNavigatingSubject.next(false);
-        //       action("replace")(directive.path, { params: {} } as any);
-        //     }
-        //     return;
-        //   }
-        //   updatePageData(data, breadcrumbs);
-        //   updatePrefecthedData(prefetchedData);
-        //   history?.[pushOrReplace](
-        //     navigationPath,
-        //     is404 ? { status: 404 } : {},
-        //   );
-        //   setTimeout(() => {
-        //     window.scrollTo(0, getScrollPosition(navigationPath));
-        //   }, 1);
-        // }
-      } catch (err) {
-        isNavigatingSubject.next(false);
-        // Do something
-      }
-
-      isNavigatingSubject.next(false);
     };
   }
 

@@ -1,5 +1,4 @@
-import { type ComponentType } from "react";
-
+import type { ComponentType } from "react";
 import { ClientRouter } from "./ClientRouter";
 import { ServerDataProvider } from "./ServerDataProvider";
 

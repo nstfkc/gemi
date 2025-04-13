@@ -218,8 +218,6 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           ...Array.from(ctx.prefetchPromiseQueue).map((fn) => fn()),
         ]);
 
-        console.log({ data });
-
         const cookies = ctx.cookies;
         const headers = ctx.headers;
         const prefetchedResources = ctx.prefetchedResources;
@@ -235,8 +233,8 @@ export class ViewRouterServiceContainer extends ServiceContainer {
         };
         const { params, currentPathName, user } = pageData;
 
-        let viewData = {};
-        let breadcrumbs = {};
+        const viewData = {};
+        const breadcrumbs = {};
         for (const part of data) {
           const [key, value] = Object.entries(part)?.[0] ?? [];
           if (!key || !value) {

@@ -13,7 +13,7 @@ datasource db {
 
 model Organization {
   id          Int                      @id @default(autoincrement())
-  publicId    String                   @unique @default(cuid())
+  publicId     String                   @unique @default(cuid())
   name        String
   logoUrl     String?
   description String?

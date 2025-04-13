@@ -1,9 +1,13 @@
-import { type History, type Location, createBrowserHistory } from "history";
+import {
+  Action,
+  type History,
+  type Location,
+  createBrowserHistory,
+} from "history";
 import {
   createContext,
   useContext,
   useEffect,
-  useMemo,
   useRef,
   useState,
   type PropsWithChildren,
@@ -14,7 +18,7 @@ import { URLPattern } from "urlpattern-polyfill";
 import { ProgressManager } from "./ProgressManager";
 import { HttpReload } from "./HttpReload";
 import { HttpClientContext } from "./HttpClientContext";
-import { type Breadcrumb } from "./useBreadcrumbs";
+import type { Breadcrumb } from "./useBreadcrumbs";
 
 interface ClientRouterContextValue {
   viewEntriesSubject: Subject<string[]>;
@@ -40,6 +44,7 @@ interface ClientRouterContextValue {
     search: string;
     state: Record<string, any>;
     pathname: string;
+    action: Action | null;
   }>;
 }
 
@@ -111,6 +116,7 @@ export const ClientRouterProvider = (
       search: searchParams,
       state: {},
       pathname,
+      action: null as Action | null,
     });
   });
 
@@ -125,13 +131,13 @@ export const ClientRouterProvider = (
   });
 
   const handleScroll = () => {
-    const key = [
-      `${locationSubject.getValue().pathname}?${locationSubject.getValue().search}`,
-    ]
-      .filter((item) => item.length > 0)
-      .join("");
+    if (!window.scrollHistory) {
+      window.scrollHistory = new Map();
+    }
+    const { pathname, search } = window.location;
+    const key = [pathname, search].join("");
 
-    scrollHistoryRef.current.set(key, window.scrollY);
+    window.scrollHistory.set(key, window.scrollY);
   };
 
   const findMatchingRouteFromParams = (pathname: string) => {
@@ -168,7 +174,13 @@ export const ClientRouterProvider = (
   };
 
   useEffect(() => {
-    history?.listen(({ location }) => {
+    const { pathname, search } = window.location;
+    const key = [pathname, search].join("");
+    window.scrollHistory = new Map();
+    window.scrollHistory.set(key, window.scrollY);
+    history?.listen(({ location, action }) => {
+      const key = [location.pathname, location.search].join("");
+      window.scrollHistory.set(key, window.scrollY);
       locationSubject.next(structuredClone(location));
       setParameters(getParams(location.pathname));
       routerSubject.next({
@@ -177,15 +189,8 @@ export const ClientRouterProvider = (
         search: location.search,
         state: location.state,
         pathname: location.pathname,
+        action,
       });
-      viewEntriesSubject.current.next(
-        (() => {
-          if ((location.state as any)?.status === 404) {
-            return ["404"];
-          }
-          return getViewPathsFromPathname(location.pathname);
-        })(),
-      );
     });
 
     window.addEventListener("scrollend", handleScroll);
@@ -286,7 +291,7 @@ function useLocationChange(cb: (location: Location) => void) {
   useEffect(() => {
     cb(locationSubject.getValue());
     return locationSubject.subscribe(cb);
-  }, []);
+  }, [cb, locationSubject]);
 }
 
 export function useLocation() {
