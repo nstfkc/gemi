@@ -1,4 +1,4 @@
-import { Redirect } from "../facades";
+import { Redirect } from "../facades/Redirect";
 import type { KeyAndValue, KeyAndValueToObject } from "../internal/type-utils";
 import { Controller } from "./Controller";
 import { HttpRequest } from "./HttpRequest";
@@ -217,6 +217,7 @@ export class ViewRouter {
     return new ViewRoute(viewPath, handler as any);
   }
 
+  // @ts-expect-error
   public redirect<
     C extends new () => Controller,
     M extends ControllerMethods<C>,

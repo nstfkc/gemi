@@ -20,6 +20,12 @@ import { HttpReload } from "./HttpReload";
 import { HttpClientContext } from "./HttpClientContext";
 import type { Breadcrumb } from "./useBreadcrumbs";
 
+declare global {
+  interface Window {
+    scrollHistory: Map<string, number>;
+  }
+}
+
 interface ClientRouterContextValue {
   viewEntriesSubject: Subject<string[]>;
   history: History | null;

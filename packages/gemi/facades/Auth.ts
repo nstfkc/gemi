@@ -1,6 +1,6 @@
 import type { User } from "../auth/adapters/types";
 import { AuthenticationServiceContainer } from "../auth/AuthenticationServiceContainer";
-import { InsufficientPermissionsError } from "../http";
+import { InsufficientPermissionsError } from "../http/errors";
 import { RequestContext } from "../http/requestContext";
 import { BroadcastingServiceContainer } from "../services/pubsub/BroadcastingServiceContainer";
 

@@ -16,14 +16,14 @@ import { ValidationError } from "../http";
 import { ServiceProvider } from "../services/ServiceProvider";
 import { AuthenticationServiceContainer } from "./AuthenticationServiceContainer";
 import { I18nServiceContainer } from "../http/I18nServiceContainer";
-import { OAuthProvider } from "./oauth/OAuthProvider";
+import type { OAuthProvider } from "./oauth/OAuthProvider";
 
 class SignInRequest extends HttpRequest<
   {
     email: string;
     password: string;
   },
-  {}
+  Record<string, string>
 > {
   schema = {
     email: {
@@ -44,7 +44,7 @@ class SignUpRequest extends HttpRequest<
     password: string;
     invitationId?: string;
   },
-  {}
+  Record<string, string>
 > {
   schema = {
     name: {
@@ -68,7 +68,7 @@ class ForgotPasswordRequest extends HttpRequest<
   {
     email: string;
   },
-  {}
+  Record<string, string>
 > {
   schema = {
     email: {
@@ -83,7 +83,7 @@ class ResetPasswordRequest extends HttpRequest<
     password: string;
     token: string;
   },
-  {}
+  Record<string, string>
 > {
   schema = {
     password: {
@@ -197,9 +197,6 @@ class AuthController extends Controller {
 
   async signIn(req = new SignInRequest()) {
     const input = await req.input();
-    if (process.env.DEBUG === "verbose") {
-      console.log("signIn", input.toJSON());
-    }
     const { email, password } = input.toJSON();
 
     const authProvider = AuthenticationServiceContainer.use().provider;

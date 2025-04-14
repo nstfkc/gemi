@@ -80,6 +80,7 @@ export class PrismaAuthenticationAdapter implements IAuthenticationAdapter {
               email: true,
               globalRole: true,
               name: true,
+              locale: true,
               publicId: true,
               accounts: {
                 select: {
@@ -115,6 +116,7 @@ export class PrismaAuthenticationAdapter implements IAuthenticationAdapter {
             globalRole: true,
             name: true,
             publicId: true,
+            locale: true,
             accounts: {
               select: {
                 id: true,

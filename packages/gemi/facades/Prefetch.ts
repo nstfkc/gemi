@@ -1,7 +1,7 @@
 import type { RPC } from "../client/rpc";
 import type { UrlParser } from "../client/types";
 import type { ApiRouterHandler } from "../http/ApiRouter";
-import { HttpRequest } from "../http";
+import { HttpRequest } from "../http/HttpRequest";
 import { RequestContext } from "../http/requestContext";
 import { applyParams } from "../utils/applyParams";
 import { omitNullishValues } from "../utils/omitNullishValues";

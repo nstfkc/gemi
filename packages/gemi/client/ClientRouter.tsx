@@ -33,6 +33,12 @@ import { type RouteState, RouteStateProvider } from "./RouteStateContext";
 import { applyParams } from "../utils/applyParams";
 import { Action } from "history";
 
+declare global {
+  interface Window {
+    scrollHistory: Map<string, number>;
+  }
+}
+
 function restoreScroll(action: Action | null = null) {
   if (action === null) {
     return;

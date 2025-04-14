@@ -23,7 +23,8 @@ import { flattenComponentTree } from "../../client/helpers/flattenComponentTree"
 import type { ComponentTree } from "../../client/types";
 import { I18nServiceContainer } from "../../http/I18nServiceContainer";
 import { MiddlewareServiceContainer } from "../middleware/MiddlewareServiceContainer";
-import { I18n, Log } from "../../facades";
+import { Log } from "../../facades/Log";
+import { I18n } from "../../facades/I18n";
 import { randomBytes, createHmac } from "crypto";
 import { AuthViewRouter } from "../../auth/AuthenticationServiceProvider";
 
