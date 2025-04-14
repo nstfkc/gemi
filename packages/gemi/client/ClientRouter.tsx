@@ -39,21 +39,22 @@ declare global {
   }
 }
 
-function restoreScroll(action: Action | null = null) {
+function restoreScroll(action: Action | null = null, _pathname = "no path") {
   if (action === null) {
     return;
   }
 
-  const { pathname, search } = window.location;
+  const { pathname, search, hash } = window.location;
 
-  const key = [pathname, search].join("");
-  const sh = window.scrollHistory as Map<string, number>;
+  const key = [pathname, hash, search].join("");
+  const sh = window.scrollHistory;
 
   const scrollPosition = sh?.get(key);
 
   if (!scrollPosition) {
     return;
   }
+
   if (action !== Action.Pop) {
     window.scrollTo(0, 0);
   } else {
@@ -70,7 +71,7 @@ interface RouteProps {
 }
 
 const Route = memo((props: PropsWithChildren<RouteProps>) => {
-  const { componentPath, pathname, action } = props;
+  const { componentPath, pathname, action, children } = props;
   const { viewImportMap } = useContext(ComponentsContext);
   const { getPageData } = useContext(ClientRouterContext);
 
@@ -79,8 +80,10 @@ const Route = memo((props: PropsWithChildren<RouteProps>) => {
   const Component = viewImportMap[componentPath];
 
   useEffect(() => {
-    restoreScroll(action);
-  }, [action]);
+    if (!children) {
+      restoreScroll(action, componentPath);
+    }
+  }, [action, children, componentPath]);
 
   if (Component) {
     return <Component {...data}>{props.children}</Component>;
@@ -144,9 +147,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
     useContext(ClientRouterContext);
   const { fetchTranslations } = useContext(I18nContext);
 
-  const [routeState, setRouteState] = useState<
-    RouteState & { views: string[] }
-  >({
+  const [routeState, setRouteState] = useState<RouteState>({
     params: routerSubject.getValue().params,
     search: routerSubject.getValue().search,
     pathname: routerSubject.getValue().pathname,

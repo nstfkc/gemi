@@ -2,10 +2,14 @@ import type { Action } from "history";
 import { createContext, type PropsWithChildren } from "react";
 
 export interface RouteState {
-  search: string;
-  pathname: string;
+  views: string[];
   params: Record<string, string>;
-  action: null | Action;
+  search: string;
+  state: Record<string, any>;
+  pathname: string;
+  hash: string;
+  action: Action | null;
+  routePath: string;
 }
 
 export const RouteStateContext = createContext({} as RouteState);

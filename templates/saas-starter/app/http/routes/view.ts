@@ -1,4 +1,4 @@
-import { HttpRequest, ViewRouter } from "gemi/http";
+import { type HttpRequest, ViewRouter } from "gemi/http";
 
 class AuthViewRouter extends ViewRouter {
   routes = {
@@ -14,6 +14,7 @@ class AppRouter extends ViewRouter {
   routes = {
     "/": this.layout("AppLayout", {
       "/dashboard": this.view("Dashboard"),
+      "/inbox": this.view("Inbox"),
     }),
   };
 }

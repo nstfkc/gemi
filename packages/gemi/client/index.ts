@@ -13,8 +13,8 @@ export {
   useMutationStatus,
   ValidationErrors,
 } from "./Mutation";
-export { useLocation } from "./ClientRouterContext";
 export { useParams } from "./useParams";
+export { useLocation } from "./useLocation";
 export { useSearchParams } from "./useSearchParams";
 export { useRoute } from "./useRoute";
 export { useIsNavigationPending } from "./useIsNavigationPending";
@@ -27,7 +27,7 @@ export { init, create } from "./init";
 export { createRoot } from "./createRoot";
 
 export type { RPC, ViewRPC, I18nDictionary } from "./rpc";
-export { type ViewProps, type LayoutProps } from "./types";
+export type { ViewProps, LayoutProps } from "./types";
 
 export { Image } from "./Image";
 

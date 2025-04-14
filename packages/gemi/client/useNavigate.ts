@@ -3,17 +3,16 @@ import { ClientRouterContext } from "./ClientRouterContext";
 import type { UrlParser, ViewPaths } from "./types";
 import { applyParams } from "../utils/applyParams";
 
-type Options<T extends ViewPaths> =
-  UrlParser<T> extends Record<string, never>
-    ? {
-        search?: Record<string, string | number | boolean | undefined | null>;
-        shallow?: boolean;
-      }
-    : {
-        search?: Record<string, string | number | boolean | undefined | null>;
-        params: UrlParser<T>;
-        shallow?: boolean;
-      };
+type Options<T extends ViewPaths> = UrlParser<T> extends Record<string, never>
+  ? {
+      search?: Record<string, string | number | boolean | undefined | null>;
+      shallow?: boolean;
+    }
+  : {
+      search?: Record<string, string | number | boolean | undefined | null>;
+      params: UrlParser<T>;
+      shallow?: boolean;
+    };
 
 export function useNavigate() {
   const { history, setNavigationAbortController } =

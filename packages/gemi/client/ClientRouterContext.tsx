@@ -1,13 +1,9 @@
-import {
-  Action,
-  type History,
-  type Location,
-  createBrowserHistory,
-} from "history";
+import { type Action, type History, createBrowserHistory } from "history";
 import {
   createContext,
   useContext,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type PropsWithChildren,
@@ -19,6 +15,7 @@ import { ProgressManager } from "./ProgressManager";
 import { HttpReload } from "./HttpReload";
 import { HttpClientContext } from "./HttpClientContext";
 import type { Breadcrumb } from "./useBreadcrumbs";
+import type { RouteState } from "./RouteStateContext";
 
 declare global {
   interface Window {
@@ -30,13 +27,11 @@ interface ClientRouterContextValue {
   viewEntriesSubject: Subject<string[]>;
   history: History | null;
   updatePageData: (
-    pageData: Record<string, any>,
+    pageData: Record<string, unknown>,
     breadcrumbs: Record<string, Breadcrumb>,
   ) => void;
-  getPageData: (key: string, pathname: string) => any;
-  locationSubject: Subject<Location>;
+  getPageData: (key: string, pathname: string) => Record<string, unknown>;
   getScrollPosition: (path: string) => number;
-  params: Record<string, string>;
   getViewPathsFromPathname: (pathname: string) => string[];
   getRoutePathnameFromHref: (href: string) => string | null;
   isNavigatingSubject: Subject<boolean>;
@@ -44,14 +39,7 @@ interface ClientRouterContextValue {
   progressManager: ProgressManager;
   fetchRouteCSS: (routePath: string) => Promise<void>;
   breadcrumbsCache: Map<string, Breadcrumb>;
-  routerSubject: Subject<{
-    views: string[];
-    params: Record<string, string>;
-    search: string;
-    state: Record<string, any>;
-    pathname: string;
-    action: Action | null;
-  }>;
+  routerSubject: Subject<RouteState>;
 }
 
 export const ClientRouterContext = createContext(
@@ -62,7 +50,7 @@ interface ClientRouterProviderProps {
   pathname: string;
   routeManifest: Record<string, string[]>;
   cssManifest: Record<string, string[]>;
-  pageData: Record<string, any>;
+  pageData: Record<string, unknown>;
   currentPath: string;
   params: Record<string, string>;
   searchParams: string;
@@ -85,7 +73,6 @@ export const ClientRouterProvider = (
     searchParams,
     breadcrumbs,
   } = props;
-  const [parameters, setParameters] = useState(params);
   const navigationAbortControllerRef = useRef(new AbortController());
   const [isNavigatingSubject] = useState(() => {
     return new Subject<boolean>(false);
@@ -104,91 +91,83 @@ export const ClientRouterProvider = (
     ? ["404"]
     : (routeManifest[pathname] ?? ["404"]);
   const viewEntriesSubject = useRef(new Subject<string[]>(initalViewEntries));
-  const [locationSubject] = useState(
-    () =>
-      new Subject<Location>({
-        hash: "",
-        pathname: currentPath,
-        search: searchParams,
-        state: {},
-        key: "",
-      }),
-  );
 
   const [routerSubject] = useState(() => {
-    return new Subject({
+    return new Subject<RouteState>({
       views: initalViewEntries,
-      params: parameters,
+      params,
       search: searchParams,
       state: {},
       pathname,
+      hash: "",
       action: null as Action | null,
+      routePath: currentPath,
     });
   });
 
   const [history] = useState<History | null>(() => {
     let history: History | null = null;
 
-    // @ts-ignore
     if (typeof window !== "undefined") {
       history = createBrowserHistory();
     }
     return history;
   });
 
-  const handleScroll = () => {
-    if (!window.scrollHistory) {
-      window.scrollHistory = new Map();
-    }
-    const { pathname, search } = window.location;
-    const key = [pathname, search].join("");
-
-    window.scrollHistory.set(key, window.scrollY);
-  };
-
-  const findMatchingRouteFromParams = (pathname: string) => {
-    const candidates: string[] = [];
-    for (const route of Object.keys(routeManifest)) {
-      const urlPattern = new URLPattern({ pathname: route });
-      if (urlPattern.test({ pathname })) {
-        candidates.push(route);
+  const findMatchingRouteFromParams = useMemo(
+    () => (pathname: string) => {
+      const candidates: string[] = [];
+      for (const route of Object.keys(routeManifest)) {
+        const urlPattern = new URLPattern({ pathname: route });
+        if (urlPattern.test({ pathname })) {
+          candidates.push(route);
+        }
       }
-    }
-    const sortedCandidates = candidates.sort((a, b) => {
-      const x = a.split("/").length + a.split(":").length;
-      const y = b.split("/").length + b.split(":").length;
-      return x - y;
-    });
+      const sortedCandidates = candidates.sort((a, b) => {
+        const x = a.split("/").length + a.split(":").length;
+        const y = b.split("/").length + b.split(":").length;
+        return x - y;
+      });
 
-    return (sortedCandidates ?? [])[0];
-  };
+      return (sortedCandidates ?? [])[0];
+    },
+    [routeManifest],
+  );
 
-  const getViewPathsFromPathname = (pathname: string) => {
-    const route = findMatchingRouteFromParams(pathname);
-    return routeManifest[route] ?? [];
-  };
+  const getViewPathsFromPathname = useMemo(
+    () => (pathname: string) => {
+      const route = findMatchingRouteFromParams(pathname);
+      return routeManifest[route] ?? [];
+    },
+    [findMatchingRouteFromParams, routeManifest],
+  );
 
-  const getRoutePathnameFromHref = (href: string) => {
-    const route = findMatchingRouteFromParams(href);
-    return route;
-  };
+  const getRoutePathnameFromHref = useMemo(
+    () => (href: string) => {
+      const route = findMatchingRouteFromParams(href);
+      return route;
+    },
+    [findMatchingRouteFromParams],
+  );
 
-  const getParams = (pathname: string) => {
-    const route = findMatchingRouteFromParams(pathname);
-    const urlPattern = new URLPattern({ pathname: route });
-    return urlPattern.exec({ pathname })?.pathname.groups!;
-  };
+  const getParams = useMemo(
+    () => (pathname: string) => {
+      const route = findMatchingRouteFromParams(pathname);
+      const urlPattern = new URLPattern({ pathname: route });
+      return urlPattern.exec({ pathname })?.pathname.groups ?? {};
+    },
+    [findMatchingRouteFromParams],
+  );
 
   useEffect(() => {
-    const { pathname, search } = window.location;
-    const key = [pathname, search].join("");
-    window.scrollHistory = new Map();
-    window.scrollHistory.set(key, window.scrollY);
     history?.listen(({ location, action }) => {
-      const key = [location.pathname, location.search].join("");
+      if (!window.scrollHistory) {
+        window.scrollHistory = new Map();
+      }
+      const { hash, pathname, search } = routerSubject.getValue();
+      const key = [pathname, hash, search].join("");
       window.scrollHistory.set(key, window.scrollY);
-      locationSubject.next(structuredClone(location));
-      setParameters(getParams(location.pathname));
+      const routePath = getRoutePathnameFromHref(location.pathname);
       routerSubject.next({
         views: getViewPathsFromPathname(location.pathname),
         params: getParams(location.pathname),
@@ -196,17 +175,20 @@ export const ClientRouterProvider = (
         state: location.state,
         pathname: location.pathname,
         action,
+        routePath,
+        hash: location.hash,
       });
     });
-
-    window.addEventListener("scrollend", handleScroll);
-    return () => {
-      window.removeEventListener("scroll", handleScroll);
-    };
-  }, []);
+  }, [
+    history,
+    routerSubject,
+    getParams,
+    getRoutePathnameFromHref,
+    getViewPathsFromPathname,
+  ]);
 
   const updatePageData = (
-    newPageData: Record<string, any>,
+    newPageData: Record<string, unknown>,
     breadcrumbs: Record<string, Breadcrumb>,
   ) => {
     const [key, value] = Object.entries(newPageData)[0];
@@ -235,10 +217,9 @@ export const ClientRouterProvider = (
       return;
     }
     const cssFiles = views
-      .map((view) => {
+      .flatMap((view) => {
         return cssManifest?.[view];
       })
-      .flat()
       .filter(Boolean)
       .filter((file) => !document.getElementById(file));
 
@@ -269,8 +250,6 @@ export const ClientRouterProvider = (
         isNavigatingSubject,
         getViewPathsFromPathname,
         history,
-        params: parameters,
-        locationSubject,
         getScrollPosition: (path: string) => {
           return scrollHistoryRef.current.get(path) || 0;
         },
@@ -291,25 +270,3 @@ export const ClientRouterProvider = (
     </ClientRouterContext.Provider>
   );
 };
-
-function useLocationChange(cb: (location: Location) => void) {
-  const { locationSubject } = useContext(ClientRouterContext);
-  useEffect(() => {
-    cb(locationSubject.getValue());
-    return locationSubject.subscribe(cb);
-  }, [cb, locationSubject]);
-}
-
-export function useLocation() {
-  const ctx = useContext(ClientRouterContext);
-  if (!ctx) {
-    throw new Error("useLocation must be used within a ClientRouterProvider");
-  }
-  const [location, setLocation] = useState(ctx?.locationSubject?.getValue());
-
-  useLocationChange((newLocation) => {
-    setLocation(newLocation);
-  });
-
-  return location;
-}

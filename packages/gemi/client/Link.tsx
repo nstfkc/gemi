@@ -1,7 +1,7 @@
-import { type ComponentProps } from "react";
+import type { ComponentProps } from "react";
 
 import { applyParams } from "../utils/applyParams";
-import { useLocation } from "./ClientRouterContext";
+import { useLocation } from "./useLocation";
 import type { UrlParser, ViewResult } from "./types";
 import { useNavigate } from "./useNavigate";
 import type { ViewRPC } from "./rpc";
@@ -30,10 +30,12 @@ type LinkBaseProps<T extends keyof Views> = Omit<
     : Search;
 };
 
-type LinkProps<T extends keyof Views, U = UrlParser<T>> =
-  U extends Record<string, never>
-    ? Omit<LinkBaseProps<T>, "params">
-    : LinkBaseProps<T>;
+type LinkProps<T extends keyof Views, U = UrlParser<T>> = U extends Record<
+  string,
+  never
+>
+  ? Omit<LinkBaseProps<T>, "params">
+  : LinkBaseProps<T>;
 
 function normalizeSearch(search: Search): Record<string, string> {
   return Object.fromEntries(
