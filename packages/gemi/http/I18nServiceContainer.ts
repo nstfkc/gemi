@@ -1,7 +1,7 @@
 import { ServiceContainer } from "../services/ServiceContainer";
 import { ApiRouter } from "./ApiRouter";
 import { HttpRequest } from "./HttpRequest";
-import { I18nServiceProvider } from "./I18nServiceProvider";
+import type { I18nServiceProvider } from "./I18nServiceProvider";
 
 export class I18nRouter extends ApiRouter {
   middlewares = ["cache:private,0,no-store"];

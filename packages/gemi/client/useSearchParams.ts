@@ -1,5 +1,4 @@
 import { useContext } from "react";
-import { useLocation } from "./ClientRouterContext";
 import { useNavigate } from "./useNavigate";
 import { RouteStateContext } from "./RouteStateContext";
 
@@ -95,19 +94,16 @@ class SearchParams {
 
 export function useSearchParams() {
   const { push } = useNavigate();
-  const { search } = useContext(RouteStateContext)
+  const { search } = useContext(RouteStateContext);
 
-  const callback = (search: Record<string, any>, shallow: boolean) => {
+  const callback = (search: Record<string, never>, shallow: boolean) => {
     push(location.pathname as never, {
       search,
       shallow,
     });
   };
 
-  const searchParams = new SearchParams(
-    new URLSearchParams(search),
-    callback,
-  );
+  const searchParams = new SearchParams(new URLSearchParams(search), callback);
 
   return searchParams;
 }

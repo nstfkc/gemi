@@ -13,9 +13,12 @@ import type { UrlParser } from "./types";
 import { useParams } from "./useParams";
 import { ServerDataContext } from "./ServerDataProvider";
 
+// biome-ignore lint: type later
+type Any = any;
+
 interface MutationContextValue {
   isPending: boolean;
-  result: null | any;
+  result: null | Any;
   validationErrors: Record<string, string[]>;
   formError: null | string;
 }
@@ -25,10 +28,9 @@ const MutationContext = createContext({
   result: null,
 } as MutationContextValue);
 
-type GetResult<T> =
-  T extends ApiRouterHandler<any, infer Result, any>
-    ? UnwrapPromise<Result>
-    : never;
+type GetResult<T> = T extends ApiRouterHandler<Any, infer Result, Any>
+  ? UnwrapPromise<Result>
+  : never;
 
 type PostRequests = {
   [K in keyof RPC as K extends `POST:${infer P}` ? P : never]: GetResult<
@@ -64,7 +66,7 @@ interface FormProps<M extends keyof Methods, K extends keyof Methods[M]>
   method?: M;
   action: K;
   onSuccess?: (result: Methods[M][K], form: HTMLFormElement) => void;
-  onError?: (error: any, form: HTMLFormElement) => void;
+  onError?: (error: Any, form: HTMLFormElement) => void;
   params?: Partial<UrlParser<`${K & string}`>>;
 }
 
@@ -89,12 +91,12 @@ export function Form<
 
   const { trigger, data, error, loading } = useMutation(
     method,
-    String(action) as any,
+    String(action) as Any,
     {
       params,
-    } as any,
+    } as Any,
     {
-      onSuccess: (data) => onSuccess(data as any, formRef.current),
+      onSuccess: (data) => onSuccess(data as Any, formRef.current),
       onError: (error) => onError(error, formRef.current),
     },
   );
@@ -104,7 +106,10 @@ export function Form<
       return;
     }
     e.preventDefault();
-    trigger(new FormData(formRef.current!) as any);
+    if (!formRef.current) {
+      return;
+    }
+    trigger(new FormData(formRef.current) as never);
   };
 
   const validationErrors =

@@ -172,7 +172,7 @@ export const ClientRouterProvider = (
         views: getViewPathsFromPathname(location.pathname),
         params: getParams(location.pathname),
         search: location.search,
-        state: location.state,
+        state: location.state as Record<string, unknown>,
         pathname: location.pathname,
         action,
         routePath,

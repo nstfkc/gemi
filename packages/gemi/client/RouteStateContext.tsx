@@ -5,7 +5,7 @@ export interface RouteState {
   views: string[];
   params: Record<string, string>;
   search: string;
-  state: Record<string, any>;
+  state: Record<string, unknown>;
   pathname: string;
   hash: string;
   action: Action | null;

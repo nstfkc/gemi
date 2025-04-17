@@ -8,8 +8,6 @@ export function useLocale() {
   const { getRoutePathnameFromHref } = useContext(ClientRouterContext);
   const { pathname } = useLocation();
 
-  console.log({ pathname });
-
   const setLocale = async (locale: string) => {
     await fetchTranslations(getRoutePathnameFromHref(pathname), locale);
     changeLocale(locale);

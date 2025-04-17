@@ -15,7 +15,8 @@
     "email",
     "services",
     "broadcasting",
-    "client"
+    "client",
+    "i18n"
   ],
   "exclude": ["node_modules", "dist"]
 }

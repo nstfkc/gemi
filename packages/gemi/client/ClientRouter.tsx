@@ -7,12 +7,7 @@ import {
   useTransition,
 } from "react";
 
-import {
-  type PropsWithChildren,
-  type ReactNode,
-  type ComponentType,
-  lazy,
-} from "react";
+import type { PropsWithChildren, ReactNode, ComponentType, lazy } from "react";
 
 import { ServerDataContext } from "./ServerDataProvider";
 import {
@@ -36,6 +31,7 @@ import { Action } from "history";
 declare global {
   interface Window {
     scrollHistory: Map<string, number>;
+    loaders: Record<string, () => void>;
   }
 }
 
@@ -153,31 +149,25 @@ const Routes = (props: { componentTree: ComponentTree }) => {
     pathname: routerSubject.getValue().pathname,
     views: routerSubject.getValue().views,
     action: null,
+    hash: routerSubject.getValue().hash,
+    state: routerSubject.getValue().state,
+    routePath: routerSubject.getValue().routePath,
   });
 
   const { replace } = useNavigate();
 
   useEffect(() => {
-    return routerSubject.subscribe(async (router) => {
-      const { params, pathname, search, state, views, action } = router;
-      if (views.length === 0) {
+    return routerSubject.subscribe(async (routerState) => {
+      const { pathname, search, state, views } = routerState;
+      if (routerState.views.length === 0) {
         setRouteState(() => ({
-          pathname,
-          params,
-          search,
+          ...routerState,
           views: ["404"],
-          action,
         }));
         return;
       }
       if (state?.shallow) {
-        setRouteState(() => ({
-          pathname,
-          params,
-          search,
-          views,
-          action,
-        }));
+        setRouteState(routerState);
         return;
       }
 
@@ -187,8 +177,8 @@ const Routes = (props: { componentTree: ComponentTree }) => {
         fetchRouteCSS(pathname),
         fetchTranslations(pathname, undefined),
         ...views.map((component) => {
-          if (!(window as any)?.loaders) return Promise.resolve();
-          const loader = (window as any)?.loaders?.[component] ?? (() => ({}));
+          if (!window?.loaders) return Promise.resolve();
+          const loader = window?.loaders?.[component] ?? (() => ({}));
           loader();
         }),
       ]);
@@ -203,7 +193,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
         } = await res.json();
         if (directive?.kind === "Redirect") {
           if (directive?.path) {
-            replace(directive.path, { params: {} } as any);
+            replace(directive.path, { params: {} } as unknown);
           }
 
           return;
@@ -221,17 +211,20 @@ const Routes = (props: { componentTree: ComponentTree }) => {
         }
 
         startTransition(() => {
-          setRouteState({
-            pathname,
-            params,
-            search,
-            views,
-            action,
-          });
+          setRouteState(routerState);
         });
       }
     });
-  }, []);
+  }, [
+    routerSubject,
+    fetchRouteCSS,
+    fetchTranslations,
+    fetch,
+    host,
+    replace,
+    updatePageData,
+    updatePrefecthedData,
+  ]);
 
   return (
     <RouteStateProvider state={routeState}>

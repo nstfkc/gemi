@@ -1,5 +1,4 @@
-import { HttpRequest } from "./HttpRequest";
-
+import type { HttpRequest } from "./HttpRequest";
 import type { Translations } from "../client/i18n/I18nContext";
 import { ServiceProvider } from "../services/ServiceProvider";
 
@@ -11,7 +10,7 @@ export class I18nServiceProvider extends ServiceProvider {
   async init() {}
 
   detectLocale(_req: HttpRequest) {
-    return "";
+    return null;
   }
 
   boot() {}

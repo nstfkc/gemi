@@ -86,7 +86,7 @@ export const Link = <T extends keyof Views>(props: LinkProps<T>) => {
           search,
           params,
           shallow: path === window.location.pathname,
-        } as any);
+        } as unknown as never);
       }}
       {...rest}
     />
