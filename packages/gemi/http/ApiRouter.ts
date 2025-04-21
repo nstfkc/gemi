@@ -5,7 +5,7 @@ import {
   ResourceController,
   type ControllerMethods,
 } from "./Controller";
-import { HttpRequest } from "./HttpRequest";
+import type { HttpRequest } from "./HttpRequest";
 import type { MiddlewareReturnType } from "./Router";
 
 type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
@@ -62,10 +62,10 @@ export class RouteHandler<M extends HttpMethod, Input, Output, Params> {
       const controller = new this.handler();
       const handler = controller[this.methodName].bind(controller);
       return handler();
-    } else {
-      // @ts-ignore
-      return this.handler();
     }
+
+    // @ts-ignore
+    return this.handler();
   }
 
   middleware(middlewareList: string[]) {
@@ -213,16 +213,22 @@ export class ApiRouter {
   }
 }
 
-type TestControllerMethod<T extends new () => Controller, K extends string> =
-  K extends ControllerMethods<T> ? K : never;
+type TestControllerMethod<
+  T extends new () => Controller,
+  K extends string,
+> = K extends ControllerMethods<T> ? K : never;
 
-type RouteHandlerParser<T, Prefix extends string = ""> =
-  T extends RouteHandler<infer Method, infer Input, infer Output, infer Params>
-    ? KeyAndValue<
-        `${Method & string}:${Prefix & string}`,
-        ApiRouterHandler<Input, Output, Params>
-      >
-    : never;
+type RouteHandlerParser<T, Prefix extends string = ""> = T extends RouteHandler<
+  infer Method,
+  infer Input,
+  infer Output,
+  infer Params
+>
+  ? KeyAndValue<
+      `${Method & string}:${Prefix & string}`,
+      ApiRouterHandler<Input, Output, Params>
+    >
+  : never;
 
 type RouteHandlersParser<
   T,
@@ -262,13 +268,19 @@ type ParsePrefixAndKey<
       ? `${T1}/${T2}`
       : U;
 
-type WithoutId<T> = T extends `${infer Base}/:${string}` ? Base : T;
+type RemoveTrailingId<T> = T extends `${infer Head}/:${infer Tail}`
+  ? Tail extends `${string}/:${string}`
+    ? `${Head}/:${RemoveTrailingId<Tail>}`
+    : Head extends `/:${string}`
+      ? "X"
+      : `${Head}`
+  : T;
 
 type ResourceRoutesParser<
   T extends ResourceRoutes<new () => ResourceController>,
   U extends PropertyKey,
 > =
-  | RouteHandlersParser<T["first"], WithoutId<U & string>>
+  | RouteHandlersParser<T["first"], RemoveTrailingId<U & string>>
   | RouteHandlersParser<T["second"], `${U & string}`>;
 
 type RouteParser<
@@ -294,3 +306,27 @@ export type CreateRPC<
   T extends ApiRouter,
   Prefix extends PropertyKey = "",
 > = KeyAndValueToObject<RouteParser<T["routes"], Prefix>>;
+
+class ProductsController extends ResourceController {
+  async list() {}
+  async show() {}
+  async store() {}
+  async update() {}
+  async delete() {}
+}
+
+class OrgRouter extends ApiRouter {
+  routes = {
+    "/:orgId/products/:productId": this.resource(ProductsController),
+  };
+}
+
+class RootRouter extends ApiRouter {
+  middlewares = ["cache:private", "csrf"];
+
+  routes = {
+    "/org": OrgRouter,
+  };
+}
+
+export type RootRPC = CreateRPC<RootRouter>;
