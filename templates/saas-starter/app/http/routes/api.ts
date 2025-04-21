@@ -1,18 +1,12 @@
-import { ApiRouter, ResourceController, type HttpRequest } from "gemi/http";
-
-class OrgController extends ResourceController {}
-
-class OrgRouter extends ApiRouter {
-  routes = {
-    "/:orgId": this.resource(OrgController),
-  };
-}
+import { ApiRouter } from "gemi/http";
 
 export default class extends ApiRouter {
-  middlewares = ["cache:private"];
+  middlewares = ["cache:private", "csrf"];
 
   routes = {
-    "/org": OrgRouter,
+    "/test": this.post(() => {
+      return {};
+    }),
     "/health": this.get(() => {
       return {
         status: "ok",

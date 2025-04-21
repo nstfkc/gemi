@@ -1,7 +1,5 @@
 import { RequestBreakerError } from "./Error";
-import { HttpRequest } from "./HttpRequest";
 import { Middleware } from "./Middleware";
-import { createHmac, timingSafeEqual } from "crypto";
 
 export class CSRFMiddleware extends Middleware {
   async run() {
@@ -14,22 +12,7 @@ export class CSRFMiddleware extends Middleware {
       return {};
     }
 
-    try {
-      const secret = Buffer.from(process.env.SECRET, "utf8");
-      const mac = createHmac("sha256", secret as any);
-      mac.update(csrfToken);
-      const expectedHMAC = mac.digest();
-
-      const cloneReq = this.req.rawRequest.clone();
-      const httpRequest = new HttpRequest(cloneReq);
-      const input = await httpRequest.input();
-
-      const csrfTokenHMAC = Buffer.from(input.get("__csrf"), "base64");
-
-      if (!timingSafeEqual(csrfTokenHMAC as any, expectedHMAC as any)) {
-        throw new InvalidCSRFTokenError();
-      }
-    } catch (err) {
+    if (!Bun.CSRF.verify(csrfToken, { secret: process.env.SECRET })) {
       throw new InvalidCSRFTokenError();
     }
 

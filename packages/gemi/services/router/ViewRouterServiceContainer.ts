@@ -59,7 +59,6 @@ export class ViewRouterServiceContainer extends ServiceContainer {
     const mac = createHmac("sha256", secret as any);
     mac.update(csrfToken);
     const csrfTokenHMAC = mac.digest();
-
     return { csrfToken, csrfTokenHMAC };
   }
 
@@ -293,11 +292,13 @@ export class ViewRouterServiceContainer extends ServiceContainer {
 
         headers.set("Content-Type", "text/html");
 
-        cookies.forEach((cookie) =>
-          headers.append("Set-Cookie", cookie.toString()),
-        );
+        for (const cookie of cookies) {
+          headers.append("Set-Cookie", cookie.toString());
+        }
 
-        const { csrfToken, csrfTokenHMAC } = this.generateCSRFTokenWithHmac();
+        // const { csrfToken, csrfTokenHMAC } = this.generateCSRFTokenWithHmac();
+
+        const csrfToken = Bun.CSRF.generate(process.env.SECRET);
         headers.append(
           "Set-Cookie",
           `csrf_token=${csrfToken}; HttpOnly; Secure; SameSite=Strict; Expires=${new Date(Date.now() + 1000 * 60 * 60 * 24).toUTCString()}`,
@@ -312,7 +313,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
         }
 
         return await this.render({
-          csrfTokenHMAC,
+          csrfTokenHMAC: Buffer.from(""),
           currentPathName,
           headers,
           i18n,

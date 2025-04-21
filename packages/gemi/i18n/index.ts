@@ -3,8 +3,9 @@ import type { ParseTranslationParams, Prettify } from "../utils/type";
 
 type Translations = Record<string, Record<string, string>>;
 
-type ParamsOrNever<T> =
-  T extends Record<string, never> ? [params?: never] : [params: T];
+type ParamsOrNever<T> = T extends Record<string, never>
+  ? [params?: never]
+  : [params: T];
 
 class Dictionary<T extends Translations> {
   constructor(
@@ -49,6 +50,8 @@ const GlobalDictionary = Dictionary.create("Global", {
   },
 });
 
+export const x = "I have {{dogs:[a dog][# dogs]}}";
+
 const HomePage = Dictionary.create("HomePage", {
   title: {
     "en-US": "Home",
@@ -56,22 +59,3 @@ const HomePage = Dictionary.create("HomePage", {
   },
   x: GlobalDictionary.reference("hello"),
 });
-
-HomePage.render("x", "en-US", { name: "John" });
-
-const dics = {
-  HomePage,
-  Global: GlobalDictionary,
-};
-
-type Dic = typeof dics;
-
-export function useDictionary<T extends keyof Dic>(key: T) {
-  type Translations = Dic[T] extends Dictionary<infer U> ? U : never;
-  const dic = dics[key];
-  return <K extends keyof Translations>(key: K) => {};
-}
-
-const f = useDictionary("HomePage");
-
-f("title");

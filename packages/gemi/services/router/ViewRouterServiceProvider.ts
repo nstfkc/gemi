@@ -1,5 +1,5 @@
 import type { JSX } from "react";
-import { HttpRequest } from "../../http";
+import type { HttpRequest } from "../../http";
 import type { ViewRouter } from "../../http/ViewRouter";
 import { ServiceProvider } from "../ServiceProvider";
 

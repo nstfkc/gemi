@@ -1,4 +1,4 @@
-import { HttpRequest, Middleware } from "../../http";
+import { HttpRequest, type Middleware } from "../../http";
 import {
   type ApiRoutes,
   type RouteHandlers,
@@ -52,7 +52,7 @@ function isApiRouter(
 
 export function createFlatApiRoutes(
   routes: ApiRoutes,
-  rootPath: string = "",
+  rootPath = "",
   rootMiddleware: RouterMiddleware[] | string[] = [],
 ) {
   const flatApiRoutes: FlatApiRoutes = {};
@@ -75,7 +75,7 @@ export function createFlatApiRoutes(
       exec,
       middleware: [...rootMiddleware, ...middleware],
     };
-    flatApiRoutes[finalPath]["OPTIONS"] = {
+    flatApiRoutes[finalPath].OPTIONS = {
       exec: () => {
         const req = new HttpRequest();
         const headers = req.ctx().headers;

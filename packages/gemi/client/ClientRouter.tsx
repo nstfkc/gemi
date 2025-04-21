@@ -5,6 +5,7 @@ import {
   StrictMode,
   memo,
   useTransition,
+  useRef,
 } from "react";
 
 import type { PropsWithChildren, ReactNode, ComponentType, lazy } from "react";
@@ -47,13 +48,12 @@ function restoreScroll(action: Action | null = null, _pathname = "no path") {
 
   const scrollPosition = sh?.get(key);
 
-  if (!scrollPosition) {
-    return;
-  }
-
   if (action !== Action.Pop) {
     window.scrollTo(0, 0);
   } else {
+    if (!scrollPosition) {
+      return;
+    }
     window.scrollTo(0, scrollPosition ?? 0);
   }
 
