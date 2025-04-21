@@ -5,7 +5,6 @@ import {
   StrictMode,
   memo,
   useTransition,
-  useRef,
 } from "react";
 
 import type { PropsWithChildren, ReactNode, ComponentType, lazy } from "react";
@@ -51,6 +50,9 @@ function restoreScroll(action: Action | null = null, _pathname = "no path") {
   if (action !== Action.Pop) {
     window.scrollTo(0, 0);
   } else {
+    // In dev mode the effect runs scroll restoration
+    // will be called twice, this if statement prevents
+    // scroll to top
     if (!scrollPosition) {
       return;
     }
