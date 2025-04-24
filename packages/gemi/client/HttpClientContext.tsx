@@ -6,7 +6,7 @@ export const HttpClientContext = createContext({
 });
 
 interface HttpClientProviderProps {
-  fetch: typeof globalThis.fetch;
+  fetch?: typeof globalThis.fetch;
   host: string;
   children: React.ReactNode;
 }
