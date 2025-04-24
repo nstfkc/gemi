@@ -13,6 +13,7 @@ export {
   useMutationStatus,
   ValidationErrors,
 } from "./Mutation";
+export { QueryManagerProvider } from "./QueryManagerContext";
 export { useParams } from "./useParams";
 export { useLocation } from "./useLocation";
 export { useSearchParams } from "./useSearchParams";

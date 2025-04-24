@@ -32,13 +32,21 @@ type GetRPC = {
   [K in keyof RPC as K extends `GET:${infer P}` ? P : never]: RPC[K];
 };
 
-type Data<T extends keyof GetRPC> =
-  GetRPC[T] extends ApiRouterHandler<any, infer Data, any>
-    ? UnwrapPromise<Data>
-    : never;
+type Data<T extends keyof GetRPC> = GetRPC[T] extends ApiRouterHandler<
+  any,
+  infer Data,
+  any
+>
+  ? UnwrapPromise<Data>
+  : never;
 
-type Input<T extends keyof GetRPC> =
-  GetRPC[T] extends ApiRouterHandler<infer I, any, any> ? I : never;
+type Input<T extends keyof GetRPC> = GetRPC[T] extends ApiRouterHandler<
+  infer I,
+  any,
+  any
+>
+  ? I
+  : never;
 
 type QueryOptions<T extends keyof GetRPC> = {
   search?: Partial<WithOptionalValues<Input<T>>>;
@@ -74,7 +82,7 @@ const defaultOptions: QueryOptions<any> & { params?: Record<string, any> } = {
   search: {} as Record<string, string>,
 };
 
-export type QueryResult<T extends keyof GetRPC> = Data<T>
+export type QueryResult<T extends keyof GetRPC> = Data<T>;
 
 export function useQuery<T extends keyof GetRPC>(
   url: T,
@@ -121,31 +129,9 @@ export function useQuery<T extends keyof GetRPC>(
     }
   };
 
-  // const handleReload = useCallback(() => {
-  //   setResource(getResource(applyParams(url, params)));
-  // }, [url, params]);
-
-  // useEffect(() => {
-  //   // @ts-ignore
-  //   if (import.meta.hot) {
-  //     // @ts-ignore
-  //     import.meta.hot.on("http-reload", mutate);
-  //   }
-  //   return () => {
-  //     // @ts-ignore
-  //     if (import.meta.hot) {
-  //       // @ts-ignore
-  //       import.meta.hot.off("http-reload", mutate);
-  //     }
-  //   };
-  // }, [handleReload]);
-
   useEffect(() => {
     const key = JSON.stringify(params);
     if (key !== paramsRef.current) {
-      if (config.debug) {
-        console.log("refetching - params changed", key, paramsRef.current);
-      }
       setResource(getResource(applyParams(url, params)));
       setState(resource.getVariant(variantKey));
       paramsRef.current = key;

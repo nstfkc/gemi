@@ -16,7 +16,7 @@ import type {
 } from "./types";
 
 export class PrismaAuthenticationAdapter implements IAuthenticationAdapter {
-  constructor(private prisma: any) {}
+  constructor(protected prisma: any) {}
 
   async findUserByVerificationToken(token: string): Promise<User | null> {
     return await this.prisma.user.findFirst({
@@ -62,7 +62,6 @@ export class PrismaAuthenticationAdapter implements IAuthenticationAdapter {
     return user;
   }
 
-  // TODO: extend the session until absolute expiration
   async findSession(args: FindSessionArgs): Promise<SessionWithUser | null> {
     if (!args.token) return null;
     try {

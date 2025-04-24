@@ -4,7 +4,8 @@ import { generateETag } from "./generateEtag";
 import { URLPattern } from "urlpattern-polyfill";
 import { createStyles } from "./styles";
 
-const rootDir = process.cwd();
+const projectDir = process.env.GEMI_PROJECT_DIR ?? "";
+const rootDir = join(process.cwd(), projectDir);
 
 const appDir = join(rootDir, "app");
 const distDir = join(rootDir, "dist");
@@ -68,7 +69,7 @@ export async function startProdServer() {
       const url = new URL(req.url);
       const filePath = req.url.replace(url.origin, "").split("?")[0];
       const file = Bun.file(
-        `dist/client${filePath.replace("/assets/assets", "/assets")}`,
+        `${distDir}/client${filePath.replace("/assets/assets", "/assets")}`,
       );
       if (!file) {
         return new Response("Not found", { status: 404 });
@@ -98,6 +99,9 @@ export async function startProdServer() {
         });
 
         const getStyles = async (currentViews: string[]) => {
+          if (!currentViews) {
+            return createStyles([]);
+          }
           for (const view of currentViews) {
             const clientFile = manifest[`app/views/${view}.tsx`];
             for (const cssFile of clientFile?.css ?? []) {
