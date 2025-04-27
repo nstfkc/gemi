@@ -43,7 +43,7 @@ export const I18nProvider = (props: PropsWithChildren) => {
   const dictionary = useRef<Dictionary>(
     (() => {
       const dictionary = new Map();
-      for (const [locale, value] of Object.entries(i18n.dictionary)) {
+      for (const [locale, value] of Object.entries(i18n?.dictionary ?? {})) {
         const components = new Map();
         for (const [component, translations] of Object.entries(value)) {
           components.set(component, translations);

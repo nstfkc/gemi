@@ -41,7 +41,7 @@
     },
     "packages/gemi": {
       "name": "gemi",
-      "version": "0.13.0",
+      "version": "0.13.3",
       "bin": {
         "gemi": "./dist/bin/gemi.js",
       },
@@ -54,8 +54,8 @@
         "history": "^5.3.0",
         "jsx-email": "2.0.0-rc2.1",
         "open": "^10.1.0",
-        "react": "^19.0.0",
-        "react-dom": "^19.0.0",
+        "react": "19.1.0",
+        "react-dom": "19.1.0",
         "recast": "^0.23.9",
         "resend": "^3.4.0",
         "temporal-polyfill": "^0.2.5",
