@@ -9,7 +9,8 @@
     "./runtime": "./client/runtime.ts",
     "./kernel": "./kernel/index.ts",
     "./services": "./services/index.ts",
-    "./broadcasting": "./broadcasting/index.ts"
+    "./broadcasting": "./broadcasting/index.ts",
+    "./i18n/": "./i18n/index.ts"
   },
   "prod": {
     "./http": "./dist/http/index.js",
@@ -21,6 +22,6 @@
     "./runtime": "./dist/runtime/index.js",
     "./kernel": "./dist/kernel/index.js",
     "./services": "./dist/services/index.js",
-    "./broadcasting": "./dist/broadcasting/index.js"
+    "./i18n": "./dist/i18n/index.js"
   }
 }

@@ -1,5 +1,5 @@
 import { HttpRequest } from "../../http";
-import { Cookie } from "../../http/Cookie";
+import type { Cookie } from "../../http/Cookie";
 import { GEMI_REQUEST_BREAKER_ERROR } from "../../http/Error";
 import { RequestContext } from "../../http/requestContext";
 import type { RouterMiddleware } from "../../http/Router";
@@ -8,7 +8,7 @@ import {
   type FlatViewRoutes,
   type ViewRouteExec,
 } from "./createFlatViewRoutes";
-import { ViewRouterServiceProvider } from "./ViewRouterServiceProvider";
+import type { ViewRouterServiceProvider } from "./ViewRouterServiceProvider";
 // @ts-ignore
 import { renderToReadableStream } from "react-dom/server.browser";
 import { createElement, Fragment } from "react";
@@ -21,11 +21,10 @@ import { createRouteManifest } from "./createRouteManifest";
 import { createComponentTree } from "./createComponentTree";
 import { flattenComponentTree } from "../../client/helpers/flattenComponentTree";
 import type { ComponentTree } from "../../client/types";
-import { I18nServiceContainer } from "../../http/I18nServiceContainer";
+import { I18nServiceContainer } from "../../i18n/I18nServiceContainer";
 import { MiddlewareServiceContainer } from "../middleware/MiddlewareServiceContainer";
 import { Log } from "../../facades/Log";
 import { I18n } from "../../facades/I18n";
-import { randomBytes, createHmac } from "crypto";
 import { AuthViewRouter } from "../../auth/AuthenticationServiceProvider";
 
 export class ViewRouterServiceContainer extends ServiceContainer {
@@ -51,16 +50,6 @@ export class ViewRouterServiceContainer extends ServiceContainer {
   }
 
   boot() {}
-
-  private generateCSRFTokenWithHmac() {
-    const secret = Buffer.from(process.env.SECRET, "utf8");
-    const buffer = randomBytes(21);
-    const csrfToken = buffer.toString("base64");
-    const mac = createHmac("sha256", secret as any);
-    mac.update(csrfToken);
-    const csrfTokenHMAC = mac.digest();
-    return { csrfToken, csrfTokenHMAC };
-  }
 
   async onRequestEnd(req: HttpRequest) {
     if (!req.cookies.has("session_id")) {

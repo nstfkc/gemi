@@ -23,4 +23,4 @@ export {
   InsufficientPermissionsError,
 } from "./errors";
 
-export { I18nServiceProvider } from "./I18nServiceProvider";
+// export { I18nServiceProvider } from "./I18nServiceProvider";

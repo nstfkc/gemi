@@ -7,6 +7,7 @@ if (typeof window !== "undefined") {
   (window as any)._ = import.meta.glob([
     "./views/**/*.tsx",
     "!./views/**/components/**",
+    "!./views/**/assets/**",
     "!/views/RootLayout.tsx",
   ]);
 }

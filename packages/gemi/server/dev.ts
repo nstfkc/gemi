@@ -1,5 +1,5 @@
-import { Serve } from "bun";
-import { join } from "path";
+import type { Serve } from "bun";
+import { join } from "node:path";
 
 import type { App } from "../app/App";
 import { createDevStyles } from "./styles";

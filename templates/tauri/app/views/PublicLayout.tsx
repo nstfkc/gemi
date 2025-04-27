@@ -1,10 +1,4 @@
-import {
-  Link,
-  useLocale,
-  useNavigationProgress,
-  useRoute,
-  useScopedTranslator,
-} from "gemi/client";
+import { Link, useLocale, useNavigationProgress, useRoute } from "gemi/client";
 import { useState } from "react";
 import { LoadingBar } from "./components/LoadingBar";
 
@@ -13,7 +7,7 @@ export default function PublicLayout({
 }: {
   children: React.ReactNode;
 }) {
-  const st = useScopedTranslator("layout:/");
+  const st = () => {};
   const [locale, setLocale] = useLocale();
   const { pathname } = useRoute();
   return (

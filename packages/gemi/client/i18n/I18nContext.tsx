@@ -2,6 +2,7 @@ import {
   createContext,
   type PropsWithChildren,
   useContext,
+  useRef,
   useState,
 } from "react";
 import { ServerDataContext } from "../ServerDataProvider";
@@ -17,54 +18,50 @@ interface I18nContextValue {
   updateDictionary: (
     translations: Record<string, Record<string, Record<string, string>>>,
   ) => void;
-  translations: TranslationScopes;
   fetchTranslations: (
     pathname: string,
     locale?: string,
     signal?: AbortSignal,
   ) => Promise<void>;
+  getComponentTranslations: (key: string) => Record<string, string>;
 }
+
+export type CreateI18nDictionary<T> = {
+  [K in keyof T]: T[K];
+};
 
 export const I18nContext = createContext({} as I18nContextValue);
 
-interface I18nProviderProps {}
-
 export type Dictionary = Map<string, Map<string, Record<string, string>>>;
 
-export const I18nProvider = (props: PropsWithChildren<I18nProviderProps>) => {
+export const I18nProvider = (props: PropsWithChildren) => {
   const { i18n } = useContext(ServerDataContext);
   const { fetch, host } = useContext(HttpClientContext);
 
   const [currentLocale, setCurrentLocale] = useState(i18n.currentLocale);
 
-  const [dictionary] = useState<Dictionary>(() => {
-    const dictionary = new Map();
-    for (const [locale, value] of Object.entries(i18n.dictionary)) {
-      const scopes = new Map();
-      for (const [scope, translations] of Object.entries(value)) {
-        scopes.set(scope, translations);
+  const dictionary = useRef<Dictionary>(
+    (() => {
+      const dictionary = new Map();
+      for (const [locale, value] of Object.entries(i18n.dictionary)) {
+        const components = new Map();
+        for (const [component, translations] of Object.entries(value)) {
+          components.set(component, translations);
+        }
+        dictionary.set(locale, components);
       }
-      dictionary.set(locale, scopes);
-    }
-    return dictionary;
-  });
-
-  const [currentTranslations, setCurrentTranslations] =
-    useState<TranslationScopes>(() => {
-      if (!dictionary.has(currentLocale)) {
-        return {};
-      }
-      return Object.fromEntries(dictionary.get(currentLocale).entries());
-    });
+      return dictionary;
+    })(),
+  );
 
   function updateDictionary(
     translations: Record<string, Record<string, Record<string, string>>> = {},
   ) {
     for (const [locale, value] of Object.entries(translations)) {
-      if (!dictionary.has(locale)) {
-        dictionary.set(locale, new Map());
+      if (!dictionary.current.has(locale)) {
+        dictionary.current.set(locale, new Map());
       }
-      const scopes = dictionary.get(locale);
+      const scopes = dictionary.current.get(locale);
       for (const [scope, translations] of Object.entries(value)) {
         if (!scopes.has(scope)) {
           scopes.set(scope, {});
@@ -72,18 +69,18 @@ export const I18nProvider = (props: PropsWithChildren<I18nProviderProps>) => {
         scopes.set(scope, translations);
       }
     }
-    setCurrentTranslations(
-      Object.fromEntries(dictionary.get(currentLocale).entries()),
-    );
   }
 
   const changeLocale = (locale: string) => {
-    if (dictionary.has(locale)) {
+    if (dictionary.current.has(locale)) {
       setCurrentLocale(locale);
-      setCurrentTranslations(
-        Object.fromEntries(dictionary.get(locale).entries()),
-      );
     }
+  };
+
+  const getTranslations = (locale: string) => {
+    return (component: string) => {
+      return dictionary.current.get(locale).get(component);
+    };
   };
 
   const fetchTranslations = async (
@@ -109,8 +106,8 @@ export const I18nProvider = (props: PropsWithChildren<I18nProviderProps>) => {
   return (
     <I18nContext.Provider
       value={{
+        getComponentTranslations: getTranslations(currentLocale),
         locale: currentLocale,
-        translations: currentTranslations,
         changeLocale,
         updateDictionary,
         fetchTranslations,

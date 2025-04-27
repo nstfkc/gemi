@@ -1,15 +1,9 @@
-import { AnimatePresence, motion } from "framer-motion";
-import { useNavigate, type ViewProps } from "gemi/client";
-import { useEffect } from "react";
+import { motion } from "framer-motion";
+import { type ViewProps } from "gemi/client";
 
 export default function About(props: ViewProps<"/about">) {
   return (
-    <motion.div
-      initial={{ opacity: 0, translateY: 0 }}
-      animate={{ opacity: 1, translateY: 20 }}
-      exit={{ opacity: 0, translateY: 0 }}
-      className="py-4"
-    >
+    <div>
       <div className="py-8">
         <div>{props.title}</div>
         <p>
@@ -75,6 +69,6 @@ export default function About(props: ViewProps<"/about">) {
         </a>{" "}
         to report issues, ask questions or contribute.
       </div>
-    </motion.div>
+    </div>
   );
 }

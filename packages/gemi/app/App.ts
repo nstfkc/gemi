@@ -1,5 +1,5 @@
 import type { WebSocketHandler } from "bun";
-import { Kernel } from "../kernel";
+import type { Kernel } from "../kernel";
 import { ApiRouterServiceContainer } from "../services/router/ApiRouterServiceContainer";
 import { ViewRouterServiceContainer } from "../services/router/ViewRouterServiceContainer";
 import { BroadcastingServiceContainer } from "../services/pubsub/BroadcastingServiceContainer";
@@ -40,9 +40,8 @@ export class App {
     return this.kernel.run.call(this.kernel, async () => {
       if (url.pathname.startsWith("/api")) {
         return await ApiRouterServiceContainer.use().handleApiRequest(req);
-      } else {
-        return await ViewRouterServiceContainer.use().handleViewRequest(req);
       }
+      return await ViewRouterServiceContainer.use().handleViewRequest(req);
     });
   }
 

@@ -1,6 +1,6 @@
 {
   "name": "gemi",
-  "version": "0.12.25",
+  "version": "0.13.0",
   "author": "Enes Tufekci <enes@gemijs.dev>",
   "license": "MIT",
   "devDependencies": {
@@ -30,11 +30,10 @@
     "./runtime": "./client/runtime.ts",
     "./kernel": "./kernel/index.ts",
     "./services": "./services/index.ts",
-    "./broadcasting": "./broadcasting/index.ts"
+    "./broadcasting": "./broadcasting/index.ts",
+    "./i18n": "./i18n/index.ts"
   },
-  "files": [
-    "dist/**/*"
-  ],
+  "files": ["dist/**/*"],
   "private": false,
   "module": true,
   "scripts": {

@@ -29,6 +29,7 @@ export { createRoot } from "./createRoot";
 
 export type { RPC, ViewRPC, I18nDictionary } from "./rpc";
 export type { ViewProps, LayoutProps } from "./types";
+export type { CreateI18nDictionary } from "./i18n/I18nContext";
 
 export { Image } from "./Image";
 
@@ -39,7 +40,6 @@ export { useSignOut } from "./auth/useSignOut";
 export { useResetPassword } from "./auth/useResetPassword";
 export { useUser } from "./auth/useUser";
 
-export { useScopedTranslator } from "./i18n/useScopedTranslator";
 export { useTranslator } from "./i18n/useTranslator";
 export { useLocale } from "./i18n/useLocale";
 

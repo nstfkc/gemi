@@ -15,7 +15,7 @@ import { AuthorizationError } from "../http/errors";
 import { ValidationError } from "../http";
 import { ServiceProvider } from "../services/ServiceProvider";
 import { AuthenticationServiceContainer } from "./AuthenticationServiceContainer";
-import { I18nServiceContainer } from "../http/I18nServiceContainer";
+import { I18nServiceContainer } from "../i18n/I18nServiceContainer";
 import type { OAuthProvider } from "./oauth/OAuthProvider";
 
 class SignInRequest extends HttpRequest<

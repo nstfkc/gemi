@@ -1,8 +1,8 @@
-import { ComponentType } from "react";
+import type { ComponentType } from "react";
 import { render } from "jsx-email";
 import { EmailServiceContainer } from "../services/email/EmailServiceContainer";
-import { SendEmailParams } from "../services/email/drivers/types";
-import { I18nServiceContainer } from "../http/I18nServiceContainer";
+import type { SendEmailParams } from "../services/email/drivers/types";
+import { I18nServiceContainer } from "../i18n/I18nServiceContainer";
 
 interface SendEmailArgs<T> extends Partial<Omit<SendEmailParams, "html">> {
   data: Omit<T, "locale">;

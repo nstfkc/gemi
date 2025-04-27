@@ -1,40 +1,33 @@
 import type { I18nDictionary } from "../rpc";
-import type { IsEmptyObject, ParseTranslationParams } from "../../utils/type";
-import type {
-  KeyAndValue,
-  KeyAndValueToObject,
-} from "../../internal/type-utils";
+import type { ParseTranslationParams, Prettify } from "../../utils/type";
 import { applyTranslationParams } from "../../utils/applyTranslationParams";
 import { useContext } from "react";
 import { I18nContext } from "./I18nContext";
 
-type FlattenDictionary<T extends I18nDictionary> = {
-  [K in keyof T]: {
-    [K2 in keyof T[K]]: KeyAndValue<K2, T[K][K2]>;
-  }[keyof T[K]];
+type Parser<T extends Record<string, string>> = {
+  [K in keyof T]: ParseTranslationParams<T[K]>;
 }[keyof T];
 
-type FlatI18nDictionary = KeyAndValueToObject<
-  FlattenDictionary<I18nDictionary>
->;
+type ParamsOrNever<T> = T extends Record<string, never>
+  ? [params?: never]
+  : [params: T];
 
-export function useTranslator() {
-  const { translations } = useContext(I18nContext);
+export function useTranslator<T extends keyof I18nDictionary>(component: T) {
+  const { getComponentTranslations } = useContext(I18nContext);
 
-  return <T extends keyof FlatI18nDictionary>(
-    key: T,
-    ...args: IsEmptyObject<
-      ParseTranslationParams<FlatI18nDictionary[T]["default"]>
-    > extends true
-      ? []
-      : [params: ParseTranslationParams<FlatI18nDictionary[T]["default"]>]
+  return <K extends keyof I18nDictionary[T]["dictionary"]>(
+    key: K,
+    ...args: ParamsOrNever<Prettify<Parser<I18nDictionary[T]["dictionary"][K]>>>
   ) => {
-    const [params = {}] = args;
-    for (const scope in translations) {
-      if (translations[scope][key as any]) {
-        return applyTranslationParams(translations[scope][key as any], params);
-      }
+    try {
+      const translations = getComponentTranslations(component);
+      const [params = {}] = args;
+      return applyTranslationParams(translations[key as any], params);
+    } catch (err) {
+      console.error(
+        `Unresolved translation Component:${component} key:${String(key)}`,
+      );
+      return String(key);
     }
-    return key;
   };
 }

@@ -1,8 +1,9 @@
-import { Link } from "gemi/client";
+import { Link, useLocale } from "gemi/client";
 import { type ReactNode } from "react";
 import { BrainIcon } from "lucide-react";
 
 const Header = () => {
+  const [locale, setLocale] = useLocale();
   return (
     <header>
       <nav className="container max-w-4xl mx-auto">
@@ -15,6 +16,10 @@ const Header = () => {
             <Link href="/pricing">Pricing</Link>
             <Link href="/auth/sign-in">Sign In</Link>
           </div>
+        </div>
+        <div>
+          <button onClick={() => setLocale("es")}>Es</button>
+          <button onClick={() => setLocale("en-US")}>EN-US</button>
         </div>
       </nav>
     </header>
