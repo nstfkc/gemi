@@ -4,10 +4,8 @@ import type { I18nServiceProvider } from "./I18nServiceProvider";
 
 export class I18nServiceContainer extends ServiceContainer {
   static _name = "I18nServiceContainer";
-  isEnabled = false;
   translations = {};
-  supportedLocales: string[] = [];
-
+  isEnabled = false;
   constructor(public service: I18nServiceProvider) {
     super();
 
@@ -22,6 +20,7 @@ export class I18nServiceContainer extends ServiceContainer {
         for (const dic of dicArray) {
           translations[locale][route][dic.name] = {};
           for (const [key, value] of Object.entries(dic.dictionary)) {
+            this.isEnabled = true;
             translations[locale][route][dic.name][key] = value[locale];
           }
         }
@@ -32,25 +31,25 @@ export class I18nServiceContainer extends ServiceContainer {
 
   detectLocale(req: HttpRequest<any, any>) {
     const fallbackLocale =
-      this.service.defaultLocale ?? this.supportedLocales[0] ?? "en-US";
+      this.service.defaultLocale ?? this.service.supportedLocales[0] ?? "en-US";
     const detectedLocale = this.service.detectLocale(req);
-    if (this.supportedLocales.includes(detectedLocale)) {
+    console.log({ detectedLocale });
+    if (this.service.supportedLocales.includes(detectedLocale)) {
       return detectedLocale;
     }
 
     const previousLocale = req.cookies.get("i18n-locale");
-
     const locale =
       previousLocale ?? (req.headers.get("accept-language") || fallbackLocale);
 
     const [_locale] = locale.split(",");
 
-    if (this.supportedLocales.includes(_locale)) {
+    if (this.service.supportedLocales.includes(_locale)) {
       return _locale;
     }
 
     if (_locale.length === 2) {
-      for (const supportedLocale of this.supportedLocales) {
+      for (const supportedLocale of this.service.supportedLocales) {
         if (supportedLocale.startsWith(_locale)) {
           return supportedLocale;
         }

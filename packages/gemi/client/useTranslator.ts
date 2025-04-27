@@ -1,6 +1,6 @@
-import type { I18nDictionary } from "../rpc";
-import type { ParseTranslationParams, Prettify } from "../../utils/type";
-import { applyTranslationParams } from "../../utils/applyTranslationParams";
+import type { I18nDictionary } from "./rpc";
+import type { ParseTranslationParams, Prettify } from "../utils/type";
+import { applyTranslationParams } from "../utils/applyTranslationParams";
 import { useContext } from "react";
 import { I18nContext } from "./I18nContext";
 

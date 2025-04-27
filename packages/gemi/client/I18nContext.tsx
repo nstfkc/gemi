@@ -5,8 +5,8 @@ import {
   useRef,
   useState,
 } from "react";
-import { ServerDataContext } from "../ServerDataProvider";
-import { HttpClientContext } from "../HttpClientContext";
+import { ServerDataContext } from "./ServerDataProvider";
+import { HttpClientContext } from "./HttpClientContext";
 
 type TranslationScope = Record<string, string>;
 type TranslationScopes = Record<string, TranslationScope>;

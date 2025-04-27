@@ -20,7 +20,7 @@ import {
   QueryManagerContext,
   QueryManagerProvider,
 } from "./QueryManagerContext";
-import { I18nContext, I18nProvider } from "./i18n/I18nContext";
+import { I18nContext, I18nProvider } from "./I18nContext";
 import { WebSocketContextProvider } from "./WebsocketContext";
 import { HttpClientContext } from "./HttpClientContext";
 import { useNavigate } from "./useNavigate";

@@ -240,13 +240,14 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           const locale = i18nServiceContainer.detectLocale(
             new HttpRequest(req, params as any),
           );
+
           const translations = i18nServiceContainer.getPageTranslations(
             locale,
             currentPathName,
           );
 
           i18n = {
-            supportedLocales: i18nServiceContainer.supportedLocales,
+            supportedLocales: i18nServiceContainer.service.supportedLocales,
             currentLocale: locale,
             dictionary: {
               [locale]: translations,

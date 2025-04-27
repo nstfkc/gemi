@@ -3,7 +3,7 @@ import { RequestContext } from "../http/requestContext";
 
 export class I18n {
   static getSupportedLocales() {
-    return I18nServiceContainer.use().supportedLocales;
+    return I18nServiceContainer.use().service.supportedLocales;
   }
 
   static getDefaultLocale() {
@@ -18,7 +18,7 @@ export class I18n {
   static setLocale(locale = I18n.locale()) {
     const container = I18nServiceContainer.use();
     let _locale = locale;
-    if (!container.supportedLocales.includes(locale)) {
+    if (!container.service.supportedLocales.includes(locale)) {
       _locale = container.service.defaultLocale;
     }
 

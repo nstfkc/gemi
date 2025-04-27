@@ -1,7 +1,7 @@
 import { useContext } from "react";
 import { I18nContext } from "./I18nContext";
-import { ClientRouterContext } from "../ClientRouterContext";
-import { useLocation } from "../useLocation";
+import { ClientRouterContext } from "./ClientRouterContext";
+import { useLocation } from "./useLocation";
 
 export function useLocale() {
   const { changeLocale, locale, fetchTranslations } = useContext(I18nContext);

@@ -16,8 +16,8 @@
     "gemi": "*",
     "jsx-email": "2.0.0-rc2.1",
     "lucide-react": "^0.484.0",
-    "react": "19.0.0",
-    "react-dom": "19.0.0",
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
     "sharp": "^0.34.1",
     "tailwind-merge": "^3.0.2",
     "tailwindcss-animate": "^1.0.7"
@@ -38,7 +38,7 @@
     "vitest": "^1.5.0"
   },
   "resolution": {
-    "react": "19.0.0",
-    "react-dom": "19.0.0"
+    "react": "19.1.0",
+    "react-dom": "19.1.0"
   }
 }

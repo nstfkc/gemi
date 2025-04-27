@@ -1,5 +1,5 @@
 import { createContext, type PropsWithChildren } from "react";
-import type { Translations } from "./i18n/I18nContext";
+import type { Translations } from "./I18nContext";
 import type { ComponentTree } from "./types";
 import type { User } from "../auth/adapters/types";
 
