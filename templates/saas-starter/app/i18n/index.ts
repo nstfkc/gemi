@@ -1,4 +1,4 @@
-import { Dictionary } from "gemi/i18n";
+import { Dictionary } from "gemi/i18n/i18n/index.ts";
 
 const HomePage = Dictionary.create("HomePage", {
   title: {

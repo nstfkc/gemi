@@ -1,4 +1,4 @@
-import { I18nServiceContainer } from "./I18nServiceContainer";
+import { I18nServiceContainer } from "../i18n/I18nServiceContainer";
 import { RequestContext } from "./requestContext";
 import { ValidationError } from "./Router";
 

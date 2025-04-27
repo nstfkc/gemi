@@ -1,6 +1,8 @@
 import { rmdir } from "node:fs/promises";
 
-await rmdir("dist", { recursive: true });
+try {
+  await rmdir("dist", { recursive: true });
+} catch (err) {}
 
 const result = await Bun.build({
   entrypoints: [

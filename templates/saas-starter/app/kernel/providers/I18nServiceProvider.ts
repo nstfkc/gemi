@@ -1,11 +1,10 @@
-import components from "@/app/i18n";
 import { I18nServiceProvider } from "gemi/i18n";
 
 export default class extends I18nServiceProvider {
   defaultLocale = "en-US";
-  supportedLocales = ["en-US", "es", "de", "tr"];
+  supportedLocales = ["en-US", "tr-TR"];
   prefetch = {
-    "/": [components.HomePage],
-    "/about": [components.About],
+    "/": [],
+    "/about": [],
   };
 }

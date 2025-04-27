@@ -1,10 +1,10 @@
-import type { HttpRequest } from "../http";
+import type { HttpRequest } from "../http/HttpRequest";
 import { ServiceContainer } from "../services/ServiceContainer";
 import type { I18nServiceProvider } from "./I18nServiceProvider";
 
 export class I18nServiceContainer extends ServiceContainer {
   static _name = "I18nServiceContainer";
-  isEnabled = true;
+  isEnabled = false;
   translations = {};
   supportedLocales: string[] = [];
 
@@ -31,6 +31,8 @@ export class I18nServiceContainer extends ServiceContainer {
   }
 
   detectLocale(req: HttpRequest<any, any>) {
+    const fallbackLocale =
+      this.service.defaultLocale ?? this.supportedLocales[0] ?? "en-US";
     const detectedLocale = this.service.detectLocale(req);
     if (this.supportedLocales.includes(detectedLocale)) {
       return detectedLocale;
@@ -39,7 +41,7 @@ export class I18nServiceContainer extends ServiceContainer {
     const previousLocale = req.cookies.get("i18n-locale");
 
     const locale =
-      previousLocale ?? (req.headers.get("accept-language") || "en-US");
+      previousLocale ?? (req.headers.get("accept-language") || fallbackLocale);
 
     const [_locale] = locale.split(",");
 
@@ -55,14 +57,7 @@ export class I18nServiceContainer extends ServiceContainer {
       }
     }
 
-    const fallbackLocale =
-      this.service.defaultLocale ?? this.supportedLocales[0];
-
-    if (fallbackLocale) {
-      return fallbackLocale;
-    }
-
-    return "en-US";
+    return fallbackLocale;
   }
 
   getPageTranslations(locale: string, scope: string) {

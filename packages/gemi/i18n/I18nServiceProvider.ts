@@ -1,5 +1,6 @@
 import type { Dictionary } from "./Dictionary";
 import { ServiceProvider } from "../services/ServiceProvider";
+import type { HttpRequest } from "../http/HttpRequest";
 
 export class I18nServiceProvider extends ServiceProvider {
   boot() {}
@@ -7,7 +8,7 @@ export class I18nServiceProvider extends ServiceProvider {
   defaultLocale = "en-US";
   prefetch: Record<string, Array<Dictionary<any>>> = {};
   components: Record<string, Dictionary<any>> = {};
-  detectLocale(_req: any) {
-    return "en-US";
+  detectLocale(_req: HttpRequest): string | null {
+    return null;
   }
 }

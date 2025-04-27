@@ -18,7 +18,7 @@
     "lucide-react": "^0.484.0",
     "react": "19.0.0",
     "react-dom": "19.0.0",
-    "sharp": "^0.33.3",
+    "sharp": "^0.34.1",
     "tailwind-merge": "^3.0.2",
     "tailwindcss-animate": "^1.0.7"
   },

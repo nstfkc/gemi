@@ -1,7 +1,7 @@
 import { AuthApiRouter } from "../../auth/AuthenticationServiceProvider";
 import { ApiRouter, HttpRequest } from "../../http";
 import { GEMI_REQUEST_BREAKER_ERROR } from "../../http/Error";
-import { I18nRouter } from "../../http/I18nServiceContainer";
+import { I18nRouter } from "../../i18n/I18nRouter";
 import { RequestContext } from "../../http/requestContext";
 import { ImageOptimizationRouter } from "../image-optimization/ImageOptimizationServiceContainer";
 import { LoggingRouter } from "../logging/LoggingRouter";
