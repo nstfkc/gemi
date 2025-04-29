@@ -143,7 +143,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
   const { updatePrefecthedData } = useContext(QueryManagerContext);
   const { routerSubject, updatePageData, fetchRouteCSS } =
     useContext(ClientRouterContext);
-  const { fetchTranslations } = useContext(I18nContext);
+  const { updateDictionary } = useContext(I18nContext);
 
   const [routeState, setRouteState] = useState<RouteState>({
     params: routerSubject.getValue().params,
@@ -177,7 +177,6 @@ const Routes = (props: { componentTree: ComponentTree }) => {
       const [res] = await Promise.all([
         fetch(url),
         fetchRouteCSS(pathname),
-        fetchTranslations(pathname, undefined),
         ...views.map((component) => {
           if (!window?.loaders) return Promise.resolve();
           const loader = window?.loaders?.[component] ?? (() => ({}));
@@ -188,6 +187,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
       if (res.ok) {
         const {
           data,
+          i18n,
           prefetchedData,
           breadcrumbs,
           directive = {},
@@ -202,6 +202,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
         }
         updatePageData(data, breadcrumbs);
         updatePrefecthedData(prefetchedData);
+        updateDictionary(i18n?.dictionary ?? {});
 
         if (is404) {
           startTransition(() => {
@@ -220,12 +221,12 @@ const Routes = (props: { componentTree: ComponentTree }) => {
   }, [
     routerSubject,
     fetchRouteCSS,
-    fetchTranslations,
     fetch,
     host,
     replace,
     updatePageData,
     updatePrefecthedData,
+    updateDictionary,
   ]);
 
   return (
