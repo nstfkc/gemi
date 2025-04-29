@@ -1,3 +1,5 @@
+import type { JSX } from "react";
+
 export type UnwrapPromise<T> = T extends Promise<infer U> ? U : T;
 
 type PluralSuffix = "s" | "es" | "ies";
@@ -16,11 +18,19 @@ export type IsEmptyObject<T> = T extends Record<string, never> ? true : false;
 
 export type ParseTranslationParams<T extends string> =
   T extends `${infer _Start}{{${infer Param}}}${infer Rest}`
-    ? Param extends `${infer Key}:${infer Type}`
+    ? Param extends `${infer Key}:[${string}]`
       ? {
-          [K in Key]: Type extends "number" ? number : string;
+          [K in Key]: (p: string) => string | JSX.Element;
         } & ParseTranslationParams<Rest>
-      : { [K in Param]: string } & ParseTranslationParams<Rest>
+      : Param extends `${infer Key}:${infer Type}`
+        ? {
+            [K in Key]: Type extends "number"
+              ? (() => number | JSX.Element) | number
+              : (() => string | JSX.Element) | string;
+          } & ParseTranslationParams<Rest>
+        : {
+            [K in Param]: (() => string | JSX.Element) | string;
+          } & ParseTranslationParams<Rest>
     : Record<string, never>;
 
 type JSONValue =

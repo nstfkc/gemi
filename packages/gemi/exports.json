@@ -10,7 +10,7 @@
     "./kernel": "./kernel/index.ts",
     "./services": "./services/index.ts",
     "./broadcasting": "./broadcasting/index.ts",
-    "./i18n/": "./i18n/index.ts"
+    "./i18n": "./i18n/index.ts"
   },
   "prod": {
     "./http": "./dist/http/index.js",

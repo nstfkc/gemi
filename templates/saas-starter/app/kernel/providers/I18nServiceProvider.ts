@@ -1,4 +1,4 @@
-import { I18nServiceProvider } from "gemi/i18n/i18n/index.ts";
+import { I18nServiceProvider } from "gemi/i18n";
 import components from "@/app/i18n";
 
 export default class extends I18nServiceProvider {

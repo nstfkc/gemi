@@ -1,4 +1,4 @@
-import { applyTranslationParams } from "../utils/applyTranslationParams";
+import { parseTranslation } from "../utils/parseTranslation";
 import type { ParseTranslationParams, Prettify } from "../utils/type";
 
 type Translations = Record<string, Record<string, string>>;
@@ -36,7 +36,7 @@ export class Dictionary<T extends Translations> {
         `Translation not found for ${String(key)} in ${String(locale)}`,
       );
     }
-    return applyTranslationParams(this.dictionary[key][locale], args[0] ?? {});
+    return parseTranslation(this.dictionary[key][locale], args[0] ?? {});
   }
 
   static create<const T extends Translations>(name: string, translations: T) {

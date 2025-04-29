@@ -1,4 +1,4 @@
-import { Dictionary } from "gemi/i18n/i18n/index.ts";
+import { Dictionary } from "gemi/i18n";
 
 const HomePage = Dictionary.create("HomePage", {
   title: {
@@ -13,8 +13,12 @@ const HomePage = Dictionary.create("HomePage", {
 
 const About = Dictionary.create("About", {
   title: {
-    "en-US": "About",
-    "tr-TR": "Hakkında",
+    "en-US": "About {{version:[hi]}}",
+    "tr-TR": "Hakkında {{version:[hi]}}",
+  },
+  para: {
+    "en-US": "You are! {{break}} hello there",
+    "tr-TR": "You are! {{break}} hello there",
   },
 });
 

@@ -5,7 +5,10 @@ export default function About(props: ViewProps<"/about">) {
   return (
     <div className="h-dvh">
       <h1>{props.title}</h1>
-      <div>{x("title")}</div>
+      <div>{x.jsx("title", { version: (v) => <strong>{v}</strong> })}</div>
+      <div>
+        <p>{x.jsx("para", { break: () => <br /> })}</p>
+      </div>
     </div>
   );
 }

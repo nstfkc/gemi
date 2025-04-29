@@ -33,7 +33,6 @@ export class I18nServiceContainer extends ServiceContainer {
     const fallbackLocale =
       this.service.defaultLocale ?? this.service.supportedLocales[0] ?? "en-US";
     const detectedLocale = this.service.detectLocale(req);
-    console.log({ detectedLocale });
     if (this.service.supportedLocales.includes(detectedLocale)) {
       return detectedLocale;
     }
