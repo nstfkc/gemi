@@ -94,10 +94,10 @@ class SearchParams {
 
 export function useSearchParams() {
   const { push } = useNavigate();
-  const { search } = useContext(RouteStateContext);
+  const { search, pathname } = useContext(RouteStateContext);
 
   const callback = (search: Record<string, never>, shallow: boolean) => {
-    push(location.pathname as never, {
+    push(pathname as never, {
       search,
       shallow,
     });

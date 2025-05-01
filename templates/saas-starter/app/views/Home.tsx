@@ -1,4 +1,4 @@
-import { useTranslator } from "gemi/client";
+import { Link, useLocation, useSearchParams, useTranslator } from "gemi/client";
 import { useState } from "react";
 
 export default function Home() {
@@ -7,14 +7,25 @@ export default function Home() {
   const x = useTranslator("HomePage");
 
   return (
-    <div className="h-dvh">
+    <div>
       <div>
         <div>Title: {x("title", { version: "1" })}</div>
-        <button type="button" onClick={() => setCount((c) => c + 1)}>
-          Count:{count}
-        </button>
       </div>
       <h1>Home</h1>
+      <div>
+        <Link href="/" hash="#test">
+          Test
+        </Link>
+        <Link href="/" search={{ test: "test" }}>
+          Searh test
+        </Link>
+      </div>
+      <div className="h-[1000px]"></div>
+      <div>
+        <section id="test" className="h-[500px] bg-red-100">
+          <h1>Test</h1>
+        </section>
+      </div>
     </div>
   );
 }

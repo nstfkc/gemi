@@ -8,11 +8,13 @@ type Options<T extends ViewPaths> = UrlParser<T> extends Record<string, never>
   ? {
       search?: Record<string, string | number | boolean | undefined | null>;
       shallow?: boolean;
+      hash?: string;
       locale?: string;
     }
   : {
       search?: Record<string, string | number | boolean | undefined | null>;
       params: UrlParser<T>;
+      hash?: string;
       shallow?: boolean;
       locale?: string;
     };
@@ -37,10 +39,12 @@ export function useNavigate() {
         params = {},
         shallow,
         locale,
+        hash,
       } = {
         params: {},
         shallow: false,
         locale: null,
+        hash: "",
         ...options,
       };
 
@@ -50,19 +54,22 @@ export function useNavigate() {
         localeSegment = locale;
       }
 
-      let routePath = applyParams(path, params);
-      routePath = localeSegment && routePath === "/" ? "" : routePath;
+      const routePath = applyParams(path, params);
       const navigationPath = [
-        [localeSegment ? `/${localeSegment}` : "", routePath].join(""),
+        `${localeSegment ? `/${localeSegment}` : ""}${routePath}`,
         urlSearchParams.toString(),
-      ].join("?");
+      ]
+        .filter((s) => s.length > 0)
+        .join("?");
+
+      const finalPath = [navigationPath, hash].filter(Boolean).join("");
 
       if (shallow) {
-        history?.[pushOrReplace](navigationPath);
+        history?.[pushOrReplace](finalPath, { shallow });
         return;
       }
 
-      history?.[pushOrReplace](navigationPath);
+      history?.[pushOrReplace](finalPath);
     };
   }
 

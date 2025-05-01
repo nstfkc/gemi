@@ -23,6 +23,7 @@ type LinkBaseProps<T extends keyof Views> = Omit<
 > & {
   active?: boolean;
   href: T;
+  hash?: string;
   params: UrlParser<T>;
   search?: T extends keyof Views
     ? Views[T]["input"] extends Record<string, never>
@@ -51,6 +52,7 @@ export const Link = <T extends keyof Views>(props: LinkProps<T>) => {
   const {
     href,
     onClick,
+    hash = "",
     active = false,
     params = {},
     search = {},
@@ -63,11 +65,15 @@ export const Link = <T extends keyof Views>(props: LinkProps<T>) => {
   const path = applyParams(href, params);
   const urlLocaleSegment = location.locale;
   const localeSegment = urlLocaleSegment ? `/${urlLocaleSegment}` : "";
-  const targetHref = [`${localeSegment}${path}`, searchParams.toString()]
-    .filter((s) => s.length > 0)
-    .join("?");
 
-  const currentHref = [location.pathname, location.hash, location.search]
+  const targetHref = [
+    [`${localeSegment}${path}`, searchParams.toString()]
+      .filter((s) => s.length > 0)
+      .join("?"),
+    hash,
+  ].join("");
+
+  const currentHref = [location.pathname, location.search, location.hash]
     .filter((item) => !!item)
     .join("");
 
@@ -83,12 +89,20 @@ export const Link = <T extends keyof Views>(props: LinkProps<T>) => {
             return;
           }
         }
-        e.preventDefault();
+        let currentPath = window.location.pathname.replace(localeSegment, "");
+        currentPath = currentPath === "" ? "/" : currentPath;
         onClick?.(e);
+
+        if (hash === "") {
+          e.preventDefault();
+        }
+        onClick?.(e);
+
         push(href, {
+          hash,
           search,
           params,
-          shallow: path === window.location.pathname,
+          shallow: path === currentPath,
         } as unknown as never);
       }}
       {...rest}

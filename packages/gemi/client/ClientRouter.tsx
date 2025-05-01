@@ -42,7 +42,7 @@ function restoreScroll(action: Action | null = null, _pathname = "no path") {
 
   const { pathname, search, hash } = window.location;
 
-  const key = [pathname, hash, search].join("");
+  const key = [pathname, search, hash].join("");
   const sh = window.scrollHistory;
 
   const scrollPosition = sh?.get(key);

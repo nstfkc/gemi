@@ -174,7 +174,7 @@ export const ClientRouterProvider = (
         window.scrollHistory = new Map();
       }
       const { hash, pathname, search } = routerSubject.getValue();
-      const key = [pathname, hash, search].join("");
+      const key = [pathname, search, hash].join("");
       window.scrollHistory.set(key, window.scrollY);
       let _pathname = location.pathname;
       let _locale = null;

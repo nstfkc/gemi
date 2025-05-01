@@ -18,7 +18,6 @@ export class I18n {
   static setLocale(locale = I18n.locale()) {
     const container = I18nServiceContainer.use();
     let _locale = locale;
-    console.log({ _locale });
     if (!container.service.supportedLocales.includes(locale)) {
       _locale = container.service.defaultLocale;
     }
