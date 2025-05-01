@@ -6,12 +6,13 @@ export function useLocation() {
   if (!ctx) {
     throw new Error("Router context not found");
   }
-  const { hash, pathname, search, state } = ctx;
+  const { hash, pathname, search, state, locale } = ctx;
   return {
     hash,
     key: pathname,
     pathname,
     search,
     state,
+    locale,
   };
 }

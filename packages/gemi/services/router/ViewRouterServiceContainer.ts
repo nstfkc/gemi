@@ -26,6 +26,7 @@ import { MiddlewareServiceContainer } from "../middleware/MiddlewareServiceConta
 import { Log } from "../../facades/Log";
 import { I18n } from "../../facades/I18n";
 import { AuthViewRouter } from "../../auth/AuthenticationServiceProvider";
+import { Redirect } from "../../facades";
 
 export class ViewRouterServiceContainer extends ServiceContainer {
   static _name = "ViewRouterServiceContainer";
@@ -76,6 +77,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
     prefetchedData: any;
     params: any;
     breadcrumbs: any;
+    urlLocaleSegment?: string;
   }) {
     const {
       csrfTokenHMAC,
@@ -89,13 +91,16 @@ export class ViewRouterServiceContainer extends ServiceContainer {
       user,
       viewData,
       breadcrumbs,
+      urlLocaleSegment,
     } = props;
+
+    const pageDataKey = pathname.replace(`/${urlLocaleSegment}`, "");
 
     const result = {
       kind: "view",
       data: {
         pageData: {
-          [pathname]: viewData,
+          [pageDataKey]: viewData,
         },
         __csrf: csrfTokenHMAC.toString("base64"),
         prefetchedData,
@@ -104,6 +109,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
         routeManifest: this.routeManifest,
         breadcrumbs,
         router: {
+          urlLocaleSegment,
           pathname: currentPathName,
           params,
           currentPath: pathname,
@@ -160,8 +166,40 @@ export class ViewRouterServiceContainer extends ServiceContainer {
   async handleViewRequest(req: Request) {
     const url = new URL(req.url);
     const isViewDataRequest = url.pathname.endsWith(".json");
-    const urlPathname = url.pathname.replace(".json", "");
+    const urlPathnameWithLocale = url.pathname.replace(".json", "");
 
+    const [, maybeLocale, ...rest] = urlPathnameWithLocale.split("/");
+    let urlPathname = `/${rest.join("/")}`;
+    let urlLocaleSegment = null;
+    let urlLocale: string | null = null;
+
+    if (
+      !I18nServiceContainer.use().service.supportedLocales.includes(maybeLocale)
+    ) {
+      urlPathname = urlPathnameWithLocale;
+    } else {
+      urlLocaleSegment = maybeLocale;
+      urlLocale = maybeLocale;
+    }
+
+    if (I18nServiceContainer.use().isEnabled) {
+      if (urlLocale === null) {
+        const locale = I18nServiceContainer.use().detectLocale(
+          new HttpRequest(req, {}, "view", urlPathname),
+        );
+        const _pathname = url.pathname === "/" ? "" : url.pathname;
+        return new Response("", {
+          status: 302,
+          headers: {
+            "Cache-Control":
+              "private, no-cache, no-store, max-age=0, must-revalidate",
+            Location: `/${locale}${_pathname}`,
+          },
+        });
+      }
+    }
+
+    urlPathname = urlPathname.replace("//", "/");
     let handlers: ViewRouteExec[] = [];
     let middlewares: (RouterMiddleware | string)[] = [];
     let currentPathName: null | string = null;
@@ -185,7 +223,11 @@ export class ViewRouterServiceContainer extends ServiceContainer {
 
     const httpRequest = new HttpRequest(req, params, "view", currentPathName);
     return await RequestContext.run(httpRequest, async () => {
-      I18n.setLocale();
+      if (urlLocale) {
+        I18n.setLocale(urlLocale.replaceAll("/", ""));
+      } else {
+        I18n.setLocale();
+      }
       let pageData: {
         cookies: Set<Cookie>;
         headers: Headers;
@@ -194,6 +236,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
         prefetchedData: Record<string, any>;
         user: any; // TODO: fix type
         params: Record<string, any>;
+        urlLocaleSegment: string | null;
       } | null = null;
       const ctx = RequestContext.getStore();
 
@@ -219,6 +262,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           prefetchedData: Object.fromEntries(prefetchedResources.entries()),
           currentPathName: httpRequest.routePath,
           params: httpRequest.params,
+          urlLocaleSegment,
         };
         const { params, currentPathName, user } = pageData;
 
@@ -237,9 +281,14 @@ export class ViewRouterServiceContainer extends ServiceContainer {
         const isI18nEnabled = i18nServiceContainer.isEnabled;
         let i18n: Record<string, any> = {};
         if (isI18nEnabled) {
-          const locale = i18nServiceContainer.detectLocale(
-            new HttpRequest(req, params as any),
-          );
+          let locale = null;
+          if (urlLocale) {
+            locale = urlLocale.replaceAll("/", "");
+          } else {
+            locale = i18nServiceContainer.detectLocale(
+              new HttpRequest(req, params as any),
+            );
+          }
 
           const translations = i18nServiceContainer.getPageTranslations(
             locale,
@@ -314,6 +363,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           user,
           viewData,
           breadcrumbs,
+          urlLocaleSegment,
         });
       } catch (err) {
         if (err.kind === GEMI_REQUEST_BREAKER_ERROR) {

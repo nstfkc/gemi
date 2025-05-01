@@ -10,6 +10,7 @@ export interface RouteState {
   hash: string;
   action: Action | null;
   routePath: string;
+  locale: string | null;
 }
 
 export const RouteStateContext = createContext({} as RouteState);

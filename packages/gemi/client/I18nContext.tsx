@@ -17,6 +17,7 @@ interface I18nContextValue {
   changeLocale: (locale: string) => void;
   updateDictionary: (
     translations: Record<string, Record<string, Record<string, string>>>,
+    locale?: string,
   ) => void;
   fetchTranslations: (
     pathname: string,
@@ -24,6 +25,7 @@ interface I18nContextValue {
     signal?: AbortSignal,
   ) => Promise<void>;
   getComponentTranslations: (key: string) => Record<string, string>;
+  supportedLocales: string[];
 }
 
 export type CreateI18nDictionary<T> = {
@@ -56,6 +58,7 @@ export const I18nProvider = (props: PropsWithChildren) => {
 
   function updateDictionary(
     translations: Record<string, Record<string, Record<string, string>>> = {},
+    locale?: string,
   ) {
     for (const [locale, value] of Object.entries(translations)) {
       if (!dictionary.current.has(locale)) {
@@ -69,6 +72,7 @@ export const I18nProvider = (props: PropsWithChildren) => {
         scopes.set(scope, translations);
       }
     }
+    changeLocale(locale);
   }
 
   const changeLocale = (locale: string) => {
@@ -111,6 +115,7 @@ export const I18nProvider = (props: PropsWithChildren) => {
         changeLocale,
         updateDictionary,
         fetchTranslations,
+        supportedLocales: i18n.supportedLocales,
       }}
     >
       {props.children}

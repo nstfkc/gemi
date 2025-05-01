@@ -17,8 +17,8 @@ const Header = () => {
             <Link href="/auth/sign-in">Sign In</Link>
           </div>
         </div>
-        <div>
-          <button onClick={() => setLocale("es")}>Es</button>
+        <div className="flex gap-4">
+          <button onClick={() => setLocale("tr-TR")}>TR-TR</button>
           <button onClick={() => setLocale("en-US")}>EN-US</button>
         </div>
       </nav>

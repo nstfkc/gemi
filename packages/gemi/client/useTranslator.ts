@@ -3,6 +3,7 @@ import type { ParseTranslationParams, Prettify } from "../utils/type";
 import { useContext, type JSX } from "react";
 import { I18nContext } from "./I18nContext";
 import { parseTranslation } from "../utils/parseTranslation";
+import { log } from "console";
 
 type Parser<T extends Record<string, string>> = Prettify<
   {

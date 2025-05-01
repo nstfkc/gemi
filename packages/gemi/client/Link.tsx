@@ -1,4 +1,4 @@
-import type { ComponentProps } from "react";
+import { useContext, useSyncExternalStore, type ComponentProps } from "react";
 
 import { applyParams } from "../utils/applyParams";
 import { useLocation } from "./useLocation";
@@ -7,6 +7,7 @@ import { useNavigate } from "./useNavigate";
 import type { ViewRPC } from "./rpc";
 import type { Prettify } from "../utils/type";
 import { useParams } from "./useParams";
+import { ClientRouterContext } from "./ClientRouterContext";
 
 type Views = {
   [K in keyof ViewRPC as K extends `view:${infer P}`
@@ -60,11 +61,13 @@ export const Link = <T extends keyof Views>(props: LinkProps<T>) => {
   const searchParams = new URLSearchParams(normalizeSearch(search));
 
   const path = applyParams(href, params);
-  const targetHref = [path, searchParams.toString()]
+  const urlLocaleSegment = location.locale;
+  const localeSegment = urlLocaleSegment ? `/${urlLocaleSegment}` : "";
+  const targetHref = [`${localeSegment}${path}`, searchParams.toString()]
     .filter((s) => s.length > 0)
     .join("?");
 
-  const currentHref = [location.pathname, location.search]
+  const currentHref = [location.pathname, location.hash, location.search]
     .filter((item) => !!item)
     .join("");
 

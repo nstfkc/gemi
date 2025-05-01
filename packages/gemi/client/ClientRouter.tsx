@@ -154,6 +154,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
     hash: routerSubject.getValue().hash,
     state: routerSubject.getValue().state,
     routePath: routerSubject.getValue().routePath,
+    locale: routerSubject.getValue().locale,
   });
 
   const { replace } = useNavigate();
@@ -173,7 +174,12 @@ const Routes = (props: { componentTree: ComponentTree }) => {
         return;
       }
 
-      const url = `${host}${pathname}.json${search}`;
+      const localeSegment = routerState.locale ? `/${routerState.locale}` : "";
+      const _pathname =
+        localeSegment.length > 0 && pathname === "/" ? "" : pathname;
+      const pathnameWithLocaleSegment = `${localeSegment}${_pathname}`;
+
+      const url = `${host}${pathnameWithLocaleSegment}.json${search}`;
       const [res] = await Promise.all([
         fetch(url),
         fetchRouteCSS(pathname),
@@ -202,7 +208,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
         }
         updatePageData(data, breadcrumbs);
         updatePrefecthedData(prefetchedData);
-        updateDictionary(i18n?.dictionary ?? {});
+        updateDictionary(i18n?.dictionary ?? {}, i18n?.currentLocale ?? "");
 
         if (is404) {
           startTransition(() => {
@@ -271,6 +277,7 @@ export const ClientRouter = (props: {
               currentPath={router.currentPath}
               routeManifest={routeManifest}
               breadcrumbs={breadcrumbs}
+              urlLocaleSegment={router.urlLocaleSegment}
             >
               <StrictMode>
                 <RootLayout>

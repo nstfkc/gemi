@@ -16,6 +16,7 @@ import { HttpReload } from "./HttpReload";
 import { HttpClientContext } from "./HttpClientContext";
 import type { Breadcrumb } from "./useBreadcrumbs";
 import type { RouteState } from "./RouteStateContext";
+import { I18nContext } from "./I18nContext";
 
 declare global {
   interface Window {
@@ -40,6 +41,7 @@ interface ClientRouterContextValue {
   fetchRouteCSS: (routePath: string) => Promise<void>;
   breadcrumbsCache: Map<string, Breadcrumb>;
   routerSubject: Subject<RouteState>;
+  urlLocaleSegment: string | null;
 }
 
 export const ClientRouterContext = createContext(
@@ -52,6 +54,7 @@ interface ClientRouterProviderProps {
   cssManifest: Record<string, string[]>;
   pageData: Record<string, unknown>;
   currentPath: string;
+  urlLocaleSegment: string | null;
   params: Record<string, string>;
   searchParams: string;
   is404: boolean;
@@ -72,11 +75,14 @@ export const ClientRouterProvider = (
     params,
     searchParams,
     breadcrumbs,
+    urlLocaleSegment,
   } = props;
   const navigationAbortControllerRef = useRef(new AbortController());
   const [isNavigatingSubject] = useState(() => {
     return new Subject<boolean>(false);
   });
+
+  const { supportedLocales, locale } = useContext(I18nContext);
 
   const { fetch, host } = useContext(HttpClientContext);
 
@@ -102,6 +108,7 @@ export const ClientRouterProvider = (
       hash: "",
       action: null as Action | null,
       routePath: currentPath,
+      locale,
     });
   });
 
@@ -116,10 +123,12 @@ export const ClientRouterProvider = (
 
   const findMatchingRouteFromParams = useMemo(
     () => (pathname: string) => {
+      let routePath = pathname.replace("/en-US", "").replace("/tr-TR", "");
+      routePath = routePath === "" ? "/" : routePath;
       const candidates: string[] = [];
       for (const route of Object.keys(routeManifest)) {
         const urlPattern = new URLPattern({ pathname: route });
-        if (urlPattern.test({ pathname })) {
+        if (urlPattern.test({ pathname: routePath })) {
           candidates.push(route);
         }
       }
@@ -167,19 +176,31 @@ export const ClientRouterProvider = (
       const { hash, pathname, search } = routerSubject.getValue();
       const key = [pathname, hash, search].join("");
       window.scrollHistory.set(key, window.scrollY);
-      const routePath = getRoutePathnameFromHref(location.pathname);
+      let _pathname = location.pathname;
+      let _locale = null;
+      for (const locale of supportedLocales) {
+        if (_pathname.startsWith(`/${locale}`)) {
+          _locale = locale;
+          _pathname = _pathname.replace(`/${locale}`, "");
+          break;
+        }
+      }
+      _pathname = _pathname === "" ? "/" : _pathname;
+      const routePath = getRoutePathnameFromHref(_pathname);
       routerSubject.next({
-        views: getViewPathsFromPathname(location.pathname),
-        params: getParams(location.pathname),
+        views: getViewPathsFromPathname(_pathname),
+        params: getParams(_pathname),
         search: location.search,
         state: location.state as Record<string, unknown>,
-        pathname: location.pathname,
+        pathname: _pathname,
         action,
         routePath,
         hash: location.hash,
+        locale: _locale,
       });
     });
   }, [
+    supportedLocales,
     history,
     routerSubject,
     getParams,
@@ -262,6 +283,7 @@ export const ClientRouterProvider = (
         fetchRouteCSS,
         breadcrumbsCache: breadcrumbsCache.current,
         routerSubject,
+        urlLocaleSegment,
       }}
     >
       {children}

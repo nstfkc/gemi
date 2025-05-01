@@ -16,6 +16,7 @@ export interface ServerDataContextValue {
     currentPath: string;
     is404: boolean;
     searchParams: string;
+    urlLocaleSegment: string | null;
   };
   i18n: {
     dictionary: Translations;
