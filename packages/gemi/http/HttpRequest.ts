@@ -229,7 +229,7 @@ export class HttpRequest<
   }
 
   locale() {
-    return I18nServiceContainer.use().detectLocale(this);
+    return RequestContext.getStore().locale;
   }
 
   ctx() {

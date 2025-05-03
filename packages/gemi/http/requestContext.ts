@@ -1,6 +1,6 @@
-import { AsyncLocalStorage } from "async_hooks";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { Cookie, type CreateCookieOptions } from "./Cookie";
-import { HttpRequest } from "./HttpRequest";
+import type { HttpRequest } from "./HttpRequest";
 
 const requestContext = new AsyncLocalStorage<Store>();
 
@@ -11,8 +11,13 @@ class Store {
   prefetchPromiseQueue = new Set<() => Promise<any>>();
   user: any = null;
   csrfHmac: string | null = null;
+  locale: string | null = null;
 
   constructor(public req: HttpRequest) {}
+
+  setLocale(locale: string) {
+    this.locale = locale;
+  }
 
   setCSRFHmac(hmac: string) {
     this.csrfHmac = hmac;

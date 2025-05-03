@@ -223,11 +223,6 @@ export class ViewRouterServiceContainer extends ServiceContainer {
 
     const httpRequest = new HttpRequest(req, params, "view", currentPathName);
     return await RequestContext.run(httpRequest, async () => {
-      if (urlLocale) {
-        I18n.setLocale(urlLocale.replaceAll("/", ""));
-      } else {
-        I18n.setLocale();
-      }
       let pageData: {
         cookies: Set<Cookie>;
         headers: Headers;
@@ -240,10 +235,46 @@ export class ViewRouterServiceContainer extends ServiceContainer {
       } | null = null;
       const ctx = RequestContext.getStore();
 
+      if (urlLocale) {
+        const locale = urlLocale.replaceAll("/", "");
+        I18n.setLocale(locale);
+      } else {
+        I18n.setLocale();
+      }
+
       const httpRequest = ctx.req;
 
       try {
         await MiddlewareServiceContainer.use().runMiddleware(middlewares);
+
+        const i18nServiceContainer = I18nServiceContainer.use();
+        const isI18nEnabled = i18nServiceContainer.isEnabled;
+        let i18n: Record<string, any> = {};
+        if (isI18nEnabled) {
+          let locale = null;
+          if (urlLocale) {
+            locale = urlLocale.replaceAll("/", "");
+            ctx.setLocale(locale);
+          } else {
+            locale = i18nServiceContainer.detectLocale(
+              new HttpRequest(req, httpRequest.params as any),
+            );
+            ctx.setLocale(locale);
+          }
+
+          const translations = i18nServiceContainer.getPageTranslations(
+            locale,
+            httpRequest.routePath,
+          );
+
+          i18n = {
+            supportedLocales: i18nServiceContainer.service.supportedLocales,
+            currentLocale: locale,
+            dictionary: {
+              [locale]: translations,
+            },
+          };
+        }
 
         const data = await Promise.all([
           ...handlers.map((fn) => fn(httpRequest as any)),
@@ -275,33 +306,6 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           }
           breadcrumbs[`${key}:${currentPathName}`] = (value as any).breadcrumb;
           viewData[key] = value;
-        }
-
-        const i18nServiceContainer = I18nServiceContainer.use();
-        const isI18nEnabled = i18nServiceContainer.isEnabled;
-        let i18n: Record<string, any> = {};
-        if (isI18nEnabled) {
-          let locale = null;
-          if (urlLocale) {
-            locale = urlLocale.replaceAll("/", "");
-          } else {
-            locale = i18nServiceContainer.detectLocale(
-              new HttpRequest(req, params as any),
-            );
-          }
-
-          const translations = i18nServiceContainer.getPageTranslations(
-            locale,
-            currentPathName,
-          );
-
-          i18n = {
-            supportedLocales: i18nServiceContainer.service.supportedLocales,
-            currentLocale: locale,
-            dictionary: {
-              [locale]: translations,
-            },
-          };
         }
 
         if (isViewDataRequest) {
