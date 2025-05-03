@@ -4,7 +4,13 @@ import { ServerDataProvider } from "./ServerDataProvider";
 import { ClientRouter } from "./ClientRouter";
 import { HttpClientProvider } from "./HttpClientContext";
 
-export function init(RootLayout: ComponentType<any>) {
+export function init(
+  RootLayout: ComponentType<any>,
+  glob: Record<string, () => Promise<unknown>>,
+) {
+  if (typeof window !== "undefined") {
+    (window as any)._ = glob;
+  }
   hydrateRoot(
     document,
     <>
