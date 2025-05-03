@@ -16,16 +16,13 @@ import {
 } from "./ClientRouterContext";
 import type { ComponentTree } from "./types";
 import { ComponentsContext, ComponentsProvider } from "./ComponentContext";
-import {
-  QueryManagerContext,
-  QueryManagerProvider,
-} from "./QueryManagerContext";
-import { I18nContext, I18nProvider } from "./I18nContext";
+import { QueryManagerProvider } from "./QueryManagerContext";
+import { I18nProvider } from "./I18nContext";
 import { WebSocketContextProvider } from "./WebsocketContext";
 import { HttpClientContext } from "./HttpClientContext";
 import { useNavigate } from "./useNavigate";
 import {
-  PageData,
+  type PageData,
   type RouteState,
   RouteStateProvider,
 } from "./RouteStateContext";
@@ -78,7 +75,7 @@ const Route = memo((props: PropsWithChildren<RouteProps>) => {
   const { viewImportMap } = useContext(ComponentsContext);
   const { data } = useRouteData();
 
-  const componentData = data[pathname][componentPath];
+  const componentData = data?.[pathname]?.[componentPath] ?? {};
   const Component = viewImportMap[componentPath];
 
   useEffect(() => {
