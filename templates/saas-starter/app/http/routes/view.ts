@@ -1,3 +1,4 @@
+import { I18n, Query } from "gemi/facades";
 import { type HttpRequest, ViewRouter } from "gemi/http";
 
 class AuthViewRouter extends ViewRouter {
@@ -26,10 +27,21 @@ export default class extends ViewRouter {
     "/": this.layout("PublicLayout", {
       "/": this.view("Home"),
       "/about": this.view("About", () => {
+        // Query.prefetch("/test");
         return { title: "About" };
       }),
       "/pricing": this.view("Pricing", (req: HttpRequest) => {
         return { title: "Pricing" };
+      }),
+      "/test/:testId": this.view("Test", (req: HttpRequest) => {
+        const result = {
+          "en-US": "Hello",
+          "tr-TR": "Merhaba",
+        };
+
+        return {
+          message: result[req.locale()],
+        };
       }),
     }),
     "/auth": AuthViewRouter,

@@ -24,9 +24,14 @@ import { I18nContext, I18nProvider } from "./I18nContext";
 import { WebSocketContextProvider } from "./WebsocketContext";
 import { HttpClientContext } from "./HttpClientContext";
 import { useNavigate } from "./useNavigate";
-import { type RouteState, RouteStateProvider } from "./RouteStateContext";
+import {
+  PageData,
+  type RouteState,
+  RouteStateProvider,
+} from "./RouteStateContext";
 import { applyParams } from "../utils/applyParams";
 import { Action } from "history";
+import { useRouteData } from "./useRouteData";
 
 declare global {
   interface Window {
@@ -71,10 +76,9 @@ interface RouteProps {
 const Route = memo((props: PropsWithChildren<RouteProps>) => {
   const { componentPath, pathname, action, children } = props;
   const { viewImportMap } = useContext(ComponentsContext);
-  const { getPageData } = useContext(ClientRouterContext);
+  const { data } = useRouteData();
 
-  const data = getPageData(componentPath, pathname);
-
+  const componentData = data[pathname][componentPath];
   const Component = viewImportMap[componentPath];
 
   useEffect(() => {
@@ -84,8 +88,9 @@ const Route = memo((props: PropsWithChildren<RouteProps>) => {
   }, [action, children, componentPath]);
 
   if (Component) {
-    return <Component {...data}>{props.children}</Component>;
+    return <Component {...componentData}>{props.children}</Component>;
   }
+
   const NotFound = viewImportMap["404"];
   return <NotFound />;
 });
@@ -140,12 +145,11 @@ const Routes = (props: { componentTree: ComponentTree }) => {
   const [, startTransition] = useTransition();
   const { fetch, host } = useContext(HttpClientContext);
 
-  const { updatePrefecthedData } = useContext(QueryManagerContext);
-  const { routerSubject, updatePageData, fetchRouteCSS } =
-    useContext(ClientRouterContext);
-  const { updateDictionary } = useContext(I18nContext);
+  const { routerSubject, fetchRouteCSS } = useContext(ClientRouterContext);
+  const { breadcrumbs, pageData, i18n, prefetchedData } =
+    useContext(ServerDataContext);
 
-  const [routeState, setRouteState] = useState<RouteState>({
+  const [routeState, setRouteState] = useState<RouteState & PageData>({
     params: routerSubject.getValue().params,
     search: routerSubject.getValue().search,
     pathname: routerSubject.getValue().pathname,
@@ -155,6 +159,10 @@ const Routes = (props: { componentTree: ComponentTree }) => {
     state: routerSubject.getValue().state,
     routePath: routerSubject.getValue().routePath,
     locale: routerSubject.getValue().locale,
+    breadcrumbs,
+    data: pageData,
+    i18n,
+    prefetchedData,
   });
 
   const { replace } = useNavigate();
@@ -162,15 +170,20 @@ const Routes = (props: { componentTree: ComponentTree }) => {
   useEffect(() => {
     return routerSubject.subscribe(async (routerState) => {
       const { pathname, search, state, views } = routerState;
+
       if (routerState.views.length === 0) {
-        setRouteState(() => ({
+        setRouteState((routerState) => ({
           ...routerState,
           views: ["404"],
         }));
         return;
       }
+
       if (state?.shallow) {
-        setRouteState(routerState);
+        setRouteState((state) => ({
+          ...state,
+          ...routerState,
+        }));
         return;
       }
 
@@ -206,9 +219,6 @@ const Routes = (props: { componentTree: ComponentTree }) => {
 
           return;
         }
-        updatePageData(data, breadcrumbs);
-        updatePrefecthedData(prefetchedData);
-        updateDictionary(i18n?.dictionary ?? {}, i18n?.currentLocale ?? "");
 
         if (is404) {
           startTransition(() => {
@@ -220,20 +230,17 @@ const Routes = (props: { componentTree: ComponentTree }) => {
         }
 
         startTransition(() => {
-          setRouteState(routerState);
+          setRouteState({
+            ...routerState,
+            data,
+            i18n,
+            prefetchedData,
+            breadcrumbs,
+          });
         });
       }
     });
-  }, [
-    routerSubject,
-    fetchRouteCSS,
-    fetch,
-    host,
-    replace,
-    updatePageData,
-    updatePrefecthedData,
-    updateDictionary,
-  ]);
+  }, [routerSubject, fetchRouteCSS, fetch, host, replace]);
 
   return (
     <RouteStateProvider state={routeState}>
@@ -259,13 +266,12 @@ export const ClientRouter = (props: {
     pageData,
     cssManifest,
     breadcrumbs,
-    prefetchedData,
   } = useContext(ServerDataContext);
 
   return (
     <I18nProvider>
       <WebSocketContextProvider>
-        <QueryManagerProvider prefetchedData={prefetchedData}>
+        <QueryManagerProvider>
           <ComponentsProvider viewImportMap={props.viewImportMap}>
             <ClientRouterProvider
               cssManifest={cssManifest}

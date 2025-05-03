@@ -1,4 +1,5 @@
-import { ApiRouter, ResourceController } from "gemi/http";
+import { I18n } from "gemi/facades";
+import { ApiRouter, ResourceController, HttpRequest } from "gemi/http";
 
 class ProductsController extends ResourceController {
   async list() {}
@@ -19,8 +20,16 @@ export default class extends ApiRouter {
 
   routes = {
     "/org": OrgRouter,
-    "/test": this.post(() => {
-      return {};
+    "/test": this.get((req: HttpRequest) => {
+      const result = {
+        "en-US": "Hello",
+        "tr-TR": "Merhaba",
+      };
+      const locale = I18n.locale() ?? "en-US";
+      console.log({ locale });
+      return {
+        message: result[locale],
+      };
     }),
     "/health": this.get(() => {
       return {

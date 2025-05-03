@@ -13,10 +13,23 @@ export interface RouteState {
   locale: string | null;
 }
 
-export const RouteStateContext = createContext({} as RouteState);
+export type PageData = {
+  data: Record<string, unknown>;
+  i18n: {
+    currentLocale: string;
+    dictionary: Record<string, Record<string, unknown>>;
+    supportedLocales: string[];
+  };
+  prefetchedData: Record<string, unknown>;
+  breadcrumbs: any;
+};
+
+export const RouteStateContext = createContext({} as RouteState & PageData);
 
 export const RouteStateProvider = (
-  props: PropsWithChildren<{ state: RouteState }>,
+  props: PropsWithChildren<{
+    state: RouteState & PageData;
+  }>,
 ) => {
   return (
     <RouteStateContext.Provider value={props.state}>

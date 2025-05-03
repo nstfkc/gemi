@@ -6,7 +6,7 @@ const Header = () => {
   const [locale, setLocale] = useLocale();
   return (
     <header>
-      <nav className="container max-w-4xl mx-auto">
+      <nav className="container max-w-4xl mx-auto px-4 lg:px-0">
         <div className="flex justify-between items-center py-8">
           <Link href="/">
             <BrainIcon /> brain.co
@@ -29,7 +29,7 @@ const Header = () => {
 const Footer = () => {
   return (
     <footer className="bg-emerald-200 pt-16 pb-4">
-      <div className="container max-w-4xl mx-auto">
+      <div className="container max-w-4xl mx-auto px-4 lg:px-0">
         <div className="flex justify-between">
           <div>
             <Link href="/">
@@ -55,7 +55,9 @@ export default function PublicLayout(props: { children: ReactNode }) {
   return (
     <>
       <Header />
-      <main className="container max-w-4xl mx-auto">{children}</main>
+      <main className="container max-w-4xl mx-auto px-4 lg:px-0">
+        {children}
+      </main>
       <Footer />
     </>
   );

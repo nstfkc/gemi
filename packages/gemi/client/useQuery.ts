@@ -9,6 +9,7 @@ import { applyParams } from "../utils/applyParams";
 import type { UrlParser } from "./types";
 import { omitNullishValues } from "../utils/omitNullishValues";
 import { useParams } from "./useParams";
+import { useRouteData } from "./useRouteData";
 
 interface Config<T> {
   fallbackData?: T;
@@ -107,11 +108,11 @@ export function useQuery<T extends keyof GetRPC>(
   const searchParams = new URLSearchParams(omitNullishValues(search));
   searchParams.sort();
   const variantKey = searchParams.toString();
+  const { prefetchedData } = useRouteData();
+  const fallbackData =
+    config.fallbackData ?? prefetchedData?.[normalPath] ?? null;
   const [resource, setResource] = useState(() =>
-    getResource(
-      normalPath,
-      config.fallbackData ? { [variantKey]: config.fallbackData } : null,
-    ),
+    getResource(normalPath, fallbackData),
   );
 
   const retryIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
