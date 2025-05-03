@@ -253,7 +253,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
 
 export const ClientRouter = (props: {
   viewImportMap?: Record<string, ReturnType<typeof lazy>>;
-  RootLayout: ComponentType<{ children: ReactNode }>;
+  RootLayout: ComponentType<{ children: ReactNode; locale: string }>;
 }) => {
   const { RootLayout } = props;
   const {
@@ -263,6 +263,7 @@ export const ClientRouter = (props: {
     pageData,
     cssManifest,
     breadcrumbs,
+    i18n,
   } = useContext(ServerDataContext);
 
   return (
@@ -283,7 +284,7 @@ export const ClientRouter = (props: {
               urlLocaleSegment={router.urlLocaleSegment}
             >
               <StrictMode>
-                <RootLayout>
+                <RootLayout locale={i18n.currentLocale}>
                   <Routes componentTree={componentTree} />
                 </RootLayout>
               </StrictMode>

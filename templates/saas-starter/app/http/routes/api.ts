@@ -26,7 +26,6 @@ export default class extends ApiRouter {
         "tr-TR": "Merhaba",
       };
       const locale = I18n.locale() ?? "en-US";
-      console.log({ locale });
       return {
         message: result[locale],
       };
