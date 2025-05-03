@@ -10,6 +10,7 @@ import { ServiceContainer } from "../ServiceContainer";
 import type { ApiRouterServiceProvider } from "./ApiRouterServiceProvider";
 import { createFlatApiRoutes, type FlatApiRoutes } from "./createFlatApiRoutes";
 import { ViewRouterServiceContainer } from "./ViewRouterServiceContainer";
+import { I18nServiceContainer } from "../../i18n/I18nServiceContainer";
 
 class DebugRouter extends ApiRouter {
   routes = {
@@ -150,6 +151,13 @@ export class ApiRouterServiceContainer extends ServiceContainer {
     }
     return await RequestContext.run(httpRequest, async () => {
       const ctx = RequestContext.getStore();
+
+      const i18nServiceContainer = I18nServiceContainer.use();
+      if (i18nServiceContainer.isEnabled) {
+        const locale = i18nServiceContainer.detectLocale(httpRequest);
+        ctx.setLocale(locale);
+      }
+
       ctx.setRequest(httpRequest);
       const middlewareResponse = await this.runRouteMiddleware(
         path,
