@@ -78,6 +78,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
     params: any;
     breadcrumbs: any;
     urlLocaleSegment?: string;
+    meta: any;
   }) {
     const {
       csrfTokenHMAC,
@@ -92,6 +93,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
       viewData,
       breadcrumbs,
       urlLocaleSegment,
+      meta,
     } = props;
 
     const pageDataKey = pathname.replace(`/${urlLocaleSegment}`, "");
@@ -99,6 +101,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
     const result = {
       kind: "view",
       data: {
+        meta,
         pageData: {
           [pageDataKey]: viewData,
         },
@@ -232,6 +235,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
         user: any; // TODO: fix type
         params: Record<string, any>;
         urlLocaleSegment: string | null;
+        meta: any;
       } | null = null;
       const ctx = RequestContext.getStore();
 
@@ -294,6 +298,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           currentPathName: httpRequest.routePath,
           params: httpRequest.params,
           urlLocaleSegment,
+          meta: ctx.renderMeta(),
         };
         const { params, currentPathName, user } = pageData;
 
@@ -319,6 +324,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
 
           return new Response(
             JSON.stringify({
+              meta: pageData.meta,
               data: {
                 [urlPathname]: viewData,
               },
@@ -368,6 +374,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           viewData,
           breadcrumbs,
           urlLocaleSegment,
+          meta: pageData.meta,
         });
       } catch (err) {
         if (err.kind === GEMI_REQUEST_BREAKER_ERROR) {

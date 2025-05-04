@@ -6,3 +6,4 @@ export { Query } from "./Prefetch";
 export { Broadcast } from "./Broadcast";
 export { Url } from "./Url";
 export { Log } from "./Log";
+export { Meta } from "./Meta";

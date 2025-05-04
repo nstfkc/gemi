@@ -29,6 +29,7 @@ import {
 import { applyParams } from "../utils/applyParams";
 import { Action } from "history";
 import { useRouteData } from "./useRouteData";
+import { updateMeta } from "./Head";
 
 declare global {
   interface Window {
@@ -206,9 +207,11 @@ const Routes = (props: { componentTree: ComponentTree }) => {
           i18n,
           prefetchedData,
           breadcrumbs,
+          meta,
           directive = {},
           is404 = false,
         } = await res.json();
+        updateMeta(meta);
         if (directive?.kind === "Redirect") {
           if (directive?.path) {
             replace(directive.path, { params: {} } as unknown);

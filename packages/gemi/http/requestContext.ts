@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { Cookie, type CreateCookieOptions } from "./Cookie";
 import type { HttpRequest } from "./HttpRequest";
+import { Metadata } from "./Metadata";
 
 const requestContext = new AsyncLocalStorage<Store>();
 
@@ -12,11 +13,16 @@ class Store {
   user: any = null;
   csrfHmac: string | null = null;
   locale: string | null = null;
+  metadata = new Metadata();
 
   constructor(public req: HttpRequest) {}
 
   setLocale(locale: string) {
     this.locale = locale;
+  }
+
+  renderMeta() {
+    return this.metadata.render();
   }
 
   setCSRFHmac(hmac: string) {

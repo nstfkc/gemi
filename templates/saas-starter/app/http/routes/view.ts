@@ -1,4 +1,4 @@
-import { I18n, Query } from "gemi/facades";
+import { I18n, Meta, Query } from "gemi/facades";
 import { type HttpRequest, ViewRouter } from "gemi/http";
 
 class AuthViewRouter extends ViewRouter {
@@ -24,26 +24,35 @@ export default class extends ViewRouter {
   middlewares = ["cache:public,12840,must-revalidate"];
 
   override routes = {
-    "/": this.layout("PublicLayout", {
-      "/": this.view("Home"),
-      "/about": this.view("About", () => {
-        // Query.prefetch("/test");
-        return { title: "About" };
-      }),
-      "/pricing": this.view("Pricing", (req: HttpRequest) => {
-        return { title: "Pricing" };
-      }),
-      "/test/:testId": this.view("Test", (req: HttpRequest) => {
-        const result = {
-          "en-US": "Hello",
-          "tr-TR": "Merhaba",
-        };
+    "/": this.layout(
+      "PublicLayout",
+      () => {
+        Meta.title("GEMI here");
+        Meta.description("GEMI here");
+      },
+      {
+        "/": this.view("Home", () => {
+          Meta.title("GEMI here home page");
+        }),
+        "/about": this.view("About", () => {
+          // Query.prefetch("/test");
+          return { title: "About" };
+        }),
+        "/pricing": this.view("Pricing", (req: HttpRequest) => {
+          return { title: "Pricing" };
+        }),
+        "/test/:testId": this.view("Test", (req: HttpRequest) => {
+          const result = {
+            "en-US": "Hello",
+            "tr-TR": "Merhaba",
+          };
 
-        return {
-          message: result[req.locale()],
-        };
-      }),
-    }),
+          return {
+            message: result[req.locale()],
+          };
+        }),
+      },
+    ),
     "/auth": AuthViewRouter,
     "(app)/": AppRouter,
   };

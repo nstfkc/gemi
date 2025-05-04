@@ -1,4 +1,4 @@
-import { type ComponentType } from "react";
+import type { ComponentType } from "react";
 import { hydrateRoot, createRoot } from "react-dom/client";
 import { ServerDataProvider } from "./ServerDataProvider";
 import { ClientRouter } from "./ClientRouter";

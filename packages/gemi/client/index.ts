@@ -32,6 +32,7 @@ export type { ViewProps, LayoutProps } from "./types";
 export type { CreateI18nDictionary } from "./I18nContext";
 
 export { Image } from "./Image";
+export { Head } from "./Head";
 
 export { useForgotPassword } from "./auth/useForgotPassword";
 export { useSignIn } from "./auth/useSignIn";
