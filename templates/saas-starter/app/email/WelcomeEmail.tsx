@@ -20,7 +20,7 @@ const baseUrl = process.env.HOST_NAME;
 export class WelcomeEmail extends Email {
   subject = "Welcome to our platform";
 
-  template = (props: { name: string; magicLink: string }) => {
+  template = (props: { name: string; magicLink: string; pin: string }) => {
     return (
       <Html>
         <Head />
@@ -35,6 +35,7 @@ export class WelcomeEmail extends Email {
                 You can view your payments and a variety of other information
                 about your account right from your dashboard.
               </Text>
+              <Text>{props.pin}</Text>
               <Button style={button} href={props.magicLink}>
                 View your Brain.co Dashboard
               </Button>

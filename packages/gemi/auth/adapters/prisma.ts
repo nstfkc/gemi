@@ -39,7 +39,10 @@ export class PrismaAuthenticationAdapter implements IAuthenticationAdapter {
   }
 
   async createUser(args: CreateUserArgs): Promise<User> {
-    return await this.prisma.user.create({ data: args });
+    return await this.prisma.user.create({
+      data: args,
+      omit: { password: true },
+    });
   }
 
   async deleteSession(args: DeleteSessionArgs): Promise<void> {

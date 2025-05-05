@@ -2,7 +2,7 @@ import { randomBytes } from "crypto";
 import { Temporal } from "temporal-polyfill";
 import { HttpRequest } from "../http";
 import { ServiceContainer } from "../services/ServiceContainer";
-import { AuthenticationServiceProvider } from "./AuthenticationServiceProvider";
+import type { AuthenticationServiceProvider } from "./AuthenticationServiceProvider";
 
 export class AuthenticationServiceContainer extends ServiceContainer {
   static _name = "AuthenticationServiceContainer";

@@ -298,15 +298,20 @@ export class HttpRequest<
           continue;
         }
 
+        if (!input.get(key) && !Object.keys(rules).includes("required")) {
+          continue;
+        }
+
         if (!errors[key]) {
           errors[key] = [];
         }
+
         if (rule === "required") {
           errors[key] = [String(_message)];
           break;
-        } else {
-          errors[key].push(String(_message));
         }
+
+        errors[key].push(String(_message));
       }
     }
 

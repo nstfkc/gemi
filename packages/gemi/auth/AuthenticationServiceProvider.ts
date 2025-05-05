@@ -58,8 +58,8 @@ class SignUpRequest extends HttpRequest<
       email: "Invalid email",
     },
     password: {
-      required: "Password is required",
-      "min:8": "Password must be at least 8 characters",
+      // required: "Password is required",
+      "min:8": "Password must be at least 9 characters",
     },
   };
 }

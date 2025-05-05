@@ -29,6 +29,7 @@ export default class extends AuthenticationServiceProvider {
         data: {
           name: user.name,
           magicLink: `${process.env.HOST_NAME}/auth/sign-in/magic-link?token=${magicLink.token}&email=${user.email}`,
+          pin: magicLink.pin,
         },
         to: [user.email],
       });
