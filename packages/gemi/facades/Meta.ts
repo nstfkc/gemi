@@ -1,3 +1,4 @@
+import type { OpenGraphParams } from "../http/Metadata";
 import { RequestContext } from "../http/requestContext";
 
 export class Meta {
@@ -7,5 +8,8 @@ export class Meta {
   }
   static title(title: string) {
     RequestContext.getStore().metadata.title(title);
+  }
+  static openGraph(params: OpenGraphParams) {
+    RequestContext.getStore().metadata.openGraph(params);
   }
 }

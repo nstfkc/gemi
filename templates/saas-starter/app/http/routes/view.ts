@@ -29,6 +29,14 @@ export default class extends ViewRouter {
       () => {
         Meta.title("GEMI here");
         Meta.description("GEMI here");
+        Meta.openGraph({
+          title: "GEMI here",
+          image: "/.og",
+          type: "image/svg+xml",
+          url: "https://gemiapp.com",
+          imageWidth: 600,
+          imageHeight: 400,
+        });
       },
       {
         "/": this.view("Home", () => {

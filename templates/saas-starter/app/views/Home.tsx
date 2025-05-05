@@ -1,4 +1,11 @@
-import { Link, useLocation, useSearchParams, useTranslator } from "gemi/client";
+import {
+  Link,
+  OGImage,
+  useLocation,
+  useSearchParams,
+  useTranslator,
+  type ViewProps,
+} from "gemi/client";
 import { useState } from "react";
 
 export default function Home() {

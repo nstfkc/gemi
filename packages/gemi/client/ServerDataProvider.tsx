@@ -29,7 +29,7 @@ export interface ServerDataContextValue {
   };
   __csrf: string;
   cssManifest: Record<string, string[]>;
-  meta: Record<string, string>;
+  meta: any;
 }
 
 export const ServerDataContext = createContext({} as ServerDataContextValue);

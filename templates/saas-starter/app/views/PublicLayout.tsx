@@ -1,5 +1,5 @@
-import { Link, useLocale } from "gemi/client";
-import { type ReactNode } from "react";
+import { Link, OpenGraphImage, useLocale, type ViewProps } from "gemi/client";
+import type { ReactNode } from "react";
 import { BrainIcon } from "lucide-react";
 
 const Header = () => {
@@ -60,5 +60,37 @@ export default function PublicLayout(props: { children: ReactNode }) {
       </main>
       <Footer />
     </>
+  );
+}
+
+export async function OpenGraph(data: ViewProps<"/">) {
+  return (
+    <OpenGraphImage
+      width={600}
+      height={400}
+      fonts={[
+        {
+          name: "Open Sans",
+          weight: 400,
+          style: "normal",
+        },
+      ]}
+    >
+      <div
+        style={{
+          width: "600px",
+          height: "400px",
+          display: "flex",
+          flexDirection: "column",
+          justifyContent: "center",
+          alignItems: "center",
+          backgroundColor: "#FFF",
+        }}
+      >
+        <img width={32} src="http://localhost:5173/gemi.svg" />
+        <div>Hello world</div>
+        <div>Enes tufekci</div>
+      </div>
+    </OpenGraphImage>
   );
 }

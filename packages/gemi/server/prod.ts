@@ -20,6 +20,7 @@ export async function startProdServer() {
   process.env.DIST_DIR = distDir;
 
   const viewImportMap = {};
+  const ogMap = {};
   const cssManifest = {};
   const template = (viewName: string, path: string) =>
     `"${viewName}": () => import("${path}")`;
@@ -39,6 +40,7 @@ export async function startProdServer() {
       `${process.env.DIST_DIR}/server/${serverFile?.file}`
     );
     viewImportMap[fileName] = mod.default;
+    ogMap[fileName] = mod.OpenGraph;
     const clientFile = manifest[`app/views/${fileName}.tsx`];
 
     if (clientFile?.css && clientFile?.css.length > 0) {
@@ -120,6 +122,7 @@ export async function startProdServer() {
           bootstrapModules: [`/${manifest["app/client.tsx"].file}`],
           loaders,
           viewImportMap,
+          ogMap,
           cssManifest,
         });
       }

@@ -1,3 +1,16 @@
+export type OpenGraphParams = {
+  title: string;
+  type: string;
+  url: string;
+  image: string;
+  imageAlt?: string;
+  imageWidth?: number;
+  imageHeight?: number;
+  twitterImage?: string;
+  twitterImageAlt?: string;
+  twitterImageWidth?: number;
+  twitterImageHeight?: number;
+};
 export class Metadata {
   content: any = {
     title: "Gemi App",
@@ -9,6 +22,7 @@ export class Metadata {
     return {
       title: this.content.title,
       description: this.content.description,
+      openGraph: this.content.openGraph,
     };
   }
 
@@ -20,12 +34,39 @@ export class Metadata {
     this.content.description = description;
   }
 
-  openGraph(title: string, description: string, image: string, url: string) {
-    this.content.openGraph = {
-      title,
-      description,
-      image,
-      url,
-    };
+  openGraph({
+    title,
+    type,
+    url,
+    image,
+    imageAlt,
+    imageWidth,
+    imageHeight,
+    twitterImage = image,
+    twitterImageAlt = imageAlt,
+    twitterImageWidth = imageWidth,
+    twitterImageHeight = imageHeight,
+  }: OpenGraphParams) {
+    let _image = image;
+    let _twitterImage = twitterImage;
+    if (image && !image.startsWith("http")) {
+      _image = `${process.env.HOST_NAME}${image}`;
+      _twitterImage = `${process.env.HOST_NAME}${twitterImage}`;
+    }
+    this.content.openGraph = Object.fromEntries(
+      Object.entries({
+        title,
+        type,
+        url,
+        image: _image,
+        imageAlt,
+        imageWidth,
+        imageHeight,
+        twitterImage: _twitterImage,
+        twitterImageAlt,
+        twitterImageWidth,
+        twitterImageHeight,
+      }).filter(([_, value]) => value !== undefined),
+    );
   }
 }

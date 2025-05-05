@@ -11,9 +11,7 @@ const appDir = join(rootDir, "app");
 export async function startDevServer() {
   const root = process.cwd();
 
-  const vite = await (
-    await import("vite")
-  ).createServer({
+  const vite = await (await import("vite")).createServer({
     root,
     logLevel: "error",
     server: {
@@ -104,6 +102,7 @@ export async function startDevServer() {
             return result;
           } else {
             const viewImportMap = {};
+            const ogMap = {};
             const template = (viewName: string, path: string) =>
               `"${viewName}": () => import("${path}")`;
             const templates = [];
@@ -121,6 +120,7 @@ export async function startDevServer() {
                 { fixStacktrace: true },
               );
               viewImportMap[fileName] = mod.default;
+              ogMap[fileName] = mod?.OpenGraph;
               templates.push(
                 template(fileName, `${appDir}/views/${fileName}.tsx`),
               );
@@ -137,6 +137,7 @@ export async function startDevServer() {
                 "/@vite/client",
               ],
               viewImportMap,
+              ogMap,
               loaders,
               cssManifest: {},
             });

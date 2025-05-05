@@ -1,3 +1,4 @@
+import satori from "satori";
 import { HttpRequest } from "../../http";
 import type { Cookie } from "../../http/Cookie";
 import { GEMI_REQUEST_BREAKER_ERROR } from "../../http/Error";
@@ -10,7 +11,10 @@ import {
 } from "./createFlatViewRoutes";
 import type { ViewRouterServiceProvider } from "./ViewRouterServiceProvider";
 // @ts-ignore
-import { renderToReadableStream } from "react-dom/server.browser";
+import {
+  renderToReadableStream,
+  renderToString,
+} from "react-dom/server.browser";
 import { createElement, Fragment } from "react";
 
 // @ts-ignore
@@ -26,7 +30,29 @@ import { MiddlewareServiceContainer } from "../middleware/MiddlewareServiceConta
 import { Log } from "../../facades/Log";
 import { I18n } from "../../facades/I18n";
 import { AuthViewRouter } from "../../auth/AuthenticationServiceProvider";
-import { Redirect } from "../../facades";
+
+async function getTtfFont(
+  family: string,
+  weight: number,
+  style: "normal" | "italic",
+): Promise<ArrayBuffer> {
+  const familyParam = `${style === "italic" ? "italic," : ""}wght@${style === "italic" ? "1," : ""}${weight}`;
+
+  // Get css style sheet with user agent Mozilla/5.0 Firefox/1.0 to ensure non-variable TTF is returned
+  const cssCall = await fetch(
+    `https://fonts.googleapis.com/css2?family=${family}:${familyParam}&display=swap`,
+    {
+      headers: {
+        "User-Agent": "Mozilla/5.0 Firefox/1.0",
+      },
+    },
+  );
+
+  const css = await cssCall.text();
+  const ttfUrl = css.match(/url\(([^)]+)\)/)?.[1];
+
+  return await fetch(ttfUrl).then((res) => res.arrayBuffer());
+}
 
 export class ViewRouterServiceContainer extends ServiceContainer {
   static _name = "ViewRouterServiceContainer";
@@ -79,6 +105,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
     breadcrumbs: any;
     urlLocaleSegment?: string;
     meta: any;
+    isOgRequest?: boolean;
   }) {
     const {
       csrfTokenHMAC,
@@ -94,6 +121,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
       breadcrumbs,
       urlLocaleSegment,
       meta,
+      isOgRequest,
     } = props;
 
     const pageDataKey = pathname.replace(`/${urlLocaleSegment}`, "");
@@ -132,6 +160,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
       bootstrapModules: string[];
       loaders: string;
       cssManifest: Record<string, string[]>;
+      ogMap: Record<string, any>;
     }) => {
       const {
         bootstrapModules,
@@ -139,7 +168,51 @@ export class ViewRouterServiceContainer extends ServiceContainer {
         getStyles,
         viewImportMap,
         cssManifest,
+        ogMap,
       } = params;
+
+      if (isOgRequest) {
+        let ogHandler = null;
+        let ogComponent = null;
+        for (const view of currentViews) {
+          if (typeof ogMap[view] === "function") {
+            ogComponent = view;
+            ogHandler = ogMap[view];
+          }
+        }
+        if (!ogHandler) {
+          return new Response("Not found", { status: 404 });
+        }
+        const data = Object.values(result.data.pageData)[0];
+
+        try {
+          await renderToReadableStream(
+            createElement(ogHandler, data[ogComponent]),
+            {
+              onError: () => {},
+            },
+          );
+        } catch (err) {
+          const { fonts, ...options } = err.satoriOptions;
+          const _fonts = await Promise.all(
+            fonts.map((font) => {
+              return getTtfFont(font.name, font.weight, font.style).then(
+                (data) => ({
+                  ...font,
+                  data,
+                }),
+              );
+            }),
+          );
+
+          return new Response(
+            await satori(err.jsx, { ...options, fonts: _fonts }),
+            { headers: { "Content-Type": "image/svg+xml" } },
+          );
+        }
+
+        return new Response("data");
+      }
 
       result.data["cssManifest"] = cssManifest;
       const stream = await renderToReadableStream(
@@ -169,7 +242,10 @@ export class ViewRouterServiceContainer extends ServiceContainer {
   async handleViewRequest(req: Request) {
     const url = new URL(req.url);
     const isViewDataRequest = url.pathname.endsWith(".json");
-    const urlPathnameWithLocale = url.pathname.replace(".json", "");
+    const isOgRequest = url.pathname.endsWith(".og");
+    const urlPathnameWithLocale = url.pathname
+      .replace(".json", "")
+      .replace(".og", "");
 
     const [, maybeLocale, ...rest] = urlPathnameWithLocale.split("/");
     let urlPathname = `/${rest.join("/")}`;
@@ -185,7 +261,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
       urlLocale = maybeLocale;
     }
 
-    if (I18nServiceContainer.use().isEnabled) {
+    if (I18nServiceContainer.use().isEnabled && !isOgRequest) {
       if (urlLocale === null) {
         const locale = I18nServiceContainer.use().detectLocale(
           new HttpRequest(req, {}, "view", urlPathname),
@@ -375,6 +451,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           breadcrumbs,
           urlLocaleSegment,
           meta: pageData.meta,
+          isOgRequest,
         });
       } catch (err) {
         if (err.kind === GEMI_REQUEST_BREAKER_ERROR) {

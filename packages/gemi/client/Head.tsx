@@ -19,6 +19,63 @@ export function updateMeta(meta: any) {
   }
 }
 
+const OpenGraph = (props: {
+  title: string;
+  type: string;
+  url: string;
+  image: string;
+  imageAlt?: string;
+  imageWidth?: number;
+  imageHeight?: number;
+  twitterImage?: string;
+  twitterImageAlt?: string;
+  twitterImageWidth?: number;
+  twitterImageHeight?: number;
+}) => {
+  const {
+    title,
+    type,
+    url,
+    image,
+    imageAlt,
+    imageWidth,
+    imageHeight,
+    twitterImage,
+    twitterImageAlt,
+    twitterImageWidth,
+    twitterImageHeight,
+  } = props;
+
+  return (
+    <>
+      <meta property="og:title" content={title} />
+      <meta property="og:type" content={type} />
+      <meta property="og:url" content={url} />
+      <meta property="og:image" content={image} />
+      {imageAlt && <meta property="og:image:alt" content={imageAlt} />}
+      {imageWidth && (
+        <meta property="og:image:width" content={String(imageWidth)} />
+      )}
+      {imageHeight && (
+        <meta property="og:image:height" content={String(imageHeight)} />
+      )}
+      {twitterImage && <meta name="twitter:image" content={twitterImage} />}
+      {twitterImageAlt && (
+        <meta name="twitter:image:alt" content={twitterImageAlt} />
+      )}
+      {twitterImageWidth && (
+        <meta name="twitter:image:width" content={String(twitterImageWidth)} />
+      )}
+      {twitterImageHeight && (
+        <meta
+          name="twitter:image:height"
+          content={String(twitterImageHeight)}
+        />
+      )}
+    </>
+  );
+};
+
 export const Head = ({
   children = null,
   charSet = "utf-8",
@@ -32,6 +89,7 @@ export const Head = ({
       {meta.description && (
         <meta name="description" content={meta.description} />
       )}
+      {meta.openGraph && <OpenGraph {...meta.openGraph} />}
       {children}
     </head>
   );
