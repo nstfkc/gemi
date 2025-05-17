@@ -83,7 +83,11 @@ export class QueryResource {
     const cacheKey = [window.location.origin, this.key, variantKey]
       .filter((s) => s.length > 0)
       .join("?");
-    caches.delete(cacheKey);
+    try {
+      if (caches) {
+        caches?.delete(cacheKey);
+      }
+    } catch (err) {}
   }
 
   private async resolveVariant(variantKey: string, silent = false) {

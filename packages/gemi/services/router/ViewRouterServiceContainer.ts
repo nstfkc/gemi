@@ -205,9 +205,12 @@ export class ViewRouterServiceContainer extends ServiceContainer {
             }),
           );
 
+          const ogHeaders = new Headers(headers);
+          ogHeaders.set("Content-Type", "image/svg+xml");
+
           return new Response(
             await satori(err.jsx, { ...options, fonts: _fonts }),
-            { headers: { "Content-Type": "image/svg+xml" } },
+            { headers: ogHeaders },
           );
         }
 

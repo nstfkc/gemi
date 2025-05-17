@@ -126,16 +126,21 @@ export class LoggingServiceContainer extends ServiceContainer {
     try {
       log = JSON.stringify(logObject);
     } catch (err) {
-      throw new Error("Metadata must be a valid JSON object");
+      console.log("Error parsing log object", err);
     }
     this.writerSize += log.length;
     this.fileSize += log.length;
 
-    this.writer.write(log);
-    this.writer.write("\n");
-    Broadcast.channel("/logs/live", {}).publish(JSON.stringify(logObject));
-    this.service.onLogCreated(logObject);
-    this.tryFlush();
+    try {
+      this.writer.write(log);
+      this.writer.write("\n");
+      Broadcast.channel("/logs/live", {}).publish(JSON.stringify(logObject));
+      this.service.onLogCreated(logObject);
+      this.tryFlush();
+    } catch (err) {
+      console.error("Error writing log", err);
+      // Do something
+    }
   }
 
   async tryFlush() {
