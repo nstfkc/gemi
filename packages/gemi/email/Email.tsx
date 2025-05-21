@@ -36,7 +36,15 @@ export class Email {
       bcc = instance.bcc,
       attachments = instance.attachments,
       data,
+      headers = {},
     } = args;
+
+    const recipients =
+      await EmailServiceContainer.use().service.filterRecipients(to);
+
+    if (!recipients.length) {
+      return;
+    }
 
     const html = await instance.render({
       ...(data as any),
@@ -58,6 +66,7 @@ export class Email {
       to,
       attachments,
       html,
+      headers,
     });
   }
 
