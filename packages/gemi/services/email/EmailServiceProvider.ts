@@ -4,6 +4,7 @@ import { ResendDriver } from "./drivers/ResendDriver";
 
 export class EmailServiceProvider extends ServiceProvider {
   driver: EmailDriver = new ResendDriver();
+  headers: Record<string, string> = {};
 
   boot() {}
 

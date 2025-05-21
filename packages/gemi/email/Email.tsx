@@ -17,6 +17,7 @@ export class Email {
   bcc = [];
   attachments = [];
   template: ComponentType<any>;
+  headers: Record<string, string> = {};
 
   static async send<T extends Email>(
     this: new () => T,
@@ -25,6 +26,7 @@ export class Email {
     const instance = new this();
 
     const defaultLocale = I18nServiceContainer.use().service.defaultLocale;
+    const emailService = EmailServiceContainer.use().service;
 
     const {
       to = instance.to,
@@ -39,17 +41,28 @@ export class Email {
       headers = {},
     } = args;
 
-    const recipients =
-      await EmailServiceContainer.use().service.filterRecipients(to);
+    const _headers = {
+      ...(emailService.headers ?? {}),
+      ...(instance.headers ?? {}),
+      ...(headers ?? {}),
+    };
+
+    const recipients = await emailService.filterRecipients(to);
 
     if (!recipients.length) {
       return;
     }
 
-    const html = await instance.render({
-      ...(data as any),
-      locale: args.locale,
-    });
+    const [html, text] = await Promise.all([
+      instance.render({
+        ...(data as any),
+        locale: args.locale,
+      }),
+      instance.renderText({
+        ...(data as any),
+        locale: args.locale,
+      }),
+    ]);
 
     if (process.env.EMAIL_DEBUG === "true") {
       const fileName = `${process.env.ROOT_DIR}/.debug/emails/${new Date().toISOString()}${subject}.html`;
@@ -66,12 +79,18 @@ export class Email {
       to,
       attachments,
       html,
-      headers,
+      headers: _headers,
+      text,
     });
   }
 
   protected async render<T extends Record<string, any>>(props: T) {
     const Template = this.template;
     return await render(<Template {...props} />);
+  }
+
+  protected async renderText<T extends Record<string, any>>(props: T) {
+    const Template = this.template;
+    return await render(<Template {...props} />, { plainText: true });
   }
 }

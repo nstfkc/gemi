@@ -11,5 +11,6 @@ export interface SendEmailParams {
   bcc: string[];
   attachments: EmailAttachment[];
   html: string;
+  text?: string;
   headers?: Record<string, string>;
 }
