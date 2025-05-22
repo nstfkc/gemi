@@ -65,9 +65,12 @@ export async function startProdServer() {
       pathname: "/*.:filetype(png|txt|js|css|jpg|svg|jpeg|ico|ttf)",
     });
 
+    const isWellKnownFile = pathname.startsWith("/.well-known");
+    const isFileRequest = pattern.test({ pathname }) || isWellKnownFile;
+
     const isApi = pathname.startsWith("/api");
 
-    if (pattern.test({ pathname }) && !isApi) {
+    if (isFileRequest && !isApi) {
       const url = new URL(req.url);
       const filePath = req.url.replace(url.origin, "").split("?")[0];
       const file = Bun.file(
