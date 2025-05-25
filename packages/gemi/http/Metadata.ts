@@ -1,5 +1,6 @@
 export type OpenGraphParams = {
   title: string;
+  description?: string;
   type: string;
   url: string;
   image: string;
@@ -36,6 +37,7 @@ export class Metadata {
 
   openGraph({
     title,
+    description,
     type,
     url,
     image,
@@ -56,6 +58,7 @@ export class Metadata {
     this.content.openGraph = Object.fromEntries(
       Object.entries({
         title,
+        description,
         type,
         url,
         image: _image,

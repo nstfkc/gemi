@@ -1,4 +1,7 @@
 import satori from "satori";
+// @ts-ignore
+import sharp from "sharp";
+
 import { HttpRequest } from "../../http";
 import type { Cookie } from "../../http/Cookie";
 import { GEMI_REQUEST_BREAKER_ERROR } from "../../http/Error";
@@ -206,12 +209,16 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           );
 
           const ogHeaders = new Headers(headers);
-          ogHeaders.set("Content-Type", "image/svg+xml");
+          ogHeaders.set("Content-Type", "image/png");
+          const svg = await satori(err.jsx, { ...options, fonts: _fonts });
+          const png = await sharp(Buffer.from(svg))
+            .png({
+              compressionLevel: 0,
+              effort: 10,
+            })
+            .toBuffer();
 
-          return new Response(
-            await satori(err.jsx, { ...options, fonts: _fonts }),
-            { headers: ogHeaders },
-          );
+          return new Response(png, { headers: ogHeaders });
         }
 
         return new Response("data");

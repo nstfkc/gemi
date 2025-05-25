@@ -24,6 +24,7 @@ const OpenGraph = (props: {
   type: string;
   url: string;
   image: string;
+  description?: string;
   imageAlt?: string;
   imageWidth?: number;
   imageHeight?: number;
@@ -34,6 +35,7 @@ const OpenGraph = (props: {
 }) => {
   const {
     title,
+    description,
     type,
     url,
     image,
@@ -52,6 +54,7 @@ const OpenGraph = (props: {
       <meta property="og:type" content={type} />
       <meta property="og:url" content={url} />
       <meta property="og:image" content={image} />
+      {description && <meta property="og:description" content={description} />}
       {imageAlt && <meta property="og:image:alt" content={imageAlt} />}
       {imageWidth && (
         <meta property="og:image:width" content={String(imageWidth)} />
@@ -59,7 +62,12 @@ const OpenGraph = (props: {
       {imageHeight && (
         <meta property="og:image:height" content={String(imageHeight)} />
       )}
-      {twitterImage && <meta name="twitter:image" content={twitterImage} />}
+      {twitterImage && (
+        <>
+          <meta name="twitter:image" content={twitterImage} />
+          <meta name="twitter:card" content="summary_large_image" />
+        </>
+      )}
       {twitterImageAlt && (
         <meta name="twitter:image:alt" content={twitterImageAlt} />
       )}

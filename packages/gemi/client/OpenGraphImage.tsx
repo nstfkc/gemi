@@ -14,7 +14,6 @@ export const OpenGraphImage = ({
     <>
       {(() => {
         throw {
-          x: "1",
           jsx: createElement(Fragment, { children }),
           satoriOptions,
         };

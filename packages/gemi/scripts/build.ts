@@ -25,6 +25,7 @@ const result = await Bun.build({
     "react/jsx-runtime",
     "bun",
     "jsx-email",
+    "sharp",
   ],
   target: "bun",
   format: "esm",

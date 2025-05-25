@@ -11,7 +11,7 @@ export default defineConfig({
     minify: false,
     outDir: "dist/client",
     rollupOptions: {
-      external: ["react", "react-dom", "react/jsx-runtime", "gemi"],
+      external: ["react", "react-dom", "react/jsx-runtime", "gemi", "sharp"],
     },
     sourcemap: true,
   },
