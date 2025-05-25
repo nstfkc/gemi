@@ -1,6 +1,6 @@
 {
   "name": "gemi",
-  "version": "0.15.11",
+  "version": "0.15.12",
   "author": "Enes Tufekci <enes@gemijs.dev>",
   "license": "MIT",
   "devDependencies": {
@@ -63,11 +63,13 @@
     "recast": "^0.23.9",
     "resend": "^3.4.0",
     "satori": "^0.12.2",
-    "sharp": "^0.34.2",
     "temporal-polyfill": "^0.2.5",
     "twitter-api-v2": "^1.20.2",
     "urlpattern-polyfill": "^10.0.0",
     "uuid": "^9.0.1",
     "vite": "^6.3.5"
+  },
+  "peerDependencies": {
+    "sharp": "^0.34.2"
   }
 }
