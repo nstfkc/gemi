@@ -49,6 +49,72 @@ export class AuthenticationServiceContainer extends ServiceContainer {
     return false;
   }
 
+  async createOrUpdateSessionV2(user: { email: string; id?: number }) {
+    const authProvider = this.provider;
+    const req = new HttpRequest();
+
+    const userAgent = req.headers.get("User-Agent");
+
+    const hasher = new Bun.CryptoHasher("sha256");
+    hasher.update(`${user.email}${userAgent}`);
+
+    const token = hasher.digest("hex");
+    let session = await authProvider.adapter.findSession({
+      token,
+      userAgent:
+        process.env.NODE_ENV === "development"
+          ? "local"
+          : req.headers.get("User-Agent"),
+    });
+
+    if (!session) {
+      let userId: number = user.id;
+      if (!userId) {
+        const { id } = await authProvider.adapter.findUserByEmailAddress(
+          user.email,
+          false,
+        );
+        userId = id;
+      }
+      session = await authProvider.adapter.createSessionV2({
+        token,
+        userId,
+        userAgent:
+          process.env.NODE_ENV === "development"
+            ? "local"
+            : req.headers.get("User-Agent"),
+        expiresAt: new Date(
+          Temporal.Now.instant()
+            .add({ hours: authProvider.sessionExpiresInHours })
+            .toString(),
+        ),
+        absoluteExpiresAt: new Date(
+          Temporal.Now.instant()
+            .add({ hours: authProvider.sessionAbsoluteExpiresInHours })
+            .toString(),
+        ),
+      });
+    } else {
+      session = await authProvider.adapter.updateSession({
+        token,
+        expiresAt: new Date(
+          Temporal.Now.instant()
+            .add({ hours: authProvider.sessionExpiresInHours })
+            .toString(),
+        ),
+      });
+    }
+
+    let sessionExtension = null;
+
+    if (session?.user) {
+      sessionExtension = await this.provider.extendSession(session.user);
+      session.user.extension = sessionExtension;
+    }
+
+    return session;
+  }
+
   async createOrUpdateSession(user: { email: string; id?: number }) {
     const authProvider = this.provider;
     const req = new HttpRequest();

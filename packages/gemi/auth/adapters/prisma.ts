@@ -31,6 +31,33 @@ export class PrismaAuthenticationAdapter implements IAuthenticationAdapter {
     });
   }
 
+  async createSessionV2(args: CreateSessionArgs): Promise<SessionWithUser> {
+    return await this.prisma.session.create({
+      data: args,
+      include: {
+        user: {
+          select: {
+            password: false,
+            id: true,
+            email: true,
+            globalRole: true,
+            name: true,
+            locale: true,
+            publicId: true,
+            accounts: {
+              select: {
+                id: true,
+                publicId: true,
+                organization: true,
+                organizationRole: true,
+              },
+            },
+          },
+        },
+      },
+    });
+  }
+
   async createSession(args: CreateSessionArgs): Promise<SessionWithUser> {
     return await this.prisma.session.create({
       data: args,

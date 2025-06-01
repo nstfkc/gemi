@@ -164,6 +164,39 @@ class AuthController extends Controller {
     return { session };
   }
 
+  async signInWithPinV2(
+    req = new HttpRequest<{ email: string; pin: string }>(),
+  ) {
+    const container = AuthenticationServiceContainer.use();
+    const authProvider = container.provider;
+    const input = await req.input();
+    const { email, pin } = input.toJSON();
+
+    const magicLinkToken = await authProvider.adapter.findUserMagicLinkToken({
+      email,
+      pin,
+    });
+
+    if (!magicLinkToken) {
+      throw new ValidationError({
+        pin: ["Invalid pin"],
+      });
+    }
+
+    await authProvider.adapter.deleteMagicLinkToken(email);
+    await authProvider.adapter.verifyUser(email);
+
+    const session = await container.createOrUpdateSessionV2({ email });
+
+    req.ctx().setCookie("access_token", session.token, {
+      expires: session.absoluteExpiresAt,
+    });
+
+    await authProvider.onSignIn(session);
+
+    return session;
+  }
+
   async signInWithPin(req = new HttpRequest<{ email: string; pin: string }>()) {
     const container = AuthenticationServiceContainer.use();
     const authProvider = container.provider;
@@ -193,6 +226,51 @@ class AuthController extends Controller {
     await authProvider.onSignIn(session);
 
     return { session };
+  }
+
+  async signInV2(req = new SignInRequest()) {
+    const input = await req.input();
+    const { email, password } = input.toJSON();
+
+    const authProvider = AuthenticationServiceContainer.use().provider;
+
+    const user = await authProvider.adapter.findUserByEmailAddress(
+      email,
+      authProvider.verifyEmail,
+    );
+
+    if (!user) {
+      throw new ValidationError({
+        invalid_credentials: ["Invalid credentials"],
+      });
+    }
+
+    const isPasswordValid = await authProvider.verifyPassword(
+      password,
+      user.password,
+    );
+
+    if (!isPasswordValid) {
+      throw new ValidationError({
+        invalid_credentials: ["Invalid credentials"],
+      });
+    }
+
+    const session =
+      await AuthenticationServiceContainer.use().createOrUpdateSessionV2({
+        email: user.email,
+        id: user.id,
+      });
+
+    req.ctx().setCookie("access_token", session.token, {
+      expires: session.absoluteExpiresAt,
+    });
+
+    await authProvider.onSignIn(user);
+
+    const { password: _, ...rest } = user;
+
+    return rest;
   }
 
   async signIn(req = new SignInRequest()) {
@@ -551,6 +629,7 @@ export class AuthApiRouter extends ApiRouter {
   middlewares = ["cache:private"];
   routes = {
     "/sign-in": this.post(AuthController, "signIn"),
+    "/sign-in-v2": this.post(AuthController, "signInV2"),
     "/sign-up": this.post(AuthController, "signUp"),
     "/sign-out": this.post(AuthController, "signOut"),
     "/forgot-password": this.post(AuthController, "forgotPassword"),
@@ -560,6 +639,7 @@ export class AuthApiRouter extends ApiRouter {
     "/me": this.get(AuthController, "me").middleware(["auth"]),
     "/magic-link": this.post(AuthController, "createMagicLinkToken"),
     "/sign-in-with-pin": this.post(AuthController, "signInWithPin"),
+    "/sign-in-with-pin-v2": this.post(AuthController, "signInWithPinV2"),
   };
 }
 
