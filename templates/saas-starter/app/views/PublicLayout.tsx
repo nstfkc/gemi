@@ -12,7 +12,9 @@ const Header = () => {
             <BrainIcon /> brain.co
           </Link>
           <div className="flex gap-16 items-center">
-            <Link href="/about">About</Link>
+            <Link className="data-[pending=true]:opacity-50" href="/about">
+              About
+            </Link>
             <Link href="/pricing">Pricing</Link>
             <Link href="/auth/sign-in">Sign In</Link>
           </div>
@@ -38,7 +40,9 @@ const Footer = () => {
             </Link>
           </div>
           <div className="flex flex-col gap-4">
-            <Link href="/about">About</Link>
+            <Link className="data-[pending=true]:opacity-50" href="/about">
+              About
+            </Link>
             <Link href="/pricing">Pricing</Link>
             <Link href="/auth/sign-in">Sign In</Link>
           </div>

@@ -1,4 +1,4 @@
-import { useContext, useSyncExternalStore, type ComponentProps } from "react";
+import { useContext, memo, type ComponentProps } from "react";
 
 import { applyParams } from "../utils/applyParams";
 import { useLocation } from "./useLocation";
@@ -7,8 +7,8 @@ import { useNavigate } from "./useNavigate";
 import type { ViewRPC } from "./rpc";
 import type { Prettify } from "../utils/type";
 import { useParams } from "./useParams";
-import { ClientRouterContext } from "./ClientRouterContext";
 import { I18nContext } from "./I18nContext";
+import { useRouteTransition } from "./RouteTransitionProvider";
 
 type Views = {
   [K in keyof ViewRPC as K extends `view:${infer P}`
@@ -48,8 +48,9 @@ function normalizeSearch(search: Search): Record<string, string> {
   ) as Record<string, string>;
 }
 
-export const Link = <T extends keyof Views>(props: LinkProps<T>) => {
+export const Link = memo(<T extends keyof Views>(props: LinkProps<T>) => {
   const _params = useParams();
+  const { isTransitioning, targetPath } = useRouteTransition();
   const {
     href,
     onClick,
@@ -59,7 +60,7 @@ export const Link = <T extends keyof Views>(props: LinkProps<T>) => {
     search = {},
     ...rest
   } = { params: _params, search: {}, ...props };
-  const { defaultLocale, ...i18 } = useContext(I18nContext);
+  const { defaultLocale } = useContext(I18nContext);
   const { push } = useNavigate();
   const location = useLocation();
   const searchParams = new URLSearchParams(normalizeSearch(search));
@@ -86,7 +87,7 @@ export const Link = <T extends keyof Views>(props: LinkProps<T>) => {
   return (
     <a
       data-active={active || currentHref === targetHref}
-      data-current={currentHref}
+      data-pending={href === targetPath && isTransitioning}
       href={targetHref}
       onClick={(e) => {
         if (typeof window !== "undefined") {
@@ -114,4 +115,4 @@ export const Link = <T extends keyof Views>(props: LinkProps<T>) => {
       {...rest}
     />
   );
-};
+});

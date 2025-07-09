@@ -30,6 +30,7 @@ import { applyParams } from "../utils/applyParams";
 import { Action } from "history";
 import { useRouteData } from "./useRouteData";
 import { updateMeta } from "./Head";
+import { RouteTransitionProvider } from "./RouteTransitionProvider";
 
 declare global {
   interface Window {
@@ -140,10 +141,17 @@ const Tree = memo(
 
 const Routes = (props: { componentTree: ComponentTree }) => {
   const { componentTree } = props;
-  const [, startTransition] = useTransition();
+  const [isPending, startTransition] = useTransition();
+  const [isFetching, setIsFetching] = useState(false);
   const { fetch, host } = useContext(HttpClientContext);
 
   const { routerSubject, fetchRouteCSS } = useContext(ClientRouterContext);
+
+  const [transitionPath, setTransitionPath] = useState<[string, string]>([
+    null,
+    routerSubject.getValue().pathname,
+  ]);
+
   const { breadcrumbs, pageData, i18n, prefetchedData } =
     useContext(ServerDataContext);
 
@@ -168,7 +176,10 @@ const Routes = (props: { componentTree: ComponentTree }) => {
   useEffect(() => {
     return routerSubject.subscribe(async (routerState) => {
       const { pathname, search, state, views } = routerState;
-
+      setTransitionPath((current) => {
+        const [, prevTarget] = current;
+        return [prevTarget, pathname];
+      });
       if (routerState.views.length === 0) {
         setRouteState((routerState) => ({
           ...routerState,
@@ -193,6 +204,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
       const pathnameWithLocaleSegment = `${localeSegment}${_pathname}`;
 
       const url = `${host}${pathnameWithLocaleSegment}.json${search}`;
+      setIsFetching(true);
       const [res] = await Promise.all([
         fetch(url),
         fetchRouteCSS(pathname),
@@ -241,18 +253,25 @@ const Routes = (props: { componentTree: ComponentTree }) => {
           });
         });
       }
+      setIsFetching(false);
     });
   }, [routerSubject, fetchRouteCSS, fetch, host, replace]);
 
   return (
-    <RouteStateProvider state={routeState}>
-      <Tree
-        action={routeState.action}
-        pathname={applyParams(routeState.pathname ?? "/", routeState.params)}
-        tree={componentTree}
-        entries={routeState.pathname ? routeState.views : ["404"]}
-      />
-    </RouteStateProvider>
+    <RouteTransitionProvider
+      isPending={isPending}
+      isFetching={isFetching}
+      transitionPath={transitionPath}
+    >
+      <RouteStateProvider state={routeState}>
+        <Tree
+          action={routeState.action}
+          pathname={applyParams(routeState.pathname ?? "/", routeState.params)}
+          tree={componentTree}
+          entries={routeState.pathname ? routeState.views : ["404"]}
+        />
+      </RouteStateProvider>
+    </RouteTransitionProvider>
   );
 };
 

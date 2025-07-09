@@ -10,6 +10,7 @@ import { useState } from "react";
 
 export default function Home() {
   const [count, setCount] = useState(0);
+  console.log("home render");
 
   const x = useTranslator("HomePage");
 

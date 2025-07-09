@@ -3,9 +3,9 @@ import { useNavigate } from "./useNavigate";
 import { useParams } from "./useParams";
 import { useRouteData } from "./useRouteData";
 
-const deleteLocaleCookie = async (locale: string) => {
+const setCookie = async (locale: string) => {
   try {
-    return await globalThis.cookieStore.delete("i18n-locale");
+    return await globalThis.cookieStore.set("i18n-locale", locale);
   } catch (err) {
     return await fetch(`/api/__gemi__/services/i18n/set-locale/${locale}`);
     // TODO: show unsuported browser error
@@ -21,7 +21,7 @@ export function useLocale() {
 
   const setLocale = async (locale: string) => {
     const urlSearchParams = new URLSearchParams(search);
-    deleteLocaleCookie(locale).then(() => {
+    setCookie(locale).then(() => {
       replace(pathname, {
         locale,
         // TODO: fix: this conversion is wrong, because there can be multiple
