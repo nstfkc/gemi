@@ -26,6 +26,7 @@ interface I18nContextValue {
   ) => Promise<void>;
   getComponentTranslations: (key: string) => Record<string, string>;
   supportedLocales: string[];
+  defaultLocale: string;
 }
 
 export type CreateI18nDictionary<T> = {
@@ -116,6 +117,7 @@ export const I18nProvider = (props: PropsWithChildren) => {
         updateDictionary,
         fetchTranslations,
         supportedLocales: i18n.supportedLocales,
+        defaultLocale: i18n.defaultLocale,
       }}
     >
       {props.children}

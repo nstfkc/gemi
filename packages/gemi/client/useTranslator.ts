@@ -1,9 +1,7 @@
 import type { I18nDictionary } from "./rpc";
 import type { ParseTranslationParams, Prettify } from "../utils/type";
-import { useContext, type JSX } from "react";
-import { I18nContext } from "./I18nContext";
+import type { JSX } from "react";
 import { parseTranslation } from "../utils/parseTranslation";
-import { log } from "console";
 import { useRouteData } from "./useRouteData";
 
 type Parser<T extends Record<string, string>> = Prettify<
@@ -17,7 +15,6 @@ type ParamsOrNever<T> = T extends Record<string, never>
   : [params: T];
 
 export function useTranslator<T extends keyof I18nDictionary>(component: T) {
-  const { getComponentTranslations } = useContext(I18nContext);
   const { i18n } = useRouteData();
 
   function parse<

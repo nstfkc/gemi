@@ -3,6 +3,16 @@ import { useNavigate } from "./useNavigate";
 import { useParams } from "./useParams";
 import { useRouteData } from "./useRouteData";
 
+const deleteLocaleCookie = async (locale: string) => {
+  try {
+    return await globalThis.cookieStore.delete("i18n-locale");
+  } catch (err) {
+    return await fetch(`/api/__gemi__/services/i18n/set-locale/${locale}`);
+    // TODO: show unsuported browser error
+    // console.log(err);
+  }
+};
+
 export function useLocale() {
   const { i18n } = useRouteData();
   const { pathname, search } = useLocation();
@@ -11,13 +21,15 @@ export function useLocale() {
 
   const setLocale = async (locale: string) => {
     const urlSearchParams = new URLSearchParams(search);
-    replace(pathname, {
-      locale,
-      // TODO: fix: this conversion is wrong, because there can be multiple
-      // search params with the same name
-      search: Object.fromEntries(urlSearchParams.entries()),
-      params,
-    } as any);
+    deleteLocaleCookie(locale).then(() => {
+      replace(pathname, {
+        locale,
+        // TODO: fix: this conversion is wrong, because there can be multiple
+        // search params with the same name
+        search: Object.fromEntries(urlSearchParams.entries()),
+        params,
+      } as any);
+    });
   };
 
   return [i18n.currentLocale, setLocale] as const;

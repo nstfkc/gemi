@@ -89,7 +89,7 @@ export function useQuery<T extends keyof GetRPC>(
   url: T,
   ...args: [
     options?: {
-      search?: WithOptionalValues<Input<T>>;
+      search?: Record<string, string | number | boolean | null>;
       params?: Partial<UrlParser<`${T & string}`>>;
     },
     config?: Config<Data<T>>,

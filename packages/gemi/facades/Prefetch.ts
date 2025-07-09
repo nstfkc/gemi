@@ -11,20 +11,20 @@ type GetRPC = {
   [K in keyof RPC as K extends `GET:${infer P}` ? P : never]: RPC[K];
 };
 
-type Data<T extends keyof GetRPC> =
-  GetRPC[T] extends ApiRouterHandler<any, infer Data, any>
-    ? Awaited<Data>
-    : never;
-
-type Input<T extends keyof GetRPC> =
-  GetRPC[T] extends ApiRouterHandler<infer Input, any, any> ? Input : never;
+type Data<T extends keyof GetRPC> = GetRPC[T] extends ApiRouterHandler<
+  any,
+  infer Data,
+  any
+>
+  ? Awaited<Data>
+  : never;
 
 export class Query {
   private static prepare<T extends keyof GetRPC>(
     path: T,
     ...args: [
       options?: {
-        search?: Partial<Input<T>>;
+        search?: Record<string, string | number | boolean | null>;
         params?: Partial<UrlParser<T>>;
       },
     ]
@@ -81,7 +81,10 @@ export class Query {
   static instant<T extends keyof GetRPC>(
     path: T,
     ...args: [
-      options?: { search?: Partial<Input<T>>; params?: Partial<UrlParser<T>> },
+      options?: {
+        search?: Record<string, string | number | boolean | null>;
+        params?: Partial<UrlParser<T>>;
+      },
     ]
   ) {
     return Query.prepare(path, ...args).instant();
@@ -90,7 +93,10 @@ export class Query {
   static prefetch<T extends keyof GetRPC>(
     path: T,
     ...args: [
-      options?: { search?: Partial<Input<T>>; params?: Partial<UrlParser<T>> },
+      options?: {
+        search?: Record<string, string | number | boolean | null>;
+        params?: Partial<UrlParser<T>>;
+      },
     ]
   ) {
     return Query.prepare(path, ...args).prefetch();

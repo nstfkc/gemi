@@ -262,17 +262,24 @@ export class ViewRouterServiceContainer extends ServiceContainer {
     let urlLocaleSegment = null;
     let urlLocale: string | null = null;
 
-    if (
-      !I18nServiceContainer.use().service.supportedLocales.includes(maybeLocale)
-    ) {
+    const i18nServiceContainer = I18nServiceContainer.use();
+
+    if (!i18nServiceContainer.service.supportedLocales.includes(maybeLocale)) {
       urlPathname = urlPathnameWithLocale;
     } else {
       urlLocaleSegment = maybeLocale;
       urlLocale = maybeLocale;
     }
 
-    if (I18nServiceContainer.use().isEnabled && !isOgRequest) {
-      if (urlLocale === null) {
+    if (i18nServiceContainer.isEnabled && !isOgRequest) {
+      const locale = I18nServiceContainer.use().detectLocale(
+        new HttpRequest(req, {}, "view", urlPathname),
+      );
+
+      if (
+        urlLocale === null &&
+        locale !== i18nServiceContainer.service.defaultLocale
+      ) {
         const locale = I18nServiceContainer.use().detectLocale(
           new HttpRequest(req, {}, "view", urlPathname),
         );
@@ -363,6 +370,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
             dictionary: {
               [locale]: translations,
             },
+            defaultLocale: i18nServiceContainer.service.defaultLocale,
           };
         }
 

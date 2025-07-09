@@ -82,7 +82,7 @@ export const ClientRouterProvider = (
     return new Subject<boolean>(false);
   });
 
-  const { supportedLocales, locale } = useContext(I18nContext);
+  const { supportedLocales = [], locale } = useContext(I18nContext);
 
   const { fetch, host } = useContext(HttpClientContext);
 

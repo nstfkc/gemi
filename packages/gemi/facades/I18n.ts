@@ -24,6 +24,8 @@ export class I18n {
 
     RequestContext.getStore().setCookie("i18n-locale", _locale, {
       expires: new Date(Date.now() + 1000 * 60 * 60 * 24 * 365),
+      secure: false,
+      httpOnly: false,
     });
 
     return _locale;

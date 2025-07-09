@@ -8,6 +8,7 @@ import type { ViewRPC } from "./rpc";
 import type { Prettify } from "../utils/type";
 import { useParams } from "./useParams";
 import { ClientRouterContext } from "./ClientRouterContext";
+import { I18nContext } from "./I18nContext";
 
 type Views = {
   [K in keyof ViewRPC as K extends `view:${infer P}`
@@ -58,12 +59,17 @@ export const Link = <T extends keyof Views>(props: LinkProps<T>) => {
     search = {},
     ...rest
   } = { params: _params, search: {}, ...props };
+  const { defaultLocale, ...i18 } = useContext(I18nContext);
   const { push } = useNavigate();
   const location = useLocation();
   const searchParams = new URLSearchParams(normalizeSearch(search));
 
   const path = applyParams(href, params);
-  const urlLocaleSegment = location.locale;
+  let urlLocaleSegment = location.locale;
+  if (urlLocaleSegment === defaultLocale) {
+    urlLocaleSegment = "";
+  }
+
   const localeSegment = urlLocaleSegment ? `/${urlLocaleSegment}` : "";
 
   const targetHref = [

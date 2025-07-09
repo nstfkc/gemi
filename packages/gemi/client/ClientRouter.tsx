@@ -186,8 +186,10 @@ const Routes = (props: { componentTree: ComponentTree }) => {
       }
 
       const localeSegment = routerState.locale ? `/${routerState.locale}` : "";
+
       const _pathname =
         localeSegment.length > 0 && pathname === "/" ? "" : pathname;
+
       const pathnameWithLocaleSegment = `${localeSegment}${_pathname}`;
 
       const url = `${host}${pathnameWithLocaleSegment}.json${search}`;

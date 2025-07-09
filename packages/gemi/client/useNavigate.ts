@@ -3,6 +3,7 @@ import { ClientRouterContext } from "./ClientRouterContext";
 import type { UrlParser, ViewPaths } from "./types";
 import { applyParams } from "../utils/applyParams";
 import { useLocation } from "./useLocation";
+import { I18nContext } from "./I18nContext";
 
 type Options<T extends ViewPaths> = UrlParser<T> extends Record<string, never>
   ? {
@@ -22,6 +23,7 @@ type Options<T extends ViewPaths> = UrlParser<T> extends Record<string, never>
 export function useNavigate() {
   const { history, setNavigationAbortController } =
     useContext(ClientRouterContext);
+  const { defaultLocale } = useContext(I18nContext);
   const location = useLocation();
 
   function action(pushOrReplace: "push" | "replace") {
@@ -53,6 +55,9 @@ export function useNavigate() {
       let localeSegment = location.locale;
       if (locale) {
         localeSegment = locale;
+      }
+      if (localeSegment === defaultLocale) {
+        localeSegment = "";
       }
 
       const routePath = applyParams(path, params);

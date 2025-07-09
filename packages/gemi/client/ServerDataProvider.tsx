@@ -22,6 +22,7 @@ export interface ServerDataContextValue {
     dictionary: Translations;
     currentLocale: string;
     supportedLocales: string[];
+    defaultLocale: string;
   };
   componentTree: ComponentTree;
   auth: {

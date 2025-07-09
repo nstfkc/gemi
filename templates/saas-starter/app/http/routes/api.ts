@@ -1,5 +1,5 @@
 import { I18n } from "gemi/facades";
-import { ApiRouter, ResourceController, HttpRequest } from "gemi/http";
+import { ApiRouter, ResourceController, type HttpRequest } from "gemi/http";
 
 class ProductsController extends ResourceController {
   async list() {}
