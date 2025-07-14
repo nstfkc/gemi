@@ -308,7 +308,7 @@ export class HttpRequest<
 
         if (rule === "required") {
           errors[key] = [String(_message)];
-          break;
+          continue;
         }
 
         errors[key].push(String(_message));
