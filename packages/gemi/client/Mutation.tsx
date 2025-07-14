@@ -176,7 +176,7 @@ export const FormField = (props: ComponentProps<"div"> & { name: string }) => {
   const { validationErrors } = useContext(MutationContext);
   const errors = validationErrors[name] || [];
   return (
-    <div data-hasError={errors.length > 0} {...rest}>
+    <div data-has-error={errors.length > 0} {...rest}>
       {children}
     </div>
   );
