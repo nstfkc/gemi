@@ -113,6 +113,81 @@ export function useMutation<
 
   const formData = useRef(new FormData());
 
+  async function trigger(input?: U): Promise<T> {
+    setState({
+      data: state.data,
+      error: state.error,
+      loading: true,
+    });
+    const [inputs = {}, options = defaultOptions] = args ?? [];
+    const params =
+      "params" in inputs ? { ..._params, ...inputs.params } : _params;
+    const finalUrl = applyParams(String(url).replace(`${method}:`, ""), params);
+
+    let body = null;
+
+    const contentType =
+      typeof input === "undefined" || input instanceof FormData
+        ? {}
+        : { "Content-Type": "application/json" };
+
+    if (input instanceof FormData) {
+      body = input;
+    } else if (typeof input === "undefined") {
+      body = formData.current;
+    } else if (input) {
+      body = JSON.stringify(input);
+    }
+
+    try {
+      const response = await fetch(`${host}/api${finalUrl}`, {
+        method,
+        headers: {
+          ...contentType,
+        },
+        ...(body ? { body } : {}),
+        signal: abortController.signal,
+      });
+
+      formData.current = new FormData();
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        setState({
+          data: null,
+          error: data.error,
+          loading: false,
+        });
+
+        options.onError(data);
+        return;
+      }
+
+      options.onSuccess(data);
+
+      setState({
+        data,
+        error: null,
+        loading: false,
+      });
+
+      return data as any;
+    } catch (error) {
+      formData.current = new FormData();
+      options.onError(error);
+      setState({
+        data: null,
+        error,
+        loading: false,
+      });
+    }
+  }
+
+  trigger.formData = (formData: FormData) => {
+    return trigger(formData as U);
+  };
+
   return {
     data: state.data as T,
     error: state.error as any,
@@ -131,79 +206,7 @@ export function useMutation<
       formData.current = new FormData();
       options.onCanceled();
     },
-    trigger: async (input?: U): Promise<T> => {
-      setState({
-        data: state.data,
-        error: state.error,
-        loading: true,
-      });
-      const [inputs = {}, options = defaultOptions] = args ?? [];
-      const params =
-        "params" in inputs ? { ..._params, ...inputs.params } : _params;
-      const finalUrl = applyParams(
-        String(url).replace(`${method}:`, ""),
-        params,
-      );
-
-      let body = null;
-
-      const contentType =
-        typeof input === "undefined" || input instanceof FormData
-          ? {}
-          : { "Content-Type": "application/json" };
-
-      if (input instanceof FormData) {
-        body = input;
-      } else if (typeof input === "undefined") {
-        body = formData.current;
-      } else if (input) {
-        body = JSON.stringify(input);
-      }
-
-      try {
-        const response = await fetch(`${host}/api${finalUrl}`, {
-          method,
-          headers: {
-            ...contentType,
-          },
-          ...(body ? { body } : {}),
-          signal: abortController.signal,
-        });
-
-        formData.current = new FormData();
-
-        const data = await response.json();
-
-        if (!response.ok) {
-          setState({
-            data: null,
-            error: data.error,
-            loading: false,
-          });
-
-          options.onError(data);
-          return;
-        }
-
-        options.onSuccess(data);
-
-        setState({
-          data,
-          error: null,
-          loading: false,
-        });
-
-        return data as any;
-      } catch (error) {
-        formData.current = new FormData();
-        options.onError(error);
-        setState({
-          data: null,
-          error,
-          loading: false,
-        });
-      }
-    },
+    trigger,
   };
 }
 

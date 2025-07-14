@@ -318,11 +318,12 @@ class AuthController extends Controller {
     return rest;
   }
 
-  async signUp(req = new SignUpRequest()) {
+  async signUp() {
+    const authProvider = AuthenticationServiceContainer.use().provider;
+    const req = new authProvider.signUpRequest();
     const input = await req.input();
     const { email, password, name, invitationId } = input.toJSON();
 
-    const authProvider = AuthenticationServiceContainer.use().provider;
     const user = await authProvider.adapter.findUserByEmailAddress(
       email,
       false,
@@ -650,6 +651,8 @@ export class AuthenticationServiceProvider extends ServiceProvider {
 
   sessionExpiresInHours = 24;
   sessionAbsoluteExpiresInHours = 24 * 7 * 4;
+
+  signUpRequest = SignUpRequest as any;
 
   // @ts-ignore
   adapter: IAuthenticationAdapter = new BlankAdapter();
