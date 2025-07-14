@@ -11,6 +11,7 @@ export {
   Form,
   FormError,
   useMutationStatus,
+  FormFieldContainer,
   ValidationErrors,
 } from "./Mutation";
 export { QueryManagerProvider } from "./QueryManagerContext";
