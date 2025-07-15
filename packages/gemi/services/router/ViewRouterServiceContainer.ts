@@ -34,6 +34,19 @@ import { Log } from "../../facades/Log";
 import { I18n } from "../../facades/I18n";
 import { AuthViewRouter } from "../../auth/AuthenticationServiceProvider";
 
+const themeScript = `
+!function(){try{var d=document.documentElement,c=d.classList;
+c.remove('light','dark');
+var e=localStorage.getItem('theme');
+if('system'===e||(!e&&'system'===defaultTheme)){
+  var t='(prefers-color-scheme: dark)',m=window.matchMedia(t);
+  if(m.media!==t||m.matches){d.style.colorScheme='dark';c.add('dark')}
+  else{d.style.colorScheme='light';c.add('light')}
+}else if(e){
+  c.add(e||'')
+}}catch(e){}}()
+`;
+
 async function getTtfFont(
   family: string,
   weight: number,
@@ -232,6 +245,12 @@ export class ViewRouterServiceContainer extends ServiceContainer {
         createElement(Fragment, {
           children: [
             ...(await getStyles(currentViews)),
+            createElement("script", {
+              key: "theme-script",
+              dangerouslySetInnerHTML: {
+                __html: themeScript,
+              },
+            }),
             createElement(Root, {
               data: result.data,
               viewImportMap,
@@ -332,7 +351,6 @@ export class ViewRouterServiceContainer extends ServiceContainer {
         params: Record<string, any>;
         urlLocaleSegment: string | null;
         meta: any;
-        theme: string;
       } | null = null;
       const ctx = RequestContext.getStore();
 
@@ -397,7 +415,6 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           params: httpRequest.params,
           urlLocaleSegment,
           meta: ctx.renderMeta(),
-          theme: ctx.req.cookies.get("theme") ?? "system",
         };
         const { params, currentPathName, user } = pageData;
 
@@ -475,7 +492,6 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           urlLocaleSegment,
           meta: pageData.meta,
           isOgRequest,
-          theme: pageData.theme,
         });
       } catch (err) {
         if (err.kind === GEMI_REQUEST_BREAKER_ERROR) {

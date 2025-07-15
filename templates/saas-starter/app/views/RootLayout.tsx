@@ -1,4 +1,4 @@
-import { Head, useTheme } from "gemi/client";
+import { Head } from "gemi/client";
 
 import "./main.css";
 
@@ -8,10 +8,8 @@ interface Props {
 }
 
 export default function RootLayout(props: Props) {
-  const { theme } = useTheme();
-  console.log(theme);
   return (
-    <html className={theme} lang={props.locale}>
+    <html lang={props.locale} suppressHydrationWarning>
       <Head />
       <body>{props.children}</body>
     </html>
