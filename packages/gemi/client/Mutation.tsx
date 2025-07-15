@@ -141,6 +141,13 @@ export function useMutationStatus() {
   return { isPending };
 }
 
+export function useFormStatus() {
+  const { isPending, validationErrors, formError } =
+    useContext(MutationContext);
+
+  return { isPending, validationErrors, formError };
+}
+
 export const ValidationErrors = (props: {
   name: string;
   className?: string;

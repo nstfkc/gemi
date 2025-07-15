@@ -40,6 +40,8 @@ export class AuthenticationServiceContainer extends ServiceContainer {
       const req = new HttpRequest();
       req.ctx().setCookie("access_token", session.token, {
         expires: session.expiresAt,
+        secure: true,
+        httpOnly: true,
       });
       return true;
     } catch (err) {

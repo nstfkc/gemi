@@ -16,7 +16,6 @@ class SignUpRequest extends HttpRequest {
     email: {
       string: "Invalid email",
       required: "Email is required",
-      "max:2": "Name must be at least 3 characters",
       email: "Invalid email",
     },
     password: {

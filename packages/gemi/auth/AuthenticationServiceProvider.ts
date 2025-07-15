@@ -157,6 +157,8 @@ class AuthController extends Controller {
 
     req.ctx().setCookie("access_token", session.token, {
       expires: session.absoluteExpiresAt,
+      secure: true,
+      httpOnly: true,
     });
 
     await authProvider.onSignIn(session);
@@ -190,6 +192,8 @@ class AuthController extends Controller {
 
     req.ctx().setCookie("access_token", session.token, {
       expires: session.absoluteExpiresAt,
+      secure: true,
+      httpOnly: true,
     });
 
     await authProvider.onSignIn(session);
@@ -221,6 +225,8 @@ class AuthController extends Controller {
 
     req.ctx().setCookie("access_token", session.token, {
       expires: session.absoluteExpiresAt,
+      secure: true,
+      httpOnly: true,
     });
 
     await authProvider.onSignIn(session);
@@ -264,6 +270,8 @@ class AuthController extends Controller {
 
     req.ctx().setCookie("access_token", session.token, {
       expires: session.absoluteExpiresAt,
+      secure: true,
+      httpOnly: true,
     });
 
     await authProvider.onSignIn(user);
@@ -309,6 +317,8 @@ class AuthController extends Controller {
 
     req.ctx().setCookie("access_token", session.token, {
       expires: session.absoluteExpiresAt,
+      secure: true,
+      httpOnly: true,
     });
 
     await authProvider.onSignIn(user);
@@ -396,6 +406,8 @@ class AuthController extends Controller {
 
     req.ctx().setCookie("access_token", "", {
       expires: new Date(0),
+      secure: true,
+      httpOnly: true,
     });
 
     await authProvider.onSignOut(user);
@@ -584,6 +596,8 @@ class AuthController extends Controller {
     });
 
     req.ctx().setCookie("access_token", session.token, {
+      secure: true,
+      httpOnly: true,
       expires: session.expiresAt,
     });
 

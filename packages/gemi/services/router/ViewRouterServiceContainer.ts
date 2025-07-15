@@ -108,6 +108,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
     breadcrumbs: any;
     urlLocaleSegment?: string;
     meta: any;
+    theme: string;
     isOgRequest?: boolean;
   }) {
     const {
@@ -125,6 +126,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
       urlLocaleSegment,
       meta,
       isOgRequest,
+      theme,
     } = props;
 
     const pageDataKey = pathname.replace(`/${urlLocaleSegment}`, "");
@@ -151,6 +153,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           is404: !currentPathName ? true : false,
         },
         componentTree: [["404", []], ...this.componentTree],
+        theme,
       },
       head: {},
     };
@@ -329,6 +332,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
         params: Record<string, any>;
         urlLocaleSegment: string | null;
         meta: any;
+        theme: string;
       } | null = null;
       const ctx = RequestContext.getStore();
 
@@ -393,6 +397,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           params: httpRequest.params,
           urlLocaleSegment,
           meta: ctx.renderMeta(),
+          theme: ctx.req.cookies.get("theme") ?? "system",
         };
         const { params, currentPathName, user } = pageData;
 
@@ -470,6 +475,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           urlLocaleSegment,
           meta: pageData.meta,
           isOgRequest,
+          theme: pageData.theme,
         });
       } catch (err) {
         if (err.kind === GEMI_REQUEST_BREAKER_ERROR) {

@@ -31,6 +31,7 @@ import { Action } from "history";
 import { useRouteData } from "./useRouteData";
 import { updateMeta } from "./Head";
 import { RouteTransitionProvider } from "./RouteTransitionProvider";
+import { ThemeProvider } from "./ThemeProvider";
 
 declare global {
   interface Window {
@@ -291,31 +292,33 @@ export const ClientRouter = (props: {
   } = useContext(ServerDataContext);
 
   return (
-    <I18nProvider>
-      <WebSocketContextProvider>
-        <QueryManagerProvider>
-          <ComponentsProvider viewImportMap={props.viewImportMap}>
-            <ClientRouterProvider
-              cssManifest={cssManifest}
-              searchParams={router.searchParams}
-              params={router.params}
-              pageData={pageData}
-              is404={router.is404}
-              pathname={router.pathname}
-              currentPath={router.currentPath}
-              routeManifest={routeManifest}
-              breadcrumbs={breadcrumbs}
-              urlLocaleSegment={router.urlLocaleSegment}
-            >
-              <StrictMode>
-                <RootLayout locale={i18n.currentLocale}>
-                  <Routes componentTree={componentTree} />
-                </RootLayout>
-              </StrictMode>
-            </ClientRouterProvider>
-          </ComponentsProvider>
-        </QueryManagerProvider>
-      </WebSocketContextProvider>
-    </I18nProvider>
+    <ThemeProvider>
+      <I18nProvider>
+        <WebSocketContextProvider>
+          <QueryManagerProvider>
+            <ComponentsProvider viewImportMap={props.viewImportMap}>
+              <ClientRouterProvider
+                cssManifest={cssManifest}
+                searchParams={router.searchParams}
+                params={router.params}
+                pageData={pageData}
+                is404={router.is404}
+                pathname={router.pathname}
+                currentPath={router.currentPath}
+                routeManifest={routeManifest}
+                breadcrumbs={breadcrumbs}
+                urlLocaleSegment={router.urlLocaleSegment}
+              >
+                <StrictMode>
+                  <RootLayout locale={i18n.currentLocale}>
+                    <Routes componentTree={componentTree} />
+                  </RootLayout>
+                </StrictMode>
+              </ClientRouterProvider>
+            </ComponentsProvider>
+          </QueryManagerProvider>
+        </WebSocketContextProvider>
+      </I18nProvider>
+    </ThemeProvider>
   );
 };
