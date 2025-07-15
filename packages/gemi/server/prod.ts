@@ -73,21 +73,22 @@ export async function startProdServer() {
     if (isFileRequest && !isApi) {
       const url = new URL(req.url);
       const filePath = req.url.replace(url.origin, "").split("?")[0];
-      const file = Bun.file(
-        `${distDir}/client${filePath.replace("/assets/assets", "/assets")}`,
-      );
-      if (!file) {
+      try {
+        const file = Bun.file(
+          `${distDir}/client${filePath.replace("/assets/assets", "/assets")}`,
+        );
+        const etag = generateETag(file.lastModified);
+        return new Response(file.stream(), {
+          headers: {
+            "Content-Type": file.type,
+            "Cache-Control": "public, max-age=31536000, must-revalidate",
+            "Content-Length": String(file.size),
+            ETag: etag,
+          },
+        });
+      } catch (error) {
         return new Response("Not found", { status: 404 });
       }
-      const etag = generateETag(file.lastModified);
-      return new Response(file.stream(), {
-        headers: {
-          "Content-Type": file.type,
-          "Cache-Control": "public, max-age=31536000, must-revalidate",
-          "Content-Length": String(file.size),
-          ETag: etag,
-        },
-      });
     }
 
     const handler = app.fetch.bind(app);
