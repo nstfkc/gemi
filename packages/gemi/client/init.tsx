@@ -15,6 +15,7 @@ export function init(
     document,
     <>
       <></>
+      <></>
       <ServerDataProvider>
         <ClientRouter RootLayout={RootLayout} />
       </ServerDataProvider>

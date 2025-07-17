@@ -121,7 +121,6 @@ export class ViewRouterServiceContainer extends ServiceContainer {
     breadcrumbs: any;
     urlLocaleSegment?: string;
     meta: any;
-    theme: string;
     isOgRequest?: boolean;
   }) {
     const {
@@ -139,7 +138,6 @@ export class ViewRouterServiceContainer extends ServiceContainer {
       urlLocaleSegment,
       meta,
       isOgRequest,
-      theme,
     } = props;
 
     const pageDataKey = pathname.replace(`/${urlLocaleSegment}`, "");
@@ -166,7 +164,6 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           is404: !currentPathName ? true : false,
         },
         componentTree: [["404", []], ...this.componentTree],
-        theme,
       },
       head: {},
     };
