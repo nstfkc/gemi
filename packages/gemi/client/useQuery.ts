@@ -182,6 +182,9 @@ export function useQuery<T extends keyof GetRPC>(
     return resource.mutate.call(resource, variantKey, (data: any) => {
       try {
         if (typeof fn === "function") {
+          if (Array.isArray(data)) {
+            return [...data, ...fn(data)];
+          }
           return { ...data, ...fn(data) };
         } else if (typeof fn === "string") {
           const keys = (fn as string).split(".");
