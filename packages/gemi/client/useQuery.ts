@@ -172,8 +172,8 @@ export function useQuery<T extends keyof GetRPC>(
     };
   }, [variantKey, resource]);
 
-  function mutate(fn: Data<T>): void;
-  function mutate(fn: (data: Data<T>) => Data<T>): void;
+  function mutate(fn: Partial<Data<T>>): void;
+  function mutate(fn: (data: Data<T>) => Partial<Data<T>>): void;
   function mutate<K extends NestedKeyof<Data<T>>, V = ValueAtPath<Data<T>, K>>(
     key: K,
     value: V | ((value: V) => V),
@@ -182,7 +182,7 @@ export function useQuery<T extends keyof GetRPC>(
     return resource.mutate.call(resource, variantKey, (data: any) => {
       try {
         if (typeof fn === "function") {
-          return fn(data);
+          return { ...data, ...fn(data) };
         } else if (typeof fn === "string") {
           const keys = (fn as string).split(".");
 
@@ -204,9 +204,8 @@ export function useQuery<T extends keyof GetRPC>(
           current[keys[keys.length - 1]] = newValue;
 
           return current;
-        } else {
-          return fn;
         }
+        return { ...data, ...fn };
       } catch (err) {
         console.log(err);
         // Do something
