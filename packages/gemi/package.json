@@ -1,6 +1,6 @@
 {
   "name": "gemi",
-  "version": "0.17.7",
+  "version": "0.18.0",
   "author": "Enes Tufekci <enes@gemijs.dev>",
   "license": "MIT",
   "devDependencies": {
@@ -33,9 +33,7 @@
     "./broadcasting": "./broadcasting/index.ts",
     "./i18n": "./i18n/index.ts"
   },
-  "files": [
-    "dist/**/*"
-  ],
+  "files": ["dist/**/*"],
   "private": false,
   "module": true,
   "scripts": {
@@ -57,6 +55,7 @@
     "@prisma/client": "^6.4.1",
     "ast-types": "^0.14.2",
     "commander": "^12.1.0",
+    "cronbake": "^0.1.2",
     "history": "^5.3.0",
     "jsx-email": "2.0.0-rc2.1",
     "open": "^10.1.0",

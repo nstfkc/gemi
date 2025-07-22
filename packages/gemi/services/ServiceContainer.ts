@@ -1,12 +1,14 @@
 import { kernelContext } from "../kernel/context";
-import { ServiceProvider } from "./ServiceProvider";
+import type { ServiceProvider } from "./ServiceProvider";
 
 export class ServiceContainer {
   static _name: string;
   service: ServiceProvider;
 
   static use<T extends ServiceContainer>(
-    this: new (service: ServiceProvider) => T,
+    this: new (
+      service: ServiceProvider,
+    ) => T,
   ): T {
     const store = kernelContext.getStore();
     if (!store) {

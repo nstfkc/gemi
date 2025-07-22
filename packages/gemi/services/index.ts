@@ -50,3 +50,7 @@ export { Sharp } from "./image-optimization/drivers/SharpDriver";
 export { GoogleOAuthProvider } from "../auth/oauth/GoogleOAuthProvider";
 export { XOAuthProvider } from "../auth/oauth/XOAuthProvider";
 export { OAuthProvider } from "../auth/oauth/OAuthProvider";
+
+// Cron
+export { CronServiceProvider } from "./cron/CronServiceProvider";
+export { CronJob } from "./cron/CronJob";
