@@ -171,7 +171,7 @@ export class HttpRequest<
   rawRequest: Request;
   headers: Omit<Headers, "set" | "delete">;
   cookies: Omit<Map<string, string>, "set" | "delete">;
-  search: Input<T>;
+  search: Input<any>;
   schema: any = {};
   routePath: string;
   params: Params;
@@ -206,25 +206,23 @@ export class HttpRequest<
         cookies.set(key.trim(), value.trim());
       }
     }
-    if (this.rawRequest.method === "GET") {
-      const url = new URL(this.rawRequest.url);
-      const map = new Map<string, string | string[]>();
-      for (const [key, value] of url.searchParams) {
-        if (map.has(key)) {
-          const currentValue = map.get(key);
-          if (Array.isArray(currentValue)) {
-            currentValue.push(value);
-            map.set(key, currentValue);
-          } else {
-            map.set(key, [currentValue, value]);
-          }
+    const url = new URL(this.rawRequest.url);
+    const map = new Map<string, string | string[]>();
+    for (const [key, value] of url.searchParams) {
+      if (map.has(key)) {
+        const currentValue = map.get(key);
+        if (Array.isArray(currentValue)) {
+          currentValue.push(value);
+          map.set(key, currentValue);
         } else {
-          map.set(key, value);
+          map.set(key, [currentValue, value]);
         }
+      } else {
+        map.set(key, value);
       }
-      const params = Object.fromEntries(map.entries());
-      this.search = new Input<T>(params as T);
     }
+    const _params = Object.fromEntries(map.entries());
+    this.search = new Input(_params);
     this.cookies = cookies;
   }
 
