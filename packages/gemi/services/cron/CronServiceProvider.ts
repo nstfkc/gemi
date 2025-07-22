@@ -1,9 +1,13 @@
-import Baker from "cronbake";
 import { ServiceProvider } from "../ServiceProvider";
-import { CronJob } from "./CronJob";
+import type { CronJob } from "./CronJob";
+import type { Kernel } from "../../kernel";
 
 export class CronServiceProvider extends ServiceProvider {
-  driver = Baker.create({ autoStart: true });
   jobs: (new () => CronJob)[] = [];
+
+  constructor(public kernel: Kernel) {
+    super();
+  }
+
   boot() {}
 }

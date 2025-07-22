@@ -42,6 +42,7 @@ export class Kernel {
   protected cronServiceProvider = CronServiceProvider;
 
   services: Record<string, ServiceContainer> = {};
+  private booted = false;
 
   boot() {
     this.services = {
@@ -82,9 +83,10 @@ export class Kernel {
       [ImageOptimizationServiceContainer._name]:
         new ImageOptimizationServiceContainer(new this.imageServiceProvider()),
       [CronServiceContainer._name]: new CronServiceContainer(
-        new this.cronServiceProvider(),
+        new this.cronServiceProvider(this),
       ),
     };
+    this.booted = true;
   }
 
   run<T>(cb: () => T) {
@@ -98,5 +100,19 @@ export class Kernel {
     }
 
     kernelContext.disable();
+  }
+
+  async waitForBoot() {
+    if (!this.booted) {
+      await new Promise<void>((resolve) => {
+        while (!this.booted) {
+          setTimeout(() => {
+            if (this.booted) {
+              resolve();
+            }
+          }, 10);
+        }
+      });
+    }
   }
 }
