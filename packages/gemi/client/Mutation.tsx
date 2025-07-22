@@ -12,6 +12,7 @@ import type { UnwrapPromise } from "../utils/type";
 import type { UrlParser } from "./types";
 import { useParams } from "./useParams";
 import { ServerDataContext } from "./ServerDataProvider";
+import { log } from "node:console";
 
 // biome-ignore lint: type later
 type Any = any;
@@ -28,9 +29,10 @@ const MutationContext = createContext({
   result: null,
 } as MutationContextValue);
 
-type GetResult<T> = T extends ApiRouterHandler<Any, infer Result, Any>
-  ? UnwrapPromise<Result>
-  : never;
+type GetResult<T> =
+  T extends ApiRouterHandler<Any, infer Result, Any>
+    ? UnwrapPromise<Result>
+    : never;
 
 type PostRequests = {
   [K in keyof RPC as K extends `POST:${infer P}` ? P : never]: GetResult<
@@ -68,6 +70,7 @@ interface FormProps<M extends keyof Methods, K extends keyof Methods[M]>
   onSuccess?: (result: Methods[M][K], form: HTMLFormElement) => void;
   onError?: (error: Any, form: HTMLFormElement) => void;
   params?: Partial<UrlParser<`${K & string}`>>;
+  dynamicInputs?: (formData: FormData) => Record<string, any>;
 }
 
 export function Form<
@@ -82,6 +85,7 @@ export function Form<
     onError = () => {},
     params,
     className,
+    dynamicInputs = () => ({}),
     ...formProps
   } = "params" in props
     ? { ...props, params: { ..._params, ...props.params } }
@@ -109,7 +113,11 @@ export function Form<
     if (!formRef.current) {
       return;
     }
-    trigger(new FormData(formRef.current) as never);
+    const formData = new FormData(formRef.current);
+    for (const [key, value] of Object.entries(dynamicInputs(formData))) {
+      formData.append(key, value as any);
+    }
+    trigger(formData as any);
   };
 
   const validationErrors =
