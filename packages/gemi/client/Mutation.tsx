@@ -4,6 +4,9 @@ import {
   type ComponentProps,
   type FormEvent,
   useRef,
+  useEffect,
+  useSyncExternalStore,
+  useCallback,
 } from "react";
 import type { RPC } from "./rpc";
 import type { ApiRouterHandler } from "../http/ApiRouter";
@@ -12,7 +15,7 @@ import type { UnwrapPromise } from "../utils/type";
 import type { UrlParser } from "./types";
 import { useParams } from "./useParams";
 import { ServerDataContext } from "./ServerDataProvider";
-import { log } from "node:console";
+import { Subject } from "../utils/Subject";
 
 // biome-ignore lint: type later
 type Any = any;
@@ -22,6 +25,7 @@ interface MutationContextValue {
   result: null | Any;
   validationErrors: Record<string, string[]>;
   formError: null | string;
+  formDataSubject: React.RefObject<Subject<FormData>>;
 }
 
 const MutationContext = createContext({
@@ -29,10 +33,9 @@ const MutationContext = createContext({
   result: null,
 } as MutationContextValue);
 
-type GetResult<T> =
-  T extends ApiRouterHandler<Any, infer Result, Any>
-    ? UnwrapPromise<Result>
-    : never;
+type GetResult<T> = T extends ApiRouterHandler<Any, infer Result, Any>
+  ? UnwrapPromise<Result>
+  : never;
 
 type PostRequests = {
   [K in keyof RPC as K extends `POST:${infer P}` ? P : never]: GetResult<
@@ -92,6 +95,50 @@ export function Form<
     : { ...props, params: _params };
   const formRef = useRef<HTMLFormElement>(null);
   const { __csrf } = useContext(ServerDataContext);
+  const formDataSubject = useRef(new Subject(new FormData()));
+
+  const updateFormData = useCallback(() => {
+    formDataSubject.current.next(new FormData(formRef.current));
+  }, []);
+
+  useEffect(() => {
+    if (!formRef.current) return;
+
+    formRef.current.addEventListener("input", updateFormData);
+
+    const observer = new MutationObserver(() => {
+      const formData = new FormData(formRef.current);
+      formDataSubject.current.next(formData);
+    });
+
+    formRef.current.querySelectorAll("input").forEach((input) =>
+      observer.observe(input, {
+        attributes: true,
+        attributeFilter: ["value"],
+      }),
+    );
+
+    formRef.current.querySelectorAll("select").forEach((input) =>
+      observer.observe(input, {
+        attributes: true,
+        attributeFilter: ["value"],
+      }),
+    );
+
+    formRef.current.querySelectorAll("textarea").forEach((input) =>
+      observer.observe(input, {
+        attributes: true,
+        attributeFilter: ["value"],
+      }),
+    );
+
+    return () => {
+      observer.disconnect();
+      if (formRef.current) {
+        formRef.current.removeEventListener("input", updateFormData);
+      }
+    };
+  }, [updateFormData]);
 
   const { trigger, data, error, loading } = useMutation(
     method,
@@ -127,7 +174,13 @@ export function Form<
 
   return (
     <MutationContext.Provider
-      value={{ isPending: loading, result: data, validationErrors, formError }}
+      value={{
+        isPending: loading,
+        result: data,
+        validationErrors,
+        formError,
+        formDataSubject,
+      }}
     >
       <form
         className={["group", className].filter(Boolean).join(" ")}
@@ -154,6 +207,18 @@ export function useFormStatus() {
     useContext(MutationContext);
 
   return { isPending, validationErrors, formError };
+}
+
+export function useFormData() {
+  const context = useContext(MutationContext);
+
+  const { formDataSubject } = context;
+
+  return useSyncExternalStore(
+    formDataSubject.current.subscribe.bind(formDataSubject.current),
+    formDataSubject.current.getValue.bind(formDataSubject.current),
+    formDataSubject.current.getValue.bind(formDataSubject.current),
+  );
 }
 
 export const ValidationErrors = (props: {

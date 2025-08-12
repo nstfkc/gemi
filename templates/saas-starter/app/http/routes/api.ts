@@ -25,9 +25,10 @@ export default class extends ApiRouter {
         "en-US": "Hello",
         "tr-TR": "Merhaba",
       };
+
       const locale = I18n.locale() ?? "en-US";
       return {
-        message: result[locale],
+        message: "",
       };
     }),
     "/health": this.get(() => {

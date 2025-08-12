@@ -5,7 +5,7 @@ class TestCron extends CronJob {
   name = "TestCron";
   cron = CronJob.exp("@daily");
 
-  async onTick() {
+  async callback() {
     const users = await prisma.user.findMany({
       select: { email: true },
     });

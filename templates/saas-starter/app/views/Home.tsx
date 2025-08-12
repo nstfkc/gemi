@@ -1,6 +1,7 @@
 import {
+  Form,
   Link,
-  OGImage,
+  useFormData,
   useLocation,
   useSearchParams,
   useTheme,
@@ -9,36 +10,53 @@ import {
 } from "gemi/client";
 import { useState } from "react";
 
+const FormData = () => {
+  const formData = useFormData();
+  const state = formData.getAll("test");
+  console.log([
+    { item: formData.get("number") },
+    state,
+    formData.get("text"),
+    formData.get("radio"),
+  ]);
+  return <pre>{JSON.stringify({})}</pre>;
+};
+
 export default function Home() {
-  const [count, setCount] = useState(0);
-  console.log("home render");
-  const { setTheme, theme } = useTheme();
-
-  const x = useTranslator("HomePage");
-
+  const [value, setValue] = useState("");
+  const [toggle, setToggle] = useState(false);
   return (
     <div>
-      <div>
-        <div>Title: {x("title", { version: "1" })}</div>
-      </div>
       <h1>Home</h1>
-      <button onClick={() => setTheme("dark")}>Dark</button>
-      <button onClick={() => setTheme("light")}>Light</button>
-      <button onClick={() => setTheme("system")}>System</button>
-      <div>
-        <Link href="/" hash="#test">
-          Test
-        </Link>
-        <Link href="/" search={{ test: "test" }}>
-          Searh test
-        </Link>
-      </div>
-      <div className="h-[1000px]"></div>
-      <div>
-        <section id="test" className="h-[500px] bg-red-100">
-          <h1>Test</h1>
-        </section>
-      </div>
+      <button type="button" onClick={() => setValue("foo")}>
+        Update
+      </button>
+      <button type="button" onClick={() => setToggle((s) => !s)}>
+        Toggle
+      </button>
+      {toggle && (
+        <div>
+          <Form method="POST" action="/org/:orgId/products">
+            <input
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+              name="test"
+            />
+            <input type="checkbox" name="test" />
+            <input type="radio" name="radio" />
+            <input name="number" type="number" />
+            <div>
+              <textarea name="text" />
+            </div>
+            <select name="option">
+              <option value="1">Option 1</option>
+              <option value="2">Option 2</option>
+              <option value="3">Option 3</option>
+            </select>
+            <FormData />
+          </Form>
+        </div>
+      )}
     </div>
   );
 }
