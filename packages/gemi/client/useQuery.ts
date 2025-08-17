@@ -1,6 +1,6 @@
 import { useCallback, useContext, useEffect, useRef, useState } from "react";
 import type { RPC } from "./rpc";
-import type { JSONLike } from "../utils/type";
+import type { JSONLike, NestedPrettify } from "../utils/type";
 
 import type { ApiRouterHandler } from "../http/ApiRouter";
 import type { UnwrapPromise } from "../utils/type";
@@ -10,6 +10,7 @@ import type { UrlParser } from "./types";
 import { omitNullishValues } from "../utils/omitNullishValues";
 import { useParams } from "./useParams";
 import { useRouteData } from "./useRouteData";
+import { isPlainObject } from "./isPlainObject";
 
 interface Config<T> {
   fallbackData?: T;
@@ -53,37 +54,14 @@ type QueryOptions<T extends keyof GetRPC> = {
   search?: Partial<WithOptionalValues<Input<T>>>;
 };
 
-type Error = {};
-
-type CombineKeys<
-  T extends PropertyKey,
-  K extends PropertyKey,
-> = `${T & string}.${K & string}`;
-
-type NestedKeyof<T> = T extends JSONLike
-  ? {
-      [K in keyof T]: K extends string
-        ? K | CombineKeys<K, NestedKeyof<T[K]>>
-        : never;
-    }[keyof T]
-  : never;
-
-type ValueAtPath<T, Path extends string> = T extends JSONLike
-  ? Path extends keyof T
-    ? T[Path]
-    : Path extends `${infer K}.${infer R}`
-      ? K extends keyof T
-        ? ValueAtPath<T[K], R>
-        : never
-      : never
-  : never;
+type Error = Record<string, unknown>;
 
 const defaultOptions: QueryOptions<any> & { params?: Record<string, any> } = {
   params: {} as Record<string, string>,
   search: {} as Record<string, string>,
 };
 
-export type QueryResult<T extends keyof GetRPC> = Data<T>;
+export type QueryResult<T extends keyof GetRPC> = NestedPrettify<Data<T> & {}>;
 
 export function useQuery<T extends keyof GetRPC>(
   url: T,
@@ -172,53 +150,49 @@ export function useQuery<T extends keyof GetRPC>(
     };
   }, [variantKey, resource]);
 
-  function mutate(fn: Partial<Data<T>>): void;
-  function mutate(fn: (data: Data<T>) => Partial<Data<T>>): void;
-  function mutate<K extends NestedKeyof<Data<T>>, V = ValueAtPath<Data<T>, K>>(
-    key: K,
-    value: V | ((value: V) => V),
+  function mutate(fn: Partial<NestedPrettify<Data<T>>>): void;
+  function mutate(
+    fn: (data: NestedPrettify<Data<T>>) => Partial<NestedPrettify<Data<T>>>,
   ): void;
-  function mutate(fn: any, value?: any) {
+  function mutate(fn: any) {
     return resource.mutate.call(resource, variantKey, (data: any) => {
-      try {
-        if (typeof fn === "function") {
-          if (Array.isArray(data)) {
-            return [...data, ...fn(data)];
-          }
-          return { ...data, ...fn(data) };
-        } else if (typeof fn === "string") {
-          const keys = (fn as string).split(".");
-
-          let current: any = structuredClone(data);
-
-          for (let i = 0; i < keys.length - 1; i++) {
-            const subKey = keys[i];
-            current[subKey] = current[subKey] || {}; // Create the nested object if it doesn't exist
-            current = current[subKey];
-          }
-
-          let newValue = value;
-
-          if (typeof value === "function") {
-            newValue = value(current[keys[keys.length - 1]]);
-          }
-
-          // Update the final key with the new value
-          current[keys[keys.length - 1]] = newValue;
-
-          return current;
-        }
-        return { ...data, ...fn };
-      } catch (err) {
-        console.log(err);
-        // Do something
+      if (data === undefined || data === null) {
+        console.warn("Mutate function called before the query.");
+        return;
       }
-      return data;
+
+      const updatedData = typeof fn === "function" ? fn(data) : fn;
+
+      if (isPlainObject(data)) {
+        if (isPlainObject(updatedData)) {
+          return { ...data, ...updatedData };
+        }
+        throw new Error(
+          "Mutate function must return an object when the current data is an object.",
+        );
+      }
+
+      if (Array.isArray(data)) {
+        if (Array.isArray(updatedData)) {
+          return [...data, ...updatedData];
+        }
+        throw new Error(
+          "Mutate function must return an array when the current data is an array.",
+        );
+      }
+
+      if (typeof data !== typeof updatedData) {
+        throw new Error(
+          "Mutate function must return the same type as the current data.",
+        );
+      }
+
+      return updatedData;
     });
   }
 
   return {
-    data: state?.data as Data<T>,
+    data: state?.data as NestedPrettify<Data<T>>,
     loading: state?.loading ?? true,
     error: state?.error as Error,
     mutate,

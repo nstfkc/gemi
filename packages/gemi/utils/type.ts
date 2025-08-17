@@ -14,6 +14,39 @@ export type Prettify<T> = {
   [P in keyof T as T[P] extends never ? never : P]: T[P];
 } & {};
 
+export type NestedPrettify<T> = {
+  [K in keyof T]: T[K] extends Date
+    ? T[K]
+    : T[K] extends Array<infer R>
+      ? Array<NestedPrettify<R>>
+      : T[K] extends Record<string, any>
+        ? NestedPrettify<T[K]>
+        : T[K];
+} & {};
+
+type Result =
+  | ({
+      accounts: ({
+        organization: {
+          name: string;
+          id: number;
+          publicId: string;
+          description: string | null;
+          logoUrl: string | null;
+        } | null;
+      } & {
+        id: number;
+        publicId: string;
+        organizationId: number | null;
+        userId: number | null;
+      })[];
+    } & {
+      anotherField: string;
+    })
+  | null;
+
+type R1 = NestedPrettify<Result>;
+
 export type IsEmptyObject<T> = T extends Record<string, never> ? true : false;
 
 export type ParseTranslationParams<T extends string> =

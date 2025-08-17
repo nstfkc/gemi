@@ -1,4 +1,3 @@
-import { I18nServiceContainer } from "../i18n/I18nServiceContainer";
 import { RequestContext } from "./requestContext";
 import { ValidationError } from "./Router";
 
@@ -25,7 +24,7 @@ function parseFileSizeString(size: string) {
   if (!number || !unit) {
     return 0;
   }
-  const fileSize = parseInt(number);
+  const fileSize = Number.parseInt(number);
   switch (unit) {
     case "B":
       return fileSize;
@@ -96,15 +95,15 @@ function validate(ruleName: string) {
       return (value: any) => {
         if (typeof value !== "number") return false;
 
-        return !isNaN(value);
+        return !Number.isNaN(value);
       };
     case "min":
       return (value: any) => {
-        return value?.length >= parseInt(param);
+        return value?.length >= Number.parseInt(param);
       };
     case "max":
       return (value: any) => {
-        return value?.length <= parseInt(param);
+        return value?.length <= Number.parseInt(param);
       };
     case "email":
       return (value: any) => {
@@ -324,9 +323,9 @@ export class HttpRequest<
 
     if (Object.keys(errors).length > 0) {
       throw new ValidationError(errors);
-    } else {
-      return input;
     }
+
+    return input;
   }
 
   async input(): Promise<Input<T>> {
