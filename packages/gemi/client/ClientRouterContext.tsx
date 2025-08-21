@@ -58,6 +58,7 @@ interface ClientRouterProviderProps {
   params: Record<string, string>;
   searchParams: string;
   is404: boolean;
+  is500: boolean;
   breadcrumbs: Record<string, Breadcrumb>;
 }
 
@@ -69,6 +70,7 @@ export const ClientRouterProvider = (
     pathname,
     currentPath,
     is404,
+    is500,
     routeManifest,
     cssManifest,
     pageData,
@@ -95,7 +97,9 @@ export const ClientRouterProvider = (
 
   const initalViewEntries = is404
     ? ["404"]
-    : (routeManifest[pathname] ?? ["404"]);
+    : is500
+      ? ["500"]
+      : (routeManifest[pathname] ?? ["404"]);
   const viewEntriesSubject = useRef(new Subject<string[]>(initalViewEntries));
 
   const [routerSubject] = useState(() => {

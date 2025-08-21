@@ -238,33 +238,47 @@ export class ViewRouterServiceContainer extends ServiceContainer {
       }
 
       result.data["cssManifest"] = cssManifest;
-      const stream = await renderToReadableStream(
-        createElement(Fragment, {
-          children: [
-            ...(await getStyles(currentViews)),
-            createElement("script", {
-              key: "theme-script",
-              dangerouslySetInnerHTML: {
-                __html: themeScript,
-              },
-            }),
-            createElement(Root, {
-              data: result.data,
-              viewImportMap,
-              key: "root",
-            }),
-          ],
-        }),
-        {
-          bootstrapScriptContent: `window.__GEMI_DATA__ = ${JSON.stringify(result.data)}; window.loaders=${loaders}`,
-          bootstrapModules,
-        },
-      );
+      try {
+        const stream = await renderToReadableStream(
+          createElement(Fragment, {
+            children: [
+              ...(await getStyles(currentViews)),
+              createElement("script", {
+                key: "theme-script",
+                dangerouslySetInnerHTML: {
+                  __html: themeScript,
+                },
+              }),
+              createElement(Root, {
+                data: result.data,
+                viewImportMap,
+                key: "root",
+              }),
+            ],
+          }),
+          {
+            bootstrapScriptContent: `window.__GEMI_DATA__ = ${JSON.stringify(result.data)}; window.loaders=${loaders}`,
+            bootstrapModules,
+          },
+        );
 
-      return new Response(stream, {
-        status: !currentPathName ? 404 : 200,
-        headers,
-      });
+        return new Response(stream, {
+          status: !currentPathName ? 404 : 200,
+          headers,
+        });
+      } catch (err) {
+        const stream = await renderToReadableStream(createElement("div"), {
+          bootstrapScriptContent: `window.error= ${JSON.stringify(err.message)}; window.stack_trace=${JSON.stringify(err.stack)};window.__GEMI_DATA__ = ${JSON.stringify(result.data)}; window.loaders=${loaders}`,
+          bootstrapModules:
+            process.env.NODE_ENV === "development"
+              ? ["/render-error.js", ...bootstrapModules]
+              : bootstrapModules,
+        });
+        return new Response(stream, {
+          status: !currentPathName ? 404 : 200,
+          headers,
+        });
+      }
     };
   }
 

@@ -1,3 +1,21 @@
+function cleanupTerminalText(text) {
+  return (
+    text
+      // Remove ANSI escape sequences (colors, formatting)
+      .replace(/\x1b\[[0-9;]*m/g, "")
+      // Remove ANSI escape sequences with different format
+      .replace(/\[[0-9;]*m/g, "")
+      // Remove excessive whitespace and normalize line breaks
+      .replace(/\n\s*\n/g, "\n")
+      // Trim each line
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0)
+      .join("\n")
+      .trim()
+  );
+}
+
 export function renderErrorPage(err: any) {
   return `
 <!DOCTYPE html>
@@ -22,16 +40,17 @@ export function renderErrorPage(err: any) {
   </head>
   <body>
   <div id="overlay"></div>
-
     <script type="module" src="/refresh.js"></script>
     <script type="module" src="/@vite/client"></script>
     <script>
-      const err = ${JSON.stringify(err)}
+      ${cleanupTerminalText.toString()}
+      const err = ${JSON.stringify(err, Object.getOwnPropertyNames(err), 2)}
+
       window.addEventListener('load', () => {
         const container = document.getElementById('overlay')
         const ErrorOverlay = customElements.get('vite-error-overlay')
         if (ErrorOverlay) {
-          const overlay = new ErrorOverlay(err)
+      const overlay = new ErrorOverlay({ ...err, message: cleanupTerminalText(err.message) });
           container.appendChild(overlay)
         }
       })

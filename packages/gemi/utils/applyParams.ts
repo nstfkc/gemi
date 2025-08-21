@@ -12,7 +12,11 @@ export function applyParams<T extends string>(
         if (isOptional) {
           return ""; // Remove the optional segment if no value is provided
         }
-        throw new Error(`Missing parameter: ${paramName}`);
+        // @ts-ignore
+        if (import.meta.env.DEV) {
+          throw new Error(`Missing parameter: ${paramName}`);
+        }
+        console.error(`Missing parameter: ${paramName} in URL: ${url}`);
       }
 
       return String(value);

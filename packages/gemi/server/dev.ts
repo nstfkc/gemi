@@ -37,6 +37,13 @@ export async function startDevServer() {
 
   async function handleDevRequests(req: Request): Promise<Response> {
     const { pathname, host } = new URL(req.url);
+    if (pathname.startsWith("/render-error.js")) {
+      return new Response("window.render_error = true", {
+        headers: {
+          "Content-Type": "application/javascript",
+        },
+      });
+    }
     if (pathname.startsWith("/refresh.js")) {
       return new Response(
         `
@@ -119,6 +126,7 @@ export async function startDevServer() {
                 `${appDir}/views/${fileName}.tsx`,
                 { fixStacktrace: true },
               );
+
               viewImportMap[fileName] = mod.default;
               ogMap[fileName] = mod?.OpenGraph;
               templates.push(
@@ -143,7 +151,6 @@ export async function startDevServer() {
             });
           }
         } catch (err) {
-          console.error(err);
           if (pathname.startsWith("/api")) {
             return new Response(JSON.stringify({ error: err.message }), {
               status: 500,
@@ -151,15 +158,9 @@ export async function startDevServer() {
             });
           }
 
-          return new Response(
-            renderErrorPage({
-              ...err,
-              message: "",
-            }),
-            {
-              headers: { "Content-Type": "text/html" },
-            },
-          );
+          return new Response(renderErrorPage(err), {
+            headers: { "Content-Type": "text/html" },
+          });
         }
       },
 

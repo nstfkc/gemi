@@ -303,6 +303,7 @@ export const ClientRouter = (props: {
                 params={router.params}
                 pageData={pageData}
                 is404={router.is404}
+                is500={false}
                 pathname={router.pathname}
                 currentPath={router.currentPath}
                 routeManifest={routeManifest}

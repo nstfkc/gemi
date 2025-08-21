@@ -1,14 +1,17 @@
+import type { Account, Organization, User } from "@prisma/client";
 import {
   Form,
   Link,
   useFormData,
   useLocation,
+  useQuery,
   useSearchParams,
   useTheme,
   useTranslator,
+  type QueryResult,
   type ViewProps,
 } from "gemi/client";
-import { useState } from "react";
+import { useId, useState } from "react";
 
 const FormData = () => {
   const formData = useFormData();
@@ -25,8 +28,11 @@ const FormData = () => {
 export default function Home() {
   const [value, setValue] = useState("");
   const [toggle, setToggle] = useState(false);
+  const { data } = useQuery("/test/:testId");
+  const id = useId();
   return (
-    <div>
+    <div data-testid="home" id={id}>
+      {id}
       <h1>Home</h1>
       <button type="button" onClick={() => setValue("foo")}>
         Update
@@ -60,3 +66,60 @@ export default function Home() {
     </div>
   );
 }
+
+type data = {
+  accounts: {
+    organization: {
+      name: string;
+      id: number;
+      publicId: string;
+      logoUrl: string | null;
+      description: string | null;
+    } | null;
+    id: number;
+    publicId: string;
+    organizationId: number | null;
+    createdAt: Date;
+    updatedAt: Date;
+    deletedAt: Date | null;
+    organizationRole: number;
+    userId: number | null;
+  }[];
+  name: string | null;
+  id: number;
+  publicId: string;
+  email: string | null;
+  emailVerifiedAt: Date | null;
+  verificationToken: string | null;
+  locale: string | null;
+  globalRole: number;
+  password: string | null;
+  organizationId: number | null;
+  createdAt: Date;
+  updatedAt: Date;
+  deletedAt: Date | null;
+};
+
+type user = {
+  name: string | null;
+  id: number;
+  publicId: string;
+  email: string | null;
+  emailVerifiedAt: Date | null;
+  verificationToken: string | null;
+  locale: string | null;
+  globalRole: number;
+  password: string | null;
+  organizationId: number | null;
+  createdAt: Date;
+  updatedAt: Date;
+  deletedAt: Date | null;
+} & {
+  accounts: (Account & {
+    organization: Organization;
+  })[];
+};
+
+type Equals<U, T> = T extends U ? (U extends T ? true : false) : false;
+
+type IsDataEqual = Equals<data, user>;

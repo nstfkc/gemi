@@ -12,7 +12,12 @@ export class I18n {
 
   static locale() {
     const container = I18nServiceContainer.use();
-    return container.detectLocale(RequestContext.getStore().req);
+    const requestStore = RequestContext.getStore();
+    if (requestStore) {
+      return container.detectLocale(requestStore.req);
+    }
+
+    return container.service.defaultLocale;
   }
 
   static setLocale(locale = I18n.locale()) {
