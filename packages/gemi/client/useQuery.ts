@@ -1,6 +1,6 @@
 import { useCallback, useContext, useEffect, useRef, useState } from "react";
 import type { RPC } from "./rpc";
-import type { JSONLike, NestedPrettify } from "../utils/type";
+import type { NestedPrettify } from "../utils/type";
 
 import type { ApiRouterHandler } from "../http/ApiRouter";
 import type { UnwrapPromise } from "../utils/type";
@@ -97,16 +97,19 @@ export function useQuery<T extends keyof GetRPC>(
   const retryingMap = useRef<Map<string, boolean>>(new Map());
   const [state, setState] = useState(() => resource.getVariant(variantKey));
 
-  const retry = (variantKey: string) => {
-    if (!retryingMap.current.get(variantKey)) {
-      if (config.debug) console.log("retrying", variantKey);
-      retryingMap.current.set(variantKey, true);
-      retryIntervalRef.current = setTimeout(() => {
-        resource.getVariant(variantKey);
-        retryingMap.current.set(variantKey, false);
-      }, config.retryIntervalOnError);
-    }
-  };
+  const retry = useCallback(
+    (variantKey: string) => {
+      if (!retryingMap.current.get(variantKey)) {
+        if (config.debug) console.log("retrying", variantKey);
+        retryingMap.current.set(variantKey, true);
+        retryIntervalRef.current = setTimeout(() => {
+          resource.getVariant(variantKey);
+          retryingMap.current.set(variantKey, false);
+        }, config.retryIntervalOnError);
+      }
+    },
+    [config.debug, config.retryIntervalOnError, resource],
+  );
 
   useEffect(() => {
     const key = JSON.stringify(params);
@@ -115,7 +118,30 @@ export function useQuery<T extends keyof GetRPC>(
       setState(resource.getVariant(variantKey));
       paramsRef.current = key;
     }
-  }, [params]);
+  }, [params, url, variantKey, getResource, resource]);
+
+  const handleReload = useCallback(() => {
+    if (config.debug) {
+      console.log("Reloading query for", variantKey);
+    }
+    const data = resource.getVariant(variantKey).data;
+    resource.mutate.call(resource, variantKey, () => data);
+  }, [variantKey, resource, config.debug]);
+
+  useEffect(() => {
+    // @ts-ignore
+    if (import.meta.hot) {
+      // @ts-ignore
+      import.meta.hot.on("http-reload", handleReload);
+    }
+    return () => {
+      // @ts-ignore
+      if (import.meta.hot) {
+        // @ts-ignore
+        import.meta.hot.off("http-reload", handleReload);
+      }
+    };
+  }, [handleReload]);
 
   const handleStateUpdate = useCallback(
     (nextState) => {
@@ -136,7 +162,7 @@ export function useQuery<T extends keyof GetRPC>(
         setState(nextState);
       }
     },
-    [variantKey],
+    [variantKey, config.keepPreviousData, config.debug, retry],
   );
 
   useEffect(() => {
@@ -148,7 +174,7 @@ export function useQuery<T extends keyof GetRPC>(
       unsub();
       clearInterval(retryIntervalRef.current);
     };
-  }, [variantKey, resource]);
+  }, [variantKey, resource, handleStateUpdate]);
 
   function mutate(fn: Partial<NestedPrettify<Data<T>>>): void;
   function mutate(

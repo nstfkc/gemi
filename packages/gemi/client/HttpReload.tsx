@@ -11,17 +11,19 @@ export const HttpReload = () => {
   const { pathname } = useRoute();
   const params = useParams();
   const [reloading, setReloading] = useState(false);
+
   const handleReload = () => {
     setReloading(true);
-    replace(pathname, {
-      params: params,
-      search: searchParams.toJSON(),
-    } as any)
-      .catch(console.log)
-      .finally(() => {
-        setReloading(false);
-      });
+    // replace(pathname, {
+    //   params: params,
+    //   search: searchParams.toJSON(),
+    // } as any)
+    //   .catch(console.log)
+    //   .finally(() => {
+    //     setReloading(false);
+    //   });
   };
+
   useEffect(() => {
     // @ts-ignore
     if (import.meta.hot) {

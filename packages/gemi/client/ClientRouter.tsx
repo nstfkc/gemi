@@ -150,22 +150,22 @@ const Routes = (props: { componentTree: ComponentTree }) => {
 
   const [transitionPath, setTransitionPath] = useState<[string, string]>([
     null,
-    routerSubject.getValue().pathname,
+    routerSubject?.getValue().pathname,
   ]);
 
   const { breadcrumbs, pageData, i18n, prefetchedData } =
     useContext(ServerDataContext);
 
   const [routeState, setRouteState] = useState<RouteState & PageData>({
-    params: routerSubject.getValue().params,
-    search: routerSubject.getValue().search,
-    pathname: routerSubject.getValue().pathname,
-    views: routerSubject.getValue().views,
+    params: routerSubject?.getValue().params,
+    search: routerSubject?.getValue().search,
+    pathname: routerSubject?.getValue().pathname,
+    views: routerSubject?.getValue().views,
     action: null,
-    hash: routerSubject.getValue().hash,
-    state: routerSubject.getValue().state,
-    routePath: routerSubject.getValue().routePath,
-    locale: routerSubject.getValue().locale,
+    hash: routerSubject?.getValue().hash,
+    state: routerSubject?.getValue().state,
+    routePath: routerSubject?.getValue().routePath,
+    locale: routerSubject?.getValue().locale,
     breadcrumbs,
     data: pageData,
     i18n,
@@ -175,7 +175,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
   const { replace } = useNavigate();
 
   useEffect(() => {
-    return routerSubject.subscribe(async (routerState) => {
+    return routerSubject?.subscribe(async (routerState) => {
       const { pathname, search, state, views } = routerState;
       setTransitionPath((current) => {
         const [, prevTarget] = current;

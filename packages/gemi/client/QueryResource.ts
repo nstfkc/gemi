@@ -71,15 +71,6 @@ export class QueryResource {
   }
 
   mutate(variantKey: string, fn: (data: any) => any) {
-    const store = this.store.getValue();
-    const state = store.get(variantKey);
-    const data = fn(state.data);
-
-    this.staleVariants.add(variantKey);
-    this.store.next(
-      store.set(variantKey, { loading: false, data, error: null }),
-    );
-    this.resolveVariant(variantKey);
     const cacheKey = [window.location.origin, this.key, variantKey]
       .filter((s) => s.length > 0)
       .join("?");
@@ -88,9 +79,23 @@ export class QueryResource {
         caches?.delete(cacheKey);
       }
     } catch (err) {}
+
+    const store = this.store.getValue();
+    const state = store.get(variantKey);
+    const data = fn(state.data);
+
+    this.staleVariants.add(variantKey);
+    this.store.next(
+      store.set(variantKey, { loading: false, data, error: null }),
+    );
+    this.resolveVariant(variantKey, false, false);
   }
 
-  private async resolveVariant(variantKey: string, silent = false) {
+  private async resolveVariant(
+    variantKey: string,
+    silent = false,
+    cache = true,
+  ) {
     if (typeof window === "undefined") {
       return;
     }
@@ -106,7 +111,9 @@ export class QueryResource {
     }
 
     const fullUrl = [this.key, variantKey].filter((s) => s.length).join("?");
-    const response = await this.fetch(`${this.host}/api${fullUrl}`);
+    const response = await this.fetch(`${this.host}/api${fullUrl}`, {
+      cache: cache ? "default" : "reload",
+    });
 
     let data = null;
     try {

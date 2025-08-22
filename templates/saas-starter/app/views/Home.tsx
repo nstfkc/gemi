@@ -28,7 +28,6 @@ const FormData = () => {
 export default function Home() {
   const [value, setValue] = useState("");
   const [toggle, setToggle] = useState(false);
-  const { data } = useQuery("/test/:testId");
   const id = useId();
   return (
     <div data-testid="home" id={id}>

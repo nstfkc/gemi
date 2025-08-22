@@ -19,6 +19,9 @@
       "recommended": true,
       "nursery": {
         "useExplicitType": "off"
+      },
+      "suspicious": {
+        "noExplicitAny": "off"
       }
     }
   },
