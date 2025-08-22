@@ -43,12 +43,15 @@ export class AuthenticationServiceContainer extends ServiceContainer {
         secure: true,
         httpOnly: true,
       });
-      return true;
+      if (session?.user) {
+        session.user["extension"] = await this.provider.extendSession(
+          session.user,
+        );
+      }
+      return session;
     } catch (err) {
       console.log(err);
     }
-
-    return false;
   }
 
   async createOrUpdateSessionV2(user: { email: string; id?: number }) {
