@@ -76,7 +76,7 @@ export class Auth {
 
   static async authenticate(email: string) {
     const container = AuthenticationServiceContainer.use();
-    await container.authenticate(email);
+    return await container.authenticate(email);
   }
 
   static async createMagicLink(email: string) {
