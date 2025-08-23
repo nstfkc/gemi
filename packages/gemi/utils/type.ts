@@ -66,6 +66,23 @@ export type ParseTranslationParams<T extends string> =
           } & ParseTranslationParams<Rest>
     : Record<string, never>;
 
+export type ParseTranslationParamsServer<T extends string> =
+  T extends `${infer _Start}{{${infer Param}}}${infer Rest}`
+    ? Param extends `${infer Key}:[${string}]`
+      ? {
+          [K in Key]: (p: string) => string | JSX.Element;
+        } & ParseTranslationParams<Rest>
+      : Param extends `${infer Key}:${infer Type}`
+        ? {
+            [K in Key]: Type extends "number"
+              ? (() => number) | number
+              : (() => string) | string;
+          } & ParseTranslationParams<Rest>
+        : {
+            [K in Param]: (() => string) | string;
+          } & ParseTranslationParams<Rest>
+    : Record<string, never>;
+
 type JSONValue =
   | string
   | number

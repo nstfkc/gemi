@@ -1,13 +1,12 @@
 import { I18n } from "../facades";
 import { parseTranslation } from "../utils/parseTranslation";
-import type { ParseTranslationParams, Prettify } from "../utils/type";
-import { I18nServiceContainer } from "./I18nServiceContainer";
+import type {
+  ParseTranslationParams,
+  ParseTranslationParamsServer,
+  Prettify,
+} from "../utils/type";
 
 type Translations = Record<string, Record<string, string>>;
-
-type ParamsOrNever<T> = T extends Record<string, never>
-  ? [params?: never]
-  : [params: T];
 
 export class Dictionary<T extends Translations> {
   constructor(
@@ -54,5 +53,28 @@ export class Dictionary<T extends Translations> {
 
   static create<const T extends Translations>(name: string, translations: T) {
     return new Dictionary<T>(name, translations);
+  }
+
+  static text<const T extends Record<string, string>, U extends keyof T>(
+    content: T,
+    ...args: Prettify<ParseTranslationParamsServer<T[U]>> extends Record<
+      string,
+      never
+    >
+      ? [args?: { locale?: U | (string & {}) }]
+      : [
+          args: {
+            locale?: U | (string & {});
+            params: Prettify<ParseTranslationParamsServer<T[U]>>;
+          },
+        ]
+  ) {
+    const { locale = I18n.locale(), params } = { params: {}, ...args?.[0] };
+
+    if (!content?.[locale]) {
+      throw new Error(`Translation not found for ${String(locale)}`);
+    }
+
+    return parseTranslation(content[locale], params ?? {});
   }
 }
