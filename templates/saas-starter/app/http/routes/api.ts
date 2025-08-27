@@ -1,5 +1,6 @@
 import { I18n } from "gemi/facades";
 import { ApiRouter, ResourceController, type HttpRequest } from "gemi/http";
+import { Dictionary } from "gemi/i18n";
 
 class ProductsController extends ResourceController {
   async list() {}
@@ -21,14 +22,14 @@ export default class extends ApiRouter {
   routes = {
     "/org": OrgRouter,
     "/test": this.get((req: HttpRequest) => {
-      const result = {
-        "en-US": "Hello",
-        "tr-TR": "Merhaba",
-      };
-
-      const locale = I18n.locale() ?? "en-US";
       return {
-        message: "Test223",
+        message: Dictionary.text(
+          {
+            "en-US": "ok {{message}}",
+            "tr-TR": "d'accord {{message:[test]}}",
+          },
+          { params: { message: (test) => test } },
+        ),
       };
     }),
     "/health": this.get(() => {

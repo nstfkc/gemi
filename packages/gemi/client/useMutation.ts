@@ -44,17 +44,13 @@ const defaultOptions: Config<any> = {
   onCanceled: () => {},
 };
 
-type Data<
-  M extends keyof Methods,
-  K extends keyof Methods[M],
-> = Methods[M][K] extends ApiRouterHandler<any, infer T, any>
-  ? UnwrapPromise<T>
-  : never;
+type Data<M extends keyof Methods, K extends keyof Methods[M]> =
+  Methods[M][K] extends ApiRouterHandler<any, infer T, any>
+    ? UnwrapPromise<T>
+    : never;
 
-type Body<
-  M extends keyof Methods,
-  K extends keyof Methods[M],
-> = Methods[M][K] extends ApiRouterHandler<infer T, any, any> ? T : never;
+type Body<M extends keyof Methods, K extends keyof Methods[M]> =
+  Methods[M][K] extends ApiRouterHandler<infer T, any, any> ? T : never;
 
 type MutationError =
   | {
@@ -160,7 +156,7 @@ export function useMutation<
           loading: false,
         });
 
-        options.onError(data);
+        options?.onError(data);
         return;
       }
 
@@ -175,7 +171,7 @@ export function useMutation<
       return data as any;
     } catch (error) {
       formData.current = new FormData();
-      options.onError(error);
+      options?.onError(error);
       setState({
         data: null,
         error,
