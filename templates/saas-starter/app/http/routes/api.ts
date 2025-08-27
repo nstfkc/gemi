@@ -1,5 +1,10 @@
 import { I18n } from "gemi/facades";
-import { ApiRouter, ResourceController, type HttpRequest } from "gemi/http";
+import {
+  ApiRouter,
+  ResourceController,
+  ValidationError,
+  type HttpRequest,
+} from "gemi/http";
 import { Dictionary } from "gemi/i18n";
 
 class ProductsController extends ResourceController {
@@ -30,6 +35,18 @@ export default class extends ApiRouter {
           },
           { params: { message: (test) => test } },
         ),
+      };
+    }),
+    "/upload": this.post(async (req: HttpRequest<{ file: File }>) => {
+      const input = await req.input();
+      const file = input.get("file");
+      throw new ValidationError({
+        file: ["File is too large", "File type not allowed"],
+      });
+      return {
+        filename: file.name,
+        size: file.size,
+        type: file.type,
       };
     }),
     "/health": this.get(() => {

@@ -6,6 +6,7 @@ export {
   usePatch,
   usePost,
   usePut,
+  useUpload,
 } from "./useMutation";
 export {
   Form,

@@ -44,13 +44,17 @@ const defaultOptions: Config<any> = {
   onCanceled: () => {},
 };
 
-type Data<M extends keyof Methods, K extends keyof Methods[M]> =
-  Methods[M][K] extends ApiRouterHandler<any, infer T, any>
-    ? UnwrapPromise<T>
-    : never;
+type Data<
+  M extends keyof Methods,
+  K extends keyof Methods[M],
+> = Methods[M][K] extends ApiRouterHandler<any, infer T, any>
+  ? UnwrapPromise<T>
+  : never;
 
-type Body<M extends keyof Methods, K extends keyof Methods[M]> =
-  Methods[M][K] extends ApiRouterHandler<infer T, any, any> ? T : never;
+type Body<
+  M extends keyof Methods,
+  K extends keyof Methods[M],
+> = Methods[M][K] extends ApiRouterHandler<infer T, any, any> ? T : never;
 
 type MutationError =
   | {
@@ -156,7 +160,7 @@ export function useMutation<
           loading: false,
         });
 
-        options?.onError(data);
+        options?.onError?.(data);
         return;
       }
 
@@ -171,7 +175,7 @@ export function useMutation<
       return data as any;
     } catch (error) {
       formData.current = new FormData();
-      options?.onError(error);
+      options?.onError?.(error);
       setState({
         data: null,
         error,
@@ -250,4 +254,110 @@ export function useDelete<
   ]
 ) {
   return useMutation("DELETE", url, ...(args as any));
+}
+
+export function useUpload<K extends keyof Methods["POST"], T = Data<"POST", K>>(
+  url: K,
+  ...args: [
+    options?: { params?: Partial<ParseParams<K>> },
+    config?: Partial<Config<T>>,
+  ]
+) {
+  const [state, setState] = useState<"idle" | "uploading" | "done" | "error">(
+    "idle",
+  );
+  const [progress, setProgress] = useState(0);
+  const _params = useParams();
+  const abortRef = useRef<VoidFunction | null>(null);
+  const { host } = useContext(HttpClientContext);
+
+  const [inputs = {}, options = defaultOptions] = args ?? [];
+
+  const cancel = () => {
+    if (abortRef.current) {
+      abortRef.current();
+      options.onCanceled?.();
+      setState("idle");
+      setProgress(0);
+    }
+  };
+
+  const trigger = async (file: File) => {
+    const params =
+      "params" in inputs ? { ..._params, ...inputs.params } : _params;
+    const finalUrl = applyParams(String(url).replace("POST:", ""), params);
+
+    const method = "POST";
+    const action = `${host}/api${finalUrl}`;
+    const data = new FormData();
+    data.append("file", file);
+    const xhr = new XMLHttpRequest();
+    abortRef.current = () => {
+      xhr.abort();
+    };
+
+    try {
+      const result = await new Promise<Response>((resolve, reject) => {
+        xhr.responseType = "blob";
+        xhr.onreadystatechange = async () => {
+          if (xhr.readyState !== 4) {
+            // done
+            return;
+          }
+
+          const response = new Response(xhr.response, {
+            status: xhr.status,
+            statusText: xhr.statusText,
+          });
+
+          resolve(response);
+        };
+
+        xhr.addEventListener("error", () => {
+          reject(new TypeError("Failed to fetch"));
+        });
+
+        xhr.upload.addEventListener("loadstart", () => {
+          setProgress(0);
+        });
+        xhr.upload.addEventListener("loadend", () => {
+          setProgress(1);
+        });
+
+        xhr.upload.addEventListener("progress", (event) => {
+          setProgress(event.loaded / event.total);
+        });
+
+        xhr.open(method, action, true);
+        xhr.send(data);
+      });
+      setState("uploading");
+      if (!result.ok) {
+        let error: MutationError = {
+          kind: "server_error",
+          message: result.statusText,
+        };
+        try {
+          const data = await result.json();
+          error = data.error;
+        } catch (e) {
+          // do nothing
+        }
+        setState("error");
+        options?.onError?.(error);
+        return;
+      }
+    } catch (error) {
+      setState("error");
+      options?.onError?.(error);
+      return;
+    }
+  };
+
+  return {
+    state,
+    progress,
+    trigger,
+    cancel,
+  };
 }
