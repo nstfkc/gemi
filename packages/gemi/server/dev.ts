@@ -233,7 +233,7 @@ export async function startDevServer() {
       });
     } catch (err) {
       console.log("Error on server reload");
-      console.log(err);
+      console.log(vite.ssrFixStacktrace(err));
     }
   });
 

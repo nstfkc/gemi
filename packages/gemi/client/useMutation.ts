@@ -282,7 +282,7 @@ export function useUpload<K extends keyof Methods["POST"], T = Data<"POST", K>>(
     }
   };
 
-  const trigger = async (file: File) => {
+  const trigger = async (file: File): Promise<T> => {
     const params =
       "params" in inputs ? { ..._params, ...inputs.params } : _params;
     const finalUrl = applyParams(String(url).replace("POST:", ""), params);
@@ -347,6 +347,9 @@ export function useUpload<K extends keyof Methods["POST"], T = Data<"POST", K>>(
         options?.onError?.(error);
         return;
       }
+      const json = await result.json();
+      options?.onSuccess?.(json);
+      return json;
     } catch (error) {
       setState("error");
       options?.onError?.(error);
