@@ -37,17 +37,18 @@ export default class extends ApiRouter {
         ),
       };
     }),
-    "/upload": this.post(async (req: HttpRequest<{ file: File }>) => {
+    "/upload": this.post(async (req: HttpRequest<{ file: File | File[] }>) => {
       const input = await req.input();
       const file = input.get("file");
-      throw new ValidationError({
-        file: ["File is too large", "File type not allowed"],
+      const files = Array.isArray(file) ? file : [file];
+
+      return files.map((file) => {
+        return {
+          filename: file.name,
+          size: file.size,
+          type: file.type,
+        };
       });
-      return {
-        filename: file.name,
-        size: file.size,
-        type: file.type,
-      };
     }),
     "/health": this.get(() => {
       return {

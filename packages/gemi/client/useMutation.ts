@@ -282,7 +282,10 @@ export function useUpload<K extends keyof Methods["POST"], T = Data<"POST", K>>(
     }
   };
 
-  const trigger = async (file: File): Promise<T> => {
+  const trigger = async (fileList: FileList | null | File): Promise<T> => {
+    if (!fileList) {
+      return;
+    }
     const params =
       "params" in inputs ? { ..._params, ...inputs.params } : _params;
     const finalUrl = applyParams(String(url).replace("POST:", ""), params);
@@ -290,7 +293,13 @@ export function useUpload<K extends keyof Methods["POST"], T = Data<"POST", K>>(
     const method = "POST";
     const action = `${host}/api${finalUrl}`;
     const data = new FormData();
-    data.append("file", file);
+    if (fileList instanceof FileList) {
+      for (const file of Array.from(fileList)) {
+        data.append("file", file);
+      }
+    } else {
+      data.append("file", fileList);
+    }
     const xhr = new XMLHttpRequest();
     abortRef.current = () => {
       xhr.abort();

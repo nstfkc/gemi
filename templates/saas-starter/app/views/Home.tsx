@@ -35,10 +35,10 @@ export default function Home() {
         <input
           name="file"
           type="file"
+          multiple
           onChange={(event) => {
-            const file = event.target.files?.[0];
-            if (file) {
-              trigger(file);
+            if (event.target.files) {
+              trigger(event.target.files!);
             }
           }}
         />
