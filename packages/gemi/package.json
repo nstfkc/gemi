@@ -1,6 +1,6 @@
 {
   "name": "gemi",
-  "version": "0.24.2",
+  "version": "0.24.3",
   "author": "Enes Tufekci <enes@gemijs.dev>",
   "license": "MIT",
   "devDependencies": {
@@ -33,7 +33,9 @@
     "./broadcasting": "./broadcasting/index.ts",
     "./i18n": "./i18n/index.ts"
   },
-  "files": ["dist/**/*"],
+  "files": [
+    "dist/**/*"
+  ],
   "private": false,
   "module": true,
   "scripts": {

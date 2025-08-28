@@ -1,8 +1,7 @@
 import type { FileSink } from "bun";
 import { mkdir, exists, readdir } from "fs/promises";
 import { ServiceContainer } from "../ServiceContainer";
-import { LoggingServiceProvider } from "./LoggingServiceProvider";
-import { Broadcast } from "../../facades/Broadcast";
+import type { LoggingServiceProvider } from "./LoggingServiceProvider";
 import { RequestContext } from "../../http/requestContext";
 import type { LogEntry, LogLevel } from "./types";
 
@@ -134,7 +133,7 @@ export class LoggingServiceContainer extends ServiceContainer {
     try {
       this.writer.write(log);
       this.writer.write("\n");
-      Broadcast.channel("/logs/live", {}).publish(JSON.stringify(logObject));
+      // Broadcast.channel("/logs/live", {}).publish(JSON.stringify(logObject));
       this.service.onLogCreated(logObject);
       this.tryFlush();
     } catch (err) {

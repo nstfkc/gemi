@@ -147,7 +147,7 @@ export class AuthenticationServiceContainer extends ServiceContainer {
         );
         userId = id;
       }
-      session = await authProvider.adapter.createSession({
+      session = await authProvider.adapter.createSessionV2({
         token,
         userId,
         userAgent:
