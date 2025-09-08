@@ -16,6 +16,7 @@ interface Config<T> {
   fallbackData?: T;
   keepPreviousData?: boolean;
   retryIntervalOnError?: number;
+  refreshInterval?: number;
   debug?: boolean;
 }
 
@@ -27,6 +28,7 @@ const defaultConfig: Config<any> = {
   fallbackData: null,
   keepPreviousData: true,
   retryIntervalOnError: 10000,
+  refreshInterval: 999999,
   debug: false,
 };
 
@@ -89,10 +91,14 @@ export function useQuery<T extends keyof GetRPC>(
   const { prefetchedData } = useRouteData();
   const fallbackData =
     config.fallbackData ?? prefetchedData?.[normalPath] ?? null;
+  const refreshInterval = config.refreshInterval;
   const [resource, setResource] = useState(() =>
     getResource(normalPath, fallbackData),
   );
 
+  const refreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(
+    null,
+  );
   const retryIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const retryingMap = useRef<Map<string, boolean>>(new Map());
   const [state, setState] = useState(() => resource.getVariant(variantKey));
@@ -127,6 +133,18 @@ export function useQuery<T extends keyof GetRPC>(
     const data = resource.getVariant(variantKey).data;
     resource.mutate.call(resource, variantKey, () => data);
   }, [variantKey, resource, config.debug]);
+
+  useEffect(() => {
+    refreshIntervalRef.current = setInterval(() => {
+      handleReload();
+    }, refreshInterval);
+
+    return () => {
+      if (refreshIntervalRef.current) {
+        clearInterval(refreshIntervalRef.current);
+      }
+    };
+  }, [refreshInterval, handleReload]);
 
   useEffect(() => {
     // @ts-ignore
