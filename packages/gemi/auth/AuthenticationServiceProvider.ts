@@ -156,8 +156,8 @@ class AuthController extends Controller {
     const session = await container.createOrUpdateSession({ email });
 
     req.ctx().setCookie("access_token", session.token, {
-      expires: session.absoluteExpiresAt,
-      secure: true,
+      expires: session.expiresAt,
+      secure: process.env.NODE_ENV !== "development",
       httpOnly: true,
     });
 
@@ -191,8 +191,8 @@ class AuthController extends Controller {
     const session = await container.createOrUpdateSessionV2({ email });
 
     req.ctx().setCookie("access_token", session.token, {
-      expires: session.absoluteExpiresAt,
-      secure: true,
+      expires: session.expiresAt,
+      secure: process.env.NODE_ENV !== "development",
       httpOnly: true,
     });
 
@@ -224,8 +224,8 @@ class AuthController extends Controller {
     const session = await container.createOrUpdateSession({ email });
 
     req.ctx().setCookie("access_token", session.token, {
-      expires: session.absoluteExpiresAt,
-      secure: true,
+      expires: session.expiresAt,
+      secure: process.env.NODE_ENV !== "development",
       httpOnly: true,
     });
 
@@ -269,8 +269,8 @@ class AuthController extends Controller {
       });
 
     req.ctx().setCookie("access_token", session.token, {
-      expires: session.absoluteExpiresAt,
-      secure: true,
+      expires: session.expiresAt,
+      secure: process.env.NODE_ENV !== "development",
       httpOnly: true,
     });
 
@@ -316,8 +316,8 @@ class AuthController extends Controller {
       });
 
     req.ctx().setCookie("access_token", session.token, {
-      expires: session.absoluteExpiresAt,
-      secure: true,
+      expires: session.expiresAt,
+      secure: process.env.NODE_ENV !== "development",
       httpOnly: true,
     });
 
@@ -406,7 +406,7 @@ class AuthController extends Controller {
 
     req.ctx().setCookie("access_token", "", {
       expires: new Date(0),
-      secure: true,
+      secure: process.env.NODE_ENV !== "development",
       httpOnly: true,
     });
 
@@ -596,7 +596,7 @@ class AuthController extends Controller {
     });
 
     req.ctx().setCookie("access_token", session.token, {
-      secure: true,
+      secure: process.env.NODE_ENV !== "development",
       httpOnly: true,
       expires: session.expiresAt,
     });

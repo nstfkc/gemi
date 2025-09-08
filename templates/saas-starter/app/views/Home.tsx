@@ -27,23 +27,12 @@ const FormData = () => {
 };
 
 export default function Home() {
-  const { trigger, progress } = useUpload("/upload");
+  const { data } = useQuery("/health", {}, { refreshInterval: 20000 });
+
   return (
     <div>
       <h1>Home</h1>
-      <div>
-        <input
-          name="file"
-          type="file"
-          multiple
-          onChange={(event) => {
-            if (event.target.files) {
-              trigger(event.target.files!);
-            }
-          }}
-        />
-        <div>Progress: {Math.ceil(progress * 100)}</div>
-      </div>
+      <div>{JSON.stringify(data)}</div>
     </div>
   );
 }

@@ -1,5 +1,5 @@
-import { HttpRequest } from "../http";
-import { ViewRoutes } from "../http/ViewRouter";
+import type { HttpRequest } from "../http";
+import type { ViewRoutes } from "../http/ViewRouter";
 
 function removeGroupPrefix(input: string) {
   // Remove all (str) patterns

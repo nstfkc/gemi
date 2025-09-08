@@ -33,7 +33,8 @@ export default class extends AuthenticationServiceProvider {
   signUpRequest = SignUpRequest;
 
   // Adapt these options to your needs
-  sessionExpiresInHours = 24 * 30; // 30 days
+  sessionExpiresInHours = 24 * 7 * 60; // 30 days
+
   // Sessions will be renewed if the user logs in within this time frame
   sessionAbsoluteExpiresInHours = 24 * 30 * 6; // 6 months
 

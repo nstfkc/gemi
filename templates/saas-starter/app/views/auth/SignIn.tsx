@@ -10,7 +10,7 @@ export default function SignIn() {
     <div className="container max-w-sm mx-auto h-screen flex flex-col justify-center items-center">
       <Form
         method="POST"
-        action="/auth/sign-in"
+        action="/auth/sign-in-v2"
         onSuccess={() => push("/dashboard")}
         className="flex flex-col gap-8 w-full"
       >

@@ -1,5 +1,5 @@
 import { ServiceProvider } from "../ServiceProvider";
-import { Job } from "./Job";
+import type { Job } from "./Job";
 
 export class QueueServiceProvider extends ServiceProvider {
   jobs: Array<new () => Job> = [];
