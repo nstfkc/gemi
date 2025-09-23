@@ -16,7 +16,7 @@ export class QueryResource {
 
   constructor(
     key: string,
-    initialState: Record<string, any> = {},
+    initialState: Record<string, any>,
     fetch: typeof globalThis.fetch,
     host: string,
   ) {
@@ -25,7 +25,7 @@ export class QueryResource {
     this.key = key;
     const store = new Map();
     const now = Date.now();
-    for (const [variantKey, data] of Object.entries(initialState)) {
+    for (const [variantKey, data] of Object.entries(initialState ?? {})) {
       if (data) {
         store.set(variantKey, {
           loading: false,

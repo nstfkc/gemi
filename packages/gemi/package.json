@@ -1,6 +1,6 @@
 {
   "name": "gemi",
-  "version": "0.24.4",
+  "version": "0.25.0",
   "author": "Enes Tufekci <enes@gemijs.dev>",
   "license": "MIT",
   "devDependencies": {

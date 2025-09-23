@@ -8,6 +8,7 @@ export {
   usePut,
   useUpload,
 } from "./useMutation";
+export { useMutate } from "./useMutate";
 export {
   Form,
   FormError,

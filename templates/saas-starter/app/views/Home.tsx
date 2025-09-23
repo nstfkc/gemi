@@ -4,6 +4,9 @@ import {
   Link,
   useFormData,
   useLocation,
+  useMutate,
+  usePost,
+  usePut,
   useQuery,
   useSearchParams,
   useTheme,
@@ -28,10 +31,27 @@ const FormData = () => {
 
 export default function Home() {
   const { data } = useQuery("/health", {}, { refreshInterval: 20000 });
+  const mutate = useMutate();
 
   return (
     <div>
       <h1>Home</h1>
+      <button
+        onClick={() =>
+          mutate(
+            {
+              //
+              path: "/health",
+              params: { orgId: 1 },
+            },
+            {
+              status: "1234",
+            },
+          )
+        }
+      >
+        Trigger
+      </button>
       <div>{JSON.stringify(data)}</div>
     </div>
   );

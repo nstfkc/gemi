@@ -11,7 +11,7 @@ class ProductsController extends ResourceController {
   async list() {}
   async show() {}
   async store() {}
-  async update() {}
+  async update(req: HttpRequest<{ id: 1 }>) {}
   async delete() {}
 }
 
