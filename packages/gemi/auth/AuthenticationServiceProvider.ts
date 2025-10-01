@@ -133,7 +133,9 @@ class AuthController extends Controller {
     const container = AuthenticationServiceContainer.use();
     const authProvider = container.provider;
     const token = req.search.get("token");
-    const email = decodeURIComponent(req.search.get("email"));
+    const email = decodeURIComponent(req.search.get("email"))
+      .toLowerCase()
+      .trim();
 
     let magicLink = null;
 
@@ -172,7 +174,8 @@ class AuthController extends Controller {
     const container = AuthenticationServiceContainer.use();
     const authProvider = container.provider;
     const input = await req.input();
-    const { email, pin } = input.toJSON();
+    const { email: _email, pin } = input.toJSON();
+    const email = _email.toLowerCase().trim();
 
     const magicLinkToken = await authProvider.adapter.findUserMagicLinkToken({
       email,
@@ -205,7 +208,8 @@ class AuthController extends Controller {
     const container = AuthenticationServiceContainer.use();
     const authProvider = container.provider;
     const input = await req.input();
-    const { email, pin } = input.toJSON();
+    const { email: _email, pin } = input.toJSON();
+    const email = _email.toLowerCase().trim();
 
     const magicLinkToken = await authProvider.adapter.findUserMagicLinkToken({
       email,
@@ -236,7 +240,8 @@ class AuthController extends Controller {
 
   async signInV2(req = new SignInRequest()) {
     const input = await req.input();
-    const { email, password } = input.toJSON();
+    const { email: _email, password } = input.toJSON();
+    const email = _email.toLowerCase().trim();
 
     const authProvider = AuthenticationServiceContainer.use().provider;
 
@@ -283,7 +288,8 @@ class AuthController extends Controller {
 
   async signIn(req = new SignInRequest()) {
     const input = await req.input();
-    const { email, password } = input.toJSON();
+    const { email: _email, password } = input.toJSON();
+    const email = _email.toLowerCase().trim();
 
     const authProvider = AuthenticationServiceContainer.use().provider;
 
@@ -332,7 +338,8 @@ class AuthController extends Controller {
     const authProvider = AuthenticationServiceContainer.use().provider;
     const req = new authProvider.signUpRequest();
     const input = await req.input();
-    const { email, password, name, invitationId } = input.toJSON();
+    const { email: _email, password, name, invitationId } = input.toJSON();
+    const email = _email.toLowerCase().trim();
 
     const user = await authProvider.adapter.findUserByEmailAddress(
       email,
@@ -417,7 +424,7 @@ class AuthController extends Controller {
 
   async forgotPassword(req = new ForgotPasswordRequest()) {
     const input = await req.input();
-    const { email } = input.toJSON();
+    const email = input.get("email").toLowerCase().trim();
 
     const authProvider = AuthenticationServiceContainer.use().provider;
 
@@ -610,7 +617,7 @@ class AuthController extends Controller {
 
   async createMagicLinkToken(req = new HttpRequest<{ email: string }>()) {
     const input = await req.input();
-    const { email } = input.toJSON();
+    const email = input.get("email").toLowerCase().trim();
     const container = AuthenticationServiceContainer.use();
     const provider = container.provider;
     const { user, pin, token } = await container.createMagicLinkToken(email);
