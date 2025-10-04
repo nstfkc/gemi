@@ -18,7 +18,8 @@ export async function startDevServer() {
       watch: {
         usePolling: true,
         interval: 100,
-        ignored: ["**/storage/**"],
+        // ignore paths starts with .
+        ignored: ["**/storage/**", "**/node_modules/**", "**/.**"],
       },
       hmr: {
         clientPort: 5174,
