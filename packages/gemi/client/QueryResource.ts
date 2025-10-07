@@ -82,6 +82,9 @@ export class QueryResource {
 
     const store = this.store.getValue();
     const state = store.get(variantKey);
+    if (!state || !state.data) {
+      return;
+    }
     const data = fn(state.data);
 
     this.staleVariants.add(variantKey);
