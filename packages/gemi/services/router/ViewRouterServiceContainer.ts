@@ -296,6 +296,8 @@ export class ViewRouterServiceContainer extends ServiceContainer {
     let urlLocale: string | null = null;
 
     const i18nServiceContainer = I18nServiceContainer.use();
+    const views = this.routeManifest[urlPathname];
+    const isFileRequest = views[views.length - 1] === "FILE";
 
     if (!i18nServiceContainer.service.supportedLocales.includes(maybeLocale)) {
       urlPathname = urlPathnameWithLocale;
@@ -339,7 +341,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
         const pattern = new URLPattern({ pathname });
         if (pattern.test({ pathname: urlPathname })) {
           currentPathName = pathname;
-          params = pattern.exec({ pathname: urlPathname })?.pathname.groups!;
+          params = pattern.exec({ pathname: urlPathname })?.pathname.groups;
           handlers = handler.exec;
           middlewares = handler.middleware;
           break;
@@ -440,6 +442,14 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           viewData[key] = value;
         }
 
+        if (isFileRequest) {
+          const file: File = (viewData as any)["FILE"];
+
+          headers.set("Content-Type", file.type || "application/octet-stream");
+
+          return new Response(file.stream(), { headers });
+        }
+
         if (isViewDataRequest) {
           headers.set("Content-Type", "application/json");
 
@@ -519,10 +529,9 @@ export class ViewRouterServiceContainer extends ServiceContainer {
               status,
             });
           }
-        } else {
-          this.service.onRequestFail(httpRequest, err);
-          throw err;
         }
+        this.service.onRequestFail(httpRequest, err);
+        throw err;
       }
     });
   }

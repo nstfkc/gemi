@@ -10,7 +10,12 @@ export function createComponentTree(routes: ViewRoutes): ComponentTree {
       if (viewPath === "__") {
         continue;
       }
+
       if (viewPath === "REDIRECT") {
+        continue;
+      }
+
+      if (viewPath === "FILE") {
         continue;
       }
 

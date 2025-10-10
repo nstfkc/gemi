@@ -1,7 +1,7 @@
 import { Redirect } from "../facades/Redirect";
 import type { KeyAndValue, KeyAndValueToObject } from "../internal/type-utils";
-import { Controller } from "./Controller";
-import { HttpRequest } from "./HttpRequest";
+import type { Controller } from "./Controller";
+import type { HttpRequest } from "./HttpRequest";
 
 type ControllerMethods<T extends new () => Controller> = {
   [K in keyof InstanceType<T>]: InstanceType<T>[K] extends Function ? K : never;
@@ -123,6 +123,12 @@ export class ViewRoute<Input, Output, Params> {
 
   async run(req: HttpRequest<Input, Params>, path: string) {
     const data = await this.handler(req);
+
+    if (this.viewPath === "FILE") {
+      return {
+        FILE: data,
+      };
+    }
 
     return {
       [this.viewPath]: {
@@ -264,17 +270,22 @@ export class ViewRouter {
   }
 }
 
-type ViewRouteParser<T, Prefix extends PropertyKey = ""> =
-  T extends ViewRoute<infer Input, infer Output, infer Params>
-    ? KeyAndValue<`view:${Prefix & string}`, ViewHandler<Input, Output, Params>>
-    : never;
+type ViewRouteParser<T, Prefix extends PropertyKey = ""> = T extends ViewRoute<
+  infer Input,
+  infer Output,
+  infer Params
+>
+  ? KeyAndValue<`view:${Prefix & string}`, ViewHandler<Input, Output, Params>>
+  : never;
 
-type LayoutRouteParser<T, Prefix extends PropertyKey = ""> =
-  T extends LayoutRoute<infer Routes, infer I, infer O, infer P>
-    ?
-        | RoutesParser<Routes, Prefix>
-        | KeyAndValue<`layout:${Prefix & string}`, ViewHandler<I, O, P>>
-    : never;
+type LayoutRouteParser<
+  T,
+  Prefix extends PropertyKey = "",
+> = T extends LayoutRoute<infer Routes, infer I, infer O, infer P>
+  ?
+      | RoutesParser<Routes, Prefix>
+      | KeyAndValue<`layout:${Prefix & string}`, ViewHandler<I, O, P>>
+  : never;
 
 type RemoveGroupPrefix<T> = T extends `(${string})${infer U}` ? U : T;
 

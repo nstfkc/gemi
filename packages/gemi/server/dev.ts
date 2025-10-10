@@ -37,7 +37,7 @@ export async function startDevServer() {
   process.env.APP_DIR = appDir;
 
   async function handleDevRequests(req: Request): Promise<Response> {
-    const { pathname, host } = new URL(req.url);
+    const { pathname, host, protocol } = new URL(req.url);
     if (pathname.startsWith("/render-error.js")) {
       return new Response("window.render_error = true", {
         headers: {
@@ -48,7 +48,7 @@ export async function startDevServer() {
     if (pathname.startsWith("/refresh.js")) {
       return new Response(
         `
-          import RefreshRuntime from "http://${host}/@react-refresh";
+          import RefreshRuntime from "${protocol}//${host}/@react-refresh";
           RefreshRuntime.injectIntoGlobalHook(window);
           window.$RefreshReg$ = () => {};
           window.$RefreshSig$ = () => (type) => type;
