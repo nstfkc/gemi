@@ -296,10 +296,11 @@ export class ViewRouterServiceContainer extends ServiceContainer {
     let urlLocale: string | null = null;
 
     const i18nServiceContainer = I18nServiceContainer.use();
-    const views = this.routeManifest[urlPathname];
-    const isFileRequest = views[views.length - 1] === "FILE";
 
-    if (!i18nServiceContainer.service.supportedLocales.includes(maybeLocale)) {
+    const isPathnameWithLocale =
+      !i18nServiceContainer.service.supportedLocales.includes(maybeLocale);
+
+    if (isPathnameWithLocale) {
       urlPathname = urlPathnameWithLocale;
     } else {
       urlLocaleSegment = maybeLocale;
@@ -442,8 +443,10 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           viewData[key] = value;
         }
 
+        const views = this.routeManifest[currentPathName];
+        const isFileRequest = views?.[views?.length ?? 0 - 1] === "FILE";
         if (isFileRequest) {
-          const file: File = (viewData as any)["FILE"];
+          const file: File = (viewData as any).FILE;
 
           headers.set("Content-Type", file.type || "application/octet-stream");
 
