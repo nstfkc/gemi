@@ -25,6 +25,8 @@ import { ImageOptimizationServiceProvider } from "../services/image-optimization
 import { ImageOptimizationServiceContainer } from "../services/image-optimization/ImageOptimizationServiceContainer";
 import { CronServiceProvider } from "../services/cron/CronServiceProvider";
 import { CronServiceContainer } from "../services/cron/CronServiceContainer";
+import { KernelIdServiceProvider } from "../services/kernel-id/KernelIdServiceProvider";
+import { KernelIdServiceContainer } from "../services/kernel-id/KernelIdServiceContainer";
 
 export class Kernel {
   protected emailServiceProvider = EmailServiceProvider;
@@ -40,6 +42,7 @@ export class Kernel {
   protected queueServiceProvider = QueueServiceProvider;
   protected imageServiceProvider = ImageOptimizationServiceProvider;
   protected cronServiceProvider = CronServiceProvider;
+  protected kernelIdServiceProvider = KernelIdServiceProvider;
 
   services: Record<string, ServiceContainer> = {};
   private booted = false;
@@ -84,6 +87,9 @@ export class Kernel {
         new ImageOptimizationServiceContainer(new this.imageServiceProvider()),
       [CronServiceContainer._name]: new CronServiceContainer(
         new this.cronServiceProvider(this),
+      ),
+      [KernelIdServiceContainer._name]: new KernelIdServiceContainer(
+        new this.kernelIdServiceProvider(),
       ),
     };
     this.booted = true;

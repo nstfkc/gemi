@@ -6,7 +6,7 @@ Gemi comes with config based routing that allows you to define your application 
 In a fresh project, you can find your root router in `app/http/router/view.ts` file. A very basic route can be defined like in the following code example.
 
 
-```ts
+```typescript
 // app/http/router/view.ts
 
 export default class extends ViewRouter {
@@ -45,7 +45,7 @@ If you want to pass dynamic data to your components. You can pass a callback fun
 
 Let's expand the first examples and pass a dynamic data to the `Home.tsx` component.
 
-```ts
+```typescript
 // app/http/router/view.ts
 
 export default class extends ViewRouter {

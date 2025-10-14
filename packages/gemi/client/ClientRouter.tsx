@@ -153,8 +153,13 @@ const Routes = (props: { componentTree: ComponentTree }) => {
     routerSubject?.getValue().pathname,
   ]);
 
-  const { breadcrumbs, pageData, i18n, prefetchedData } =
-    useContext(ServerDataContext);
+  const {
+    breadcrumbs,
+    pageData,
+    i18n,
+    prefetchedData,
+    appId: currentAppId,
+  } = useContext(ServerDataContext);
 
   const [routeState, setRouteState] = useState<RouteState & PageData>({
     params: routerSubject?.getValue().params,
@@ -170,6 +175,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
     data: pageData,
     i18n,
     prefetchedData,
+    appId: currentAppId,
   });
 
   const { replace } = useNavigate();
@@ -206,15 +212,21 @@ const Routes = (props: { componentTree: ComponentTree }) => {
 
       const url = `${host}${pathnameWithLocaleSegment}.json${search}`;
       setIsFetching(true);
-      const [res] = await Promise.all([
-        fetch(url),
-        fetchRouteCSS(pathname),
-        ...views.map((component) => {
-          if (!window?.loaders) return Promise.resolve();
-          const loader = window?.loaders?.[component] ?? (() => ({}));
-          loader();
-        }),
-      ]);
+      let res = { ok: false, json: async () => ({}) } as Response;
+      try {
+        const result = await Promise.all([
+          fetch(url),
+          fetchRouteCSS(pathname),
+          ...views.map((component) => {
+            if (!window?.loaders) return Promise.resolve();
+            const loader = window?.loaders?.[component] ?? (() => ({}));
+            loader();
+          }),
+        ]);
+        res = result[0];
+      } catch (e) {
+        console.error(e);
+      }
 
       if (res.ok) {
         const {
@@ -225,6 +237,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
           meta,
           directive = {},
           is404 = false,
+          appId,
         } = await res.json();
         updateMeta(meta);
         if (directive?.kind === "Redirect") {
@@ -239,6 +252,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
           startTransition(() => {
             setRouteState((state) => ({
               ...state,
+              appId,
               views: ["404"],
             }));
           });
@@ -247,6 +261,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
         startTransition(() => {
           setRouteState({
             ...routerState,
+            appId,
             data,
             i18n,
             prefetchedData,

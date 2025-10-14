@@ -33,6 +33,7 @@ import { MiddlewareServiceContainer } from "../middleware/MiddlewareServiceConta
 import { Log } from "../../facades/Log";
 import { I18n } from "../../facades/I18n";
 import { AuthViewRouter } from "../../auth/AuthenticationServiceProvider";
+import { KernelIdServiceContainer } from "../kernel-id/KernelIdServiceContainer";
 
 const themeScript = `
 !function(){try{var d=document.documentElement,c=d.classList;
@@ -122,6 +123,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
     urlLocaleSegment?: string;
     meta: any;
     isOgRequest?: boolean;
+    appId: string;
   }) {
     const {
       csrfTokenHMAC,
@@ -138,6 +140,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
       urlLocaleSegment,
       meta,
       isOgRequest,
+      appId,
     } = props;
 
     const pageDataKey = pathname.replace(`/${urlLocaleSegment}`, "");
@@ -163,6 +166,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           searchParams: url.search,
           is404: !currentPathName ? true : false,
         },
+        appId,
         componentTree: [["404", []], ...this.componentTree],
       },
       head: {},
@@ -365,6 +369,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
         params: Record<string, any>;
         urlLocaleSegment: string | null;
         meta: any;
+        appId: string;
       } | null = null;
       const ctx = RequestContext.getStore();
 
@@ -429,7 +434,9 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           params: httpRequest.params,
           urlLocaleSegment,
           meta: ctx.renderMeta(),
+          appId: KernelIdServiceContainer.use().service.id,
         };
+
         const { params, currentPathName, user } = pageData;
 
         const viewData = {};
@@ -472,6 +479,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
               prefetchedData: pageData.prefetchedData,
               i18n,
               is404: !currentPathName,
+              appId: pageData.appId,
             }),
             {
               headers,
@@ -515,6 +523,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           breadcrumbs,
           urlLocaleSegment,
           meta: pageData.meta,
+          appId: pageData.appId,
           isOgRequest,
         });
       } catch (err) {

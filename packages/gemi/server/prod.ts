@@ -3,6 +3,7 @@ import { join } from "path";
 import { generateETag } from "./generateEtag";
 import { URLPattern } from "urlpattern-polyfill";
 import { createStyles } from "./styles";
+import { refresh } from "./refresh";
 
 const projectDir = process.env.GEMI_PROJECT_DIR ?? "";
 const rootDir = join(process.cwd(), projectDir);
@@ -77,6 +78,11 @@ export async function startProdServer() {
         const file = Bun.file(
           `${distDir}/client${filePath.replace("/assets/assets", "/assets")}`,
         );
+        if (!file.exists() && url.pathname.includes(".js")) {
+          return new Response("window.location.reload();export {}", {
+            headers: { "Content-Type": "application/javascript" },
+          });
+        }
         const etag = generateETag(file.lastModified);
         return new Response(file.stream(), {
           headers: {

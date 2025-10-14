@@ -60,3 +60,4 @@ export { HttpClientContext, HttpClientProvider } from "./HttpClientContext";
 export { OpenGraphImage } from "./OpenGraphImage";
 
 export { useTheme } from "./ThemeProvider";
+export { useAppIdMissmatch } from "./useAppIdMissmatch";

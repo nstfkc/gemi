@@ -22,6 +22,7 @@ export type PageData = {
   };
   prefetchedData: Record<string, unknown>;
   breadcrumbs: any;
+  appId: string;
 };
 
 export const RouteStateContext = createContext({} as RouteState & PageData);
