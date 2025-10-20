@@ -4,6 +4,7 @@ type State = {
   loading: boolean;
   data: any;
   error: any;
+  version: number;
 };
 
 export class QueryResource {
@@ -52,7 +53,8 @@ export class QueryResource {
           this.resolveVariant(variantKey);
           return store.get(variantKey);
           //
-        } else if (variant.data) {
+        }
+        if (variant.data) {
           const stale = this.staleVariants.has(variantKey);
           const now = Date.now();
           // TODO: age must be dynamic
@@ -70,7 +72,7 @@ export class QueryResource {
     return store.get(variantKey);
   }
 
-  mutate(variantKey: string, fn: (data: any) => any) {
+  mutate(variantKey: string, fn: (data: any) => any = (data) => data) {
     const cacheKey = [window.location.origin, this.key, variantKey]
       .filter((s) => s.length > 0)
       .join("?");
@@ -89,7 +91,12 @@ export class QueryResource {
 
     this.staleVariants.add(variantKey);
     this.store.next(
-      store.set(variantKey, { loading: false, data, error: null }),
+      store.set(variantKey, {
+        loading: false,
+        data,
+        error: null,
+        version: state.version,
+      }),
     );
     this.resolveVariant(variantKey, false, false);
   }
@@ -110,6 +117,7 @@ export class QueryResource {
         loading: true,
         data: previousState?.data,
         error: previousState?.data,
+        version: previousState?.version,
       });
     }
 
@@ -127,13 +135,19 @@ export class QueryResource {
           loading: false,
           data: previousState?.data,
           error,
+          version: previousState?.version,
         }),
       );
     }
 
     if (response.ok) {
       this.store.next(
-        store.set(variantKey, { loading: false, data, error: null }),
+        store.set(variantKey, {
+          loading: false,
+          data,
+          error: null,
+          version: Date.now(),
+        }),
       );
       this.staleVariants.delete(variantKey);
       this.lastFetchRecord.set(variantKey, Date.now());
@@ -144,6 +158,7 @@ export class QueryResource {
           loading: false,
           data: previousState?.data,
           error: data,
+          version: previousState?.version,
         }),
       );
     }

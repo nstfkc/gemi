@@ -194,11 +194,14 @@ export function useQuery<T extends keyof GetRPC>(
     };
   }, [variantKey, resource, handleStateUpdate]);
 
-  function mutate(fn: Partial<NestedPrettify<Data<T>>>): void;
+  function mutate(fn?: Partial<NestedPrettify<Data<T>>>): void;
   function mutate(
-    fn: (data: NestedPrettify<Data<T>>) => Partial<NestedPrettify<Data<T>>>,
+    fn?: (data: NestedPrettify<Data<T>>) => Partial<NestedPrettify<Data<T>>>,
   ): void;
-  function mutate(fn: any) {
+  function mutate(fn?: any) {
+    if (!fn) {
+      return resource.mutate.call(resource, variantKey, (data: any) => data);
+    }
     return resource.mutate.call(resource, variantKey, (data: any) => {
       if (data === undefined || data === null) {
         console.warn("Mutate function called before the query.");
@@ -240,5 +243,6 @@ export function useQuery<T extends keyof GetRPC>(
     loading: state?.loading ?? true,
     error: state?.error as Error,
     mutate,
+    version: state?.version as number,
   };
 }

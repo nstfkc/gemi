@@ -1,4 +1,4 @@
-import { useAppIdMissmatch } from "gemi/client";
+import { useAppIdMissmatch, useQuery } from "gemi/client";
 
 function useAppRefresh() {
   const appIdMissmatch = useAppIdMissmatch();
@@ -20,10 +20,16 @@ function useAppRefresh() {
 
 export default function Home() {
   useAppRefresh();
+  const { data, version, mutate } = useQuery("/health");
 
   return (
     <div>
       <h1>Home</h1>
+      <p>Status: {data?.status ?? "Loading..."}</p>
+      <p>Version: {version}</p>
+      <button type="button" onClick={() => mutate()}>
+        Refresh
+      </button>
     </div>
   );
 }
