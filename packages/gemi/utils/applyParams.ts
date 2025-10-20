@@ -3,13 +3,13 @@ export function applyParams<T extends string>(
   params: Record<string, string | number | undefined>,
 ): string {
   return url
-    .replace(/:([^/]+)/g, (_, key) => {
-      const isOptional = key.endsWith("?");
-      const paramName = isOptional ? key.slice(0, -1) : key;
+    .replace(/:([^/]+[*?]?)/g, (_, key) => {
+      const hasSuffix = key.endsWith("?") || key.endsWith("*");
+      const paramName = hasSuffix ? key.slice(0, -1) : key;
       const value = params[paramName];
 
       if (value === undefined) {
-        if (isOptional) {
+        if (hasSuffix) {
           return ""; // Remove the optional segment if no value is provided
         }
         // @ts-ignore

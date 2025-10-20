@@ -39,12 +39,20 @@ export type LayoutProps<T extends LayoutKeys<keyof ViewRPC>> =
 
 type UrlParserInternal<T extends string> = string extends T
   ? Record<string, string>
-  : T extends `${infer _Start}/:${infer Param}?/${infer Rest}`
-    ? { [K in Param]?: string | number } & UrlParser<`/${Rest}`>
-    : T extends `${infer _Start}/:${infer Param}/${infer Rest}`
-      ? { [K in Param]: string | number } & UrlParser<`/${Rest}`>
-      : T extends `${infer _Start}/:${infer Param}`
-        ? { [K in Param]: string | number }
-        : Record<string, never>;
+  : T extends `${infer _Start}/:${infer Param}*/${infer Rest}`
+    ? { [K in Param]: string[] } & UrlParserInternal<`/${Rest}`>
+    : T extends `${infer _Start}/:${infer Param}?/${infer Rest}`
+      ? { [K in Param]?: string | number } & UrlParserInternal<`/${Rest}`>
+      : T extends `${infer _Start}/:${infer Param}/${infer Rest}`
+        ? { [K in Param]: string | number } & UrlParserInternal<`/${Rest}`>
+        : T extends `${infer _Start}/:${infer Param}*`
+          ? { [K in Param]: string }
+          : T extends `${infer _Start}/:${infer Param}?`
+            ? { [K in Param]?: string | number }
+            : T extends `${infer _Start}/:${infer Param}`
+              ? { [K in Param]: string | number }
+              : Record<string, never>;
 
 export type UrlParser<T extends string> = Prettify<UrlParserInternal<T>>;
+
+type X = UrlParser<"/users/:userId/posts/:postId?">;
