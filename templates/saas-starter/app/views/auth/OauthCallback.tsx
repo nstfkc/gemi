@@ -1,8 +1,16 @@
-import { Redirect } from "gemi/client";
+import { Redirect, useNavigate } from "gemi/client";
+import { useEffect } from "react";
 
 export default function OauthSignIn({ session }) {
-  if (session) {
-    return <Redirect action="replace" href="/app/dashboard" />;
-  }
-  return <div>Error</div>;
+  return (
+    <div
+      ref={() => {
+        if (session) {
+          window.location.href = "/dashboard";
+        }
+      }}
+    >
+      Loading
+    </div>
+  );
 }

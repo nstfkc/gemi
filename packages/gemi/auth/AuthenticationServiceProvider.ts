@@ -610,9 +610,7 @@ class AuthController extends Controller {
 
     await authProvider.onSignIn(user);
 
-    return {
-      destination: authProvider.redirectPath,
-    };
+    return { session };
   }
 
   async createMagicLinkToken(req = new HttpRequest<{ email: string }>()) {
@@ -633,7 +631,10 @@ class AuthController extends Controller {
 class OAuthViewRouter extends ViewRouter {
   routes = {
     "/:provider": this.redirect([AuthController, "oauthRedirect"]),
-    "/:provider/callback": this.redirect([AuthController, "oauthCallback"]),
+    "/:provider/callback": this.view("auth/OauthCallback", [
+      AuthController,
+      "oauthCallback",
+    ]),
   };
 }
 

@@ -1,11 +1,14 @@
 import type { User } from "../auth/adapters/types";
 import { AuthenticationServiceContainer } from "../auth/AuthenticationServiceContainer";
-import { InsufficientPermissionsError } from "../http/errors";
+import {
+  AuthenticationError,
+  InsufficientPermissionsError,
+} from "../http/errors";
 import { RequestContext } from "../http/requestContext";
 import { BroadcastingServiceContainer } from "../services/pubsub/BroadcastingServiceContainer";
 
 export class Auth {
-  static async user(): Promise<User | null> {
+  static async user(): Promise<User> {
     const requestContextStore = RequestContext.getStore();
     const broadcastingContextStore =
       BroadcastingServiceContainer.use().context.getStore();
@@ -37,8 +40,7 @@ export class Auth {
     if (user) {
       return user;
     }
-
-    return null;
+    throw new AuthenticationError();
   }
 
   static async guard(

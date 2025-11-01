@@ -1,9 +1,7 @@
-import { join } from "path";
-
+import { join } from "node:path";
 import { generateETag } from "./generateEtag";
 import { URLPattern } from "urlpattern-polyfill";
 import { createStyles } from "./styles";
-import { refresh } from "./refresh";
 
 const projectDir = process.env.GEMI_PROJECT_DIR ?? "";
 const rootDir = join(process.cwd(), projectDir);

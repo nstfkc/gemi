@@ -6,6 +6,7 @@ import { WelcomeEmail } from "@/app/email/WelcomeEmail";
 import { Auth } from "gemi/facades";
 import { prisma } from "@/app/database/prisma";
 import { HttpRequest } from "gemi/http";
+import { GoogleOAuthProvider } from "gemi/services";
 
 class SignUpRequest extends HttpRequest {
   schema = {
@@ -28,15 +29,16 @@ class SignUpRequest extends HttpRequest {
 export default class extends AuthenticationServiceProvider {
   adapter = new PrismaAuthenticationAdapter(prisma);
 
+  oauthProviders = {
+    google: new GoogleOAuthProvider(),
+  };
+
   // Path to redirect after successful login
-  redirectPath = "/app/dashboard";
+  redirectPath = "/dashboard";
   signUpRequest = SignUpRequest;
 
-  // Adapt these options to your needs
-  sessionExpiresInHours = 24 * 7 * 60; // 30 days
-
-  // Sessions will be renewed if the user logs in within this time frame
-  sessionAbsoluteExpiresInHours = 24 * 30 * 6; // 6 months
+  sessionExpiresInHours = 999;
+  sessionAbsoluteExpiresInHours = 999;
 
   // Change this true to only allow verified emails to login
   verifyEmail = false;

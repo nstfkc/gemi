@@ -1,5 +1,5 @@
 import { type ComponentProps, useEffect } from "react";
-import { Link } from "./Link";
+import type { Link } from "./Link";
 
 import { useNavigate } from "./useNavigate";
 
@@ -8,13 +8,14 @@ export const Redirect = (
 ) => {
   const { href, params = {}, search = {}, action } = props;
   const { push, replace } = useNavigate();
+
   useEffect(() => {
     if (action === "push") {
       push(href, { params, search } as any);
     } else {
       replace(href, { params, search } as any);
     }
-  }, []);
+  }, [replace, action, push, params, search, href]);
 
   return null;
 };
