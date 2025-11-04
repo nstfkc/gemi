@@ -62,7 +62,7 @@ export function useNavigate() {
 
       const routePath = applyParams(path, params);
       const navigationPath = [
-        `${localeSegment ? `/${localeSegment}` : ""}${routePath}`,
+        `${localeSegment ? `/${localeSegment}` : ""}${routePath === "/" ? "" : routePath}`,
         urlSearchParams.toString(),
       ]
         .filter((s) => s.length > 0)
