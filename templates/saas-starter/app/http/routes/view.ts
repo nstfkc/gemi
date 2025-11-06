@@ -1,4 +1,4 @@
-import { I18n, Meta, Query } from "gemi/facades";
+import { Cookie, I18n, Meta, Query } from "gemi/facades";
 import { type HttpRequest, ViewRouter } from "gemi/http";
 
 class AuthViewRouter extends ViewRouter {
@@ -37,6 +37,12 @@ export default class extends ViewRouter {
           imageWidth: 600,
           imageHeight: 400,
         });
+        const isSet = Cookie.setIfAbsent("test", Math.random().toString(), {
+          path: "/",
+          maxAge: 3600,
+        });
+
+        console.log({ isSet });
       },
       {
         "/": this.view("Home", () => {

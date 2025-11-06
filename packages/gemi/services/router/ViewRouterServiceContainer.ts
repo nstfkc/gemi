@@ -3,7 +3,6 @@ import satori from "satori";
 import sharp from "sharp";
 
 import { HttpRequest } from "../../http";
-import type { Cookie } from "../../http/Cookie";
 import { GEMI_REQUEST_BREAKER_ERROR } from "../../http/Error";
 import { RequestContext } from "../../http/requestContext";
 import type { RouterMiddleware } from "../../http/Router";
@@ -14,10 +13,7 @@ import {
 } from "./createFlatViewRoutes";
 import type { ViewRouterServiceProvider } from "./ViewRouterServiceProvider";
 // @ts-ignore
-import {
-  renderToReadableStream,
-  renderToString,
-} from "react-dom/server.browser";
+import { renderToReadableStream } from "react-dom/server.browser";
 import { createElement, Fragment } from "react";
 
 // @ts-ignore
@@ -360,7 +356,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
     const httpRequest = new HttpRequest(req, params, "view", currentPathName);
     return await RequestContext.run(httpRequest, async () => {
       let pageData: {
-        cookies: Set<Cookie>;
+        cookies: Set<string>;
         headers: Headers;
         currentPathName: string;
         data: Record<string, any>;

@@ -1,12 +1,42 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { Cookie, type CreateCookieOptions } from "./Cookie";
 import type { HttpRequest } from "./HttpRequest";
 import { Metadata } from "./Metadata";
+
+export interface CreateCookieOptions {
+  maxAge?: number;
+  expires?: Date;
+  httpOnly?: boolean;
+  secure?: boolean;
+  sameSite?: "Strict" | "Lax";
+  path?: string;
+  domain?: string;
+  partitioned?: boolean;
+}
+
+export function createCookie(
+  name: string,
+  value: string,
+  options: CreateCookieOptions = {},
+) {
+  return [
+    `${name}=${value}`,
+    options.maxAge ? `Max-Age=${options.maxAge}` : "",
+    options.httpOnly ? "HttpOnly" : "",
+    options.secure ? "Secure" : "",
+    options.sameSite ? `SameSite=${options.sameSite}` : "SameSite=Strict",
+    options.path ? `Path=${options.path}` : "Path=/",
+    options.domain ? `Domain=${options.domain}` : "",
+    options.expires ? `Expires=${options.expires.toUTCString()}` : "",
+    options.partitioned ? "Partitioned" : "",
+  ]
+    .filter((i) => i !== "")
+    .join("; ");
+}
 
 const requestContext = new AsyncLocalStorage<Store>();
 
 class Store {
-  cookies: Set<Cookie> = new Set();
+  cookies: Set<string> = new Set();
   headers: Headers = new Headers();
   prefetchedResources = new Map<string, Record<string, any>>();
   prefetchPromiseQueue = new Set<() => Promise<any>>();
@@ -30,11 +60,11 @@ class Store {
   }
 
   setCookie(name: string, value: string, options: CreateCookieOptions = {}) {
-    this.cookies.add(new Cookie(name, value, options));
+    this.cookies.add(createCookie(name, value, options));
   }
 
   deleteCookie(name: string) {
-    this.cookies.add(new Cookie(name, "", { maxAge: -1 }));
+    this.cookies.add(createCookie(name, "", { maxAge: -1 }));
   }
 
   setHeaders(name: string, value: string) {
