@@ -338,7 +338,13 @@ class AuthController extends Controller {
     const authProvider = AuthenticationServiceContainer.use().provider;
     const req = new authProvider.signUpRequest();
     const input = await req.input();
-    const { email: _email, password, name, invitationId } = input.toJSON();
+    const {
+      email: _email,
+      password,
+      name,
+      invitationId,
+      metadata = {},
+    } = input.toJSON();
     const email = _email.toLowerCase().trim();
 
     const user = await authProvider.adapter.findUserByEmailAddress(
@@ -576,7 +582,10 @@ class AuthController extends Controller {
 
     const locale = I18nServiceContainer.use().detectLocale(req);
 
+    let action: "signin" | "signup" = "signin";
+
     if (!user) {
+      action = "signup";
       user = await authProvider.adapter.createUser({
         email: identifier,
         name,
@@ -608,7 +617,13 @@ class AuthController extends Controller {
       expires: session.expiresAt,
     });
 
-    await authProvider.onSignIn(user);
+    if (action === "signup") {
+      const verificationToken =
+        await authProvider.generateEmailVerificationToken(email);
+      await authProvider.onSignUp(user, verificationToken);
+    } else {
+      await authProvider.onSignIn(user);
+    }
 
     return { session };
   }
@@ -716,10 +731,7 @@ export class AuthenticationServiceProvider extends ServiceProvider {
     return {};
   }
 
-  onSignUp<T extends User>(
-    _user: T,
-    _verificationToken?: string,
-  ): Promise<void> | void {}
+  onSignUp(_user: User, _verificationToken?: string): Promise<void> | void {}
   onSignIn(_session: any): Promise<void> | void {}
   onSignOut(_session: any): Promise<void> | void {}
   onForgotPassword(
