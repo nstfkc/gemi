@@ -618,9 +618,8 @@ class AuthController extends Controller {
     });
 
     if (action === "signup") {
-      const verificationToken =
-        await authProvider.generateEmailVerificationToken(email);
-      await authProvider.onSignUp(user, verificationToken);
+      const magicLink = await authProvider.generateMagicLinkToken(email);
+      await authProvider.onSignUp(user, magicLink);
     } else {
       await authProvider.onSignIn(user);
     }

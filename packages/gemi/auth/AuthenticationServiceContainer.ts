@@ -189,7 +189,9 @@ export class AuthenticationServiceContainer extends ServiceContainer {
 
       const token = await provider.generateMagicLinkToken(email);
 
-      const pin = (parseInt(randomBytes(4).toString("hex"), 16) % 1000000)
+      const pin = (
+        Number.parseInt(randomBytes(4).toString("hex"), 16) % 1000000
+      )
         .toString()
         .padStart(6, "0");
 
