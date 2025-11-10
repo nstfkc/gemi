@@ -208,5 +208,7 @@ export class AuthenticationServiceContainer extends ServiceContainer {
         token,
       };
     }
+
+    return {};
   }
 }

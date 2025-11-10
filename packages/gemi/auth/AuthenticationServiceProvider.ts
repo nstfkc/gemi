@@ -634,11 +634,14 @@ class AuthController extends Controller {
     const provider = container.provider;
     const { user, pin, token } = await container.createMagicLinkToken(email);
 
-    await provider.onMagicLinkCreated(user, { email, pin, token });
+    if (user) {
+      await provider.onMagicLinkCreated(user, { email, pin, token });
+      return {
+        email,
+      };
+    }
 
-    return {
-      email,
-    };
+    return { email: null };
   }
 }
 
