@@ -157,9 +157,10 @@ class AuthController extends Controller {
     await authProvider.adapter.deleteMagicLinkToken(email);
     const session = await container.createOrUpdateSession({ email });
 
+    const url = new URL(req.rawRequest.url);
     req.ctx().setCookie("access_token", session.token, {
       expires: session.expiresAt,
-      secure: process.env.NODE_ENV !== "development",
+      secure: !url.origin.includes("localhost"),
       httpOnly: true,
     });
 
@@ -193,9 +194,10 @@ class AuthController extends Controller {
 
     const session = await container.createOrUpdateSessionV2({ email });
 
+    const url = new URL(req.rawRequest.url);
     req.ctx().setCookie("access_token", session.token, {
       expires: session.expiresAt,
-      secure: process.env.NODE_ENV !== "development",
+      secure: !url.origin.includes("localhost"),
       httpOnly: true,
     });
 
@@ -227,9 +229,10 @@ class AuthController extends Controller {
 
     const session = await container.createOrUpdateSession({ email });
 
+    const url = new URL(req.rawRequest.url);
     req.ctx().setCookie("access_token", session.token, {
       expires: session.expiresAt,
-      secure: process.env.NODE_ENV !== "development",
+      secure: !url.origin.includes("localhost"),
       httpOnly: true,
     });
 
@@ -239,6 +242,7 @@ class AuthController extends Controller {
   }
 
   async signInV2(req = new SignInRequest()) {
+    const url = new URL(req.rawRequest.url);
     const input = await req.input();
     const { email: _email, password } = input.toJSON();
     const email = _email.toLowerCase().trim();
@@ -275,7 +279,7 @@ class AuthController extends Controller {
 
     req.ctx().setCookie("access_token", session.token, {
       expires: session.expiresAt,
-      secure: process.env.NODE_ENV !== "development",
+      secure: !url.origin.includes("localhost"),
       httpOnly: true,
     });
 
@@ -321,9 +325,10 @@ class AuthController extends Controller {
         id: user.id,
       });
 
+    const url = new URL(req.rawRequest.url);
     req.ctx().setCookie("access_token", session.token, {
       expires: session.expiresAt,
-      secure: process.env.NODE_ENV !== "development",
+      secure: !url.origin.includes("localhost"),
       httpOnly: true,
     });
 
@@ -417,9 +422,10 @@ class AuthController extends Controller {
 
     await authProvider.adapter.deleteSession({ token });
 
+    const url = new URL(req.rawRequest.url);
     req.ctx().setCookie("access_token", "", {
       expires: new Date(0),
-      secure: process.env.NODE_ENV !== "development",
+      secure: !url.origin.includes("localhost"),
       httpOnly: true,
     });
 
@@ -611,8 +617,10 @@ class AuthController extends Controller {
       id: user.id,
     });
 
+    const url = new URL(req.rawRequest.url);
+
     req.ctx().setCookie("access_token", session.token, {
-      secure: process.env.NODE_ENV !== "development",
+      secure: !url.origin.includes("localhost"),
       httpOnly: true,
       expires: session.expiresAt,
     });
