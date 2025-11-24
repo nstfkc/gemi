@@ -73,7 +73,13 @@ export class QueryResource {
   }
 
   mutate(variantKey: string, fn: (data: any) => any = (data) => data) {
-    const cacheKey = [window.location.origin, this.key, variantKey]
+    const cacheKey = [
+      typeof window !== "undefined" && window.location?.origin
+        ? window.location.origin
+        : "",
+      this.key,
+      variantKey,
+    ]
       .filter((s) => s.length > 0)
       .join("?");
     try {

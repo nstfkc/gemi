@@ -1,4 +1,4 @@
-import { HttpRequest } from "./HttpRequest";
+import type { HttpRequest } from "./HttpRequest";
 import { Middleware } from "./Middleware";
 import { RequestContext } from "./requestContext";
 import { AuthenticationError } from "./errors";
