@@ -61,7 +61,7 @@ export async function startProdServer() {
     const { pathname } = new URL(req.url);
 
     const pattern = new URLPattern({
-      pathname: "/*.:filetype(png|txt|js|css|jpg|svg|jpeg|ico|ttf)",
+      pathname: "/*.:filetype(png|txt|js|css|jpg|svg|jpeg|avif|webp|ico|ttf)",
     });
 
     const isWellKnownFile = pathname.startsWith("/.well-known");
