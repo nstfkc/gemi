@@ -88,6 +88,7 @@ export async function startDevServer() {
   async function createServe(app: App): Promise<Serve> {
     const handler = app.fetch.bind(app);
     return {
+      maxRequestBodySize: 10 * 1024 * 1024 * 1024, // 10 GB
       fetch: async (req, server) => {
         if (server.upgrade(req, { data: { headers: req.headers } })) {
           return; // do not return a Response

@@ -147,6 +147,7 @@ export async function startProdServer() {
   }
 
   const server = Bun.serve({
+    maxRequestBodySize: 10 * 1024 * 1024 * 1024, // 10 GB
     fetch: async (req, server) => {
       if (!req.headers.get("x-forwarded-for")) {
         const ip = server.requestIP(req);
