@@ -1,6 +1,6 @@
 {
   "name": "gemi",
-  "version": "0.29.8",
+  "version": "0.29.9",
   "author": "Enes Tufekci <enes@gemijs.dev>",
   "license": "MIT",
   "devDependencies": {
@@ -21,19 +21,20 @@
     "gemi": "./dist/bin/gemi.js"
   },
   "exports": {
-    "./http": "./http/index.ts",
-    "./client": "./client/index.ts",
-    "./app": "./app/index.ts",
-    "./facades": "./facades/index.ts",
-    "./email": "./email/index.ts",
+    "./http": "./dist/http/index.js",
+    "./client": "./dist/client/index.js",
+    "./app": "./dist/app/index.js",
+    "./facades": "./dist/facades/index.js",
+    "./email": "./dist/email/index.js",
     "./vite": "./dist/vite/index.mjs",
-    "./runtime": "./client/runtime.ts",
-    "./kernel": "./kernel/index.ts",
-    "./services": "./services/index.ts",
-    "./broadcasting": "./broadcasting/index.ts",
-    "./i18n": "./i18n/index.ts"
+    "./runtime": "./dist/runtime/index.js",
+    "./kernel": "./dist/kernel/index.js",
+    "./services": "./dist/services/index.js",
+    "./i18n": "./dist/i18n/index.js"
   },
-  "files": ["dist/**/*"],
+  "files": [
+    "dist/**/*"
+  ],
   "private": false,
   "module": true,
   "scripts": {

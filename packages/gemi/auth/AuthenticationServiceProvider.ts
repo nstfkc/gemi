@@ -574,7 +574,6 @@ class AuthController extends Controller {
     const oauthProvider = authProvider.oauthProviders[provider as string];
     const { email, name, username, providerId } =
       await oauthProvider.onCallback(req);
-
     if (!username && !email) {
       throw new Error("Email or username is required");
     }
@@ -655,7 +654,7 @@ class AuthController extends Controller {
 
 class OAuthViewRouter extends ViewRouter {
   routes = {
-    "/:provider": this.redirect([AuthController, "oauthRedirect"]),
+    "/:provider": this.view("_Redirect", [AuthController, "oauthRedirect"]),
     "/:provider/callback": this.view("auth/OauthCallback", [
       AuthController,
       "oauthCallback",
