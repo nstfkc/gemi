@@ -47,7 +47,7 @@ export class GoogleOAuthProvider extends OAuthProvider {
     }
 
     const str = url.toString();
-    Redirect.to(str as never);
+    Redirect.external(str);
 
     return str;
   }

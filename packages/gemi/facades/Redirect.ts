@@ -24,19 +24,18 @@ class RedirectError extends RequestBreakerError {
   }
 }
 
-type Options<T extends ViewPaths> =
-  UrlParser<T> extends Record<string, never>
-    ? {
-        search?: Record<string, string | number | boolean | undefined | null>;
-        status?: number;
-        permanent?: boolean;
-      }
-    : {
-        search?: Record<string, string | number | boolean | undefined | null>;
-        params: UrlParser<T>;
-        status?: number;
-        permanent?: boolean;
-      };
+type Options<T extends ViewPaths> = UrlParser<T> extends Record<string, never>
+  ? {
+      search?: Record<string, string | number | boolean | undefined | null>;
+      status?: number;
+      permanent?: boolean;
+    }
+  : {
+      search?: Record<string, string | number | boolean | undefined | null>;
+      params: UrlParser<T>;
+      status?: number;
+      permanent?: boolean;
+    };
 
 export class Redirect {
   static to<T extends ViewPaths>(
@@ -64,5 +63,9 @@ export class Redirect {
         .join("?"),
       status ?? (permanent ? 301 : 307),
     );
+  }
+
+  static external(url: string, status = 307) {
+    throw new RedirectError(url, status);
   }
 }
