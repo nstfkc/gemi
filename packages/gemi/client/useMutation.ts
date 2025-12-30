@@ -95,7 +95,7 @@ export function useMutation<
   method: M,
   url: K,
   ...args: [
-    options?: { params?: Partial<ParseParams<K>> },
+    options?: { params?: Partial<ParseParams<K>>, search?: Record<string, string> },
     config?: Partial<Config<T>>,
   ]
 ) {
@@ -122,7 +122,9 @@ export function useMutation<
     const [inputs = {}, options = defaultOptions] = args ?? [];
     const params =
       "params" in inputs ? { ..._params, ...inputs.params } : _params;
-    const finalUrl = applyParams(String(url).replace(`${method}:`, ""), params);
+    const search = "search" in inputs ? inputs.search : {};
+    const searchParams = new URLSearchParams(search);
+    const finalUrl = [applyParams(String(url).replace(`${method}:`, ""), params), searchParams.toString()].filter(Boolean).join("?");
 
     let body = null;
 

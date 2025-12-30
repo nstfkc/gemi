@@ -73,6 +73,7 @@ interface FormProps<M extends keyof Methods, K extends keyof Methods[M]>
   onSuccess?: (result: Methods[M][K], form: HTMLFormElement) => void;
   onError?: (error: Any, form: HTMLFormElement) => void;
   params?: Partial<UrlParser<`${K & string}`>>;
+  search?: Record<string, string>;
   dynamicInputs?: (formData: FormData) => Record<string, any>;
 }
 
@@ -87,6 +88,7 @@ export function Form<
     onSuccess = () => {},
     onError = () => {},
     params,
+    search = {},
     className,
     dynamicInputs = () => ({}),
     ...formProps
@@ -145,6 +147,7 @@ export function Form<
     String(action) as Any,
     {
       params,
+      search,
     } as Any,
     {
       onSuccess: (data) => onSuccess(data as Any, formRef.current),

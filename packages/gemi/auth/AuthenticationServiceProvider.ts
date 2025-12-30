@@ -164,7 +164,7 @@ class AuthController extends Controller {
       httpOnly: true,
     });
 
-    await authProvider.onSignIn(session);
+    await authProvider.onSignIn(session, req.search.toJSON());
 
     return { session };
   }
@@ -201,7 +201,7 @@ class AuthController extends Controller {
       httpOnly: true,
     });
 
-    await authProvider.onSignIn(session);
+    await authProvider.onSignIn(session, req.search.toJSON());
 
     return session;
   }
@@ -236,7 +236,7 @@ class AuthController extends Controller {
       httpOnly: true,
     });
 
-    await authProvider.onSignIn(session);
+    await authProvider.onSignIn(session, req.search.toJSON());
 
     return { session };
   }
@@ -283,7 +283,7 @@ class AuthController extends Controller {
       httpOnly: true,
     });
 
-    await authProvider.onSignIn(user);
+    await authProvider.onSignIn(user, req.search.toJSON());
 
     const { password: _, ...rest } = user;
 
@@ -332,7 +332,7 @@ class AuthController extends Controller {
       httpOnly: true,
     });
 
-    await authProvider.onSignIn(user);
+    await authProvider.onSignIn(user, req.search.toJSON());
 
     const { password: _, ...rest } = user;
 
@@ -408,7 +408,7 @@ class AuthController extends Controller {
       });
     }
 
-    await authProvider.onSignUp(newUser, verificationToken);
+    await authProvider.onSignUp(newUser, verificationToken, req.search.toJSON());
 
     return newUser;
   }
@@ -626,9 +626,9 @@ class AuthController extends Controller {
 
     if (action === "signup") {
       const magicLink = await authProvider.generateMagicLinkToken(email);
-      await authProvider.onSignUp(user, magicLink);
+      await authProvider.onSignUp(user, magicLink, req.search.toJSON());
     } else {
-      await authProvider.onSignIn(user);
+      await authProvider.onSignIn(user, req.search.toJSON());
     }
 
     return { session };
@@ -740,8 +740,8 @@ export class AuthenticationServiceProvider extends ServiceProvider {
     return {};
   }
 
-  onSignUp(_user: User, _verificationToken?: string): Promise<void> | void {}
-  onSignIn(_session: any): Promise<void> | void {}
+  onSignUp(_user: User, _verificationToken: string, search: Record<string, string>): Promise<void> | void {}
+  onSignIn(_session: any, search: Record<string, string>): Promise<void> | void {}
   onSignOut(_session: any): Promise<void> | void {}
   onForgotPassword(
     _user: any,

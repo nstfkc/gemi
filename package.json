@@ -1,6 +1,7 @@
 {
   "name": "gemi",
   "devDependencies": {
+    "@biomejs/biome": "^2.3.10",
     "@repo/eslint-config": "*",
     "@repo/typescript-config": "*",
     "prettier": "^3.2.5",
