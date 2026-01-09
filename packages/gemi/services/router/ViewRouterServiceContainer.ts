@@ -325,7 +325,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           headers: {
             "Cache-Control":
               "private, no-cache, no-store, max-age=0, must-revalidate",
-            Location: `/${locale}${_pathname}`,
+            Location: `/${locale}${_pathname}${url.search}`,
           },
         });
       }
