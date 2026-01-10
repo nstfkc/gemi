@@ -93,11 +93,11 @@ export const Head = ({
     <head>
       <meta charSet={charSet} />
       <meta name="viewport" content="width=device-width, initial-scale=1" />
-      <title>{meta.title}</title>
-      {meta.description && (
+      <title>{meta?.title}</title>
+      {meta?.description && (
         <meta name="description" content={meta.description} />
       )}
-      {meta.openGraph && <OpenGraph {...meta.openGraph} />}
+      {meta?.openGraph && <OpenGraph {...meta.openGraph} />}
       {children}
     </head>
   );
