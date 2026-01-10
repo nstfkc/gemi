@@ -611,7 +611,7 @@ class AuthController extends Controller {
       });
     }
 
-    const session = await container.createOrUpdateSession({
+    const session = await container.createOrUpdateSessionV2({
       email: user.email,
       id: user.id,
     });
@@ -653,6 +653,7 @@ class AuthController extends Controller {
 }
 
 class OAuthViewRouter extends ViewRouter {
+  middlewares = ["cache:private"];
   routes = {
     "/:provider": this.view("_Redirect", [AuthController, "oauthRedirect"]),
     "/:provider/callback": this.view("auth/OauthCallback", [
@@ -663,6 +664,7 @@ class OAuthViewRouter extends ViewRouter {
 }
 
 export class AuthViewRouter extends ViewRouter {
+  middlewares = ["cache:private"];
   routes = {
     "/sign-in/magic-link": this.view("auth/MagicLinkSignIn", [
       AuthController,
