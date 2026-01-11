@@ -98,8 +98,8 @@ export class PrismaAuthenticationAdapter implements IAuthenticationAdapter {
       const session = await this.prisma.session.findUnique({
         where: {
           token: args.token,
-          userAgent:
-            process.env.NODE_ENV === "development" ? "local" : args.userAgent,
+          // userAgent:
+          //   process.env.NODE_ENV === "development" ? "local" : args.userAgent,
         },
         include: {
           user: {
