@@ -12,7 +12,7 @@ export function useUser() {
     "/auth/me",
     {},
     {
-      fallbackData: auth.user ? auth?.user : null,
+      fallbackData: auth?.user ? auth.user : null,
     },
   );
 

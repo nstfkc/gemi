@@ -34,7 +34,9 @@ export function useNavigate() {
         : [options: Options<T>]
     ) => {
       const navigationAbortController = new AbortController();
-      setNavigationAbortController(navigationAbortController);
+      if (setNavigationAbortController) {
+        setNavigationAbortController(navigationAbortController);
+      }
 
       const [options = {}] = args;
       const {
