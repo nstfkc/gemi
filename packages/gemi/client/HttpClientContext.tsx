@@ -12,7 +12,7 @@ interface HttpClientProviderProps {
 }
 
 export const HttpClientProvider = ({
-  fetch = globalThis.fetch,
+  fetch = globalThis.fetch.bind(globalThis),
   host = "",
   children,
 }: HttpClientProviderProps) => {
