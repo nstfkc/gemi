@@ -6,7 +6,7 @@ import { useNavigate } from "./useNavigate";
 export const Redirect = (
   props: ComponentProps<typeof Link> & { action: "push" | "replace" },
 ) => {
-  const { href, params = {}, search = {}, action } = props;
+  const { href, params = {}, search = {}, action = "replace" } = props;
   const { push, replace } = useNavigate();
 
   useEffect(() => {
@@ -17,5 +17,5 @@ export const Redirect = (
     }
   }, [replace, action, push, params, search, href]);
 
-  return null;
+  return <></>;
 };
