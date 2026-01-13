@@ -38,6 +38,7 @@ export class AuthenticationServiceContainer extends ServiceContainer {
       );
       const session = await this.createOrUpdateSession({ email, id: user.id });
       const req = new HttpRequest();
+      const url = new URL(req.rawRequest.url);
       req.ctx().setCookie("access_token", session.token, {
         expires: session.expiresAt,
         secure: !url.origin.includes("localhost"),

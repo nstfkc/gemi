@@ -22,9 +22,6 @@
       },
       "suspicious": {
         "noExplicitAny": "off"
-      },
-      "security": {
-        "noDangerouslySetInnerHTML": "off"
       }
     }
   },
