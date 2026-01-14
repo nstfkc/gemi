@@ -88,7 +88,7 @@ export const Link = memo(<T extends keyof Views>(props: LinkProps<T>) => {
     <a
       data-active={active || currentHref === targetHref}
       data-pending={href === targetPath && isTransitioning}
-      href={targetHref}
+      href={targetHref === '' ? '/' : targetHref}
       onClick={(e) => {
         if (typeof window !== "undefined") {
           if (currentHref === targetHref) {
@@ -104,7 +104,6 @@ export const Link = memo(<T extends keyof Views>(props: LinkProps<T>) => {
           e.preventDefault();
         }
         onClick?.(e);
-
         push(href, {
           hash,
           search,

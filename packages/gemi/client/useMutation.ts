@@ -4,7 +4,6 @@ import type { ApiRouterHandler } from "../http/ApiRouter";
 import type { UnwrapPromise } from "../utils/type";
 import type { UrlParser } from "./types";
 import { useParams } from "./useParams";
-import { HttpClientContext } from "./HttpClientContext";
 
 type Methods = {
   POST: {
@@ -100,7 +99,6 @@ export function useMutation<
   ]
 ) {
   const _params = useParams();
-  const { fetch, host } = useContext(HttpClientContext);
   const [state, setState] = useState<State<T>>({
     data: null,
     error: null,
@@ -142,7 +140,7 @@ export function useMutation<
     }
 
     try {
-      const response = await fetch(`${host}/api${finalUrl}`, {
+      const response = await fetch(`/api${finalUrl}`, {
         method,
         headers: {
           ...contentType,
@@ -271,7 +269,6 @@ export function useUpload<K extends keyof Methods["POST"], T = Data<"POST", K>>(
   const [progress, setProgress] = useState(0);
   const _params = useParams();
   const abortRef = useRef<VoidFunction | null>(null);
-  const { host } = useContext(HttpClientContext);
 
   const [inputs = {}, options = defaultOptions] = args ?? [];
 
@@ -293,7 +290,7 @@ export function useUpload<K extends keyof Methods["POST"], T = Data<"POST", K>>(
     const finalUrl = applyParams(String(url).replace("POST:", ""), params);
 
     const method = "POST";
-    const action = `${host}/api${finalUrl}`;
+    const action = `/api${finalUrl}`;
     const data = new FormData();
     if (fileList instanceof FileList) {
       for (const file of Array.from(fileList)) {

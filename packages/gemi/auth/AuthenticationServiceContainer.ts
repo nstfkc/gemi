@@ -36,6 +36,9 @@ export class AuthenticationServiceContainer extends ServiceContainer {
         email,
         false,
       );
+      if (!user) {
+        throw new Error(`User not found with email: ${email}`);
+      }
       const session = await this.createOrUpdateSession({ email, id: user.id });
       const req = new HttpRequest();
       const url = new URL(req.rawRequest.url);

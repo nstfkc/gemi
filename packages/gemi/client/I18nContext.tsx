@@ -6,7 +6,6 @@ import {
   useState,
 } from "react";
 import { ServerDataContext } from "./ServerDataProvider";
-import { HttpClientContext } from "./HttpClientContext";
 
 type TranslationScope = Record<string, string>;
 type TranslationScopes = Record<string, TranslationScope>;
@@ -39,7 +38,6 @@ export type Dictionary = Map<string, Map<string, Record<string, string>>>;
 
 export const I18nProvider = (props: PropsWithChildren) => {
   const { i18n } = useContext(ServerDataContext);
-  const { fetch, host } = useContext(HttpClientContext);
 
   const [currentLocale, setCurrentLocale] = useState(i18n.currentLocale);
 
@@ -97,7 +95,7 @@ export const I18nProvider = (props: PropsWithChildren) => {
       return;
     }
     const response = await fetch(
-      `${host}/api/__gemi__/services/i18n/translations/${
+      `/api/__gemi__/services/i18n/translations/${
         locale || currentLocale
       }${pathname === "/" ? "" : pathname}`,
       {

@@ -17,7 +17,6 @@ import { useParams } from "./useParams";
 import { ServerDataContext } from "./ServerDataProvider";
 import { Subject } from "../utils/Subject";
 
-// biome-ignore lint: type later
 type Any = any;
 
 interface MutationContextValue {
@@ -33,9 +32,10 @@ const MutationContext = createContext({
   result: null,
 } as MutationContextValue);
 
-type GetResult<T> = T extends ApiRouterHandler<Any, infer Result, Any>
-  ? UnwrapPromise<Result>
-  : never;
+type GetResult<T> =
+  T extends ApiRouterHandler<Any, infer Result, Any>
+    ? UnwrapPromise<Result>
+    : never;
 
 type PostRequests = {
   [K in keyof RPC as K extends `POST:${infer P}` ? P : never]: GetResult<
@@ -66,8 +66,10 @@ type Methods = {
   PATCH: PatchRequests;
 };
 
-interface FormProps<M extends keyof Methods, K extends keyof Methods[M]>
-  extends Omit<ComponentProps<"form">, "action" | "onError"> {
+interface FormProps<
+  M extends keyof Methods,
+  K extends keyof Methods[M],
+> extends Omit<ComponentProps<"form">, "action" | "onError"> {
   method?: M;
   action: K;
   onSuccess?: (result: Methods[M][K], form: HTMLFormElement) => void;

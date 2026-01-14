@@ -19,7 +19,6 @@ import { ComponentsContext, ComponentsProvider } from "./ComponentContext";
 import { QueryManagerProvider } from "./QueryManagerContext";
 import { I18nProvider } from "./I18nContext";
 import { WebSocketContextProvider } from "./WebsocketContext";
-import { HttpClientContext } from "./HttpClientContext";
 import { useNavigate } from "./useNavigate";
 import {
   type PageData,
@@ -144,8 +143,6 @@ const Routes = (props: { componentTree: ComponentTree }) => {
   const { componentTree } = props;
   const [isPending, startTransition] = useTransition();
   const [isFetching, setIsFetching] = useState(false);
-  const { fetch, host } = useContext(HttpClientContext);
-
   const { routerSubject, fetchRouteCSS } = useContext(ClientRouterContext);
 
   const [transitionPath, setTransitionPath] = useState<[string, string]>([
@@ -210,7 +207,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
 
       const pathnameWithLocaleSegment = `${localeSegment}${_pathname}`;
 
-      const url = `${host}${pathnameWithLocaleSegment}.json${search}`;
+      const url = `${pathnameWithLocaleSegment}.json${search}`;
       setIsFetching(true);
       let res = { ok: false, json: async () => ({}) } as Response;
       try {
@@ -271,7 +268,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
       }
       setIsFetching(false);
     });
-  }, [routerSubject, fetchRouteCSS, fetch, host, replace]);
+  }, [routerSubject, fetchRouteCSS, replace]);
 
   return (
     <RouteTransitionProvider

@@ -77,7 +77,7 @@ export function useNavigate() {
         return;
       }
 
-      history?.[pushOrReplace](finalPath);
+      history?.[pushOrReplace](finalPath === '' ? '/' : finalPath);
     };
   }
 

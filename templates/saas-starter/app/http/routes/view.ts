@@ -1,4 +1,4 @@
-import { Cookie, I18n, Meta, Query } from "gemi/facades";
+import { Cookie, I18n, Meta, Query, Auth } from "gemi/facades";
 import { type HttpRequest, ViewRouter } from "gemi/http";
 
 class AuthViewRouter extends ViewRouter {
@@ -55,16 +55,13 @@ export default class extends ViewRouter {
         "/pricing": this.view("Pricing", (req: HttpRequest) => {
           return { title: "Pricing" };
         }),
-        "/test/:testId": this.view("Test", (req: HttpRequest) => {
-          const result = {
-            "en-US": "Hello",
-            "tr-TR": "Merhaba",
-          };
+        "/testx": this.view("Test", async (req: HttpRequest) => {
+          await Auth.authenticate("enesxtufekci@gmail.com");
 
           return {
-            message: result[req.locale()],
+            message: "This is a test message from the /test route.",
           };
-        }),
+        }).middleware("cache:private"),
       },
     ),
     "/auth": AuthViewRouter,

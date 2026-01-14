@@ -13,7 +13,6 @@ import { Subject } from "../utils/Subject";
 import { URLPattern } from "urlpattern-polyfill";
 import { ProgressManager } from "./ProgressManager";
 import { HttpReload } from "./HttpReload";
-import { HttpClientContext } from "./HttpClientContext";
 import type { Breadcrumb } from "./useBreadcrumbs";
 import type { RouteState } from "./RouteStateContext";
 import { I18nContext } from "./I18nContext";
@@ -85,8 +84,6 @@ export const ClientRouterProvider = (
   });
 
   const { supportedLocales = [], locale } = useContext(I18nContext);
-
-  const { fetch, host } = useContext(HttpClientContext);
 
   const [progressManager] = useState(new ProgressManager(isNavigatingSubject));
   const pageDataRef = useRef(structuredClone(pageData));
@@ -253,7 +250,7 @@ export const ClientRouterProvider = (
     }
 
     async function fetchCSS(path: string) {
-      const response = await fetch(`${host}/${path}`);
+      const response = await fetch(`/${path}`);
       const content = response.text();
       return {
         content,

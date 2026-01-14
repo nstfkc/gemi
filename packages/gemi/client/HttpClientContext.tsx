@@ -1,7 +1,9 @@
 import { createContext } from "react";
+import { defaultFetch } from "./defaultFetch"
+
 
 export const HttpClientContext = createContext({
-  fetch: (...params: any) => globalThis.fetch.bind(globalThis)(...params),
+  fetch: defaultFetch,
   host: "",
 });
 
@@ -12,7 +14,7 @@ interface HttpClientProviderProps {
 }
 
 export const HttpClientProvider = ({
-  fetch = globalThis.fetch.bind(globalThis),
+  fetch = defaultFetch,
   host = "",
   children,
 }: HttpClientProviderProps) => {

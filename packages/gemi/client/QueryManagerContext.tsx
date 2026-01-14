@@ -5,17 +5,15 @@ import {
   useRef,
 } from "react";
 import { QueryResource } from "./QueryResource";
-import { HttpClientContext } from "./HttpClientContext";
 
 export const QueryManagerContext = createContext({
   getResource: (key: string, initialState: Record<string, any> = {}) => {
-    return new QueryResource(key, initialState, fetch, "");
+    return new QueryResource(key, initialState);
   },
 });
 
 export const QueryManagerProvider = ({ children }: PropsWithChildren<{}>) => {
   const resourcesRef = useRef<Map<string, QueryResource>>(new Map());
-  const { fetch, host } = useContext(HttpClientContext);
 
   return (
     <QueryManagerContext.Provider
@@ -24,7 +22,7 @@ export const QueryManagerProvider = ({ children }: PropsWithChildren<{}>) => {
           if (!resourcesRef.current.has(key)) {
             resourcesRef.current.set(
               key,
-              new QueryResource(key, initialState ?? {}, fetch as any, host),
+              new QueryResource(key, initialState ?? {}),
             );
           }
           return resourcesRef.current.get(key);

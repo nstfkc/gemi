@@ -2,7 +2,6 @@ import { useEffect, type ComponentType } from "react";
 import { hydrateRoot, createRoot } from "react-dom/client";
 import { ServerDataProvider } from "./ServerDataProvider";
 import { ClientRouter } from "./ClientRouter";
-import { HttpClientProvider } from "./HttpClientContext";
 import { ErrorBoundary } from "react-error-boundary";
 
 const StackTrace = () => {
@@ -89,10 +88,8 @@ export function create(
     pageData: {},
   };
   createRoot(document.getElementById("root")).render(
-    <HttpClientProvider host={http.host} fetch={http.fetch}>
-      <ServerDataProvider>
-        <ClientRouter viewImportMap={viewImportMap} RootLayout={RootLayout} />
-      </ServerDataProvider>
-    </HttpClientProvider>,
+    <ServerDataProvider>
+      <ClientRouter viewImportMap={viewImportMap} RootLayout={RootLayout} />
+    </ServerDataProvider>
   );
 }
