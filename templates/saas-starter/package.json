@@ -16,6 +16,7 @@
     "gemi": "*",
     "jsx-email": "2.0.0-rc2.1",
     "lucide-react": "^0.484.0",
+    "oxlint": "^1.39.0",
     "react": "19.1.0",
     "react-dom": "19.1.0",
     "sharp": "^0.34.3",
