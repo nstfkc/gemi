@@ -68,7 +68,7 @@ export class Dictionary<T extends Translations> {
             params: Prettify<ParseTranslationParamsServer<T[U]>>;
           },
         ]
-  ) {
+  ): string {
     const { locale = I18n.locale(), params } = { params: {}, ...args?.[0] };
 
     if (!content?.[locale]) {
