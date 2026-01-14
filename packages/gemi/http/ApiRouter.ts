@@ -1,3 +1,4 @@
+import { RemoveGroupPrefix } from "../client/types";
 import { isConstructor } from "../internal/isConstructor";
 import type { KeyAndValue, KeyAndValueToObject } from "../internal/type-utils";
 import {
@@ -213,22 +214,16 @@ export class ApiRouter {
   }
 }
 
-type TestControllerMethod<
-  T extends new () => Controller,
-  K extends string,
-> = K extends ControllerMethods<T> ? K : never;
+type TestControllerMethod<T extends new () => Controller, K extends string> =
+  K extends ControllerMethods<T> ? K : never;
 
-type RouteHandlerParser<T, Prefix extends string = ""> = T extends RouteHandler<
-  infer Method,
-  infer Input,
-  infer Output,
-  infer Params
->
-  ? KeyAndValue<
-      `${Method & string}:${Prefix & string}`,
-      ApiRouterHandler<Input, Output, Params>
-    >
-  : never;
+type RouteHandlerParser<T, Prefix extends string = ""> =
+  T extends RouteHandler<infer Method, infer Input, infer Output, infer Params>
+    ? KeyAndValue<
+        `${Method & string}:${Prefix & string}`,
+        ApiRouterHandler<Input, Output, Params>
+      >
+    : never;
 
 type RouteHandlersParser<
   T,
@@ -259,14 +254,14 @@ type RouterInstanceParser<
 type ParsePrefixAndKey<
   P extends PropertyKey,
   K extends PropertyKey,
-  U = `${P & string}${K & string}`,
+  U extends string = `${P & string}${K & string}`,
 > = U extends "//"
   ? "/"
   : U extends `${infer T1}//${infer T2}`
-    ? `${T1}/${T2}`
+    ? `${RemoveGroupPrefix<T1>}/${RemoveGroupPrefix<T2>}`
     : U extends `${infer T1}/${infer T2}/`
-      ? `${T1}/${T2}`
-      : U;
+      ? `${RemoveGroupPrefix<T1>}/${RemoveGroupPrefix<T2>}`
+      : RemoveGroupPrefix<U>;
 
 type RemoveTrailingId<T> = T extends `${infer Head}/:${infer Tail}`
   ? Tail extends `${string}/:${string}`

@@ -6,6 +6,15 @@ import type { ViewRPC } from "./rpc";
 type ComponentBranch = [string, ComponentBranch[]];
 export type ComponentTree = ComponentBranch[];
 
+type RemoveDoubleSlash<T extends string> = T extends `${infer P}//${infer S}`
+  ? RemoveDoubleSlash<`${P}/${S}`>
+  : T;
+
+export type RemoveGroupPrefix<T extends string> =
+  T extends `${infer P}(${string})${infer S}`
+    ? RemoveDoubleSlash<`${P}${S}`>
+    : T;
+
 export type ViewPaths = ViewKeys<keyof ViewRPC>;
 
 export type ViewResult<T extends keyof ViewRPC> =
@@ -54,5 +63,3 @@ type UrlParserInternal<T extends string> = string extends T
               : Record<string, never>;
 
 export type UrlParser<T extends string> = Prettify<UrlParserInternal<T>>;
-
-type X = UrlParser<"/users/:userId/posts/:postId?">;

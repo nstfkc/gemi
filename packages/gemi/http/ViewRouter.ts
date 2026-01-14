@@ -1,3 +1,4 @@
+import { RemoveGroupPrefix } from "../client/types";
 import { Redirect } from "../facades/Redirect";
 import type { KeyAndValue, KeyAndValueToObject } from "../internal/type-utils";
 import type { Controller } from "./Controller";
@@ -270,29 +271,22 @@ export class ViewRouter {
   }
 }
 
-type ViewRouteParser<T, Prefix extends PropertyKey = ""> = T extends ViewRoute<
-  infer Input,
-  infer Output,
-  infer Params
->
-  ? KeyAndValue<`view:${Prefix & string}`, ViewHandler<Input, Output, Params>>
-  : never;
+type ViewRouteParser<T, Prefix extends PropertyKey = ""> =
+  T extends ViewRoute<infer Input, infer Output, infer Params>
+    ? KeyAndValue<`view:${Prefix & string}`, ViewHandler<Input, Output, Params>>
+    : never;
 
-type LayoutRouteParser<
-  T,
-  Prefix extends PropertyKey = "",
-> = T extends LayoutRoute<infer Routes, infer I, infer O, infer P>
-  ?
-      | RoutesParser<Routes, Prefix>
-      | KeyAndValue<`layout:${Prefix & string}`, ViewHandler<I, O, P>>
-  : never;
-
-type RemoveGroupPrefix<T> = T extends `(${string})${infer U}` ? U : T;
+type LayoutRouteParser<T, Prefix extends PropertyKey = ""> =
+  T extends LayoutRoute<infer Routes, infer I, infer O, infer P>
+    ?
+        | RoutesParser<Routes, Prefix>
+        | KeyAndValue<`layout:${Prefix & string}`, ViewHandler<I, O, P>>
+    : never;
 
 type ParsePrefixAndKey<
   P extends PropertyKey,
   K extends PropertyKey,
-  U = `${P & string}${K & string}`,
+  U extends string = `${P & string}${K & string}`,
 > = U extends "//"
   ? "/"
   : U extends `${infer T1}//${infer T2}`
