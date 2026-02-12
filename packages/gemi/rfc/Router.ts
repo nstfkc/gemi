@@ -39,3 +39,14 @@ ApiRouter.routes(
     ),
   }),
 );
+
+export default ApiRouter.path("/api")
+  .middleware(Auth)
+  .add(Controller.post("/test", "handler").middleware(Auth.ignore()))
+  .add(Controller.post("/test", "handler"))
+  .add(ApiRouter.post((req) => req.cookies()));
+
+export default ApiRouter.path("/api")
+  .middleware(Auth, Cache.configure("private"))
+  .POST("/path", Controller.use("handler"))
+  .GET("/path", Controller.use("handler"));
