@@ -1,4 +1,5 @@
 import { useAppIdMissmatch, useQuery, useSearchParams } from "gemi/client";
+import { useEffect } from "react";
 
 function useAppRefresh() {
   const appIdMissmatch = useAppIdMissmatch();

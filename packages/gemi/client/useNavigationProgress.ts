@@ -10,7 +10,7 @@ export function useNavigationProgress() {
     return () => {
       unsub();
     };
-  }, []);
+  }, [progressManager.state]);
 
   return progress;
 }

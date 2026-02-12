@@ -1,4 +1,4 @@
-import { RemoveGroupPrefix } from "../client/types";
+import type { RemoveGroupPrefix } from "../client/types";
 import { Redirect } from "../facades/Redirect";
 import type { KeyAndValue, KeyAndValueToObject } from "../internal/type-utils";
 import type { Controller } from "./Controller";

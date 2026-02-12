@@ -1,4 +1,4 @@
-import { RemoveGroupPrefix } from "../client/types";
+import type { RemoveGroupPrefix } from "../client/types";
 import { isConstructor } from "../internal/isConstructor";
 import type { KeyAndValue, KeyAndValueToObject } from "../internal/type-utils";
 import {

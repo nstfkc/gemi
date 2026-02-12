@@ -90,6 +90,6 @@ export function create(
   createRoot(document.getElementById("root")).render(
     <ServerDataProvider>
       <ClientRouter viewImportMap={viewImportMap} RootLayout={RootLayout} />
-    </ServerDataProvider>
+    </ServerDataProvider>,
   );
 }
