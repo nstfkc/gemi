@@ -1,6 +1,15 @@
 import type { FileSink } from "bun";
-import { mkdir, exists, readdir } from "fs/promises";
+import { mkdir, readdir, access } from "fs/promises";
 import { ServiceContainer } from "../ServiceContainer";
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
 import type { LoggingServiceProvider } from "./LoggingServiceProvider";
 import { RequestContext } from "../../http/requestContext";
 import type { LogEntry, LogLevel } from "./types";

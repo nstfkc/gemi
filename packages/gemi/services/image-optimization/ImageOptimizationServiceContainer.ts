@@ -56,12 +56,11 @@ export class ImageOptimizationRouter extends ApiRouter {
 
       res.headers.delete("Content-Type");
       res.headers.delete("Content-Length");
-      return new Response(buffer, {
-        headers: {
-          "Content-Type": "image/webp",
-          "Content-Length": `${buffer.byteLength}`,
-          ...res.headers.toJSON(),
-        },
+      const _headers = new Headers(res.headers);
+      _headers.set("Content-Type", "image/webp");
+      _headers.set("Content-Length", `${buffer.byteLength}`);
+      return new Response(new Uint8Array(buffer), {
+        headers: _headers,
       });
     }),
   };

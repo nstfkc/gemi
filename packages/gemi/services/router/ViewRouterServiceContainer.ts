@@ -231,7 +231,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
             })
             .toBuffer();
 
-          return new Response(png, { headers: ogHeaders });
+          return new Response(new Uint8Array(png), { headers: ogHeaders });
         }
 
         return new Response("data");
