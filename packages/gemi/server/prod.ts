@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { generateETag } from "./generateEtag";
 import { URLPattern } from "urlpattern-polyfill";
+import { exists } from "node:fs/promises";
 import { createStyles } from "./styles";
 
 const projectDir = process.env.GEMI_PROJECT_DIR ?? "";
@@ -72,15 +73,20 @@ export async function startProdServer() {
     if (isFileRequest && !isApi) {
       const url = new URL(req.url);
       const filePath = req.url.replace(url.origin, "").split("?")[0];
-      try {
-        const file = Bun.file(
-          `${distDir}/client${filePath.replace("/assets/assets", "/assets")}`,
-        );
-        if (!file.exists() && url.pathname.includes(".js")) {
-          return new Response("window.location.reload();export {}", {
+      const distPath = `${distDir}/client${filePath.replace("/assets/assets", "/assets")}`;
+      const doesExist = await exists(distPath);
+
+      if (!doesExist && url.pathname.includes(".js")) {
+        return new Response(
+          `if(caches){caches?.delete("${distPath}")}window.location.reload();export {}`,
+          {
             headers: { "Content-Type": "application/javascript" },
-          });
-        }
+          },
+        );
+      }
+      try {
+        const file = Bun.file(distPath);
+
         const etag = generateETag(file.lastModified);
         return new Response(file.stream(), {
           headers: {
