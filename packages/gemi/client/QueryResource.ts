@@ -13,10 +13,7 @@ export class QueryResource {
   lastFetchRecord = new Map<string, number>();
   key: string;
 
-  constructor(
-    key: string,
-    initialState: Record<string, any>,
-  ) {
+  constructor(key: string, initialState: Record<string, any>) {
     this.key = key;
     const store = new Map();
     const now = Date.now();
@@ -121,15 +118,16 @@ export class QueryResource {
       });
     }
 
-    const fullUrl = [this.key, variantKey].filter((s) => s.length).join("?");
-    const response = await fetch(`/api${fullUrl}`, {
-      cache: cache ? "default" : "reload",
-    });
-
     let data = null;
+    let response: Response | null = null;
+    const fullUrl = [this.key, variantKey].filter((s) => s.length).join("?");
     try {
+      response = await fetch(`/api${fullUrl}`, {
+        cache: cache ? "default" : "reload",
+      });
       data = await response.json();
     } catch (error) {
+      console.error(`Error fetching url /api${fullUrl}`, error);
       this.store.next(
         store.set(variantKey, {
           loading: false,
