@@ -91,6 +91,7 @@ export async function startProdServer() {
           },
         });
       } catch (error) {
+        app.onException?.(error);
         return new Response("Not found", { status: 404 });
       }
     }
@@ -142,6 +143,7 @@ export async function startProdServer() {
           headers: { "Content-Type": "application/json" },
         });
       }
+      app.onException?.(err);
       return new Response(err.stack, { status: 500 });
     }
   }

@@ -7,14 +7,21 @@ import { QueueServiceContainer } from "../services/queue/QueueServiceContainer";
 
 interface AppParams {
   kernel: new () => Kernel;
+  onException?: (error: Error) => void;
 }
 
 export class App {
   private kernel: Kernel;
+  public onException?: (error: Error) => void;
 
   constructor(params: AppParams) {
     this.kernel = new params.kernel();
     this.kernel.boot.call(this.kernel);
+    this.onException =
+      params.onException ??
+      ((error: Error) => {
+        console.error("Unhandled exception in App:", error);
+      });
   }
 
   public getComponentTree() {
