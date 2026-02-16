@@ -18,6 +18,7 @@ interface Config<T> {
   retryIntervalOnError?: number;
   refreshInterval?: number;
   debug?: boolean;
+  lazy?: boolean;
 }
 
 type WithOptionalValues<T> = {
@@ -30,27 +31,20 @@ const defaultConfig: Config<any> = {
   retryIntervalOnError: 10000,
   refreshInterval: 999999,
   debug: false,
+  lazy: false,
 };
 
 type GetRPC = {
   [K in keyof RPC as K extends `GET:${infer P}` ? P : never]: RPC[K];
 };
 
-type Data<T extends keyof GetRPC> = GetRPC[T] extends ApiRouterHandler<
-  any,
-  infer Data,
-  any
->
-  ? UnwrapPromise<Data>
-  : never;
+type Data<T extends keyof GetRPC> =
+  GetRPC[T] extends ApiRouterHandler<any, infer Data, any>
+    ? UnwrapPromise<Data>
+    : never;
 
-type Input<T extends keyof GetRPC> = GetRPC[T] extends ApiRouterHandler<
-  infer I,
-  any,
-  any
->
-  ? I
-  : never;
+type Input<T extends keyof GetRPC> =
+  GetRPC[T] extends ApiRouterHandler<infer I, any, any> ? I : never;
 
 type QueryOptions<T extends keyof GetRPC> = {
   search?: Partial<WithOptionalValues<Input<T>>>;
@@ -92,6 +86,7 @@ export function useQuery<T extends keyof GetRPC>(
   const fallbackData =
     config.fallbackData ?? prefetchedData?.[normalPath] ?? null;
   const refreshInterval = config.refreshInterval;
+  const lazy = config.lazy;
   const [resource, setResource] = useState(() =>
     getResource(normalPath, fallbackData),
   );
@@ -101,7 +96,13 @@ export function useQuery<T extends keyof GetRPC>(
   );
   const retryIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const retryingMap = useRef<Map<string, boolean>>(new Map());
-  const [state, setState] = useState(() => resource.getVariant(variantKey));
+  const fetchedRef = useRef(!lazy);
+  const [state, setState] = useState(() => {
+    if (lazy) {
+      return { loading: false, data: null, error: null, version: 0 };
+    }
+    return resource.getVariant(variantKey);
+  });
 
   const retry = useCallback(
     (variantKey: string) => {
@@ -121,7 +122,9 @@ export function useQuery<T extends keyof GetRPC>(
     const key = JSON.stringify(params);
     if (key !== paramsRef.current) {
       setResource(getResource(applyParams(url, params)));
-      setState(resource.getVariant(variantKey));
+      if (fetchedRef.current) {
+        setState(resource.getVariant(variantKey));
+      }
       paramsRef.current = key;
     }
   }, [params, url, variantKey, getResource, resource]);
@@ -135,6 +138,7 @@ export function useQuery<T extends keyof GetRPC>(
   }, [variantKey, resource, config.debug]);
 
   useEffect(() => {
+    if (!fetchedRef.current) return;
     refreshIntervalRef.current = setInterval(() => {
       handleReload();
     }, refreshInterval);
@@ -184,9 +188,14 @@ export function useQuery<T extends keyof GetRPC>(
   );
 
   useEffect(() => {
-    handleStateUpdate(resource.getVariant(variantKey));
+    if (fetchedRef.current) {
+      handleStateUpdate(resource.getVariant(variantKey));
+    }
     const unsub = resource.store.subscribe.call(resource.store, (store) => {
-      handleStateUpdate(store.get(variantKey));
+      const variant = store.get(variantKey);
+      if (variant) {
+        handleStateUpdate(variant);
+      }
     });
     return () => {
       unsub();
@@ -200,7 +209,9 @@ export function useQuery<T extends keyof GetRPC>(
   ): void;
   function mutate(fn?: any) {
     if (!fn) {
-      return resource.mutate.call(resource, variantKey, (data: any) => data);
+      fetchedRef.current = true;
+      resource.refetch(variantKey);
+      return;
     }
     return resource.mutate.call(resource, variantKey, (data: any) => {
       if (data === undefined || data === null) {
@@ -243,6 +254,7 @@ export function useQuery<T extends keyof GetRPC>(
     loading: state?.loading ?? true,
     error: state?.error as Error,
     mutate,
+    refetch: () => mutate(null),
     version: state?.version as number,
   };
 }

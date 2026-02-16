@@ -21,15 +21,19 @@ function useAppRefresh() {
 
 export default function Home() {
   useAppRefresh();
-  const { data, version, mutate } = useQuery("/health");
+  const { data, version, mutate, refetch } = useQuery(
+    "/health",
+    {},
+    { lazy: false },
+  );
   const searchParams = useSearchParams();
 
   return (
     <div>
       <h1>Home</h1>
-      <p>Status: {data?.status ?? "Loading..."}</p>
+      <pre>{JSON.stringify(data, null, 2)}</pre>
       <p>Version: {version}</p>
-      <button type="button" onClick={() => mutate()}>
+      <button type="button" onClick={() => refetch()}>
         Refresh
       </button>
       <button

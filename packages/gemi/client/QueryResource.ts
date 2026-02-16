@@ -98,6 +98,10 @@ export class QueryResource {
     this.resolveVariant(variantKey, false, false);
   }
 
+  refetch(variantKey: string) {
+    this.resolveVariant(variantKey, false, false);
+  }
+
   private async resolveVariant(
     variantKey: string,
     silent = false,
