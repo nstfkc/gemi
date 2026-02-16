@@ -19,6 +19,7 @@ interface Config<T> {
   refreshInterval?: number;
   debug?: boolean;
   lazy?: boolean;
+  refetchUntil?: (data: T, duration: number) => number;
 }
 
 type WithOptionalValues<T> = {
@@ -97,6 +98,10 @@ export function useQuery<T extends keyof GetRPC>(
   const retryIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const retryingMap = useRef<Map<string, boolean>>(new Map());
   const fetchedRef = useRef(!lazy);
+  const refetchUntilTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const refetchUntilDurationRef = useRef(0);
   const [state, setState] = useState(() => {
     if (lazy) {
       return { loading: false, data: null, error: null, version: 0 };
@@ -183,8 +188,28 @@ export function useQuery<T extends keyof GetRPC>(
       } else {
         setState(nextState);
       }
+
+      if (
+        config.refetchUntil &&
+        !nextState.loading &&
+        nextState.data &&
+        !nextState.error
+      ) {
+        const nextDuration = config.refetchUntil(
+          nextState.data,
+          refetchUntilDurationRef.current,
+        );
+        if (nextDuration > 0) {
+          refetchUntilDurationRef.current = nextDuration;
+          refetchUntilTimerRef.current = setTimeout(() => {
+            resource.refetch(variantKey);
+          }, nextDuration);
+        } else {
+          refetchUntilDurationRef.current = 0;
+        }
+      }
     },
-    [variantKey, config.keepPreviousData, config.debug, retry],
+    [variantKey, config.keepPreviousData, config.debug, config.refetchUntil, retry, resource],
   );
 
   useEffect(() => {
@@ -200,6 +225,9 @@ export function useQuery<T extends keyof GetRPC>(
     return () => {
       unsub();
       clearInterval(retryIntervalRef.current);
+      if (refetchUntilTimerRef.current) {
+        clearTimeout(refetchUntilTimerRef.current);
+      }
     };
   }, [variantKey, resource, handleStateUpdate]);
 

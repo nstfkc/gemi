@@ -24,7 +24,15 @@ export default function Home() {
   const { data, version, mutate, refetch } = useQuery(
     "/health",
     {},
-    { lazy: false },
+    {
+      lazy: false,
+      refetchUntil: (data) => {
+        if (data.status === "ok") {
+          return 0;
+        }
+        return 2000;
+      },
+    },
   );
   const searchParams = useSearchParams();
 

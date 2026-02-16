@@ -21,6 +21,8 @@ class OrgRouter extends ApiRouter {
   };
 }
 
+let health = 0;
+
 export default class extends ApiRouter {
   middlewares = ["cache:private", "csrf"];
 
@@ -52,7 +54,7 @@ export default class extends ApiRouter {
     }),
     "/health": this.get(() => {
       return {
-        status: "ok",
+        status: Math.random() > 0.95 ? "ok" : "error",
       };
     }),
   };
