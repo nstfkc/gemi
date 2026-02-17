@@ -76,7 +76,8 @@ export function useQuery<T extends keyof GetRPC>(
   const config = { ...defaultConfig, ..._config };
   const params =
     "params" in options ? { ..._params, ...options.params } : _params;
-  const paramsRef = useRef(JSON.stringify(params));
+  const paramsKey = JSON.stringify(params);
+  const paramsRef = useRef(paramsKey);
   const search = "search" in options ? (options.search ?? {}) : {};
   const { getResource } = useContext(QueryManagerContext);
   const normalPath = applyParams(url, params);
@@ -92,6 +93,9 @@ export function useQuery<T extends keyof GetRPC>(
     getResource(normalPath, fallbackData),
   );
 
+  const configRef = useRef(config);
+  configRef.current = config;
+
   const refreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(
     null,
   );
@@ -102,6 +106,7 @@ export function useQuery<T extends keyof GetRPC>(
     null,
   );
   const refetchUntilDurationRef = useRef(0);
+  const prefetchedRef = useRef(false);
   const [state, setState] = useState(() => {
     if (lazy) {
       return { loading: false, data: null, error: null, version: 0 };
@@ -110,37 +115,36 @@ export function useQuery<T extends keyof GetRPC>(
   });
 
   const retry = useCallback(
-    (variantKey: string) => {
-      if (!retryingMap.current.get(variantKey)) {
-        if (config.debug) console.log("retrying", variantKey);
-        retryingMap.current.set(variantKey, true);
+    (vk: string) => {
+      if (!retryingMap.current.get(vk)) {
+        if (configRef.current.debug) console.log("retrying", vk);
+        retryingMap.current.set(vk, true);
         retryIntervalRef.current = setTimeout(() => {
-          resource.getVariant(variantKey);
-          retryingMap.current.set(variantKey, false);
-        }, config.retryIntervalOnError);
+          resource.getVariant(vk);
+          retryingMap.current.set(vk, false);
+        }, configRef.current.retryIntervalOnError);
       }
     },
-    [config.debug, config.retryIntervalOnError, resource],
+    [resource],
   );
 
   useEffect(() => {
-    const key = JSON.stringify(params);
-    if (key !== paramsRef.current) {
-      setResource(getResource(applyParams(url, params)));
+    if (paramsKey !== paramsRef.current) {
+      setResource(getResource(normalPath));
       if (fetchedRef.current) {
         setState(resource.getVariant(variantKey));
       }
-      paramsRef.current = key;
+      paramsRef.current = paramsKey;
     }
-  }, [params, url, variantKey, getResource, resource]);
+  }, [paramsKey, normalPath, variantKey, getResource, resource]);
 
   const handleReload = useCallback(() => {
-    if (config.debug) {
+    if (configRef.current.debug) {
       console.log("Reloading query for", variantKey);
     }
     const data = resource.getVariant(variantKey).data;
-    resource.mutate.call(resource, variantKey, () => data);
-  }, [variantKey, resource, config.debug]);
+    resource.mutate(variantKey, () => data);
+  }, [variantKey, resource]);
 
   useEffect(() => {
     if (!fetchedRef.current) return;
@@ -171,15 +175,16 @@ export function useQuery<T extends keyof GetRPC>(
   }, [handleReload]);
 
   const handleStateUpdate = useCallback(
-    (nextState) => {
-      if (config.debug) {
+    (nextState: ReturnType<typeof resource.getVariant>) => {
+      const cfg = configRef.current;
+      if (cfg.debug) {
         console.log("state updating due to url update", variantKey);
         console.log(nextState);
       }
       if (nextState.error) {
         retry(variantKey);
       }
-      if (config.keepPreviousData) {
+      if (cfg.keepPreviousData) {
         if (nextState.loading) {
           setState((s) => ({ ...s, loading: true }));
         } else {
@@ -190,12 +195,12 @@ export function useQuery<T extends keyof GetRPC>(
       }
 
       if (
-        config.refetchUntil &&
+        cfg.refetchUntil &&
         !nextState.loading &&
         nextState.data &&
         !nextState.error
       ) {
-        const nextDuration = config.refetchUntil(
+        const nextDuration = cfg.refetchUntil(
           nextState.data,
           refetchUntilDurationRef.current,
         );
@@ -209,14 +214,14 @@ export function useQuery<T extends keyof GetRPC>(
         }
       }
     },
-    [variantKey, config.keepPreviousData, config.debug, config.refetchUntil, retry, resource],
+    [variantKey, retry, resource],
   );
 
   useEffect(() => {
     if (fetchedRef.current) {
       handleStateUpdate(resource.getVariant(variantKey));
     }
-    const unsub = resource.store.subscribe.call(resource.store, (store) => {
+    const unsub = resource.store.subscribe((store) => {
       const variant = store.get(variantKey);
       if (variant) {
         handleStateUpdate(variant);
@@ -224,12 +229,33 @@ export function useQuery<T extends keyof GetRPC>(
     });
     return () => {
       unsub();
-      clearInterval(retryIntervalRef.current);
+      clearTimeout(retryIntervalRef.current);
       if (refetchUntilTimerRef.current) {
         clearTimeout(refetchUntilTimerRef.current);
       }
     };
   }, [variantKey, resource, handleStateUpdate]);
+
+  const trigger = useCallback(() => {
+    fetchedRef.current = true;
+    const store = resource.store.getValue();
+    const variant = store.get(variantKey);
+    if (!variant || (!variant.loading && !variant.data)) {
+      resource.refetch(variantKey);
+    }
+  }, [resource, variantKey]);
+
+  const prefetch = useCallback(() => {
+    if (prefetchedRef.current) return;
+    prefetchedRef.current = true;
+    fetchedRef.current = true;
+    resource.refetch(variantKey);
+  }, [resource, variantKey]);
+
+  const refetch = useCallback(() => {
+    fetchedRef.current = true;
+    resource.refetch(variantKey);
+  }, [resource, variantKey]);
 
   function mutate(fn?: Partial<NestedPrettify<Data<T>>>): void;
   function mutate(
@@ -241,7 +267,7 @@ export function useQuery<T extends keyof GetRPC>(
       resource.refetch(variantKey);
       return;
     }
-    return resource.mutate.call(resource, variantKey, (data: any) => {
+    return resource.mutate(variantKey, (data: any) => {
       if (data === undefined || data === null) {
         console.warn("Mutate function called before the query.");
         return;
@@ -282,7 +308,8 @@ export function useQuery<T extends keyof GetRPC>(
     loading: state?.loading ?? true,
     error: state?.error as Error,
     mutate,
-    refetch: () => mutate(null),
+    trigger,
+    prefetch,
     version: state?.version as number,
   };
 }

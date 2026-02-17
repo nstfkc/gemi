@@ -21,16 +21,16 @@ function useAppRefresh() {
 
 export default function Home() {
   useAppRefresh();
-  const { data, version, mutate, refetch } = useQuery(
+  const { data, version, trigger, prefetch } = useQuery(
     "/health",
     {},
     {
-      lazy: false,
+      lazy: true,
       refetchUntil: (data) => {
         if (data.status === "ok") {
           return 0;
         }
-        return 2000;
+        return 20000;
       },
     },
   );
@@ -41,15 +41,15 @@ export default function Home() {
       <h1>Home</h1>
       <pre>{JSON.stringify(data, null, 2)}</pre>
       <p>Version: {version}</p>
-      <button type="button" onClick={() => refetch()}>
-        Refresh
+      <button type="button" onClick={() => prefetch()}>
+        Prefetch
       </button>
       <button
         onClick={() => {
-          searchParams.set("test", "123").push();
+          trigger();
         }}
       >
-        Test
+        Trigger
       </button>
     </div>
   );

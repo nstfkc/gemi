@@ -43,7 +43,6 @@ export class QueryResource {
         if (!variant.data) {
           this.resolveVariant(variantKey);
           return store.get(variantKey);
-          //
         }
         if (variant.data) {
           const stale = this.staleVariants.has(variantKey);
@@ -55,7 +54,6 @@ export class QueryResource {
             this.lastFetchRecord.set(variantKey, now);
             this.resolveVariant(variantKey, true);
             return store.get(variantKey);
-            //
           }
         }
       }
@@ -117,7 +115,7 @@ export class QueryResource {
       store.set(variantKey, {
         loading: true,
         data: previousState?.data,
-        error: previousState?.data,
+        error: previousState?.error,
         version: previousState?.version,
       });
     }
@@ -140,9 +138,10 @@ export class QueryResource {
           version: previousState?.version,
         }),
       );
+      return;
     }
 
-    if (response.ok) {
+    if (response!.ok) {
       this.store.next(
         store.set(variantKey, {
           loading: false,

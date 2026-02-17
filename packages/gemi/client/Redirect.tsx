@@ -10,10 +10,10 @@ export const Redirect = (
   const { push, replace } = useNavigate();
 
   useEffect(() => {
-    if (action === "push") {
-      push(href, { params, search } as any);
-    } else {
+    if (action === "replace") {
       replace(href, { params, search } as any);
+    } else {
+      push(href, { params, search } as any);
     }
   }, [replace, action, push, params, search, href]);
 
