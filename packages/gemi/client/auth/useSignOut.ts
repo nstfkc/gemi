@@ -1,5 +1,5 @@
-import { useMutation } from "../useMutation";
-import { useQuery } from "../useQuery";
+import { useMutate } from "../useMutate";
+import { usePost } from "../useMutation";
 
 interface UseSignOutArgs {
   onSuccess?: () => void;
@@ -10,15 +10,14 @@ const defaultArgs: UseSignOutArgs = {
 };
 
 export function useSignOut(args: UseSignOutArgs = defaultArgs) {
-  const { mutate } = useQuery("/auth/me");
-  return useMutation(
-    "POST",
+  const mutator = useMutate();
+  return usePost(
     "/auth/sign-out",
     {},
     {
       onSuccess: () => {
         args.onSuccess();
-        mutate(null);
+        mutator({ path: "/auth/me" });
       },
     },
   );
