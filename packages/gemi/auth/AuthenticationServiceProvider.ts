@@ -348,7 +348,7 @@ class AuthController extends Controller {
       password,
       name,
       invitationId,
-      metadata = {},
+      // _metadata = {},
     } = input.toJSON();
     const email = _email.toLowerCase().trim();
 
@@ -408,7 +408,11 @@ class AuthController extends Controller {
       });
     }
 
-    await authProvider.onSignUp(newUser, verificationToken, req.search.toJSON());
+    await authProvider.onSignUp(
+      newUser,
+      verificationToken,
+      req.search.toJSON(),
+    );
 
     return newUser;
   }
@@ -572,18 +576,12 @@ class AuthController extends Controller {
     const container = AuthenticationServiceContainer.use();
     const authProvider = container.provider;
     const oauthProvider = authProvider.oauthProviders[provider as string];
-    const { email, name, username, providerId } =
-      await oauthProvider.onCallback(req);
-    if (!username && !email) {
-      throw new Error("Email or username is required");
+    const { email, name } = await oauthProvider.onCallback(req);
+    if (!email) {
+      throw new Error("Authentication failed: missing email");
     }
 
-    const identifier = email ?? `${username}:${provider}`;
-
-    let user = await authProvider.adapter.findUserByEmailAddress(
-      identifier,
-      false,
-    );
+    let user = await authProvider.adapter.findUserByEmailAddress(email, false);
 
     const locale = I18nServiceContainer.use().detectLocale(req);
 
@@ -592,7 +590,7 @@ class AuthController extends Controller {
     if (!user) {
       action = "signup";
       user = await authProvider.adapter.createUser({
-        email: identifier,
+        email,
         name,
         locale,
         emailVerifiedAt: new Date(),
@@ -602,9 +600,9 @@ class AuthController extends Controller {
       await authProvider.adapter.createSocialAccount({
         provider,
         userId: user.id,
-        email: identifier,
-        username,
-        providerId,
+        email,
+        username: name,
+        providerId: "",
         expiresAt: new Date(),
         accessToken: "",
         refreshToken: "",
@@ -742,8 +740,15 @@ export class AuthenticationServiceProvider extends ServiceProvider {
     return {};
   }
 
-  onSignUp(_user: User, _verificationToken: string, search: Record<string, string>): Promise<void> | void {}
-  onSignIn(_session: any, search: Record<string, string>): Promise<void> | void {}
+  onSignUp(
+    _user: User,
+    _verificationToken: string,
+    search: Record<string, string>,
+  ): Promise<void> | void {}
+  onSignIn(
+    _session: any,
+    search: Record<string, string>,
+  ): Promise<void> | void {}
   onSignOut(_session: any): Promise<void> | void {}
   onForgotPassword(
     _user: any,

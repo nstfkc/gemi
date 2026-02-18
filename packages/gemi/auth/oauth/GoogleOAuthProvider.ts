@@ -1,4 +1,3 @@
-import { Redirect } from "../../facades/Redirect";
 import type { HttpRequest } from "../../http/HttpRequest";
 import { OAuthProvider } from "./OAuthProvider";
 
@@ -13,7 +12,7 @@ const defaultConfig: Config = {
   clientId: process.env.GOOGLE_CLIENT_ID!,
   clientSecret: process.env.GOOGLE_CLIENT_SECRET!,
   redirectPath: "/auth/oauth/google/callback",
-  scope: "https://www.googleapis.com/auth/userinfo.email",
+  scope: "https://www.googleapis.com/auth/userinfo.profile",
 };
 
 export class GoogleOAuthProvider extends OAuthProvider {
