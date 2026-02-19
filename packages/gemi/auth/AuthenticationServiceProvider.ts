@@ -576,9 +576,13 @@ class AuthController extends Controller {
     const container = AuthenticationServiceContainer.use();
     const authProvider = container.provider;
     const oauthProvider = authProvider.oauthProviders[provider as string];
+
     const { email, name } = await oauthProvider.onCallback(req);
+
     if (!email) {
-      throw new Error("Authentication failed: missing email");
+      throw new Error("Authentication failed: missing email", {
+        cause: { email, name },
+      });
     }
 
     let user = await authProvider.adapter.findUserByEmailAddress(email, false);

@@ -74,6 +74,12 @@ export class GoogleOAuthProvider extends OAuthProvider {
     );
 
     const user = await userresponse.json();
+    if (!user.email) {
+      console.error(
+        "Google OAuth error: email not found in user info response",
+        user,
+      );
+    }
 
     return { name: user.name, email: user.email };
   }
