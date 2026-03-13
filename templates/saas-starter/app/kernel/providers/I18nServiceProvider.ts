@@ -8,4 +8,7 @@ export default class extends I18nServiceProvider {
     "/": [components.HomePage],
     "/about": [components.About],
   };
+  onLocaleChange(locale: string) {
+    console.log(`Locale changed to ${locale}`);
+  }
 }

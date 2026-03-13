@@ -316,9 +316,6 @@ export class ViewRouterServiceContainer extends ServiceContainer {
         urlLocale === null &&
         locale !== i18nServiceContainer.service.defaultLocale
       ) {
-        const locale = I18nServiceContainer.use().detectLocale(
-          new HttpRequest(req, {}, "view", urlPathname),
-        );
         const _pathname = url.pathname === "/" ? "" : url.pathname;
         return new Response("", {
           status: 302,

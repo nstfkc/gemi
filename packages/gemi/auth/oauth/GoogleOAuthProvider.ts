@@ -12,7 +12,8 @@ const defaultConfig: Config = {
   clientId: process.env.GOOGLE_CLIENT_ID!,
   clientSecret: process.env.GOOGLE_CLIENT_SECRET!,
   redirectPath: "/auth/oauth/google/callback",
-  scope: "https://www.googleapis.com/auth/userinfo.profile",
+  scope:
+    "https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/userinfo.email",
 };
 
 export class GoogleOAuthProvider extends OAuthProvider {
@@ -74,6 +75,7 @@ export class GoogleOAuthProvider extends OAuthProvider {
     );
 
     const user = await userresponse.json();
+
     if (!user.email) {
       console.error(
         "Google OAuth error: email not found in user info response",

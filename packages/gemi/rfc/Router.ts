@@ -50,3 +50,14 @@ export default ApiRouter.path("/api")
   .middleware(Auth, Cache.configure("private"))
   .POST("/path", Controller.use("handler"))
   .GET("/path", Controller.use("handler"));
+
+export default class extends ApiRouter {
+  routes = {
+    "/": HomeController.get("index"),
+    "/products/:productId": ProductController.resource(),
+    "/test": [
+      TestController.get("test").middleware(Auth.ignore()),
+      TestController.post("test").middleware(Auth),
+    ],
+  };
+}

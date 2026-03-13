@@ -57,5 +57,16 @@ export default class extends ApiRouter {
         status: Math.random() > 0.95 ? "ok" : "error",
       };
     }),
+    "/dict/:id": this.get(async (req: HttpRequest<{ id: string }>) => {
+      const { id } = req.params;
+      if (id === "test") {
+        return {
+          hello: "world",
+          foo: "bar",
+        };
+      } else {
+        throw new Error("No dict");
+      }
+    }),
   };
 }

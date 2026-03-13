@@ -4,10 +4,13 @@ import { I18nServiceContainer } from "./I18nServiceContainer";
 export class I18nRouter extends ApiRouter {
   middlewares = ["cache:private,0,no-store"];
   routes = {
-    "/set-locale/:locale": this.get(() => {
+    "/set-locale/:locale": this.get(async () => {
       const req = new HttpRequest<any, any>();
-      req.ctx().setCookie("i18n-locale", req.params.locale);
-      return {};
+      const locale = req.params.locale;
+      console.log(`Setting locale to ${locale}`);
+      req.ctx().setCookie("i18n-locale", locale);
+      await I18nServiceContainer.use().service.onLocaleChange(locale);
+      return { locale };
     }),
     "/translations/:locale/:scope*": this.get(async () => {
       const req = new HttpRequest<any, any>();

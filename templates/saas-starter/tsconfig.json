@@ -19,6 +19,6 @@
     "paths": {
       "@/app/*": ["./app/*"]
     },
-    "types": ["vite/client", "bun", "./gemi.d.ts"]
+    "types": ["vite/client", "bun", "./node_modules/gemi/gemi.d.ts"]
   }
 }

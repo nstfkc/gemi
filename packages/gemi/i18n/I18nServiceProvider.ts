@@ -11,4 +11,7 @@ export class I18nServiceProvider extends ServiceProvider {
   detectLocale(_req: HttpRequest): string | null {
     return null;
   }
+  onLocaleChange(locale: string): Promise<void> | void {
+    console.log(`Locale changed to ${locale}`);
+  }
 }

@@ -16,7 +16,8 @@
     "services",
     "broadcasting",
     "client",
-    "i18n"
+    "i18n",
+    "rfc"
   ],
   "exclude": ["node_modules", "dist"]
 }

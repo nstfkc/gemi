@@ -1,5 +1,12 @@
 import { useAppIdMissmatch, useQuery, useSearchParams } from "gemi/client";
-import { useEffect } from "react";
+import { lazy, Suspense, useEffect } from "react";
+import { Dict } from "./components/Dict";
+import { Translation } from "./components/Translation";
+import { TestUI } from "./TestUI";
+
+// const TestUI = lazy(() =>
+//   import("./TestUI").then((mod) => ({ default: mod.TestUI })),
+// );
 
 function useAppRefresh() {
   const appIdMissmatch = useAppIdMissmatch();
@@ -20,37 +27,10 @@ function useAppRefresh() {
 }
 
 export default function Home() {
-  useAppRefresh();
-  const { data, version, trigger, prefetch } = useQuery(
-    "/health",
-    {},
-    {
-      lazy: true,
-      refetchUntil: (data) => {
-        if (data.status === "ok") {
-          return 0;
-        }
-        return 20000;
-      },
-    },
-  );
-  const searchParams = useSearchParams();
-
+  const x = useQuery("/org/:orgId/products");
   return (
     <div>
       <h1>Home</h1>
-      <pre>{JSON.stringify(data, null, 2)}</pre>
-      <p>Version: {version}</p>
-      <button type="button" onClick={() => prefetch()}>
-        Prefetch
-      </button>
-      <button
-        onClick={() => {
-          trigger();
-        }}
-      >
-        Trigger
-      </button>
     </div>
   );
 }
