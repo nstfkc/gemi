@@ -32,7 +32,9 @@
     "./broadcasting": "./broadcasting/index.ts",
     "./i18n": "./i18n/index.ts"
   },
-  "files": ["dist/**/*"],
+  "files": [
+    "dist/**/*"
+  ],
   "private": false,
   "module": true,
   "scripts": {
