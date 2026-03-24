@@ -1,7 +1,6 @@
 {
   "name": "gemi",
   "devDependencies": {
-    "@repo/eslint-config": "*",
     "@repo/typescript-config": "*",
     "oxlint": "^1.39.0",
     "prettier": "^3.2.5",
@@ -18,9 +17,5 @@
     "lint": "turbo lint",
     "format": "prettier --write \"**/*.{ts,tsx,md}\""
   },
-  "workspaces": [
-    "apps/*",
-    "packages/*",
-    "templates/*"
-  ]
+  "workspaces": ["apps/*", "packages/*", "templates/*"]
 }

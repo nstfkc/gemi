@@ -1,11 +1,10 @@
 {
   "name": "gemi",
-  "version": "0.34.1",
+  "version": "0.35.1",
   "author": "Enes Tufekci <enes@gemijs.dev>",
   "license": "MIT",
   "devDependencies": {
     "@babel/parser": "^7.25.4",
-    "@repo/eslint-config": "*",
     "@repo/typescript-config": "*",
     "@types/bun": "^1.2.10",
     "@types/eslint": "^8.56.5",
@@ -59,8 +58,8 @@
     "history": "^5.3.0",
     "jsx-email": "2.0.0-rc2.1",
     "open": "^10.1.0",
-    "react": "19.1.0",
-    "react-dom": "19.1.0",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
     "react-error-boundary": "^6.0.0",
     "recast": "^0.23.9",
     "resend": "^3.4.0",
