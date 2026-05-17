@@ -27,7 +27,6 @@ function useAppRefresh() {
 }
 
 export default function Home() {
-  const x = useQuery("/org/:orgId/products");
   return (
     <div>
       <h1>Home</h1>

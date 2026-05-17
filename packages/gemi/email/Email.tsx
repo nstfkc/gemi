@@ -84,6 +84,19 @@ export class Email {
     });
   }
 
+  static async preview<T extends Email>(
+    this: new () => T,
+    args: Pick<SendEmailArgs<T["template"] extends (p: infer P) => any ? P : never>, "data" | "locale">,
+  ) {
+
+    const instance = new this();
+
+    return await instance.render({
+      ...args.data,
+      locale: args.locale,
+    })
+  }
+
   protected async render<T extends Record<string, any>>(props: T) {
     const Template = this.template;
     return await render(<Template {...props} />);

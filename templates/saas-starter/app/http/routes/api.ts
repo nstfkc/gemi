@@ -1,3 +1,4 @@
+import { WelcomeEmail } from "@/app/email/WelcomeEmail";
 import { I18n } from "gemi/facades";
 import {
   ApiRouter,
@@ -8,11 +9,11 @@ import {
 import { Dictionary } from "gemi/i18n";
 
 class ProductsController extends ResourceController {
-  async list() {}
-  async show() {}
-  async store() {}
-  async update(req: HttpRequest<{ id: 1 }>) {}
-  async delete() {}
+  async list() { }
+  async show() { }
+  async store() { }
+  async update(req: HttpRequest<{ id: 1 }>) { }
+  async delete() { }
 }
 
 class OrgRouter extends ApiRouter {
@@ -28,16 +29,15 @@ export default class extends ApiRouter {
 
   routes = {
     "/org": OrgRouter,
-    "/test": this.get((req: HttpRequest) => {
-      return {
-        message: Dictionary.text(
-          {
-            "en-US": "ok {{message}}",
-            "tr-TR": "d'accord {{message:[test]}}",
-          },
-          { params: { message: (test) => test } },
-        ),
-      };
+    "/test": this.get(async (req: HttpRequest) => {
+      const html =await WelcomeEmail.preview({
+        data: { magicLink: "https://example.com/magic-link", name: 'Enes', pin: '1234' },
+      });
+      return new Response(html, {
+        headers: {
+          "Content-Type": "text/html",
+        },
+      });
     }),
     "/upload": this.post(async (req: HttpRequest<{ file: File | File[] }>) => {
       const input = await req.input();
