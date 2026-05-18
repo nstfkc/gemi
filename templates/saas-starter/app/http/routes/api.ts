@@ -30,8 +30,9 @@ export default class extends ApiRouter {
   routes = {
     "/org": OrgRouter,
     "/test": this.get(async (req: HttpRequest) => {
-      const html =await WelcomeEmail.preview({
+      const html =await WelcomeEmail.send({
         data: { magicLink: "https://example.com/magic-link", name: 'Enes', pin: '1234' },
+        locale: "en-US",
       });
       return new Response(html, {
         headers: {
