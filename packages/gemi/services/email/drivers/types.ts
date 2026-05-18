@@ -13,5 +13,5 @@ export interface SendEmailParams {
   html: string;
   text?: string;
   headers?: Record<string, string>;
-  scheduleAt?: string;
+  scheduledAt?: string;
 }

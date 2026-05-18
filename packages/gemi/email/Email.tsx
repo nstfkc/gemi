@@ -81,6 +81,7 @@ export class Email {
       html,
       headers: _headers,
       text,
+      scheduledAt: args.scheduledAt,
     });
   }
 
