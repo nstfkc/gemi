@@ -1,19 +1,13 @@
 import type { RemoveGroupPrefix } from "../client/types";
 import { isConstructor } from "../internal/isConstructor";
 import type { KeyAndValue, KeyAndValueToObject } from "../internal/type-utils";
-import {
-  Controller,
-  ResourceController,
-  type ControllerMethods,
-} from "./Controller";
-import type { HttpRequest } from "./HttpRequest";
+import { Controller, ResourceController, type ControllerMethods } from "./Controller";
+import { HttpRequest } from "./HttpRequest";
 import type { MiddlewareReturnType } from "./Router";
 
 type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
-export type ApiRouterHandler<Input, Output, Params> = (
-  req: HttpRequest<Input, Params>,
-) => Output;
+export type ApiRouterHandler<Input, Output, Params> = (req: HttpRequest<Input, Params>) => Output;
 
 type CallbackHandler<Input, Output, Params> = (
   req: HttpRequest<Input, Params>,
@@ -23,9 +17,7 @@ type ParseRouteHandler<
   T extends new () => Controller,
   K extends ControllerMethods<T>,
   M extends HttpMethod,
-> = InstanceType<T>[K] extends (
-  req: HttpRequest<infer Input, infer Params>,
-) => infer Output
+> = InstanceType<T>[K] extends (req: HttpRequest<infer Input, infer Params>) => infer Output
   ? RouteHandler<M, Input, Output, Params>
   : never;
 
@@ -41,9 +33,7 @@ export class RouteHandler<M extends HttpMethod, Input, Output, Params> {
 
   constructor(
     public method: M,
-    private handler:
-      | CallbackHandler<Input, Output, Params>
-      | (new () => Controller),
+    private handler: CallbackHandler<Input, Output, Params> | (new () => Controller),
     private methodName?: any,
   ) {
     this.handler = handler;
@@ -75,6 +65,27 @@ export class RouteHandler<M extends HttpMethod, Input, Output, Params> {
   }
 }
 
+export class ProxyHandler {
+  __internal_brand = "ProxyHandler";
+
+  constructor(
+    public url: string,
+    public headers: Record<string, string>,
+  ) {}
+
+  run() {
+    const req = new HttpRequest();
+    return fetch(this.url, {
+      method: req.rawRequest.method,
+      headers: {
+        ...Object.fromEntries(req.headers),
+        ...this.headers,
+      },
+      body: req.rawRequest.body,
+    });
+  }
+}
+
 export class FileHandler {
   constructor(...args: ConstructorParameters<typeof RouteHandler>) {
     return new RouteHandler(...args) as any;
@@ -92,6 +103,7 @@ export type ApiRoutes = Record<
   string,
   | RouteHandler<any, any, any, any>
   | FileHandler
+  | ProxyHandler
   | RouteHandlers
   | typeof ApiRouter
   | ResourceRoutes<any>
@@ -199,9 +211,7 @@ export class ApiRouter {
     } as ResourceRoutes<T>;
   }
 
-  public file<Input, Output, Params>(
-    handler: CallbackHandler<Input, Output, Params>,
-  ): FileHandler;
+  public file<Input, Output, Params>(handler: CallbackHandler<Input, Output, Params>): FileHandler;
   public file<T extends new () => Controller, K extends ControllerMethods<T>>(
     handler: T,
     methodName: K,
@@ -212,6 +222,10 @@ export class ApiRouter {
   >(handler: T, methodName?: K) {
     return new FileHandler("GET", handler, methodName);
   }
+
+  public proxy(url: string, headers: Record<string, string> = {}) {
+    return new ProxyHandler(url, headers);
+  }
 }
 
 type TestControllerMethod<T extends new () => Controller, K extends string> =
@@ -219,16 +233,10 @@ type TestControllerMethod<T extends new () => Controller, K extends string> =
 
 type RouteHandlerParser<T, Prefix extends string = ""> =
   T extends RouteHandler<infer Method, infer Input, infer Output, infer Params>
-    ? KeyAndValue<
-        `${Method & string}:${Prefix & string}`,
-        ApiRouterHandler<Input, Output, Params>
-      >
+    ? KeyAndValue<`${Method & string}:${Prefix & string}`, ApiRouterHandler<Input, Output, Params>>
     : never;
 
-type RouteHandlersParser<
-  T,
-  Prefix extends string = "",
-> = T extends RouteHandlers
+type RouteHandlersParser<T, Prefix extends string = ""> = T extends RouteHandlers
   ? {
       [K in keyof T]: T[K] extends RouteHandler<
         infer Method,
@@ -290,38 +298,10 @@ type RouteParser<
       : T[K] extends new () => ApiRouter
         ? RouterInstanceParser<T[K], ParsePrefixAndKey<Prefix, K>>
         : T[K] extends RouteHandlers
-          ? RouteHandlersParser<
-              T[K],
-              `${Prefix & string}${K extends "/" ? "" : K & string}`
-            >
+          ? RouteHandlersParser<T[K], `${Prefix & string}${K extends "/" ? "" : K & string}`>
           : never
   : never;
 
-export type CreateRPC<
-  T extends ApiRouter,
-  Prefix extends PropertyKey = "",
-> = KeyAndValueToObject<RouteParser<T["routes"], Prefix>>;
-
-class ProductsController extends ResourceController {
-  async list() {}
-  async show() {}
-  async store() {}
-  async update() {}
-  async delete() {}
-}
-
-class OrgRouter extends ApiRouter {
-  routes = {
-    "/:orgId/products/:productId": this.resource(ProductsController),
-  };
-}
-
-class RootRouter extends ApiRouter {
-  middlewares = ["cache:private", "csrf"];
-
-  routes = {
-    "/org": OrgRouter,
-  };
-}
-
-export type RootRPC = CreateRPC<RootRouter>;
+export type CreateRPC<T extends ApiRouter, Prefix extends PropertyKey = ""> = KeyAndValueToObject<
+  RouteParser<T["routes"], Prefix>
+>;

@@ -55,5 +55,6 @@ export default class extends ApiRouter {
         throw new Error("No dict");
       }
     }),
+    "/proxy": this.proxy("http://localhost:3000/api/test"),
   };
 }
