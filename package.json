@@ -2,6 +2,7 @@
   "name": "gemi",
   "devDependencies": {
     "@repo/typescript-config": "*",
+    "oxfmt": "^0.53.0",
     "oxlint": "^1.39.0",
     "prettier": "^3.2.5",
     "turbo": "latest"

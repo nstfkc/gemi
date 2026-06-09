@@ -1,19 +1,15 @@
 import { WelcomeEmail } from "@/app/email/WelcomeEmail";
 import { I18n } from "gemi/facades";
-import {
-  ApiRouter,
-  ResourceController,
-  ValidationError,
-  type HttpRequest,
-} from "gemi/http";
+import { ApiRouter, ResourceController, ValidationError, type HttpRequest } from "gemi/http";
 import { Dictionary } from "gemi/i18n";
+import { HomeController } from "../controllers/HomeController";
 
 class ProductsController extends ResourceController {
-  async list() { }
-  async show() { }
-  async store() { }
-  async update(req: HttpRequest<{ id: 1 }>) { }
-  async delete() { }
+  async list() {}
+  async show() {}
+  async store() {}
+  async update(req: HttpRequest<{ id: 1 }>) {}
+  async delete() {}
 }
 
 class OrgRouter extends ApiRouter {
@@ -25,21 +21,11 @@ class OrgRouter extends ApiRouter {
 let health = 0;
 
 export default class extends ApiRouter {
-  middlewares = ["cache:private", "csrf"];
+  middlewares = ["cache:private"];
 
   routes = {
     "/org": OrgRouter,
-    "/test": this.get(async (req: HttpRequest) => {
-      const html =await WelcomeEmail.send({
-        data: { magicLink: "https://example.com/magic-link", name: 'Enes', pin: '1234' },
-        locale: "en-US",
-      });
-      return new Response(html, {
-        headers: {
-          "Content-Type": "text/html",
-        },
-      });
-    }),
+    "/test": this.get(HomeController, "index"),
     "/upload": this.post(async (req: HttpRequest<{ file: File | File[] }>) => {
       const input = await req.input();
       const file = input.get("file");
