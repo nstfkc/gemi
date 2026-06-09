@@ -5,6 +5,7 @@ import {
   type ApiRouter,
   type ResourceRoutes,
   RouteHandler,
+  type ProxyHandler,
 } from "../../http/ApiRouter";
 import type { RouterMiddleware } from "../../http/Router";
 
@@ -20,9 +21,7 @@ export type FlatApiRoutes = Record<
   >
 >;
 
-function isRouteHandler(
-  option: ApiRoutes[string],
-): option is RouteHandler<any, any, any, any> {
+function isRouteHandler(option: ApiRoutes[string]): option is RouteHandler<any, any, any, any> {
   return "run" in option;
 }
 
@@ -35,17 +34,20 @@ function isRouteHandlers(option: ApiRoutes[string]): option is RouteHandlers {
   );
 }
 
-function isResouceRoutes(
-  option: ApiRoutes[string],
-): option is ResourceRoutes<any> {
+function isResouceRoutes(option: ApiRoutes[string]): option is ResourceRoutes<any> {
   return Object.hasOwn(option, "first") && Object.hasOwn(option, "second");
 }
 
-function isApiRouter(
-  routeHandlers: ApiRoutes[string],
-): routeHandlers is new () => ApiRouter {
+function isApiRouter(routeHandlers: ApiRoutes[string]): routeHandlers is new () => ApiRouter {
   if ("__brand" in routeHandlers) {
     return routeHandlers.__brand === "ApiRouter";
+  }
+  return false;
+}
+
+function isProxyHandler(option: ApiRoutes[string]): option is ProxyHandler {
+  if ("__internal_brand" in option) {
+    return option.__internal_brand === "ProxyHandler";
   }
   return false;
 }
@@ -65,9 +67,10 @@ export function createFlatApiRoutes(
   ) {
     const subPath = path === "/" ? "" : path;
     const _rootPath = rootPath === "/" ? "" : rootPath;
-    const finalPath = (
-      `${_rootPath}${subPath}` === "" ? "/" : `${_rootPath}${subPath}`
-    ).replaceAll("//", "/");
+    const finalPath = (`${_rootPath}${subPath}` === "" ? "/" : `${_rootPath}${subPath}`).replaceAll(
+      "//",
+      "/",
+    );
     if (!flatApiRoutes[finalPath]) {
       flatApiRoutes[finalPath] = {};
     }
@@ -86,6 +89,14 @@ export function createFlatApiRoutes(
   }
 
   for (const [path, option] of Object.entries(routes)) {
+    if (isProxyHandler(option)) {
+      const proxyHandler = option;
+      for (const method of ["GET", "POST", "PUT", "DELETE"]) {
+        addRoute(path, method, proxyHandler.run.bind(proxyHandler), []);
+      }
+      continue;
+    }
+
     if (isRouteHandler(option)) {
       const routeHandler = option;
       const method = routeHandler.method;
@@ -104,11 +115,7 @@ export function createFlatApiRoutes(
 
     if (isApiRouter(option)) {
       const router = new option();
-      const routes = createFlatApiRoutes(
-        router.routes,
-        `${rootPath}${path}`,
-        router.middlewares,
-      );
+      const routes = createFlatApiRoutes(router.routes, `${rootPath}${path}`, router.middlewares);
       for (const [path, route] of Object.entries(routes)) {
         flatApiRoutes[path.replaceAll("//", "/")] = route;
       }

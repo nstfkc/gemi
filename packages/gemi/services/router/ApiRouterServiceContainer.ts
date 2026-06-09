@@ -28,9 +28,7 @@ class DebugRouter extends ApiRouter {
     "/view-routes": this.get(() => {
       const flatroutes = ViewRouterServiceContainer.use().flatViewRoutes;
       const out = [];
-      for (const [path, { middleware, viewPath }] of Object.entries(
-        flatroutes,
-      )) {
+      for (const [path, { middleware, viewPath }] of Object.entries(flatroutes)) {
         out.push({ path, method: "GET", viewPath, middleware });
       }
       return out;
@@ -107,9 +105,7 @@ export class ApiRouterServiceContainer extends ServiceContainer {
     const routeHandler = this.flatRoutes[path];
 
     const ctx = RequestContext.getStore();
-    const exec =
-      routeHandler[ctx.req.rawRequest.method].exec ??
-      (() => Promise.resolve({}));
+    const exec = routeHandler[ctx.req.rawRequest.method].exec ?? (() => Promise.resolve({}));
 
     let data = {};
     try {
@@ -159,10 +155,7 @@ export class ApiRouterServiceContainer extends ServiceContainer {
       }
 
       ctx.setRequest(httpRequest);
-      const middlewareResponse = await this.runRouteMiddleware(
-        path,
-        httpRequest,
-      );
+      const middlewareResponse = await this.runRouteMiddleware(path, httpRequest);
 
       if (middlewareResponse instanceof Response) {
         return middlewareResponse;
@@ -177,9 +170,7 @@ export class ApiRouterServiceContainer extends ServiceContainer {
 
       headers.append("Content-Type", "application/json");
 
-      ctx.cookies.forEach((cookie) =>
-        headers.append("Set-Cookie", cookie.toString()),
-      );
+      ctx.cookies.forEach((cookie) => headers.append("Set-Cookie", cookie.toString()));
 
       ctx.destroy();
 
