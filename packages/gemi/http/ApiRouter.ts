@@ -125,6 +125,13 @@ export type ResourceMethod = "list" | "store" | "show" | "update" | "delete";
 
 export type ResourceMiddlewareConfig = Partial<Record<ResourceMethod, string[]>>;
 
+// The value stored in `routes` for a resource. It carries the plain
+// `ResourceRoutes<T>` shape (so RouteParser keeps matching it exactly as
+// before) plus a fluent `.middleware()` for per-action middleware.
+export type ResourceRoute<T extends new () => ResourceController> = ResourceRoutes<T> & {
+  middleware(config: ResourceMiddlewareConfig): ResourceRoute<T>;
+};
+
 export class ResourceRouteHandlers<T extends new () => ResourceController> {
   __internal_brand = "ResourceRoutes";
 
@@ -229,8 +236,8 @@ export class ApiRouter {
     return new RouteHandler("DELETE", handler, methodName);
   }
 
-  public resource<T extends new () => ResourceController>(Controller: T) {
-    return new ResourceRouteHandlers(Controller);
+  public resource<T extends new () => ResourceController>(Controller: T): ResourceRoute<T> {
+    return new ResourceRouteHandlers(Controller) as unknown as ResourceRoute<T>;
   }
 
   public file<Input, Output, Params>(handler: CallbackHandler<Input, Output, Params>): FileHandler;
