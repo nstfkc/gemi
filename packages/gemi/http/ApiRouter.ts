@@ -121,6 +121,38 @@ export type ResourceRoutes<T extends new () => ResourceController> = {
   };
 };
 
+export type ResourceMethod = "list" | "store" | "show" | "update" | "delete";
+
+export type ResourceMiddlewareConfig = Partial<Record<ResourceMethod, string[]>>;
+
+export class ResourceRouteHandlers<T extends new () => ResourceController> {
+  __internal_brand = "ResourceRoutes";
+
+  first: ResourceRoutes<T>["first"];
+  second: ResourceRoutes<T>["second"];
+
+  constructor(Controller: T) {
+    this.first = {
+      get: new RouteHandler("GET", Controller, "list") as any,
+      post: new RouteHandler("POST", Controller, "store") as any,
+    };
+    this.second = {
+      get: new RouteHandler("GET", Controller, "show") as any,
+      put: new RouteHandler("PUT", Controller, "update") as any,
+      delete: new RouteHandler("DELETE", Controller, "delete") as any,
+    };
+  }
+
+  middleware(config: ResourceMiddlewareConfig) {
+    if (config.list) this.first.get.middleware(config.list);
+    if (config.store) this.first.post.middleware(config.store);
+    if (config.show) this.second.get.middleware(config.show);
+    if (config.update) this.second.put.middleware(config.update);
+    if (config.delete) this.second.delete.middleware(config.delete);
+    return this;
+  }
+}
+
 export class ApiRouter {
   static __brand = "ApiRouter";
   public routes: ApiRoutes = {};
@@ -198,17 +230,7 @@ export class ApiRouter {
   }
 
   public resource<T extends new () => ResourceController>(Controller: T) {
-    return {
-      first: {
-        get: new RouteHandler("GET", Controller, "list"),
-        post: new RouteHandler("POST", Controller, "store"),
-      },
-      second: {
-        get: new RouteHandler("GET", Controller, "show"),
-        put: new RouteHandler("PUT", Controller, "update"),
-        delete: new RouteHandler("DELETE", Controller, "delete"),
-      },
-    } as ResourceRoutes<T>;
+    return new ResourceRouteHandlers(Controller);
   }
 
   public file<Input, Output, Params>(handler: CallbackHandler<Input, Output, Params>): FileHandler;
