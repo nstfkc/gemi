@@ -27,8 +27,8 @@ import { CronServiceProvider } from "../services/cron/CronServiceProvider";
 import { CronServiceContainer } from "../services/cron/CronServiceContainer";
 import { KernelIdServiceProvider } from "../services/kernel-id/KernelIdServiceProvider";
 import { KernelIdServiceContainer } from "../services/kernel-id/KernelIdServiceContainer";
-import { CustomServiceContainer } from "../services/custom-service/CustomServiceContainer";
-import { CustomServiceProvider } from "../services/custom-service/CustomServiceProvider";
+import { SingletonServiceContainer } from "../services/singleton/SingletonServiceContainer";
+import { SingletonServiceProvider } from "../services/singleton/SingletonServiceProvider";
 
 export class Kernel {
   protected emailServiceProvider = EmailServiceProvider;
@@ -93,8 +93,8 @@ export class Kernel {
       [KernelIdServiceContainer._name]: new KernelIdServiceContainer(
         new this.kernelIdServiceProvider(),
       ),
-      [CustomServiceContainer._name]: new CustomServiceContainer(
-        new CustomServiceProvider(),
+      [SingletonServiceContainer._name]: new SingletonServiceContainer(
+        new SingletonServiceProvider(),
       ),
     };
     this.booted = true;
