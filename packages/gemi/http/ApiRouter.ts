@@ -78,7 +78,7 @@ export class ProxyHandler {
     return fetch(this.url, {
       method: req.rawRequest.method,
       headers: {
-        ...Object.fromEntries(req.rawRequest.headers),
+        ...req.headers.toJSON(),
         ...this.headers,
       },
       body: req.rawRequest.body,

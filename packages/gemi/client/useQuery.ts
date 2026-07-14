@@ -40,9 +40,7 @@ type GetRPC = {
 };
 
 type Data<T extends keyof GetRPC> =
-  GetRPC[T] extends ApiRouterHandler<any, infer Data, any>
-    ? UnwrapPromise<Data>
-    : never;
+  GetRPC[T] extends ApiRouterHandler<any, infer Data, any> ? UnwrapPromise<Data> : never;
 
 type Input<T extends keyof GetRPC> =
   GetRPC[T] extends ApiRouterHandler<infer I, any, any> ? I : never;
@@ -74,8 +72,7 @@ export function useQuery<T extends keyof GetRPC>(
   const [_options = defaultOptions, _config = defaultConfig] = args;
   const options = { ...defaultOptions, ..._options };
   const config = { ...defaultConfig, ..._config };
-  const params =
-    "params" in options ? { ..._params, ...options.params } : _params;
+  const params = "params" in options ? { ..._params, ...options.params } : _params;
   const paramsKey = JSON.stringify(params);
   const paramsRef = useRef(paramsKey);
   const search = "search" in options ? (options.search ?? {}) : {};
@@ -85,26 +82,19 @@ export function useQuery<T extends keyof GetRPC>(
   searchParams.sort();
   const variantKey = searchParams.toString();
   const { prefetchedData } = useRouteData();
-  const fallbackData =
-    config.fallbackData ?? prefetchedData?.[normalPath] ?? null;
+  const fallbackData = config.fallbackData ?? prefetchedData?.[normalPath] ?? null;
   const refreshInterval = config.refreshInterval;
   const lazy = config.lazy;
-  const [resource, setResource] = useState(() =>
-    getResource(normalPath, fallbackData),
-  );
+  const [resource, setResource] = useState(() => getResource(normalPath, fallbackData));
 
   const configRef = useRef(config);
   configRef.current = config;
 
-  const refreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(
-    null,
-  );
+  const refreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const retryIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const retryingMap = useRef<Map<string, boolean>>(new Map());
   const fetchedRef = useRef(!lazy);
-  const refetchUntilTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
-    null,
-  );
+  const refetchUntilTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const refetchUntilDurationRef = useRef(0);
   const prefetchedRef = useRef(false);
   const [state, setState] = useState(() => {
@@ -194,16 +184,8 @@ export function useQuery<T extends keyof GetRPC>(
         setState(nextState);
       }
 
-      if (
-        cfg.refetchUntil &&
-        !nextState.loading &&
-        nextState.data &&
-        !nextState.error
-      ) {
-        const nextDuration = cfg.refetchUntil(
-          nextState.data,
-          refetchUntilDurationRef.current,
-        );
+      if (cfg.refetchUntil && !nextState.loading && nextState.data && !nextState.error) {
+        const nextDuration = cfg.refetchUntil(nextState.data, refetchUntilDurationRef.current);
         if (nextDuration > 0) {
           refetchUntilDurationRef.current = nextDuration;
           refetchUntilTimerRef.current = setTimeout(() => {
@@ -258,9 +240,7 @@ export function useQuery<T extends keyof GetRPC>(
   }, [resource, variantKey]);
 
   function mutate(fn?: Partial<NestedPrettify<Data<T>>>): void;
-  function mutate(
-    fn?: (data: NestedPrettify<Data<T>>) => Partial<NestedPrettify<Data<T>>>,
-  ): void;
+  function mutate(fn?: (data: NestedPrettify<Data<T>>) => Partial<NestedPrettify<Data<T>>>): void;
   function mutate(fn?: any) {
     if (!fn) {
       fetchedRef.current = true;
@@ -288,15 +268,11 @@ export function useQuery<T extends keyof GetRPC>(
         if (Array.isArray(updatedData)) {
           return [...data, ...updatedData];
         }
-        throw new Error(
-          "Mutate function must return an array when the current data is an array.",
-        );
+        throw new Error("Mutate function must return an array when the current data is an array.");
       }
 
       if (typeof data !== typeof updatedData) {
-        throw new Error(
-          "Mutate function must return the same type as the current data.",
-        );
+        throw new Error("Mutate function must return the same type as the current data.");
       }
 
       return updatedData;
