@@ -1,0 +1,4435 @@
+# gemi — Full Documentation
+
+> gemi is a batteries-included, full-stack TypeScript web framework built on Bun, Vite, and React 19 with server-side rendering. This file concatenates the entire documentation set for LLM consumption. Source: https://github.com/nstfkc/gemi
+
+---
+
+## gemi Documentation
+
+**gemi** is a batteries-included, full-stack TypeScript web framework built on **Bun**, **Vite**, and **React 19** with server-side rendering. It ships everything a typical web application needs — class-based routing, a type-safe network layer, authentication and authorization, middleware, form validation, transactional email, background jobs, cron, object storage, real-time broadcasting, and i18n — so you spend time on product code instead of wiring libraries together.
+
+gemi is Laravel-inspired: an application is a **Kernel** that registers **service providers**, routes are declared in **router classes**, request logic lives in **controllers**, and framework services are reached through **facades**. It is **not** Next.js — there is no file-based routing; every URL is mapped explicitly in a router.
+
+> These docs describe the framework as of the `server2-migration` branch. Runnable examples come from the `saas-starter` template (`templates/saas-starter`) and the production `folio` app.
+
+## When to use gemi
+
+gemi is a strong fit for **B2B / SaaS apps** with many API endpoints and non-trivial business logic, where an integrated, type-safe front-to-back stack pays off. For static sites, blogs, or content-first e-commerce optimized for first paint, a static/SSG framework may fit better.
+
+## Getting started
+
+```bash
+bunx create-gemi-app
+## then:
+cd my-app
+mv .env.example .env
+bunx prisma migrate deploy
+bun dev
+```
+
+See **[Getting Started](./getting-started.md)** for requirements and a first route-and-view walkthrough.
+
+## Documentation map
+
+### Foundations
+- **[Getting Started](./getting-started.md)** — install, scaffold, dev/build/start, your first route + view.
+- **[Project Structure & the Kernel](./project-structure.md)** — the `app/` layout, the Kernel, service providers, and app bootstrap.
+- **[Configuration](./configuration.md)** — `gemi.config.ts`, `.env` handling, `app/preload.ts`, Vite config.
+- **[CLI](./cli.md)** — `gemi dev`, `build`, `start`, and the codegen/inspection commands.
+
+### HTTP layer
+- **[Routing](./routing.md)** — `ApiRouter` / `ViewRouter`, path params, groups, nesting, `resource()`.
+- **[Controllers](./controllers.md)** — `Controller` / `ResourceController`, the `HttpRequest` API, request validation, `ValidationError`.
+- **[Middleware](./middleware.md)** — the string DSL, built-in middleware, negation, and writing custom middleware.
+
+### Views & client
+- **[Views & Layouts](./views-and-layouts.md)** — view components, server data binding, nested layouts, `Head`, breadcrumbs.
+- **[Data Fetching](./data-fetching.md)** — `useQuery`, the mutation hooks, the `Query` prefetch facade, and the type-safe `gemi.d.ts` layer.
+- **[Forms](./forms.md)** — the `Form` component, surfacing validation errors, form status hooks.
+- **[Navigation](./navigation.md)** — `Link`, `useNavigate`, `useParams`, `useSearchParams`, and the `Redirect` component vs. facade.
+
+### Auth
+- **[Authentication](./authentication.md)** — the `AuthenticationServiceProvider`, adapters, sessions, magic links, OAuth, the `Auth` facade, and client auth hooks.
+- **[Authorization](./authorization.md)** — policies, role-based middleware, and authorization errors.
+
+### Services & facades
+- **[Facades](./facades.md)** — reference for `Auth`, `Redirect`, `I18n`, `FileStorage`, `Query`, `Broadcast`, `Url`, `Log`, `Meta`, `Cookie`, `Redis`.
+- **[File Storage](./file-storage.md)** — the `FileStorage` facade, filesystem/S3 drivers, image optimization, the `Image` component.
+- **[Email](./email.md)** — the `Email` class, jsx-email templates, the Resend driver, localization and scheduling.
+- **[Jobs & Queues](./jobs-and-queues.md)** — defining and dispatching background `Job`s.
+- **[Cron](./cron.md)** — scheduling recurring `CronJob`s.
+- **[Broadcasting](./broadcasting.md)** — websocket channels, the `Broadcast` facade, `useSubscription` / `useBroadcast`.
+- **[Internationalization](./i18n.md)** — component-scoped dictionaries, `useTranslator`, `useLocale`, locale detection.
+
+## Core concepts at a glance
+
+| Concept | What it is | Where |
+| --- | --- | --- |
+| **Kernel** | Wires service providers into the app | [project-structure](./project-structure.md) |
+| **Service provider** | Configures one subsystem (auth, email, storage, …) | [project-structure](./project-structure.md) |
+| **Router** | Class declaring a `routes` object; routers nest | [routing](./routing.md) |
+| **Controller** | Server logic behind a route; receives `HttpRequest` | [controllers](./controllers.md) |
+| **Facade** | Static accessor to a framework service | [facades](./facades.md) |
+| **View** | Default-export React component rendered for a URL | [views-and-layouts](./views-and-layouts.md) |
+| **`gemi.d.ts`** | Generated types binding client hooks to your routes | [data-fetching](./data-fetching.md) |
+
+## A few things that will bite you
+
+These are the counter-intuitive rules worth knowing up front — each is covered in depth in its page.
+
+- **The `Redirect` facade works by throwing.** Never wrap `Redirect.to(...)` in `try/catch`; the framework catches the throw to perform the redirect, and wrapping it silently breaks it. (This is the server facade from `gemi/facades`, distinct from the client `<Redirect />` component.) See [Facades](./facades.md) and [Navigation](./navigation.md).
+- **Middleware is a string DSL.** `auth`, `cache:...`, `rate-limit:N`, etc., and `-auth` *cancels* an inherited middleware. Most names (`admin`, `role:...`) are **app-registered aliases**, not built-ins. See [Middleware](./middleware.md).
+- **The query hook is `useQuery`, not `useGet`.** Some app-level notes mention `useGet`; it does not exist in gemi. See [Data Fetching](./data-fetching.md).
+- **Routing is explicit.** A view/controller file name has no relation to its URL — the mapping lives in a router. See [Routing](./routing.md).
+- **`gemi.d.ts` is generated — never edit it by hand.** Regenerate the API surface with `gemi ide:generate-api-manifest`. See [CLI](./cli.md).
+
+
+---
+
+## Getting Started
+
+gemi is a batteries-included, full-stack TypeScript web framework built on Bun, Vite, and React 19 with server-side rendering. It ships everything a typical web app needs — routing, authentication, a type-safe network layer, middleware, form validation, emails, background jobs, object storage, and i18n — so you spend your time on product code instead of wiring libraries together.
+
+## What is gemi?
+
+gemi is Laravel-inspired: you describe your app with class-based routers, controllers, service providers, and a kernel rather than a file-based convention. It is **not** Next.js — routes are plain config objects on router classes, not files in a directory.
+
+A single gemi project serves both your API and your React front end from one Bun process. Views are rendered on the server and hydrated on the client, and the network layer between them is fully typed end to end.
+
+### When should you use gemi?
+
+gemi is a good fit for **B2B applications with many API endpoints and non-trivial business logic** — dashboards, internal tools, and SaaS products where you control the whole stack.
+
+> **Note:** If you are building a mostly static site, a blog, or a content-heavy e-commerce storefront where cold-start load time is the top priority, a static-first framework like Next.js or Astro may serve you better. gemi optimizes for application development, not static content delivery.
+
+## Requirements
+
+- **[Bun](https://bun.sh)** — gemi's runtime, package manager, bundler, and test runner. The CLI (`gemi dev`, `gemi build`, `gemi start`) spawns Bun processes directly.
+- **Node.js >= 18** — some tooling expects a modern Node baseline even though the app runs on Bun.
+- **React 19** — gemi depends on React and React DOM `>=19` (`react` / `react-dom` `19.2.x` in the templates). React 19 SSR is core to how views render.
+- **Vite 8** and **sharp** are peer dependencies used by the build and the image-optimization service.
+
+These come from gemi's `peerDependencies` — `react >= 19`, `react-dom >= 19`, `sharp ^0.34.2`, `vite ^8.0.0`.
+
+## Create a new app
+
+Scaffold a project with `create-gemi-app`:
+
+```bash
+bunx create-gemi-app
+```
+
+You'll be prompted for a project name (defaults to `my-app`). You can also pass it directly:
+
+```bash
+bunx create-gemi-app --project-name my-app
+```
+
+The scaffolder downloads the **saas-starter** template, pins your `package.json` to the latest published `gemi` version, installs dependencies with Bun, and initializes a git repository. When it finishes, follow the printed steps:
+
+```bash
+cd my-app
+mv .env.example .env          # create your local environment file
+bunx prisma migrate deploy    # initialize the database and generate the Prisma client
+bun dev                       # start the development server
+```
+
+The generated project is the canonical gemi layout: an `app/` directory (server entry, client entry, kernel, routes, controllers, views, email, i18n, database), plus `gemi.config.ts`, `gemi.d.ts`, `vite.config.mjs`, `tsconfig.json`, a `prisma/` schema, and a `Dockerfile`. See [Project Structure](./project-structure.md) for a full tour.
+
+## Commands
+
+gemi projects wire the CLI into their `package.json` scripts:
+
+```json
+{
+  "scripts": {
+    "dev": "gemi dev",
+    "build": "gemi build",
+    "start": "gemi start"
+  }
+}
+```
+
+- **`gemi dev`** — starts the hot-reloading development server (Vite-backed, Bun `--hot`).
+- **`gemi build`** — produces a production build: the Vite client bundle, the SSR view bundle, and a runnable `dist/server/server.mjs`.
+- **`gemi start`** — runs the built server in production mode.
+
+Run them via Bun:
+
+```bash
+bun dev
+bun run build
+bun run start
+```
+
+See the [CLI reference](./cli.md) for every command and flag.
+
+> **Gotcha:** In production, `start` requires a completed `build` first — it launches `dist/server/server.mjs`. In containerized deploys, the `start` script also typically runs migrations first, e.g. `bunx prisma migrate deploy && gemi start`.
+
+## Your first route and view
+
+gemi separates **API routes** (JSON endpoints under `/api`) from **view routes** (server-rendered pages). Both live under `app/http/routes/`.
+
+Add an API endpoint in `app/http/routes/api.ts`:
+
+```typescript
+import { ApiRouter, type HttpRequest } from "gemi/http";
+
+export default class extends ApiRouter {
+  routes = {
+    "/greeting/:name": this.get((req: HttpRequest<{ name: string }>) => {
+      return { message: `Hello, ${req.params.name}!` };
+    }),
+  };
+}
+```
+
+This is served at `/api/greeting/:name`. See [Routing](./routing.md) and [Controllers](./controllers.md) for handlers, resource controllers, and validation.
+
+Add a page in `app/http/routes/view.ts`:
+
+```typescript
+import { ViewRouter } from "gemi/http";
+
+export default class extends ViewRouter {
+  routes = {
+    "/": this.view("Home"),
+    "/about": this.view("About"),
+  };
+}
+```
+
+`this.view("Home")` maps the `/` path to `app/views/Home.tsx`. Create that view:
+
+```tsx
+export default function Home() {
+  return <h1>Welcome to gemi</h1>;
+}
+```
+
+Then fetch your endpoint from a view with the type-safe client hook:
+
+```tsx
+import { useQuery } from "gemi/client";
+
+export default function Home() {
+  const { data } = useQuery("/greeting/:name", { params: { name: "world" } });
+  return <h1>{data?.message}</h1>;
+}
+```
+
+Run `bun dev` and open the printed URL. From here, dig into:
+
+- [Project Structure & the Kernel](./project-structure.md)
+- [Configuration](./configuration.md)
+- [Routing](./routing.md)
+- [Controllers](./controllers.md)
+
+
+---
+
+## Project Structure
+
+Every gemi app follows the same layout. The `app/` directory holds all of your application code, wired together by a **Kernel** that registers **service providers**. This page tours the directory, then explains how the kernel, service providers, and app bootstrap fit together.
+
+## The `app/` directory
+
+A freshly scaffolded project (the `saas-starter` template) looks like this:
+
+```
+app/
+  server.ts              # server entry — boots the kernel and starts the HTTP server
+  client.tsx             # browser entry — hydrates the React app
+  preload.ts             # optional Bun preload, runs before the server starts
+  kernel/
+    Kernel.ts            # your Kernel subclass, wiring up service providers
+    providers/           # your service provider subclasses
+  http/
+    routes/
+      api.ts             # root ApiRouter (JSON endpoints under /api)
+      view.ts            # root ViewRouter (server-rendered pages)
+    controllers/         # controller classes
+  views/                 # React views (.tsx), layouts, and the RootLayout
+  email/                 # email templates (jsx-email)
+  i18n/                  # translation dictionaries
+  database/
+    prisma.ts            # the Prisma client instance
+```
+
+Root-level files support the app: [`gemi.config.ts`](./configuration.md) (Vite/Bun plugin config), `gemi.d.ts` (type augmentation for the type-safe RPC layer), `vite.config.mjs`, `tsconfig.json`, the `prisma/` schema, and a `Dockerfile`.
+
+### `server.ts` — the server entry
+
+`server.ts` is what `gemi dev` and `gemi start` execute. It boots your kernel and starts the HTTP server:
+
+```typescript
+import { Server } from "gemi/server";
+import Kernel from "./kernel/Kernel";
+
+const server = new Server({ kernel: Kernel });
+
+server.start();
+```
+
+`Server.start()` picks the right HTTP stack for the environment: a Vite-backed dev server when `NODE_ENV !== "production"` (and starts watching `.env` for live reloads), or the built production server otherwise. See [App bootstrap](#app-bootstrap) below for what `Server` wraps.
+
+### `client.tsx` — the browser entry
+
+`client.tsx` hydrates the server-rendered React tree in the browser. It hands your `RootLayout` to gemi's `init`:
+
+```tsx
+import { init } from "gemi/client";
+import RootLayout from "./views/RootLayout";
+
+init(RootLayout);
+```
+
+`init` discovers your views via `import.meta.glob("./views/**/*.tsx")` (excluding `components/`, `assets/`, and `RootLayout.tsx`) so every view route has a client bundle to hydrate.
+
+### `preload.ts` — optional Bun preload
+
+If present, `app/preload.ts` runs once, before the server starts, for both `gemi dev` and `gemi start`. Use it for process-wide setup that must happen before any request is handled — registering Bun plugins, installing polyfills, opening connections, wiring instrumentation. Delete the file if you don't need it. See [Configuration](./configuration.md#apppreloadts) for details.
+
+### `views/`, `email/`, `i18n/`, `database/`
+
+- **`views/`** — your React views and layouts. `RootLayout.tsx` is the document shell; nested layouts are composed through the `ViewRouter`. See [Routing](./routing.md).
+- **`email/`** — email templates built with `jsx-email`, extending `Email` from `gemi/email`.
+- **`i18n/`** — translation dictionaries created with `Dictionary.create` from `gemi/i18n`, exported as a single default object.
+- **`database/prisma.ts`** — your Prisma client instance, imported wherever you query the database.
+
+## The Kernel
+
+The kernel is the composition root. Your `app/kernel/Kernel.ts` extends the base `Kernel` from `gemi/kernel` and assigns your service provider subclasses to named slots:
+
+```typescript
+import { Kernel } from "gemi/kernel";
+
+import AuthenticationServiceProvider from "./providers/AuthenticationServiceProvider";
+import ApiRouterServiceProvider from "./providers/ApiRouterServiceProvider";
+import ViewRouterServiceProvider from "./providers/ViewRouterServiceProvider";
+import MiddlewareServiceProvider from "./providers/MiddlewareServiceProvider";
+import EmailServiceProvider from "./providers/EmailServiceProvider";
+import FileStorageServiceProvider from "./providers/FileStorageServiceProvider";
+import I18nServiceProvider from "./providers/I18nServiceProvider";
+import LoggingServiceProvider from "./providers/LoggingServiceProvider";
+import QueueServiceProvider from "./providers/QueueServiceProvider";
+import CronServiceProvider from "./providers/CronServiceProvider";
+import RedisServiceProvider from "./providers/RedisServiceProvider";
+
+export default class extends Kernel {
+  authenticationServiceProvider = AuthenticationServiceProvider;
+  apiRouterServiceProvider = ApiRouterServiceProvider;
+  viewRouterServiceProvider = ViewRouterServiceProvider;
+  middlewareServiceProvider = MiddlewareServiceProvider;
+  emailServiceProvider = EmailServiceProvider;
+  fileStorageServiceProvider = FileStorageServiceProvider;
+  i18nServiceProvider = I18nServiceProvider;
+  loggingServiceProvider = LoggingServiceProvider;
+  queueServiceProvider = QueueServiceProvider;
+  cronServiceProvider = CronServiceProvider;
+  redisServiceProvider = RedisServiceProvider;
+}
+```
+
+When the app boots, the kernel instantiates each provider, wraps it in its service container, and stores them all in a registry that request handlers resolve from ambient context.
+
+### Service provider slots
+
+The base `Kernel` defines a slot for every built-in service. Each slot has a working default, so **you only override the ones you need to configure** — the template above leaves several at their defaults.
+
+| Slot | Import (base class) | Purpose |
+| --- | --- | --- |
+| `authenticationServiceProvider` | `gemi/kernel` | Auth adapter, OAuth providers, sign-up/login hooks. |
+| `apiRouterServiceProvider` | `gemi/services` | Registers the root `ApiRouter`; API request lifecycle hooks. |
+| `viewRouterServiceProvider` | `gemi/services` | Registers the root `ViewRouter` and `RootLayout`; view lifecycle hooks. |
+| `middlewareServiceProvider` | `gemi/http` | Named middleware aliases (`auth`, `cache`, `rate-limit`, `csrf`, `cors`). |
+| `emailServiceProvider` | `gemi/services` | Email driver (e.g. `ResendDriver`). |
+| `fileStorageServiceProvider` | `gemi/services` | Object-storage driver (`S3Driver`, `FileSystemDriver`). |
+| `i18nServiceProvider` | `gemi/i18n` | Locales, default locale, dictionary prefetch. |
+| `loggingServiceProvider` | `gemi/services` | Log sinks and log lifecycle hooks. |
+| `queueServiceProvider` | `gemi/services` | Background job queue. |
+| `cronServiceProvider` | `gemi/services` | Scheduled `CronJob`s. |
+| `redisServiceProvider` | `gemi/services` | Redis connection. |
+| `rateLimiterServiceProvider` | `gemi/services` | Rate-limiter driver (default in-memory). |
+| `broadcastingsServiceProvider` | `gemi/services` | WebSocket pub/sub. |
+| `imageServiceProvider` | `gemi/services` | Image optimization (sharp). |
+| `kernelIdServiceProvider` | (internal) | Per-kernel identity for multi-process coordination. |
+
+> **Note:** The property is spelled `broadcastingsServiceProvider` (with the extra `s`) in the base kernel — match it exactly when overriding. A `SingletonServiceProvider` is also registered internally but has no override slot.
+
+## Service Providers
+
+A service provider configures one slice of the framework. gemi ships a base provider for each slot (exported from `gemi/services`, `gemi/http`, `gemi/kernel`, or `gemi/i18n`); your app subclasses it and sets a few properties or overrides a few methods.
+
+For example, the API router provider just points at your root router:
+
+```typescript
+import { ApiRouterServiceProvider } from "gemi/services";
+import RootApiRouter from "@/app/http/routes/api";
+
+export default class extends ApiRouterServiceProvider {
+  rootRouter = RootApiRouter;
+}
+```
+
+The view router provider points at your root router **and** your `RootLayout`, wrapped by `createRoot`:
+
+```typescript
+import { createRoot } from "gemi/client";
+import { ViewRouterServiceProvider } from "gemi/services";
+import RootViewRouter from "@/app/http/routes/view";
+import RootLayout from "@/app/views/RootLayout";
+
+export default class extends ViewRouterServiceProvider {
+  rootRouter = RootViewRouter;
+  root = createRoot(RootLayout);
+}
+```
+
+Other providers select a **driver** — the swappable implementation of a service:
+
+```typescript
+import { EmailServiceProvider, ResendDriver } from "gemi/services";
+
+export default class extends EmailServiceProvider {
+  driver = new ResendDriver();
+}
+```
+
+```typescript
+import { FileStorageServiceProvider, S3Driver } from "gemi/services";
+
+export default class extends FileStorageServiceProvider {
+  driver = new S3Driver();
+}
+```
+
+The middleware provider maps short aliases to middleware classes, which routes then reference by name:
+
+```typescript
+import {
+  MiddlewareServiceProvider,
+  AuthenticationMiddleware,
+  CacheMiddleware,
+  RateLimitMiddleware,
+  CSRFMiddleware,
+  CorsMiddleware,
+} from "gemi/http";
+
+export default class extends MiddlewareServiceProvider {
+  aliases = {
+    auth: AuthenticationMiddleware,
+    cache: CacheMiddleware,
+    "rate-limit": RateLimitMiddleware,
+    csrf: CSRFMiddleware,
+    cors: CorsMiddleware,
+  };
+}
+```
+
+### Lifecycle hooks
+
+The router providers expose request lifecycle hooks you can override for cross-cutting concerns like tracing, logging, or error reporting:
+
+- **`boot()`** — called once when the provider is instantiated at kernel boot.
+- **`onRequestStart(req)`** — before a matched request is handled (API path).
+- **`onRequestEnd(req)`** — after a request is handled successfully.
+- **`onRequestFail(req, error)`** — when handling throws.
+
+A real-world example from a production app reports failures to Sentry:
+
+```typescript
+import { ApiRouterServiceProvider } from "gemi/services";
+import type { HttpRequest } from "gemi/http";
+import RootApiRouter from "@/app/http/routes/api";
+
+export default class extends ApiRouterServiceProvider {
+  rootRouter = RootApiRouter;
+
+  onRequestStart(req: HttpRequest) {
+    // e.g. name a tracing span from the matched route
+  }
+
+  onRequestFail(req: HttpRequest, error: any) {
+    // e.g. Sentry.captureException(error)
+  }
+}
+```
+
+Other providers expose their own hooks — for example the logging provider has `onLogCreated(logEntry)` and `onLogFileClosed(file)`, the i18n provider has `onLocaleChange(locale)`, and the authentication provider has `onSignUp`, `onForgotPassword`, and `onMagicLinkCreated`.
+
+> **Gotcha:** On the view path, gemi does not call `onRequestStart`. If you need per-request setup for views, use `onRequestEnd` / `onRequestFail`, which both fire on the view path.
+
+## App bootstrap
+
+`Server` (from `gemi/server`) is a thin wrapper around the lower-level `App` (from `gemi/app`). `App` is what actually owns the kernel and handles requests:
+
+```typescript
+import { App } from "gemi/app";
+import Kernel from "./kernel/Kernel";
+
+export const app = new App({
+  kernel: Kernel,
+  onException(error) {
+    // central place to report unhandled errors
+  },
+});
+```
+
+`new App({ kernel })` instantiates and boots the kernel immediately. The key methods:
+
+- **`app.fetch(req)`** — the request handler. It runs inside the kernel's async context and dispatches: requests to `/api/*` go to the API router, everything else to the view router.
+- **`app.websocket`** — a Bun `WebSocketHandler` for the broadcasting service.
+- **`app.dispatchJob(name, args)`** — enqueue a background job.
+- **`onException`** — an optional callback for unhandled errors thrown during a request; defaults to `console.error`.
+
+Most apps use `Server`, which constructs the `App` for you and wires it to the dev or prod HTTP stack. Reach for `App` directly only when you need to wrap `app.fetch` yourself — for example to add request-level instrumentation before serving:
+
+```typescript
+import { App } from "gemi/app";
+import Kernel from "./kernel/Kernel";
+
+const app = new App({ kernel: Kernel, onException: reportError });
+// ...wrap app.fetch, then serve it
+```
+
+## Related
+
+- [Configuration](./configuration.md) — `gemi.config.ts`, environment variables, `preload.ts`, Vite.
+- [Routing](./routing.md) — API and view routers, layouts, middleware.
+- [Controllers](./controllers.md) — controller and resource controller classes.
+- [CLI](./cli.md) — `dev`, `build`, `start`, and tooling commands.
+
+
+---
+
+## Configuration
+
+gemi keeps build- and runtime-level configuration in a handful of root files: `gemi.config.ts` for Vite and Bun plugins, `.env` files for secrets and environment variables, an optional `app/preload.ts` for process setup, and `vite.config.mjs` for the front-end build.
+
+## `gemi.config.ts`
+
+`gemi.config.ts` is where you extend gemi's build with your own Vite and Bun plugins. Define it with `defineConfig` from `gemi/config` for full type-checking and autocomplete:
+
+```typescript
+import { defineConfig } from "gemi/config";
+
+export default defineConfig({
+  // Vite plugins/config for the client + SSR view builds.
+  // `plugins` are appended after gemi's own; any other key is a Vite
+  // UserConfig field merged on top of gemi's defaults.
+  vite: {
+    plugins: [],
+  },
+  // Bun plugins applied to the server build and the dev/prod runtime.
+  bun: {
+    plugins: [],
+  },
+});
+```
+
+The config shape is:
+
+```typescript
+interface GemiConfig {
+  vite?: {
+    plugins?: PluginOption[];   // appended after gemi's Vite plugins
+    [key: string]: unknown;     // any other Vite UserConfig field, merged on top
+  };
+  bun?: {
+    plugins?: BunPlugin[];      // applied at build time and at runtime
+  };
+}
+```
+
+- **`vite.plugins`** are appended to gemi's own Vite plugins for both the client bundle and the SSR view bundle. Any other key under `vite` is treated as a standard Vite `UserConfig` field and merged on top of gemi's base config.
+- **`bun.plugins`** are applied in two places: the production server `Bun.build`, and the dev/prod **runtime** (registered via `--preload`), alongside gemi's built-in custom-request plugin.
+
+The file is entirely optional — if it's absent, gemi uses an empty config. It's loaded directly as TypeScript under Bun (as `gemi.config.ts`, `gemi.config.js`, or `gemi.config.mjs`), so no separate transpile step is needed.
+
+> **Note:** This is not the same file as `vite.config.mjs`. `gemi.config.ts` is gemi's own config (Vite **and** Bun plugins) consumed by the CLI, the runtime preload, and the gemi Vite plugin. `vite.config.mjs` is the standard Vite entry that loads the gemi Vite plugin. See [Vite config](#vite-config) below.
+
+## Environment variables & `.env`
+
+gemi reads configuration from the environment (`process.env`), following Bun's `.env` conventions. Secrets like `DATABASE_URL`, `SECRET`, `RESEND_API_KEY`, and your S3/OAuth credentials all live in `.env`. The scaffolded template ships a `.env.example` you copy to `.env`:
+
+```bash
+mv .env.example .env
+```
+
+A typical `.env` from the template:
+
+```bash
+HOST_NAME=http://localhost:5173
+DATABASE_URL=file:./dev.db
+
+## openssl rand -base64 32 | head -c 32
+SECRET=SECRET
+
+### Email
+EMAIL_DEBUG=true
+## RESEND_API_KEY=
+
+### S3 Storage
+## AWS_ACCESS_KEY_ID=
+## AWS_ENDPOINT_URL_S3=
+## AWS_REGION=auto
+## AWS_SECRET_ACCESS_KEY=
+## BUCKET_NAME=
+```
+
+### `.env` file precedence
+
+gemi loads the standard Bun/dotenv set, in increasing precedence (later overrides earlier):
+
+1. `.env`
+2. `.env.<NODE_ENV>` (e.g. `.env.production`)
+3. `.env.local`
+4. `.env.<NODE_ENV>.local`
+
+`.env.local` variants are skipped when `NODE_ENV=test`, matching dotenv conventions.
+
+### Hot reload in development
+
+Bun reads `.env` only once at startup and does not reload it — even under `--hot`. gemi fills this gap: in **development only**, `Server.start()` watches your project's `.env` files and re-applies changes to `process.env` on save, so config edits take effect without restarting the dev server. You'll see a log line like:
+
+```
+[gemi] .env reloaded: RESEND_API_KEY, EMAIL_DEBUG
+```
+
+> **Gotcha:** The reload updates `process.env`, so config read **per request** picks up the new value immediately. But a value a service reads **once at boot** (e.g. a client constructed from an env var) is already cached and won't change until that code re-runs — a hot reload in dev, or a full restart in production. Also, a key you delete from the file keeps its last value until the next full restart; the watcher only adds and updates keys, never clears them.
+
+## `app/preload.ts`
+
+`app/preload.ts` is an optional [Bun `--preload`](https://bun.sh/docs/runtime/bunfig#preload) script that runs **once, before the server starts**, for both `gemi dev` and `gemi start`. Use it for process-wide setup that must happen before any request is handled:
+
+```typescript
+// Runs once before the server starts.
+console.log("[app/preload.ts] preloaded before server start");
+// e.g. register Bun plugins, install polyfills, open connections,
+// wire global instrumentation...
+```
+
+Delete the file if your app doesn't need a preload step — the CLI only adds it to the Bun command when `app/preload.ts` exists.
+
+### How preloading works
+
+For both `dev` and `start`, the CLI spawns Bun with two preloads, in order:
+
+```bash
+bun --preload gemi/bun/preload [--preload <app>/app/preload.ts] <entry>
+```
+
+1. **`gemi/bun/preload`** — gemi's own runtime plugin. It registers the custom-request transform so that controller/route handler `Request` parameters are default-instantiated at runtime (and applies any Bun plugins you declared in `gemi.config.ts`).
+2. **`app/preload.ts`** — your optional preload, which therefore runs *after* gemi's plugin but *before* `server.ts`.
+
+> **Gotcha:** `gemi/bun/preload` is not optional — it's how handler `req` params get wired. Without it you'd hit runtime errors like `req.input is not a function`. The CLI always registers it for `dev` and `start`; you don't add it yourself.
+
+## Vite config
+
+`vite.config.mjs` is the standard Vite entry point. It loads the React plugin and the gemi Vite plugin (`gemi/vite`):
+
+```typescript
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+import gemi from "gemi/vite";
+
+export default defineConfig({
+  plugins: [react(), gemi()],
+});
+```
+
+The `gemi()` plugin handles view discovery, the client/SSR build wiring, and reading your `gemi.config.ts`. Because both the dev server and the build run Vite under Bun (`bun --bun vite`), the plugin can import your TypeScript `gemi.config.ts` directly.
+
+To add app-specific Vite configuration, prefer `gemi.config.ts`'s `vite` field (merged into gemi's base config for both the client and SSR builds) over editing `vite.config.mjs` directly — that keeps your extra plugins and options applied consistently across both builds.
+
+## Related
+
+- [CLI](./cli.md) — the commands that consume this configuration.
+- [Project Structure & the Kernel](./project-structure.md) — where `server.ts`, `preload.ts`, and the kernel fit.
+
+
+---
+
+## CLI
+
+The `gemi` command is the entry point for developing, building, and running a gemi app, plus a few tooling commands for editor integration and inspection. It's a Bun executable installed with the `gemi` package and typically invoked through your `package.json` scripts.
+
+Run a command directly with Bun:
+
+```bash
+bun run gemi <command>
+## or, since the templates wire them into scripts:
+bun dev
+bun run build
+bun run start
+```
+
+> **Note:** None of the current commands take flags or options — each is a bare subcommand. gemi discovers your project from the current working directory (it expects `app/` and, for tooling commands, `app/kernel/Kernel.ts`).
+
+## `gemi dev`
+
+Starts the hot-reloading development server.
+
+```bash
+gemi dev
+```
+
+It sets `NODE_ENV=development` and spawns Bun with `--hot` on `app/server.ts`, registering the runtime preloads first:
+
+- `--preload gemi/bun/preload` — gemi's custom-request transform, so handler `req` params are wired at runtime.
+- `--preload app/preload.ts` — your optional [preload script](./configuration.md#apppreloadts), if the file exists.
+
+In dev, the server also watches your `.env` files and re-applies changes to `process.env` without a restart (see [Configuration](./configuration.md#hot-reload-in-development)). Use this for day-to-day development.
+
+## `gemi build`
+
+Produces a production build.
+
+```bash
+gemi build
+```
+
+The command runs in three stages:
+
+1. **Client build** — `vite build` (under `bun --bun`) emits the browser bundle to `dist/client`.
+2. **Server (SSR) build** — `vite build --ssr` emits per-view server chunks plus `dist/server/.vite/manifest.json` to `dist/server`. This mirrors the client build so each `app/views/*.tsx` maps to its built server module.
+3. **Server entry** — `Bun.build` emits a runnable `dist/server/server.mjs` that `gemi start` launches. `node_modules` dependencies are kept external (resolved at runtime) so native/dev-only packages like sharp, the Prisma engine, and Vite aren't bundled.
+
+Any Bun plugins declared in your [`gemi.config.ts`](./configuration.md#gemiconfigts) `bun.plugins` are applied to the server build.
+
+> **Gotcha:** `build` re-executes itself once in a fresh Bun process with `NODE_ENV=production` set from the start. This is required so Bun fixes its JSX transform to the production runtime (`jsx`, not the dev `jsxDEV`) before any code loads — otherwise SSR would crash with `jsxDEV is not a function`. This is automatic; you just run `gemi build`.
+
+## `gemi start`
+
+Runs the built production server.
+
+```bash
+gemi start
+```
+
+It launches `dist/server/server.mjs` in a fresh Bun process with `NODE_ENV=production`, registering the same runtime preloads as `dev` (`gemi/bun/preload`, then `app/preload.ts` if present). The fresh process is required so Bun starts with the production JSX runtime and production React DOM export conditions.
+
+> **Gotcha:** `start` requires a completed [`gemi build`](#gemi-build) — it does not build for you. In deployments you'll typically run migrations first, e.g. `bunx prisma migrate deploy && gemi start`.
+
+## `gemi ide:generate-api-manifest`
+
+Generates the API route manifest used for editor integration (jump-to-definition from a route path to its controller method).
+
+```bash
+gemi ide:generate-api-manifest
+```
+
+It statically parses your API routes starting from `app/http/routes/api.ts`, resolves each route + HTTP method to the source position of its handler (the controller method when the route is `this.get(Controller, "method")`, otherwise the router callback), and writes a manifest under `.gemi/cache/api-routes-manifest`. This is meant to be run by tooling rather than by hand.
+
+## `gemi app:component-tree`
+
+Prints the view component tree derived from your view router.
+
+```bash
+gemi app:component-tree
+```
+
+It loads your app from `app/kernel/Kernel.ts` (without starting a server) and prints the nested view/layout component tree to stdout, then exits. Useful for debugging how your `ViewRouter` layouts and views compose.
+
+## `gemi app:route-manifest`
+
+Prints the route manifest derived from your view router.
+
+```bash
+gemi app:route-manifest
+```
+
+Like `app:component-tree`, it loads the app from the kernel and prints the resolved view route manifest to stdout, then exits. Useful for inspecting exactly which paths your `ViewRouter` resolves and how they map to views.
+
+## Related
+
+- [Getting Started](./getting-started.md) — installing gemi and running your first commands.
+- [Configuration](./configuration.md) — `.env`, `preload.ts`, and `gemi.config.ts` that these commands consume.
+- [Project Structure & the Kernel](./project-structure.md) — `server.ts`, the kernel, and how the app boots.
+
+
+---
+
+## Routing
+
+Routing in gemi is **class-based**, not file-based. You declare routes in a `routes` object on an `ApiRouter` or `ViewRouter` subclass. The file name of a view component or a controller has **no relation** to its URL — every mapping is explicit in a router. Routers nest, so you compose a large app out of small, focused router classes.
+
+There are two kinds of router:
+
+- **`ApiRouter`** — JSON/API endpoints, one per HTTP method (`GET`, `POST`, `PUT`, `PATCH`, `DELETE`), plus file responses and proxies.
+- **`ViewRouter`** — server-rendered React pages, layouts, and redirects.
+
+Both are imported from `gemi/http`:
+
+```typescript
+import { ApiRouter, ViewRouter, HttpRequest } from "gemi/http";
+```
+
+A project wires a root `ApiRouter` (`app/http/routes/api.ts`) and a root `ViewRouter` (`app/http/routes/view.ts`) into the kernel. Everything else hangs off those two via nesting.
+
+## The `routes` object
+
+A router is a class with a `routes` field. Keys are URL path segments; values describe what happens at that path — a route handler, a group of handlers, a nested router, a layout, or a resource.
+
+```typescript
+export default class extends ApiRouter {
+  routes = {
+    "/health": this.get(() => ({ status: "ok" })),
+    "/org": OrgRouter, // nested router
+  };
+}
+```
+
+Router-level middleware is declared with the `middlewares` array (note the plural — see [Middleware](./middleware.md)):
+
+```typescript
+export default class extends ApiRouter {
+  middlewares = ["cache:private"];
+  routes = { /* ... */ };
+}
+```
+
+## ApiRouter
+
+### HTTP method handlers
+
+`this.get`, `this.post`, `this.put`, `this.patch`, and `this.delete` register a handler for one HTTP method at a path. Each accepts **two forms**.
+
+**Inline callback** — receives the [`HttpRequest`](./controllers.md) and returns data (serialized to JSON):
+
+```typescript
+export default class extends ApiRouter {
+  routes = {
+    "/health": this.get(() => {
+      return { status: "ok" };
+    }),
+    "/dict/:id": this.get(async (req: HttpRequest<{}, { id: string }>) => {
+      const { id } = req.params;
+      return { id };
+    }),
+    "/upload": this.post(async (req: HttpRequest<{ file: File | File[] }>) => {
+      const input = await req.input();
+      const file = input.get("file");
+      return { name: (file as File).name };
+    }),
+  };
+}
+```
+
+**Controller reference** — pass a `Controller` class and the method name to invoke ([Controllers](./controllers.md)):
+
+```typescript
+import { HomeController } from "../controllers/HomeController";
+
+export default class extends ApiRouter {
+  routes = {
+    "/test": this.get(HomeController, "index"),
+    "/home": this.post(HomeController, "post"),
+  };
+}
+```
+
+> **Note:** The generic parameters of `HttpRequest<Body, Params>` flow through the router types, so the client network layer (`useQuery`/`Form`) is typed end to end from the handler you write here. Type the request body and params on the handler and you get client-side type safety for free.
+
+### Grouping methods at one path
+
+To serve several methods from the **same** path, use an object whose keys are lowercase method names:
+
+```typescript
+routes = {
+  "/conversations/:conversationId/v2": {
+    get: this.get(CustomerMiniAgentController, "restoreV2"),
+    delete: this.delete(CustomerMiniAgentController, "deleteConversationV2"),
+  },
+};
+```
+
+### Resource routes
+
+`this.resource(Controller)` maps a single [`ResourceController`](./controllers.md) to the standard REST set. The controller must implement `list`, `store`, `show`, `update`, and `delete`.
+
+```typescript
+class ProductsController extends ResourceController {
+  async list() {}
+  async show() {}
+  async store() {}
+  async update() {}
+  async delete() {}
+}
+
+class OrgRouter extends ApiRouter {
+  routes = {
+    "/:orgId/products/:productId": this.resource(ProductsController),
+  };
+}
+```
+
+The route key **must end in the item id param** (here `:productId`). gemi splits the resource into two paths:
+
+| Controller method | HTTP | Path |
+| --- | --- | --- |
+| `list`   | `GET`    | collection path — item id stripped (`/:orgId/products`) |
+| `store`  | `POST`   | collection path (`/:orgId/products`) |
+| `show`   | `GET`    | item path (`/:orgId/products/:productId`) |
+| `update` | `PUT`    | item path (`/:orgId/products/:productId`) |
+| `delete` | `DELETE` | item path (`/:orgId/products/:productId`) |
+
+Per-action middleware is attached with `.middleware(...)`, keyed by method name:
+
+```typescript
+this.resource(ProductsController).middleware({
+  store: ["auth"],
+  update: ["auth"],
+  delete: ["auth"],
+});
+```
+
+### File responses and proxies
+
+`this.file(...)` registers a `GET` handler for serving files (same two forms as `this.get` — callback or `Controller`/method). `this.proxy(url, headers?)` forwards the incoming request to another URL:
+
+```typescript
+routes = {
+  "/download/:id": this.file(FileController, "download"),
+  "/proxy": this.proxy("http://localhost:3000/api/test"),
+};
+```
+
+### Per-route middleware
+
+Every handler returned by `this.get`/`this.post`/… (and `this.resource`) has a fluent `.middleware([...])` that adds middleware to that route only:
+
+```typescript
+routes = {
+  "/agents/v2": this.get(CustomerMiniAgentController, "listOrgV2").middleware(["org"]),
+};
+```
+
+### Nesting API routers
+
+A route value can be **another `ApiRouter` class**. The key becomes a path prefix for every route inside the nested router:
+
+```typescript
+class OrgRouter extends ApiRouter {
+  middlewares = ["auth"];
+  routes = {
+    "/:orgId/products/:productId": this.resource(ProductsController),
+  };
+}
+
+export default class extends ApiRouter {
+  routes = {
+    "/org": OrgRouter, // e.g. /org/:orgId/products
+  };
+}
+```
+
+## ViewRouter
+
+A `ViewRouter` maps URLs to server-rendered React views. The string you pass to `this.view(...)` is the **view component name** (resolved against `app/views`), which is independent of the URL — you decide the mapping.
+
+### Rendering a view
+
+`this.view("ComponentName")` renders a component with no server data:
+
+```typescript
+class AuthViewRouter extends ViewRouter {
+  routes = {
+    "/sign-in": this.view("auth/SignIn"),
+    "/sign-up": this.view("auth/SignUp"),
+  };
+}
+```
+
+### Views with server data
+
+Pass a second argument to load data on the server before rendering. It can be an **inline callback** or a `[Controller, "method"]` tuple. Whatever object the handler returns becomes the view's props (see [Data Fetching](./data-fetching.md)):
+
+```typescript
+routes = {
+  // inline callback — can set metadata and return props
+  "/pricing": this.view("Pricing", (req: HttpRequest) => {
+    return { title: "Pricing" };
+  }),
+  // controller-bound
+  "/dashboard": this.view("admin/Dashboard", [DashboardController, "index"]),
+};
+```
+
+The callback also receives the `HttpRequest`, so you can read query params (`req.search.get(...)`) and route params (`req.params`):
+
+```typescript
+"/users": this.view("admin/UserList", (req: HttpRequest) => {
+  const limit = Number(req.search.get("limit")) || 25;
+  const page = Number(req.search.get("page")) || 1;
+  return { limit, page };
+}),
+```
+
+### Layouts
+
+`this.layout("LayoutName", children)` wraps a set of nested routes in a shared layout component. The nested routes render inside the layout's outlet.
+
+```typescript
+export default class extends ViewRouter {
+  routes = {
+    "/": this.layout("PublicLayout", {
+      "/": this.view("Home"),
+      "/about": this.view("About"),
+    }),
+  };
+}
+```
+
+A layout can also load its own data, via an inline callback or a controller tuple, as the **second** argument, with the child routes moved to the **third**:
+
+```typescript
+"/": this.layout(
+  "PublicLayout",
+  () => {
+    Meta.title("gemi");
+  },
+  {
+    "/": this.view("Home"),
+    "/about": this.view("About"),
+  },
+),
+```
+
+Layouts nest arbitrarily deep — a child route inside a layout can itself be another `this.layout(...)`.
+
+### Redirects
+
+`this.redirect(...)` declares a route that resolves to a redirect. The handler returns `{ destination, permanent?, status? }`.
+
+> **Gotcha:** The [`Redirect`](./facades.md) facade works by throwing, which the framework catches to perform the redirect. Never wrap a `Redirect` call in `try/catch` — it swallows the throw and breaks the redirect.
+
+### Nesting view routers
+
+Just like `ApiRouter`, a route value can be another `ViewRouter` class, prefixed by its key:
+
+```typescript
+export default class extends ViewRouter {
+  routes = {
+    "/auth": AuthViewRouter,     // /auth/sign-in, /auth/sign-up, ...
+    "(app)/": AppRouter,         // no URL prefix — see groups below
+  };
+}
+```
+
+## Path parameters
+
+Path segments support three special forms, usable in both routers.
+
+### Dynamic — `:param`
+
+A `:name` segment matches any value and is exposed on `req.params.name`:
+
+```typescript
+"/organizations/:orgId": this.view("admin/OrganizationShow", [OrgController, "show"]),
+// req.params.orgId
+```
+
+### Optional — `:param?`
+
+A trailing `?` makes the segment optional, so the route matches with or without it:
+
+```typescript
+"/:catalogId/:productId?": this.view("Catalog", [CatalogController, "show"]),
+```
+
+### Prefix-less groups — `(group)/`
+
+A segment wrapped in parentheses is **stripped from the URL**. It exists only to group routes so they can share middleware or a layout without adding a path segment. These are equivalent in URL terms but differ in the middleware/layout they inherit:
+
+```typescript
+routes = {
+  "(auth)/": AdminAuthViewRouter,   // routes mount at "/", not "/(auth)"
+  "(store)/": this.layout("StoreLayout", { /* ... */ }),
+  "(customer)/auth": CustomerAuthRouter, // mounts at "/auth"
+};
+```
+
+A common pattern is one group for authenticated routes (`middlewares = ["auth"]`) and another for public routes, both mounting at the same URL root:
+
+```typescript
+export default class extends ViewRouter {
+  routes = {
+    "/": this.layout("PublicLayout", { "/": this.view("Home") }),
+    "(app)/": AppRouter, // AppRouter has middlewares = ["auth", "cache:private"]
+  };
+}
+```
+
+## See also
+
+- [Controllers](./controllers.md) — writing `Controller` / `ResourceController` classes and using `HttpRequest`.
+- [Middleware](./middleware.md) — the middleware DSL and built-in middleware.
+- [Views & Layouts](./views-and-layouts.md) — authoring the React components that routes render.
+- [Data Fetching](./data-fetching.md) — consuming these routes from the client.
+
+
+---
+
+## Controllers
+
+Controllers hold the server-side logic behind a route. A controller is a class exported from `app/http/controllers`, named in PascalCase with a `Controller` suffix (e.g. `OrganizationCustomerController`), extending either `Controller` or `ResourceController` from `gemi/http`. Bind a controller method to a route in an [`ApiRouter` or `ViewRouter`](./routing.md); the method receives an [`HttpRequest`](#httprequest) and returns the data for the response.
+
+```typescript
+import { Controller, HttpRequest } from "gemi/http";
+
+export class HomeController extends Controller {
+  async index() {
+    return { message: "Hello from HomeController" };
+  }
+}
+```
+
+> **Note:** Controllers are **named exports** (`export class XController`). The router imports them by name and passes the class plus a method name: `this.get(HomeController, "index")`.
+
+## Return values
+
+Whatever a handler returns is the response body. Return a plain object (or array) and gemi serializes it to JSON for API routes, or passes it to the view component as props for view routes:
+
+```typescript
+export class HomeController extends Controller {
+  async index() {
+    return { message: "Hello" }; // → 200 application/json
+  }
+}
+```
+
+To change the response (redirect, status, headers), use the facades and errors rather than constructing a `Response` yourself — see [Errors](#errors-and-validation) below and the [`Redirect`](./authentication.md) facade.
+
+## HttpRequest
+
+Every controller method (and every inline route callback) receives an `HttpRequest`. It is generic over the request **body** and the route **params**:
+
+```typescript
+import { HttpRequest } from "gemi/http";
+
+// HttpRequest<Body, Params>
+async show(req: HttpRequest<{ name: string }, { orgId: string }>) { /* ... */ }
+```
+
+### Members
+
+| Member | Type | Description |
+| --- | --- | --- |
+| `req.params` | `Params` | Route parameters from `:param` segments (e.g. `req.params.orgId`). |
+| `req.search` | `Input` | Parsed query string. Use `req.search.get(key)` / `req.search.has(key)`; repeated keys come back as an array. **Not** a native `URLSearchParams`. |
+| `req.cookies` | read-only `Map<string, string>` | Request cookies. `req.cookies.get("access_token")`. |
+| `req.headers` | read-only `Headers` | Request headers. `req.headers.get("User-Agent")`. |
+| `req.rawRequest` | `Request` | The underlying Fetch API `Request` (method, url, body, etc.). |
+| `req.routePath` | `string` | The matched route pattern. |
+| `await req.input()` | `Promise<Input<Body>>` | Parses **and validates** the request body — see below. |
+| `await req.safeInput()` | `Promise<{ isValid, errors, input }>` | Same parsing, but returns validation errors instead of throwing. |
+| `req.locale()` | `string` | The resolved request locale. |
+| `req.ctx()` | request context | Access to the per-request store (used by facades, `setHeaders`, etc.). |
+
+### Reading query params
+
+`req.search` wraps the query string. `get` returns the value (a string, or `string[]` for repeated keys):
+
+```typescript
+async list(req: HttpRequest) {
+  const search = req.search.get("search");
+  const limit = Number(req.search.get("limit")) || 25;
+  // ...
+}
+```
+
+### Reading the body: `req.input()`
+
+`await req.input()` reads and parses the body (`application/json`, `application/x-www-form-urlencoded`, or `multipart/form-data`), runs [validation](#errors-and-validation), and returns an `Input` wrapper. Call `.toJSON()` for the plain object, or `.get(key)` / `.has(key)` for individual fields:
+
+```typescript
+async post(req: HttpRequest<{ name: string; email: string }>) {
+  const input = await req.input();
+  const data = input.toJSON();     // { name, email }
+  const name = input.get("name");  // string
+  return { data };
+}
+```
+
+Multipart uploads come through the same API; a file field is a `Blob`/`File`, and repeated fields arrive as arrays:
+
+```typescript
+async upload(req: HttpRequest<{ file: File | File[] }>) {
+  const input = await req.input();
+  const file = input.get("file");
+  const files = Array.isArray(file) ? file : [file];
+  return files.map((f) => ({ name: f.name, size: f.size, type: f.type }));
+}
+```
+
+## ResourceController
+
+`ResourceController` is an abstract base for REST resources. It requires five methods — `list`, `store`, `show`, `update`, `delete` — which [`this.resource(Controller)`](./routing.md) maps to the standard REST routes:
+
+```typescript
+import { HttpRequest, ResourceController } from "gemi/http";
+
+export class OrganizationCustomerController extends ResourceController {
+  async list(req: HttpRequest)   { /* GET  collection */ }
+  async store(req: HttpRequest)  { /* POST collection */ }
+  async show(req: HttpRequest)   { /* GET  item */ }
+  async update(req: HttpRequest) { /* PUT  item */ }
+  async delete(req: HttpRequest) { /* DELETE item */ }
+}
+```
+
+See [Routing → Resource routes](./routing.md) for the exact method-to-path mapping and per-action middleware.
+
+## Errors and validation
+
+gemi handles control flow through **thrown errors** that the framework catches and turns into the right response. All of them extend `RequestBreakerError` (exported from `gemi/http`), which carries separate `api` and `view` payloads.
+
+### ValidationError
+
+`throw new ValidationError(errors)` produces a **400** response shaped as:
+
+```json
+{ "error": { "kind": "validation_error", "messages": { "name": ["Name is required"] } } }
+```
+
+`errors` is a `Record<string, string[]>` (field → messages). Use it directly instead of inventing a per-endpoint error shape:
+
+```typescript
+import { ValidationError } from "gemi/http";
+
+async store(req: HttpRequest<{ name: string }>) {
+  const { name } = (await req.input()).toJSON();
+  if (!name.trim()) {
+    throw new ValidationError({ name: ["Name is required"] });
+  }
+  // ...
+}
+```
+
+### Schema-based validation
+
+Rather than validating by hand, subclass `HttpRequest` and declare a `schema`. `req.input()` validates the body against it and throws a `ValidationError` automatically before your handler code runs:
+
+```typescript
+class CreateCustomerRequest extends HttpRequest<{ name: string; email?: string }> {
+  schema = {
+    name: { required: "Name is required", "max:120": "Too long" },
+    email: { email: "Email is invalid", "max:160": "Too long" },
+  };
+}
+
+export class CustomerController extends ResourceController {
+  async store(req: CreateCustomerRequest) {
+    const input = await req.input(); // throws 400 if invalid
+    const data = input.toJSON();
+    // ...
+  }
+}
+```
+
+The schema is a map of field → `{ rule: message }`. Built-in rules include `required`, `email`, `number`, `password`, `min:N`, `max:N`, `file`, `fileType:png|jpg|pdf|…`, and `fileSize:5MB`. A rule value may also be a function for custom messages, and `refine()` can be overridden for cross-field checks. When you need errors without throwing, use `await req.safeInput()`, which returns `{ isValid, errors, input }`. See [Forms](./forms.md).
+
+> **Note:** Fields with no value and no `required` rule are skipped, so optional fields (e.g. an omitted `email`) don't fail their format rules. This makes partial-update schemas easy — leave `required` off `update` fields.
+
+### Auth and other errors
+
+The following are exported from `gemi/http` and thrown by [middleware](./middleware.md) or your own code:
+
+| Error | Status (API) | Use |
+| --- | --- | --- |
+| `AuthenticationError` | 401 | No/invalid session. On a view request it redirects to `/auth/sign-in`. |
+| `AuthorizationError` | 401 | Authenticated but not allowed. |
+| `InsufficientPermissionsError` | 401 | Authenticated, lacks a specific permission. |
+| `RequestBreakerError` | (custom) | Base class — extend it to define your own throw-to-respond errors with `api`/`view` payloads. |
+
+## See also
+
+- [Routing](./routing.md) — binding controllers and resources to URLs.
+- [Middleware](./middleware.md) — guarding controller methods with `auth`, `admin`, etc.
+- [Forms](./forms.md) — client-side forms that consume these validation errors.
+- [Authentication](./authentication.md) — sessions and the current user.
+
+
+---
+
+## Middleware
+
+Middleware runs before a route handler to authenticate, authorize, rate-limit, set cache headers, and so on. In gemi you attach middleware with a **string DSL** — short names like `"auth"` or `"cache:private"` — and the framework resolves each name to a middleware class through your app's `MiddlewareServiceProvider`.
+
+## Attaching middleware
+
+Middleware can be declared at two levels:
+
+**Router level** — the `middlewares` array applies to every route in the router (and nested routers):
+
+```typescript
+export default class extends ApiRouter {
+  middlewares = ["auth", "cache:private,0,no-store"];
+  routes = { /* ... */ };
+}
+```
+
+**Route level** — the fluent `.middleware([...])` applies to a single route, on top of what the router provides:
+
+```typescript
+routes = {
+  "/agents/v2": this.get(AgentController, "list").middleware(["org"]),
+};
+```
+
+Both accept the same string DSL. See [Routing](./routing.md) for where these live.
+
+### The DSL syntax
+
+Each entry is `name` or `name:param1,param2`:
+
+- The part before `:` is the **alias** — a name registered in your `MiddlewareServiceProvider`.
+- The part after `:` is a comma-separated **parameter list** passed to the middleware's `run(...)`. For example `cache:private,0,no-store` calls `run("private", "0", "no-store")`.
+
+### Negation with `-`
+
+Prefix an alias with `-` to **cancel** a middleware that a parent router (or the router itself) added. This is how a public sub-router opts out of an inherited `auth`:
+
+```typescript
+class AdminAuthViewRouter extends ViewRouter {
+  middlewares = ["cache:public", "-auth", "-admin"];
+  routes = {
+    "/sign-in": this.view("auth/SignIn"),
+  };
+}
+```
+
+Middleware is resolved into a de-duplicated map keyed by alias, so `-auth` removes any previously-added `auth`, and re-adding an alias replaces its parameters.
+
+## Built-in middleware
+
+The following middleware classes ship with the framework and are exported from `gemi/http`. They are not automatically wired to any alias — your app maps DSL names to them (see [Registering middleware](#registering-middleware)). The names below are the conventional aliases used across gemi apps.
+
+### `auth` → `AuthenticationMiddleware`
+
+Requires a valid session. Reads the `access_token` cookie (or `access_token` header), loads the session, and puts the user on the request context. Throws `AuthenticationError` when missing/invalid — a **401** for API routes, a redirect to `/auth/sign-in` for view routes. See [Authentication](./authentication.md).
+
+### `cache:...` → `CacheMiddleware`
+
+Sets a `Cache-Control` header on `GET` responses. Parameters are `scope`, `maxAge`, then any extra directives:
+
+| DSL | Resulting `Cache-Control` |
+| --- | --- |
+| `cache` or `cache:public` | `public, max-age=864000, stale-while-revalidate=300, stale-if-error=600` |
+| `cache:private` | `private, max-age=0, stale-while-revalidate=300, stale-if-error=600` |
+| `cache:private,0,no-store` | `private, max-age=0, no-store` |
+| `cache:public,12840,must-revalidate` | `public, max-age=12840, must-revalidate` |
+
+### `rate-limit:N` → `RateLimitMiddleware`
+
+Limits requests per client (keyed by `x-forwarded-for` and route path) using the rate-limiter service. `N` is the max count (default `1000`); over the limit throws a **429**. Example: `rate-limit:100`.
+
+### `cors` → `CorsMiddleware`
+
+Sets CORS headers for requests whose `Origin` is in the configured `origins` map. Because it needs configuration, it's registered with `CorsMiddleware.configure({ origins: { ... } })` (see below) rather than as a bare class.
+
+### `csrf` → `CSRFMiddleware`
+
+Verifies the `csrf_token` cookie against Bun's CSRF verifier for `POST`/`PUT`/`PATCH`/`DELETE`. Missing or invalid tokens throw a **403**.
+
+## Registering middleware
+
+The base `MiddlewareServiceProvider` (from `gemi/http`) exposes an `aliases` map — `Record<string, MiddlewareClass>`. Your app subclasses it and fills in the map. This is where DSL names become classes:
+
+```typescript
+// app/kernel/providers/MiddlewareServiceProvider.ts
+import {
+  MiddlewareServiceProvider,
+  AuthenticationMiddleware,
+  RateLimitMiddleware,
+  CacheMiddleware,
+  CSRFMiddleware,
+  CorsMiddleware,
+} from "gemi/http";
+
+export default class extends MiddlewareServiceProvider {
+  aliases = {
+    auth: AuthenticationMiddleware,
+    cache: CacheMiddleware,
+    "rate-limit": RateLimitMiddleware,
+    csrf: CSRFMiddleware,
+    cors: CorsMiddleware.configure({
+      origins: {
+        "http://localhost:3000": { "Access-Control-Allow-Methods": "GET, POST" },
+      },
+    }),
+  };
+}
+```
+
+> **Note:** `Middleware.configure(config)` returns a preconfigured subclass. Use it to register a middleware that needs static config (like `CorsMiddleware`'s allowed origins) under an alias.
+
+Because the alias map is app-owned, any DSL name your app uses must appear here — an unregistered alias is silently skipped. This also means aliases like `admin`, `org`, or `ai-quota` are **application-defined**, not framework built-ins.
+
+## Custom middleware
+
+Write a middleware by subclassing `Middleware` from `gemi/http` and implementing `run(...)`. The instance has `this.req` (the [`HttpRequest`](./controllers.md)); DSL parameters arrive as arguments to `run`. Return nothing (or an object of extra `headers`/`cookies` to merge into the response), or throw a `RequestBreakerError` subclass to stop the request.
+
+```typescript
+import { Auth } from "gemi/facades";
+import { Middleware, InsufficientPermissionsError } from "gemi/http";
+
+class OrganizationMiddleware extends Middleware {
+  async run() {
+    const user = await Auth.user();
+    const { orgId } = this.req.params;
+    if (user && user.globalRole! < 10) return; // internal users bypass
+    const hasOrg = user?.accounts
+      .map((a) => a.organization.publicId)
+      .includes(orgId);
+    if (!hasOrg) throw new InsufficientPermissionsError();
+  }
+}
+```
+
+A middleware that takes a DSL parameter reads it as a `run` argument. For example, an `ai-quota:N` middleware:
+
+```typescript
+class AIQuotaMiddleware extends Middleware {
+  async run(quota: string) {
+    const user = await Auth.user();
+    // ...compare remaining tokens against `quota`, throw if insufficient
+  }
+}
+```
+
+Register your custom classes in the provider's `aliases`, alongside the built-ins:
+
+```typescript
+export default class extends MiddlewareServiceProvider {
+  aliases = {
+    auth: AuthenticationMiddleware,
+    admin: AdminMiddleware,          // app-defined
+    org: OrganizationMiddleware,     // app-defined
+    "ai-quota": AIQuotaMiddleware,   // app-defined, takes a param: ai-quota:100
+    cache: CacheMiddleware,
+    "rate-limit": RateLimitMiddleware,
+    csrf: CSRFMiddleware,
+    cors: CorsMiddleware.configure({ origins: { /* ... */ } }),
+  };
+}
+```
+
+Now `"admin"`, `"org"`, and `"ai-quota:100"` are usable anywhere in the DSL:
+
+```typescript
+class AdminRouter extends ViewRouter {
+  middlewares = ["auth", "admin", "cache:private,0,no-store"];
+  routes = { /* ... */ };
+}
+```
+
+> **Gotcha:** Authorization middleware (like `admin` above) throws to reject. Follow the built-in pattern — throw a `RequestBreakerError` subclass with the right `api`/`view` payload so API callers get a JSON error and browser navigations get a redirect. See [Authorization](./authorization.md).
+
+## See also
+
+- [Authentication](./authentication.md) — how `auth` establishes the session and current user.
+- [Authorization](./authorization.md) — role/permission checks and policies.
+- [Controllers](./controllers.md) — the handlers middleware runs before.
+- [Routing](./routing.md) — where `middlewares` and `.middleware(...)` are declared.
+
+
+---
+
+## Views and Layouts
+
+A **view** is a plain React component that gemi renders for a URL. Views live under
+`app/views/`, are the **default export** of their file, and are wired to a URL in a
+`ViewRouter` — the file name has no relation to the route. Layouts wrap views (and
+other layouts) to share chrome like navigation, sidebars, and the HTML shell.
+
+Views render on the server first (SSR) and then hydrate on the client, so a view is
+just React — no special base class, no framework component to extend.
+
+## Registering a view
+
+View routes are declared in a `ViewRouter` subclass (typically
+`app/http/routes/view.ts`). Each entry maps a path to `this.view("ComponentName")`,
+where `"ComponentName"` is the path of the module under `app/views/` (without the
+extension).
+
+```typescript
+import { ViewRouter } from "gemi/http";
+
+export default class extends ViewRouter {
+  routes = {
+    "/": this.view("Home"),
+    "/about": this.view("About"),
+    "/pricing": this.view("Pricing"),
+  };
+}
+```
+
+`this.view("About")` resolves to `app/views/About.tsx`. The key (`"/about"`) is the
+URL; the component name is independent of it. Nested folders work too —
+`this.view("auth/SignIn")` maps to `app/views/auth/SignIn.tsx`.
+
+> **Note:** Route paths support dynamic segments (`/:id`), optional segments
+> (`/:id?`), catch-all segments (`/:path*`), and prefix-less group segments
+> (`(group)/`). See [Routing](./routing.md) for the full path grammar.
+
+## Server data binding
+
+A view often needs data computed on the server before it renders. Pass a **second
+argument** to `this.view(...)` — either an inline handler or a
+`[Controller, "method"]` tuple — and whatever it returns becomes the view's props.
+
+```typescript
+// Inline handler
+"/about": this.view("About", () => {
+  return { title: "About us" };
+}),
+
+// Controller method
+"/dashboard": this.view("Dashboard", [DashboardController, "index"]),
+```
+
+The handler receives the `HttpRequest` and may be async. Its return value is
+serialized and handed to the component as props during SSR (and re-used on client
+navigation). Read them in the component with the `ViewProps` type, keyed by the
+**route path**:
+
+```tsx
+import type { ViewProps } from "gemi/client";
+
+export default function About(props: ViewProps<"/about">) {
+  return <h1>{props.title}</h1>;
+}
+```
+
+`ViewProps<"/about">` infers the exact shape returned by the handler bound to
+`"/about"`, so props stay type-safe end to end. If the route takes params, they are
+available on the request inside the handler; the returned object is still what
+reaches the component.
+
+> **Note:** The handler here provides the view's **props**, computed once per
+> request. It is not the same as client-side data fetching. For data the component
+> fetches (and can refetch/mutate) over the API, use `useQuery`, and for priming
+> that cache during SSR use the `Query` prefetch facade — both covered in
+> [Data Fetching](./data-fetching.md).
+
+### SSR flow at a glance
+
+1. A request hits a view route. gemi runs the matched layout/view handlers
+   top-down, collecting each one's returned object.
+2. The React tree (RootLayout → layouts → view) is rendered to HTML on the server
+   with those objects as props.
+3. The HTML — plus the serialized server data and any prefetched query data — is
+   sent to the browser.
+4. The client hydrates the same tree. Subsequent in-app navigations fetch just the
+   new view's data as JSON instead of a full page load.
+
+## Layouts
+
+A layout is also a default-export React component, but it renders `children` and can
+also carry its own server data. Declare one with `this.layout(viewPath, routes)` (or
+`this.layout(viewPath, handler, routes)` to attach a data handler), and nest the
+child routes inside it:
+
+```typescript
+export default class extends ViewRouter {
+  routes = {
+    "/": this.layout("PublicLayout", {
+      "/": this.view("Home"),
+      "/about": this.view("About"),
+      "/pricing": this.view("Pricing"),
+    }),
+    "(app)/": this.layout("AppLayout", {
+      "/dashboard": this.view("Dashboard"),
+      "/inbox": this.view("Inbox"),
+    }),
+  };
+}
+```
+
+Layouts nest arbitrarily — a `layout` can contain other `layout`s, and a nested
+`ViewRouter` class can be mounted as a value to compose routers. At render time
+gemi builds the tree from the outermost layout inward, so the active view ends up
+wrapped by every layout on its branch.
+
+The layout component receives `children` (the nested layout/view) plus any props
+from its handler. Type them with `LayoutProps`, which is `PropsWithChildren` of the
+handler's return shape:
+
+```tsx
+import type { ReactNode } from "react";
+
+export default function PublicLayout(props: { children: ReactNode }) {
+  return (
+    <>
+      <Header />
+      <main>{props.children}</main>
+      <Footer />
+    </>
+  );
+}
+```
+
+A layout with a data handler reads its own props like a view:
+
+```typescript
+"/": this.layout("PublicLayout", () => {
+  Meta.title("GEMI here");
+  return { plan: "free" };
+}, {
+  "/": this.view("Home"),
+}),
+```
+
+```tsx
+import type { LayoutProps } from "gemi/client";
+
+export default function PublicLayout(props: LayoutProps<"/">) {
+  return <div data-plan={props.plan}>{props.children}</div>;
+}
+```
+
+### RootLayout
+
+`RootLayout` is the single top-level layout that renders the `<html>` document. It
+is passed to `init()` in your client entry (`app/client.tsx`) and wraps everything.
+It is where you render the `<Head />` and `<body>`:
+
+```tsx
+import { Head } from "gemi/client";
+import "./main.css";
+
+export default function RootLayout(props: {
+  children: React.ReactNode;
+  locale: string;
+}) {
+  return (
+    <html lang={props.locale} translate="no" suppressHydrationWarning>
+      <Head />
+      <body>{props.children}</body>
+    </html>
+  );
+}
+```
+
+```tsx
+// app/client.tsx
+import { init } from "gemi/client";
+import RootLayout from "./views/RootLayout";
+
+init(RootLayout);
+```
+
+> **Gotcha:** `RootLayout` receives `locale` (the active locale, see [i18n](./i18n.md))
+> and `children`. Keep `translate="no"` on `<html>` — gemi does its own i18n, and a
+> browser translator that rewrites text before hydration causes a React hydration
+> mismatch that drops the server-injected styles.
+
+## Page metadata: `Head` and the `Meta` facade
+
+Render `<Head />` once, inside `RootLayout`. It emits `<title>`, the description
+meta tag, viewport, and Open Graph tags from the request's metadata. You set that
+metadata **on the server** with the `Meta` facade from `gemi/facades`, usually
+inside a view or layout handler:
+
+```typescript
+import { Meta } from "gemi/facades";
+
+"/": this.view("Home", () => {
+  Meta.title("GEMI — Home");
+  Meta.description("The in-house full-stack TypeScript framework.");
+  Meta.openGraph({
+    title: "GEMI",
+    image: "/.og",
+    type: "image/svg+xml",
+    url: "https://gemiapp.com",
+    imageWidth: 600,
+    imageHeight: 400,
+  });
+}),
+```
+
+`Meta.title`, `Meta.description`, and `Meta.openGraph` populate what `<Head />`
+renders on the server; the client keeps `document.title` and the description tag in
+sync on navigation. You can also pass extra elements as `children` to `<Head>` if a
+page needs custom tags.
+
+> **Note:** `Meta` is a server-side facade (like `Auth`, `Cookie`, `Redirect`). Call
+> it from route/controller handlers, not from React components. See the facades
+> reference for the full list.
+
+## Breadcrumbs: `useBreadcrumbs`
+
+Every view/layout handler can return a `breadcrumb` string; gemi records it against
+the current path. The `useBreadcrumbs` hook returns the trail for the active route as
+an array of `{ label, href }`, ordered from the outermost matched segment inward:
+
+```tsx
+import { useBreadcrumbs, Link } from "gemi/client";
+
+function Breadcrumbs() {
+  const breadcrumbs = useBreadcrumbs();
+  return (
+    <nav aria-label="Breadcrumb">
+      {breadcrumbs.map((crumb) => (
+        <Link key={crumb.href} href={crumb.href as never}>
+          {crumb.label}
+        </Link>
+      ))}
+    </nav>
+  );
+}
+```
+
+Set the label from a handler by returning it as `breadcrumb`:
+
+```typescript
+"/settings": this.view("Settings", () => {
+  return { breadcrumb: "Settings" };
+}),
+```
+
+Entries with an empty label are filtered out, so a route contributes a crumb only
+when its handler supplies one.
+
+## Related
+
+- [Routing](./routing.md) — path grammar, route groups, middleware.
+- [Data Fetching](./data-fetching.md) — `useQuery`, prefetching, mutations.
+- [Navigation](./navigation.md) — `Link`, `useNavigate`, redirects.
+- [Controllers](./controllers.md) — binding controller methods to routes.
+- [i18n](./i18n.md) — locales and translation.
+
+
+---
+
+## Data Fetching
+
+gemi ships a small set of typed hooks for talking to your API routes from the
+client, plus a server-side facade for priming that data during SSR. Every hook is
+fully type-safe: the endpoint path, its params, its search input, and its response
+shape are all inferred from your API routes through the generated `gemi.d.ts` network
+layer. You never write a raw `fetch` or hand-annotate a response type.
+
+All hooks and components below come from `gemi/client`:
+
+```tsx
+import { useQuery, usePost, useMutate } from "gemi/client";
+```
+
+> **Note:** Some app-level docs mention `useGet`. The real query hook is
+> **`useQuery`** — that is what `gemi/client` exports. Use `useQuery` everywhere.
+
+## Reading data: `useQuery`
+
+`useQuery` reads a `GET` endpoint. The first argument is the endpoint path (typed
+against your `GET:` routes); the optional second argument carries `params` and
+`search`; the optional third argument is config.
+
+```tsx
+import { useQuery } from "gemi/client";
+
+export default function Todos() {
+  const { data, loading, error, refetch } = useQuery("/todos");
+
+  if (loading) return <p>Loading…</p>;
+  if (error) return <p>Something went wrong.</p>;
+
+  return (
+    <ul>
+      {data.map((todo) => (
+        <li key={todo.id}>{todo.title}</li>
+      ))}
+    </ul>
+  );
+}
+```
+
+### Params and search
+
+```tsx
+const searchParams = useSearchParams();
+
+const { data } = useQuery("/admin/content/translations", {
+  search: {
+    limit: searchParams.get("limit") || "25",
+    page: searchParams.get("page"),
+    query: searchParams.get("query") || "",
+  },
+});
+```
+
+- `params` fills dynamic URL segments (e.g. `/users/:id` → `{ params: { id } }`).
+  If omitted, `useQuery` inherits the current route's params automatically.
+- `search` becomes the query string. Each distinct search combination is cached
+  and revalidated independently.
+
+The `data` shape and the accepted `search` keys are both inferred from the endpoint,
+so a typo in a param or a wrong field type is a compile error.
+
+### Return shape
+
+`useQuery` returns:
+
+| field | description |
+| --- | --- |
+| `data` | The response body, typed from the endpoint. `null`/undefined until first load. |
+| `loading` | `true` while a request is in flight (defaults to `true` before the first fetch). |
+| `error` | Error record if the request failed, otherwise `null`. |
+| `refetch()` | Force a fresh fetch of the current variant. |
+| `mutate(fn?)` | Optimistically update the cached data (see below), or refetch when called with no argument. |
+| `trigger()` | Kick off the fetch for a `lazy` query. |
+| `prefetch()` | Fetch once, eagerly, without subscribing to loading state (e.g. on hover). |
+| `version` | Monotonic counter that increments on each successful update. |
+
+> The exported `QueryResult<T>` type is the inferred **data** type for endpoint
+> `T` (i.e. the type of `data`), not the whole hook return.
+
+### Config (third argument)
+
+```tsx
+const { data } = useQuery("/feed", {}, {
+  fallbackData: [],        // initial data before the first fetch
+  keepPreviousData: true,  // keep old data visible while refetching (default true)
+  refreshInterval: 5000,   // poll every 5s
+  retryIntervalOnError: 10000,
+  lazy: false,             // when true, no fetch until trigger()/refetch()
+});
+```
+
+### Optimistic updates with `mutate`
+
+The `mutate` returned by `useQuery` updates the cached value in place:
+
+```tsx
+const { data, mutate } = useQuery("/todos");
+
+// Merge/append into the current data
+mutate((todos) => [{ id: "tmp", title: "New" }]);
+
+// Or refetch by calling with no args
+mutate();
+```
+
+For objects, the returned partial is shallow-merged; for arrays, it is appended.
+To update a query from **outside** the component that owns it, use `useMutate`.
+
+## Prefetching on the server: the `Query` facade
+
+To avoid a client-side loading flash, prime a query's cache during SSR with the
+`Query` facade from `gemi/facades`. Call it inside a view or layout handler
+([Views and Layouts](./views-and-layouts.md)); when the matching `useQuery` mounts on
+the client, its data is already there as `fallbackData`.
+
+```typescript
+import { Query } from "gemi/facades";
+
+"/dashboard": this.view("Dashboard", async () => {
+  // Fetch eagerly and await it (blocks render until ready)
+  await Query.instant("/todos");
+
+  // Or queue it to run in parallel without awaiting here
+  Query.prefetch("/feed", { search: { page: "1" } });
+}),
+```
+
+- `Query.instant(path, options?)` runs the endpoint immediately and returns the
+  data (also storing it for the client).
+- `Query.prefetch(path, options?)` adds it to the request's prefetch queue so it
+  resolves alongside the rest of the page.
+
+Both take the same `{ params, search }` options as `useQuery`, and the stored data
+is matched to the client query by path + search key.
+
+> **Gotcha:** The `Query` facade can only be used from a **view/page request**, not
+> from an API request — calling it during an API request throws.
+
+## Writing data: mutation hooks
+
+For `POST`/`PUT`/`PATCH`/`DELETE`, use the mutation hooks. `useMutation` is the
+general form; `usePost`, `usePut`, `usePatch`, `useDelete`, and `useUpload` are typed
+shorthands.
+
+```tsx
+import { usePost } from "gemi/client";
+
+function CreateTodo() {
+  const { trigger, loading, error, data } = usePost("/todos");
+
+  async function onClick() {
+    await trigger({ title: "Buy milk" });
+  }
+
+  return (
+    <button onClick={onClick} disabled={loading}>
+      Add
+    </button>
+  );
+}
+```
+
+`useMutation` (and its shorthands) return:
+
+| field | description |
+| --- | --- |
+| `trigger(input?)` | Fire the request. `input` may be a typed JSON body or a `FormData`; returns the response. |
+| `trigger.formData(fd)` | Convenience for submitting a `FormData`. |
+| `data` | The response body after success. |
+| `error` | A `MutationError` on failure (see below). |
+| `loading` | `true` while in flight. |
+| `cancel()` | Abort the in-flight request. |
+| `formData` | A mutable `FormData` accumulator used when `trigger()` is called with no input. |
+
+`useMutation` takes the method explicitly:
+
+```tsx
+import { useMutation } from "gemi/client";
+
+const { trigger } = useMutation("PATCH", "/todos/:id", { params: { id } });
+```
+
+Options mirror the query hooks — `{ params, search }` in the second argument, and a
+config object (`onSuccess`, `onError`, `onCanceled`, `autoInvalidate`) in the third.
+
+### Errors
+
+A failed mutation surfaces a tagged `error` object. The common kinds are:
+
+- `validation_error` — `{ kind, messages }`, keyed by field (from a server-side
+  `ValidationError`).
+- `form_error` — `{ kind, message }`, a single form-level message.
+- `server_error`, `not_authorized`, `insufficient_permissions`.
+
+When you drive mutations from the `Form` component instead of calling `trigger`
+directly, these are unpacked for you into `ValidationErrors` / `FormError`. See
+[Forms](./forms.md).
+
+### File uploads: `useUpload`
+
+`useUpload` posts files with progress tracking (via `XMLHttpRequest`):
+
+```tsx
+import { useUpload } from "gemi/client";
+
+function Avatar() {
+  const { trigger, progress, state, cancel } = useUpload("/avatar");
+
+  return (
+    <input
+      type="file"
+      onChange={(e) => trigger(e.target.files)}
+    />
+  );
+}
+```
+
+It returns `state` (`"idle" | "uploading" | "done" | "error"`), a `progress` number
+(0–1), `trigger(fileListOrFile)`, and `cancel()`. See [File Storage](./file-storage.md)
+for the server side.
+
+## Updating queries from elsewhere: `useMutate`
+
+`useMutate` returns a function to update **any** query's cache by path — useful
+after a mutation to reflect the change without a round-trip:
+
+```tsx
+import { useMutate } from "gemi/client";
+
+const mutate = useMutate();
+
+// After creating a todo:
+mutate({ path: "/todos" }, (todos) => [newTodo]);
+```
+
+The signature is `mutate({ path, params?, search? }, fn?)`, with the same
+merge/append semantics as `useQuery`'s `mutate`.
+
+## Type safety: the generated `gemi.d.ts`
+
+The typing that powers all of the above comes from `gemi.d.ts` at your app root. It
+augments `gemi/client` by binding the framework's generic `RPC` / `ViewRPC` interfaces
+to **your** routers:
+
+```typescript
+// gemi.d.ts (generated — do not edit)
+import type Api from "@/app/http/routes/api";
+import type View from "@/app/http/routes/view";
+import type { CreateRPC, CreateViewRPC } from "gemi/http";
+
+declare module "gemi/client" {
+  export interface RPC extends CreateRPC<Api> {}
+  export interface ViewRPC extends CreateViewRPC<View> {}
+}
+```
+
+- `RPC` maps every API route to a key like `GET:/todos` / `POST:/todos`, carrying its
+  input and response types. `useQuery`, `useMutation`, `Form`, etc. filter `RPC` by
+  method to know which paths are valid and what they accept/return.
+- `ViewRPC` does the same for view/layout routes, powering `ViewProps`, `LayoutProps`,
+  and typed navigation paths.
+
+Because it is generated from your route files, **do not edit `gemi.d.ts` by hand** —
+your changes would be overwritten. Regenerate it after adding or changing API routes
+with the CLI:
+
+```bash
+gemi ide:generate-api-manifest
+```
+
+This runs the API manifest generator over `app/http/routes/api.ts` and rewrites the
+typed network layer. See the [CLI reference](./cli.md) for details and editor
+integrations.
+
+> **Note:** View/layout types (`ViewRPC`) come straight from importing your
+> `view.ts` router into `gemi.d.ts`, so they update automatically. It is the **API**
+> side that the manifest generator fills in.
+
+## Related
+
+- [Forms](./forms.md) — the `Form` component and validation display.
+- [Views and Layouts](./views-and-layouts.md) — server props vs. client queries.
+- [Controllers](./controllers.md) — writing the endpoints these hooks call.
+- [File Storage](./file-storage.md) — handling `useUpload` on the server.
+- [CLI](./cli.md) — regenerating `gemi.d.ts`.
+
+
+---
+
+## Forms
+
+The `Form` component is gemi's declarative way to submit data to an API route. It
+wraps a native `<form>`, collects its fields into a `FormData`, fires the right
+mutation for you, injects the CSRF token, and exposes the server's validation and
+form errors to child components through context. You get typed endpoints, automatic
+error surfacing, and pending state without wiring up `useMutation` by hand.
+
+Everything here is exported from `gemi/client`:
+
+```tsx
+import { Form, FormError, ValidationErrors, useFormStatus } from "gemi/client";
+```
+
+## The `Form` component
+
+At minimum, `Form` needs an `action` (the endpoint path). It defaults to the `POST`
+method. Name your inputs to match the endpoint's expected body.
+
+```tsx
+import { Form, ValidationErrors } from "gemi/client";
+
+export default function CreateUser() {
+  return (
+    <Form method="POST" action="/admin/user">
+      <input name="name" />
+      <ValidationErrors name="name" />
+
+      <input name="email" type="email" />
+      <ValidationErrors name="email" />
+
+      <button type="submit">Create</button>
+    </Form>
+  );
+}
+```
+
+### Props
+
+| prop | description |
+| --- | --- |
+| `action` | The endpoint path, typed against your routes for the chosen `method`. Required. |
+| `method` | `"POST"` (default), `"PUT"`, `"PATCH"`, or `"DELETE"`. |
+| `params` | Fills dynamic segments in `action` (e.g. `/user/:id`). Inherits current route params if omitted. |
+| `search` | Query-string values appended to the request. |
+| `onSuccess(result, form)` | Called on success with the typed response and the `HTMLFormElement`. |
+| `onError(error, form)` | Called on failure with the error and the form element. |
+| `dynamicInputs(formData)` | Return extra key/value pairs to append at submit time (values not in the DOM). |
+
+All other native `<form>` props (`className`, `id`, …) pass straight through. The
+form element gets a `group` class and a `data-loading` attribute reflecting the
+pending state, which you can style against.
+
+### Submit and navigate on success
+
+Combine `onSuccess` with `useNavigate` to redirect after a successful submit:
+
+```tsx
+import { Form, useNavigate } from "gemi/client";
+
+export default function UserCreate() {
+  const { push } = useNavigate();
+
+  return (
+    <Form
+      method="POST"
+      action="/admin/user"
+      onSuccess={(_data, form) => {
+        form.reset();
+        push("/admin/users");
+      }}
+    >
+      <input name="name" />
+      <input name="email" type="email" />
+      <button type="submit">Submit</button>
+    </Form>
+  );
+}
+```
+
+> **Note:** `Form` renders a hidden `__csrf` input automatically — you do not add it
+> yourself. It submits via `fetch` (no full page reload) and prevents the native
+> submit.
+
+## Validation and error display
+
+When a controller throws a `ValidationError`, the server responds with a
+`validation_error` shaped as `{ kind, messages }`, where `messages` is keyed by field
+name. `Form` catches that and exposes it through context so these child components can
+render it — no manual error plumbing. See [Controllers](./controllers.md) for throwing
+`ValidationError` server-side.
+
+### `ValidationErrors`
+
+Renders the messages for one field. Place it next to that field's input:
+
+```tsx
+<input name="email" type="email" />
+<ValidationErrors name="email" className="text-sm text-red-600" />
+```
+
+It renders one element per message (a `<div>` by default). Pass a `render` prop to
+customize the element:
+
+```tsx
+<ValidationErrors
+  name="email"
+  render={(props) => <p role="alert" {...props} />}
+/>
+```
+
+Renders nothing when the field has no errors.
+
+### `FormError`
+
+Renders a single **form-level** message — the `form_error` kind, used for errors
+that aren't tied to a specific field (e.g. "Invalid credentials"):
+
+```tsx
+<Form action="/auth/sign-in">
+  <FormError className="text-red-700" />
+  {/* fields… */}
+</Form>
+```
+
+Renders nothing when there is no form error.
+
+### `FormFieldContainer`
+
+A `<div>` wrapper that sets `data-has-error` based on whether the named field has
+validation errors — handy for styling a whole field group (label, input, message):
+
+```tsx
+<FormFieldContainer name="email" className="field">
+  <label htmlFor="email">Email</label>
+  <input id="email" name="email" />
+  <ValidationErrors name="email" />
+</FormFieldContainer>
+```
+
+## Form state hooks
+
+These hooks read the surrounding `Form`'s context and must be used in components
+rendered **inside** a `Form`.
+
+### `useFormStatus`
+
+Returns `{ isPending, validationErrors, formError }` — the full picture: whether a
+submit is in flight, the per-field error map, and the form-level error. Ideal for a
+submit button:
+
+```tsx
+import { useFormStatus } from "gemi/client";
+
+function SubmitButton() {
+  const { isPending } = useFormStatus();
+  return (
+    <button type="submit" disabled={isPending}>
+      {isPending ? "Submitting…" : "Submit"}
+    </button>
+  );
+}
+```
+
+### `useMutationStatus`
+
+A narrower version that returns only `{ isPending }` — use it when you just need the
+pending flag.
+
+### `useFormData`
+
+Returns the live `FormData` of the surrounding form, kept in sync as the user types
+(via input events and value mutations). Use it to derive UI from current field
+values — for example, enabling a button only when a field is filled, or previewing
+input:
+
+```tsx
+import { useFormData } from "gemi/client";
+
+function PreviewName() {
+  const formData = useFormData();
+  return <p>Hello, {String(formData.get("name") ?? "")}</p>;
+}
+```
+
+## Building forms without `Form`
+
+`Form` is a thin, ergonomic layer over the mutation hooks. If you need full control,
+call `usePost` / `useMutation` directly and manage the request yourself — see
+[Data Fetching](./data-fetching.md). Auth flows are a common case; the auth views use
+`Form` together with `useNavigate` (see [Authentication](./authentication.md)).
+
+## Related
+
+- [Controllers](./controllers.md) — throwing `ValidationError` to drive `ValidationErrors`.
+- [Data Fetching](./data-fetching.md) — the mutation hooks `Form` is built on.
+- [Navigation](./navigation.md) — redirecting after a successful submit.
+- [Authentication](./authentication.md) — sign-in/up forms use these components.
+
+
+---
+
+## Navigation
+
+gemi has a client-side router that renders your views without full page reloads.
+This page covers the tools for moving between routes and reading the current
+location: the `Link` component, the `useNavigate` hook, the location hooks
+(`useParams`, `useSearchParams`, `useLocation`, `useRoute`), the pending-navigation
+hooks, and the two kinds of redirect — the client `Redirect` component and the
+server-side `Redirect` **facade** (with an important gotcha).
+
+Everything except the facade is imported from `gemi/client`:
+
+```tsx
+import { Link, useNavigate, useParams, useSearchParams } from "gemi/client";
+```
+
+## `Link`
+
+`Link` renders an `<a>` that navigates client-side. `href` is typed against your
+view routes, and if the route has dynamic segments you must pass `params`:
+
+```tsx
+import { Link } from "gemi/client";
+
+<Link href="/about">About</Link>
+<Link href="/users/:id" params={{ id: user.id }}>Profile</Link>
+<Link href="/search" search={{ q: "shoes", page: "2" }}>Results</Link>
+```
+
+- `params` — fills dynamic segments; inherits the current route's params if omitted.
+- `search` — query-string values; keys are typed to the target view's input where
+  available.
+- `hash` — appends a `#fragment`.
+- `active` — force the active state.
+
+`Link` sets `data-active` when its target matches the current URL, and
+`data-pending` while a navigation to it is in flight — style against these:
+
+```tsx
+<Link className="data-[pending=true]:opacity-50" href="/about">About</Link>
+```
+
+## `useNavigate`
+
+For programmatic navigation, `useNavigate` returns `{ push, replace }`. Both take a
+typed path and the same options as `Link` (`params`, `search`, `hash`, `shallow`,
+`locale`):
+
+```tsx
+import { useNavigate } from "gemi/client";
+
+function Toolbar() {
+  const { push, replace } = useNavigate();
+
+  return (
+    <>
+      <button onClick={() => push("/dashboard")}>Dashboard</button>
+      <button onClick={() => push("/users/:id", { params: { id: "42" } })}>
+        Open user
+      </button>
+    </>
+  );
+}
+```
+
+`push` adds a history entry; `replace` swaps the current one. Pass `shallow: true` to
+update the URL (typically search params) without re-running the view's data load. A
+common pattern is navigating after a successful form submit:
+
+```tsx
+const { push } = useNavigate();
+
+<Form action="/admin/user" onSuccess={() => push("/admin/users")}>
+```
+
+## Reading the current location
+
+### `useParams`
+
+Returns the dynamic route params for the active route as a plain object:
+
+```tsx
+import { useParams } from "gemi/client";
+
+const params = useParams(); // e.g. { id: "42" } on /users/:id
+```
+
+### `useSearchParams`
+
+Returns a mutable search-params helper for reading and updating the query string.
+Reads with `.get(key)`; stage changes with `.set(...)` / `.delete(...)` and commit
+them by calling `.push()`:
+
+```tsx
+import { useSearchParams } from "gemi/client";
+
+function Pagination() {
+  const searchParams = useSearchParams();
+  const page = Number(searchParams.get("page")) || 1;
+
+  function goTo(next: number) {
+    searchParams.set("page", String(next));
+    searchParams.push(); // navigate with the updated query string
+  }
+  // …
+}
+```
+
+`.set` accepts either `(key, value)` or an object of updates, and the value may be a
+function of the current value. `.push("hard")` forces a full data reload; the default
+`.push()` (soft) updates shallowly. This is the idiomatic way to drive filtered lists
+and pagination together with `useQuery` (see [Data Fetching](./data-fetching.md)).
+
+### `useLocation`
+
+Returns the current location: `{ pathname, search, hash, state, locale, key }`.
+
+```tsx
+import { useLocation } from "gemi/client";
+
+const { pathname, search, locale } = useLocation();
+```
+
+### `useRoute`
+
+Returns the matched route `pathname` and a typed `startsWith` helper — useful for
+highlighting nav sections:
+
+```tsx
+import { useRoute } from "gemi/client";
+
+const { pathname, startsWith } = useRoute();
+const inAdmin = startsWith("/admin");
+```
+
+## Pending navigation
+
+While a client navigation is loading data, you can show a progress indicator.
+
+### `useIsNavigationPending`
+
+Returns a boolean that is `true` while any navigation is in flight:
+
+```tsx
+import { useIsNavigationPending } from "gemi/client";
+
+function TopBar() {
+  const pending = useIsNavigationPending();
+  return pending ? <Spinner /> : null;
+}
+```
+
+### `useNavigationProgress`
+
+Returns a numeric progress value for the active navigation — wire it to a progress
+bar:
+
+```tsx
+import { useNavigationProgress } from "gemi/client";
+
+function ProgressBar() {
+  const progress = useNavigationProgress();
+  return <div style={{ width: `${progress}%` }} className="bar" />;
+}
+```
+
+## Redirects
+
+There are two distinct redirect tools. Pick by **where** you are redirecting from.
+
+### Client-side: the `Redirect` component
+
+Rendered inside a React tree, the `Redirect` component from `gemi/client` navigates
+as soon as it mounts. Use it to bounce out of a view based on client state:
+
+```tsx
+import { Redirect } from "gemi/client";
+
+export default function Dashboard() {
+  const { user, loading } = useUser();
+  if (loading) return null;
+  if (!user) return <Redirect href="/auth/sign-in" action="replace" />;
+  return <RealDashboard />;
+}
+```
+
+It accepts the same `href` / `params` / `search` as `Link`, plus `action`
+(`"push"` or `"replace"`, default `"replace"`).
+
+### Server-side: the `Redirect` facade
+
+To redirect **before** a page renders — from a view/layout handler, a controller,
+or middleware — use the `Redirect` facade from `gemi/facades`:
+
+```typescript
+import { Redirect } from "gemi/facades";
+
+"/dashboard": this.view("Dashboard", async () => {
+  const user = await Auth.user();
+  if (!user) {
+    Redirect.to("/auth/sign-in", { search: { next: "/dashboard" } });
+  }
+  return { /* … */ };
+}),
+```
+
+`Redirect.to(path, options?)` takes a typed view path with `params` / `search`, plus
+`status` / `permanent`. There is also `Redirect.external(url, status?)` for
+off-site URLs.
+
+> **Gotcha — never wrap the `Redirect` facade in try/catch.** The facade works by
+> **throwing** a special error, which the framework catches higher up to perform the
+> redirect (conceptually like Next.js's `notFound()`). If you call it inside a
+> `try/catch`, your `catch` swallows that throw and the redirect silently breaks.
+> Keep `Redirect.to(...)` / `Redirect.external(...)` out of any `try` block. For the
+> same reason, code after a `Redirect.to(...)` call is unreachable — it never
+> returns.
+
+## Related
+
+- [Routing](./routing.md) — how paths, params, and groups are defined.
+- [Views and Layouts](./views-and-layouts.md) — what each route renders.
+- [Data Fetching](./data-fetching.md) — pairing `useSearchParams` with `useQuery`.
+- [Authentication](./authentication.md) — guarding routes with the `Redirect` facade.
+
+
+---
+
+## Authentication
+
+gemi ships a full authentication system — email/password, passwordless magic-link (PIN),
+OAuth, sessions, email verification and password reset — configured through a single
+service provider in your app. You subclass the framework's `AuthenticationServiceProvider`,
+plug in an adapter that talks to your database, and (optionally) override lifecycle hooks to
+send emails, provision resources, or extend the session payload.
+
+The provider is registered in the [Kernel](./project-structure.md) like any other
+[service provider](./project-structure.md). It automatically mounts a set of API and view
+routes under `/auth` (sign-in, sign-up, sign-out, magic-link, OAuth callbacks, etc.), so you
+rarely write auth routes yourself — you point forms and client hooks at those endpoints.
+
+## The AuthenticationServiceProvider
+
+Your app defines `app/kernel/providers/AuthenticationServiceProvider.ts` as a subclass of the
+base class exported from `gemi/kernel`:
+
+```typescript
+import {
+  AuthenticationServiceProvider,
+  PrismaAuthenticationAdapter,
+} from "gemi/kernel";
+import { GoogleOAuthProvider } from "gemi/services";
+import { prisma } from "@/app/database/prisma";
+
+export default class extends AuthenticationServiceProvider {
+  adapter = new PrismaAuthenticationAdapter(prisma);
+
+  oauthProviders = {
+    google: new GoogleOAuthProvider(),
+  };
+
+  // Only allow users with a verified email to sign in.
+  verifyEmail = false;
+
+  // Rolling / absolute session lifetimes (in hours).
+  sessionExpiresInHours = 24;
+  sessionAbsoluteExpiresInHours = 24 * 7 * 4;
+
+  async onSignUp(user, verificationToken, search) {
+    // send a welcome / verification email, provision resources, etc.
+  }
+}
+```
+
+### Config fields
+
+| Field | Type | Default | Purpose |
+| --- | --- | --- | --- |
+| `adapter` | `IAuthenticationAdapter` | `BlankAdapter` | Persistence layer (users, sessions, tokens). See [Adapters](#adapters). |
+| `oauthProviders` | `Record<string, OAuthProvider>` | `{}` | OAuth providers keyed by name (the `:provider` in the callback route). See [OAuth](#oauth). |
+| `verifyEmail` | `boolean` | `true` | When `true`, sign-in only succeeds for users whose `emailVerifiedAt` is set. |
+| `sessionExpiresInHours` | `number` | `24` | Rolling expiry — refreshed to `now + N` hours every time the session is used. |
+| `sessionAbsoluteExpiresInHours` | `number` | `672` (4 weeks) | Hard ceiling set at session creation; not extended on use. |
+| `redirectPath` | `string` | `"/dashboard"` | Convention for where to send users after a successful login. |
+| `signUpRequest` | `HttpRequest` subclass | built-in | The [request/validation schema](./forms.md) used by the sign-up endpoint. Override to add fields or change rules. |
+
+> **Note:** Session lifetime is enforced two ways. `sessionExpiresInHours` is a *rolling*
+> window pushed forward on each request; `sessionAbsoluteExpiresInHours` is a fixed cap
+> stamped at creation. Setting both very high (as the folio app does) effectively creates
+> long-lived sessions.
+
+## Adapters
+
+The adapter is the bridge between the auth system and your database. It implements
+`IAuthenticationAdapter` — a set of methods for creating users, managing sessions, and
+handling verification / reset / magic-link tokens.
+
+### PrismaAuthenticationAdapter
+
+`PrismaAuthenticationAdapter` (from `gemi/kernel`) is a ready-made implementation backed by a
+Prisma client. Construct it with your client:
+
+```typescript
+import { PrismaAuthenticationAdapter } from "gemi/kernel";
+import { prisma } from "@/app/database/prisma";
+
+adapter = new PrismaAuthenticationAdapter(prisma);
+```
+
+It expects the following Prisma models (field names matter, they are queried directly):
+
+- **`User`** — `id`, `publicId`, `email` (unique), `name`, `password`, `emailVerifiedAt`,
+  `verificationToken`, `globalRole`, `locale`, `organizationId`, and an `accounts` relation.
+- **`Session`** — `token` (unique), `userId`, `userAgent`, `location`, `expiresAt`,
+  `absoluteExpiresAt`, with a `user` relation.
+- **`Account`** — `id`, `publicId`, `organizationId`, `organizationRole`, `userId`, and an
+  `organization` relation (used for [role-based access](./authorization.md)).
+- **`PasswordResetToken`** — `token` (unique), `createdAt`, `user` relation.
+- **`MagicLinkToken`** — `email`, `token`, `pin`, with composite unique keys
+  `token_email` and `pin_email`.
+- **`SocialAccount`** — `provider`, `providerId`, `userId`, `email`, `username`,
+  `accessToken`, `refreshToken`, `expiresAt` (created on first OAuth sign-up).
+- **`OrganizationInvitation`** — `publicId`, `email`, `organizationId`, `role` (used by the
+  optional invitation sign-up flow).
+
+### Adapter interface
+
+A custom adapter must implement `IAuthenticationAdapter`. The methods:
+
+| Method | Purpose |
+| --- | --- |
+| `createUser(args)` | Create a user row. |
+| `updateUserPassword(args)` | Set a new (hashed) password by user id. |
+| `findUserByEmailAddress(email, verifyEmail)` | Look up a user; when `verifyEmail` is true, only return verified users. |
+| `createSession(args)` / `createSessionV2(args)` | Persist a new session (V2 selects a trimmed user shape incl. `accounts`). |
+| `updateSession(args)` | Push a session's `expiresAt` forward. |
+| `findSession(args)` | Load a session (+ its user) by token. |
+| `deleteSession(args)` | Delete a session by token (sign-out). |
+| `deleteAllUserSessions(userId)` | Invalidate every session for a user (after password change/reset). |
+| `findUserByVerificationToken(token)` / `verifyUser(email)` | Email-verification lookup / marking verified. |
+| `createPasswordResetToken(args)` / `findPasswordResetToken(args)` / `deletePasswordResetToken(args)` | Password-reset token lifecycle. |
+| `createMagicLinkToken(args)` / `findUserMagicLinkToken(args)` / `deleteMagicLinkToken(email)` | Magic-link / PIN token lifecycle. |
+| `createSocialAccount(args)` | Persist an OAuth-linked social account. |
+| `findInvitation(id, email)` / `deleteInvitationById(id)` / `createAccount(args)` | Invitation-based sign-up. |
+
+### Writing a custom adapter
+
+The easiest path is to extend `PrismaAuthenticationAdapter` and override just the method(s)
+you need. The folio app does this to make sign-up atomic — it provisions an organization in
+the same transaction that creates the user:
+
+```typescript
+import { PrismaAuthenticationAdapter } from "gemi/kernel";
+import type { Prisma, PrismaClient } from "@folio/db";
+
+type CreateUserArgs = Parameters<PrismaAuthenticationAdapter["createUser"]>[0];
+type AdapterUser = Awaited<ReturnType<PrismaAuthenticationAdapter["createUser"]>>;
+
+export class OrgProvisioningAuthAdapter extends PrismaAuthenticationAdapter {
+  async createUser(args: CreateUserArgs): Promise<AdapterUser> {
+    return (this.prisma as PrismaClient).$transaction(async (tx) => {
+      const user = await tx.user.create({
+        data: args as Prisma.UserCreateInput,
+        omit: { password: true },
+      });
+      await provisionOrganization(tx, user, user.publicId, 10);
+      return user as unknown as AdapterUser;
+    });
+  }
+}
+```
+
+> **Note:** gemi runs `createUser` and then fires `onSignUp` *separately*. Provisioning
+> inside the `onSignUp` hook is therefore **not** atomic with user creation — a failure there
+> leaves an orphaned user. Do transactional provisioning inside a `createUser` override, as
+> above. The base class stores the client as `protected prisma`.
+
+## Lifecycle hooks
+
+Override these on your provider to run side effects at each stage. All may be sync or async.
+
+| Hook | Signature | Fires when |
+| --- | --- | --- |
+| `onSignUp` | `(user, verificationToken, search)` | A new account is created (email/password, or first OAuth sign-in). `verificationToken` is empty when `verifyEmail` is off. |
+| `onSignIn` | `(userOrSession, search)` | A user authenticates (password, magic-link/PIN, or returning OAuth). |
+| `onSignOut` | `(user)` | The `/auth/sign-out` endpoint runs. |
+| `onForgotPassword` | `(user, token)` | A password-reset is requested — send the reset email with `token`. |
+| `onResetPassword` | `(user)` | A password reset completes (all the user's sessions are already invalidated). |
+| `onMagicLinkCreated` | `(user, { email, token, pin })` | The `/auth/magic-link` endpoint mints a link — send the PIN/link email. |
+| `extendSession` | `(user) => object` | Every session load and create/update; the returned object is merged onto `user.extension`. |
+
+`search` is the request's query string as a plain object (useful for attribution / redirect
+params).
+
+### Example: magic-link PIN emails (folio)
+
+```typescript
+import { Auth } from "gemi/facades";
+import { PinEmail } from "@/app/email/PinEmail";
+
+export default class extends AuthenticationServiceProvider {
+  // ...
+
+  async onSignUp(user, token, search) {
+    // Mint a magic link and email the PIN so the new user can verify + sign in.
+    const magicLink = await Auth.createMagicLink(user.email);
+    if (magicLink.pin) {
+      await PinEmail.send({
+        to: [user.email],
+        locale: user.locale ?? "en-US",
+        data: { name: user.name, pin: magicLink.pin, token: magicLink.token },
+      });
+    }
+  }
+
+  async onMagicLinkCreated(user, { email, pin }) {
+    await PinEmail.send({
+      to: [email],
+      locale: user.locale ?? "en-US",
+      data: { name: user.name?.split(" ")[0] ?? "User", pin },
+    });
+  }
+}
+```
+
+See [Email](./email.md) for the `Email.send(...)` API.
+
+### extendSession
+
+`extendSession` runs on the hot `/auth/me` path, so keep it cheap. Whatever it returns is
+attached to `user.extension` and is then available everywhere `Auth.user()` is read (server)
+and on `useUser()` (client). folio uses it to attach the current org's logo and subscription
+data:
+
+```typescript
+async extendSession(user) {
+  const orgIds = (user.accounts ?? [])
+    .map((a) => a?.organization?.publicId)
+    .filter(Boolean);
+
+  const subscriptions = await prisma.subscription.findMany({
+    where: { organizationId: { in: orgIds } },
+  });
+
+  return { subscriptions };
+}
+```
+
+## Magic links and PIN sign-in
+
+Passwordless sign-in works with a one-time token embedded in a URL **and** a 6-digit PIN —
+both are minted together and either can complete the flow.
+
+Mint a link from server code with the [Auth facade](#the-auth-facade):
+
+```typescript
+import { Auth } from "gemi/facades";
+
+const { user, email, token, pin } = await Auth.createMagicLink("john@example.com");
+// -> {} if no user exists for that email
+```
+
+`Auth.createMagicLink` deletes any existing token for the email, generates a fresh
+`token` + 6-digit `pin`, persists them, and returns them so you can build the email yourself.
+
+There are two ways for the user to complete it:
+
+- **Link:** direct them to the view route
+  `/auth/sign-in/magic-link?token=<token>&email=<email>` — it verifies the user, deletes the
+  token, creates the session cookie, and fires `onSignIn`.
+- **PIN:** `POST /auth/sign-in-with-pin` (or `/auth/sign-in-with-pin-v2`) with
+  `{ email, pin }`. An invalid PIN returns a [validation error](./forms.md) under the `pin`
+  key.
+
+> **Note:** `Auth.createMagicLink()` does **not** itself fire `onMagicLinkCreated` — it just
+> returns the token/PIN for you to use. The `onMagicLinkCreated` hook fires only when the
+> `POST /auth/magic-link` endpoint is called (e.g. a "email me a login code" form). Call
+> `Auth.createMagicLink` from your own hooks (as in the `onSignUp` example above) when you
+> want to send the code yourself.
+
+## OAuth
+
+Register providers under `oauthProviders`, keyed by the name that appears in the callback
+URL. `GoogleOAuthProvider` and `XOAuthProvider` are exported from `gemi/services`:
+
+```typescript
+import { GoogleOAuthProvider, XOAuthProvider } from "gemi/services";
+
+oauthProviders = {
+  google: new GoogleOAuthProvider({
+    redirectPath: "/auth/oauth/google/callback",
+  }),
+  x: new XOAuthProvider(),
+};
+```
+
+`GoogleOAuthProvider` config: `clientId`, `clientSecret`, `scope`, `redirectPath`
+(default `/auth/oauth/google/callback`). It reads `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`,
+and `HOST_NAME` from the environment by default. `XOAuthProvider` reads `X_CLIENT_ID` /
+`X_SECRET` and takes a `scope` array.
+
+The framework mounts two view routes per provider automatically:
+
+- `/auth/oauth/:provider` — redirects the browser to the provider's consent screen.
+- `/auth/oauth/:provider/callback` — exchanges the code, resolves the user's email/name,
+  signs them in (or creates the account + a `SocialAccount` on first login), sets the session
+  cookie, and fires `onSignUp` (new) or `onSignIn` (returning).
+
+A "Sign in with Google" button is just a link:
+
+```tsx
+<a href="/auth/oauth/google">Continue with Google</a>
+```
+
+To add your own provider, extend the abstract `OAuthProvider` (from `gemi/services`) and
+implement `getRedirectUrl(req)` and `onCallback(req)` — the latter returns
+`{ email, name, username?, providerId? }`.
+
+## The Auth facade
+
+`Auth` (from `gemi/facades`) is the server-side entry point to the current user and session.
+
+| Method | Returns | Description |
+| --- | --- | --- |
+| `Auth.user()` | `Promise<User>` | The authenticated user (with `.extension` from `extendSession`). **Throws `AuthenticationError` if not signed in.** |
+| `Auth.guard(fn)` | `Promise<void>` | Runs `fn(user)`; throws `InsufficientPermissionsError` if it returns falsy or throws. |
+| `Auth.guardSafe(fn)` | `Promise<boolean>` | Like `guard` but returns `true`/`false` instead of throwing. |
+| `Auth.authenticate(email)` | `Promise<session>` | Programmatically sign a user in — creates the session and sets the cookie. |
+| `Auth.createMagicLink(email)` | `Promise<{ user, email, token, pin } \| {}>` | Mint a magic-link token + PIN (see above). |
+
+```typescript
+import { Auth } from "gemi/facades";
+
+// In a controller: read the current user.
+const user = await Auth.user();
+
+// Guard an action inline (see Authorization for policy-based checks).
+await Auth.guard((user) => user.globalRole === 0);
+```
+
+> **Note:** `Auth.user()` *throws* when there is no session — inside a [controller](./controllers.md)
+> that's fine (the framework turns it into a 401 / redirect). If you want a nullable check,
+> use `Auth.guardSafe(...)` instead of wrapping `Auth.user()` in a try/catch.
+
+See [Authorization](./authorization.md) for policies and role checks.
+
+## Client hooks
+
+These React hooks (from `gemi/client`) call the auth endpoints and keep the cached user in
+sync. Each mutation hook returns the standard mutation object — `{ trigger, data, error,
+loading, ... }` — where `trigger(input)` fires the request.
+
+| Hook | Signature | Notes |
+| --- | --- | --- |
+| `useSignIn({ onSuccess })` | POSTs `/auth/sign-in` | Re-fetches `/auth/me` on success. |
+| `useSignUp()` | POSTs `/auth/sign-up` | |
+| `useSignOut({ onSuccess })` | POSTs `/auth/sign-out` | Invalidates the cached user. |
+| `useForgotPassword({ onSuccess })` | POSTs `/auth/forgot-password` | |
+| `useResetPassword({ onSuccess })` | POSTs `/auth/reset-password` | |
+| `useUser()` | `{ user, loading, error }` | Reads the current user (SSR-hydrated from server data). |
+
+### Reading the current user
+
+```tsx
+import { useUser } from "gemi/client";
+
+function Profile() {
+  const { user, loading } = useUser();
+  if (loading) return <Spinner />;
+  if (!user) return <SignInPrompt />;
+  return <span>Hello {user.name}</span>;
+}
+```
+
+### A sign-in form
+
+You can drive sign-in with a `useSignIn` hook, or point a `Form` at the endpoint directly.
+Both use the [Forms](./forms.md) primitives for validation-error display.
+
+Hook-driven:
+
+```tsx
+import { useSignIn, useNavigate } from "gemi/client";
+import { useState } from "react";
+
+function SignIn() {
+  const { push } = useNavigate();
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+
+  const { trigger, loading } = useSignIn({
+    onSuccess: () => push("/dashboard"),
+  });
+
+  return (
+    <form
+      onSubmit={(e) => {
+        e.preventDefault();
+        trigger({ email, password });
+      }}
+    >
+      <input value={email} onChange={(e) => setEmail(e.target.value)} />
+      <input
+        type="password"
+        value={password}
+        onChange={(e) => setPassword(e.target.value)}
+      />
+      <button disabled={loading}>Sign in</button>
+    </form>
+  );
+}
+```
+
+`Form`-driven (validation errors surface automatically via `ValidationErrors`):
+
+```tsx
+import { Form, ValidationErrors, useNavigate } from "gemi/client";
+
+function SignIn() {
+  const { push } = useNavigate();
+  return (
+    <Form
+      method="POST"
+      action="/auth/sign-in"
+      onSuccess={() => push("/dashboard")}
+    >
+      <input name="email" type="email" />
+      <input name="password" type="password" />
+      <ValidationErrors name="invalid_credentials" />
+      <button type="submit">Sign in</button>
+    </Form>
+  );
+}
+```
+
+See [Forms](./forms.md) for `Form`, `ValidationErrors`, and validation schemas.
+
+## The `auth` middleware
+
+Protect routes by requiring an authenticated session. Register the framework's
+`AuthenticationMiddleware` under the `auth` alias in your app's `MiddlewareServiceProvider`,
+then reference it by name:
+
+```typescript
+// app/kernel/providers/MiddlewareServiceProvider.ts
+import { MiddlewareServiceProvider, AuthenticationMiddleware } from "gemi/http";
+
+export default class extends MiddlewareServiceProvider {
+  aliases = {
+    auth: AuthenticationMiddleware,
+    // ...
+  };
+}
+```
+
+```typescript
+// In a router
+this.get(DashboardController, "index").middleware(["auth"]);
+```
+
+Requests without a valid `access_token` are rejected with an `AuthenticationError`
+(401 for API routes, a redirect to `/auth/sign-in` for views). See
+[Middleware](./middleware.md) for the full DSL (`-auth` to cancel, router vs per-route, etc.)
+and [Authorization](./authorization.md) for role/policy enforcement.
+
+
+---
+
+## Authorization
+
+Authentication answers *who* a request is; authorization answers *what they may do*. gemi
+gives you three complementary tools:
+
+- **Middleware** (`auth`, `admin`, `role:...`) — coarse, route-level gates. See
+  [Middleware](./middleware.md).
+- **Policies** — model-scoped rules registered through a service provider.
+- **Inline guards** — `Auth.guard(...)` inside a [controller](./controllers.md) for one-off
+  checks (see [Authentication](./authentication.md)).
+
+This page covers policies, role-based middleware, and the authorization error types.
+
+## Policies
+
+Policies group the authorization rules for a resource in one class. Both pieces come from
+`gemi/http`: the `Policies` base class and the `PoliciesServiceProvider` that registers them.
+
+### Defining a policy
+
+Extend `Policies` and implement `all(operation, args)`. It receives the operation being
+attempted and its arguments, and returns a boolean (sync or async) — `true` allows,
+`false` denies:
+
+```typescript
+import { Policies } from "gemi/http";
+import { Auth } from "gemi/facades";
+
+export class PostPolicies extends Policies {
+  async all(operation: string, args: any) {
+    const user = await Auth.user();
+
+    // Anyone signed in may read.
+    if (operation === "findMany" || operation === "findUnique") {
+      return true;
+    }
+
+    // Only the owner may mutate.
+    return args.where?.authorId === user.id;
+  }
+}
+```
+
+> **Note:** The base `Policies.all` returns `true` (allow-all). Override it to enforce
+> anything. The naming convention is `<Model>Policies` — the provider keys each policy by its
+> class name, so a class named `PostPolicies` is the policy for the `Post` model.
+
+### Registering policies
+
+Create a `PoliciesServiceProvider` subclass and return your policy classes from `register()`.
+The provider instantiates each and stores it in `policiesList` under its class name:
+
+```typescript
+import { PoliciesServiceProvider } from "gemi/http";
+import { PostPolicies } from "./PostPolicies";
+
+export default class extends PoliciesServiceProvider {
+  protected register() {
+    return [PostPolicies];
+  }
+}
+```
+
+Register the provider in your [Kernel](./project-structure.md) alongside the other service
+providers.
+
+> **Note:** The API surface here is intentionally small: `Policies.all(operation, args)` and
+> `PoliciesServiceProvider.register()` returning `Array<new () => Policies>`. Do not assume
+> per-verb methods like `create()` / `update()` — there is a single `all` entry point that
+> switches on `operation`. Automatic model-level enforcement is wired through the Prisma
+> extension layer; when a policy denies, it raises `InsufficientPermissionsError` (below).
+> For request-scoped checks that don't map to a model, prefer `Auth.guard(...)` /
+> `Auth.guardSafe(...)` in the controller — see [Authentication](./authentication.md).
+
+## Role-based access
+
+Roles live on the user record and are checked with middleware. Two conventions are common:
+
+- **Global role** — `user.globalRole`, a numeric rank on the user (e.g. `0` = admin,
+  higher = lower privilege). Used for app-wide admin gating.
+- **Organization role** — `user.accounts[].organizationRole` (per-membership), for
+  multi-tenant / per-workspace permissions.
+
+> **Note:** `admin` and `role:...` are **not** built-in framework middleware — they are
+> aliases *your app* registers in its `MiddlewareServiceProvider`, backed by small
+> `Middleware` classes that read the role off `Auth.user()`. Only `auth` (→
+> `AuthenticationMiddleware`) ships with the framework. This keeps role semantics (which
+> number means what, which relation holds the org role) entirely in your app.
+
+### Defining role middleware
+
+A role middleware reads the current user and throws when the rank is insufficient. `role:...`
+middleware receives its argument via `run(param)` (the string DSL passes `:`-suffixed params
+through — see [Middleware](./middleware.md)):
+
+```typescript
+import { Auth } from "gemi/facades";
+import {
+  MiddlewareServiceProvider,
+  AuthenticationMiddleware,
+  Middleware,
+  InsufficientPermissionsError,
+} from "gemi/http";
+
+class AdminMiddleware extends Middleware {
+  async run() {
+    const user = await Auth.user();
+    if (Number(user?.globalRole) >= 10) {
+      throw new InsufficientPermissionsError();
+    }
+  }
+}
+
+class RoleMiddleware extends Middleware {
+  // Invoked as `role:owner` -> run("owner")
+  async run(required: string) {
+    const user = await Auth.user();
+    const roles = user.accounts.map((a) => String(a.organizationRole));
+    if (!roles.includes(required)) {
+      throw new InsufficientPermissionsError();
+    }
+  }
+}
+
+export default class extends MiddlewareServiceProvider {
+  aliases = {
+    auth: AuthenticationMiddleware,
+    admin: AdminMiddleware,
+    role: RoleMiddleware,
+  };
+}
+```
+
+### Applying it
+
+```typescript
+// Router-level: every route in this router requires an admin.
+middlewares = ["auth", "admin"];
+
+// Per-route, with a parameter:
+this.post(TeamController, "invite").middleware(["auth", "role:owner"]);
+```
+
+See [Middleware](./middleware.md) for router-vs-route placement, cancelling inherited
+middleware with `-auth`, and how `:`-parameters are parsed.
+
+## Authorization errors
+
+Three error types (all from `gemi/http`) drive authorization responses. They are
+"request-breaker" errors: throw one anywhere in the request lifecycle — middleware, policy,
+controller, or facade — and the framework turns it into the response below. You generally
+don't construct them yourself; they are thrown for you by the middleware / facade helpers.
+
+| Error | API response | View response |
+| --- | --- | --- |
+| `AuthenticationError` | `401` `{ error: "Authentication error" }` | `302` redirect to `/auth/sign-in` |
+| `AuthorizationError` | `401` `{ error }` (default `"Not authorized"`) | (none) |
+| `InsufficientPermissionsError` | `401` `{ error }` (default `"Insufficient permissions"`) | (none) |
+
+- **`AuthenticationError`** — "you are not signed in." Thrown by the `auth` middleware and by
+  `Auth.user()` when there is no session. For view routes it redirects to the sign-in page
+  rather than returning JSON.
+- **`AuthorizationError`** — "signed in, but this action is refused." Accepts a custom
+  message: `new AuthorizationError("You cannot edit this post")`.
+- **`InsufficientPermissionsError`** — "signed in, but lacking the required role/permission."
+  Thrown by `Auth.guard(...)`, by role middleware, and when a policy denies. Also accepts a
+  custom message.
+
+```typescript
+import { AuthorizationError } from "gemi/http";
+
+async function update() {
+  const user = await Auth.user();
+  if (post.authorId !== user.id) {
+    throw new AuthorizationError("You cannot edit this post");
+  }
+  // ...
+}
+```
+
+> **Note:** All three currently produce a `401` on API routes. Choose the type by intent —
+> `AuthenticationError` when identity is missing (and you want the view redirect),
+> `AuthorizationError` / `InsufficientPermissionsError` when the identity is known but the
+> action is refused.
+
+## Related
+
+- [Authentication](./authentication.md) — sessions, `Auth.user()`, `Auth.guard()`, the `auth` middleware.
+- [Middleware](./middleware.md) — the `auth` / `admin` / `role:` DSL in full.
+- [Controllers](./controllers.md) — where guards and policy checks usually live.
+
+
+---
+
+## Facades
+
+Facades are static accessors to gemi's framework services. Instead of resolving a service container by hand, you import a class from `gemi/facades` and call its static methods:
+
+```typescript
+import { Auth, Redirect, Url, Log } from "gemi/facades";
+```
+
+Every facade is backed by a service container that gemi boots from your `app/kernel/providers`. Facades are **server-side** — use them in controllers, service providers, jobs, middleware, and any other server code. They read from the current request through gemi's request context, so most of them only make sense while a request is being handled.
+
+> **Note:** Some facade names (`Redirect`, `Broadcast`) also exist as client-side React components/hooks with the same name but a different API. The facade is the server-side one from `gemi/facades`; the client one comes from `gemi/client`. They are covered separately below and in [Navigation](./navigation.md).
+
+All exports live in `gemi/facades`:
+
+```typescript
+import {
+  Auth,
+  Redirect,
+  I18n,
+  FileStorage,
+  Query,
+  Broadcast,
+  Url,
+  Log,
+  Meta,
+  Cookie,
+  Redis,
+} from "gemi/facades";
+```
+
+## Auth
+
+`Auth` reads and authorizes the current user from the request's `access_token` cookie.
+
+- `Auth.user()` — `Promise<User>`. Resolves the authenticated user, or throws `AuthenticationError` if there is none.
+- `Auth.guard(fn)` — `Promise<void>`. Runs `fn(user)`; throws `InsufficientPermissionsError` if it returns falsy or throws.
+- `Auth.guardSafe(fn)` — `Promise<boolean>`. Same check, but returns `true`/`false` instead of throwing.
+- `Auth.authenticate(email)` — creates a session for the given email.
+- `Auth.createMagicLink(email)` — issues a magic-link token.
+
+```typescript
+import { Auth } from "gemi/facades";
+
+const user = await Auth.user();
+await Auth.guard((u) => u.globalRole === 0); // admin only
+```
+
+See [Authentication](./authentication.md) for the full auth flow, sessions, and adapters.
+
+## Redirect
+
+`Redirect` performs a server-side redirect from a controller, view data loader, provider, or middleware.
+
+- `Redirect.to(path, options?)` — redirect to an internal route. `path` is a typed view path; `options` accepts `params`, `search`, `status`, and `permanent`. Routes with URL params require `params`. Defaults to a `307` (or `301` when `permanent: true`).
+- `Redirect.external(url, status?)` — redirect to an absolute external URL. Defaults to `307`.
+
+```typescript
+import { Redirect } from "gemi/facades";
+
+// Named route with params + query string
+Redirect.to("/orgs/:orgId/settings", {
+  params: { orgId },
+  search: { tab: "billing" },
+});
+
+// External URL
+Redirect.external("https://stripe.com/checkout/...");
+```
+
+> **Note (critical):** The `Redirect` facade works by **throwing**. `Redirect.to(...)` and `Redirect.external(...)` never return — they throw a special error that the framework catches to emit the redirect response (similar to Next.js's `notFound()`). **Never wrap a `Redirect` call in `try/catch`.** A surrounding `try/catch` swallows the throw and silently breaks the redirect. If you must run cleanup around code that might redirect, call `Redirect` outside the `try` block, or re-throw anything that isn't your own error.
+
+> **Note:** This is distinct from the client `<Redirect />` component and `useNavigate` from `gemi/client`, which perform client-side navigation. See [Navigation](./navigation.md).
+
+## I18n
+
+`I18n` exposes the server-side locale for the current request.
+
+- `I18n.locale()` — the active locale for this request (falls back to the default locale outside a request).
+- `I18n.getDefaultLocale()` — the configured default locale.
+- `I18n.getSupportedLocales()` — the configured list of supported locales.
+- `I18n.setLocale(locale?)` — persists the locale in the `i18n-locale` cookie (validated against supported locales) and returns the resolved locale.
+
+```typescript
+import { I18n } from "gemi/facades";
+
+const locale = I18n.locale(); // e.g. "en-US"
+```
+
+See [Internationalization](./i18n.md) for dictionaries, translation, and client hooks.
+
+## FileStorage
+
+`FileStorage` is the object-storage facade (local disk, S3, and other drivers configured in your `FileStorageServiceProvider`).
+
+- `FileStorage.put(params | Blob)` — store a file; returns the driver's put result.
+- `FileStorage.fetch(params | string)` — read a stored file.
+- `FileStorage.list(folder)` — list files in a folder.
+- `FileStorage.metadata(blobOrFile)` — extract image metadata (width, height, format, …) via `sharp`; returns `{}` for non-images.
+
+```typescript
+import { FileStorage } from "gemi/facades";
+
+const result = await FileStorage.put(file);
+```
+
+See [File Storage](./file-storage.md) for drivers, upload handling, and configuration.
+
+## Query
+
+`Query` (exported from `Prefetch.ts`) runs a **`GET` API route on the server** so its data is available to a view without a client round-trip. It is fully typed against your API router.
+
+- `Query.instant(path, options?)` — run the route handler immediately and return its data. `options` accepts `params` and `search`.
+- `Query.prefetch(path, options?)` — queue the route to run during server rendering so the client hydrates with the data already present (no loading flash).
+
+```typescript
+import { Query } from "gemi/facades";
+
+// In a view data loader
+Query.prefetch("/orders/:orderId", { params: { orderId } });
+const stats = await Query.instant("/dashboard/stats");
+```
+
+> **Note:** `Query` cannot be called from an API request context (it throws) — it is meant for view rendering. See [Data Fetching](./data-fetching.md) for the client `useQuery` hook that consumes the same routes.
+
+## Broadcast
+
+`Broadcast` publishes real-time messages to a websocket channel from the server.
+
+- `Broadcast.channel(route, params)` — returns a handle with `publish(data, compress?)` that sends a message to the channel's topic (the route pattern with `params` applied).
+
+```typescript
+import { Broadcast } from "gemi/facades";
+
+Broadcast.channel("/chat/:roomId", { roomId }).publish({ text: "hello" });
+```
+
+See [Broadcasting](./broadcasting.md) for defining channels and the client `useSubscription`/`useBroadcast` hooks.
+
+## Url
+
+`Url` generates URLs for your typed view routes, applying route params.
+
+- `Url.relative(path, params?)` — a path-only URL (`/orgs/123/settings`). Params are required only when the route has them.
+- `Url.absolute(path, params?)` — a fully-qualified URL, prefixed with `process.env.HOST_NAME`.
+
+```typescript
+import { Url } from "gemi/facades";
+
+Url.relative("/orgs/:orgId", { orgId }); // "/orgs/123"
+Url.absolute("/orgs/:orgId", { orgId }); // "https://app.example.com/orgs/123"
+```
+
+> **Note:** `Url.absolute` relies on the `HOST_NAME` environment variable. See [Configuration](./configuration.md).
+
+## Log
+
+`Log` writes structured log entries through the configured logging service. Every method takes a `message` and an optional `metadata` object, and maps to a standard syslog severity:
+
+- `Log.debug(message, metadata?)`
+- `Log.info(message, metadata?)`
+- `Log.notice(message, metadata?)`
+- `Log.warning(message, metadata?)`
+- `Log.error(message, metadata?)`
+- `Log.critical(message, metadata?)`
+- `Log.alert(message, metadata?)`
+- `Log.emergency(message, metadata?)`
+
+```typescript
+import { Log } from "gemi/facades";
+
+Log.info("Order created", { orderId, total });
+Log.error("Payment failed", { orderId, reason });
+```
+
+## Meta
+
+`Meta` sets page metadata for the current request — used during SSR to populate `<head>` tags and Open Graph data.
+
+- `Meta.title(title)` — set the page title.
+- `Meta.description(description)` — set the meta description.
+- `Meta.openGraph(params)` — set Open Graph tags.
+
+```typescript
+import { Meta } from "gemi/facades";
+
+Meta.title("Order #1234");
+Meta.description("Your order summary");
+Meta.openGraph({ title: "Order #1234", image: "https://..." });
+```
+
+See [Views & Layouts](./views-and-layouts.md) for rendering and the client `<Head />`/`OpenGraphImage` helpers.
+
+## Cookie
+
+`Cookie` reads and writes cookies on the current request/response. (It is a plain object, not a class, but is used the same way.)
+
+- `Cookie.set(name, value, options)` — set a cookie. `options` is the standard cookie option set (`expires`, `secure`, `httpOnly`, …).
+- `Cookie.setIfAbsent(name, value, options)` — set only if the request doesn't already have that cookie; returns `false` if it was already present, `true` otherwise.
+- `Cookie.delete(name)` — remove a cookie.
+
+```typescript
+import { Cookie } from "gemi/facades";
+
+Cookie.set("theme", "dark", {
+  expires: new Date(Date.now() + 1000 * 60 * 60 * 24 * 365),
+  httpOnly: false,
+  secure: true,
+});
+```
+
+> **Note:** To read incoming cookies inside a controller, use the request object (`req.cookies.get("...")`). `Cookie` is primarily for writing the response cookies.
+
+## Redis
+
+`Redis` gives ergonomic access to the app's Redis client (Bun's built-in `RedisClient`).
+
+- `Redis.client` — the full Bun `RedisClient` (hashes, sets, sorted sets, pub/sub, pipelining, …).
+- `Redis.get(key)`, `Redis.set(key, value)`, `Redis.del(...keys)`, `Redis.exists(key)`, `Redis.incr(key)`, `Redis.expire(key, seconds)`, `Redis.ttl(key)` — shortcuts for the most common string commands.
+
+```typescript
+import { Redis } from "gemi/facades";
+
+await Redis.set("visits", "0");
+await Redis.incr("visits");
+await Redis.expire("visits", 3600);
+
+// Reach for the full client for anything beyond the shortcuts:
+await Redis.client.hset("user:1", { name: "Ada" });
+```
+
+### Configuration
+
+The connection is configured by `RedisServiceProvider`. Extend it in `app/kernel/providers/RedisServiceProvider.ts`:
+
+```typescript
+import { RedisServiceProvider } from "gemi/services";
+
+export default class extends RedisServiceProvider {
+  // Defaults to process.env.REDIS_URL (Bun falls back to
+  // redis://localhost:6379 when unset).
+  url = process.env.REDIS_URL;
+
+  // Optional Bun RedisOptions: TLS, timeouts, auto-reconnect, ...
+  options = {};
+}
+```
+
+See [Configuration](./configuration.md) and the provider registration in [Project Structure](./project-structure.md).
+
+## Related
+
+- [Authentication](./authentication.md)
+- [Navigation](./navigation.md)
+- [File Storage](./file-storage.md)
+- [Data Fetching](./data-fetching.md)
+- [Broadcasting](./broadcasting.md)
+- [Internationalization](./i18n.md)
+- [Views & Layouts](./views-and-layouts.md)
+- [Configuration](./configuration.md)
+
+
+---
+
+## File Storage
+
+gemi ships a driver-based file storage service with a single facade, `FileStorage`, that reads and writes files without your controllers ever knowing whether the bytes live on the local disk or in an S3 bucket. It also includes an on-the-fly image optimization service and a client `Image` component that requests resized, WebP-encoded variants automatically.
+
+Configure it through the `FileStorageServiceProvider` in your app's kernel — see [Kernel & Service Providers](./project-structure.md) — and call it through the [`FileStorage` facade](./facades.md).
+
+## The `FileStorage` facade
+
+Import the facade from `gemi/facades`:
+
+```typescript
+import { FileStorage } from "gemi/facades";
+```
+
+Every method delegates to the configured driver, so the surface is intentionally small.
+
+### `put(params | Blob)`
+
+Stores a file and returns the stored object's **name** (a string) that you persist and later use to fetch the file back.
+
+```typescript
+// Store an uploaded file with an explicit name
+const name = await FileStorage.put({
+  name: "avatars/user-42.png",
+  body: file, // Blob | File | Buffer
+  contentType: "image/png", // optional
+  bucket: "public",         // optional — defaults to process.env.BUCKET_NAME
+});
+```
+
+`PutFileParams` is:
+
+```typescript
+interface PutFileParams {
+  name: string;
+  bucket?: string;
+  body: Blob | File | Buffer;
+  contentType?: string;
+}
+```
+
+You can also pass a bare `Blob`/`File` — the driver generates a UUID-based name from the blob's MIME type and returns it:
+
+```typescript
+// name is auto-generated, e.g. "0192f...c3.png"
+const name = await FileStorage.put(uploadedBlob);
+```
+
+> **Note:** `put` returns the object name, not a URL. Store that name against your record; you serve the file later by handing the name to `FileStorage.fetch` (typically from a controller route).
+
+### `fetch(params | string)`
+
+Reads a file back as a web `Response` (streamed body, with `Content-Type`, `Content-Length`, and caching headers already set). Pass the object name as a string, or a `ReadFileParams` object to target a specific bucket:
+
+```typescript
+// From a controller — stream the stored file straight back to the client
+return FileStorage.fetch(record.imageName);
+
+// Or target a bucket explicitly
+return FileStorage.fetch({ name: record.imageName, bucket: "private" });
+```
+
+```typescript
+interface ReadFileParams {
+  name: string;
+  bucket?: string;
+}
+```
+
+Because `fetch` returns a `Response`, a controller can return it directly. See [Controllers](./controllers.md).
+
+### `list(folder)`
+
+Lists the objects under a folder/prefix. The shape of the result depends on the driver (the filesystem driver returns a `string[]` of file names; the S3 driver returns the raw `ListObjectsV2` result).
+
+```typescript
+const files = await FileStorage.list("avatars/");
+```
+
+### `metadata(blob | file)`
+
+Reads image metadata (width, height, format, etc.) from a `Blob`/`File` using Sharp. Returns a partial metadata object, or `{}` if the bytes aren't a decodable image — useful for validating an upload before storing it.
+
+```typescript
+const meta = await FileStorage.metadata(uploadedFile);
+if ((meta.width ?? 0) > 4096) {
+  // reject oversized image
+}
+```
+
+> **Note:** `FileStorage.delete()` is currently a no-op placeholder — deletion is not yet implemented at the facade level.
+
+## Drivers
+
+The active driver is set on your app's `FileStorageServiceProvider`. gemi ships two drivers; the default is `FileSystemDriver`.
+
+### `FileSystemDriver` (local disk)
+
+Writes to a folder on the local filesystem — defaults to `${process.env.ROOT_DIR}/storage`. Ideal for development.
+
+```typescript
+// app/kernel/providers/FileStorageServiceProvider.ts
+import {
+  FileStorageServiceProvider,
+  FileSystemDriver,
+} from "gemi/services";
+
+export default class extends FileStorageServiceProvider {
+  driver = new FileSystemDriver();
+}
+```
+
+You can point it at a custom directory by passing a path to the constructor: `new FileSystemDriver("/var/data/uploads")`.
+
+### `S3Driver` (S3 / S3-compatible)
+
+Talks to AWS S3 or any S3-compatible service (Cloudflare R2, MinIO, DigitalOcean Spaces, …). The constructor forwards its arguments straight to the AWS SDK's `S3Client`, so you configure it exactly as you would that client:
+
+```typescript
+// app/kernel/providers/FileStorageServiceProvider.ts
+import { FileStorageServiceProvider, S3Driver } from "gemi/services";
+
+export default class extends FileStorageServiceProvider {
+  driver = new S3Driver({
+    region: process.env.AWS_REGION,
+    // endpoint is optional — set it for S3-compatible services like R2/MinIO
+    endpoint: process.env.S3_ENDPOINT,
+    credentials: {
+      accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
+      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
+    },
+  });
+}
+```
+
+The bucket comes from `params.bucket` when provided, otherwise from `process.env.BUCKET_NAME`. See [Configuration](./configuration.md) for where to define these environment variables.
+
+> **Note:** Both drivers fall back to `process.env.BUCKET_NAME` as the default bucket. For `put`, the S3 driver derives `contentType` from the blob/file when the body is a `Blob`/`File`.
+
+### Writing a custom driver
+
+Any storage backend works by subclassing `FileStorageDriver` (exported from `gemi/services`) and implementing `put`, `fetch`, and `list`:
+
+```typescript
+import {
+  FileStorageDriver,
+  type PutFileParams,
+  type ReadFileParams,
+} from "gemi/services";
+
+class MyDriver extends FileStorageDriver {
+  async put(params: PutFileParams | Blob): Promise<string> {
+    /* ...store and return the object name... */
+  }
+  async fetch(params: ReadFileParams | string): Promise<Response> {
+    /* ...return a Response streaming the object... */
+  }
+  async list(folder: string): Promise<any> {
+    /* ... */
+  }
+}
+```
+
+## Image optimization
+
+gemi optimizes images on demand — resizing and re-encoding to WebP — through the `ImageOptimizationServiceProvider`, which uses a Sharp-backed driver by default.
+
+```typescript
+// app/kernel/providers/ImageOptimizationServiceProvider.ts
+import { ImageOptimizationServiceProvider } from "gemi/services";
+
+// The default provider already uses the Sharp driver — subclass only to override.
+export default class extends ImageOptimizationServiceProvider {}
+```
+
+The `Sharp` driver's `resize` accepts `ResizeParameters`:
+
+```typescript
+type ResizeParameters = {
+  width: number;
+  height: number;
+  quality?: number;            // defaults to 80
+  fit?: keyof FitEnum;         // "contain" | "cover" | "fill" | "inside" | "outside"
+};
+```
+
+Zero or missing `width`/`height` is treated as "unconstrained" for that dimension, and the output is always encoded as WebP.
+
+### How images are served
+
+The service exposes an internal route:
+
+```
+GET /api/__gemi__/services/image/resize?url=<src>&w=<width>&h=<height>&fit=<fit>&q=<quality>
+```
+
+It fetches the source image at `url` (an absolute URL, or a path resolved against the local dev server), runs it through the optimization driver, and streams back `image/webp`. You rarely build these URLs by hand — the `Image` component does it for you. `fit` defaults to `cover` and `q` to `80`.
+
+## The client `Image` component
+
+Import from `gemi/client`. It renders a responsive `<img>` whose `srcSet` points at the resize route, so browsers download an appropriately sized WebP for the viewport and DPR.
+
+```tsx
+import { Image } from "gemi/client";
+
+<Image src={`/api/files/${record.imageName}`} width={640} alt="Product" />;
+```
+
+Props (on top of all standard `<img>` attributes):
+
+| Prop | Type | Default | Description |
+| --- | --- | --- | --- |
+| `src` | `string` | — | Source image URL/path (passed to the resize route as `url`). Required. |
+| `width` | `number` | — | Intended render width in px. Drives the generated widths and the `2x` candidate. Required. |
+| `quality` | `number` | `80` | WebP quality passed as `q`. |
+| `container` | `number[]` | `[100,100,100,100]` | Percentage of each screen breakpoint the image occupies (its column width), used to compute candidate widths. |
+| `screen` | `number[]` | `[390, 768, 1024]` | Breakpoints (px) the `srcSet`/sizes are generated against. |
+
+It automatically generates a `srcSet` (including a `2x` high-DPR candidate at `width * 2`) so you don't set `srcSet` yourself.
+
+> **Note:** `src` may be a local path (e.g. a controller route that streams a stored file) or an absolute URL. The resize route resolves relative paths against the dev server origin.
+
+### `OpenGraphImage`
+
+Also exported from `gemi/client`, `OpenGraphImage` renders a React tree into an Open Graph image (via Satori) for social sharing previews. You pass Satori options (`width`, `height`, `fonts`, …) plus the JSX to render as `children`:
+
+```tsx
+import { OpenGraphImage } from "gemi/client";
+
+<OpenGraphImage width={1200} height={630} fonts={[/* ... */]}>
+  <div style={{ display: "flex" }}>My page title</div>
+</OpenGraphImage>;
+```
+
+This pairs with the `OpenGraph` metadata helpers — see [`Meta`/facades](./facades.md) for wiring page-level Open Graph tags.
+
+## Related
+
+- [Facades](./facades.md) — how `FileStorage` resolves the active service.
+- [Kernel & Service Providers](./project-structure.md) — registering `FileStorageServiceProvider` and `ImageOptimizationServiceProvider`.
+- [Controllers](./controllers.md) — returning a `FileStorage.fetch` `Response` from a route.
+- [Configuration](./configuration.md) — the `BUCKET_NAME`, `ROOT_DIR`, and S3 credential environment variables.
+
+
+---
+
+## Email
+
+gemi sends transactional email through a small `Email` base class backed by [jsx-email](https://jsx.email) templates. You write each email as a React component, wrap it in a class that extends `Email`, and send it with a fully-typed `send(...)` call. Delivery goes through a driver (Resend by default) configured on your `EmailServiceProvider`.
+
+## Defining an email
+
+Create a class that extends `Email` (from `gemi/email`). It declares the message envelope (`from`, `subject`, …) as fields and the body as a `template` — a React component rendered by jsx-email. Its props type becomes the type of the `data` you must pass when sending.
+
+```tsx
+// app/email/WelcomeEmail.tsx
+import { Email } from "gemi/email";
+import { Body, Button, Container, Head, Html, Text } from "jsx-email";
+
+export class WelcomeEmail extends Email {
+  subject = "Welcome to our platform";
+  from = "Acme <updates@transactional.acme.com>";
+
+  template = (props: { name: string; magicLink: string; pin: string }) => {
+    return (
+      <Html>
+        <Head />
+        <Body>
+          <Container>
+            <Text>Hi {props.name}, welcome aboard!</Text>
+            <Text>Your PIN is {props.pin}</Text>
+            <Button href={props.magicLink}>Open your dashboard</Button>
+          </Container>
+        </Body>
+      </Html>
+    );
+  };
+}
+```
+
+The class fields you can set:
+
+| Field | Type | Purpose |
+| --- | --- | --- |
+| `from` | `string` | Default sender (e.g. `"Acme <no-reply@acme.com>"`). |
+| `to` | `string[]` | Default recipients. |
+| `subject` | `string` \| `Record<string, string>` | Subject line — a plain string, or a map of locale → subject (see [i18n](#localization-i18n)). |
+| `cc` / `bcc` | `string[]` | Default CC/BCC. |
+| `attachments` | `EmailAttachment[]` | Default attachments. |
+| `headers` | `Record<string, string>` | Extra headers merged into every send. |
+| `template` | `ComponentType` | The jsx-email React body. Its props type drives `data`. |
+
+## Sending
+
+Call the static `send` method on your subclass. Everything except `data` is optional and falls back to the class fields.
+
+```typescript
+import { WelcomeEmail } from "@/app/email/WelcomeEmail";
+
+await WelcomeEmail.send({
+  data: {
+    name: user.firstName,
+    magicLink: link,
+    pin: "123456",
+  },
+  to: [user.email],
+  locale: user.locale,
+  scheduledAt: "in 3 min",
+});
+```
+
+The argument shape:
+
+```typescript
+{
+  data: <template props, minus `locale`>;   // required, typed from `template`
+  to?: string[];
+  from?: string;
+  subject?: string;
+  cc?: string[];
+  bcc?: string[];
+  attachments?: EmailAttachment[];
+  headers?: Record<string, string>;
+  locale?: string;
+  scheduledAt?: string;
+}
+```
+
+Key points:
+
+- **`data` is type-checked against your `template` props.** The `locale` key is provided separately (see below) and is injected into the template props for you, so you omit it from `data`.
+- Any field you omit falls back to the value declared on the class (`to`, `from`, `subject`, `cc`, `bcc`, `attachments`, `headers`).
+- Sending renders **both** an HTML body and a plain-text body from the same template automatically.
+- Recipients pass through the provider's `filterRecipients` hook before delivery; if it returns an empty list, the send is skipped.
+
+> **Note:** When `process.env.EMAIL_DEBUG === "true"`, `send` does not deliver. Instead it writes the rendered HTML to `${ROOT_DIR}/.debug/emails/…html` and opens it locally — handy for previewing templates during development.
+
+### Previewing
+
+`preview` renders the template to an HTML string without sending — useful for a preview route or snapshot test:
+
+```typescript
+const html = await WelcomeEmail.preview({
+  data: { name: "Ada", magicLink: "#", pin: "000000" },
+  locale: "en-US",
+});
+```
+
+## The `EmailServiceProvider` and drivers
+
+The active driver and global headers live on your app's `EmailServiceProvider`. The default driver is `ResendDriver`.
+
+```typescript
+// app/kernel/providers/EmailServiceProvider.ts
+import { EmailServiceProvider, ResendDriver } from "gemi/services";
+
+export default class extends EmailServiceProvider {
+  driver = new ResendDriver();
+  // Headers merged into every outgoing message
+  headers = {
+    "List-Unsubscribe": `<${process.env.HOST_NAME}/api/email/unsubscribe>`,
+  };
+}
+```
+
+`ResendDriver` reads its API key from `process.env.RESEND_API_KEY` by default; pass a key explicitly with `new ResendDriver(myKey)` if you prefer. See [Configuration](./configuration.md) for setting `RESEND_API_KEY`.
+
+### Filtering recipients
+
+Override `filterRecipients` on the provider to globally suppress or transform recipients (e.g. respecting unsubscribes, or restricting to a whitelist in staging):
+
+```typescript
+export default class extends EmailServiceProvider {
+  driver = new ResendDriver();
+
+  async filterRecipients(emails: string[]) {
+    return emails.filter((email) => !(await isUnsubscribed(email)));
+  }
+}
+```
+
+### Custom drivers
+
+Subclass `EmailDriver` (from `gemi/services`) and implement `send(params: SendEmailParams)` to integrate a different provider.
+
+## Localization (i18n)
+
+Emails are locale-aware. Pass `locale` to `send`, and:
+
+1. **The subject** is chosen from the `subject` map by locale (falling back to the app's default locale). Declare it as a `Record<locale, string>`:
+
+   ```tsx
+   export class WelcomeEmail extends Email {
+     subject = {
+       "en-US": "Welcome to Acme",
+       "tr-TR": "Acme'ye Hoş Geldiniz",
+       "de-DE": "Willkommen bei Acme",
+     };
+     // ...
+   }
+   ```
+
+2. **The template receives `locale`** as a prop, so you can branch copy inside the body:
+
+   ```tsx
+   template = (props: { firstName: string; locale?: string }) => {
+     const t = props.locale === "tr-TR" ? tr : en;
+     return <Layout locale={props.locale}>{/* ... */}</Layout>;
+   };
+   ```
+
+When `locale` is omitted, the app's default locale is used. See [i18n](./i18n.md).
+
+## Scheduling
+
+`scheduledAt` schedules delayed delivery. It accepts a natural-language offset or an ISO 8601 timestamp (forwarded to the driver — Resend supports both):
+
+```typescript
+await WelcomeEmail.send({
+  data: { /* ... */ },
+  to: [user.email],
+  scheduledAt: "in 3 min",
+});
+```
+
+## Attachments
+
+Attach files with the `EmailAttachment` shape — a filename and a `Buffer` of content:
+
+```typescript
+import type { EmailAttachment } from "gemi/services";
+
+const invoice: EmailAttachment = {
+  filename: "invoice.pdf",
+  content: pdfBuffer, // Buffer
+};
+
+await OrderEmail.send({
+  data: { /* ... */ },
+  to: [customer.email],
+  attachments: [invoice],
+});
+```
+
+You can also set default `attachments` on the class if every send should carry the same file.
+
+## Related
+
+- [Facades](./facades.md) — how services are resolved.
+- [Kernel & Service Providers](./project-structure.md) — registering `EmailServiceProvider`.
+- [i18n](./i18n.md) — locale resolution and default locale.
+- [Configuration](./configuration.md) — `RESEND_API_KEY`, `EMAIL_DEBUG`, `HOST_NAME`.
+- [Authentication](./authentication.md) — auth flows send welcome, PIN, and password-reset emails.
+
+
+---
+
+## Jobs & Queues
+
+Jobs move slow or non-essential work off the request path. Instead of making a user wait while you call an external API, generate an image, or send a batch of emails, you dispatch a **Job** — it runs in the background through gemi's in-process queue, and the request returns immediately.
+
+You define jobs as classes extending `Job` (from `gemi/services`), register them on your `QueueServiceProvider`, and fire them with `Job.dispatch(...)`.
+
+## Defining a job
+
+A job is a class extending `Job` with a **static `name`** and a `run` method that does the work. The parameters of `run` are your job's payload.
+
+```typescript
+// app/kernel/providers/jobs/TranslationJob.ts
+import { Job } from "gemi/services";
+import { prisma } from "@/app/database/prisma";
+
+type Params = {
+  key: string;
+  value: string;
+  locale: string;
+  targetLocales: string[];
+};
+
+export class TranslationJob extends Job {
+  static name = "TranslationJob";
+
+  async run(params: Params) {
+    const translations = await translate(params.value, params.targetLocales);
+    await prisma.translation.createMany({
+      data: params.targetLocales.map((locale) => ({
+        key: params.key,
+        value: translations[locale],
+        locale,
+      })),
+    });
+  }
+}
+```
+
+> **Note:** The static `name` is **required** — jobs are enqueued and dispatched to workers by this name, and dispatching a job whose `name` is still the default (`"unset"`) throws. Give every job a unique static `name`.
+
+### Lifecycle hooks
+
+`Job` exposes hooks that run around `run`, each receiving the result/error plus the original `run` arguments:
+
+```typescript
+export class TranslationJob extends Job {
+  static name = "TranslationJob";
+  maxAttempts = 3; // retries before dead-lettering (default 3)
+
+  async run(params: Params) { /* ... */ }
+
+  onSuccess(result: any, params: Params) { /* ran after run resolves */ }
+  onFail(error: Error, params: Params) { /* ran on each failed attempt */ }
+  onDeadletter(error: Error, params: Params) { /* ran after the last attempt fails */ }
+}
+```
+
+Retry behavior: when `run` throws, `onFail` fires and the job is re-queued until it has been attempted `maxAttempts` times; once the final attempt fails, `onDeadletter` fires and the job is dropped.
+
+### Configurable fields
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `static name` | `string` | `"unset"` | Unique job identifier. Required. |
+| `maxAttempts` | `number` | `3` | Total attempts before dead-lettering. |
+| `worker` | `boolean` | `false` | When `true`, `run` executes in a separate Worker thread (a fresh cloned app instance) instead of the main event loop — use for CPU-bound work you want off the main thread. |
+
+## Dispatching
+
+Call the static `dispatch` method with exactly the arguments your `run` method takes — the call is fully typed against `run`'s signature.
+
+```typescript
+import { TranslationJob } from "@/app/kernel/providers/jobs/TranslationJob";
+
+// Inside a controller — returns immediately; the job runs in the background.
+TranslationJob.dispatch({
+  key: "product.title",
+  value: "Hello",
+  locale: "en-US",
+  targetLocales: ["tr-TR", "de-DE"],
+});
+```
+
+`dispatch` enqueues the job and returns `void` (fire-and-forget) — it does not wait for the job to finish, and the payload is serialized as JSON, so pass plain, serializable data (not class instances or functions). See [Controllers](./controllers.md) for dispatching from request handlers.
+
+## Registering jobs — `QueueServiceProvider`
+
+Every job class must be listed on your app's `QueueServiceProvider` so the queue knows how to construct it by name. You also set the worker `concurrency` here.
+
+```typescript
+// app/kernel/providers/QueueServiceProvider.ts
+import { QueueServiceProvider } from "gemi/services";
+import { TranslationJob } from "./jobs/TranslationJob";
+import { ImageGenerationJob } from "./jobs/ImageGenerationJob";
+
+export default class extends QueueServiceProvider {
+  concurrency = 20; // max jobs running at once (default 1)
+
+  jobs = [TranslationJob, ImageGenerationJob];
+}
+```
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `jobs` | `(new () => Job)[]` | `[]` | All dispatchable job classes. A job not listed here cannot be dispatched. |
+| `concurrency` | `number` | `1` | Maximum number of jobs processed simultaneously. |
+
+See [Kernel & Service Providers](./project-structure.md) for how providers are wired into the kernel.
+
+> **Note:** The queue is **in-process and in-memory** — jobs live in the running server's memory and are processed by that same process (or, for `worker` jobs, a Worker thread it spawns). Enqueued jobs do not survive a restart, and there is no cross-machine/distributed queue. Use jobs for best-effort background work (translations, image processing, notifications), not for work that must be durably guaranteed across restarts.
+
+## When to use a job
+
+Reach for a job when work is:
+
+- **Slow** — external API calls, AI generation, image/video processing.
+- **Non-blocking** — the user doesn't need the result in the HTTP response.
+- **Batchable or retryable** — sending many emails, syncing records, where automatic retries help.
+
+For work that must happen on a **schedule** (nightly reports, hourly cleanups) rather than in response to a request, use a cron job instead — see [Cron](./cron.md).
+
+## Related
+
+- [Cron](./cron.md) — scheduled, recurring background work.
+- [Controllers](./controllers.md) — dispatching jobs from request handlers.
+- [Kernel & Service Providers](./project-structure.md) — registering `QueueServiceProvider`.
+- [Configuration](./configuration.md) — environment setup.
+
+
+---
+
+## Cron
+
+Cron jobs run code on a recurring schedule — nightly reports, hourly cleanups, periodic audits — without any incoming request. You define each one as a class extending `CronJob` (from `gemi/services`) and register it on your app's `CronServiceProvider`. gemi schedules them in-process using `Bun.cron`.
+
+## Defining a cron job
+
+A cron job needs a unique `name`, a `cron` schedule expression, and a `callback` that does the work.
+
+```typescript
+// app/kernel/providers/CronServiceProvider.ts
+import { CronJob, CronServiceProvider } from "gemi/services";
+import { prisma } from "@/app/database/prisma";
+
+class DailyDigest extends CronJob {
+  name = "DailyDigest";
+  cron = CronJob.exp("@daily");
+
+  async callback() {
+    const users = await prisma.user.findMany({ select: { email: true } });
+    // ...build and send the digest...
+  }
+}
+
+export default class extends CronServiceProvider {
+  jobs = [DailyDigest];
+}
+```
+
+Fields and hooks on `CronJob`:
+
+| Member | Type | Description |
+| --- | --- | --- |
+| `name` | `string` | Unique job name. Required — a job without a name is skipped with an error. Also used as the registry key so a hot reload updates the job in place instead of stacking duplicates. |
+| `cron` | `CronExpression` | The schedule. Required — a job without an expression is skipped. |
+| `callback()` | `() => void \| Promise<void>` | The work to run on each tick. |
+| `onTick()` | `() => void \| Promise<void>` | Optional hook run alongside each tick. |
+| `onComplete()` | `() => void \| Promise<void>` | Optional hook run when the tick's work completes. |
+
+Each tick runs inside the app's kernel context (after boot), so facades and services — `prisma`, `Email`, `FileStorage`, `Job.dispatch`, etc. — are available inside `callback`. Errors thrown in `callback`, `onTick`, or `onComplete` are caught and logged rather than crashing the scheduler.
+
+## Schedule expressions — `CronJob.exp(...)`
+
+`CronJob.exp(expression)` is a typed helper that returns the expression string it's given. Its only job is to surface the supported nicknames in editor autocomplete while still accepting any raw expression — assigning to `cron` directly works identically. The expression is passed straight to `Bun.cron`.
+
+A `cron` value is either a **standard 5-field expression** or one of the **nicknames** below.
+
+### 5-field expressions
+
+```
+┌───────────── minute (0–59)
+│ ┌───────────── hour (0–23)
+│ │ ┌───────────── day of month (1–31)
+│ │ │ ┌───────────── month (1–12)
+│ │ │ │ ┌───────────── day of week (0–6, Sunday = 0)
+│ │ │ │ │
+* * * * *
+```
+
+```typescript
+cron = CronJob.exp("0 9 * * *");    // every day at 09:00
+cron = CronJob.exp("*/15 * * * *"); // every 15 minutes
+cron = CronJob.exp("0 0 * * 1");    // every Monday at 00:00
+```
+
+Standard field syntax is supported: `*`, ranges (`1-5`), steps (`*/10`), and lists (`1,15,30`).
+
+> **Note:** Cron expressions are interpreted in **UTC**, not the server's local timezone. `"0 9 * * *"` fires at 09:00 UTC. Account for the offset when a job needs to run at a specific local time.
+
+### Nicknames
+
+| Nickname | Equivalent |
+| --- | --- |
+| `@yearly` / `@annually` | Once a year, Jan 1 at 00:00 |
+| `@monthly` | First day of the month at 00:00 |
+| `@weekly` | Every Sunday at 00:00 |
+| `@daily` / `@midnight` | Every day at 00:00 |
+| `@hourly` | Every hour, on the hour |
+
+```typescript
+cron = CronJob.exp("@daily");
+cron = CronJob.exp("@hourly");
+```
+
+> **Note:** Only the nicknames above and standard 5-field expressions are valid — they are handled by `Bun.cron`. Extended shortcuts you may see in older gemi apps (e.g. `@at_9:00`, `@every_5_minutes`, `@on_monday`, `@between_9_17`) came from gemi's previous custom cron engine and are **not** understood by the current `Bun.cron`-based scheduler. Translate them to standard expressions — for example `@at_9:00` becomes `"0 9 * * *"` (09:00 UTC), and `@every_5_minutes` becomes `"*/5 * * * *"`.
+
+## Registering jobs — `CronServiceProvider`
+
+List every cron job class on your app's `CronServiceProvider`. They are scheduled automatically when the kernel boots.
+
+```typescript
+// app/kernel/providers/CronServiceProvider.ts
+import { CronJob, CronServiceProvider } from "gemi/services";
+
+class ProductCreationReport extends CronJob {
+  name = "ProductCreationReport";
+  cron = CronJob.exp("0 9 * * *"); // daily at 09:00 UTC
+
+  async callback() {
+    // ...gather metrics and email the report...
+  }
+}
+
+class SubscriptionAudit extends CronJob {
+  name = "SubscriptionAudit";
+  cron = CronJob.exp("0 8 * * *"); // daily at 08:00 UTC
+
+  async callback() {
+    // ...read-only audit + alert...
+  }
+}
+
+export default class extends CronServiceProvider {
+  jobs = [ProductCreationReport, SubscriptionAudit];
+}
+```
+
+The provider's only field is `jobs` — an array of `CronJob` subclasses. See [Project Structure](./project-structure.md) for how the provider is registered in the kernel.
+
+> **Note:** Cron jobs run **in-process** in the server. Every running server instance registers and fires its own schedule, so if you run multiple replicas, a job scheduled `@daily` fires once per replica per day. For work that must run exactly once across a fleet, add your own coordination (e.g. an advisory lock) inside `callback`.
+
+## Cron jobs vs. queued jobs
+
+Use a **cron job** for time-based, recurring work that runs on its own schedule. Use a **queued job** for work triggered by a request that you want to run in the background. The two compose well — a cron `callback` often dispatches queued jobs to fan work out. See [Jobs & Queues](./jobs-and-queues.md).
+
+## Related
+
+- [Jobs & Queues](./jobs-and-queues.md) — background work triggered on demand.
+- [Project Structure](./project-structure.md) — registering `CronServiceProvider`.
+- [Configuration](./configuration.md) — environment setup.
+
+
+---
+
+## Broadcasting
+
+gemi ships real-time messaging over websockets. You define **channels** on the server (route patterns with authorization logic), publish messages to them with the [`Broadcast`](./facades.md) facade, and subscribe to them from React components with `useSubscription`. A channel's topic is a route pattern — the same `:param` syntax used elsewhere in gemi — so a single channel definition can serve many concrete topics (one per room, per user, per order, …).
+
+## Defining a channel
+
+A channel is a class extending `BroadcastingChannel` from `gemi/broadcasting`:
+
+```typescript
+import { BroadcastingChannel } from "gemi/broadcasting";
+import { Auth } from "gemi/facades";
+
+export class ChatChannel extends BroadcastingChannel {
+  // Authorize a client's subscription. Receives the matched route params
+  // (from the topic pattern). Return true to allow, false to reject.
+  async subscribe(params: { roomId: string }) {
+    const user = await Auth.user();
+    return await isMemberOfRoom(user.id, params.roomId);
+  }
+
+  // Transform the payload before it is delivered to subscribers.
+  // Whatever you return is what clients receive as the message data.
+  publish(input: { text: string; userId: string }) {
+    return {
+      text: input.text,
+      userId: input.userId,
+      at: Date.now(),
+    };
+  }
+}
+```
+
+- **`subscribe(params)`** → `Promise<boolean> | boolean`. Called when a client tries to subscribe to a matching topic. It receives the route params parsed from the topic. Return `true` to authorize, `false` to reject. This is where you run auth/permission checks — the [`Auth`](./facades.md) facade works here because gemi runs it inside the request context of the socket. The base implementation returns `true` (public channel).
+- **`publish(input)`** → the message payload. Called on the server each time you publish; its return value is serialized and delivered to every subscriber. Use it to shape/enrich the outgoing message. The base implementation returns `{}`.
+
+> **Note:** `subscribe` runs per subscription attempt, so keep it cheap. If you don't override it, the channel is public — any client can subscribe.
+
+## Registering channels
+
+Register your channels in `BroadcastingServiceProvider`, keyed by the topic route pattern. Extend it in `app/kernel/providers/BroadcastingServiceProvider.ts`:
+
+```typescript
+import { BroadcastingServiceProvider } from "gemi/services";
+import { ChatChannel } from "@/app/broadcasting/ChatChannel";
+
+export default class extends BroadcastingServiceProvider {
+  channels = {
+    "/chat/:roomId": ChatChannel,
+  };
+}
+```
+
+The key is the topic pattern; the value is the channel class. When a client subscribes to `/chat/42`, gemi matches it against the registered patterns (shortest pattern first), extracts `{ roomId: "42" }`, instantiates the channel, and calls `subscribe({ roomId: "42" })` to authorize.
+
+> **Note:** Register the provider in your kernel like the other service providers (see [Project Structure](./project-structure.md) and [Configuration](./configuration.md)).
+
+## Publishing from the server
+
+Use the [`Broadcast`](./facades.md) facade to publish to a channel from a controller, job, or any server code:
+
+```typescript
+import { Broadcast } from "gemi/facades";
+
+Broadcast.channel("/chat/:roomId", { roomId }).publish({
+  text: "hello",
+  userId: user.id,
+});
+```
+
+- `Broadcast.channel(route, params)` resolves the registered channel for `route`, applies `params` to build the concrete topic, and returns a handle.
+- `handle.publish(data, compress?)` runs the channel's `publish(data)` transform, then delivers `{ topic, data }` to every subscriber. Pass `compress: true` (default `false`) to enable per-message compression.
+
+If no channel is registered for `route`, `Broadcast.channel` logs an error and returns a no-op `publish`, so a missing registration fails quietly rather than throwing.
+
+## Subscribing from the client
+
+Use `useSubscription` from `gemi/client` to receive messages in a component:
+
+```tsx
+import { useState } from "react";
+import { useSubscription } from "gemi/client";
+
+function ChatRoom({ roomId }: { roomId: string }) {
+  const [messages, setMessages] = useState<any[]>([]);
+
+  useSubscription("/chat/:roomId", {
+    params: { roomId },
+    cb: (data) => setMessages((prev) => [...prev, data]),
+  });
+
+  return (
+    <ul>
+      {messages.map((m, i) => (
+        <li key={i}>{m.text}</li>
+      ))}
+    </ul>
+  );
+}
+```
+
+`useSubscription(route, { params, cb })`:
+
+- `route` — the channel's topic pattern (same string you registered).
+- `params` — values for the pattern's `:params`, used to build the concrete topic to subscribe to.
+- `cb(data)` — called for each message whose topic matches; `data` is the payload your channel's `publish` returned.
+
+The hook subscribes on mount and unsubscribes on unmount (and re-subscribes when the resolved topic changes).
+
+## Broadcasting from the client
+
+`useBroadcast` returns a function that sends a payload straight to a topic from the browser (client-to-client relay, without going through a server-side channel transform):
+
+```tsx
+import { useBroadcast } from "gemi/client";
+
+function Typing({ roomId }: { roomId: string }) {
+  const broadcast = useBroadcast("/chat/:roomId", { params: { roomId } });
+
+  return (
+    <input
+      onFocus={() => broadcast({ typing: true })}
+      onBlur={() => broadcast({ typing: false })}
+    />
+  );
+}
+```
+
+`useBroadcast(path, { params })` returns `(payload) => void`. It applies `params` to `path` to build the topic and relays `payload` to everyone subscribed to that topic. Subscribers receive it through their `useSubscription` `cb` just like a server-published message.
+
+> **Note:** Server publishing (`Broadcast` facade) runs your channel's `publish` transform and is the right tool for authoritative events. `useBroadcast` is a lightweight client relay for ephemeral signals like typing/presence — it does not pass through the channel's `publish` method.
+
+## Related
+
+- [Facades](./facades.md) — the `Broadcast` and `Auth` facades used above.
+- [Data Fetching](./data-fetching.md) — `useQuery` for request/response data.
+- [Configuration](./configuration.md) — registering service providers.
+
+
+---
+
+## Internationalization (i18n)
+
+gemi's i18n is built around **component-scoped dictionaries**. Instead of one giant global namespace, each component (page, panel, form, email) gets its own `Dictionary` of keyed strings, and gemi prefetches only the dictionaries a route actually needs. Locale detection, translation, and the client hooks all build on these dictionaries.
+
+## Dictionaries
+
+Create a dictionary with `Dictionary.create` from `gemi/i18n`. Each entry is a key mapping to a per-locale string:
+
+```typescript
+// app/i18n/HomePage.ts
+import { Dictionary } from "gemi/i18n";
+
+export const HomePage = Dictionary.create("HomePage", {
+  title: {
+    "en-US": "Welcome to Gemi {{version}}",
+    "tr-TR": "Gemi'ye Hoş Geldiniz {{version}}",
+  },
+  description: {
+    "en-US": "A simple and fast framework for building web applications.",
+    "tr-TR": "Web uygulamaları oluşturmak için basit ve hızlı bir çerçeve.",
+  },
+});
+```
+
+`Dictionary.create(name, translations)`:
+
+- `name` — a unique dictionary name (matches the component it serves). It becomes the key you pass to `useTranslator` on the client.
+- `translations` — `{ [key]: { [locale]: string } }`. Every key holds a map from locale code (e.g. `"en-US"`) to the translated string.
+
+### Interpolation
+
+Strings support `{{param}}` placeholders, filled in at render time:
+
+```typescript
+title: {
+  "en-US": "Welcome to Gemi {{version}}",
+}
+```
+
+```tsx
+t("title", { version: "1.0" }); // "Welcome to Gemi 1.0"
+```
+
+Placeholders also support **type casting** with `{{param:type}}` (`number`, `string`, `boolean`):
+
+```typescript
+"en-US": "You have {{count:number}} items";
+```
+
+And **interpolated content** with `{{param:[content]}}`, where the param is a function that receives the bracketed content — this is how you embed JSX (links, bold text) inside a translation:
+
+```tsx
+// "Read our {{terms:[terms of service]}} to continue"
+t.jsx("notice", {
+  terms: (label) => <a href="/terms">{label}</a>,
+});
+```
+
+> **Note:** gemi has no dedicated pluralization API. Handle plurals with a `{{count:number}}` placeholder plus wording, a function param, or separate keys per plural form.
+
+## Collecting dictionaries
+
+Gather every dictionary in `app/i18n/index.ts` and export them as a single object:
+
+```typescript
+// app/i18n/index.ts
+import { HomePage } from "./HomePage";
+import { About } from "./About";
+import { Footer } from "./Footer";
+import { Header } from "./Header";
+
+export default { HomePage, About, Footer, Header };
+```
+
+Small apps can define the dictionaries inline in `index.ts`; larger apps (like production `folio`, with 7 locales — en/tr/de/it/fr/es/ru) keep one file per component (`app/i18n/<Component>.ts`) and collect them here.
+
+## Prefetching per route
+
+Register your dictionaries and locale config in `I18nServiceProvider`. This is where you tell gemi which dictionaries each route needs so they can be sent with the initial render:
+
+```typescript
+// app/kernel/providers/I18nServiceProvider.ts
+import { I18nServiceProvider } from "gemi/i18n";
+import type { HttpRequest } from "gemi/http";
+import components from "@/app/i18n";
+
+export default class extends I18nServiceProvider {
+  defaultLocale = "en-US";
+  supportedLocales = ["en-US", "tr-TR"];
+
+  prefetch = {
+    "/": [components.HomePage],
+    "/about": [components.About],
+  };
+
+  detectLocale(req: HttpRequest) {
+    return req.cookies.get("i18n-locale") ?? null;
+  }
+
+  onLocaleChange(locale: string) {
+    console.log(`Locale changed to ${locale}`);
+  }
+}
+```
+
+Configuration fields:
+
+- **`defaultLocale`** — fallback locale (default `"en-US"`).
+- **`supportedLocales`** — `string[]` of accepted locale codes. A requested locale outside this list falls back to `defaultLocale`.
+- **`prefetch`** — `Record<routePattern, Dictionary[]>`. Maps each route pattern to the dictionaries needed to render it; only these are shipped for that route. A route commonly lists shared dictionaries (`Header`, `Footer`) plus its own.
+- **`detectLocale(req)`** — resolve the locale for a request. Return a locale string or `null` to fall back. A typical implementation reads the `i18n-locale` cookie, then the `x-locale`/`accept-language` headers.
+- **`onLocaleChange(locale)`** — hook called when the active locale changes.
+
+## Client usage
+
+### `useTranslator`
+
+`useTranslator(componentName)` returns a translator `t` bound to that component's dictionary and the current locale:
+
+```tsx
+import { useTranslator } from "gemi/client";
+
+function HomePage() {
+  const t = useTranslator("HomePage");
+
+  return (
+    <div>
+      <h1>{t("title", { version: "1.0" })}</h1>
+      <p>{t("description")}</p>
+    </div>
+  );
+}
+```
+
+- `t(key, params?)` — returns the translated string for `key` in the current locale, with `params` interpolated. Params are required only when the string has placeholders.
+- `t.jsx(key, params?)` — same, but typed to return a JSX element (use it when a param renders JSX, e.g. an embedded link).
+
+If a translation can't be resolved, `t` logs a warning and returns the key itself, so the UI degrades gracefully rather than crashing.
+
+### `useLocale`
+
+`useLocale()` returns the current locale and a setter:
+
+```tsx
+import { useLocale } from "gemi/client";
+
+function LocaleSwitcher() {
+  const [locale, setLocale] = useLocale();
+
+  return (
+    <select value={locale} onChange={(e) => setLocale(e.target.value)}>
+      <option value="en-US">English</option>
+      <option value="tr-TR">Türkçe</option>
+    </select>
+  );
+}
+```
+
+`setLocale(locale)` persists the choice in the `i18n-locale` cookie and re-navigates so the new locale's dictionaries load.
+
+## Server-side translation
+
+### `I18n` facade
+
+Use the [`I18n`](./facades.md) facade to read the request's locale on the server:
+
+```typescript
+import { I18n } from "gemi/facades";
+
+const locale = I18n.locale(); // active locale for this request
+I18n.getDefaultLocale();
+I18n.getSupportedLocales();
+```
+
+### `Dictionary.text` and `Dictionary` render helpers
+
+For strings that live on the server (validation messages, emails, generated content), translate inline without a client dictionary:
+
+```typescript
+import { Dictionary } from "gemi/i18n";
+
+// Inline locale map -> string in the current (or given) locale
+const message = Dictionary.text({
+  "en-US": "Slot name is required",
+  "tr-TR": "Slot adı gereklidir",
+});
+```
+
+`Dictionary.text(content, args?)` picks `content[locale]` (defaulting to `I18n.locale()`), interpolating `args.params`. This is common in `HttpRequest` validation schemas:
+
+```typescript
+class CreateSlotRequest extends HttpRequest<CreateSlotInput> {
+  schema = {
+    name: {
+      required: Dictionary.text({
+        "en-US": "Slot name is required",
+        "tr-TR": "Slot adı gereklidir",
+      }),
+    },
+  };
+}
+```
+
+An instance dictionary also offers **server-only** helpers:
+
+- `dictionary.render(key, { locale?, params? })` — resolve a single key to a string in the given (or current) locale, with interpolation.
+- `dictionary.reference(key)` — return the full per-locale map for a key.
+
+> **Note:** `render` and `reference` throw if called in the browser — they are server-only. On the client, use `useTranslator`.
+
+### App-level translation services (`Translation.transform`)
+
+Some apps translate **database content** (product names, descriptions) rather than static UI strings. In production `folio` this is done with an app service — `import { Translation } from "@/app/services/TranslationService"` — exposing `Translation.transform(records, locale)` to batch-translate a payload before returning it from a controller:
+
+```typescript
+// App-specific service, NOT a gemi facade
+import { Translation } from "@/app/services/TranslationService";
+
+return await Translation.transform(stores, req.locale());
+```
+
+> **Note:** `Translation`/`Translation.transform` is **application code**, not part of the gemi framework. There is no `Translation` facade in `gemi/facades`. If you need batch translation of dynamic data, build your own service — gemi provides the per-request locale (`I18n.locale()` / `req.locale()`) and the dictionary primitives above.
+
+## Locale in emails
+
+Emails render outside the browser, so pass the resolved locale into the email component explicitly and use it to select strings (via `Dictionary.text` or a plain locale switch):
+
+```tsx
+import { I18n } from "gemi/facades";
+
+// When dispatching the email
+sendPinEmail({ locale: I18n.locale(), pin });
+
+// Inside the email component
+function PinEmail({ locale, pin }: { locale: string; pin: string }) {
+  const heading = locale === "tr-TR" ? "Giriş kodunuz" : "Your login code";
+  return <Layout locale={locale}>{heading}: {pin}</Layout>;
+}
+```
+
+See [Email](./email.md) for building and sending emails.
+
+## Related
+
+- [Facades](./facades.md) — the `I18n` facade.
+- [Views & Layouts](./views-and-layouts.md) — rendering translated views.
+- [Configuration](./configuration.md) — registering `I18nServiceProvider`.
+- [Email](./email.md) — localized emails.
+
