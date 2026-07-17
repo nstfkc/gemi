@@ -16,7 +16,7 @@
     "broadcasting",
     "client",
     "i18n",
-    "server2"
+    "server"
   ],
   "exclude": ["node_modules", "dist"]
 }

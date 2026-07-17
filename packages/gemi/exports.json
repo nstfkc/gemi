@@ -10,7 +10,11 @@
     "./kernel": "./kernel/index.ts",
     "./services": "./services/index.ts",
     "./broadcasting": "./broadcasting/index.ts",
-    "./i18n": "./i18n/index.ts"
+    "./i18n": "./i18n/index.ts",
+    "./server": "./server/index.ts",
+    "./config": "./config/index.ts",
+    "./bun/preload": "./bun/preload.ts",
+    "./bun/plugin": "./bun/plugin.ts"
   },
   "prod": {
     "./http": "./dist/http/index.js",
@@ -22,6 +26,11 @@
     "./runtime": "./dist/runtime/index.js",
     "./kernel": "./dist/kernel/index.js",
     "./services": "./dist/services/index.js",
-    "./i18n": "./dist/i18n/index.js"
+    "./broadcasting": "./dist/broadcasting/index.js",
+    "./i18n": "./dist/i18n/index.js",
+    "./server": "./dist/server/index.js",
+    "./config": "./dist/config/index.js",
+    "./bun/preload": "./dist/bun/preload.js",
+    "./bun/plugin": "./dist/bun/plugin.js"
   }
 }

@@ -8,7 +8,7 @@
 // view imports of `gemi/*` resolve to the one Bun-loaded instance.
 //
 // Two consumers, two forms:
-//   - dev (`server2/httpDev.ts`): Vite's `ssr.external` matches EXACT specifiers
+//   - dev (`server/httpDev.ts`): Vite's `ssr.external` matches EXACT specifiers
 //     only (subpaths are not covered by the bare name, regexes are ignored), so
 //     it needs the enumerated list below. When you add a `gemi/*` export that a
 //     view may import, add it here too or dev SSR will silently bundle a copy.

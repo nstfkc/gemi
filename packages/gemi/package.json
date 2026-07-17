@@ -23,10 +23,10 @@
     "./services": "./services/index.ts",
     "./broadcasting": "./broadcasting/index.ts",
     "./i18n": "./i18n/index.ts",
-    "./server": "./server2/index.ts",
-    "./bun/plugin": "./bun/plugin.ts",
+    "./server": "./server/index.ts",
+    "./config": "./config/index.ts",
     "./bun/preload": "./bun/preload.ts",
-    "./config": "./config/index.ts"
+    "./bun/plugin": "./bun/plugin.ts"
   },
   "scripts": {
     "lint": "oxlint",
