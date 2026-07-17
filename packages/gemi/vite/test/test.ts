@@ -1,4 +1,4 @@
-import { customRequestParser } from "../customRequestParser";
+import { customRequestParser } from "../../bun/customRequestParser";
 
 const orgFile = await Bun.file(__dirname + "/ApiRouter.ts").text();
 

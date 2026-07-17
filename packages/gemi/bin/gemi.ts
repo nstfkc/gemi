@@ -3,6 +3,7 @@ import { $ } from "bun";
 import path from "node:path";
 import createRollupInput from "./createRollupInput";
 import { loadApp } from "./loadApp";
+import { gemiPlugin } from "../bun/plugin";
 import { build } from "vite";
 
 import { program } from "commander";
@@ -14,7 +15,19 @@ program.command("dev").action(async () => {
   const appDir = path.join(rootDir, "app");
   process.env.NODE_ENV = "development";
   Bun.spawn({
-    cmd: ["bun", "--hot", "--no-clear-screen", `${path.join(appDir, "server.ts")}`],
+    cmd: [
+      "bun",
+      "--hot",
+      "--no-clear-screen",
+      // Register the gemi custom-request transform as a runtime plugin before
+      // app code loads, so controllers/routes imported by the dev server get
+      // their typed `Request` params default-instantiated (see bun/plugin.ts).
+      // Resolved from the app's node_modules via gemi's export map, so it tracks
+      // the linked source in dev and the published build in prod.
+      "--preload",
+      "gemi/bun/preload",
+      `${path.join(appDir, "server.ts")}`,
+    ],
     stdout: "inherit",
     stderr: "inherit",
   });
@@ -52,6 +65,12 @@ program.command("build").action(async () => {
     naming: "[name].mjs",
     target: "bun",
     minify: true,
+    // Apply the custom-request transform to any controllers/routes that end up
+    // bundled into the server entry. With `packages: "external"` the app's own
+    // code (imported via `@/app/*`) is currently kept external and transformed at
+    // runtime by the `--preload` plugin in `start` instead — so this only fires
+    // if app code is ever bundled here. Kept as a safety net for that case.
+    plugins: [gemiPlugin()],
     // Keep everything in node_modules external — resolved at runtime from the
     // app's node_modules. This avoids bundling native/dev-only deps (sharp,
     // prisma's engine, vite/rolldown) that break or bloat the server bundle.
@@ -80,7 +99,19 @@ program.command("start").action(async () => {
   // same as the `dev` command.
   const rootDir = path.resolve(process.cwd());
   const proc = Bun.spawn({
-    cmd: ["bun", `${rootDir}/dist/server/server.mjs`],
+    cmd: [
+      "bun",
+      // The built `server.mjs` is a thin bootstrap: `packages: "external"` keeps
+      // the app's own code (imported via the non-relative `@/app/*` alias) out of
+      // the bundle, so controllers/routes are resolved from source and run by Bun
+      // at runtime — exactly like dev. So the custom-request transform must run at
+      // runtime here too: register it via `--preload` before the server loads
+      // (same plugin as `dev`), otherwise handler `req` params stay undefined
+      // (`req.input is not a function`).
+      "--preload",
+      "gemi/bun/preload",
+      `${rootDir}/dist/server/server.mjs`,
+    ],
     stdout: "inherit",
     stderr: "inherit",
     env: { ...process.env, NODE_ENV: "production" },
