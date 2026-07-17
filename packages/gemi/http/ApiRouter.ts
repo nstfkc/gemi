@@ -78,7 +78,7 @@ export class ProxyHandler {
     return fetch(this.url, {
       method: req.rawRequest.method,
       headers: {
-        ...Object.fromEntries(req.headers),
+        ...req.headers.toJSON(),
         ...this.headers,
       },
       body: req.rawRequest.body,
@@ -120,6 +120,45 @@ export type ResourceRoutes<T extends new () => ResourceController> = {
     delete: ParseRouteHandler<T, TestControllerMethod<T, "delete">, "DELETE">;
   };
 };
+
+export type ResourceMethod = "list" | "store" | "show" | "update" | "delete";
+
+export type ResourceMiddlewareConfig = Partial<Record<ResourceMethod, string[]>>;
+
+// The value stored in `routes` for a resource. It carries the plain
+// `ResourceRoutes<T>` shape (so RouteParser keeps matching it exactly as
+// before) plus a fluent `.middleware()` for per-action middleware.
+export type ResourceRoute<T extends new () => ResourceController> = ResourceRoutes<T> & {
+  middleware(config: ResourceMiddlewareConfig): ResourceRoute<T>;
+};
+
+export class ResourceRouteHandlers<T extends new () => ResourceController> {
+  __internal_brand = "ResourceRoutes";
+
+  first: ResourceRoutes<T>["first"];
+  second: ResourceRoutes<T>["second"];
+
+  constructor(Controller: T) {
+    this.first = {
+      get: new RouteHandler("GET", Controller, "list") as any,
+      post: new RouteHandler("POST", Controller, "store") as any,
+    };
+    this.second = {
+      get: new RouteHandler("GET", Controller, "show") as any,
+      put: new RouteHandler("PUT", Controller, "update") as any,
+      delete: new RouteHandler("DELETE", Controller, "delete") as any,
+    };
+  }
+
+  middleware(config: ResourceMiddlewareConfig) {
+    if (config.list) this.first.get.middleware(config.list);
+    if (config.store) this.first.post.middleware(config.store);
+    if (config.show) this.second.get.middleware(config.show);
+    if (config.update) this.second.put.middleware(config.update);
+    if (config.delete) this.second.delete.middleware(config.delete);
+    return this;
+  }
+}
 
 export class ApiRouter {
   static __brand = "ApiRouter";
@@ -197,18 +236,8 @@ export class ApiRouter {
     return new RouteHandler("DELETE", handler, methodName);
   }
 
-  public resource<T extends new () => ResourceController>(Controller: T) {
-    return {
-      first: {
-        get: new RouteHandler("GET", Controller, "list"),
-        post: new RouteHandler("POST", Controller, "store"),
-      },
-      second: {
-        get: new RouteHandler("GET", Controller, "show"),
-        put: new RouteHandler("PUT", Controller, "update"),
-        delete: new RouteHandler("DELETE", Controller, "delete"),
-      },
-    } as ResourceRoutes<T>;
+  public resource<T extends new () => ResourceController>(Controller: T): ResourceRoute<T> {
+    return new ResourceRouteHandlers(Controller) as unknown as ResourceRoute<T>;
   }
 
   public file<Input, Output, Params>(handler: CallbackHandler<Input, Output, Params>): FileHandler;

@@ -8,3 +8,4 @@ export { Url } from "./Url";
 export { Log } from "./Log";
 export { Meta } from "./Meta";
 export { Cookie } from "./Cookie";
+export { Redis } from "./Redis";

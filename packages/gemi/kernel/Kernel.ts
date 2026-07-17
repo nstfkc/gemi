@@ -27,8 +27,10 @@ import { CronServiceProvider } from "../services/cron/CronServiceProvider";
 import { CronServiceContainer } from "../services/cron/CronServiceContainer";
 import { KernelIdServiceProvider } from "../services/kernel-id/KernelIdServiceProvider";
 import { KernelIdServiceContainer } from "../services/kernel-id/KernelIdServiceContainer";
-import { CustomServiceContainer } from "../services/custom-service/CustomServiceContainer";
-import { CustomServiceProvider } from "../services/custom-service/CustomServiceProvider";
+import { SingletonServiceContainer } from "../services/singleton/SingletonServiceContainer";
+import { SingletonServiceProvider } from "../services/singleton/SingletonServiceProvider";
+import { RedisServiceProvider } from "../services/redis/RedisServiceProvider";
+import { RedisServiceContainer } from "../services/redis/RedisServiceContainer";
 
 export class Kernel {
   protected emailServiceProvider = EmailServiceProvider;
@@ -45,6 +47,7 @@ export class Kernel {
   protected imageServiceProvider = ImageOptimizationServiceProvider;
   protected cronServiceProvider = CronServiceProvider;
   protected kernelIdServiceProvider = KernelIdServiceProvider;
+  protected redisServiceProvider = RedisServiceProvider;
 
   services: Record<string, ServiceContainer> = {};
   private booted = false;
@@ -93,8 +96,11 @@ export class Kernel {
       [KernelIdServiceContainer._name]: new KernelIdServiceContainer(
         new this.kernelIdServiceProvider(),
       ),
-      [CustomServiceContainer._name]: new CustomServiceContainer(
-        new CustomServiceProvider(),
+      [RedisServiceContainer._name]: new RedisServiceContainer(
+        new this.redisServiceProvider(),
+      ),
+      [SingletonServiceContainer._name]: new SingletonServiceContainer(
+        new SingletonServiceProvider(),
       ),
     };
     this.booted = true;

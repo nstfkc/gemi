@@ -1,4 +1,4 @@
-import { TOAuth2Scope, TwitterApi } from "twitter-api-v2";
+import { type TOAuth2Scope, TwitterApi } from "twitter-api-v2";
 import { Redirect } from "../../facades/Redirect";
 import { HttpRequest } from "../../http/HttpRequest";
 import { OAuthProvider } from "./OAuthProvider";

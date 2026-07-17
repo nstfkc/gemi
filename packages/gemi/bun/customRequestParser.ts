@@ -6,25 +6,25 @@ export async function customRequestParser(original: string) {
     return (
       (body.type === "ExportNamedDeclaration" ||
         body.type === "ExportDefaultDeclaration") &&
-      body.declaration.type === "ClassDeclaration" &&
-      (body.declaration.superClass.name === "Controller" ||
-        body.declaration.superClass.name === "ResourceController")
+      body.declaration?.type === "ClassDeclaration" &&
+      (body.declaration.superClass?.name === "Controller" ||
+        body.declaration.superClass?.name === "ResourceController")
     );
   }
 
   function isController(body: any) {
     return (
       body.type === "ClassDeclaration" &&
-      (body.superClass.name === "Controller" ||
-        body.superClass.name === "ResourceController")
+      (body.superClass?.name === "Controller" ||
+        body.superClass?.name === "ResourceController")
     );
   }
 
   function isRouterClassDeclaration(body: any) {
     return (
       body.type === "ClassDeclaration" &&
-      (body.superClass.name === "ApiRouter" ||
-        body.superClass.name === "ViewRouter")
+      (body.superClass?.name === "ApiRouter" ||
+        body.superClass?.name === "ViewRouter")
     );
   }
 
@@ -32,9 +32,9 @@ export async function customRequestParser(original: string) {
     return (
       (body.type === "ExportNamedDeclaration" ||
         body.type === "ExportDefaultDeclaration") &&
-      body.declaration.type === "ClassDeclaration" &&
-      (body.declaration.superClass.name === "ApiRouter" ||
-        body.declaration.superClass.name === "ViewRouter")
+      body.declaration?.type === "ClassDeclaration" &&
+      (body.declaration.superClass?.name === "ApiRouter" ||
+        body.declaration.superClass?.name === "ViewRouter")
     );
   }
 
@@ -153,5 +153,5 @@ export async function customRequestParser(original: string) {
       continue;
     }
   }
-  return print(orgFile).code.replace('type HttpRequest', 'HttpRequest');
+  return print(orgFile).code.replace("type HttpRequest", "HttpRequest");
 }

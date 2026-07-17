@@ -3,7 +3,6 @@
   "compilerOptions": {
     "outDir": "dist",
     "emitDeclarationOnly": true,
-    "moduleResolution": "nodenext",
     "downlevelIteration": true
   },
   "include": [
@@ -16,7 +15,8 @@
     "services",
     "broadcasting",
     "client",
-    "i18n"
+    "i18n",
+    "server2"
   ],
   "exclude": ["node_modules", "dist"]
 }

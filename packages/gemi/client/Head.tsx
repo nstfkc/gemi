@@ -93,6 +93,15 @@ export const Head = ({
     <head>
       <meta charSet={charSet} />
       <meta name="viewport" content="width=device-width, initial-scale=1" />
+      {/*
+        Disable browser auto-translation (Chrome/Google Translate). Gemi apps do
+        their own i18n, and a translator that rewrites text nodes *before* React
+        hydrates mutates the SSR DOM — which React rejects as a hydration
+        mismatch (Minified React error #418) and then regenerates the tree,
+        dropping the server-injected <style> and leaving the page unstyled.
+        Pair this with `translate="no"` on the <html> element in RootLayout.
+      */}
+      <meta name="google" content="notranslate" />
       <title>{meta?.title}</title>
       {meta?.description && (
         <meta name="description" content={meta.description} />

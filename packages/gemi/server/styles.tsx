@@ -1,3 +1,4 @@
+import { createElement } from "react";
 import { ModuleNode, type ViteDevServer } from "vite";
 
 function replaceStrings(text: string, record: Record<string, string>): string {
@@ -36,8 +37,7 @@ export async function createDevStyles(
     if (mod) {
       for (const imported of mod.importedModules) {
         if (imported.file.includes("module.css")) {
-          cssModuleContent[imported.file] =
-            imported.ssrTransformResult.map.sourcesContent.join("");
+          cssModuleContent[imported.file] = imported.ssrTransformResult.map.sourcesContent.join("");
         }
         if (imported.file.includes(".css")) {
           cssModules.push(imported.file);
@@ -54,10 +54,7 @@ export async function createDevStyles(
     let transformedCssModule = "";
 
     if (isCssModule) {
-      transformedCssModule = replaceStrings(
-        cssModuleContent[cssModulePath],
-        transform.default,
-      );
+      transformedCssModule = replaceStrings(cssModuleContent[cssModulePath], transform.default);
     }
 
     styles.push({
@@ -68,20 +65,22 @@ export async function createDevStyles(
   }
 
   return styles.map((style, i) => {
-    return (
-      <style key={i} type="text/css" data-vite-dev-id={style.id}>
-        {style.content}
-      </style>
-    );
+    return createElement("style", {
+      key: i,
+      type: "text/css",
+      "data-vite-dev-id": style.id,
+      dangerouslySetInnerHTML: { __html: style.content },
+    });
   });
 }
 
 export async function createStyles(styles = []) {
   return styles.map((style, i) => {
-    return (
-      <style key={i} id={style?.id} type="text/css">
-        {style.content}
-      </style>
-    );
+    return createElement("style", {
+      key: i,
+      id: style?.id,
+      type: "text/css",
+      dangerouslySetInnerHTML: { __html: style.content },
+    });
   });
 }

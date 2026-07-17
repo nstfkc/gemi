@@ -13,6 +13,14 @@ export const HttpReload = () => {
   const [reloading, setReloading] = useState(false);
 
   const handleReload = () => {
+    // The server recovered, so dismiss any Vite error overlay left on the page
+    // (each element exposes a `close()` that also tears down its listeners).
+    if (typeof document !== "undefined") {
+      document.querySelectorAll("vite-error-overlay").forEach((el: any) => {
+        if (typeof el.close === "function") el.close();
+        else el.remove();
+      });
+    }
     setReloading(true);
     // replace(pathname, {
     //   params: params,

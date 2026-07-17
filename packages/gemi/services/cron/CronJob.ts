@@ -1,4 +1,16 @@
-import type { CronExpression } from "cronbake";
+// A cron expression accepted by `Bun.cron`: a 5-field expression
+// (`minute hour day-of-month month day-of-week`, interpreted in UTC) or one of
+// the nicknames below. The `string & {}` member keeps arbitrary expressions
+// assignable while still surfacing the nicknames in editor autocomplete.
+export type CronExpression =
+  | "@yearly"
+  | "@annually"
+  | "@monthly"
+  | "@weekly"
+  | "@daily"
+  | "@midnight"
+  | "@hourly"
+  | (string & {});
 
 export class CronJob {
   name: string;

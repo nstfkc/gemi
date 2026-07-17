@@ -2,11 +2,7 @@
 export { FileStorageServiceProvider } from "./file-storage/FileStorageServiceProvider";
 export { FileSystemDriver } from "./file-storage/drivers/FileSystemDriver";
 export { S3Driver } from "./file-storage/drivers/S3Driver";
-export type {
-  FileMetadata,
-  PutFileParams,
-  ReadFileParams,
-} from "./file-storage/drivers/types";
+export type { FileMetadata, PutFileParams, ReadFileParams } from "./file-storage/drivers/types";
 export { FileStorageDriver } from "./file-storage/drivers/FileStorageDriver";
 
 // Ratelimiter
@@ -39,10 +35,7 @@ export { Job } from "./queue/Job";
 
 // Image optimization
 export { ImageOptimizationServiceProvider } from "./image-optimization/ImageOptimizationServiceProvider";
-export type {
-  FitEnum,
-  ResizeParameters,
-} from "./image-optimization/drivers/types";
+export type { FitEnum, ResizeParameters } from "./image-optimization/drivers/types";
 export { ImageOptimizationDriver } from "./image-optimization/drivers/ImageOptimizationDriver";
 export { Sharp } from "./image-optimization/drivers/SharpDriver";
 
@@ -55,5 +48,7 @@ export { OAuthProvider } from "../auth/oauth/OAuthProvider";
 export { CronServiceProvider } from "./cron/CronServiceProvider";
 export { CronJob } from "./cron/CronJob";
 
-// Injectable
-export { Service } from "./Injectable";
+// Redis
+export { RedisServiceProvider } from "./redis/RedisServiceProvider";
+
+export { Singleton } from "./Singleton";

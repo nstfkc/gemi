@@ -1,30 +1,29 @@
-import { Controller } from "gemi/http";
-import { Service } from "gemi/services";
+import { Controller, HttpRequest } from "gemi/http";
 
-class Bar extends Service {
-  bar() {
-    console.log("bar");
-  }
-}
-
-class Foo extends Service {
-  constructor(private bar = Bar.inject()) {
-    super();
-  }
-
-  foo() {
-    console.log("foo");
-    this.bar.bar();
-  }
+class CustomHttpRequest extends HttpRequest {
+  schema = {
+    name: {
+      required: "Name is required",
+    },
+    email: {
+      required: "Email is required",
+      email: "Email must be valid",
+    },
+  };
 }
 
 export class HomeController extends Controller {
-  constructor(private foo = Foo.inject()) {
-    super();
+  async index() {
+    return {
+      message: "Hello from HomeController 1",
+    };
   }
 
-  async index() {
-    this.foo.foo();
-    return {};
+  async post(req: CustomHttpRequest) {
+    const input = await req.input();
+    const data = input.toJSON();
+    return {
+      data,
+    };
   }
 }

@@ -26,6 +26,7 @@ export default class extends ApiRouter {
   routes = {
     "/org": OrgRouter,
     "/test": this.get(HomeController, "index"),
+    "/home": this.post(HomeController, "post"),
     "/upload": this.post(async (req: HttpRequest<{ file: File | File[] }>) => {
       const input = await req.input();
       const file = input.get("file");
