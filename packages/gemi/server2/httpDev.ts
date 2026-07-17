@@ -9,6 +9,7 @@ import { createDevStyles } from "./styles";
 import { renderErrorPage } from "./renderErrorPage";
 import { Instrumentation } from "./types";
 import { printStartupBanner } from "./banner";
+import { GEMI_EXTERNAL_SPECIFIERS } from "../internal/gemiExternals";
 
 // Run a Web `Request` through Vite's Connect middleware.
 // Resolves to a `Response` when Vite handles the request (module transforms,
@@ -182,21 +183,10 @@ export async function httpDev(app: App, instrumentation: Instrumentation) {
     // Externalizing makes view imports of `gemi/*` resolve to the one Bun
     // instance. Vite's `ssr.external` matches exact specifiers (subpaths are NOT
     // covered by the bare name, and regexes are ignored here), so every subpath
-    // a view might import must be listed.
+    // a view might import must be listed — see `internal/gemiExternals`, the
+    // shared source of truth this and the SSR build (`vite/index.ts`) both use.
     ssr: {
-      external: [
-        "gemi",
-        "gemi/client",
-        "gemi/http",
-        "gemi/app",
-        "gemi/facades",
-        "gemi/email",
-        "gemi/runtime",
-        "gemi/kernel",
-        "gemi/services",
-        "gemi/broadcasting",
-        "gemi/i18n",
-      ],
+      external: [...GEMI_EXTERNAL_SPECIFIERS],
     },
   }));
 

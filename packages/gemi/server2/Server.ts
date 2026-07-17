@@ -30,8 +30,4 @@ export class Server {
       await httpDev(this.app, this.instrumentation.bind(this));
     }
   }
-
-  static app() {
-    return this.app;
-  }
 }

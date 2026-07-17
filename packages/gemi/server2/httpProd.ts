@@ -56,8 +56,15 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
 
   const loaders = `{${templates.join(",")}}`;
 
-  const appCssFile = Bun.file(`${distDir}/client/${manifest["app/client.tsx"].css}`);
-  const appCSSContent = await appCssFile.text();
+  // Vite's manifest `css` field is a `string[]` — a client entry can emit more
+  // than one CSS chunk. Read and concatenate them all instead of interpolating
+  // the array into a single path (which only works for a one-element array).
+  const appCssFiles: string[] = manifest["app/client.tsx"]?.css ?? [];
+  const appCSSContent = (
+    await Promise.all(
+      appCssFiles.map((cssFile) => Bun.file(`${distDir}/client/${cssFile}`).text()),
+    )
+  ).join("\n");
 
   async function requestHandler(req: Request) {
     const { pathname } = new URL(req.url);
@@ -160,8 +167,10 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
     maxRequestBodySize: 10 * 1024 * 1024 * 1024, // 10 GB
     fetch: async (req, server) => {
       if (!req.headers.get("x-forwarded-for")) {
+        // `requestIP` is null for closed/unix sockets — guard so it never
+        // throws before the request is handled.
         const ip = server.requestIP(req);
-        req.headers.set("x-forwarded-for", ip.address);
+        if (ip) req.headers.set("x-forwarded-for", ip.address);
       }
       return await instrumentation(req, requestHandler);
     },

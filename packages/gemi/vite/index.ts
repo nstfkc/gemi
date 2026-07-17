@@ -1,5 +1,6 @@
 import type { PluginOption } from "vite";
 import { loadGemiConfig } from "../config/load";
+import { isGemiExternal } from "../internal/gemiExternals";
 
 // Async so it can load `gemi.config.ts` before returning the plugin list. The
 // build runs Vite under `bun --bun` and dev under `bun --hot`, so the config's
@@ -36,13 +37,9 @@ const gemi = async (): Promise<PluginOption[]> => {
               // built view chunks `import ... from "gemi/*"` at runtime, resolving
               // to the one instance shared with the renderer. (Vite 8's
               // `ssr.external` does not externalize for the build, so this is done
-              // at the rollup level.) Mirrors `server2/httpDev.ts`'s dev config.
-              ...(env.isSsrBuild
-                ? {
-                    external: (id: string) =>
-                      id === "gemi" || id.startsWith("gemi/"),
-                  }
-                : {}),
+              // at the rollup level.) Mirrors `server2/httpDev.ts`'s dev config
+              // via the shared `internal/gemiExternals` source of truth.
+              ...(env.isSsrBuild ? { external: isGemiExternal } : {}),
             },
           },
           resolve: {
