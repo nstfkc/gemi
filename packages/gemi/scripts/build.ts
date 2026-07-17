@@ -18,6 +18,7 @@ const result = await Bun.build({
     "./i18n/index.ts",
     "./bun/plugin.ts",
     "./bun/preload.ts",
+    "./config/index.ts",
   ],
   outdir: "./dist",
   external: [

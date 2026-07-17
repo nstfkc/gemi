@@ -25,7 +25,8 @@
     "./i18n": "./i18n/index.ts",
     "./server": "./server2/index.ts",
     "./bun/plugin": "./bun/plugin.ts",
-    "./bun/preload": "./bun/preload.ts"
+    "./bun/preload": "./bun/preload.ts",
+    "./config": "./config/index.ts"
   },
   "scripts": {
     "lint": "oxlint",

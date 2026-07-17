@@ -1,6 +1,15 @@
 import type { PluginOption } from "vite";
+import { loadGemiConfig } from "../config/load";
 
-const gemi = (): PluginOption[] => {
+// Async so it can load `gemi.config.ts` before returning the plugin list. The
+// build runs Vite under `bun --bun` and dev under `bun --hot`, so the config's
+// TypeScript imports directly. Vite accepts a `Promise<PluginOption[]>` as an
+// entry in its `plugins` array, so `plugins: [react(), gemi()]` keeps working.
+const gemi = async (): Promise<PluginOption[]> => {
+  const userConfig = await loadGemiConfig(process.cwd());
+  const { plugins: userVitePlugins = [], ...userViteConfig } =
+    userConfig.vite ?? {};
+
   return [
     {
       name: "gemi-plugin-config",
@@ -41,6 +50,15 @@ const gemi = (): PluginOption[] => {
         };
       },
     },
+    // The app's `gemi.config.ts` `vite` config (minus `plugins`, which are
+    // appended below) as its own `config` hook. Vite deep-merges every plugin's
+    // `config` result, so the app config layers cleanly on top of gemi's base
+    // without a manual merge (and without pulling `vite`'s `mergeConfig` into
+    // this bundle).
+    {
+      name: "gemi-plugin-user-config",
+      config: () => userViteConfig,
+    },
     {
       name: "gemi-plugin-hot-reload",
       handleHotUpdate({ server, modules }) {
@@ -57,6 +75,8 @@ const gemi = (): PluginOption[] => {
         }
       },
     },
+    // App-provided Vite plugins run after gemi's own.
+    ...userVitePlugins,
   ];
 };
 

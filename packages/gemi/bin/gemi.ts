@@ -4,6 +4,7 @@ import path from "node:path";
 import createRollupInput from "./createRollupInput";
 import { loadApp } from "./loadApp";
 import { gemiPlugin } from "../bun/plugin";
+import { loadGemiConfig } from "../config/load";
 import { build } from "vite";
 
 import { program } from "commander";
@@ -38,11 +39,15 @@ program.command("build").action(async () => {
   const rootDir = path.resolve(process.cwd());
   const appDir = path.join(rootDir, "app");
 
+  const config = await loadGemiConfig(rootDir);
+
   const input = await createRollupInput(appDir);
 
   console.log("Building client...");
 
-  await $`GEMI_INPUT=${JSON.stringify(input)} vite build --outDir dist/client`;
+  // Run Vite under Bun (`bun --bun`) so the gemi Vite plugin can import the
+  // app's TypeScript `gemi.config.ts` directly (see `gemi/vite`).
+  await $`GEMI_INPUT=${JSON.stringify(input)} bun --bun vite build --outDir dist/client`;
 
   console.log("Building server...");
 
@@ -51,7 +56,7 @@ program.command("build").action(async () => {
   // `app/views/*.tsx` to its built server module. Uses the same `GEMI_INPUT`
   // entries and gemi vite plugin (`manifest: true`, `ssrEmitAssets: true`) as
   // the client build above — the two builds are mirror images.
-  await $`GEMI_INPUT=${JSON.stringify(input)} vite build --ssr --outDir dist/server`;
+  await $`GEMI_INPUT=${JSON.stringify(input)} bun --bun vite build --ssr --outDir dist/server`;
 
   // Runnable server entry. `start` imports `dist/server/server.mjs`, so emit
   // exactly that file. `packages: "external"` keeps node_modules deps (sharp,
@@ -65,12 +70,13 @@ program.command("build").action(async () => {
     naming: "[name].mjs",
     target: "bun",
     minify: true,
-    // Apply the custom-request transform to any controllers/routes that end up
-    // bundled into the server entry. With `packages: "external"` the app's own
-    // code (imported via `@/app/*`) is currently kept external and transformed at
-    // runtime by the `--preload` plugin in `start` instead — so this only fires
-    // if app code is ever bundled here. Kept as a safety net for that case.
-    plugins: [gemiPlugin()],
+    // Apply the custom-request transform (plus any app-declared Bun plugins from
+    // gemi.config.ts) to controllers/routes that end up bundled into the server
+    // entry. With `packages: "external"` the app's own code (imported via
+    // `@/app/*`) is currently kept external and transformed at runtime by the
+    // `--preload` plugin in `start` instead — so these only fire if app code is
+    // ever bundled here. Kept as a safety net for that case.
+    plugins: [gemiPlugin(), ...(config.bun?.plugins ?? [])],
     // Keep everything in node_modules external — resolved at runtime from the
     // app's node_modules. This avoids bundling native/dev-only deps (sharp,
     // prisma's engine, vite/rolldown) that break or bloat the server bundle.
