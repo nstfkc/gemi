@@ -1,6 +1,7 @@
 import { App } from "../app";
 import { Kernel } from "../kernel";
 import { Instrumentation } from "./types";
+import { watchEnv } from "./watchEnv";
 
 export class Server {
   private app: App;
@@ -21,6 +22,10 @@ export class Server {
       const { httpProd } = await import("./httpProd.js");
       await httpProd(this.app, this.instrumentation.bind(this));
     } else {
+      // Dev only: reload `.env` into process.env on change so config edits take
+      // effect without restarting the dev server (Bun reads `.env` only at
+      // startup, even under `--hot`).
+      watchEnv();
       const { httpDev } = await import("./httpDev.js");
       await httpDev(this.app, this.instrumentation.bind(this));
     }

@@ -144,7 +144,22 @@ export async function httpDev(app: App, instrumentation: Instrumentation) {
   // HMR socket) on each reload.
   const isReload = Boolean(globalThis.__gemiVite);
   const vite = (globalThis.__gemiVite ??= await createServer({
-    server: { middlewareMode: true },
+    server: {
+      middlewareMode: true,
+      // gemi reloads `.env` into process.env itself (see `watchEnv`). Stop Vite
+      // from *also* watching env files: Vite's env-change handler restarts the
+      // dev server, which closes the SSR module runner — but gemi keeps a single
+      // Vite instance across `bun --hot` reloads, so an in-flight `ssrLoadModule`
+      // hits the closed runner ("Vite module runner has been closed"). Ignoring
+      // env files here only disables the restart; env *loading* at startup (and
+      // `import.meta.env`) is unaffected.
+      watch: {
+        ignored: (file: string) => {
+          const base = file.split(/[/\\]/).pop() ?? "";
+          return base === ".env" || base.startsWith(".env.");
+        },
+      },
+    },
     appType: "custom",
     // Views are loaded through this SSR graph while the renderer
     // (react-dom/server in ViewRouterServiceContainer) is imported by Bun.
