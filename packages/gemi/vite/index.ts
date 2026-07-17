@@ -21,6 +21,9 @@ const gemi = async (): Promise<PluginOption[]> => {
           build: {
             manifest: true,
             ssrEmitAssets: true,
+            // Emit source maps for both the client and SSR view builds so
+            // browser devtools and server stack traces map back to app source.
+            sourcemap: true,
             rollupOptions: {
               input: Array.from(JSON.parse(process.env.GEMI_INPUT ?? "[]")),
               // For the SSR build, externalize `gemi` (a linked package) and all

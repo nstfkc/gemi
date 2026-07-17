@@ -98,6 +98,9 @@ program.command("build").action(async () => {
     naming: "[name].mjs",
     target: "bun",
     minify: true,
+    // Emit a linked `.map` (with a `sourceMappingURL` comment) so Bun maps
+    // production server stack traces back to the app's source.
+    sourcemap: "linked",
     // Apply the custom-request transform (plus any app-declared Bun plugins from
     // gemi.config.ts) to controllers/routes that end up bundled into the server
     // entry. With `packages: "external"` the app's own code (imported via

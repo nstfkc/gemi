@@ -62,7 +62,8 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
     const { pathname } = new URL(req.url);
 
     const pattern = new URLPattern({
-      pathname: "/*.:filetype(png|txt|js|css|jpg|svg|jpeg|avif|webp|ico|ttf)",
+      pathname:
+        "/*.:filetype(png|txt|js|css|jpg|svg|jpeg|avif|webp|ico|ttf|map)",
     });
 
     const isWellKnownFile = pathname.startsWith("/.well-known");
