@@ -46,6 +46,23 @@ program.command("dev").action(async () => {
 });
 
 program.command("build").action(async () => {
+  // Bun fixes its JSX transform (prod `jsx` vs dev `jsxDEV`) at process startup
+  // from NODE_ENV. `bun run build` starts without it, so the in-process
+  // `Bun.build` of the server entry would emit dev `jsxDEV` calls that are
+  // undefined in production react-dom and crash during SSR. Setting NODE_ENV
+  // here is too late — re-exec once in a fresh process that starts with
+  // NODE_ENV=production so the transform is correct from the start.
+  if (process.env.GEMI_BUILD_PROD !== "1") {
+    const proc = Bun.spawn({
+      cmd: ["bun", process.argv[1], "build"],
+      env: { ...process.env, NODE_ENV: "production", GEMI_BUILD_PROD: "1" },
+      stdout: "inherit",
+      stderr: "inherit",
+    });
+    await proc.exited;
+    process.exit(proc.exitCode ?? 0);
+  }
+
   process.env.NODE_ENV = "production";
   const rootDir = path.resolve(process.cwd());
   const appDir = path.join(rootDir, "app");
