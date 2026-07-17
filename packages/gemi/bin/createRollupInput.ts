@@ -1,25 +1,33 @@
-import type { ComponentTree } from "../client/types";
+import { Glob } from "bun";
 import { join } from "node:path";
-import { App } from "../app";
 
-import { flattenComponentTree } from "../client/helpers/flattenComponentTree";
-
+// The entry list for the Vite client + SSR builds (passed through as
+// GEMI_INPUT). Derived straight from the filesystem — the same view set
+// `app/client.tsx` registers via `import.meta.glob` — so the build no longer
+// needs to boot the app kernel to discover views.
+//
+// Keep these patterns in sync with `app/client.tsx`'s `init()` glob:
+//   include "./views/**/*.tsx"
+//   exclude "./views/**/components/**", "./views/**/assets/**",
+//           "./views/RootLayout.tsx"
 export default async function (appDir: string): Promise<string[]> {
-  const { default: Kernel } = await import(join(appDir, "./kernel/Kernel.ts"));
+  const viewsDir = join(appDir, "views");
+  const glob = new Glob("**/*.tsx");
 
-  const app = new App({ kernel: Kernel });
-  const entries = app.getComponentTree();
+  // `client.tsx` is always the client entry; RootLayout is bundled into it
+  // directly (hence excluded from the view globs below).
+  const entries = new Set<string>(["/app/client.tsx"]);
 
-  function getEntries(componentTree: ComponentTree) {
-    const out: string[] = ["/app/client.tsx"];
-    if (!componentTree) {
-      return out;
-    }
+  for await (const file of glob.scan({ cwd: viewsDir })) {
+    // `file` is POSIX-relative to `viewsDir`, e.g. "Home.tsx",
+    // "dashboard/Index.tsx", "components/ui/sidebar.tsx".
+    const segments = file.split("/");
+    if (segments.includes("components")) continue; // **/components/**
+    if (segments.includes("assets")) continue; // **/assets/**
+    if (file === "RootLayout.tsx") continue; // ./views/RootLayout.tsx
 
-    return Array.from(new Set(flattenComponentTree(componentTree)));
+    entries.add(`/app/views/${file}`);
   }
 
-  return Array.from(
-    new Set(["/app/client.tsx", ...getEntries(entries).map((item) => `/app/views/${item}.tsx`)]),
-  );
+  return Array.from(entries);
 }
