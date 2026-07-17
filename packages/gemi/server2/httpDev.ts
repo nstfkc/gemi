@@ -238,7 +238,13 @@ export async function httpDev(app: App) {
 
           viewImportMap[fileName] = mod.default;
           ogMap[fileName] = mod?.OpenGraph;
-          templates.push(template(fileName, `${appDir}/views/${fileName}.tsx`));
+          // Emit a root-relative URL (`/app/views/Foo.tsx`), NOT the absolute
+          // filesystem path used for `ssrLoadModule` above. The browser's
+          // `window.loaders` preload and `client.tsx`'s `import.meta.glob` map
+          // must import the exact same URL — otherwise Vite serves the module
+          // under two URLs (`/app/views/Foo.tsx` vs `/Users/.../app/views/Foo.tsx`)
+          // and loads/instantiates the view twice.
+          templates.push(template(fileName, `/app/views/${fileName}.tsx`));
         }
 
         const loaders = `{${templates.join(",")}}`;
