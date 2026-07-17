@@ -1,6 +1,7 @@
 import { $ } from "bun";
 
 import path from "node:path";
+import { existsSync } from "node:fs";
 import createRollupInput from "./createRollupInput";
 import { loadApp } from "./loadApp";
 import { gemiPlugin } from "../bun/plugin";
@@ -9,6 +10,14 @@ import { build } from "vite";
 
 import { program } from "commander";
 import { ApiManifestGenerator } from "./ide/generateApiManifest";
+
+// `bun --preload` args for the app's optional `app/preload.ts`. Preloaded (after
+// gemi's own runtime plugin) before the server entry runs — so it executes
+// before `httpDev`/`httpProd` start. Empty when the app has no preload file.
+function appPreloadArgs(appDir: string): string[] {
+  const preloadPath = path.join(appDir, "preload.ts");
+  return existsSync(preloadPath) ? ["--preload", preloadPath] : [];
+}
 
 program.command("dev").action(async () => {
   console.log("Starting dev server...");
@@ -27,6 +36,8 @@ program.command("dev").action(async () => {
       // the linked source in dev and the published build in prod.
       "--preload",
       "gemi/bun/preload",
+      // App-provided `app/preload.ts`, if present — runs before server.ts.
+      ...appPreloadArgs(appDir),
       `${path.join(appDir, "server.ts")}`,
     ],
     stdout: "inherit",
@@ -104,6 +115,7 @@ program.command("start").action(async () => {
   // (`jsxDEV is not a function`). Spawning inherits the flag from the start,
   // same as the `dev` command.
   const rootDir = path.resolve(process.cwd());
+  const appDir = path.join(rootDir, "app");
   const proc = Bun.spawn({
     cmd: [
       "bun",
@@ -116,6 +128,8 @@ program.command("start").action(async () => {
       // (`req.input is not a function`).
       "--preload",
       "gemi/bun/preload",
+      // App-provided `app/preload.ts`, if present — runs before the server entry.
+      ...appPreloadArgs(appDir),
       `${rootDir}/dist/server/server.mjs`,
     ],
     stdout: "inherit",
