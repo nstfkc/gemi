@@ -22,7 +22,8 @@
     "./kernel": "./kernel/index.ts",
     "./services": "./services/index.ts",
     "./broadcasting": "./broadcasting/index.ts",
-    "./i18n": "./i18n/index.ts"
+    "./i18n": "./i18n/index.ts",
+    "./server": "./server2/index.ts"
   },
   "scripts": {
     "lint": "oxlint",
@@ -47,8 +48,6 @@
     "history": "^5.3.0",
     "jsx-email": "2.0.0-rc2.1",
     "open": "^10.1.0",
-    "react": "19.2.3",
-    "react-dom": "19.2.3",
     "react-error-boundary": "^6.0.0",
     "recast": "^0.23.9",
     "resend": "^6.12.3",
@@ -56,8 +55,7 @@
     "temporal-polyfill": "^0.2.5",
     "twitter-api-v2": "^1.20.2",
     "urlpattern-polyfill": "^10.0.0",
-    "uuid": "^9.0.1",
-    "vite": "^6.3.5"
+    "uuid": "^9.0.1"
   },
   "devDependencies": {
     "@babel/parser": "^7.25.4",
@@ -69,10 +67,15 @@
     "@types/react-dom": "^19.0.2",
     "eslint": "^8.57.0",
     "oxlint": "^1.39.0",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
     "typescript": "^5.7.3",
-    "vitest": "^1.6.0"
+    "vitest": "^4.0.0"
   },
   "peerDependencies": {
-    "sharp": "^0.34.2"
+    "react": ">=19",
+    "react-dom": ">=19",
+    "sharp": "^0.34.2",
+    "vite": "^8.0.0"
   }
 }

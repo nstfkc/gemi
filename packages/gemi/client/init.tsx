@@ -22,10 +22,7 @@ const StackTrace = () => {
   return <div id="overlay" />;
 };
 
-export function init(
-  RootLayout: ComponentType<any>,
-  glob: Record<string, () => Promise<unknown>>,
-) {
+export function init(RootLayout: ComponentType<any>, glob: Record<string, () => Promise<unknown>>) {
   if (typeof window !== "undefined") {
     (window as any)._ = glob;
   }
@@ -65,17 +62,7 @@ export function init(
 
 export function create(
   RootLayout: ComponentType<any>,
-  {
-    componentTree,
-    loaders,
-    routeManifest,
-    router,
-    i18n,
-    auth,
-    prefetchedData,
-    viewImportMap,
-    http,
-  }: any,
+  { componentTree, loaders, routeManifest, router, i18n, auth, prefetchedData, viewImportMap }: any,
 ) {
   (window as any).__GEMI_DATA__ = {
     componentTree,

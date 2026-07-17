@@ -1,9 +1,4 @@
-import {
-  useLocale,
-  useQuery,
-  useTranslator,
-  type ViewProps,
-} from "gemi/client";
+import { useLocale, useQuery, useTranslator, type ViewProps } from "gemi/client";
 
 export default function About(props: ViewProps<"/about">) {
   const x = useTranslator("About");
@@ -11,6 +6,7 @@ export default function About(props: ViewProps<"/about">) {
   const { data } = useQuery("/test", {
     search: { locale },
   });
+  console.log({ data });
   return (
     <div className="h-dvh">
       <h1>

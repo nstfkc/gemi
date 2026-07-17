@@ -7,6 +7,6 @@ init(
     "./views/**/*.tsx",
     "!./views/**/components/**",
     "!./views/**/assets/**",
-    "!/views/RootLayout.tsx",
+    "!./views/RootLayout.tsx",
   ]),
 );

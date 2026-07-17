@@ -24,22 +24,36 @@ export class App {
       });
   }
 
+  // Read-only tooling accessors used at build time (createRollupInput, the
+  // `app:*` bin commands). These deliberately read the container straight from
+  // `kernel.services` instead of going through `ViewRouterServiceContainer.use()`.
+  // The built bin (`dist/bin/gemi.js`) bundles its own copy of gemi, while the
+  // app's Kernel resolves `gemi/*` to the source modules — so the two have
+  // *different* `kernelContext` AsyncLocalStorage instances and `.use()` reads
+  // an empty store. Looking the container up by its string `_name` is identical
+  // across both copies and needs no ambient context.
+  private useViewRouter(): ViewRouterServiceContainer {
+    const container = this.kernel.services[ViewRouterServiceContainer._name] as
+      | ViewRouterServiceContainer
+      | undefined;
+    if (!container) {
+      throw new Error(
+        "ViewRouterServiceContainer is not registered — was the kernel booted?",
+      );
+    }
+    return container;
+  }
+
   public getComponentTree() {
-    return this.kernel.run.call(this.kernel, () => {
-      return ViewRouterServiceContainer.use().componentTree;
-    });
+    return this.useViewRouter().componentTree;
   }
 
   public getFlatComponentTree() {
-    return this.kernel.run.call(this.kernel, () => {
-      return ViewRouterServiceContainer.use().flatComponentTree;
-    });
+    return this.useViewRouter().flatComponentTree;
   }
 
   public getRouteManifest() {
-    return this.kernel.run.call(this.kernel, () => {
-      return ViewRouterServiceContainer.use().routeManifest;
-    });
+    return this.useViewRouter().routeManifest;
   }
 
   public async fetch(req: Request): Promise<Response> {
@@ -96,3 +110,5 @@ export class App {
     return Object.assign(Object.create(Object.getPrototypeOf(this)), this);
   }
 }
+
+export type FetchHandler = InstanceType<typeof App>["fetch"];

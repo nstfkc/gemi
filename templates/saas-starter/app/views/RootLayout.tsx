@@ -9,7 +9,7 @@ interface Props {
 
 export default function RootLayout(props: Props) {
   return (
-    <html lang={props.locale} suppressHydrationWarning>
+    <html lang={props.locale} translate="no" suppressHydrationWarning>
       <Head />
       <body>{props.children}</body>
     </html>

@@ -1,10 +1,13 @@
-import path from "node:path";
 import type { ComponentTree } from "../client/types";
+import { join } from "node:path";
+import { App } from "../app";
+
 import { flattenComponentTree } from "../client/helpers/flattenComponentTree";
 
-export default async function () {
-  const { app } = await import(path.resolve("./app/bootstrap.ts"));
+export default async function (appDir: string): Promise<string[]> {
+  const { default: Kernel } = await import(join(appDir, "./kernel/Kernel.ts"));
 
+  const app = new App({ kernel: Kernel });
   const entries = app.getComponentTree();
 
   function getEntries(componentTree: ComponentTree) {
@@ -17,9 +20,6 @@ export default async function () {
   }
 
   return Array.from(
-    new Set([
-      "/app/client.tsx",
-      ...getEntries(entries).map((item) => `/app/views/${item}.tsx`),
-    ]),
+    new Set(["/app/client.tsx", ...getEntries(entries).map((item) => `/app/views/${item}.tsx`)]),
   );
 }

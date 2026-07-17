@@ -1,5 +1,5 @@
 import { createElement } from "react";
-import { ModuleNode, type ViteDevServer } from "vite";
+import { type ModuleNode, type ViteDevServer } from "vite";
 
 function replaceStrings(text: string, record: Record<string, string>): string {
   const escapedKeys = Object.keys(record)
@@ -22,11 +22,11 @@ export async function createDevStyles(
     `${appDir}/views/RootLayout.tsx`,
   ];
 
-  let modules = new Set<ModuleNode>();
+  const modules = new Set<ModuleNode>();
   for (const view of views) {
     const mod = vite.moduleGraph.getModulesByFile(view);
     if (mod) {
-      modules = modules.union(mod);
+      for (const m of mod) modules.add(m);
     }
   }
 
@@ -54,7 +54,12 @@ export async function createDevStyles(
     let transformedCssModule = "";
 
     if (isCssModule) {
-      transformedCssModule = replaceStrings(cssModuleContent[cssModulePath], transform.default);
+      transformedCssModule = replaceStrings(
+        cssModuleContent[cssModulePath],
+        // Vite's `TransformResult` type has no `default`, but the CSS-module
+        // transform attaches the class-name mapping there at runtime.
+        (transform as unknown as { default: Record<string, string> }).default,
+      );
     }
 
     styles.push({

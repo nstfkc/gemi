@@ -178,14 +178,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
       cssManifest: Record<string, string[]>;
       ogMap: Record<string, any>;
     }) => {
-      const {
-        bootstrapModules,
-        loaders,
-        getStyles,
-        viewImportMap,
-        cssManifest,
-        ogMap,
-      } = params;
+      const { bootstrapModules, loaders, getStyles, viewImportMap, cssManifest, ogMap } = params;
 
       if (isOgRequest) {
         let ogHandler = null;
@@ -202,22 +195,17 @@ export class ViewRouterServiceContainer extends ServiceContainer {
         const data = Object.values(result.data.pageData)[0];
 
         try {
-          await renderToReadableStream(
-            createElement(ogHandler, data[ogComponent]),
-            {
-              onError: () => {},
-            },
-          );
+          await renderToReadableStream(createElement(ogHandler, data[ogComponent]), {
+            onError: () => {},
+          });
         } catch (err) {
           const { fonts, ...options } = err.satoriOptions;
           const _fonts = await Promise.all(
             fonts.map((font) => {
-              return getTtfFont(font.name, font.weight, font.style).then(
-                (data) => ({
-                  ...font,
-                  data,
-                }),
-              );
+              return getTtfFont(font.name, font.weight, font.style).then((data) => ({
+                ...font,
+                data,
+              }));
             }),
           );
 
@@ -238,11 +226,12 @@ export class ViewRouterServiceContainer extends ServiceContainer {
       }
 
       result.data["cssManifest"] = cssManifest;
+      const styles = await getStyles(currentViews);
       try {
         const stream = await renderToReadableStream(
           createElement(Fragment, {
             children: [
-              ...(await getStyles(currentViews)),
+              ...styles,
               createElement("script", {
                 key: "theme-script",
                 dangerouslySetInnerHTML: {
@@ -286,9 +275,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
     const url = new URL(req.url);
     const isViewDataRequest = url.pathname.endsWith(".json");
     const isOgRequest = url.pathname.endsWith(".og");
-    const urlPathnameWithLocale = url.pathname
-      .replace(".json", "")
-      .replace(".og", "");
+    const urlPathnameWithLocale = url.pathname.replace(".json", "").replace(".og", "");
 
     const [, maybeLocale, ...rest] = urlPathnameWithLocale.split("/");
     let urlPathname = `/${rest.join("/")}`;
@@ -312,16 +299,12 @@ export class ViewRouterServiceContainer extends ServiceContainer {
         new HttpRequest(req, {}, "view", urlPathname),
       );
 
-      if (
-        urlLocale === null &&
-        locale !== i18nServiceContainer.service.defaultLocale
-      ) {
+      if (urlLocale === null && locale !== i18nServiceContainer.service.defaultLocale) {
         const _pathname = url.pathname === "/" ? "" : url.pathname;
         return new Response("", {
           status: 302,
           headers: {
-            "Cache-Control":
-              "private, no-cache, no-store, max-age=0, must-revalidate",
+            "Cache-Control": "private, no-cache, no-store, max-age=0, must-revalidate",
             Location: `/${locale}${_pathname}${url.search}`,
           },
         });
@@ -454,11 +437,9 @@ export class ViewRouterServiceContainer extends ServiceContainer {
         }
 
         if (isViewDataRequest) {
-          headers.set("Content-Type", "application/json");
+          headers.set("Content-Type", "application/json; charset=utf-8");
 
-          cookies.forEach((cookie) =>
-            headers.append("Set-Cookie", cookie.toString()),
-          );
+          cookies.forEach((cookie) => headers.append("Set-Cookie", cookie.toString()));
 
           await this.service.onRequestEnd(httpRequest);
 
@@ -480,7 +461,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           );
         }
 
-        headers.set("Content-Type", "text/html");
+        headers.set("Content-Type", "text/html; charset=utf-8");
 
         for (const cookie of cookies) {
           headers.append("Set-Cookie", cookie.toString());
