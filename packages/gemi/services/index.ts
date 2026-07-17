@@ -48,4 +48,7 @@ export { OAuthProvider } from "../auth/oauth/OAuthProvider";
 export { CronServiceProvider } from "./cron/CronServiceProvider";
 export { CronJob } from "./cron/CronJob";
 
+// Redis
+export { RedisServiceProvider } from "./redis/RedisServiceProvider";
+
 export { Singleton } from "./Singleton";

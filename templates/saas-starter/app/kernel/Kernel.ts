@@ -10,6 +10,7 @@ import LoggingServiceProvider from "./providers/LoggingServiceProvider";
 import QueueServiceProvider from "./providers/QueueServiceProvider";
 import EmailServiceProvider from "./providers/EmailServiceProvider";
 import CronServiceProvider from "./providers/CronServiceProvider";
+import RedisServiceProvider from "./providers/RedisServiceProvider";
 
 export default class extends Kernel {
   authenticationServiceProvider = AuthenticationServiceProvider;
@@ -22,4 +23,5 @@ export default class extends Kernel {
   queueServiceProvider = QueueServiceProvider;
   viewRouterServiceProvider = ViewRouterServiceProvider;
   cronServiceProvider = CronServiceProvider;
+  redisServiceProvider = RedisServiceProvider;
 }
