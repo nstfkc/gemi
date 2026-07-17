@@ -22,10 +22,7 @@ const StackTrace = () => {
   return <div id="overlay" />;
 };
 
-export function init(RootLayout: ComponentType<any>, glob: Record<string, () => Promise<unknown>>) {
-  if (typeof window !== "undefined") {
-    (window as any)._ = glob;
-  }
+export function init(RootLayout: ComponentType<any>) {
   if (typeof window !== "undefined" && (window as any).render_error) {
     createRoot(document.body).render(<StackTrace />);
   } else {
