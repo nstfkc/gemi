@@ -4,6 +4,7 @@ import { URLPattern } from "urlpattern-polyfill";
 import { exists } from "node:fs/promises";
 import { createStyles } from "./styles";
 import type { App } from "../app";
+import { Instrumentation } from "./types";
 
 const projectDir = process.env.GEMI_PROJECT_DIR ?? "";
 const rootDir = join(process.cwd(), projectDir);
@@ -15,7 +16,7 @@ const distDir = join(rootDir, "dist");
 // `httpDev` — so prod and dev share one construction path. What differs here is
 // that views/styles are served from the built `dist/` manifests instead of
 // Vite's dev SSR graph.
-export async function httpProd(app: App) {
+export async function httpProd(app: App, instrumentation: Instrumentation) {
   const manifest = await import(`${distDir}/client/.vite/manifest.json`);
   const serverManifest = await import(`${distDir}/server/.vite/manifest.json`);
 
@@ -160,7 +161,7 @@ export async function httpProd(app: App) {
         const ip = server.requestIP(req);
         req.headers.set("x-forwarded-for", ip.address);
       }
-      return await requestHandler(req);
+      return await instrumentation(req, requestHandler);
     },
     idleTimeout: Number(process.env.SERVER_IDLE_TIMEOUT ?? 10),
     port: process.env.PORT || 5173,

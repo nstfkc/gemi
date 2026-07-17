@@ -7,6 +7,7 @@ import { createServer, type ViteDevServer } from "vite";
 import { App } from "../app";
 import { createDevStyles } from "./styles";
 import { renderErrorPage } from "./renderErrorPage";
+import { Instrumentation } from "./types";
 
 // Run a Web `Request` through Vite's Connect middleware.
 // Resolves to a `Response` when Vite handles the request (module transforms,
@@ -137,7 +138,7 @@ if (!globalThis.__gemiErrorHooked) {
   });
 }
 
-export async function httpDev(app: App) {
+export async function httpDev(app: App, instrumentation: Instrumentation) {
   // `bun --hot` re-runs this module on every server-code change, so keep a
   // single Vite server on `globalThis` instead of spawning a new one (and a new
   // HMR socket) on each reload.
@@ -213,76 +214,79 @@ export async function httpDev(app: App) {
           },
         );
       }
-
-      try {
-        const handler = app.fetch.bind(app);
-        const result = (await viteMiddleware(vite, req)) ?? (await handler(req));
-        if (result instanceof Response) {
-          return result;
-        }
-
-        const viewImportMap = {};
-        const ogMap = {};
-        const template = (viewName: string, path: string) =>
-          `"${viewName}": () => import("${path}")`;
-        const templates = [];
-
-        for (const fileName of ["404", ...app.getFlatComponentTree.call(app)]) {
-          if (process.env.NODE_ENV === "test") {
-            break;
+      const requestHandler = async (req: Request): Promise<Response> => {
+        try {
+          const handler = app.fetch.bind(app);
+          const result = (await viteMiddleware(vite, req)) ?? (await handler(req));
+          if (result instanceof Response) {
+            return result;
           }
-          const appDir = `${process.env.APP_DIR}`;
-          const mod = await vite.ssrLoadModule(`${appDir}/views/${fileName}.tsx`, {
-            fixStacktrace: true,
+
+          const viewImportMap = {};
+          const ogMap = {};
+          const template = (viewName: string, path: string) =>
+            `"${viewName}": () => import("${path}")`;
+          const templates = [];
+
+          for (const fileName of ["404", ...app.getFlatComponentTree.call(app)]) {
+            if (process.env.NODE_ENV === "test") {
+              break;
+            }
+            const appDir = `${process.env.APP_DIR}`;
+            const mod = await vite.ssrLoadModule(`${appDir}/views/${fileName}.tsx`, {
+              fixStacktrace: true,
+            });
+
+            viewImportMap[fileName] = mod.default;
+            ogMap[fileName] = mod?.OpenGraph;
+            // Emit a root-relative URL (`/app/views/Foo.tsx`), NOT the absolute
+            // filesystem path used for `ssrLoadModule` above. The browser's
+            // `window.loaders` preload and `client.tsx`'s `import.meta.glob` map
+            // must import the exact same URL — otherwise Vite serves the module
+            // under two URLs (`/app/views/Foo.tsx` vs `/Users/.../app/views/Foo.tsx`)
+            // and loads/instantiates the view twice.
+            templates.push(template(fileName, `/app/views/${fileName}.tsx`));
+          }
+
+          const loaders = `{${templates.join(",")}}`;
+
+          return await result({
+            getStyles: async (currentViews: string[]) =>
+              await createDevStyles(appDir, vite, currentViews),
+            bootstrapModules: ["/refresh.js", "/app/client.tsx", "/@vite/client"],
+            viewImportMap,
+            ogMap,
+            loaders,
+            cssManifest: {},
           });
+        } catch (err: any) {
+          // Errors thrown *while handling a request* (a controller throwing, a
+          // failing `ssrLoadModule`, ...) never hit the module-load hooks above,
+          // so surface them here: forward to the overlay for any already-open
+          // page, and render an error page for this response so a fresh load
+          // (which has no live HMR socket yet) still shows the failure.
+          console.error(err);
+          vite.ssrFixStacktrace?.(err);
+          sendErrorToClient(err);
 
-          viewImportMap[fileName] = mod.default;
-          ogMap[fileName] = mod?.OpenGraph;
-          // Emit a root-relative URL (`/app/views/Foo.tsx`), NOT the absolute
-          // filesystem path used for `ssrLoadModule` above. The browser's
-          // `window.loaders` preload and `client.tsx`'s `import.meta.glob` map
-          // must import the exact same URL — otherwise Vite serves the module
-          // under two URLs (`/app/views/Foo.tsx` vs `/Users/.../app/views/Foo.tsx`)
-          // and loads/instantiates the view twice.
-          templates.push(template(fileName, `/app/views/${fileName}.tsx`));
+          if (pathname.startsWith("/api")) {
+            return new Response(JSON.stringify({ error: err?.message ?? String(err) }), {
+              status: 500,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+
+          // This document has no live app (so no HttpReload listener to clear the
+          // overlay) — remember that, so recovery forces a full page reload.
+          globalThis.__gemiErrorPageServed = true;
+          return new Response(renderErrorPage(viteErrorPayload(err)), {
+            status: 500,
+            headers: { "Content-Type": "text/html" },
+          });
         }
+      };
 
-        const loaders = `{${templates.join(",")}}`;
-
-        return await result({
-          getStyles: async (currentViews: string[]) =>
-            await createDevStyles(appDir, vite, currentViews),
-          bootstrapModules: ["/refresh.js", "/app/client.tsx", "/@vite/client"],
-          viewImportMap,
-          ogMap,
-          loaders,
-          cssManifest: {},
-        });
-      } catch (err: any) {
-        // Errors thrown *while handling a request* (a controller throwing, a
-        // failing `ssrLoadModule`, ...) never hit the module-load hooks above,
-        // so surface them here: forward to the overlay for any already-open
-        // page, and render an error page for this response so a fresh load
-        // (which has no live HMR socket yet) still shows the failure.
-        console.error(err);
-        vite.ssrFixStacktrace?.(err);
-        sendErrorToClient(err);
-
-        if (pathname.startsWith("/api")) {
-          return new Response(
-            JSON.stringify({ error: err?.message ?? String(err) }),
-            { status: 500, headers: { "Content-Type": "application/json" } },
-          );
-        }
-
-        // This document has no live app (so no HttpReload listener to clear the
-        // overlay) — remember that, so recovery forces a full page reload.
-        globalThis.__gemiErrorPageServed = true;
-        return new Response(renderErrorPage(viteErrorPayload(err)), {
-          status: 500,
-          headers: { "Content-Type": "text/html" },
-        });
-      }
+      return await instrumentation(req, requestHandler);
     },
   });
 
