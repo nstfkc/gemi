@@ -8,6 +8,7 @@ import { App } from "../app";
 import { createDevStyles } from "./styles";
 import { renderErrorPage } from "./renderErrorPage";
 import { Instrumentation } from "./types";
+import { printStartupBanner } from "./banner";
 
 // Run a Web `Request` through Vite's Connect middleware.
 // Resolves to a `Response` when Vite handles the request (module transforms,
@@ -324,6 +325,9 @@ export async function httpDev(app: App, instrumentation: Instrumentation) {
       globalThis.__gemiErrorActive = false;
       vite.ws.send({ type: "custom", event: "http-reload" });
     }
+  } else {
+    // First start (not a `bun --hot` reload) — print the startup banner once.
+    printStartupBanner({ port: server.port, rootDir });
   }
 
   return server;

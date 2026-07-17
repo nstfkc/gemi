@@ -5,6 +5,7 @@ import { exists } from "node:fs/promises";
 import { createStyles } from "./styles";
 import type { App } from "../app";
 import { Instrumentation } from "./types";
+import { printStartupBanner } from "./banner";
 
 const projectDir = process.env.GEMI_PROJECT_DIR ?? "";
 const rootDir = join(process.cwd(), projectDir);
@@ -168,7 +169,7 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
     port: process.env.PORT || 5173,
   });
 
-  console.log("Production server running on", server.url.href);
+  printStartupBanner({ port: server.port, rootDir });
 
   return server;
 }

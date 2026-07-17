@@ -35,7 +35,7 @@ function parseEnv(content: string): Record<string, string> {
 
 // The `.env` files Bun loads, in increasing precedence (later overrides earlier).
 // `.env.local` is skipped for `NODE_ENV=test`, matching Bun/dotenv conventions.
-function envFiles(rootDir: string): string[] {
+export function envFiles(rootDir: string): string[] {
   const nodeEnv = process.env.NODE_ENV;
   const names = [".env"];
   if (nodeEnv) names.push(`.env.${nodeEnv}`);
