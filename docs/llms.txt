@@ -1,0 +1,54 @@
+# gemi
+
+> gemi is a batteries-included, full-stack TypeScript web framework built on Bun, Vite, and React 19 with server-side rendering. It ships class-based routing, a type-safe network layer, authentication and authorization, middleware, form validation, transactional email, background jobs, cron, object storage, real-time broadcasting, and i18n as one integrated stack.
+
+gemi is Laravel-inspired: an application is a **Kernel** that registers **service providers**, routes are declared in **router classes**, request logic lives in **controllers**, and framework services are reached through **facades**. It is **not** Next.js — there is no file-based routing; every URL is mapped explicitly in a router. It is a strong fit for B2B/SaaS apps with many API endpoints and non-trivial business logic.
+
+Each link below points to a self-contained Markdown page. For a single file containing the entire documentation set, see [llms-full.txt](llms-full.txt).
+
+## Foundations
+
+- [Getting Started](getting-started.md): install, scaffold with create-gemi-app, dev/build/start, a first route + view.
+- [Project Structure & the Kernel](project-structure.md): the app/ layout, the Kernel, service providers, and app bootstrap.
+- [Configuration](configuration.md): gemi.config.ts, .env handling, app/preload.ts, Vite config.
+- [CLI](cli.md): gemi dev/build/start plus codegen and inspection commands.
+
+## HTTP layer
+
+- [Routing](routing.md): ApiRouter/ViewRouter, path params, groups, nesting, resource().
+- [Controllers](controllers.md): Controller/ResourceController, the HttpRequest API, request validation, ValidationError.
+- [Middleware](middleware.md): the string DSL, built-in middleware, negation with -name, and custom middleware.
+
+## Views & client
+
+- [Views & Layouts](views-and-layouts.md): view components, server data binding, nested layouts, Head, breadcrumbs.
+- [Data Fetching](data-fetching.md): the useQuery hook, mutation hooks, the Query prefetch facade, and the generated gemi.d.ts type layer.
+- [Forms](forms.md): the Form component, surfacing validation errors, form-status hooks.
+- [Navigation](navigation.md): Link, useNavigate, useParams, useSearchParams, and the Redirect component vs facade.
+
+## Auth
+
+- [Authentication](authentication.md): AuthenticationServiceProvider, adapters, sessions, magic links, OAuth, the Auth facade, and client auth hooks.
+- [Authorization](authorization.md): role-based middleware and authorization errors.
+
+## Services & facades
+
+- [Facades](facades.md): reference for Auth, Redirect, I18n, FileStorage, Query, Broadcast, Url, Log, Meta, Cookie, and Redis.
+- [File Storage](file-storage.md): the FileStorage facade, filesystem/S3 drivers, image optimization, and the Image component.
+- [Email](email.md): the Email class, jsx-email templates, the Resend driver, localization and scheduling.
+- [Jobs & Queues](jobs-and-queues.md): defining and dispatching background Jobs through the in-process queue.
+- [Cron](cron.md): scheduling recurring CronJobs with Bun.cron.
+- [Broadcasting](broadcasting.md): websocket channels, the Broadcast facade, useSubscription/useBroadcast.
+- [Internationalization](i18n.md): component-scoped dictionaries, useTranslator, useLocale, locale detection.
+
+## Notes
+
+- The client query hook is `useQuery` (not `useGet`).
+- The server-side `Redirect` facade works by throwing — never wrap it in try/catch.
+- Middleware is a string DSL (`auth`, `cache:...`, `rate-limit:N`); `-name` cancels an inherited middleware.
+- `gemi.d.ts` is generated (`gemi ide:generate-api-manifest`) — do not edit it by hand.
+
+## Optional
+
+- [Full documentation (single file)](llms-full.txt): every page concatenated for one-shot LLM context.
+- [Documentation index](README.md): the human-readable table of contents.
