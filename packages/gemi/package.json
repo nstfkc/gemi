@@ -4,6 +4,11 @@
   "private": false,
   "license": "MIT",
   "author": "Enes Tufekci <enes@gemijs.dev>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nstfkc/gemi.git",
+    "directory": "packages/gemi"
+  },
   "bin": {
     "gemi": "./dist/bin/gemi.js"
   },
