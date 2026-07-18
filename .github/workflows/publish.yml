@@ -1,0 +1,73 @@
+name: Publish gemi to npm
+
+# Publishes the `gemi` package (packages/gemi) to npm.
+#
+# Triggers:
+#   - a published GitHub Release (create a release, e.g. tag `v0.41.0`);
+#   - manual dispatch, optionally under a non-default dist-tag (e.g. `next`).
+#
+# Requires an `NPM_TOKEN` repository secret (an npm automation token with
+# publish rights). Version bumps stay manual — the workflow publishes whatever
+# version is in packages/gemi/package.json and no-ops if it's already on npm.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      dist-tag:
+        description: "npm dist-tag to publish under"
+        required: false
+        default: latest
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      # Sets up an ~/.npmrc wired to NODE_AUTH_TOKEN so `npm publish` can auth.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build and stage package
+        working-directory: packages/gemi
+        run: bun run build:publish
+
+      - name: Skip if this version is already published
+        id: check
+        working-directory: packages/gemi
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if npm view "gemi@$VERSION" version >/dev/null 2>&1; then
+            echo "gemi@$VERSION is already published — skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish
+        if: steps.check.outputs.skip == 'false'
+        working-directory: packages/gemi/.publish
+        run: npm publish --access public --tag "${{ github.event.inputs.dist-tag || 'latest' }}"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Summary
+        run: |
+          if [ "${{ steps.check.outputs.skip }}" = "true" ]; then
+            echo "gemi@${{ steps.check.outputs.version }} already on npm — nothing published." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Published gemi@${{ steps.check.outputs.version }} under tag \`${{ github.event.inputs.dist-tag || 'latest' }}\`." >> "$GITHUB_STEP_SUMMARY"
+          fi

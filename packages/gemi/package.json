@@ -38,8 +38,8 @@
     "build:types": "tsc",
     "build:client-types": "tsc -p tsconfig.browser.json",
     "test": "vitest",
-    "prepublishOnly": "bun run build && bun scripts/setupExports.ts prod",
-    "postpublish": "bun scripts/setupExports.ts dev"
+    "build:publish": "bun scripts/build-publish.ts",
+    "prepublishOnly": "echo 'Do not publish from this directory — its exports point at TS source. Run: bun run build:publish, then publish from .publish/' && exit 1"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.629.0",
