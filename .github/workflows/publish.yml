@@ -6,9 +6,12 @@ name: Publish gemi to npm
 #   - a published GitHub Release (create a release, e.g. tag `v0.41.0`);
 #   - manual dispatch, optionally under a non-default dist-tag (e.g. `next`).
 #
-# Requires an `NPM_TOKEN` repository secret (an npm automation token with
-# publish rights). Version bumps stay manual — the workflow publishes whatever
-# version is in packages/gemi/package.json and no-ops if it's already on npm.
+# Authenticates to npm via OIDC trusted publishing (no token secret). Configure
+# gemi's trusted publisher on npm to point at this workflow file (publish.yml).
+# Publishing this way also attaches build provenance automatically.
+#
+# Version bumps stay manual — the workflow publishes whatever version is in
+# packages/gemi/package.json and no-ops if it's already on npm.
 on:
   release:
     types: [published]
@@ -24,6 +27,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      # Required for OIDC trusted publishing — npm exchanges this token for
+      # short-lived publish credentials.
+      id-token: write
     steps:
       - uses: actions/checkout@v4
 
@@ -31,11 +37,14 @@ jobs:
         with:
           bun-version: 1.3.14
 
-      # Sets up an ~/.npmrc wired to NODE_AUTH_TOKEN so `npm publish` can auth.
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           registry-url: "https://registry.npmjs.org"
+
+      # Trusted publishing needs npm >= 11.5.1; node 20 ships npm 10.
+      - name: Update npm
+        run: npm install -g npm@latest
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -60,9 +69,9 @@ jobs:
       - name: Publish
         if: steps.check.outputs.skip == 'false'
         working-directory: packages/gemi/.publish
+        # OIDC trusted publishing — no NODE_AUTH_TOKEN. npm detects the id-token
+        # permission and authenticates via OIDC, attaching provenance.
         run: npm publish --access public --tag "${{ github.event.inputs.dist-tag || 'latest' }}"
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Summary
         run: |
