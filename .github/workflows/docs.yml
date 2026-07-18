@@ -1,0 +1,52 @@
+name: Deploy docs to GitHub Pages
+
+# Publishes the `docs/` directory to GitHub Pages as-is (raw Markdown + llms.txt +
+# a static index.html). No site generator runs, so every `.md` file and both
+# `llms.txt`/`llms-full.txt` are served verbatim at stable URLs and all relative
+# links between docs keep working.
+#
+# Before this runs, enable Pages once: repo Settings → Pages → Build and deployment
+# → Source: "GitHub Actions".
+
+on:
+  push:
+    branches: [main, server2-migration]
+    paths: ["docs/**", ".github/workflows/docs.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow one concurrent deployment; don't cancel an in-progress run.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      # `.nojekyll` disables Jekyll so files are served verbatim (raw Markdown,
+      # files/paths with leading underscores, etc.).
+      - name: Disable Jekyll processing
+        run: touch docs/.nojekyll
+
+      - name: Upload docs artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

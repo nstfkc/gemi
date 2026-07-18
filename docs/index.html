@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>gemi — Documentation</title>
+    <meta
+      name="description"
+      content="Documentation for gemi, a batteries-included full-stack TypeScript web framework built on Bun, Vite, and React 19."
+    />
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #ffffff;
+        --fg: #1a1a1a;
+        --muted: #666;
+        --border: #e5e5e5;
+        --card: #fafafa;
+        --card-hover: #f0f0f0;
+        --accent: #2563eb;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0d1117;
+          --fg: #e6edf3;
+          --muted: #8b949e;
+          --border: #21262d;
+          --card: #161b22;
+          --card-hover: #1c2330;
+          --accent: #58a6ff;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--fg);
+        font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      .wrap { max-width: 880px; margin: 0 auto; padding: 3rem 1.25rem 5rem; }
+      header { margin-bottom: 2.5rem; }
+      h1 { font-size: 2.4rem; margin: 0 0 .4rem; letter-spacing: -0.02em; }
+      .tagline { color: var(--muted); font-size: 1.05rem; margin: 0 0 1.25rem; max-width: 60ch; }
+      .llms { display: flex; flex-wrap: wrap; gap: .6rem; margin-top: 1rem; }
+      .llms a {
+        display: inline-flex; align-items: center; gap: .4rem;
+        padding: .4rem .8rem; border: 1px solid var(--border); border-radius: 8px;
+        text-decoration: none; color: var(--fg); font-size: .9rem; background: var(--card);
+      }
+      .llms a:hover { background: var(--card-hover); }
+      .llms code { font-size: .85em; color: var(--accent); }
+      h2 {
+        font-size: .8rem; text-transform: uppercase; letter-spacing: .08em;
+        color: var(--muted); margin: 2.5rem 0 .9rem; font-weight: 600;
+      }
+      .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: .75rem; }
+      a.card {
+        display: block; padding: .85rem 1rem; border: 1px solid var(--border);
+        border-radius: 10px; text-decoration: none; color: inherit; background: var(--card);
+        transition: background .12s ease, border-color .12s ease;
+      }
+      a.card:hover { background: var(--card-hover); border-color: var(--accent); }
+      a.card .t { font-weight: 600; display: block; }
+      a.card .d { color: var(--muted); font-size: .87rem; margin-top: .15rem; }
+      footer { margin-top: 3.5rem; color: var(--muted); font-size: .85rem; border-top: 1px solid var(--border); padding-top: 1.25rem; }
+      footer a { color: var(--accent); }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header>
+        <h1>gemi</h1>
+        <p class="tagline">
+          A batteries-included, full-stack TypeScript web framework built on Bun,
+          Vite, and React&nbsp;19 with server-side rendering. Class-based routing, a
+          type-safe network layer, auth, jobs, email, storage, real-time, and i18n —
+          one integrated stack.
+        </p>
+        <div class="llms">
+          <a href="llms.txt">🤖 <code>llms.txt</code> — LLM index</a>
+          <a href="llms-full.txt">📄 <code>llms-full.txt</code> — everything, one file</a>
+          <a href="https://github.com/nstfkc/gemi">⭐ GitHub</a>
+        </div>
+      </header>
+
+      <h2>Foundations</h2>
+      <div class="grid">
+        <a class="card" href="getting-started.md"><span class="t">Getting Started</span><span class="d">Install, scaffold, dev/build/start, first route + view.</span></a>
+        <a class="card" href="project-structure.md"><span class="t">Project Structure &amp; the Kernel</span><span class="d">The app/ layout, Kernel, service providers, bootstrap.</span></a>
+        <a class="card" href="configuration.md"><span class="t">Configuration</span><span class="d">gemi.config.ts, .env, preload, Vite config.</span></a>
+        <a class="card" href="cli.md"><span class="t">CLI</span><span class="d">dev, build, start, and codegen commands.</span></a>
+      </div>
+
+      <h2>HTTP layer</h2>
+      <div class="grid">
+        <a class="card" href="routing.md"><span class="t">Routing</span><span class="d">ApiRouter/ViewRouter, params, groups, nesting, resource().</span></a>
+        <a class="card" href="controllers.md"><span class="t">Controllers</span><span class="d">Controller, HttpRequest, validation, ValidationError.</span></a>
+        <a class="card" href="middleware.md"><span class="t">Middleware</span><span class="d">The string DSL, built-ins, negation, custom middleware.</span></a>
+      </div>
+
+      <h2>Views &amp; client</h2>
+      <div class="grid">
+        <a class="card" href="views-and-layouts.md"><span class="t">Views &amp; Layouts</span><span class="d">Components, server data, nested layouts, Head, breadcrumbs.</span></a>
+        <a class="card" href="data-fetching.md"><span class="t">Data Fetching</span><span class="d">useQuery, mutations, Query prefetch, gemi.d.ts types.</span></a>
+        <a class="card" href="forms.md"><span class="t">Forms</span><span class="d">The Form component, validation errors, status hooks.</span></a>
+        <a class="card" href="navigation.md"><span class="t">Navigation</span><span class="d">Link, useNavigate, params, search, Redirect.</span></a>
+      </div>
+
+      <h2>Auth</h2>
+      <div class="grid">
+        <a class="card" href="authentication.md"><span class="t">Authentication</span><span class="d">Providers, adapters, sessions, magic links, OAuth, hooks.</span></a>
+        <a class="card" href="authorization.md"><span class="t">Authorization</span><span class="d">Policies, role-based middleware, authorization errors.</span></a>
+      </div>
+
+      <h2>Services &amp; facades</h2>
+      <div class="grid">
+        <a class="card" href="facades.md"><span class="t">Facades</span><span class="d">Auth, Redirect, I18n, FileStorage, Query, Broadcast, Url, Log, Meta, Cookie, Redis.</span></a>
+        <a class="card" href="file-storage.md"><span class="t">File Storage</span><span class="d">FileStorage facade, drivers, image optimization, Image.</span></a>
+        <a class="card" href="email.md"><span class="t">Email</span><span class="d">Email class, jsx-email templates, Resend, scheduling.</span></a>
+        <a class="card" href="jobs-and-queues.md"><span class="t">Jobs &amp; Queues</span><span class="d">Background Jobs through the in-process queue.</span></a>
+        <a class="card" href="cron.md"><span class="t">Cron</span><span class="d">Recurring CronJobs with Bun.cron.</span></a>
+        <a class="card" href="broadcasting.md"><span class="t">Broadcasting</span><span class="d">Websocket channels, Broadcast, useSubscription.</span></a>
+        <a class="card" href="i18n.md"><span class="t">Internationalization</span><span class="d">Component-scoped dictionaries, useTranslator, useLocale.</span></a>
+      </div>
+
+      <footer>
+        Pages are served as raw Markdown — for a rendered view, browse the
+        <a href="https://github.com/nstfkc/gemi/tree/main/docs">docs on GitHub</a>.
+        The <a href="llms.txt"><code>llms.txt</code></a> and
+        <a href="llms-full.txt"><code>llms-full.txt</code></a> files follow the
+        <a href="https://llmstxt.org">llmstxt.org</a> convention.
+      </footer>
+    </div>
+  </body>
+</html>
