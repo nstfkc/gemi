@@ -20,8 +20,9 @@ gemi is a good fit for **B2B applications with many API endpoints and non-trivia
 - **Node.js >= 18** — some tooling expects a modern Node baseline even though the app runs on Bun.
 - **React 19** — gemi depends on React and React DOM `>=19` (`react` / `react-dom` `19.2.x` in the templates). React 19 SSR is core to how views render.
 - **Vite 8** and **sharp** are peer dependencies used by the build and the image-optimization service.
+- **[`@vitejs/plugin-react`](https://github.com/vitejs/vite-plugin-react)** — required by the client/SSR build and wired into your app's `vite.config.mjs` (the scaffolded template includes it).
 
-These come from gemi's `peerDependencies` — `react >= 19`, `react-dom >= 19`, `sharp ^0.34.2`, `vite ^8.0.0`.
+gemi's own `peerDependencies` are `react >= 19`, `react-dom >= 19`, `sharp ^0.34.2`, and `vite ^8.0.0`; the generated project also depends on `@vitejs/plugin-react`.
 
 ## Create a new app
 

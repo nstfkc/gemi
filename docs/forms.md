@@ -186,7 +186,7 @@ function PreviewName() {
 ## Building forms without `Form`
 
 `Form` is a thin, ergonomic layer over the mutation hooks. If you need full control,
-call `usePost` / `useMutation` directly and manage the request yourself — see
+call `usePost` / `usePut` directly and manage the request yourself — see
 [Data Fetching](./data-fetching.md). Auth flows are a common case; the auth views use
 `Form` together with `useNavigate` (see [Authentication](./authentication.md)).
 

@@ -306,7 +306,7 @@ import { Auth } from "gemi/facades";
 // In a controller: read the current user.
 const user = await Auth.user();
 
-// Guard an action inline (see Authorization for policy-based checks).
+// Guard an action inline (see Authorization for role-based checks).
 await Auth.guard((user) => user.globalRole === 0);
 ```
 
@@ -314,7 +314,7 @@ await Auth.guard((user) => user.globalRole === 0);
 > that's fine (the framework turns it into a 401 / redirect). If you want a nullable check,
 > use `Auth.guardSafe(...)` instead of wrapping `Auth.user()` in a try/catch.
 
-See [Authorization](./authorization.md) for policies and role checks.
+See [Authorization](./authorization.md) for role checks.
 
 ## Client hooks
 
@@ -433,4 +433,4 @@ this.get(DashboardController, "index").middleware(["auth"]);
 Requests without a valid `access_token` are rejected with an `AuthenticationError`
 (401 for API routes, a redirect to `/auth/sign-in` for views). See
 [Middleware](./middleware.md) for the full DSL (`-auth` to cancel, router vs per-route, etc.)
-and [Authorization](./authorization.md) for role/policy enforcement.
+and [Authorization](./authorization.md) for role enforcement.

@@ -9,29 +9,20 @@ You define jobs as classes extending `Job` (from `gemi/services`), register them
 A job is a class extending `Job` with a **static `name`** and a `run` method that does the work. The parameters of `run` are your job's payload.
 
 ```typescript
-// app/kernel/providers/jobs/TranslationJob.ts
+// app/kernel/providers/jobs/ProcessVideoJob.ts
 import { Job } from "gemi/services";
-import { prisma } from "@/app/database/prisma";
 
 type Params = {
-  key: string;
-  value: string;
-  locale: string;
-  targetLocales: string[];
+  videoId: string;
 };
 
-export class TranslationJob extends Job {
-  static name = "TranslationJob";
+export class ProcessVideoJob extends Job {
+  static name = "ProcessVideoJob";
 
   async run(params: Params) {
-    const translations = await translate(params.value, params.targetLocales);
-    await prisma.translation.createMany({
-      data: params.targetLocales.map((locale) => ({
-        key: params.key,
-        value: translations[locale],
-        locale,
-      })),
-    });
+    // Slow, non-blocking work the user shouldn't wait on: transcode the
+    // uploaded video, generate thumbnails, store the results, etc.
+    await transcodeVideo(params.videoId);
   }
 }
 ```
@@ -43,8 +34,8 @@ export class TranslationJob extends Job {
 `Job` exposes hooks that run around `run`, each receiving the result/error plus the original `run` arguments:
 
 ```typescript
-export class TranslationJob extends Job {
-  static name = "TranslationJob";
+export class ProcessVideoJob extends Job {
+  static name = "ProcessVideoJob";
   maxAttempts = 3; // retries before dead-lettering (default 3)
 
   async run(params: Params) { /* ... */ }
@@ -70,15 +61,10 @@ Retry behavior: when `run` throws, `onFail` fires and the job is re-queued until
 Call the static `dispatch` method with exactly the arguments your `run` method takes — the call is fully typed against `run`'s signature.
 
 ```typescript
-import { TranslationJob } from "@/app/kernel/providers/jobs/TranslationJob";
+import { ProcessVideoJob } from "@/app/kernel/providers/jobs/ProcessVideoJob";
 
 // Inside a controller — returns immediately; the job runs in the background.
-TranslationJob.dispatch({
-  key: "product.title",
-  value: "Hello",
-  locale: "en-US",
-  targetLocales: ["tr-TR", "de-DE"],
-});
+ProcessVideoJob.dispatch({ videoId: video.id });
 ```
 
 `dispatch` enqueues the job and returns `void` (fire-and-forget) — it does not wait for the job to finish, and the payload is serialized as JSON, so pass plain, serializable data (not class instances or functions). See [Controllers](./controllers.md) for dispatching from request handlers.
@@ -90,13 +76,12 @@ Every job class must be listed on your app's `QueueServiceProvider` so the queue
 ```typescript
 // app/kernel/providers/QueueServiceProvider.ts
 import { QueueServiceProvider } from "gemi/services";
-import { TranslationJob } from "./jobs/TranslationJob";
-import { ImageGenerationJob } from "./jobs/ImageGenerationJob";
+import { ProcessVideoJob } from "./jobs/ProcessVideoJob";
 
 export default class extends QueueServiceProvider {
   concurrency = 20; // max jobs running at once (default 1)
 
-  jobs = [TranslationJob, ImageGenerationJob];
+  jobs = [ProcessVideoJob];
 }
 ```
 

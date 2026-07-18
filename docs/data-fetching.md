@@ -109,29 +109,30 @@ mutate();
 For objects, the returned partial is shallow-merged; for arrays, it is appended.
 To update a query from **outside** the component that owns it, use `useMutate`.
 
-## Prefetching on the server: the `Query` facade
+## Reusing endpoints on the server: the `Query` facade
 
-To avoid a client-side loading flash, prime a query's cache during SSR with the
-`Query` facade from `gemi/facades`. Call it inside a view or layout handler
-([Views and Layouts](./views-and-layouts.md)); when the matching `useQuery` mounts on
-the client, its data is already there as `fallbackData`.
+The `Query` facade (`gemi/facades`) runs one of your API route handlers **on the
+server**, so you can reuse an endpoint's logic inside a view or layout handler
+([Views and Layouts](./views-and-layouts.md)) instead of duplicating it. It returns
+the handler's result for you to use directly, and stores it so the matching client
+`useQuery` starts with the data already in cache — no loading flash.
 
 ```typescript
 import { Query } from "gemi/facades";
 
 "/dashboard": this.view("Dashboard", async () => {
-  // Fetch eagerly and await it (blocks render until ready)
-  await Query.instant("/todos");
+  // Reuse the `/todos` API handler here and use its result as view props.
+  // The same data is cached for the client's useQuery("/todos").
+  const todos = await Query.instant("/todos");
 
-  // Or queue it to run in parallel without awaiting here
-  Query.prefetch("/feed", { search: { page: "1" } });
+  return { todos };
 }),
 ```
 
-- `Query.instant(path, options?)` runs the endpoint immediately and returns the
-  data (also storing it for the client).
-- `Query.prefetch(path, options?)` adds it to the request's prefetch queue so it
-  resolves alongside the rest of the page.
+- `Query.instant(path, options?)` runs the endpoint immediately and **returns the
+  data** — use its return value in the handler. It also stores the result for the client.
+- `Query.prefetch(path, options?)` only primes the client cache: it queues the endpoint
+  to resolve alongside the rest of the page, without returning the data for use here.
 
 Both take the same `{ params, search }` options as `useQuery`, and the stored data
 is matched to the client query by path + search key.
@@ -139,11 +140,12 @@ is matched to the client query by path + search key.
 > **Gotcha:** The `Query` facade can only be used from a **view/page request**, not
 > from an API request — calling it during an API request throws.
 
-## Writing data: mutation hooks
+## Writing data: mutations
 
-For `POST`/`PUT`/`PATCH`/`DELETE`, use the mutation hooks. `useMutation` is the
-general form; `usePost`, `usePut`, `usePatch`, `useDelete`, and `useUpload` are typed
-shorthands.
+For `POST`/`PUT`/`PATCH`/`DELETE`, the [`Form`](./forms.md) component is the
+recommended way to send mutations — it wires up inputs, CSRF, and validation-error
+display for you. When you need to trigger a mutation imperatively (outside a form), use
+the typed hooks `usePost`, `usePut`, `usePatch`, `useDelete`, and `useUpload`.
 
 ```tsx
 import { usePost } from "gemi/client";
@@ -163,7 +165,7 @@ function CreateTodo() {
 }
 ```
 
-`useMutation` (and its shorthands) return:
+These hooks return:
 
 | field | description |
 | --- | --- |
@@ -175,16 +177,9 @@ function CreateTodo() {
 | `cancel()` | Abort the in-flight request. |
 | `formData` | A mutable `FormData` accumulator used when `trigger()` is called with no input. |
 
-`useMutation` takes the method explicitly:
-
-```tsx
-import { useMutation } from "gemi/client";
-
-const { trigger } = useMutation("PATCH", "/todos/:id", { params: { id } });
-```
-
-Options mirror the query hooks — `{ params, search }` in the second argument, and a
-config object (`onSuccess`, `onError`, `onCanceled`, `autoInvalidate`) in the third.
+Options mirror the query hooks — `{ params, search }` in the second argument (e.g.
+`usePatch("/todos/:id", { params: { id } })`), and a config object (`onSuccess`,
+`onError`, `onCanceled`, `autoInvalidate`) in the third.
 
 ### Errors
 
@@ -239,45 +234,16 @@ mutate({ path: "/todos" }, (todos) => [newTodo]);
 The signature is `mutate({ path, params?, search? }, fn?)`, with the same
 merge/append semantics as `useQuery`'s `mutate`.
 
-## Type safety: the generated `gemi.d.ts`
+## Type safety
 
-The typing that powers all of the above comes from `gemi.d.ts` at your app root. It
-augments `gemi/client` by binding the framework's generic `RPC` / `ViewRPC` interfaces
-to **your** routers:
+The network layer is type-safe end to end: the framework infers each route's input and
+response types from your `api.ts` / `view.ts` routers and applies them to `useQuery`,
+the mutation hooks, `Form`, and `ViewProps` / `LayoutProps` automatically. You get
+autocomplete for valid paths and params and typed response data, with no manual wiring.
 
-```typescript
-// gemi.d.ts (generated — do not edit)
-import type Api from "@/app/http/routes/api";
-import type View from "@/app/http/routes/view";
-import type { CreateRPC, CreateViewRPC } from "gemi/http";
-
-declare module "gemi/client" {
-  export interface RPC extends CreateRPC<Api> {}
-  export interface ViewRPC extends CreateViewRPC<View> {}
-}
-```
-
-- `RPC` maps every API route to a key like `GET:/todos` / `POST:/todos`, carrying its
-  input and response types. `useQuery`, `useMutation`, `Form`, etc. filter `RPC` by
-  method to know which paths are valid and what they accept/return.
-- `ViewRPC` does the same for view/layout routes, powering `ViewProps`, `LayoutProps`,
-  and typed navigation paths.
-
-Because it is generated from your route files, **do not edit `gemi.d.ts` by hand** —
-your changes would be overwritten. Regenerate it after adding or changing API routes
-with the CLI:
-
-```bash
-gemi ide:generate-api-manifest
-```
-
-This runs the API manifest generator over `app/http/routes/api.ts` and rewrites the
-typed network layer. See the [CLI reference](./cli.md) for details and editor
-integrations.
-
-> **Note:** View/layout types (`ViewRPC`) come straight from importing your
-> `view.ts` router into `gemi.d.ts`, so they update automatically. It is the **API**
-> side that the manifest generator fills in.
+> **Note:** This is backed by a generated `gemi.d.ts` at your app root — don't edit it by
+> hand. Regenerate it after changing API routes with `gemi ide:generate-api-manifest`
+> (see the [CLI reference](./cli.md)).
 
 ## Related
 

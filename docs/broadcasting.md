@@ -35,24 +35,9 @@ export class ChatChannel extends BroadcastingChannel {
 
 > **Note:** `subscribe` runs per subscription attempt, so keep it cheap. If you don't override it, the channel is public — any client can subscribe.
 
-## Registering channels
+## Topics and channels
 
-Register your channels in `BroadcastingServiceProvider`, keyed by the topic route pattern. Extend it in `app/kernel/providers/BroadcastingServiceProvider.ts`:
-
-```typescript
-import { BroadcastingServiceProvider } from "gemi/services";
-import { ChatChannel } from "@/app/broadcasting/ChatChannel";
-
-export default class extends BroadcastingServiceProvider {
-  channels = {
-    "/chat/:roomId": ChatChannel,
-  };
-}
-```
-
-The key is the topic pattern; the value is the channel class. When a client subscribes to `/chat/42`, gemi matches it against the registered patterns (shortest pattern first), extracts `{ roomId: "42" }`, instantiates the channel, and calls `subscribe({ roomId: "42" })` to authorize.
-
-> **Note:** Register the provider in your kernel like the other service providers (see [Project Structure](./project-structure.md) and [Configuration](./configuration.md)).
+Each channel is associated with a **topic route pattern** (e.g. `/chat/:roomId`). When a client subscribes to a concrete topic like `/chat/42`, gemi matches it against the registered patterns (shortest pattern first), extracts `{ roomId: "42" }`, instantiates the channel, and calls `subscribe({ roomId: "42" })` to authorize.
 
 ## Publishing from the server
 

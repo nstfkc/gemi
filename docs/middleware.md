@@ -175,6 +175,6 @@ class AdminRouter extends ViewRouter {
 ## See also
 
 - [Authentication](./authentication.md) — how `auth` establishes the session and current user.
-- [Authorization](./authorization.md) — role/permission checks and policies.
+- [Authorization](./authorization.md) — role/permission checks.
 - [Controllers](./controllers.md) — the handlers middleware runs before.
 - [Routing](./routing.md) — where `middlewares` and `.middleware(...)` are declared.

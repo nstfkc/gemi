@@ -29,7 +29,7 @@ Each link below points to a self-contained Markdown page. For a single file cont
 ## Auth
 
 - [Authentication](authentication.md): AuthenticationServiceProvider, adapters, sessions, magic links, OAuth, the Auth facade, and client auth hooks.
-- [Authorization](authorization.md): policies, role-based middleware, and authorization errors.
+- [Authorization](authorization.md): role-based middleware and authorization errors.
 
 ## Services & facades
 

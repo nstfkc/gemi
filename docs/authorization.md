@@ -1,76 +1,14 @@
 # Authorization
 
 Authentication answers *who* a request is; authorization answers *what they may do*. gemi
-gives you three complementary tools:
+gives you two complementary tools:
 
 - **Middleware** (`auth`, `admin`, `role:...`) — coarse, route-level gates. See
   [Middleware](./middleware.md).
-- **Policies** — model-scoped rules registered through a service provider.
 - **Inline guards** — `Auth.guard(...)` inside a [controller](./controllers.md) for one-off
   checks (see [Authentication](./authentication.md)).
 
-This page covers policies, role-based middleware, and the authorization error types.
-
-## Policies
-
-Policies group the authorization rules for a resource in one class. Both pieces come from
-`gemi/http`: the `Policies` base class and the `PoliciesServiceProvider` that registers them.
-
-### Defining a policy
-
-Extend `Policies` and implement `all(operation, args)`. It receives the operation being
-attempted and its arguments, and returns a boolean (sync or async) — `true` allows,
-`false` denies:
-
-```typescript
-import { Policies } from "gemi/http";
-import { Auth } from "gemi/facades";
-
-export class PostPolicies extends Policies {
-  async all(operation: string, args: any) {
-    const user = await Auth.user();
-
-    // Anyone signed in may read.
-    if (operation === "findMany" || operation === "findUnique") {
-      return true;
-    }
-
-    // Only the owner may mutate.
-    return args.where?.authorId === user.id;
-  }
-}
-```
-
-> **Note:** The base `Policies.all` returns `true` (allow-all). Override it to enforce
-> anything. The naming convention is `<Model>Policies` — the provider keys each policy by its
-> class name, so a class named `PostPolicies` is the policy for the `Post` model.
-
-### Registering policies
-
-Create a `PoliciesServiceProvider` subclass and return your policy classes from `register()`.
-The provider instantiates each and stores it in `policiesList` under its class name:
-
-```typescript
-import { PoliciesServiceProvider } from "gemi/http";
-import { PostPolicies } from "./PostPolicies";
-
-export default class extends PoliciesServiceProvider {
-  protected register() {
-    return [PostPolicies];
-  }
-}
-```
-
-Register the provider in your [Kernel](./project-structure.md) alongside the other service
-providers.
-
-> **Note:** The API surface here is intentionally small: `Policies.all(operation, args)` and
-> `PoliciesServiceProvider.register()` returning `Array<new () => Policies>`. Do not assume
-> per-verb methods like `create()` / `update()` — there is a single `all` entry point that
-> switches on `operation`. Automatic model-level enforcement is wired through the Prisma
-> extension layer; when a policy denies, it raises `InsufficientPermissionsError` (below).
-> For request-scoped checks that don't map to a model, prefer `Auth.guard(...)` /
-> `Auth.guardSafe(...)` in the controller — see [Authentication](./authentication.md).
+This page covers role-based middleware and the authorization error types.
 
 ## Role-based access
 
@@ -147,7 +85,7 @@ middleware with `-auth`, and how `:`-parameters are parsed.
 ## Authorization errors
 
 Three error types (all from `gemi/http`) drive authorization responses. They are
-"request-breaker" errors: throw one anywhere in the request lifecycle — middleware, policy,
+"request-breaker" errors: throw one anywhere in the request lifecycle — middleware,
 controller, or facade — and the framework turns it into the response below. You generally
 don't construct them yourself; they are thrown for you by the middleware / facade helpers.
 
@@ -163,8 +101,7 @@ don't construct them yourself; they are thrown for you by the middleware / facad
 - **`AuthorizationError`** — "signed in, but this action is refused." Accepts a custom
   message: `new AuthorizationError("You cannot edit this post")`.
 - **`InsufficientPermissionsError`** — "signed in, but lacking the required role/permission."
-  Thrown by `Auth.guard(...)`, by role middleware, and when a policy denies. Also accepts a
-  custom message.
+  Thrown by `Auth.guard(...)` and by role middleware. Also accepts a custom message.
 
 ```typescript
 import { AuthorizationError } from "gemi/http";
@@ -187,4 +124,4 @@ async function update() {
 
 - [Authentication](./authentication.md) — sessions, `Auth.user()`, `Auth.guard()`, the `auth` middleware.
 - [Middleware](./middleware.md) — the `auth` / `admin` / `role:` DSL in full.
-- [Controllers](./controllers.md) — where guards and policy checks usually live.
+- [Controllers](./controllers.md) — where inline `Auth.guard(...)` checks usually live.

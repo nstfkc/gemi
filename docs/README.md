@@ -44,7 +44,7 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 
 ### Auth
 - **[Authentication](./authentication.md)** — the `AuthenticationServiceProvider`, adapters, sessions, magic links, OAuth, the `Auth` facade, and client auth hooks.
-- **[Authorization](./authorization.md)** — policies, role-based middleware, and authorization errors.
+- **[Authorization](./authorization.md)** — role-based middleware and authorization errors.
 
 ### Services & facades
 - **[Facades](./facades.md)** — reference for `Auth`, `Redirect`, `I18n`, `FileStorage`, `Query`, `Broadcast`, `Url`, `Log`, `Meta`, `Cookie`, `Redis`.
