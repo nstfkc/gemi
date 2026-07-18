@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { createServer, type ViteDevServer } from "vite";
 
 import { App } from "../app";
+import gemiVite from "../vite";
 import { createDevStyles } from "./styles";
 import { renderErrorPage } from "./renderErrorPage";
 import { Instrumentation } from "./types";
@@ -146,6 +147,12 @@ export async function httpDev(app: App, instrumentation: Instrumentation) {
   // HMR socket) on each reload.
   const isReload = Boolean(globalThis.__gemiVite);
   const vite = (globalThis.__gemiVite ??= await createServer({
+    // gemi owns the Vite setup — the app has no `vite.config.mjs` to discover.
+    // Register the gemi plugin explicitly instead; it loads `gemi.config.ts` and
+    // appends the app's Vite plugins (e.g. `@vitejs/plugin-react`, which serves
+    // `/@react-refresh` and the HMR preamble referenced below).
+    configFile: false,
+    plugins: [gemiVite()],
     server: {
       middlewareMode: true,
       // gemi reloads `.env` into process.env itself (see `watchEnv`). Stop Vite

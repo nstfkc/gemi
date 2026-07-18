@@ -1,5 +1,3 @@
-import { $ } from "bun";
-
 import path from "node:path";
 import { existsSync } from "node:fs";
 import createRollupInput from "./createRollupInput";
@@ -7,6 +5,7 @@ import { loadApp } from "./loadApp";
 import { gemiPlugin } from "../bun/plugin";
 import { loadGemiConfig } from "../config/load";
 import { build } from "vite";
+import gemiVite from "../vite";
 
 import { program } from "commander";
 import { ApiManifestGenerator } from "./ide/generateApiManifest";
@@ -71,20 +70,34 @@ program.command("build").action(async () => {
 
   const input = await createRollupInput(appDir);
 
+  // The gemi Vite plugin reads the entry list from `GEMI_INPUT` (see
+  // `gemi/vite`). This CLI already runs under Bun, so Vite's programmatic
+  // `build()` runs under Bun too — the plugin can import the app's TypeScript
+  // `gemi.config.ts` directly, and there is no per-app `vite.config.mjs` to
+  // discover, so the gemi plugin is passed explicitly (with `configFile: false`).
+  process.env.GEMI_INPUT = JSON.stringify(input);
+
   console.log("Building client...");
 
-  // Run Vite under Bun (`bun --bun`) so the gemi Vite plugin can import the
-  // app's TypeScript `gemi.config.ts` directly (see `gemi/vite`).
-  await $`GEMI_INPUT=${JSON.stringify(input)} bun --bun vite build --outDir dist/client`;
+  await build({
+    configFile: false,
+    plugins: [gemiVite()],
+    build: { outDir: "dist/client" },
+  });
 
   console.log("Building server...");
 
   // SSR build of the view entries. This emits per-view server chunks plus
   // `dist/server/.vite/manifest.json`, which `httpProd` reads to map each
-  // `app/views/*.tsx` to its built server module. Uses the same `GEMI_INPUT`
-  // entries and gemi vite plugin (`manifest: true`, `ssrEmitAssets: true`) as
-  // the client build above — the two builds are mirror images.
-  await $`GEMI_INPUT=${JSON.stringify(input)} bun --bun vite build --ssr --outDir dist/server`;
+  // `app/views/*.tsx` to its built server module. `build.ssr` flips Vite's
+  // `isSsrBuild`, which the gemi plugin uses to externalize `gemi` from the view
+  // graph (see `internal/gemiExternals`); everything else mirrors the client
+  // build above — the two are mirror images.
+  await build({
+    configFile: false,
+    plugins: [gemiVite()],
+    build: { ssr: true, outDir: "dist/server" },
+  });
 
   // Runnable server entry. `start` imports `dist/server/server.mjs`, so emit
   // exactly that file. `packages: "external"` keeps node_modules deps (sharp,

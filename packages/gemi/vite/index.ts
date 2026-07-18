@@ -2,10 +2,12 @@ import type { PluginOption } from "vite";
 import { loadGemiConfig } from "../config/load";
 import { isGemiExternal } from "../internal/gemiExternals";
 
-// Async so it can load `gemi.config.ts` before returning the plugin list. The
-// build runs Vite under `bun --bun` and dev under `bun --hot`, so the config's
-// TypeScript imports directly. Vite accepts a `Promise<PluginOption[]>` as an
-// entry in its `plugins` array, so `plugins: [react(), gemi()]` keeps working.
+// Async so it can load `gemi.config.ts` before returning the plugin list. Both
+// consumers run under Bun (the CLI's `build()` and dev's `createServer`, spawned
+// via `bun`), so the config's TypeScript imports directly. Vite accepts a
+// `Promise<PluginOption[]>` as an entry in its `plugins` array, so gemi passes
+// `plugins: [gemi()]` itself — the app's own Vite plugins (e.g. React) come from
+// `gemi.config.ts` and are appended below, so there is no `vite.config.mjs`.
 const gemi = async (): Promise<PluginOption[]> => {
   const userConfig = await loadGemiConfig(process.cwd());
   const { plugins: userVitePlugins = [], ...userViteConfig } =
