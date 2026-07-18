@@ -35,6 +35,18 @@ const result = await Bun.build({
   minify: true,
   splitting: true,
   sourcemap: "external",
+  // The framework build runs under `NODE_ENV=production` (so Bun emits the
+  // production JSX transform — see the `build` script). But Bun's bundler also
+  // constant-folds every literal `process.env.NODE_ENV` to that build-time
+  // value and dead-code-eliminates the losing branch. That baked `"production"`
+  // into the *published* bundle for every runtime check — most visibly
+  // `Server.start`, whose `NODE_ENV === "production"` switch had its whole dev
+  // branch (Vite dev server / HMR in `httpDev`) deleted, so `gemi dev` silently
+  // ran `httpProd` and served the prebuilt `dist/client` with no rebuild/HMR.
+  // Redirect the read to `Bun.env.NODE_ENV` (which Bun does NOT fold) so mode is
+  // resolved at RUNTIME — the same published artifact then serves dev and prod
+  // correctly. JSX selection is unaffected (it follows the env var, not this).
+  define: { "process.env.NODE_ENV": "Bun.env.NODE_ENV" },
 });
 
 if (!result.success) {
