@@ -93,6 +93,16 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
           },
         );
       }
+
+      // `Bun.file(path).stream()` is lazy — a missing file only throws ENOENT
+      // once the body is streamed, which is *after* this handler has returned,
+      // so the `try/catch` below can't catch it (it surfaces as an unhandled
+      // rejection with the response already committed as 200). Bail out to a
+      // clean 404 before we ever build the streaming Response.
+      if (!doesExist) {
+        return new Response("Not found", { status: 404 });
+      }
+
       try {
         const file = Bun.file(distPath);
 
