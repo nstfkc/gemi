@@ -25,6 +25,9 @@ export default async function (appDir: string): Promise<string[]> {
     if (segments.includes("components")) continue; // **/components/**
     if (segments.includes("assets")) continue; // **/assets/**
     if (file === "RootLayout.tsx") continue; // ./views/RootLayout.tsx
+    // Test files are not views — keep them out of the build so they never
+    // become a Vite entry (and never emit a compiled chunk into `dist`).
+    if (/\.(test|spec)\.tsx$/.test(file)) continue; // **/*.{test,spec}.tsx
 
     entries.add(`/app/views/${file}`);
   }

@@ -24,5 +24,13 @@
     "types": ["vite/client", "bun"],
     "outDir": "dist"
   },
-  "include": ["client"]
+  "include": ["client"],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "**/*.test.ts",
+    "**/*.test.tsx",
+    "**/*.spec.ts",
+    "**/*.spec.tsx"
+  ]
 }
