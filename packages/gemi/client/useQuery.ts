@@ -239,8 +239,8 @@ export function useQuery<T extends keyof GetRPC>(
     resource.refetch(variantKey);
   }, [resource, variantKey]);
 
-  function mutate(fn?: Partial<NestedPrettify<Data<T>>>): void;
-  function mutate(fn?: (data: NestedPrettify<Data<T>>) => Partial<NestedPrettify<Data<T>>>): void;
+  function mutate(fn?: NestedPrettify<Data<T>>): void;
+  function mutate(fn?: (data: NestedPrettify<Data<T>>) => NestedPrettify<Data<T>>): void;
   function mutate(fn?: any) {
     if (!fn) {
       fetchedRef.current = true;
@@ -250,14 +250,17 @@ export function useQuery<T extends keyof GetRPC>(
     return resource.mutate(variantKey, (data: any) => {
       if (data === undefined || data === null) {
         console.warn("Mutate function called before the query.");
-        return;
+        return data;
       }
 
+      // The callback's return value *replaces* the cached data. The type checks
+      // below only ensure the shape matches so a stray value can't corrupt the
+      // cache; they do not merge or append.
       const updatedData = typeof fn === "function" ? fn(data) : fn;
 
       if (isPlainObject(data)) {
         if (isPlainObject(updatedData)) {
-          return { ...data, ...updatedData };
+          return updatedData;
         }
         throw new Error(
           "Mutate function must return an object when the current data is an object.",
@@ -266,7 +269,7 @@ export function useQuery<T extends keyof GetRPC>(
 
       if (Array.isArray(data)) {
         if (Array.isArray(updatedData)) {
-          return [...data, ...updatedData];
+          return updatedData;
         }
         throw new Error("Mutate function must return an array when the current data is an array.");
       }

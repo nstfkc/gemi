@@ -94,19 +94,31 @@ const { data } = useQuery("/feed", {}, {
 
 ### Optimistic updates with `mutate`
 
-The `mutate` returned by `useQuery` updates the cached value in place:
+The `mutate` returned by `useQuery` has two forms:
 
 ```tsx
 const { data, mutate } = useQuery("/todos");
 
-// Merge/append into the current data
-mutate((todos) => [{ id: "tmp", title: "New" }]);
+// 1. Optimistically REPLACE the cached data with what the callback returns,
+//    then refetch from the server in the background.
+mutate((todos) => [...todos, { id: "tmp", title: "New" }]); // append an item
+mutate((todos) => todos.filter((t) => t.id !== id));        // remove an item
+mutate((todos) => todos.map((t) => (t.id === id ? next : t))); // update an item
 
-// Or refetch by calling with no args
+// 2. Refetch from the server (no optimistic update) by calling with no args.
 mutate();
 ```
 
-For objects, the returned partial is shallow-merged; for arrays, it is appended.
+The callback's return value **replaces** the cached value — it is not merged or
+appended, so you return the full next value (spread the existing data yourself when
+you want to keep it). It must keep the same shape as the current data: return an
+object when the data is an object, an array when it's an array. After the optimistic
+write, `mutate` always refetches so the cache reconciles with the server.
+
+`mutate(fn)` on a query whose data hasn't loaded yet (including a `lazy` query) has
+nothing to update optimistically, so it falls through to a refetch rather than doing
+nothing.
+
 To update a query from **outside** the component that owns it, use `useMutate`.
 
 ## Reusing endpoints on the server: the `Query` facade
@@ -232,7 +244,7 @@ mutate({ path: "/todos" }, (todos) => [newTodo]);
 ```
 
 The signature is `mutate({ path, params?, search? }, fn?)`, with the same
-merge/append semantics as `useQuery`'s `mutate`.
+replace-then-refetch semantics as `useQuery`'s `mutate`.
 
 ## Type safety
 

@@ -80,6 +80,10 @@ export class QueryResource {
     const store = this.store.getValue();
     const state = store.get(variantKey);
     if (!state || !state.data) {
+      // Nothing is cached yet to update optimistically — e.g. a lazy query, or
+      // one that hasn't resolved. Fall through to a refetch so `mutate(fn)` is
+      // not a silent no-op (it still means "go get the latest data").
+      this.resolveVariant(variantKey, false, false);
       return;
     }
     const data = fn(state.data);
