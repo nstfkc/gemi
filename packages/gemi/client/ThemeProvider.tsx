@@ -1,8 +1,10 @@
 import {
   createContext,
   type ReactNode,
+  useCallback,
   useContext,
   useEffect,
+  useMemo,
   useState,
 } from "react";
 
@@ -30,34 +32,36 @@ export const ThemeProvider = (props: { children: ReactNode }) => {
   });
 
   useEffect(() => {
-    if (theme === "system") {
-      window
-        .matchMedia("(prefers-color-scheme: dark)")
-        .addEventListener("change", ({ matches }) => {
-          document.documentElement.classList.remove("light", "dark");
-          document.documentElement.classList.add(matches ? "dark" : "light");
-        });
-    }
+    if (theme !== "system") return;
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const onChange = ({ matches }: MediaQueryListEvent) => {
+      document.documentElement.classList.remove("light", "dark");
+      document.documentElement.classList.add(matches ? "dark" : "light");
+    };
+    media.addEventListener("change", onChange);
+    return () => media.removeEventListener("change", onChange);
   }, [theme]);
 
-  return (
-    <ThemeContext.Provider
-      value={{
-        theme: theme as Theme,
-        setTheme: (newTheme: Theme) => {
-          setTheme(newTheme);
-          storeTheme(newTheme);
+  const setThemeAndStore = useCallback((newTheme: Theme) => {
+    setTheme(newTheme);
+    storeTheme(newTheme);
 
-          let documentTheme = newTheme as Theme;
-          if (newTheme === "system") {
-            const media = window.matchMedia("(prefers-color-scheme: dark)");
-            documentTheme = media.matches ? "dark" : "light";
-          }
-          document.documentElement.classList.remove("light", "dark");
-          document.documentElement.classList.add(documentTheme);
-        },
-      }}
-    >
+    let documentTheme = newTheme as Theme;
+    if (newTheme === "system") {
+      const media = window.matchMedia("(prefers-color-scheme: dark)");
+      documentTheme = media.matches ? "dark" : "light";
+    }
+    document.documentElement.classList.remove("light", "dark");
+    document.documentElement.classList.add(documentTheme);
+  }, []);
+
+  const value = useMemo(
+    () => ({ theme: theme as Theme, setTheme: setThemeAndStore }),
+    [theme, setThemeAndStore],
+  );
+
+  return (
+    <ThemeContext.Provider value={value}>
       {props.children}
     </ThemeContext.Provider>
   );

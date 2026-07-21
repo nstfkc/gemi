@@ -6,7 +6,7 @@ import { ErrorBoundary } from "react-error-boundary";
 
 const StackTrace = () => {
   useEffect(() => {
-    window.addEventListener("load", () => {
+    const onLoad = () => {
       const container = document.getElementById("overlay");
       const ErrorOverlay = customElements.get("vite-error-overlay");
       if (ErrorOverlay) {
@@ -16,7 +16,9 @@ const StackTrace = () => {
         });
         container.appendChild(overlay);
       }
-    });
+    };
+    window.addEventListener("load", onLoad);
+    return () => window.removeEventListener("load", onLoad);
   }, []);
 
   return <div id="overlay" />;

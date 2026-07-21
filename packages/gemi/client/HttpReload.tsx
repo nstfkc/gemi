@@ -12,40 +12,26 @@ export const HttpReload = () => {
   const params = useParams();
   const [reloading, setReloading] = useState(false);
 
-  const handleReload = () => {
-    // The server recovered, so dismiss any Vite error overlay left on the page
-    // (each element exposes a `close()` that also tears down its listeners).
-    if (typeof document !== "undefined") {
-      document.querySelectorAll("vite-error-overlay").forEach((el: any) => {
-        if (typeof el.close === "function") el.close();
-        else el.remove();
-      });
-    }
-    setReloading(true);
-    // replace(pathname, {
-    //   params: params,
-    //   search: searchParams.toJSON(),
-    // } as any)
-    //   .catch(console.log)
-    //   .finally(() => {
-    //     setReloading(false);
-    //   });
-  };
-
   useEffect(() => {
     // @ts-ignore
-    if (import.meta.hot) {
-      // @ts-ignore
-      import.meta.hot.on("http-reload", handleReload);
-    }
-    return () => {
-      // @ts-ignore
-      if (import.meta.hot) {
-        // @ts-ignore
-        import.meta.hot.off("http-reload", handleReload);
+    const hot = import.meta.hot;
+    if (!hot) return;
+
+    const handleReload = () => {
+      // The server recovered, so dismiss any Vite error overlay left on the page
+      // (each element exposes a `close()` that also tears down its listeners).
+      if (typeof document !== "undefined") {
+        document.querySelectorAll("vite-error-overlay").forEach((el: any) => {
+          if (typeof el.close === "function") el.close();
+          else el.remove();
+        });
       }
+      setReloading(true);
     };
-  }, [handleReload]);
+
+    hot.on("http-reload", handleReload);
+    return () => hot.off("http-reload", handleReload);
+  }, []);
 
   if (!reloading || typeof document === "undefined") {
     return null;

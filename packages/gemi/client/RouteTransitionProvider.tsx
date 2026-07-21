@@ -1,4 +1,9 @@
-import { createContext, useContext, type PropsWithChildren } from "react";
+import {
+  createContext,
+  useContext,
+  useMemo,
+  type PropsWithChildren,
+} from "react";
 
 const RouteTransitionContext = createContext<{
   isTransitioning: boolean;
@@ -21,14 +26,17 @@ export const RouteTransitionProvider = (
 ) => {
   const { isPending, isFetching, transitionPath } = props;
 
+  const value = useMemo(
+    () => ({
+      isTransitioning: isPending || isFetching,
+      targetPath: transitionPath[1],
+      currentPath: transitionPath[0] || "",
+    }),
+    [isPending, isFetching, transitionPath],
+  );
+
   return (
-    <RouteTransitionContext.Provider
-      value={{
-        isTransitioning: isPending || isFetching,
-        targetPath: transitionPath[1],
-        currentPath: transitionPath[0] || "",
-      }}
-    >
+    <RouteTransitionContext.Provider value={value}>
       {props.children}
     </RouteTransitionContext.Provider>
   );

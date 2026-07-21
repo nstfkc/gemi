@@ -1,7 +1,9 @@
 import {
   createContext,
   type PropsWithChildren,
+  useCallback,
   useContext,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -41,83 +43,99 @@ export const I18nProvider = (props: PropsWithChildren) => {
 
   const [currentLocale, setCurrentLocale] = useState(i18n.currentLocale);
 
-  const dictionary = useRef<Dictionary>(
-    (() => {
-      const dictionary = new Map();
-      for (const [locale, value] of Object.entries(i18n?.dictionary ?? {})) {
-        const components = new Map();
-        for (const [component, translations] of Object.entries(value)) {
-          components.set(component, translations);
-        }
-        dictionary.set(locale, components);
+  const dictionary = useRef<Dictionary>(null);
+  if (dictionary.current === null) {
+    const initialDictionary: Dictionary = new Map();
+    for (const [locale, value] of Object.entries(i18n?.dictionary ?? {})) {
+      const components = new Map();
+      for (const [component, translations] of Object.entries(value)) {
+        components.set(component, translations);
       }
-      return dictionary;
-    })(),
-  );
-
-  function updateDictionary(
-    translations: Record<string, Record<string, Record<string, string>>> = {},
-    locale?: string,
-  ) {
-    for (const [locale, value] of Object.entries(translations)) {
-      if (!dictionary.current.has(locale)) {
-        dictionary.current.set(locale, new Map());
-      }
-      const scopes = dictionary.current.get(locale);
-      for (const [scope, translations] of Object.entries(value)) {
-        if (!scopes.has(scope)) {
-          scopes.set(scope, {});
-        }
-        scopes.set(scope, translations);
-      }
+      initialDictionary.set(locale, components);
     }
-    changeLocale(locale);
+    dictionary.current = initialDictionary;
   }
 
-  const changeLocale = (locale: string) => {
+  const changeLocale = useCallback((locale: string) => {
     if (dictionary.current.has(locale)) {
       setCurrentLocale(locale);
     }
-  };
+  }, []);
 
-  const getTranslations = (locale: string) => {
-    return (component: string) => {
-      return dictionary.current.get(locale).get(component);
-    };
-  };
+  const updateDictionary = useCallback(
+    (
+      translations: Record<string, Record<string, Record<string, string>>> = {},
+      locale?: string,
+    ) => {
+      for (const [locale, value] of Object.entries(translations)) {
+        if (!dictionary.current.has(locale)) {
+          dictionary.current.set(locale, new Map());
+        }
+        const scopes = dictionary.current.get(locale);
+        for (const [scope, translations] of Object.entries(value)) {
+          if (!scopes.has(scope)) {
+            scopes.set(scope, {});
+          }
+          scopes.set(scope, translations);
+        }
+      }
+      changeLocale(locale);
+    },
+    [changeLocale],
+  );
 
-  const fetchTranslations = async (
-    pathname: string,
-    locale?: string,
-    signal?: AbortSignal,
-  ) => {
-    if (Object.keys(i18n).length === 0) {
-      return;
-    }
-    const response = await fetch(
-      `/api/__gemi__/services/i18n/translations/${
-        locale || currentLocale
-      }${pathname === "/" ? "" : pathname}`,
-      {
-        signal,
-      },
-    );
-    const translations = await response.json();
-    updateDictionary(translations);
-  };
+  const getComponentTranslations = useCallback(
+    (component: string) => {
+      return dictionary.current.get(currentLocale).get(component);
+    },
+    [currentLocale],
+  );
+
+  const fetchTranslations = useCallback(
+    async (pathname: string, locale?: string, signal?: AbortSignal) => {
+      if (Object.keys(i18n).length === 0) {
+        return;
+      }
+      const response = await fetch(
+        `/api/__gemi__/services/i18n/translations/${
+          locale || currentLocale
+        }${pathname === "/" ? "" : pathname}`,
+        {
+          signal,
+        },
+      );
+      if (!response.ok) {
+        return;
+      }
+      const translations = await response.json();
+      updateDictionary(translations);
+    },
+    [i18n, currentLocale, updateDictionary],
+  );
+
+  const value = useMemo(
+    () => ({
+      getComponentTranslations,
+      locale: currentLocale,
+      changeLocale,
+      updateDictionary,
+      fetchTranslations,
+      supportedLocales: i18n.supportedLocales,
+      defaultLocale: i18n.defaultLocale,
+    }),
+    [
+      getComponentTranslations,
+      currentLocale,
+      changeLocale,
+      updateDictionary,
+      fetchTranslations,
+      i18n.supportedLocales,
+      i18n.defaultLocale,
+    ],
+  );
 
   return (
-    <I18nContext.Provider
-      value={{
-        getComponentTranslations: getTranslations(currentLocale),
-        locale: currentLocale,
-        changeLocale,
-        updateDictionary,
-        fetchTranslations,
-        supportedLocales: i18n.supportedLocales,
-        defaultLocale: i18n.defaultLocale,
-      }}
-    >
+    <I18nContext.Provider value={value}>
       {props.children}
     </I18nContext.Provider>
   );

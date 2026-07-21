@@ -102,12 +102,13 @@ const Tree = memo(
     pathname: string;
   }) => {
     const { entries, tree, pathname, action } = props;
+    const entrySet = new Set(entries);
 
     return (
       <>
         {tree.map((node) => {
           const [path, subtree] = node;
-          if (!entries.includes(path)) return null;
+          if (!entrySet.has(path)) return null;
           if (subtree.length > 0) {
             return (
               <Route
@@ -209,64 +210,67 @@ const Routes = (props: { componentTree: ComponentTree }) => {
 
       const url = `${pathnameWithLocaleSegment}.json${search}`;
       setIsFetching(true);
-      let res = { ok: false, json: async () => ({}) } as Response;
       try {
-        const result = await Promise.all([
-          fetch(url),
-          fetchRouteCSS(pathname),
-          ...views.map((component) => {
-            if (!window?.loaders) return Promise.resolve();
-            const loader = window?.loaders?.[component] ?? (() => ({}));
-            loader();
-          }),
-        ]);
-        res = result[0];
-      } catch (e) {
-        console.error(e);
-      }
-
-      if (res.ok) {
-        const {
-          data,
-          i18n,
-          prefetchedData,
-          breadcrumbs,
-          meta,
-          directive = {},
-          is404 = false,
-          appId,
-        } = await res.json();
-        updateMeta(meta);
-        if (directive?.kind === "Redirect") {
-          if (directive?.path) {
-            replace(directive.path, { params: {} } as unknown);
-          }
-
-          return;
+        let res = { ok: false, json: async () => ({}) } as Response;
+        try {
+          const result = await Promise.all([
+            fetch(url),
+            fetchRouteCSS(pathname),
+            ...views.map((component) => {
+              if (!window?.loaders) return Promise.resolve();
+              const loader = window?.loaders?.[component] ?? (() => ({}));
+              loader();
+            }),
+          ]);
+          res = result[0];
+        } catch (e) {
+          console.error(e);
         }
 
-        if (is404) {
-          startTransition(() => {
-            setRouteState((state) => ({
-              ...state,
-              appId,
-              views: ["404"],
-            }));
-          });
-        }
-
-        startTransition(() => {
-          setRouteState({
-            ...routerState,
-            appId,
+        if (res.ok) {
+          const {
             data,
             i18n,
             prefetchedData,
             breadcrumbs,
+            meta,
+            directive = {},
+            is404 = false,
+            appId,
+          } = await res.json();
+          updateMeta(meta);
+          if (directive?.kind === "Redirect") {
+            if (directive?.path) {
+              replace(directive.path, { params: {} } as unknown);
+            }
+
+            return;
+          }
+
+          if (is404) {
+            startTransition(() => {
+              setRouteState((state) => ({
+                ...state,
+                appId,
+                views: ["404"],
+              }));
+            });
+          }
+
+          startTransition(() => {
+            setRouteState({
+              ...routerState,
+              appId,
+              data,
+              i18n,
+              prefetchedData,
+              breadcrumbs,
+            });
           });
-        });
+        }
+      } finally {
+        setIsFetching(false);
       }
-      setIsFetching(false);
     });
   }, [routerSubject, fetchRouteCSS, replace]);
 

@@ -9,17 +9,17 @@ export function useSubscription(
   const { cb, params } = options;
   const { subscribe, unsubscribe } = useContext(WebSocketContext);
 
-  const topic = useMemo(
-    () => applyParams(route, options.params),
-    [route, params],
-  );
+  const topic = useMemo(() => applyParams(route, params), [route, params]);
 
-  const handler = (event: MessageEvent<any>) => {
-    const message = JSON.parse(event.data);
-    if (topic === message.topic) {
-      cb(message.data);
-    }
-  };
+  const handler = useCallback(
+    (event: MessageEvent<any>) => {
+      const message = JSON.parse(event.data);
+      if (topic === message.topic) {
+        cb(message.data);
+      }
+    },
+    [topic, cb],
+  );
 
   useEffect(() => {
     subscribe(topic, handler);
@@ -27,5 +27,5 @@ export function useSubscription(
     return () => {
       unsubscribe(topic, handler);
     };
-  }, [topic]);
+  }, [topic, subscribe, unsubscribe, handler]);
 }
