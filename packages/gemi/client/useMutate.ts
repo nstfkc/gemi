@@ -29,8 +29,8 @@ export function useMutate() {
       search?: Record<string, any>;
     },
     fn?:
-      | ((data: NestedPrettify<Data<T>>) => Partial<NestedPrettify<Data<T>>>)
-      | Partial<NestedPrettify<Data<T>>>,
+      | ((data: NestedPrettify<Data<T>>) => NestedPrettify<Data<T>>)
+      | NestedPrettify<Data<T>>,
   ) {
     const { path, params = {}, search = {} } = options ?? {};
     const normalPath = applyParams(path, params);
@@ -41,18 +41,20 @@ export function useMutate() {
     return resource.mutate.call(resource, variantKey, (data: any) => {
       if (data === undefined || data === null) {
         console.warn("Mutate function called before the query.");
-        return;
+        return data;
       }
 
       if (!fn) {
         return data;
       }
 
+      // The callback's return value *replaces* the cached data. The type checks
+      // below only ensure the shape matches; they do not merge or append.
       const updatedData = typeof fn === "function" ? fn(data) : fn;
 
       if (isPlainObject(data)) {
         if (isPlainObject(updatedData)) {
-          return { ...data, ...updatedData };
+          return updatedData;
         }
         throw new Error(
           "Mutate function must return an object when the current data is an object.",
@@ -61,7 +63,7 @@ export function useMutate() {
 
       if (Array.isArray(data)) {
         if (Array.isArray(updatedData)) {
-          return [...data, ...updatedData];
+          return updatedData;
         }
         throw new Error(
           "Mutate function must return an array when the current data is an array.",
