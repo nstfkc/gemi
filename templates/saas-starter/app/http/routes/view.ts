@@ -1,6 +1,5 @@
 import { Cookie, I18n, Meta, Query, Auth } from "gemi/facades";
 import { type HttpRequest, ViewRouter } from "gemi/http";
-import { FilesRouter } from "./files";
 
 class AuthViewRouter extends ViewRouter {
   routes = {
@@ -66,7 +65,6 @@ export default class extends ViewRouter {
       },
     ),
     "/auth": AuthViewRouter,
-    "/files": FilesRouter,
     "(app)/": AppRouter,
   };
 }
