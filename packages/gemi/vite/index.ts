@@ -29,6 +29,20 @@ const gemi = async (): Promise<PluginOption[]> => {
             sourcemap: true,
             rollupOptions: {
               input: Array.from(JSON.parse(process.env.GEMI_INPUT ?? "[]")),
+              // Each view is a build entry, but the app never imports them
+              // statically — the client router pulls them in via `import.meta.glob`
+              // (a runtime dynamic import). Rolldown's default entry-signature
+              // handling therefore sees a view's `export default` as unused and
+              // tree-shakes it. For a plain view the component is hoisted into the
+              // shared bundle so it still renders, but a view with a module-scope
+              // `lazy(() => import(...))` keeps its own chunk alive as a side
+              // effect while the "unused" default export is dropped — leaving a
+              // hollow chunk whose default is `undefined`. Hydration then renders
+              // `<undefined/>` → React #306 and the whole page unmounts to blank.
+              // `"strict"` forces every entry to preserve its exact exports (a
+              // facade chunk is emitted if needed), so every view keeps its
+              // default regardless of how the router loads it.
+              preserveEntrySignatures: "strict",
               // For the SSR build, externalize `gemi` (a linked package) and all
               // its subpaths. Otherwise the bundler compiles its own copy of
               // gemi's module-level singletons (`RouteStateContext`,
