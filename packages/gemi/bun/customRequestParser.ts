@@ -2,6 +2,10 @@ import { parse, print } from "recast";
 import { builders } from "ast-types";
 
 export async function customRequestParser(original: string) {
+  // Every identifier we turn from a type annotation into a `new X()` default
+  // value. Their imports have to survive as value imports.
+  const promotedToValue = new Set<string>();
+
   function isExportedControllerClassDeclaration(body: any) {
     return (
       (body.type === "ExportNamedDeclaration" ||
@@ -66,6 +70,7 @@ export async function customRequestParser(original: string) {
         const right = builders.newExpression(builders.identifier(reqName), []);
         const _node = builders.assignmentPattern(left, right);
         node.params[0] = _node;
+        promotedToValue.add(reqName);
       }
     }
   }
@@ -118,7 +123,44 @@ export async function customRequestParser(original: string) {
             );
             const _node = builders.assignmentPattern(left, right);
             arg.params[0] = _node;
+            promotedToValue.add(reqName);
           }
+        }
+      }
+    }
+  }
+
+  // A param annotated as `req: HttpRequest` becomes `req = new HttpRequest()`,
+  // so a type-only import of it would be stripped by the transpiler and leave a
+  // dangling reference. Turn those imports into value imports.
+  function promoteTypeOnlyImports(body: any[]) {
+    for (const node of body) {
+      if (node?.type !== "ImportDeclaration") {
+        continue;
+      }
+
+      const specifiers = node.specifiers ?? [];
+      const isNeeded = (specifier: any) =>
+        promotedToValue.has(specifier.local?.name ?? specifier.imported?.name);
+
+      if (node.importKind === "type") {
+        if (!specifiers.some(isNeeded)) {
+          continue;
+        }
+        // `import type { A, B }` -> `import { A, type B }`, keeping the
+        // untouched specifiers type-only.
+        node.importKind = "value";
+        for (const specifier of specifiers) {
+          if (!isNeeded(specifier)) {
+            specifier.importKind = "type";
+          }
+        }
+        continue;
+      }
+
+      for (const specifier of specifiers) {
+        if (specifier.importKind === "type" && isNeeded(specifier)) {
+          specifier.importKind = "value";
         }
       }
     }
@@ -153,5 +195,7 @@ export async function customRequestParser(original: string) {
       continue;
     }
   }
-  return print(orgFile).code.replace("type HttpRequest", "HttpRequest");
+  promoteTypeOnlyImports(orgFile.program.body);
+
+  return print(orgFile).code;
 }
