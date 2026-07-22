@@ -6,6 +6,7 @@ import { createStyles } from "./styles";
 import type { App } from "../app";
 import { Instrumentation } from "./types";
 import { printStartupBanner } from "./banner";
+import { RESERVED_ROUTE_PREFIX } from "../services/router/ViewRouterServiceContainer";
 
 const projectDir = process.env.GEMI_PROJECT_DIR ?? "";
 const rootDir = join(process.cwd(), projectDir);
@@ -61,21 +62,18 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
   // the array into a single path (which only works for a one-element array).
   const appCssFiles: string[] = manifest["app/client.tsx"]?.css ?? [];
   const appCSSContent = (
-    await Promise.all(
-      appCssFiles.map((cssFile) => Bun.file(`${distDir}/client/${cssFile}`).text()),
-    )
+    await Promise.all(appCssFiles.map((cssFile) => Bun.file(`${distDir}/client/${cssFile}`).text()))
   ).join("\n");
+
+  const staticFilePattern = new URLPattern({
+    pathname: "/*.:filetype(png|txt|js|css|jpg|svg|jpeg|avif|webp|ico|ttf|map)",
+  });
 
   async function requestHandler(req: Request) {
     const { pathname } = new URL(req.url);
 
-    const pattern = new URLPattern({
-      pathname:
-        "/*.:filetype(png|txt|js|css|jpg|svg|jpeg|avif|webp|ico|ttf|map)",
-    });
-
     const isWellKnownFile = pathname.startsWith("/.well-known");
-    const isFileRequest = pattern.test({ pathname }) || isWellKnownFile;
+    const isFileRequest = staticFilePattern.test({ pathname }) || isWellKnownFile;
 
     const isApi = pathname.startsWith("/api");
 
@@ -94,14 +92,29 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
         );
       }
 
+      if (!doesExist) {
+        // `/assets` is reserved for build output (the router rejects routes
+        // there at boot), so a miss is a miss — 404 without paying for an SSR
+        // render.
+        if (
+          pathname === RESERVED_ROUTE_PREFIX ||
+          pathname.startsWith(`${RESERVED_ROUTE_PREFIX}/`)
+        ) {
+          return new Response("Not found", { status: 404 });
+        }
+
+        // Anywhere else the pattern above matched on extension alone, so this
+        // may well be an app route — a file route like
+        // `this.file(() => Bun.file(...))` mounted at `/files/logo.svg` lands
+        // here too. Hand it to the app rather than 404ing on its behalf.
+        return await handleWithApp(req, pathname);
+      }
+
       // `Bun.file(path).stream()` is lazy — a missing file only throws ENOENT
       // once the body is streamed, which is *after* this handler has returned,
       // so the `try/catch` below can't catch it (it surfaces as an unhandled
-      // rejection with the response already committed as 200). Bail out to a
-      // clean 404 before we ever build the streaming Response.
-      if (!doesExist) {
-        return new Response("Not found", { status: 404 });
-      }
+      // rejection with the response already committed as 200). Never build the
+      // streaming Response without checking existence first.
 
       try {
         const file = Bun.file(distPath);
@@ -121,6 +134,10 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
       }
     }
 
+    return await handleWithApp(req, pathname);
+  }
+
+  async function handleWithApp(req: Request, pathname: string) {
     const handler = app.fetch.bind(app);
 
     try {

@@ -19,7 +19,7 @@ import { createElement, Fragment } from "react";
 // @ts-ignore
 import { URLPattern } from "urlpattern-polyfill/urlpattern";
 import { ServiceContainer } from "../ServiceContainer";
-import type { ViewRoutes } from "../../http/ViewRouter";
+import { createFileResponse, type FileOutput, type ViewRoutes } from "../../http/ViewRouter";
 import { createRouteManifest } from "./createRouteManifest";
 import { createComponentTree } from "./createComponentTree";
 import { flattenComponentTree } from "../../client/helpers/flattenComponentTree";
@@ -67,11 +67,36 @@ async function getTtfFont(
   return await fetch(ttfUrl).then((res) => res.arrayBuffer());
 }
 
+/**
+ * `/assets` is where the client build output is served from, ahead of the
+ * router — a route mounted there could never be reached in production, and in
+ * dev it would appear to work. Fail at boot instead of shipping that.
+ */
+export const RESERVED_ROUTE_PREFIX = "/assets";
+
+export function assertNoReservedRoutePaths(routePaths: string[]) {
+  const reserved = routePaths.filter(
+    (path) => path === RESERVED_ROUTE_PREFIX || path.startsWith(`${RESERVED_ROUTE_PREFIX}/`),
+  );
+
+  if (reserved.length > 0) {
+    const many = reserved.length > 1;
+    throw new Error(
+      `View route path${many ? "s" : ""} ${reserved.map((path) => `"${path}"`).join(", ")} ` +
+        `use${many ? "" : "s"} the reserved "${RESERVED_ROUTE_PREFIX}" prefix. ` +
+        `The client build output is served from there before the router runs, so the route would never match. ` +
+        `Mount it somewhere else.`,
+    );
+  }
+}
+
 export class ViewRouterServiceContainer extends ServiceContainer {
   static _name = "ViewRouterServiceContainer";
 
   flatViewRoutes: FlatViewRoutes = {};
   routeManifest: Record<string, string[]> = {};
+  /** `routeManifest` without file routes — they have no component to render client side. */
+  clientRouteManifest: Record<string, string[]> = {};
   componentTree: ComponentTree = [];
   flatComponentTree: string[] = [];
   root: any = null;
@@ -83,7 +108,11 @@ export class ViewRouterServiceContainer extends ServiceContainer {
       "/auth": AuthViewRouter,
     };
     this.flatViewRoutes = createFlatViewRoutes(routes);
+    assertNoReservedRoutePaths(Object.keys(this.flatViewRoutes));
     this.routeManifest = createRouteManifest(routes);
+    this.clientRouteManifest = Object.fromEntries(
+      Object.entries(this.routeManifest).filter(([, views]) => views.at(-1) !== "FILE"),
+    );
     this.componentTree = createComponentTree(routes);
     this.flatComponentTree = flattenComponentTree(this.componentTree);
     this.root = service.root;
@@ -152,7 +181,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
         prefetchedData,
         i18n,
         auth: { user },
-        routeManifest: this.routeManifest,
+        routeManifest: this.clientRouteManifest,
         breadcrumbs,
         router: {
           urlLocaleSegment,
@@ -426,14 +455,21 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           viewData[key] = value;
         }
 
-        const views = this.routeManifest[currentPathName];
-        const isFileRequest = views?.[views?.length ?? 0 - 1] === "FILE";
-        if (isFileRequest) {
-          const file: File = (viewData as any).FILE;
+        const fileOutput: FileOutput | undefined = (viewData as any).FILE;
+        if (fileOutput) {
+          for (const cookie of cookies) {
+            headers.append("Set-Cookie", cookie.toString());
+          }
 
-          headers.set("Content-Type", file.type || "application/octet-stream");
+          try {
+            await this.onRequestEnd(httpRequest);
+          } catch (err) {
+            Log.error(err?.message ?? 'Error in "onRequestEnd" event handler', {
+              err: JSON.stringify(err),
+            });
+          }
 
-          return new Response(file.stream(), { headers });
+          return await createFileResponse(fileOutput, headers);
         }
 
         if (isViewDataRequest) {
