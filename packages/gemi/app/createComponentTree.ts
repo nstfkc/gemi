@@ -7,6 +7,19 @@ export function createComponentTree(routes: ViewRoutes): ComponentTree {
   for (const [_, routeHandler] of Object.entries(routes)) {
     if ("run" in routeHandler) {
       const viewPath = routeHandler.viewPath;
+      if (viewPath === "__") {
+        continue;
+      }
+
+      // File and redirect routes never resolve to a component.
+      if (viewPath === "REDIRECT") {
+        continue;
+      }
+
+      if (viewPath === "FILE") {
+        continue;
+      }
+
       if ("children" in routeHandler) {
         const router = new routeHandler.children();
         const branch = createComponentTree(router.routes);
