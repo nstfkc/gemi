@@ -1,4 +1,4 @@
-import { createContext, lazy, type PropsWithChildren } from "react";
+import { createContext, lazy, useMemo, type PropsWithChildren } from "react";
 import { flattenComponentTree } from "./helpers/flattenComponentTree";
 import type { ServerDataContextValue } from "./ServerDataProvider";
 
@@ -27,10 +27,12 @@ export const ComponentsContext = createContext({ viewImportMap });
 export const ComponentsProvider = (
   props: PropsWithChildren<{ viewImportMap: typeof viewImportMap }>,
 ) => {
+  const value = useMemo(
+    () => ({ viewImportMap: props.viewImportMap ?? viewImportMap }),
+    [props.viewImportMap],
+  );
   return (
-    <ComponentsContext.Provider
-      value={{ viewImportMap: props.viewImportMap ?? viewImportMap }}
-    >
+    <ComponentsContext.Provider value={value}>
       {props.children}
     </ComponentsContext.Provider>
   );

@@ -1,7 +1,9 @@
 import {
   createContext,
   type PropsWithChildren,
+  useCallback,
   useEffect,
+  useMemo,
   useRef,
 } from "react";
 
@@ -24,7 +26,7 @@ export const WebSocketContext = createContext(
 export const WebSocketContextProvider = (props: PropsWithChildren) => {
   const wsRef = useRef<WebSocket>(null);
 
-  function getWS() {
+  const getWS = useCallback(() => {
     return new Promise<WebSocket>((resolve) => {
       if (wsRef.current) {
         resolve(wsRef.current);
@@ -41,36 +43,39 @@ export const WebSocketContextProvider = (props: PropsWithChildren) => {
         };
       }
     });
-  }
+  }, []);
 
-  const subscribe = async (
-    topic: string,
-    handler: (event: MessageEvent<any>) => void,
-  ) => {
-    const ws = await getWS();
-    ws.send(JSON.stringify({ type: "subscribe", topic }));
-    ws.addEventListener("message", handler);
-  };
+  const subscribe = useCallback(
+    async (topic: string, handler: (event: MessageEvent<any>) => void) => {
+      const ws = await getWS();
+      ws.send(JSON.stringify({ type: "subscribe", topic }));
+      ws.addEventListener("message", handler);
+    },
+    [getWS],
+  );
 
-  const unsubscribe = async (
-    topic: string,
-    handler: (event: MessageEvent<any>) => void,
-  ) => {
-    const ws = await getWS();
-    ws.send(JSON.stringify({ type: "unsubscribe", topic }));
-    ws.removeEventListener("message", handler);
-  };
+  const unsubscribe = useCallback(
+    async (topic: string, handler: (event: MessageEvent<any>) => void) => {
+      const ws = await getWS();
+      ws.send(JSON.stringify({ type: "unsubscribe", topic }));
+      ws.removeEventListener("message", handler);
+    },
+    [getWS],
+  );
 
-  const broadcast = async (topic: string, payload = {}) => {
-    const ws = await getWS();
-    ws.send(
-      JSON.stringify({
-        type: "broadcast",
-        topic,
-        payload,
-      }),
-    );
-  };
+  const broadcast = useCallback(
+    async (topic: string, payload = {}) => {
+      const ws = await getWS();
+      ws.send(
+        JSON.stringify({
+          type: "broadcast",
+          topic,
+          payload,
+        }),
+      );
+    },
+    [getWS],
+  );
 
   useEffect(() => {
     return () => {
@@ -81,8 +86,13 @@ export const WebSocketContextProvider = (props: PropsWithChildren) => {
     };
   }, []);
 
+  const value = useMemo(
+    () => ({ subscribe, unsubscribe, broadcast }),
+    [subscribe, unsubscribe, broadcast],
+  );
+
   return (
-    <WebSocketContext.Provider value={{ subscribe, unsubscribe, broadcast }}>
+    <WebSocketContext.Provider value={value}>
       {props.children}
     </WebSocketContext.Provider>
   );

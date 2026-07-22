@@ -5,6 +5,7 @@ import {
   type FormEvent,
   useRef,
   useEffect,
+  useMemo,
   useSyncExternalStore,
   useCallback,
 } from "react";
@@ -99,37 +100,41 @@ export function Form<
     : { ...props, params: _params };
   const formRef = useRef<HTMLFormElement>(null);
   const { __csrf } = useContext(ServerDataContext);
-  const formDataSubject = useRef(new Subject(new FormData()));
+  const formDataSubject = useRef<Subject<FormData>>(null);
+  if (formDataSubject.current === null) {
+    formDataSubject.current = new Subject(new FormData());
+  }
 
   const updateFormData = useCallback(() => {
     formDataSubject.current.next(new FormData(formRef.current));
   }, []);
 
   useEffect(() => {
-    if (!formRef.current) return;
+    const form = formRef.current;
+    if (!form) return;
 
-    formRef.current.addEventListener("input", updateFormData);
+    form.addEventListener("input", updateFormData);
 
     const observer = new MutationObserver(() => {
-      const formData = new FormData(formRef.current);
+      const formData = new FormData(form);
       formDataSubject.current.next(formData);
     });
 
-    formRef.current.querySelectorAll("input").forEach((input) =>
+    form.querySelectorAll("input").forEach((input) =>
       observer.observe(input, {
         attributes: true,
         attributeFilter: ["value"],
       }),
     );
 
-    formRef.current.querySelectorAll("select").forEach((input) =>
+    form.querySelectorAll("select").forEach((input) =>
       observer.observe(input, {
         attributes: true,
         attributeFilter: ["value"],
       }),
     );
 
-    formRef.current.querySelectorAll("textarea").forEach((input) =>
+    form.querySelectorAll("textarea").forEach((input) =>
       observer.observe(input, {
         attributes: true,
         attributeFilter: ["value"],
@@ -138,9 +143,7 @@ export function Form<
 
     return () => {
       observer.disconnect();
-      if (formRef.current) {
-        formRef.current.removeEventListener("input", updateFormData);
-      }
+      form.removeEventListener("input", updateFormData);
     };
   }, [updateFormData]);
 
@@ -172,21 +175,19 @@ export function Form<
     trigger(formData as any);
   };
 
-  const validationErrors =
-    error?.kind === "validation_error" ? error.messages : {};
-
-  const formError = error?.kind === "form_error" ? error.message : null;
+  const contextValue = useMemo(
+    () => ({
+      isPending: loading,
+      result: data,
+      validationErrors: error?.kind === "validation_error" ? error.messages : {},
+      formError: error?.kind === "form_error" ? error.message : null,
+      formDataSubject,
+    }),
+    [loading, data, error, formDataSubject],
+  );
 
   return (
-    <MutationContext.Provider
-      value={{
-        isPending: loading,
-        result: data,
-        validationErrors,
-        formError,
-        formDataSubject,
-      }}
-    >
+    <MutationContext.Provider value={contextValue}>
       <form
         className={["group", className].filter(Boolean).join(" ")}
         data-loading={loading}

@@ -88,7 +88,9 @@ export function useQuery<T extends keyof GetRPC>(
   const [resource, setResource] = useState(() => getResource(normalPath, fallbackData));
 
   const configRef = useRef(config);
-  configRef.current = config;
+  useEffect(() => {
+    configRef.current = config;
+  });
 
   const refreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const retryIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -151,17 +153,11 @@ export function useQuery<T extends keyof GetRPC>(
 
   useEffect(() => {
     // @ts-ignore
-    if (import.meta.hot) {
-      // @ts-ignore
-      import.meta.hot.on("http-reload", handleReload);
-    }
-    return () => {
-      // @ts-ignore
-      if (import.meta.hot) {
-        // @ts-ignore
-        import.meta.hot.off("http-reload", handleReload);
-      }
-    };
+    const hot = import.meta.hot;
+    if (!hot) return;
+
+    hot.on("http-reload", handleReload);
+    return () => hot.off("http-reload", handleReload);
   }, [handleReload]);
 
   const handleStateUpdate = useCallback(

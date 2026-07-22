@@ -109,7 +109,10 @@ export function useMutation<
     () => new AbortController(),
   );
 
-  const formData = useRef(new FormData());
+  const formData = useRef<FormData>(null);
+  if (formData.current === null) {
+    formData.current = new FormData();
+  }
 
   async function trigger(input?: U): Promise<T> {
     setState({

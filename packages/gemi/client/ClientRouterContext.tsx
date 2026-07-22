@@ -1,6 +1,7 @@
 import { type Action, type History, createBrowserHistory } from "history";
 import {
   createContext,
+  useCallback,
   useContext,
   useEffect,
   useMemo,
@@ -85,19 +86,28 @@ export const ClientRouterProvider = (
 
   const { supportedLocales = [], locale } = useContext(I18nContext);
 
-  const [progressManager] = useState(new ProgressManager(isNavigatingSubject));
-  const pageDataRef = useRef(structuredClone(pageData));
-  const scrollHistoryRef = useRef<Map<string, number>>(new Map());
-  const breadcrumbsCache = useRef<Map<string, Breadcrumb>>(
-    new Map(Object.entries(breadcrumbs)),
+  const [progressManager] = useState(
+    () => new ProgressManager(isNavigatingSubject),
   );
+  const pageDataRef = useRef<Record<string, any>>(null);
+  if (pageDataRef.current === null) {
+    pageDataRef.current = structuredClone(pageData);
+  }
+  const scrollHistoryRef = useRef<Map<string, number>>(new Map());
+  const breadcrumbsCache = useRef<Map<string, Breadcrumb>>(null);
+  if (breadcrumbsCache.current === null) {
+    breadcrumbsCache.current = new Map(Object.entries(breadcrumbs));
+  }
 
   const initalViewEntries = is404
     ? ["404"]
     : is500
       ? ["500"]
       : (routeManifest[pathname] ?? ["404"]);
-  const viewEntriesSubject = useRef(new Subject<string[]>(initalViewEntries));
+  const viewEntriesSubject = useRef<Subject<string[]>>(null);
+  if (viewEntriesSubject.current === null) {
+    viewEntriesSubject.current = new Subject<string[]>(initalViewEntries);
+  }
 
   const [routerSubject] = useState(() => {
     return new Subject<RouteState>({
@@ -170,7 +180,7 @@ export const ClientRouterProvider = (
   );
 
   useEffect(() => {
-    history?.listen(({ location, action }) => {
+    const unlisten = history?.listen(({ location, action }) => {
       if (!window.scrollHistory) {
         window.scrollHistory = new Map();
       }
@@ -200,6 +210,7 @@ export const ClientRouterProvider = (
         locale: _locale,
       });
     });
+    return unlisten;
   }, [
     supportedLocales,
     history,
@@ -209,84 +220,124 @@ export const ClientRouterProvider = (
     getViewPathsFromPathname,
   ]);
 
-  const updatePageData = (
-    newPageData: Record<string, unknown>,
-    breadcrumbs: Record<string, Breadcrumb>,
-  ) => {
-    const [key, value] = Object.entries(newPageData)[0];
-    if (!pageDataRef.current?.[key]) {
-      pageDataRef.current[key] = {};
-    }
-    for (const b in breadcrumbs) {
-      breadcrumbsCache.current.set(b, breadcrumbs[b]);
-    }
+  const getScrollPosition = useCallback((path: string) => {
+    return scrollHistoryRef.current.get(path) || 0;
+  }, []);
 
-    pageDataRef.current[key] = value;
-  };
+  const updatePageData = useCallback(
+    (
+      newPageData: Record<string, unknown>,
+      breadcrumbs: Record<string, Breadcrumb>,
+    ) => {
+      const [key, value] = Object.entries(newPageData)[0];
+      if (!pageDataRef.current?.[key]) {
+        pageDataRef.current[key] = {};
+      }
+      for (const b in breadcrumbs) {
+        breadcrumbsCache.current.set(b, breadcrumbs[b]);
+      }
 
-  const getPageData = (key: string, pathname: string) => {
+      pageDataRef.current[key] = value;
+    },
+    [],
+  );
+
+  const getPageData = useCallback((key: string, pathname: string) => {
     return pageDataRef.current[pathname]?.[key];
-  };
+  }, []);
 
-  const setNavigationAbortController = (controller: AbortController) => {
-    navigationAbortControllerRef.current.abort();
-    navigationAbortControllerRef.current = controller;
-  };
+  const setNavigationAbortController = useCallback(
+    (controller: AbortController) => {
+      navigationAbortControllerRef.current.abort();
+      navigationAbortControllerRef.current = controller;
+    },
+    [],
+  );
 
-  const fetchRouteCSS = async (routePath: string) => {
-    const views = routeManifest[routePath];
-    if (!views) {
-      return;
-    }
-    const cssFiles = views
-      .flatMap((view) => {
-        return cssManifest?.[view];
-      })
-      .filter(Boolean)
-      .filter((file) => !document.getElementById(file));
+  const fetchRouteCSS = useCallback(
+    async (routePath: string) => {
+      const views = routeManifest[routePath];
+      if (!views) {
+        return;
+      }
+      const cssFiles = views
+        .flatMap((view) => {
+          return cssManifest?.[view];
+        })
+        .filter(Boolean)
+        .filter((file) => !document.getElementById(file));
 
-    if (cssFiles.length === 0) {
-      return;
-    }
+      if (cssFiles.length === 0) {
+        return;
+      }
 
-    async function fetchCSS(path: string) {
-      const response = await fetch(`/${path}`);
-      const content = response.text();
-      return {
-        content,
-        id: path,
-      };
-    }
-    const result = await Promise.all(cssFiles?.map((file) => fetchCSS(file)));
-    for (const { content, id } of result) {
-      const style = document.createElement("style");
-      style.id = id;
-      style.textContent = await content;
-      document.head.appendChild(style);
-    }
-  };
+      async function fetchCSS(path: string) {
+        const response = await fetch(`/${path}`);
+        if (!response.ok) {
+          return null;
+        }
+        const content = response.text();
+        return {
+          content,
+          id: path,
+        };
+      }
+      const result = await Promise.all(cssFiles?.map((file) => fetchCSS(file)));
+      const styles = await Promise.all(
+        result
+          .filter((entry): entry is { content: Promise<string>; id: string } =>
+            Boolean(entry),
+          )
+          .map(async (entry) => ({
+            id: entry.id,
+            content: await entry.content,
+          })),
+      );
+      for (const { content, id } of styles) {
+        const style = document.createElement("style");
+        style.id = id;
+        style.textContent = content;
+        document.head.appendChild(style);
+      }
+    },
+    [routeManifest, cssManifest],
+  );
+
+  const value = useMemo(
+    () => ({
+      isNavigatingSubject,
+      getViewPathsFromPathname,
+      history,
+      getScrollPosition,
+      viewEntriesSubject: viewEntriesSubject.current,
+      updatePageData,
+      getPageData,
+      getRoutePathnameFromHref,
+      setNavigationAbortController,
+      progressManager,
+      fetchRouteCSS,
+      breadcrumbsCache: breadcrumbsCache.current,
+      routerSubject,
+      urlLocaleSegment,
+    }),
+    [
+      isNavigatingSubject,
+      getViewPathsFromPathname,
+      history,
+      getScrollPosition,
+      updatePageData,
+      getPageData,
+      getRoutePathnameFromHref,
+      setNavigationAbortController,
+      progressManager,
+      fetchRouteCSS,
+      routerSubject,
+      urlLocaleSegment,
+    ],
+  );
 
   return (
-    <ClientRouterContext.Provider
-      value={{
-        isNavigatingSubject,
-        getViewPathsFromPathname,
-        history,
-        getScrollPosition: (path: string) => {
-          return scrollHistoryRef.current.get(path) || 0;
-        },
-        viewEntriesSubject: viewEntriesSubject.current,
-        updatePageData,
-        getPageData,
-        getRoutePathnameFromHref,
-        setNavigationAbortController,
-        progressManager,
-        fetchRouteCSS,
-        breadcrumbsCache: breadcrumbsCache.current,
-        routerSubject,
-        urlLocaleSegment,
-      }}
-    >
+    <ClientRouterContext.Provider value={value}>
       {children}
       {/* @ts-ignore */}
       {import.meta.hot && <HttpReload />}
