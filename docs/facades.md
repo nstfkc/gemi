@@ -1,12 +1,12 @@
 # Facades
 
-Facades are static accessors to gemi's framework services. Instead of resolving a service container by hand, you import a class from `gemi/facades` and call its static methods:
+A facade is a static proxy to a service resolved from the container. Instead of resolving a binding by hand, you import a class from `gemi/facades` and call its static methods:
 
 ```typescript
 import { Auth, Redirect, Url, Log } from "gemi/facades";
 ```
 
-Every facade is backed by a service container that gemi boots from your `app/kernel/providers`. Facades are **server-side** — use them in controllers, service providers, jobs, middleware, and any other server code. They read from the current request through gemi's request context, so most of them only make sense while a request is being handled.
+Each facade names one container binding and resolves it **per call**, so it always reads the instance registered for the current application — never one captured at module load. Facades are **server-side** — use them in controllers, service providers, jobs, middleware, and any other server code. Most read from the current request through gemi's request context, so they only make sense while a request is being handled.
 
 > **Note:** Some facade names (`Redirect`, `Broadcast`) also exist as client-side React components/hooks with the same name but a different API. The facade is the server-side one from `gemi/facades`; the client one comes from `gemi/client`. They are covered separately below and in [Navigation](./navigation.md).
 
@@ -14,10 +14,11 @@ All exports live in `gemi/facades`:
 
 ```typescript
 import {
+  Facade,
   Auth,
   Redirect,
-  I18n,
-  FileStorage,
+  Lang,
+  Storage,
   Query,
   Broadcast,
   Url,
@@ -28,9 +29,50 @@ import {
 } from "gemi/facades";
 ```
 
+## How a facade resolves
+
+Three pieces are involved, and it is worth keeping them straight:
+
+- **The Container** (`gemi/container`) holds the bindings. Every service class carries a `static token` string — `MailManager.token === "mail"` — and the container keys off that string, so `app(FilesystemManager)` is typed `FilesystemManager` with no cast.
+- **A ServiceProvider** (`gemi/support`) registers bindings *into* the container. Its `register()` binds; its `boot()` runs after every provider has registered, so resolving is only safe there.
+- **`app/config/*.ts`** holds the settings a provider reads. One file per slice; the file's basename is the config key (`app/config/redis.ts` → `redis.*`), and providers read it with `this.app.config.get("redis", {})`.
+
+A facade is a thin fourth layer over all of that. It declares the binding it fronts with `getFacadeAccessor()` and reaches the live instance with `this.getFacadeRoot()`:
+
+```typescript
+import { Facade } from "gemi/facades";
+import { FilesystemManager } from "gemi/services";
+
+export class Storage extends Facade {
+  static getFacadeAccessor() {
+    return FilesystemManager;
+  }
+
+  static put(params: PutFileParams | Blob) {
+    return this.getFacadeRoot().driver.put(params);
+  }
+}
+```
+
+Two deliberate divergences from Laravel's `Facade`:
+
+1. **No `__callStatic`.** TypeScript has no typed equivalent, and a Proxy would erase the signatures that make these facades worth having. Subclasses declare explicit statics that forward to `getFacadeRoot()`.
+2. **`getFacadeAccessor()` is public.** `getFacadeRoot()` types its `this` structurally in order to infer the service type from the accessor's return, and a protected static is not structurally assignable to that.
+
+Facades that resolve nothing from the container — `Cookie`, `Redirect`, `Url`, `Meta` — do not extend `Facade`. They read the request context or the environment directly.
+
+You can resolve any service without a facade at all:
+
+```typescript
+import { app } from "gemi/foundation";
+import { MailManager } from "gemi/services";
+
+const mail = app(MailManager); // typed MailManager
+```
+
 ## Auth
 
-`Auth` reads and authorizes the current user from the request's `access_token` cookie.
+`Auth` reads and authorizes the current user from the request's `access_token` cookie. It fronts `AuthManager` (token `auth`), configured by `app/config/auth.ts`.
 
 - `Auth.user()` — `Promise<User>`. Resolves the authenticated user, or throws `AuthenticationError` if there is none.
 - `Auth.guard(fn)` — `Promise<void>`. Runs `fn(user)`; throws `InsufficientPermissionsError` if it returns falsy or throws.
@@ -71,43 +113,53 @@ Redirect.external("https://stripe.com/checkout/...");
 
 > **Note:** This is distinct from the client `<Redirect />` component and `useNavigate` from `gemi/client`, which perform client-side navigation. See [Navigation](./navigation.md).
 
-## I18n
+## Lang
 
-`I18n` exposes the server-side locale for the current request.
+`Lang` exposes the server-side locale for the current request. It fronts `Translator` (token `translator`), configured by `app/config/translation.ts`.
 
-- `I18n.locale()` — the active locale for this request (falls back to the default locale outside a request).
-- `I18n.getDefaultLocale()` — the configured default locale.
-- `I18n.getSupportedLocales()` — the configured list of supported locales.
-- `I18n.setLocale(locale?)` — persists the locale in the `i18n-locale` cookie (validated against supported locales) and returns the resolved locale.
+- `Lang.locale()` — the active locale for this request (falls back to the default locale outside a request).
+- `Lang.getDefaultLocale()` — the configured default locale.
+- `Lang.getSupportedLocales()` — the configured list of supported locales.
+- `Lang.setLocale(locale?)` — persists the locale in the `i18n-locale` cookie (validated against supported locales) and returns the resolved locale.
 
 ```typescript
-import { I18n } from "gemi/facades";
+import { Lang } from "gemi/facades";
 
-const locale = I18n.locale(); // e.g. "en-US"
+const locale = Lang.locale(); // e.g. "en-US"
 ```
 
 See [Internationalization](./i18n.md) for dictionaries, translation, and client hooks.
 
-## FileStorage
+## Storage
 
-`FileStorage` is the object-storage facade (local disk, S3, and other drivers configured in your `FileStorageServiceProvider`).
+`Storage` is the object-storage facade. It fronts `FilesystemManager` (token `filesystem`); the driver — local disk, S3, or your own — comes from `app/config/filesystem.ts`.
 
-- `FileStorage.put(params | Blob)` — store a file; returns the driver's put result.
-- `FileStorage.fetch(params | string)` — read a stored file.
-- `FileStorage.list(folder)` — list files in a folder.
-- `FileStorage.metadata(blobOrFile)` — extract image metadata (width, height, format, …) via `sharp`; returns `{}` for non-images.
+- `Storage.put(params | Blob)` — store a file; returns the driver's put result.
+- `Storage.fetch(params | string)` — read a stored file.
+- `Storage.list(folder)` — list files in a folder.
+- `Storage.metadata(blobOrFile)` — extract image metadata (width, height, format, …) via `sharp`; returns `{}` for non-images. This one runs locally and does not touch the driver.
 
 ```typescript
-import { FileStorage } from "gemi/facades";
+import { Storage } from "gemi/facades";
 
-const result = await FileStorage.put(file);
+const result = await Storage.put(file);
+```
+
+```typescript
+// app/config/filesystem.ts
+import { defineFilesystemConfig, S3Driver } from "gemi/services";
+
+export default defineFilesystemConfig({
+  // S3Driver takes the S3Client options; the bucket comes from BUCKET_NAME.
+  driver: new S3Driver(),
+});
 ```
 
 See [File Storage](./file-storage.md) for drivers, upload handling, and configuration.
 
 ## Query
 
-`Query` (exported from `Prefetch.ts`) runs a **`GET` API route on the server** so its data is available to a view without a client round-trip. It is fully typed against your API router.
+`Query` (exported from `Prefetch.ts`) runs a **`GET` API route on the server** so its data is available to a view without a client round-trip. It fronts `ApiRouteDispatcher` (token `router.api`) and is fully typed against your API router.
 
 - `Query.instant(path, options?)` — run the route handler immediately and return its data. `options` accepts `params` and `search`.
 - `Query.prefetch(path, options?)` — queue the route to run during server rendering so the client hydrates with the data already present (no loading flash).
@@ -124,7 +176,7 @@ const stats = await Query.instant("/dashboard/stats");
 
 ## Broadcast
 
-`Broadcast` publishes real-time messages to a websocket channel from the server.
+`Broadcast` publishes real-time messages to a websocket channel from the server. It fronts `BroadcastManager` (token `broadcast`); channels are declared in `app/config/broadcast.ts`.
 
 - `Broadcast.channel(route, params)` — returns a handle with `publish(data, compress?)` that sends a message to the channel's topic (the route pattern with `params` applied).
 
@@ -150,11 +202,11 @@ Url.relative("/orgs/:orgId", { orgId }); // "/orgs/123"
 Url.absolute("/orgs/:orgId", { orgId }); // "https://app.example.com/orgs/123"
 ```
 
-> **Note:** `Url.absolute` relies on the `HOST_NAME` environment variable. See [Configuration](./configuration.md).
+> **Note:** `Url` resolves nothing from the container — `Url.absolute` reads the `HOST_NAME` environment variable directly. See [Configuration](./configuration.md).
 
 ## Log
 
-`Log` writes structured log entries through the configured logging service. Every method takes a `message` and an optional `metadata` object, and maps to a standard syslog severity:
+`Log` writes structured log entries through `LogManager` (token `log`), configured by `app/config/log.ts`. Every method takes a `message` and an optional `metadata` object, and maps to a standard syslog severity:
 
 - `Log.debug(message, metadata?)`
 - `Log.info(message, metadata?)`
@@ -174,7 +226,7 @@ Log.error("Payment failed", { orderId, reason });
 
 ## Meta
 
-`Meta` sets page metadata for the current request — used during SSR to populate `<head>` tags and Open Graph data.
+`Meta` sets page metadata for the current request — used during SSR to populate `<head>` tags and Open Graph data. It writes to the request context, not to a container binding.
 
 - `Meta.title(title)` — set the page title.
 - `Meta.description(description)` — set the meta description.
@@ -212,7 +264,7 @@ Cookie.set("theme", "dark", {
 
 ## Redis
 
-`Redis` gives ergonomic access to the app's Redis client (Bun's built-in `RedisClient`).
+`Redis` gives ergonomic access to the app's Redis client (Bun's built-in `RedisClient`). It fronts `RedisManager` (token `redis`).
 
 - `Redis.client` — the full Bun `RedisClient` (hashes, sets, sorted sets, pub/sub, pipelining, …).
 - `Redis.get(key)`, `Redis.set(key, value)`, `Redis.del(...keys)`, `Redis.exists(key)`, `Redis.incr(key)`, `Redis.expire(key, seconds)`, `Redis.ttl(key)` — shortcuts for the most common string commands.
@@ -230,22 +282,112 @@ await Redis.client.hset("user:1", { name: "Ada" });
 
 ### Configuration
 
-The connection is configured by `RedisServiceProvider`. Extend it in `app/kernel/providers/RedisServiceProvider.ts`:
+The connection is configured in `app/config/redis.ts`:
 
 ```typescript
-import { RedisServiceProvider } from "gemi/services";
+import { defineRedisConfig } from "gemi/services";
 
-export default class extends RedisServiceProvider {
+export default defineRedisConfig({
   // Defaults to process.env.REDIS_URL (Bun falls back to
   // redis://localhost:6379 when unset).
-  url = process.env.REDIS_URL;
+  url: process.env.REDIS_URL,
 
   // Optional Bun RedisOptions: TLS, timeouts, auto-reconnect, ...
-  options = {};
+  options: {},
+});
+```
+
+Then list the slice on your kernel so it reaches the container:
+
+```typescript
+// app/kernel/Kernel.ts
+import { Kernel } from "gemi/kernel";
+import redis from "../config/redis";
+
+export default class extends Kernel {
+  config = { redis /* , ...the other slices */ };
 }
 ```
 
-See [Configuration](./configuration.md) and the provider registration in [Project Structure](./project-structure.md).
+See [Configuration](./configuration.md) and [Project Structure](./project-structure.md).
+
+## Hooks are config, not provider methods
+
+Laravel puts a lot of per-subsystem customization in a provider's `boot()`. gemi deliberately does not: subsystem hooks are **callbacks on the config slice**, so they sit next to the settings they modify and require no provider at all.
+
+```typescript
+// app/config/mail.ts
+import { defineMailConfig } from "gemi/services";
+
+export default defineMailConfig({
+  // Rewrite or drop recipients before every send — staging safety net.
+  filterRecipients: (emails) =>
+    process.env.NODE_ENV === "production" ? emails : ["dev@example.com"],
+});
+```
+
+```typescript
+// app/config/log.ts
+import { defineLogConfig } from "gemi/services";
+
+export default defineLogConfig({
+  maxFileSize: 1024 * 1024 * 10,
+  onLogCreated: async (entry) => {
+    if (entry.level === "error") await notifySlack(entry);
+  },
+  onLogFileClosed: async (file) => {
+    await archive(file);
+  },
+});
+```
+
+The same applies to `extendSession` and the `onSignIn`/`onSignUp`/`onForgotPassword` hooks in `app/config/auth.ts`, `detectLocale`/`onLocaleChange` in `app/config/translation.ts`, and `onRequestStart`/`onRequestEnd`/`onRequestFail` in `app/config/route.ts`.
+
+Providers are for **bindings**. Write one when you want your own service in the container — and give it a facade if you want static access to it:
+
+```typescript
+// app/providers/AppServiceProvider.ts
+import { ServiceProvider } from "gemi/support";
+import { Billing } from "../services/Billing";
+
+export default class AppServiceProvider extends ServiceProvider {
+  register() {
+    this.app.singleton(Billing, () => new Billing(this.app.config.get("billing", {})));
+  }
+
+  async boot() {
+    // Every provider has registered by now, so resolving is safe here.
+  }
+}
+```
+
+```typescript
+// app/kernel/Kernel.ts
+import AppServiceProvider from "../providers/AppServiceProvider";
+
+export default class extends Kernel {
+  config = { /* ... */ };
+  providers = [AppServiceProvider];
+}
+```
+
+App providers run after the framework's, so a binding here overrides a framework binding of the same token.
+
+```typescript
+// app/facades/BillingFacade.ts
+import { Facade } from "gemi/facades";
+import { Billing } from "../services/Billing";
+
+export class BillingFacade extends Facade {
+  static getFacadeAccessor() {
+    return Billing; // requires `static token = "billing"` on the class
+  }
+
+  static charge(amount: number) {
+    return this.getFacadeRoot().charge(amount);
+  }
+}
+```
 
 ## Related
 

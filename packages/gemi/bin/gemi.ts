@@ -2,6 +2,7 @@ import path from "node:path";
 import { existsSync } from "node:fs";
 import createRollupInput from "./createRollupInput";
 import { loadApp } from "./loadApp";
+import { runMigrate } from "./migrate";
 import { gemiPlugin } from "../bun/plugin";
 import { loadGemiConfig } from "../config/load";
 import { build } from "vite";
@@ -171,6 +172,22 @@ program.command("start").action(async () => {
   });
   await proc.exited;
 });
+
+program
+  .command("migrate")
+  .description(
+    "Migrate an app from the 0.42 service-provider layout to 0.43 config + container",
+  )
+  .option("--dry-run", "Print the plan without writing anything")
+  .action(async (options: { dryRun?: boolean }) => {
+    const rootDir = path.resolve(process.cwd());
+    console.log(
+      options.dryRun
+        ? `Planning migration of ${rootDir} (0.42 -> 0.43)...`
+        : `Migrating ${rootDir} (0.42 -> 0.43)...`,
+    );
+    await runMigrate({ rootDir, dryRun: options.dryRun });
+  });
 
 program.command("ide:generate-api-manifest").action(async () => {
   const parser = new ApiManifestGenerator();

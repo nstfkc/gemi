@@ -8,13 +8,10 @@ import { createRoot } from "../client/createRoot";
 import { createElement } from "react";
 import { Controller } from "../http/Controller";
 import { HttpRequest } from "../http/HttpRequest";
-import {
-  AuthenticationMiddleware,
-  Middleware,
-  MiddlewareServiceProvider,
-  RequestBreakerError,
-} from "../http";
+import { AuthenticationMiddleware, RequestBreakerError } from "../http";
 import { Kernel } from "../kernel";
+
+process.env.SECRET ??= "test-secret";
 
 class RefinedValidationRequest extends HttpRequest<
   { iban: string; paypal: string },
@@ -53,27 +50,23 @@ class ValidationRequest extends HttpRequest<{ name: string; age: number }, {}> {
 }
 
 class TestController extends Controller {
-  requests = {
-    validate: ValidationRequest,
-    refined: RefinedValidationRequest,
-  };
-
   test() {
     return { message: "test" };
   }
 
-  async foo(req: HttpRequest) {
+  async foo(req = new HttpRequest<{ data: number }, {}>()) {
     const body = await req.input();
 
     return body.toJSON();
   }
 
-  async validate(req: ValidationRequest) {
+  async validate(req = new ValidationRequest()) {
     const body = await req.input();
 
     return body.toJSON();
   }
-  async refined(req: RefinedValidationRequest) {
+
+  async refined(req = new RefinedValidationRequest()) {
     const body = await req.input();
 
     return body.toJSON();
@@ -123,32 +116,53 @@ export class AuthenticationError extends RequestBreakerError {
   };
 }
 
-export default class extends MiddlewareServiceProvider {
-  aliases = {
-    auth: AuthenticationMiddleware,
+class AppKernel extends Kernel {
+  config = {
+    middleware: {
+      aliases: {
+        auth: AuthenticationMiddleware,
+      },
+    },
+    route: {
+      api: {
+        rootRouter: RootApiRouter,
+      },
+      view: {
+        root: createRoot(() => createElement("div")),
+        rootRouter: RootViewRouter,
+      },
+    },
   };
 }
 
-class AppKernel extends Kernel {
-  middlewareServiceProvider = MiddlewareServiceProvider;
-}
+const app = new App({ kernel: AppKernel });
 
-const app = new App({
-  root: createRoot(() => createElement("div")),
-  apiRouter: RootApiRouter,
-  viewRouter: RootViewRouter,
-  kernel: AppKernel,
-});
+// An HTML view request resolves to a renderer that the server invokes with the
+// build artifacts it owns (styles, import map, bootstrap modules). The test
+// stands in for the server.
+const renderParams = {
+  getStyles: async () => [],
+  viewImportMap: {},
+  bootstrapModules: [],
+  loaders: "{}",
+  cssManifest: {},
+  ogMap: {},
+};
 
 describe("App fetch()", () => {
   test("view", async () => {
-    const res1 = await app.fetch(
+    const render = await app.fetch(
       new Request("http://gemi.dev", {
         method: "GET",
       }),
     );
 
-    expect(await res1.text()).toMatchSnapshot();
+    const res = await (render as any)(renderParams);
+    const html = await res.text();
+
+    expect(res.status).toBe(200);
+    expect(html).toContain("window.__GEMI_DATA__");
+    expect(html).toContain('"Home":{"message":"Home"');
   });
 
   test("api", async () => {
@@ -162,14 +176,14 @@ describe("App fetch()", () => {
   });
 
   test("view controller handler", async () => {
-    const request = new Request("http://gemi.dev/about?json=true", {
+    const request = new Request("http://gemi.dev/about.json", {
       method: "GET",
     });
     const res = await app.fetch(request);
-    expect(await res.json()).toEqual({
-      data: { "/about": { About: { message: "test" } } },
-      is404: false,
-    });
+    const body = await res.json();
+
+    expect(body.is404).toBe(false);
+    expect(body.data["/about"].About.message).toBe("test");
   });
 
   test("api callback handler", async () => {
@@ -276,7 +290,8 @@ describe("App fetch()", () => {
     const request = new Request("http://gemi.dev/not-found", {
       method: "GET",
     });
-    const res = await app.fetch(request);
+    const render = await app.fetch(request);
+    const res = await (render as any)(renderParams);
     expect(res.status).toBe(404);
   });
 });

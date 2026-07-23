@@ -4,7 +4,7 @@ gemi is a batteries-included, full-stack TypeScript web framework built on Bun, 
 
 ## What is gemi?
 
-gemi is Laravel-inspired: you describe your app with class-based routers, controllers, service providers, and a kernel rather than a file-based convention. It is **not** Next.js — routes are plain config objects on router classes, not files in a directory.
+gemi is Laravel-inspired: you describe your app with class-based routers, controllers, config modules, service providers, and a kernel rather than a file-based convention. It is **not** Next.js — routes are plain config objects on router classes, not files in a directory.
 
 A single gemi project serves both your API and your React front end from one Bun process. Views are rendered on the server and hydrated on the client, and the network layer between them is fully typed end to end.
 
@@ -47,7 +47,7 @@ bunx prisma migrate deploy    # initialize the database and generate the Prisma 
 bun dev                       # start the development server
 ```
 
-The generated project is the canonical gemi layout: an `app/` directory (server entry, client entry, kernel, routes, controllers, views, email, i18n, database), plus `gemi.config.ts`, `gemi.d.ts`, `vite.config.mjs`, `tsconfig.json`, a `prisma/` schema, and a `Dockerfile`. See [Project Structure](./project-structure.md) for a full tour.
+The generated project is the canonical gemi layout: an `app/` directory (server entry, client entry, kernel, `config/`, `providers/`, routes, controllers, views, email, i18n, database), plus `gemi.config.ts`, `gemi.d.ts`, `vite.config.mjs`, `tsconfig.json`, a `prisma/` schema, and a `Dockerfile`. See [Project Structure](./project-structure.md) for a full tour.
 
 ## Commands
 

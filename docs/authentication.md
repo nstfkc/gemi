@@ -2,68 +2,97 @@
 
 gemi ships a full authentication system — email/password, passwordless magic-link (PIN),
 OAuth, sessions, email verification and password reset — configured through a single
-service provider in your app. You subclass the framework's `AuthenticationServiceProvider`,
-plug in an adapter that talks to your database, and (optionally) override lifecycle hooks to
-send emails, provision resources, or extend the session payload.
+config file in your app. You write `app/config/auth.ts`, plug in a *user provider* that talks
+to your database, and (optionally) supply lifecycle callbacks to send emails, provision
+resources, or extend the session payload.
 
-The provider is registered in the [Kernel](./project-structure.md) like any other
-[service provider](./project-structure.md). It automatically mounts a set of API and view
+The framework's own `AuthServiceProvider` reads that config slice and binds an `AuthManager`
+singleton into the [container](./project-structure.md); the `Auth` [facade](#the-auth-facade)
+is a static proxy to that resolved instance. The provider also mounts a set of API and view
 routes under `/auth` (sign-in, sign-up, sign-out, magic-link, OAuth callbacks, etc.), so you
 rarely write auth routes yourself — you point forms and client hooks at those endpoints.
 
-## The AuthenticationServiceProvider
+## app/config/auth.ts
 
-Your app defines `app/kernel/providers/AuthenticationServiceProvider.ts` as a subclass of the
-base class exported from `gemi/kernel`:
+Auth configuration is a plain object built with the `defineAuthConfig` helper from
+`gemi/services`, default-exported from `app/config/auth.ts`:
 
 ```typescript
-import {
-  AuthenticationServiceProvider,
-  PrismaAuthenticationAdapter,
-} from "gemi/kernel";
-import { GoogleOAuthProvider } from "gemi/services";
+import { defineAuthConfig, GoogleOAuthProvider } from "gemi/services";
+import { PrismaAuthenticationAdapter } from "gemi/kernel";
 import { prisma } from "@/app/database/prisma";
 
-export default class extends AuthenticationServiceProvider {
-  adapter = new PrismaAuthenticationAdapter(prisma);
+export default defineAuthConfig({
+  userProvider: new PrismaAuthenticationAdapter(prisma),
 
-  oauthProviders = {
+  oauthProviders: {
     google: new GoogleOAuthProvider(),
-  };
+  },
 
   // Only allow users with a verified email to sign in.
-  verifyEmail = false;
+  verifyEmail: false,
 
   // Rolling / absolute session lifetimes (in hours).
-  sessionExpiresInHours = 24;
-  sessionAbsoluteExpiresInHours = 24 * 7 * 4;
+  sessionExpiresInHours: 24,
+  sessionAbsoluteExpiresInHours: 24 * 7 * 4,
 
   async onSignUp(user, verificationToken, search) {
     // send a welcome / verification email, provision resources, etc.
-  }
+  },
+});
+```
+
+`defineAuthConfig` is an identity function — it exists purely so your editor types the object
+as `AuthConfig`. Every field is optional; anything you omit falls back to the framework
+default.
+
+Wire the slice into the [Kernel](./project-structure.md) under the `auth` key:
+
+```typescript
+// app/kernel/Kernel.ts
+import { Kernel } from "gemi/kernel";
+import auth from "../config/auth";
+
+export default class extends Kernel {
+  config = {
+    auth,
+    // ...other slices
+  };
 }
 ```
+
+At boot, `Application` merges `config` into a `Repository` (`gemi/support`), the framework
+providers run their `register()`, and `AuthServiceProvider` does the equivalent of
+`this.app.singleton(AuthManager, () => new AuthManager(this.app.config.get("auth", {})))`.
+That is the whole indirection: **config lives in `app/config`, a `ServiceProvider` registers
+a binding into the container, and a facade resolves it.**
 
 ### Config fields
 
 | Field | Type | Default | Purpose |
 | --- | --- | --- | --- |
-| `adapter` | `IAuthenticationAdapter` | `BlankAdapter` | Persistence layer (users, sessions, tokens). See [Adapters](#adapters). |
+| `userProvider` | `IAuthenticationAdapter` | `BlankAdapter` | Persistence layer (users, sessions, tokens). See [User providers](#user-providers). |
 | `oauthProviders` | `Record<string, OAuthProvider>` | `{}` | OAuth providers keyed by name (the `:provider` in the callback route). See [OAuth](#oauth). |
 | `verifyEmail` | `boolean` | `true` | When `true`, sign-in only succeeds for users whose `emailVerifiedAt` is set. |
 | `sessionExpiresInHours` | `number` | `24` | Rolling expiry — refreshed to `now + N` hours every time the session is used. |
 | `sessionAbsoluteExpiresInHours` | `number` | `672` (4 weeks) | Hard ceiling set at session creation; not extended on use. |
 | `redirectPath` | `string` | `"/dashboard"` | Convention for where to send users after a successful login. |
-| `signUpRequest` | `HttpRequest` subclass | built-in | The [request/validation schema](./forms.md) used by the sign-up endpoint. Override to add fields or change rules. |
+| `basePath` | `string` | `"/auth"` | Prefix the auth routes are mounted under. |
+| `signUpRequest` | `HttpRequest` subclass | built-in `SignUpRequest` | The [request/validation schema](./forms.md) used by the sign-up endpoint. Override to add fields or change rules. |
+| `hashPassword` / `verifyPassword` | `(password) => Promise<string>` / `(password, hash) => Promise<boolean>` | `Bun.password.*` | Swap the hashing scheme. |
+| `generateEmailVerificationToken` / `generateForgotPasswordToken` / `generateMagicLinkToken` | `(...) => string \| Promise<string>` | sha256 of value + timestamp | Token minting. |
+
+> **Note:** the field is `userProvider`, not `adapter`. It is named after Laravel's
+> `Illuminate\Contracts\Auth\UserProvider`. `AuthManager.userProvider` exposes the same
+> instance to framework internals.
 
 > **Note:** Session lifetime is enforced two ways. `sessionExpiresInHours` is a *rolling*
 > window pushed forward on each request; `sessionAbsoluteExpiresInHours` is a fixed cap
-> stamped at creation. Setting both very high (as the folio app does) effectively creates
-> long-lived sessions.
+> stamped at creation. Setting both very high effectively creates long-lived sessions.
 
-## Adapters
+## User providers
 
-The adapter is the bridge between the auth system and your database. It implements
+The user provider is the bridge between the auth system and your database. It implements
 `IAuthenticationAdapter` — a set of methods for creating users, managing sessions, and
 handling verification / reset / magic-link tokens.
 
@@ -73,10 +102,13 @@ handling verification / reset / magic-link tokens.
 Prisma client. Construct it with your client:
 
 ```typescript
+import { defineAuthConfig } from "gemi/services";
 import { PrismaAuthenticationAdapter } from "gemi/kernel";
 import { prisma } from "@/app/database/prisma";
 
-adapter = new PrismaAuthenticationAdapter(prisma);
+export default defineAuthConfig({
+  userProvider: new PrismaAuthenticationAdapter(prisma),
+});
 ```
 
 It expects the following Prisma models (field names matter, they are queried directly):
@@ -95,9 +127,9 @@ It expects the following Prisma models (field names matter, they are queried dir
 - **`OrganizationInvitation`** — `publicId`, `email`, `organizationId`, `role` (used by the
   optional invitation sign-up flow).
 
-### Adapter interface
+### Provider interface
 
-A custom adapter must implement `IAuthenticationAdapter`. The methods:
+A custom user provider must implement `IAuthenticationAdapter`. The methods:
 
 | Method | Purpose |
 | --- | --- |
@@ -115,11 +147,11 @@ A custom adapter must implement `IAuthenticationAdapter`. The methods:
 | `createSocialAccount(args)` | Persist an OAuth-linked social account. |
 | `findInvitation(id, email)` / `deleteInvitationById(id)` / `createAccount(args)` | Invitation-based sign-up. |
 
-### Writing a custom adapter
+### Writing a custom provider
 
 The easiest path is to extend `PrismaAuthenticationAdapter` and override just the method(s)
-you need. The folio app does this to make sign-up atomic — it provisions an organization in
-the same transaction that creates the user:
+you need — for example to make sign-up atomic by provisioning an organization in the same
+transaction that creates the user:
 
 ```typescript
 import { PrismaAuthenticationAdapter } from "gemi/kernel";
@@ -142,80 +174,97 @@ export class OrgProvisioningAuthAdapter extends PrismaAuthenticationAdapter {
 }
 ```
 
+Then point the config at it: `userProvider: new OrgProvisioningAuthAdapter(prisma)`.
+
 > **Note:** gemi runs `createUser` and then fires `onSignUp` *separately*. Provisioning
-> inside the `onSignUp` hook is therefore **not** atomic with user creation — a failure there
-> leaves an orphaned user. Do transactional provisioning inside a `createUser` override, as
-> above. The base class stores the client as `protected prisma`.
+> inside the `onSignUp` callback is therefore **not** atomic with user creation — a failure
+> there leaves an orphaned user. Do transactional provisioning inside a `createUser`
+> override, as above. The base class stores the client as `protected prisma`.
 
 ## Lifecycle hooks
 
-Override these on your provider to run side effects at each stage. All may be sync or async.
+Auth side effects are **config callbacks**, not `ServiceProvider` methods. This is a
+deliberate divergence from Laravel, where such hooks are typically registered as macros or
+event listeners inside a provider's `boot()`. In gemi, `filterRecipients` (mail),
+`onLogCreated` / `onLogFileClosed` (logging), `extendSession` and the `onXxx` auth hooks all
+live as functions on their config slice. A `ServiceProvider` in gemi does one job — register
+bindings into the container — and behaviour a subsystem invokes is data you hand it.
+
+Practically this means the callbacks are properties of a plain object: there is no `this`
+pointing at a provider, and you import whatever you need at the top of the config file. All
+may be sync or async.
 
 | Hook | Signature | Fires when |
 | --- | --- | --- |
 | `onSignUp` | `(user, verificationToken, search)` | A new account is created (email/password, or first OAuth sign-in). `verificationToken` is empty when `verifyEmail` is off. |
-| `onSignIn` | `(userOrSession, search)` | A user authenticates (password, magic-link/PIN, or returning OAuth). |
-| `onSignOut` | `(user)` | The `/auth/sign-out` endpoint runs. |
+| `onSignIn` | `(session, search)` | A user authenticates (password, magic-link/PIN, or returning OAuth). |
+| `onSignOut` | `(session)` | The `/auth/sign-out` endpoint runs. |
 | `onForgotPassword` | `(user, token)` | A password-reset is requested — send the reset email with `token`. |
-| `onResetPassword` | `(user)` | A password reset completes (all the user's sessions are already invalidated). |
-| `onMagicLinkCreated` | `(user, { email, token, pin })` | The `/auth/magic-link` endpoint mints a link — send the PIN/link email. |
+| `onResetPassword` | `(session)` | A password reset completes (all the user's sessions are already invalidated). |
+| `onMagicLinkCreated` | `(session, { email, token, pin })` | The `/auth/magic-link` endpoint mints a link — send the PIN/link email. |
 | `extendSession` | `(user) => object` | Every session load and create/update; the returned object is merged onto `user.extension`. |
 
 `search` is the request's query string as a plain object (useful for attribution / redirect
 params).
 
-### Example: magic-link PIN emails (folio)
+### Example: magic-link PIN emails
 
 ```typescript
+import { defineAuthConfig } from "gemi/services";
 import { Auth } from "gemi/facades";
 import { PinEmail } from "@/app/email/PinEmail";
 
-export default class extends AuthenticationServiceProvider {
-  // ...
-
+export default defineAuthConfig({
   async onSignUp(user, token, search) {
+    if (!user.email) return;
     // Mint a magic link and email the PIN so the new user can verify + sign in.
     const magicLink = await Auth.createMagicLink(user.email);
-    if (magicLink.pin) {
+    if ("pin" in magicLink) {
       await PinEmail.send({
         to: [user.email],
-        locale: user.locale ?? "en-US",
         data: { name: user.name, pin: magicLink.pin, token: magicLink.token },
       });
     }
-  }
+  },
 
-  async onMagicLinkCreated(user, { email, pin }) {
+  async onMagicLinkCreated(session, { email, pin }) {
     await PinEmail.send({
       to: [email],
-      locale: user.locale ?? "en-US",
-      data: { name: user.name?.split(" ")[0] ?? "User", pin },
+      data: { name: session.user?.name?.split(" ")[0] ?? "User", pin },
     });
-  }
-}
+  },
+});
 ```
 
-See [Email](./email.md) for the `Email.send(...)` API.
+Calling `Auth.createMagicLink()` from inside a config callback is safe: the callback runs
+during a request, long after every provider has registered, so the container can resolve
+`AuthManager`.
+
+See [Email](./email.md) for the `.send(...)` API.
 
 ### extendSession
 
 `extendSession` runs on the hot `/auth/me` path, so keep it cheap. Whatever it returns is
 attached to `user.extension` and is then available everywhere `Auth.user()` is read (server)
-and on `useUser()` (client). folio uses it to attach the current org's logo and subscription
-data:
+and on `useUser()` (client) — e.g. to attach the current org's subscription data:
 
 ```typescript
-async extendSession(user) {
-  const orgIds = (user.accounts ?? [])
-    .map((a) => a?.organization?.publicId)
-    .filter(Boolean);
+import { defineAuthConfig } from "gemi/services";
+import { prisma } from "@/app/database/prisma";
 
-  const subscriptions = await prisma.subscription.findMany({
-    where: { organizationId: { in: orgIds } },
-  });
+export default defineAuthConfig({
+  async extendSession(user) {
+    const orgIds = (user.accounts ?? [])
+      .map((a) => a?.organization?.publicId)
+      .filter(Boolean);
 
-  return { subscriptions };
-}
+    const subscriptions = await prisma.subscription.findMany({
+      where: { organizationId: { in: orgIds } },
+    });
+
+    return { subscriptions };
+  },
+});
 ```
 
 ## Magic links and PIN sign-in
@@ -228,8 +277,11 @@ Mint a link from server code with the [Auth facade](#the-auth-facade):
 ```typescript
 import { Auth } from "gemi/facades";
 
-const { user, email, token, pin } = await Auth.createMagicLink("john@example.com");
-// -> {} if no user exists for that email
+const magicLink = await Auth.createMagicLink("john@example.com");
+// -> `{}` if no user exists for that email, otherwise `{ user, email, token, pin }`
+if ("token" in magicLink) {
+  const { user, email, token, pin } = magicLink;
+}
 ```
 
 `Auth.createMagicLink` deletes any existing token for the email, generates a fresh
@@ -247,8 +299,8 @@ There are two ways for the user to complete it:
 > **Note:** `Auth.createMagicLink()` does **not** itself fire `onMagicLinkCreated` — it just
 > returns the token/PIN for you to use. The `onMagicLinkCreated` hook fires only when the
 > `POST /auth/magic-link` endpoint is called (e.g. a "email me a login code" form). Call
-> `Auth.createMagicLink` from your own hooks (as in the `onSignUp` example above) when you
-> want to send the code yourself.
+> `Auth.createMagicLink` from your own callbacks (as in the `onSignUp` example above) when
+> you want to send the code yourself.
 
 ## OAuth
 
@@ -256,14 +308,20 @@ Register providers under `oauthProviders`, keyed by the name that appears in the
 URL. `GoogleOAuthProvider` and `XOAuthProvider` are exported from `gemi/services`:
 
 ```typescript
-import { GoogleOAuthProvider, XOAuthProvider } from "gemi/services";
+import {
+  defineAuthConfig,
+  GoogleOAuthProvider,
+  XOAuthProvider,
+} from "gemi/services";
 
-oauthProviders = {
-  google: new GoogleOAuthProvider({
-    redirectPath: "/auth/oauth/google/callback",
-  }),
-  x: new XOAuthProvider(),
-};
+export default defineAuthConfig({
+  oauthProviders: {
+    google: new GoogleOAuthProvider({
+      redirectPath: "/auth/oauth/google/callback",
+    }),
+    x: new XOAuthProvider(),
+  },
+});
 ```
 
 `GoogleOAuthProvider` config: `clientId`, `clientSecret`, `scope`, `redirectPath`
@@ -290,7 +348,10 @@ implement `getRedirectUrl(req)` and `onCallback(req)` — the latter returns
 
 ## The Auth facade
 
-`Auth` (from `gemi/facades`) is the server-side entry point to the current user and session.
+`Auth` (from `gemi/facades`) is a static proxy to the container-resolved `AuthManager` — it
+extends the framework's `Facade` base and declares `AuthManager` as its accessor, so every
+call goes through `app(AuthManager)` under the hood. It is the server-side entry point to the
+current user and session.
 
 | Method | Returns | Description |
 | --- | --- | --- |
@@ -309,6 +370,21 @@ const user = await Auth.user();
 // Guard an action inline (see Authorization for role-based checks).
 await Auth.guard((user) => user.globalRole === 0);
 ```
+
+If you need the underlying `AuthManager` instance rather than the static proxy, every facade
+exposes `getFacadeRoot()`, which resolves it out of the container:
+
+```typescript
+import { Auth } from "gemi/facades";
+
+const manager = Auth.getFacadeRoot(); // typed AuthManager, no cast
+manager.config.redirectPath;
+manager.userProvider;
+```
+
+That is the same call the static methods make internally — `getFacadeRoot()` is
+`app(this.getFacadeAccessor())`, and `getFacadeAccessor()` returns the `AuthManager` class,
+which doubles as its own container token.
 
 > **Note:** `Auth.user()` *throws* when there is no session — inside a [controller](./controllers.md)
 > that's fine (the framework turns it into a 401 / redirect). If you want a nullable check,
@@ -410,18 +486,29 @@ See [Forms](./forms.md) for `Form`, `ValidationErrors`, and validation schemas.
 ## The `auth` middleware
 
 Protect routes by requiring an authenticated session. Register the framework's
-`AuthenticationMiddleware` under the `auth` alias in your app's `MiddlewareServiceProvider`,
-then reference it by name:
+`AuthenticationMiddleware` under the `auth` alias in `app/config/middleware.ts`, then
+reference it by name:
 
 ```typescript
-// app/kernel/providers/MiddlewareServiceProvider.ts
-import { MiddlewareServiceProvider, AuthenticationMiddleware } from "gemi/http";
+// app/config/middleware.ts
+import { defineMiddlewareConfig, AuthenticationMiddleware } from "gemi/http";
 
-export default class extends MiddlewareServiceProvider {
-  aliases = {
+export default defineMiddlewareConfig({
+  aliases: {
     auth: AuthenticationMiddleware,
     // ...
-  };
+  },
+});
+```
+
+```typescript
+// app/kernel/Kernel.ts
+import { Kernel } from "gemi/kernel";
+import auth from "../config/auth";
+import middleware from "../config/middleware";
+
+export default class extends Kernel {
+  config = { auth, middleware /* ... */ };
 }
 ```
 

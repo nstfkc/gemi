@@ -1,9 +1,5 @@
 import type { WebSocketHandler } from "bun";
 import type { Kernel } from "../kernel";
-import { ApiRouterServiceContainer } from "../services/router/ApiRouterServiceContainer";
-import { ViewRouterServiceContainer } from "../services/router/ViewRouterServiceContainer";
-import { BroadcastingServiceContainer } from "../services/pubsub/BroadcastingServiceContainer";
-import { QueueServiceContainer } from "../services/queue/QueueServiceContainer";
 
 interface AppParams {
   kernel: new () => Kernel;
@@ -24,45 +20,39 @@ export class App {
       });
   }
 
-  // Read-only tooling accessors used at build time (createRollupInput, the
-  // `app:*` bin commands). These deliberately read the container straight from
-  // `kernel.services` instead of going through `ViewRouterServiceContainer.use()`.
-  // The built bin (`dist/bin/gemi.js`) bundles its own copy of gemi, while the
-  // app's Kernel resolves `gemi/*` to the source modules — so the two have
-  // *different* `kernelContext` AsyncLocalStorage instances and `.use()` reads
-  // an empty store. Looking the container up by its string `_name` is identical
-  // across both copies and needs no ambient context.
-  private useViewRouter(): ViewRouterServiceContainer {
-    const container = this.kernel.services[ViewRouterServiceContainer._name] as
-      | ViewRouterServiceContainer
-      | undefined;
-    if (!container) {
-      throw new Error(
-        "ViewRouterServiceContainer is not registered — was the kernel booted?",
-      );
-    }
-    return container;
+  // Every service this class touches is resolved through a `this.kernel.*`
+  // accessor rather than by importing the service class and calling `app()`
+  // here. That is deliberate: the built bin (`dist/bin/gemi.js`) bundles its own
+  // copy of gemi, while the app's Kernel is loaded from source and resolves
+  // `gemi/*` to the source modules — so the two copies have *different*
+  // `kernelContext` AsyncLocalStorage instances and different `Application`
+  // class objects. A method call on the Kernel executes in the app's copy and
+  // reads the app's container; a resolution attempted here would not. Service
+  // *tokens* still cross the boundary safely (they are plain strings), which is
+  // why `kernel.resolve()` works from either side.
+  public async waitForBoot() {
+    await this.kernel.waitForBoot();
   }
 
   public getComponentTree() {
-    return this.useViewRouter().componentTree;
+    return this.kernel.viewRoutes().componentTree;
   }
 
   public getFlatComponentTree() {
-    return this.useViewRouter().flatComponentTree;
+    return this.kernel.viewRoutes().flatComponentTree;
   }
 
   public getRouteManifest() {
-    return this.useViewRouter().routeManifest;
+    return this.kernel.viewRoutes().routeManifest;
   }
 
   public async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url);
     return this.kernel.run.call(this.kernel, async () => {
       if (url.pathname.startsWith("/api")) {
-        return await ApiRouterServiceContainer.use().handleApiRequest(req);
+        return await this.kernel.apiRoutes().handleApiRequest(req);
       }
-      return await ViewRouterServiceContainer.use().handleViewRequest(req);
+      return await this.kernel.viewRoutes().handleViewRequest(req);
     });
   }
 
@@ -70,8 +60,9 @@ export class App {
     message: (ws, message) => {
       const kernelRun = this.kernel.run.bind(this.kernel);
       kernelRun(() => {
-        BroadcastingServiceContainer.use().run(ws.data.headers, () => {
-          BroadcastingServiceContainer.use().handleMessage(ws, message);
+        const broadcast = this.kernel.broadcast();
+        broadcast.run(ws.data.headers, () => {
+          broadcast.handleMessage(ws, message);
         });
       });
     },
@@ -91,14 +82,14 @@ export class App {
   ) {
     const kernelRun = this.kernel.run.bind(this.kernel);
     kernelRun(() => {
-      BroadcastingServiceContainer.use().onPublish(fn);
+      this.kernel.broadcast().onPublish(fn);
     });
   }
 
   public dispatchJob(jobName: string, args: string) {
     const kernelRun = this.kernel.run.bind(this.kernel);
     return kernelRun(() => {
-      return QueueServiceContainer.use().dispatchJob(jobName, args);
+      return this.kernel.queue().dispatchJob(jobName, args);
     });
   }
 

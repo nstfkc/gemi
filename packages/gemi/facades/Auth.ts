@@ -1,17 +1,22 @@
 import type { User } from "../auth/adapters/types";
-import { AuthenticationServiceContainer } from "../auth/AuthenticationServiceContainer";
+import { AuthManager } from "../auth/AuthManager";
 import {
   AuthenticationError,
   InsufficientPermissionsError,
 } from "../http/errors";
 import { RequestContext } from "../http/requestContext";
-import { BroadcastingServiceContainer } from "../services/pubsub/BroadcastingServiceContainer";
+import { Broadcast } from "./Broadcast";
+import { Facade } from "./Facade";
 
-export class Auth {
+export class Auth extends Facade {
+  static getFacadeAccessor() {
+    return AuthManager;
+  }
+
   static async user(): Promise<User> {
     const requestContextStore = RequestContext.getStore();
     const broadcastingContextStore =
-      BroadcastingServiceContainer.use().context.getStore();
+      Broadcast.getFacadeRoot().context.getStore();
 
     let accessToken = "";
     let userAgent = "";
@@ -29,7 +34,7 @@ export class Auth {
     let user = requestContextStore?.user;
 
     if (!user) {
-      const container = AuthenticationServiceContainer.use();
+      const container = this.getFacadeRoot();
       // TODO: extend session if its expired
       const session = await container.getSession(accessToken, userAgent);
 
@@ -77,12 +82,12 @@ export class Auth {
   }
 
   static async authenticate(email: string) {
-    const container = AuthenticationServiceContainer.use();
+    const container = this.getFacadeRoot();
     return await container.authenticate(email);
   }
 
   static async createMagicLink(email: string) {
-    const container = AuthenticationServiceContainer.use();
+    const container = this.getFacadeRoot();
     return await container.createMagicLinkToken(email);
   }
 }

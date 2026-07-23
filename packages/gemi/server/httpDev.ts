@@ -171,7 +171,7 @@ export async function httpDev(app: App, instrumentation: Instrumentation) {
     },
     appType: "custom",
     // Views are loaded through this SSR graph while the renderer
-    // (react-dom/server in ViewRouterServiceContainer) is imported by Bun.
+    // (react-dom/server in ViewRouteDispatcher) is imported by Bun.
     // Dedupe so Vite can never resolve a second React copy — a mismatch makes
     // the SSR dispatcher null ("Invalid hook call") after an HMR reload.
     resolve: { dedupe: ["react", "react-dom"] },

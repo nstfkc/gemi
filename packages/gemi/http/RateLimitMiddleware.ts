@@ -1,4 +1,5 @@
-import { RateLimiterServiceContainer } from "../services/rate-limiter/RateLimiterServiceContainer";
+import { app } from "../foundation/app";
+import { RateLimiter } from "../services/rate-limiter/RateLimiter";
 import { RequestBreakerError } from "./Error";
 import { Middleware } from "./Middleware";
 
@@ -30,8 +31,7 @@ class RateLimitExceededError extends RequestBreakerError {
 export class RateLimitMiddleware extends Middleware {
   async run(limit = 1000) {
     const userId = this.req.headers.get("x-forwarded-for");
-    const driver = RateLimiterServiceContainer.use().service.driver;
-    const result = driver.consume.call(driver, userId, this.req.routePath);
+    const result = app(RateLimiter).consume(userId, this.req.routePath);
     if (result > limit) {
       throw new RateLimitExceededError();
     }

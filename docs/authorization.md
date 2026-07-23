@@ -20,27 +20,25 @@ Roles live on the user record and are checked with middleware. Two conventions a
   multi-tenant / per-workspace permissions.
 
 > **Note:** `admin` and `role:...` are **not** built-in framework middleware — they are
-> aliases *your app* registers in its `MiddlewareServiceProvider`, backed by small
-> `Middleware` classes that read the role off `Auth.user()`. Only `auth` (→
-> `AuthenticationMiddleware`) ships with the framework. This keeps role semantics (which
-> number means what, which relation holds the org role) entirely in your app.
+> aliases *your app* registers in `app/config/middleware.ts`, backed by small `Middleware`
+> classes that read the role off `Auth.user()`. Only `auth` (→ `AuthenticationMiddleware`)
+> ships with the framework. This keeps role semantics (which number means what, which
+> relation holds the org role) entirely in your app.
 
 ### Defining role middleware
 
 A role middleware reads the current user and throws when the rank is insufficient. `role:...`
 middleware receives its argument via `run(param)` (the string DSL passes `:`-suffixed params
-through — see [Middleware](./middleware.md)):
+through — see [Middleware](./middleware.md)).
+
+Put the classes somewhere under `app/http/middleware/`:
 
 ```typescript
+// app/http/middleware/roles.ts
 import { Auth } from "gemi/facades";
-import {
-  MiddlewareServiceProvider,
-  AuthenticationMiddleware,
-  Middleware,
-  InsufficientPermissionsError,
-} from "gemi/http";
+import { Middleware, InsufficientPermissionsError } from "gemi/http";
 
-class AdminMiddleware extends Middleware {
+export class AdminMiddleware extends Middleware {
   async run() {
     const user = await Auth.user();
     if (Number(user?.globalRole) >= 10) {
@@ -49,7 +47,7 @@ class AdminMiddleware extends Middleware {
   }
 }
 
-class RoleMiddleware extends Middleware {
+export class RoleMiddleware extends Middleware {
   // Invoked as `role:owner` -> run("owner")
   async run(required: string) {
     const user = await Auth.user();
@@ -59,15 +57,40 @@ class RoleMiddleware extends Middleware {
     }
   }
 }
+```
 
-export default class extends MiddlewareServiceProvider {
-  aliases = {
+…and map them to aliases in the `middleware` config slice:
+
+```typescript
+// app/config/middleware.ts
+import { defineMiddlewareConfig, AuthenticationMiddleware } from "gemi/http";
+import { AdminMiddleware, RoleMiddleware } from "@/app/http/middleware/roles";
+
+export default defineMiddlewareConfig({
+  aliases: {
     auth: AuthenticationMiddleware,
     admin: AdminMiddleware,
     role: RoleMiddleware,
-  };
+  },
+});
+```
+
+The slice is handed to the Kernel like every other one:
+
+```typescript
+// app/kernel/Kernel.ts
+import { Kernel } from "gemi/kernel";
+import middleware from "../config/middleware";
+
+export default class extends Kernel {
+  config = { middleware /* ...other slices */ };
 }
 ```
+
+At boot the framework's `MiddlewareServiceProvider` reads `config.get("middleware")` and
+binds a `MiddlewareRegistry` into the container; the routers resolve it to turn the alias
+strings in `.middleware([...])` into middleware instances. You never touch the registry
+directly — the alias map *is* the public surface.
 
 ### Applying it
 
@@ -81,6 +104,68 @@ this.post(TeamController, "invite").middleware(["auth", "role:owner"]);
 
 See [Middleware](./middleware.md) for router-vs-route placement, cancelling inherited
 middleware with `-auth`, and how `:`-parameters are parsed.
+
+## Shared authorization logic
+
+gemi has no `Gate` facade or policy auto-discovery. When several controllers need the same
+check, put the predicate in a plain module and call it from `Auth.guard(...)`:
+
+```typescript
+// app/authorization/gates.ts
+export const isOrgOwner = (orgId: string) => (user: any) =>
+  (user.accounts ?? []).some(
+    (a: any) => a.organization?.publicId === orgId && a.organizationRole === 0,
+  );
+```
+
+`Auth.guard` takes `(user: User) => boolean | Promise<boolean>` and throws
+`InsufficientPermissionsError` when the predicate returns falsy or throws.
+
+```typescript
+// in a controller
+await Auth.guard(isOrgOwner(req.params.orgId));
+```
+
+If a gate needs a service — a billing client, a feature-flag reader — bind that service in
+your app's `ServiceProvider` and resolve it where the gate runs. A `ServiceProvider` in gemi
+registers bindings into the container; it is not a place to hang behaviour:
+
+```typescript
+// app/providers/AppServiceProvider.ts
+import { ServiceProvider } from "gemi/support";
+import { Billing } from "@/app/billing/Billing";
+
+export default class AppServiceProvider extends ServiceProvider {
+  register() {
+    // Nothing may be resolved here — other providers may not have registered yet.
+    this.app.singleton(Billing, () => new Billing(this.app.config.get("billing", {})));
+  }
+
+  async boot() {
+    // Every provider has registered by now, so resolving is safe.
+  }
+}
+```
+
+Register it in the Kernel's `providers` array. App providers run *after* the framework's, so
+a binding here wins over a framework binding for the same token:
+
+```typescript
+// app/kernel/Kernel.ts
+import { Kernel } from "gemi/kernel";
+import AppServiceProvider from "../providers/AppServiceProvider";
+
+export default class extends Kernel {
+  config = {
+    /* ... */
+  };
+
+  providers = [AppServiceProvider];
+}
+```
+
+For a class binding to work as a container token it needs a stable `static token = "..."`
+string, exactly as the framework's own managers (`AuthManager`'s is `"auth"`) declare one.
 
 ## Authorization errors
 

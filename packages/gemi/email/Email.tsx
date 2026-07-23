@@ -1,8 +1,9 @@
 import type { ComponentType } from "react";
 import { render } from "jsx-email";
-import { EmailServiceContainer } from "../services/email/EmailServiceContainer";
+import { app } from "../foundation/app";
+import { MailManager } from "../services/email/MailManager";
 import type { SendEmailParams } from "../services/email/drivers/types";
-import { I18nServiceContainer } from "../i18n/I18nServiceContainer";
+import { Translator } from "../i18n/Translator";
 
 interface SendEmailArgs<T> extends Partial<Omit<SendEmailParams, "html">> {
   data: Omit<T, "locale">;
@@ -25,8 +26,8 @@ export class Email {
   ) {
     const instance = new this();
 
-    const defaultLocale = I18nServiceContainer.use().service.defaultLocale;
-    const emailService = EmailServiceContainer.use().service;
+    const defaultLocale = app(Translator).defaultLocale;
+    const mail = app(MailManager);
 
     const {
       to = instance.to,
@@ -42,12 +43,12 @@ export class Email {
     } = args;
 
     const _headers = {
-      ...(emailService.headers ?? {}),
+      ...(mail.headers ?? {}),
       ...(instance.headers ?? {}),
       ...(headers ?? {}),
     };
 
-    const recipients = await emailService.filterRecipients(to);
+    const recipients = await mail.filterRecipients(to);
 
     if (!recipients.length) {
       return;
@@ -71,7 +72,7 @@ export class Email {
       return;
     }
 
-    await EmailServiceContainer.use().service.driver.send({
+    await mail.send({
       bcc,
       cc,
       from,

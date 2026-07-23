@@ -1,18 +1,18 @@
 # File Storage
 
-gemi ships a driver-based file storage service with a single facade, `FileStorage`, that reads and writes files without your controllers ever knowing whether the bytes live on the local disk or in an S3 bucket. It also includes an on-the-fly image optimization service and a client `Image` component that requests resized, WebP-encoded variants automatically.
+gemi ships a driver-based file storage service with a single facade, `Storage`, that reads and writes files without your controllers ever knowing whether the bytes live on the local disk or in an S3 bucket. It also includes an on-the-fly image optimization service and a client `Image` component that requests resized, WebP-encoded variants automatically.
 
-Configure it through the `FileStorageServiceProvider` in your app's kernel — see [Kernel & Service Providers](./project-structure.md) — and call it through the [`FileStorage` facade](./facades.md).
+Configure it in `app/config/filesystem.ts` — see [Kernel & Service Providers](./project-structure.md) — and call it through the [`Storage` facade](./facades.md).
 
-## The `FileStorage` facade
+## The `Storage` facade
 
 Import the facade from `gemi/facades`:
 
 ```typescript
-import { FileStorage } from "gemi/facades";
+import { Storage } from "gemi/facades";
 ```
 
-Every method delegates to the configured driver, so the surface is intentionally small.
+`Storage` is a static proxy over the `FilesystemManager` that the framework's `FilesystemServiceProvider` binds into the container from your `filesystem` config. Every method delegates to the configured driver, so the surface is intentionally small.
 
 ### `put(params | Blob)`
 
@@ -20,7 +20,7 @@ Stores a file and returns the stored object's **name** (a string) that you persi
 
 ```typescript
 // Store an uploaded file with an explicit name
-const name = await FileStorage.put({
+const name = await Storage.put({
   name: "avatars/user-42.png",
   body: file, // Blob | File | Buffer
   contentType: "image/png", // optional
@@ -43,10 +43,10 @@ You can also pass a bare `Blob`/`File` — the driver generates a UUID-based nam
 
 ```typescript
 // name is auto-generated, e.g. "0192f...c3.png"
-const name = await FileStorage.put(uploadedBlob);
+const name = await Storage.put(uploadedBlob);
 ```
 
-> **Note:** `put` returns the object name, not a URL. Store that name against your record; you serve the file later by handing the name to `FileStorage.fetch` (typically from a controller route).
+> **Note:** `put` returns the object name, not a URL. Store that name against your record; you serve the file later by handing the name to `Storage.fetch` (typically from a controller route).
 
 ### `fetch(params | string)`
 
@@ -54,10 +54,10 @@ Reads a file back as a web `Response` (streamed body, with `Content-Type`, `Cont
 
 ```typescript
 // From a controller — stream the stored file straight back to the client
-return FileStorage.fetch(record.imageName);
+return Storage.fetch(record.imageName);
 
 // Or target a bucket explicitly
-return FileStorage.fetch({ name: record.imageName, bucket: "private" });
+return Storage.fetch({ name: record.imageName, bucket: "private" });
 ```
 
 ```typescript
@@ -74,7 +74,7 @@ Because `fetch` returns a `Response`, a controller can return it directly. See [
 Lists the objects under a folder/prefix. The shape of the result depends on the driver (the filesystem driver returns a `string[]` of file names; the S3 driver returns the raw `ListObjectsV2` result).
 
 ```typescript
-const files = await FileStorage.list("avatars/");
+const files = await Storage.list("avatars/");
 ```
 
 ### `metadata(blob | file)`
@@ -82,32 +82,66 @@ const files = await FileStorage.list("avatars/");
 Reads image metadata (width, height, format, etc.) from a `Blob`/`File` using Sharp. Returns a partial metadata object, or `{}` if the bytes aren't a decodable image — useful for validating an upload before storing it.
 
 ```typescript
-const meta = await FileStorage.metadata(uploadedFile);
+const meta = await Storage.metadata(uploadedFile);
 if ((meta.width ?? 0) > 4096) {
   // reject oversized image
 }
 ```
 
-> **Note:** `FileStorage.delete()` is currently a no-op placeholder — deletion is not yet implemented at the facade level.
+> **Note:** `Storage.delete()` is currently a no-op placeholder — deletion is not yet implemented at the facade level.
+
+## Configuration: `app/config/filesystem.ts`
+
+The active driver lives in the `filesystem` config slice, written with the `defineFilesystemConfig` helper and default-exported:
+
+```typescript
+// app/config/filesystem.ts
+import { defineFilesystemConfig, FileSystemDriver } from "gemi/services";
+
+export default defineFilesystemConfig({
+  driver: new FileSystemDriver(),
+});
+```
+
+Register the slice under the `filesystem` key on your kernel:
+
+```typescript
+// app/kernel/Kernel.ts
+import { Kernel } from "gemi/kernel";
+
+import filesystem from "../config/filesystem";
+
+export default class extends Kernel {
+  config = {
+    filesystem,
+    // ...other slices
+  };
+}
+```
+
+`FilesystemConfig` has exactly one optional field:
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `driver` | `FileStorageDriver` | `new FileSystemDriver()` |
+
+If you omit the slice entirely, the default driver is used.
 
 ## Drivers
 
-The active driver is set on your app's `FileStorageServiceProvider`. gemi ships two drivers; the default is `FileSystemDriver`.
+gemi ships two drivers; the default is `FileSystemDriver`.
 
 ### `FileSystemDriver` (local disk)
 
 Writes to a folder on the local filesystem — defaults to `${process.env.ROOT_DIR}/storage`. Ideal for development.
 
 ```typescript
-// app/kernel/providers/FileStorageServiceProvider.ts
-import {
-  FileStorageServiceProvider,
-  FileSystemDriver,
-} from "gemi/services";
+// app/config/filesystem.ts
+import { defineFilesystemConfig, FileSystemDriver } from "gemi/services";
 
-export default class extends FileStorageServiceProvider {
-  driver = new FileSystemDriver();
-}
+export default defineFilesystemConfig({
+  driver: new FileSystemDriver(),
+});
 ```
 
 You can point it at a custom directory by passing a path to the constructor: `new FileSystemDriver("/var/data/uploads")`.
@@ -117,11 +151,11 @@ You can point it at a custom directory by passing a path to the constructor: `ne
 Talks to AWS S3 or any S3-compatible service (Cloudflare R2, MinIO, DigitalOcean Spaces, …). The constructor forwards its arguments straight to the AWS SDK's `S3Client`, so you configure it exactly as you would that client:
 
 ```typescript
-// app/kernel/providers/FileStorageServiceProvider.ts
-import { FileStorageServiceProvider, S3Driver } from "gemi/services";
+// app/config/filesystem.ts
+import { defineFilesystemConfig, S3Driver } from "gemi/services";
 
-export default class extends FileStorageServiceProvider {
-  driver = new S3Driver({
+export default defineFilesystemConfig({
+  driver: new S3Driver({
     region: process.env.AWS_REGION,
     // endpoint is optional — set it for S3-compatible services like R2/MinIO
     endpoint: process.env.S3_ENDPOINT,
@@ -129,8 +163,8 @@ export default class extends FileStorageServiceProvider {
       accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
       secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
     },
-  });
-}
+  }),
+});
 ```
 
 The bucket comes from `params.bucket` when provided, otherwise from `process.env.BUCKET_NAME`. See [Configuration](./configuration.md) for where to define these environment variables.
@@ -161,17 +195,69 @@ class MyDriver extends FileStorageDriver {
 }
 ```
 
-## Image optimization
-
-gemi optimizes images on demand — resizing and re-encoding to WebP — through the `ImageOptimizationServiceProvider`, which uses a Sharp-backed driver by default.
+Then point `app/config/filesystem.ts` at it:
 
 ```typescript
-// app/kernel/providers/ImageOptimizationServiceProvider.ts
-import { ImageOptimizationServiceProvider } from "gemi/services";
+import { defineFilesystemConfig } from "gemi/services";
+import { MyDriver } from "../storage/MyDriver";
 
-// The default provider already uses the Sharp driver — subclass only to override.
-export default class extends ImageOptimizationServiceProvider {}
+export default defineFilesystemConfig({
+  driver: new MyDriver(),
+});
 ```
+
+### Replacing the manager entirely
+
+Config covers the normal case. If you need to swap the `FilesystemManager` itself, rebind its token from your own service provider — a `ServiceProvider`'s `register()` binds into the container, and app providers listed in `providers` register **after** the framework's, so the last binding wins:
+
+```typescript
+// app/providers/AppServiceProvider.ts
+import { ServiceProvider } from "gemi/support";
+import { FilesystemManager } from "gemi/services";
+
+export default class AppServiceProvider extends ServiceProvider {
+  register() {
+    this.app.singleton(FilesystemManager, () => new TenantAwareFilesystem());
+  }
+}
+```
+
+```typescript
+// app/kernel/Kernel.ts
+import AppServiceProvider from "../providers/AppServiceProvider";
+
+export default class extends Kernel {
+  providers = [AppServiceProvider];
+}
+```
+
+## Image optimization
+
+gemi optimizes images on demand — resizing and re-encoding to WebP — through the `ImageManager`, which uses a Sharp-backed driver by default. It needs no configuration at all; supply an `image` slice only to swap the driver:
+
+```typescript
+// app/config/image.ts
+import { defineImageConfig } from "gemi/services";
+import { MySharpVariant } from "../images/MySharpVariant";
+
+export default defineImageConfig({
+  driver: new MySharpVariant(),
+});
+```
+
+```typescript
+// app/kernel/Kernel.ts
+import image from "../config/image";
+
+export default class extends Kernel {
+  config = {
+    image,
+    // ...other slices
+  };
+}
+```
+
+A custom driver subclasses `ImageOptimizationDriver` (from `gemi/services`) and implements `resize(buffer, params)`.
 
 The `Sharp` driver's `resize` accepts `ResizeParameters`:
 
@@ -236,7 +322,7 @@ This pairs with the `OpenGraph` metadata helpers — see [`Meta`/facades](./faca
 
 ## Related
 
-- [Facades](./facades.md) — how `FileStorage` resolves the active service.
-- [Kernel & Service Providers](./project-structure.md) — registering `FileStorageServiceProvider` and `ImageOptimizationServiceProvider`.
-- [Controllers](./controllers.md) — returning a `FileStorage.fetch` `Response` from a route.
+- [Facades](./facades.md) — how `Storage` resolves the active `FilesystemManager` from the container.
+- [Kernel & Service Providers](./project-structure.md) — the `config` and `providers` fields on the kernel.
+- [Controllers](./controllers.md) — returning a `Storage.fetch` `Response` from a route.
 - [Configuration](./configuration.md) — the `BUCKET_NAME`, `ROOT_DIR`, and S3 credential environment variables.

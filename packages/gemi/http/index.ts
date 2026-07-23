@@ -12,8 +12,12 @@ export { HttpRequest } from "./HttpRequest";
 export { Middleware } from "./Middleware";
 export { getCookies } from "./getCookies";
 export { RequestBreakerError } from "./Error";
+export {
+  defineMiddlewareConfig,
+  middlewareConfigDefaults,
+  type MiddlewareConfig,
+} from "./middleware-config";
 
-export { MiddlewareServiceProvider } from "./MiddlewareServiceProvider";
 export { AuthenticationMiddleware } from "./AuthenticationMiddlware";
 export { CacheMiddleware } from "./CacheMiddleware";
 export { CorsMiddleware } from "./CorsMiddleware";

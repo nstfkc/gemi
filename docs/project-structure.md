@@ -1,6 +1,6 @@
 # Project Structure
 
-Every gemi app follows the same layout. The `app/` directory holds all of your application code, wired together by a **Kernel** that registers **service providers**. This page tours the directory, then explains how the kernel, service providers, and app bootstrap fit together.
+Every gemi app follows the same layout. The `app/` directory holds all of your application code, wired together by a **Kernel** that hands **config** and **service providers** to the application **container**. This page tours the directory, then explains how the container, config, providers, and app bootstrap fit together.
 
 ## The `app/` directory
 
@@ -12,21 +12,37 @@ app/
   client.tsx             # browser entry — hydrates the React app
   preload.ts             # optional Bun preload, runs before the server starts
   kernel/
-    Kernel.ts            # your Kernel subclass, wiring up service providers
-    providers/           # your service provider subclasses
+    Kernel.ts            # your Kernel subclass — declares `config` and `providers`
+  config/                # runtime config, one file per subsystem
+    auth.ts
+    filesystem.ts
+    log.ts
+    mail.ts
+    middleware.ts
+    queue.ts
+    redis.ts
+    route.ts
+    schedule.ts
+    translation.ts
+  providers/
+    AppServiceProvider.ts  # your own container bindings
   http/
     routes/
       api.ts             # root ApiRouter (JSON endpoints under /api)
       view.ts            # root ViewRouter (server-rendered pages)
     controllers/         # controller classes
+    requests/            # HttpRequest subclasses used for validation
   views/                 # React views (.tsx), layouts, and the RootLayout
   email/                 # email templates (jsx-email)
+  cron/                  # CronJob classes
   i18n/                  # translation dictionaries
   database/
     prisma.ts            # the Prisma client instance
 ```
 
 Root-level files support the app: [`gemi.config.ts`](./configuration.md) (Vite/Bun plugin config), `gemi.d.ts` (type augmentation for the type-safe RPC layer), `vite.config.mjs`, `tsconfig.json`, the `prisma/` schema, and a `Dockerfile`.
+
+> **`gemi.config.ts` and `app/config/` are different things.** `gemi.config.ts` is *build* config (Vite/Bun plugins), imported from `gemi/config`. `app/config/*.ts` is *runtime* config for framework services, consumed by the container. They never overlap.
 
 ### `server.ts` — the server entry
 
@@ -41,7 +57,7 @@ const server = new Server({ kernel: Kernel });
 server.start();
 ```
 
-`Server.start()` picks the right HTTP stack for the environment: a Vite-backed dev server when `NODE_ENV !== "production"` (and starts watching `.env` for live reloads), or the built production server otherwise. See [App bootstrap](#app-bootstrap) below for what `Server` wraps.
+`Server.start()` finishes the boot (see [Boot phases](#boot-phases)) and then picks the right HTTP stack for the environment: a Vite-backed dev server when `NODE_ENV !== "production"` (and starts watching `.env` for live reloads), or the built production server otherwise. See [App bootstrap](#app-bootstrap) below for what `Server` wraps.
 
 ### `client.tsx` — the browser entry
 
@@ -69,116 +85,150 @@ If present, `app/preload.ts` runs once, before the server starts, for both `gemi
 
 ## The Kernel
 
-The kernel is the composition root. Your `app/kernel/Kernel.ts` extends the base `Kernel` from `gemi/kernel` and assigns your service provider subclasses to named slots:
+The kernel is the composition root. Your `app/kernel/Kernel.ts` extends the base `Kernel` from `gemi/kernel` and declares two things: the app's **config slices** and any **service providers** the app adds.
 
 ```typescript
 import { Kernel } from "gemi/kernel";
 
-import AuthenticationServiceProvider from "./providers/AuthenticationServiceProvider";
-import ApiRouterServiceProvider from "./providers/ApiRouterServiceProvider";
-import ViewRouterServiceProvider from "./providers/ViewRouterServiceProvider";
-import MiddlewareServiceProvider from "./providers/MiddlewareServiceProvider";
-import EmailServiceProvider from "./providers/EmailServiceProvider";
-import FileStorageServiceProvider from "./providers/FileStorageServiceProvider";
-import I18nServiceProvider from "./providers/I18nServiceProvider";
-import LoggingServiceProvider from "./providers/LoggingServiceProvider";
-import QueueServiceProvider from "./providers/QueueServiceProvider";
-import CronServiceProvider from "./providers/CronServiceProvider";
-import RedisServiceProvider from "./providers/RedisServiceProvider";
+import auth from "../config/auth";
+import filesystem from "../config/filesystem";
+import log from "../config/log";
+import mail from "../config/mail";
+import middleware from "../config/middleware";
+import queue from "../config/queue";
+import redis from "../config/redis";
+import route from "../config/route";
+import schedule from "../config/schedule";
+import translation from "../config/translation";
+
+import AppServiceProvider from "../providers/AppServiceProvider";
 
 export default class extends Kernel {
-  authenticationServiceProvider = AuthenticationServiceProvider;
-  apiRouterServiceProvider = ApiRouterServiceProvider;
-  viewRouterServiceProvider = ViewRouterServiceProvider;
-  middlewareServiceProvider = MiddlewareServiceProvider;
-  emailServiceProvider = EmailServiceProvider;
-  fileStorageServiceProvider = FileStorageServiceProvider;
-  i18nServiceProvider = I18nServiceProvider;
-  loggingServiceProvider = LoggingServiceProvider;
-  queueServiceProvider = QueueServiceProvider;
-  cronServiceProvider = CronServiceProvider;
-  redisServiceProvider = RedisServiceProvider;
+  config = {
+    auth,
+    filesystem,
+    log,
+    mail,
+    middleware,
+    queue,
+    redis,
+    route,
+    schedule,
+    translation,
+  };
+
+  providers = [AppServiceProvider];
 }
 ```
 
-When the app boots, the kernel instantiates each provider, wraps it in its service container, and stores them all in a registry that request handlers resolve from ambient context.
+Both properties are optional-by-default: `config` merges over the framework defaults (every slice except `route` has one), and `providers` is registered *after* the framework's own, so an app provider can rebind anything the framework bound.
 
-### Service provider slots
+The imports are explicit rather than glob-discovered because the first boot phase is synchronous — see [Boot phases](#boot-phases).
 
-The base `Kernel` defines a slot for every built-in service. Each slot has a working default, so **you only override the ones you need to configure** — the template above leaves several at their defaults.
+### The container
 
-| Slot | Import (base class) | Purpose |
-| --- | --- | --- |
-| `authenticationServiceProvider` | `gemi/kernel` | Auth adapter, OAuth providers, sign-up/login hooks. |
-| `apiRouterServiceProvider` | `gemi/services` | Registers the root `ApiRouter`; API request lifecycle hooks. |
-| `viewRouterServiceProvider` | `gemi/services` | Registers the root `ViewRouter` and `RootLayout`; view lifecycle hooks. |
-| `middlewareServiceProvider` | `gemi/http` | Named middleware aliases (`auth`, `cache`, `rate-limit`, `csrf`, `cors`). |
-| `emailServiceProvider` | `gemi/services` | Email driver (e.g. `ResendDriver`). |
-| `fileStorageServiceProvider` | `gemi/services` | Object-storage driver (`S3Driver`, `FileSystemDriver`). |
-| `i18nServiceProvider` | `gemi/i18n` | Locales, default locale, dictionary prefetch. |
-| `loggingServiceProvider` | `gemi/services` | Log sinks and log lifecycle hooks. |
-| `queueServiceProvider` | `gemi/services` | Background job queue. |
-| `cronServiceProvider` | `gemi/services` | Scheduled `CronJob`s. |
-| `redisServiceProvider` | `gemi/services` | Redis connection. |
-| `rateLimiterServiceProvider` | `gemi/services` | Rate-limiter driver (default in-memory). |
-| `broadcastingsServiceProvider` | `gemi/services` | WebSocket pub/sub. |
-| `imageServiceProvider` | `gemi/services` | Image optimization (sharp). |
-| `kernelIdServiceProvider` | (internal) | Per-kernel identity for multi-process coordination. |
-
-> **Note:** The property is spelled `broadcastingsServiceProvider` (with the extra `s`) in the base kernel — match it exactly when overriding. A `SingletonServiceProvider` is also registered internally but has no override slot.
-
-## Service Providers
-
-A service provider configures one slice of the framework. gemi ships a base provider for each slot (exported from `gemi/services`, `gemi/http`, `gemi/kernel`, or `gemi/i18n`); your app subclasses it and sets a few properties or overrides a few methods.
-
-For example, the API router provider just points at your root router:
+`Kernel` owns an `Application`, which *is* the container (`Application extends Container`). There is exactly one of them per kernel, and everything the framework offers is a binding in it:
 
 ```typescript
-import { ApiRouterServiceProvider } from "gemi/services";
-import RootApiRouter from "@/app/http/routes/api";
+import { app } from "gemi/foundation";
+import { MailManager } from "gemi/services";
 
-export default class extends ApiRouterServiceProvider {
-  rootRouter = RootApiRouter;
-}
+app();               // the Application itself
+app(MailManager);    // typed MailManager — no cast
+app().config;        // the config Repository
 ```
 
-The view router provider points at your root router **and** your `RootLayout`, wrapped by `createRoot`:
+Bindings are keyed by a stable `static token` string that each service class carries, and the class doubles as the typed handle — so `app(MailManager)` is typed `MailManager` while the underlying key is `"mail"`. (The string key is what lets a binding survive gemi's build tooling, which loads a second copy of the framework.)
+
+The container API is Laravel's:
+
+| Method | Meaning |
+| --- | --- |
+| `app().bind(Token, factory)` | Fresh instance on every `make`. |
+| `app().singleton(Token, factory)` | Instance created once, cached. |
+| `app().instance(Token, object)` | Bind an already-constructed object. |
+| `app().make(Token)` | Resolve. Throws `BindingResolutionError` if unbound. |
+| `app().bound(Token)` / `app().resolved(Token)` | Is it bound / has it been constructed yet. |
+
+`Container`, `BindingResolutionError` and the `ServiceToken` type are exported from `gemi/container`; `Application` and `app` from `gemi/foundation`.
+
+### Framework services
+
+Fourteen framework providers bind fifteen services. You rarely resolve these directly — most have a [facade](./facades.md) — but this is what is in the container:
+
+| Service | Token | Config slice | Facade |
+| --- | --- | --- | --- |
+| `AuthManager` | `auth` | `auth` | `Auth` |
+| `MailManager` | `mail` | `mail` | — |
+| `LogManager` | `log` | `log` | `Log` |
+| `FilesystemManager` | `filesystem` | `filesystem` | `Storage` |
+| `QueueManager` | `queue` | `queue` | — |
+| `RedisManager` | `redis` | `redis` | `Redis` |
+| `BroadcastManager` | `broadcast` | `broadcast` | `Broadcast` |
+| `ImageManager` | `image` | `image` | — |
+| `ApiRouteDispatcher` | `router.api` | `route.api` | `Query` |
+| `ViewRouteDispatcher` | `router.view` | `route.view` | — |
+| `Translator` | `translator` | `translation` | `Lang` |
+| `RateLimiter` | `ratelimiter` | `ratelimiter` | — |
+| `Scheduler` | `scheduler` | `schedule` | — |
+| `MiddlewareRegistry` | `middleware` | `middleware` | — |
+| `KernelId` | `kernel.id` | — | — |
+| `Repository` (config) | `config` | — | — |
+
+The service classes are exported from `gemi/services` (except `Translator`, from `gemi/i18n`, and `Repository`, from `gemi/support`), so you can pass them to `app()` as tokens. `AuthManager` is intentionally not exported — reach auth through the `Auth` facade.
+
+`RouteServiceProvider` is the one provider that owns two services — the api/view split is a config slice, not a separate provider, matching Laravel's single `RouteServiceProvider`.
+
+## Configuration (`app/config/`)
+
+Each file under `app/config/` is one **config slice**, default-exporting a plain object wrapped in a `define*` helper. The helpers are identity functions — they exist purely so TypeScript checks the shape and autocompletes the keys.
 
 ```typescript
+// app/config/mail.ts
+import { defineMailConfig, ResendDriver } from "gemi/services";
+
+export default defineMailConfig({
+  driver: new ResendDriver(),
+});
+```
+
+```typescript
+// app/config/filesystem.ts
+import { defineFilesystemConfig, S3Driver } from "gemi/services";
+
+export default defineFilesystemConfig({
+  driver: new S3Driver(),
+});
+```
+
+The `route` slice is the only **required** one — the root routers and the root layout have no defaults. It merges what used to be two separate providers:
+
+```typescript
+// app/config/route.ts
 import { createRoot } from "gemi/client";
-import { ViewRouterServiceProvider } from "gemi/services";
+import { defineRouteConfig } from "gemi/services";
+
+import RootApiRouter from "@/app/http/routes/api";
 import RootViewRouter from "@/app/http/routes/view";
 import RootLayout from "@/app/views/RootLayout";
 
-export default class extends ViewRouterServiceProvider {
-  rootRouter = RootViewRouter;
-  root = createRoot(RootLayout);
-}
+export default defineRouteConfig({
+  api: {
+    rootRouter: RootApiRouter,
+  },
+  view: {
+    rootRouter: RootViewRouter,
+    root: createRoot(RootLayout),
+  },
+});
 ```
 
-Other providers select a **driver** — the swappable implementation of a service:
+Middleware aliases — the names routes reference in the middleware string DSL — are a config slice too:
 
 ```typescript
-import { EmailServiceProvider, ResendDriver } from "gemi/services";
-
-export default class extends EmailServiceProvider {
-  driver = new ResendDriver();
-}
-```
-
-```typescript
-import { FileStorageServiceProvider, S3Driver } from "gemi/services";
-
-export default class extends FileStorageServiceProvider {
-  driver = new S3Driver();
-}
-```
-
-The middleware provider maps short aliases to middleware classes, which routes then reference by name:
-
-```typescript
+// app/config/middleware.ts
 import {
-  MiddlewareServiceProvider,
+  defineMiddlewareConfig,
   AuthenticationMiddleware,
   CacheMiddleware,
   RateLimitMiddleware,
@@ -186,49 +236,180 @@ import {
   CorsMiddleware,
 } from "gemi/http";
 
-export default class extends MiddlewareServiceProvider {
-  aliases = {
+export default defineMiddlewareConfig({
+  aliases: {
     auth: AuthenticationMiddleware,
     cache: CacheMiddleware,
     "rate-limit": RateLimitMiddleware,
     csrf: CSRFMiddleware,
     cors: CorsMiddleware,
-  };
-}
+  },
+});
 ```
 
-### Lifecycle hooks
+### The slice reference
 
-The router providers expose request lifecycle hooks you can override for cross-cutting concerns like tracing, logging, or error reporting:
+| Slice | Helper | Exported from |
+| --- | --- | --- |
+| `auth` | `defineAuthConfig` | `gemi/services` |
+| `mail` | `defineMailConfig` | `gemi/services` |
+| `log` | `defineLogConfig` | `gemi/services` |
+| `filesystem` | `defineFilesystemConfig` | `gemi/services` |
+| `queue` | `defineQueueConfig` | `gemi/services` |
+| `redis` | `defineRedisConfig` | `gemi/services` |
+| `broadcast` | `defineBroadcastConfig` | `gemi/services` |
+| `image` | `defineImageConfig` | `gemi/services` |
+| `ratelimiter` | `defineRateLimiterConfig` | `gemi/services` |
+| `schedule` | `defineScheduleConfig` | `gemi/services` |
+| `route` | `defineRouteConfig` | `gemi/services` |
+| `translation` | `defineTranslationConfig` | `gemi/i18n` (also re-exported from `gemi/services`) |
+| `middleware` | `defineMiddlewareConfig` | `gemi/http` |
 
-- **`boot()`** — called once when the provider is instantiated at kernel boot.
-- **`onRequestStart(req)`** — before a matched request is handled (API path).
-- **`onRequestEnd(req)`** — after a request is handled successfully.
-- **`onRequestFail(req, error)`** — when handling throws.
+Every slice but `route` is optional; omit the file and the framework default applies. A missing `route` slice throws on the first request, not at boot.
 
-A real-world example from a production app reports failures to Sentry:
+### Reading config at runtime
+
+Config lives in a `Repository` (`gemi/support`), the same dot-path store Laravel uses. It is reachable as `app().config` and is itself a container binding:
 
 ```typescript
-import { ApiRouterServiceProvider } from "gemi/services";
+import { app } from "gemi/foundation";
+
+app().config.get("mail.headers", {});
+app().config.get<boolean>("auth.verifyEmail");
+app().config.has("redis.url");
+app().config.set("queue.concurrency", 4);
+```
+
+### Hooks are config callbacks, not provider methods
+
+This is a deliberate divergence from Laravel. In Laravel you would subclass a provider and override a method; in gemi, a subsystem's lifecycle hooks are **plain callbacks on its config slice**. There is nothing to subclass:
+
+```typescript
+// app/config/log.ts
+import { defineLogConfig, type LogEntry } from "gemi/services";
+import { Storage } from "gemi/facades";
+
+export default defineLogConfig({
+  maxFileSize: 1024 * 1024 * 10,
+
+  async onLogFileClosed(file: File) {
+    await Storage.put({ body: file, name: `logs/${file.name}` });
+  },
+
+  async onLogCreated(logEntry: LogEntry) {
+    if (logEntry.level === "error") {
+      // report it
+    }
+  },
+});
+```
+
+The hooks are ordinary config values, so a service reads them the same way it reads a driver or a timeout, and swapping one in a test is just a config override. The full set:
+
+| Slice | Hooks |
+| --- | --- |
+| `auth` | `onSignUp`, `onSignIn`, `onSignOut`, `onForgotPassword`, `onResetPassword`, `onMagicLinkCreated`, `extendSession`, `verifyPassword`, `hashPassword`, `generateForgotPasswordToken`, `generateEmailVerificationToken`, `generateMagicLinkToken` |
+| `mail` | `filterRecipients` |
+| `log` | `onLogCreated`, `onLogFileClosed` |
+| `translation` | `detectLocale`, `onLocaleChange` |
+| `route.api` | `onRequestStart`, `onRequestEnd`, `onRequestFail` |
+| `route.view` | `onRequestStart`, `onRequestEnd`, `onRequestFail` |
+
+Request lifecycle hooks are the usual place for tracing and error reporting:
+
+```typescript
+// app/config/route.ts
+import { defineRouteConfig } from "gemi/services";
 import type { HttpRequest } from "gemi/http";
-import RootApiRouter from "@/app/http/routes/api";
+// ...
 
-export default class extends ApiRouterServiceProvider {
-  rootRouter = RootApiRouter;
+export default defineRouteConfig({
+  api: {
+    rootRouter: RootApiRouter,
+    onRequestStart(req: HttpRequest) {
+      // e.g. name a tracing span from the matched route
+    },
+    onRequestFail(req: HttpRequest, error: any) {
+      // e.g. Sentry.captureException(error)
+    },
+  },
+  view: {
+    rootRouter: RootViewRouter,
+    root: createRoot(RootLayout),
+  },
+});
+```
 
-  onRequestStart(req: HttpRequest) {
-    // e.g. name a tracing span from the matched route
+> **Gotcha:** On the view path, gemi does not call `onRequestStart`. If you need per-request setup for views, use `onRequestEnd` / `onRequestFail`, which both fire on the view path.
+
+## Service Providers
+
+A service provider **registers bindings into the container**. That is its whole job — it is not a config bag and it has no per-subsystem properties to set. The framework's fourteen providers each read their config slice and bind their service; your app writes providers for its *own* services.
+
+`app/providers/AppServiceProvider.ts` is the one the template scaffolds:
+
+```typescript
+import { ServiceProvider } from "gemi/support";
+
+export default class AppServiceProvider extends ServiceProvider {
+  register() {}
+
+  async boot() {}
+}
+```
+
+Fill it in by binding your own classes. `this.app` is the `Application`, so the container and the config Repository are both right there:
+
+```typescript
+import { ServiceProvider } from "gemi/support";
+import { Billing } from "@/app/services/Billing";
+import { Clock, SystemClock } from "@/app/services/Clock";
+
+export default class AppServiceProvider extends ServiceProvider {
+  register() {
+    this.app.singleton(Billing, () => new Billing(this.app.config.get("billing", {})));
+    this.app.bind(Clock, () => new SystemClock());
   }
 
-  onRequestFail(req: HttpRequest, error: any) {
-    // e.g. Sentry.captureException(error)
+  async boot() {
+    // every provider has registered by now, so resolving is safe here
+    this.app.make(Billing).warmCache();
   }
 }
 ```
 
-Other providers expose their own hooks — for example the logging provider has `onLogCreated(logEntry)` and `onLogFileClosed(file)`, the i18n provider has `onLocaleChange(locale)`, and the authentication provider has `onSignUp`, `onForgotPassword`, and `onMagicLinkCreated`.
+For `Billing` to be a container token it needs a `static token`:
 
-> **Gotcha:** On the view path, gemi does not call `onRequestStart`. If you need per-request setup for views, use `onRequestEnd` / `onRequestFail`, which both fire on the view path.
+```typescript
+export class Billing {
+  static token = "billing";
+  constructor(private config: BillingConfig) {}
+}
+```
+
+Add the provider to the `providers` array in your Kernel. Because app providers register after the framework's, rebinding a framework token here replaces the framework's implementation wholesale:
+
+```typescript
+import { MailManager } from "gemi/services";
+
+register() {
+  this.app.singleton(MailManager, () => new MyMailManager());
+}
+```
+
+### The two methods
+
+- **`register()`** — bind factories. Runs synchronously for every provider, in order, at `Kernel.boot()`. **Never resolve anything here** — the providers after you have not registered yet.
+- **`boot()`** — may be `async`. Runs after *every* provider has registered, so resolving is safe. This is where cross-cutting wiring belongs.
+
+## Boot phases
+
+The boot is split in two because `new App({ kernel })` is a synchronous constructor while providers may need to `await` during startup:
+
+1. **`kernel.boot()` — synchronous.** Merges the Kernel's `config` into the `Repository`, sets the current `Application` instance, and runs every provider's `register()`. Only bindings are recorded; no service is constructed.
+2. **`kernel.waitForBoot()` — asynchronous.** Runs every provider's `boot()` in registration order. Idempotent.
+
+`new App({ kernel })` performs phase one for you; `Server.start()` awaits phase two before binding the port. If you drive `App` yourself, `await app.waitForBoot()` before serving.
 
 ## App bootstrap
 
@@ -244,28 +425,42 @@ export const app = new App({
     // central place to report unhandled errors
   },
 });
+
+await app.waitForBoot();
 ```
 
-`new App({ kernel })` instantiates and boots the kernel immediately. The key methods:
+The key members:
 
-- **`app.fetch(req)`** — the request handler. It runs inside the kernel's async context and dispatches: requests to `/api/*` go to the API router, everything else to the view router.
+- **`app.waitForBoot()`** — completes phase two of the boot. Await it before the first request.
+- **`app.fetch(req)`** — the request handler. It runs inside the kernel's async context and dispatches: requests to `/api/*` go to the API route dispatcher, everything else to the view route dispatcher.
 - **`app.websocket`** — a Bun `WebSocketHandler` for the broadcasting service.
 - **`app.dispatchJob(name, args)`** — enqueue a background job.
 - **`onException`** — an optional callback for unhandled errors thrown during a request; defaults to `console.error`.
 
-Most apps use `Server`, which constructs the `App` for you and wires it to the dev or prod HTTP stack. Reach for `App` directly only when you need to wrap `app.fetch` yourself — for example to add request-level instrumentation before serving:
+Most apps use `Server`, which constructs the `App` for you, awaits the boot, and wires it to the dev or prod HTTP stack. Reach for `App` directly only when you need to wrap `app.fetch` yourself — for example to add request-level instrumentation before serving:
 
 ```typescript
 import { App } from "gemi/app";
 import Kernel from "./kernel/Kernel";
 
 const app = new App({ kernel: Kernel, onException: reportError });
+await app.waitForBoot();
 // ...wrap app.fetch, then serve it
+```
+
+`Server` also accepts an `instrumentation` function if wrapping is all you need:
+
+```typescript
+const server = new Server({
+  kernel: Kernel,
+  instrumentation: (req, next) => next(req),
+});
 ```
 
 ## Related
 
 - [Configuration](./configuration.md) — `gemi.config.ts`, environment variables, `preload.ts`, Vite.
+- [Facades](./facades.md) — the static proxies over container-resolved services.
 - [Routing](./routing.md) — API and view routers, layouts, middleware.
 - [Controllers](./controllers.md) — controller and resource controller classes.
 - [CLI](./cli.md) — `dev`, `build`, `start`, and tooling commands.
