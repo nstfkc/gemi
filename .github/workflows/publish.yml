@@ -18,9 +18,9 @@ on:
   workflow_dispatch:
     inputs:
       dist-tag:
-        description: "npm dist-tag to publish under"
+        description: "npm dist-tag (leave blank to derive: prereleases -> their identifier, e.g. rc; stable -> latest)"
         required: false
-        default: latest
+        default: ""
 
 jobs:
   publish:
@@ -54,6 +54,29 @@ jobs:
         working-directory: packages/gemi
         run: bun run build:publish
 
+      - name: Resolve dist-tag
+        id: tag
+        working-directory: packages/gemi
+        # A blank input derives the tag from the version, so a prerelease can
+        # never silently take over `latest`: 0.50.0-rc.1 publishes under `rc`,
+        # a stable 0.50.0 under `latest`. An explicit input always wins. This
+        # also protects the `release: published` path, which fires for
+        # prereleases too and otherwise has no input to fall back on.
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          REQUESTED="${{ github.event.inputs.dist-tag }}"
+          if [ -n "$REQUESTED" ]; then
+            TAG="$REQUESTED"
+          elif [ "${{ github.event.release.prerelease }}" = "true" ] || [[ "$VERSION" == *-* ]]; then
+            PRE="${VERSION#*-}"        # 0.50.0-rc.1 -> rc.1
+            TAG="${PRE%%.*}"           # rc.1        -> rc
+            [ -n "$TAG" ] || TAG="next"
+          else
+            TAG="latest"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Publishing gemi@$VERSION under dist-tag: $TAG"
+
       - name: Skip if this version is already published
         id: check
         working-directory: packages/gemi
@@ -72,12 +95,12 @@ jobs:
         working-directory: packages/gemi/.publish
         # OIDC trusted publishing — no NODE_AUTH_TOKEN. npm detects the id-token
         # permission and authenticates via OIDC, attaching provenance.
-        run: npm publish --access public --tag "${{ github.event.inputs.dist-tag || 'latest' }}"
+        run: npm publish --access public --tag "${{ steps.tag.outputs.tag }}"
 
       - name: Summary
         run: |
           if [ "${{ steps.check.outputs.skip }}" = "true" ]; then
             echo "gemi@${{ steps.check.outputs.version }} already on npm — nothing published." >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "Published gemi@${{ steps.check.outputs.version }} under tag \`${{ github.event.inputs.dist-tag || 'latest' }}\`." >> "$GITHUB_STEP_SUMMARY"
+            echo "Published gemi@${{ steps.check.outputs.version }} under tag \`${{ steps.tag.outputs.tag }}\`." >> "$GITHUB_STEP_SUMMARY"
           fi
