@@ -1,27 +1,31 @@
 import { Kernel } from "gemi/kernel";
 
-import AuthenticationServiceProvider from "./providers/AuthenticationServiceProvider";
-import MiddlewareServiceProvider from "./providers/MiddlewareServiceProvider";
-import I18nServiceProvider from "./providers/I18nServiceProvider";
-import FileStorageServiceProvider from "./providers/FileStorageServiceProvider";
-import ViewRouterServiceProvider from "./providers/ViewRouterServiceProvider";
-import ApiRouterServiceProvider from "./providers/ApiRouterServiceProvider";
-import LoggingServiceProvider from "./providers/LoggingServiceProvider";
-import QueueServiceProvider from "./providers/QueueServiceProvider";
-import EmailServiceProvider from "./providers/EmailServiceProvider";
-import CronServiceProvider from "./providers/CronServiceProvider";
-import RedisServiceProvider from "./providers/RedisServiceProvider";
+import auth from "../config/auth";
+import filesystem from "../config/filesystem";
+import log from "../config/log";
+import mail from "../config/mail";
+import middleware from "../config/middleware";
+import queue from "../config/queue";
+import redis from "../config/redis";
+import route from "../config/route";
+import schedule from "../config/schedule";
+import translation from "../config/translation";
+
+import AppServiceProvider from "../providers/AppServiceProvider";
 
 export default class extends Kernel {
-  authenticationServiceProvider = AuthenticationServiceProvider;
-  apiRouterServiceProvider = ApiRouterServiceProvider;
-  emailServiceProvider = EmailServiceProvider;
-  fileStorageServiceProvider = FileStorageServiceProvider;
-  i18nServiceProvider = I18nServiceProvider;
-  middlewareServiceProvider = MiddlewareServiceProvider;
-  loggingServiceProvider = LoggingServiceProvider;
-  queueServiceProvider = QueueServiceProvider;
-  viewRouterServiceProvider = ViewRouterServiceProvider;
-  cronServiceProvider = CronServiceProvider;
-  redisServiceProvider = RedisServiceProvider;
+  config = {
+    auth,
+    filesystem,
+    log,
+    mail,
+    middleware,
+    queue,
+    redis,
+    route,
+    schedule,
+    translation,
+  };
+
+  providers = [AppServiceProvider];
 }

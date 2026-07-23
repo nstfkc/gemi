@@ -35,6 +35,35 @@ export class ChatChannel extends BroadcastingChannel {
 
 > **Note:** `subscribe` runs per subscription attempt, so keep it cheap. If you don't override it, the channel is public — any client can subscribe.
 
+## Registering channels
+
+A channel does nothing until it is registered under its topic route pattern in `app/config/broadcast.ts`:
+
+```typescript
+// app/config/broadcast.ts
+import { defineBroadcastConfig } from "gemi/services";
+import { ChatChannel } from "@/app/broadcasting/ChatChannel";
+
+export default defineBroadcastConfig({
+  channels: {
+    "/chat/:roomId": ChatChannel,
+  },
+});
+```
+
+Then import it into your Kernel's `config` under the `broadcast` key — see [Project Structure](./project-structure.md#configuration-appconfig):
+
+```typescript
+// app/kernel/Kernel.ts
+import broadcast from "../config/broadcast";
+
+export default class extends Kernel {
+  config = { broadcast /* , ... */ };
+}
+```
+
+An unregistered route is what makes `Broadcast.channel(...)` fall back to the no-op described below.
+
 ## Topics and channels
 
 Each channel is associated with a **topic route pattern** (e.g. `/chat/:roomId`). When a client subscribes to a concrete topic like `/chat/42`, gemi matches it against the registered patterns (shortest pattern first), extracts `{ roomId: "42" }`, instantiates the channel, and calls `subscribe({ roomId: "42" })` to authorize.
@@ -118,4 +147,4 @@ function Typing({ roomId }: { roomId: string }) {
 
 - [Facades](./facades.md) — the `Broadcast` and `Auth` facades used above.
 - [Data Fetching](./data-fetching.md) — `useQuery` for request/response data.
-- [Configuration](./configuration.md) — registering service providers.
+- [Project Structure](./project-structure.md#configuration-appconfig) — `app/config/*.ts` slices and how the Kernel assembles them.

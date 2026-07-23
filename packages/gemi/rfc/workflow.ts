@@ -1,9 +1,9 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { ServiceProvider } from "../services/ServiceProvider";
-import { ServiceContainer } from "../services/ServiceContainer";
+import { app } from "../foundation/app";
+import { ServiceProvider } from "../support/ServiceProvider";
 
-class WorkflowServiceProvider extends ServiceProvider {
-  boot() {}
+class WorkflowManager {
+  static token = "workflow";
 
   async getWorkflow(id: string): Promise<Workflow> {
     return new Workflow(id);
@@ -13,8 +13,10 @@ class WorkflowServiceProvider extends ServiceProvider {
   async completeWorkflow() {}
 }
 
-class WorkflorServiceContainer extends ServiceContainer {
-  static _name = "WorkflorServiceContainer";
+class WorkflowServiceProvider extends ServiceProvider {
+  register() {
+    this.app.singleton(WorkflowManager, () => new WorkflowManager());
+  }
 }
 
 const WorkflowContext = new AsyncLocalStorage<{
@@ -42,7 +44,7 @@ class Workflow {
     id: string,
     ...args: Parameters<InstanceType<T>["handler"]>
   ) {
-    const service = WorkflorServiceContainer.use().service;
+    const service = app(WorkflowManager);
     const w = new Workflow(id);
     w.handler(...args);
   }

@@ -2,16 +2,16 @@
 
 > gemi is a batteries-included, full-stack TypeScript web framework built on Bun, Vite, and React 19 with server-side rendering. It ships class-based routing, a type-safe network layer, authentication and authorization, middleware, form validation, transactional email, background jobs, cron, object storage, real-time broadcasting, and i18n as one integrated stack.
 
-gemi is Laravel-inspired: an application is a **Kernel** that registers **service providers**, routes are declared in **router classes**, request logic lives in **controllers**, and framework services are reached through **facades**. It is **not** Next.js — there is no file-based routing; every URL is mapped explicitly in a router. It is a strong fit for B2B/SaaS apps with many API endpoints and non-trivial business logic.
+gemi is Laravel-inspired: an application is a **Kernel** owning a **container**, **service providers** register bindings into that container, runtime settings live in **`app/config/*.ts`**, routes are declared in **router classes**, request logic lives in **controllers**, and framework services are reached through **facades**. It is **not** Next.js — there is no file-based routing; every URL is mapped explicitly in a router. It is a strong fit for B2B/SaaS apps with many API endpoints and non-trivial business logic.
 
 Each link below points to a self-contained Markdown page. For a single file containing the entire documentation set, see [llms-full.txt](https://nstfkc.github.io/gemi/llms-full.txt).
 
 ## Foundations
 
 - [Getting Started](https://nstfkc.github.io/gemi/getting-started.md): install, scaffold with create-gemi-app, dev/build/start, a first route + view.
-- [Project Structure & the Kernel](https://nstfkc.github.io/gemi/project-structure.md): the app/ layout, the Kernel, service providers, and app bootstrap.
-- [Configuration](https://nstfkc.github.io/gemi/configuration.md): gemi.config.ts, .env handling, app/preload.ts, Vite config.
-- [CLI](https://nstfkc.github.io/gemi/cli.md): gemi dev/build/start plus codegen and inspection commands.
+- [Project Structure & the Kernel](https://nstfkc.github.io/gemi/project-structure.md): the app/ layout, the Kernel, the container, app/config/*.ts, service providers, and app bootstrap.
+- [Configuration](https://nstfkc.github.io/gemi/configuration.md): gemi.config.ts (BUILD config, distinct from app/config/), .env handling, app/preload.ts, Vite config.
+- [CLI](https://nstfkc.github.io/gemi/cli.md): gemi dev/build/start, gemi migrate (0.42 -> 0.43 codemod), plus codegen and inspection commands.
 
 ## HTTP layer
 
@@ -28,13 +28,13 @@ Each link below points to a self-contained Markdown page. For a single file cont
 
 ## Auth
 
-- [Authentication](https://nstfkc.github.io/gemi/authentication.md): AuthenticationServiceProvider, adapters, sessions, magic links, OAuth, the Auth facade, and client auth hooks.
+- [Authentication](https://nstfkc.github.io/gemi/authentication.md): app/config/auth.ts, adapters, sessions, magic links, OAuth, the Auth facade, and client auth hooks.
 - [Authorization](https://nstfkc.github.io/gemi/authorization.md): role-based middleware and authorization errors.
 
 ## Services & facades
 
-- [Facades](https://nstfkc.github.io/gemi/facades.md): reference for Auth, Redirect, I18n, FileStorage, Query, Broadcast, Url, Log, Meta, Cookie, and Redis.
-- [File Storage](https://nstfkc.github.io/gemi/file-storage.md): the FileStorage facade, filesystem/S3 drivers, image optimization, and the Image component.
+- [Facades](https://nstfkc.github.io/gemi/facades.md): reference for Auth, Redirect, Lang, Storage, Query, Broadcast, Url, Log, Meta, Cookie, and Redis.
+- [File Storage](https://nstfkc.github.io/gemi/file-storage.md): the Storage facade, filesystem/S3 drivers, image optimization, and the Image component.
 - [Email](https://nstfkc.github.io/gemi/email.md): the Email class, jsx-email templates, the Resend driver, localization and scheduling.
 - [Jobs & Queues](https://nstfkc.github.io/gemi/jobs-and-queues.md): defining and dispatching background Jobs through the in-process queue.
 - [Cron](https://nstfkc.github.io/gemi/cron.md): scheduling recurring CronJobs with Bun.cron.
@@ -47,6 +47,10 @@ Each link below points to a self-contained Markdown page. For a single file cont
 - The server-side `Redirect` facade works by throwing — never wrap it in try/catch.
 - Middleware is a string DSL (`auth`, `cache:...`, `rate-limit:N`); `-name` cancels an inherited middleware.
 - `gemi.d.ts` is generated (`gemi ide:generate-api-manifest`) — do not edit it by hand.
+- Runtime config lives in `app/config/*.ts` (`defineMailConfig`, `defineAuthConfig`, …) and is read through `Repository` from `gemi/support`. `gemi.config.ts` / `gemi/config` is the unrelated BUILD config.
+- Subsystem hooks (`filterRecipients`, `onLogCreated`, `onSignUp`, `detectLocale`, `extendSession`, …) are plain properties on a config slice, not methods to override on a provider.
+- A `ServiceProvider` (from `gemi/support`) registers bindings: `register()` binds and must not resolve; `boot()` runs after every provider registered and may resolve.
+- Services resolve lazily from the container. `app()` returns the `Application`; `app(MailManager)` resolves a service and is typed from the token class.
 
 ## Optional
 
