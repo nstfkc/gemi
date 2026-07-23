@@ -1,6 +1,9 @@
-import { ServiceProvider } from "../ServiceProvider";
+import { ServiceProvider } from "../../support/ServiceProvider";
+import { KernelId } from "./KernelId";
 
+// Config-less by nature: the id is generated per process, never declared.
 export class KernelIdServiceProvider extends ServiceProvider {
-  id = crypto.randomUUID();
-  boot() {}
+  register() {
+    this.app.instance(KernelId, new KernelId());
+  }
 }

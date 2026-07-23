@@ -1,35 +1,40 @@
-import { LoggingServiceContainer } from "../services/logging/LoggingServiceContainer";
+import { LogManager } from "../services/logging/LogManager";
+import { Facade } from "./Facade";
 
-export class Log {
+export class Log extends Facade {
+  static getFacadeAccessor() {
+    return LogManager;
+  }
+
   static debug(message: string, metadata?: Record<string, any>) {
-    LoggingServiceContainer.use().log("debug", message, metadata);
+    this.getFacadeRoot().log("debug", message, metadata);
   }
 
   static info(message: string, metadata?: Record<string, any>) {
-    LoggingServiceContainer.use().log("info", message, metadata);
+    this.getFacadeRoot().log("info", message, metadata);
   }
 
   static notice(message: string, metadata?: Record<string, any>) {
-    LoggingServiceContainer.use().log("notice", message, metadata);
+    this.getFacadeRoot().log("notice", message, metadata);
   }
 
   static warning(message: string, metadata?: Record<string, any>) {
-    LoggingServiceContainer.use().log("warning", message, metadata);
+    this.getFacadeRoot().log("warning", message, metadata);
   }
 
   static error(message: string, metadata?: Record<string, any>) {
-    LoggingServiceContainer.use().log("error", message, metadata);
+    this.getFacadeRoot().log("error", message, metadata);
   }
 
   static critical(message: string, metadata?: Record<string, any>) {
-    LoggingServiceContainer.use().log("critical", message, metadata);
+    this.getFacadeRoot().log("critical", message, metadata);
   }
 
   static alert(message: string, metadata?: Record<string, any>) {
-    LoggingServiceContainer.use().log("alert", message, metadata);
+    this.getFacadeRoot().log("alert", message, metadata);
   }
 
   static emergency(message: string, metadata?: Record<string, any>) {
-    LoggingServiceContainer.use().log("emergency", message, metadata);
+    this.getFacadeRoot().log("emergency", message, metadata);
   }
 }

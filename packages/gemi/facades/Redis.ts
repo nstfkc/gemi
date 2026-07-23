@@ -1,12 +1,17 @@
 import type { RedisClient } from "bun";
-import { RedisServiceContainer } from "../services/redis/RedisServiceContainer";
+import { RedisManager } from "../services/redis/RedisManager";
+import { Facade } from "./Facade";
 
 // Ergonomic access to the app's Redis client. Use `Redis.client` for the full
 // Bun Redis API (hashes, sets, sorted sets, pub/sub, pipelining, ...); the
 // static shortcuts below cover the most common string commands.
-export class Redis {
+export class Redis extends Facade {
+  static getFacadeAccessor() {
+    return RedisManager;
+  }
+
   static get client(): RedisClient {
-    return RedisServiceContainer.use().client;
+    return this.getFacadeRoot().client;
   }
 
   static get(key: string) {

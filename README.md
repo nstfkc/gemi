@@ -135,7 +135,7 @@ await Email.send({ data: { name: 'John' }, to: ['johndoe@gemijs.dev'] })
 Storing a file to object storage (S3) and retrieving it.
 
 ``` typescript
-import { FileStorage } from "gemi/facades";
+import { Storage } from "gemi/facades";
 import { ApiRouter, HttpRequest } from "gemi/http";
 
 export default class extends ApiRouter {
@@ -143,12 +143,12 @@ export default class extends ApiRouter {
     "/upload": this.post(async (req: HttpRequest) => {
       const input = await req.input();
       const file = input.get("file");
-      const src = await FileStorage.put(file);
+      const src = await Storage.put(file);
 
       return { src }
     }),
     "/file/:src*": this.get(async (req: HttpRequest) => {
-      return await FileStorage.fetch(req.params.src);
+      return await Storage.fetch(req.params.src);
     }),
   };
 }
