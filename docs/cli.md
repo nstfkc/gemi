@@ -61,7 +61,7 @@ It launches `dist/server/server.mjs` in a fresh Bun process with `NODE_ENV=produ
 
 ## `gemi migrate`
 
-Upgrades an app from the 0.42 service-provider layout to the 0.43 config + container layout.
+Upgrades an app from the 0.42 service-provider layout to the 0.50 config + container layout.
 
 ```bash
 gemi migrate --dry-run   # print the plan, write nothing
@@ -72,7 +72,7 @@ It reads `app/kernel/providers/`, turns each recognised provider into an `app/co
 
 Anything it cannot translate is left on disk and reported rather than guessed at — unrecognised providers are carried into the new `providers` array with a TODO, and `.use()` call sites are renamed but not rewritten. Run `--dry-run` first, and see [UPGRADE.md](https://github.com/nstfkc/gemi/blob/main/UPGRADE.md) for the full list of what it does and does not handle.
 
-> This command only makes sense once, when moving from 0.42 to 0.43. It is a no-op on an app that has no `app/kernel/providers/` directory.
+> This command only makes sense once, when moving from 0.42 to 0.50. It is a no-op on an app that has no `app/kernel/providers/` directory.
 
 ## `gemi ide:generate-api-manifest`
 

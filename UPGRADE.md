@@ -1,12 +1,12 @@
-# Upgrading from 0.42 to 0.43
+# Upgrading from 0.42 to 0.50
 
-0.43 replaces the 16 hand-written `*ServiceContainer` singletons and the
+0.50 replaces the 16 hand-written `*ServiceContainer` singletons and the
 `*ServiceProvider` config-bag classes with one Laravel-style container. This is
 a **hard break**: there are no deprecation aliases and no back-compat shims.
 Everything you need to change is listed below, and most of it is automated.
 
 ```sh
-# from your app's root, with gemi 0.43 installed
+# from your app's root, with gemi 0.50 installed
 bunx gemi migrate --dry-run   # see the plan
 bunx gemi migrate             # apply it
 ```
@@ -24,7 +24,7 @@ rg 'TODO\(gemi-migrate\)'
 ## 1. Providers became config
 
 In 0.42 you configured the framework by subclassing a provider and overriding
-properties. In 0.43 those same values are a plain object exported from
+properties. In 0.50 those same values are a plain object exported from
 `app/config/<slice>.ts`.
 
 ```ts
@@ -37,7 +37,7 @@ export default class extends EmailServiceProvider {
 ```
 
 ```ts
-// 0.43 — app/config/mail.ts
+// 0.50 — app/config/mail.ts
 import { defineMailConfig, ResendDriver } from "gemi/services";
 
 export default defineMailConfig({
@@ -50,7 +50,7 @@ in a class body is `async onSignUp(user, token) {},` in the object literal. The
 codemod does this conversion mechanically and preserves your comments and
 formatting.
 
-| 0.42 provider | 0.43 config file | helper | import from |
+| 0.42 provider | 0.50 config file | helper | import from |
 | --- | --- | --- | --- |
 | `AuthenticationServiceProvider` | `app/config/auth.ts` | `defineAuthConfig` | `gemi/services` |
 | `EmailServiceProvider` | `app/config/mail.ts` | `defineMailConfig` | `gemi/services` |
@@ -100,7 +100,7 @@ export default class extends Kernel {
 ```
 
 ```ts
-// 0.43
+// 0.50
 import { Kernel } from "gemi/kernel";
 import auth from "../config/auth";
 import mail from "../config/mail";
@@ -127,7 +127,7 @@ are ordinary config slices now.
 
 Only two identifiers changed, both from `gemi/facades`:
 
-| 0.42 | 0.43 |
+| 0.42 | 0.50 |
 | --- | --- |
 | `FileStorage` | `Storage` |
 | `I18n` | `Lang` |
@@ -165,7 +165,7 @@ container. If you called `.use()` anywhere, replace it:
 import { EmailServiceContainer } from "gemi/services";
 const mail = EmailServiceContainer.use().service;
 
-// 0.43
+// 0.50
 import { app } from "gemi/foundation";
 import { MailManager } from "gemi/services";
 const mail = app(MailManager);
@@ -176,7 +176,7 @@ site, but **it does not rewrite the call itself** — `.use().service` unwrappin
 varied enough across call sites that a blind rewrite would be wrong more often
 than right.
 
-| 0.42 | 0.43 | token |
+| 0.42 | 0.50 | token |
 | --- | --- | --- |
 | `AuthenticationServiceContainer` | `AuthManager` | `auth` |
 | `EmailServiceContainer` | `MailManager` | `mail` |
@@ -210,7 +210,7 @@ import { Singleton } from "gemi/services";
 export class Clock extends Singleton {}
 const clock = Clock.use();
 
-// 0.43
+// 0.50
 import { app } from "gemi/foundation";
 export class Clock {}
 
@@ -264,7 +264,7 @@ binding the port. If you have async setup, it goes in `boot()`, not
 ### Services are now built lazily
 
 In 0.42 every `*ServiceContainer` was constructed during `Kernel.boot()`. In
-0.43 `singleton()` bindings are built on first `make()`, so a service whose
+0.50 `singleton()` bindings are built on first `make()`, so a service whose
 constructor throws now fails at its first use rather than at startup. Three
 providers opt back into eager construction with a `boot()`, because their
 readiness is a genuine startup concern:

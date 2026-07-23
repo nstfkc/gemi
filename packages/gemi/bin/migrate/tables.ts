@@ -1,4 +1,4 @@
-// The 0.42 -> 0.43 rename tables the codemod drives off. Keeping them as data
+// The 0.42 -> 0.50 rename tables the codemod drives off. Keeping them as data
 // (rather than scattered string literals) means `UPGRADE.md` and the codemod
 // cannot drift apart.
 

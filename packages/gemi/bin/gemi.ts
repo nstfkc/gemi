@@ -176,15 +176,15 @@ program.command("start").action(async () => {
 program
   .command("migrate")
   .description(
-    "Migrate an app from the 0.42 service-provider layout to 0.43 config + container",
+    "Migrate an app from the 0.42 service-provider layout to 0.50 config + container",
   )
   .option("--dry-run", "Print the plan without writing anything")
   .action(async (options: { dryRun?: boolean }) => {
     const rootDir = path.resolve(process.cwd());
     console.log(
       options.dryRun
-        ? `Planning migration of ${rootDir} (0.42 -> 0.43)...`
-        : `Migrating ${rootDir} (0.42 -> 0.43)...`,
+        ? `Planning migration of ${rootDir} (0.42 -> 0.50)...`
+        : `Migrating ${rootDir} (0.42 -> 0.50)...`,
     );
     await runMigrate({ rootDir, dryRun: options.dryRun });
   });

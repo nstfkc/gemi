@@ -1,7 +1,7 @@
 // Minimal source scanner used by the `gemi migrate` codemod.
 //
 // The codemod is deliberately text-preserving: it rewrites the handful of
-// tokens that changed between 0.42 and 0.43 and leaves every comment, blank
+// tokens that changed between 0.42 and 0.50 and leaves every comment, blank
 // line and formatting decision exactly where the app author put it. A full
 // parse-and-print round trip would reformat whole files and throw away the
 // comments that make a config file readable, so instead we scan just far enough
