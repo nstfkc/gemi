@@ -32,6 +32,7 @@
     "./config": "./config/index.ts",
     "./container": "./container/index.ts",
     "./foundation": "./foundation/index.ts",
+    "./database": "./database/index.ts",
     "./support": "./support/index.ts",
     "./bun/preload": "./bun/preload.ts",
     "./bun/plugin": "./bun/plugin.ts"
