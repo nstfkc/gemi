@@ -1,5 +1,6 @@
 import type { ComponentType } from "react";
 import { render } from "jsx-email";
+import open from "open";
 import { EmailServiceContainer } from "../services/email/EmailServiceContainer";
 import type { SendEmailParams } from "../services/email/drivers/types";
 import { I18nServiceContainer } from "../i18n/I18nServiceContainer";
@@ -67,7 +68,9 @@ export class Email {
     if (process.env.EMAIL_DEBUG === "true") {
       const fileName = `${process.env.ROOT_DIR}/.debug/emails/${new Date().toISOString()}${subject}.html`;
       await Bun.write(fileName, html);
-      Bun.spawnSync(["open", fileName]);
+      if (process.env.CI !== "true") {
+        await open(fileName);
+      }
       return;
     }
 
