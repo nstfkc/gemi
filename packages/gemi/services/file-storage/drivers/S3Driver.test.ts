@@ -29,6 +29,83 @@ function driverWith(send: (command: any) => Promise<any>) {
   return driver;
 }
 
+describe("S3Driver.put()", () => {
+  beforeEach(() => {
+    process.env.BUCKET_NAME = "test-bucket";
+  });
+
+  async function putWith(params: any) {
+    let input: any;
+    const driver = driverWith(async (command) => {
+      input = command.input;
+      return {};
+    });
+    const name = await driver.put(params);
+    return { input, name };
+  }
+
+  test("keeps an explicitly passed contentType over the blob's own type", async () => {
+    // A caller that says "this PNG is really an octet-stream", or vice versa,
+    // has to win — they know something the blob does not.
+    const { input } = await putWith({
+      name: "a.png",
+      body: new Blob(["x"], { type: "application/octet-stream" }),
+      contentType: "image/png",
+    });
+
+    expect(input.ContentType).toBe("image/png");
+  });
+
+  test("keeps the contentType of a Buffer body", async () => {
+    // A Buffer carries no type of its own, so dropping the caller's value left
+    // it with none at all and S3 stored it as application/octet-stream.
+    const { input } = await putWith({
+      name: "a.png",
+      body: Buffer.from("x"),
+      contentType: "image/png",
+    });
+
+    expect(input.ContentType).toBe("image/png");
+  });
+
+  test("falls back to the blob's own type when none is given", async () => {
+    const { input } = await putWith({
+      name: "a.png",
+      body: new Blob(["x"], { type: "image/png" }),
+    });
+
+    expect(input.ContentType).toBe("image/png");
+  });
+
+  test("sends no content type for a typeless body rather than an empty one", async () => {
+    const { input } = await putWith({ name: "a.bin", body: Buffer.from("x") });
+    expect(input.ContentType).toBeUndefined();
+
+    const blob = await putWith({ name: "b.bin", body: new Blob(["x"]) });
+    expect(blob.input.ContentType).toBeUndefined();
+  });
+
+  // The bare-Blob path generates a name with Bun.randomUUIDv7().
+  test.skipIf(typeof Bun === "undefined")(
+    "uses the blob's type for a bare Blob",
+    async () => {
+      const { input } = await putWith(new Blob(["x"], { type: "image/png" }));
+      expect(input.ContentType).toBe("image/png");
+    },
+  );
+
+  test("honours an explicit bucket", async () => {
+    const { input } = await putWith({
+      name: "a.png",
+      body: Buffer.from("x"),
+      bucket: "other",
+    });
+
+    expect(input.Bucket).toBe("other");
+    expect(input.Key).toBe("a.png");
+  });
+});
+
 describe("S3Driver.read()", () => {
   beforeEach(() => {
     process.env.BUCKET_NAME = "test-bucket";
