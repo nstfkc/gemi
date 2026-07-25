@@ -98,6 +98,18 @@ export class FileHandler {
   constructor(...args: ConstructorParameters<typeof RouteHandler>) {
     return new RouteHandler(...args) as any;
   }
+
+  /**
+   * Declared for two reasons: so `this.file(...).middleware([...])` typechecks,
+   * and so `FileHandler` is not structurally `{}`. As `{}` it accepted every
+   * non-nullish value, which through the `ApiRoutes` union meant a route could
+   * be assigned literally anything — `"/x": 42` typechecked.
+   *
+   * It stays out of the RPC types regardless: `RouteHandlersParser` maps over
+   * `keyof T` and only emits members extending `RouteHandler`, and a method
+   * does not.
+   */
+  declare middleware: (middlewareList: string[]) => FileHandler;
 }
 
 /**
