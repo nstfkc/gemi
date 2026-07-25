@@ -38,7 +38,10 @@ function isResouceRoutes(option: ApiRoutes[string]): option is ResourceRoutes<an
   return Object.hasOwn(option, "first") && Object.hasOwn(option, "second");
 }
 
-function isApiRouter(routeHandlers: ApiRoutes[string]): routeHandlers is new () => ApiRouter {
+// Narrows to `typeof ApiRouter`, not `new () => ApiRouter`: the latter lacks
+// the static `__brand` this very guard reads, so it is not a subtype of the
+// parameter and TypeScript rejects the predicate under a strict lib.
+function isApiRouter(routeHandlers: ApiRoutes[string]): routeHandlers is typeof ApiRouter {
   if ("__brand" in routeHandlers) {
     return routeHandlers.__brand === "ApiRouter";
   }
