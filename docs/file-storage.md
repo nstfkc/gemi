@@ -101,35 +101,7 @@ interface ReadResult {
 
 An unsatisfiable range throws `RangeNotSatisfiableError`, and a missing object throws `FileNotFoundError`. Both extend `RequestBreakerError`, so they turn into a `416` and a `404` on their own.
 
-### Writing a custom driver
-
-Extend `FileStorageDriver` and implement `fetch`, `put` and `list`. `read()` and `size()` already have working defaults, so an existing driver keeps compiling and gains range support for free — but the default `read()` buffers the whole object to serve a range, which saves no bandwidth from the backend.
-
-Override `read()` whenever the backend can range natively. Report the *authoritative* total, which most backends hand back in their own `Content-Range` on a ranged read — that is what keeps a range down to a single round trip:
-
-```typescript
-import { parseContentRange, resolveRange, toRangeHeaderValue } from "gemi/services";
-
-async read({ name, range }) {
-  const res = await backend.get(name, range ? toRangeHeaderValue(range) : undefined);
-  const cr = parseContentRange(res.headers["content-range"]);
-  return {
-    body: res.stream,
-    start: cr?.start ?? 0,
-    end: cr?.end ?? (res.size - 1),
-    total: cr?.total ?? res.size,
-    partial: Boolean(cr),
-    type: res.contentType,
-  };
-}
-```
-
-Two things to get right:
-
-- `partial` says whether *you* applied the range, and cannot be derived from the offsets: `bytes=0-` over a whole object is a `206` whose window spans the entire file. A driver that ignored the range must report `false`, or the response will carry a `Content-Range` that does not describe the body it sent.
-- Backends without a native suffix range (`bytes=-N`) need one size lookup first. Use `resolveRange(range, total)` to turn it into absolute offsets, and throw `RangeNotSatisfiableError(total)` when it returns `null`.
-
-Prefer returning a `Blob` over a `ReadableStream` when the backend gives you a sized handle: Bun drops an explicitly set `Content-Length` and falls back to chunked encoding for any stream body, but keeps it for a sized blob.
+See [Writing a custom driver](#writing-a-custom-driver) for how a driver implements `read()`.
 
 ### `list(folder)`
 
@@ -154,7 +126,7 @@ if ((meta.width ?? 0) > 4096) {
 
 ## Drivers
 
-The active driver is set on your app's `FileStorageServiceProvider`. gemi ships two drivers; the default is `FileSystemDriver`.
+The active driver is set on your app's `FileStorageServiceProvider`. gemi ships three drivers; the default is `FileSystemDriver`.
 
 ### `FileSystemDriver` (local disk)
 
@@ -197,11 +169,56 @@ export default class extends FileStorageServiceProvider {
 
 The bucket comes from `params.bucket` when provided, otherwise from `process.env.BUCKET_NAME`. See [Configuration](./configuration.md) for where to define these environment variables.
 
-> **Note:** Both drivers fall back to `process.env.BUCKET_NAME` as the default bucket. For `put`, an explicitly passed `contentType` is used as-is; without one, the S3 driver falls back to the type of the `Blob`/`File` body. A `Buffer` body has no type of its own, so pass `contentType` alongside it or the object is stored without one.
+> **Note:** All drivers fall back to `process.env.BUCKET_NAME` as the default bucket. For `put`, the S3 driver derives `contentType` from the blob/file when the body is a `Blob`/`File`.
+
+### `AzureBlobDriver` (Azure Blob Storage)
+
+`@azure/storage-blob` is an **optional peer dependency** — install it only if you use this driver:
+
+```bash
+bun add @azure/storage-blob
+```
+
+```typescript
+// app/kernel/providers/FileStorageServiceProvider.ts
+import { FileStorageServiceProvider, AzureBlobDriver } from "gemi/services";
+
+export default class extends FileStorageServiceProvider {
+  driver = new AzureBlobDriver({
+    // defaults to process.env.AZURE_STORAGE_CONNECTION_STRING
+    connectionString: process.env.AZURE_STORAGE_CONNECTION_STRING,
+    container: process.env.BUCKET_NAME,
+  });
+}
+```
+
+The SDK is loaded lazily on first use, so importing `gemi/services` costs nothing when the driver is unused. Using it without the package installed throws an error telling you to install it.
+
+Instead of a connection string you can pass an account `url` (optionally carrying a SAS token) with a `credential`, or hand over a fully built client — useful for a custom credential chain, retry policy or proxy. With `serviceClient` the driver never imports the SDK at all:
+
+```typescript
+import { BlobServiceClient } from "@azure/storage-blob";
+import { DefaultAzureCredential } from "@azure/identity";
+
+new AzureBlobDriver({
+  url: "https://myaccount.blob.core.windows.net",
+  credential: new DefaultAzureCredential(),
+});
+
+// or fully pre-built
+new AzureBlobDriver({
+  serviceClient: BlobServiceClient.fromConnectionString(conn),
+  container: "media",
+});
+```
+
+The container comes from `params.bucket`, then the `container` config, then `process.env.BUCKET_NAME`. `list(folder)` returns a `string[]` of blob names under the prefix.
+
+**On range requests:** Azure's `download(offset, count)` takes an absolute offset and has no suffix form, so the driver handles the two cases differently. `bytes=S-E` and `bytes=S-` — everything a media player actually sends — go straight to the download and read the authoritative total back off Azure's own `Content-Range`, costing no extra round trip. A suffix range (`bytes=-N`) needs one `getProperties()` first to resolve it into absolute offsets.
 
 ### Writing a custom driver
 
-Any storage backend works by subclassing `FileStorageDriver` (exported from `gemi/services`) and implementing `put`, `fetch`, and `list`:
+Subclass `FileStorageDriver` (exported from `gemi/services`) and implement `put`, `fetch` and `list`:
 
 ```typescript
 import {
@@ -222,6 +239,34 @@ class MyDriver extends FileStorageDriver {
   }
 }
 ```
+
+`read()` and `size()` already have working defaults, so a driver that implements only the three methods above still compiles and gains range support — but the default `read()` buffers the whole object to serve a range, which saves no bandwidth from the backend.
+
+Override `read()` whenever the backend can range natively. Report the *authoritative* total, which most backends hand back in their own `Content-Range` on a ranged read — that is what keeps a range down to a single round trip:
+
+```typescript
+import { parseContentRange, resolveRange, toRangeHeaderValue } from "gemi/services";
+
+async read({ name, range }) {
+  const res = await backend.get(name, range ? toRangeHeaderValue(range) : undefined);
+  const cr = parseContentRange(res.headers["content-range"]);
+  return {
+    body: res.stream,
+    start: cr?.start ?? 0,
+    end: cr?.end ?? (res.size - 1),
+    total: cr?.total ?? res.size,
+    partial: Boolean(cr),
+    type: res.contentType,
+  };
+}
+```
+
+Two things to get right:
+
+- `partial` says whether *you* applied the range, and cannot be derived from the offsets: `bytes=0-` over a whole object is a `206` whose window spans the entire file. A driver that ignored the range must report `false`, or the response will carry a `Content-Range` that does not describe the body it sent.
+- Backends without a native suffix range (`bytes=-N`) need one size lookup first — see `AzureBlobDriver` for a worked example. Use `resolveRange(range, total)` to turn it into absolute offsets, and throw `RangeNotSatisfiableError(total)` when it returns `null`.
+
+Prefer returning a `Blob` over a `ReadableStream` when the backend gives you a sized handle: Bun drops an explicitly set `Content-Length` and falls back to chunked encoding for any stream body, but keeps it for a sized blob.
 
 ## Image optimization
 
