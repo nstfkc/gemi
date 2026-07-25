@@ -52,6 +52,13 @@ function isProxyHandler(option: ApiRoutes[string]): option is ProxyHandler {
   return false;
 }
 
+function isStreamHandler(option: ApiRoutes[string]) {
+  if ("__internal_brand" in option) {
+    return option.__internal_brand === "StreamHandler";
+  }
+  return false;
+}
+
 export function createFlatApiRoutes(
   routes: ApiRoutes,
   rootPath = "",
@@ -103,6 +110,11 @@ export function createFlatApiRoutes(
       const middleware = routeHandler.middlewares;
       const exec = routeHandler.run.bind(routeHandler);
       addRoute(path, method, exec, middleware);
+      // A stream route also answers HEAD, so a client can read the size and
+      // Accept-Ranges without pulling the body.
+      if (isStreamHandler(option)) {
+        addRoute(path, "HEAD", exec, middleware);
+      }
     }
 
     if (isRouteHandlers(option)) {

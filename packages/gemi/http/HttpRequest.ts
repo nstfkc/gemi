@@ -1,3 +1,4 @@
+import { parseRangeHeader } from "./range";
 import { RequestContext } from "./requestContext";
 import { ValidationError } from "./Router";
 
@@ -231,6 +232,15 @@ export class HttpRequest<
 
   ctx() {
     return RequestContext.getStore();
+  }
+
+  /**
+   * The parsed `Range` header, or `null` when absent or unusable. Pass it to
+   * `FileStorage.read(name, { range })` to range explicitly; inside a
+   * `this.stream()` route `read()` already picks it up on its own.
+   */
+  range() {
+    return parseRangeHeader(this.rawRequest.headers.get("Range"));
   }
 
   refine(_input: any): any {

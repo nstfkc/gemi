@@ -64,10 +64,72 @@ return FileStorage.fetch({ name: record.imageName, bucket: "private" });
 interface ReadFileParams {
   name: string;
   bucket?: string;
+  range?: ByteRange | null;
 }
 ```
 
 Because `fetch` returns a `Response`, a controller can return it directly. See [Controllers](./controllers.md).
+
+### `read(params | string, options?)`
+
+Reads a file as bytes plus metadata, rather than as a finished `Response`. Use it with [`this.stream(...)`](./routing.md#streaming-and-range-requests) to serve range requests:
+
+```typescript
+"/assets/:src*": this.stream(async (req) => FileStorage.read(req.params.src)),
+```
+
+Inside a `this.stream(...)` route the in-flight request's `Range` is picked up automatically and pushed down to the storage backend, so a seek reads one window instead of the whole object. Pass a range explicitly — or `null` to force a full read — when you need to override that:
+
+```typescript
+await FileStorage.read(name, { range: req.range() });
+await FileStorage.read(name, { range: null });
+```
+
+```typescript
+interface ReadResult {
+  body: ReadableStream<Uint8Array> | Blob | null;
+  start: number; // absolute inclusive offsets of `body` within the object
+  end: number;
+  total: number; // authoritative size of the complete object
+  partial: boolean; // whether the driver actually applied the range
+  type: string;
+  etag?: string;
+  lastModified?: Date;
+  name?: string;
+}
+```
+
+An unsatisfiable range throws `RangeNotSatisfiableError`, and a missing object throws `FileNotFoundError`. Both extend `RequestBreakerError`, so they turn into a `416` and a `404` on their own.
+
+### Writing a custom driver
+
+Extend `FileStorageDriver` and implement `fetch`, `put` and `list`. `read()` and `size()` already have working defaults, so an existing driver keeps compiling and gains range support for free — but the default `read()` buffers the whole object to serve a range, which saves no bandwidth from the backend.
+
+Override `read()` whenever the backend can range natively. Report the *authoritative* total, which most backends hand back in their own `Content-Range` on a ranged read — that is what keeps a range down to a single round trip:
+
+```typescript
+import { parseContentRange, resolveRange, toRangeHeaderValue } from "gemi/services";
+
+async read({ name, range }) {
+  const res = await backend.get(name, range ? toRangeHeaderValue(range) : undefined);
+  const cr = parseContentRange(res.headers["content-range"]);
+  return {
+    body: res.stream,
+    start: cr?.start ?? 0,
+    end: cr?.end ?? (res.size - 1),
+    total: cr?.total ?? res.size,
+    partial: Boolean(cr),
+    type: res.contentType,
+  };
+}
+```
+
+Two things to get right:
+
+- `partial` says whether *you* applied the range, and cannot be derived from the offsets: `bytes=0-` over a whole object is a `206` whose window spans the entire file. A driver that ignored the range must report `false`, or the response will carry a `Content-Range` that does not describe the body it sent.
+- Backends without a native suffix range (`bytes=-N`) need one size lookup first. Use `resolveRange(range, total)` to turn it into absolute offsets, and throw `RangeNotSatisfiableError(total)` when it returns `null`.
+
+Prefer returning a `Blob` over a `ReadableStream` when the backend gives you a sized handle: Bun drops an explicitly set `Content-Length` and falls back to chunked encoding for any stream body, but keeps it for a sized blob.
 
 ### `list(folder)`
 

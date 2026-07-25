@@ -1,6 +1,11 @@
-import type { PutFileParams, ReadFileParams } from "./types";
+import type { PutFileParams, ReadFileParams, ReadResult } from "./types";
 import { FileStorageDriver } from "./FileStorageDriver";
 import { readdir } from "fs/promises";
+import { resolveRange } from "../../../http/range";
+import {
+  FileNotFoundError,
+  RangeNotSatisfiableError,
+} from "../../../http/errors";
 
 export class FileSystemDriver extends FileStorageDriver {
   constructor(private folderPath: string = `${process.env.ROOT_DIR}/storage`) {
@@ -62,6 +67,56 @@ export class FileSystemDriver extends FileStorageDriver {
         "Last-Modified": date,
       },
     });
+  }
+
+  async read(input: ReadFileParams | string): Promise<ReadResult> {
+    const params = typeof input === "string" ? { name: input } : input;
+    const { name, range = null } = params;
+
+    if (!name) {
+      throw new Error("Object name has to be specified");
+    }
+
+    const file = Bun.file(`${this.folderPath}/${name}`);
+
+    // `Bun.file()` is lazy. Without this the response commits with a 200 and
+    // the ENOENT only surfaces once the stream is pulled, as an unhandled
+    // rejection with the status already on the wire.
+    if (!(await file.exists())) {
+      throw new FileNotFoundError(name);
+    }
+
+    const total = file.size;
+    const resolved = range ? resolveRange(range, total) : null;
+
+    if (range && !resolved) {
+      throw new RangeNotSatisfiableError(total);
+    }
+
+    const start = resolved?.start ?? 0;
+    const end = resolved ? resolved.end : total - 1;
+
+    return {
+      // A BunFile slice stays lazy and keeps a known size, so Bun can send it
+      // with a real Content-Length instead of falling back to chunked.
+      body: resolved ? file.slice(start, end + 1) : file,
+      start,
+      end,
+      total,
+      partial: Boolean(resolved),
+      type: file.type || "application/octet-stream",
+      lastModified: new Date(file.lastModified),
+      name,
+    };
+  }
+
+  async size(params: ReadFileParams | string) {
+    const name = typeof params === "string" ? params : params.name;
+    const file = Bun.file(`${this.folderPath}/${name}`);
+    if (!(await file.exists())) {
+      throw new FileNotFoundError(name);
+    }
+    return file.size;
   }
 
   async list() {

@@ -17,7 +17,7 @@ export class CorsMiddleware extends Middleware {
   config = {
     origins: {
       "": {
-        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+        "Access-Control-Allow-Methods": "GET, HEAD, POST, PUT, DELETE, OPTIONS",
         "Access-Control-Allow-Headers":
           "Content-Type, Authorization, X-Requested-With",
         "Access-Control-Allow-Credentials": "true",

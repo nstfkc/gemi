@@ -4,6 +4,14 @@ import type { KeyAndValue, KeyAndValueToObject } from "../internal/type-utils";
 import { Controller, ResourceController, type ControllerMethods } from "./Controller";
 import { HttpRequest } from "./HttpRequest";
 import type { MiddlewareReturnType } from "./Router";
+import {
+  createStreamResponse,
+  createUnsatisfiableResponse,
+  type StreamOutput,
+} from "./createStreamResponse";
+import { RangeNotSatisfiableError } from "./errors";
+import { parseRangeHeader } from "./range";
+import { RequestContext } from "./requestContext";
 
 type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
@@ -92,6 +100,67 @@ export class FileHandler {
   }
 }
 
+/**
+ * A GET route that serves bytes and understands `Range`.
+ *
+ * Reads the request's `Range` once, parks it on the request context so
+ * `FileStorage.read()` can push it down to the storage backend, and turns
+ * whatever the handler returned into a 200, 206 or 416.
+ */
+export class StreamRouteHandler extends RouteHandler<"GET", any, any, any> {
+  __internal_brand = "StreamHandler";
+
+  async run(_req?: HttpRequest<any, any>) {
+    const ctx = RequestContext.getStore();
+    const rawRequest = ctx?.req?.rawRequest;
+    const range = parseRangeHeader(rawRequest?.headers.get("Range"));
+
+    if (ctx) {
+      ctx.rangeRequest = range;
+    }
+
+    try {
+      const output = await super.run(_req as any);
+      return await createStreamResponse(output, {
+        range,
+        method: rawRequest?.method,
+      });
+    } catch (err) {
+      // The driver reached the backend and found the window unreachable. It
+      // carries the object's real size, which the 416 has to report.
+      if (err instanceof RangeNotSatisfiableError) {
+        return createUnsatisfiableResponse(err.total);
+      }
+      throw err;
+    } finally {
+      // A `FileStorage.read()` later in this request must not inherit it.
+      if (ctx) {
+        ctx.rangeRequest = null;
+      }
+    }
+  }
+}
+
+/**
+ * Structurally `{}` at the type level, exactly like `FileHandler`, so a stream
+ * route stays out of the generated RPC client types — a typed JSON client has
+ * no way to consume a byte stream. At runtime it is a `StreamRouteHandler`.
+ */
+export class StreamHandler {
+  constructor(...args: ConstructorParameters<typeof StreamRouteHandler>) {
+    return new StreamRouteHandler(...args) as any;
+  }
+
+  /**
+   * Declared so `this.stream(...).middleware([...])` typechecks. The runtime
+   * object is a `StreamRouteHandler`, which really does have this. Adding it
+   * keeps the route out of the RPC types: `RouteHandlersParser` maps over
+   * `keyof T` and only emits members that extend `RouteHandler`, and a method
+   * does not.
+   */
+  declare middleware: (middlewareList: string[]) => StreamHandler;
+}
+
 export type RouteHandlers = Partial<{
   post: RouteHandler<"POST", any, any, any>;
   get: RouteHandler<"GET", any, any, any>;
@@ -103,6 +172,7 @@ export type ApiRoutes = Record<
   string,
   | RouteHandler<any, any, any, any>
   | FileHandler
+  | StreamHandler
   | ProxyHandler
   | RouteHandlers
   | typeof ApiRouter
@@ -250,6 +320,30 @@ export class ApiRouter {
     K extends ControllerMethods<any>,
   >(handler: T, methodName?: K) {
     return new FileHandler("GET", handler, methodName);
+  }
+
+  /**
+   * A GET route that serves bytes and answers `Range` requests, so a `<video>`
+   * can seek. Return a `FileStorage.read()` result to have the byte window
+   * pushed down to the storage backend, or a `Blob`/`Bun.file()` to serve a
+   * local file directly.
+   *
+   * ```ts
+   * "/assets/:src*": this.stream(async (req) => FileStorage.read(req.params.src)),
+   * ```
+   */
+  public stream<Input, Output extends StreamOutput, Params>(
+    handler: CallbackHandler<Input, Output, Params>,
+  ): StreamHandler;
+  public stream<T extends new () => Controller, K extends ControllerMethods<T>>(
+    handler: T,
+    methodName: K,
+  ): StreamHandler;
+  public stream<
+    T extends CallbackHandler<any, any, any> | (new () => Controller),
+    K extends ControllerMethods<any>,
+  >(handler: T, methodName?: K) {
+    return new StreamHandler("GET", handler, methodName);
   }
 
   public proxy(url: string, headers: Record<string, string> = {}) {
