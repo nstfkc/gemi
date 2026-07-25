@@ -139,7 +139,10 @@ export class ApiRouterServiceContainer extends ServiceContainer {
     headers: Headers,
     cookies: Set<string>,
   ) {
-    const entries = headers ? [...headers] : [];
+    // Built with forEach rather than spread: the browser tsconfig's lib set
+    // has DOM but not DOM.Iterable, so `Headers` has no [Symbol.iterator].
+    const entries: [string, string][] = [];
+    headers?.forEach((value, key) => entries.push([key, value]));
     const setCookies = [
       ...(typeof headers?.getSetCookie === "function"
         ? headers.getSetCookie()

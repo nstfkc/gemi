@@ -169,7 +169,7 @@ export default class extends FileStorageServiceProvider {
 
 The bucket comes from `params.bucket` when provided, otherwise from `process.env.BUCKET_NAME`. See [Configuration](./configuration.md) for where to define these environment variables.
 
-> **Note:** All drivers fall back to `process.env.BUCKET_NAME` as the default bucket. For `put`, the S3 driver derives `contentType` from the blob/file when the body is a `Blob`/`File`.
+> **Note:** All drivers fall back to `process.env.BUCKET_NAME` as the default bucket. For `put`, an explicitly passed `contentType` is used as-is; without one, the S3 driver falls back to the type of the `Blob`/`File` body. A `Buffer` body has no type of its own, so pass `contentType` alongside it or the object is stored without one.
 
 ### `AzureBlobDriver` (Azure Blob Storage)
 
