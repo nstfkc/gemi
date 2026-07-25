@@ -2,6 +2,10 @@
 export { FileStorageServiceProvider } from "./file-storage/FileStorageServiceProvider";
 export { FileSystemDriver } from "./file-storage/drivers/FileSystemDriver";
 export { S3Driver } from "./file-storage/drivers/S3Driver";
+export {
+  AzureBlobDriver,
+  type AzureBlobDriverConfig,
+} from "./file-storage/drivers/AzureBlobDriver";
 export type {
   ByteRange,
   FileMetadata,
