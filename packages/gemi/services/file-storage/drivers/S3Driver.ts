@@ -26,7 +26,7 @@ export class S3Driver extends FileStorageDriver {
 
   async put(params: PutFileParams | Blob) {
     let body: Blob | File | Buffer;
-    let contentType: string;
+    let contentType: string | undefined;
     let name: string;
     let bucket = process.env.BUCKET_NAME;
 
@@ -38,11 +38,17 @@ export class S3Driver extends FileStorageDriver {
       body = params.body;
       name = params.name;
       bucket = params.bucket ?? bucket;
-      contentType = params.contentType;
+      // An explicitly passed contentType wins; otherwise fall back to the
+      // blob's own type. A Buffer carries no type, so it has nothing to fall
+      // back to and relies on the caller's value.
+      contentType =
+        params.contentType ||
+        (body instanceof Blob || body instanceof File ? body.type : undefined);
     }
 
-    contentType =
-      body instanceof Blob || body instanceof File ? body.type : undefined;
+    // A typeless Blob reports "". Send nothing rather than an empty header, so
+    // S3 applies its own default instead of storing a blank content type.
+    contentType = contentType || undefined;
 
     const buffer =
       body instanceof Buffer
