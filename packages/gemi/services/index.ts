@@ -2,8 +2,21 @@
 export { FileStorageServiceProvider } from "./file-storage/FileStorageServiceProvider";
 export { FileSystemDriver } from "./file-storage/drivers/FileSystemDriver";
 export { S3Driver } from "./file-storage/drivers/S3Driver";
-export type { FileMetadata, PutFileParams, ReadFileParams } from "./file-storage/drivers/types";
+export {
+  AzureBlobDriver,
+  type AzureBlobDriverConfig,
+} from "./file-storage/drivers/AzureBlobDriver";
+export type {
+  ByteRange,
+  FileMetadata,
+  PutFileParams,
+  ReadFileParams,
+  ReadResult,
+} from "./file-storage/drivers/types";
 export { FileStorageDriver } from "./file-storage/drivers/FileStorageDriver";
+// The toolkit a custom driver needs to resolve a range against its backend.
+export { resolveRange, toRangeHeaderValue, parseContentRange } from "../http/range";
+export { FileNotFoundError, RangeNotSatisfiableError } from "../http/errors";
 
 // Ratelimiter
 export { RateLimiterServiceProvider } from "./rate-limiter/RateLimiterServiceProvider";

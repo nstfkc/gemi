@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { HttpRequest } from "./HttpRequest";
 import { Metadata } from "./Metadata";
+import type { ByteRange } from "./range";
 
 export interface CreateCookieOptions {
   maxAge?: number;
@@ -44,6 +45,16 @@ class Store {
   csrfHmac: string | null = null;
   locale: string | null = null;
   metadata = new Metadata();
+  /**
+   * The parsed `Range` of the in-flight request, picked up by
+   * `FileStorage.read()` so a range reaches the storage backend without every
+   * handler having to thread it through by hand.
+   *
+   * Only populated inside a `this.stream()` route, and cleared once that route
+   * returns: a `FileStorage.read()` in an ordinary handler must never start
+   * silently returning partial bytes.
+   */
+  rangeRequest: ByteRange | null = null;
 
   constructor(public req: HttpRequest) {}
 

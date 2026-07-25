@@ -110,3 +110,48 @@ describe("createFlatApiRoutes() resource middleware", () => {
     expect(middlewares["GET /products"]).toEqual(["cors"]);
   });
 });
+
+describe("createFlatApiRoutes - stream routes", () => {
+  test("registers GET, HEAD and OPTIONS", () => {
+    class Root extends ApiRouter {
+      routes = {
+        "/video": this.stream(() => null),
+      };
+    }
+
+    const routes = createFlatApiRoutes(new Root().routes);
+
+    expect(Object.keys(routes["/video"]).sort()).toEqual([
+      "GET",
+      "HEAD",
+      "OPTIONS",
+    ]);
+  });
+
+  test("propagates middleware to both GET and HEAD", () => {
+    class Root extends ApiRouter {
+      routes = {
+        "/video": this.stream(() => null).middleware(["auth"]),
+      };
+    }
+
+    const middlewares = middlewaresOf(
+      createFlatApiRoutes(new Root().routes, "", ["cors"]),
+    );
+
+    expect(middlewares["GET /video"]).toEqual(["cors", "auth"]);
+    expect(middlewares["HEAD /video"]).toEqual(["cors", "auth"]);
+  });
+
+  test("a plain file route stays GET only", () => {
+    class Root extends ApiRouter {
+      routes = {
+        "/download": this.file(() => null),
+      };
+    }
+
+    const routes = createFlatApiRoutes(new Root().routes);
+
+    expect(Object.keys(routes["/download"]).sort()).toEqual(["GET", "OPTIONS"]);
+  });
+});
