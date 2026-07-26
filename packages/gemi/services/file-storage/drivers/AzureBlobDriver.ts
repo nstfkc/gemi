@@ -213,14 +213,27 @@ export class AzureBlobDriver extends FileStorageDriver {
 
     const blob = await this.blob(name, bucket);
 
-    // Azure has no suffix range: `download()` takes an absolute offset, so
-    // `bytes=-N` has to be resolved against the size first. This is the one
-    // shape that costs a second round trip; `bytes=S-` and `bytes=S-E` go
-    // straight to the download and read the total back off its Content-Range.
+    // Azure's `download()` takes an absolute offset rather than a Range header,
+    // and only emits one when the offset is non-zero or a count is given. Two
+    // shapes therefore have to be resolved against the size first, at the cost
+    // of a second round trip:
+    //
+    //   - `bytes=-N`, which Azure cannot express at all; and
+    //   - `bytes=0-`, because `download(0, undefined)` is byte-identical to an
+    //     unranged read, so Azure answers 200 with no Content-Range and the
+    //     result comes back non-partial. That is the *first* range a <video>
+    //     sends, so getting it wrong silently breaks seeking.
+    //
+    // `bytes=S-` and `bytes=S-E` go straight to the download and read the total
+    // back off its Content-Range.
     let offset: number | undefined;
     let count: number | undefined;
 
-    if (range?.kind === "suffix") {
+    const needsResolvedLength =
+      range?.kind === "suffix" ||
+      (range?.kind === "offset" && range.end === null && range.start === 0);
+
+    if (range && needsResolvedLength) {
       const total = await this.size({ name, bucket });
       const resolved = resolveRange(range, total);
       if (!resolved) {
@@ -228,7 +241,7 @@ export class AzureBlobDriver extends FileStorageDriver {
       }
       offset = resolved.start;
       count = resolved.length;
-    } else if (range) {
+    } else if (range?.kind === "offset") {
       offset = range.start;
       count = range.end === null ? undefined : range.end - range.start + 1;
     }

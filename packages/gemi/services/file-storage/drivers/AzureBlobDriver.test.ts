@@ -150,6 +150,44 @@ describe("AzureBlobDriver.read()", () => {
     expect(calls.getProperties).toBe(0);
   });
 
+  test("resolves `bytes=0-` against the size instead of downloading unranged", async () => {
+    // `download(0, undefined)` emits no Range header at all, so Azure answers
+    // 200 and the read comes back non-partial — and `bytes=0-` is the first
+    // range a <video> sends, so that silently kills seeking. Resolve the
+    // length, exactly as the suffix branch does.
+    const { driver, calls } = driverWith({
+      properties: { contentLength: 12345, contentType: "video/mp4" },
+      download: () => ({
+        blobBody: Promise.resolve(new Blob(["x".repeat(12345)])),
+        contentRange: "bytes 0-12344/12345",
+        contentType: "video/mp4",
+      }),
+    });
+
+    const result = await driver.read({
+      name: "clip.mp4",
+      range: parseRangeHeader("bytes=0-"),
+    });
+
+    expect(calls.getProperties).toBe(1);
+    expect(calls.downloads).toEqual([{ offset: 0, count: 12345 }]);
+    expect(result).toMatchObject({
+      start: 0,
+      end: 12344,
+      total: 12345,
+      partial: true,
+    });
+  });
+
+  test("rejects `bytes=0-` over an empty blob without downloading", async () => {
+    const { driver, calls } = driverWith({ properties: { contentLength: 0 } });
+
+    await expect(
+      driver.read({ name: "empty.bin", range: parseRangeHeader("bytes=0-") }),
+    ).rejects.toBeInstanceOf(RangeNotSatisfiableError);
+    expect(calls.downloads).toEqual([]);
+  });
+
   test("resolves a suffix range against the size, since Azure has no suffix support", async () => {
     const { driver, calls } = driverWith({
       properties: { contentLength: 12345, contentType: "video/mp4" },
