@@ -34,7 +34,12 @@ export { MiddlewareServiceProvider } from "./MiddlewareServiceProvider";
 export { AuthenticationMiddleware } from "./AuthenticationMiddlware";
 export { CacheMiddleware } from "./CacheMiddleware";
 export { CorsMiddleware } from "./CorsMiddleware";
-export { RateLimitMiddleware } from "./RateLimitMiddleware";
+export {
+  RateLimitMiddleware,
+  RateLimitExceededError,
+  clientIp,
+  type RateLimitMiddlewareConfig,
+} from "./RateLimitMiddleware";
 export { CSRFMiddleware } from "./CSRFMiddleware";
 
 export { PoliciesServiceProvider } from "./PoliciesServiceProvider";

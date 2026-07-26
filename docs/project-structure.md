@@ -120,7 +120,7 @@ The base `Kernel` defines a slot for every built-in service. Each slot has a wor
 | `queueServiceProvider` | `gemi/services` | Background job queue. |
 | `cronServiceProvider` | `gemi/services` | Scheduled `CronJob`s. |
 | `redisServiceProvider` | `gemi/services` | Redis connection. |
-| `rateLimiterServiceProvider` | `gemi/services` | Rate-limiter driver (default in-memory). |
+| `rateLimiterServiceProvider` | `gemi/services` | Rate-limiter driver (`InMemoryRateLimiter` by default, `RedisRateLimiter` for multi-instance) and its default limit/window. |
 | `broadcastingsServiceProvider` | `gemi/services` | WebSocket pub/sub. |
 | `imageServiceProvider` | `gemi/services` | Image optimization (sharp). |
 | `kernelIdServiceProvider` | (internal) | Per-kernel identity for multi-process coordination. |
