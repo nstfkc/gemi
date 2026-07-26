@@ -231,7 +231,7 @@ function readProvider(
   if (!migration) {
     notes.push({
       file: label,
-      message: `extends \`${superName ?? "?"}\`, which is not a known 0.42 service provider — left in place, migrate it by hand`,
+      message: `extends \`${superName ?? "?"}\`, which is not a known 0.45 service provider — left in place, migrate it by hand`,
     });
     return undefined;
   }
@@ -431,7 +431,7 @@ function renderMembers(
       });
       lines.push(
         reindent(
-          `${TODO} ${member.reason}. The 0.42 source is kept below.`,
+          `${TODO} ${member.reason}. The 0.45 source is kept below.`,
           width,
           shift,
         ),
@@ -572,11 +572,11 @@ function buildKernel(
   for (const member of leftovers) {
     notes.push({
       file: rel(rootDir, file),
-      message: `Kernel member \`${member.name ?? "?"}\` is not part of the 0.43 Kernel shape; it was carried over commented out`,
+      message: `Kernel member \`${member.name ?? "?"}\` is not part of the 0.50 Kernel shape; it was carried over commented out`,
     });
     lines.push("");
     lines.push(
-      `  ${TODO} this member has no 0.43 equivalent on Kernel. Move it to a`,
+      `  ${TODO} this member has no 0.50 equivalent on Kernel. Move it to a`,
     );
     lines.push("  // ServiceProvider or an app/config/*.ts slice.");
     lines.push(
@@ -850,5 +850,5 @@ function report(notes: Note[], dryRun: boolean) {
   console.log(
     `\nSearch the tree for \`TODO(gemi-migrate)\` to find everything that needs a decision.`,
   );
-  console.log(`See UPGRADE.md for the 0.42 -> 0.43 notes.`);
+  console.log(`See UPGRADE.md for the 0.45 -> 0.50 notes.`);
 }
