@@ -22,6 +22,7 @@ const result = await Bun.build({
     "./container/index.ts",
     "./foundation/index.ts",
     "./support/index.ts",
+    "./database/index.ts",
   ],
   outdir: "./dist",
   external: [

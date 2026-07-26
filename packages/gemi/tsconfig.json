@@ -20,6 +20,7 @@
     "container",
     "foundation",
     "support",
+    "database",
     "bin/migrate"
   ],
   "exclude": [
