@@ -1,5 +1,6 @@
 import { ApiRouter, HttpRequest } from "../http";
-import { I18nServiceContainer } from "./I18nServiceContainer";
+import { app } from "../foundation/app";
+import { Translator } from "./Translator";
 
 export class I18nRouter extends ApiRouter {
   middlewares = ["cache:private,0,no-store"];
@@ -9,7 +10,7 @@ export class I18nRouter extends ApiRouter {
       const locale = req.params.locale;
       console.log(`Setting locale to ${locale}`);
       req.ctx().setCookie("i18n-locale", locale);
-      await I18nServiceContainer.use().service.onLocaleChange(locale);
+      await app(Translator).onLocaleChange(locale);
       return { locale };
     }),
     "/translations/:locale/:scope*": this.get(async () => {
@@ -18,13 +19,10 @@ export class I18nRouter extends ApiRouter {
       const scope = `/${req.params.scope ?? ""}`;
       const forcedLocale = req.params.locale;
 
-      const locale =
-        forcedLocale ?? I18nServiceContainer.use().detectLocale(req);
+      const translator = app(Translator);
+      const locale = forcedLocale ?? translator.detectLocale(req);
 
-      const translations = I18nServiceContainer.use().getPageTranslations(
-        locale,
-        scope,
-      );
+      const translations = translator.getPageTranslations(locale, scope);
 
       req.ctx().setCookie("i18n-locale", locale, {
         expires: new Date(Date.now() + 1000 * 60 * 60 * 24 * 365),

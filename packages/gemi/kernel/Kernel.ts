@@ -1,135 +1,101 @@
+import { Application } from "../foundation/Application";
+import type { ServiceProviderConstructor } from "../foundation/Application";
+import type { ServiceToken } from "../container/Container";
+import type { ConfigItems } from "../support/Repository";
+import { Scheduler } from "../services/cron/Scheduler";
+import { BroadcastManager } from "../services/pubsub/BroadcastManager";
+import { QueueManager } from "../services/queue/QueueManager";
+import { ApiRouteDispatcher } from "../services/router/ApiRouteDispatcher";
+import { ViewRouteDispatcher } from "../services/router/ViewRouteDispatcher";
 import { kernelContext } from "./context";
-import { AuthenticationServiceProvider } from "../auth/AuthenticationServiceProvider";
-import { AuthenticationServiceContainer } from "../auth/AuthenticationServiceContainer";
-import { MiddlewareServiceProvider } from "../http/MiddlewareServiceProvider";
-import { I18nServiceProvider } from "../i18n/I18nServiceProvider";
-import { I18nServiceContainer } from "../i18n/I18nServiceContainer";
-import { FileStorageServiceContainer } from "../services/file-storage/FileStorageServiceContainer";
-import { FileStorageServiceProvider } from "../services/file-storage/FileStorageServiceProvider";
-import { ApiRouterServiceContainer } from "../services/router/ApiRouterServiceContainer";
-import { ApiRouterServiceProvider } from "../services/router/ApiRouterServiceProvider";
-import { MiddlewareServiceContainer } from "../services/middleware/MiddlewareServiceContainer";
-import { RateLimiterServiceContainer } from "../services/rate-limiter/RateLimiterServiceContainer";
-import { QueueServiceProvider, RateLimiterServiceProvider } from "../services";
-import { EmailServiceProvider } from "../services/email/EmailServiceProvider";
-import { EmailServiceContainer } from "../services/email/EmailServiceContainer";
-import { BroadcastingServiceContainer } from "../services/pubsub/BroadcastingServiceContainer";
-import { BroadcastingServiceProvider } from "../services/pubsub/BroadcastingServiceProvider";
-import { ViewRouterServiceContainer } from "../services/router/ViewRouterServiceContainer";
-import { ViewRouterServiceProvider } from "../services/router/ViewRouterServiceProvider";
-import type { ServiceContainer } from "../services/ServiceContainer";
-import { LoggingServiceContainer } from "../services/logging/LoggingServiceContainer";
-import { LoggingServiceProvider } from "../services/logging/LoggingServiceProvider";
-import { QueueServiceContainer } from "../services/queue/QueueServiceContainer";
-import { ImageOptimizationServiceProvider } from "../services/image-optimization/ImageOptimizationServiceProvider";
-import { ImageOptimizationServiceContainer } from "../services/image-optimization/ImageOptimizationServiceContainer";
-import { CronServiceProvider } from "../services/cron/CronServiceProvider";
-import { CronServiceContainer } from "../services/cron/CronServiceContainer";
-import { KernelIdServiceProvider } from "../services/kernel-id/KernelIdServiceProvider";
-import { KernelIdServiceContainer } from "../services/kernel-id/KernelIdServiceContainer";
-import { SingletonServiceContainer } from "../services/singleton/SingletonServiceContainer";
-import { SingletonServiceProvider } from "../services/singleton/SingletonServiceProvider";
-import { RedisServiceProvider } from "../services/redis/RedisServiceProvider";
-import { RedisServiceContainer } from "../services/redis/RedisServiceContainer";
+import { frameworkProviders } from "./providers";
 
+/**
+ * The app's entry point into the framework. A Kernel subclass declares what the
+ * app adds — its `config` slices and any extra `providers` — and everything
+ * else lives in the Application container it owns.
+ */
 export class Kernel {
-  protected emailServiceProvider = EmailServiceProvider;
-  protected authenticationServiceProvider = AuthenticationServiceProvider;
-  protected middlewareServiceProvider = MiddlewareServiceProvider;
-  protected i18nServiceProvider = I18nServiceProvider;
-  protected fileStorageServiceProvider = FileStorageServiceProvider;
-  protected apiRouterServiceProvider = ApiRouterServiceProvider;
-  protected viewRouterServiceProvider = ViewRouterServiceProvider;
-  protected rateLimiterServiceProvider = RateLimiterServiceProvider;
-  protected broadcastingsServiceProvider = BroadcastingServiceProvider;
-  protected loggingServiceProvider = LoggingServiceProvider;
-  protected queueServiceProvider = QueueServiceProvider;
-  protected imageServiceProvider = ImageOptimizationServiceProvider;
-  protected cronServiceProvider = CronServiceProvider;
-  protected kernelIdServiceProvider = KernelIdServiceProvider;
-  protected redisServiceProvider = RedisServiceProvider;
+  /**
+   * App-level config, merged over the framework defaults. Each key is a config
+   * slice: `{ mail: { ... }, route: { ... } }`, normally the modules under
+   * `app/config`.
+   */
+  protected config: ConfigItems = {};
 
-  services: Record<string, ServiceContainer> = {};
-  private booted = false;
+  /**
+   * App-level providers, registered after the framework's own so they can
+   * rebind anything the framework bound.
+   */
+  protected providers: ServiceProviderConstructor[] = [];
 
+  readonly app = new Application();
+
+  /**
+   * Phase one, synchronous: every provider is constructed and its `register()`
+   * runs. Only bindings are recorded here — no service is instantiated, so this
+   * is safe to call from a synchronous constructor (`new App({ kernel })`).
+   * Phase two is `waitForBoot()`.
+   */
   boot() {
-    this.services = {
-      [EmailServiceContainer._name]: new EmailServiceContainer(
-        new this.emailServiceProvider(),
-      ),
-      [AuthenticationServiceContainer._name]:
-        new AuthenticationServiceContainer(
-          new this.authenticationServiceProvider(),
-        ),
-      [MiddlewareServiceContainer._name]: new MiddlewareServiceContainer(
-        new this.middlewareServiceProvider(),
-      ),
-      [I18nServiceContainer._name]: new I18nServiceContainer(
-        new this.i18nServiceProvider(),
-      ),
-      [FileStorageServiceContainer._name]: new FileStorageServiceContainer(
-        new this.fileStorageServiceProvider(),
-      ),
-      [ApiRouterServiceContainer._name]: new ApiRouterServiceContainer(
-        new this.apiRouterServiceProvider(),
-      ),
-      [ViewRouterServiceContainer._name]: new ViewRouterServiceContainer(
-        new this.viewRouterServiceProvider(),
-      ),
-      [RateLimiterServiceContainer._name]: new RateLimiterServiceContainer(
-        new this.rateLimiterServiceProvider(),
-      ),
-      [BroadcastingServiceContainer._name]: new BroadcastingServiceContainer(
-        new this.broadcastingsServiceProvider(),
-      ),
-      [LoggingServiceContainer._name]: new LoggingServiceContainer(
-        new this.loggingServiceProvider(),
-      ),
-      [QueueServiceContainer._name]: new QueueServiceContainer(
-        new this.queueServiceProvider(),
-      ),
-      [ImageOptimizationServiceContainer._name]:
-        new ImageOptimizationServiceContainer(new this.imageServiceProvider()),
-      [CronServiceContainer._name]: new CronServiceContainer(
-        new this.cronServiceProvider(this),
-      ),
-      [KernelIdServiceContainer._name]: new KernelIdServiceContainer(
-        new this.kernelIdServiceProvider(),
-      ),
-      [RedisServiceContainer._name]: new RedisServiceContainer(
-        new this.redisServiceProvider(),
-      ),
-      [SingletonServiceContainer._name]: new SingletonServiceContainer(
-        new SingletonServiceProvider(),
-      ),
-    };
-    this.booted = true;
+    this.app.config.merge(this.config);
+    Application.setInstance(this.app);
+    this.app.registerMany([...frameworkProviders, ...this.providers]);
+  }
+
+  /**
+   * Phase two, asynchronous: every provider's `boot()` runs, in registration
+   * order, after all of them have registered. Idempotent.
+   */
+  async waitForBoot() {
+    await this.app.boot();
   }
 
   run<T>(cb: () => T) {
-    const services = this.services;
-    return kernelContext.run(services, cb);
+    return kernelContext.run(this.app, cb);
+  }
+
+  /**
+   * Resolve a service by token. Callers outside this module should prefer the
+   * named accessors below or `app()`; this exists for tooling that holds a
+   * Kernel but no ambient context.
+   */
+  resolve<T>(token: ServiceToken<T>): T {
+    return this.app.make(token);
+  }
+
+  // Named accessors. `app/App.ts` goes through these rather than importing the
+  // service classes itself — see the note in that file about the two copies of
+  // gemi that coexist at build time.
+  apiRoutes(): ApiRouteDispatcher {
+    return this.app.make(ApiRouteDispatcher);
+  }
+
+  viewRoutes(): ViewRouteDispatcher {
+    return this.app.make(ViewRouteDispatcher);
+  }
+
+  broadcast(): BroadcastManager {
+    return this.app.make(BroadcastManager);
+  }
+
+  queue(): QueueManager {
+    return this.app.make(QueueManager);
   }
 
   destroy() {
-    for (const key of Object.keys(this.services)) {
-      delete this.services[key];
+    // Only touch services that were actually resolved — resolving one here
+    // would construct it purely to tear it down.
+    if (this.app.resolved(Scheduler)) {
+      this.app.make(Scheduler).stop();
+    }
+
+    this.app.flush();
+
+    if (Application.getInstance() === this.app) {
+      Application.setInstance(undefined);
     }
 
     kernelContext.disable();
-  }
-
-  async waitForBoot() {
-    if (!this.booted) {
-      await new Promise<void>((resolve) => {
-        while (!this.booted) {
-          setTimeout(() => {
-            if (this.booted) {
-              resolve();
-            }
-          }, 10);
-        }
-      });
-    }
   }
 }

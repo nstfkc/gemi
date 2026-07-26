@@ -1,4 +1,5 @@
-import { RateLimiterServiceContainer } from "../services/rate-limiter/RateLimiterServiceContainer";
+import { app } from "../foundation/app";
+import { RateLimiter } from "../services/rate-limiter/RateLimiter";
 import type { RateLimitResult } from "../services/rate-limiter/types";
 import { RequestBreakerError } from "./Error";
 import type { HttpRequest } from "./HttpRequest";
@@ -72,16 +73,17 @@ export interface RateLimitMiddlewareConfig {
  */
 export class RateLimitMiddleware extends Middleware<RateLimitMiddlewareConfig> {
   async run(limit?: string | number, window?: string | number) {
-    const container = RateLimiterServiceContainer.use();
+    const limiter = resolveLimiter();
 
-    // No kernel, no limiter. Rejecting every request because a service is
-    // missing would be a worse failure than not limiting.
-    if (!container) return {};
+    // No application, or one without a rate limiter bound. Rejecting every
+    // request because a service is missing would be a worse failure than not
+    // limiting.
+    if (!limiter) return {};
 
-    const result = await container.consume(this.key(), {
+    const result = await limiter.consume(this.key(), {
       // The DSL passes strings (`"rate-limit:100,30"`), so both parameters are
       // parsed rather than trusted; anything unusable falls back to config and
-      // then to the provider defaults.
+      // then to the configured defaults.
       limit: toPositiveNumber(limit) ?? this.config.limit,
       window: toPositiveNumber(window) ?? this.config.window,
     });
@@ -107,6 +109,20 @@ export class RateLimitMiddleware extends Middleware<RateLimitMiddlewareConfig> {
       return this.config.key(this.req);
     }
     return `${clientIp(this.req)}:${this.req.routePath ?? "*"}`;
+  }
+}
+
+/**
+ * The limiter, or `null` when there is nothing to resolve it from. `app()`
+ * throws outside a booted application — unit tests, build-time tooling — and
+ * that is not a reason to fail a request.
+ */
+function resolveLimiter(): RateLimiter | null {
+  try {
+    const container = app();
+    return container.bound(RateLimiter) ? container.make(RateLimiter) : null;
+  } catch {
+    return null;
   }
 }
 

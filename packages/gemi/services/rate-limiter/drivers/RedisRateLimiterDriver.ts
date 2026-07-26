@@ -1,5 +1,5 @@
-import { kernelContext } from "../../../kernel/context";
-import type { RedisServiceContainer } from "../../redis/RedisServiceContainer";
+import type { ServiceToken } from "../../../container/Container";
+import { app } from "../../../foundation/app";
 import { buildResult, windowStartFor } from "../slidingWindow";
 import type { ConsumeParams, RateLimitResult } from "../types";
 import { RateLimiterDriver } from "./RateLimiterDriver";
@@ -12,6 +12,15 @@ import { RateLimiterDriver } from "./RateLimiterDriver";
 export interface RateLimiterRedisClient {
   send(command: string, args: string[]): Promise<any>;
 }
+
+/**
+ * Stands in for `RedisManager` — same token string, so the container hands back
+ * the very same singleton — without importing the class. See `client` below for
+ * why the import has to be avoided.
+ */
+const REDIS_TOKEN = { token: "redis" } as unknown as ServiceToken<{
+  client: RateLimiterRedisClient;
+}>;
 
 export interface RedisRateLimiterOptions {
   /**
@@ -77,10 +86,12 @@ return {1, current, previous}
  * same budget. Use it as soon as you run more than one process.
  *
  * ```ts
- * // app/kernel/providers/RateLimiterServiceProvider.ts
- * export default class extends RateLimiterServiceProvider {
- *   driver = new RedisRateLimiter();
- * }
+ * // app/config/ratelimiter.ts
+ * import { defineRateLimiterConfig, RedisRateLimiter } from "gemi/services";
+ *
+ * export default defineRateLimiterConfig({
+ *   driver: new RedisRateLimiter(),
+ * });
  * ```
  *
  * Window boundaries come from the app server's clock, not Redis's, so keep
@@ -163,18 +174,19 @@ export class RedisRateLimiter extends RateLimiterDriver {
   private get client(): RateLimiterRedisClient {
     if (this.injectedClient) return this.injectedClient;
 
-    // Looked up by name instead of through the container class: that module
-    // imports Bun's `RedisClient` as a value, and importing it here would make
-    // this driver — and anything that re-exports it — unloadable outside the
-    // Bun runtime.
-    const store = kernelContext.getStore() as
-      | Record<string, RedisServiceContainer | undefined>
-      | undefined;
-    const client = store?.RedisServiceContainer?.client;
+    // Resolved through a locally declared token rather than by importing
+    // `RedisManager`: that module imports Bun's `RedisClient` as a value, and
+    // importing it here would make this driver — and anything that re-exports
+    // it — unloadable outside the Bun runtime. The container keys bindings off
+    // the token string, so this resolves the same singleton the real class does.
+    const container = app();
+    const client = container.bound(REDIS_TOKEN)
+      ? container.make(REDIS_TOKEN).client
+      : undefined;
 
     if (!client) {
       throw new Error(
-        "RedisRateLimiter could not reach the Redis client. Register RedisServiceProvider on your kernel, or pass a client: new RedisRateLimiter({ client }).",
+        "RedisRateLimiter could not reach the Redis client. Register RedisServiceProvider on your application, or pass a client: new RedisRateLimiter({ client }).",
       );
     }
     return client;

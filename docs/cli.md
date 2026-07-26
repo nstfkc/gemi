@@ -12,7 +12,7 @@ bun run build
 bun run start
 ```
 
-> **Note:** None of the current commands take flags or options — each is a bare subcommand. gemi discovers your project from the current working directory (it expects `app/` and, for tooling commands, `app/kernel/Kernel.ts`).
+> **Note:** Apart from `gemi migrate --dry-run`, the commands take no flags or options — each is a bare subcommand. gemi discovers your project from the current working directory (it expects `app/` and, for tooling commands, `app/kernel/Kernel.ts`).
 
 ## `gemi dev`
 
@@ -58,6 +58,21 @@ gemi start
 It launches `dist/server/server.mjs` in a fresh Bun process with `NODE_ENV=production`, registering the same runtime preloads as `dev` (`gemi/bun/preload`, then `app/preload.ts` if present). The fresh process is required so Bun starts with the production JSX runtime and production React DOM export conditions.
 
 > **Gotcha:** `start` requires a completed [`gemi build`](#gemi-build) — it does not build for you. In deployments you'll typically run migrations first, e.g. `bunx prisma migrate deploy && gemi start`.
+
+## `gemi migrate`
+
+Upgrades an app from the 0.42 service-provider layout to the 0.43 config + container layout.
+
+```bash
+gemi migrate --dry-run   # print the plan, write nothing
+gemi migrate             # apply it
+```
+
+It reads `app/kernel/providers/`, turns each recognised provider into an `app/config/<slice>.ts` module, rewrites `app/kernel/Kernel.ts` to declare `config` and `providers`, moves the `ServiceProvider` import from `gemi/services` to `gemi/support`, and applies the facade and service renames (`I18n` → `Lang`, `FileStorage` → `Storage`, `EmailServiceContainer` → `MailManager`, …) across your app.
+
+Anything it cannot translate is left on disk and reported rather than guessed at — unrecognised providers are carried into the new `providers` array with a TODO, and `.use()` call sites are renamed but not rewritten. Run `--dry-run` first, and see [UPGRADE.md](https://github.com/nstfkc/gemi/blob/main/UPGRADE.md) for the full list of what it does and does not handle.
+
+> This command only makes sense once, when moving from 0.42 to 0.43. It is a no-op on an app that has no `app/kernel/providers/` directory.
 
 ## `gemi ide:generate-api-manifest`
 

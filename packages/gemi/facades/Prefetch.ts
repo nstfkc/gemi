@@ -5,7 +5,8 @@ import { HttpRequest } from "../http/HttpRequest";
 import { RequestContext } from "../http/requestContext";
 import { applyParams } from "../utils/applyParams";
 import { omitNullishValues } from "../utils/omitNullishValues";
-import { ApiRouterServiceContainer } from "../services/router/ApiRouterServiceContainer";
+import { ApiRouteDispatcher } from "../services/router/ApiRouteDispatcher";
+import { Facade } from "./Facade";
 
 type GetRPC = {
   [K in keyof RPC as K extends `GET:${infer P}` ? P : never]: RPC[K];
@@ -19,7 +20,11 @@ type Data<T extends keyof GetRPC> = GetRPC[T] extends ApiRouterHandler<
   ? Awaited<Data>
   : never;
 
-export class Query {
+export class Query extends Facade {
+  static getFacadeAccessor() {
+    return ApiRouteDispatcher;
+  }
+
   private static prepare<T extends keyof GetRPC>(
     path: T,
     ...args: [
@@ -63,8 +68,7 @@ export class Query {
 
     const trigger = () => {
       return RequestContext.run(httpRequest, async () => {
-        const data: Data<T> =
-          await ApiRouterServiceContainer.use().getRouteData(path);
+        const data: Data<T> = await Query.getFacadeRoot().getRouteData(path);
         store(data);
         return data;
       });

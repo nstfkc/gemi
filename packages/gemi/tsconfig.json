@@ -16,7 +16,11 @@
     "broadcasting",
     "client",
     "i18n",
-    "server"
+    "server",
+    "container",
+    "foundation",
+    "support",
+    "bin/migrate"
   ],
   "exclude": [
     "node_modules",

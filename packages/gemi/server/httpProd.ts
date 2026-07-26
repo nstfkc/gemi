@@ -6,7 +6,7 @@ import { createStyles } from "./styles";
 import type { App } from "../app";
 import { Instrumentation } from "./types";
 import { printStartupBanner } from "./banner";
-import { RESERVED_ROUTE_PREFIX } from "../services/router/ViewRouterServiceContainer";
+import { RESERVED_ROUTE_PREFIX } from "../services/router/ViewRouteDispatcher";
 
 const projectDir = process.env.GEMI_PROJECT_DIR ?? "";
 const rootDir = join(process.cwd(), projectDir);

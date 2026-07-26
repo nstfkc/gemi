@@ -15,6 +15,11 @@ export class Server {
   }
 
   async start() {
+    // Phase two of the boot. `new App({ kernel })` already ran every provider's
+    // synchronous `register()`; this awaits their `boot()` before the first
+    // request is served.
+    await this.app.waitForBoot();
+
     // Dynamic import so each mode only pulls in its own code: `httpDev` drags in
     // Vite (dev-only) and `httpProd` reads the built `dist/` manifests — neither
     // should load in the other environment.

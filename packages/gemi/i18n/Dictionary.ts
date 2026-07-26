@@ -1,4 +1,4 @@
-import { I18n } from "../facades";
+import { Lang } from "../facades";
 import { parseTranslation } from "../utils/parseTranslation";
 import type {
   ParseTranslationParams,
@@ -34,7 +34,7 @@ export class Dictionary<T extends Translations> {
       ? [args?: { locale?: U | (string & {}) }]
       : [args: { locale?: U | (string & {}); params: R }]
   ) {
-    const { locale = I18n.locale(), params } = {
+    const { locale = Lang.locale(), params } = {
       params: {},
       ...args[0],
     };
@@ -69,7 +69,7 @@ export class Dictionary<T extends Translations> {
           },
         ]
   ): string {
-    const { locale = I18n.locale(), params } = { params: {}, ...args?.[0] };
+    const { locale = Lang.locale(), params } = { params: {}, ...args?.[0] };
 
     if (!content?.[locale]) {
       throw new Error(`Translation not found for ${String(locale)}`);

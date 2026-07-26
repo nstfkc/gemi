@@ -1,31 +1,39 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
+import { Application } from "../foundation/Application";
 import { kernelContext } from "../kernel/context";
 import { InMemoryRateLimiter } from "../services/rate-limiter/drivers/InMemoryRateLimiterDriver";
-import { RateLimiterServiceContainer } from "../services/rate-limiter/RateLimiterServiceContainer";
 import { RateLimiterServiceProvider } from "../services/rate-limiter/RateLimiterServiceProvider";
+import { Repository } from "../support/Repository";
+import type { RateLimiterConfig } from "../services/rate-limiter/config";
 import { HttpRequest } from "./HttpRequest";
 import { RateLimitMiddleware } from "./RateLimitMiddleware";
 import { RequestContext } from "./requestContext";
 
 /**
+ * An Application with only the rate limiter registered. Each call builds a new
+ * one, so a test's counters never leak into the next — pass the same instance
+ * to `runMiddleware` twice to share a budget across requests.
+ */
+function makeApp(config: RateLimiterConfig = {}) {
+  const application = new Application(new Repository({ ratelimiter: config }));
+  application.register(RateLimiterServiceProvider);
+  return application;
+}
+
+/**
  * Runs `middleware.run(...)` the way the router does: inside a kernel context
- * that has the rate limiter registered, and inside a request context so the
- * middleware can set response headers.
+ * holding an Application that has the rate limiter registered, and inside a
+ * request context so the middleware can set response headers.
  */
 function runMiddleware(options: {
   Middleware?: typeof RateLimitMiddleware;
-  provider?: RateLimiterServiceProvider;
+  app?: Application;
   headers?: Record<string, string>;
   routePath?: string;
   args?: (string | number)[];
 }) {
-  const provider = options.provider ?? new RateLimiterServiceProvider();
-  const services = {
-    [RateLimiterServiceContainer._name]: new RateLimiterServiceContainer(
-      provider,
-    ),
-  };
+  const application = options.app ?? makeApp();
 
   const request = new HttpRequest(
     new Request("http://localhost/api/search", {
@@ -38,7 +46,7 @@ function runMiddleware(options: {
 
   const MiddlewareClass = options.Middleware ?? RateLimitMiddleware;
 
-  return kernelContext.run(services, () =>
+  return kernelContext.run(application, () =>
     RequestContext.run(request, async () => {
       const middleware = new MiddlewareClass(request);
       try {
@@ -69,9 +77,9 @@ afterEach(() => {
 
 describe("run", () => {
   test("passes requests under the limit and reports the budget", async () => {
-    const provider = new RateLimiterServiceProvider();
+    const app = makeApp();
 
-    const first = await runMiddleware({ provider, args: ["3", "60"] });
+    const first = await runMiddleware({ app, args: ["3", "60"] });
 
     expect(first.rejected).toBe(false);
     expect(first.headers.get("X-RateLimit-Limit")).toBe("3");
@@ -82,12 +90,12 @@ describe("run", () => {
   });
 
   test("rejects with a 429 and a Retry-After once the budget is spent", async () => {
-    const provider = new RateLimiterServiceProvider();
+    const app = makeApp();
     const args = ["2", "60"];
 
-    await runMiddleware({ provider, args });
-    await runMiddleware({ provider, args });
-    const third = await runMiddleware({ provider, args });
+    await runMiddleware({ app, args });
+    await runMiddleware({ app, args });
+    const third = await runMiddleware({ app, args });
 
     expect(third.rejected).toBe(true);
     expect(third.error.payload.api.status).toBe(429);
@@ -101,23 +109,23 @@ describe("run", () => {
   });
 
   test("keys by client and route, so one route cannot spend another's budget", async () => {
-    const provider = new RateLimiterServiceProvider();
+    const app = makeApp();
     const args = ["1", "60"];
 
-    await runMiddleware({ provider, args, routePath: "/search" });
+    await runMiddleware({ app, args, routePath: "/search" });
 
     const sameRoute = await runMiddleware({
-      provider,
+      app,
       args,
       routePath: "/search",
     });
     const otherRoute = await runMiddleware({
-      provider,
+      app,
       args,
       routePath: "/upload",
     });
     const otherClient = await runMiddleware({
-      provider,
+      app,
       args,
       routePath: "/search",
       headers: { "x-forwarded-for": "5.6.7.8" },
@@ -129,18 +137,18 @@ describe("run", () => {
   });
 
   test("reads only the left-most x-forwarded-for entry", async () => {
-    const provider = new RateLimiterServiceProvider();
+    const app = makeApp();
     const args = ["1", "60"];
 
     await runMiddleware({
-      provider,
+      app,
       args,
       headers: { "x-forwarded-for": "1.2.3.4, 10.0.0.1" },
     });
 
     // Same client, different proxy chain: it must not buy a fresh budget.
     const second = await runMiddleware({
-      provider,
+      app,
       args,
       headers: { "x-forwarded-for": "1.2.3.4, 10.0.0.9, 10.0.0.7" },
     });
@@ -149,14 +157,14 @@ describe("run", () => {
   });
 
   test("falls back to x-real-ip", async () => {
-    const provider = new RateLimiterServiceProvider();
+    const app = makeApp();
     const args = ["1", "60"];
     const headers = { "x-real-ip": "9.9.9.9" };
 
-    await runMiddleware({ provider, args, headers });
-    const second = await runMiddleware({ provider, args, headers });
+    await runMiddleware({ app, args, headers });
+    const second = await runMiddleware({ app, args, headers });
     const other = await runMiddleware({
-      provider,
+      app,
       args,
       headers: { "x-real-ip": "8.8.8.8" },
     });
@@ -165,55 +173,54 @@ describe("run", () => {
     expect(other.rejected).toBe(false);
   });
 
-  test("falls back to the provider defaults when the DSL passes nothing", async () => {
-    class Provider extends RateLimiterServiceProvider {
-      driver = new InMemoryRateLimiter();
-      limit = 1;
-      window = 30;
-    }
-    const provider = new Provider();
+  test("falls back to the configured defaults when the DSL passes nothing", async () => {
+    const app = makeApp({
+      driver: new InMemoryRateLimiter(),
+      limit: 1,
+      window: 30,
+    });
 
-    const first = await runMiddleware({ provider });
-    const second = await runMiddleware({ provider });
+    const first = await runMiddleware({ app });
+    const second = await runMiddleware({ app });
 
     expect(first.headers.get("X-RateLimit-Limit")).toBe("1");
     expect(second.rejected).toBe(true);
   });
 
   test("ignores unusable DSL parameters instead of limiting to zero", async () => {
-    const provider = new RateLimiterServiceProvider();
+    const app = makeApp();
 
-    const result = await runMiddleware({ provider, args: ["abc", "0"] });
+    const result = await runMiddleware({ app, args: ["abc", "0"] });
 
     expect(result.rejected).toBe(false);
     expect(result.headers.get("X-RateLimit-Limit")).toBe("1000");
   });
 
   test("takes the limit from configure() when the DSL omits one", async () => {
-    const provider = new RateLimiterServiceProvider();
+    const app = makeApp();
     const Configured = RateLimitMiddleware.configure({
       limit: 1,
       window: 60,
     }) as typeof RateLimitMiddleware;
 
-    const first = await runMiddleware({ provider, Middleware: Configured });
-    const second = await runMiddleware({ provider, Middleware: Configured });
+    const first = await runMiddleware({ app, Middleware: Configured });
+    const second = await runMiddleware({ app, Middleware: Configured });
 
     expect(first.headers.get("X-RateLimit-Limit")).toBe("1");
     expect(second.rejected).toBe(true);
   });
 
   test("lets configure() replace what counts as one client", async () => {
-    const provider = new RateLimiterServiceProvider();
+    const app = makeApp();
     const Configured = RateLimitMiddleware.configure({
       limit: 1,
       key: () => "tenant:acme",
     }) as typeof RateLimitMiddleware;
 
-    await runMiddleware({ provider, Middleware: Configured });
+    await runMiddleware({ app, Middleware: Configured });
     // Different IP and route, same tenant — one shared budget.
     const second = await runMiddleware({
-      provider,
+      app,
       Middleware: Configured,
       routePath: "/upload",
       headers: { "x-forwarded-for": "5.6.7.8" },
@@ -223,12 +230,12 @@ describe("run", () => {
   });
 
   test("can be told not to set headers", async () => {
-    const provider = new RateLimiterServiceProvider();
+    const app = makeApp();
     const Configured = RateLimitMiddleware.configure({
       headers: false,
     }) as typeof RateLimitMiddleware;
 
-    const result = await runMiddleware({ provider, Middleware: Configured });
+    const result = await runMiddleware({ app, Middleware: Configured });
 
     expect(result.headers.get("X-RateLimit-Limit")).toBe(null);
   });
@@ -236,19 +243,15 @@ describe("run", () => {
 
 describe("invalid configuration", () => {
   test("says so instead of limiting in an unexplainable way", async () => {
-    class Provider extends RateLimiterServiceProvider {
-      window = 0;
-    }
-
-    const result = await runMiddleware({ provider: new Provider() });
+    const result = await runMiddleware({ app: makeApp({ window: 0 }) });
 
     expect(result.rejected).toBe(true);
     expect(result.error.message).toMatch(/window must be greater than zero/);
   });
 });
 
-describe("without a kernel", () => {
-  test("does not reject requests when the service is missing", async () => {
+describe("without a limiter", () => {
+  function runWithout(store: unknown) {
     const request = new HttpRequest(
       new Request("http://localhost/api/search"),
       {},
@@ -256,12 +259,20 @@ describe("without a kernel", () => {
       "/search",
     );
 
-    const result = await kernelContext.run({}, () =>
+    return kernelContext.run(store, () =>
       RequestContext.run(request, () =>
         new RateLimitMiddleware(request).run("1"),
       ),
     );
+  }
 
-    expect(result).toEqual({});
+  test("does not reject requests when there is no application", async () => {
+    expect(await runWithout({})).toEqual({});
+  });
+
+  test("does not reject requests when the service is not bound", async () => {
+    const application = new Application(new Repository());
+
+    expect(await runWithout(application)).toEqual({});
   });
 });

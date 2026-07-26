@@ -30,6 +30,9 @@
     "./i18n": "./i18n/index.ts",
     "./server": "./server/index.ts",
     "./config": "./config/index.ts",
+    "./container": "./container/index.ts",
+    "./foundation": "./foundation/index.ts",
+    "./support": "./support/index.ts",
     "./bun/preload": "./bun/preload.ts",
     "./bun/plugin": "./bun/plugin.ts"
   },

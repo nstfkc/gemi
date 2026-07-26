@@ -1,19 +1,19 @@
-import { ServiceProvider } from "../ServiceProvider";
-import { InMemoryRateLimiter } from "./drivers/InMemoryRateLimiterDriver";
-import { RateLimiterDriver } from "./drivers/RateLimiterDriver";
+import { ServiceProvider } from "../../support/ServiceProvider";
+import { withDefaults } from "../../support/withDefaults";
+import { RateLimiter } from "./RateLimiter";
+import { rateLimiterConfigDefaults, type RateLimiterConfig } from "./config";
 
 export class RateLimiterServiceProvider extends ServiceProvider {
-  /**
-   * Where counters live. In-process by default; swap in `RedisRateLimiter` once
-   * the app runs on more than one instance.
-   */
-  driver: RateLimiterDriver = new InMemoryRateLimiter();
-
-  /** Requests allowed per window when the `rate-limit` DSL omits a limit. */
-  limit = 1000;
-
-  /** Window length in **seconds** when the `rate-limit` DSL omits one. */
-  window = 60;
-
-  boot() {}
+  register() {
+    this.app.singleton(
+      RateLimiter,
+      () =>
+        new RateLimiter(
+          withDefaults(
+            rateLimiterConfigDefaults(),
+            this.app.config.get<RateLimiterConfig>("ratelimiter", {}),
+          ),
+        ),
+    );
+  }
 }

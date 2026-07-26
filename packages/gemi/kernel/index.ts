@@ -1,4 +1,4 @@
 export { Kernel } from "./Kernel";
+export { frameworkProviders } from "./providers";
 
-export { AuthenticationServiceProvider } from "../auth/AuthenticationServiceProvider";
 export { PrismaAuthenticationAdapter } from "../auth/adapters/prisma";

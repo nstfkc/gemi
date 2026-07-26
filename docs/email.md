@@ -1,6 +1,8 @@
 # Email
 
-gemi sends transactional email through a small `Email` base class backed by [jsx-email](https://jsx.email) templates. You write each email as a React component, wrap it in a class that extends `Email`, and send it with a fully-typed `send(...)` call. Delivery goes through a driver (Resend by default) configured on your `EmailServiceProvider`.
+gemi sends transactional email through a small `Email` base class backed by [jsx-email](https://jsx.email) templates. You write each email as a React component, wrap it in a class that extends `Email`, and send it with a fully-typed `send(...)` call. Delivery goes through a driver (Resend by default) configured in `app/config/mail.ts`.
+
+Under the hood the `mail` config slice is read by the framework's `MailServiceProvider`, which binds a `MailManager` singleton into the container. `Email.send` resolves that manager — see [Facades](./facades.md) for how container resolution works.
 
 ## Defining an email
 
@@ -85,7 +87,7 @@ Key points:
 - **`data` is type-checked against your `template` props.** The `locale` key is provided separately (see below) and is injected into the template props for you, so you omit it from `data`.
 - Any field you omit falls back to the value declared on the class (`to`, `from`, `subject`, `cc`, `bcc`, `attachments`, `headers`).
 - Sending renders **both** an HTML body and a plain-text body from the same template automatically.
-- Recipients pass through the provider's `filterRecipients` hook before delivery; if it returns an empty list, the send is skipped.
+- Recipients pass through the `filterRecipients` callback from `app/config/mail.ts` before delivery; if it returns an empty list, the send is skipped.
 
 > **Note:** When `process.env.EMAIL_DEBUG === "true"`, `send` does not deliver. Instead it writes the rendered HTML to `${ROOT_DIR}/.debug/emails/…html` and opens it locally — handy for previewing templates during development.
 
@@ -100,42 +102,120 @@ const html = await WelcomeEmail.preview({
 });
 ```
 
-## The `EmailServiceProvider` and drivers
+## Configuration: `app/config/mail.ts`
 
-The active driver and global headers live on your app's `EmailServiceProvider`. The default driver is `ResendDriver`.
+The active driver, global headers, and the recipient filter live in the `mail` config slice. Write it with the `defineMailConfig` helper (an identity function that gives you type checking and completion) and default-export it:
 
 ```typescript
-// app/kernel/providers/EmailServiceProvider.ts
-import { EmailServiceProvider, ResendDriver } from "gemi/services";
+// app/config/mail.ts
+import { defineMailConfig, ResendDriver } from "gemi/services";
 
-export default class extends EmailServiceProvider {
-  driver = new ResendDriver();
+export default defineMailConfig({
+  driver: new ResendDriver(),
   // Headers merged into every outgoing message
-  headers = {
+  headers: {
     "List-Unsubscribe": `<${process.env.HOST_NAME}/api/email/unsubscribe>`,
+  },
+});
+```
+
+Register the slice under the `mail` key on your kernel:
+
+```typescript
+// app/kernel/Kernel.ts
+import { Kernel } from "gemi/kernel";
+
+import mail from "../config/mail";
+
+export default class extends Kernel {
+  config = {
+    mail,
+    // ...other slices
   };
 }
 ```
+
+Every field is optional; the whole slice is optional too. `MailConfig` is:
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `driver` | `EmailDriver` | `new ResendDriver()` |
+| `headers` | `Record<string, string>` | `{}` |
+| `filterRecipients` | `(emails: string[]) => string[] \| Promise<string[]>` | identity |
 
 `ResendDriver` reads its API key from `process.env.RESEND_API_KEY` by default; pass a key explicitly with `new ResendDriver(myKey)` if you prefer. See [Configuration](./configuration.md) for setting `RESEND_API_KEY`.
 
 ### Filtering recipients
 
-Override `filterRecipients` on the provider to globally suppress or transform recipients (e.g. respecting unsubscribes, or restricting to a whitelist in staging):
+`filterRecipients` is a **config callback**, not a provider method. Use it to globally suppress or transform recipients (e.g. respecting unsubscribes, or restricting to a whitelist in staging):
 
 ```typescript
-export default class extends EmailServiceProvider {
-  driver = new ResendDriver();
+// app/config/mail.ts
+import { defineMailConfig, ResendDriver } from "gemi/services";
+import { isUnsubscribed } from "../database/unsubscribes";
 
-  async filterRecipients(emails: string[]) {
-    return emails.filter((email) => !(await isUnsubscribed(email)));
+export default defineMailConfig({
+  driver: new ResendDriver(),
+
+  async filterRecipients(emails) {
+    const results = await Promise.all(emails.map(isUnsubscribed));
+    return emails.filter((_, i) => !results[i]);
+  },
+});
+```
+
+> **A deliberate divergence from Laravel.** In Laravel you would hang this kind of hook off a service provider's `boot()` (an event listener, a `Mail::alwaysTo` macro). In gemi, subsystem hooks — `filterRecipients` here, `onLogCreated`/`onLogFileClosed` for logging, `extendSession` for auth — are plain callbacks on the config slice instead. They are part of the service's configuration, so they live where the rest of that service's configuration lives, and the service can read them synchronously at construction time.
+
+### Custom drivers
+
+Subclass `EmailDriver` (from `gemi/services`) and implement `send(params: SendEmailParams)` to integrate a different provider, then point the config at it:
+
+```typescript
+import { EmailDriver, type SendEmailParams } from "gemi/services";
+
+export class PostmarkDriver extends EmailDriver {
+  async send(params: SendEmailParams) {
+    /* ... */
   }
 }
 ```
 
-### Custom drivers
+```typescript
+// app/config/mail.ts
+import { defineMailConfig } from "gemi/services";
+import { PostmarkDriver } from "../email/PostmarkDriver";
 
-Subclass `EmailDriver` (from `gemi/services`) and implement `send(params: SendEmailParams)` to integrate a different provider.
+export default defineMailConfig({
+  driver: new PostmarkDriver(),
+});
+```
+
+### Replacing the manager entirely
+
+Config covers the normal case. If you need to swap the `MailManager` itself, rebind its token from your own service provider — app providers listed in `providers` register **after** the framework's, so the last binding wins:
+
+```typescript
+// app/providers/AppServiceProvider.ts
+import { ServiceProvider } from "gemi/support";
+import { MailManager } from "gemi/services";
+
+export default class AppServiceProvider extends ServiceProvider {
+  register() {
+    this.app.singleton(MailManager, () => new AuditedMailManager());
+  }
+}
+```
+
+```typescript
+// app/kernel/Kernel.ts
+import AppServiceProvider from "../providers/AppServiceProvider";
+
+export default class extends Kernel {
+  providers = [AppServiceProvider];
+}
+```
+
+A `ServiceProvider` in gemi means what it means in Laravel: a class whose `register()` binds services into the container, and whose `boot()` runs once every provider has registered (so `boot()` may resolve, `register()` may not).
 
 ## Localization (i18n)
 
@@ -200,8 +280,8 @@ You can also set default `attachments` on the class if every send should carry t
 
 ## Related
 
-- [Facades](./facades.md) — how services are resolved.
-- [Kernel & Service Providers](./project-structure.md) — registering `EmailServiceProvider`.
+- [Facades](./facades.md) — how the container resolves services behind static proxies.
+- [Kernel & Service Providers](./project-structure.md) — the `config` and `providers` fields on the kernel.
 - [i18n](./i18n.md) — locale resolution and default locale.
 - [Configuration](./configuration.md) — `RESEND_API_KEY`, `EMAIL_DEBUG`, `HOST_NAME`.
 - [Authentication](./authentication.md) — auth flows send welcome, PIN, and password-reset emails.

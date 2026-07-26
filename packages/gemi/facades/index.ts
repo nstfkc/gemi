@@ -1,7 +1,8 @@
+export { Facade } from "./Facade";
 export { Auth } from "./Auth";
 export { Redirect } from "./Redirect";
-export { I18n } from "./I18n";
-export { FileStorage } from "./FileStorage";
+export { Lang } from "./Lang";
+export { Storage } from "./Storage";
 export { Query } from "./Prefetch";
 export { Broadcast } from "./Broadcast";
 export { Url } from "./Url";
