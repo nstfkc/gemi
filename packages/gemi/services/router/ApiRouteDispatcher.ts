@@ -139,6 +139,62 @@ export class ApiRouteDispatcher {
     return data;
   }
 
+  /**
+   * Copies request-context headers and cookies onto a Response a handler built
+   * itself, without disturbing what the handler already set.
+   */
+  private mergeContextIntoResponse(
+    response: Response,
+    headers: Headers,
+    cookies: Set<string>,
+  ) {
+    // Built with forEach rather than spread: the browser tsconfig's lib set
+    // has DOM but not DOM.Iterable, so `Headers` has no [Symbol.iterator].
+    const entries: [string, string][] = [];
+    headers?.forEach((value, key) => entries.push([key, value]));
+    const setCookies = [
+      ...(typeof headers?.getSetCookie === "function"
+        ? headers.getSetCookie()
+        : []),
+      ...Array.from(cookies ?? []),
+    ];
+
+    if (entries.length === 0 && setCookies.length === 0) {
+      return response;
+    }
+
+    const apply = (target: Headers) => {
+      for (const [key, value] of entries) {
+        if (key.toLowerCase() === "set-cookie") {
+          continue;
+        }
+        if (!target.has(key)) {
+          target.set(key, value);
+        }
+      }
+      for (const cookie of setCookies) {
+        target.append("Set-Cookie", cookie);
+      }
+    };
+
+    try {
+      // Mutating in place keeps the original Response object, and with it a
+      // sized Blob body — rebuilding turns that into a stream, which costs the
+      // Content-Length that Bun only emits for known-length bodies.
+      apply(response.headers);
+      return response;
+    } catch {
+      // A Response from fetch() — this.proxy() routes — has immutable headers.
+      const merged = new Headers(response.headers);
+      apply(merged);
+      return new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: merged,
+      });
+    }
+  }
+
   async handleApiRequest(req: Request) {
     const { params, path } = this.getRouteHandlerAndParams(req);
 
@@ -171,21 +227,35 @@ export class ApiRouteDispatcher {
       }
       const data = await this.getRouteData(path);
 
+      const headers = ctx.headers;
+      const cookies = ctx.cookies;
+
       if (data instanceof Response) {
-        return data;
+        // A handler owning its own Response — stream, file and proxy routes,
+        // and the RequestBreakerError path in getRouteData — still has to carry
+        // what the request context accumulated: headers set by middleware via
+        // ctx.setHeaders (CORS, Cache-Control) and any Set-Cookie. The
+        // response's own headers win; the context only fills gaps.
+        const response = this.mergeContextIntoResponse(data, headers, cookies);
+
+        if (!req.url.includes("/__gemi__")) {
+          // Before destroy(), which empties the store the hook reads from.
+          this.onRequestEnd(httpRequest);
+        }
+        ctx.destroy();
+        return response;
       }
 
-      const headers = ctx.headers;
+      headers.set("Content-Type", "application/json");
 
-      headers.append("Content-Type", "application/json");
-
-      ctx.cookies.forEach((cookie) => headers.append("Set-Cookie", cookie.toString()));
-
-      ctx.destroy();
+      cookies.forEach((cookie) => headers.append("Set-Cookie", cookie.toString()));
 
       if (!req.url.includes("/__gemi__")) {
         this.onRequestEnd(httpRequest);
       }
+
+      ctx.destroy();
+
       return new Response(JSON.stringify(data), {
         headers,
       });

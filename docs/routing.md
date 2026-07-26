@@ -143,6 +143,33 @@ routes = {
 };
 ```
 
+### Streaming and range requests
+
+`this.stream(...)` registers a `GET` (and `HEAD`) handler that understands the `Range` header, so browsers can seek within audio and video. Return a `FileStorage.read()` result and the byte window is pushed down to the storage backend, so a seek transfers one window rather than the whole object:
+
+```typescript
+routes = {
+  "/assets/:src*": this.stream(async (req) => FileStorage.read(req.params.src)),
+};
+```
+
+The route handles the HTTP side for you:
+
+- a request with no `Range` gets the complete object with `200` and `Accept-Ranges: bytes`
+- `bytes=S-E`, `bytes=S-` and `bytes=-N` get a `206` with `Content-Range: bytes S-E/TOTAL`
+- a range that starts past the end of the object gets a `416` with `Content-Range: bytes */TOTAL`
+- a malformed or multi-range header is ignored and the complete object is served, as RFC 7233 requires
+
+A handler can also return a `Blob` or a `Bun.file()` directly, and the framework will slice it — no storage driver involved:
+
+```typescript
+"/clip": this.stream(() => Bun.file("/videos/clip.mp4")),
+```
+
+Returning a `Response` yourself opts out of all of the above and is passed through untouched.
+
+Stream routes are excluded from the generated RPC client types, since a typed JSON client has no way to consume a byte stream.
+
 ### Per-route middleware
 
 Every handler returned by `this.get`/`this.post`/… (and `this.resource`) has a fluent `.middleware([...])` that adds middleware to that route only:

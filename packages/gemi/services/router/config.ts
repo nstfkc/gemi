@@ -5,7 +5,10 @@ import type { ViewRouter } from "../../http/ViewRouter";
 
 // Config key: `route.api`. Derived from `ApiRouterServiceProvider`.
 export interface ApiRouteConfig {
-  rootRouter: new () => ApiRouter;
+  // `typeof ApiRouter`, not `new () => ApiRouter`: route flattening identifies
+  // nested routers by the static `__brand`, which a bare construct signature
+  // does not carry.
+  rootRouter: typeof ApiRouter;
 
   onRequestStart?: (req: HttpRequest) => void | Promise<void>;
   onRequestEnd?: (req: HttpRequest) => void | Promise<void>;

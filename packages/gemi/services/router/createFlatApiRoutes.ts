@@ -38,7 +38,10 @@ function isResouceRoutes(option: ApiRoutes[string]): option is ResourceRoutes<an
   return Object.hasOwn(option, "first") && Object.hasOwn(option, "second");
 }
 
-function isApiRouter(routeHandlers: ApiRoutes[string]): routeHandlers is new () => ApiRouter {
+// Narrows to `typeof ApiRouter`, not `new () => ApiRouter`: the latter lacks
+// the static `__brand` this very guard reads, so it is not a subtype of the
+// parameter and TypeScript rejects the predicate under a strict lib.
+function isApiRouter(routeHandlers: ApiRoutes[string]): routeHandlers is typeof ApiRouter {
   if ("__brand" in routeHandlers) {
     return routeHandlers.__brand === "ApiRouter";
   }
@@ -48,6 +51,13 @@ function isApiRouter(routeHandlers: ApiRoutes[string]): routeHandlers is new () 
 function isProxyHandler(option: ApiRoutes[string]): option is ProxyHandler {
   if ("__internal_brand" in option) {
     return option.__internal_brand === "ProxyHandler";
+  }
+  return false;
+}
+
+function isStreamHandler(option: ApiRoutes[string]) {
+  if ("__internal_brand" in option) {
+    return option.__internal_brand === "StreamHandler";
   }
   return false;
 }
@@ -103,6 +113,11 @@ export function createFlatApiRoutes(
       const middleware = routeHandler.middlewares;
       const exec = routeHandler.run.bind(routeHandler);
       addRoute(path, method, exec, middleware);
+      // A stream route also answers HEAD, so a client can read the size and
+      // Accept-Ranges without pulling the body.
+      if (isStreamHandler(option)) {
+        addRoute(path, "HEAD", exec, middleware);
+      }
     }
 
     if (isRouteHandlers(option)) {

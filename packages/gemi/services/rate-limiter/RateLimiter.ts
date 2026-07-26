@@ -1,5 +1,15 @@
 import type { RateLimiterConfig } from "./config";
 import type { RateLimiterDriver } from "./drivers/RateLimiterDriver";
+import type { RateLimitResult } from "./types";
+
+export interface ConsumeOptions {
+  /** Requests allowed per window. Defaults to the configured `limit`. */
+  limit?: number;
+  /** Window length in **seconds**. Defaults to the configured `window`. */
+  window?: number;
+  /** How much this call costs. Defaults to `1`. */
+  cost?: number;
+}
 
 export class RateLimiter {
   static token = "ratelimiter";
@@ -10,8 +20,43 @@ export class RateLimiter {
     return this.config.driver;
   }
 
-  consume(userId: string, requestPath: string): number {
-    const driver = this.config.driver;
-    return driver.consume(userId, requestPath);
+  /**
+   * Records one hit against `key` and reports whether it fits the budget.
+   *
+   * Windows are given in seconds here — the unit routes, middleware and config
+   * are written in — and converted to the milliseconds drivers work in.
+   */
+  async consume(
+    key: string,
+    options: ConsumeOptions = {},
+  ): Promise<RateLimitResult> {
+    const limit = options.limit ?? this.config.limit;
+    const window = options.window ?? this.config.window;
+    const cost = options.cost ?? 1;
+
+    // A zero window divides by zero inside the sliding-window maths and a
+    // negative cost hands out budget instead of spending it. Both mean the
+    // caller passed something nonsensical, so say so rather than limiting in a
+    // way nobody can explain later.
+    assertPositive("window", window);
+    assertPositive("limit", limit);
+    if (!Number.isFinite(cost) || cost < 0) {
+      throw new Error(`Rate limiter cost must be zero or greater, got ${cost}`);
+    }
+
+    return await this.config.driver.consume({
+      key,
+      limit,
+      window: window * 1000,
+      cost,
+    });
+  }
+}
+
+function assertPositive(name: string, value: number) {
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(
+      `Rate limiter ${name} must be greater than zero, got ${value}`,
+    );
   }
 }

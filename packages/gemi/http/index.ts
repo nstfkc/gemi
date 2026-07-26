@@ -7,6 +7,23 @@ export {
   type FileOutput,
   type ViewHandler,
 } from "./ViewRouter";
+export {
+  createStreamResponse,
+  createUnsatisfiableResponse,
+  type StreamOutput,
+  type StreamDescriptor,
+} from "./createStreamResponse";
+export {
+  formatContentRange,
+  formatUnsatisfiedContentRange,
+  parseContentRange,
+  parseRangeHeader,
+  resolveRange,
+  toRangeHeaderValue,
+  type ByteRange,
+  type ContentRange,
+  type ResolvedRange,
+} from "./range";
 export { ValidationError } from "./Router";
 export { HttpRequest } from "./HttpRequest";
 export { Middleware } from "./Middleware";
@@ -21,10 +38,21 @@ export {
 export { AuthenticationMiddleware } from "./AuthenticationMiddlware";
 export { CacheMiddleware } from "./CacheMiddleware";
 export { CorsMiddleware } from "./CorsMiddleware";
-export { RateLimitMiddleware } from "./RateLimitMiddleware";
+export {
+  RateLimitMiddleware,
+  RateLimitExceededError,
+  clientIp,
+  type RateLimitMiddlewareConfig,
+} from "./RateLimitMiddleware";
 export { CSRFMiddleware } from "./CSRFMiddleware";
 
 export { PoliciesServiceProvider } from "./PoliciesServiceProvider";
 export { Policies } from "./Policy";
 
-export { AuthenticationError, AuthorizationError, InsufficientPermissionsError } from "./errors";
+export {
+  AuthenticationError,
+  AuthorizationError,
+  FileNotFoundError,
+  InsufficientPermissionsError,
+  RangeNotSatisfiableError,
+} from "./errors";

@@ -3,14 +3,41 @@ export { FilesystemServiceProvider } from "./file-storage/FilesystemServiceProvi
 export { FilesystemManager } from "./file-storage/FilesystemManager";
 export { FileSystemDriver } from "./file-storage/drivers/FileSystemDriver";
 export { S3Driver } from "./file-storage/drivers/S3Driver";
-export type { FileMetadata, PutFileParams, ReadFileParams } from "./file-storage/drivers/types";
+export {
+  AzureBlobDriver,
+  type AzureBlobDriverConfig,
+} from "./file-storage/drivers/AzureBlobDriver";
+export type {
+  ByteRange,
+  FileMetadata,
+  PutFileParams,
+  ReadFileParams,
+  ReadResult,
+} from "./file-storage/drivers/types";
 export { FileStorageDriver } from "./file-storage/drivers/FileStorageDriver";
+// The toolkit a custom driver needs to resolve a range against its backend.
+export {
+  resolveRange,
+  toRangeHeaderValue,
+  parseContentRange,
+} from "../http/range";
+export { FileNotFoundError, RangeNotSatisfiableError } from "../http/errors";
 
 // Ratelimiter
 export { RateLimiterServiceProvider } from "./rate-limiter/RateLimiterServiceProvider";
 export { RateLimiter } from "./rate-limiter/RateLimiter";
-export { InMemoryRateLimiter } from "./rate-limiter/drivers/InMemoryRateLimiterDriver";
+export {
+  InMemoryRateLimiter,
+  type InMemoryRateLimiterOptions,
+} from "./rate-limiter/drivers/InMemoryRateLimiterDriver";
+export {
+  RedisRateLimiter,
+  type RedisRateLimiterOptions,
+  type RateLimiterRedisClient,
+} from "./rate-limiter/drivers/RedisRateLimiterDriver";
 export { RateLimiterDriver } from "./rate-limiter/drivers/RateLimiterDriver";
+export type { ConsumeParams, RateLimitResult } from "./rate-limiter/types";
+export type { ConsumeOptions } from "./rate-limiter/RateLimiter";
 
 // Email
 export { MailServiceProvider } from "./email/MailServiceProvider";
@@ -41,7 +68,10 @@ export { Job } from "./queue/Job";
 // Image optimization
 export { ImageServiceProvider } from "./image-optimization/ImageServiceProvider";
 export { ImageManager } from "./image-optimization/ImageManager";
-export type { FitEnum, ResizeParameters } from "./image-optimization/drivers/types";
+export type {
+  FitEnum,
+  ResizeParameters,
+} from "./image-optimization/drivers/types";
 export { ImageOptimizationDriver } from "./image-optimization/drivers/ImageOptimizationDriver";
 export { Sharp } from "./image-optimization/drivers/SharpDriver";
 

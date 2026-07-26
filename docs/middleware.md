@@ -66,9 +66,19 @@ Sets a `Cache-Control` header on `GET` responses. Parameters are `scope`, `maxAg
 | `cache:private,0,no-store` | `private, max-age=0, no-store` |
 | `cache:public,12840,must-revalidate` | `public, max-age=12840, must-revalidate` |
 
-### `rate-limit:N` → `RateLimitMiddleware`
+### `rate-limit:N,W` → `RateLimitMiddleware`
 
-Limits requests per client (keyed by `x-forwarded-for` and route path) using the rate-limiter service. `N` is the max count (default `1000`); over the limit throws a **429**. Example: `rate-limit:100`.
+Limits how often one client may hit a route. `N` is the number of requests, `W` the window in **seconds**; both fall back to the rate-limiter service defaults (`1000` per `60`s). Over the limit the middleware throws a **429**.
+
+| DSL | Meaning |
+| --- | --- |
+| `rate-limit` | provider defaults — 1000 requests per 60s |
+| `rate-limit:100` | 100 requests per 60s |
+| `rate-limit:10,30` | 10 requests per 30s |
+
+The default bucket is the client's IP (left-most `x-forwarded-for` entry, then `x-real-ip`) **plus the route path**, so a client's budget for `/api/search` is separate from its budget for `/api/upload`. Every response carries `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset`; a rejected one also carries `Retry-After`.
+
+Counting uses a **sliding window**, so a client cannot spend a full budget at the end of one window and another at the start of the next. See [Rate limiting](#rate-limiting) below for drivers, Redis, and limiting by something other than an IP.
 
 ### `cors` → `CorsMiddleware`
 
@@ -244,6 +254,84 @@ export default class extends Kernel {
 App providers run after the framework's, so they can rebind anything the framework bound. Note the division of labour: **config** (`app/config/*.ts`) is data and callbacks, **providers** turn that data into container bindings, and **facades** are static proxies that resolve those bindings on each call.
 
 > **Gotcha:** Authorization middleware (like `admin` above) throws to reject. Follow the built-in pattern — throw a `RequestBreakerError` subclass with the right `api`/`view` payload so API callers get a JSON error and browser navigations get a redirect. See [Authorization](./authorization.md).
+
+## Rate limiting
+
+`rate-limit` is a thin wrapper around the rate-limiter service, so the same DSL runs against an in-process counter locally and a shared one in production.
+
+### Drivers
+
+| Driver | Use it when |
+| --- | --- |
+| `InMemoryRateLimiter` (default) | one instance, or local development |
+| `RedisRateLimiter` | more than one instance — counters are shared, so the limit is the limit |
+
+The in-memory driver keeps counters in the process that served the request. With N instances behind a load balancer the effective limit is N × the configured limit, and it resets on every deploy. Switch to Redis as soon as you scale past one:
+
+```typescript
+// app/config/ratelimiter.ts
+import { defineRateLimiterConfig, RedisRateLimiter } from "gemi/services";
+
+export default defineRateLimiterConfig({
+  driver: new RedisRateLimiter(),
+
+  // Defaults for a bare "rate-limit" with no DSL parameters.
+  limit: 1000,
+  window: 60, // seconds
+});
+```
+
+`RedisRateLimiter` uses the connection from your `redis` config slice — no extra configuration — and runs the whole count-and-decide step as one Lua script, so concurrent requests across instances cannot overspend the budget. It accepts:
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `client` | the app's Redis client | run against a different connection |
+| `prefix` | `gemi:rl` | key namespace |
+| `failOpen` | `true` | admit requests while Redis is unreachable |
+| `onError` | `console.error` | where Redis failures are reported |
+
+`failOpen` is the interesting one: by default a Redis outage lets traffic through rather than taking the site down with it. Set it to `false` on endpoints where an unmetered request is worse than a rejected one — anything that sends email or costs money per call.
+
+### Limiting by something other than an IP
+
+`x-forwarded-for` is trivially spoofed unless a proxy overwrites it, and it does not distinguish two users behind one NAT. `configure()` replaces the key with anything you can read off the request:
+
+```typescript
+import { RateLimitMiddleware, clientIp } from "gemi/http";
+
+export default class extends MiddlewareServiceProvider {
+  aliases = {
+    "rate-limit": RateLimitMiddleware,
+    // Signed-in users get a per-user budget; anonymous ones fall back to IP.
+    "user-rate-limit": RateLimitMiddleware.configure({
+      limit: 60,
+      window: 60,
+      key: (req) => `user:${req.ctx().user?.id ?? clientIp(req)}`,
+    }),
+  };
+}
+```
+
+`configure()` also takes `headers: false` to suppress the `X-RateLimit-*` response headers.
+
+### Limiting outside of middleware
+
+Some budgets do not belong to a route — a cooldown on password-reset emails, a quota on a paid third-party API. The `RateLimiter` facade is the same limiter, callable from anywhere:
+
+```typescript
+import { RateLimiter } from "gemi/facades";
+
+const { allowed, retryAfter } = await RateLimiter.consume(`reset:${email}`, {
+  limit: 3,
+  window: 3600, // seconds
+});
+
+if (!allowed) {
+  return { error: `Try again in ${Math.ceil(retryAfter / 1000)}s` };
+}
+```
+
+Pass `cost` to charge a request more than one unit — useful when a single call does far more work than the others sharing its budget.
 
 ## See also
 

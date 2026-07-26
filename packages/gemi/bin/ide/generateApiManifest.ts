@@ -223,7 +223,7 @@ export class ApiManifestGenerator {
       this.routes.set(finalRoutePath, new Map());
     }
 
-    if (method === "file") {
+    if (method === "file" || method === "stream") {
       return;
     } else if (method === "resource") {
       const idPrefixer = (path: string) =>

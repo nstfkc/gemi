@@ -1,6 +1,7 @@
 import type { RemoveGroupPrefix } from "../client/types";
 import { Redirect } from "../facades/Redirect";
 import type { KeyAndValue, KeyAndValueToObject } from "../internal/type-utils";
+import { contentDisposition } from "./contentDisposition";
 import type { Controller } from "./Controller";
 import type { HttpRequest } from "./HttpRequest";
 
@@ -113,13 +114,6 @@ export type FileOutput =
       status?: number;
       headers?: Record<string, string>;
     };
-
-function contentDisposition(name: string, download: boolean) {
-  const kind = download ? "attachment" : "inline";
-  // Quoted form for legacy clients, RFC 5987 form for anything non-ascii.
-  const fallback = name.replace(/["\\]/g, "").replace(/[^\x20-\x7e]/g, "_");
-  return `${kind}; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(name)}`;
-}
 
 export async function createFileResponse(output: FileOutput, headers: Headers) {
   if (output instanceof Response) {
