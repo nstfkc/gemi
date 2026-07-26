@@ -25,6 +25,7 @@ import {
   Meta,
   Cookie,
   Redis,
+  RateLimiter,
 } from "gemi/facades";
 ```
 
@@ -246,6 +247,29 @@ export default class extends RedisServiceProvider {
 ```
 
 See [Configuration](./configuration.md) and the provider registration in [Project Structure](./project-structure.md).
+
+## RateLimiter
+
+`RateLimiter` is the rate limiter behind the `rate-limit` middleware, callable directly — for budgets that do not belong to a route.
+
+- `RateLimiter.consume(key, { limit, window, cost })` — records one hit against `key` and reports whether it fits. `window` is in **seconds**; `limit` and `window` default to the values on your `RateLimiterServiceProvider`, and `cost` defaults to `1`.
+
+```typescript
+import { RateLimiter } from "gemi/facades";
+
+const result = await RateLimiter.consume(`reset-password:${email}`, {
+  limit: 3,
+  window: 3600,
+});
+
+if (!result.allowed) {
+  return { error: `Try again in ${Math.ceil(result.retryAfter / 1000)}s` };
+}
+```
+
+The result carries `allowed`, `limit`, `remaining`, `resetAt` (epoch ms) and `retryAfter` (ms) — enough to build `X-RateLimit-*` headers or a user-facing message. Counting happens in whichever driver the provider is configured with (in-memory by default, Redis when you run more than one instance), so the same call is process-local in development and shared in production.
+
+See [Rate limiting](./middleware.md#rate-limiting) for drivers and configuration.
 
 ## Related
 
