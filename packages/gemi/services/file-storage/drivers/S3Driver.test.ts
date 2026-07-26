@@ -175,6 +175,33 @@ describe("S3Driver.read()", () => {
     expect(result.total).toBe(12345);
   });
 
+  test("forwards `bytes=0-` as a real Range header, so it stays partial", async () => {
+    // AzureBlobDriver has to special-case this shape because its SDK takes an
+    // offset rather than a header and `download(0, undefined)` emits none. S3
+    // sends the header verbatim and needs no such workaround — pin that.
+    let input: any;
+    const driver = driverWith(async (command) => {
+      input = command.input;
+      return objectOutput({
+        ContentRange: "bytes 0-12344/12345",
+        $metadata: { httpStatusCode: 206 },
+      });
+    });
+
+    const result = await driver.read({
+      name: "video.mp4",
+      range: parseRangeHeader("bytes=0-"),
+    });
+
+    expect(input.Range).toBe("bytes=0-");
+    expect(result).toMatchObject({
+      start: 0,
+      end: 12344,
+      total: 12345,
+      partial: true,
+    });
+  });
+
   test("reports partial: false when S3 answered 200 despite a range", async () => {
     const driver = driverWith(async () => objectOutput());
 
