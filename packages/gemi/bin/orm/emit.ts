@@ -79,11 +79,36 @@ function scalarType(model: string, field: DMMF.Field): ScalarType {
   return mapped;
 }
 
+/**
+ * Is this DMMF default a *function* call — `autoincrement()`, `cuid()`, `now()`
+ * — rather than a literal or a list?
+ *
+ * A hand-written predicate rather than the inline
+ * `typeof value === "object" && !Array.isArray(value)` this replaces, for two
+ * reasons. TypeScript does not narrow a `readonly T[]` out of a union through
+ * `Array.isArray`, whose signature asserts `arg is any[]` — so the inline form
+ * left `value.name` unresolved, which is the error that surfaced the moment
+ * `bin/orm` entered the tsconfig. And `typeof null === "object"`, so the inline
+ * form would have dereferenced a null default rather than falling through to
+ * the literal branch.
+ */
+function isFunctionDefault(
+  value: unknown,
+): value is { name: string; args: readonly (string | number)[] } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    "name" in value &&
+    typeof (value as { name: unknown }).name === "string"
+  );
+}
+
 function defaultSpec(field: DMMF.Field): DefaultSpec | undefined {
   if (!field.hasDefaultValue || field.default === undefined) return undefined;
 
   const value = field.default;
-  if (typeof value === "object" && !Array.isArray(value)) {
+  if (isFunctionDefault(value)) {
     switch (value.name) {
       case "autoincrement":
       case "cuid":

@@ -22,7 +22,12 @@
     "support",
     "database",
     "orm",
-    "bin/migrate"
+    "bin/migrate",
+    "bin/orm",
+    "auth",
+    "config",
+    "internal",
+    "runtime"
   ],
   "exclude": [
     "node_modules",
