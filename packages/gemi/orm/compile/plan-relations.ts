@@ -1,5 +1,3 @@
-import { DatabaseManager } from "../../database/DatabaseManager";
-import { app } from "../../foundation/app";
 import type { SqlDialect } from "../dialect";
 import {
   MalformedRelationError,
@@ -12,6 +10,7 @@ import {
 import * as registry from "../registry";
 import type { FieldSchema, ModelSchema, RelationSchema } from "../schema";
 import { concat, render, sql } from "./fragment";
+import { resolveSelection } from "./select";
 
 /**
  * The relation planner: an include tree plus a root model in, a *strategy* out.
@@ -28,8 +27,16 @@ import { concat, render, sql } from "./fragment";
  * SQL that takes, and how many statements, is entirely the strategy's business.
  */
 
-/** The keys a relation node accepts. `take` / `skip` are refused; see below. */
+/**
+ * The keys a relation node accepts, which differ by kind. `take` / `skip` are
+ * refused on both; see `assertNodeArgs`.
+ *
+ * Prisma's to-one include argument is `{ where?, select?, include? }` — it
+ * takes a `where` (verified: it filters, and the relation comes back `null`
+ * when nothing matches) but not an `orderBy`, since there is at most one row.
+ */
 const RELATION_ARGS = new Set(["where", "orderBy", "select", "include"]);
+const TO_ONE_ARGS = new Set(["where", "select", "include"]);
 
 /**
  * How deep an include tree may nest. Not a modelling limit — a legal tree can
@@ -41,13 +48,38 @@ export const MAX_RELATION_DEPTH = 10;
 type Row = Record<string, unknown>;
 
 /**
- * The registry hands back model *classes*; the planner only ever needs these
- * two statics off them. Typed structurally rather than by importing `Model`,
- * which would make `compile/` depend on the class it is compiled for.
+ * The registry hands back model *classes*; planning only ever needs the schema
+ * off them. Typed structurally rather than by importing `Model`, which would
+ * make `compile/` depend on the class it is compiled for.
  */
 interface RelatedModel {
   $schema?: ModelSchema;
-  $exec(op: string, args: unknown): Promise<unknown>;
+}
+
+/**
+ * Everything a loaded relation needs from the outside world, handed in by the
+ * caller rather than reached for.
+ *
+ * This is what keeps `compile/` a pure schema-in / SQL-out directory: without
+ * it, planning a relation would put `DatabaseManager` — and so `import { SQL }
+ * from "bun"` — on the load path of every compiler unit test, which is a real
+ * cost and not a theoretical one. It also means the m-n join hop runs on
+ * whatever connection `$exec` resolved, so iteration 5's ambient transaction
+ * will cover both hops of a many-to-many read rather than only the second.
+ */
+export interface RelationExecutor {
+  /**
+   * A read on another model, through *that model's own* `$exec` (invariant 1).
+   * Named rather than passed as a class so resolution stays at call time
+   * (invariant 6).
+   */
+  exec(model: string, op: string, args: unknown): Promise<unknown>;
+  /**
+   * A statement with no model behind it. Exactly one query in the ORM is like
+   * this: Prisma's implicit many-to-many join table, which has no model, no
+   * fields of its own and nothing an application could scope.
+   */
+  query(text: string, values: unknown[]): Promise<unknown>;
 }
 
 /** One relation as it appears in an `include` / `select` argument tree. */
@@ -88,7 +120,7 @@ export interface RelationPlan {
   /** Which strategy produced this plan. Reported by tests and, later, metrics. */
   strategy: string;
   /** Fetches the children for these parents and attaches them in place. */
-  load(parents: Row[], args: any): Promise<void>;
+  load(parents: Row[], args: any, executor: RelationExecutor): Promise<void>;
 }
 
 export interface RelationStrategy {
@@ -160,6 +192,7 @@ export async function attachRelations(
   hidden: readonly string[] | undefined,
   result: unknown,
   args: any,
+  executor: RelationExecutor,
 ): Promise<void> {
   const parents: Row[] = Array.isArray(result)
     ? (result as Row[])
@@ -175,7 +208,7 @@ export async function attachRelations(
   // concurrent statements are not safe. Parallelism belongs with iteration 7,
   // which owns performance and can measure it.
   for (const relation of relations) {
-    await relation.load(parents, args);
+    await relation.load(parents, args, executor);
   }
 
   if (hidden && hidden.length > 0) {
@@ -310,9 +343,25 @@ function assertNodeArgs(
   const args = value as Record<string, unknown>;
   assertExclusive(schema, args.include, args.select, operation, node.as);
 
+  const many = node.relation.kind === "many";
+
   for (const key of Object.keys(args).sort()) {
     if (args[key] === undefined) continue;
-    if (RELATION_ARGS.has(key)) continue;
+    if (many ? RELATION_ARGS.has(key) : TO_ONE_ARGS.has(key)) continue;
+
+    // A to-one relation is at most one row, so ordering it is meaningless and
+    // Prisma rejects it outright — `Unknown argument 'orderBy'`, listing
+    // `where?` as one of the options it *does* take. Accepting it here would be
+    // a silent superset of Prisma on an argument that cannot mean anything.
+    if (key === "orderBy" && !many) {
+      throw new UnsupportedQueryError(
+        `${node.as}.orderBy`,
+        schema.name,
+        operation,
+        `Prisma does not accept 'orderBy' on a to-one relation — there is at ` +
+          `most one row to order.`,
+      );
+    }
 
     // The decision recorded in the PR: `take` / `skip` on a to-many relation
     // throw rather than being implemented under the batched strategy.
@@ -343,7 +392,16 @@ function assertNodeArgs(
   }
 }
 
-/** Walks the rest of the tree for the structural rules and the depth guard. */
+/**
+ * Walks the rest of the tree for the structural rules and the depth guard.
+ *
+ * Field names go through the same walk, not just structure: without it a typo
+ * in a `select` three levels down is an `UnknownFieldError` raised by that
+ * model's own compile — which is to say, after two queries have already run.
+ * The whole reason this walk exists is that a guard seeing one level at a time
+ * catches things a query too late, and that applies to a misspelled column as
+ * much as to an unbounded tree.
+ */
 function validateSubtree(
   schema: ModelSchema,
   node: unknown,
@@ -351,6 +409,12 @@ function validateSubtree(
   depth: number,
 ): void {
   if (typeof node !== "object" || node === null || Array.isArray(node)) return;
+
+  // Validates the scalar keys and rejects unknown ones; the relation keys in a
+  // `select` are this function's own business and it skips them.
+  if ((node as Record<string, unknown>).select !== undefined) {
+    resolveSelection(schema, node, operation);
+  }
 
   const nodes = relationNodes(schema, node, operation);
   if (nodes.length === 0) return;
@@ -590,6 +654,8 @@ export const batchedStrategy: RelationStrategy = {
     // compiled rather than after the root query has already run.
     const parentKeyField = field(request.parent, request.relation, link.parentField);
     const childKeyField = field(request.child, request.relation, link.childField);
+    assertKeyable(request.parent, request.relation, parentKeyField);
+    assertKeyable(request.child, request.relation, childKeyField);
 
     const many = request.relation.kind === "many";
 
@@ -598,22 +664,18 @@ export const batchedStrategy: RelationStrategy = {
       kind: request.relation.kind,
       parentField: link.parentField,
       strategy: BATCHED,
-      load(parents, args) {
+      load(parents, args, executor) {
+        const context = {
+          parentKeyField,
+          childKeyField,
+          many,
+          parents,
+          args,
+          executor,
+        };
         return link.join
-          ? loadThroughJoinTable(request, link, {
-              parentKeyField,
-              childKeyField,
-              many,
-              parents,
-              args,
-            })
-          : loadDirect(request, link, {
-              parentKeyField,
-              childKeyField,
-              many,
-              parents,
-              args,
-            });
+          ? loadThroughJoinTable(request, link, context)
+          : loadDirect(request, link, context);
       },
     };
   },
@@ -625,6 +687,7 @@ interface LoadContext {
   many: boolean;
   parents: Row[];
   args: any;
+  executor: RelationExecutor;
 }
 
 async function loadDirect(
@@ -640,7 +703,8 @@ async function loadDirect(
   const node = request.locate(context.args);
   const query = childQuery(node, link.childField, keys);
 
-  const rows = (await childModel(request).$exec(
+  const rows = (await context.executor.exec(
+    request.relation.model,
     "findMany",
     query.args,
   )) as Row[];
@@ -666,6 +730,12 @@ async function loadDirect(
  * holds two foreign keys. The hop that reads *rows* still goes through `$exec`
  * on the child's own model class, so a policy on `Tag` applies to
  * `include: { tags: true }` exactly as it would to `Tag.findMany`.
+ *
+ * It runs on `executor.query` rather than resolving a connection of its own,
+ * which is what keeps the two hops on the same one. Iteration 5 should keep it
+ * that way: if the ambient transaction is resolved inside `$exec` and this hop
+ * reached for `DatabaseManager` directly, a many-to-many read would straddle
+ * the transaction boundary — second hop enrolled, first not.
  */
 async function loadThroughJoinTable(
   request: RelationRequest,
@@ -682,6 +752,7 @@ async function loadThroughJoinTable(
     dialect,
     join,
     keys.map((key) => dialect.encode(key, context.parentKeyField)),
+    context.executor,
   )) as Row[];
 
   // Parents keyed by the *child* id they link to, so the second hop can stitch
@@ -716,7 +787,8 @@ async function loadThroughJoinTable(
   const node = request.locate(context.args);
   const query = childQuery(node, link.childField, childKeys);
 
-  const rows = (await childModel(request).$exec(
+  const rows = (await context.executor.exec(
+    request.relation.model,
     "findMany",
     query.args,
   )) as Row[];
@@ -747,6 +819,7 @@ async function readPairs(
   dialect: SqlDialect,
   join: NonNullable<Link["join"]>,
   values: unknown[],
+  executor: RelationExecutor,
 ): Promise<unknown> {
   const statement = concat(
     sql(
@@ -763,30 +836,23 @@ async function readPairs(
   );
 
   const { text, binders } = render(statement, dialect);
-  const db = app(DatabaseManager);
-  return db.sql.unsafe(
+  return executor.query(
     text,
     binders.map((binder) => binder(undefined)),
   );
-}
-
-function childModel(request: RelationRequest): RelatedModel {
-  // Resolved here, not at plan time, so the plan cache never holds a class
-  // reference and a re-registered model is picked up (invariant 6). The child
-  // query is `$exec` on the child's own class — the choke point, so policies,
-  // ambient transactions and the plan cache all apply to a nested read exactly
-  // as they do to a top-level one (invariant 1).
-  return registry.get<RelatedModel>(request.relation.model);
 }
 
 /**
  * The child query's arguments: the caller's own relation arguments, plus the
  * key filter, plus the key itself when a `select` left it out.
  *
- * The `in (<parent keys>)` list has the plan-cache problem iteration 2 already
- * has for `in`, at higher volume: on SQLite each distinct parent count is its
- * own plan text. It is the same mechanism and the same answer — the plan
- * cache's LRU bound — rather than a second one.
+ * The `in (<parent keys>)` list is the same mechanism iteration 2 built for
+ * `in`, at higher volume — the list length here is the *parent row count*, so
+ * it varies with the data rather than with the code. On SQLite each distinct
+ * length is its own plan text and the plan cache's LRU bound is what contains
+ * it; on Postgres the whole list binds to one parameter, and `planKey` asks the
+ * dialect so that one entry serves every length rather than one per parent
+ * count. No second mechanism either way.
  */
 function childQuery(
   node: unknown,
@@ -881,10 +947,57 @@ function index(
 
 /**
  * `Map` keys compare by identity for objects, so two `Date`s holding the same
- * instant are two different keys. Both sides of a stitch are decoded by the
- * same dialect from the same declared type, so this only has to cover the
- * decoded shapes that are objects.
+ * instant — or two `Uint8Array`s holding the same bytes — are two different
+ * keys. Both sides of a stitch are decoded by the same dialect from the same
+ * declared type, so only the decoded shapes that are objects need covering, but
+ * they need covering *exhaustively*: a key kind that falls through compares by
+ * reference, every lookup misses, and the relation silently stitches to `[]` or
+ * `null`. That is the same failure this function exists to prevent, and it is
+ * silent in the same way — hence the throw rather than a fallthrough.
  */
 function keyOf(value: unknown): unknown {
-  return value instanceof Date ? value.getTime() : value;
+  if (typeof value !== "object" || value === null) return value;
+  if (value instanceof Date) return value.getTime();
+  if (ArrayBuffer.isView(value)) {
+    const bytes = new Uint8Array(
+      (value as ArrayBufferView).buffer,
+      (value as ArrayBufferView).byteOffset,
+      (value as ArrayBufferView).byteLength,
+    );
+    let hex = "";
+    for (const byte of bytes) hex += byte.toString(16).padStart(2, "0");
+    return `bytes:${hex}`;
+  }
+  // Unreachable: `assertKeyable` refuses a join key whose declared type decodes
+  // to any other object at plan time, where the model and field are in scope
+  // for the message. Worth asserting rather than falling through to a reference
+  // comparison that returns empty relations.
+  throw new Error(
+    `Cannot key a relation stitch on ${Object.prototype.toString.call(value)}.`,
+  );
+}
+
+/**
+ * Refuses a join key whose values cannot be compared *by value* once decoded.
+ *
+ * Every scalar Prisma can put in a foreign key compares fine — numbers,
+ * strings, bigints, booleans — and `Date` and `Bytes` are normalised by
+ * `keyOf`. `Json` is the one that cannot be: it decodes to a fresh object per
+ * row, so the two sides of a stitch would never match and the relation would
+ * come back empty rather than wrong-looking. Prisma cannot declare such a
+ * relation, so this only fires on a hand-edited artifact — which is exactly
+ * when a clear message is worth having.
+ */
+function assertKeyable(
+  schema: ModelSchema,
+  relation: RelationSchema,
+  key: FieldSchema,
+): void {
+  if (key.type !== "Json") return;
+  throw new MalformedRelationError(
+    schema.name,
+    relation.name,
+    `it joins on '${key.name}', a ${key.type} — which decodes to a new object ` +
+      `per row and so cannot be compared between the two sides.`,
+  );
 }

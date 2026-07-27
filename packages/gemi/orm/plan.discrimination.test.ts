@@ -72,7 +72,7 @@ describe("plan cache discrimination", () => {
   test("every shape in the table gets its own key", () => {
     const keys = new Map<string, string>();
     for (const [label, args] of DISTINCT_SHAPES) {
-      const key = planKey("sqlite", "User", "findMany", args);
+      const key = planKey(sqlite, "User", "findMany", args);
       const clash = keys.get(key);
       expect(clash, `"${label}" collides with "${clash}"`).toBeUndefined();
       keys.set(key, label);
@@ -123,7 +123,7 @@ describe("plan cache discrimination", () => {
       expect(getOrCompile(user, "findMany", args, sqlite).text, label).toBe(
         base,
       );
-      keys.add(planKey("sqlite", "User", "findMany", args));
+      keys.add(planKey(sqlite, "User", "findMany", args));
     }
 
     expect(keys.size).toBe(VACUOUS.length);
@@ -142,7 +142,7 @@ describe("plan cache discrimination", () => {
       const plan = getOrCompile(user, "findMany", args, sqlite);
       expect(plan.text, label).toMatch(/where false$/);
       expect(plan.bind(args), label).toEqual([]);
-      keys.add(planKey("sqlite", "User", "findMany", args));
+      keys.add(planKey(sqlite, "User", "findMany", args));
     }
     expect(keys.size).toBe(NEVER_MATCHES.length);
   });
@@ -151,11 +151,11 @@ describe("plan cache discrimination", () => {
   // they must share a plan — the magnitude is bound, only the sign is
   // structural.
   test("take magnitude shares a plan but take sign does not", () => {
-    expect(planKey("sqlite", "User", "findMany", { take: 10 })).toBe(
-      planKey("sqlite", "User", "findMany", { take: 20 }),
+    expect(planKey(sqlite, "User", "findMany", { take: 10 })).toBe(
+      planKey(sqlite, "User", "findMany", { take: 20 }),
     );
-    expect(planKey("sqlite", "User", "findMany", { take: 10 })).not.toBe(
-      planKey("sqlite", "User", "findMany", { take: -10 }),
+    expect(planKey(sqlite, "User", "findMany", { take: 10 })).not.toBe(
+      planKey(sqlite, "User", "findMany", { take: -10 }),
     );
   });
 
@@ -163,7 +163,7 @@ describe("plan cache discrimination", () => {
     const args = { where: { id: 1 } };
     const keys = new Set(
       (["findMany", "findFirst", "findUnique", "count"] as const).map((op) =>
-        planKey("sqlite", "User", op, args),
+        planKey(sqlite, "User", op, args),
       ),
     );
     expect(keys.size).toBe(4);
@@ -171,8 +171,8 @@ describe("plan cache discrimination", () => {
 
   test("the dialect is part of the key", () => {
     const args = { where: { id: { in: [1, 2] } } };
-    expect(planKey("sqlite", "User", "findMany", args)).not.toBe(
-      planKey("postgres", "User", "findMany", args),
+    expect(planKey(sqlite, "User", "findMany", args)).not.toBe(
+      planKey(postgres, "User", "findMany", args),
     );
 
     // ...and they really do compile differently, which is why they must not
@@ -183,9 +183,10 @@ describe("plan cache discrimination", () => {
   });
 
   // Postgres is the exception that proves the point: there, every in-length
-  // shares one SQL text on purpose, so the extra cache entries are the cost of
-  // SQLite's expansion rather than something to eliminate everywhere.
-  test("postgres compiles every in-length to one text", () => {
+  // shares one SQL text on purpose — so it shares one cache entry too, and the
+  // extra entries are the cost of SQLite's expansion rather than a fact about
+  // `in` lists. `planKey` asks the dialect which it is.
+  test("postgres compiles every in-length to one text, under one key", () => {
     const texts = new Set(
       [[1], [1, 2], [1, 2, 3]].map(
         (values) =>
@@ -194,6 +195,7 @@ describe("plan cache discrimination", () => {
       ),
     );
     expect(texts.size).toBe(1);
+    expect(planCacheStats()).toMatchObject({ compiles: 1, size: 1 });
   });
 });
 
@@ -299,10 +301,10 @@ describe("the plan cache is bounded", () => {
  */
 describe("structural keying stops at a value boundary", () => {
   test("a nested where does not leak its values into the key", () => {
-    const a = planKey("sqlite", "User", "findMany", {
+    const a = planKey(sqlite, "User", "findMany", {
       include: { accounts: { where: { publicId: "secret-value" } } },
     });
-    const b = planKey("sqlite", "User", "findMany", {
+    const b = planKey(sqlite, "User", "findMany", {
       include: { accounts: { where: { publicId: "another-value" } } },
     });
 
@@ -312,11 +314,11 @@ describe("structural keying stops at a value boundary", () => {
 
   test("but the structural part of a nested selection still discriminates", () => {
     expect(
-      planKey("sqlite", "User", "findMany", {
+      planKey(sqlite, "User", "findMany", {
         include: { accounts: { orderBy: { id: "asc" } } },
       }),
     ).not.toBe(
-      planKey("sqlite", "User", "findMany", {
+      planKey(sqlite, "User", "findMany", {
         include: { accounts: { orderBy: { id: "desc" } } },
       }),
     );

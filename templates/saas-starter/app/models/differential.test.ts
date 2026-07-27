@@ -297,6 +297,19 @@ const CASES: [string, string, unknown][] = [
 
   // --- relations: to-one -------------------------------------------------
   ["include to-one", "findMany", { include: { organization: true } }],
+  // Prisma's to-one include takes a `where` — it filters, and the relation
+  // comes back null when nothing matches — but not an `orderBy`, since there is
+  // at most one row to order. Both halves are pinned here rather than argued
+  // from the types: the second case is agreement that *both* clients refuse it.
+  ["include to-one with where", "findMany", {
+    include: { organization: { where: { name: "Acme" } } },
+  }],
+  ["include to-one with where matching nothing", "findMany", {
+    include: { organization: { where: { name: "nobody" } } },
+  }],
+  ["include to-one with orderBy is refused by both", "findMany", {
+    include: { organization: { orderBy: { id: "asc" } } },
+  }],
   ["include to-one with select", "findMany", {
     include: { organization: { select: { name: true } } },
   }],

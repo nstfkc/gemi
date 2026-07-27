@@ -3,12 +3,13 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { SqliteDialect } from "../dialect/sqlite";
 import {
   RelationDepthExceededError,
+  UnknownFieldError,
   UnknownRelationError,
   UnregisteredRelationTargetError,
   UnsupportedQueryError,
 } from "../errors";
 import { account, organization, post, tag, user } from "../fixtures";
-import { clearRegistry, register } from "../registry";
+import { clearRegistry, get, register } from "../registry";
 import type { ModelSchema } from "../schema";
 import { attachRelations } from "./plan-relations";
 import { compileRead } from "./read";
@@ -40,12 +41,24 @@ function matches(row: Row, where: any): boolean {
       continue;
     }
     if (value !== null && typeof value === "object" && "in" in (value as any)) {
-      if (!(value as any).in.includes(row[key])) return false;
+      const wanted = (value as any).in.map(compare);
+      if (!wanted.includes(compare(row[key]))) return false;
       continue;
     }
-    if (row[key] !== value) return false;
+    if (compare(row[key]) !== compare(value)) return false;
   }
   return true;
+}
+
+/**
+ * A real database compares a `Bytes` column by value; `Array.includes` compares
+ * two `Uint8Array`s by reference. Without this the stand-in would find nothing
+ * for a bytes key and the test would pass or fail for the wrong reason.
+ */
+function compare(value: unknown): unknown {
+  return ArrayBuffer.isView(value)
+    ? `bytes:${[...(value as Uint8Array)].join(",")}`
+    : value;
 }
 
 function project(row: Row, select: any): Row {
@@ -84,11 +97,28 @@ function registerAll() {
   return models;
 }
 
+/**
+ * The executor `Model.$exec` would have handed in, built from the same registry
+ * so that spying on a fake model's `$exec` still observes the relation query.
+ * `query` is only reached by the implicit m-n join hop.
+ */
+function executor(pairs: Row[] = []) {
+  return {
+    exec: (model: string, op: string, args: unknown) =>
+      registryGet(model).$exec(op, args),
+    query: vi.fn(async (_text: string, _values: unknown[]) => pairs),
+  };
+}
+
+function registryGet(name: string) {
+  return get<{ $exec: (op: string, args: unknown) => Promise<unknown> }>(name);
+}
+
 /** Compile, shape driver rows, load relations — the whole read path but the SQL. */
 async function read(args: any, rows: Row[] = USER_ROWS) {
   const plan = compileRead(user, "findMany", args, sqlite);
   const shaped = plan.shape(rows);
-  await attachRelations(plan.relations!, plan.hidden, shaped, args);
+  await attachRelations(plan.relations!, plan.hidden, shaped, args, executor());
   return shaped as Row[];
 }
 
@@ -373,6 +403,49 @@ describe("rejected arguments", () => {
     );
   });
 
+  // Verified against Prisma rather than reasoned about: it rejects `orderBy` on
+  // a to-one include — `Unknown argument 'orderBy'`, listing `where?` as one of
+  // the options it does take — and accepts `where`, which filters and leaves
+  // the relation `null` when nothing matches. Both halves matter: gating
+  // `where` too would refuse a query Prisma runs.
+  test("orderBy is refused on a to-one and accepted on a to-many", () => {
+    registerAll();
+    expect(() =>
+      compile({ include: { organization: { orderBy: { id: "asc" } } } }),
+    ).toThrow(/does not accept 'orderBy' on a to-one relation/);
+    expect(() =>
+      compile({ include: { accounts: { orderBy: { id: "asc" } } } }),
+    ).not.toThrow();
+  });
+
+  test("where is accepted on both kinds", () => {
+    registerAll();
+    expect(() =>
+      compile({ include: { organization: { where: { name: "Acme" } } } }),
+    ).not.toThrow();
+    expect(() =>
+      compile({ include: { accounts: { where: { organizationRole: 0 } } } }),
+    ).not.toThrow();
+  });
+
+  // The depth walk exists because a guard that sees one level at a time catches
+  // things a query too late. A misspelled column is one of those things.
+  test("a misspelled field deep in the tree is caught at root compile", () => {
+    registerAll();
+    expect(() =>
+      compile({
+        include: {
+          accounts: { include: { user: { select: { emial: true } } } },
+        },
+      }),
+    ).toThrow(UnknownFieldError);
+    expect(() =>
+      compile({
+        include: { accounts: { select: { organizationRole: true } } },
+      }),
+    ).not.toThrow();
+  });
+
   test("an unknown relation argument is named precisely", () => {
     registerAll();
     expect(() => compile({ include: { accounts: { cursor: {} } } })).toThrow(
@@ -437,6 +510,69 @@ describe("guards", () => {
   });
 });
 
+// Both sides of a stitch are decoded from the same declared type, so the only
+// question is whether that decoded shape compares by value. Anything that does
+// not, and is not normalised, silently produces empty relations rather than
+// wrong ones — the quietest failure in the file.
+describe("join keys that are not plain scalars", () => {
+  /** `Bytes` on both sides: distinct Uint8Arrays holding the same bytes. */
+  function bytesPair() {
+    const owner: ModelSchema = {
+      name: "Blob",
+      table: "Blob",
+      fields: {
+        id: { name: "id", column: "id", type: "Bytes", nullable: false, isId: true, isUpdatedAt: false },
+      },
+      primaryKey: ["id"],
+      uniques: [],
+      relations: {
+        chunks: { name: "chunks", model: "Chunk", kind: "many", relationName: "BlobToChunk", from: [], to: [], nullable: false },
+      },
+    };
+    const child: ModelSchema = {
+      name: "Chunk",
+      table: "Chunk",
+      fields: {
+        id: { name: "id", column: "id", type: "Int", nullable: false, isId: true, isUpdatedAt: false },
+        blobId: { name: "blobId", column: "blobId", type: "Bytes", nullable: false, isId: false, isUpdatedAt: false },
+      },
+      primaryKey: ["id"],
+      uniques: [],
+      relations: {
+        blob: { name: "blob", model: "Blob", kind: "one", relationName: "BlobToChunk", from: ["blobId"], to: ["id"], nullable: false },
+      },
+    };
+    return { owner, child };
+  }
+
+  test("a Bytes key stitches by value, not by reference", async () => {
+    const { owner, child } = bytesPair();
+    register("Blob", fake(owner, []));
+    register("Chunk", fake(child, [
+      // A *different* Uint8Array holding the same bytes as the parent's id,
+      // which is what comes back from a second query.
+      { id: 1, blobId: new Uint8Array([1, 2, 3]) },
+    ]));
+
+    const plan = compileRead(owner, "findMany", { include: { chunks: true } }, sqlite);
+    const rows = plan.shape([{ id: new Uint8Array([1, 2, 3]) }]) as Row[];
+    await attachRelations(plan.relations!, plan.hidden, rows, {}, executor());
+
+    expect(rows[0].chunks).toHaveLength(1);
+  });
+
+  test("a Json key is refused at compile, naming the field", () => {
+    const { owner, child } = bytesPair();
+    const json = { ...owner, fields: { id: { ...owner.fields.id, type: "Json" as const } } };
+    register("Blob", fake(json, []));
+    register("Chunk", fake(child, []));
+
+    expect(() =>
+      compileRead(json, "findMany", { include: { chunks: true } }, sqlite),
+    ).toThrow(/joins on 'id', a Json/);
+  });
+});
+
 describe("implicit many-to-many", () => {
   test("plans a two-hop join through the _Relation table", () => {
     register("Post", fake(post, []));
@@ -450,6 +586,50 @@ describe("implicit many-to-many", () => {
       parentField: "id",
     });
     expect(plan.text).toBe('select "id", "title" from "Post"');
+  });
+
+  // The join table has no model, so its hop is the executor's `query` rather
+  // than an `$exec` — which is exactly what makes it observable here.
+  test("reads the pairs, then the rows, and stitches through both", async () => {
+    register("Post", fake(post, []));
+    const tags = fake(tag, [
+      { id: 1, label: "red" },
+      { id: 2, label: "blue" },
+    ]);
+    register("Tag", tags);
+
+    const plan = compileRead(post, "findMany", { include: { tags: true } }, sqlite);
+    const rows = plan.shape([
+      { id: 1, title: "first" },
+      { id: 2, title: "second" },
+      { id: 3, title: "untagged" },
+    ]) as Row[];
+
+    const run = executor([
+      { A: 1, B: 1 },
+      { A: 1, B: 2 },
+      { A: 2, B: 2 },
+    ]);
+    await attachRelations(plan.relations!, plan.hidden, rows, {}, run);
+
+    // Parent ids go into the `A` side and come back as `B`s...
+    expect(run.query).toHaveBeenCalledTimes(1);
+    expect(run.query.mock.calls[0][0]).toBe(
+      `select "A", "B" from "_PostToTag" where "A" in (?, ?, ?)`,
+    );
+    expect(run.query.mock.calls[0][1]).toEqual([1, 2, 3]);
+
+    // ...and only the tags those pairs name are fetched, once.
+    expect(tags.$exec).toHaveBeenCalledTimes(1);
+    expect(tags.$exec).toHaveBeenCalledWith("findMany", {
+      where: { id: { in: [1, 2] } },
+    });
+
+    expect(rows.map((row) => (row.tags as Row[]).map((t) => t.label))).toEqual([
+      ["red", "blue"],
+      ["blue"],
+      [],
+    ]);
   });
 
   test("refuses a self-referential implicit m-n rather than guessing", () => {

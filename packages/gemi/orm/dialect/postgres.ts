@@ -14,52 +14,6 @@ import type { SqlDialect } from "./index";
 // entirely a pass-through. That asymmetry with SQLite is the point: the same
 // query returns the same JavaScript values on both dialects, which is exactly
 // what the differential harness checks.
-/**
- * `[1, 2]` -> `{"1","2"}`: Postgres' text form for an array value.
- *
- * Every element is quoted, including numbers and booleans — Postgres casts a
- * quoted element to the array's element type, so one rule covers every column
- * type instead of a per-type branch that has to stay in step with `encode`.
- * `NULL` is the one thing that cannot be quoted, since `"NULL"` is the string.
- *
- * Verified against a real database for `int`, `text` (with quotes, commas,
- * braces, backslashes and newlines in the value), `timestamp`, `boolean`,
- * `bigint` past 2^53, `bytea` and `double precision`.
- */
-function arrayLiteral(values: unknown[]): string {
-  let out = "{";
-  for (let i = 0; i < values.length; i++) {
-    if (i > 0) out += ",";
-    out += arrayElement(values[i]);
-  }
-  return out + "}";
-}
-
-function arrayElement(value: unknown): string {
-  if (value === null || value === undefined) return "NULL";
-
-  // ISO 8601 keeps the value's own UTC wall clock, which is what Prisma stores
-  // in a `timestamp(3)`; the zone designator is ignored on the way in.
-  if (value instanceof Date) return `"${value.toISOString()}"`;
-
-  if (ArrayBuffer.isView(value)) {
-    let hex = "";
-    for (const byte of new Uint8Array(
-      value.buffer,
-      value.byteOffset,
-      value.byteLength,
-    )) {
-      hex += byte.toString(16).padStart(2, "0");
-    }
-    // `\x…` is Postgres' hex bytea form, and the backslash is doubled because
-    // the array literal parser reads one level of escapes first.
-    return `"\\\\x${hex}"`;
-  }
-
-  const text = typeof value === "string" ? value : String(value);
-  return `"${text.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
-}
-
 export class PostgresDialect implements SqlDialect {
   readonly name: Dialect = "postgres";
 
@@ -68,6 +22,9 @@ export class PostgresDialect implements SqlDialect {
   // and has no way to opt out. Prisma has the same split; gemi matches Prisma
   // per dialect rather than inventing a uniformity Prisma does not have.
   readonly supportsInsensitiveMode = true;
+
+  // `= any($1)`: one parameter, one SQL text, one plan for every list length.
+  readonly bindsListAsOneParameter = true;
 
   quoteIdent(name: string): string {
     // See the SQLite implementation: NUL is the parameter sentinel in
@@ -161,4 +118,50 @@ export class PostgresDialect implements SqlDialect {
   decode(value: unknown, _field: FieldSchema): unknown {
     return value ?? null;
   }
+}
+
+/**
+ * `[1, 2]` -> `{"1","2"}`: Postgres' text form for an array value.
+ *
+ * Every element is quoted, including numbers and booleans — Postgres casts a
+ * quoted element to the array's element type, so one rule covers every column
+ * type instead of a per-type branch that has to stay in step with `encode`.
+ * `NULL` is the one thing that cannot be quoted, since `"NULL"` is the string.
+ *
+ * Verified against a real database for `int`, `text` (with quotes, commas,
+ * braces, backslashes and newlines in the value), `timestamp`, `boolean`,
+ * `bigint` past 2^53, `bytea` and `double precision`.
+ */
+function arrayLiteral(values: unknown[]): string {
+  let out = "{";
+  for (let i = 0; i < values.length; i++) {
+    if (i > 0) out += ",";
+    out += arrayElement(values[i]);
+  }
+  return out + "}";
+}
+
+function arrayElement(value: unknown): string {
+  if (value === null || value === undefined) return "NULL";
+
+  // ISO 8601 keeps the value's own UTC wall clock, which is what Prisma stores
+  // in a `timestamp(3)`; the zone designator is ignored on the way in.
+  if (value instanceof Date) return `"${value.toISOString()}"`;
+
+  if (ArrayBuffer.isView(value)) {
+    let hex = "";
+    for (const byte of new Uint8Array(
+      value.buffer,
+      value.byteOffset,
+      value.byteLength,
+    )) {
+      hex += byte.toString(16).padStart(2, "0");
+    }
+    // `\x…` is Postgres' hex bytea form, and the backslash is doubled because
+    // the array literal parser reads one level of escapes first.
+    return `"\\\\x${hex}"`;
+  }
+
+  const text = typeof value === "string" ? value : String(value);
+  return `"${text.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }

@@ -57,6 +57,9 @@ export class SqliteDialect implements SqlDialect {
   // legitimately return different rows for the same `contains`.
   readonly supportsInsensitiveMode = false;
 
+  // `in (?, ?, ?)`: the length is part of the text, so it is part of the plan.
+  readonly bindsListAsOneParameter = false;
+
   quoteIdent(name: string): string {
     // NUL is the parameter sentinel in compile/fragment.ts, so it is the one
     // character that could shift a placeholder's position rather than merely
