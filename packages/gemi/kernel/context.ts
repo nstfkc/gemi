@@ -5,13 +5,22 @@ import { AsyncLocalStorage } from "async_hooks";
  * `Kernel.run()` enters it once per request, websocket message or cron tick,
  * and `foundation/app.ts` reads it to resolve services.
  *
- * There was exactly one AsyncLocalStorage in the framework until iteration 5 of
- * the ORM. There are now two, and this note is here so that claim does not
- * quietly become false where someone would otherwise still be relying on it.
+ * "The framework's only AsyncLocalStorage" is a claim that used to sit here. It
+ * was already not true — the *kernel's* is the only one, but `http/`, `pubsub/`
+ * and now the ORM each keep their own:
  *
- * The second is `packages/gemi/orm/context.ts`, holding an open transaction
- * handle and its nesting depth. It is deliberately separate rather than merged
- * into this one:
+ *   kernel     kernel/context.ts                     the Application
+ *   request    http/requestContext.ts                req, user, cookies, locale
+ *   broadcast  services/pubsub/BroadcastManager.ts   headers, cookies
+ *   orm        orm/context.ts                        an open transaction
+ *
+ * The pattern is one store per scope with one owner, entered by that owner and
+ * read through its own accessor — `app()`, `RequestContext.getStore()`,
+ * `currentTransaction()`. What matters is that this one holds the Application
+ * and nothing else, because `foundation/app.ts` reads it unconditionally.
+ *
+ * The ORM's, added in iteration 5, holds an open transaction handle and its
+ * nesting depth. It is deliberately separate rather than merged into this one:
  *
  * - A transaction scope nests *inside* an Application scope without replacing
  *   it. Re-entering this store with a `{ app, tx }` wrapper would mean every
@@ -23,13 +32,13 @@ import { AsyncLocalStorage } from "async_hooks";
  *   overlapping transactions would overwrite each other's handle and statements
  *   would land in the wrong one. That is silent data corruption.
  *
- * The cost is honest: two stores on the hot path of every query instead of one.
- * The ORM's is shallow — one small object, entered only inside
- * `Model.transaction` or `DB.transaction`, never per request — so a query
- * outside a transaction pays one `getStore()` returning undefined.
+ * The cost is honest: one more store on the hot path of every query. The ORM's
+ * is shallow — one small object, entered only inside `Model.transaction` or
+ * `DB.transaction`, never per request — so a query outside a transaction pays
+ * one `getStore()` returning undefined.
  *
- * If a third is ever proposed, this is the note to read first: the bar is that
- * the state is genuinely per-async-scope *and* cannot live in an existing
- * store without making that store's readers ambiguous.
+ * If another is ever proposed, this is the note to read first: the bar is that
+ * the state is genuinely per-async-scope *and* cannot live in an existing store
+ * without making that store's readers ambiguous.
  */
 export const kernelContext = new AsyncLocalStorage();

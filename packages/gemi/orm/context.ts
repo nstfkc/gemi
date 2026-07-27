@@ -5,13 +5,15 @@ import { AsyncLocalStorage } from "node:async_hooks";
  * The ambient transaction: the ORM's own `AsyncLocalStorage`, holding nothing
  * but the open handle and how deep the nesting is.
  *
- * This is the second `AsyncLocalStorage` in the framework, and the first one
- * that is not the kernel's. `packages/gemi/kernel/context.ts` carries the
- * Application and says so; the reasoning for adding a second rather than
- * widening that one is written up beside it, and the short version is that a
- * transaction scope has to *nest inside* an Application scope without replacing
- * it, and `foundation/app.ts` must keep reading exactly one shape out of the
- * kernel store or resolving a service becomes a transaction concern.
+ * One store per scope with one owner, which is the pattern the framework
+ * already follows — `kernel/context.ts` holds the Application,
+ * `http/requestContext.ts` the request and its user,
+ * `services/pubsub/BroadcastManager.ts` a socket's headers. The reasoning for
+ * not folding this into the kernel's is written up beside it, and the short
+ * version is that a transaction scope has to *nest inside* an Application scope
+ * without replacing it, and `foundation/app.ts` must keep reading exactly one
+ * shape out of the kernel store or resolving a service becomes a transaction
+ * concern.
  *
  * What makes an ALS the right home rather than a field somewhere: two concurrent
  * requests each in their own transaction must never see each other's handle.
