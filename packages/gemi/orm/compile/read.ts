@@ -1,10 +1,11 @@
 import type { SqlDialect } from "../dialect";
 import { UnsupportedQueryError } from "../errors";
 import type { Operation, QueryPlan } from "../plan";
-import type { ModelSchema } from "../schema";
+import type { FieldSchema, ModelSchema } from "../schema";
 import { buildRowShaper } from "../shape";
 import { type Binder, type Fragment, concat, joinFragments, render, sql } from "./fragment";
 import { compileOrderBy, parseOrderBy, reverse, type OrderTerm } from "./orderBy";
+import { planRelations } from "./plan-relations";
 import { resolveSelection } from "./select";
 import { compileWhere } from "./where";
 
@@ -106,7 +107,10 @@ export function compileRead(
     };
   }
 
-  const fields = resolveSelection(schema, args, op);
+  const selection = resolveSelection(schema, args, op);
+  const { plans, keyFields } = planRelations(schema, args, dialect, op);
+  const { fields, hidden } = withKeyFields(schema, selection, keyFields);
+
   const columns = joinFragments(
     fields.map((field) => sql(dialect.quoteIdent(field.column))),
     ", ",
@@ -135,12 +139,18 @@ export function compileRead(
   );
 
   const { text, binders } = render(statement, dialect);
-  const shaper = buildRowShaper(fields, dialect);
+  const shaper = buildRowShaper(
+    fields,
+    dialect,
+    plans.map((plan) => ({ key: plan.as, kind: plan.kind })),
+  );
   const single = SINGLE_ROW.has(op);
 
   return {
     text,
     bind: binder(binders),
+    relations: plans.length > 0 ? plans : undefined,
+    hidden,
     shape(rows) {
       const shaped = shaper(rows);
       // A negative `take` means "the last N". The ordering terms were flipped
@@ -154,6 +164,39 @@ export function compileRead(
       // where the model's name is in scope for the message.
       return single ? (shaped[0] ?? null) : shaped;
     },
+  };
+}
+
+/**
+ * Adds the columns the relation planner needs to stitch on, and reports which
+ * of them the caller did not ask for.
+ *
+ * `select: { name: true, accounts: true }` returns `{ name, accounts }` — no
+ * `id` — but the accounts cannot be found without `User.id`. So it is selected,
+ * shaped, used, and then deleted (see `attachRelations`). Under an `include`,
+ * or a `select` that names the key itself, nothing is hidden and nothing is
+ * deleted.
+ */
+function withKeyFields(
+  schema: ModelSchema,
+  selection: FieldSchema[],
+  keyFields: string[],
+): { fields: FieldSchema[]; hidden?: string[] } {
+  if (keyFields.length === 0) return { fields: selection };
+
+  const present = new Set(selection.map((field) => field.name));
+  const missing = keyFields.filter((name) => !present.has(name));
+  if (missing.length === 0) return { fields: selection };
+
+  const wanted = new Set([...present, ...missing]);
+  return {
+    // Rebuilt in schema order rather than appended, so the emitted column list
+    // depends only on *which* fields are selected and never on how they were
+    // reached.
+    fields: Object.values(schema.fields).filter((field) =>
+      wanted.has(field.name),
+    ),
+    hidden: missing,
   };
 }
 
@@ -245,16 +288,6 @@ function assertArgs(schema: ModelSchema, op: Operation, args: any): void {
     if (args[key] === undefined) continue;
     if (!allowed.has(key)) {
       throw new UnsupportedQueryError(key, schema.name, op);
-    }
-    // `include` is in the accepted set so it reaches this specific message
-    // rather than being reported as if it were a typo.
-    if (key === "include") {
-      throw new UnsupportedQueryError(
-        "include",
-        schema.name,
-        op,
-        "Relations are not implemented yet.",
-      );
     }
   }
 }

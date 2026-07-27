@@ -1,0 +1,890 @@
+import { DatabaseManager } from "../../database/DatabaseManager";
+import { app } from "../../foundation/app";
+import type { SqlDialect } from "../dialect";
+import {
+  MalformedRelationError,
+  MissingModelSchemaError,
+  RelationDepthExceededError,
+  UnknownRelationError,
+  UnregisteredRelationTargetError,
+  UnsupportedQueryError,
+} from "../errors";
+import * as registry from "../registry";
+import type { FieldSchema, ModelSchema, RelationSchema } from "../schema";
+import { concat, render, sql } from "./fragment";
+
+/**
+ * The relation planner: an include tree plus a root model in, a *strategy* out.
+ *
+ * Three strategies exist and the right one is dialect- and query-dependent
+ * (invariant 4): batched separate queries, a plain `JOIN`, and `LATERAL` +
+ * `json_agg`. This file implements exactly one — batching — but the seam is the
+ * point: iteration 7's lateral form has to be a sibling `RelationStrategy`, not
+ * a rewrite of everything that reads relations.
+ *
+ * The strategy interface is deliberately narrow: given a parent schema and one
+ * relation node, produce (a) the parent field the stitch keys on, and (b) a
+ * `load` that fetches the children and attaches them to the parent rows. What
+ * SQL that takes, and how many statements, is entirely the strategy's business.
+ */
+
+/** The keys a relation node accepts. `take` / `skip` are refused; see below. */
+const RELATION_ARGS = new Set(["where", "orderBy", "select", "include"]);
+
+/**
+ * How deep an include tree may nest. Not a modelling limit — a legal tree can
+ * be arbitrarily deep and this is far past anything hand-written — but a guard
+ * against an argument tree that was generated or forwarded from a request.
+ */
+export const MAX_RELATION_DEPTH = 10;
+
+type Row = Record<string, unknown>;
+
+/**
+ * The registry hands back model *classes*; the planner only ever needs these
+ * two statics off them. Typed structurally rather than by importing `Model`,
+ * which would make `compile/` depend on the class it is compiled for.
+ */
+interface RelatedModel {
+  $schema?: ModelSchema;
+  $exec(op: string, args: unknown): Promise<unknown>;
+}
+
+/** One relation as it appears in an `include` / `select` argument tree. */
+interface RelationNode {
+  /** The key on the parent's output object. */
+  as: string;
+  relation: RelationSchema;
+  /** `true`, or the node's own `{ where, orderBy, select, include }`. */
+  node: unknown;
+  /**
+   * Re-locates this node inside the caller's argument tree at run time. The
+   * plan is compiled once per argument *shape* and reused across calls, so the
+   * node's `where` *values* have to be read from the call, never captured here.
+   */
+  locate: (args: any) => any;
+}
+
+export interface RelationRequest {
+  parent: ModelSchema;
+  child: ModelSchema;
+  relation: RelationSchema;
+  as: string;
+  node: unknown;
+  locate: (args: any) => any;
+  dialect: SqlDialect;
+  operation: string;
+}
+
+export interface RelationPlan {
+  /** The key this relation is written to on each parent row. */
+  as: string;
+  kind: "one" | "many";
+  /**
+   * The parent *field* whose value keys the stitch. The root query must select
+   * it even when the caller's `select` did not ask for it.
+   */
+  parentField: string;
+  /** Which strategy produced this plan. Reported by tests and, later, metrics. */
+  strategy: string;
+  /** Fetches the children for these parents and attaches them in place. */
+  load(parents: Row[], args: any): Promise<void>;
+}
+
+export interface RelationStrategy {
+  readonly name: string;
+  plan(request: RelationRequest): RelationPlan;
+}
+
+export interface RelationPlanning {
+  plans: RelationPlan[];
+  /** Parent fields the root query must select for stitching to be possible. */
+  keyFields: string[];
+}
+
+export function planRelations(
+  schema: ModelSchema,
+  args: any,
+  dialect: SqlDialect,
+  operation: string,
+  strategy: RelationStrategy = batchedStrategy,
+): RelationPlanning {
+  const nodes = relationNodes(schema, args, operation);
+  if (nodes.length === 0) return { plans: [], keyFields: [] };
+
+  const plans: RelationPlan[] = [];
+  const keyFields = new Set<string>();
+
+  for (const node of nodes) {
+    assertNodeArgs(schema, node, operation);
+    const child = resolveSchema(schema, node);
+
+    // Only the first level becomes a plan here: a child query runs through
+    // `$exec` on the child's own model class, so its own include tree is
+    // compiled by its own call (invariant 1). The *whole* tree is still walked
+    // now, because the depth guard is worthless if it only ever sees one level
+    // at a time — an unbounded tree would be caught one query too late, every
+    // time, forever.
+    validateSubtree(child, node.node, operation, 2);
+
+    const plan = strategy.plan({
+      parent: schema,
+      child,
+      relation: node.relation,
+      as: node.as,
+      node: node.node,
+      locate: node.locate,
+      dialect,
+      operation,
+    });
+
+    plans.push(plan);
+    keyFields.add(plan.parentField);
+  }
+
+  return { plans, keyFields: [...keyFields] };
+}
+
+/**
+ * Runs after the parent rows are shaped: loads every relation node and drops
+ * the key columns that were only selected to make stitching possible.
+ *
+ * One query per **node in the include tree**, not per row. A depth-3 tree with
+ * two branches is 5 queries over 100 parents, not 500 — the thing everyone
+ * assumes is wrong when they first read the query log. `relations.test.ts`
+ * asserts the count, because an accidental N+1 is otherwise invisible until it
+ * is in production.
+ */
+export async function attachRelations(
+  relations: readonly RelationPlan[],
+  hidden: readonly string[] | undefined,
+  result: unknown,
+  args: any,
+): Promise<void> {
+  const parents: Row[] = Array.isArray(result)
+    ? (result as Row[])
+    : result === null || result === undefined
+      ? []
+      : [result as Row];
+
+  if (parents.length === 0) return;
+
+  // Sequentially, not `Promise.all`: sibling relations are independent queries
+  // and running them concurrently is a real win on Postgres, but iteration 5
+  // puts an ambient transaction on a single reserved connection, where
+  // concurrent statements are not safe. Parallelism belongs with iteration 7,
+  // which owns performance and can measure it.
+  for (const relation of relations) {
+    await relation.load(parents, args);
+  }
+
+  if (hidden && hidden.length > 0) {
+    // A `select` that omits the join key still has to *fetch* it. Deleting is
+    // the price of that, and it is confined to exactly this case: with no
+    // `select`, or a `select` that already names the key, `hidden` is empty and
+    // this never runs.
+    for (const parent of parents) {
+      for (const key of hidden) delete parent[key];
+    }
+  }
+}
+
+// --- the include tree ------------------------------------------------------
+
+/**
+ * Pulls the relation nodes out of an `include` or a `select`.
+ *
+ * Prisma allows relations in both, and they mean different things about the
+ * *scalars*: `include` keeps them all, `select` keeps only what it names. What
+ * they mean about relations is identical, so both funnel through here.
+ */
+function relationNodes(
+  schema: ModelSchema,
+  args: any,
+  operation: string,
+): RelationNode[] {
+  if (args === undefined || args === null) return [];
+
+  const include = args.include;
+  const select = args.select;
+
+  assertExclusive(schema, include, select, operation);
+
+  const out: RelationNode[] = [];
+
+  if (include !== undefined && include !== null) {
+    if (typeof include !== "object" || Array.isArray(include)) {
+      throw new UnsupportedQueryError(
+        "include",
+        schema.name,
+        operation,
+        "Expected an object.",
+      );
+    }
+
+    // Sorted for the same reason `where` is: the plan cache canonicalises key
+    // order, so two argument objects differing only in key order are one entry
+    // and must therefore produce one plan.
+    for (const key of Object.keys(include).sort()) {
+      const node = include[key];
+      if (node === undefined || node === false) continue;
+
+      const relation = schema.relations[key];
+      if (!relation) {
+        throw new UnknownRelationError(
+          key,
+          schema.name,
+          Object.keys(schema.relations),
+        );
+      }
+
+      out.push({
+        as: key,
+        relation,
+        node,
+        locate: (args: any) => args?.include?.[key],
+      });
+    }
+    return out;
+  }
+
+  if (select !== undefined && select !== null && typeof select === "object") {
+    for (const key of Object.keys(select).sort()) {
+      const node = (select as Record<string, unknown>)[key];
+      if (node === undefined || node === false) continue;
+
+      // A scalar key, or a typo in one — `resolveSelection` owns both, and
+      // reports a typo against the field list rather than the relation list.
+      const relation = schema.relations[key];
+      if (!relation) continue;
+
+      out.push({
+        as: key,
+        relation,
+        node,
+        locate: (args: any) => args?.select?.[key],
+      });
+    }
+  }
+
+  return out;
+}
+
+/**
+ * `select` and `include` are mutually exclusive at *every* level, not only at
+ * the root: the result shape would be ambiguous either way.
+ */
+function assertExclusive(
+  schema: ModelSchema,
+  include: unknown,
+  select: unknown,
+  operation: string,
+  at?: string,
+): void {
+  if (include === undefined || select === undefined) return;
+  throw new UnsupportedQueryError(
+    at ? `${at}: select + include` : "select + include",
+    schema.name,
+    operation,
+    "Prisma allows only one of them on the same query, at any level.",
+  );
+}
+
+function assertNodeArgs(
+  schema: ModelSchema,
+  node: RelationNode,
+  operation: string,
+): void {
+  const value = node.node;
+  if (value === true) return;
+
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new UnsupportedQueryError(
+      node.as,
+      schema.name,
+      operation,
+      "Expected true or an object of relation arguments.",
+    );
+  }
+
+  const args = value as Record<string, unknown>;
+  assertExclusive(schema, args.include, args.select, operation, node.as);
+
+  for (const key of Object.keys(args).sort()) {
+    if (args[key] === undefined) continue;
+    if (RELATION_ARGS.has(key)) continue;
+
+    // The decision recorded in the PR: `take` / `skip` on a to-many relation
+    // throw rather than being implemented under the batched strategy.
+    //
+    // `include: { accounts: { take: 5 } }` means five accounts *per user*, not
+    // five overall. Under batching, one query serves every parent, so a
+    // per-parent limit needs `row_number() over (partition by ...)` wrapped in
+    // a subquery — which cannot be expressed through `$exec` on the child's own
+    // model class, and so would need exactly the private query path invariant 1
+    // exists to prevent. It falls out for free from iteration 7's lateral
+    // strategy. The alternative — applying the limit globally — silently
+    // returns wrong data, which is worse than not supporting it.
+    if (key === "take" || key === "skip") {
+      throw new UnsupportedQueryError(
+        `${node.as}.${key}`,
+        schema.name,
+        operation,
+        node.relation.kind === "many"
+          ? `A '${key}' inside a to-many relation is per parent, which the ` +
+            `batched relation planner cannot express. It arrives with the ` +
+            `lateral join strategy; until then, load '${node.as}' as its own ` +
+            `query, or narrow it with 'where'.`
+          : `Prisma does not accept '${key}' on a to-one relation.`,
+      );
+    }
+
+    throw new UnsupportedQueryError(`${node.as}.${key}`, schema.name, operation);
+  }
+}
+
+/** Walks the rest of the tree for the structural rules and the depth guard. */
+function validateSubtree(
+  schema: ModelSchema,
+  node: unknown,
+  operation: string,
+  depth: number,
+): void {
+  if (typeof node !== "object" || node === null || Array.isArray(node)) return;
+
+  const nodes = relationNodes(schema, node, operation);
+  if (nodes.length === 0) return;
+
+  if (depth > MAX_RELATION_DEPTH) {
+    throw new RelationDepthExceededError(schema.name, MAX_RELATION_DEPTH);
+  }
+
+  for (const child of nodes) {
+    assertNodeArgs(schema, child, operation);
+    validateSubtree(
+      resolveSchema(schema, child),
+      child.node,
+      operation,
+      depth + 1,
+    );
+  }
+}
+
+// --- topology --------------------------------------------------------------
+
+interface Link {
+  /** Field on the parent whose value the child is matched against. */
+  parentField: string;
+  /** Field on the child holding the matching value. */
+  childField: string;
+  /** Set for Prisma's implicit many-to-many, which joins through a table. */
+  join?: { table: string; parentColumn: string; childColumn: string };
+}
+
+/**
+ * Which fields on which side actually connect.
+ *
+ * Only the *owning* side of a relation carries `from` / `to`; the other side
+ * carries empty arrays and has to find its counterpart through the shared
+ * `relationName`. That is the whole reason `relationName` is in the emitted
+ * artifact.
+ */
+function resolveLink(
+  parent: ModelSchema,
+  child: ModelSchema,
+  relation: RelationSchema,
+): Link {
+  if (relation.joinTable) return joinTableLink(parent, child, relation);
+
+  if (relation.from.length > 0) {
+    return {
+      parentField: single(parent, relation, relation.from, "from"),
+      childField: single(parent, relation, relation.to, "to"),
+    };
+  }
+
+  const other = otherSide(parent, child, relation);
+  if (other.from.length === 0) {
+    throw new MalformedRelationError(
+      parent.name,
+      relation.name,
+      `neither ${parent.name}.${relation.name} nor ${child.name}.${other.name} ` +
+        `holds the foreign key.`,
+    );
+  }
+
+  return {
+    parentField: single(parent, relation, other.to, "to"),
+    childField: single(parent, relation, other.from, "from"),
+  };
+}
+
+/** The far end of the relation, found by the name both sides share. */
+function otherSide(
+  parent: ModelSchema,
+  child: ModelSchema,
+  relation: RelationSchema,
+): RelationSchema {
+  const candidates = Object.values(child.relations).filter(
+    (candidate) =>
+      candidate.relationName === relation.relationName &&
+      // A self-relation names the same model on both ends, so the *field* is
+      // what distinguishes them.
+      !(child.name === parent.name && candidate.name === relation.name),
+  );
+
+  if (candidates.length !== 1) {
+    throw new MalformedRelationError(
+      parent.name,
+      relation.name,
+      candidates.length === 0
+        ? `${child.name} declares no relation named '${relation.relationName}'.`
+        : `${child.name} declares ${candidates.length} relations named ` +
+          `'${relation.relationName}'.`,
+    );
+  }
+
+  return candidates[0];
+}
+
+/**
+ * Multi-field relations (`@relation(fields: [a, b], references: [c, d])`) would
+ * need a row-value `in`, which the two dialects spell differently and neither
+ * indexes well. Refused rather than quietly matching on the first field.
+ */
+function single(
+  parent: ModelSchema,
+  relation: RelationSchema,
+  fields: string[],
+  side: string,
+): string {
+  if (fields.length !== 1) {
+    throw new UnsupportedQueryError(
+      relation.name,
+      parent.name,
+      "include",
+      `${relation.name} joins on ${fields.length} fields (${side}: ` +
+        `${fields.join(", ") || "none"}). Multi-field relations are not ` +
+        `implemented yet.`,
+    );
+  }
+  return fields[0];
+}
+
+/**
+ * Prisma's implicit many-to-many has no join *model*: it is a bare
+ * `_RelationName` table with an `A` and a `B` column, each holding one side's
+ * id, ordered by the two model names alphabetically.
+ */
+function joinTableLink(
+  parent: ModelSchema,
+  child: ModelSchema,
+  relation: RelationSchema,
+): Link {
+  const { table, a, b } = relation.joinTable!;
+
+  if (a === b) {
+    // A self-referential implicit m-n puts the same model on both ends, so the
+    // emitted record cannot say which column is which — Prisma disambiguates by
+    // field order, which the artifact does not carry. Refusing is honest;
+    // guessing would silently reverse the relation.
+    throw new UnsupportedQueryError(
+      relation.name,
+      parent.name,
+      "include",
+      `${relation.name} is a self-referential implicit many-to-many. The ` +
+        `generated artifact cannot say which of the join table's two columns ` +
+        `is which end, so it is not implemented yet.`,
+    );
+  }
+
+  if (parent.name !== a && parent.name !== b) {
+    throw new MalformedRelationError(
+      parent.name,
+      relation.name,
+      `the join table '${table}' connects ${a} and ${b}, neither of which is ` +
+        `${parent.name}.`,
+    );
+  }
+
+  const parentColumn = parent.name === a ? "A" : "B";
+
+  return {
+    parentField: primaryKey(parent, relation),
+    childField: primaryKey(child, relation),
+    join: {
+      table,
+      parentColumn,
+      childColumn: parentColumn === "A" ? "B" : "A",
+    },
+  };
+}
+
+function primaryKey(schema: ModelSchema, relation: RelationSchema): string {
+  if (schema.primaryKey.length !== 1) {
+    throw new MalformedRelationError(
+      schema.name,
+      relation.name,
+      `an implicit many-to-many joins on ${schema.name}'s primary key, which ` +
+        `has ${schema.primaryKey.length} fields.`,
+    );
+  }
+  return schema.primaryKey[0];
+}
+
+function field(
+  schema: ModelSchema,
+  relation: RelationSchema,
+  name: string,
+): FieldSchema {
+  const found = schema.fields[name];
+  if (!found) {
+    throw new MalformedRelationError(
+      schema.name,
+      relation.name,
+      `it joins on '${name}', which is not a field on ${schema.name}.`,
+    );
+  }
+  return found;
+}
+
+function resolveSchema(parent: ModelSchema, node: RelationNode): ModelSchema {
+  const target = node.relation.model;
+
+  // Resolved by name at call time, never by import at module load: that is what
+  // lets two models reference each other without the generated files forming an
+  // import cycle (invariant 6).
+  if (!registry.has(target)) {
+    throw new UnregisteredRelationTargetError(
+      parent.name,
+      node.as,
+      target,
+      registry.registeredNames(),
+    );
+  }
+
+  const schema = registry.get<RelatedModel>(target)?.$schema;
+  if (!schema) throw new MissingModelSchemaError(target);
+  return schema;
+}
+
+// --- the batched strategy --------------------------------------------------
+
+/**
+ * One query per relation node: collect the parents' key values, fetch every
+ * child in a single `where <key> in (<parent keys>)`, stitch by key.
+ *
+ * SQLite is in-process, so round trips are nearly free and this is close to
+ * optimal there. Postgres over a network is RTT-dominated and the lateral form
+ * will beat it; that is iteration 7, and it plugs in here.
+ */
+const BATCHED = "batched";
+
+export const batchedStrategy: RelationStrategy = {
+  name: BATCHED,
+
+  plan(request: RelationRequest): RelationPlan {
+    const link = resolveLink(request.parent, request.child, request.relation);
+
+    // Resolved at plan time so a stale artifact fails when the query is
+    // compiled rather than after the root query has already run.
+    const parentKeyField = field(request.parent, request.relation, link.parentField);
+    const childKeyField = field(request.child, request.relation, link.childField);
+
+    const many = request.relation.kind === "many";
+
+    return {
+      as: request.as,
+      kind: request.relation.kind,
+      parentField: link.parentField,
+      strategy: BATCHED,
+      load(parents, args) {
+        return link.join
+          ? loadThroughJoinTable(request, link, {
+              parentKeyField,
+              childKeyField,
+              many,
+              parents,
+              args,
+            })
+          : loadDirect(request, link, {
+              parentKeyField,
+              childKeyField,
+              many,
+              parents,
+              args,
+            });
+      },
+    };
+  },
+};
+
+interface LoadContext {
+  parentKeyField: FieldSchema;
+  childKeyField: FieldSchema;
+  many: boolean;
+  parents: Row[];
+  args: any;
+}
+
+async function loadDirect(
+  request: RelationRequest,
+  link: Link,
+  context: LoadContext,
+): Promise<void> {
+  const { keys, byKey } = index(context.parents, link.parentField);
+  // Every parent's key is null: nothing can match, and the defaults the shaper
+  // already wrote (`null` / `[]`) are the answer.
+  if (keys.length === 0) return;
+
+  const node = request.locate(context.args);
+  const query = childQuery(node, link.childField, keys);
+
+  const rows = (await childModel(request).$exec(
+    "findMany",
+    query.args,
+  )) as Row[];
+
+  for (const row of rows) {
+    const bucket = byKey.get(keyOf(row[link.childField]));
+    if (!bucket) continue;
+    for (const parent of bucket) attach(parent, request.as, row, context.many);
+  }
+
+  if (query.hidden) {
+    for (const row of rows) delete row[link.childField];
+  }
+}
+
+/**
+ * Implicit many-to-many, in two hops: read the pairs out of the join table,
+ * then load the children the pairs name.
+ *
+ * The first hop is the one place in the ORM that issues SQL outside
+ * `Model.$exec`, and it is deliberate rather than a shortcut: `_PostToTag` has
+ * no model, no fields of its own and nothing an application could scope — it
+ * holds two foreign keys. The hop that reads *rows* still goes through `$exec`
+ * on the child's own model class, so a policy on `Tag` applies to
+ * `include: { tags: true }` exactly as it would to `Tag.findMany`.
+ */
+async function loadThroughJoinTable(
+  request: RelationRequest,
+  link: Link,
+  context: LoadContext,
+): Promise<void> {
+  const { keys, byKey } = index(context.parents, link.parentField);
+  if (keys.length === 0) return;
+
+  const { dialect } = request;
+  const join = link.join!;
+
+  const pairs = (await readPairs(
+    dialect,
+    join,
+    keys.map((key) => dialect.encode(key, context.parentKeyField)),
+  )) as Row[];
+
+  // Parents keyed by the *child* id they link to, so the second hop can stitch
+  // in one pass over its rows. Built once, not searched per row.
+  const owners = new Map<unknown, Row[]>();
+  const childKeys: unknown[] = [];
+
+  for (const pair of pairs) {
+    const parentKey = keyOf(
+      dialect.decode(pair[join.parentColumn], context.parentKeyField),
+    );
+    const linked = byKey.get(parentKey);
+    if (!linked) continue;
+
+    const childValue = dialect.decode(
+      pair[join.childColumn],
+      context.childKeyField,
+    );
+    const childKey = keyOf(childValue);
+
+    let bucket = owners.get(childKey);
+    if (bucket === undefined) {
+      bucket = [];
+      owners.set(childKey, bucket);
+      childKeys.push(childValue);
+    }
+    for (const parent of linked) bucket.push(parent);
+  }
+
+  if (childKeys.length === 0) return;
+
+  const node = request.locate(context.args);
+  const query = childQuery(node, link.childField, childKeys);
+
+  const rows = (await childModel(request).$exec(
+    "findMany",
+    query.args,
+  )) as Row[];
+
+  // Iterated in the child query's order rather than the pairs' order, so a
+  // relation-level `orderBy` still describes what each parent receives.
+  for (const row of rows) {
+    const bucket = owners.get(keyOf(row[link.childField]));
+    if (!bucket) continue;
+    for (const parent of bucket) attach(parent, request.as, row, context.many);
+  }
+
+  if (query.hidden) {
+    for (const row of rows) delete row[link.childField];
+  }
+}
+
+/**
+ * `select <A>, <B> from <_Relation> where <parent column> in (...)`.
+ *
+ * Built through the same `Fragment` machinery as everything else, so the two
+ * compiler rules still hold: the identifiers come from the generated schema and
+ * every value is a bound parameter. It is assembled per call rather than per
+ * plan only because the number of parents — and so the number of placeholders
+ * on SQLite — is not known until the parents are in hand.
+ */
+async function readPairs(
+  dialect: SqlDialect,
+  join: NonNullable<Link["join"]>,
+  values: unknown[],
+): Promise<unknown> {
+  const statement = concat(
+    sql(
+      `select ${dialect.quoteIdent(join.parentColumn)}, ` +
+        `${dialect.quoteIdent(join.childColumn)} ` +
+        `from ${dialect.quoteIdent(join.table)} where `,
+    ),
+    dialect.inList(
+      dialect.quoteIdent(join.parentColumn),
+      false,
+      values.length,
+      () => values,
+    ),
+  );
+
+  const { text, binders } = render(statement, dialect);
+  const db = app(DatabaseManager);
+  return db.sql.unsafe(
+    text,
+    binders.map((binder) => binder(undefined)),
+  );
+}
+
+function childModel(request: RelationRequest): RelatedModel {
+  // Resolved here, not at plan time, so the plan cache never holds a class
+  // reference and a re-registered model is picked up (invariant 6). The child
+  // query is `$exec` on the child's own class — the choke point, so policies,
+  // ambient transactions and the plan cache all apply to a nested read exactly
+  // as they do to a top-level one (invariant 1).
+  return registry.get<RelatedModel>(request.relation.model);
+}
+
+/**
+ * The child query's arguments: the caller's own relation arguments, plus the
+ * key filter, plus the key itself when a `select` left it out.
+ *
+ * The `in (<parent keys>)` list has the plan-cache problem iteration 2 already
+ * has for `in`, at higher volume: on SQLite each distinct parent count is its
+ * own plan text. It is the same mechanism and the same answer — the plan
+ * cache's LRU bound — rather than a second one.
+ */
+function childQuery(
+  node: unknown,
+  childField: string,
+  keys: unknown[],
+): { args: Record<string, unknown>; hidden: boolean } {
+  const relationArgs = (
+    node === true || node === null || typeof node !== "object" ? {} : node
+  ) as Record<string, unknown>;
+
+  const filter = { [childField]: { in: keys } };
+  const args: Record<string, unknown> = {
+    where:
+      relationArgs.where === undefined
+        ? filter
+        : { AND: [relationArgs.where, filter] },
+  };
+
+  if (relationArgs.orderBy !== undefined) args.orderBy = relationArgs.orderBy;
+  if (relationArgs.include !== undefined) args.include = relationArgs.include;
+
+  const select = relationArgs.select as Record<string, unknown> | undefined;
+  if (select === undefined) return { args, hidden: false };
+
+  if (select[childField] === true) {
+    args.select = select;
+    return { args, hidden: false };
+  }
+
+  // The stitch key has to come back even when the caller did not ask for it.
+  // `attachRelations`' counterpart on the parent side deletes it again.
+  args.select = { ...select, [childField]: true };
+  return { args, hidden: true };
+}
+
+/**
+ * Note that a child row reached by more than one parent is attached to each of
+ * them **by reference** — a hundred users in three organizations get three
+ * organization objects between them, not a hundred. Prisma builds one object
+ * per parent, so this is a deliberate divergence in *identity*: the values are
+ * identical and the differential harness sees no difference, but mutating
+ * `users[0].organization` would be visible through `users[1].organization`.
+ *
+ * The alternative is a clone per extra parent, which on a wide to-one include
+ * is exactly the copying the batched strategy exists to avoid — and a shallow
+ * clone would still alias everything below it, so it would buy less than it
+ * looks. Worth revisiting in iteration 8, where row provenance gives a reason
+ * to care about identity.
+ */
+function attach(parent: Row, as: string, row: Row, many: boolean): void {
+  if (many) {
+    (parent[as] as Row[]).push(row);
+    return;
+  }
+  // The shaper wrote `null`; the first match wins. A to-one cannot legitimately
+  // have two matches, and taking the first is what Prisma does with one.
+  if (parent[as] === null) parent[as] = row;
+}
+
+/**
+ * Parents grouped by their key value, built once per child query. The stitch is
+ * then one pass over the child rows — never a `find()` per row, which is the
+ * quadratic shape this is here to avoid on wide results.
+ */
+function index(
+  parents: Row[],
+  on: string,
+): { keys: unknown[]; byKey: Map<unknown, Row[]> } {
+  const byKey = new Map<unknown, Row[]>();
+  const keys: unknown[] = [];
+
+  for (const parent of parents) {
+    const value = parent[on];
+    // A null foreign key matches nothing — `in` would not match it either —
+    // and the shaper has already written the `null` the caller sees.
+    if (value === null || value === undefined) continue;
+
+    const key = keyOf(value);
+    let bucket = byKey.get(key);
+    if (bucket === undefined) {
+      bucket = [];
+      byKey.set(key, bucket);
+      // The raw value, not the map key: this is what gets bound into the `in`
+      // list, and the dialect's encoder expects the value Prisma would hold.
+      keys.push(value);
+    }
+    bucket.push(parent);
+  }
+
+  return { keys, byKey };
+}
+
+/**
+ * `Map` keys compare by identity for objects, so two `Date`s holding the same
+ * instant are two different keys. Both sides of a stitch are decoded by the
+ * same dialect from the same declared type, so this only has to cover the
+ * decoded shapes that are objects.
+ */
+function keyOf(value: unknown): unknown {
+  return value instanceof Date ? value.getTime() : value;
+}

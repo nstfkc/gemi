@@ -166,10 +166,17 @@ describe("User.findMany()", () => {
     );
   });
 
-  test("throws on include rather than silently dropping the relation", async () => {
-    await expect(
-      User.findMany({ include: { accounts: true } }),
-    ).rejects.toThrow(/Relations are not implemented yet/);
+  // The relation is loaded through the *generated* artifact's topology: this
+  // model class was never told where `accounts` lives, only that it is a
+  // relation named `AccountToUser` on a model named `Account`.
+  test("include loads the relation, and an empty one is an array", async () => {
+    const [user] = await User.findMany({
+      where: { email: SEEDED.email },
+      include: { accounts: true },
+    });
+
+    expect(user.accounts).toEqual([]);
+    expect("accounts" in user).toBe(true);
   });
 });
 

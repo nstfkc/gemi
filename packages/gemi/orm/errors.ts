@@ -80,6 +80,98 @@ export class RecordNotFoundError extends Error {
   }
 }
 
+/**
+ * Thrown when an `include` — or a relation-shaped key inside a `select` — names
+ * something the model does not declare as a relation.
+ */
+export class UnknownRelationError extends Error {
+  constructor(
+    public readonly relation: string,
+    public readonly model: string,
+    known: string[],
+  ) {
+    super(
+      `'${relation}' is not a relation on model ${model}. ` +
+        (known.length > 0
+          ? `Known relations: ${known.join(", ")}.`
+          : `${model} declares no relations.`),
+    );
+    this.name = "UnknownRelationError";
+  }
+}
+
+/**
+ * Thrown when an include tree nests deeper than the guard allows.
+ *
+ * A cyclic include is legal and finite — `user -> accounts -> user` terminates
+ * because the caller wrote a finite tree. What this catches is an *unbounded*
+ * one: an argument tree built by a loop, or forwarded from a request body, that
+ * describes a thousand levels. Under the batched planner every level is at least
+ * one query, so the guard is what stops a malformed argument from becoming a
+ * self-inflicted denial of service.
+ */
+export class RelationDepthExceededError extends Error {
+  constructor(
+    public readonly model: string,
+    public readonly limit: number,
+  ) {
+    super(
+      `The include tree nests more than ${limit} relations deep (at model ` +
+        `${model}). Deeply nested includes are legal, so this is a guard ` +
+        `against a generated or malformed argument tree rather than a limit on ` +
+        `modelling — every level costs at least one query.`,
+    );
+    this.name = "RelationDepthExceededError";
+  }
+}
+
+/**
+ * Thrown when a relation names a model the registry does not hold. Every
+ * relation in a generated artifact was emitted from a model in the same
+ * `schema.prisma`, so this can only mean the artifact and the registry disagree.
+ */
+export class UnregisteredRelationTargetError extends Error {
+  constructor(
+    public readonly model: string,
+    public readonly relation: string,
+    public readonly target: string,
+    known: string[],
+  ) {
+    super(
+      `${model}.${relation} points at model '${target}', which nothing has ` +
+        `registered. The generated artifact and the registry disagree: re-run ` +
+        `\`prisma generate\`, and check that app/models/generated/index.ts is ` +
+        `imported. ` +
+        (known.length > 0
+          ? `Registered models: ${known.join(", ")}.`
+          : `Nothing is registered at all.`),
+    );
+    this.name = "UnregisteredRelationTargetError";
+  }
+}
+
+/**
+ * Thrown when a relation is registered on both sides but the two sides do not
+ * describe a link the planner can follow: no matching `relationName` on the
+ * other model, or a `from` / `to` naming a field that is not there. Like
+ * `UnregisteredRelationTargetError`, it means a stale generated artifact — a
+ * consistent one cannot produce it.
+ */
+export class MalformedRelationError extends Error {
+  constructor(
+    public readonly model: string,
+    public readonly relation: string,
+    detail: string,
+  ) {
+    super(
+      `Cannot resolve how ${model}.${relation} joins: ${detail} This means ` +
+        `app/models/generated is stale or hand-edited — re-run ` +
+        `\`prisma generate\`.`,
+    );
+    this.name = "MalformedRelationError";
+  }
+}
+
 /** Thrown when a relation resolves to a model name nothing registered. */
 export class ModelNotRegisteredError extends Error {
   constructor(name: string, known: string[]) {

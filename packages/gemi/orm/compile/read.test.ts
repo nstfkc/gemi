@@ -280,9 +280,13 @@ describe("select", () => {
     );
   });
 
-  test("rejects a relation until iteration 3", () => {
+  // Relations inside a `select` are relation nodes, not columns, and they need
+  // the registry — so they live in relations.test.ts next to the planner. What
+  // belongs here is that this file's `text()` helper, which registers nothing,
+  // still reports the reason legibly rather than crashing somewhere downstream.
+  test("a relation in a select needs the registry", () => {
     expect(() => text({ select: { accounts: true } })).toThrow(
-      /'select\.accounts'/,
+      /nothing has registered/,
     );
   });
 
@@ -438,7 +442,10 @@ describe("postgres", () => {
     const args = { where: { id: { in: [1, 2, 3] } } };
     const plan = compileRead(user, "findMany", args, postgres);
     expect(plan.text).toBe(`${SELECT_USER} where "id" = any ($1)`);
-    expect(plan.bind(args)).toEqual([[1, 2, 3]]);
+    // A Postgres array *literal*, not a JS array: Bun's driver refuses an array
+    // bound to `= any($1)`. Still exactly one parameter, and still nothing in
+    // the text.
+    expect(plan.bind(args)).toEqual([`{"1","2","3"}`]);
 
     // ...and the text does not change with the length.
     expect(
@@ -472,12 +479,6 @@ describe("unimplemented arguments still throw", () => {
   ])("%s", (argument, args) => {
     expect(() => text(args)).toThrow(
       `gemi ORM does not support '${argument}' yet (User.findMany).`,
-    );
-  });
-
-  test("include names relations specifically", () => {
-    expect(() => text({ include: { accounts: true } })).toThrow(
-      /Relations are not implemented yet/,
     );
   });
 

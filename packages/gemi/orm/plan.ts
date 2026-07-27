@@ -1,5 +1,6 @@
 import type { Dialect } from "../database/dialect";
 import { compile } from "./compile";
+import type { RelationPlan } from "./compile/plan-relations";
 import type { SqlDialect } from "./dialect";
 import type { ModelSchema } from "./schema";
 
@@ -34,6 +35,17 @@ export interface QueryPlan {
   text: string;
   bind(args: any): unknown[];
   shape(rows: unknown[]): unknown;
+  /**
+   * The relation nodes this query's `include` / `select` asks for, one plan per
+   * node. Empty — and left undefined — for a query with no relations, so the
+   * choke point can skip the whole stage with one check.
+   */
+  relations?: RelationPlan[];
+  /**
+   * Fields the query had to select to stitch relations, but which the caller's
+   * `select` did not ask for. Dropped once the relations are attached.
+   */
+  hidden?: string[];
 }
 
 /**
@@ -125,9 +137,10 @@ export function canonicalShape(value: unknown, literal = false): string {
  * those verbatim would put user data into a long-lived global map and give
  * every distinct filter value its own cache entry.
  *
- * Inert today, because `include` throws before it can reach the cache. Iteration
- * 3 turns it on, and it is much cheaper to be right about it here than to find
- * it alongside relation compilation.
+ * Live as of iteration 3: `include: { accounts: { where: { deletedAt: null } } }`
+ * is one plan whatever the filter's values are, and the relation loader reads
+ * those values back out of the *call's* argument tree rather than the compiled
+ * plan's.
  */
 const VALUE_KEYS = new Set(["where", "cursor", "data"]);
 

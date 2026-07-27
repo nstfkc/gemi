@@ -24,4 +24,14 @@ export { compileRead, isReadOperation };
 export { compileWhere } from "./where";
 export { compileOrderBy, parseOrderBy } from "./orderBy";
 export { resolveSelection } from "./select";
+export {
+  MAX_RELATION_DEPTH,
+  attachRelations,
+  batchedStrategy,
+  planRelations,
+  type RelationPlan,
+  type RelationPlanning,
+  type RelationRequest,
+  type RelationStrategy,
+} from "./plan-relations";
 export * from "./fragment";

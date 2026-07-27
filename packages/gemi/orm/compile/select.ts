@@ -31,6 +31,8 @@ export function resolveSelection(
     );
   }
 
+  // `include` keeps every scalar and adds relations beside them, which is
+  // precisely the default column list.
   if (select === undefined || select === null) {
     return Object.values(schema.fields);
   }
@@ -53,19 +55,21 @@ export function resolveSelection(
     if (wanted === true) selected.push(field);
   }
 
+  let relations = 0;
+
   // Validate everything the caller named, including the keys that were switched
   // off — a typo in a `false` entry is still a typo.
   for (const key of Object.keys(select as Record<string, unknown>)) {
     const value = (select as Record<string, unknown>)[key];
     if (value === undefined) continue;
 
+    // A relation inside a `select` is a relation node, not a column. The
+    // planner owns it, including validating its own arguments; here it only has
+    // to be counted, so that a selection of nothing but relations is not
+    // mistaken for an empty one.
     if (key in schema.relations) {
-      throw new UnsupportedQueryError(
-        `select.${key}`,
-        schema.name,
-        operation,
-        "Selecting a relation is not implemented yet.",
-      );
+      if (value !== false) relations++;
+      continue;
     }
 
     if (!(key in schema.fields)) {
@@ -82,7 +86,7 @@ export function resolveSelection(
     }
   }
 
-  if (selected.length === 0) {
+  if (selected.length === 0 && relations === 0) {
     // Prisma raises rather than returning rows of empty objects, and a
     // `select ... from` with no columns is not valid SQL either way.
     throw new UnsupportedQueryError(
@@ -93,5 +97,9 @@ export function resolveSelection(
     );
   }
 
+  // `select: { accounts: true }` selects no scalar at all, and is legal —
+  // Prisma returns `{ accounts: [...] }`. The column list is still not empty,
+  // because the relation's own key column is added by the caller of this
+  // function and then hidden again from the result.
   return selected;
 }
