@@ -7,7 +7,9 @@ import { AsyncLocalStorage } from "async_hooks";
  *
  * "The framework's only AsyncLocalStorage" is a claim that used to sit here. It
  * was already not true — the *kernel's* is the only one, but `http/`, `pubsub/`
- * and now the ORM each keep their own:
+ * and now the ORM each keep their own. Four in the shipped framework (a fifth
+ * sits in `rfc/workflow.ts`, an unreferenced design sketch that is outside
+ * `package.json`'s exports and that nothing imports):
  *
  *   kernel     kernel/context.ts                     the Application
  *   request    http/requestContext.ts                req, user, cookies, locale

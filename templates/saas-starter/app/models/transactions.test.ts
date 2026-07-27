@@ -452,6 +452,86 @@ function suite(label: string, url?: string) {
       ]);
     });
 
+    // --- the dialect asymmetry that documentation alone would not hold ----
+
+    /**
+     * KNOWN DIALECT ASYMMETRY, pinned rather than only described.
+     *
+     * On Postgres a *failed statement* aborts the whole transaction block, so
+     * catching the error and carrying on loses everything. SQLite does not
+     * care. That makes the natural thing to write —
+     *
+     *     try { await User.create(...) } catch { }
+     *     await Account.create(...)
+     *
+     * — pass in development on SQLite and take out the transaction in
+     * production on Postgres, with an error naming neither statement.
+     *
+     * Both halves are asserted per dialect rather than skipping the SQLite one:
+     * the point is that the two genuinely differ, and a test that ran only
+     * where the answer is convenient would not say that.
+     */
+    test("catching a bare failed statement: the two dialects differ", async () => {
+      const first = await Model.transaction(async () => {
+        const user = await User.create({ data: { email: "dup@x.test" } });
+
+        let aborted = false;
+        try {
+          // Same unique email, so this fails at the database.
+          await User.create({ data: { email: "dup@x.test" } });
+        } catch {
+          // Swallowed, which is the whole point.
+        }
+
+        try {
+          await AccountModel.create({ data: { userId: user.id } });
+        } catch {
+          aborted = true;
+        }
+
+        return aborted;
+      }).catch(() => "transaction-lost" as const);
+
+      if (url) {
+        // Postgres: the statement after the caught failure cannot run —
+        // "current transaction is aborted, commands ignored until end of
+        // transaction block". Asserted as `true` rather than "not false", so
+        // this cannot pass by the transaction failing some other way.
+        expect(first).toBe(true);
+        expect(await userCount()).toBe(0);
+      } else {
+        // SQLite: carried on, and both rows are there.
+        expect(first).toBe(false);
+        expect(await userCount()).toBe(1);
+      }
+    });
+
+    /**
+     * ...and the remedy this iteration already ships: wrapping the fallible
+     * statement in a nested `Model.transaction` makes it a savepoint, and
+     * rolling back to the savepoint clears the aborted state. Identical on both
+     * dialects, which is what makes it the thing to recommend.
+     */
+    test("wrapping the fallible statement in a nested transaction recovers", async () => {
+      await Model.transaction(async () => {
+        const user = await User.create({ data: { email: "dup2@x.test" } });
+
+        try {
+          await Model.transaction(() =>
+            User.create({ data: { email: "dup2@x.test" } }),
+          );
+        } catch {
+          // Rolled back to the savepoint; the outer transaction is intact.
+        }
+
+        await AccountModel.create({ data: { userId: user.id } });
+      });
+
+      expect(await userCount()).toBe(1);
+      const rows: any = await raw.unsafe(`SELECT "id" FROM "Account"`);
+      expect([...rows]).toHaveLength(1);
+    });
+
     // --- criterion 7: plan cache ------------------------------------------
 
     // The cache is keyed on dialect, model, operation and argument shape — not
