@@ -22,9 +22,37 @@ export class AccountModel extends Model {
   static findMany<T extends Prisma.AccountFindManyArgs>(
     args?: Subset<T, Prisma.AccountFindManyArgs>,
   ): Promise<Prisma.AccountGetPayload<T>[]> {
-    return this.$exec("findMany", args) as Promise<
-      Prisma.AccountGetPayload<T>[]
-    >;
+    return this.$exec("findMany", args) as Promise<Prisma.AccountGetPayload<T>[]>;
+  }
+
+  static findFirst<T extends Prisma.AccountFindFirstArgs>(
+    args?: Subset<T, Prisma.AccountFindFirstArgs>,
+  ): Promise<Prisma.AccountGetPayload<T> | null> {
+    return this.$exec("findFirst", args) as Promise<Prisma.AccountGetPayload<T> | null>;
+  }
+
+  static findFirstOrThrow<T extends Prisma.AccountFindFirstOrThrowArgs>(
+    args?: Subset<T, Prisma.AccountFindFirstOrThrowArgs>,
+  ): Promise<Prisma.AccountGetPayload<T>> {
+    return this.$exec("findFirstOrThrow", args) as Promise<Prisma.AccountGetPayload<T>>;
+  }
+
+  static findUnique<T extends Prisma.AccountFindUniqueArgs>(
+    args: Subset<T, Prisma.AccountFindUniqueArgs>,
+  ): Promise<Prisma.AccountGetPayload<T> | null> {
+    return this.$exec("findUnique", args) as Promise<Prisma.AccountGetPayload<T> | null>;
+  }
+
+  static findUniqueOrThrow<T extends Prisma.AccountFindUniqueOrThrowArgs>(
+    args: Subset<T, Prisma.AccountFindUniqueOrThrowArgs>,
+  ): Promise<Prisma.AccountGetPayload<T>> {
+    return this.$exec("findUniqueOrThrow", args) as Promise<Prisma.AccountGetPayload<T>>;
+  }
+
+  static count(
+    args?: Omit<Prisma.AccountCountArgs, "select">,
+  ): Promise<number> {
+    return this.$exec("count", args) as Promise<number>;
   }
 }
 
@@ -34,9 +62,37 @@ export class MagicLinkTokenModel extends Model {
   static findMany<T extends Prisma.MagicLinkTokenFindManyArgs>(
     args?: Subset<T, Prisma.MagicLinkTokenFindManyArgs>,
   ): Promise<Prisma.MagicLinkTokenGetPayload<T>[]> {
-    return this.$exec("findMany", args) as Promise<
-      Prisma.MagicLinkTokenGetPayload<T>[]
-    >;
+    return this.$exec("findMany", args) as Promise<Prisma.MagicLinkTokenGetPayload<T>[]>;
+  }
+
+  static findFirst<T extends Prisma.MagicLinkTokenFindFirstArgs>(
+    args?: Subset<T, Prisma.MagicLinkTokenFindFirstArgs>,
+  ): Promise<Prisma.MagicLinkTokenGetPayload<T> | null> {
+    return this.$exec("findFirst", args) as Promise<Prisma.MagicLinkTokenGetPayload<T> | null>;
+  }
+
+  static findFirstOrThrow<T extends Prisma.MagicLinkTokenFindFirstOrThrowArgs>(
+    args?: Subset<T, Prisma.MagicLinkTokenFindFirstOrThrowArgs>,
+  ): Promise<Prisma.MagicLinkTokenGetPayload<T>> {
+    return this.$exec("findFirstOrThrow", args) as Promise<Prisma.MagicLinkTokenGetPayload<T>>;
+  }
+
+  static findUnique<T extends Prisma.MagicLinkTokenFindUniqueArgs>(
+    args: Subset<T, Prisma.MagicLinkTokenFindUniqueArgs>,
+  ): Promise<Prisma.MagicLinkTokenGetPayload<T> | null> {
+    return this.$exec("findUnique", args) as Promise<Prisma.MagicLinkTokenGetPayload<T> | null>;
+  }
+
+  static findUniqueOrThrow<T extends Prisma.MagicLinkTokenFindUniqueOrThrowArgs>(
+    args: Subset<T, Prisma.MagicLinkTokenFindUniqueOrThrowArgs>,
+  ): Promise<Prisma.MagicLinkTokenGetPayload<T>> {
+    return this.$exec("findUniqueOrThrow", args) as Promise<Prisma.MagicLinkTokenGetPayload<T>>;
+  }
+
+  static count(
+    args?: Omit<Prisma.MagicLinkTokenCountArgs, "select">,
+  ): Promise<number> {
+    return this.$exec("count", args) as Promise<number>;
   }
 }
 
@@ -46,9 +102,37 @@ export class OrganizationModel extends Model {
   static findMany<T extends Prisma.OrganizationFindManyArgs>(
     args?: Subset<T, Prisma.OrganizationFindManyArgs>,
   ): Promise<Prisma.OrganizationGetPayload<T>[]> {
-    return this.$exec("findMany", args) as Promise<
-      Prisma.OrganizationGetPayload<T>[]
-    >;
+    return this.$exec("findMany", args) as Promise<Prisma.OrganizationGetPayload<T>[]>;
+  }
+
+  static findFirst<T extends Prisma.OrganizationFindFirstArgs>(
+    args?: Subset<T, Prisma.OrganizationFindFirstArgs>,
+  ): Promise<Prisma.OrganizationGetPayload<T> | null> {
+    return this.$exec("findFirst", args) as Promise<Prisma.OrganizationGetPayload<T> | null>;
+  }
+
+  static findFirstOrThrow<T extends Prisma.OrganizationFindFirstOrThrowArgs>(
+    args?: Subset<T, Prisma.OrganizationFindFirstOrThrowArgs>,
+  ): Promise<Prisma.OrganizationGetPayload<T>> {
+    return this.$exec("findFirstOrThrow", args) as Promise<Prisma.OrganizationGetPayload<T>>;
+  }
+
+  static findUnique<T extends Prisma.OrganizationFindUniqueArgs>(
+    args: Subset<T, Prisma.OrganizationFindUniqueArgs>,
+  ): Promise<Prisma.OrganizationGetPayload<T> | null> {
+    return this.$exec("findUnique", args) as Promise<Prisma.OrganizationGetPayload<T> | null>;
+  }
+
+  static findUniqueOrThrow<T extends Prisma.OrganizationFindUniqueOrThrowArgs>(
+    args: Subset<T, Prisma.OrganizationFindUniqueOrThrowArgs>,
+  ): Promise<Prisma.OrganizationGetPayload<T>> {
+    return this.$exec("findUniqueOrThrow", args) as Promise<Prisma.OrganizationGetPayload<T>>;
+  }
+
+  static count(
+    args?: Omit<Prisma.OrganizationCountArgs, "select">,
+  ): Promise<number> {
+    return this.$exec("count", args) as Promise<number>;
   }
 }
 
@@ -58,9 +142,37 @@ export class OrganizationInvitationModel extends Model {
   static findMany<T extends Prisma.OrganizationInvitationFindManyArgs>(
     args?: Subset<T, Prisma.OrganizationInvitationFindManyArgs>,
   ): Promise<Prisma.OrganizationInvitationGetPayload<T>[]> {
-    return this.$exec("findMany", args) as Promise<
-      Prisma.OrganizationInvitationGetPayload<T>[]
-    >;
+    return this.$exec("findMany", args) as Promise<Prisma.OrganizationInvitationGetPayload<T>[]>;
+  }
+
+  static findFirst<T extends Prisma.OrganizationInvitationFindFirstArgs>(
+    args?: Subset<T, Prisma.OrganizationInvitationFindFirstArgs>,
+  ): Promise<Prisma.OrganizationInvitationGetPayload<T> | null> {
+    return this.$exec("findFirst", args) as Promise<Prisma.OrganizationInvitationGetPayload<T> | null>;
+  }
+
+  static findFirstOrThrow<T extends Prisma.OrganizationInvitationFindFirstOrThrowArgs>(
+    args?: Subset<T, Prisma.OrganizationInvitationFindFirstOrThrowArgs>,
+  ): Promise<Prisma.OrganizationInvitationGetPayload<T>> {
+    return this.$exec("findFirstOrThrow", args) as Promise<Prisma.OrganizationInvitationGetPayload<T>>;
+  }
+
+  static findUnique<T extends Prisma.OrganizationInvitationFindUniqueArgs>(
+    args: Subset<T, Prisma.OrganizationInvitationFindUniqueArgs>,
+  ): Promise<Prisma.OrganizationInvitationGetPayload<T> | null> {
+    return this.$exec("findUnique", args) as Promise<Prisma.OrganizationInvitationGetPayload<T> | null>;
+  }
+
+  static findUniqueOrThrow<T extends Prisma.OrganizationInvitationFindUniqueOrThrowArgs>(
+    args: Subset<T, Prisma.OrganizationInvitationFindUniqueOrThrowArgs>,
+  ): Promise<Prisma.OrganizationInvitationGetPayload<T>> {
+    return this.$exec("findUniqueOrThrow", args) as Promise<Prisma.OrganizationInvitationGetPayload<T>>;
+  }
+
+  static count(
+    args?: Omit<Prisma.OrganizationInvitationCountArgs, "select">,
+  ): Promise<number> {
+    return this.$exec("count", args) as Promise<number>;
   }
 }
 
@@ -70,9 +182,37 @@ export class PasswordResetTokenModel extends Model {
   static findMany<T extends Prisma.PasswordResetTokenFindManyArgs>(
     args?: Subset<T, Prisma.PasswordResetTokenFindManyArgs>,
   ): Promise<Prisma.PasswordResetTokenGetPayload<T>[]> {
-    return this.$exec("findMany", args) as Promise<
-      Prisma.PasswordResetTokenGetPayload<T>[]
-    >;
+    return this.$exec("findMany", args) as Promise<Prisma.PasswordResetTokenGetPayload<T>[]>;
+  }
+
+  static findFirst<T extends Prisma.PasswordResetTokenFindFirstArgs>(
+    args?: Subset<T, Prisma.PasswordResetTokenFindFirstArgs>,
+  ): Promise<Prisma.PasswordResetTokenGetPayload<T> | null> {
+    return this.$exec("findFirst", args) as Promise<Prisma.PasswordResetTokenGetPayload<T> | null>;
+  }
+
+  static findFirstOrThrow<T extends Prisma.PasswordResetTokenFindFirstOrThrowArgs>(
+    args?: Subset<T, Prisma.PasswordResetTokenFindFirstOrThrowArgs>,
+  ): Promise<Prisma.PasswordResetTokenGetPayload<T>> {
+    return this.$exec("findFirstOrThrow", args) as Promise<Prisma.PasswordResetTokenGetPayload<T>>;
+  }
+
+  static findUnique<T extends Prisma.PasswordResetTokenFindUniqueArgs>(
+    args: Subset<T, Prisma.PasswordResetTokenFindUniqueArgs>,
+  ): Promise<Prisma.PasswordResetTokenGetPayload<T> | null> {
+    return this.$exec("findUnique", args) as Promise<Prisma.PasswordResetTokenGetPayload<T> | null>;
+  }
+
+  static findUniqueOrThrow<T extends Prisma.PasswordResetTokenFindUniqueOrThrowArgs>(
+    args: Subset<T, Prisma.PasswordResetTokenFindUniqueOrThrowArgs>,
+  ): Promise<Prisma.PasswordResetTokenGetPayload<T>> {
+    return this.$exec("findUniqueOrThrow", args) as Promise<Prisma.PasswordResetTokenGetPayload<T>>;
+  }
+
+  static count(
+    args?: Omit<Prisma.PasswordResetTokenCountArgs, "select">,
+  ): Promise<number> {
+    return this.$exec("count", args) as Promise<number>;
   }
 }
 
@@ -82,9 +222,37 @@ export class SessionModel extends Model {
   static findMany<T extends Prisma.SessionFindManyArgs>(
     args?: Subset<T, Prisma.SessionFindManyArgs>,
   ): Promise<Prisma.SessionGetPayload<T>[]> {
-    return this.$exec("findMany", args) as Promise<
-      Prisma.SessionGetPayload<T>[]
-    >;
+    return this.$exec("findMany", args) as Promise<Prisma.SessionGetPayload<T>[]>;
+  }
+
+  static findFirst<T extends Prisma.SessionFindFirstArgs>(
+    args?: Subset<T, Prisma.SessionFindFirstArgs>,
+  ): Promise<Prisma.SessionGetPayload<T> | null> {
+    return this.$exec("findFirst", args) as Promise<Prisma.SessionGetPayload<T> | null>;
+  }
+
+  static findFirstOrThrow<T extends Prisma.SessionFindFirstOrThrowArgs>(
+    args?: Subset<T, Prisma.SessionFindFirstOrThrowArgs>,
+  ): Promise<Prisma.SessionGetPayload<T>> {
+    return this.$exec("findFirstOrThrow", args) as Promise<Prisma.SessionGetPayload<T>>;
+  }
+
+  static findUnique<T extends Prisma.SessionFindUniqueArgs>(
+    args: Subset<T, Prisma.SessionFindUniqueArgs>,
+  ): Promise<Prisma.SessionGetPayload<T> | null> {
+    return this.$exec("findUnique", args) as Promise<Prisma.SessionGetPayload<T> | null>;
+  }
+
+  static findUniqueOrThrow<T extends Prisma.SessionFindUniqueOrThrowArgs>(
+    args: Subset<T, Prisma.SessionFindUniqueOrThrowArgs>,
+  ): Promise<Prisma.SessionGetPayload<T>> {
+    return this.$exec("findUniqueOrThrow", args) as Promise<Prisma.SessionGetPayload<T>>;
+  }
+
+  static count(
+    args?: Omit<Prisma.SessionCountArgs, "select">,
+  ): Promise<number> {
+    return this.$exec("count", args) as Promise<number>;
   }
 }
 
@@ -94,9 +262,37 @@ export class SocialAccountModel extends Model {
   static findMany<T extends Prisma.SocialAccountFindManyArgs>(
     args?: Subset<T, Prisma.SocialAccountFindManyArgs>,
   ): Promise<Prisma.SocialAccountGetPayload<T>[]> {
-    return this.$exec("findMany", args) as Promise<
-      Prisma.SocialAccountGetPayload<T>[]
-    >;
+    return this.$exec("findMany", args) as Promise<Prisma.SocialAccountGetPayload<T>[]>;
+  }
+
+  static findFirst<T extends Prisma.SocialAccountFindFirstArgs>(
+    args?: Subset<T, Prisma.SocialAccountFindFirstArgs>,
+  ): Promise<Prisma.SocialAccountGetPayload<T> | null> {
+    return this.$exec("findFirst", args) as Promise<Prisma.SocialAccountGetPayload<T> | null>;
+  }
+
+  static findFirstOrThrow<T extends Prisma.SocialAccountFindFirstOrThrowArgs>(
+    args?: Subset<T, Prisma.SocialAccountFindFirstOrThrowArgs>,
+  ): Promise<Prisma.SocialAccountGetPayload<T>> {
+    return this.$exec("findFirstOrThrow", args) as Promise<Prisma.SocialAccountGetPayload<T>>;
+  }
+
+  static findUnique<T extends Prisma.SocialAccountFindUniqueArgs>(
+    args: Subset<T, Prisma.SocialAccountFindUniqueArgs>,
+  ): Promise<Prisma.SocialAccountGetPayload<T> | null> {
+    return this.$exec("findUnique", args) as Promise<Prisma.SocialAccountGetPayload<T> | null>;
+  }
+
+  static findUniqueOrThrow<T extends Prisma.SocialAccountFindUniqueOrThrowArgs>(
+    args: Subset<T, Prisma.SocialAccountFindUniqueOrThrowArgs>,
+  ): Promise<Prisma.SocialAccountGetPayload<T>> {
+    return this.$exec("findUniqueOrThrow", args) as Promise<Prisma.SocialAccountGetPayload<T>>;
+  }
+
+  static count(
+    args?: Omit<Prisma.SocialAccountCountArgs, "select">,
+  ): Promise<number> {
+    return this.$exec("count", args) as Promise<number>;
   }
 }
 
@@ -106,8 +302,36 @@ export class UserModel extends Model {
   static findMany<T extends Prisma.UserFindManyArgs>(
     args?: Subset<T, Prisma.UserFindManyArgs>,
   ): Promise<Prisma.UserGetPayload<T>[]> {
-    return this.$exec("findMany", args) as Promise<
-      Prisma.UserGetPayload<T>[]
-    >;
+    return this.$exec("findMany", args) as Promise<Prisma.UserGetPayload<T>[]>;
+  }
+
+  static findFirst<T extends Prisma.UserFindFirstArgs>(
+    args?: Subset<T, Prisma.UserFindFirstArgs>,
+  ): Promise<Prisma.UserGetPayload<T> | null> {
+    return this.$exec("findFirst", args) as Promise<Prisma.UserGetPayload<T> | null>;
+  }
+
+  static findFirstOrThrow<T extends Prisma.UserFindFirstOrThrowArgs>(
+    args?: Subset<T, Prisma.UserFindFirstOrThrowArgs>,
+  ): Promise<Prisma.UserGetPayload<T>> {
+    return this.$exec("findFirstOrThrow", args) as Promise<Prisma.UserGetPayload<T>>;
+  }
+
+  static findUnique<T extends Prisma.UserFindUniqueArgs>(
+    args: Subset<T, Prisma.UserFindUniqueArgs>,
+  ): Promise<Prisma.UserGetPayload<T> | null> {
+    return this.$exec("findUnique", args) as Promise<Prisma.UserGetPayload<T> | null>;
+  }
+
+  static findUniqueOrThrow<T extends Prisma.UserFindUniqueOrThrowArgs>(
+    args: Subset<T, Prisma.UserFindUniqueOrThrowArgs>,
+  ): Promise<Prisma.UserGetPayload<T>> {
+    return this.$exec("findUniqueOrThrow", args) as Promise<Prisma.UserGetPayload<T>>;
+  }
+
+  static count(
+    args?: Omit<Prisma.UserCountArgs, "select">,
+  ): Promise<number> {
+    return this.$exec("count", args) as Promise<number>;
   }
 }

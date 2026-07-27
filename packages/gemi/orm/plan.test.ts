@@ -92,7 +92,7 @@ describe("the plan cache", () => {
       sqlite,
     );
 
-    expect(planCacheStats()).toEqual({ size: 1, compiles: 1, hits: 1 });
+    expect(planCacheStats()).toMatchObject({ size: 1, compiles: 1, hits: 1 });
     expect(second).toBe(first);
     expect(second.text).toBe(
       `select ${USER_COLUMNS} from "User" where "email" = ?`,
@@ -121,7 +121,7 @@ describe("the plan cache", () => {
 
   test("does not cache a compile that threw", () => {
     expect(() =>
-      getOrCompile(user, "findMany", { orderBy: { id: "asc" } }, sqlite),
+      getOrCompile(user, "findMany", { cursor: { id: 1 } }, sqlite),
     ).toThrow();
     expect(planCacheStats().size).toBe(0);
   });

@@ -282,6 +282,80 @@ export function emitSchemaFile(schemas: ModelSchema[]): string {
   return parts.join("");
 }
 
+/**
+ * The read surface, and how each operation's return type is built from Prisma's
+ * own generated types.
+ *
+ * `returns` is a template over the model name. The three shapes are: many rows,
+ * one row or `null`, and one row (the `*OrThrow` variants, which never resolve
+ * to `null` because `$exec` raises instead).
+ */
+interface ReadOperation {
+  name: string;
+  args: string;
+  returns: (model: string) => string;
+  /** `findUnique` cannot be called without a `where`, so its args are required. */
+  required?: boolean;
+}
+
+const READ_OPERATIONS: ReadOperation[] = [
+  {
+    name: "findMany",
+    args: "FindManyArgs",
+    returns: (m) => `Prisma.${m}GetPayload<T>[]`,
+  },
+  {
+    name: "findFirst",
+    args: "FindFirstArgs",
+    returns: (m) => `Prisma.${m}GetPayload<T> | null`,
+  },
+  {
+    name: "findFirstOrThrow",
+    args: "FindFirstOrThrowArgs",
+    returns: (m) => `Prisma.${m}GetPayload<T>`,
+  },
+  {
+    name: "findUnique",
+    args: "FindUniqueArgs",
+    returns: (m) => `Prisma.${m}GetPayload<T> | null`,
+    required: true,
+  },
+  {
+    name: "findUniqueOrThrow",
+    args: "FindUniqueOrThrowArgs",
+    returns: (m) => `Prisma.${m}GetPayload<T>`,
+    required: true,
+  },
+];
+
+function operation(model: string, op: ReadOperation): string {
+  const argsType = `Prisma.${model}${op.args}`;
+  const returns = op.returns(model);
+  return `
+  static ${op.name}<T extends ${argsType}>(
+    args${op.required ? "" : "?"}: Subset<T, ${argsType}>,
+  ): Promise<${returns}> {
+    return this.$exec("${op.name}", args) as Promise<${returns}>;
+  }
+`;
+}
+
+/**
+ * `count` is the one read whose return type is not a payload. Prisma's own
+ * `count` also accepts a `select` that turns the result into an object of
+ * per-field counts; that is aggregate territory, so it is omitted and the
+ * return type is plainly `number`.
+ */
+function countOperation(model: string): string {
+  return `
+  static count(
+    args?: Omit<Prisma.${model}CountArgs, "select">,
+  ): Promise<number> {
+    return this.$exec("count", args) as Promise<number>;
+  }
+`;
+}
+
 export function emitModelsFile(schemas: ModelSchema[]): string {
   const parts = [
     HEADER,
@@ -300,19 +374,10 @@ type Subset<T, U> = {
   ];
 
   for (const schema of schemas) {
-    const name = schema.name;
     parts.push(`
-export class ${name}Model extends Model {
-  static $schema = schema.${name};
-
-  static findMany<T extends Prisma.${name}FindManyArgs>(
-    args?: Subset<T, Prisma.${name}FindManyArgs>,
-  ): Promise<Prisma.${name}GetPayload<T>[]> {
-    return this.$exec("findMany", args) as Promise<
-      Prisma.${name}GetPayload<T>[]
-    >;
-  }
-}
+export class ${schema.name}Model extends Model {
+  static $schema = schema.${schema.name};
+${READ_OPERATIONS.map((op) => operation(schema.name, op)).join("")}${countOperation(schema.name)}}
 `);
   }
 

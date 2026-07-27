@@ -1,4 +1,12 @@
 import type { Dialect } from "../../database/dialect";
+import {
+  type Binder,
+  type Fragment,
+  concat,
+  joinFragments,
+  param,
+  sql,
+} from "../compile/fragment";
 import { DecodeError } from "../errors";
 import type { FieldSchema } from "../schema";
 import type { SqlDialect } from "./index";
@@ -42,6 +50,13 @@ function toDate(value: unknown, field: FieldSchema): Date {
 export class SqliteDialect implements SqlDialect {
   readonly name: Dialect = "sqlite";
 
+  // Prisma rejects `mode: "insensitive"` on SQLite rather than emulating it, so
+  // gemi does too — the contract is with Prisma's behaviour, not with
+  // cross-dialect uniformity. Note SQLite's `like` is *already* case-insensitive
+  // for ASCII, which is the opposite of Postgres and is why the two dialects
+  // legitimately return different rows for the same `contains`.
+  readonly supportsInsensitiveMode = false;
+
   quoteIdent(name: string): string {
     // NUL is the parameter sentinel in compile/fragment.ts, so it is the one
     // character that could shift a placeholder's position rather than merely
@@ -61,6 +76,47 @@ export class SqliteDialect implements SqlDialect {
 
   placeholder(_index: number): string {
     return "?";
+  }
+
+  // One placeholder per element, so the array's length is part of the SQL text
+  // and therefore part of the plan key. `in: [1,2]` and `in: [1,2,3]` are two
+  // plans here; on Postgres they are one. See the note on `SqlDialect`.
+  inList(
+    lhs: string,
+    negated: boolean,
+    length: number,
+    values: Binder,
+  ): Fragment {
+    const operator = negated ? "not in" : "in";
+    const elements: Fragment[] = [];
+    for (let i = 0; i < length; i++) {
+      elements.push(param((args) => (values(args) as unknown[])[i]));
+    }
+    return concat(
+      sql(`${lhs} ${operator} (`),
+      joinFragments(elements, ", "),
+      sql(")"),
+    );
+  }
+
+  like(lhs: string, _insensitive: boolean, pattern: Binder): Fragment {
+    // `_insensitive` is unreachable — the compiler checks
+    // `supportsInsensitiveMode` and raises a contextful error first.
+    return concat(sql(`${lhs} like `), param(pattern));
+  }
+
+  // SQLite cannot parse `offset` without a preceding `limit`, so a bare `skip`
+  // needs a limit anyway. `-1` is SQLite's "no limit", and it goes through a
+  // parameter rather than into the text like everything else.
+  paginate(take: Binder | null, skip: Binder | null): Fragment {
+    if (!take && !skip) return sql("");
+    if (!skip) return concat(sql(" limit "), param(take!));
+    return concat(
+      sql(" limit "),
+      param(take ?? (() => -1)),
+      sql(" offset "),
+      param(skip),
+    );
   }
 
   encode(value: unknown, field: FieldSchema): unknown {
