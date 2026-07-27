@@ -223,6 +223,28 @@ export interface RelationStrategy {
   plan(request: RelationRequest): RelationPlan;
 }
 
+/**
+ * Which relation strategy a query uses, when the caller has not said.
+ *
+ * **Batched, on every dialect, today.** The lateral strategy is built, tested
+ * against a real server and shown to produce results identical to the batched
+ * path — but the *full* nested differential matrix has not yet run against it,
+ * and that is what iteration 9's acceptance criterion 2 asks for before it
+ * becomes what every Postgres query does. Flipping this line is the whole of the
+ * change when that evidence exists; leaving it until then is the same discipline
+ * as measuring before optimising.
+ *
+ * A caller who wants it now says so per query — see `ExecOptions.strategy` — which
+ * is also how the differential matrix will run both sides.
+ *
+ * Deliberately a function of the dialect rather than a constant, because that is
+ * the shape the eventual rule needs: lateral is Postgres-only, and the strategy
+ * itself already declines per node for everything else it cannot fold.
+ */
+export function defaultStrategy(_dialect: SqlDialect): RelationStrategy {
+  return batchedStrategy;
+}
+
 export interface RelationPlanning {
   plans: RelationPlan[];
   /** Parent fields the root query must select for stitching to be possible. */

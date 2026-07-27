@@ -2,6 +2,7 @@ import { compile } from "./compile";
 import type { BindContext } from "./compile/fragment";
 import type { NestedWriteStep, RelationPlan } from "./compile/plan-relations";
 import type { SqlDialect } from "./dialect";
+import type { RelationStrategy } from "./compile/plan-relations";
 import type { ModelSchema } from "./schema";
 
 /**
@@ -38,6 +39,20 @@ export type Operation =
  * not affect the plan key, and they cannot if they never reach the compiler.
  */
 export interface ExecOptions {
+  /**
+   * Which relation strategy loads this query's `include` tree.
+   *
+   * `"batched"` issues one query per include node; `"lateral"` folds them into
+   * the root statement with a `LATERAL` join on Postgres, declining per node for
+   * anything it cannot express. Omitted, `defaultStrategy` chooses.
+   *
+   * Unlike `track`, this **does** reach the compiler and **is** part of the plan
+   * key — two strategies emit different SQL for the same arguments, so sharing a
+   * plan between them would run one query's statement for the other's request.
+   * That is the one thing a per-call option must not do, which is why this one is
+   * threaded rather than kept out of the way like `track` is.
+   */
+  strategy?: "batched" | "lateral";
   /**
    * Record where each returned row came from, so `Model.save(row)` can update it.
    *
@@ -258,8 +273,23 @@ export function planKey(
   model: string,
   op: Operation,
   args: unknown,
+  /**
+   * The relation strategy's name, because **different strategies emit different
+   * SQL for the same arguments**.
+   *
+   * Leaving it out would let a query run under one strategy return a plan
+   * compiled for the other — a lateral statement executed where the caller asked
+   * for batched, or worse a batched one whose children are then never loaded
+   * because `attachRelations` skips a plan carrying `root`. Silent wrong results
+   * from a caching bug, which is the same failure shape iteration 6's policy
+   * ordering had to avoid.
+   *
+   * Defaulted so every existing caller keys exactly as it did, which is what
+   * keeps this from invalidating a warm cache.
+   */
+  strategy: string = "batched",
 ): string {
-  return `${dialect.name}:${model}:${op}:${canonicalShape(
+  return `${dialect.name}:${strategy}:${model}:${op}:${canonicalShape(
     args,
     false,
     dialect.bindsListAsOneParameter,
@@ -271,8 +301,9 @@ export function getOrCompile(
   op: Operation,
   args: any,
   dialect: SqlDialect,
+  strategy?: RelationStrategy,
 ): QueryPlan {
-  const key = planKey(dialect, schema.name, op, args);
+  const key = planKey(dialect, schema.name, op, args, strategy?.name);
   const cached = cache.get(key);
   if (cached) {
     hits++;
@@ -283,7 +314,7 @@ export function getOrCompile(
     return cached;
   }
 
-  const plan = compile(schema, op, args, dialect);
+  const plan = compile(schema, op, args, dialect, strategy);
   compiles++;
 
   if (cache.size >= MAX_CACHED_PLANS) {

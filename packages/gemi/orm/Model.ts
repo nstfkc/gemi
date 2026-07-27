@@ -12,8 +12,12 @@ import {
 import {
   type NestedWriteStep,
   type RelationExecutor,
+  type RelationStrategy,
   attachRelations,
+  batchedStrategy,
+  defaultStrategy,
 } from "./compile/plan-relations";
+import { lateralStrategy } from "./compile/lateral";
 import { dialectFor, type SqlDialect } from "./dialect";
 import {
   MissingModelSchemaError,
@@ -479,7 +483,13 @@ export abstract class Model {
       effective = applyPolicies(policies, policy, args);
     }
 
-    const plan = getOrCompile(schema, op, effective, dialect);
+    // Which strategy plans the include tree. Named per call or chosen by
+    // `defaultStrategy`, and either way it reaches the plan key — two strategies
+    // emit different SQL for the same arguments, so sharing a plan between them
+    // would run one request's statement for the other's.
+    const strategy = resolveStrategy(options?.strategy, dialect);
+
+    const plan = getOrCompile(schema, op, effective, dialect, strategy);
 
     const executor: RelationExecutor = {
       // `markPreScoped`: this model's policies were already applied to
@@ -599,6 +609,29 @@ export abstract class Model {
   static $shape(plan: QueryPlan, rows: unknown[]): unknown {
     return plan.shape(rows);
   }
+}
+
+/**
+ * The named strategy, or the dialect's default.
+ *
+ * An unknown name raises rather than falling back: a typo that silently ran the
+ * other strategy would be a performance mystery with no error attached, and the
+ * set is two.
+ */
+function resolveStrategy(
+  named: string | undefined,
+  dialect: SqlDialect,
+): RelationStrategy {
+  if (named === undefined) return defaultStrategy(dialect);
+  if (named === "batched") return batchedStrategy;
+  if (named === "lateral") return lateralStrategy;
+
+  throw new UnsupportedQueryError(
+    `strategy: ${JSON.stringify(named)}`,
+    "Model",
+    "$exec",
+    `Unknown relation strategy. Expected "batched" or "lateral".`,
+  );
 }
 
 async function runSteps(

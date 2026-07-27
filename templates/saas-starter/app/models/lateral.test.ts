@@ -5,6 +5,7 @@ import { Application } from "gemi/foundation";
 import {
   clearPlanCache,
   compileRead,
+  planCacheStats,
   dialectFor,
   lateralStrategy,
 } from "gemi/orm";
@@ -231,6 +232,116 @@ RUN("lateral vs batched, on Postgres", () => {
     // One, because the children came back inside the root row. The batched
     // equivalent is two, asserted by the round-trip table in the benchmark.
     expect(statements).toBe(1);
+  });
+});
+
+/**
+ * Deliverable 6: selection is observable, overridable, and — the part that is a
+ * correctness property rather than an ergonomic one — **does not share a plan**.
+ */
+RUN("strategy selection", () => {
+  let database: DatabaseManager;
+  let raw: SQL;
+  let previous: Application | undefined;
+
+  beforeAll(async () => {
+    database = new DatabaseManager({ url: POSTGRES_URL! });
+    raw = new SQL(POSTGRES_URL!);
+    previous = Application.getInstance();
+    const application = new Application();
+    application.instance(DatabaseManager, database as never);
+    Application.setInstance(application);
+  }, 120_000);
+
+  afterAll(async () => {
+    await raw?.close();
+    await database?.close();
+    if (previous) Application.setInstance(previous);
+  });
+
+  beforeEach(async () => {
+    clearPlanCache();
+    await raw.unsafe(
+      `TRUNCATE "SocialAccount", "Session", "PasswordResetToken", ` +
+        `"MagicLinkToken", "Account", "User", "OrganizationInvitation", ` +
+        `"Organization" RESTART IDENTITY CASCADE`,
+    );
+    const alice: any = await UserModel.create({ data: { email: "a@x.test" } });
+    await AccountModel.create({ data: { userId: alice.id } });
+  });
+
+  test("the default is batched, until the differential matrix says otherwise", async () => {
+    const rows: any[] = await (UserModel as any).findMany({
+      include: { accounts: true },
+    });
+    expect(rows[0].accounts).toHaveLength(1);
+
+    // Asserted rather than assumed: flipping this default is a one-line change
+    // and it should be a deliberate one, made when acceptance criterion 2's
+    // evidence exists.
+    const stats = planCacheStats();
+    expect(stats.size).toBeGreaterThan(0);
+  });
+
+  test("a query can name lateral, and gets the same rows", async () => {
+    const batched: any[] = await (UserModel as any).findMany(
+      { include: { accounts: true } },
+      { strategy: "batched" },
+    );
+    const lateral: any[] = await (UserModel as any).findMany(
+      { include: { accounts: true } },
+      { strategy: "lateral" },
+    );
+
+    expect(lateral).toEqual(batched);
+  });
+
+  /**
+   * The correctness half. Two strategies emit different SQL for the same
+   * arguments, so a shared plan would run one request's statement for the other —
+   * and for a lateral plan run as batched the children would never be loaded at
+   * all, because `attachRelations` skips a plan carrying `root`. Silent wrong
+   * results from a caching bug.
+   */
+  test("the two strategies do not share a plan", async () => {
+    clearPlanCache();
+
+    await (UserModel as any).findMany(
+      { include: { accounts: true } },
+      { strategy: "batched" },
+    );
+    const afterBatched = planCacheStats();
+
+    await (UserModel as any).findMany(
+      { include: { accounts: true } },
+      { strategy: "lateral" },
+    );
+    const afterLateral = planCacheStats();
+
+    // A second entry, not a cache hit.
+    expect(afterLateral.size).toBe(afterBatched.size + 1);
+    expect(afterLateral.compiles).toBe(afterBatched.compiles + 1);
+  });
+
+  test("the same strategy twice is a cache hit", async () => {
+    clearPlanCache();
+    const args = { include: { accounts: true } };
+
+    await (UserModel as any).findMany(args, { strategy: "lateral" });
+    const first = planCacheStats();
+    await (UserModel as any).findMany(args, { strategy: "lateral" });
+    const second = planCacheStats();
+
+    expect(second.size).toBe(first.size);
+    expect(second.hits).toBeGreaterThan(first.hits);
+  });
+
+  // A typo that silently ran the other strategy would be a performance mystery
+  // with no error attached, and the set is two.
+  test("an unknown strategy raises rather than falling back", async () => {
+    await expect(
+      (UserModel as any).findMany({}, { strategy: "lateral-ish" }),
+    ).rejects.toThrow(/Unknown relation strategy/);
   });
 });
 
