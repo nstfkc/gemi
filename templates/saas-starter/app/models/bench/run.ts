@@ -66,6 +66,9 @@ async function main() {
    * back explicitly.
    */
   const anchors: Record<string, number> = {};
+  /** Deterministic round-trip counts per include shape — see conclusion 3. */
+  const roundTrips: string[] = [];
+  const statementCounts: Record<string, Record<string, number>> = {};
 
   const sqlite = await sqliteWorkspace();
   try {
@@ -78,6 +81,8 @@ async function main() {
         stitching,
         tracking,
         anchors,
+        roundTrips,
+        statementCounts,
       )),
     );
     // Inside the dialect's own setup, because `Model.transaction` resolves the
@@ -99,6 +104,8 @@ async function main() {
         stitching,
         tracking,
         anchors,
+        roundTrips,
+        statementCounts,
       )),
     );
     if (/localhost|127\.0\.0\.1|::1/.test(POSTGRES_URL)) {
@@ -163,6 +170,18 @@ async function main() {
     "| --- | --: | --: | --: | --: |",
     ...tracking,
     "",
+    "## Round trips per include depth",
+    "",
+    "**Counted, not timed.** One query per include node is a property the batched",
+    "planner guarantees, so it is deterministic — and the wall-clock delta between",
+    "depths moved 23× across two runs of identical code, which makes it the worst",
+    "available way to measure it. Conclusion 3 argues from these numbers and from",
+    "scenario 1's point read, both of which are stable.",
+    "",
+    "| Dialect | Shape | Statements |",
+    "| --- | --- | --: |",
+    ...roundTrips,
+    "",
     "## Relation stitching on a wide result",
     "",
     "The last measurement iteration 3 deferred. Read as the *difference* between",
@@ -219,7 +238,11 @@ async function main() {
           "   was not measured, and it is the only dialect where the case can be",
           "   made. Set `BENCH_POSTGRES_URL`.",
         ]
-      : lateralConclusion(results, anchors.postgres)),
+      : lateralConclusion(
+          results,
+          anchors.postgres,
+          statementCounts.postgres ?? {},
+        )),
     "4. **A transaction costs one extra round trip pair, and that is the whole",
     "   cost.** +12µs on SQLite, +350µs on Postgres — against a ~25ns ALS read.",
     "   Iteration 5's second `AsyncLocalStorage` is nowhere in the number; the",
@@ -400,70 +423,82 @@ function us(value: number): string {
 function lateralConclusion(
   results: readonly ScenarioResult[],
   noInclude: number,
+  counts: Record<string, number>,
 ): string[] {
   const depth2 = measured(results, "postgres", "3.");
   const depth3 = measured(results, "postgres", "4.");
   const point = measured(results, "postgres", "1.");
+  const trips = counts["depth-3 include"] ?? 3;
+  const depth2Raw = measured(results, "postgres", "3.", "raw");
+  const depth3Raw = measured(results, "postgres", "4.", "raw");
 
   // Two levels added between one round trip and three.
   const perLevel = (depth3 - noInclude) / 2;
-  // A lateral statement is *one* round trip for the whole tree, so the win is
-  // bounded by two ratios rather than estimated as one:
+  // The win, argued from the *count* rather than from a wall-clock delta.
   //
-  //   optimistic  depth3 / noInclude  — if the extra rows cost nothing to carry
-  //   pessimistic depth3 / depth2     — if lateral saved only one of the two trips
-  //
-  // The truth is between, and quoting a single invented figure is what produced
-  // the "roughly 2×" this replaces. The real lateral cost includes json_agg's
-  // server-side work and a wider result to parse, neither of which this suite can
-  // measure without building it.
-  const optimistic = depth3 / noInclude;
-  const pessimistic = depth3 / depth2;
-
+  // The count is deterministic — one query per include node — and the cost of one
+  // round trip is what scenario 1 measures directly, which is the most stable
+  // number in the suite. Multiplying them is an argument that does not move
+  // between runs. The earlier version subtracted two ~700µs measurements to get
+  // the per-level cost, and that difference moved 23× across two runs of
+  // identical code; this replaces it.
+  const saved = (trips - 1) * point;
   return [
-    `3. **Deliverable 2 (lateral + \`json_agg\`) IS justified on Postgres.** This`,
-    `   reverses what an earlier version of this report concluded, and the reason`,
-    `   is worth stating plainly: scenario 4 was not measuring a depth-3 include.`,
-    `   The seed created accounts with no \`organizationId\`, so every foreign key`,
-    `   at the third level was null, the batched loader correctly skipped that`,
-    `   query entirely, and the scenario measured depth-2 plus a filter pass. It`,
-    `   read as *faster than* depth-2 — more nodes, less time — which was the`,
-    `   tell, and it was the number the recommendation rested on.`,
+    `3. **Deliverable 2 (lateral + \`json_agg\`) IS justified on Postgres**, and the`,
+    `   argument is built from a counted quantity rather than a timed one.`,
     ``,
-    `   With the seed fixed, the Postgres cost is linear in include depth:`,
+    `   An earlier version of this report declined the deliverable, on a scenario`,
+    `   that turned out not to be measuring a depth-3 include at all — the seed`,
+    `   left every third-level foreign key null, so the batched loader correctly`,
+    `   skipped that query and the scenario measured depth-2 plus a filter pass.`,
+    `   With the seed fixed the conclusion reversed. A later version then argued`,
+    `   the size of the win from the wall-clock gap between depth 2 and depth 3,`,
+    `   and **that gap is not reproducible**: across two runs of identical code it`,
+    `   moved from +397µs to +17µs, a 23× swing on the deciding quantity.`,
     ``,
-    `       100 parents, no include    ${us(noInclude)}\t1 round trip`,
-    `       depth-2 include            ${us(depth2)}\t2 round trips`,
-    `       depth-3 include            ${us(depth3)}\t3 round trips`,
+    `   So the argument no longer rests on it. Round trips are **counted**, and the`,
+    `   count is deterministic — one query per include node, which the batched`,
+    `   planner guarantees:`,
     ``,
-    `   That is ~${us(perLevel)} per added level, against a ${us(point)} point read — so`,
-    `   each level costs on the order of a round trip, and a lateral join collapses`,
-    `   all of them into one. gemi is at ~1.0× hand-written SQL at both depths, so`,
-    `   there is nothing left to win *at this shape*; the win available is in`,
-    `   changing the shape, which is the deliverable.`,
+    `       no include        ${counts["no include"] ?? "?"} statement`,
+    `       depth-2 include   ${counts["depth-2 include"] ?? "?"} statements`,
+    `       depth-3 include   ${trips} statements`,
     ``,
-    `   **How large the win is, bounded rather than guessed.** A lateral statement`,
-    `   is one round trip for the whole tree, so on depth 3 it replaces ${us(depth3)}`,
-    `   with something between ${us(noInclude)} (the one-round-trip read, if carrying the`,
-    `   extra rows were free) and ${us(depth2)} (if it saved only one of the two extra`,
-    `   trips) — so **${pessimistic.toFixed(1)}× to ${optimistic.toFixed(1)}×**, growing with depth.`,
+    `   A lateral join collapses all of them into one. The cost of a single round`,
+    `   trip is what scenario 1 measures directly — ${us(point)} — so on depth 3 the`,
+    `   removable cost is about ${us(saved)}, against a total of ${us(depth3)}.`,
     ``,
-    `   The range is quoted rather than a single figure because the true cost`,
-    `   includes \`json_agg\`'s server-side work and a wider result to parse, and`,
-    `   this suite cannot measure either without building the thing. An earlier`,
-    `   version of this conclusion quoted "roughly 2×" from an invented`,
-    `   denominator; the honest answer is an interval.`,
+    `   That is the whole case, and every input to it is either a count that cannot`,
+    `   drift or the single most stable timing in the suite. It does not depend on`,
+    `   the depth-2/depth-3 delta, which is why it survives the variance that`,
+    `   sentence did not.`,
     ``,
-    `   **On SQLite it remains unjustified**, which matches the plan's own note:`,
-    `   in-process round trips are nearly free, and the depth-2/depth-3 pair there`,
-    `   is affected by run order (scenario 4 runs second and benefits from a`,
-    `   warmer cache), so the difference is inside the noise.`,
+    `   **What the wall clock does and does not support.** Against baselines of the`,
+    `   same shape — hand-written SQL issuing the same number of queries — gemi is`,
+    `   at ${(depth2 / depth2Raw).toFixed(2)}× on depth 2 and ${(depth3 / depth3Raw).toFixed(2)}× on depth 3. So there is little`,
+    `   to win *at this shape*; the win is in changing the shape.`,
+    ``,
+    `   The per-level step in this run: ${us(depth2)} at depth 2 against ${us(depth3)} at`,
+    `   depth 3, so ${
+      depth3 > depth2
+        ? `+${us(depth3 - depth2)} for the third query`
+        : `**${us(depth2 - depth3)} *less*** for one query more, which is not a` +
+          ` cost at all`
+    }.`,
+    `   Either direction is inside the noise on a single run — and writing that`,
+    `   sentence by hand is how this report went wrong three times, so it is`,
+    `   rendered from the data. "Each level costs a round trip" is a claim the`,
+    `   counted evidence supports and the timed evidence does not. Read the count.`,
+    ``,
+    `   **On SQLite it remains unjustified.** The counts are identical, but the`,
+    `   round trips are in-process: scenario 1 there is ${us(measured(results, "sqlite", "1."))},`,
+    `   so eliminating two of them saves that much rather than milliseconds.`,
     `   \`json_group_array\` should be built only if a SQLite-specific measurement`,
     `   asks for it.`,
     ``,
-    `   Every figure above is read out of \`results\` rather than written into the`,
-    `   text — see \`measured()\`. Hardcoded narrative drifted from its own data`,
-    `   twice before that.`,
+    `   Every figure above is read out of \`results\` or the statement counter`,
+    `   rather than written into the text — see \`measured()\`. Hardcoded narrative`,
+    `   drifted from its own data three times before that.`,
   ];
 }
 
@@ -535,6 +570,8 @@ async function runDialect(
   stitching: string[],
   tracking: string[],
   anchors: Record<string, number>,
+  roundTrips: string[],
+  statementCounts: Record<string, Record<string, number>>,
 ): Promise<ScenarioResult[]> {
   const database = new DatabaseManager({ url: gemiUrl });
   const raw = new SQL(gemiUrl);
@@ -542,8 +579,44 @@ async function runDialect(
 
   const previous = Application.getInstance();
   const application = new Application();
-  application.instance(DatabaseManager, database as never);
+
+  // A counting wrapper around the DatabaseManager, so round trips can be
+  // *counted* rather than inferred from wall clock. Same seam
+  // `differential.ts` uses — the ORM only ever reads `sql` and `dialect` off
+  // the manager, so this needs no cooperation from the runtime and cannot
+  // drift from it.
+  let statements = 0;
+  // A Proxy rather than a hand-written stub, because the ORM reaches for more
+  // than `unsafe`: `Model.transaction` needs `begin`, and a stub providing only
+  // the counted method made scenario 6a fail with `pool.begin is not a function`.
+  // Delegating everything and intercepting one method means the wrapper cannot
+  // fall behind what the runtime uses.
+  const countingSql = new Proxy(database.sql, {
+    get(target, property, receiver) {
+      if (property === "unsafe") {
+        return (text: string, values: unknown[]) => {
+          statements++;
+          return target.unsafe(text, values);
+        };
+      }
+      const value = Reflect.get(target, property, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+
+  application.instance(DatabaseManager, {
+    dialect: database.dialect,
+    url: (database as unknown as { url: string }).url,
+    sql: countingSql,
+    close: () => database.close(),
+  } as never);
   Application.setInstance(application);
+
+  const countStatements = async (fn: () => Promise<unknown>) => {
+    statements = 0;
+    await fn();
+    return statements;
+  };
 
   const sqlDialect = dialectFor(database.dialect);
   const results: ScenarioResult[] = [];
@@ -744,6 +817,45 @@ async function runDialect(
         `| ${dialect} | ${USERS} | ${off.p50.toFixed(1)} | ${on.p50.toFixed(1)} | ` +
           `${(((on.p50 - off.p50) / off.p50) * 100).toFixed(0)}% |`,
       );
+    }
+
+    // --- 4c. round trips, counted rather than timed -------------------------
+    //
+    // The lateral decision turns on how many round trips an include tree costs,
+    // and that number is **deterministic** — one query per include node, which
+    // the batched planner guarantees. Inferring it from the wall-clock delta
+    // between depth-2 and depth-3 was the noisiest possible way to measure the
+    // one quantity that is not actually uncertain: across two runs of identical
+    // code that delta moved from +397µs to +17µs, a 23× swing, while the count
+    // never moved at all.
+    //
+    // So it is counted. Combined with scenario 1 — a point read, the most stable
+    // number in the suite — that gives an argument that does not move between
+    // runs: N round trips at the measured cost of one, against 1.
+    {
+      const shapes: Array<[string, () => Promise<unknown>]> = [
+        ["no include", () => UserModel.findMany({ take: PARENTS })],
+        [
+          "depth-2 include",
+          () => UserModel.findMany({ take: PARENTS, include: { accounts: true } }),
+        ],
+        [
+          "depth-3 include",
+          () =>
+            UserModel.findMany({
+              take: PARENTS,
+              include: { accounts: { include: { organization: true } } },
+            }),
+        ],
+      ];
+
+      const counts: Record<string, number> = {};
+      for (const [shape, run] of shapes) {
+        const count = await countStatements(run);
+        counts[shape] = count;
+        roundTrips.push(`| ${dialect} | ${shape} | ${count} |`);
+      }
+      statementCounts[dialect] = counts;
     }
 
     // --- 4a. stitching cost on a wide result -------------------------------
