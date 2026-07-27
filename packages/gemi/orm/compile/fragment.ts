@@ -1,4 +1,5 @@
 import type { SqlDialect } from "../dialect";
+import { ParameterLimitError } from "../errors";
 
 /**
  * Pulls one value out of the argument tree at bind time. Compilation closes
@@ -106,6 +107,12 @@ export function joinFragments(parts: Fragment[], separator: string): Fragment {
 export function render(
   fragment: Fragment,
   dialect: SqlDialect,
+  /**
+   * Where the statement came from, for the parameter-ceiling error. Optional so
+   * a fragment can still be rendered in isolation by a test; every compiler
+   * passes it.
+   */
+  origin?: { model: string; operation: string },
 ): { text: string; binders: Binder[] } {
   const segments = fragment.text.split(PARAM_MARKER);
   const count = segments.length - 1;
@@ -116,6 +123,37 @@ export function render(
     throw new Error(
       `Compiled ${count} parameter placeholders but collected ` +
         `${fragment.binders.length} binders.`,
+    );
+  }
+
+  // The parameter ceiling, checked here because this is the one place that
+  // knows a *statement's* final count — and because a guard at any single
+  // compiler is a guard the next compiler forgets.
+  //
+  // It started life inside `compileCreateMany`, on the reasoning that
+  // `rows × columns` was the only count that scaled with the caller's data.
+  // That was wrong: on SQLite an `in` list binds one placeholder per element,
+  // so `findMany({ where: { id: { in: <40 000 ids> } } })` walks into the same
+  // driver error, and such a list is routinely request-derived. The relation
+  // loader has the same shape, batching an `in` over the parent keys — so a
+  // large `findMany` with an `include` reaches it without anyone writing a big
+  // list by hand. Postgres is unaffected either way: `= any($1)` is one
+  // parameter however long the array.
+  //
+  // Compile-time is exact rather than approximate, on both dialects: where the
+  // length changes the placeholder count it also changes the SQL text, so it is
+  // already part of the plan's identity.
+  if (origin && count > dialect.maxBoundParameters) {
+    throw new ParameterLimitError(
+      origin.model,
+      origin.operation,
+      count,
+      dialect.maxBoundParameters,
+      dialect.name,
+      dialect.bindsListAsOneParameter
+        ? `That is one parameter per value in the statement.`
+        : `That is one parameter per value, and on ${dialect.name} each ` +
+            `element of an 'in' list counts separately.`,
     );
   }
 

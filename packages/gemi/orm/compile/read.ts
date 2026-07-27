@@ -105,7 +105,7 @@ export function compileRead(
       );
     }
 
-    const { text, binders } = render(statement, dialect);
+    const { text, binders } = render(statement, dialect, { model: schema.name, operation: op });
     return {
       text,
       bind: bindValues(binders),
@@ -147,7 +147,7 @@ export function compileRead(
     paginationClause,
   );
 
-  const { text, binders } = render(statement, dialect);
+  const { text, binders } = render(statement, dialect, { model: schema.name, operation: op });
   const shaper = buildRowShaper(
     fields,
     dialect,

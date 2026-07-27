@@ -2,7 +2,6 @@ import { clientSideValue, hasClientSideValue } from "../defaults";
 import type { SqlDialect } from "../dialect";
 import {
   MissingRequiredValueError,
-  ParameterLimitError,
   ReturningUnsupportedError,
   UnknownFieldError,
   UnsupportedQueryError,
@@ -149,7 +148,7 @@ function compileCreate(
     returning.clause,
   );
 
-  return plan(statement, dialect, op, returning, nested);
+  return plan(schema, statement, dialect, op, returning, nested);
 }
 
 // --- createMany ------------------------------------------------------------
@@ -174,6 +173,7 @@ function compileCreateMany(
         `select ${key} from ${dialect.quoteIdent(schema.table)} where false`,
       ),
       dialect,
+      { model: schema.name, operation: op },
     );
     return {
       text,
@@ -207,8 +207,6 @@ function compileCreateMany(
     );
   }
 
-  assertParameterCount(schema, op, rows.length * grid[0].length, dialect);
-
   const returning = returningClause(schema, undefined, dialect, op, undefined);
 
   const statement = concat(
@@ -217,7 +215,7 @@ function compileCreateMany(
     returning.clause,
   );
 
-  const { text, binders } = render(statement, dialect);
+  const { text, binders } = render(statement, dialect, { model: schema.name, operation: op });
   return {
     text,
     bind: bindValues(binders),
@@ -389,7 +387,7 @@ function compileUpdate(
     returning.clause,
   );
 
-  return plan(statement, dialect, op, returning, nested);
+  return plan(schema, statement, dialect, op, returning, nested);
 }
 
 // --- delete / deleteMany ---------------------------------------------------
@@ -432,7 +430,7 @@ function compileDelete(
     returning.clause,
   );
 
-  return plan(statement, dialect, op, returning, undefined);
+  return plan(schema, statement, dialect, op, returning, undefined);
 }
 
 // --- upsert ----------------------------------------------------------------
@@ -471,6 +469,19 @@ function compileUpsert(
   // find no match, attempt the create, and hit a unique violation). Refused
   // rather than narrowed, for the same reason the create-omits-the-key shape a
   // few lines down is.
+  // KNOWN DIFFERENCE, and deliberate: this also refuses a `where` naming *two
+  // different unique keys* — `{ id: 1, publicId: "p" }` — which Prisma accepts.
+  // `on conflict` takes one target, so honouring both is not expressible;
+  // picking `id` and ignoring `publicId` is the same silent narrowing the rest
+  // of this guard exists to remove. A migrating application does hit a compile
+  // error on a call Prisma ran happily, which is why it is listed under known
+  // differences in the plan rather than only here.
+  //
+  // Note which key gets *named* in that case is an artifact of declaration
+  // order — `matchUniqueKey` returns the primary key first, then `uniques` in
+  // schema order — not of anything the caller wrote. Fine for a message that
+  // lists every other member by name and tells the caller to choose, and not
+  // worth resolving, since there is no principled way to prefer one.
   const named = key.length > 1 ? key.join("_") : key[0];
   const extra = Object.keys(args.where as Record<string, unknown>).filter(
     (name) => name !== named && args.where[name] !== undefined,
@@ -484,8 +495,8 @@ function compileUpsert(
         `'${named}'. An upsert compiles its where into an 'on conflict' ` +
         `target, which can only be a key, so the extra ${
           extra.length === 1 ? "filter would be" : "filters would be"
-        } silently dropped. Drop ${extra.length === 1 ? "it" : "them"} here, ` +
-        `or use findFirst plus update / create.`,
+        } silently dropped. Name exactly one unique key here — or, if you meant ` +
+        `to filter further, use findFirst plus update / create.`,
     );
   }
 
@@ -586,7 +597,7 @@ function compileUpsert(
     returning.clause,
   );
 
-  return plan(statement, dialect, op, returning, undefined);
+  return plan(schema, statement, dialect, op, returning, undefined);
 }
 
 /**
@@ -677,11 +688,45 @@ function sameEncoded(a: unknown, b: unknown): boolean {
   return false;
 }
 
-/** A value for an error message, without pretending a `Date` is a string. */
+/**
+ * A value for an error message, distinct whenever `sameEncoded` says the two
+ * values differ.
+ *
+ * That equivalence is the whole requirement, and it is easy to half-meet: the
+ * first version of this stringified a `Date`, which made a genuine mismatch
+ * read as `is X ... but X` and look like a framework bug rather than a wrong
+ * argument. Two more ways to land back there:
+ *
+ * - Two different `Uint8Array`s of the same length both describing as
+ *   `"2 bytes"`. Hence the hex, truncated so a large blob does not fill the
+ *   message.
+ * - `1n` and `1`, which `sameEncoded` separates and `String()` collapses.
+ *   Reachable because Prisma coerces a number into a `BigInt` field. Hence the
+ *   `typeof` suffix on anything that is not a string.
+ */
 function describe(value: unknown): string {
   if (value instanceof Date) return JSON.stringify(value.toISOString());
-  if (ArrayBuffer.isView(value)) return `${value.byteLength} bytes`;
-  return JSON.stringify(String(value));
+
+  if (ArrayBuffer.isView(value)) {
+    const bytes = new Uint8Array(
+      value.buffer,
+      value.byteOffset,
+      value.byteLength,
+    );
+    // `Array.from` rather than a spread + `.map`: a `Uint8Array`'s own `map`
+    // returns another `Uint8Array`, so the strings would be coerced back to
+    // bytes and every one of them would become 0.
+    const shown = Array.from(bytes.slice(0, 8), (byte) =>
+      byte.toString(16).padStart(2, "0"),
+    ).join("");
+    const ellipsis = bytes.length > 8 ? "…" : "";
+    return `${bytes.length} bytes (0x${shown}${ellipsis})`;
+  }
+
+  if (typeof value === "string") return JSON.stringify(value);
+  if (value === null || value === undefined) return String(value);
+
+  return `${JSON.stringify(String(value))} (${typeof value})`;
 }
 
 /**
@@ -842,36 +887,6 @@ function suppliedFields(
   }
 
   return out;
-}
-
-/**
- * Refuse a statement that would bind more parameters than the driver can carry.
- *
- * `createMany` is the only operation whose parameter count is a function of the
- * caller's *data* rather than of the query's shape, so it is the only one that
- * can walk into a limit an application never chose. Everything else binds a
- * handful.
- *
- * Note this is checked at compile time from the row and column counts, which is
- * enough — the value of any one parameter cannot change how many there are.
- */
-function assertParameterCount(
-  schema: ModelSchema,
-  op: Operation,
-  required: number,
-  dialect: SqlDialect,
-): void {
-  const limit = dialect.maxBoundParameters;
-  if (required <= limit) return;
-
-  throw new ParameterLimitError(
-    schema.name,
-    op,
-    required,
-    limit,
-    dialect.name,
-    `That is ${required} values across the rows in 'data'.`,
-  );
 }
 
 /**
@@ -1155,13 +1170,14 @@ function fieldOf(schema: ModelSchema, name: string): FieldSchema {
 }
 
 function plan(
+  schema: ModelSchema,
   statement: Fragment,
   dialect: SqlDialect,
   op: Operation,
   returning: Returning,
   nested: NestedWritePlanning | undefined,
 ): QueryPlan {
-  const { text, binders } = render(statement, dialect);
+  const { text, binders } = render(statement, dialect, { model: schema.name, operation: op });
 
   const shaper = buildRowShaper(
     returning.fields,

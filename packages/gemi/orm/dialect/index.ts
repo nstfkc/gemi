@@ -64,11 +64,22 @@ export interface SqlDialect {
    *
    * A hard protocol/driver limit, not a tuning knob: Postgres sends the
    * parameter count as an int16 in the Bind message, and SQLite compiles
-   * `SQLITE_MAX_VARIABLE_NUMBER` in. Only `createMany` can approach either,
-   * since it is the one operation whose parameter count scales with the
-   * caller's data — `rows × columns` — rather than with the query's shape.
+   * `SQLITE_MAX_VARIABLE_NUMBER` in.
    *
-   * It lives here rather than as a constant in the write compiler for the usual
+   * Three shapes can approach it, all of them scaling with the caller's *data*
+   * rather than with the query's shape:
+   *
+   * - `createMany`, at `rows × columns`.
+   * - An `in` list on SQLite, which binds one placeholder per element — and
+   *   such a list is routinely request-derived (`?ids=…`).
+   * - A to-many `include` on SQLite, which batches an `in` over the parent
+   *   keys, so a large enough `findMany` reaches it with no big list in sight.
+   *
+   * Postgres escapes the last two: `= any($1)` is one parameter however long
+   * the array. The check itself lives in `compile/fragment.ts`'s `render`,
+   * because that is the one place that sees a statement's final count.
+   *
+   * It lives *here* rather than as a constant in the compiler for the usual
    * reason: the number differs per dialect, and the compiler is not allowed to
    * know which dialect it is compiling for.
    */

@@ -143,6 +143,38 @@ apply and that is fine), MySQL / MariaDB write paths, transactions (iteration 5 
 though this iteration should note every place it wants one), policies on writes
 (iteration 6).
 
+## Known differences from Prisma, as shipped
+
+Each of these is a deliberate refusal rather than a gap. The alternative in
+every case is a write that succeeds and does something other than what Prisma
+does, which is the failure this iteration is arranged to prevent.
+
+- **`upsert` refuses a `where` that carries anything beside one unique key.**
+  Prisma 5 allows extra non-unique filters in a `WhereUniqueInput`, and allows
+  naming two different unique keys. `update` and `delete` honour both, since
+  their whole `where` is compiled. An upsert's `where` becomes an
+  `on conflict (...)` target, which is a key and not a predicate — there is
+  nowhere to put `deletedAt: null`, and `on conflict` takes exactly one target.
+  So a migrating application will hit a compile error on a call Prisma ran
+  happily. The fix at the call site is `findFirst` plus `update` / `create`.
+- **`upsert` refuses a `create` that omits the conflict key**, and refuses a
+  `create` whose key value disagrees with the `where` (checked at bind time,
+  where values exist). Prisma means find-then-write there; expressing that takes
+  a read and a write inside one transaction, which is iteration 5's.
+- **`createMany` refuses a partially-supplied database default** — some rows
+  setting a column and others leaving it to the database. `NULL` would overwrite
+  the default rather than request it, and SQLite rejects `DEFAULT` inside a
+  `VALUES` list.
+- **`createMany` refuses more than one all-empty row.** `default values` inserts
+  exactly one and has no portable multi-row spelling.
+- **No automatic chunking.** Prisma splits a large `createMany`; gemi raises
+  `ParameterLimitError` naming the model and the driver limit. Chunking means
+  several statements, which cannot be made atomic before iteration 5.
+- **`delete` with `include` on a cascading relation** returns the children
+  empty, because the relation reads run after the delete has cascaded. Prisma
+  does the whole thing in a transaction. Recorded at `compileDelete`; fixable
+  once iteration 5 lands, and not before.
+
 ## Notes and risks
 
 - **Column order in a multi-row `createMany` must be canonical**, derived from the
