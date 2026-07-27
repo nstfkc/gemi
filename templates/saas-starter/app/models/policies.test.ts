@@ -341,6 +341,45 @@ function suite(label: string, url?: string) {
       ).rejects.toThrow(UnregisteredPolicyClassError);
     });
 
+    /**
+     * The mirror image of the original bug, and the one the guard's first
+     * placement missed.
+     *
+     * There, the policied class was unregistered and *nested* reads were
+     * unscoped. Here the policied class **is** registered — so nested reads are
+     * correctly scoped — and a *direct* query through the generated base skips
+     * the policy instead. Both are "the scope silently does not apply", and this
+     * one needs no include to reach.
+     *
+     * It is not exotic: `AccountModel` and `Account` come out of the same barrel
+     * with near-identical names, and querying the generated base is what every
+     * test in this file used to do.
+     */
+    test("querying the generated base when a policied class owns the name raises", async () => {
+      (ScopedAccount as any).$policy = tenantScoped;
+
+      await expect(
+        Model.asUser(ALICE, () => AccountModel.findMany({})),
+      ).rejects.toThrow(UnregisteredPolicyClassError);
+
+      // The message has to speak to *this* direction — the caller is skipping
+      // policies rather than failing to register any.
+      await expect(
+        Model.asUser(ALICE, () => AccountModel.findMany({})),
+      ).rejects.toThrow(/carries policies AccountModel does not/);
+    });
+
+    // ...and the exemption that keeps it usable: under `asSystem` policies are
+    // suspended by design, so a seed or a script querying the base directly is
+    // correct and must not raise. Without this the guard would break every
+    // seeded fixture in the repo.
+    test("asSystem may query the generated base without raising", async () => {
+      (ScopedAccount as any).$policy = tenantScoped;
+
+      const rows = await Model.asSystem(() => AccountModel.findMany({}));
+      expect(rows).toHaveLength(2);
+    });
+
     test("the same include for the other tenant sees only theirs", async () => {
       (ScopedAccount as any).$policy = tenantScoped;
 

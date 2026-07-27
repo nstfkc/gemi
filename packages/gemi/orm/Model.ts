@@ -207,24 +207,38 @@ export abstract class Model {
     let policy: PolicyContext | undefined;
     let effective = args;
 
-    if (policies.length > 0) {
-      // A nested relation read resolves its target through the registry, so it
-      // runs whatever is registered under this model's name — not necessarily
-      // the class the caller queried. If the two disagree about *policies*, the
-      // same query is scoped at the root and unscoped inside an include. See
-      // `UnregisteredPolicyClassError`.
-      //
-      // The comparison is on the resolved policy **chain**, not on class
-      // identity, and the difference matters: a plain subclass of a registered,
-      // policied class carries the same policy objects in the same order by
-      // inheritance, so a nested read resolving to the parent applies exactly
-      // what the root query applied. There is no divergence and nothing to
-      // refuse. Checking identity instead rejected `class AdminUser extends User
-      // {}` — a typed view that adds nothing — with an error about policies it
-      // did not write.
-      //
-      // Checked here rather than at registration because a class can acquire a
-      // policy at any point after it is defined.
+    // POLICY-DIVERGENCE GUARD.
+    //
+    // A nested relation read resolves its target through the registry, so it
+    // runs whatever is registered under this model's name — not necessarily the
+    // class the caller queried. When those two disagree about *policies*, the
+    // same policy applies to some queries and not others, silently. Both
+    // directions are reachable and both are the same bug:
+    //
+    //   policied class not registered  -> root scoped, nested reads unscoped
+    //   policied class registered, but -> nested reads scoped, a direct query
+    //   the caller queries the base       through the base unscoped
+    //
+    // The second is the one this check sat inside `policies.length > 0` and
+    // therefore missed: querying `AccountModel` when `Account` owns the name
+    // finds no policies on `AccountModel`, so the old placement never looked.
+    // `AccountModel` and `Account` come out of the same barrel with near
+    // identical names, so it needs no include and no mistake worth calling one.
+    //
+    // Keyed on the *divergence*, not on either class having policies. The
+    // comparison is of the resolved policy chain rather than class identity: a
+    // plain subclass of a registered, policied class inherits the same policy
+    // objects in the same order, so nothing diverges and there is nothing to
+    // refuse — checking identity rejected `class AdminUser extends User {}`, a
+    // typed view, for policies it had not written.
+    //
+    // `!system` is load-bearing. Under `asSystem` policies are suspended by
+    // design, so a seed script querying the generated base directly is correct
+    // and must not raise.
+    //
+    // Cost on the common path: one `Map.get` and one reference compare, for a
+    // model where nothing is registered under a different class.
+    if (!system) {
       const registered = registry.has(schema.name)
         ? registry.get<unknown>(schema.name)
         : undefined;
@@ -233,17 +247,20 @@ export abstract class Model {
         const theirs = policiesFor(registered);
         const diverges =
           policies.length !== theirs.length ||
-          policies.some((policy, index) => policy !== theirs[index]);
+          policies.some((entry, index) => entry !== theirs[index]);
 
         if (diverges) {
           throw new UnregisteredPolicyClassError(
             schema.name,
             (registered as { name?: string }).name ?? String(registered),
             this.name,
+            policies.length > 0 ? "queried" : "registered",
           );
         }
       }
+    }
 
+    if (policies.length > 0) {
       // Deny-by-default lives on the context's `user` accessor, not here: a
       // policy that never consults the user — a soft-delete scope, say — has
       // nothing to deny and must keep working with no request in sight. See
