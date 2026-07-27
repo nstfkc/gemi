@@ -883,7 +883,14 @@ async function readPairs(
     ),
   );
 
-  const { text, binders } = render(statement, dialect);
+  // The one statement in the ORM whose parameter count is not known until the
+  // parents are in hand, so the ceiling here is a real ceiling on *fan-out*: on
+  // SQLite a to-many `include` over more than 32 766 parent rows would exceed
+  // it. Named rather than left to the driver, like everywhere else.
+  const { text, binders } = render(statement, dialect, {
+    model: join.table,
+    operation: "include",
+  });
   return executor.query(
     text,
     binders.map((binder) => binder(undefined)),

@@ -2,7 +2,11 @@ import { describe, expect, test } from "vitest";
 
 import { PostgresDialect } from "../dialect/postgres";
 import { SqliteDialect } from "../dialect/sqlite";
-import { UnknownFieldError, UnsupportedQueryError } from "../errors";
+import {
+  ParameterLimitError,
+  UnknownFieldError,
+  UnsupportedQueryError,
+} from "../errors";
 import { USER_COLUMNS, mapped, user } from "../fixtures";
 import { compileRead } from "./read";
 
@@ -587,5 +591,69 @@ describe("compile is a function of shape, not values", () => {
     const args = { where: { email: evil } };
     expect(text(args)).toBe(`${SELECT_USER} where "email" = ?`);
     expect(bind(args)).toEqual([evil]);
+  });
+});
+
+/**
+ * The parameter ceiling is a *statement* property, not a `createMany` one.
+ *
+ * It first shipped inside `compileCreateMany`, on the reasoning that
+ * `rows × columns` was the only count that scaled with the caller's data. On
+ * SQLite an `in` list binds one placeholder per element, so a read walks into
+ * the same driver limit — and such a list is routinely request-derived, which
+ * is the case worth naming rather than letting the driver report obscurely.
+ */
+describe("the parameter ceiling applies to reads", () => {
+  const ids = (count: number) =>
+    Array.from({ length: count }, (_, index) => index);
+
+  test("a large in list is refused on sqlite, by name", () => {
+    const args = { where: { id: { in: ids(40_000) } } };
+
+    expect(() => compileRead(user, "findMany", args, sqlite)).toThrow(
+      ParameterLimitError,
+    );
+    expect(() => compileRead(user, "findMany", args, sqlite)).toThrow(
+      /would bind 40000 parameters.*accepts at most 32766/,
+    );
+  });
+
+  test("the message says why the count is what it is", () => {
+    expect(() =>
+      compileRead(user, "findMany", { where: { id: { in: ids(40_000) } } }, sqlite),
+    ).toThrow(/each element of an 'in' list counts separately/);
+  });
+
+  // `= any($1)` is one parameter however long the array, so the same query is
+  // fine here. This asymmetry is the reason the limit is a dialect capability
+  // rather than a constant.
+  test("the same list is one parameter on postgres", () => {
+    const args = { where: { id: { in: ids(40_000) } } };
+    const plan = compileRead(user, "findMany", args, postgres);
+
+    expect(plan.text).toContain("= any ($1)");
+    expect(plan.bind(args)).toHaveLength(1);
+  });
+
+  test("a list at exactly the sqlite limit still compiles", () => {
+    const args = { where: { id: { in: ids(32_766) } } };
+    expect(() => compileRead(user, "findMany", args, sqlite)).not.toThrow();
+  });
+
+  // Two lists in one statement are one statement's worth of parameters — which
+  // is the reason the check reads the rendered count rather than any single
+  // clause's length.
+  test("the ceiling counts the whole statement, not one clause", () => {
+    const args = {
+      where: {
+        AND: [
+          { id: { in: ids(20_000) } },
+          { globalRole: { in: ids(20_000) } },
+        ],
+      },
+    };
+    expect(() => compileRead(user, "findMany", args, sqlite)).toThrow(
+      ParameterLimitError,
+    );
   });
 });

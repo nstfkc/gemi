@@ -556,6 +556,94 @@ describe("upsert", () => {
       /2024-01-01.*2024-06-01/s,
     );
   });
+
+  /**
+   * The refusal message has to *distinguish* the two values, or it reads as
+   * "'x' is A ... but A" and looks like a framework bug rather than a wrong
+   * argument. Fixing the `Date` case is easy to half-do: `String()` collapses
+   * two different `Bytes` of the same length, and collapses `1n` against `1`.
+   */
+  test.each([
+    [
+      "Bytes of the same length",
+      new Uint8Array([1, 2]),
+      new Uint8Array([3, 4]),
+    ],
+    ["a bigint against a number", 1n, 1],
+  ])("a mismatched %s is described distinguishably", (_label, a, b) => {
+    const digest: any = {
+      name: "Digest",
+      table: "Digest",
+      fields: {
+        id: {
+          name: "id",
+          column: "id",
+          type: "Int",
+          nullable: false,
+          isId: true,
+          isUpdatedAt: false,
+          default: { kind: "autoincrement" },
+        },
+        key: {
+          name: "key",
+          column: "key",
+          type: typeof a === "bigint" ? "BigInt" : "Bytes",
+          nullable: false,
+          isId: false,
+          isUpdatedAt: false,
+        },
+        note: {
+          name: "note",
+          column: "note",
+          type: "String",
+          nullable: true,
+          isId: false,
+          isUpdatedAt: false,
+        },
+      },
+      primaryKey: ["id"],
+      uniques: [["key"]],
+      relations: {},
+    };
+
+    const args = {
+      where: { key: a },
+      create: { key: b },
+      update: { note: "n" },
+    };
+    const compiled = compileWrite(digest, "upsert", args, postgres);
+
+    let message = "";
+    try {
+      compiled.bind(args, createBindContext());
+    } catch (error: any) {
+      message = error.message;
+    }
+
+    expect(message).toMatch(/must agree on the key/);
+
+    // The two halves of "is X in the where clause but Y in 'create'" must not
+    // be the same string.
+    const [, left, right] =
+      /'key' is (.+?) in the where clause but (.+?) in 'create'/s.exec(
+        message,
+      ) ?? [];
+    expect(left).toBeDefined();
+    expect(left).not.toBe(right);
+  });
+
+  // Deliberate strictness, recorded in the plan's known-differences list:
+  // Prisma accepts a `where` naming two unique keys, but `on conflict` takes
+  // exactly one target and picking either would be silent narrowing.
+  test("a where naming two different unique keys is refused", () => {
+    expect(() =>
+      text("upsert", {
+        where: { id: 1, email: "a@b.c" },
+        create: { id: 1, email: "a@b.c" },
+        update: { name: "N" },
+      }),
+    ).toThrow(/Name exactly one unique key/);
+  });
 });
 
 describe("nested writes", () => {
