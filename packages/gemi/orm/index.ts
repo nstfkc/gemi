@@ -103,6 +103,7 @@ export {
   attachRelations,
   batchedStrategy,
   planRelations,
+  strategiesOf,
   type RelationPlan,
   type RelationPlanning,
   type RelationRequest,

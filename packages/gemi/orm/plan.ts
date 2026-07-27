@@ -49,6 +49,22 @@ export interface QueryPlan {
    */
   relations?: RelationPlan[];
   /**
+   * Which relation strategies this plan's own nodes used, deduplicated and
+   * sorted. Undefined when the query has no relations.
+   *
+   * Exists because a silent planner is untestable: once more than one strategy
+   * can be chosen, "which one ran" has to be answerable from outside, both for
+   * tests and for debugging a query that is slower than expected.
+   *
+   * **This plan's own nodes only, and that is not a limitation to remove.** A
+   * nested level is loaded by `$exec` on the *child* model, which compiles its
+   * own plan and chooses its own strategy — so a depth-3 include is three plans
+   * with three independent answers, and asking the root for all of them would
+   * mean reporting decisions that have not been made yet. It also means a mixed
+   * tree is expressible, which is the point of the strategy being per-node.
+   */
+  strategies?: string[];
+  /**
    * Fields the query had to select to stitch relations, but which the caller's
    * `select` did not ask for. Dropped once the relations are attached.
    */

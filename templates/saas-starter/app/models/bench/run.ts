@@ -52,11 +52,12 @@ async function main() {
 
   let micro = "";
   const positional: string[] = [];
+  const stitching: string[] = [];
 
   const sqlite = await sqliteWorkspace();
   try {
     results.push(
-      ...(await runDialect("sqlite", sqlite.url, `file:${sqlite.path}`, positional)),
+      ...(await runDialect("sqlite", sqlite.url, `file:${sqlite.path}`, positional, stitching)),
     );
     // Inside the dialect's own setup, because `Model.transaction` resolves the
     // DatabaseManager from the container and `runDialect` restores the previous
@@ -69,7 +70,7 @@ async function main() {
 
   if (POSTGRES_URL) {
     results.push(
-      ...(await runDialect("postgres", POSTGRES_URL, POSTGRES_URL, positional)),
+      ...(await runDialect("postgres", POSTGRES_URL, POSTGRES_URL, positional, stitching)),
     );
     if (/localhost|127\.0\.0\.1|::1/.test(POSTGRES_URL)) {
       notes.push(
@@ -121,6 +122,17 @@ async function main() {
     "— which at these magnitudes is mostly noise.",
     "",
     micro,
+    "",
+    "## Relation stitching on a wide result",
+    "",
+    "The last measurement iteration 3 deferred. Read as the *difference* between",
+    "the same query with and without the include — the include's own round trip",
+    "and child shaping are inside that difference, so it is an upper bound on",
+    "stitching rather than stitching alone.",
+    "",
+    "| Dialect | Parents | no include µs | with include µs | difference |",
+    "| --- | --: | --: | --: | --: |",
+    ...stitching,
     "",
     "## Positional row mode (deliverable 4)",
     "",
@@ -371,6 +383,7 @@ async function runDialect(
   gemiUrl: string,
   prismaUrl: string,
   positional: string[],
+  stitching: string[],
 ): Promise<ScenarioResult[]> {
   const database = new DatabaseManager({ url: gemiUrl });
   const raw = new SQL(gemiUrl);
@@ -559,6 +572,27 @@ async function runDialect(
         connection: database.sql,
       }),
     );
+
+    // --- 4a. stitching cost on a wide result -------------------------------
+    // The last measurement iteration 3 deferred: what the parent-key stitching
+    // costs when the parent set is large. Read as the *difference* between the
+    // same query with and without the include, since the include's own round
+    // trip and shaping are in both halves of a naive reading.
+    {
+      const withoutInclude = await time(
+        () => UserModel.findMany({ take: PARENTS }),
+        { runs: 50 },
+      );
+      const withInclude = await time(
+        () => UserModel.findMany({ take: PARENTS, include: { accounts: true } }),
+        { runs: 50 },
+      );
+      stitching.push(
+        `| ${dialect} | ${PARENTS} | ${withoutInclude.p50.toFixed(1)} | ` +
+          `${withInclude.p50.toFixed(1)} | ` +
+          `${(withInclude.p50 - withoutInclude.p50).toFixed(1)} |`,
+      );
+    }
 
     // --- 4b. positional row mode ------------------------------------------
     // Deliverable 4 proposes index-based shaping over Bun's `.values()`, which

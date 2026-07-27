@@ -19,24 +19,24 @@ there is nothing left to win in that scenario.
 
 | Dialect | Scenario | Rows | raw µs | gemi µs | ×raw | Prisma µs | ×raw | compile | lookup | execute | shape |
 | --- | --- | --: | --: | --: | --: | --: | --: | --: | --: | --: | --: |
-| sqlite | 1. point read by pk | 1 | 15.5 | 28.0 | 1.80× | 126.9 | 8.17× | 9.0 | 0.9 | 22.4 | 0.2 |
-| sqlite | 2. findMany 1000 rows | 1000 | 357.7 | 440.2 | 1.23× | 6386.2 | 17.85× | 6.3 | 0.3 | 383.8 | 78.3 |
-| sqlite | 3. depth-2 include, 100 parents | 100 | 149.8 | 348.0 | 2.32× | 1678.5 | 11.21× | 12.2 | 0.9 | 61.2 | 12.2 |
-| sqlite | 4. depth-3 include, 100 parents | 100 | 156.2 | 285.7 | 1.83× | 1896.8 | 12.14× | 11.5 | 1.0 | 62.2 | 12.2 |
-| sqlite | 5a. create | 1 | — | 406.2 | — | — | — | 16.1 | 0.5 | — | — |
-| sqlite | 5b. updateMany | 1000 | — | 1264.5 | — | — | — | 10.2 | 1.1 | 546.4 | 0.1 |
-| sqlite | 6a. point read, in a transaction | 1 | — | 43.5 | — | — | — | — | — | — | — |
-| sqlite | 6b. point read, policy-scoped | 1 | — | 37.0 | — | — | — | — | — | — | — |
-| sqlite | 6c. findMany 1000, policy-scoped | 1000 | — | 537.7 | — | — | — | — | — | — | — |
-| postgres | 1. point read by pk | 1 | 303.4 | 254.3 | 0.84× | 300.5 | 0.99× | 11.9 | 0.5 | 167.6 | 0.1 |
-| postgres | 2. findMany 1000 rows | 1000 | 1255.5 | 1206.0 | 0.96× | 5130.4 | 4.09× | 6.5 | 0.2 | 1484.4 | 35.9 |
-| postgres | 3. depth-2 include, 100 parents | 100 | 612.8 | 703.8 | 1.15× | 2293.8 | 3.74× | 12.1 | 0.8 | 275.9 | 7.7 |
-| postgres | 4. depth-3 include, 100 parents | 100 | 614.0 | 654.0 | 1.07× | 2252.3 | 3.67× | 12.0 | 1.2 | 270.5 | 7.9 |
-| postgres | 5a. create | 1 | — | 251.5 | — | — | — | 11.4 | 0.5 | — | — |
-| postgres | 5b. updateMany | 1000 | — | 6828.7 | — | — | — | 12.8 | 1.1 | 4213.3 | 0.1 |
-| postgres | 6a. point read, in a transaction | 1 | — | 653.2 | — | — | — | — | — | — | — |
-| postgres | 6b. point read, policy-scoped | 1 | — | 186.4 | — | — | — | — | — | — | — |
-| postgres | 6c. findMany 1000, policy-scoped | 1000 | — | 1682.9 | — | — | — | — | — | — | — |
+| sqlite | 1. point read by pk | 1 | 16.5 | 28.4 | 1.73× | 141.6 | 8.60× | 12.4 | 0.9 | 23.8 | 0.3 |
+| sqlite | 2. findMany 1000 rows | 1000 | 382.4 | 442.5 | 1.16× | 5904.8 | 15.44× | 6.8 | 0.3 | 459.4 | 66.1 |
+| sqlite | 3. depth-2 include, 100 parents | 100 | 170.2 | 411.0 | 2.41× | 1686.2 | 9.91× | 12.5 | 0.9 | 65.5 | 13.3 |
+| sqlite | 4. depth-3 include, 100 parents | 100 | 148.5 | 286.2 | 1.93× | 1869.5 | 12.59× | 10.0 | 1.0 | 64.0 | 12.8 |
+| sqlite | 5a. create | 1 | — | 415.8 | — | — | — | 16.4 | 0.5 | — | — |
+| sqlite | 5b. updateMany | 1000 | — | 1458.4 | — | — | — | 31.2 | 1.1 | 579.2 | 0.1 |
+| sqlite | 6a. point read, in a transaction | 1 | — | 40.2 | — | — | — | — | — | — | — |
+| sqlite | 6b. point read, policy-scoped | 1 | — | 32.0 | — | — | — | — | — | — | — |
+| sqlite | 6c. findMany 1000, policy-scoped | 1000 | — | 496.9 | — | — | — | — | — | — | — |
+| postgres | 1. point read by pk | 1 | 152.4 | 173.1 | 1.14× | 300.5 | 1.97× | 8.3 | 0.5 | 152.5 | 0.1 |
+| postgres | 2. findMany 1000 rows | 1000 | 1077.3 | 991.5 | 0.92× | 5130.4 | 4.76× | 6.0 | 0.2 | 922.9 | 21.5 |
+| postgres | 3. depth-2 include, 100 parents | 100 | 573.3 | 542.5 | 0.95× | 2293.8 | 4.00× | 11.7 | 1.0 | 221.0 | 7.7 |
+| postgres | 4. depth-3 include, 100 parents | 100 | 588.7 | 567.1 | 0.96× | 2252.3 | 3.83× | 9.6 | 1.2 | 258.6 | 7.8 |
+| postgres | 5a. create | 1 | — | 542.6 | — | — | — | 10.1 | 0.5 | — | — |
+| postgres | 5b. updateMany | 1000 | — | 5550.1 | — | — | — | 14.4 | 1.4 | 3839.4 | 0.1 |
+| postgres | 6a. point read, in a transaction | 1 | — | 465.5 | — | — | — | — | — | — | — |
+| postgres | 6b. point read, policy-scoped | 1 | — | 159.1 | — | — | — | — | — | — | — |
+| postgres | 6c. findMany 1000, policy-scoped | 1000 | — | 1191.4 | — | — | — | — | — | — | — |
 
 ## Per-call overheads
 
@@ -52,14 +52,26 @@ nanoseconds against a ~27µs point read, so roughly 0.1% each.
 
 | Cost | ns per call | Notes |
 | --- | --: | --- |
-| `currentTransaction()`, no transaction open | 24 | The common case: `getStore()` returning undefined. |
-| `currentTransaction()`, inside a transaction | 40 | An occupied store is barely dearer to read than an empty one. |
-| `policiesFor()`, no policy | 36 | Walks the prototype chain and finds nothing. Paid by every model. |
-| `policiesFor()`, one policy | 53 | Same walk, one `Object.hasOwn` hit. |
+| `currentTransaction()`, no transaction open | 26 | The common case: `getStore()` returning undefined. |
+| `currentTransaction()`, inside a transaction | 37 | An occupied store is barely dearer to read than an empty one. |
+| `policiesFor()`, no policy | 39 | Walks the prototype chain and finds nothing. Paid by every model. |
+| `policiesFor()`, one policy | 57 | Same walk, one `Object.hasOwn` hit. |
 
 Plan cache after the full run: **4 entries** of 1000, 4 compiles, 698 hits, 0 evictions.
 
 The bound is not load-bearing at this scale, and the eviction count says so. It matters only where the *shape* space is unbounded, and there is exactly one such case: an `in` list on SQLite puts its length into the SQL text, so `in: [1]` and `in: [1, 2]` are separate entries. A request-derived list of varying length therefore mints one per distinct length — bounded above by the parameter ceiling, but easily enough to churn a 1000-entry cache. That is the case to measure if the bound is ever revisited, and **nothing in this suite exercises it**, so the numbers here do not speak to it.
+
+## Relation stitching on a wide result
+
+The last measurement iteration 3 deferred. Read as the *difference* between
+the same query with and without the include — the include's own round trip
+and child shaping are inside that difference, so it is an upper bound on
+stitching rather than stitching alone.
+
+| Dialect | Parents | no include µs | with include µs | difference |
+| --- | --: | --: | --: | --: |
+| sqlite | 100 | 87.2 | 334.1 | 246.9 |
+| postgres | 100 | 259.5 | 587.3 | 327.7 |
 
 ## Positional row mode (deliverable 4)
 
@@ -71,8 +83,8 @@ and is the `shape` column in the table above.
 
 | Dialect | object mode p50/p95 µs | `.values()` p50/p95 µs | p50 delta |
 | --- | --: | --: | --: |
-| sqlite | 354.1 / 395.8 | 421.6 / 1022.2 | -19% |
-| postgres | 1377.0 / 3601.3 | 922.3 / 1288.6 | +33% |
+| sqlite | 389.1 / 666.6 | 461.0 / 553.3 | -18% |
+| postgres | 990.4 / 2090.9 | 1091.9 / 1584.7 | -10% |
 
 ## What these say about the rest of iteration 7
 

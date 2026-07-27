@@ -165,6 +165,14 @@ export interface RelationPlan {
   load(parents: Row[], args: any, executor: RelationExecutor): Promise<void>;
 }
 
+/**
+ * The distinct strategies a set of relation plans used, sorted so the value is a
+ * stable thing to assert on.
+ */
+export function strategiesOf(plans: readonly RelationPlan[]): string[] {
+  return [...new Set(plans.map((plan) => plan.strategy))].sort();
+}
+
 export interface RelationStrategy {
   readonly name: string;
   plan(request: RelationRequest): RelationPlan;
