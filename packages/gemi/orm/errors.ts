@@ -209,16 +209,32 @@ export class UnregisteredPolicyClassError extends Error {
     public readonly model: string,
     public readonly registered: string,
     public readonly queried: string,
+    /**
+     * Which side carries the policies that would be skipped. The two directions
+     * need different advice: one is a missing registration, the other is a
+     * query through the wrong class.
+     */
+    public readonly carries: "queried" | "registered" = "queried",
   ) {
     super(
-      `${queried} carries policies but the registry resolves '${model}' to ` +
-        `${registered}. Nested relation reads go through the registry, so they ` +
-        `would run on ${registered} and skip every policy on ${queried} — ` +
-        `scoped at the root, unscoped inside an include. Register the class ` +
-        `that carries the policy:\n\n` +
-        `    import { register } from "gemi/orm"\n` +
-        `    export class ${queried} extends ${registered} { … }\n` +
-        `    register("${model}", ${queried})\n`,
+      carries === "queried"
+        ? `${queried} carries policies but the registry resolves '${model}' to ` +
+            `${registered}. Nested relation reads go through the registry, so ` +
+            `they would run on ${registered} and skip every policy on ` +
+            `${queried} — scoped at the root, unscoped inside an include. ` +
+            `Register the class that carries the policy:\n\n` +
+            `    import { register } from "gemi/orm"\n` +
+            `    export class ${queried} extends ${registered} { … }\n` +
+            `    register("${model}", ${queried})\n`
+        : `This query goes through ${queried}, but the registry resolves ` +
+            `'${model}' to ${registered}, which carries policies ${queried} ` +
+            `does not. Nested relation reads would be scoped and this query is ` +
+            `not — the same policy applying to some queries and not others. ` +
+            `Query ${registered} instead:\n\n` +
+            `    ${registered}.findMany(…)\n\n` +
+            `If skipping policies is intended, say so at the call site — that ` +
+            `is what Model.asSystem() is for, and it is the only way to do it ` +
+            `that a reader can see.\n`,
     );
     this.name = "UnregisteredPolicyClassError";
   }
