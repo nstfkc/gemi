@@ -298,6 +298,49 @@ function suite(label: string, url?: string) {
       ).rejects.toThrow(/register\("Account", Unregistered\)/);
     });
 
+    /**
+     * The guard fires on a divergence in the *policy chain*, not on the two
+     * classes merely differing.
+     *
+     * A plain subclass of a registered, policied class inherits the same policy
+     * objects in the same order, so a nested read resolving to the parent
+     * applies exactly what a root query through the child applied. There is no
+     * leak, and an identity check refused it — `class AdminUser extends User {}`
+     * as a typed view is a natural thing to write, and it failed with an error
+     * about policies it had not written.
+     */
+    test("a subclass adding no policy of its own is allowed", async () => {
+      (ScopedAccount as any).$policy = tenantScoped;
+
+      // A typed view over the registered, policied class.
+      class AdminAccount extends ScopedAccount {}
+
+      const rows = await Model.asUser(ALICE, () =>
+        (AdminAccount as any).findMany({}),
+      );
+
+      // Allowed, and still scoped — the inherited policy is the same object.
+      expect(rows).toHaveLength(1);
+      expect(rows[0].organizationId).toBe(ALICE.organizationId);
+    });
+
+    // ...and the divergent case is still refused, which is the half that
+    // distinguishes "stricter than the risk" from "matching the risk".
+    test("a subclass adding its own policy must own the name", async () => {
+      (ScopedAccount as any).$policy = tenantScoped;
+
+      class Narrower extends ScopedAccount {
+        static $policy: ModelPolicy = {
+          scope: () => ({ deletedAt: null }),
+          onCreate: (_c, data) => data,
+        };
+      }
+
+      await expect(
+        Model.asUser(ALICE, () => (Narrower as any).findMany({})),
+      ).rejects.toThrow(UnregisteredPolicyClassError);
+    });
+
     test("the same include for the other tenant sees only theirs", async () => {
       (ScopedAccount as any).$policy = tenantScoped;
 
