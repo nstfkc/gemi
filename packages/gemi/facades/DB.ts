@@ -1,6 +1,7 @@
 import type { SQL } from "bun";
 import { DatabaseManager } from "../database/DatabaseManager";
 import type { Dialect } from "../database/dialect";
+import { withTransaction } from "../orm/context";
 import { Facade } from "./Facade";
 
 // Access to the app's database connection. Bun's `SQL` client is a tagged
@@ -29,9 +30,19 @@ export class DB extends Facade {
   }
 
   // Runs the callback inside a transaction, committing when it resolves and
-  // rolling back if it throws.
+  // rolling back if it throws. The callback still receives the raw handle, as
+  // it always has.
+  //
+  // It goes through the ORM's `withTransaction` rather than straight to
+  // `sql.begin` so that the two transaction systems are one: a `User.create`
+  // inside a `DB.transaction` joins it instead of committing separately on a
+  // pooled connection, and a `DB.transaction` nested inside a
+  // `Model.transaction` becomes a savepoint instead of throwing (Bun refuses
+  // `begin` inside a transaction). Two systems that silently ignored each other
+  // would be worse than either alone — a rollback would leave half the work
+  // committed.
   static transaction<T>(fn: (tx: SQL) => Promise<T>): Promise<T> {
-    return this.sql.begin(fn as any) as Promise<T>;
+    return withTransaction(this.sql, fn as (tx: SQL) => Promise<T>);
   }
 
   static close(): Promise<void> {
