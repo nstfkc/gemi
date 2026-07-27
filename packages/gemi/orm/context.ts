@@ -22,19 +22,44 @@ import { AsyncLocalStorage } from "node:async_hooks";
  * written data, not as an error. "two concurrent transactions never see each
  * other's handle" in `context.test.ts` is the test that would catch it.
  */
-export interface TransactionScope {
+export interface OrmScope {
   /**
    * Bun's transaction handle. Every ORM statement in scope runs on it, which
    * means they all run on one reserved connection — so nothing here may issue
    * two statements concurrently. `Model.$exec` already runs its nested writes
    * and its relation reads sequentially, for exactly this reason.
    */
-  tx: TransactionSQL;
+  tx?: TransactionSQL;
   /** 0 for the outermost transaction, 1+ for each savepoint inside it. */
   depth: number;
+  /**
+   * Whether policies are suspended for this scope. Set only by
+   * `Model.asSystem`, and never by anything ambient — the whole point is that
+   * unscoped access is a decision visible at the call site, not the accidental
+   * result of a missing user.
+   */
+  system?: boolean;
+  /**
+   * The user policies should scope to, when there is no request to read one
+   * from. Set only by `Model.asUser`.
+   *
+   * A sentinel wrapper rather than the bare value, so that "a scope was entered
+   * with `null`" stays distinguishable from "no scope was entered" — the two
+   * mean different things under deny-by-default.
+   */
+  actor?: { user: unknown };
 }
 
-export const ormContext = new AsyncLocalStorage<TransactionScope>();
+/**
+ * One ambient scope for the ORM, not one per feature.
+ *
+ * Transactions (iteration 5) and system access (iteration 6) are both
+ * "something is true for this async subtree and every query in it", so they
+ * share a store rather than minting a second `AsyncLocalStorage` each. The
+ * inventory note in `kernel/context.ts` sets the bar for adding one; two
+ * booleans-worth of ORM state does not clear it.
+ */
+export const ormContext = new AsyncLocalStorage<OrmScope>();
 
 /**
  * The open transaction, or `undefined` outside one. This is what `Model.$exec`
@@ -53,7 +78,75 @@ export function currentTransaction(): TransactionSQL | undefined {
 
 /** How deeply nested the current transaction is; `null` outside one. */
 export function transactionDepth(): number | null {
-  return ormContext.getStore()?.depth ?? null;
+  const store = ormContext.getStore();
+  return store?.tx === undefined ? null : store.depth;
+}
+
+/** Whether policies are suspended for the current async scope. */
+export function isSystemScope(): boolean {
+  return ormContext.getStore()?.system === true;
+}
+
+/**
+ * Run `fn` with policies suspended.
+ *
+ * The escape hatch the deny-by-default rule needs to be usable: a cron tick, a
+ * queue worker or a seed script has no user, and under deny-by-default every
+ * policied model would refuse it. This makes that intent explicit *at the call
+ * site*, which is the property that matters — unscoped access must never be
+ * what happens when a user simply fails to turn up.
+ *
+ * It nests inside a transaction and a transaction nests inside it: the scope is
+ * merged rather than replaced, so `asSystem` does not silently drop an open
+ * handle.
+ */
+export function runAsSystem<T>(fn: () => Promise<T>): Promise<T> {
+  const current = ormContext.getStore();
+  return ormContext.run({ ...current, depth: current?.depth ?? 0, system: true }, fn);
+}
+
+/** The explicitly-set actor, or `undefined` when none was. */
+export function currentActor(): { user: unknown } | undefined {
+  return ormContext.getStore()?.actor;
+}
+
+/**
+ * Run `fn` with policies scoped to `user`, for code with no request to read one
+ * from.
+ *
+ * The counterpart to `runAsSystem`, and the reason that one is not the only
+ * escape hatch. A queue worker processing "send the invoice for organisation 7"
+ * genuinely acts *as somebody*; giving it `asSystem` would suspend policies
+ * entirely and leave it hand-scoping every query — which is precisely the
+ * unscoped-by-accident failure the deny-by-default rule exists to prevent. The
+ * narrow tool should be the easy one.
+ *
+ * It is also what makes policies testable without reaching into
+ * `RequestContext`'s internals.
+ *
+ * Takes precedence over the request store, so a job that says who it is acting
+ * as is not quietly overridden by an ambient request that happens to enclose it.
+ *
+ * It also **clears `system`**, which is the more surprising half. Acting as a
+ * user is strictly narrower than acting as the system, so naming one inside an
+ * `asSystem` block has to narrow back — and the spread would otherwise carry
+ * `system: true` forward, leaving `$exec` to skip policies entirely while
+ * `currentUser()` cheerfully returned the actor. Silently unscoped, from the
+ * realistic shape: a worker enters `asSystem` to read its job queue, then
+ * narrows to the job's owner for the work itself. The reverse nesting —
+ * `asSystem` inside `asUser` — suspends policies, which is what it should do.
+ */
+export function runAsUser<T>(user: unknown, fn: () => Promise<T>): Promise<T> {
+  const current = ormContext.getStore();
+  return ormContext.run(
+    {
+      ...current,
+      depth: current?.depth ?? 0,
+      system: false,
+      actor: { user: user ?? null },
+    },
+    fn,
+  );
 }
 
 /**
@@ -104,16 +197,23 @@ export function withTransaction<T>(
   // failure shape as the "handle on the Application" alternative this file
   // argues against. Multi-connection support must compare the two and either
   // join or refuse, not fall through to here.
-  if (current) {
+  //
+  // `current?.tx` rather than `current`: since iteration 6 a scope can exist
+  // with no open transaction — `Model.asSystem` enters one — and a savepoint
+  // needs an actual handle, not merely a store.
+  if (current?.tx) {
     return current.tx.savepoint((sp) => {
       const nested = sp as TransactionSQL;
-      return ormContext.run({ tx: nested, depth: current.depth + 1 }, () =>
-        fn(nested),
+      return ormContext.run(
+        { ...current, tx: nested, depth: current.depth + 1 },
+        () => fn(nested),
       );
     }) as Promise<T>;
   }
 
+  // Spread rather than replace: a `Model.transaction` inside a `Model.asSystem`
+  // must not silently re-enable policies for its whole subtree.
   return pool.begin((tx) =>
-    ormContext.run({ tx, depth: 0 }, () => fn(tx)),
+    ormContext.run({ ...current, tx, depth: 0 }, () => fn(tx)),
   ) as Promise<T>;
 }

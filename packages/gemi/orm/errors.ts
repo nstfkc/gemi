@@ -143,14 +143,115 @@ export class ReturningUnsupportedError extends Error {
 }
 
 /**
+ * Thrown when a policy denies an operation.
+ *
+ * Two ways to get here, and the message distinguishes them because the fixes
+ * are different: a policy's `before` returned false, or the model is policied
+ * and there is no user in scope at all.
+ *
+ * The second is the deny-by-default rule, and it is the reason this error is
+ * loud. A cron tick or a queue worker reading a policied model has no user, and
+ * the alternative — treating "no user" as "no policy" — means the dangerous
+ * case is the silent one: a request whose auth middleware was misconfigured
+ * would read every tenant's rows rather than failing. So unscoped access is
+ * always a decision written at the call site, through `Model.asSystem`.
+ */
+export class PolicyDeniedError extends Error {
+  constructor(
+    public readonly model: string,
+    public readonly operation: string,
+    public readonly reason: "denied" | "no-user" = "denied",
+  ) {
+    super(
+      reason === "no-user"
+        ? `${model}.${operation} is governed by a policy and there is no user ` +
+            `in scope. If this is a cron tick, a queue worker or a script, say ` +
+            `so at the call site: Model.asSystem(() => ...). Policies are ` +
+            `never skipped just because a user failed to turn up.`
+        : `${model}.${operation} was denied by ${model}'s policy.`,
+    );
+    this.name = "PolicyDeniedError";
+  }
+}
+
+/**
+ * Thrown when a model class carries policies but is not the class the registry
+ * resolves its name to.
+ *
+ * This exists because of a cross-tenant leak that shipped past review. The
+ * generated `index.ts` registers the *generated* base — `register("Account",
+ * AccountModel)` — while an application authors its policy on a subclass:
+ *
+ *     export class Account extends AccountModel {
+ *       static $policy = { scope: (ctx) => ({ organizationId: … }) }
+ *     }
+ *
+ * A root query goes through `Account`, so `policiesFor(this)` finds the policy
+ * and the scope applies. A **nested** relation read resolves through the
+ * registry, gets `AccountModel`, and walks a prototype chain the policy is not
+ * on — so `User.findMany({ include: { accounts: true } })` returned every
+ * tenant's accounts. Root queries scoped, nested reads unscoped: exactly the
+ * Prisma behaviour policies exist to fix, and silent.
+ *
+ * Raised at the first query through the unregistered class, naming the one-line
+ * fix, because the alternative is data crossing a tenant boundary with nothing
+ * to notice it.
+ *
+ * It fires on a divergence in the resolved policy *chain*, not merely on the two
+ * classes differing. A plain subclass that adds no policy of its own inherits
+ * the same policy objects in the same order, so a nested read resolving to its
+ * parent applies exactly what the root query applied — no divergence, nothing
+ * to refuse. An earlier version compared class identity and rejected
+ * `class AdminUser extends User {}` for policies it had not written.
+ */
+export class UnregisteredPolicyClassError extends Error {
+  constructor(
+    public readonly model: string,
+    public readonly registered: string,
+    public readonly queried: string,
+    /**
+     * Which side carries the policies that would be skipped. The two directions
+     * need different advice: one is a missing registration, the other is a
+     * query through the wrong class.
+     */
+    public readonly carries: "queried" | "registered" = "queried",
+  ) {
+    super(
+      carries === "queried"
+        ? `${queried} carries policies but the registry resolves '${model}' to ` +
+            `${registered}. Nested relation reads go through the registry, so ` +
+            `they would run on ${registered} and skip every policy on ` +
+            `${queried} — scoped at the root, unscoped inside an include. ` +
+            `Register the class that carries the policy:\n\n` +
+            `    import { register } from "gemi/orm"\n` +
+            `    export class ${queried} extends ${registered} { … }\n` +
+            `    register("${model}", ${queried})\n`
+        : `This query goes through ${queried}, but the registry resolves ` +
+            `'${model}' to ${registered}, which carries policies ${queried} ` +
+            `does not. Nested relation reads would be scoped and this query is ` +
+            `not — the same policy applying to some queries and not others. ` +
+            `Query ${registered} instead:\n\n` +
+            `    ${registered}.findMany(…)\n\n` +
+            `If skipping policies is intended, say so at the call site — that ` +
+            `is what Model.asSystem() is for, and it is the only way to do it ` +
+            `that a reader can see.\n`,
+    );
+    this.name = "UnregisteredPolicyClassError";
+  }
+}
+
+/**
  * Thrown when a statement would bind more parameters than the driver's wire
  * protocol can carry.
  *
- * Only `createMany` can reach it, since it is the one operation whose parameter
- * count scales with the caller's data rather than with the query's shape:
- * `rows × columns`. Both limits are hard and low enough to hit with an ordinary
- * import — Postgres counts parameters in an int16 (65535), SQLite defaults
- * `SQLITE_MAX_VARIABLE_NUMBER` to 32766.
+ * Three shapes reach it, all of them scaling with the caller's *data* rather
+ * than with the query's shape: `createMany` at `rows × columns`, an `in` list on
+ * SQLite (one placeholder per element, and such a list is routinely
+ * request-derived), and a to-many `include` on SQLite, which batches an `in`
+ * over the parent keys. Both limits are hard and low enough to hit with an
+ * ordinary import — Postgres counts parameters in an int16 (65535), SQLite
+ * defaults `SQLITE_MAX_VARIABLE_NUMBER` to 32766. Postgres escapes the last two
+ * either way: `= any($1)` is one parameter however long the array.
  *
  * Prisma chunks the insert automatically. Doing that here means several
  * statements, which without a transaction is a partially-applied `createMany`

@@ -19,12 +19,14 @@ export {
   MissingRequiredValueError,
   ModelNotRegisteredError,
   ParameterLimitError,
+  PolicyDeniedError,
   RecordNotFoundError,
   RelationDepthExceededError,
   ReturningUnsupportedError,
   UniqueConstraintError,
   UnknownFieldError,
   UnknownRelationError,
+  UnregisteredPolicyClassError,
   UnregisteredRelationTargetError,
   UnsupportedQueryError,
 } from "./errors";
@@ -50,12 +52,34 @@ export {
 // uses; these are for code that has to *observe* the scope rather than open one
 // — a raw query joining it, or a test asserting a statement ran inside it.
 export {
+  currentActor,
   currentTransaction,
+  isSystemScope,
   ormContext,
+  runAsSystem,
+  runAsUser,
   transactionDepth,
   withTransaction,
-  type TransactionScope,
+  type OrmScope,
 } from "./context";
+
+export {
+  softDelete,
+  softDeleteMany,
+  softDeletes,
+  type SoftDeleteOptions,
+} from "./soft-deletes";
+
+export {
+  applyPolicies,
+  applyRedaction,
+  currentUser,
+  policiesFor,
+  policyContext,
+  redactNullable,
+  type ModelPolicy,
+  type PolicyContext,
+} from "./policy";
 
 export { compile, compileRead, compileWrite } from "./compile";
 export { buildRowShaper, type RowShaper, type ShapedRelation } from "./shape";

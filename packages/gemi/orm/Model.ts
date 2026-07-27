@@ -2,7 +2,13 @@ import type { SQL } from "bun";
 import { DatabaseManager } from "../database/DatabaseManager";
 import { app } from "../foundation/app";
 import { type BindContext, createBindContext } from "./compile/fragment";
-import { currentTransaction, withTransaction } from "./context";
+import {
+  currentTransaction,
+  isSystemScope,
+  runAsSystem,
+  runAsUser,
+  withTransaction,
+} from "./context";
 import {
   type NestedWriteStep,
   type RelationExecutor,
@@ -13,8 +19,18 @@ import {
   MissingModelSchemaError,
   RecordNotFoundError,
   UniqueConstraintError,
+  UnregisteredPolicyClassError,
 } from "./errors";
 import { getOrCompile, type Operation, type QueryPlan } from "./plan";
+import {
+  applyPolicies,
+  applyRedaction,
+  currentUser,
+  policiesFor,
+  policyContext,
+  type ModelPolicy,
+  type PolicyContext,
+} from "./policy";
 import * as registry from "./registry";
 import type { ModelSchema } from "./schema";
 
@@ -48,6 +64,45 @@ const ORTHROW = new Set([
 export abstract class Model {
   /** Assigned by the generated subclass from `app/models/generated/schema.ts`. */
   static $schema: ModelSchema;
+
+  /**
+   * The model's own policy. Optional, inherited through the prototype chain so
+   * a shared base can contribute one to every subclass — see `policiesFor` for
+   * the order, which is base first and narrowing-only.
+   */
+  static $policy?: ModelPolicy;
+
+  /**
+   * Runs `fn` with policies suspended, for code that has no user and knows it:
+   * a cron tick, a queue worker, a seed script, a migration.
+   *
+   * Deliberately a wrapper rather than a flag or a fallback. Under
+   * deny-by-default the alternative to writing this is an error, which is the
+   * point — unscoped access is a sentence someone typed, never what happens
+   * when a user fails to turn up.
+   *
+   *     await Model.asSystem(() => User.findMany({}))
+   */
+  static asSystem<T>(fn: () => Promise<T>): Promise<T> {
+    return runAsSystem(fn);
+  }
+
+  /**
+   * Runs `fn` with policies scoped to `user`, for code that acts on somebody's
+   * behalf without a request to read them from — a queue job, a scheduled
+   * report, a test.
+   *
+   * The narrow counterpart to `asSystem`, and deliberately the easier of the
+   * two to reach for. A worker handling "send the invoice for organisation 7"
+   * acts *as* a user; giving it only `asSystem` would suspend policies outright
+   * and leave it hand-scoping every query, which is the unscoped-by-accident
+   * outcome deny-by-default exists to prevent.
+   *
+   *     await Model.asUser(owner, () => Invoice.findMany({}))
+   */
+  static asUser<T>(user: unknown, fn: () => Promise<T>): Promise<T> {
+    return runAsUser(user, fn);
+  }
 
   static $modelSchema(): ModelSchema {
     const schema = this.$schema;
@@ -130,7 +185,91 @@ export abstract class Model {
     // while its neighbours roll back.
     const conn = currentTransaction() ?? db.sql;
 
-    const plan = getOrCompile(schema, op, args, dialect);
+    // POLICIES, AND THE ORDER MATTERS MORE HERE THAN ANYWHERE ELSE IN THE ORM.
+    //
+    // Policies rewrite the argument tree, so they change the SQL. They must
+    // therefore run *before* `getOrCompile`, which keys the plan cache on those
+    // arguments. Reordered — compile first, scope after — two users with the
+    // same query shape and different scopes would share one plan, and one of
+    // them would run the other's SQL. That is a cross-tenant data leak produced
+    // by a caching bug, and it would not look like one.
+    //
+    // A scope that injects a *value* keeps the same shape for every user, so
+    // the plan is still shared and only the bound value differs. That is the
+    // desired outcome, not a compromise, and `policy.plan-cache.test.ts` pins
+    // both halves: same shape means one plan and different parameters, and a
+    // scope whose shape varies by user means a different plan key.
+    // `asSystem` suspends the whole hook, not just the no-user check: a script
+    // that has said it is a script should not then be scoped to a user that
+    // happens to be in the request store.
+    const system = isSystemScope();
+    const policies = system ? [] : policiesFor(this);
+    let policy: PolicyContext | undefined;
+    let effective = args;
+
+    // POLICY-DIVERGENCE GUARD.
+    //
+    // A nested relation read resolves its target through the registry, so it
+    // runs whatever is registered under this model's name — not necessarily the
+    // class the caller queried. When those two disagree about *policies*, the
+    // same policy applies to some queries and not others, silently. Both
+    // directions are reachable and both are the same bug:
+    //
+    //   policied class not registered  -> root scoped, nested reads unscoped
+    //   policied class registered, but -> nested reads scoped, a direct query
+    //   the caller queries the base       through the base unscoped
+    //
+    // The second is the one this check sat inside `policies.length > 0` and
+    // therefore missed: querying `AccountModel` when `Account` owns the name
+    // finds no policies on `AccountModel`, so the old placement never looked.
+    // `AccountModel` and `Account` come out of the same barrel with near
+    // identical names, so it needs no include and no mistake worth calling one.
+    //
+    // Keyed on the *divergence*, not on either class having policies. The
+    // comparison is of the resolved policy chain rather than class identity: a
+    // plain subclass of a registered, policied class inherits the same policy
+    // objects in the same order, so nothing diverges and there is nothing to
+    // refuse — checking identity rejected `class AdminUser extends User {}`, a
+    // typed view, for policies it had not written.
+    //
+    // `!system` is load-bearing. Under `asSystem` policies are suspended by
+    // design, so a seed script querying the generated base directly is correct
+    // and must not raise.
+    //
+    // Cost on the common path: one `Map.get` and one reference compare, for a
+    // model where nothing is registered under a different class.
+    if (!system) {
+      const registered = registry.has(schema.name)
+        ? registry.get<unknown>(schema.name)
+        : undefined;
+
+      if (registered !== undefined && registered !== this) {
+        const theirs = policiesFor(registered);
+        const diverges =
+          policies.length !== theirs.length ||
+          policies.some((entry, index) => entry !== theirs[index]);
+
+        if (diverges) {
+          throw new UnregisteredPolicyClassError(
+            schema.name,
+            (registered as { name?: string }).name ?? String(registered),
+            this.name,
+            policies.length > 0 ? "queried" : "registered",
+          );
+        }
+      }
+    }
+
+    if (policies.length > 0) {
+      // Deny-by-default lives on the context's `user` accessor, not here: a
+      // policy that never consults the user — a soft-delete scope, say — has
+      // nothing to deny and must keep working with no request in sight. See
+      // `policyContext`.
+      policy = policyContext(schema.name, op, currentUser(), system);
+      effective = applyPolicies(policies, policy, args);
+    }
+
+    const plan = getOrCompile(schema, op, effective, dialect);
 
     const executor: RelationExecutor = {
       exec: (model, operation, relationArgs) =>
@@ -154,7 +293,7 @@ export abstract class Model {
     // per call would put a `BEGIN` around every query in the framework and turn
     // a caller's transaction into a nest of savepoints it never asked for.
     // Outside one, a failing later step still leaves the earlier rows written.
-    await runSteps(plan.before, args, context, executor, []);
+    await runSteps(plan.before, effective, context, executor, []);
 
     // `unsafe` despite the name. Bun's tagged template cannot express a query
     // whose *shape* is dynamic, which every ORM query is. Safety here does not
@@ -167,7 +306,7 @@ export abstract class Model {
       schema,
       op,
       plan.text,
-      plan.bind(args, context),
+      plan.bind(effective, context),
     );
 
     const result = this.$shape(plan, rows as unknown[]);
@@ -182,7 +321,7 @@ export abstract class Model {
     // Rows that could not exist until this one did: the far side of a relation
     // whose foreign key lives on the child. Run before relations are attached,
     // so an `include` on the same call sees what was just written.
-    await runSteps(plan.after, args, context, executor, rowsOf(result));
+    await runSteps(plan.after, effective, context, executor, rowsOf(result));
 
     // Relations are loaded after the root rows are shaped, one query per node
     // in the include tree. Each of those queries is `$exec` on the *related
@@ -198,7 +337,7 @@ export abstract class Model {
         plan.relations,
         plan.hidden,
         result,
-        args,
+        effective,
         executor,
       );
     } else if (plan.hidden !== undefined && plan.hidden.length > 0) {
@@ -209,6 +348,11 @@ export abstract class Model {
         for (const key of plan.hidden) delete row[key];
       }
     }
+
+    // Redaction last, on the shaped result. After relations, not before: a
+    // related row was shaped by its own model's `$exec` and has already been
+    // through its own policy's `redact` — this one only owns its own rows.
+    if (policy) applyRedaction(policies, policy, result);
 
     return result;
   }
