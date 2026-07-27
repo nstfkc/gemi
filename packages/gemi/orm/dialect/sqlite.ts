@@ -106,7 +106,9 @@ export class SqliteDialect implements SqlDialect {
     const operator = negated ? "not in" : "in";
     const elements: Fragment[] = [];
     for (let i = 0; i < length; i++) {
-      elements.push(param((args) => (values(args) as unknown[])[i]));
+      elements.push(
+        param((args, context) => (values(args, context) as unknown[])[i]),
+      );
     }
     return concat(
       sql(`${lhs} ${operator} (`),

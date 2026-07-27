@@ -21,6 +21,7 @@
     "foundation",
     "support",
     "database",
+    "orm",
     "bin/migrate"
   ],
   "exclude": [

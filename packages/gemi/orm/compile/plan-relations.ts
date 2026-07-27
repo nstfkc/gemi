@@ -9,7 +9,13 @@ import {
 } from "../errors";
 import * as registry from "../registry";
 import type { FieldSchema, ModelSchema, RelationSchema } from "../schema";
-import { type BindContext, concat, render, sql } from "./fragment";
+import {
+  type BindContext,
+  concat,
+  createBindContext,
+  render,
+  sql,
+} from "./fragment";
 import { resolveSelection } from "./select";
 
 /**
@@ -891,9 +897,14 @@ async function readPairs(
     model: join.table,
     operation: "include",
   });
+  // These binders close over `values` and read neither argument, but the
+  // signature takes both — so a real context goes in rather than `undefined`.
+  // The three call sites that passed one argument were a type error the whole
+  // time; `orm/` was outside the tsconfig's `include`, so nothing said so.
+  const bindContext = createBindContext();
   return executor.query(
     text,
-    binders.map((binder) => binder(undefined)),
+    binders.map((binder) => binder(undefined, bindContext)),
   );
 }
 

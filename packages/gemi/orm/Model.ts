@@ -2,7 +2,7 @@ import type { SQL } from "bun";
 import { DatabaseManager } from "../database/DatabaseManager";
 import { app } from "../foundation/app";
 import { type BindContext, createBindContext } from "./compile/fragment";
-import { currentTransaction, withTransaction } from "./context";
+import { currentTransaction, isSystemScope, runAsSystem, withTransaction } from "./context";
 import {
   type NestedWriteStep,
   type RelationExecutor,
@@ -11,10 +11,19 @@ import {
 import { dialectFor, type SqlDialect } from "./dialect";
 import {
   MissingModelSchemaError,
+  PolicyDeniedError,
   RecordNotFoundError,
   UniqueConstraintError,
 } from "./errors";
 import { getOrCompile, type Operation, type QueryPlan } from "./plan";
+import {
+  applyPolicies,
+  applyRedaction,
+  currentUser,
+  policiesFor,
+  type ModelPolicy,
+  type PolicyContext,
+} from "./policy";
 import * as registry from "./registry";
 import type { ModelSchema } from "./schema";
 
@@ -48,6 +57,28 @@ const ORTHROW = new Set([
 export abstract class Model {
   /** Assigned by the generated subclass from `app/models/generated/schema.ts`. */
   static $schema: ModelSchema;
+
+  /**
+   * The model's own policy. Optional, inherited through the prototype chain so
+   * a shared base can contribute one to every subclass — see `policiesFor` for
+   * the order, which is base first and narrowing-only.
+   */
+  static $policy?: ModelPolicy;
+
+  /**
+   * Runs `fn` with policies suspended, for code that has no user and knows it:
+   * a cron tick, a queue worker, a seed script, a migration.
+   *
+   * Deliberately a wrapper rather than a flag or a fallback. Under
+   * deny-by-default the alternative to writing this is an error, which is the
+   * point — unscoped access is a sentence someone typed, never what happens
+   * when a user fails to turn up.
+   *
+   *     await Model.asSystem(() => User.findMany({}))
+   */
+  static asSystem<T>(fn: () => Promise<T>): Promise<T> {
+    return runAsSystem(fn);
+  }
 
   static $modelSchema(): ModelSchema {
     const schema = this.$schema;
@@ -95,7 +126,39 @@ export abstract class Model {
     // while its neighbours roll back.
     const conn = currentTransaction() ?? db.sql;
 
-    const plan = getOrCompile(schema, op, args, dialect);
+    // POLICIES, AND THE ORDER MATTERS MORE HERE THAN ANYWHERE ELSE IN THE ORM.
+    //
+    // Policies rewrite the argument tree, so they change the SQL. They must
+    // therefore run *before* `getOrCompile`, which keys the plan cache on those
+    // arguments. Reordered — compile first, scope after — two users with the
+    // same query shape and different scopes would share one plan, and one of
+    // them would run the other's SQL. That is a cross-tenant data leak produced
+    // by a caching bug, and it would not look like one.
+    //
+    // A scope that injects a *value* keeps the same shape for every user, so
+    // the plan is still shared and only the bound value differs. That is the
+    // desired outcome, not a compromise, and `policy.plan-cache.test.ts` pins
+    // both halves: same shape means one plan and different parameters, and a
+    // scope whose shape varies by user means a different plan key.
+    // `asSystem` suspends the whole hook, not just the no-user check: a script
+    // that has said it is a script should not then be scoped to a user that
+    // happens to be in the request store.
+    const policies = isSystemScope() ? [] : policiesFor(this);
+    let policy: PolicyContext | undefined;
+    let effective = args;
+
+    if (policies.length > 0) {
+      policy = { user: currentUser(), operation: op, model: schema.name };
+
+      // Deny by default. "No user" is not "no policy" — see PolicyDeniedError.
+      if (policy.user === null) {
+        throw new PolicyDeniedError(schema.name, op, "no-user");
+      }
+
+      effective = applyPolicies(policies, policy, args);
+    }
+
+    const plan = getOrCompile(schema, op, effective, dialect);
 
     const executor: RelationExecutor = {
       exec: (model, operation, relationArgs) =>
@@ -119,7 +182,7 @@ export abstract class Model {
     // per call would put a `BEGIN` around every query in the framework and turn
     // a caller's transaction into a nest of savepoints it never asked for.
     // Outside one, a failing later step still leaves the earlier rows written.
-    await runSteps(plan.before, args, context, executor, []);
+    await runSteps(plan.before, effective, context, executor, []);
 
     // `unsafe` despite the name. Bun's tagged template cannot express a query
     // whose *shape* is dynamic, which every ORM query is. Safety here does not
@@ -132,7 +195,7 @@ export abstract class Model {
       schema,
       op,
       plan.text,
-      plan.bind(args, context),
+      plan.bind(effective, context),
     );
 
     const result = this.$shape(plan, rows as unknown[]);
@@ -147,7 +210,7 @@ export abstract class Model {
     // Rows that could not exist until this one did: the far side of a relation
     // whose foreign key lives on the child. Run before relations are attached,
     // so an `include` on the same call sees what was just written.
-    await runSteps(plan.after, args, context, executor, rowsOf(result));
+    await runSteps(plan.after, effective, context, executor, rowsOf(result));
 
     // Relations are loaded after the root rows are shaped, one query per node
     // in the include tree. Each of those queries is `$exec` on the *related
@@ -163,7 +226,7 @@ export abstract class Model {
         plan.relations,
         plan.hidden,
         result,
-        args,
+        effective,
         executor,
       );
     } else if (plan.hidden !== undefined && plan.hidden.length > 0) {
@@ -174,6 +237,11 @@ export abstract class Model {
         for (const key of plan.hidden) delete row[key];
       }
     }
+
+    // Redaction last, on the shaped result. After relations, not before: a
+    // related row was shaped by its own model's `$exec` and has already been
+    // through its own policy's `redact` — this one only owns its own rows.
+    if (policy) applyRedaction(policies, policy, result);
 
     return result;
   }

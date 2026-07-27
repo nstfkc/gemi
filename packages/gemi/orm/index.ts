@@ -54,7 +54,7 @@ export {
   ormContext,
   transactionDepth,
   withTransaction,
-  type TransactionScope,
+  type OrmScope,
 } from "./context";
 
 export { compile, compileRead, compileWrite } from "./compile";

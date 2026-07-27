@@ -143,14 +143,49 @@ export class ReturningUnsupportedError extends Error {
 }
 
 /**
+ * Thrown when a policy denies an operation.
+ *
+ * Two ways to get here, and the message distinguishes them because the fixes
+ * are different: a policy's `before` returned false, or the model is policied
+ * and there is no user in scope at all.
+ *
+ * The second is the deny-by-default rule, and it is the reason this error is
+ * loud. A cron tick or a queue worker reading a policied model has no user, and
+ * the alternative — treating "no user" as "no policy" — means the dangerous
+ * case is the silent one: a request whose auth middleware was misconfigured
+ * would read every tenant's rows rather than failing. So unscoped access is
+ * always a decision written at the call site, through `Model.asSystem`.
+ */
+export class PolicyDeniedError extends Error {
+  constructor(
+    public readonly model: string,
+    public readonly operation: string,
+    public readonly reason: "denied" | "no-user" = "denied",
+  ) {
+    super(
+      reason === "no-user"
+        ? `${model}.${operation} is governed by a policy and there is no user ` +
+            `in scope. If this is a cron tick, a queue worker or a script, say ` +
+            `so at the call site: Model.asSystem(() => ...). Policies are ` +
+            `never skipped just because a user failed to turn up.`
+        : `${model}.${operation} was denied by ${model}'s policy.`,
+    );
+    this.name = "PolicyDeniedError";
+  }
+}
+
+/**
  * Thrown when a statement would bind more parameters than the driver's wire
  * protocol can carry.
  *
- * Only `createMany` can reach it, since it is the one operation whose parameter
- * count scales with the caller's data rather than with the query's shape:
- * `rows × columns`. Both limits are hard and low enough to hit with an ordinary
- * import — Postgres counts parameters in an int16 (65535), SQLite defaults
- * `SQLITE_MAX_VARIABLE_NUMBER` to 32766.
+ * Three shapes reach it, all of them scaling with the caller's *data* rather
+ * than with the query's shape: `createMany` at `rows × columns`, an `in` list on
+ * SQLite (one placeholder per element, and such a list is routinely
+ * request-derived), and a to-many `include` on SQLite, which batches an `in`
+ * over the parent keys. Both limits are hard and low enough to hit with an
+ * ordinary import — Postgres counts parameters in an int16 (65535), SQLite
+ * defaults `SQLITE_MAX_VARIABLE_NUMBER` to 32766. Postgres escapes the last two
+ * either way: `= any($1)` is one parameter however long the array.
  *
  * Prisma chunks the insert automatically. Doing that here means several
  * statements, which without a transaction is a partially-applied `createMany`
