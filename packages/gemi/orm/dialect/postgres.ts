@@ -72,7 +72,7 @@ export class PostgresDialect implements SqlDialect {
     const operator = negated ? "<> all" : "= any";
     return concat(
       sql(`${lhs} ${operator} (`),
-      param((args) => arrayLiteral(values(args) as unknown[])),
+      param((args, context) => arrayLiteral(values(args, context) as unknown[])),
       sql(")"),
     );
   }
