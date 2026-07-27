@@ -94,7 +94,21 @@ export function provenanceOf(row: unknown): Provenance | undefined {
  */
 export function changedFields(
   row: object,
-  schema?: ModelSchema,
+  /**
+   * Required, not optional.
+   *
+   * The unfetched-column check below is `save`'s central safety guarantee, and an
+   * optional schema would mean every caller that omitted it silently got the
+   * permissive behaviour — the exact silent drop this function exists to refuse.
+   * That is the same conclusion `render`'s `origin` reached on #49: optional
+   * "reintroduces in miniature the hole this check exists to close".
+   *
+   * The argument is stronger here, because `changedFields` is exported from
+   * `orm/index.ts`. An application computing its own diff would have got the old
+   * semantics from a signature that read as though the schema were an extra, when
+   * what it actually selected was whether the check ran at all.
+   */
+  schema: ModelSchema,
 ): Record<string, unknown> {
   const record = provenanceOf(row);
   if (!record) return {};
@@ -117,7 +131,7 @@ export function changedFields(
   // declares as a field, is not a relation, and is *absent from the snapshot* can
   // only be an assignment to something unfetched — a fetched column is in the
   // snapshot by construction.
-  if (schema) assertNothingUnfetched(row, record, schema);
+  assertNothingUnfetched(row, record, schema);
 
   return changed;
 }

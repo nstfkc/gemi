@@ -63,7 +63,7 @@ describe("what counts as changed", () => {
   test("an untouched row has no changes", () => {
     const row = { id: 1, email: "a@b.c", name: "A" };
     track(row, user, []);
-    expect(changedFields(row)).toEqual({});
+    expect(changedFields(row, user)).toEqual({});
   });
 
   test("only the mutated field", () => {
@@ -71,7 +71,7 @@ describe("what counts as changed", () => {
     track(row, user, []);
     row.name = "B";
 
-    expect(changedFields(row)).toEqual({ name: "B" });
+    expect(changedFields(row, user)).toEqual({ name: "B" });
   });
 
   test("setting a field back to its fetched value is not a change", () => {
@@ -80,7 +80,7 @@ describe("what counts as changed", () => {
     row.name = "B";
     row.name = "A";
 
-    expect(changedFields(row)).toEqual({});
+    expect(changedFields(row, user)).toEqual({});
   });
 
   test("null and undefined are distinguished from a value", () => {
@@ -88,7 +88,7 @@ describe("what counts as changed", () => {
     track(row, user, []);
     row.name = null;
 
-    expect(changedFields(row)).toEqual({ name: null });
+    expect(changedFields(row, user)).toEqual({ name: null });
   });
 
   /**
@@ -102,21 +102,38 @@ describe("what counts as changed", () => {
     track(row, user, []);
 
     row.createdAt = new Date("2024-01-01T00:00:00Z");
-    expect(changedFields(row)).toEqual({});
+    expect(changedFields(row, user)).toEqual({});
 
     row.createdAt = new Date("2024-06-01T00:00:00Z");
-    expect(changedFields(row)).toHaveProperty("createdAt");
+    expect(changedFields(row, user)).toHaveProperty("createdAt");
   });
 
-  test("a field the row never fetched is never written", () => {
-    // `password` was not selected, so it is not in the snapshot. Assigning it
-    // cannot produce an update for it — writing a column the caller never read
-    // is how a partial select silently reverts data.
+  /**
+   * Assigning to a column the query never fetched is **refused**, not dropped.
+   *
+   * This test previously asserted the drop as correct behaviour — it was encoding
+   * the bug. The diff walks the snapshot's keys, so a field outside it cannot be
+   * seen as changed, and `save` reported success having written nothing. Writing
+   * it blind is not the alternative either: that overwrites whatever the column
+   * actually holds. Refusing is the only honest answer.
+   */
+  test("assigning to a field the row never fetched is refused", () => {
     const row: any = { id: 1, email: "a@b.c" };
     track(row, user, []);
     row.password = "hunter2";
 
-    expect(changedFields(row)).toEqual({});
+    expect(() => changedFields(row, user)).toThrow(/was not fetched/);
+    expect(() => changedFields(row, user)).toThrow(/'password'/);
+  });
+
+  test("a field the row never fetched and never touched is fine", () => {
+    // The legal half of the same situation: a partial row that only touches what
+    // it read. `password` is simply absent, so there is nothing to refuse.
+    const row: any = { id: 1, email: "a@b.c" };
+    track(row, user, []);
+    row.email = "changed@b.c";
+
+    expect(changedFields(row, user)).toEqual({ email: "changed@b.c" });
   });
 
   test("an untracked object reports no changes rather than throwing", () => {
@@ -161,8 +178,8 @@ describe("identity semantics", () => {
     track(b, user, []);
 
     a.name = "changed";
-    expect(changedFields(a)).toEqual({ name: "changed" });
-    expect(changedFields(b)).toEqual({});
+    expect(changedFields(a, user)).toEqual({ name: "changed" });
+    expect(changedFields(b, user)).toEqual({});
   });
 });
 
@@ -172,11 +189,11 @@ describe("resnapshot", () => {
     track(row, user, []);
     row.name = "B";
 
-    const changed = changedFields(row);
+    const changed = changedFields(row, user);
     expect(changed).toEqual({ name: "B" });
 
     resnapshot(row, changed);
-    expect(changedFields(row)).toEqual({});
+    expect(changedFields(row, user)).toEqual({});
   });
 
   test("only the written fields are resnapshotted", () => {
@@ -188,7 +205,7 @@ describe("resnapshot", () => {
     // Pretend only `name` was written.
     resnapshot(row, { name: "B" });
 
-    expect(changedFields(row)).toEqual({ locale: "en-GB" });
+    expect(changedFields(row, user)).toEqual({ locale: "en-GB" });
   });
 
   test("resnapshotting an untracked object is a no-op, not a throw", () => {
