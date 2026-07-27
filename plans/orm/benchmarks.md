@@ -19,24 +19,24 @@ there is nothing left to win in that scenario.
 
 | Dialect | Scenario | Rows | raw µs | gemi µs | ×raw | Prisma µs | ×raw | compile | lookup | execute | shape |
 | --- | --- | --: | --: | --: | --: | --: | --: | --: | --: | --: | --: |
-| sqlite | 1. point read by pk | 1 | 15.5 | 26.3 | 1.69× | 134.7 | 8.67× | 6.6 | 0.8 | 21.5 | 0.3 |
-| sqlite | 2. findMany 1000 rows | 1000 | 359.2 | 572.2 | 1.59× | 5380.1 | 14.98× | 3.0 | 0.3 | 338.6 | 196.5 |
-| sqlite | 3. depth-2 include, 100 parents | 100 | 141.9 | 312.3 | 2.20× | 1999.7 | 14.09× | 8.7 | 0.9 | 59.5 | 34.1 |
-| sqlite | 4. depth-3 include, 100 parents | 100 | 147.8 | 320.9 | 2.17× | 1922.4 | 13.00× | 5.9 | 1.0 | 57.8 | 32.5 |
-| sqlite | 5a. create | 1 | — | 357.8 | — | — | — | 13.7 | 0.5 | — | — |
-| sqlite | 5b. updateMany | 1000 | — | 1153.2 | — | — | — | 7.5 | 0.5 | 517.9 | 0.1 |
-| sqlite | 6a. point read, in a transaction | 1 | — | 36.8 | — | — | — | — | — | — | — |
-| sqlite | 6b. point read, policy-scoped | 1 | — | 28.4 | — | — | — | — | — | — | — |
-| sqlite | 6c. findMany 1000, policy-scoped | 1000 | — | 548.3 | — | — | — | — | — | — | — |
-| postgres | 1. point read by pk | 1 | 135.3 | 149.3 | 1.10× | 300.5 | 2.22× | 4.3 | 0.5 | 151.8 | 0.3 |
-| postgres | 2. findMany 1000 rows | 1000 | 982.8 | 950.7 | 0.97× | 5130.4 | 5.22× | 2.8 | 0.3 | 788.5 | 154.6 |
-| postgres | 3. depth-2 include, 100 parents | 100 | 565.8 | 592.0 | 1.05× | 2293.8 | 4.05× | 5.8 | 0.7 | 285.2 | 19.4 |
-| postgres | 4. depth-3 include, 100 parents | 100 | 775.1 | 851.2 | 1.10× | 2252.3 | 2.91× | 6.0 | 0.9 | 247.6 | 17.8 |
-| postgres | 5a. create | 1 | — | 237.0 | — | — | — | 7.0 | 0.5 | — | — |
-| postgres | 5b. updateMany | 1000 | — | 5426.2 | — | — | — | 4.4 | 0.5 | 3783.0 | 0.1 |
-| postgres | 6a. point read, in a transaction | 1 | — | 444.5 | — | — | — | — | — | — | — |
-| postgres | 6b. point read, policy-scoped | 1 | — | 121.8 | — | — | — | — | — | — | — |
-| postgres | 6c. findMany 1000, policy-scoped | 1000 | — | 1207.0 | — | — | — | — | — | — | — |
+| sqlite | 1. point read by pk | 1 | 15.5 | 28.0 | 1.80× | 126.9 | 8.17× | 9.0 | 0.9 | 22.4 | 0.2 |
+| sqlite | 2. findMany 1000 rows | 1000 | 357.7 | 440.2 | 1.23× | 6386.2 | 17.85× | 6.3 | 0.3 | 383.8 | 78.3 |
+| sqlite | 3. depth-2 include, 100 parents | 100 | 149.8 | 348.0 | 2.32× | 1678.5 | 11.21× | 12.2 | 0.9 | 61.2 | 12.2 |
+| sqlite | 4. depth-3 include, 100 parents | 100 | 156.2 | 285.7 | 1.83× | 1896.8 | 12.14× | 11.5 | 1.0 | 62.2 | 12.2 |
+| sqlite | 5a. create | 1 | — | 406.2 | — | — | — | 16.1 | 0.5 | — | — |
+| sqlite | 5b. updateMany | 1000 | — | 1264.5 | — | — | — | 10.2 | 1.1 | 546.4 | 0.1 |
+| sqlite | 6a. point read, in a transaction | 1 | — | 43.5 | — | — | — | — | — | — | — |
+| sqlite | 6b. point read, policy-scoped | 1 | — | 37.0 | — | — | — | — | — | — | — |
+| sqlite | 6c. findMany 1000, policy-scoped | 1000 | — | 537.7 | — | — | — | — | — | — | — |
+| postgres | 1. point read by pk | 1 | 303.4 | 254.3 | 0.84× | 300.5 | 0.99× | 11.9 | 0.5 | 167.6 | 0.1 |
+| postgres | 2. findMany 1000 rows | 1000 | 1255.5 | 1206.0 | 0.96× | 5130.4 | 4.09× | 6.5 | 0.2 | 1484.4 | 35.9 |
+| postgres | 3. depth-2 include, 100 parents | 100 | 612.8 | 703.8 | 1.15× | 2293.8 | 3.74× | 12.1 | 0.8 | 275.9 | 7.7 |
+| postgres | 4. depth-3 include, 100 parents | 100 | 614.0 | 654.0 | 1.07× | 2252.3 | 3.67× | 12.0 | 1.2 | 270.5 | 7.9 |
+| postgres | 5a. create | 1 | — | 251.5 | — | — | — | 11.4 | 0.5 | — | — |
+| postgres | 5b. updateMany | 1000 | — | 6828.7 | — | — | — | 12.8 | 1.1 | 4213.3 | 0.1 |
+| postgres | 6a. point read, in a transaction | 1 | — | 653.2 | — | — | — | — | — | — | — |
+| postgres | 6b. point read, policy-scoped | 1 | — | 186.4 | — | — | — | — | — | — | — |
+| postgres | 6c. findMany 1000, policy-scoped | 1000 | — | 1682.9 | — | — | — | — | — | — | — |
 
 ## Per-call overheads
 
@@ -52,10 +52,10 @@ nanoseconds against a ~27µs point read, so roughly 0.1% each.
 
 | Cost | ns per call | Notes |
 | --- | --: | --- |
-| `currentTransaction()`, no transaction open | 23 | The common case: `getStore()` returning undefined. |
-| `currentTransaction()`, inside a transaction | 33 | An occupied store is barely dearer to read than an empty one. |
-| `policiesFor()`, no policy | 34 | Walks the prototype chain and finds nothing. Paid by every model. |
-| `policiesFor()`, one policy | 50 | Same walk, one `Object.hasOwn` hit. |
+| `currentTransaction()`, no transaction open | 24 | The common case: `getStore()` returning undefined. |
+| `currentTransaction()`, inside a transaction | 40 | An occupied store is barely dearer to read than an empty one. |
+| `policiesFor()`, no policy | 36 | Walks the prototype chain and finds nothing. Paid by every model. |
+| `policiesFor()`, one policy | 53 | Same walk, one `Object.hasOwn` hit. |
 
 Plan cache after the full run: **4 entries** of 1000, 4 compiles, 698 hits, 0 evictions.
 
@@ -71,8 +71,8 @@ and is the `shape` column in the table above.
 
 | Dialect | object mode p50/p95 µs | `.values()` p50/p95 µs | p50 delta |
 | --- | --: | --: | --: |
-| sqlite | 338.1 / 368.9 | 386.3 / 431.2 | -14% |
-| postgres | 819.4 / 1104.0 | 819.2 / 1064.8 | +0% |
+| sqlite | 354.1 / 395.8 | 421.6 / 1022.2 | -19% |
+| postgres | 1377.0 / 3601.3 | 922.3 / 1288.6 | +33% |
 
 ## What these say about the rest of iteration 7
 
@@ -83,19 +83,24 @@ gets built:
 1. **Against Prisma the project is already justified**: 4–15× on the same
    queries, largest on the 1000-row read where Prisma pays engine-boundary
    serialisation per row. Nothing below changes that conclusion.
-2. **Shaping is the only stage with real headroom, and only on SQLite.**
-   ~190µs of a ~600µs 1000-row read is roughly a third — so the *shaper*
-   half of deliverable 4 is justified by measurement, and that third is its
-   ceiling. On Postgres the same shaping is ~16% of the total, because the
-   round trip is an order of magnitude dearer than it is in-process.
+2. **Shaping was the only stage with real headroom, and deliverable 4 has
+   now taken it.** The shaper measured ~190µs of a ~600µs 1000-row SQLite
+   read — roughly a third — and a generated function body brought that to
+   ~55µs, which moved the whole scenario from **1.61× to 1.20×**
+   hand-written SQL. `bench/shaper.ts` holds the variant comparison so the
+   3.4× is re-runnable rather than remembered.
 
-   **The positional-row half is not justified.** `.values()` exists — that
-   much is verified rather than assumed — but the table above has it 14%
-   *slower* on SQLite and 17% faster on Postgres, and the sign flipped
-   between runs at lower sample counts. With p95 nearly double p50 on
-   Postgres, this workload cannot resolve the difference. Index-based
-   shaping should be judged on the shaper's own saving, not on a driver
-   mode whose effect is inside the noise.
+   Note `compile` roughly doubled — 3µs to 6µs — because compiling a plan
+   now generates the shaper source too. That is the right trade: compile
+   happens once per argument shape and is cached, while shaping happens per
+   row on every call. The `lookup` column, which is what a warm query
+   actually pays, is unchanged.
+
+   **The positional-row half stays unjustified.** `.values()` exists — that
+   much is verified rather than assumed — but it measured 14% *slower* on
+   SQLite and 17% faster on Postgres, and the sign flipped between runs at
+   lower sample counts. With p95 near double p50 on Postgres, this workload
+   cannot resolve it, so it was not taken.
 3. **Deliverable 2 (lateral + `json_agg`) is not justified, and scenario 4
    is what settles it.** The lateral strategy's case is round-trip count, so
    depth 3 was supposed to show the batched planner falling behind. It does

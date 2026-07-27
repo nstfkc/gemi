@@ -82,7 +82,14 @@ export {
 } from "./policy";
 
 export { compile, compileRead, compileWrite } from "./compile";
-export { buildRowShaper, type RowShaper, type ShapedRelation } from "./shape";
+export {
+  buildInterpretedShaper,
+  buildRowShaper,
+  setShaperCompilation,
+  shaperCompilationAvailable,
+  type RowShaper,
+  type ShapedRelation,
+} from "./shape";
 export {
   createBindContext,
   type BindContext,
