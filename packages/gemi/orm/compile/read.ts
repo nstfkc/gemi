@@ -22,7 +22,11 @@ const READ_ARGS: Record<string, Set<string>> = {
   ]),
   findUnique: new Set(["where", "select", "include"]),
   findUniqueOrThrow: new Set(["where", "select", "include"]),
-  count: new Set(["where", "orderBy", "skip", "take", "select"]),
+  // No `select`: Prisma's `count` uses it to return an object of per-field
+  // counts, which is aggregate territory and is not emitted onto the generated
+  // bases. Accepting it here and then ignoring it would return the plain total
+  // under a shape the caller did not ask for.
+  count: new Set(["where", "orderBy", "skip", "take"]),
 };
 
 export function isReadOperation(op: Operation): boolean {
@@ -65,17 +69,17 @@ export function compileRead(
     const counted = sql(`select count(*) as ${dialect.quoteIdent("_count")}`);
     const paginated = args?.take !== undefined || args?.skip !== undefined;
 
+    // Parsed unconditionally, even though an unpaginated count discards the
+    // terms: validation must not depend on whether a *different* argument was
+    // also supplied, or `orderBy: { nonexistent: "asc" }` is an error with a
+    // `take` and silently fine without one.
+    const parsed = parseOrderBy(schema, args?.orderBy, op);
+
     let statement: Fragment;
     if (!paginated) {
       statement = concat(counted, from, whereClause);
     } else {
-      const { clause, terms } = pagination(
-        schema,
-        op,
-        args,
-        dialect,
-        parseOrderBy(schema, args?.orderBy, op),
-      );
+      const { clause, terms } = pagination(schema, op, args, dialect, parsed);
       const order = compileOrderBy(terms, dialect);
       // One column, not `*`: the subquery exists to be counted, so the narrowest
       // thing that keeps a row identity is right.
@@ -108,7 +112,11 @@ export function compileRead(
     ", ",
   );
 
-  const { clause: paginationClause, terms } = pagination(
+  const {
+    clause: paginationClause,
+    terms,
+    reversed,
+  } = pagination(
     schema,
     op,
     args,
@@ -135,6 +143,12 @@ export function compileRead(
     bind: binder(binders),
     shape(rows) {
       const shaped = shaper(rows);
+      // A negative `take` means "the last N". The ordering terms were flipped
+      // so the database returns the right *rows*, but the caller asked for them
+      // in the order their `orderBy` describes — so the page is flipped back
+      // here. Verified against Prisma: `take: -3, orderBy: { id: "asc" }`
+      // returns c, d, e, not e, d, c.
+      if (reversed) shaped.reverse();
       // Prisma returns the row or `null`, not a one-element array. The
       // *OrThrow* variants turn that `null` into an error in `Model.$exec`,
       // where the model's name is in scope for the message.
@@ -158,8 +172,9 @@ function binder(binders: Binder[]) {
  * - Paginating without an `orderBy` injects `order by <primary key> asc`.
  *   Without it, "page 2" is only meaningful if the storage engine happens to
  *   return a stable order, which is not guaranteed on either dialect.
- * - A *negative* `take` means "the last N": Prisma flips every ordering term
- *   and takes `abs(take)`.
+ * - A *negative* `take` means "the last N": Prisma flips every ordering term,
+ *   takes `abs(take)`, and then reverses the result set so the caller still
+ *   sees their own ordering. `reversed` carries that last part out to `shape`.
  */
 function pagination(
   schema: ModelSchema,
@@ -167,7 +182,7 @@ function pagination(
   args: any,
   dialect: SqlDialect,
   parsed: OrderTerm[],
-): { clause: Fragment; terms: OrderTerm[] } {
+): { clause: Fragment; terms: OrderTerm[]; reversed: boolean } {
   const single = SINGLE_ROW.has(op);
   const take = single ? 1 : args?.take;
   const skip = args?.skip;
@@ -198,6 +213,7 @@ function pagination(
   return {
     clause: dialect.paginate(takeBinder, skipBinder),
     terms,
+    reversed: negative,
   };
 }
 

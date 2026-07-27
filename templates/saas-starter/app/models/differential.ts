@@ -94,6 +94,7 @@ export async function createDifferential(options: {
   // clears only the table it seeds and nothing else. The env var's contract is
   // that it points at a scratch database with the schema already applied.
   if (options.url) {
+    await prisma.socialAccount.deleteMany({});
     await prisma.user.deleteMany({});
   }
 

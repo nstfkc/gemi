@@ -100,6 +100,15 @@ export function compileWhere(
 
     const field = schema.fields[key];
     if (!field) {
+      // Prisma exposes a composite `@@unique([a, b])` as one key named `a_b`,
+      // holding an object of its members. It is the only `where` key that is
+      // not a field, a relation or a combinator, and `findUnique` on a model
+      // like the template's `SocialAccount` cannot be expressed without it.
+      const compound = compileCompoundKey(schema, key, value, context, at);
+      if (compound) {
+        predicates.push(compound);
+        continue;
+      }
       throw new UnknownFieldError(key, schema.name, Object.keys(schema.fields));
     }
 
@@ -114,6 +123,63 @@ export function compileWhere(
 export interface WhereContext {
   dialect: SqlDialect;
   operation: string;
+}
+
+/**
+ * `{ username_provider: { username, provider } }` -> `username = ? and
+ * provider = ?`.
+ *
+ * Returns `null` when `key` names no declared composite unique, so the caller
+ * can fall through to reporting an unknown field.
+ */
+function compileCompoundKey(
+  schema: ModelSchema,
+  key: string,
+  value: unknown,
+  context: WhereContext,
+  locate: (args: any) => any,
+): Fragment | null {
+  const members = schema.uniques.find(
+    (group) => group.length > 1 && group.join("_") === key,
+  );
+  if (!members) return null;
+
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new UnsupportedQueryError(
+      `where.${key}`,
+      schema.name,
+      context.operation,
+      `Expected an object holding ${members.join(" and ")}.`,
+    );
+  }
+
+  const supplied = value as Record<string, unknown>;
+  const parts: Fragment[] = [];
+
+  for (const member of members) {
+    // Every member is required: a composite key is only unique as a whole, so
+    // a partial one would quietly become a non-unique lookup.
+    if (supplied[member] === undefined) {
+      throw new UnsupportedQueryError(
+        `where.${key}`,
+        schema.name,
+        context.operation,
+        `Missing '${member}'. A composite key needs all of ${members.join(", ")}.`,
+      );
+    }
+
+    parts.push(
+      compileFieldFilter(
+        schema,
+        schema.fields[member],
+        supplied[member],
+        context,
+        (args) => locate(args)?.[member],
+      ),
+    );
+  }
+
+  return parts.length === 1 ? parts[0] : group(parts, " and ");
 }
 
 /** `AND` / `OR`, accepting Prisma's array form and its single-object form. */
@@ -284,9 +350,27 @@ function compileFieldFilter(
       case "contains":
       case "startsWith":
       case "endsWith":
-        parts.push(
-          dialect.like(column, insensitive, likePattern(key, at)),
-        );
+        // Prisma raises "Argument `contains` must not be null" — verified.
+        // Without this, `String(null)` makes the pattern `%null%`, which is a
+        // query that runs and returns the wrong rows. The types catch the
+        // static case but not a value that arrives dynamically.
+        if (typeof operand !== "string") {
+          throw new UnsupportedQueryError(
+            `where.${field.name}.${key}`,
+            schema.name,
+            context.operation,
+            `Expected a string, received ${operand === null ? "null" : typeof operand}.`,
+          );
+        }
+        if (field.type !== "String") {
+          throw new UnsupportedQueryError(
+            `where.${field.name}.${key}`,
+            schema.name,
+            context.operation,
+            `'${field.name}' is a ${field.type}, and ${key} only applies to strings.`,
+          );
+        }
+        parts.push(dialect.like(column, insensitive, likePattern(key, at)));
         break;
     }
   }

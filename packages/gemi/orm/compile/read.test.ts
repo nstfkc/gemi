@@ -230,6 +230,21 @@ describe("skip and take", () => {
       `${SELECT_USER} order by "name" desc limit ?`,
     );
   });
+
+  // ...and then hands the page back in the order the caller asked for. Flipping
+  // the SQL is only half of it, and asserting the SQL text alone is exactly how
+  // the missing half shipped.
+  test("a negative take flips the result set back", () => {
+    const plan = compileRead(user, "findMany", { take: -3 }, sqlite);
+    const rows = plan.shape([{ id: 5 }, { id: 4 }, { id: 3 }]) as any[];
+    expect(rows.map((row) => row.id)).toEqual([3, 4, 5]);
+  });
+
+  test("a positive take leaves the order alone", () => {
+    const plan = compileRead(user, "findMany", { take: 3 }, sqlite);
+    const rows = plan.shape([{ id: 1 }, { id: 2 }, { id: 3 }]) as any[];
+    expect(rows.map((row) => row.id)).toEqual([1, 2, 3]);
+  });
 });
 
 describe("select", () => {
@@ -349,7 +364,7 @@ describe("the read operations", () => {
 
 describe("compound uniques", () => {
   // The template's SocialAccount declares @@unique([username, provider]), which
-  // Prisma exposes as a single `username_provider` key.
+  // Prisma exposes as a single `username_provider` key holding both members.
   const composite = {
     ...mapped,
     name: "SocialAccount",
@@ -357,7 +372,26 @@ describe("compound uniques", () => {
     primaryKey: [] as string[],
   };
 
-  test("accepts Prisma's joined compound form", () => {
+  // Asserted on the compiled SQL, not with `.not.toThrow(/re/)` — that form
+  // passes both when nothing throws and when the *wrong* thing throws, which is
+  // how this exact case shipped broken.
+  test("destructures Prisma's joined compound form into an AND", () => {
+    const args = {
+      where: {
+        isArchived_occurredAt: { isArchived: true, occurredAt: new Date(5) },
+      },
+    };
+    const plan = compileRead(composite, "findUnique", args, sqlite);
+
+    expect(plan.text).toBe(
+      'select "id", "is_archived", "occurred_at", "payload", "size" ' +
+        'from "audit_log" where ("is_archived" = ? and "occurred_at" = ?) ' +
+        "limit ?",
+    );
+    expect(plan.bind(args)).toEqual([1, 5, 1]);
+  });
+
+  test("rejects a compound key missing a member", () => {
     expect(() =>
       compileRead(
         composite,
@@ -365,7 +399,7 @@ describe("compound uniques", () => {
         { where: { isArchived_occurredAt: { isArchived: true } } },
         sqlite,
       ),
-    ).not.toThrow(/needs a unique field/);
+    ).toThrow(/Missing 'occurredAt'/);
   });
 
   test("rejects only one half of a compound key", () => {
@@ -377,6 +411,12 @@ describe("compound uniques", () => {
         sqlite,
       ),
     ).toThrow(/isArchived_occurredAt/);
+  });
+
+  test("still reports a genuinely unknown key as an unknown field", () => {
+    expect(() =>
+      compileRead(composite, "findMany", { where: { nope_nope: {} } }, sqlite),
+    ).toThrow(UnknownFieldError);
   });
 });
 
@@ -450,6 +490,43 @@ describe("unimplemented arguments still throw", () => {
   test("an unknown operator, named precisely", () => {
     expect(() => text({ where: { email: { search: "x" } } })).toThrow(
       /'where\.email\.search'/,
+    );
+  });
+
+  test("count rejects select rather than ignoring it", () => {
+    expect(() => text({ select: { id: true } }, "count")).toThrow(
+      "gemi ORM does not support 'select' yet (User.count).",
+    );
+  });
+
+  // Validation must not depend on whether a different argument happens to be
+  // present too.
+  test("count validates orderBy whether or not it paginates", () => {
+    expect(() => text({ orderBy: { nope: "asc" } }, "count")).toThrow(
+      UnknownFieldError,
+    );
+    expect(() => text({ orderBy: { nope: "asc" }, take: 1 }, "count")).toThrow(
+      UnknownFieldError,
+    );
+  });
+
+  // `String(null)` would make the pattern `%null%` — a query that runs and
+  // returns the wrong rows. Prisma raises instead, and so do we.
+  test.each(["contains", "startsWith", "endsWith"])(
+    "%s rejects a non-string operand",
+    (operator) => {
+      expect(() => text({ where: { email: { [operator]: null } } })).toThrow(
+        /Expected a string, received null/,
+      );
+      expect(() => text({ where: { email: { [operator]: 5 } } })).toThrow(
+        /Expected a string, received number/,
+      );
+    },
+  );
+
+  test("contains rejects a non-string column", () => {
+    expect(() => text({ where: { id: { contains: "x" } } })).toThrow(
+      /'id' is a Int, and contains only applies to strings/,
     );
   });
 

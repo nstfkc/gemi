@@ -3,7 +3,12 @@ import { beforeEach, describe, expect, test } from "vitest";
 import { PostgresDialect } from "./dialect/postgres";
 import { SqliteDialect } from "./dialect/sqlite";
 import { user } from "./fixtures";
-import { clearPlanCache, getOrCompile, planKey } from "./plan";
+import {
+  clearPlanCache,
+  getOrCompile,
+  planCacheStats,
+  planKey,
+} from "./plan";
 
 const sqlite = new SqliteDialect();
 const postgres = new PostgresDialect();
@@ -237,3 +242,83 @@ describe("no value ever reaches the SQL text", () => {
 function stripIdentifiers(text: string): string {
   return text.replace(/"(?:[^"]|"")*"/g, "");
 }
+
+/**
+ * The key space is finite per application in every dimension but one: on SQLite
+ * an `in` list expands to one placeholder per element, so each distinct length
+ * is its own plan — and length is routinely request-derived. Unbounded, that is
+ * a slow memory leak reachable from untrusted input.
+ */
+describe("the plan cache is bounded", () => {
+  test("evicts rather than growing without limit", () => {
+    const { capacity } = planCacheStats();
+
+    // One distinct `in` length per iteration, the way a `?ids=` query parameter
+    // would produce them.
+    for (let length = 1; length <= capacity + 50; length++) {
+      getOrCompile(
+        user,
+        "findMany",
+        { where: { id: { in: Array.from({ length }, (_, i) => i) } } },
+        sqlite,
+      );
+    }
+
+    const stats = planCacheStats();
+    expect(stats.size).toBeLessThanOrEqual(capacity);
+    expect(stats.evictions).toBeGreaterThan(0);
+  });
+
+  // A hot shape must survive a flood of one-off ones, or the cache would be
+  // worse than useless under exactly the traffic that fills it.
+  test("keeps a repeatedly-used plan and drops the cold ones", () => {
+    const { capacity } = planCacheStats();
+    const hot = { where: { email: "x" } };
+    const first = getOrCompile(user, "findMany", hot, sqlite);
+
+    for (let length = 1; length <= capacity + 50; length++) {
+      getOrCompile(
+        user,
+        "findMany",
+        { where: { id: { in: Array.from({ length }, (_, i) => i) } } },
+        sqlite,
+      );
+      // Touching the hot shape keeps it at the head of the LRU order.
+      getOrCompile(user, "findMany", hot, sqlite);
+    }
+
+    expect(getOrCompile(user, "findMany", hot, sqlite)).toBe(first);
+  });
+});
+
+/**
+ * `select` and `include` are structural, so their contents go into the key
+ * verbatim — but a `where` nested inside one holds filter *values* again.
+ * Recording those would put user data into a long-lived global map and give
+ * every distinct value its own entry.
+ */
+describe("structural keying stops at a value boundary", () => {
+  test("a nested where does not leak its values into the key", () => {
+    const a = planKey("sqlite", "User", "findMany", {
+      include: { accounts: { where: { publicId: "secret-value" } } },
+    });
+    const b = planKey("sqlite", "User", "findMany", {
+      include: { accounts: { where: { publicId: "another-value" } } },
+    });
+
+    expect(a).toBe(b);
+    expect(a).not.toContain("secret-value");
+  });
+
+  test("but the structural part of a nested selection still discriminates", () => {
+    expect(
+      planKey("sqlite", "User", "findMany", {
+        include: { accounts: { orderBy: { id: "asc" } } },
+      }),
+    ).not.toBe(
+      planKey("sqlite", "User", "findMany", {
+        include: { accounts: { orderBy: { id: "desc" } } },
+      }),
+    );
+  });
+});

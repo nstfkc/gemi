@@ -6,7 +6,7 @@ import {
   createDifferential,
   type Differential,
 } from "./differential";
-import { UserModel } from "./generated";
+import { SocialAccountModel, UserModel } from "./generated";
 
 // Rows chosen so that every case below actually discriminates: nullable columns
 // that are null on some rows and not others, names that tie under `orderBy`,
@@ -59,6 +59,23 @@ async function seed(prisma: PrismaClient) {
       },
     ],
   });
+
+  // The only model in the template with a composite `@@unique`, so the only one
+  // that can exercise Prisma's joined compound key form.
+  const [first] = await prisma.user.findMany({ orderBy: { id: "asc" } });
+  await prisma.socialAccount.create({
+    data: {
+      userId: first.id,
+      provider: "github",
+      providerId: "gh-1",
+      username: "ada",
+      accessToken: "token",
+      refreshToken: "refresh",
+      expiresAt: new Date(EPOCH + 9000),
+      createdAt: new Date(EPOCH),
+      updatedAt: new Date(EPOCH),
+    },
+  });
 }
 
 // Every case runs through both clients. The name is what a failure reports, so
@@ -76,7 +93,13 @@ const CASES: [string, string, unknown][] = [
   ["is null", "findMany", { where: { email: null } }],
   ["equals null", "findMany", { where: { email: { equals: null } } }],
   ["is not null", "findMany", { where: { email: { not: null } } }],
+  // Three-valued logic: the row with a null name must not come back from a
+  // `not`, on either side. This is what `compileNot` reasons about in prose.
   ["not a value", "findMany", { where: { name: { not: "Ada" } } }],
+  ["NOT over a nullable", "findMany", { where: { NOT: { name: "Ada" } } }],
+  ["notIn over a nullable", "findMany", { where: { name: { notIn: ["Ada"] } } }],
+  ["not nested in over a nullable", "findMany", { where: { name: { not: { in: ["Ada"] } } } }],
+  ["NOT is null", "findMany", { where: { NOT: { name: null } } }],
   ["two keys are ANDed", "findMany", { where: { name: "Ada", globalRole: 0 } }],
 
   // --- comparisons ------------------------------------------------------
@@ -142,6 +165,14 @@ const CASES: [string, string, unknown][] = [
   ["take past the end", "findMany", { take: 99 }],
   ["skip past the end", "findMany", { skip: 99 }],
   ["take with orderBy", "findMany", { take: 2, orderBy: { name: "desc" } }],
+  // A negative take is "the last N", and Prisma hands the page back in the
+  // caller's own order. Flipping the SQL is only half of it — the compiler-text
+  // test passed while the rows came back reversed.
+  ["negative take", "findMany", { take: -3 }],
+  ["negative take ordered asc", "findMany", { take: -3, orderBy: { id: "asc" } }],
+  ["negative take ordered desc", "findMany", { take: -3, orderBy: { id: "desc" } }],
+  ["negative take with skip", "findMany", { take: -2, skip: 1, orderBy: { id: "asc" } }],
+  ["negative take one", "findMany", { take: -1, orderBy: { name: "asc" } }],
 
   // --- select -----------------------------------------------------------
   ["select one", "findMany", { select: { id: true } }],
@@ -168,6 +199,36 @@ const CASES: [string, string, unknown][] = [
   ["count with where", "count", { where: { deletedAt: null } }],
   ["count no match", "count", { where: { email: "nobody@example.dev" } }],
   ["count with take", "count", { take: 2 }],
+  ["count with skip", "count", { skip: 2 }],
+  ["count with take and skip", "count", { take: 2, skip: 1 }],
+  ["count with orderBy", "count", { orderBy: { name: "asc" } }],
+];
+
+/**
+ * `mode: "insensitive"` is the one place the two dialects legitimately disagree,
+ * so it cannot live in the shared table. Prisma rejects it on SQLite; on
+ * Postgres it becomes `ilike`. Both sides of that split are pinned here rather
+ * than only described in prose.
+ */
+const SQLITE_ONLY: [string, string, unknown][] = [
+  [
+    "mode insensitive is rejected on sqlite",
+    "findMany",
+    { where: { email: { contains: "ADA", mode: "insensitive" } } },
+  ],
+];
+
+const POSTGRES_ONLY: [string, string, unknown][] = [
+  [
+    "mode insensitive matches case-blind on postgres",
+    "findMany",
+    { where: { email: { contains: "ADA", mode: "insensitive" } } },
+  ],
+  [
+    "default contains is case-sensitive on postgres",
+    "findMany",
+    { where: { email: { contains: "ADA" } } },
+  ],
 ];
 
 function suite(label: string, url?: string) {
@@ -176,7 +237,10 @@ function suite(label: string, url?: string) {
 
     beforeAll(async () => {
       differential = await createDifferential({
-        models: { User: UserModel as never },
+        models: {
+          User: UserModel as never,
+          SocialAccount: SocialAccountModel as never,
+        },
         seed,
         url,
       });
@@ -188,6 +252,27 @@ function suite(label: string, url?: string) {
 
     test.each(CASES)("%s", async (_name, operation, args) => {
       await differential.expectSame("User", operation, args);
+    });
+
+    test.each(url ? POSTGRES_ONLY : SQLITE_ONLY)(
+      "%s",
+      async (_name, operation, args) => {
+        await differential.expectSame("User", operation, args);
+      },
+    );
+
+    // The template's SocialAccount declares @@unique([username, provider]), so
+    // this is the only model that can exercise Prisma's joined compound key.
+    // `compileWhere` had no branch for it and threw `UnknownFieldError`; the
+    // compiler test that "covered" it used `.not.toThrow(/regex/)` and passed
+    // on the wrong error.
+    test("findUnique on a compound unique key", async () => {
+      await differential.expectSame("SocialAccount", "findUnique", {
+        where: { username_provider: { username: "ada", provider: "github" } },
+      });
+      await differential.expectSame("SocialAccount", "findUnique", {
+        where: { username_provider: { username: "nobody", provider: "none" } },
+      });
     });
 
     // A guard on the harness itself: if `expectSame` compared nothing, every
