@@ -11,6 +11,7 @@ import * as registry from "../registry";
 import type { FieldSchema, ModelSchema, RelationSchema } from "../schema";
 import {
   type BindContext,
+  type Fragment,
   concat,
   createBindContext,
   render,
@@ -163,6 +164,50 @@ export interface RelationPlan {
   strategy: string;
   /** Fetches the children for these parents and attaches them in place. */
   load(parents: Row[], args: any, executor: RelationExecutor): Promise<void>;
+  /**
+   * SQL this relation contributes to the **root** statement, for a strategy that
+   * folds children in rather than fetching them separately.
+   *
+   * Absent for the batched strategy, whose `load` runs afterwards — and absent is
+   * the common case, so the compiler's fast path is one `undefined` check.
+   *
+   * **Why this exists, since it is a widening of a seam that claimed not to need
+   * one.** Iteration 3 built the planner as a swappable stage and invariant 4
+   * lists three strategies, two of which are single-round-trip. But a strategy's
+   * entire output was a `load()` that runs after the root query plus the field
+   * names the root must select for stitching — no way to add a column expression,
+   * a join, or a table alias, which is all three of the things a lateral join
+   * needs. The seam was swappable for "fetch children separately, by some means"
+   * and closed to "fold children into the root statement".
+   *
+   * Additive on purpose: `batchedStrategy` does not set it and is unchanged, so
+   * the widening cannot regress the strategy that ships. See
+   * `plans/orm/09-lateral-strategy.md`.
+   */
+  root?: RootContribution;
+}
+
+/**
+ * What a fold-into-the-root strategy adds to the root statement.
+ *
+ * Fragments rather than strings, like everything else the compiler emits, so a
+ * contributed subquery binds its values as parameters and cannot smuggle one into
+ * the SQL text — invariant 2 applies to a strategy's SQL exactly as it does to
+ * the compiler's own.
+ */
+export interface RootContribution {
+  /** Appended to the root select list. Must alias to the relation's `as`. */
+  column: Fragment;
+  /** Appended after the `from` clause — a `left join lateral (…) on true`. */
+  join: Fragment;
+  /**
+   * Turns the column's raw value into the shaped relation.
+   *
+   * Separate from the column so the shaper stays a pure function of the row:
+   * `json_agg` returns *text*, so this is where dates stop being strings and an
+   * empty to-many becomes `[]` rather than `null`.
+   */
+  decode(value: unknown): unknown;
 }
 
 /**
@@ -258,6 +303,11 @@ export async function attachRelations(
   // concurrent statements are not safe. Parallelism belongs with iteration 7,
   // which owns performance and can measure it.
   for (const relation of relations) {
+    // A relation that contributed to the root statement already has its children
+    // in the row — folded in by a lateral join and decoded by the shaper — so
+    // there is nothing to fetch. Calling `load` would issue the very query the
+    // strategy exists to avoid, and overwrite the correct result with it.
+    if (relation.root) continue;
     await relation.load(parents, args, executor);
   }
 

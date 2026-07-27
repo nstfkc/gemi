@@ -160,6 +160,22 @@ tree** before planning (invariant 2), scoping applies under every strategy — t
 scoped `where` lands inside the lateral subquery exactly as it would in a
 separate query.
 
+**Correction, found while starting the lateral strategy.** The seam iteration 3
+built is narrower than this claims. A `RelationStrategy` produces a `load()` that
+runs *after* the root query, plus a list of field names the root must select for
+stitching — and nothing else. It cannot contribute a column expression, a join
+clause or a table alias to the root statement, which is all three of the things a
+lateral join needs.
+
+So it is genuinely swappable for *"fetch children separately, by some means"* and
+closed to *"fold children into the root statement"*. The batching strategy and any
+future n+1-avoiding variant fit it; the two single-round-trip strategies in the
+table above do not. Widening it is iteration 9's first deliverable —
+[09](./09-lateral-strategy.md) — and the widening is additive, so batching is
+unaffected. The claim is left standing above with this correction beneath it
+rather than quietly rewritten, because the gap between what an invariant promised
+and what it delivered is the useful part.
+
 Caveat for iteration 7: JSON aggregation flattens types. Dates come back as
 strings, numerics may come back as strings. Coercion must be aware of both
 dialect *and* strategy.
@@ -362,6 +378,7 @@ with no prior context.
 | 6 | Car | First-class policies, including nested reads | [06](./06-policies.md) |
 | 7 | | Performance: lateral+json planner, generated shapers, benchmark suite | [07](./07-performance.md) |
 | 8 | | Eloquent doorway: opt-in provenance, `save(row)`, entity tier | [08](./08-eloquent-doorway.md) |
+| 9 | | `LATERAL` + `json_agg`: iteration 7's deliverable 2, declined then re-justified on corrected measurements | [09](./09-lateral-strategy.md) |
 
 Iterations 5 and 6 are the reason the project exists, but they are cheap *once
 the choke point exists*, which is why they come after the query engine rather

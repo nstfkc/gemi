@@ -116,6 +116,7 @@ export {
   planRelations,
   strategiesOf,
   type RelationPlan,
+  type RootContribution,
   type RelationPlanning,
   type RelationRequest,
   type RelationStrategy,
