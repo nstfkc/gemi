@@ -19,6 +19,7 @@ import {
   MissingModelSchemaError,
   RecordNotFoundError,
   UniqueConstraintError,
+  UnregisteredPolicyClassError,
 } from "./errors";
 import { getOrCompile, type Operation, type QueryPlan } from "./plan";
 import {
@@ -207,6 +208,23 @@ export abstract class Model {
     let effective = args;
 
     if (policies.length > 0) {
+      // The registry must resolve this model's name to *this* class, or nested
+      // relation reads — which go through the registry — would run on a
+      // different class and skip these policies entirely. Scoped at the root,
+      // unscoped inside an include; see `UnregisteredPolicyClassError`. Checked
+      // here rather than at registration because a class can acquire a policy
+      // at any point after it is defined.
+      const registered = registry.has(schema.name)
+        ? registry.get<unknown>(schema.name)
+        : undefined;
+      if (registered !== undefined && registered !== this) {
+        throw new UnregisteredPolicyClassError(
+          schema.name,
+          (registered as { name?: string }).name ?? String(registered),
+          this.name,
+        );
+      }
+
       // Deny-by-default lives on the context's `user` accessor, not here: a
       // policy that never consults the user — a soft-delete scope, say — has
       // nothing to deny and must keep working with no request in sight. See

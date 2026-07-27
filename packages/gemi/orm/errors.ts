@@ -175,6 +175,49 @@ export class PolicyDeniedError extends Error {
 }
 
 /**
+ * Thrown when a model class carries policies but is not the class the registry
+ * resolves its name to.
+ *
+ * This exists because of a cross-tenant leak that shipped past review. The
+ * generated `index.ts` registers the *generated* base — `register("Account",
+ * AccountModel)` — while an application authors its policy on a subclass:
+ *
+ *     export class Account extends AccountModel {
+ *       static $policy = { scope: (ctx) => ({ organizationId: … }) }
+ *     }
+ *
+ * A root query goes through `Account`, so `policiesFor(this)` finds the policy
+ * and the scope applies. A **nested** relation read resolves through the
+ * registry, gets `AccountModel`, and walks a prototype chain the policy is not
+ * on — so `User.findMany({ include: { accounts: true } })` returned every
+ * tenant's accounts. Root queries scoped, nested reads unscoped: exactly the
+ * Prisma behaviour policies exist to fix, and silent.
+ *
+ * Raised at the first query through the unregistered class, naming the one-line
+ * fix, because the alternative is data crossing a tenant boundary with nothing
+ * to notice it.
+ */
+export class UnregisteredPolicyClassError extends Error {
+  constructor(
+    public readonly model: string,
+    public readonly registered: string,
+    public readonly queried: string,
+  ) {
+    super(
+      `${queried} carries policies but the registry resolves '${model}' to ` +
+        `${registered}. Nested relation reads go through the registry, so they ` +
+        `would run on ${registered} and skip every policy on ${queried} — ` +
+        `scoped at the root, unscoped inside an include. Register the class ` +
+        `that carries the policy:\n\n` +
+        `    import { register } from "gemi/orm"\n` +
+        `    export class ${queried} extends ${registered} { … }\n` +
+        `    register("${model}", ${queried})\n`,
+    );
+    this.name = "UnregisteredPolicyClassError";
+  }
+}
+
+/**
  * Thrown when a statement would bind more parameters than the driver's wire
  * protocol can carry.
  *

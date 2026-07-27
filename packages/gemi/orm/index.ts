@@ -26,6 +26,7 @@ export {
   UniqueConstraintError,
   UnknownFieldError,
   UnknownRelationError,
+  UnregisteredPolicyClassError,
   UnregisteredRelationTargetError,
   UnsupportedQueryError,
 } from "./errors";
