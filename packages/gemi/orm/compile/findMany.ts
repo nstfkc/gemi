@@ -19,6 +19,18 @@ export function compileFindMany(
   dialect: SqlDialect,
 ): QueryPlan {
   if (args !== undefined && args !== null) {
+    // Without this, `findMany("x" as any)` walks the string's indices and
+    // reports `does not support '0'`. The types make it unlikely; the error is
+    // just misleading if it happens anyway.
+    if (typeof args !== "object" || Array.isArray(args)) {
+      throw new UnsupportedQueryError(
+        String(args),
+        schema.name,
+        "findMany",
+        "Expected an object.",
+      );
+    }
+
     for (const key of Object.keys(args).sort()) {
       if (args[key] === undefined) continue;
       if (!SUPPORTED_ARGS.has(key)) {

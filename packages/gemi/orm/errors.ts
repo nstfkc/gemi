@@ -40,6 +40,31 @@ export class UnknownFieldError extends Error {
   }
 }
 
+/**
+ * Thrown when a column holds something the generated schema says it cannot —
+ * an unparseable timestamp, a fractional value in a `BigInt` column, malformed
+ * JSON. Every dialect needs it, which is why it lives here rather than beside
+ * one of them.
+ *
+ * It exists so those cases fail rather than decode into a plausible wrong
+ * value: `new Date("nonsense")` is an `Invalid Date`, not an error, and it
+ * would travel a long way before anyone noticed.
+ */
+export class DecodeError extends Error {
+  constructor(
+    public readonly field: { column: string; type: string },
+    public readonly value: unknown,
+  ) {
+    super(
+      `Could not decode the value ${JSON.stringify(String(value))} from column ` +
+        `'${field.column}' as ${field.type}. The column's contents do not match ` +
+        `the Prisma schema — was it written by something other than Prisma or ` +
+        `the gemi ORM?`,
+    );
+    this.name = "DecodeError";
+  }
+}
+
 /** Thrown when a relation resolves to a model name nothing registered. */
 export class ModelNotRegisteredError extends Error {
   constructor(name: string, known: string[]) {

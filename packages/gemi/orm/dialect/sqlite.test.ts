@@ -30,6 +30,14 @@ describe("identifiers and placeholders", () => {
     expect(sqlite.quoteIdent('we"ird')).toBe('"we""ird"');
   });
 
+  // NUL is the parameter sentinel in compile/fragment.ts, so it is the one
+  // character that could shift a placeholder's position rather than merely
+  // produce broken SQL. Unreachable from a generated schema — asserted anyway,
+  // so the invariant is unconditional rather than argued.
+  test("refuses an identifier containing the parameter sentinel", () => {
+    expect(() => sqlite.quoteIdent("id\u0000")).toThrow(/NUL byte/);
+  });
+
   // Verified against Bun's `SQL.unsafe` rather than assumed: Postgres will be
   // `$1`, and the whole dialect abstraction depends on getting this right.
   test("uses positional ? regardless of index", () => {
@@ -89,6 +97,48 @@ describe("decode()", () => {
     expect(sqlite.decode("hello", field("String"))).toBe("hello");
     expect(sqlite.decode(3, field("Int"))).toBe(3);
     expect(sqlite.decode(1.5, field("Float"))).toBe(1.5);
+  });
+
+  // Bun returns a SQLite BLOB as a Uint8Array, which is exactly what Prisma 6
+  // returns for `Bytes`. Verified against the driver rather than assumed, since
+  // the pass-through path is otherwise silent about whether it is correct.
+  test("Bytes passes through as the Uint8Array Prisma returns", () => {
+    const bytes = new Uint8Array([1, 2, 255]);
+    expect(sqlite.decode(bytes, field("Bytes"))).toBe(bytes);
+    expect(sqlite.needsDecode(field("Bytes"))).toBe(false);
+  });
+
+  // A column holding something the schema says it cannot must fail loudly. An
+  // `Invalid Date` or a truncated bigint would be a wrong answer instead.
+  describe("refuses a value that contradicts the schema", () => {
+    test("an unparseable DateTime, rather than returning an Invalid Date", () => {
+      expect(() => sqlite.decode("not a date", field("DateTime"))).toThrow(
+        /Could not decode/,
+      );
+      expect(() => sqlite.decode({}, field("DateTime"))).toThrow(
+        /Could not decode/,
+      );
+    });
+
+    test("a fractional BigInt, naming the column", () => {
+      expect(() =>
+        sqlite.decode(3.5, field("BigInt", { column: "size" })),
+      ).toThrow(/'size'/);
+    });
+
+    test("malformed Json", () => {
+      expect(() => sqlite.decode("{not json", field("Json"))).toThrow(
+        /Could not decode/,
+      );
+    });
+  });
+
+  // `0n !== 0` is true, so a strict comparison would decode a bigint zero as
+  // `true`. Latent today — Bun returns numbers for SQLite integers — but free
+  // to close.
+  test("a bigint zero decodes to false, not true", () => {
+    expect(sqlite.decode(0n, field("Boolean"))).toBe(false);
+    expect(sqlite.decode(1n, field("Boolean"))).toBe(true);
   });
 });
 

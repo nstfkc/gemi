@@ -38,6 +38,19 @@ const SCALAR_TYPES: Record<string, ScalarType> = {
   bytes: "Bytes",
 };
 
+// Scalars the artifact can describe but no dialect can round-trip yet, mapped
+// to the reason. Refusing at generation time is the same call the `isList`
+// check below makes, and for the same reason: the alternative is a model that
+// generates cleanly and then returns a value that silently disagrees with the
+// type Prisma gave it. That is the failure mode this iteration is built around.
+const UNSUPPORTED_SCALARS: Partial<Record<ScalarType, string>> = {
+  Decimal:
+    "Prisma types a Decimal field as `Prisma.Decimal`, but SQLite stores it " +
+    "as a REAL and the driver returns a JS number — so the value would be a " +
+    "float pretending to be an arbitrary-precision decimal, losing exactly " +
+    "the precision the type exists to keep",
+};
+
 export class UnsupportedSchemaError extends Error {
   constructor(message: string) {
     super(message);
@@ -53,6 +66,16 @@ function scalarType(model: string, field: DMMF.Field): ScalarType {
         `gemi ORM generator does not know how to map.`,
     );
   }
+
+  const reason = UNSUPPORTED_SCALARS[mapped];
+  if (reason) {
+    throw new UnsupportedSchemaError(
+      `${model}.${field.name} is a ${mapped}, which the gemi ORM does not ` +
+        `support yet: ${reason}. Keep using the Prisma client for this model, ` +
+        `or change the field's type.`,
+    );
+  }
+
   return mapped;
 }
 
@@ -135,6 +158,10 @@ function implicitJoinTable(
   if (sides.length !== 2) return undefined;
   if (!sides.every((side) => side.field.isList)) return undefined;
 
+  // NOTE for iteration 3: on a *self*-referential implicit m-n both names are
+  // the same string, so `a === b` and this record cannot say which column holds
+  // which end. Prisma disambiguates by field order rather than by model name.
+  // The planner will need that extra signal before it can join one.
   const [first, second] = [model.name, field.type].sort();
   return { table: `_${field.relationName}`, a: first, b: second };
 }

@@ -149,6 +149,15 @@ describe("compileFindMany() — unimplemented arguments throw", () => {
     );
   });
 
+  // Without a plain-object guard this walks the string's indices and reports
+  // `does not support '0'`, which sends you looking in the wrong place.
+  test("a non-object args value, without blaming a character index", () => {
+    expect(() => compileFindMany(user, "x" as any, sqlite)).toThrow(
+      /Expected an object/,
+    );
+    expect(() => compileFindMany(user, "x" as any, sqlite)).not.toThrow(/'0'/);
+  });
+
   test("an argument explicitly set to undefined is not an error", () => {
     expect(() =>
       compileFindMany(user, { take: undefined, where: { id: 1 } }, sqlite),

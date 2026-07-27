@@ -58,6 +58,17 @@ export function canonicalShape(value: unknown): string {
 
   if (value instanceof Date) return "date";
   if (Array.isArray(value)) {
+    // Element-wise, so the length is part of the shape. That is not a choice:
+    // `in: [a, b]` compiles to `in (?, ?)` and `in: [a, b, c]` to `in (?, ?, ?)`,
+    // so collapsing them to one key would hand a plan the wrong number of
+    // placeholders. Length has to stay visible.
+    //
+    // WARNING for iteration 2: nothing reaches the cache with an array today
+    // (unknown operators throw before `cache.set`), so the key space is bounded
+    // by field subsets. The moment `in` lands, every distinct filter-list length
+    // a request supplies becomes a permanent entry in a module-global Map keyed
+    // off user input. The cache needs a bound — an eviction policy, not a
+    // coarser key — before that ships.
     return `[${value.map(canonicalShape).join(",")}]`;
   }
 
@@ -96,7 +107,12 @@ export function getOrCompile(
   return plan;
 }
 
-/** Test seam: proves a repeated query shape compiles exactly once. */
+/**
+ * Public on purpose, not only as a test seam. `compiles` climbing in step with
+ * `hits` means some query shape is not being reused — a metric worth graphing,
+ * and the cheapest signal that a caller is accidentally varying its argument
+ * shape per request.
+ */
 export function planCacheStats(): {
   size: number;
   compiles: number;
@@ -105,6 +121,10 @@ export function planCacheStats(): {
   return { size: cache.size, compiles, hits };
 }
 
+/**
+ * Drops every compiled plan. Needed by tests that assert compile counts, and by
+ * anything that reloads the generated schema in a running process.
+ */
 export function clearPlanCache(): void {
   cache.clear();
   compiles = 0;

@@ -1,4 +1,5 @@
 import type { Dialect } from "../../database/dialect";
+import { DecodeError } from "../errors";
 import type { FieldSchema } from "../schema";
 import type { SqlDialect } from "./index";
 
@@ -13,29 +14,48 @@ import type { SqlDialect } from "./index";
 const SQLITE_TEXT_TIMESTAMP =
   /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d+)?$/;
 
-function toDate(value: unknown): unknown {
+function toDate(value: unknown, field: FieldSchema): Date {
   if (value instanceof Date) return value;
-  if (typeof value === "number") return new Date(value);
-  if (typeof value === "bigint") return new Date(Number(value));
-  if (typeof value === "string") {
+
+  let date: Date;
+  if (typeof value === "number") {
+    date = new Date(value);
+  } else if (typeof value === "bigint") {
+    date = new Date(Number(value));
+  } else if (typeof value === "string") {
     // Naked SQLite timestamps carry no zone but are documented as UTC; `Date`
     // would otherwise read them as local time and shift them.
-    return new Date(
-      SQLITE_TEXT_TIMESTAMP.test(value)
-        ? `${value.replace(" ", "T")}Z`
-        : value,
+    date = new Date(
+      SQLITE_TEXT_TIMESTAMP.test(value) ? `${value.replace(" ", "T")}Z` : value,
     );
+  } else {
+    throw new DecodeError(field, value);
   }
-  return value;
+
+  // `new Date("nonsense")` is an `Invalid Date`, not a throw — every field on it
+  // reads `NaN`. Returning one would be a wrong answer rather than an error,
+  // which is the failure mode this whole file exists to avoid.
+  if (Number.isNaN(date.getTime())) throw new DecodeError(field, value);
+  return date;
 }
 
 export class SqliteDialect implements SqlDialect {
   readonly name: Dialect = "sqlite";
 
   quoteIdent(name: string): string {
-    // Identifiers only ever come from the generated schema, so an embedded
-    // quote is not an attack vector — but escaping it costs nothing and keeps
-    // the invariant "the compiler cannot emit broken SQL" unconditional.
+    // NUL is the parameter sentinel in compile/fragment.ts, so it is the one
+    // character that could shift a placeholder's position rather than merely
+    // produce broken SQL. An identifier from the generated schema cannot
+    // contain one — but asserting it makes the invariant unconditional instead
+    // of argued, which is the standard the rest of this file holds.
+    if (name.includes("\u0000")) {
+      throw new Error(
+        `Refusing to quote the identifier ${JSON.stringify(name)}: it contains ` +
+          `a NUL byte, which is reserved as the parameter marker.`,
+      );
+    }
+    // An embedded quote is not an attack vector for the same reason, but
+    // escaping it costs nothing.
     return `"${name.replace(/"/g, '""')}"`;
   }
 
@@ -87,13 +107,27 @@ export class SqliteDialect implements SqlDialect {
 
     switch (field.type) {
       case "DateTime":
-        return toDate(value);
+        return toDate(value, field);
       case "Boolean":
-        return typeof value === "boolean" ? value : value !== 0;
+        if (typeof value === "boolean") return value;
+        // `Number(...)` rather than `value !== 0`: a bigint zero is `0n`, and
+        // `0n !== 0` is true, so a strict comparison would decode it as `true`.
+        return Number(value) !== 0;
       case "BigInt":
-        return typeof value === "bigint" ? value : BigInt(value as string);
+        if (typeof value === "bigint") return value;
+        try {
+          return BigInt(value as string);
+        } catch {
+          // `BigInt(3.5)` throws a RangeError naming neither the column nor the
+          // field, which is not enough to act on.
+          throw new DecodeError(field, value);
+        }
       case "Json":
-        return typeof value === "string" ? JSON.parse(value) : value;
+        try {
+          return typeof value === "string" ? JSON.parse(value) : value;
+        } catch {
+          throw new DecodeError(field, value);
+        }
       default:
         return value;
     }

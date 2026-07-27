@@ -157,6 +157,33 @@ describe("buildModelSchemas()", () => {
     });
   });
 
+  // A Decimal generates cleanly and then returns the driver's raw JS number
+  // typed as `Prisma.Decimal` — a wrong answer rather than an error, which is
+  // the same class as the Date -> NULL binding this iteration is built around.
+  // The generator refuses it for the same reason it refuses a scalar list.
+  test("refuses a Decimal field, which no dialect can round-trip yet", () => {
+    expect(() =>
+      buildModelSchemas([
+        model({ fields: [field({ name: "price", type: "Decimal" })] }),
+      ]),
+    ).toThrow(UnsupportedSchemaError);
+
+    expect(() =>
+      buildModelSchemas([
+        model({ fields: [field({ name: "price", type: "Decimal" })] }),
+      ]),
+    ).toThrow(/User\.price is a Decimal/);
+  });
+
+  // Bytes is the near miss: Bun returns a Uint8Array for a BLOB, which is what
+  // Prisma 6 returns too, so it is supported rather than refused.
+  test("accepts a Bytes field", () => {
+    const [only] = buildModelSchemas([
+      model({ fields: [field({ name: "blob", type: "Bytes" })] }),
+    ]);
+    expect(only.fields.blob.type).toBe("Bytes");
+  });
+
   test("refuses a scalar type it cannot map rather than emitting a guess", () => {
     expect(() =>
       buildModelSchemas([

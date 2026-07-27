@@ -42,6 +42,25 @@ function assertPrismaClientGenerator(options: GeneratorOptions): void {
   );
 }
 
+// `@prisma/generator-helper` is a devDependency bundled into this binary, so the
+// DMMF reader's version is frozen at gemi's publish time. An app on a much newer
+// Prisma would otherwise get a silently mismatched reader — the DMMF is
+// Prisma-internal and has changed shape across majors. Warn rather than throw:
+// the mismatch is usually harmless, and refusing to generate would be a worse
+// failure than a noisy one.
+const SUPPORTED_PRISMA_MAJOR = 6;
+
+function warnOnPrismaVersion(options: GeneratorOptions): void {
+  const major = Number.parseInt(options.version?.split(".")[0] ?? "", 10);
+  if (!Number.isFinite(major) || major === SUPPORTED_PRISMA_MAJOR) return;
+
+  console.warn(
+    `gemi ORM: this is Prisma ${options.version}, but the gemi ORM generator ` +
+      `was built against Prisma ${SUPPORTED_PRISMA_MAJOR}.x. The artifacts are ` +
+      `still generated; check them, and upgrade gemi if they look wrong.`,
+  );
+}
+
 // Informational only. Which dialect the ORM speaks is a *runtime* property read
 // from `DatabaseManager`, because `DATABASE_URL` can point at a different
 // database than the one generation saw. Nothing dialect-specific is ever baked
@@ -80,6 +99,7 @@ generatorHandler({
     }
 
     assertPrismaClientGenerator(options);
+    warnOnPrismaVersion(options);
     warnOnDatasource(options);
 
     // Prisma hands the DMMF over directly, so nothing here parses

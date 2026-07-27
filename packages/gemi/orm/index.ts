@@ -13,6 +13,7 @@ export {
 } from "./schema";
 
 export {
+  DecodeError,
   MissingModelSchemaError,
   ModelNotRegisteredError,
   UnknownFieldError,
