@@ -585,37 +585,57 @@ async function runDialect(
   // `differential.ts` uses — the ORM only ever reads `sql` and `dialect` off
   // the manager, so this needs no cooperation from the runtime and cannot
   // drift from it.
-  let statements = 0;
-  // A Proxy rather than a hand-written stub, because the ORM reaches for more
-  // than `unsafe`: `Model.transaction` needs `begin`, and a stub providing only
-  // the counted method made scenario 6a fail with `pool.begin is not a function`.
-  // Delegating everything and intercepting one method means the wrapper cannot
-  // fall behind what the runtime uses.
-  const countingSql = new Proxy(database.sql, {
-    get(target, property, receiver) {
-      if (property === "unsafe") {
-        return (text: string, values: unknown[]) => {
-          statements++;
-          return target.unsafe(text, values);
-        };
-      }
-      const value = Reflect.get(target, property, receiver);
-      return typeof value === "function" ? value.bind(target) : value;
-    },
-  });
-
-  application.instance(DatabaseManager, {
-    dialect: database.dialect,
-    url: (database as unknown as { url: string }).url,
-    sql: countingSql,
-    close: () => database.close(),
-  } as never);
+  // Every *timed* scenario runs against the bare `DatabaseManager`.
+  application.instance(DatabaseManager, database as never);
   Application.setInstance(application);
 
+  /**
+   * Counts the statements `fn` issues, with the counting wrapper installed only
+   * for its duration.
+   *
+   * Scoped rather than left in place for the whole run. A Proxy on the container
+   * puts a `get` trap and a `bind` on every property access the ORM makes, which
+   * is ~100ns against a ~155µs round trip and so cannot move a number — but it
+   * would apply to gemi's timings and not to the `raw` baselines they are divided
+   * by, and this report argues from those ratios. An asymmetry too small to
+   * matter is still an asymmetry worth not having, and removing it is cheaper
+   * than explaining it.
+   *
+   * A Proxy rather than a hand-written stub because the ORM reaches for more than
+   * `unsafe`: `Model.transaction` needs `begin`, and a stub providing only the
+   * counted method failed with `pool.begin is not a function`. Delegating
+   * everything and intercepting one method cannot fall behind what the runtime
+   * uses.
+   */
   const countStatements = async (fn: () => Promise<unknown>) => {
-    statements = 0;
-    await fn();
-    return statements;
+    let statements = 0;
+    const counting = new Proxy(database.sql, {
+      get(target, property, receiver) {
+        if (property === "unsafe") {
+          return (text: string, values: unknown[]) => {
+            statements++;
+            return target.unsafe(text, values);
+          };
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+
+    application.instance(DatabaseManager, {
+      dialect: database.dialect,
+      url: (database as unknown as { url: string }).url,
+      sql: counting,
+      close: () => database.close(),
+    } as never);
+
+    try {
+      await fn();
+      return statements;
+    } finally {
+      // Back to the bare manager, so nothing timed after this pays for the trap.
+      application.instance(DatabaseManager, database as never);
+    }
   };
 
   const sqlDialect = dialectFor(database.dialect);

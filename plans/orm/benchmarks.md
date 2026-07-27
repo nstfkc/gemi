@@ -16,27 +16,34 @@ there is nothing left to win in that scenario.
 - Bun 1.3.14
 - SQLite 3.51.0
 - darwin arm64
+- Every timed scenario runs against the bare `DatabaseManager`. The
+  statement counter installs a Proxy on the container, and it is installed
+  only for the duration of the counting calls — so no ratio in this document
+  divides a proxied measurement by an unproxied baseline.
+- Postgres figures require a second run with a Postgres-generated Prisma
+  client; the `.json` sidecar carries the other dialect's Prisma column
+  forward and marks it.
 
 | Dialect | Scenario | Rows | raw µs | gemi µs | ×raw | Prisma µs | ×raw | compile | lookup | execute | shape |
 | --- | --- | --: | --: | --: | --: | --: | --: | --: | --: | --: | --: |
-| sqlite | 1. point read by pk | 1 | 15.9 | 28.4 | 1.79× | 136.5 | 8.57× | 10.1 | 0.9 | 22.2 | 0.2 |
-| sqlite | 2. findMany 1000 rows | 1000 | 357.1 | 415.5 | 1.16× | 5435.6 | 15.22× | 6.3 | 0.2 | 380.3 | 70.2 |
-| sqlite | 3. depth-2 include, 100 parents | 100 | 148.6 | 288.7 | 1.94× | 1610.8 | 10.84× | 11.7 | 0.9 | 59.0 | 12.0 |
-| sqlite | 4. depth-3 include, 100 parents | 100 | 178.0 | 317.5 | 1.78× | 2327.5 | 13.08× | 11.7 | 1.2 | 61.2 | 12.3 |
-| sqlite | 5a. create | 1 | — | 388.2 | — | — | — | 13.4 | 0.7 | — | — |
-| sqlite | 5b. updateMany | 1000 | — | 1228.7 | — | — | — | 8.8 | 0.7 | 523.5 | 0.1 |
-| sqlite | 6a. point read, in a transaction | 1 | — | 39.0 | — | — | — | — | — | — | — |
-| sqlite | 6b. point read, policy-scoped | 1 | — | 29.8 | — | — | — | — | — | — | — |
-| sqlite | 6c. findMany 1000, policy-scoped | 1000 | — | 447.5 | — | — | — | — | — | — | — |
-| postgres | 1. point read by pk | 1 | 150.9 | 146.4 | 0.97× | 300.5 | 1.99× | 7.9 | 0.5 | 149.6 | 0.1 |
-| postgres | 2. findMany 1000 rows | 1000 | 804.5 | 841.9 | 1.05× | 5130.4 | 6.38× | 5.0 | 0.2 | 790.6 | 22.2 |
-| postgres | 3. depth-2 include, 100 parents | 100 | 518.3 | 527.5 | 1.02× | 2293.8 | 4.43× | 8.7 | 0.7 | 208.4 | 7.2 |
-| postgres | 4. depth-3 include, 100 parents | 100 | 722.5 | 713.7 | 0.99× | 2252.3 | 3.12× | 9.0 | 1.2 | 203.2 | 7.3 |
-| postgres | 5a. create | 1 | — | 228.9 | — | — | — | 10.5 | 0.5 | — | — |
-| postgres | 5b. updateMany | 1000 | — | 5551.2 | — | — | — | 14.9 | 1.2 | 3696.6 | 0.2 |
-| postgres | 6a. point read, in a transaction | 1 | — | 482.1 | — | — | — | — | — | — | — |
-| postgres | 6b. point read, policy-scoped | 1 | — | 157.5 | — | — | — | — | — | — | — |
-| postgres | 6c. findMany 1000, policy-scoped | 1000 | — | 1090.8 | — | — | — | — | — | — | — |
+| sqlite | 1. point read by pk | 1 | 15.2 | 27.2 | 1.79× | 131.2 | 8.62× | 9.0 | 0.9 | 23.4 | 0.2 |
+| sqlite | 2. findMany 1000 rows | 1000 | 369.8 | 428.8 | 1.16× | 5294.6 | 14.32× | 6.1 | 0.3 | 363.0 | 66.3 |
+| sqlite | 3. depth-2 include, 100 parents | 100 | 142.2 | 268.7 | 1.89× | 1586.5 | 11.16× | 12.4 | 0.9 | 61.0 | 12.8 |
+| sqlite | 4. depth-3 include, 100 parents | 100 | 175.8 | 311.1 | 1.77× | 2286.0 | 13.00× | 9.3 | 1.1 | 57.4 | 12.1 |
+| sqlite | 5a. create | 1 | — | 362.9 | — | — | — | 15.2 | 0.7 | — | — |
+| sqlite | 5b. updateMany | 1000 | — | 1182.6 | — | — | — | 8.4 | 0.7 | 515.4 | 0.1 |
+| sqlite | 6a. point read, in a transaction | 1 | — | 38.3 | — | — | — | — | — | — | — |
+| sqlite | 6b. point read, policy-scoped | 1 | — | 28.6 | — | — | — | — | — | — | — |
+| sqlite | 6c. findMany 1000, policy-scoped | 1000 | — | 434.0 | — | — | — | — | — | — | — |
+| postgres | 1. point read by pk | 1 | 149.0 | 149.5 | 1.00× | 300.5 | 2.02× | 7.8 | 0.5 | 151.8 | 0.1 |
+| postgres | 2. findMany 1000 rows | 1000 | 870.1 | 900.3 | 1.03× | 5130.4 | 5.90× | 6.1 | 0.2 | 818.9 | 21.5 |
+| postgres | 3. depth-2 include, 100 parents | 100 | 521.1 | 532.4 | 1.02× | 2293.8 | 4.40× | 9.3 | 0.8 | 219.9 | 7.4 |
+| postgres | 4. depth-3 include, 100 parents | 100 | 699.0 | 701.5 | 1.00× | 2252.3 | 3.22× | 9.0 | 1.2 | 213.5 | 7.4 |
+| postgres | 5a. create | 1 | — | 231.3 | — | — | — | 9.9 | 0.5 | — | — |
+| postgres | 5b. updateMany | 1000 | — | 5286.6 | — | — | — | 15.4 | 1.3 | 3445.0 | 0.2 |
+| postgres | 6a. point read, in a transaction | 1 | — | 479.7 | — | — | — | — | — | — | — |
+| postgres | 6b. point read, policy-scoped | 1 | — | 155.2 | — | — | — | — | — | — | — |
+| postgres | 6c. findMany 1000, policy-scoped | 1000 | — | 1060.4 | — | — | — | — | — | — | — |
 
 ## Per-call overheads
 
@@ -52,26 +59,14 @@ nanoseconds against a ~27µs point read, so roughly 0.1% each.
 
 | Cost | ns per call | Notes |
 | --- | --: | --- |
-| `currentTransaction()`, no transaction open | 24 | The common case: `getStore()` returning undefined. |
-| `currentTransaction()`, inside a transaction | 36 | An occupied store is barely dearer to read than an empty one. |
-| `policiesFor()`, no policy | 35 | Walks the prototype chain and finds nothing. Paid by every model. |
-| `policiesFor()`, one policy | 52 | Same walk, one `Object.hasOwn` hit. |
+| `currentTransaction()`, no transaction open | 23 | The common case: `getStore()` returning undefined. |
+| `currentTransaction()`, inside a transaction | 34 | An occupied store is barely dearer to read than an empty one. |
+| `policiesFor()`, no policy | 34 | Walks the prototype chain and finds nothing. Paid by every model. |
+| `policiesFor()`, one policy | 50 | Same walk, one `Object.hasOwn` hit. |
 
 Plan cache after the full run: **4 entries** of 1000, 4 compiles, 698 hits, 0 evictions.
 
 The bound is not load-bearing at this scale, and the eviction count says so. It matters only where the *shape* space is unbounded, and there is exactly one such case: an `in` list on SQLite puts its length into the SQL text, so `in: [1]` and `in: [1, 2]` are separate entries. A request-derived list of varying length therefore mints one per distinct length — bounded above by the parameter ceiling, but easily enough to churn a 1000-entry cache. That is the case to measure if the bound is ever revisited, and **nothing in this suite exercises it**, so the numbers here do not speak to it.
-
-## Row provenance (iteration 8)
-
-`track: true` records where each row came from so `Model.save(row)` can
-update it. Off by default, because it costs a `WeakMap` insert and a
-snapshot clone per row — this is what that means on the read where it would
-cost most.
-
-| Dialect | Rows | off µs | on µs | added |
-| --- | --: | --: | --: | --: |
-| sqlite | 1000 | 416.8 | 858.8 | 106% |
-| postgres | 1000 | 799.3 | 1246.3 | 56% |
 
 ## Round trips per include depth
 
@@ -99,8 +94,8 @@ stitching rather than stitching alone.
 
 | Dialect | Parents | no include µs | with include µs | difference |
 | --- | --: | --: | --: | --: |
-| sqlite | 100 | 71.4 | 269.3 | 197.9 |
-| postgres | 100 | 215.5 | 524.2 | 308.8 |
+| sqlite | 100 | 67.9 | 253.2 | 185.3 |
+| postgres | 100 | 217.2 | 516.6 | 299.5 |
 
 ## Positional row mode (deliverable 4)
 
@@ -112,8 +107,8 @@ and is the `shape` column in the table above.
 
 | Dialect | object mode p50/p95 µs | `.values()` p50/p95 µs | p50 delta |
 | --- | --: | --: | --: |
-| sqlite | 354.7 / 793.5 | 403.7 / 444.5 | -14% |
-| postgres | 785.3 / 1258.1 | 846.5 / 1297.8 | -8% |
+| sqlite | 340.7 / 371.9 | 386.3 / 429.2 | -13% |
+| postgres | 786.0 / 992.6 | 832.6 / 1211.7 | -6% |
 
 ## What these say about the rest of iteration 7
 
@@ -163,8 +158,8 @@ gets built:
        depth-3 include   3 statements
 
    A lateral join collapses all of them into one. The cost of a single round
-   trip is what scenario 1 measures directly — 146µs — so on depth 3 the
-   removable cost is about 293µs, against a total of 714µs.
+   trip is what scenario 1 measures directly — 149µs — so on depth 3 the
+   removable cost is about 299µs, against a total of 701µs.
 
    That is the whole case, and every input to it is either a count that cannot
    drift or the single most stable timing in the suite. It does not depend on
@@ -173,18 +168,18 @@ gets built:
 
    **What the wall clock does and does not support.** Against baselines of the
    same shape — hand-written SQL issuing the same number of queries — gemi is
-   at 1.02× on depth 2 and 0.99× on depth 3. So there is little
+   at 1.02× on depth 2 and 1.00× on depth 3. So there is little
    to win *at this shape*; the win is in changing the shape.
 
-   The per-level step in this run: 528µs at depth 2 against 714µs at
-   depth 3, so +186µs for the third query.
+   The per-level step in this run: 532µs at depth 2 against 701µs at
+   depth 3, so +169µs for the third query.
    Either direction is inside the noise on a single run — and writing that
    sentence by hand is how this report went wrong three times, so it is
    rendered from the data. "Each level costs a round trip" is a claim the
    counted evidence supports and the timed evidence does not. Read the count.
 
    **On SQLite it remains unjustified.** The counts are identical, but the
-   round trips are in-process: scenario 1 there is 28µs,
+   round trips are in-process: scenario 1 there is 27µs,
    so eliminating two of them saves that much rather than milliseconds.
    `json_group_array` should be built only if a SQLite-specific measurement
    asks for it.
