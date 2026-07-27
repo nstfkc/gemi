@@ -195,5 +195,12 @@ export async function provenance(): Promise<string> {
     `- Bun ${Bun.version}`,
     `- SQLite ${sqliteVersion}`,
     `- ${process.platform} ${process.arch}`,
+    `- Every timed scenario runs against the bare \`DatabaseManager\`. The`,
+    `  statement counter installs a Proxy on the container, and it is installed`,
+    `  only for the duration of the counting calls — so no ratio in this document`,
+    `  divides a proxied measurement by an unproxied baseline.`,
+    `- Postgres figures require a second run with a Postgres-generated Prisma`,
+    `  client; the \`.json\` sidecar carries the other dialect's Prisma column`,
+    `  forward and marks it.`,
   ].join("\n");
 }
