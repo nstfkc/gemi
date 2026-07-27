@@ -22,9 +22,25 @@ interface ShapedColumn {
   decode: boolean;
 }
 
+/**
+ * One relation the plan will load. The shaper does not fetch anything; it
+ * writes the *empty* value so the key exists on every row before the relation
+ * loader fills in the rows that have children.
+ *
+ * These three lines are where most divergence bugs live, so they are stated
+ * once, here: a to-one with no match is `null` — not `undefined`, not a missing
+ * key — and an empty to-many is `[]` — not `null`, not absent. Prisma returns
+ * exactly that, and the differential harness compares key presence.
+ */
+export interface ShapedRelation {
+  key: string;
+  kind: "one" | "many";
+}
+
 export function buildRowShaper(
   fields: FieldSchema[],
   dialect: SqlDialect,
+  relations: readonly ShapedRelation[] = [],
 ): RowShaper {
   const columns: ShapedColumn[] = fields.map((field) => ({
     key: field.name,
@@ -33,6 +49,15 @@ export function buildRowShaper(
     decode: dialect.needsDecode(field),
   }));
   const width = columns.length;
+
+  // Flattened to `(key, many)` pairs at build time for the same reason the
+  // columns are: the per-row loop does no property lookups it can avoid, and
+  // the common case — no relations — costs one comparison against zero.
+  const related = relations.map((relation) => ({
+    key: relation.key,
+    many: relation.kind === "many",
+  }));
+  const relatedCount = related.length;
 
   return (rows: unknown[]) => {
     // Grown by `push` rather than preallocated: `new Array(n)` produces a holey
@@ -47,6 +72,12 @@ export function buildRowShaper(
         shaped[column.key] = column.decode
           ? dialect.decode(value, column.field)
           : (value ?? null);
+      }
+      for (let j = 0; j < relatedCount; j++) {
+        // A fresh array per row: they are handed to the caller and pushed into
+        // by the relation loader, so sharing one would alias every parent's
+        // children together.
+        shaped[related[j].key] = related[j].many ? [] : null;
       }
       out.push(shaped);
     }

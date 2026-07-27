@@ -1,8 +1,10 @@
 import { DatabaseManager } from "../database/DatabaseManager";
 import { app } from "../foundation/app";
+import { attachRelations } from "./compile/plan-relations";
 import { dialectFor } from "./dialect";
 import { MissingModelSchemaError, RecordNotFoundError } from "./errors";
 import { getOrCompile, type Operation, type QueryPlan } from "./plan";
+import * as registry from "./registry";
 import type { ModelSchema } from "./schema";
 
 /**
@@ -57,6 +59,23 @@ export abstract class Model {
     // where the model's name is in scope for the message.
     if (result === null && ORTHROW.has(op)) {
       throw new RecordNotFoundError(schema.name, op);
+    }
+
+    // Relations are loaded after the root rows are shaped, one query per node
+    // in the include tree. Each of those queries is `$exec` on the *related
+    // model's own class*, recursively — not a private helper — so a nested read
+    // is subject to everything a top-level read is.
+    //
+    // The planner is handed the database rather than reaching for it: that is
+    // what keeps `compile/` free of a runtime import, and it is why the one
+    // query with no model behind it — the implicit m-n join table — still runs
+    // on the connection this call resolved.
+    if (plan.relations !== undefined) {
+      await attachRelations(plan.relations, plan.hidden, result, args, {
+        exec: (model, op, relationArgs) =>
+          registry.get<typeof Model>(model).$exec(op as Operation, relationArgs),
+        query: (text, values) => db.sql.unsafe(text, values),
+      });
     }
 
     return result;

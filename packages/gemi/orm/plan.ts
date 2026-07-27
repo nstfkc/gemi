@@ -1,5 +1,5 @@
-import type { Dialect } from "../database/dialect";
 import { compile } from "./compile";
+import type { RelationPlan } from "./compile/plan-relations";
 import type { SqlDialect } from "./dialect";
 import type { ModelSchema } from "./schema";
 
@@ -34,17 +34,32 @@ export interface QueryPlan {
   text: string;
   bind(args: any): unknown[];
   shape(rows: unknown[]): unknown;
+  /**
+   * The relation nodes this query's `include` / `select` asks for, one plan per
+   * node. Empty — and left undefined — for a query with no relations, so the
+   * choke point can skip the whole stage with one check.
+   */
+  relations?: RelationPlan[];
+  /**
+   * Fields the query had to select to stitch relations, but which the caller's
+   * `select` did not ask for. Dropped once the relations are attached.
+   */
+  hidden?: string[];
 }
 
 /**
  * The cache is bounded because one part of the key space is *not* finite per
  * application: on SQLite an `in` list expands to one placeholder per element,
  * so every distinct list length is its own plan — and list length is routinely
- * request-derived (`?ids=1,2,3` off a query string). Unbounded, that is a slow
- * memory leak reachable from untrusted input.
+ * request-derived (`?ids=1,2,3` off a query string) or, from iteration 3,
+ * derived from the number of parent rows a relation is being loaded for.
+ * Unbounded, that is a slow memory leak reachable from untrusted input.
  *
- * A coarser key cannot fix it: collapsing lengths would hand a plan the wrong
- * number of placeholders. Eviction is the only correct answer.
+ * Postgres binds the whole list to one parameter, so there the length is not
+ * part of the key at all — see `collapsedList`.
+ *
+ * A coarser key cannot fix the SQLite side: collapsing lengths there would hand
+ * a plan the wrong number of placeholders. Eviction is the only correct answer.
  *
  * Least-recently-used, implemented on `Map`'s insertion ordering: re-inserting
  * on a hit moves the entry to the end, so the first key `keys().next()` yields
@@ -87,7 +102,15 @@ const LITERAL_KEYS = new Set([
   "mode",
 ]);
 
-export function canonicalShape(value: unknown, literal = false): string {
+export function canonicalShape(
+  value: unknown,
+  literal = false,
+  /**
+   * Set when the dialect binds an `in` list as a single parameter, so that the
+   * list's *length* stops being part of the key. See `collapsedList`.
+   */
+  collapseLists = false,
+): string {
   if (value === null) return "null";
   if (value === undefined) return "undefined";
 
@@ -99,24 +122,45 @@ export function canonicalShape(value: unknown, literal = false): string {
 
   if (value instanceof Date) return "date";
   if (Array.isArray(value)) {
-    // Element-wise, so the length is part of the shape. That is not a choice:
-    // `in: [a, b]` compiles to `in (?, ?)` and `in: [a, b, c]` to `in (?, ?, ?)`,
-    // so collapsing them to one key would hand a plan the wrong number of
-    // placeholders. Length has to stay visible.
+    // Element-wise by default, so the length is part of the shape. Usually that
+    // is not a choice: `AND: [a, b]` and `AND: [a]` are different predicates,
+    // `orderBy: [a, b]` is a different sort, and on SQLite `in: [a, b]`
+    // compiles to `in (?, ?)` — collapsing any of them would hand a plan the
+    // wrong SQL or the wrong number of placeholders.
     //
-    // This is the one part of the key space an application does not bound:
-    // list length is routinely request-derived. The cache's LRU cap is what
-    // contains it — see `MAX_CACHED_PLANS`. On Postgres the array binds to a
-    // single parameter and every length shares one text, so only SQLite grows
-    // entries this way.
-    return `[${value.map((item) => canonicalShape(item, literal)).join(",")}]`;
+    // The exception is the `in` / `notIn` operand on a dialect that binds it as
+    // one parameter, which `shapeOfMember` takes before this is reached.
+    return `[${value
+      .map((item) => canonicalShape(item, literal, collapseLists))
+      .join(",")}]`;
   }
 
   const entries = Object.entries(value as Record<string, unknown>)
     .filter(([, v]) => v !== undefined)
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-    .map(([key, v]) => `${key}:${shapeOfMember(key, v, literal)}`);
+    .map(([key, v]) => `${key}:${shapeOfMember(key, v, literal, collapseLists)}`);
   return `{${entries.join(",")}}`;
+}
+
+/** The operators whose operand is a list of values rather than a structure. */
+const LIST_KEYS = new Set(["in", "notIn"]);
+
+/**
+ * `in: [1, 2]` and `in: [1, 2, 3]` on Postgres are the same SQL text — the
+ * whole array binds to `= any($1)` — so they must be the same cache entry.
+ *
+ * Recording them element-wise there is not *wrong*, but it mints one entry per
+ * distinct list length, each holding SQL identical to its neighbours'. From
+ * iteration 3 on that stops being a curiosity: every batched relation query is
+ * an `in` over the parent keys, so the list length is the number of rows the
+ * parent query returned, and a variably-sized parent set would churn the LRU on
+ * every dialect rather than on the one that needs it.
+ *
+ * An empty list keeps its own key: `in: []` compiles to a constant-false
+ * predicate rather than to `= any($1)`, which is a different text.
+ */
+function collapsedList(value: unknown[]): string {
+  return value.length === 0 ? "[]" : "[*]";
 }
 
 /**
@@ -125,13 +169,19 @@ export function canonicalShape(value: unknown, literal = false): string {
  * those verbatim would put user data into a long-lived global map and give
  * every distinct filter value its own cache entry.
  *
- * Inert today, because `include` throws before it can reach the cache. Iteration
- * 3 turns it on, and it is much cheaper to be right about it here than to find
- * it alongside relation compilation.
+ * Live as of iteration 3: `include: { accounts: { where: { deletedAt: null } } }`
+ * is one plan whatever the filter's values are, and the relation loader reads
+ * those values back out of the *call's* argument tree rather than the compiled
+ * plan's.
  */
 const VALUE_KEYS = new Set(["where", "cursor", "data"]);
 
-function shapeOfMember(key: string, value: unknown, literal: boolean): string {
+function shapeOfMember(
+  key: string,
+  value: unknown,
+  literal: boolean,
+  collapseLists: boolean,
+): string {
   // `take` is a parameter, but its *sign* is not: a negative take means "the
   // last N", which flips every ordering term and so changes the SQL text. The
   // magnitude stays out of the key, so `take: 10` and `take: 20` still share a
@@ -139,17 +189,34 @@ function shapeOfMember(key: string, value: unknown, literal: boolean): string {
   if (key === "take" && typeof value === "number") {
     return `number:${Math.sign(value)}`;
   }
-  if (VALUE_KEYS.has(key)) return canonicalShape(value, false);
-  return canonicalShape(value, literal || LITERAL_KEYS.has(key));
+  if (collapseLists && LIST_KEYS.has(key) && Array.isArray(value)) {
+    return collapsedList(value);
+  }
+  if (VALUE_KEYS.has(key)) return canonicalShape(value, false, collapseLists);
+  return canonicalShape(
+    value,
+    literal || LITERAL_KEYS.has(key),
+    collapseLists,
+  );
 }
 
+/**
+ * Takes the dialect itself rather than its name: whether an `in` list's length
+ * belongs in the key is a property of how that dialect *binds* the list, and
+ * asking the dialect keeps `if (dialect === "postgres")` out of here the same
+ * way the compiler keeps it out of itself.
+ */
 export function planKey(
-  dialect: Dialect,
+  dialect: SqlDialect,
   model: string,
   op: Operation,
   args: unknown,
 ): string {
-  return `${dialect}:${model}:${op}:${canonicalShape(args)}`;
+  return `${dialect.name}:${model}:${op}:${canonicalShape(
+    args,
+    false,
+    dialect.bindsListAsOneParameter,
+  )}`;
 }
 
 export function getOrCompile(
@@ -158,7 +225,7 @@ export function getOrCompile(
   args: any,
   dialect: SqlDialect,
 ): QueryPlan {
-  const key = planKey(dialect.name, schema.name, op, args);
+  const key = planKey(dialect, schema.name, op, args);
   const cached = cache.get(key);
   if (cached) {
     hits++;

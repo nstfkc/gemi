@@ -14,10 +14,14 @@ export {
 
 export {
   DecodeError,
+  MalformedRelationError,
   MissingModelSchemaError,
   ModelNotRegisteredError,
   RecordNotFoundError,
+  RelationDepthExceededError,
   UnknownFieldError,
+  UnknownRelationError,
+  UnregisteredRelationTargetError,
   UnsupportedQueryError,
 } from "./errors";
 
@@ -32,7 +36,20 @@ export {
 } from "./plan";
 
 export { compile } from "./compile";
-export { buildRowShaper, type RowShaper } from "./shape";
+export { buildRowShaper, type RowShaper, type ShapedRelation } from "./shape";
+
+// The relation planner is a swappable stage (invariant 4): iteration 3 ships
+// the batched strategy, iteration 7 adds lateral + json_agg as a sibling.
+export {
+  MAX_RELATION_DEPTH,
+  attachRelations,
+  batchedStrategy,
+  planRelations,
+  type RelationPlan,
+  type RelationPlanning,
+  type RelationRequest,
+  type RelationStrategy,
+} from "./compile/plan-relations";
 
 export {
   PostgresDialect,

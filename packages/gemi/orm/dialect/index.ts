@@ -31,6 +31,18 @@ export interface SqlDialect {
    */
   readonly supportsInsensitiveMode: boolean;
 
+  /**
+   * Whether an `in` list binds as a single parameter however long it is.
+   *
+   * True on Postgres (`= any($1)`), false on SQLite (`in (?, ?, ?)`). It is the
+   * plan *cache* that needs to know: where the length does not change the SQL
+   * text, it must not change the cache key either, or every distinct list
+   * length mints another entry holding SQL identical to its neighbours'. That
+   * matters most for relations, where the list length is the parent row count
+   * and so varies with the data rather than with the code.
+   */
+  readonly bindsListAsOneParameter: boolean;
+
   /** Quote a table or column name. Only ever called with names from the schema. */
   quoteIdent(name: string): string;
 

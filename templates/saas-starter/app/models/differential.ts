@@ -32,6 +32,14 @@ export interface Differential {
     operation: string,
     args?: unknown,
   ): Promise<unknown>;
+  /**
+   * Statements the gemi ORM has executed since the last reset. The point of
+   * counting is the relation planner: one query per *node* in an include tree
+   * and not one per row is a property no result comparison can see, and an
+   * accidental N+1 is otherwise invisible until it is in production.
+   */
+  queries(): number;
+  resetQueries(): void;
   dispose(): Promise<void>;
 }
 
@@ -93,9 +101,18 @@ export async function createDifferential(options: {
   // Postgres runs against whatever `TEST_POSTGRES_URL` names, so the harness
   // clears only the table it seeds and nothing else. The env var's contract is
   // that it points at a scratch database with the schema already applied.
+  await assertPrismaSpeaks(prisma, options.url ? "postgresql" : "sqlite");
+
   if (options.url) {
+    // Children before parents: the schema's foreign keys are enforced on both
+    // dialects, and a scratch database is only scratch for this suite.
     await prisma.socialAccount.deleteMany({});
+    await prisma.session.deleteMany({});
+    await prisma.passwordResetToken.deleteMany({});
+    await prisma.account.deleteMany({});
     await prisma.user.deleteMany({});
+    await prisma.organizationInvitation.deleteMany({});
+    await prisma.organization.deleteMany({});
   }
 
   await options.seed(prisma);
@@ -105,11 +122,31 @@ export async function createDifferential(options: {
   const database = new DatabaseManager({
     url: url.startsWith("file:") ? `sqlite://${url.slice(5)}` : url,
   });
-  app.instance(DatabaseManager, database);
+
+  // What the container hands `$exec` is a counting stand-in rather than the
+  // manager itself. `$exec` resolves the manager per call and reads exactly
+  // `sql.unsafe` and `dialect` off it, so this needs no cooperation from the
+  // ORM — and a test seam the runtime does not know about cannot drift.
+  let executed = 0;
+  app.instance(DatabaseManager, {
+    dialect: database.dialect,
+    url: database.url,
+    sql: {
+      unsafe(text: string, values: unknown[]) {
+        executed++;
+        return database.sql.unsafe(text, values);
+      },
+    },
+  } as never);
   Application.setInstance(app);
 
   return {
     prisma,
+
+    queries: () => executed,
+    resetQueries: () => {
+      executed = 0;
+    },
 
     async expectSame(model, operation, args) {
       clearPlanCache();
@@ -178,6 +215,48 @@ async function applyMigrations(path: string): Promise<void> {
     }
   } finally {
     await sql.close();
+  }
+}
+
+/**
+ * The gemi side of the harness is dialect-agnostic — `DatabaseManager` reads the
+ * dialect off the URL — but the *Prisma* side is not: a generated client carries
+ * its schema's `datasource` provider, and refuses any other protocol outright.
+ * So covering Postgres is a two-step workflow, and the error Prisma raises on
+ * its own does not say so:
+ *
+ *   1. flip `datasource db { provider }` in prisma/schema.prisma to postgresql
+ *   2. `prisma generate` (the gemi artifacts are dialect-agnostic and do not
+ *      change — that is worth confirming with `git status` while you are here)
+ *   3. TZ=UTC TEST_POSTGRES_URL=postgres://... vitest
+ *   4. flip back and regenerate
+ *
+ * The SQLite suite cannot run in the same process while the client is built for
+ * Postgres, which is why the two dialects are two runs rather than one.
+ *
+ * TZ=UTC is not incidental: Bun's Postgres driver decodes a zoneless
+ * `timestamp` as local time when a statement binds no parameters and as UTC
+ * when it binds one, so on a machine that is not UTC the two protocols disagree
+ * with each other and with Prisma. See the note in orm/dialect/postgres.ts.
+ */
+async function assertPrismaSpeaks(
+  prisma: PrismaClient,
+  provider: "sqlite" | "postgresql",
+): Promise<void> {
+  try {
+    await prisma.$queryRaw`select 1`;
+  } catch (error: any) {
+    if (!/must start with the protocol/.test(String(error?.message))) throw error;
+    throw new Error(
+      `This suite needs @prisma/client generated for the '${provider}' ` +
+        `provider, and it is not. Set datasource db { provider = ` +
+        `"${provider}" } in prisma/schema.prisma and re-run ` +
+        `\`prisma generate\`. Only one dialect's suite can run at a time, ` +
+        `which is why the other one is failing rather than skipping.` +
+        (provider === "postgresql"
+          ? ` Run it as: TZ=UTC TEST_POSTGRES_URL=postgres://... vitest`
+          : ` Unset TEST_POSTGRES_URL to run only this one.`),
+    );
   }
 }
 
