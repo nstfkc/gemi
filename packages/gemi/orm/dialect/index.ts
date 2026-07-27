@@ -59,6 +59,21 @@ export interface SqlDialect {
    */
   readonly supportsReturning: boolean;
 
+  /**
+   * How many parameters one statement may bind.
+   *
+   * A hard protocol/driver limit, not a tuning knob: Postgres sends the
+   * parameter count as an int16 in the Bind message, and SQLite compiles
+   * `SQLITE_MAX_VARIABLE_NUMBER` in. Only `createMany` can approach either,
+   * since it is the one operation whose parameter count scales with the
+   * caller's data — `rows × columns` — rather than with the query's shape.
+   *
+   * It lives here rather than as a constant in the write compiler for the usual
+   * reason: the number differs per dialect, and the compiler is not allowed to
+   * know which dialect it is compiling for.
+   */
+  readonly maxBoundParameters: number;
+
   /** Quote a table or column name. Only ever called with names from the schema. */
   quoteIdent(name: string): string;
 

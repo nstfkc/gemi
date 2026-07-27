@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 import { createBindContext } from "./compile/fragment";
 import { PostgresDialect } from "./dialect/postgres";
@@ -22,6 +22,14 @@ beforeEach(() => {
   registry.register("User", class { static $schema = user });
   registry.register("Account", class { static $schema = account });
   registry.register("Organization", class { static $schema = organization });
+});
+
+// Vitest isolates modules per file, so this is invisible here — but the
+// registry is process-global, and a runner that shares one (`bun test orm/`)
+// carries these registrations into the next file, where `read.test.ts` asserts
+// that a relation in a `select` *without* a registry raises.
+afterEach(() => {
+  registry.clearRegistry();
 });
 
 /**

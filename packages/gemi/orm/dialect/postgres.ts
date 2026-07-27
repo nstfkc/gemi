@@ -29,6 +29,11 @@ export class PostgresDialect implements SqlDialect {
 
   readonly supportsReturning = true;
 
+  // The wire protocol's Bind message carries the parameter count as an int16,
+  // so 65535 is the ceiling for any client, not a Bun or a server setting. Past
+  // it the driver's error names neither the model nor the cause.
+  readonly maxBoundParameters = 65535;
+
   quoteIdent(name: string): string {
     // See the SQLite implementation: NUL is the parameter sentinel in
     // compile/fragment.ts, so it is the one character that could shift a

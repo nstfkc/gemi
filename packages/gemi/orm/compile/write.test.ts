@@ -1,14 +1,15 @@
-import { beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 import { createBindContext } from "./fragment";
 import { PostgresDialect } from "../dialect/postgres";
 import { SqliteDialect } from "../dialect/sqlite";
 import {
   MissingRequiredValueError,
+  ParameterLimitError,
   UnknownFieldError,
   UnsupportedQueryError,
 } from "../errors";
-import { account, organization, user } from "../fixtures";
+import { account, bare, organization, reading, user } from "../fixtures";
 import * as registry from "../registry";
 import { compileWrite } from "./write";
 
@@ -183,6 +184,51 @@ describe("createMany", () => {
       text("createMany", { data: [{ organization: { connect: { id: 1 } } }] }),
     ).toThrow(UnsupportedQueryError);
   });
+
+  // `default values` inserts exactly one row, and there is no portable
+  // multi-row spelling of it — so this used to succeed and insert one row for
+  // three, reporting `{ count: 1 }`.
+  test("one empty row is still `default values`", () => {
+    const plan = compileWrite(bare, "createMany", { data: [{}] }, sqlite);
+    expect(plan.text).toBe(`insert into "Bare" default values returning "id"`);
+  });
+
+  test("several empty rows are refused rather than silently collapsed", () => {
+    expect(() =>
+      compileWrite(bare, "createMany", { data: [{}, {}, {}] }, sqlite),
+    ).toThrow(/All 3 rows are empty/);
+  });
+
+  // `rows × columns` is the one parameter count an application does not choose
+  // by writing the query, so it is the one that can walk into a driver limit.
+  test.each([
+    ["sqlite", sqlite, 32766],
+    ["postgres", postgres, 65535],
+  ])("the %s parameter ceiling is named, not hit", (_name, dialect, limit) => {
+    // Six columns per row: publicId, email, locale, globalRole, createdAt,
+    // updatedAt.
+    const rows = Math.ceil(limit / 6) + 1;
+    const data = Array.from({ length: rows }, (_, i) => ({
+      email: `a${i}@b.c`,
+    }));
+
+    expect(() => compileWrite(user, "createMany", { data }, dialect)).toThrow(
+      ParameterLimitError,
+    );
+    expect(() => compileWrite(user, "createMany", { data }, dialect)).toThrow(
+      new RegExp(`accepts at most ${limit}`),
+    );
+  });
+
+  test("a createMany just under the ceiling compiles", () => {
+    const data = Array.from({ length: 5461 }, (_, i) => ({
+      email: `a${i}@b.c`,
+    }));
+    // 5461 × 6 = 32766, exactly SQLite's limit.
+    expect(() =>
+      compileWrite(user, "createMany", { data }, sqlite),
+    ).not.toThrow();
+  });
 });
 
 describe("update", () => {
@@ -221,6 +267,43 @@ describe("update", () => {
     );
     const plan = compileWrite(user, "updateMany", args, sqlite);
     expect(plan.shape([{ id: 1 }, { id: 2 }, { id: 3 }])).toEqual({ count: 3 });
+  });
+
+  // There is no nested-write planner behind `updateMany` — Prisma types it as
+  // unchecked input and rejects a relation key. Without this the key was
+  // neither executed nor reported: `suppliedFields` skips relations silently,
+  // so the `connect` simply vanished from an otherwise successful statement.
+  test("a nested write in updateMany data is refused by name", () => {
+    expect(() =>
+      text("updateMany", {
+        where: { id: 1 },
+        data: { name: "x", organization: { connect: { id: 2 } } },
+      }),
+    ).toThrow(/updateMany cannot contain nested writes/);
+  });
+
+  // And the degenerate version, which used to report the wrong problem
+  // entirely: "At least one field must be updated".
+  test("updateMany data of only a relation names the relation", () => {
+    expect(() =>
+      text("updateMany", {
+        where: { id: 1 },
+        data: { organization: { connect: { id: 2 } } },
+      }),
+    ).toThrow(/updateMany cannot contain nested writes/);
+  });
+
+  test("update still accepts the same nested write", () => {
+    registry.clearRegistry();
+    registry.register("User", class { static $schema = user });
+    registry.register("Organization", class { static $schema = organization });
+    expect(() =>
+      text("update", {
+        where: { id: 1 },
+        data: { name: "x", organization: { connect: { id: 2 } } },
+      }),
+    ).not.toThrow();
+    registry.clearRegistry();
   });
 
   test.each([
@@ -419,6 +502,60 @@ describe("upsert", () => {
       }),
     ).toThrow(/Nested writes inside an upsert/);
   });
+
+  // `update` and `delete` honour the extra filters a Prisma 5 WhereUniqueInput
+  // may carry, because their whole `where` is compiled. An `on conflict` target
+  // is a key and has nowhere to put one, so compiling only the key part would
+  // update a row Prisma would have left alone.
+  test("a where with filters beside the unique key is refused", () => {
+    expect(() =>
+      text("upsert", {
+        where: { email: "a@b.c", deletedAt: null },
+        create: { email: "a@b.c" },
+        update: { name: "N" },
+      }),
+    ).toThrow(/carries deletedAt beside the unique key/);
+  });
+
+  test("an explicit undefined beside the key is not a filter", () => {
+    expect(() =>
+      text("upsert", {
+        where: { email: "a@b.c", deletedAt: undefined },
+        create: { email: "a@b.c" },
+        update: { name: "N" },
+      }),
+    ).not.toThrow();
+  });
+
+  // The conflict-key agreement check compares *encoded* values, and what
+  // `encode` produces is not always a primitive: Postgres hands a `Date`
+  // straight to the driver. Two Dates for one instant are never `===`, so
+  // identity refused a correct call — on Postgres only, since SQLite encodes
+  // the same field to a number.
+  test.each([
+    ["sqlite", sqlite],
+    ["postgres", postgres],
+  ])("a DateTime conflict key compares by value on %s", (_name, dialect) => {
+    const args = {
+      where: { at: new Date("2024-01-01T00:00:00Z") },
+      create: { at: new Date("2024-01-01T00:00:00Z"), value: 1 },
+      update: { value: 2 },
+    };
+    const compiled = compileWrite(reading, "upsert", args, dialect);
+    expect(() => compiled.bind(args, createBindContext())).not.toThrow();
+  });
+
+  test("a DateTime conflict key that genuinely differs is still refused", () => {
+    const args = {
+      where: { at: new Date("2024-01-01T00:00:00Z") },
+      create: { at: new Date("2024-06-01T00:00:00Z"), value: 1 },
+      update: { value: 2 },
+    };
+    const compiled = compileWrite(reading, "upsert", args, postgres);
+    expect(() => compiled.bind(args, createBindContext())).toThrow(
+      /2024-01-01.*2024-06-01/s,
+    );
+  });
 });
 
 describe("nested writes", () => {
@@ -427,6 +564,14 @@ describe("nested writes", () => {
     registry.register("User", class { static $schema = user });
     registry.register("Account", class { static $schema = account });
     registry.register("Organization", class { static $schema = organization });
+  });
+
+  // The registry is process-global. Vitest isolates modules per file so this
+  // is invisible here, but under a shared-process runner these registrations
+  // would outlive the file and break `read.test.ts`, which asserts that a
+  // relation in a `select` raises when nothing is registered.
+  afterEach(() => {
+    registry.clearRegistry();
   });
 
   // The referenced value is already in hand, so this must not cost a query.

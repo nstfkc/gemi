@@ -143,6 +143,42 @@ export class ReturningUnsupportedError extends Error {
 }
 
 /**
+ * Thrown when a statement would bind more parameters than the driver's wire
+ * protocol can carry.
+ *
+ * Only `createMany` can reach it, since it is the one operation whose parameter
+ * count scales with the caller's data rather than with the query's shape:
+ * `rows × columns`. Both limits are hard and low enough to hit with an ordinary
+ * import — Postgres counts parameters in an int16 (65535), SQLite defaults
+ * `SQLITE_MAX_VARIABLE_NUMBER` to 32766.
+ *
+ * Prisma chunks the insert automatically. Doing that here means several
+ * statements, which without a transaction is a partially-applied `createMany`
+ * on failure — so it waits for iteration 5, and until then this is a named gap
+ * rather than a driver error naming neither the model nor the cause. Same
+ * treatment as `ReturningUnsupportedError`, for the same reason.
+ */
+export class ParameterLimitError extends Error {
+  constructor(
+    public readonly model: string,
+    public readonly operation: string,
+    public readonly required: number,
+    public readonly limit: number,
+    public readonly dialect: string,
+    detail: string,
+  ) {
+    super(
+      `${model}.${operation} would bind ${required} parameters, and the ` +
+        `'${dialect}' driver accepts at most ${limit} in one statement. ` +
+        `${detail} Automatic chunking is not implemented: it would make this ` +
+        `several statements, which cannot be made atomic until transactions ` +
+        `land. Split the call.`,
+    );
+    this.name = "ParameterLimitError";
+  }
+}
+
+/**
  * Thrown when a write omits a column that has no value to fall back on: not
  * supplied, no client-side default, no database default, and not nullable.
  *

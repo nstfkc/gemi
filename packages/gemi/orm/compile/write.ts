@@ -2,6 +2,7 @@ import { clientSideValue, hasClientSideValue } from "../defaults";
 import type { SqlDialect } from "../dialect";
 import {
   MissingRequiredValueError,
+  ParameterLimitError,
   ReturningUnsupportedError,
   UnknownFieldError,
   UnsupportedQueryError,
@@ -183,6 +184,31 @@ function compileCreateMany(
 
   const grid = createManyColumns(schema, rows, op, dialect);
 
+  // `insert ... default values` inserts exactly one row and has no multi-row
+  // spelling: `values (DEFAULT), (DEFAULT)` is rejected by SQLite, and the
+  // zero-column list leaves nothing else to repeat. So a grid with no columns
+  // and more than one row would quietly insert one — a wrong row count *and* a
+  // wrong `{ count }`, from a statement that succeeds.
+  //
+  // Only reachable on a model where every field is autoincrement, database
+  // default or nullable *and* no row supplies any of them, so the template's
+  // schema cannot produce it. Refused by name anyway, because a silent wrong
+  // count is the failure class this file is arranged to prevent.
+  if (grid[0].length === 0 && rows.length > 1) {
+    throw new UnsupportedQueryError(
+      "data",
+      schema.name,
+      op,
+      `All ${rows.length} rows are empty and ${schema.name} has no ` +
+        `client-side default to fill, so there is no column to insert. A ` +
+        `multi-row insert of nothing but database defaults cannot be ` +
+        `expressed on both dialects. Call create ${rows.length} times, or ` +
+        `set at least one field per row.`,
+    );
+  }
+
+  assertParameterCount(schema, op, rows.length * grid[0].length, dialect);
+
   const returning = returningClause(schema, undefined, dialect, op, undefined);
 
   const statement = concat(
@@ -308,6 +334,24 @@ function compileUpdate(
 
   if (!many) matchUniqueKey(schema, args?.where, op);
 
+  // Prisma's `updateMany` takes unchecked input — scalars and foreign keys, no
+  // relation keys — and rejects one with `Unknown argument 'organization'`.
+  // Refused by name here for the same reason `createMany` refuses it: without
+  // this the key is neither executed nor reported, since `planNestedWrites`
+  // never runs and `suppliedFields` skips relation keys silently. A `data` of
+  // only a relation key would then reach "At least one field must be updated",
+  // which names the wrong problem.
+  if (many) {
+    assertNoNestedWrites(
+      schema,
+      args?.data,
+      op,
+      "data",
+      "updateMany cannot contain nested writes — it has no single row to " +
+        "attach them to. Use update per row.",
+    );
+  }
+
   const nested = many
     ? undefined
     : planNestedWrites(schema, args?.data, op, (callArgs) => callArgs?.data);
@@ -350,6 +394,21 @@ function compileUpdate(
 
 // --- delete / deleteMany ---------------------------------------------------
 
+/**
+ * KNOWN DIVERGENCE — `delete` with an `include` on a cascading relation.
+ *
+ * The relation reads run *after* the delete statement, from `$exec`. Where the
+ * schema declares `onDelete: Cascade`, the database has already removed the
+ * children by then, so the `include` comes back empty; Prisma runs the whole
+ * thing in a transaction and returns the children as they were.
+ *
+ * Not fixable at this layer. The fix is to read the relations before the delete
+ * inside one transaction, which is iteration 5's to provide — and once it does,
+ * this is the case to write the test for. Recorded here rather than left to be
+ * discovered because the template's schema declares no cascades, so the
+ * differential harness cannot see it: the first cascading model added to any
+ * application would.
+ */
 function compileDelete(
   schema: ModelSchema,
   op: Operation,
@@ -401,21 +460,45 @@ function compileUpsert(
 ): QueryPlan {
   const key = matchUniqueKey(schema, args?.where, op);
 
+  // Since Prisma 5 a `WhereUniqueInput` may carry extra non-unique filters
+  // beside the key, and they narrow the match further. `update` and `delete`
+  // honour that for free: their whole `where` goes through `compileWhere`.
+  //
+  // An upsert cannot. Its `where` becomes an `on conflict (...)` target, which
+  // is a *key*, not a predicate — there is nowhere to put `deletedAt: null`.
+  // Compiling only the key part would mean `where: { publicId, deletedAt: null }`
+  // updating a soft-deleted row that Prisma would have left alone (Prisma would
+  // find no match, attempt the create, and hit a unique violation). Refused
+  // rather than narrowed, for the same reason the create-omits-the-key shape a
+  // few lines down is.
+  const named = key.length > 1 ? key.join("_") : key[0];
+  const extra = Object.keys(args.where as Record<string, unknown>).filter(
+    (name) => name !== named && args.where[name] !== undefined,
+  );
+  if (extra.length > 0) {
+    throw new UnsupportedQueryError(
+      "where",
+      schema.name,
+      op,
+      `The where clause carries ${extra.join(", ")} beside the unique key ` +
+        `'${named}'. An upsert compiles its where into an 'on conflict' ` +
+        `target, which can only be a key, so the extra ${
+          extra.length === 1 ? "filter would be" : "filters would be"
+        } silently dropped. Drop ${extra.length === 1 ? "it" : "them"} here, ` +
+        `or use findFirst plus update / create.`,
+    );
+  }
+
   for (const branch of ["create", "update"] as const) {
-    const data = args?.[branch];
-    if (typeof data !== "object" || data === null) continue;
-    for (const name of Object.keys(data as Record<string, unknown>)) {
-      if (name in schema.relations) {
-        throw new UnsupportedQueryError(
-          `${branch}.${name}`,
-          schema.name,
-          op,
-          "Nested writes inside an upsert are not implemented: they would " +
-            "have to run before it is known whether the row is being inserted " +
-            "or updated.",
-        );
-      }
-    }
+    assertNoNestedWrites(
+      schema,
+      args?.[branch],
+      op,
+      branch,
+      "Nested writes inside an upsert are not implemented: they would have " +
+        "to run before it is known whether the row is being inserted or " +
+        "updated.",
+    );
   }
 
   // `on conflict` only fires if the row being inserted actually collides on the
@@ -539,13 +622,13 @@ function withConflictKeyCheck(
         const inserted = column.value(args, context);
         const selected = dialect.encode(locate(args), column.field);
 
-        if (inserted !== selected) {
+        if (!sameEncoded(inserted, selected)) {
           throw new UnsupportedQueryError(
             "upsert",
             schema.name,
             op,
-            `'${column.field.name}' is ${JSON.stringify(String(selected))} in ` +
-              `the where clause but ${JSON.stringify(String(inserted))} in ` +
+            `'${column.field.name}' is ${describe(selected)} in ` +
+              `the where clause but ${describe(inserted)} in ` +
               `'create'. An upsert looks the row up by the where clause and ` +
               `inserts what 'create' says, so the two must agree on the key.`,
           );
@@ -555,6 +638,50 @@ function withConflictKeyCheck(
       },
     };
   });
+}
+
+/**
+ * Do two *encoded* values stand for the same thing?
+ *
+ * Not `===`, because `encode` is a per-dialect pass-through for whatever the
+ * driver binds natively, and what a driver binds natively is not always a
+ * primitive. Postgres passes a `DateTime` through as the `Date` it was given,
+ * and both dialects pass `Bytes` through as a `Uint8Array` — so the same
+ * instant and the same bytes arrive here as two distinct objects, and identity
+ * refuses a correct upsert with a message printing two equal-looking strings.
+ *
+ * That is exactly the SQLite/Postgres asymmetry this codebase keeps finding:
+ * SQLite encodes `DateTime` to a number and never noticed.
+ *
+ * Everything else falls through to `!==`, which is right for the string,
+ * number, boolean and bigint an encoder can produce. `NaN` is not reachable —
+ * it cannot be a unique key value that also round-trips through a `where`.
+ */
+function sameEncoded(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+
+  if (a instanceof Date && b instanceof Date) {
+    return a.getTime() === b.getTime();
+  }
+
+  if (ArrayBuffer.isView(a) && ArrayBuffer.isView(b)) {
+    const left = new Uint8Array(a.buffer, a.byteOffset, a.byteLength);
+    const right = new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
+    if (left.length !== right.length) return false;
+    for (let i = 0; i < left.length; i++) {
+      if (left[i] !== right[i]) return false;
+    }
+    return true;
+  }
+
+  return false;
+}
+
+/** A value for an error message, without pretending a `Date` is a string. */
+function describe(value: unknown): string {
+  if (value instanceof Date) return JSON.stringify(value.toISOString());
+  if (ArrayBuffer.isView(value)) return `${value.byteLength} bytes`;
+  return JSON.stringify(String(value));
 }
 
 /**
@@ -715,6 +842,62 @@ function suppliedFields(
   }
 
   return out;
+}
+
+/**
+ * Refuse a statement that would bind more parameters than the driver can carry.
+ *
+ * `createMany` is the only operation whose parameter count is a function of the
+ * caller's *data* rather than of the query's shape, so it is the only one that
+ * can walk into a limit an application never chose. Everything else binds a
+ * handful.
+ *
+ * Note this is checked at compile time from the row and column counts, which is
+ * enough — the value of any one parameter cannot change how many there are.
+ */
+function assertParameterCount(
+  schema: ModelSchema,
+  op: Operation,
+  required: number,
+  dialect: SqlDialect,
+): void {
+  const limit = dialect.maxBoundParameters;
+  if (required <= limit) return;
+
+  throw new ParameterLimitError(
+    schema.name,
+    op,
+    required,
+    limit,
+    dialect.name,
+    `That is ${required} values across the rows in 'data'.`,
+  );
+}
+
+/**
+ * Refuse a `data` object that names a relation, for the operations that have no
+ * nested-write planner behind them.
+ *
+ * `suppliedFields` skips relation keys rather than rejecting them, because on
+ * `create` and `update` they are the nested planner's business. Everywhere else
+ * that same skip is a silent drop, so those callers say so here — by name, and
+ * before anything is compiled.
+ */
+function assertNoNestedWrites(
+  schema: ModelSchema,
+  data: unknown,
+  op: Operation,
+  path: string,
+  reason: string,
+): void {
+  if (typeof data !== "object" || data === null || Array.isArray(data)) return;
+
+  for (const [name, value] of Object.entries(data as Record<string, unknown>)) {
+    if (value === undefined) continue;
+    if (name in schema.relations) {
+      throw new UnsupportedQueryError(`${path}.${name}`, schema.name, op, reason);
+    }
+  }
 }
 
 /**

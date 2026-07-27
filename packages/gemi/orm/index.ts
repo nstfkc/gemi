@@ -18,6 +18,7 @@ export {
   MissingModelSchemaError,
   MissingRequiredValueError,
   ModelNotRegisteredError,
+  ParameterLimitError,
   RecordNotFoundError,
   RelationDepthExceededError,
   ReturningUnsupportedError,

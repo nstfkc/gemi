@@ -301,13 +301,20 @@ export async function createDifferential(options: {
       const afterGemi = await readTables(prisma, tables);
 
       if (fromPrisma.threw || fromGemi.threw) {
+        // The `kind` is compared too, not just the fact of throwing: without it
+        // a gemi compile-time refusal reads as agreement with a Prisma unique
+        // violation. See `failureKind`.
         expect(
-          { threw: fromGemi.threw, at: label },
+          { threw: fromGemi.threw, kind: fromGemi.kind, at: label },
           `${label}: prisma ${fromPrisma.threw ? "threw" : "returned"} but ` +
             `gemi ${fromGemi.threw ? "threw" : "returned"}` +
             (fromGemi.threw ? ` — ${fromGemi.error}` : "") +
             (fromPrisma.threw ? ` — ${fromPrisma.error}` : ""),
-        ).toEqual({ threw: fromPrisma.threw, at: label });
+        ).toEqual({
+          threw: fromPrisma.threw,
+          kind: fromPrisma.kind,
+          at: label,
+        });
       } else {
         expect(
           normalize(fromGemi.value, volatile),
@@ -430,8 +437,37 @@ async function readTables(
 
 async function settle(run: () => Promise<unknown>) {
   try {
-    return { threw: false, value: await run(), error: "" };
+    return { threw: false, value: await run(), error: "", kind: "" };
   } catch (error: any) {
-    return { threw: true, value: null, error: String(error?.message ?? error) };
+    return {
+      threw: true,
+      value: null,
+      error: String(error?.message ?? error),
+      kind: failureKind(error),
+    };
   }
+}
+
+/**
+ * A coarse class for a thrown error, comparable across the two clients.
+ *
+ * Comparing only the *fact* of throwing lets a gemi error thrown for an
+ * unrelated reason — a compile-time refusal, say — pass as agreement with a
+ * Prisma unique violation. Comparing messages would couple every case to
+ * Prisma's wording. The classes below are the ones the two clients genuinely
+ * both have, and the ones a write can be wrong about:
+ *
+ *   Prisma P2002 / gemi UniqueConstraintError  -> "unique"
+ *   Prisma P2025 / gemi RecordNotFoundError    -> "notFound"
+ *
+ * Everything else is "other", where agreeing that it failed is all the harness
+ * can honestly claim; the dedicated tests below the table assert the type.
+ */
+function failureKind(error: any): string {
+  const name = String(error?.name ?? "");
+  const code = String(error?.code ?? "");
+
+  if (name === "UniqueConstraintError" || code === "P2002") return "unique";
+  if (name === "RecordNotFoundError" || code === "P2025") return "notFound";
+  return "other";
 }

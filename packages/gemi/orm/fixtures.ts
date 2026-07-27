@@ -459,6 +459,94 @@ export const mapped: ModelSchema = {
   relations: {},
 };
 
+/**
+ * A model whose unique key is a `DateTime`, which the template's schema has no
+ * example of.
+ *
+ * It exists for one asymmetry: `encode` passes a `Date` straight through on
+ * Postgres and turns it into a number on SQLite, so an `upsert` comparing its
+ * conflict key by identity works on one dialect and refuses a correct call on
+ * the other. `Bytes` has the same shape on both.
+ */
+export const reading: ModelSchema = {
+  name: "Reading",
+  table: "Reading",
+  fields: {
+    id: {
+      name: "id",
+      column: "id",
+      type: "Int",
+      nullable: false,
+      isId: true,
+      isUpdatedAt: false,
+      default: { kind: "autoincrement" },
+    },
+    at: {
+      name: "at",
+      column: "at",
+      type: "DateTime",
+      nullable: false,
+      isId: false,
+      isUpdatedAt: false,
+    },
+    digest: {
+      name: "digest",
+      column: "digest",
+      type: "Bytes",
+      nullable: true,
+      isId: false,
+      isUpdatedAt: false,
+    },
+    value: {
+      name: "value",
+      column: "value",
+      type: "Float",
+      nullable: false,
+      isId: false,
+      isUpdatedAt: false,
+    },
+  },
+  primaryKey: ["id"],
+  uniques: [["at"]],
+  relations: {},
+};
+
+/**
+ * A model where every field is autoincrement, database-defaulted or nullable,
+ * and none has a *client-side* default.
+ *
+ * So a `create({ data: {} })` writes no column at all — the `default values`
+ * case — and a `createMany` of empty rows has no column list to repeat. Not
+ * reachable from the template's schema, where `@default(cuid())` on `publicId`
+ * puts a client-side value in every model.
+ */
+export const bare: ModelSchema = {
+  name: "Bare",
+  table: "Bare",
+  fields: {
+    id: {
+      name: "id",
+      column: "id",
+      type: "Int",
+      nullable: false,
+      isId: true,
+      isUpdatedAt: false,
+      default: { kind: "autoincrement" },
+    },
+    note: {
+      name: "note",
+      column: "note",
+      type: "String",
+      nullable: true,
+      isId: false,
+      isUpdatedAt: false,
+    },
+  },
+  primaryKey: ["id"],
+  uniques: [],
+  relations: {},
+};
+
 /** The full explicit column list `findMany` emits for `user`, unparameterised. */
 export const USER_COLUMNS =
   '"id", "publicId", "name", "email", "emailVerifiedAt", "verificationToken", ' +

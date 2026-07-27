@@ -66,6 +66,13 @@ export class SqliteDialect implements SqlDialect {
   // `createMany` depends on it for its row count.
   readonly supportsReturning = true;
 
+  // `SQLITE_MAX_VARIABLE_NUMBER`, which has defaulted to 32766 since SQLite
+  // 3.32 (it was 999 before). A build can lower it and `sqlite3_limit` can
+  // lower it further at runtime, so this is the documented default rather than
+  // a reading off the connection — which makes it an upper bound on what is
+  // safe, which is the direction that matters for a guard.
+  readonly maxBoundParameters = 32766;
+
   quoteIdent(name: string): string {
     // NUL is the parameter sentinel in compile/fragment.ts, so it is the one
     // character that could shift a placeholder's position rather than merely
