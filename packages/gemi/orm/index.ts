@@ -16,6 +16,7 @@ export {
   DecodeError,
   MissingModelSchemaError,
   ModelNotRegisteredError,
+  RecordNotFoundError,
   UnknownFieldError,
   UnsupportedQueryError,
 } from "./errors";
@@ -34,6 +35,8 @@ export { compile } from "./compile";
 export { buildRowShaper, type RowShaper } from "./shape";
 
 export {
+  PostgresDialect,
+  SqliteDialect,
   UnsupportedDialectError,
   dialectFor,
   type SqlDialect,

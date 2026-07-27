@@ -1,7 +1,7 @@
 import { DatabaseManager } from "../database/DatabaseManager";
 import { app } from "../foundation/app";
 import { dialectFor } from "./dialect";
-import { MissingModelSchemaError } from "./errors";
+import { MissingModelSchemaError, RecordNotFoundError } from "./errors";
 import { getOrCompile, type Operation, type QueryPlan } from "./plan";
 import type { ModelSchema } from "./schema";
 
@@ -20,6 +20,8 @@ import type { ModelSchema } from "./schema";
  * Framework internals take a `$` prefix so they cannot collide with anything an
  * application author adds to a model.
  */
+const ORTHROW = new Set(["findFirstOrThrow", "findUniqueOrThrow"]);
+
 export abstract class Model {
   /** Assigned by the generated subclass from `app/models/generated/schema.ts`. */
   static $schema: ModelSchema;
@@ -48,7 +50,16 @@ export abstract class Model {
     // a bound parameter. Do not "fix" this into a tagged template.
     const rows = await db.sql.unsafe(plan.text, plan.bind(args));
 
-    return this.$shape(plan, rows as unknown[]);
+    const result = this.$shape(plan, rows as unknown[]);
+
+    // The plan shapes a single-row read to `null` when nothing matched; turning
+    // that into an error belongs here rather than in the plan, because this is
+    // where the model's name is in scope for the message.
+    if (result === null && ORTHROW.has(op)) {
+      throw new RecordNotFoundError(schema.name, op);
+    }
+
+    return result;
   }
 
   /**

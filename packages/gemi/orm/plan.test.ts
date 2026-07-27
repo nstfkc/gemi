@@ -121,7 +121,7 @@ describe("the plan cache", () => {
 
   test("does not cache a compile that threw", () => {
     expect(() =>
-      getOrCompile(user, "findMany", { orderBy: { id: "asc" } }, sqlite),
+      getOrCompile(user, "findMany", { cursor: { id: 1 } }, sqlite),
     ).toThrow();
     expect(planCacheStats().size).toBe(0);
   });

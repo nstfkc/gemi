@@ -65,6 +65,21 @@ export class DecodeError extends Error {
   }
 }
 
+/**
+ * Thrown by the `*OrThrow` operations when the query matched nothing. Prisma
+ * raises `NotFoundError` / `P2025` for the same case; the differential harness
+ * compares the fact of throwing, not the error type.
+ */
+export class RecordNotFoundError extends Error {
+  constructor(
+    public readonly model: string,
+    public readonly operation: string,
+  ) {
+    super(`No ${model} found (${model}.${operation}).`);
+    this.name = "RecordNotFoundError";
+  }
+}
+
 /** Thrown when a relation resolves to a model name nothing registered. */
 export class ModelNotRegisteredError extends Error {
   constructor(name: string, known: string[]) {

@@ -2,7 +2,7 @@ import type { SqlDialect } from "../dialect";
 import { UnsupportedQueryError } from "../errors";
 import type { Operation, QueryPlan } from "../plan";
 import type { ModelSchema } from "../schema";
-import { compileFindMany } from "./findMany";
+import { compileRead, isReadOperation } from "./read";
 
 /**
  * Argument tree -> SQL. Pure: a function of the argument *shape* and the
@@ -16,14 +16,12 @@ export function compile(
   args: any,
   dialect: SqlDialect,
 ): QueryPlan {
-  switch (op) {
-    case "findMany":
-      return compileFindMany(schema, args, dialect);
-    default:
-      throw new UnsupportedQueryError(op, schema.name, op);
-  }
+  if (isReadOperation(op)) return compileRead(schema, op, args, dialect);
+  throw new UnsupportedQueryError(op, schema.name, op);
 }
 
-export { compileFindMany };
+export { compileRead, isReadOperation };
 export { compileWhere } from "./where";
+export { compileOrderBy, parseOrderBy } from "./orderBy";
+export { resolveSelection } from "./select";
 export * from "./fragment";

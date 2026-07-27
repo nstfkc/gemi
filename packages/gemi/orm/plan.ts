@@ -4,10 +4,10 @@ import type { SqlDialect } from "./dialect";
 import type { ModelSchema } from "./schema";
 
 /**
- * The twelve public operations. `aggregate`, `groupBy` and the raw operations
- * are deliberately not among them: they are excluded at the operation level
- * rather than narrowed out of the argument types, because narrowing Prisma's
- * recursive where-inputs with `Omit` is miserable.
+ * The public operations. `aggregate`, `groupBy` and the raw operations are
+ * deliberately not among them: they are excluded at the operation level rather
+ * than narrowed out of the argument types, because narrowing Prisma's recursive
+ * where-inputs with `Omit` is miserable.
  */
 export type Operation =
   | "findUnique"
@@ -15,6 +15,7 @@ export type Operation =
   | "findFirst"
   | "findFirstOrThrow"
   | "findMany"
+  | "count"
   | "create"
   | "createMany"
   | "update"
@@ -49,12 +50,33 @@ let hits = 0;
  * canonical string is a perfect hash, and query shapes are finite per
  * application so the memory is not worth a collision risk.
  */
-export function canonicalShape(value: unknown): string {
+/**
+ * Argument keys whose *values* are structural rather than parameters — they end
+ * up in the SQL text, so two calls that differ only there are two different
+ * queries and must be two different plans.
+ *
+ * Getting this wrong is silent: `orderBy: { id: "asc" }` and
+ * `orderBy: { id: "desc" }` have identical *types*, so without this they would
+ * share a cache entry and the second caller would get the first one's SQL. The
+ * plan-cache discrimination tests exist to catch exactly that.
+ */
+const LITERAL_KEYS = new Set([
+  "orderBy",
+  "select",
+  "include",
+  "distinct",
+  "mode",
+]);
+
+export function canonicalShape(value: unknown, literal = false): string {
   if (value === null) return "null";
   if (value === undefined) return "undefined";
 
   const type = typeof value;
-  if (type !== "object") return type;
+  // In a structural subtree the value itself is part of the query, so it is
+  // recorded verbatim: "asc" and "desc" have to be two keys, and so do the
+  // `true` and `false` of a `select`.
+  if (type !== "object") return literal ? JSON.stringify(value) : type;
 
   if (value instanceof Date) return "date";
   if (Array.isArray(value)) {
@@ -63,20 +85,32 @@ export function canonicalShape(value: unknown): string {
     // so collapsing them to one key would hand a plan the wrong number of
     // placeholders. Length has to stay visible.
     //
-    // WARNING for iteration 2: nothing reaches the cache with an array today
-    // (unknown operators throw before `cache.set`), so the key space is bounded
-    // by field subsets. The moment `in` lands, every distinct filter-list length
-    // a request supplies becomes a permanent entry in a module-global Map keyed
-    // off user input. The cache needs a bound — an eviction policy, not a
-    // coarser key — before that ships.
-    return `[${value.map(canonicalShape).join(",")}]`;
+    // WARNING: `in` has now landed, so this is live. Every distinct
+    // filter-list length a request supplies becomes a permanent entry in a
+    // module-global Map keyed off user input. On Postgres the array binds to a
+    // single parameter and all lengths share one text, so only SQLite is
+    // exposed — but the cache still needs a bound. An eviction policy, not a
+    // coarser key: collapsing lengths would hand a plan the wrong number of
+    // placeholders.
+    return `[${value.map((item) => canonicalShape(item, literal)).join(",")}]`;
   }
 
   const entries = Object.entries(value as Record<string, unknown>)
     .filter(([, v]) => v !== undefined)
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-    .map(([key, v]) => `${key}:${canonicalShape(v)}`);
+    .map(([key, v]) => `${key}:${shapeOfMember(key, v, literal)}`);
   return `{${entries.join(",")}}`;
+}
+
+function shapeOfMember(key: string, value: unknown, literal: boolean): string {
+  // `take` is a parameter, but its *sign* is not: a negative take means "the
+  // last N", which flips every ordering term and so changes the SQL text. The
+  // magnitude stays out of the key, so `take: 10` and `take: 20` still share a
+  // plan the way every other value does.
+  if (key === "take" && typeof value === "number") {
+    return `number:${Math.sign(value)}`;
+  }
+  return canonicalShape(value, literal || LITERAL_KEYS.has(key));
 }
 
 export function planKey(
