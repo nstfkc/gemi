@@ -5,6 +5,28 @@
     "emitDeclarationOnly": true,
     "downlevelIteration": true
   },
+  // Every directory of server source belongs here. That was not true until
+  // iteration 5 of the ORM: `orm`, `auth`, `config`, `internal`, `runtime` and
+  // `bin/orm` were all outside it, so `tsc --noEmit` passed without looking at
+  // them — and `orm` and `config` are public exports. Six directories, two of
+  // them shipped, none of them checked.
+  //
+  // `client` is covered by tsconfig.browser.json instead.
+  //
+  // KNOWINGLY EXCLUDED, and not for the reason it looks like: `bun/` holds two
+  // public exports of its own — `./bun/preload` and `./bun/plugin` — so the
+  // "sketches and build glue" argument that covers `rfc`, `scripts`, `vite` and
+  // `ide` does not cover it. It is out because including it needs more than a
+  // line here:
+  //
+  //   bun/customRequestParser.ts  TS2307  no types for 'recast/parsers/typescript'
+  //   bun/preload.ts              TS1309  top-level await under the inherited
+  //                                       CommonJS `module` setting, which is
+  //                                       wrong for files Bun loads as ESM
+  //
+  // The second is a config mismatch rather than a code bug, so `bun/` wants a
+  // nested tsconfig with its own `module`, not an edit to the file. Recorded
+  // here so the next audit of this list does not reach "build glue" and stop.
   "include": [
     "app/index.ts",
     "http",

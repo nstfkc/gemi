@@ -91,17 +91,21 @@ function scalarType(model: string, field: DMMF.Field): ScalarType {
  * `bin/orm` entered the tsconfig. And `typeof null === "object"`, so the inline
  * form would have dereferenced a null default rather than falling through to
  * the literal branch.
+ *
+ * Note it does **not** additionally require a string `name`, though the first
+ * version of it did. That looked like a tightening and was a behaviour change:
+ * an object default carrying no `name` used to reach `switch (undefined)` and
+ * come out as `{ kind: "dbgenerated" }`, and requiring the name sent it to
+ * `{ kind: "value" }` instead. DMMF's `FieldDefault` always carries one, so
+ * neither path is reachable — but the two are not equally safe if it ever is:
+ * `dbgenerated` omits the column and lets the database supply it, while `value`
+ * would try to bind the object itself as the column's value. The safer of two
+ * unreachable branches is still the one to keep.
  */
 function isFunctionDefault(
   value: unknown,
-): value is { name: string; args: readonly (string | number)[] } {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    !Array.isArray(value) &&
-    "name" in value &&
-    typeof (value as { name: unknown }).name === "string"
-  );
+): value is { name?: string; args?: readonly (string | number)[] } {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function defaultSpec(field: DMMF.Field): DefaultSpec | undefined {
