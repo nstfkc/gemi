@@ -13,7 +13,11 @@ import {
   sql,
 } from "./fragment";
 import { compileOrderBy, parseOrderBy, reverse, type OrderTerm } from "./orderBy";
-import { planRelations, strategiesOf } from "./plan-relations";
+import {
+  planRelations,
+  strategiesOf,
+  type RelationStrategy,
+} from "./plan-relations";
 import { resolveSelection, withKeyFields } from "./select";
 import { assertUniqueWhere } from "./unique";
 import { compileWhere } from "./where";
@@ -56,10 +60,37 @@ export function compileRead(
   op: Operation,
   args: any,
   dialect: SqlDialect,
+  /**
+   * Which relation strategy plans this query's include tree.
+   *
+   * Defaults to batched, which is what every caller passes today. Threaded rather
+   * than resolved here because the compiler must not *choose* — selection depends
+   * on the dialect and the tree, and iteration 9 deliverable 6 owns the rule.
+   * Passing it keeps `compileRead` a pure function of its arguments, which is
+   * also what lets a test drive it with a fake.
+   */
+  strategy?: RelationStrategy,
 ): QueryPlan {
   assertArgs(schema, op, args);
 
-  const context = { dialect, operation: op };
+  // Relations are planned *before* the `where` is compiled, because whether any
+  // strategy folds children into the root statement decides whether the root's
+  // columns need qualifying — a lateral subquery puts a second table in scope and
+  // a bare `"id"` becomes ambiguous. `count` never has relations, so it keeps the
+  // unplanned path and pays nothing.
+  const relations =
+    op === "count"
+      ? { plans: [] as ReturnType<typeof planRelations>["plans"], keyFields: [] }
+      : planRelations(schema, args, dialect, op, strategy);
+
+  const folded = relations.plans.some((plan) => plan.root !== undefined);
+  // The table's own name, not an invented alias: Postgres lets a lateral subquery
+  // reference the outer table by name, so nothing has to be introduced into the
+  // `from` clause. Undefined when nothing folds, which is what keeps existing
+  // queries byte-identical.
+  const qualifier = folded ? `${dialect.quoteIdent(schema.table)}.` : undefined;
+
+  const context = { dialect, operation: op, qualifier };
   const where = compileWhere(schema, args?.where, context, (a) => a?.where);
 
   if (op === "findUnique" || op === "findUniqueOrThrow") {
@@ -117,13 +148,26 @@ export function compileRead(
   }
 
   const selection = resolveSelection(schema, args, op);
-  const { plans, keyFields } = planRelations(schema, args, dialect, op);
+  const { plans, keyFields } = relations;
   const { fields, hidden } = withKeyFields(schema, selection, keyFields);
 
+  // A folded relation's column comes from the strategy, appended after the
+  // scalars so the shaped key order still matches schema order followed by
+  // relations — which is what `buildRowShaper` produces and what the differential
+  // harness compares.
+  const contributed = plans.filter((plan) => plan.root !== undefined);
+
   const columns = joinFragments(
-    fields.map((field) => sql(dialect.quoteIdent(field.column))),
+    [
+      ...fields.map((field) =>
+        sql(`${qualifier ?? ""}${dialect.quoteIdent(field.column)}`),
+      ),
+      ...contributed.map((plan) => plan.root!.column),
+    ],
     ", ",
   );
+
+  const joins = concat(...contributed.map((plan) => plan.root!.join));
 
   const {
     clause: paginationClause,
@@ -136,12 +180,13 @@ export function compileRead(
     dialect,
     parseOrderBy(schema, args?.orderBy, op),
   );
-  const order = compileOrderBy(terms, dialect);
+  const order = compileOrderBy(terms, dialect, qualifier);
 
   const statement = concat(
     sql("select "),
     columns,
     from,
+    joins,
     whereClause,
     order ? concat(sql(" order by "), order) : sql(""),
     paginationClause,
@@ -163,6 +208,24 @@ export function compileRead(
     hidden,
     shape(rows) {
       const shaped = shaper(rows);
+
+      // A folded relation's children arrived *in the row*, under the alias the
+      // strategy chose. The shaper wrote the empty placeholder (`[]` / `null`)
+      // because it knows nothing about strategies, so the decode replaces it.
+      //
+      // Per-row rather than once, and per-relation rather than in the shaper,
+      // because `decode` is the strategy's — `json_agg` returns text, so this is
+      // where dates stop being strings and an empty to-many becomes `[]`.
+      if (contributed.length > 0) {
+        for (let i = 0; i < shaped.length; i++) {
+          const row = shaped[i];
+          const raw = (rows[i] as Record<string, unknown>) ?? {};
+          for (const plan of contributed) {
+            row[plan.as] = plan.root!.decode(raw[plan.as]);
+          }
+        }
+      }
+
       // A negative `take` means "the last N". The ordering terms were flipped
       // so the database returns the right *rows*, but the caller asked for them
       // in the order their `orderBy` describes — so the page is flipped back
