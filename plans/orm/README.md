@@ -312,7 +312,7 @@ packages/gemi/orm/
   errors.ts           UnsupportedQueryError, RecordNotFoundError, ...
   compile/            arg tree → SQL fragments
   dialect/            Dialect strategy: sqlite.ts, postgres.ts
-  context.ts          ambient transaction ALS            (iteration 5)
+  context.ts          ambient transaction ALS
   policy.ts           policy hook                        (iteration 6)
 
 packages/gemi/bin/orm-generator.ts  Prisma generator plugin: DMMF → artifacts.
@@ -379,12 +379,16 @@ than before it.
 
 ## Open decisions
 
-- **Ambient transaction storage.** `packages/gemi/kernel/context.ts` deliberately
-  holds the framework's *only* `AsyncLocalStorage`, and it carries the
-  Application. A transaction scope must nest inside a request without replacing
-  it, so iteration 5 proposes a second, ORM-owned ALS. That is a conscious
-  deviation from a documented design choice and needs sign-off — see
-  [05](./05-ambient-transactions.md).
+- ~~**Ambient transaction storage.**~~ **Settled in iteration 5: a second,
+  ORM-owned `AsyncLocalStorage`** in `packages/gemi/orm/context.ts`, holding
+  `{ tx, depth }` and nothing else. `packages/gemi/kernel/context.ts` keeps
+  carrying only the Application, and the reasoning for a second store rather
+  than a wider one is written up there so the "exactly one ALS" claim does not
+  silently become false. The two alternatives were rejected on the record:
+  re-entering the kernel store with a `{ app, tx }` wrapper makes every reader
+  of it — `app()` above all — handle two shapes forever, and hanging the handle
+  off the Application shares it across concurrent requests, which is data
+  corruption rather than a style question.
 - **MySQL / MariaDB.** Deferred. `DatabaseManager` already infers all four
   dialects, and the strategy seam keeps the door open, but only SQLite and
   Postgres are built and tested. Confirm this is acceptable.

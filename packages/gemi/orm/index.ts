@@ -46,6 +46,17 @@ export {
   type QueryPlan,
 } from "./plan";
 
+// The ambient transaction. `Model.transaction` is the surface an application
+// uses; these are for code that has to *observe* the scope rather than open one
+// — a raw query joining it, or a test asserting a statement ran inside it.
+export {
+  currentTransaction,
+  ormContext,
+  transactionDepth,
+  withTransaction,
+  type TransactionScope,
+} from "./context";
+
 export { compile, compileRead, compileWrite } from "./compile";
 export { buildRowShaper, type RowShaper, type ShapedRelation } from "./shape";
 export {

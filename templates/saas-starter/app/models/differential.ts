@@ -345,7 +345,7 @@ export async function createDifferential(options: {
  * timestamp. Statements are split on `;` at end of line, which is enough for
  * the DDL Prisma emits and involves no SQL parsing.
  */
-async function applyMigrations(path: string): Promise<void> {
+export async function applyMigrations(path: string): Promise<void> {
   const root = join(import.meta.dirname, "../../prisma/migrations");
   const sql = new SQL(`sqlite://${path}`);
 

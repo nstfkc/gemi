@@ -1,6 +1,8 @@
+import type { SQL } from "bun";
 import { DatabaseManager } from "../database/DatabaseManager";
 import { app } from "../foundation/app";
 import { type BindContext, createBindContext } from "./compile/fragment";
+import { currentTransaction, withTransaction } from "./context";
 import {
   type NestedWriteStep,
   type RelationExecutor,
@@ -53,14 +55,80 @@ export abstract class Model {
     return schema;
   }
 
+  /**
+   * Runs `fn` inside a transaction. Every ORM query in it — at any call depth,
+   * through any number of services, including the nested reads an `include`
+   * fans out into — joins it automatically.
+   *
+   * The callback takes **no argument**, and that is the whole feature. Handing
+   * back a `tx` would put it in the signature of every function between here
+   * and the query, which is precisely the threading Prisma's `$transaction`
+   * forces and this exists to remove. If a raw query genuinely needs the
+   * handle, `currentTransaction()` hands it over without putting it in anyone's
+   * parameter list.
+   *
+   * Nesting is a savepoint: an inner failure rolls back to it and leaves the
+   * outer transaction usable, so a caller that catches keeps going.
+   *
+   *     await User.transaction(async () => {
+   *       const user = await User.create({ data: { email } })
+   *       await audit(user)          // its queries are in the transaction too
+   *     })
+   *
+   * **KNOWN DIALECT ASYMMETRY — catching an error inside a transaction.**
+   * The sentence above holds for a *nested* `Model.transaction`. It does not
+   * hold for a bare statement: on Postgres any failed statement aborts the
+   * whole transaction block, so catching it and carrying on loses everything.
+   * SQLite does not care. Verified against Postgres 16 and SQLite:
+   *
+   *     await Model.transaction(async () => {
+   *       try { await User.create({ data: { email } }) }
+   *       catch (e) { if (!(e instanceof UniqueConstraintError)) throw e }
+   *       await Audit.create({ ... })   // fine on SQLite; on Postgres this
+   *     })                              // throws 'current transaction is
+   *                                     // aborted', and the whole transaction
+   *                                     // is lost
+   *
+   * That is a bug that passes in development on SQLite and takes out the
+   * transaction in production on Postgres, with an error naming neither the
+   * statement that failed nor the one that caused it.
+   *
+   * The fix is already here: wrap the fallible statement in a nested
+   * `Model.transaction`, which makes it a savepoint, and rolling back to that
+   * savepoint clears the aborted state. Works on both dialects.
+   *
+   *     await Model.transaction(async () => {
+   *       try {
+   *         await Model.transaction(() => User.create({ data: { email } }))
+   *       } catch (e) { if (!(e instanceof UniqueConstraintError)) throw e }
+   *       await Audit.create({ ... })   // fine on both
+   *     })
+   *
+   * **One statement at a time.** Every query in scope runs on one reserved
+   * connection, so `Promise.all` over several ORM calls inside the callback is
+   * not safe here — the ordinary, encouraged thing everywhere else in a Bun
+   * codebase. Await them in sequence. (`$exec` already runs its own nested
+   * writes and relation reads sequentially for this reason.)
+   */
+  static transaction<T>(fn: () => Promise<T>): Promise<T> {
+    return withTransaction(app(DatabaseManager).sql, () => fn());
+  }
+
   static async $exec(op: Operation, args: any = {}): Promise<unknown> {
     const schema = this.$modelSchema();
 
     // Resolved per call, never captured at module scope: that is what keeps the
-    // connection swappable in tests, and it is the hook iteration 5 uses to
-    // pick up an ambient transaction instead of the pooled connection.
+    // connection swappable in tests.
     const db = app(DatabaseManager);
     const dialect = dialectFor(db.dialect);
+
+    // The ambient-transaction hook, and the entire integration. It is one line
+    // — and it covers every operation, every nested write and every relation
+    // read — only because invariant 1 held: `$exec` is the single door. An
+    // operation that acquired a private path to the database would show up
+    // here as a statement silently running outside the transaction, committed
+    // while its neighbours roll back.
+    const conn = currentTransaction() ?? db.sql;
 
     const plan = getOrCompile(schema, op, args, dialect);
 
@@ -69,18 +137,23 @@ export abstract class Model {
         registry
           .get<typeof Model>(model)
           .$exec(operation as Operation, relationArgs),
-      query: (text, values) => db.sql.unsafe(text, values),
+      // The one query with no model behind it — the implicit m-n join table —
+      // resolves its connection here rather than reaching for the pool, so it
+      // joins the transaction like everything else.
+      query: (text, values) => conn.unsafe(text, values),
     };
 
     // One context per call, holding the instant every `now()` and `@updatedAt`
     // on this operation shares, plus whatever the `before` steps resolve.
     const context = createBindContext();
 
-    // NOT ATOMIC until iteration 5. A write with nested `create`/`connect` runs
-    // more than one statement, and there is no transaction around them: if a
-    // later step fails, the earlier rows stay written. This is a recorded
-    // decision — iteration 5 introduces the ambient-transaction ALS here and
-    // makes all of it atomic without changing the call sites.
+    // A write with a nested `create` / `connect` runs more than one statement.
+    // Atomic exactly when the caller wrapped the call in `Model.transaction` —
+    // *not* implicitly. A write does not open its own transaction, because
+    // `$exec` cannot know whether it is one step of a larger unit; opening one
+    // per call would put a `BEGIN` around every query in the framework and turn
+    // a caller's transaction into a nest of savepoints it never asked for.
+    // Outside one, a failing later step still leaves the earlier rows written.
     await runSteps(plan.before, args, context, executor, []);
 
     // `unsafe` despite the name. Bun's tagged template cannot express a query
@@ -89,7 +162,7 @@ export abstract class Model {
     // identifiers only ever come from the generated schema, and every value is
     // a bound parameter. Do not "fix" this into a tagged template.
     const rows = await execute(
-      db,
+      conn,
       dialect,
       schema,
       op,
@@ -159,8 +232,8 @@ async function runSteps(
   rows: readonly Record<string, unknown>[],
 ): Promise<void> {
   if (steps === undefined) return;
-  // Sequentially, for the same reason relations load sequentially: iteration 5
-  // puts an ambient transaction on a single reserved connection, where
+  // Sequentially, for the same reason relations load sequentially: inside an
+  // ambient transaction every statement runs on one reserved connection, where
   // concurrent statements are not safe.
   for (const step of steps) {
     await step.run(args, context, executor, rows);
@@ -178,7 +251,7 @@ async function runSteps(
  * has never seen the database's names.
  */
 async function execute(
-  db: { sql: { unsafe(text: string, values: unknown[]): unknown } },
+  conn: Pick<SQL, "unsafe">,
   dialect: SqlDialect,
   schema: ModelSchema,
   op: Operation,
@@ -186,7 +259,7 @@ async function execute(
   values: unknown[],
 ): Promise<unknown> {
   try {
-    return await db.sql.unsafe(text, values);
+    return await conn.unsafe(text, values);
   } catch (error) {
     const violation = dialect.constraintViolation(error);
     if (!violation) throw error;
