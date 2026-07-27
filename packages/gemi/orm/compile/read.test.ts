@@ -9,6 +9,8 @@ import {
 } from "../errors";
 import { USER_COLUMNS, mapped, user } from "../fixtures";
 import { compileRead } from "./read";
+import { compileWhere } from "./where";
+import { render } from "./fragment";
 
 const sqlite = new SqliteDialect();
 const postgres = new PostgresDialect();
@@ -655,5 +657,91 @@ describe("the parameter ceiling applies to reads", () => {
     expect(() => compileRead(user, "findMany", args, sqlite)).toThrow(
       ParameterLimitError,
     );
+  });
+});
+
+/**
+ * Column qualification, for iteration 9.
+ *
+ * A lateral relation strategy folds children into the root statement, which puts a
+ * second table in scope and makes a bare `"id"` ambiguous. `WhereContext.qualifier`
+ * is how a column reference becomes `"User"."id"` — the table's own name rather
+ * than an invented alias, because Postgres lets a lateral subquery reference the
+ * outer table by name.
+ *
+ * The property that matters most here is the *absence* case: with no qualifier the
+ * emitted SQL is byte-identical to what it was before this existed, which is what
+ * keeps invariant 2 and every assertion above untouched. An earlier version of the
+ * iteration-9 plan called for unconditional aliasing and predicted it would change
+ * emitted SQL for every read; making it conditional means it changes none.
+ */
+describe("column qualification", () => {
+  test("no qualifier emits exactly what it always did", () => {
+    // The same assertion as the equality test at the top of this file, restated
+    // here as the guarantee rather than as a coincidence.
+    expect(
+      compileWhere(user, { email: "a@b.c" }, { dialect: sqlite, operation: "findMany" }, (a) => a),
+    ).not.toBeNull();
+
+    expect(text({ where: { email: "a@b.c" } })).toBe(
+      `${SELECT_USER} where "email" = ?`,
+    );
+  });
+
+  test("a qualifier prefixes every column the where names", () => {
+    const compiled = compileWhere(
+      user,
+      { email: "a@b.c", globalRole: 2 },
+      { dialect: sqlite, operation: "findMany", qualifier: `"User".` },
+      (args) => args,
+    );
+
+    const { text: rendered } = render(compiled!, sqlite, {
+      model: "User",
+      operation: "findMany",
+    });
+
+    // Parenthesised, as any multi-predicate group is — the qualifier does not
+    // change the grouping, only the identifiers inside it.
+    expect(rendered).toBe(`("User"."email" = ? and "User"."globalRole" = ?)`);
+  });
+
+  test("it reaches nested groups and negations too", () => {
+    const compiled = compileWhere(
+      user,
+      { OR: [{ email: "a@b.c" }, { NOT: { globalRole: 2 } }] },
+      { dialect: sqlite, operation: "findMany", qualifier: `"User".` },
+      (args) => args,
+    );
+
+    const { text: rendered } = render(compiled!, sqlite, {
+      model: "User",
+      operation: "findMany",
+    });
+
+    // Every column, at every depth — a qualifier that only reached the top level
+    // would produce ambiguity errors on exactly the queries a lateral join makes
+    // interesting.
+    expect(rendered).not.toMatch(/(?<!")\bemail"/);
+    expect(rendered).toContain(`"User"."email"`);
+    expect(rendered).toContain(`"User"."globalRole"`);
+  });
+
+  test("a qualifier does not disturb the parameters", () => {
+    const args = { email: "a@b.c" };
+    const compiled = compileWhere(
+      user,
+      args,
+      { dialect: sqlite, operation: "findMany", qualifier: `"User".` },
+      () => args,
+    );
+
+    const { binders } = render(compiled!, sqlite, {
+      model: "User",
+      operation: "findMany",
+    });
+
+    // Qualification is an identifier concern; values stay parameters.
+    expect(binders).toHaveLength(1);
   });
 });

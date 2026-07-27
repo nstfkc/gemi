@@ -126,11 +126,23 @@ interface RelationPlan {
 
 Consequences to work through, none of which is optional:
 
-- **The root table needs an alias**, because a lateral subquery introduces a
-  second scope and unqualified column names become ambiguous. Every root column
-  reference has to be qualified, which touches `compileRead`, `compileWrite`'s
-  `returning`, and `compileWhere`. That is the largest part of the work and the
-  reason this is its own iteration.
+- ~~**The root table needs an alias**~~ — **corrected while implementing.** Three
+  claims here were wrong, and the real change is much smaller:
+
+  1. **No alias is needed.** Postgres lets a lateral subquery reference the outer
+     table by *name* — `"User"."id"` — so the qualification is
+     `dialect.quoteIdent(schema.table)`, not an invented alias.
+  2. **Qualification can be conditional**, applied only when a strategy actually
+     contributes a root join. With no contribution the statement is emitted
+     exactly as before, so this does **not** alter emitted SQL for existing
+     queries and invariant 2 is untouched. The note under "Notes and risks"
+     claiming otherwise was wrong.
+  3. **Writes need nothing.** `insert … returning` cannot carry a lateral join, so
+     a write's relations stay batched and `compileWrite` is unaffected.
+
+  `compileWhere` builds a column reference in exactly one place, so it takes an
+  optional qualifier on its existing `WhereContext`. `compileRead` qualifies its
+  select list and order-by the same way. That is the whole of it.
 - **`plan.shape` has to run the `decode`** for a `root` relation instead of
   writing the empty placeholder that the shaper writes today.
 - **`attachRelations` must skip** a plan carrying `root`, since its children are
@@ -178,12 +190,12 @@ does not have.
 
 ## Notes and risks
 
-- **This is the first iteration that changes emitted SQL for existing queries**,
-  via root-table aliasing. Byte-identical SQL for identical shapes is invariant 2,
-  and aliasing changes the bytes for every read. The differential harness compares
-  *results*, not text, so it will not catch a mistake here — the plan-cache
-  discrimination tests and the compiler's own text assertions are what must be
-  updated deliberately rather than adjusted until green.
+- ~~**This is the first iteration that changes emitted SQL for existing queries**~~
+  — **withdrawn.** It would have been, under unconditional aliasing. Qualifying
+  only when a root contribution exists means existing queries emit byte-identical
+  SQL, which the existing compiler text assertions prove by continuing to pass
+  untouched. That is a better outcome than updating them deliberately, and it is
+  why the conditional form is worth the small extra branch.
 - **Two strategies double the surface for shape divergence**, which iteration 7's
   notes already flag. CI must exercise both, not only the default.
 - **The win is predicted, not measured.** `(N-1) × one round trip` is an upper
