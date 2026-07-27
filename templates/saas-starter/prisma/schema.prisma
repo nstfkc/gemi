@@ -6,6 +6,15 @@ generator client {
   previewFeatures = ["driverAdapters"]
 }
 
+// Runtime model metadata and the typed model bases the gemi ORM executes
+// queries through. Declared after `client` on purpose: the emitted bases
+// type-import `@prisma/client`, and Prisma runs generators in declaration
+// order. The output is committed.
+generator gemi {
+  provider = "gemi-orm-generator"
+  output   = "../app/models/generated"
+}
+
 datasource db {
   provider = "sqlite"
   url      = env("DATABASE_URL")
