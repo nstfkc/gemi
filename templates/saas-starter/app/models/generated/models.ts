@@ -16,6 +16,17 @@ type Subset<T, U> = {
   [key in keyof T]: key extends keyof U ? T[key] : never;
 };
 
+// Merges the row's columns into the instance type, so a method on a subclass can
+// read `this.email`. No runtime output.
+//
+// oxlint flags class/interface merging because TypeScript does not check the
+// merged properties are initialised — a directly constructed instance would type
+// as carrying every column while holding none. That hazard is closed rather than
+// accepted: `Model`'s constructor is `protected`, so the only way to get an
+// instance is `wrap`, which assigns a complete row. See bin/orm/emit.ts.
+// oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
+export interface AccountModel extends Prisma.AccountGetPayload<{}> {}
+
 export class AccountModel extends Model {
   static $schema = schema.Account;
 
@@ -105,7 +116,25 @@ export class AccountModel extends Model {
   ): Promise<{ count: number }> {
     return this.$exec("deleteMany", args) as Promise<{ count: number }>;
   }
+
+  static wrap<C extends { prototype: unknown }, R extends Prisma.AccountGetPayload<{}>>(
+    this: C,
+    row: R,
+  ): C["prototype"] & R {
+    return (Model.wrap as (row: object) => any).call(this, row);
+  }
 }
+
+// Merges the row's columns into the instance type, so a method on a subclass can
+// read `this.email`. No runtime output.
+//
+// oxlint flags class/interface merging because TypeScript does not check the
+// merged properties are initialised — a directly constructed instance would type
+// as carrying every column while holding none. That hazard is closed rather than
+// accepted: `Model`'s constructor is `protected`, so the only way to get an
+// instance is `wrap`, which assigns a complete row. See bin/orm/emit.ts.
+// oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
+export interface MagicLinkTokenModel extends Prisma.MagicLinkTokenGetPayload<{}> {}
 
 export class MagicLinkTokenModel extends Model {
   static $schema = schema.MagicLinkToken;
@@ -196,7 +225,25 @@ export class MagicLinkTokenModel extends Model {
   ): Promise<{ count: number }> {
     return this.$exec("deleteMany", args) as Promise<{ count: number }>;
   }
+
+  static wrap<C extends { prototype: unknown }, R extends Prisma.MagicLinkTokenGetPayload<{}>>(
+    this: C,
+    row: R,
+  ): C["prototype"] & R {
+    return (Model.wrap as (row: object) => any).call(this, row);
+  }
 }
+
+// Merges the row's columns into the instance type, so a method on a subclass can
+// read `this.email`. No runtime output.
+//
+// oxlint flags class/interface merging because TypeScript does not check the
+// merged properties are initialised — a directly constructed instance would type
+// as carrying every column while holding none. That hazard is closed rather than
+// accepted: `Model`'s constructor is `protected`, so the only way to get an
+// instance is `wrap`, which assigns a complete row. See bin/orm/emit.ts.
+// oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
+export interface OrganizationModel extends Prisma.OrganizationGetPayload<{}> {}
 
 export class OrganizationModel extends Model {
   static $schema = schema.Organization;
@@ -287,7 +334,25 @@ export class OrganizationModel extends Model {
   ): Promise<{ count: number }> {
     return this.$exec("deleteMany", args) as Promise<{ count: number }>;
   }
+
+  static wrap<C extends { prototype: unknown }, R extends Prisma.OrganizationGetPayload<{}>>(
+    this: C,
+    row: R,
+  ): C["prototype"] & R {
+    return (Model.wrap as (row: object) => any).call(this, row);
+  }
 }
+
+// Merges the row's columns into the instance type, so a method on a subclass can
+// read `this.email`. No runtime output.
+//
+// oxlint flags class/interface merging because TypeScript does not check the
+// merged properties are initialised — a directly constructed instance would type
+// as carrying every column while holding none. That hazard is closed rather than
+// accepted: `Model`'s constructor is `protected`, so the only way to get an
+// instance is `wrap`, which assigns a complete row. See bin/orm/emit.ts.
+// oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
+export interface OrganizationInvitationModel extends Prisma.OrganizationInvitationGetPayload<{}> {}
 
 export class OrganizationInvitationModel extends Model {
   static $schema = schema.OrganizationInvitation;
@@ -378,7 +443,25 @@ export class OrganizationInvitationModel extends Model {
   ): Promise<{ count: number }> {
     return this.$exec("deleteMany", args) as Promise<{ count: number }>;
   }
+
+  static wrap<C extends { prototype: unknown }, R extends Prisma.OrganizationInvitationGetPayload<{}>>(
+    this: C,
+    row: R,
+  ): C["prototype"] & R {
+    return (Model.wrap as (row: object) => any).call(this, row);
+  }
 }
+
+// Merges the row's columns into the instance type, so a method on a subclass can
+// read `this.email`. No runtime output.
+//
+// oxlint flags class/interface merging because TypeScript does not check the
+// merged properties are initialised — a directly constructed instance would type
+// as carrying every column while holding none. That hazard is closed rather than
+// accepted: `Model`'s constructor is `protected`, so the only way to get an
+// instance is `wrap`, which assigns a complete row. See bin/orm/emit.ts.
+// oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
+export interface PasswordResetTokenModel extends Prisma.PasswordResetTokenGetPayload<{}> {}
 
 export class PasswordResetTokenModel extends Model {
   static $schema = schema.PasswordResetToken;
@@ -469,7 +552,25 @@ export class PasswordResetTokenModel extends Model {
   ): Promise<{ count: number }> {
     return this.$exec("deleteMany", args) as Promise<{ count: number }>;
   }
+
+  static wrap<C extends { prototype: unknown }, R extends Prisma.PasswordResetTokenGetPayload<{}>>(
+    this: C,
+    row: R,
+  ): C["prototype"] & R {
+    return (Model.wrap as (row: object) => any).call(this, row);
+  }
 }
+
+// Merges the row's columns into the instance type, so a method on a subclass can
+// read `this.email`. No runtime output.
+//
+// oxlint flags class/interface merging because TypeScript does not check the
+// merged properties are initialised — a directly constructed instance would type
+// as carrying every column while holding none. That hazard is closed rather than
+// accepted: `Model`'s constructor is `protected`, so the only way to get an
+// instance is `wrap`, which assigns a complete row. See bin/orm/emit.ts.
+// oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
+export interface SessionModel extends Prisma.SessionGetPayload<{}> {}
 
 export class SessionModel extends Model {
   static $schema = schema.Session;
@@ -560,7 +661,25 @@ export class SessionModel extends Model {
   ): Promise<{ count: number }> {
     return this.$exec("deleteMany", args) as Promise<{ count: number }>;
   }
+
+  static wrap<C extends { prototype: unknown }, R extends Prisma.SessionGetPayload<{}>>(
+    this: C,
+    row: R,
+  ): C["prototype"] & R {
+    return (Model.wrap as (row: object) => any).call(this, row);
+  }
 }
+
+// Merges the row's columns into the instance type, so a method on a subclass can
+// read `this.email`. No runtime output.
+//
+// oxlint flags class/interface merging because TypeScript does not check the
+// merged properties are initialised — a directly constructed instance would type
+// as carrying every column while holding none. That hazard is closed rather than
+// accepted: `Model`'s constructor is `protected`, so the only way to get an
+// instance is `wrap`, which assigns a complete row. See bin/orm/emit.ts.
+// oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
+export interface SocialAccountModel extends Prisma.SocialAccountGetPayload<{}> {}
 
 export class SocialAccountModel extends Model {
   static $schema = schema.SocialAccount;
@@ -651,7 +770,25 @@ export class SocialAccountModel extends Model {
   ): Promise<{ count: number }> {
     return this.$exec("deleteMany", args) as Promise<{ count: number }>;
   }
+
+  static wrap<C extends { prototype: unknown }, R extends Prisma.SocialAccountGetPayload<{}>>(
+    this: C,
+    row: R,
+  ): C["prototype"] & R {
+    return (Model.wrap as (row: object) => any).call(this, row);
+  }
 }
+
+// Merges the row's columns into the instance type, so a method on a subclass can
+// read `this.email`. No runtime output.
+//
+// oxlint flags class/interface merging because TypeScript does not check the
+// merged properties are initialised — a directly constructed instance would type
+// as carrying every column while holding none. That hazard is closed rather than
+// accepted: `Model`'s constructor is `protected`, so the only way to get an
+// instance is `wrap`, which assigns a complete row. See bin/orm/emit.ts.
+// oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
+export interface UserModel extends Prisma.UserGetPayload<{}> {}
 
 export class UserModel extends Model {
   static $schema = schema.User;
@@ -741,5 +878,12 @@ export class UserModel extends Model {
     args?: Prisma.UserDeleteManyArgs,
   ): Promise<{ count: number }> {
     return this.$exec("deleteMany", args) as Promise<{ count: number }>;
+  }
+
+  static wrap<C extends { prototype: unknown }, R extends Prisma.UserGetPayload<{}>>(
+    this: C,
+    row: R,
+  ): C["prototype"] & R {
+    return (Model.wrap as (row: object) => any).call(this, row);
   }
 }

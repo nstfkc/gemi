@@ -312,6 +312,68 @@ function suite(label: string, url?: string) {
       expect([...stored][0].name).toBe("Created");
     });
 
+    // --- deliverable 3: the entity tier ------------------------------------
+
+    /**
+     * `wrap` is explicit, never implicit, and that is the design rather than an
+     * omission. The moment queries hydrate by default, a method reading
+     * `this.email` on a row fetched as `select: { id: true }` becomes a runtime
+     * crash the type system cannot see. The compile-time half of this is in
+     * `wrap.test-d.ts`; what needs a database is that the instance behaves.
+     */
+    test("wrap gives an instance carrying the columns and the class", async () => {
+      class WrappedUser extends UserModel {
+        get displayName(): string {
+          return this.name ?? this.email ?? "anonymous";
+        }
+      }
+
+      const row = await SaveUser.findFirstOrThrow({ where: { email: "a@x.test" } });
+      const entity = WrappedUser.wrap(row);
+
+      expect(entity.displayName).toBe("Alice");
+      expect(entity.email).toBe("a@x.test");
+      expect(entity).toBeInstanceOf(WrappedUser);
+    });
+
+    /**
+     * A complete row is one that can be snapshotted in full, so `wrap` tracks it
+     * without the caller passing `track: true`. The type constraint and the save
+     * capability are one constraint, not two — which is why `wrap` requires
+     * completeness rather than merely preferring it.
+     */
+    test("a wrapped instance is saveable without asking for tracking", async () => {
+      const row = await SaveUser.findFirstOrThrow({ where: { email: "a@x.test" } });
+      expect(isTracked(row)).toBe(false);
+
+      const entity: any = SaveUser.wrap(row);
+      entity.name = "Wrapped";
+      await entity.save();
+
+      const stored: any = await raw.unsafe(
+        `SELECT "name" FROM "User" WHERE "email" = 'a@x.test'`,
+      );
+      expect([...stored][0].name).toBe("Wrapped");
+    });
+
+    test("the instance is a copy — mutating it does not touch the row", async () => {
+      const row: any = await SaveUser.findFirstOrThrow({});
+      const entity: any = SaveUser.wrap(row);
+
+      entity.name = "Changed";
+      expect(row.name).toBe("Alice");
+    });
+
+    test("instance save and static save are the same implementation", async () => {
+      const entity: any = SaveUser.wrap(
+        await SaveUser.findFirstOrThrow({ where: { email: "b@x.test" } }),
+      );
+
+      // Nothing changed, so both report the no-op the same way.
+      expect(await entity.save()).toBeNull();
+      expect(await SaveUser.save(entity)).toBeNull();
+    });
+
     test("relations are not snapshotted, so an include does not look dirty", async () => {
       const user: any = await SaveUser.findFirst({}, { track: true });
       await AccountModel.create({ data: { userId: user.id } });

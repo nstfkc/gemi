@@ -1,4 +1,5 @@
 export { Model } from "./Model";
+export { ActiveRecordModel } from "./active-record";
 
 export {
   SCHEMA_ARTIFACT_VERSION,

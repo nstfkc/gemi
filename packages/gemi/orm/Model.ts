@@ -75,6 +75,22 @@ const ORTHROW = new Set([
 ]);
 
 export abstract class Model {
+  /**
+   * Protected, so `new UserModel()` is a type error.
+   *
+   * Not stylistic. The generated bases merge the row's columns into their
+   * instance type via a same-named interface, which is what lets a method on a
+   * subclass read `this.email` — and the cost of declaration merging is that
+   * TypeScript does not check those properties are ever initialised. A directly
+   * constructed instance would therefore type as carrying every column while
+   * holding none.
+   *
+   * Closing the constructor removes that hazard rather than documenting it: the
+   * only way to get an instance is `wrap`, which assigns a complete row. Every
+   * other operation returns plain objects and never constructs one.
+   */
+  protected constructor() {}
+
   /** Assigned by the generated subclass from `app/models/generated/schema.ts`. */
   static $schema: ModelSchema;
 
@@ -170,6 +186,51 @@ export abstract class Model {
     resnapshot(row, changed);
 
     return updated;
+  }
+
+  /**
+   * Turns a **complete** row into an instance of this class, for code that wants
+   * behaviour rather than data.
+   *
+   *     const user = User.wrap(await User.findUniqueOrThrow({ where: { id } }))
+   *     user.displayName          // a method on your subclass
+   *     await user.save()
+   *
+   * Explicit, never implicit, and that is the whole design. The moment queries
+   * hydrate by default, the `select` conflict comes back: a method that reads
+   * `this.email` on a row fetched as `select: { id: true }` is a runtime crash
+   * the type system cannot see. Keeping `wrap` a call the author makes means
+   * narrowing and behaviour never meet.
+   *
+   * **Completeness is required, and the requirement is not arbitrary.** The
+   * generated signature takes the full scalar payload, so a `Pick` of it is a
+   * compile error rather than a runtime surprise (there is a type test for
+   * exactly that). It is the same constraint that makes `save()` work on the
+   * result: a complete row is one this can snapshot in full, so an instance is
+   * tracked without the caller asking. The type constraint and the save
+   * capability are one constraint, not two.
+   *
+   * Note the instance is a *copy*: mutating it does not touch the row that was
+   * passed in, and `save()` diffs against what `wrap` received.
+   */
+  static wrap(row: object): any {
+    const schema = this.$modelSchema();
+    const instance = new (this as unknown as new () => any)();
+
+    Object.assign(instance, row);
+    // Tracked on the instance, not the argument — `save()` on the instance has
+    // to diff against the values it was constructed from.
+    track(instance, schema, []);
+
+    return instance;
+  }
+
+  /**
+   * Persists this instance's changes. The instance counterpart of the static, and
+   * a one-line delegation to it so there is one implementation.
+   */
+  save(): Promise<unknown> {
+    return (this.constructor as typeof Model).save(this);
   }
 
   static $modelSchema(): ModelSchema {

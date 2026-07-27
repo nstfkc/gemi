@@ -357,6 +357,85 @@ const READ_OPERATIONS: ReadOperation[] = [
   },
 ];
 
+/**
+ * `wrap`, typed to reject a partial row at compile time.
+ *
+ * The parameter is the model's full scalar payload — `Prisma.<M>GetPayload<{}>` —
+ * so a `Pick` of it fails to type-check for the ordinary reason that it is
+ * missing properties. That single constraint is what lets instances and `select`
+ * coexist: a method reading `this.email` can only ever run on a row that
+ * actually fetched `email`.
+ *
+ * The return type intersects the row with the class, so the instance carries both
+ * the columns and whatever the application's subclass adds. `this: C` plus
+ * `C["prototype"]` is what makes it the *subclass's* instance type rather than
+ * the generated base's — `Account.wrap(...)` returns an `Account`, not an
+ * `AccountModel`, so a method defined on the subclass is visible on the result.
+ *
+ * `{ prototype: unknown }` rather than the more obvious
+ * `new (...args: never[]) => any`, because `Model`'s constructor is `protected`
+ * (which is what stops a directly constructed instance from lying about its
+ * columns) and a protected constructor does not satisfy a public construct
+ * signature. Constraining on the prototype reads the instance type without
+ * caring how — or whether — the class can be constructed from outside.
+ *
+ * `R` is generic rather than fixed to the payload so a row carrying `include`d
+ * relations keeps them in the result type. The constraint still requires *at
+ * least* the full scalar set, which is the property that matters.
+ */
+function wrapOperation(model: string): string {
+  const payload = `Prisma.${model}GetPayload<{}>`;
+  return `
+  static wrap<C extends { prototype: unknown }, R extends ${payload}>(
+    this: C,
+    row: R,
+  ): C["prototype"] & R {
+    return (Model.wrap as (row: object) => any).call(this, row);
+  }
+`;
+}
+
+/**
+ * Declaration merging, so an instance's *columns* are visible to methods written
+ * on the subclass.
+ *
+ * An `interface` sharing the class's name merges into its instance type, which is
+ * what makes this work:
+ *
+ *     export class User extends UserModel {
+ *       get displayName() { return this.name ?? this.email ?? "anonymous" }
+ *     }
+ *
+ * Without it `this.name` does not exist and the entity tier is useless — a
+ * wrapper whose methods cannot read the row is not a wrapper. The first version
+ * of `wrap` intersected the columns into its *return* type only, which typed the
+ * call site correctly and left the class body blind.
+ *
+ * Emitted as an interface rather than as `declare` fields for two reasons: it
+ * reuses Prisma's own payload type instead of re-deriving TypeScript types from
+ * the DMMF, so the two cannot drift; and it is zero runtime output, which
+ * `declare` also is but less obviously.
+ *
+ * The honest cost: `new UserModel()` now type-checks as having columns it does
+ * not have. These classes are constructed by `wrap` and by nothing else — the
+ * twelve operations return plain objects — so the lie is confined to a
+ * constructor call no application has a reason to make.
+ */
+function instanceShape(model: string): string {
+  return `
+// Merges the row's columns into the instance type, so a method on a subclass can
+// read \`this.email\`. No runtime output.
+//
+// oxlint flags class/interface merging because TypeScript does not check the
+// merged properties are initialised — a directly constructed instance would type
+// as carrying every column while holding none. That hazard is closed rather than
+// accepted: \`Model\`'s constructor is \`protected\`, so the only way to get an
+// instance is \`wrap\`, which assigns a complete row. See bin/orm/emit.ts.
+// oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
+export interface ${model}Model extends Prisma.${model}GetPayload<{}> {}
+`;
+}
+
 function operation(model: string, op: ReadOperation): string {
   const argsType = `Prisma.${model}${op.args}`;
   const returns = op.returns(model);
@@ -473,6 +552,7 @@ type Subset<T, U> = {
   ];
 
   for (const schema of schemas) {
+    parts.push(instanceShape(schema.name));
     parts.push(`
 export class ${schema.name}Model extends Model {
   static $schema = schema.${schema.name};
@@ -480,7 +560,9 @@ ${READ_OPERATIONS.map((op) => operation(schema.name, op)).join("")}${countOperat
       schema.name,
     )}${WRITE_OPERATIONS.map((op) => operation(schema.name, op)).join(
       "",
-    )}${BATCH_OPERATIONS.map((op) => batchOperation(schema.name, op)).join("")}}
+    )}${BATCH_OPERATIONS.map((op) => batchOperation(schema.name, op)).join(
+      "",
+    )}${wrapOperation(schema.name)}}
 `);
   }
 
