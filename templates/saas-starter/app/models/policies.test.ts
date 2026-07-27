@@ -402,6 +402,59 @@ function suite(label: string, url?: string) {
       ).rejects.toThrow(PolicyDeniedError);
     });
 
+    /**
+     * Iteration 9's deliverable 1c, end to end: a nested model's policies are
+     * applied to the *argument tree* in `$exec`, not only by the recursion the
+     * batched strategy happens to do.
+     *
+     * The observable consequence under batching is that the scope must apply
+     * exactly **once** — the parent's walk scopes the child's node, and the
+     * child's own `$exec` must then not scope it again. Twice would give the same
+     * rows through different SQL and a different plan key.
+     */
+    test("a nested scope applies exactly once, not twice", async () => {
+      let scopeCalls = 0;
+      (ScopedAccount as any).$policy = {
+        scope: (context: any) => {
+          scopeCalls++;
+          return { organizationId: context.user.organizationId };
+        },
+        onCreate: (_c: any, data: any) => data,
+      } satisfies ModelPolicy;
+
+      const rows = await Model.asUser(ALICE, () =>
+        ScopedUser.findMany({ include: { accounts: true } }),
+      );
+
+      // Still correctly scoped...
+      const accounts = rows.flatMap((row: any) => row.accounts);
+      expect(accounts).toHaveLength(1);
+      expect(accounts[0].organizationId).toBe(ALICE.organizationId);
+
+      // ...and the policy ran once, so the nested `where` carries one predicate
+      // rather than the same one twice.
+      expect(scopeCalls).toBe(1);
+    });
+
+    // The other half: with nothing to apply, the argument tree is untouched, so an
+    // unpolicied include mints no new plan and invalidates no cached one.
+    test("an unpolicied nested model leaves the plan key alone", async () => {
+      clearPlanCache();
+
+      await Model.asSystem(() =>
+        ScopedUser.findMany({ include: { accounts: true } }),
+      );
+      const first = planCacheStats();
+
+      await Model.asSystem(() =>
+        ScopedUser.findMany({ include: { accounts: true } }),
+      );
+      const second = planCacheStats();
+
+      expect(second.size).toBe(first.size);
+      expect(second.compiles).toBe(first.compiles);
+    });
+
     // --- criterion 3: base-class policies ---------------------------------
 
     test("a base class policy applies to a subclass, and narrows further", async () => {

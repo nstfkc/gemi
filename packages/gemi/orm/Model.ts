@@ -29,9 +29,12 @@ import {
   type QueryPlan,
 } from "./plan";
 import {
+  applyNestedPolicies,
   applyPolicies,
   applyRedaction,
   currentUser,
+  isPreScoped,
+  markPreScoped,
   policiesFor,
   policyContext,
   type ModelPolicy,
@@ -393,7 +396,39 @@ export abstract class Model {
       }
     }
 
-    if (policies.length > 0) {
+    // NESTED policies, applied to the argument tree before the plan key.
+    //
+    // A nested read under the batched strategy would acquire its own policies by
+    // recursing through the child's `$exec` — but a lateral join has no such call,
+    // so the child's policies would never be consulted and the subquery would be
+    // unscoped. Applying them here, on the args, keeps the compiler pure and makes
+    // the scope part of whatever SQL a strategy chooses to emit. See
+    // `applyNestedPolicies` and `plans/orm/09-lateral-strategy.md`.
+    //
+    // `preScoped` is how the double application is avoided: the relation executor
+    // marks its recursive calls, so a child whose args arrived already scoped does
+    // not scope them again. Without it a batched include would `AND` the same
+    // predicate twice — the same rows, but different SQL and a different plan key.
+    const preScoped = isPreScoped(options);
+
+    if (!system && !preScoped) {
+      effective = applyNestedPolicies(
+        schema,
+        effective,
+        op,
+        currentUser(),
+        system,
+        (model) => {
+          if (!registry.has(model)) return undefined;
+          const target = registry.get<typeof Model>(model);
+          const targetSchema = target.$schema;
+          if (!targetSchema) return undefined;
+          return { policies: policiesFor(target), schema: targetSchema };
+        },
+      );
+    }
+
+    if (policies.length > 0 && !preScoped) {
       // Deny-by-default lives on the context's `user` accessor, not here: a
       // policy that never consults the user — a soft-delete scope, say — has
       // nothing to deny and must keep working with no request in sight. See
@@ -405,10 +440,19 @@ export abstract class Model {
     const plan = getOrCompile(schema, op, effective, dialect);
 
     const executor: RelationExecutor = {
+      // `markPreScoped`: this model's policies were already applied to
+      // `relationArgs` by the parent's nested walk, so re-applying them here
+      // would `AND` the same predicate twice — same rows, different SQL,
+      // different plan key. The marker is a module-private Symbol and is not
+      // exported, so it cannot become a way for an application to skip policies.
       exec: (model, operation, relationArgs) =>
         registry
           .get<typeof Model>(model)
-          .$exec(operation as Operation, relationArgs),
+          .$exec(
+            operation as Operation,
+            relationArgs,
+            markPreScoped(undefined) as never,
+          ),
       // The one query with no model behind it — the implicit m-n join table —
       // resolves its connection here rather than reaching for the pool, so it
       // joins the transaction like everything else.
