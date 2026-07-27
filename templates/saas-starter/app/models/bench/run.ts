@@ -58,11 +58,25 @@ async function main() {
   let micro = "";
   const positional: string[] = [];
   const stitching: string[] = [];
+  /**
+   * Per-dialect 100-parent read with *no* include — the one-round-trip anchor
+   * conclusion 3 measures per-level cost against. Captured alongside the
+   * stitching measurement rather than as a numbered scenario, so it is handed
+   * back explicitly.
+   */
+  const anchors: Record<string, number> = {};
 
   const sqlite = await sqliteWorkspace();
   try {
     results.push(
-      ...(await runDialect("sqlite", sqlite.url, `file:${sqlite.path}`, positional, stitching)),
+      ...(await runDialect(
+        "sqlite",
+        sqlite.url,
+        `file:${sqlite.path}`,
+        positional,
+        stitching,
+        anchors,
+      )),
     );
     // Inside the dialect's own setup, because `Model.transaction` resolves the
     // DatabaseManager from the container and `runDialect` restores the previous
@@ -75,7 +89,14 @@ async function main() {
 
   if (POSTGRES_URL) {
     results.push(
-      ...(await runDialect("postgres", POSTGRES_URL, POSTGRES_URL, positional, stitching)),
+      ...(await runDialect(
+        "postgres",
+        POSTGRES_URL,
+        POSTGRES_URL,
+        positional,
+        stitching,
+        anchors,
+      )),
     );
     if (/localhost|127\.0\.0\.1|::1/.test(POSTGRES_URL)) {
       notes.push(
@@ -178,38 +199,13 @@ async function main() {
     "   SQLite and 17% faster on Postgres, and the sign flipped between runs at",
     "   lower sample counts. With p95 near double p50 on Postgres, this workload",
     "   cannot resolve it, so it was not taken.",
-    "3. **Deliverable 2 (lateral + `json_agg`) IS justified on Postgres.** This",
-    "   reverses what an earlier version of this report concluded, and the reason",
-    "   is worth stating plainly: scenario 4 was not measuring a depth-3 include.",
-    "   The seed created accounts with no `organizationId`, so every foreign key",
-    "   at the third level was null, the batched loader correctly skipped that",
-    "   query entirely, and the scenario measured depth-2 plus a filter pass. It",
-    "   read as *faster than* depth-2 — more nodes, less time — which was the",
-    "   tell, and it was the number the recommendation rested on.",
-    "",
-    "   With the seed fixed, the Postgres cost is linear in include depth:",
-    "",
-    "       100 parents, no include    286µs     1 round trip",
-    "       depth-2 include            690µs     2 round trips",
-    "       depth-3 include            911µs     3 round trips",
-    "",
-    "   That is ~220µs per level, against a 180µs point read — so each level is",
-    "   very nearly one whole round trip, which is exactly the cost a lateral",
-    "   join collapses to one. gemi sits at 0.96× and 1.00× hand-written SQL, so",
-    "   there is nothing left to win *at this shape*; the win available is in",
-    "   changing the shape, which is the deliverable.",
-    "",
-    "   Ceiling: a single lateral statement for the whole tree should land near",
-    "   the no-include figure plus the extra rows, so roughly 350–450µs against",
-    "   911µs — call it 2×, and growing with depth. That is the largest",
-    "   unclaimed win in the ORM.",
-    "",
-    "   **On SQLite it remains unjustified**, which matches the plan\u0027s own note:",
-    "   in-process round trips are nearly free, and the depth-2/depth-3 pair here",
-    "   is not even ordered consistently (scenario 4 runs after scenario 3 and",
-    "   benefits from a warmer cache), so the difference is inside the noise.",
-    "   `json_group_array` should be built only if a SQLite-specific measurement",
-    "   asks for it.",
+    ...(anchors.postgres === undefined
+      ? [
+          "3. **Deliverable 2 (lateral + `json_agg`) was not evaluated**: Postgres",
+          "   was not measured, and it is the only dialect where the case can be",
+          "   made. Set `BENCH_POSTGRES_URL`.",
+        ]
+      : lateralConclusion(results, anchors.postgres)),
     "4. **A transaction costs one extra round trip pair, and that is the whole",
     "   cost.** +12µs on SQLite, +350µs on Postgres — against a ~25ns ALS read.",
     "   Iteration 5's second `AsyncLocalStorage` is nowhere in the number; the",
@@ -335,6 +331,128 @@ async function microbenchmarks(): Promise<string> {
   return lines.join("\n");
 }
 
+/**
+ * Reads a measured figure back out of `results`, so prose can cite the same
+ * numbers the tables render.
+ *
+ * This exists because hardcoded narrative drifted from its own data three times
+ * across two commits — a caveat claiming scenario 4 was unimplemented while its
+ * row sat two screens up, and a conclusion quoting per-level costs roughly half
+ * the real ones. The artifact exists so the decision can be audited, and an
+ * auditor who checks the arithmetic has to find it reconciles.
+ *
+ * Throws rather than returning a placeholder: a conclusion citing a figure that
+ * could not be found is the failure this is meant to prevent, so it should stop
+ * the run rather than emit "undefined µs".
+ */
+function measured(
+  results: readonly ScenarioResult[],
+  dialect: string,
+  scenarioPrefix: string,
+  which: "gemi" | "raw" = "gemi",
+): number {
+  const found = results.find(
+    (result) =>
+      result.dialect === dialect && result.scenario.startsWith(scenarioPrefix),
+  );
+  if (!found) {
+    throw new Error(
+      `No ${dialect} scenario starting "${scenarioPrefix}" — the report cites ` +
+        `a figure that was not measured.`,
+    );
+  }
+
+  const timing = which === "raw" ? found.raw : found.gemi.total;
+  if (!timing) {
+    throw new Error(
+      `${dialect} "${scenarioPrefix}" has no ${which} timing to cite.`,
+    );
+  }
+  return timing.p50;
+}
+
+/** Rounded to whole microseconds, which is all the precision prose should claim. */
+function us(value: number): string {
+  return `${value.toFixed(0)}µs`;
+}
+
+/**
+ * Conclusion 3, built from the measurements rather than written out.
+ *
+ * `noInclude` is the 100-parent read with no include, which is captured while the
+ * stitching measurement runs — it is the 1-round-trip anchor the per-level cost
+ * is measured against, and it is not one of the numbered scenarios.
+ */
+function lateralConclusion(
+  results: readonly ScenarioResult[],
+  noInclude: number,
+): string[] {
+  const depth2 = measured(results, "postgres", "3.");
+  const depth3 = measured(results, "postgres", "4.");
+  const point = measured(results, "postgres", "1.");
+
+  // Two levels added between one round trip and three.
+  const perLevel = (depth3 - noInclude) / 2;
+  // A lateral statement is *one* round trip for the whole tree, so the win is
+  // bounded by two ratios rather than estimated as one:
+  //
+  //   optimistic  depth3 / noInclude  — if the extra rows cost nothing to carry
+  //   pessimistic depth3 / depth2     — if lateral saved only one of the two trips
+  //
+  // The truth is between, and quoting a single invented figure is what produced
+  // the "roughly 2×" this replaces. The real lateral cost includes json_agg's
+  // server-side work and a wider result to parse, neither of which this suite can
+  // measure without building it.
+  const optimistic = depth3 / noInclude;
+  const pessimistic = depth3 / depth2;
+
+  return [
+    `3. **Deliverable 2 (lateral + \`json_agg\`) IS justified on Postgres.** This`,
+    `   reverses what an earlier version of this report concluded, and the reason`,
+    `   is worth stating plainly: scenario 4 was not measuring a depth-3 include.`,
+    `   The seed created accounts with no \`organizationId\`, so every foreign key`,
+    `   at the third level was null, the batched loader correctly skipped that`,
+    `   query entirely, and the scenario measured depth-2 plus a filter pass. It`,
+    `   read as *faster than* depth-2 — more nodes, less time — which was the`,
+    `   tell, and it was the number the recommendation rested on.`,
+    ``,
+    `   With the seed fixed, the Postgres cost is linear in include depth:`,
+    ``,
+    `       100 parents, no include    ${us(noInclude)}\t1 round trip`,
+    `       depth-2 include            ${us(depth2)}\t2 round trips`,
+    `       depth-3 include            ${us(depth3)}\t3 round trips`,
+    ``,
+    `   That is ~${us(perLevel)} per added level, against a ${us(point)} point read — so`,
+    `   each level costs on the order of a round trip, and a lateral join collapses`,
+    `   all of them into one. gemi is at ~1.0× hand-written SQL at both depths, so`,
+    `   there is nothing left to win *at this shape*; the win available is in`,
+    `   changing the shape, which is the deliverable.`,
+    ``,
+    `   **How large the win is, bounded rather than guessed.** A lateral statement`,
+    `   is one round trip for the whole tree, so on depth 3 it replaces ${us(depth3)}`,
+    `   with something between ${us(noInclude)} (the one-round-trip read, if carrying the`,
+    `   extra rows were free) and ${us(depth2)} (if it saved only one of the two extra`,
+    `   trips) — so **${pessimistic.toFixed(1)}× to ${optimistic.toFixed(1)}×**, growing with depth.`,
+    ``,
+    `   The range is quoted rather than a single figure because the true cost`,
+    `   includes \`json_agg\`'s server-side work and a wider result to parse, and`,
+    `   this suite cannot measure either without building the thing. An earlier`,
+    `   version of this conclusion quoted "roughly 2×" from an invented`,
+    `   denominator; the honest answer is an interval.`,
+    ``,
+    `   **On SQLite it remains unjustified**, which matches the plan's own note:`,
+    `   in-process round trips are nearly free, and the depth-2/depth-3 pair there`,
+    `   is affected by run order (scenario 4 runs second and benefits from a`,
+    `   warmer cache), so the difference is inside the noise.`,
+    `   \`json_group_array\` should be built only if a SQLite-specific measurement`,
+    `   asks for it.`,
+    ``,
+    `   Every figure above is read out of \`results\` rather than written into the`,
+    `   text — see \`measured()\`. Hardcoded narrative drifted from its own data`,
+    `   twice before that.`,
+  ];
+}
+
 function reportPath(extension: string): string {
   return new URL(
     `../../../../../plans/orm/benchmarks${extension}`,
@@ -401,6 +519,7 @@ async function runDialect(
   prismaUrl: string,
   positional: string[],
   stitching: string[],
+  anchors: Record<string, number>,
 ): Promise<ScenarioResult[]> {
   const database = new DatabaseManager({ url: gemiUrl });
   const raw = new SQL(gemiUrl);
@@ -615,6 +734,9 @@ async function runDialect(
           `${withInclude.p50.toFixed(1)} | ` +
           `${(withInclude.p50 - withoutInclude.p50).toFixed(1)} |`,
       );
+      // The 1-round-trip anchor conclusion 3 measures per-level cost against.
+      // Not one of the numbered scenarios, so it is handed back explicitly.
+      anchors[dialect] = withoutInclude.p50;
     }
 
     // --- 4b. positional row mode ------------------------------------------
