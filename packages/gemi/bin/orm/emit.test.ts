@@ -328,6 +328,30 @@ describe("emitArtifacts()", () => {
   // Generated files hold data and thin delegating methods only. Anything smart
   // in there cannot be hotfixed without a codegen release.
   test("keeps the operations one-line delegations to the choke point", () => {
-    expect(files["models.ts"]).toContain('this.$exec("findMany", args)');
+    expect(files["models.ts"]).toContain(
+      'this.$exec("findMany", args, options)',
+    );
+  });
+
+  /**
+   * `options` is a second parameter, not a key inside `args`.
+   *
+   * That is what keeps `Prisma.UserFindManyArgs` describing exactly what the
+   * operation accepts — intersecting every args type with a gemi-specific key
+   * would make Prisma's own types wrong about our surface. It also keeps the
+   * flag away from the compiler, so it cannot reach the plan key, which it must
+   * not since it does not change the SQL.
+   */
+  test("per-call options are a second parameter, leaving Prisma's arg types intact", () => {
+    const models = files["models.ts"];
+
+    expect(models).toContain("options?: ExecOptions,");
+    expect(models).toContain('import { Model, type ExecOptions } from "gemi/orm";');
+
+    // The args type is Prisma's, unintersected.
+    expect(models).toMatch(
+      /static findMany<T extends Prisma\.UserFindManyArgs>\(/,
+    );
+    expect(models).not.toContain("FindManyArgs & {");
   });
 });

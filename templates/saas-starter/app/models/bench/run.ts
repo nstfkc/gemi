@@ -53,11 +53,12 @@ async function main() {
   let micro = "";
   const positional: string[] = [];
   const stitching: string[] = [];
+  const tracking: string[] = [];
 
   const sqlite = await sqliteWorkspace();
   try {
     results.push(
-      ...(await runDialect("sqlite", sqlite.url, `file:${sqlite.path}`, positional, stitching)),
+      ...(await runDialect("sqlite", sqlite.url, `file:${sqlite.path}`, positional, stitching, tracking)),
     );
     // Inside the dialect's own setup, because `Model.transaction` resolves the
     // DatabaseManager from the container and `runDialect` restores the previous
@@ -70,7 +71,7 @@ async function main() {
 
   if (POSTGRES_URL) {
     results.push(
-      ...(await runDialect("postgres", POSTGRES_URL, POSTGRES_URL, positional, stitching)),
+      ...(await runDialect("postgres", POSTGRES_URL, POSTGRES_URL, positional, stitching, tracking)),
     );
     if (/localhost|127\.0\.0\.1|::1/.test(POSTGRES_URL)) {
       notes.push(
@@ -122,6 +123,17 @@ async function main() {
     "— which at these magnitudes is mostly noise.",
     "",
     micro,
+    "",
+    "## Row provenance (iteration 8)",
+    "",
+    "`track: true` records where each row came from so `Model.save(row)` can",
+    "update it. Off by default, because it costs a `WeakMap` insert and a",
+    "snapshot clone per row — this is what that means on the read where it would",
+    "cost most.",
+    "",
+    "| Dialect | Rows | off µs | on µs | added |",
+    "| --- | --: | --: | --: | --: |",
+    ...tracking,
     "",
     "## Relation stitching on a wide result",
     "",
@@ -384,6 +396,7 @@ async function runDialect(
   prismaUrl: string,
   positional: string[],
   stitching: string[],
+  tracking: string[],
 ): Promise<ScenarioResult[]> {
   const database = new DatabaseManager({ url: gemiUrl });
   const raw = new SQL(gemiUrl);
@@ -572,6 +585,22 @@ async function runDialect(
         connection: database.sql,
       }),
     );
+
+    // --- 4z. the cost of provenance ----------------------------------------
+    // Iteration 8's criterion 1: provenance is off by default and the default
+    // path pays *measurably* nothing for it. Both halves are worth a number —
+    // "off costs nothing" is the claim that lets it exist at all, and "on costs
+    // this much" is what tells a caller whether to reach for it on a large read.
+    {
+      const off = await time(() => UserModel.findMany({}), { runs: 30 });
+      const on = await time(() => UserModel.findMany({}, { track: true }), {
+        runs: 30,
+      });
+      tracking.push(
+        `| ${dialect} | ${USERS} | ${off.p50.toFixed(1)} | ${on.p50.toFixed(1)} | ` +
+          `${(((on.p50 - off.p50) / off.p50) * 100).toFixed(0)}% |`,
+      );
+    }
 
     // --- 4a. stitching cost on a wide result -------------------------------
     // The last measurement iteration 3 deferred: what the parent-key stitching

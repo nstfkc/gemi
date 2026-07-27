@@ -360,11 +360,18 @@ const READ_OPERATIONS: ReadOperation[] = [
 function operation(model: string, op: ReadOperation): string {
   const argsType = `Prisma.${model}${op.args}`;
   const returns = op.returns(model);
+  // `options` is a *second parameter* rather than a key inside `args`, so
+  // `Prisma.${model}${op.args}` keeps describing exactly what the operation
+  // accepts. Intersecting every args type with a gemi-specific key would make
+  // Prisma's own types wrong about our surface, which is the DX parity this
+  // project is built on. It also keeps the flag away from the compiler, so it
+  // cannot reach the plan key — which it must not, since it does not change SQL.
   return `
   static ${op.name}<T extends ${argsType}>(
     args${op.required ? "" : "?"}: Subset<T, ${argsType}>,
+    options?: ExecOptions,
   ): Promise<${returns}> {
-    return this.$exec("${op.name}", args) as Promise<${returns}>;
+    return this.$exec("${op.name}", args, options) as Promise<${returns}>;
   }
 `;
 }
@@ -452,7 +459,7 @@ export function emitModelsFile(schemas: ModelSchema[]): string {
   const parts = [
     HEADER,
     `\nimport type { Prisma } from "@prisma/client";\n`,
-    `import { Model } from "gemi/orm";\n`,
+    `import { Model, type ExecOptions } from "gemi/orm";\n`,
     `\nimport * as schema from "./schema";\n`,
     `
 // Copied from Prisma's own generated client. It is what makes \`select\` and

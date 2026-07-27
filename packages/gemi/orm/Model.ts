@@ -18,10 +18,16 @@ import { dialectFor, type SqlDialect } from "./dialect";
 import {
   MissingModelSchemaError,
   RecordNotFoundError,
+  UnsupportedQueryError,
   UniqueConstraintError,
   UnregisteredPolicyClassError,
 } from "./errors";
-import { getOrCompile, type Operation, type QueryPlan } from "./plan";
+import {
+  getOrCompile,
+  type ExecOptions,
+  type Operation,
+  type QueryPlan,
+} from "./plan";
 import {
   applyPolicies,
   applyRedaction,
@@ -31,6 +37,13 @@ import {
   type ModelPolicy,
   type PolicyContext,
 } from "./policy";
+import {
+  changedFields,
+  provenanceOf,
+  resnapshot,
+  track,
+  untracked,
+} from "./provenance";
 import * as registry from "./registry";
 import type { ModelSchema } from "./schema";
 
@@ -104,6 +117,61 @@ export abstract class Model {
     return runAsUser(user, fn);
   }
 
+  /**
+   * Persists the changes made to a *tracked* row: `update` with only the columns
+   * whose value differs from what was fetched.
+   *
+   *     const user = await User.findUnique({ where: { id } }, { track: true })
+   *     user.name = "new name"
+   *     await User.save(user)     // update "User" set "name" = ?, … where "id" = ?
+   *
+   * Most of Eloquent's write ergonomics while returns stay plain objects — no
+   * proxies, no conditional return types, no signature that changes with a flag.
+   * That is invariant 5's whole claim, and this is the thing that tests it.
+   *
+   * Goes through `$exec("update", …)` rather than around it, so policies,
+   * `@updatedAt`, the ambient transaction and the plan cache all apply exactly as
+   * they do to a hand-written update. The changed-column *set* is the plan's
+   * shape and the values are parameters, so two saves touching the same columns
+   * share one plan.
+   *
+   * Returns `null` when nothing changed, having issued no statement — a save of
+   * an untouched row should not stamp `@updatedAt`.
+   *
+   * Raises when handed an object with no provenance. See `untracked` for why
+   * that is a loud failure rather than a fallback to writing everything.
+   */
+  static async save<T extends object>(row: T): Promise<unknown> {
+    const schema = this.$modelSchema();
+    const record = provenanceOf(row);
+
+    if (!record) throw untracked(row, schema.name);
+
+    if (record.model !== schema.name) {
+      throw new UnsupportedQueryError(
+        "save",
+        schema.name,
+        "save",
+        `This row came from ${record.model}, not ${schema.name}. Save it ` +
+          `through the model it was read from.`,
+      );
+    }
+
+    const changed = changedFields(row);
+    if (Object.keys(changed).length === 0) return null;
+
+    const updated = await this.$exec("update", {
+      where: record.key,
+      data: changed,
+    });
+
+    // The row is now what the database holds, so a second `save` is a no-op
+    // rather than rewriting the same columns.
+    resnapshot(row, changed);
+
+    return updated;
+  }
+
   static $modelSchema(): ModelSchema {
     const schema = this.$schema;
     if (!schema) throw new MissingModelSchemaError(this.name);
@@ -169,7 +237,11 @@ export abstract class Model {
     return withTransaction(app(DatabaseManager).sql, () => fn());
   }
 
-  static async $exec(op: Operation, args: any = {}): Promise<unknown> {
+  static async $exec(
+    op: Operation,
+    args: any = {},
+    options?: ExecOptions,
+  ): Promise<unknown> {
     const schema = this.$modelSchema();
 
     // Resolved per call, never captured at module scope: that is what keeps the
@@ -353,6 +425,20 @@ export abstract class Model {
     // related row was shaped by its own model's `$exec` and has already been
     // through its own policy's `redact` — this one only owns its own rows.
     if (policy) applyRedaction(policies, policy, result);
+
+    // Provenance, after redaction so a redacted field is not snapshotted as its
+    // original value and then written back by `save`.
+    //
+    // Here rather than inside `$shape`, which is where the plan sketched it, for
+    // one reason: `$shape` is the seam an `ActiveRecordModel` overrides to
+    // return instances, and tracking there would make every such override
+    // responsible for reimplementing it. Doing it at the choke point means an
+    // override gets provenance for free — which is the same argument that put
+    // everything else in `$exec`.
+    if (options?.track === true) {
+      const relationKeys = (plan.relations ?? []).map((relation) => relation.as);
+      for (const row of rowsOf(result)) track(row, schema, relationKeys);
+    }
 
     return result;
   }
