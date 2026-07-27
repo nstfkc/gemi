@@ -126,11 +126,25 @@ export function currentActor(): { user: unknown } | undefined {
  *
  * Takes precedence over the request store, so a job that says who it is acting
  * as is not quietly overridden by an ambient request that happens to enclose it.
+ *
+ * It also **clears `system`**, which is the more surprising half. Acting as a
+ * user is strictly narrower than acting as the system, so naming one inside an
+ * `asSystem` block has to narrow back — and the spread would otherwise carry
+ * `system: true` forward, leaving `$exec` to skip policies entirely while
+ * `currentUser()` cheerfully returned the actor. Silently unscoped, from the
+ * realistic shape: a worker enters `asSystem` to read its job queue, then
+ * narrows to the job's owner for the work itself. The reverse nesting —
+ * `asSystem` inside `asUser` — suspends policies, which is what it should do.
  */
 export function runAsUser<T>(user: unknown, fn: () => Promise<T>): Promise<T> {
   const current = ormContext.getStore();
   return ormContext.run(
-    { ...current, depth: current?.depth ?? 0, actor: { user } },
+    {
+      ...current,
+      depth: current?.depth ?? 0,
+      system: false,
+      actor: { user: user ?? null },
+    },
     fn,
   );
 }
