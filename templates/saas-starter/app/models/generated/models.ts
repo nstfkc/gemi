@@ -54,6 +54,48 @@ export class AccountModel extends Model {
   ): Promise<number> {
     return this.$exec("count", args) as Promise<number>;
   }
+
+  static create<T extends Prisma.AccountCreateArgs>(
+    args: Subset<T, Prisma.AccountCreateArgs>,
+  ): Promise<Prisma.AccountGetPayload<T>> {
+    return this.$exec("create", args) as Promise<Prisma.AccountGetPayload<T>>;
+  }
+
+  static update<T extends Prisma.AccountUpdateArgs>(
+    args: Subset<T, Prisma.AccountUpdateArgs>,
+  ): Promise<Prisma.AccountGetPayload<T>> {
+    return this.$exec("update", args) as Promise<Prisma.AccountGetPayload<T>>;
+  }
+
+  static delete<T extends Prisma.AccountDeleteArgs>(
+    args: Subset<T, Prisma.AccountDeleteArgs>,
+  ): Promise<Prisma.AccountGetPayload<T>> {
+    return this.$exec("delete", args) as Promise<Prisma.AccountGetPayload<T>>;
+  }
+
+  static upsert<T extends Prisma.AccountUpsertArgs>(
+    args: Subset<T, Prisma.AccountUpsertArgs>,
+  ): Promise<Prisma.AccountGetPayload<T>> {
+    return this.$exec("upsert", args) as Promise<Prisma.AccountGetPayload<T>>;
+  }
+
+  static createMany(
+    args?: Prisma.AccountCreateManyArgs,
+  ): Promise<{ count: number }> {
+    return this.$exec("createMany", args) as Promise<{ count: number }>;
+  }
+
+  static updateMany(
+    args?: Prisma.AccountUpdateManyArgs,
+  ): Promise<{ count: number }> {
+    return this.$exec("updateMany", args) as Promise<{ count: number }>;
+  }
+
+  static deleteMany(
+    args?: Prisma.AccountDeleteManyArgs,
+  ): Promise<{ count: number }> {
+    return this.$exec("deleteMany", args) as Promise<{ count: number }>;
+  }
 }
 
 export class MagicLinkTokenModel extends Model {
@@ -93,6 +135,48 @@ export class MagicLinkTokenModel extends Model {
     args?: Omit<Prisma.MagicLinkTokenCountArgs, "select">,
   ): Promise<number> {
     return this.$exec("count", args) as Promise<number>;
+  }
+
+  static create<T extends Prisma.MagicLinkTokenCreateArgs>(
+    args: Subset<T, Prisma.MagicLinkTokenCreateArgs>,
+  ): Promise<Prisma.MagicLinkTokenGetPayload<T>> {
+    return this.$exec("create", args) as Promise<Prisma.MagicLinkTokenGetPayload<T>>;
+  }
+
+  static update<T extends Prisma.MagicLinkTokenUpdateArgs>(
+    args: Subset<T, Prisma.MagicLinkTokenUpdateArgs>,
+  ): Promise<Prisma.MagicLinkTokenGetPayload<T>> {
+    return this.$exec("update", args) as Promise<Prisma.MagicLinkTokenGetPayload<T>>;
+  }
+
+  static delete<T extends Prisma.MagicLinkTokenDeleteArgs>(
+    args: Subset<T, Prisma.MagicLinkTokenDeleteArgs>,
+  ): Promise<Prisma.MagicLinkTokenGetPayload<T>> {
+    return this.$exec("delete", args) as Promise<Prisma.MagicLinkTokenGetPayload<T>>;
+  }
+
+  static upsert<T extends Prisma.MagicLinkTokenUpsertArgs>(
+    args: Subset<T, Prisma.MagicLinkTokenUpsertArgs>,
+  ): Promise<Prisma.MagicLinkTokenGetPayload<T>> {
+    return this.$exec("upsert", args) as Promise<Prisma.MagicLinkTokenGetPayload<T>>;
+  }
+
+  static createMany(
+    args?: Prisma.MagicLinkTokenCreateManyArgs,
+  ): Promise<{ count: number }> {
+    return this.$exec("createMany", args) as Promise<{ count: number }>;
+  }
+
+  static updateMany(
+    args?: Prisma.MagicLinkTokenUpdateManyArgs,
+  ): Promise<{ count: number }> {
+    return this.$exec("updateMany", args) as Promise<{ count: number }>;
+  }
+
+  static deleteMany(
+    args?: Prisma.MagicLinkTokenDeleteManyArgs,
+  ): Promise<{ count: number }> {
+    return this.$exec("deleteMany", args) as Promise<{ count: number }>;
   }
 }
 
@@ -134,6 +218,48 @@ export class OrganizationModel extends Model {
   ): Promise<number> {
     return this.$exec("count", args) as Promise<number>;
   }
+
+  static create<T extends Prisma.OrganizationCreateArgs>(
+    args: Subset<T, Prisma.OrganizationCreateArgs>,
+  ): Promise<Prisma.OrganizationGetPayload<T>> {
+    return this.$exec("create", args) as Promise<Prisma.OrganizationGetPayload<T>>;
+  }
+
+  static update<T extends Prisma.OrganizationUpdateArgs>(
+    args: Subset<T, Prisma.OrganizationUpdateArgs>,
+  ): Promise<Prisma.OrganizationGetPayload<T>> {
+    return this.$exec("update", args) as Promise<Prisma.OrganizationGetPayload<T>>;
+  }
+
+  static delete<T extends Prisma.OrganizationDeleteArgs>(
+    args: Subset<T, Prisma.OrganizationDeleteArgs>,
+  ): Promise<Prisma.OrganizationGetPayload<T>> {
+    return this.$exec("delete", args) as Promise<Prisma.OrganizationGetPayload<T>>;
+  }
+
+  static upsert<T extends Prisma.OrganizationUpsertArgs>(
+    args: Subset<T, Prisma.OrganizationUpsertArgs>,
+  ): Promise<Prisma.OrganizationGetPayload<T>> {
+    return this.$exec("upsert", args) as Promise<Prisma.OrganizationGetPayload<T>>;
+  }
+
+  static createMany(
+    args?: Prisma.OrganizationCreateManyArgs,
+  ): Promise<{ count: number }> {
+    return this.$exec("createMany", args) as Promise<{ count: number }>;
+  }
+
+  static updateMany(
+    args?: Prisma.OrganizationUpdateManyArgs,
+  ): Promise<{ count: number }> {
+    return this.$exec("updateMany", args) as Promise<{ count: number }>;
+  }
+
+  static deleteMany(
+    args?: Prisma.OrganizationDeleteManyArgs,
+  ): Promise<{ count: number }> {
+    return this.$exec("deleteMany", args) as Promise<{ count: number }>;
+  }
 }
 
 export class OrganizationInvitationModel extends Model {
@@ -173,6 +299,48 @@ export class OrganizationInvitationModel extends Model {
     args?: Omit<Prisma.OrganizationInvitationCountArgs, "select">,
   ): Promise<number> {
     return this.$exec("count", args) as Promise<number>;
+  }
+
+  static create<T extends Prisma.OrganizationInvitationCreateArgs>(
+    args: Subset<T, Prisma.OrganizationInvitationCreateArgs>,
+  ): Promise<Prisma.OrganizationInvitationGetPayload<T>> {
+    return this.$exec("create", args) as Promise<Prisma.OrganizationInvitationGetPayload<T>>;
+  }
+
+  static update<T extends Prisma.OrganizationInvitationUpdateArgs>(
+    args: Subset<T, Prisma.OrganizationInvitationUpdateArgs>,
+  ): Promise<Prisma.OrganizationInvitationGetPayload<T>> {
+    return this.$exec("update", args) as Promise<Prisma.OrganizationInvitationGetPayload<T>>;
+  }
+
+  static delete<T extends Prisma.OrganizationInvitationDeleteArgs>(
+    args: Subset<T, Prisma.OrganizationInvitationDeleteArgs>,
+  ): Promise<Prisma.OrganizationInvitationGetPayload<T>> {
+    return this.$exec("delete", args) as Promise<Prisma.OrganizationInvitationGetPayload<T>>;
+  }
+
+  static upsert<T extends Prisma.OrganizationInvitationUpsertArgs>(
+    args: Subset<T, Prisma.OrganizationInvitationUpsertArgs>,
+  ): Promise<Prisma.OrganizationInvitationGetPayload<T>> {
+    return this.$exec("upsert", args) as Promise<Prisma.OrganizationInvitationGetPayload<T>>;
+  }
+
+  static createMany(
+    args?: Prisma.OrganizationInvitationCreateManyArgs,
+  ): Promise<{ count: number }> {
+    return this.$exec("createMany", args) as Promise<{ count: number }>;
+  }
+
+  static updateMany(
+    args?: Prisma.OrganizationInvitationUpdateManyArgs,
+  ): Promise<{ count: number }> {
+    return this.$exec("updateMany", args) as Promise<{ count: number }>;
+  }
+
+  static deleteMany(
+    args?: Prisma.OrganizationInvitationDeleteManyArgs,
+  ): Promise<{ count: number }> {
+    return this.$exec("deleteMany", args) as Promise<{ count: number }>;
   }
 }
 
@@ -214,6 +382,48 @@ export class PasswordResetTokenModel extends Model {
   ): Promise<number> {
     return this.$exec("count", args) as Promise<number>;
   }
+
+  static create<T extends Prisma.PasswordResetTokenCreateArgs>(
+    args: Subset<T, Prisma.PasswordResetTokenCreateArgs>,
+  ): Promise<Prisma.PasswordResetTokenGetPayload<T>> {
+    return this.$exec("create", args) as Promise<Prisma.PasswordResetTokenGetPayload<T>>;
+  }
+
+  static update<T extends Prisma.PasswordResetTokenUpdateArgs>(
+    args: Subset<T, Prisma.PasswordResetTokenUpdateArgs>,
+  ): Promise<Prisma.PasswordResetTokenGetPayload<T>> {
+    return this.$exec("update", args) as Promise<Prisma.PasswordResetTokenGetPayload<T>>;
+  }
+
+  static delete<T extends Prisma.PasswordResetTokenDeleteArgs>(
+    args: Subset<T, Prisma.PasswordResetTokenDeleteArgs>,
+  ): Promise<Prisma.PasswordResetTokenGetPayload<T>> {
+    return this.$exec("delete", args) as Promise<Prisma.PasswordResetTokenGetPayload<T>>;
+  }
+
+  static upsert<T extends Prisma.PasswordResetTokenUpsertArgs>(
+    args: Subset<T, Prisma.PasswordResetTokenUpsertArgs>,
+  ): Promise<Prisma.PasswordResetTokenGetPayload<T>> {
+    return this.$exec("upsert", args) as Promise<Prisma.PasswordResetTokenGetPayload<T>>;
+  }
+
+  static createMany(
+    args?: Prisma.PasswordResetTokenCreateManyArgs,
+  ): Promise<{ count: number }> {
+    return this.$exec("createMany", args) as Promise<{ count: number }>;
+  }
+
+  static updateMany(
+    args?: Prisma.PasswordResetTokenUpdateManyArgs,
+  ): Promise<{ count: number }> {
+    return this.$exec("updateMany", args) as Promise<{ count: number }>;
+  }
+
+  static deleteMany(
+    args?: Prisma.PasswordResetTokenDeleteManyArgs,
+  ): Promise<{ count: number }> {
+    return this.$exec("deleteMany", args) as Promise<{ count: number }>;
+  }
 }
 
 export class SessionModel extends Model {
@@ -253,6 +463,48 @@ export class SessionModel extends Model {
     args?: Omit<Prisma.SessionCountArgs, "select">,
   ): Promise<number> {
     return this.$exec("count", args) as Promise<number>;
+  }
+
+  static create<T extends Prisma.SessionCreateArgs>(
+    args: Subset<T, Prisma.SessionCreateArgs>,
+  ): Promise<Prisma.SessionGetPayload<T>> {
+    return this.$exec("create", args) as Promise<Prisma.SessionGetPayload<T>>;
+  }
+
+  static update<T extends Prisma.SessionUpdateArgs>(
+    args: Subset<T, Prisma.SessionUpdateArgs>,
+  ): Promise<Prisma.SessionGetPayload<T>> {
+    return this.$exec("update", args) as Promise<Prisma.SessionGetPayload<T>>;
+  }
+
+  static delete<T extends Prisma.SessionDeleteArgs>(
+    args: Subset<T, Prisma.SessionDeleteArgs>,
+  ): Promise<Prisma.SessionGetPayload<T>> {
+    return this.$exec("delete", args) as Promise<Prisma.SessionGetPayload<T>>;
+  }
+
+  static upsert<T extends Prisma.SessionUpsertArgs>(
+    args: Subset<T, Prisma.SessionUpsertArgs>,
+  ): Promise<Prisma.SessionGetPayload<T>> {
+    return this.$exec("upsert", args) as Promise<Prisma.SessionGetPayload<T>>;
+  }
+
+  static createMany(
+    args?: Prisma.SessionCreateManyArgs,
+  ): Promise<{ count: number }> {
+    return this.$exec("createMany", args) as Promise<{ count: number }>;
+  }
+
+  static updateMany(
+    args?: Prisma.SessionUpdateManyArgs,
+  ): Promise<{ count: number }> {
+    return this.$exec("updateMany", args) as Promise<{ count: number }>;
+  }
+
+  static deleteMany(
+    args?: Prisma.SessionDeleteManyArgs,
+  ): Promise<{ count: number }> {
+    return this.$exec("deleteMany", args) as Promise<{ count: number }>;
   }
 }
 
@@ -294,6 +546,48 @@ export class SocialAccountModel extends Model {
   ): Promise<number> {
     return this.$exec("count", args) as Promise<number>;
   }
+
+  static create<T extends Prisma.SocialAccountCreateArgs>(
+    args: Subset<T, Prisma.SocialAccountCreateArgs>,
+  ): Promise<Prisma.SocialAccountGetPayload<T>> {
+    return this.$exec("create", args) as Promise<Prisma.SocialAccountGetPayload<T>>;
+  }
+
+  static update<T extends Prisma.SocialAccountUpdateArgs>(
+    args: Subset<T, Prisma.SocialAccountUpdateArgs>,
+  ): Promise<Prisma.SocialAccountGetPayload<T>> {
+    return this.$exec("update", args) as Promise<Prisma.SocialAccountGetPayload<T>>;
+  }
+
+  static delete<T extends Prisma.SocialAccountDeleteArgs>(
+    args: Subset<T, Prisma.SocialAccountDeleteArgs>,
+  ): Promise<Prisma.SocialAccountGetPayload<T>> {
+    return this.$exec("delete", args) as Promise<Prisma.SocialAccountGetPayload<T>>;
+  }
+
+  static upsert<T extends Prisma.SocialAccountUpsertArgs>(
+    args: Subset<T, Prisma.SocialAccountUpsertArgs>,
+  ): Promise<Prisma.SocialAccountGetPayload<T>> {
+    return this.$exec("upsert", args) as Promise<Prisma.SocialAccountGetPayload<T>>;
+  }
+
+  static createMany(
+    args?: Prisma.SocialAccountCreateManyArgs,
+  ): Promise<{ count: number }> {
+    return this.$exec("createMany", args) as Promise<{ count: number }>;
+  }
+
+  static updateMany(
+    args?: Prisma.SocialAccountUpdateManyArgs,
+  ): Promise<{ count: number }> {
+    return this.$exec("updateMany", args) as Promise<{ count: number }>;
+  }
+
+  static deleteMany(
+    args?: Prisma.SocialAccountDeleteManyArgs,
+  ): Promise<{ count: number }> {
+    return this.$exec("deleteMany", args) as Promise<{ count: number }>;
+  }
 }
 
 export class UserModel extends Model {
@@ -333,5 +627,47 @@ export class UserModel extends Model {
     args?: Omit<Prisma.UserCountArgs, "select">,
   ): Promise<number> {
     return this.$exec("count", args) as Promise<number>;
+  }
+
+  static create<T extends Prisma.UserCreateArgs>(
+    args: Subset<T, Prisma.UserCreateArgs>,
+  ): Promise<Prisma.UserGetPayload<T>> {
+    return this.$exec("create", args) as Promise<Prisma.UserGetPayload<T>>;
+  }
+
+  static update<T extends Prisma.UserUpdateArgs>(
+    args: Subset<T, Prisma.UserUpdateArgs>,
+  ): Promise<Prisma.UserGetPayload<T>> {
+    return this.$exec("update", args) as Promise<Prisma.UserGetPayload<T>>;
+  }
+
+  static delete<T extends Prisma.UserDeleteArgs>(
+    args: Subset<T, Prisma.UserDeleteArgs>,
+  ): Promise<Prisma.UserGetPayload<T>> {
+    return this.$exec("delete", args) as Promise<Prisma.UserGetPayload<T>>;
+  }
+
+  static upsert<T extends Prisma.UserUpsertArgs>(
+    args: Subset<T, Prisma.UserUpsertArgs>,
+  ): Promise<Prisma.UserGetPayload<T>> {
+    return this.$exec("upsert", args) as Promise<Prisma.UserGetPayload<T>>;
+  }
+
+  static createMany(
+    args?: Prisma.UserCreateManyArgs,
+  ): Promise<{ count: number }> {
+    return this.$exec("createMany", args) as Promise<{ count: number }>;
+  }
+
+  static updateMany(
+    args?: Prisma.UserUpdateManyArgs,
+  ): Promise<{ count: number }> {
+    return this.$exec("updateMany", args) as Promise<{ count: number }>;
+  }
+
+  static deleteMany(
+    args?: Prisma.UserDeleteManyArgs,
+  ): Promise<{ count: number }> {
+    return this.$exec("deleteMany", args) as Promise<{ count: number }>;
   }
 }

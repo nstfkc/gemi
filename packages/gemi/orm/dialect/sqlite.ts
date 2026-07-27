@@ -9,7 +9,7 @@ import {
 } from "../compile/fragment";
 import { DecodeError } from "../errors";
 import type { FieldSchema } from "../schema";
-import type { SqlDialect } from "./index";
+import type { ConstraintViolation, SqlDialect } from "./index";
 
 // SQLite has five storage classes and neither `DateTime` nor `Boolean` is among
 // them. Prisma stores a `DateTime` as integer milliseconds since the epoch and a
@@ -59,6 +59,19 @@ export class SqliteDialect implements SqlDialect {
 
   // `in (?, ?, ?)`: the length is part of the text, so it is part of the plan.
   readonly bindsListAsOneParameter = false;
+
+  // SQLite has had RETURNING since 3.35; Bun 1.3.14 bundles 3.51.0, confirmed by
+  // querying `select sqlite_version()` through the driver rather than by reading
+  // a changelog. Multi-row `insert ... returning` was verified there too, since
+  // `createMany` depends on it for its row count.
+  readonly supportsReturning = true;
+
+  // `SQLITE_MAX_VARIABLE_NUMBER`, which has defaulted to 32766 since SQLite
+  // 3.32 (it was 999 before). A build can lower it and `sqlite3_limit` can
+  // lower it further at runtime, so this is the documented default rather than
+  // a reading off the connection — which makes it an upper bound on what is
+  // safe, which is the direction that matters for a guard.
+  readonly maxBoundParameters = 32766;
 
   quoteIdent(name: string): string {
     // NUL is the parameter sentinel in compile/fragment.ts, so it is the one
@@ -120,6 +133,42 @@ export class SqliteDialect implements SqlDialect {
       sql(" offset "),
       param(skip),
     );
+  }
+
+  // SQLite reports every constraint failure as a `SQLiteError`, distinguished
+  // only by `code`. Read off the driver rather than guessed:
+  //
+  //   UNIQUE constraint failed: T.email      SQLITE_CONSTRAINT_UNIQUE
+  //   UNIQUE constraint failed: C.a, C.b     SQLITE_CONSTRAINT_UNIQUE  (composite)
+  //   NOT NULL constraint failed: N.v        SQLITE_CONSTRAINT_NOTNULL
+  //   FOREIGN KEY constraint failed          SQLITE_CONSTRAINT_FOREIGNKEY
+  //
+  // Matching on the code and not on the message is what keeps the last two from
+  // being reported as duplicate keys. There is no constraint *name* in any of
+  // them — SQLite does not carry one — so only the columns come back.
+  constraintViolation(error: unknown): ConstraintViolation | null {
+    const code = (error as { code?: unknown } | null)?.code;
+    if (code !== "SQLITE_CONSTRAINT_UNIQUE" && code !== "SQLITE_CONSTRAINT_PRIMARYKEY") {
+      return null;
+    }
+
+    const message = String((error as { message?: unknown }).message ?? "");
+    const listed = /constraint failed:\s*(.+)$/.exec(message);
+    if (!listed) return { kind: "unique", columns: [] };
+
+    const columns = listed[1]
+      .split(",")
+      .map((entry) => entry.trim())
+      // Each entry is `Table.column`; the table is the one being written, so
+      // only the column carries information. A column name may itself contain a
+      // dot, so the split is on the *first* one.
+      .map((entry) => {
+        const dot = entry.indexOf(".");
+        return dot === -1 ? entry : entry.slice(dot + 1);
+      })
+      .filter((entry) => entry !== "");
+
+    return { kind: "unique", columns };
   }
 
   encode(value: unknown, field: FieldSchema): unknown {

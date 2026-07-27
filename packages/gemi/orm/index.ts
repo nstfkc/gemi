@@ -16,14 +16,25 @@ export {
   DecodeError,
   MalformedRelationError,
   MissingModelSchemaError,
+  MissingRequiredValueError,
   ModelNotRegisteredError,
+  ParameterLimitError,
   RecordNotFoundError,
   RelationDepthExceededError,
+  ReturningUnsupportedError,
+  UniqueConstraintError,
   UnknownFieldError,
   UnknownRelationError,
   UnregisteredRelationTargetError,
   UnsupportedQueryError,
 } from "./errors";
+
+export {
+  createCuid,
+  clientSideValue,
+  hasClientSideValue,
+  isClientSideDefault,
+} from "./defaults";
 
 export {
   canonicalShape,
@@ -35,8 +46,13 @@ export {
   type QueryPlan,
 } from "./plan";
 
-export { compile } from "./compile";
+export { compile, compileRead, compileWrite } from "./compile";
 export { buildRowShaper, type RowShaper, type ShapedRelation } from "./shape";
+export {
+  createBindContext,
+  type BindContext,
+  type Binder,
+} from "./compile/fragment";
 
 // The relation planner is a swappable stage (invariant 4): iteration 3 ships
 // the batched strategy, iteration 7 adds lateral + json_agg as a sibling.
@@ -56,6 +72,7 @@ export {
   SqliteDialect,
   UnsupportedDialectError,
   dialectFor,
+  type ConstraintViolation,
   type SqlDialect,
 } from "./dialect";
 

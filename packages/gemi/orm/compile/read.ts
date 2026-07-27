@@ -1,12 +1,21 @@
 import type { SqlDialect } from "../dialect";
 import { UnsupportedQueryError } from "../errors";
 import type { Operation, QueryPlan } from "../plan";
-import type { FieldSchema, ModelSchema } from "../schema";
+import type { ModelSchema } from "../schema";
 import { buildRowShaper } from "../shape";
-import { type Binder, type Fragment, concat, joinFragments, render, sql } from "./fragment";
+import {
+  type Binder,
+  type Fragment,
+  bindValues,
+  concat,
+  joinFragments,
+  render,
+  sql,
+} from "./fragment";
 import { compileOrderBy, parseOrderBy, reverse, type OrderTerm } from "./orderBy";
 import { planRelations } from "./plan-relations";
-import { resolveSelection } from "./select";
+import { resolveSelection, withKeyFields } from "./select";
+import { assertUniqueWhere } from "./unique";
 import { compileWhere } from "./where";
 
 /** Every read operation, and what each accepts. */
@@ -96,10 +105,10 @@ export function compileRead(
       );
     }
 
-    const { text, binders } = render(statement, dialect);
+    const { text, binders } = render(statement, dialect, { model: schema.name, operation: op });
     return {
       text,
-      bind: binder(binders),
+      bind: bindValues(binders),
       shape(rows) {
         const row = (rows as Record<string, unknown>[])[0];
         return Number(row?._count ?? 0);
@@ -138,7 +147,7 @@ export function compileRead(
     paginationClause,
   );
 
-  const { text, binders } = render(statement, dialect);
+  const { text, binders } = render(statement, dialect, { model: schema.name, operation: op });
   const shaper = buildRowShaper(
     fields,
     dialect,
@@ -148,7 +157,7 @@ export function compileRead(
 
   return {
     text,
-    bind: binder(binders),
+    bind: bindValues(binders),
     relations: plans.length > 0 ? plans : undefined,
     hidden,
     shape(rows) {
@@ -164,47 +173,6 @@ export function compileRead(
       // where the model's name is in scope for the message.
       return single ? (shaped[0] ?? null) : shaped;
     },
-  };
-}
-
-/**
- * Adds the columns the relation planner needs to stitch on, and reports which
- * of them the caller did not ask for.
- *
- * `select: { name: true, accounts: true }` returns `{ name, accounts }` — no
- * `id` — but the accounts cannot be found without `User.id`. So it is selected,
- * shaped, used, and then deleted (see `attachRelations`). Under an `include`,
- * or a `select` that names the key itself, nothing is hidden and nothing is
- * deleted.
- */
-function withKeyFields(
-  schema: ModelSchema,
-  selection: FieldSchema[],
-  keyFields: string[],
-): { fields: FieldSchema[]; hidden?: string[] } {
-  if (keyFields.length === 0) return { fields: selection };
-
-  const present = new Set(selection.map((field) => field.name));
-  const missing = keyFields.filter((name) => !present.has(name));
-  if (missing.length === 0) return { fields: selection };
-
-  const wanted = new Set([...present, ...missing]);
-  return {
-    // Rebuilt in schema order rather than appended, so the emitted column list
-    // depends only on *which* fields are selected and never on how they were
-    // reached.
-    fields: Object.values(schema.fields).filter((field) =>
-      wanted.has(field.name),
-    ),
-    hidden: missing,
-  };
-}
-
-function binder(binders: Binder[]) {
-  return (callArgs: any) => {
-    const values: unknown[] = [];
-    for (let i = 0; i < binders.length; i++) values.push(binders[i](callArgs));
-    return values;
   };
 }
 
@@ -292,59 +260,3 @@ function assertArgs(schema: ModelSchema, op: Operation, args: any): void {
   }
 }
 
-/**
- * `findUnique` must be given a key the database can prove is unique — the `@id`,
- * a single-field `@unique`, or a composite `@@unique` in Prisma's compound form
- * (`{ username_provider: { username, provider } }`).
- *
- * This runs once per argument shape, in the compiler, not per call. Anything
- * else would be a query that silently returns the *first* of several matches.
- */
-function assertUniqueWhere(
-  schema: ModelSchema,
-  where: unknown,
-  op: Operation,
-): void {
-  const candidates = uniqueKeys(schema);
-
-  if (typeof where !== "object" || where === null) {
-    throw unique(schema, op, candidates);
-  }
-
-  const keys = Object.keys(where as Record<string, unknown>).filter(
-    (key) => (where as Record<string, unknown>)[key] !== undefined,
-  );
-
-  // Prisma's compound form: one key named after the fields joined by `_`.
-  for (const candidate of candidates) {
-    if (candidate.length === 1 && keys.includes(candidate[0])) return;
-    if (candidate.length > 1 && keys.includes(candidate.join("_"))) return;
-  }
-
-  throw unique(schema, op, candidates);
-}
-
-function uniqueKeys(schema: ModelSchema): string[][] {
-  const keys: string[][] = [];
-  if (schema.primaryKey.length > 0) keys.push(schema.primaryKey);
-  for (const group of schema.uniques) keys.push(group);
-  return keys;
-}
-
-function unique(
-  schema: ModelSchema,
-  op: Operation,
-  candidates: string[][],
-): UnsupportedQueryError {
-  const shown = candidates
-    .map((group) => (group.length === 1 ? group[0] : `${group.join("_")}`))
-    .join(", ");
-
-  return new UnsupportedQueryError(
-    "where",
-    schema.name,
-    op,
-    `${op} needs a unique field. ${schema.name} declares: ${shown}. ` +
-      `Use findFirst to query on anything else.`,
-  );
-}

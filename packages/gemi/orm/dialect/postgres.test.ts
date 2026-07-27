@@ -82,3 +82,124 @@ describe("the text is still one parameter, whatever the length", () => {
     expect(plan.bind(args)).toHaveLength(1);
   });
 });
+
+/**
+ * The shapes below are copied from a live Postgres 16 through Bun 1.3.14, not
+ * from the Postgres manual — because the manual would have told you the
+ * SQLSTATE is on `code`, and Bun puts its *own* code there and the SQLSTATE on
+ * `errno`. Matching only `code` silently recognised nothing at all, and every
+ * unique violation escaped as a raw driver error until a real database was
+ * pointed at the suite.
+ */
+describe("constraint violations", () => {
+  const violation = {
+    name: "PostgresError",
+    message: `duplicate key value violates unique constraint "User_email_key"`,
+    code: "ERR_POSTGRES_SERVER_ERROR",
+    errno: "23505",
+    detail: "Key (email)=(ada@example.dev) already exists.",
+    constraint: "User_email_key",
+    table: "User",
+  };
+
+  test("a duplicate key is recognised through errno", () => {
+    expect(postgres.constraintViolation(violation)).toEqual({
+      kind: "unique",
+      columns: ["email"],
+      constraint: "User_email_key",
+    });
+  });
+
+  test("a driver that puts the SQLSTATE on code is recognised too", () => {
+    expect(
+      postgres.constraintViolation({ ...violation, errno: undefined, code: "23505" }),
+    ).toMatchObject({ kind: "unique", columns: ["email"] });
+  });
+
+  test("a composite key reports every column", () => {
+    expect(
+      postgres.constraintViolation({
+        ...violation,
+        detail: "Key (username, provider)=(ada, github) already exists.",
+        constraint: "SocialAccount_username_provider_key",
+      }),
+    ).toEqual({
+      kind: "unique",
+      columns: ["username", "provider"],
+      constraint: "SocialAccount_username_provider_key",
+    });
+  });
+
+  // The whole point of matching five characters rather than the `23` class:
+  // these are integrity violations too, and reporting one as a duplicate key
+  // sends the caller looking for a row that does not exist.
+  test.each([
+    ["not null", "23502"],
+    ["foreign key", "23503"],
+    ["check", "23514"],
+    ["exclusion", "23P01"],
+  ])("a %s violation is not a unique violation", (_name, errno) => {
+    expect(postgres.constraintViolation({ ...violation, errno })).toBeNull();
+  });
+
+  test("anything else is left alone", () => {
+    expect(postgres.constraintViolation(new Error("connection refused"))).toBeNull();
+    expect(postgres.constraintViolation(null)).toBeNull();
+    expect(postgres.constraintViolation(undefined)).toBeNull();
+  });
+
+  // Postgres localises `detail`, so on a server with lc_messages set to
+  // anything but English the column list is unparseable. Degrading to a typed
+  // violation with no columns beats inventing a wrong one.
+  test("an unparseable detail still reports the constraint", () => {
+    expect(
+      postgres.constraintViolation({ ...violation, detail: "Schlüssel …" }),
+    ).toEqual({
+      kind: "unique",
+      columns: [],
+      constraint: "User_email_key",
+    });
+  });
+});
+
+describe("decoding the types the template schema cannot reach", () => {
+  const field = (type: any) => ({
+    name: "x", column: "x", type, nullable: true, isId: false, isUpdatedAt: false,
+  });
+
+  // Read off a live server: bigint arrives as a string and jsonb as unparsed
+  // text, where Prisma returns a BigInt and an object. Everything else Bun
+  // already decodes to what Prisma returns.
+  test("bigint arrives as a string and becomes a BigInt", () => {
+    expect(postgres.needsDecode(field("BigInt") as any)).toBe(true);
+    expect(postgres.decode("9007199254740993", field("BigInt") as any)).toBe(
+      9007199254740993n,
+    );
+  });
+
+  test("jsonb arrives as text and is parsed", () => {
+    expect(postgres.needsDecode(field("Json") as any)).toBe(true);
+    expect(postgres.decode('{"a":[1,2]}', field("Json") as any)).toEqual({
+      a: [1, 2],
+    });
+    // A driver that starts parsing it for us keeps working.
+    expect(postgres.decode({ a: 1 }, field("Json") as any)).toEqual({ a: 1 });
+  });
+
+  test.each(["Int", "String", "Boolean", "Float", "DateTime", "Bytes"])(
+    "%s needs no decoding",
+    (type) => {
+      expect(postgres.needsDecode(field(type) as any)).toBe(false);
+    },
+  );
+
+  test("a value that cannot be decoded raises rather than returning nonsense", () => {
+    expect(() => postgres.decode("not json", field("Json") as any)).toThrow();
+    expect(() => postgres.decode("3.5", field("BigInt") as any)).toThrow();
+  });
+
+  test("null stays null", () => {
+    expect(postgres.decode(null, field("Json") as any)).toBeNull();
+    expect(postgres.decode(undefined, field("BigInt") as any)).toBeNull();
+  });
+});

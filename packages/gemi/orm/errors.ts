@@ -81,6 +81,126 @@ export class RecordNotFoundError extends Error {
 }
 
 /**
+ * Thrown when a write violates a unique constraint.
+ *
+ * DECISION — gemi defines its own error rather than mirroring Prisma's codes.
+ *
+ * Prisma raises `PrismaClientKnownRequestError` with code `P2002` and
+ * `meta.target` holding the field names. Mirroring that would ease a migration
+ * for code already branching on `P2002` — but nothing in this repository does
+ * (checked), and carrying a `P` code implies the rest of the taxonomy is
+ * implemented too: `P2003`, `P2025`, and the fifty others an application might
+ * reasonably then expect to catch. Claiming a compatibility surface we have not
+ * built is worse than asking the few call sites that need it to catch a gemi
+ * error instead.
+ *
+ * What the contract does promise is the part that matters: the error is typed,
+ * catchable, and names the fields — as *field* names, the way Prisma's
+ * `meta.target` does, not as the database columns the driver reported.
+ */
+export class UniqueConstraintError extends Error {
+  constructor(
+    public readonly model: string,
+    public readonly operation: string,
+    /** Field names, mapped back through the schema from the driver's columns. */
+    public readonly fields: string[],
+    /** The constraint's own name, when the dialect reports one. */
+    public readonly constraint?: string,
+    options?: { cause?: unknown },
+  ) {
+    super(
+      `Unique constraint violated on ${model}.${operation}` +
+        (fields.length > 0 ? ` for ${fields.join(", ")}` : "") +
+        (constraint ? ` (constraint '${constraint}')` : "") +
+        `. A ${model} with those values already exists.`,
+      options,
+    );
+    this.name = "UniqueConstraintError";
+  }
+}
+
+/**
+ * Thrown when a write needs `RETURNING` and the dialect has none.
+ *
+ * Unreachable on SQLite and Postgres, which both support it. It exists so that
+ * the MySQL / MariaDB path is a named gap rather than a wrong answer: the
+ * fallback there is `lastInsertRowid` plus a re-select, which is a different
+ * statement shape and is not implemented.
+ */
+export class ReturningUnsupportedError extends Error {
+  constructor(
+    public readonly model: string,
+    public readonly operation: string,
+    public readonly dialect: string,
+  ) {
+    super(
+      `${model}.${operation} needs RETURNING to report its result, and the ` +
+        `'${dialect}' dialect does not support it. The fallback — ` +
+        `lastInsertRowid plus a re-select — is not implemented.`,
+    );
+    this.name = "ReturningUnsupportedError";
+  }
+}
+
+/**
+ * Thrown when a statement would bind more parameters than the driver's wire
+ * protocol can carry.
+ *
+ * Only `createMany` can reach it, since it is the one operation whose parameter
+ * count scales with the caller's data rather than with the query's shape:
+ * `rows × columns`. Both limits are hard and low enough to hit with an ordinary
+ * import — Postgres counts parameters in an int16 (65535), SQLite defaults
+ * `SQLITE_MAX_VARIABLE_NUMBER` to 32766.
+ *
+ * Prisma chunks the insert automatically. Doing that here means several
+ * statements, which without a transaction is a partially-applied `createMany`
+ * on failure — so it waits for iteration 5, and until then this is a named gap
+ * rather than a driver error naming neither the model nor the cause. Same
+ * treatment as `ReturningUnsupportedError`, for the same reason.
+ */
+export class ParameterLimitError extends Error {
+  constructor(
+    public readonly model: string,
+    public readonly operation: string,
+    public readonly required: number,
+    public readonly limit: number,
+    public readonly dialect: string,
+    detail: string,
+  ) {
+    super(
+      `${model}.${operation} would bind ${required} parameters, and the ` +
+        `'${dialect}' driver accepts at most ${limit} in one statement. ` +
+        `${detail} Automatic chunking is not implemented: it would make this ` +
+        `several statements, which cannot be made atomic until transactions ` +
+        `land. Split the call.`,
+    );
+    this.name = "ParameterLimitError";
+  }
+}
+
+/**
+ * Thrown when a write omits a column that has no value to fall back on: not
+ * supplied, no client-side default, no database default, and not nullable.
+ *
+ * Raised in the compiler rather than left to the database so the message names
+ * the field and the model, instead of surfacing as `NOT NULL constraint failed`
+ * with a column name and no context.
+ */
+export class MissingRequiredValueError extends Error {
+  constructor(
+    public readonly model: string,
+    public readonly operation: string,
+    public readonly field: string,
+  ) {
+    super(
+      `${model}.${operation} is missing a value for '${field}', which is ` +
+        `required and has no default.`,
+    );
+    this.name = "MissingRequiredValueError";
+  }
+}
+
+/**
  * Thrown when an `include` — or a relation-shaped key inside a `select` — names
  * something the model does not declare as a relation.
  */

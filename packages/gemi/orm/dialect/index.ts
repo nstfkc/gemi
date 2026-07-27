@@ -43,6 +43,48 @@ export interface SqlDialect {
    */
   readonly bindsListAsOneParameter: boolean;
 
+  /**
+   * Whether `insert`/`update`/`delete` can return the rows they touched.
+   *
+   * True on both implemented dialects — Postgres has had `RETURNING` forever,
+   * and SQLite since 3.35 (Bun 1.3.14 bundles 3.51.0, verified by querying
+   * `sqlite_version()` rather than by reading a changelog).
+   *
+   * It is a capability rather than an assumption because MySQL and MariaDB have
+   * no `RETURNING` at all. Their fallback — `lastInsertRowid` plus a re-select,
+   * and no way to identify the rows an `updateMany` touched — is a different
+   * statement shape, not a different spelling. Iteration 4 does not build it,
+   * but it must stay expressible, so the write compiler asks rather than
+   * assumes and raises a clear error when the answer is no.
+   */
+  readonly supportsReturning: boolean;
+
+  /**
+   * How many parameters one statement may bind.
+   *
+   * A hard protocol/driver limit, not a tuning knob: Postgres sends the
+   * parameter count as an int16 in the Bind message, and SQLite compiles
+   * `SQLITE_MAX_VARIABLE_NUMBER` in.
+   *
+   * Three shapes can approach it, all of them scaling with the caller's *data*
+   * rather than with the query's shape:
+   *
+   * - `createMany`, at `rows × columns`.
+   * - An `in` list on SQLite, which binds one placeholder per element — and
+   *   such a list is routinely request-derived (`?ids=…`).
+   * - A to-many `include` on SQLite, which batches an `in` over the parent
+   *   keys, so a large enough `findMany` reaches it with no big list in sight.
+   *
+   * Postgres escapes the last two: `= any($1)` is one parameter however long
+   * the array. The check itself lives in `compile/fragment.ts`'s `render`,
+   * because that is the one place that sees a statement's final count.
+   *
+   * It lives *here* rather than as a constant in the compiler for the usual
+   * reason: the number differs per dialect, and the compiler is not allowed to
+   * know which dialect it is compiling for.
+   */
+  readonly maxBoundParameters: number;
+
   /** Quote a table or column name. Only ever called with names from the schema. */
   quoteIdent(name: string): string;
 
@@ -94,6 +136,30 @@ export interface SqlDialect {
    * single most tempting place in the compiler to inline a number.
    */
   paginate(take: Binder | null, skip: Binder | null): Fragment;
+
+  /**
+   * Recognise a driver error as a constraint violation, and say which columns
+   * it names.
+   *
+   * Returns `null` for anything else, including the *other* constraint kinds:
+   * SQLite reports NOT NULL and FOREIGN KEY failures through the same exception
+   * type, and reporting one of those as a duplicate-key error would send a
+   * caller looking for a row that does not exist.
+   *
+   * Columns, not fields — the driver only knows the database's names. The
+   * caller maps them back through the schema, where `@map` is in scope.
+   */
+  constraintViolation(error: unknown): ConstraintViolation | null;
+}
+
+/** A driver error identified as a constraint failure, in dialect-neutral terms. */
+export interface ConstraintViolation {
+  /** Only `unique` is translated today; the rest surface as the raw error. */
+  kind: "unique";
+  /** Database column names, in the order the driver reported them. */
+  columns: string[];
+  /** The constraint's own name, when the driver gives one. Postgres does. */
+  constraint?: string;
 }
 
 export class UnsupportedDialectError extends Error {

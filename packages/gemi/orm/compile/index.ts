@@ -3,6 +3,7 @@ import { UnsupportedQueryError } from "../errors";
 import type { Operation, QueryPlan } from "../plan";
 import type { ModelSchema } from "../schema";
 import { compileRead, isReadOperation } from "./read";
+import { compileWrite, isWriteOperation } from "./write";
 
 /**
  * Argument tree -> SQL. Pure: a function of the argument *shape* and the
@@ -17,10 +18,18 @@ export function compile(
   dialect: SqlDialect,
 ): QueryPlan {
   if (isReadOperation(op)) return compileRead(schema, op, args, dialect);
+  if (isWriteOperation(op)) return compileWrite(schema, op, args, dialect);
   throw new UnsupportedQueryError(op, schema.name, op);
 }
 
 export { compileRead, isReadOperation };
+export { compileWrite, isWriteOperation };
+export {
+  planNestedWrites,
+  type ForeignKeyContribution,
+  type NestedWritePlanning,
+} from "./nested-writes";
+export { assertUniqueWhere, matchUniqueKey, uniqueKeys } from "./unique";
 export { compileWhere } from "./where";
 export { compileOrderBy, parseOrderBy } from "./orderBy";
 export { resolveSelection } from "./select";

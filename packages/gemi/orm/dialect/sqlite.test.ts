@@ -211,3 +211,76 @@ describe("needsDecode()", () => {
     },
   );
 });
+
+/**
+ * The shapes below are copied from Bun 1.3.14's bundled SQLite 3.51.0, not from
+ * the SQLite docs. Every constraint failure is the same `SQLiteError` type and
+ * only `code` distinguishes them, which is why matching on the message would
+ * report a NOT NULL failure as a duplicate key.
+ */
+describe("constraint violations", () => {
+  const violation = {
+    name: "SQLiteError",
+    message: "UNIQUE constraint failed: User.email",
+    code: "SQLITE_CONSTRAINT_UNIQUE",
+    errno: 2067,
+  };
+
+  test("a duplicate key reports its column, without the table", () => {
+    expect(sqlite.constraintViolation(violation)).toEqual({
+      kind: "unique",
+      columns: ["email"],
+    });
+  });
+
+  test("a composite key reports every column", () => {
+    expect(
+      sqlite.constraintViolation({
+        ...violation,
+        message: "UNIQUE constraint failed: SocialAccount.username, SocialAccount.provider",
+      }),
+    ).toEqual({ kind: "unique", columns: ["username", "provider"] });
+  });
+
+  test("a primary-key collision counts as a unique violation", () => {
+    expect(
+      sqlite.constraintViolation({
+        ...violation,
+        code: "SQLITE_CONSTRAINT_PRIMARYKEY",
+        message: "UNIQUE constraint failed: User.id",
+      }),
+    ).toEqual({ kind: "unique", columns: ["id"] });
+  });
+
+  // The reason `code` is what is matched on.
+  test.each([
+    ["not null", "SQLITE_CONSTRAINT_NOTNULL", "NOT NULL constraint failed: User.publicId"],
+    ["foreign key", "SQLITE_CONSTRAINT_FOREIGNKEY", "FOREIGN KEY constraint failed"],
+    ["check", "SQLITE_CONSTRAINT_CHECK", "CHECK constraint failed: User"],
+  ])("a %s violation is not a unique violation", (_name, code, message) => {
+    expect(sqlite.constraintViolation({ ...violation, code, message })).toBeNull();
+  });
+
+  test("anything else is left alone", () => {
+    expect(sqlite.constraintViolation(new Error("database is locked"))).toBeNull();
+    expect(sqlite.constraintViolation(null)).toBeNull();
+    expect(sqlite.constraintViolation(undefined)).toBeNull();
+  });
+
+  // A column name may itself contain a dot, so only the first one separates
+  // the table from the column.
+  test("only the first dot separates table from column", () => {
+    expect(
+      sqlite.constraintViolation({
+        ...violation,
+        message: "UNIQUE constraint failed: User.odd.name",
+      }),
+    ).toEqual({ kind: "unique", columns: ["odd.name"] });
+  });
+
+  test("a message it cannot parse still reports a violation", () => {
+    expect(
+      sqlite.constraintViolation({ ...violation, message: "UNIQUE failed somehow" }),
+    ).toEqual({ kind: "unique", columns: [] });
+  });
+});

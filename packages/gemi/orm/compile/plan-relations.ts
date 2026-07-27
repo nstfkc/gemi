@@ -9,7 +9,7 @@ import {
 } from "../errors";
 import * as registry from "../registry";
 import type { FieldSchema, ModelSchema, RelationSchema } from "../schema";
-import { concat, render, sql } from "./fragment";
+import { type BindContext, concat, render, sql } from "./fragment";
 import { resolveSelection } from "./select";
 
 /**
@@ -106,6 +106,42 @@ export interface RelationRequest {
   locate: (args: any) => any;
   dialect: SqlDialect;
   operation: string;
+}
+
+/**
+ * One nested write, planned once per argument shape and run per call.
+ *
+ * `before` steps run ahead of the main statement and put foreign keys into the
+ * bind context — that is the `data: { user: { connect: ... } }` direction, where
+ * this model holds the key. `after` steps run once the row exists and write the
+ * far side — the `data: { accounts: { create: ... } }` direction, where the
+ * child holds the key and cannot be written until the parent has one.
+ *
+ * NOT ATOMIC in iteration 4. A nested write is the first single logical
+ * operation in this ORM that issues more than one statement, and there is no
+ * transaction around them yet: if an `after` step fails, the parent row stays
+ * written. This is a recorded decision rather than an oversight — iteration 5
+ * introduces the ambient-transaction ALS at the `$exec` choke point and makes
+ * every one of these atomic without changing a line here. Building an interim
+ * mechanism now would be work iteration 5 deletes.
+ */
+export interface NestedWriteStep {
+  /** The relation field this step was planned for. Named in errors. */
+  relation: string;
+  /**
+   * The Prisma nested-write key this step implements — `connect` or `create`.
+   * Two steps on the same relation can produce byte-identical SQL and differ
+   * only in what the step itself does, so this is what makes a plan legible
+   * from the outside: to a test, and to whatever logs queries later.
+   */
+  operation: "connect" | "create";
+  run(
+    args: any,
+    context: BindContext,
+    executor: RelationExecutor,
+    /** The rows the main statement returned. Empty for a `before` step. */
+    rows: readonly Row[],
+  ): Promise<void>;
 }
 
 export interface RelationPlan {
@@ -436,7 +472,7 @@ function validateSubtree(
 
 // --- topology --------------------------------------------------------------
 
-interface Link {
+export interface Link {
   /** Field on the parent whose value the child is matched against. */
   parentField: string;
   /** Field on the child holding the matching value. */
@@ -453,7 +489,7 @@ interface Link {
  * `relationName`. That is the whole reason `relationName` is in the emitted
  * artifact.
  */
-function resolveLink(
+export function resolveLink(
   parent: ModelSchema,
   child: ModelSchema,
   relation: RelationSchema,
@@ -613,15 +649,27 @@ function field(
 }
 
 function resolveSchema(parent: ModelSchema, node: RelationNode): ModelSchema {
-  const target = node.relation.model;
+  return relatedSchema(parent, node.relation, node.as);
+}
 
-  // Resolved by name at call time, never by import at module load: that is what
-  // lets two models reference each other without the generated files forming an
-  // import cycle (invariant 6).
+/**
+ * The schema on the far side of a relation, looked up by *name*.
+ *
+ * Resolved by name at call time, never by import at module load: that is what
+ * lets two models reference each other without the generated files forming an
+ * import cycle (invariant 6).
+ */
+export function relatedSchema(
+  parent: ModelSchema,
+  relation: RelationSchema,
+  as: string = relation.name,
+): ModelSchema {
+  const target = relation.model;
+
   if (!registry.has(target)) {
     throw new UnregisteredRelationTargetError(
       parent.name,
-      node.as,
+      as,
       target,
       registry.registeredNames(),
     );
@@ -835,7 +883,14 @@ async function readPairs(
     ),
   );
 
-  const { text, binders } = render(statement, dialect);
+  // The one statement in the ORM whose parameter count is not known until the
+  // parents are in hand, so the ceiling here is a real ceiling on *fan-out*: on
+  // SQLite a to-many `include` over more than 32 766 parent rows would exceed
+  // it. Named rather than left to the driver, like everywhere else.
+  const { text, binders } = render(statement, dialect, {
+    model: join.table,
+    operation: "include",
+  });
   return executor.query(
     text,
     binders.map((binder) => binder(undefined)),

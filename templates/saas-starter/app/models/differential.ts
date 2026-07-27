@@ -24,6 +24,25 @@ import { expect } from "vitest";
  * loud: a silently skipped dialect reads as a passing one.
  */
 
+/**
+ * Fields that legitimately differ between two runs of the same write, because
+ * the value is minted rather than supplied: a `@default(cuid())`, a
+ * `@default(now())`, an `@updatedAt`.
+ *
+ * They are not skipped — they are replaced by a *descriptor* of the value, so
+ * a cuid that is the wrong length or has the wrong prefix still fails. That is
+ * exactly the divergence the plan warns about: "a cuid that is shaped
+ * differently from Prisma's will show up as a diff in column length or prefix".
+ */
+const VOLATILE = ["publicId", "createdAt", "updatedAt"];
+
+export interface WriteComparison {
+  /** Models whose full contents are compared afterwards. Defaults to the one written. */
+  tables?: string[];
+  /** Fields compared by shape rather than by value. Defaults to {@link VOLATILE}. */
+  volatile?: string[];
+}
+
 export interface Differential {
   prisma: PrismaClient;
   /** Runs both clients and asserts the results are deep-equal. */
@@ -32,6 +51,24 @@ export interface Differential {
     operation: string,
     args?: unknown,
   ): Promise<unknown>;
+  /**
+   * The same, for an operation that *mutates*.
+   *
+   * A write cannot be run through both clients against one database — the
+   * second would see the first one's effects. So each client gets the seeded
+   * state fresh, and both the returned value and the resulting table contents
+   * are compared. Comparing the rows afterwards is the half that matters:
+   * `updateMany` returns only a count, and a `create` that wrote the right
+   * payload to the wrong columns returns something perfectly plausible.
+   */
+  expectSameWrite(
+    model: string,
+    operation: string,
+    args?: unknown,
+    options?: WriteComparison,
+  ): Promise<void>;
+  /** Restores the seeded state, dropping everything either client wrote. */
+  reset(): Promise<void>;
   /**
    * Statements the gemi ORM has executed since the last reset. The point of
    * counting is the relation planner: one query per *node* in an include tree
@@ -61,21 +98,39 @@ function prismaDelegate(client: PrismaClient, model: string) {
  * sides the same way keeps the comparison about *our* divergences rather than
  * about the serializer.
  */
-function normalize(value: unknown): unknown {
+function normalize(value: unknown, volatile?: Set<string>): unknown {
   if (value === undefined) return null;
   if (value === null) return null;
   if (value instanceof Date) return `date:${value.toISOString()}`;
   if (typeof value === "bigint") return `bigint:${value.toString()}`;
   if (ArrayBuffer.isView(value)) return `bytes:${[...(value as any)].join(",")}`;
-  if (Array.isArray(value)) return value.map(normalize);
+  if (Array.isArray(value)) return value.map((item) => normalize(item, volatile));
   if (typeof value === "object") {
     const out: Record<string, unknown> = {};
     for (const key of Object.keys(value as Record<string, unknown>).sort()) {
-      out[key] = normalize((value as Record<string, unknown>)[key]);
+      const member = (value as Record<string, unknown>)[key];
+      out[key] =
+        volatile?.has(key) === true
+          ? descriptor(member)
+          : normalize(member, volatile);
     }
     return out;
   }
   return value;
+}
+
+/**
+ * What a generated value looks like, without what it is. Keeps the comparison
+ * meaningful for `@default(cuid())` and `@default(now())` — a string of the
+ * wrong length or with the wrong first character still fails.
+ */
+function descriptor(value: unknown): string {
+  if (value === null || value === undefined) return "absent";
+  if (value instanceof Date) return "date";
+  if (typeof value === "string") {
+    return `string(len=${value.length},head=${value.slice(0, 1)})`;
+  }
+  return typeof value;
 }
 
 export async function createDifferential(options: {
@@ -103,17 +158,56 @@ export async function createDifferential(options: {
   // that it points at a scratch database with the schema already applied.
   await assertPrismaSpeaks(prisma, options.url ? "postgresql" : "sqlite");
 
-  if (options.url) {
-    // Children before parents: the schema's foreign keys are enforced on both
-    // dialects, and a scratch database is only scratch for this suite.
+  // Children before parents: the schema's foreign keys are enforced on both
+  // dialects, and a scratch database is only scratch for this suite.
+  const TABLES = [
+    "SocialAccount",
+    "Session",
+    "PasswordResetToken",
+    "MagicLinkToken",
+    "Account",
+    "User",
+    "OrganizationInvitation",
+    "Organization",
+  ];
+
+  /**
+   * Empties every table **and restarts the identity sequences**.
+   *
+   * The restart is not tidiness. A write comparison runs the same operation
+   * twice from the same seeded state, and an autoincrement sequence survives a
+   * `DELETE` on both dialects — so without it the second run's rows get higher
+   * ids than the first's and every single comparison fails on `id` alone. It
+   * is also the difference between "the same state" and "the same rows".
+   */
+  const clearAll = async () => {
+    if (options.url) {
+      // One statement, and `RESTART IDENTITY` is part of it.
+      await prisma.$executeRawUnsafe(
+        `TRUNCATE ${TABLES.map((table) => `"${table}"`).join(", ")} ` +
+          `RESTART IDENTITY CASCADE`,
+      );
+      return;
+    }
+
     await prisma.socialAccount.deleteMany({});
     await prisma.session.deleteMany({});
     await prisma.passwordResetToken.deleteMany({});
+    await prisma.magicLinkToken.deleteMany({});
     await prisma.account.deleteMany({});
     await prisma.user.deleteMany({});
     await prisma.organizationInvitation.deleteMany({});
     await prisma.organization.deleteMany({});
-  }
+
+    // SQLite keeps the high-water mark for an AUTOINCREMENT column in this
+    // table, and clearing it is the only way to make ids start from 1 again.
+    // It does not exist until the first AUTOINCREMENT insert, hence the guard.
+    await prisma
+      .$executeRawUnsafe(`DELETE FROM sqlite_sequence`)
+      .catch(() => undefined);
+  };
+
+  if (options.url) await clearAll();
 
   await options.seed(prisma);
 
@@ -180,6 +274,62 @@ export async function createDifferential(options: {
       return fromGemi.value;
     },
 
+    async reset() {
+      await clearAll();
+      await options.seed(prisma);
+    },
+
+    async expectSameWrite(model, operation, args, comparison = {}) {
+      const volatile = new Set(comparison.volatile ?? VOLATILE);
+      const tables = comparison.tables ?? [model];
+      const label = `${model}.${operation}(${JSON.stringify(args ?? {})})`;
+
+      // Sequential, not concurrent: a write run through both clients against
+      // one database would have the second see the first one's effects. Each
+      // gets the seeded state fresh, and the two are compared afterwards.
+      await this.reset();
+      const fromPrisma = await settle(() =>
+        prismaDelegate(prisma, model)[operation](args),
+      );
+      const afterPrisma = await readTables(prisma, tables);
+
+      await this.reset();
+      clearPlanCache();
+      const gemiModel = options.models[model];
+      if (!gemiModel) throw new Error(`No gemi model registered for ${model}.`);
+      const fromGemi = await settle(() => (gemiModel as any)[operation](args));
+      const afterGemi = await readTables(prisma, tables);
+
+      if (fromPrisma.threw || fromGemi.threw) {
+        // The `kind` is compared too, not just the fact of throwing: without it
+        // a gemi compile-time refusal reads as agreement with a Prisma unique
+        // violation. See `failureKind`.
+        expect(
+          { threw: fromGemi.threw, kind: fromGemi.kind, at: label },
+          `${label}: prisma ${fromPrisma.threw ? "threw" : "returned"} but ` +
+            `gemi ${fromGemi.threw ? "threw" : "returned"}` +
+            (fromGemi.threw ? ` — ${fromGemi.error}` : "") +
+            (fromPrisma.threw ? ` — ${fromPrisma.error}` : ""),
+        ).toEqual({
+          threw: fromPrisma.threw,
+          kind: fromPrisma.kind,
+          at: label,
+        });
+      } else {
+        expect(
+          normalize(fromGemi.value, volatile),
+          `${label}: returned value`,
+        ).toEqual(normalize(fromPrisma.value, volatile));
+      }
+
+      // The half that catches a write which returned something plausible and
+      // stored something else.
+      expect(
+        normalize(afterGemi, volatile),
+        `${label}: resulting rows`,
+      ).toEqual(normalize(afterPrisma, volatile));
+    },
+
     async dispose() {
       await prisma.$disconnect();
       await database.close();
@@ -226,10 +376,17 @@ async function applyMigrations(path: string): Promise<void> {
  * its own does not say so:
  *
  *   1. flip `datasource db { provider }` in prisma/schema.prisma to postgresql
- *   2. `prisma generate` (the gemi artifacts are dialect-agnostic and do not
- *      change — that is worth confirming with `git status` while you are here)
- *   3. TZ=UTC TEST_POSTGRES_URL=postgres://... vitest
+ *   2. `prisma db push` against the scratch database, then `prisma generate`
+ *      (the gemi artifacts are dialect-agnostic and do not change — that is
+ *      worth confirming with `git status` while you are here)
+ *   3. TZ=UTC TEST_POSTGRES_URL=postgres://... vitest run --no-file-parallelism
  *   4. flip back and regenerate
+ *
+ * `--no-file-parallelism` is not optional on Postgres. Every suite points at
+ * the one database the env var names, and the write suites truncate it between
+ * cases — so run in parallel, one file empties the tables another is reading
+ * and the failures land in whichever suite lost the race. On SQLite each suite
+ * builds its own file in a temp directory, so the flag is unnecessary there.
  *
  * The SQLite suite cannot run in the same process while the client is built for
  * Postgres, which is why the two dialects are two runs rather than one.
@@ -260,10 +417,57 @@ async function assertPrismaSpeaks(
   }
 }
 
+/**
+ * Every row of the named models, read through Prisma so that both sides of a
+ * write comparison are observed by the *same* client. Reading gemi's result
+ * with gemi would hide a decode bug that exactly cancels an encode bug.
+ */
+async function readTables(
+  prisma: PrismaClient,
+  models: readonly string[],
+): Promise<Record<string, unknown>> {
+  const out: Record<string, unknown> = {};
+  for (const model of models) {
+    out[model] = await prismaDelegate(prisma, model).findMany({
+      orderBy: { id: "asc" },
+    });
+  }
+  return out;
+}
+
 async function settle(run: () => Promise<unknown>) {
   try {
-    return { threw: false, value: await run(), error: "" };
+    return { threw: false, value: await run(), error: "", kind: "" };
   } catch (error: any) {
-    return { threw: true, value: null, error: String(error?.message ?? error) };
+    return {
+      threw: true,
+      value: null,
+      error: String(error?.message ?? error),
+      kind: failureKind(error),
+    };
   }
+}
+
+/**
+ * A coarse class for a thrown error, comparable across the two clients.
+ *
+ * Comparing only the *fact* of throwing lets a gemi error thrown for an
+ * unrelated reason — a compile-time refusal, say — pass as agreement with a
+ * Prisma unique violation. Comparing messages would couple every case to
+ * Prisma's wording. The classes below are the ones the two clients genuinely
+ * both have, and the ones a write can be wrong about:
+ *
+ *   Prisma P2002 / gemi UniqueConstraintError  -> "unique"
+ *   Prisma P2025 / gemi RecordNotFoundError    -> "notFound"
+ *
+ * Everything else is "other", where agreeing that it failed is all the harness
+ * can honestly claim; the dedicated tests below the table assert the type.
+ */
+function failureKind(error: any): string {
+  const name = String(error?.name ?? "");
+  const code = String(error?.code ?? "");
+
+  if (name === "UniqueConstraintError" || code === "P2002") return "unique";
+  if (name === "RecordNotFoundError" || code === "P2025") return "notFound";
+  return "other";
 }
