@@ -151,10 +151,90 @@ Consequences to work through, none of which is optional:
   observability against one strategy; with two there must be a rule, and it must
   be overridable per query.
 
+## The second finding, and it is blocking: policies do not survive the fold
+
+Acceptance criterion 3 below is "a policy-scoped nested read is correctly scoped
+under the lateral strategy", and the README asserts it comes for free:
+
+> Because policies rewrite the **arg tree** before planning (invariant 2), scoping
+> applies under every strategy — the scoped `where` lands inside the lateral
+> subquery exactly as it would in a separate query.
+
+**That is not true, and the reason is structural.** Policies are applied in
+`Model.$exec`, to `policiesFor(this)` — the model being queried. A *nested* read
+under the batched strategy acquires its own policies only because the strategy
+recurses through the child's own `$exec`:
+
+```ts
+exec: (model, operation, relationArgs) =>
+  registry.get<typeof Model>(model).$exec(operation, relationArgs)
+```
+
+A lateral join has no such call. The child's SQL is compiled *inside the parent's
+compile step*, which never enters the child's `$exec` — so the child's policies
+are never consulted and the subquery is unscoped. The same include that is
+correctly scoped under batching would read across a tenant boundary under lateral,
+and it would do so silently.
+
+This is the exact failure iteration 6 was built to prevent, arriving from a new
+direction: not a policy on the wrong class, but a query path that skips the hook
+entirely.
+
+### Two ways out, and the first is wrong
+
+**(a) Make the compiler policy-aware.** Have the lateral strategy resolve the
+child's policies and apply them while building the subquery. Rejected: `compile/`
+is pure and knows nothing of the registry, the request, or the current user, and
+`plans/orm/README.md` invariant 2 plus the "do not let policies see SQL" note in
+06 both exist to keep it that way. A compiler that reads the ambient user is no
+longer a pure function of the argument shape, and the plan cache stops being
+sound.
+
+**(b) Apply nested policies to the arg tree, in `$exec`, before the plan key.**
+Walk the `include` / `select` tree and apply each nested model's policies to its
+own node, recursively, at the point where root policies are already applied. The
+compiler stays pure — it just receives an arg tree whose nested `where`s are
+already scoped — and the scope lands inside the lateral subquery because it is
+part of the args the subquery is compiled from.
+
+(b) is the right shape, and it has a property worth noticing: it makes the
+README's claim *become* true rather than papering over it, because the scope
+genuinely is in the arg tree before planning.
+
+### What (b) costs, none of it optional
+
+- **The batched strategy would apply child policies twice** — once from the
+  pre-walk and again inside the child's `$exec`. Scopes are `AND`ed, so the result
+  is the same rows, but the SQL and therefore the plan key differ, and a policy
+  with side effects or a `before` that counts would misbehave. Either the pre-walk
+  is skipped for batched nodes, or `$exec` learns that its args arrive pre-scoped.
+- **`asSystem` and `asUser` must be honoured per node**, which they will be, since
+  the walk runs inside the same ambient scope.
+- **A nested model with no registered class** currently fails at load time with
+  `ModelNotRegisteredError`; under a pre-walk it would fail at compile time
+  instead. That is a better error, but it is a behaviour change.
+- **Deny is no longer lazy.** A `before` that throws on a nested model currently
+  throws when that relation loads; under a pre-walk it throws before the root
+  query runs. Arguably better — nothing is fetched — but different.
+
+**This is why iteration 9 is not a strategy plus some SQL.** The seam widening was
+one interface change; this is a change to when policies are evaluated, and it
+touches the guarantee iteration 6 exists to provide. It should be its own
+deliverable, reviewed on its own, and it must land *before* the lateral strategy
+rather than alongside it — otherwise the first version of the strategy is one that
+silently bypasses policies, which is not a state this codebase should pass
+through even briefly.
+
 ## Deliverables
 
 1. The seam widening above, with the batched strategy unchanged and proven so by
-   the existing tests.
+   the existing tests. **(done — `RelationPlan.root`, additive; 543 existing tests
+   pass untouched.)**
+1b. Conditional column qualification for a second table in scope. **(done —
+   `WhereContext.qualifier`; no qualifier means byte-identical SQL, so existing
+   text assertions pass unmodified.)**
+1c. **Nested policy application in `$exec`, before the plan key** — option (b)
+   above. Blocking for deliverable 3, and to be reviewed separately.
 2. Root-table aliasing across read, write-returning and where compilation.
 3. The lateral strategy for Postgres, behind the seam.
 4. **JSON type flattening.** `json_agg` returns text: dates become strings,

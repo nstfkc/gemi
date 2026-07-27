@@ -160,7 +160,21 @@ tree** before planning (invariant 2), scoping applies under every strategy — t
 scoped `where` lands inside the lateral subquery exactly as it would in a
 separate query.
 
-**Correction, found while starting the lateral strategy.** The seam iteration 3
+**Correction 2, found while designing the lateral strategy.** The last sentence
+above — that scoping applies under every strategy because policies rewrite the arg
+tree before planning — is **not true today**. Policies are applied in
+`Model.$exec` to the model being queried, and a nested read acquires its own only
+because the batched strategy recurses through the child's `$exec`. A lateral join
+compiles the child's SQL inside the parent's compile step and never enters that
+call, so the child's policies would be skipped and the subquery would be unscoped.
+
+Making the claim true means applying nested models' policies to the arg tree in
+`$exec`, before the plan key — which is what the sentence describes and what the
+code does not do. That is iteration 9's deliverable 1c, and it is blocking: the
+first version of the lateral strategy must not be one that silently bypasses
+policies. See [09](./09-lateral-strategy.md).
+
+**Correction 1, found while starting the lateral strategy.** The seam iteration 3
 built is narrower than this claims. A `RelationStrategy` produces a `load()` that
 runs *after* the root query, plus a list of field names the root must select for
 stitching — and nothing else. It cannot contribute a column expression, a join
