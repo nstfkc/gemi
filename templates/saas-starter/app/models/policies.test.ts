@@ -8,8 +8,12 @@ import { Application } from "gemi/foundation";
 import {
   Model,
   PolicyDeniedError,
+  RecordNotFoundError,
   clearPlanCache,
   planCacheStats,
+  softDelete,
+  softDeleteMany,
+  softDeletes,
   type ModelPolicy,
 } from "gemi/orm";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "vitest";
@@ -385,16 +389,50 @@ function suite(label: string, url?: string) {
       expect([...rows].map((row: any) => row.email)).toEqual(["bob@x.test"]);
     });
 
+    /**
+     * The error type is asserted, not just the fact of throwing.
+     *
+     * This test used to say `rejects.toThrow()` and passed for the wrong
+     * reason: the scope was wrapping the caller's `{ id }` inside an `AND`, so
+     * `matchUniqueKey` could not see it and every scoped `delete` failed with
+     * "needs a unique field" rather than finding no row. A bare `toThrow()`
+     * cannot tell those apart, which is exactly how the bug survived.
+     */
     test("a scoped delete of another tenant's row finds nothing", async () => {
       await Model.asSystem(() => AccountModel.deleteMany({}));
       (UserModel as any).$policy = tenantScoped;
 
       await expect(
         Model.asUser(ALICE, () => UserModel.delete({ where: { id: BOB.id } })),
-      ).rejects.toThrow();
+      ).rejects.toThrow(RecordNotFoundError);
 
       const rows: any = await raw.unsafe(`SELECT "email" FROM "User"`);
       expect([...rows]).toHaveLength(2);
+    });
+
+    // ...and the same delete of the caller's *own* row succeeds, which is the
+    // half that proves the refusal above was about the scope and not about the
+    // unique key being unreachable.
+    test("a scoped delete of the caller's own row succeeds", async () => {
+      await Model.asSystem(() => AccountModel.deleteMany({}));
+      (UserModel as any).$policy = tenantScoped;
+
+      const deleted: any = await Model.asUser(ALICE, () =>
+        UserModel.delete({ where: { id: ALICE.id } }),
+      );
+      expect(deleted.email).toBe("alice@x.test");
+
+      const rows: any = await raw.unsafe(`SELECT "email" FROM "User"`);
+      expect([...rows].map((row: any) => row.email)).toEqual(["bob@x.test"]);
+    });
+
+    test("a scoped update of the caller's own row succeeds", async () => {
+      (UserModel as any).$policy = tenantScoped;
+
+      const updated: any = await Model.asUser(ALICE, () =>
+        UserModel.update({ where: { id: ALICE.id }, data: { name: "renamed" } }),
+      );
+      expect(updated.name).toBe("renamed");
     });
 
     // --- criteria 6 and 7: no user, and system access ---------------------
@@ -454,10 +492,199 @@ function suite(label: string, url?: string) {
   });
 }
 
+/**
+ * Soft deletes, the proof case for the hook being expressive enough.
+ *
+ * `User` and `Account` both carry a nullable `deletedAt`, so the recipe is
+ * exercised against the template's real schema rather than a fixture. The part
+ * that matters is the same part as the headline test: a soft-deleted row
+ * disappears from *nested* reads too, which is what ORM-level soft deletes
+ * usually get wrong.
+ */
+function softDeleteSuite(label: string, url?: string) {
+  describe(label, () => {
+    let workspace: string | undefined;
+    let database: DatabaseManager;
+    let raw: SQL;
+    let previous: Application | undefined;
+    let aliceId: number;
+    let bobId: number;
+
+    beforeAll(async () => {
+      let target = url;
+      if (!target) {
+        workspace = mkdtempSync(join(tmpdir(), "gemi-orm-soft-"));
+        const path = join(workspace, "soft.db");
+        await applyMigrations(path);
+        target = `sqlite://${path}`;
+      }
+
+      database = new DatabaseManager({ url: target });
+      raw = new SQL(target);
+
+      previous = Application.getInstance();
+      const application = new Application();
+      application.instance(DatabaseManager, database as never);
+      Application.setInstance(application);
+    }, 120_000);
+
+    afterAll(async () => {
+      await raw?.close();
+      await database?.close();
+      if (previous) Application.setInstance(previous);
+      if (workspace) rmSync(workspace, { recursive: true, force: true });
+    });
+
+    beforeEach(async () => {
+      clearPlanCache();
+      if (url) {
+        await raw.unsafe(
+          `TRUNCATE "Account", "User" RESTART IDENTITY CASCADE`,
+        );
+      } else {
+        await raw.unsafe(`DELETE FROM "Account"`);
+        await raw.unsafe(`DELETE FROM "User"`);
+      }
+
+      const alice: any = await UserModel.create({
+        data: { email: "alice@x.test" },
+      });
+      const bob: any = await UserModel.create({ data: { email: "bob@x.test" } });
+      aliceId = alice.id;
+      bobId = bob.id;
+      await AccountModel.create({ data: { userId: alice.id } });
+    });
+
+    afterEach(() => {
+      delete (UserModel as any).$policy;
+      delete (AccountModel as any).$policy;
+    });
+
+    // No user is needed: the soft-delete scope does not read one, so
+    // deny-by-default has nothing to deny. Worth asserting, because a policy
+    // that forced every query in the application through `asUser` would make
+    // the recipe unusable for anything but request-scoped code.
+    test("the scope works with no user in scope", async () => {
+      (UserModel as any).$policy = softDeletes();
+      const rows = await UserModel.findMany({});
+      expect(rows).toHaveLength(2);
+    });
+
+    test("a soft-deleted row disappears from reads", async () => {
+      (UserModel as any).$policy = softDeletes();
+      const remove = softDelete(UserModel);
+
+      await remove({ where: { id: bobId } });
+
+      const rows = await UserModel.findMany({});
+      expect(rows.map((row: any) => row.email)).toEqual(["alice@x.test"]);
+
+      // Still in the table — that is the whole point.
+      const stored: any = await raw.unsafe(`SELECT "email" FROM "User"`);
+      expect([...stored]).toHaveLength(2);
+    });
+
+    test("the timestamp is set, not the row removed", async () => {
+      (UserModel as any).$policy = softDeletes();
+      await softDelete(UserModel)({ where: { id: bobId } });
+
+      const stored: any = await raw.unsafe(
+        `SELECT "email", "deletedAt" FROM "User" ORDER BY "id"`,
+      );
+      const rows = [...stored];
+      expect(rows.find((row: any) => row.email === "alice@x.test").deletedAt).toBeNull();
+      expect(rows.find((row: any) => row.email === "bob@x.test").deletedAt).not.toBeNull();
+    });
+
+    /**
+     * The half ORM-level soft deletes usually miss. `Account` is soft-deleted;
+     * a deleted account must not appear under an `include` on `User` — and
+     * nothing is written at the include site to make that true.
+     */
+    test("a soft-deleted row disappears from a nested include too", async () => {
+      (AccountModel as any).$policy = softDeletes();
+
+      const before = await UserModel.findMany({ include: { accounts: true } });
+      expect(before.flatMap((row: any) => row.accounts)).toHaveLength(1);
+
+      await softDeleteMany(AccountModel)({});
+
+      const after = await UserModel.findMany({ include: { accounts: true } });
+      expect(after.flatMap((row: any) => row.accounts)).toHaveLength(0);
+
+      // ...and the account row is still there.
+      const stored: any = await raw.unsafe(`SELECT "id" FROM "Account"`);
+      expect([...stored]).toHaveLength(1);
+    });
+
+    // The rewrite goes through `update`, so the model's own scope applies to it:
+    // deleting an already-deleted row matches nothing, exactly as a hard delete
+    // of a missing row would.
+    test("soft-deleting an already-deleted row finds nothing", async () => {
+      (UserModel as any).$policy = softDeletes();
+      const remove = softDelete(UserModel);
+
+      await remove({ where: { id: bobId } });
+      await expect(remove({ where: { id: bobId } })).rejects.toThrow();
+    });
+
+    test("softDeleteMany reports a count and respects a where", async () => {
+      (UserModel as any).$policy = softDeletes();
+
+      const result: any = await softDeleteMany(UserModel)({
+        where: { email: "bob@x.test" },
+      });
+      expect(result.count).toBe(1);
+      expect(await UserModel.findMany({})).toHaveLength(1);
+    });
+
+    // Synchronously, before any query is built — the rewrite validates its own
+    // arguments rather than handing a contradictory pair to `update`.
+    test("a data argument is refused rather than overwritten", () => {
+      (UserModel as any).$policy = softDeletes();
+      expect(() =>
+        softDelete(UserModel)({ where: { id: aliceId }, data: { name: "x" } }),
+      ).toThrow(/takes no 'data'/);
+    });
+
+    test("a custom field name is honoured", async () => {
+      (UserModel as any).$policy = softDeletes({ field: "deletedAt" });
+      await softDelete(UserModel, { field: "deletedAt" })({
+        where: { id: bobId },
+      });
+      expect(await UserModel.findMany({})).toHaveLength(1);
+    });
+
+    // Composed through the prototype chain, which is the documented route and
+    // gets the ordering right for free: the soft-delete scope is applied first
+    // and the subclass's narrows further.
+    test("composes with another policy via a base class", async () => {
+      class SoftDeleted extends UserModel {
+        static $policy = softDeletes();
+      }
+      class Restricted extends SoftDeleted {
+        static $policy: ModelPolicy = {
+          scope: () => ({ email: { contains: "alice" } }),
+          onCreate: (_c, data) => data,
+        };
+      }
+
+      await softDelete(SoftDeleted as any)({ where: { id: aliceId } });
+
+      // Alice matches the derived scope but is soft-deleted, so the base's
+      // scope excludes her; Bob matches the base but not the derived.
+      expect(await (Restricted as any).findMany({})).toEqual([]);
+      expect(await (SoftDeleted as any).findMany({})).toHaveLength(1);
+    });
+  });
+}
+
 suite("policies (sqlite)", undefined);
+softDeleteSuite("soft deletes (sqlite)", undefined);
 
 if (POSTGRES_URL) {
   suite("policies (postgres)", POSTGRES_URL);
+  softDeleteSuite("soft deletes (postgres)", POSTGRES_URL);
 } else {
   describe("policies (postgres)", () => {
     test.skip("set TEST_POSTGRES_URL to run these against Postgres", () => {});

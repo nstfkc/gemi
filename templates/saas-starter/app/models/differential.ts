@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { PrismaClient } from "@prisma/client";
 import { DatabaseManager } from "gemi/database";
 import { Application } from "gemi/foundation";
-import { clearPlanCache } from "gemi/orm";
+import { Model, clearPlanCache } from "gemi/orm";
 import { expect } from "vitest";
 
 /**
@@ -81,6 +81,25 @@ export interface Differential {
 }
 
 export const POSTGRES_URL = process.env.TEST_POSTGRES_URL;
+
+/**
+ * Redaction is the one policy capability that makes gemi's result *deliberately*
+ * differ from Prisma's, so every comparison in this harness runs with policies
+ * suspended.
+ *
+ * The alternative — comparing a redacted payload against Prisma's — would fail
+ * for a correct implementation, and the obvious fix for that (teaching the
+ * harness which fields to ignore) is worse: it would also mask a redaction that
+ * removed the *wrong* field, which is the bug worth catching. So the contract
+ * is the one the plan asks for: the differential asserts equality against the
+ * pre-redaction payload, and redaction itself is tested where it can be
+ * asserted directly, in `policies.test.ts`.
+ *
+ * This matters even though the template declares no policies today: the moment
+ * an application adds one, every comparison here would start failing for a
+ * reason that has nothing to do with the compiler.
+ */
+const unpoliced = <T>(fn: () => Promise<T>): Promise<T> => Model.asSystem(fn);
 
 /** Every model class the generated registry knows, keyed by Prisma's own name. */
 type ModelMap = Record<string, { [op: string]: (args?: any) => Promise<any> }>;
@@ -252,7 +271,7 @@ export async function createDifferential(options: {
 
       const [fromPrisma, fromGemi] = await Promise.all([
         settle(() => prismaDelegate(prisma, model)[operation](args)),
-        settle(() => (gemiModel as any)[operation](args)),
+        settle(() => unpoliced(() => (gemiModel as any)[operation](args))),
       ]);
 
       // Both throwing is agreement — Prisma's `*OrThrow` and ours raise
@@ -297,7 +316,9 @@ export async function createDifferential(options: {
       clearPlanCache();
       const gemiModel = options.models[model];
       if (!gemiModel) throw new Error(`No gemi model registered for ${model}.`);
-      const fromGemi = await settle(() => (gemiModel as any)[operation](args));
+      const fromGemi = await settle(() =>
+        unpoliced(() => (gemiModel as any)[operation](args)),
+      );
       const afterGemi = await readTables(prisma, tables);
 
       if (fromPrisma.threw || fromGemi.threw) {

@@ -63,10 +63,18 @@ export {
 } from "./context";
 
 export {
+  softDelete,
+  softDeleteMany,
+  softDeletes,
+  type SoftDeleteOptions,
+} from "./soft-deletes";
+
+export {
   applyPolicies,
   applyRedaction,
   currentUser,
   policiesFor,
+  policyContext,
   redactNullable,
   type ModelPolicy,
   type PolicyContext,

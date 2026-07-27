@@ -33,19 +33,76 @@ import type { ModelSchema } from "./schema";
 
 export interface PolicyContext {
   /**
-   * The authenticated user, or `null`.
+   * The authenticated user.
    *
    * Read synchronously off the request store — no `await` anywhere on this
    * path, because the hook runs per query *per relation node* and an awaited
    * user would be a round trip per node. A route without the `auth` middleware
-   * therefore sees `null` even when a cookie is present, which is the correct
+   * therefore sees no user even when a cookie is present, which is the correct
    * reading: the route did not ask to authenticate.
+   *
+   * **Reading this when there is no user raises `PolicyDeniedError`.** That is
+   * where deny-by-default actually lives, and it is deliberately here rather
+   * than as an up-front check on the model: a policy that never consults the
+   * user has nothing to deny. `softDeletes()` scopes on `deletedAt: null` and
+   * is a data-integrity rule, not an authorization one — it must keep working
+   * in a cron tick, a queue worker and a seed script. An up-front "this model
+   * has a policy, so it needs a user" check made it unusable outside a request,
+   * which was wrong.
+   *
+   * Raising on *access* rather than returning null is what keeps it safe: a
+   * scope built from a null user would be `{ organizationId: undefined }`, and
+   * Prisma treats an undefined value as an absent filter — so the scope would
+   * silently vanish and the read would be unscoped. The leak, in other words,
+   * is the quiet version of this error.
+   *
+   * Check {@link hasUser} first if a policy genuinely wants to handle both.
    */
-  user: unknown;
+  readonly user: unknown;
+  /**
+   * Whether there is a user to read, for a policy that wants to branch rather
+   * than raise — a scope that differs for anonymous access, say.
+   */
+  readonly hasUser: boolean;
   /** The operation being performed, so a policy can vary by it. */
-  operation: Operation;
+  readonly operation: Operation;
   /** The model the policy is attached to. */
-  model: string;
+  readonly model: string;
+}
+
+/**
+ * Builds the context a policy sees, with `user` as an accessor that enforces
+ * deny-by-default at the moment of use.
+ *
+ * `system` suppresses the raise, because `Model.asSystem` has already said this
+ * code is not acting for anybody — a policy under it reading `user` gets
+ * `null` rather than an error, which is what lets a policy written for requests
+ * be reused by a script without rewriting it.
+ */
+export function policyContext(
+  model: string,
+  operation: Operation,
+  user: unknown,
+  system: boolean,
+): PolicyContext {
+  const context = { model, operation, hasUser: user !== null } as {
+    model: string;
+    operation: Operation;
+    hasUser: boolean;
+    user: unknown;
+  };
+
+  Object.defineProperty(context, "user", {
+    enumerable: true,
+    get() {
+      if (user === null && !system) {
+        throw new PolicyDeniedError(model, operation, "no-user");
+      }
+      return user;
+    },
+  });
+
+  return context as PolicyContext;
 }
 
 /**
@@ -209,12 +266,26 @@ export function applyPolicies(
 }
 
 /**
- * `AND`s a policy's fragment into `args.where`.
+ * Adds a policy's fragment to `args.where` as an extra `AND` member, **beside**
+ * the caller's own keys rather than wrapping them.
  *
- * Always through `AND` rather than by merging keys: a policy scoping on the
- * same field the caller filtered on must not silently replace the caller's
- * filter, and `{ AND: [caller, policy] }` is the only combination that cannot.
- * `compileWhere` flattens nested `AND`s, so this costs nothing in the SQL.
+ * Two requirements pull in opposite directions here, and getting either wrong is
+ * silent:
+ *
+ * 1. The scope must not *replace* a caller's filter on the same field, which
+ *    rules out merging keys. `{ organizationId: 9 }` scoped by
+ *    `{ organizationId: 7 }` has to mean "both", i.e. no rows.
+ * 2. The caller's top-level keys must stay at the top level, because
+ *    `matchUniqueKey` reads them there. This is the one the obvious
+ *    implementation gets wrong: `{ AND: [caller, scope] }` is semantically
+ *    correct SQL and it hides `{ id: 1 }` one level down, so **every scoped
+ *    `update` and `delete` fails** with "update needs a unique field". Found by
+ *    the soft-delete tests, and one earlier test was passing for the wrong
+ *    reason because of it — it expected a throw and got the wrong throw.
+ *
+ * `{ ...caller, AND: [...callersOwnAND, scope] }` satisfies both: `AND` is a
+ * sibling key in Prisma's `where` grammar and `compileWhere` treats it as one,
+ * so the scope is conjoined without moving anything the caller wrote.
  */
 function withScope(args: any, scope: unknown): any {
   const where = args?.where;
@@ -223,7 +294,20 @@ function withScope(args: any, scope: unknown): any {
     return { ...args, where: scope };
   }
 
-  return { ...args, where: { AND: [where, scope] } };
+  if (typeof where !== "object" || Array.isArray(where)) {
+    return { ...args, where: { AND: [where, scope] } };
+  }
+
+  // The caller may already have an `AND`, as an array or a bare object.
+  const existing = where.AND;
+  const members =
+    existing === undefined || existing === null
+      ? []
+      : Array.isArray(existing)
+        ? existing
+        : [existing];
+
+  return { ...args, where: { ...where, AND: [...members, scope] } };
 }
 
 /** Runs an `onCreate` over whichever shape the operation's payload takes. */

@@ -17,7 +17,6 @@ import {
 import { dialectFor, type SqlDialect } from "./dialect";
 import {
   MissingModelSchemaError,
-  PolicyDeniedError,
   RecordNotFoundError,
   UniqueConstraintError,
 } from "./errors";
@@ -27,6 +26,7 @@ import {
   applyRedaction,
   currentUser,
   policiesFor,
+  policyContext,
   type ModelPolicy,
   type PolicyContext,
 } from "./policy";
@@ -201,18 +201,17 @@ export abstract class Model {
     // `asSystem` suspends the whole hook, not just the no-user check: a script
     // that has said it is a script should not then be scoped to a user that
     // happens to be in the request store.
-    const policies = isSystemScope() ? [] : policiesFor(this);
+    const system = isSystemScope();
+    const policies = system ? [] : policiesFor(this);
     let policy: PolicyContext | undefined;
     let effective = args;
 
     if (policies.length > 0) {
-      policy = { user: currentUser(), operation: op, model: schema.name };
-
-      // Deny by default. "No user" is not "no policy" — see PolicyDeniedError.
-      if (policy.user === null) {
-        throw new PolicyDeniedError(schema.name, op, "no-user");
-      }
-
+      // Deny-by-default lives on the context's `user` accessor, not here: a
+      // policy that never consults the user — a soft-delete scope, say — has
+      // nothing to deny and must keep working with no request in sight. See
+      // `policyContext`.
+      policy = policyContext(schema.name, op, currentUser(), system);
       effective = applyPolicies(policies, policy, args);
     }
 

@@ -6,6 +6,7 @@ import {
   applyPolicies,
   applyRedaction,
   policiesFor,
+  policyContext,
   redactNullable,
   type ModelPolicy,
   type PolicyContext,
@@ -25,10 +26,11 @@ import {
 function context(overrides: Partial<PolicyContext> = {}): PolicyContext {
   return {
     user: { id: 1, organizationId: 7 },
+    hasUser: true,
     operation: "findMany" as any,
     model: "User",
     ...overrides,
-  };
+  } as PolicyContext;
 }
 
 describe("dispatch through the prototype chain", () => {
@@ -156,20 +158,50 @@ describe("scope", () => {
     const args = { where: { organizationId: 9 } };
 
     expect(applyPolicies(policies, context(), args)).toEqual({
-      where: { AND: [{ organizationId: 9 }, { organizationId: 7 }] },
+      where: { organizationId: 9, AND: [{ organizationId: 7 }] },
     });
   });
 
-  test("two policies nest, base outermost", () => {
+  /**
+   * The caller's keys stay at the *top level*. Not cosmetic: `matchUniqueKey`
+   * reads them there, so wrapping them in `{ AND: [caller, scope] }` — which is
+   * equally correct SQL — makes every scoped `update` and `delete` fail with
+   * "needs a unique field".
+   */
+  test("the caller's unique key is not buried by the scope", () => {
+    const policies = [{ scope: () => ({ deletedAt: null }) }];
+    const out = applyPolicies(policies, context(), { where: { id: 1 } });
+
+    expect(out.where.id).toBe(1);
+    expect(out.where.AND).toEqual([{ deletedAt: null }]);
+  });
+
+  test("two policies both land in the same AND, base first", () => {
     const policies = [
       { scope: () => ({ deletedAt: null }) },
       { scope: () => ({ organizationId: 7 }) },
     ];
 
     expect(applyPolicies(policies, context(), { where: { id: 1 } })).toEqual({
-      where: {
-        AND: [{ AND: [{ id: 1 }, { deletedAt: null }] }, { organizationId: 7 }],
-      },
+      where: { id: 1, AND: [{ deletedAt: null }, { organizationId: 7 }] },
+    });
+  });
+
+  test("a caller's own AND is extended, not replaced", () => {
+    const policies = [{ scope: () => ({ deletedAt: null }) }];
+    const args = { where: { AND: [{ name: "a" }, { globalRole: 1 }] } };
+
+    expect(applyPolicies(policies, context(), args)).toEqual({
+      where: { AND: [{ name: "a" }, { globalRole: 1 }, { deletedAt: null }] },
+    });
+  });
+
+  test("a caller's bare-object AND is normalised into the list", () => {
+    const policies = [{ scope: () => ({ deletedAt: null }) }];
+    const args = { where: { AND: { name: "a" } } };
+
+    expect(applyPolicies(policies, context(), args)).toEqual({
+      where: { AND: [{ name: "a" }, { deletedAt: null }] },
     });
   });
 
@@ -388,6 +420,92 @@ describe("redaction", () => {
     const row: any = { id: 1 };
     expect(() => redactNullable(user, row, ["password"])).not.toThrow();
     expect("password" in row).toBe(false);
+  });
+});
+
+/**
+ * Deny-by-default lives on the context's `user` accessor rather than on an
+ * up-front "this model has a policy" check.
+ *
+ * The distinction is what makes `softDeletes()` usable at all: it scopes on
+ * `deletedAt: null`, never consults the user, and is a data-integrity rule
+ * rather than an authorization one — so it has to keep working in a cron tick.
+ * An up-front check denied it, which was wrong, and the soft-delete tests are
+ * what found that.
+ */
+describe("deny-by-default, on access", () => {
+  test("a policy that never reads the user works with no user", () => {
+    const soft: ModelPolicy = { scope: () => ({ deletedAt: null }) };
+    const out = applyPolicies(
+      [soft],
+      policyContext("User", "findMany" as any, null, false),
+      {},
+    );
+    expect(out).toEqual({ where: { deletedAt: null } });
+  });
+
+  test("a policy that reads the user is denied when there is none", () => {
+    const tenant: ModelPolicy = {
+      scope: (context) => ({ organizationId: (context.user as any).organizationId }),
+    };
+    expect(() =>
+      applyPolicies(
+        [tenant],
+        policyContext("User", "findMany" as any, null, false),
+        {},
+      ),
+    ).toThrow(PolicyDeniedError);
+  });
+
+  /**
+   * Why it raises on access instead of handing back null: a scope built from a
+   * null user is `{ organizationId: undefined }`, and an undefined value is an
+   * *absent* filter — so the scope would silently vanish and the read would be
+   * unscoped. The error is the loud version of the leak.
+   */
+  test("the denial happens before any scope is built", () => {
+    let built = false;
+    const tenant: ModelPolicy = {
+      scope: (context) => {
+        const scope = { organizationId: (context.user as any).organizationId };
+        built = true;
+        return scope;
+      },
+    };
+
+    expect(() =>
+      applyPolicies(
+        [tenant],
+        policyContext("User", "findMany" as any, null, false),
+        {},
+      ),
+    ).toThrow(PolicyDeniedError);
+    expect(built).toBe(false);
+  });
+
+  test("under system, reading the user gives null rather than raising", () => {
+    const context = policyContext("User", "findMany" as any, null, true);
+    expect(context.user).toBeNull();
+    expect(context.hasUser).toBe(false);
+  });
+
+  // For a policy that wants to serve anonymous access differently rather than
+  // refuse it.
+  test("hasUser lets a policy branch instead of raising", () => {
+    const optional: ModelPolicy = {
+      scope: (context) =>
+        context.hasUser
+          ? { organizationId: (context.user as any).organizationId }
+          : { published: true },
+    };
+
+    expect(
+      applyPolicies(
+        [optional],
+        policyContext("Post", "findMany" as any, null, false),
+        {},
+      ),
+    ).toEqual({ where: { published: true } });
   });
 });
 
