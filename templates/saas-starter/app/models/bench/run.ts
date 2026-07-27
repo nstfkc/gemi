@@ -51,10 +51,13 @@ async function main() {
   const notes: string[] = [];
 
   let micro = "";
+  const positional: string[] = [];
 
   const sqlite = await sqliteWorkspace();
   try {
-    results.push(...(await runDialect("sqlite", sqlite.url, `file:${sqlite.path}`)));
+    results.push(
+      ...(await runDialect("sqlite", sqlite.url, `file:${sqlite.path}`, positional)),
+    );
     // Inside the dialect's own setup, because `Model.transaction` resolves the
     // DatabaseManager from the container and `runDialect` restores the previous
     // Application on the way out. Dialect-independent otherwise — these are
@@ -65,7 +68,9 @@ async function main() {
   }
 
   if (POSTGRES_URL) {
-    results.push(...(await runDialect("postgres", POSTGRES_URL, POSTGRES_URL)));
+    results.push(
+      ...(await runDialect("postgres", POSTGRES_URL, POSTGRES_URL, positional)),
+    );
     if (/localhost|127\.0\.0\.1|::1/.test(POSTGRES_URL)) {
       notes.push(
         "**Postgres numbers were taken over loopback**, which understates " +
@@ -117,6 +122,18 @@ async function main() {
     "",
     micro,
     "",
+    "## Positional row mode (deliverable 4)",
+    "",
+    "Bun's query object exposes `.values()`, which returns rows as arrays rather",
+    "than objects — verified, not assumed. Below is driver-side time for the",
+    "1000-row read in each mode, which is the **ceiling** on what index-based",
+    "shaping could win from the execute side; the shaper's own saving is separate",
+    "and is the `shape` column in the table above.",
+    "",
+    "| Dialect | object mode p50/p95 µs | `.values()` p50/p95 µs | p50 delta |",
+    "| --- | --: | --: | --: |",
+    ...positional,
+    "",
     "## What these say about the rest of iteration 7",
     "",
     "The plan orders the benchmark first because the risk is optimising the",
@@ -127,19 +144,36 @@ async function main() {
     "   queries, largest on the 1000-row read where Prisma pays engine-boundary",
     "   serialisation per row. Nothing below changes that conclusion.",
     "2. **Shaping is the only stage with real headroom, and only on SQLite.**",
-    "   192µs of a 568µs 1000-row read is 34% — so deliverable 4 (generated",
-    "   shapers, positional rows) is justified by measurement, and its ceiling is",
-    "   about a third of that scenario. On Postgres the same shaping is 10% of",
-    "   the total, because the round trip is 20× more expensive than it is",
-    "   in-process.",
-    "3. **`execute` dominates Postgres — 84% of the 1000-row read.** So the",
-    "   lateral strategy in deliverable 2 cannot be justified as *per-query*",
-    "   speed; its case is round-trip **count**, which this table does not yet",
-    "   isolate because the depth-2 batched plan is already only two round trips.",
-    "   The depth-3 scenario (4) and a real socket are what would show it, and",
-    "   both are still missing. **Deliverable 2 is not yet justified by",
-    "   measurement** — which is exactly the finding deliverable 1 exists to",
-    "   produce, and it should be built only after scenario 4 exists.",
+    "   ~190µs of a ~600µs 1000-row read is roughly a third — so the *shaper*",
+    "   half of deliverable 4 is justified by measurement, and that third is its",
+    "   ceiling. On Postgres the same shaping is ~16% of the total, because the",
+    "   round trip is an order of magnitude dearer than it is in-process.",
+    "",
+    "   **The positional-row half is not justified.** `.values()` exists — that",
+    "   much is verified rather than assumed — but the table above has it 14%",
+    "   *slower* on SQLite and 17% faster on Postgres, and the sign flipped",
+    "   between runs at lower sample counts. With p95 nearly double p50 on",
+    "   Postgres, this workload cannot resolve the difference. Index-based",
+    "   shaping should be judged on the shaper\u0027s own saving, not on a driver",
+    "   mode whose effect is inside the noise.",
+    "3. **Deliverable 2 (lateral + `json_agg`) is not justified, and scenario 4",
+    "   is what settles it.** The lateral strategy\u0027s case is round-trip count, so",
+    "   depth 3 was supposed to show the batched planner falling behind. It does",
+    "   not: on Postgres gemi\u0027s depth-3 include is *no slower than its depth-2*",
+    "   one, and both sit at ~1.1× hand-written SQL.",
+    "",
+    "   The reason is structural rather than lucky. The batched planner issues one",
+    "   query per include **node**, not per row — so depth 3 is three round trips",
+    "   against the lateral form\u0027s one, and two saved round trips cannot show up",
+    "   against a total that is already at the floor. A lateral rewrite would be",
+    "   trading a measurable ~1.1× for an unmeasurable one, at the cost of a",
+    "   second relation-loading implementation — which the plan itself warns",
+    "   doubles the surface for shape divergence.",
+    "",
+    "   **Recommendation: do not build it.** Revisit only with a workload this",
+    "   suite does not have — a deeper tree, or a real network where three RTTs",
+    "   are three milliseconds rather than three hundred microseconds. That is a",
+    "   finding, not a deferral, and it is what deliverable 1 exists to produce.",
     "4. **A transaction costs one extra round trip pair, and that is the whole",
     "   cost.** +12µs on SQLite, +350µs on Postgres — against a ~25ns ALS read.",
     "   Iteration 5's second `AsyncLocalStorage` is nowhere in the number; the",
@@ -331,6 +365,7 @@ async function runDialect(
   dialect: string,
   gemiUrl: string,
   prismaUrl: string,
+  positional: string[],
 ): Promise<ScenarioResult[]> {
   const database = new DatabaseManager({ url: gemiUrl });
   const raw = new SQL(gemiUrl);
@@ -431,12 +466,8 @@ async function runDialect(
             `select * from "User" limit ${PARENTS}`,
           );
           const ids = [...parents].map((row: any) => row.id);
-          const placeholders =
-            dialect === "sqlite"
-              ? ids.map(() => "?").join(", ")
-              : ids.map((_, i) => `$${i + 1}`).join(", ");
           await raw.unsafe(
-            `select * from "Account" where "userId" in (${placeholders})`,
+            `select * from "Account" where "userId" in (${placeholders(ids, dialect)})`,
             ids,
           );
         },
@@ -458,6 +489,104 @@ async function runDialect(
         connection: database.sql,
       }),
     );
+
+    // --- 4. depth-3 include -----------------------------------------------
+    // Round-trip-dominated on Postgres, and the scenario that decides whether
+    // deliverable 2 (lateral + json_agg) is worth building: the batched planner
+    // issues one query per include *node*, so depth 3 is three round trips
+    // against the lateral form's one. Depth 2 could not show this because two
+    // round trips is close enough to one to be lost in variance.
+    //
+    // User -> accounts -> organization, which is the deepest chain the
+    // template's schema offers.
+    results.push(
+      await scenario({
+        name: `4. depth-3 include, ${PARENTS} parents`,
+        dialect,
+        rows: PARENTS,
+        runs: 30,
+        raw: async () => {
+          // Three round trips by hand, matching what the batched planner does,
+          // so the floor is the same shape rather than a straw man.
+          const parents: any = await database.sql.unsafe(
+            `select * from "User" limit ${PARENTS}`,
+          );
+          const userIds = [...parents].map((row: any) => row.id);
+          const accounts: any = await database.sql.unsafe(
+            `select * from "Account" where "userId" in (${placeholders(userIds, dialect)})`,
+            userIds,
+          );
+          const orgIds = [
+            ...new Set(
+              [...accounts]
+                .map((row: any) => row.organizationId)
+                .filter((id: unknown) => id !== null),
+            ),
+          ];
+          if (orgIds.length > 0) {
+            await database.sql.unsafe(
+              `select * from "Organization" where "id" in (${placeholders(orgIds, dialect)})`,
+              orgIds,
+            );
+          }
+        },
+        prisma: prismaSpeaks
+          ? () =>
+              prisma.user.findMany({
+                take: PARENTS,
+                include: { accounts: { include: { organization: true } } },
+              })
+          : undefined,
+        gemi: () =>
+          UserModel.findMany({
+            take: PARENTS,
+            include: { accounts: { include: { organization: true } } },
+          }),
+        stages: {
+          schema: UserModel.$schema,
+          operation: "findMany",
+          args: {
+            take: PARENTS,
+            include: { accounts: { include: { organization: true } } },
+          },
+        },
+        sqlDialect,
+        connection: database.sql,
+      }),
+    );
+
+    // --- 4b. positional row mode ------------------------------------------
+    // Deliverable 4 proposes index-based shaping over Bun's `.values()`, which
+    // skips per-row key hashing on both sides. The API exists — verified, it
+    // returns `[[1, "x", 1.5], ...]` — so the open question is whether it is
+    // worth the shaper rewrite. Timed as driver-only work on the 1000-row read,
+    // which is the scenario with headroom, so the number below is the *ceiling*
+    // on what deliverable 4 could win from the execute side.
+    {
+      const plan = getOrCompile(
+        UserModel.$schema,
+        "findMany" as any,
+        {},
+        sqlDialect,
+      );
+      // 200 runs, not 30. At 30 this measurement flipped sign between runs —
+      // +15% one time, -9% the next — which is the signature of reading noise as
+      // a result. p95 is reported alongside p50 so the spread is visible rather
+      // than hidden behind a single number.
+      const objectMode = await time(() => database.sql.unsafe(plan.text, []), {
+        runs: 200,
+      });
+      const valuesMode = await time(
+        () => (database.sql.unsafe(plan.text, []) as any).values(),
+        { runs: 200 },
+      );
+      const delta = (1 - valuesMode.p50 / objectMode.p50) * 100;
+      positional.push(
+        `| ${dialect} | ${objectMode.p50.toFixed(1)} / ${objectMode.p95.toFixed(1)} | ` +
+          `${valuesMode.p50.toFixed(1)} / ${valuesMode.p95.toFixed(1)} | ` +
+          `${delta > 0 ? "+" : ""}${delta.toFixed(0)}% |`,
+      );
+    }
 
     // --- 5. writes ---------------------------------------------------------
     // `create` on a fresh email each call, so no scenario measures a unique
@@ -664,6 +793,13 @@ async function scenario(spec: ScenarioSpec): Promise<ScenarioResult> {
     gemi: stages,
     rows: spec.rows,
   };
+}
+
+/** Dialect-appropriate placeholders for an `in` list of `values`. */
+function placeholders(values: unknown[], dialect: string): string {
+  return dialect === "sqlite"
+    ? values.map(() => "?").join(", ")
+    : values.map((_, index) => `$${index + 1}`).join(", ");
 }
 
 /** Enough rows for the large-read and include scenarios to mean something. */
