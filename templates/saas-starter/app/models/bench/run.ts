@@ -432,8 +432,6 @@ function lateralConclusion(
   const depth2Raw = measured(results, "postgres", "3.", "raw");
   const depth3Raw = measured(results, "postgres", "4.", "raw");
 
-  // Two levels added between one round trip and three.
-  const perLevel = (depth3 - noInclude) / 2;
   // The win, argued from the *count* rather than from a wall-clock delta.
   //
   // The count is deterministic — one query per include node — and the cost of one

@@ -44,3 +44,5 @@ export {
   type RelationStrategy,
 } from "./plan-relations";
 export * from "./fragment";
+
+export { lateralStrategy } from "./lateral";

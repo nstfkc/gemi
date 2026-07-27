@@ -122,6 +122,8 @@ export {
   type RelationStrategy,
 } from "./compile/plan-relations";
 
+export { lateralStrategy } from "./compile/lateral";
+
 export {
   PostgresDialect,
   SqliteDialect,
