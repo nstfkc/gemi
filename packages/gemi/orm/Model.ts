@@ -105,6 +105,41 @@ export abstract class Model {
    *       const user = await User.create({ data: { email } })
    *       await audit(user)          // its queries are in the transaction too
    *     })
+   *
+   * **KNOWN DIALECT ASYMMETRY — catching an error inside a transaction.**
+   * The sentence above holds for a *nested* `Model.transaction`. It does not
+   * hold for a bare statement: on Postgres any failed statement aborts the
+   * whole transaction block, so catching it and carrying on loses everything.
+   * SQLite does not care. Verified against Postgres 16 and SQLite:
+   *
+   *     await Model.transaction(async () => {
+   *       try { await User.create({ data: { email } }) }
+   *       catch (e) { if (!(e instanceof UniqueConstraintError)) throw e }
+   *       await Audit.create({ ... })   // fine on SQLite; on Postgres this
+   *     })                              // throws 'current transaction is
+   *                                     // aborted', and the whole transaction
+   *                                     // is lost
+   *
+   * That is a bug that passes in development on SQLite and takes out the
+   * transaction in production on Postgres, with an error naming neither the
+   * statement that failed nor the one that caused it.
+   *
+   * The fix is already here: wrap the fallible statement in a nested
+   * `Model.transaction`, which makes it a savepoint, and rolling back to that
+   * savepoint clears the aborted state. Works on both dialects.
+   *
+   *     await Model.transaction(async () => {
+   *       try {
+   *         await Model.transaction(() => User.create({ data: { email } }))
+   *       } catch (e) { if (!(e instanceof UniqueConstraintError)) throw e }
+   *       await Audit.create({ ... })   // fine on both
+   *     })
+   *
+   * **One statement at a time.** Every query in scope runs on one reserved
+   * connection, so `Promise.all` over several ORM calls inside the callback is
+   * not safe here — the ordinary, encouraged thing everywhere else in a Bun
+   * codebase. Await them in sequence. (`$exec` already runs its own nested
+   * writes and relation reads sequentially for this reason.)
    */
   static transaction<T>(fn: () => Promise<T>): Promise<T> {
     return withTransaction(app(DatabaseManager).sql, () => fn());

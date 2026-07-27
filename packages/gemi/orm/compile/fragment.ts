@@ -108,11 +108,16 @@ export function render(
   fragment: Fragment,
   dialect: SqlDialect,
   /**
-   * Where the statement came from, for the parameter-ceiling error. Optional so
-   * a fragment can still be rendered in isolation by a test; every compiler
-   * passes it.
+   * Where the statement came from, for the parameter-ceiling error.
+   *
+   * Required, and deliberately so. Optional would reintroduce in miniature the
+   * hole this check exists to close — a new call site that omits it skips the
+   * ceiling silently, which is the same failure as a per-compiler guard, one
+   * level down. Making it required is the difference between a convention and
+   * something `tsc` enforces. A test that wants to render bare can pass
+   * `{ model: "test", operation: "test" }`.
    */
-  origin?: { model: string; operation: string },
+  origin: { model: string; operation: string },
 ): { text: string; binders: Binder[] } {
   const segments = fragment.text.split(PARAM_MARKER);
   const count = segments.length - 1;
@@ -143,7 +148,7 @@ export function render(
   // Compile-time is exact rather than approximate, on both dialects: where the
   // length changes the placeholder count it also changes the SQL text, so it is
   // already part of the plan's identity.
-  if (origin && count > dialect.maxBoundParameters) {
+  if (count > dialect.maxBoundParameters) {
     throw new ParameterLimitError(
       origin.model,
       origin.operation,

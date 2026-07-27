@@ -132,6 +132,22 @@ export function withTransaction<T>(
 ): Promise<T> {
   const current = ormContext.getStore();
 
+  // SINGLE-CONNECTION ASSUMPTION, pinned here so it is found rather than
+  // discovered. The savepoint branch ignores `pool` entirely, which is correct
+  // today: there is one `DatabaseManager` and one `SQL`, so the ambient handle
+  // and whatever pool the caller passed are necessarily the same database.
+  //
+  // It stops being correct the moment a second connection is configurable. A
+  // `DB.transaction` against connection B, called inside a `Model.transaction`
+  // on A, would open a savepoint on **A** and hand the callback A's handle —
+  // statements landing in the wrong database, with no error. That is the same
+  // failure shape as the "handle on the Application" alternative this file
+  // argues against. Multi-connection support must compare the two and either
+  // join or refuse, not fall through to here.
+  //
+  // `current?.tx` rather than `current`: since iteration 6 a scope can exist
+  // with no open transaction — `Model.asSystem` enters one — and a savepoint
+  // needs an actual handle, not merely a store.
   if (current?.tx) {
     return current.tx.savepoint((sp) => {
       const nested = sp as TransactionSQL;
