@@ -165,18 +165,37 @@ function suite(label: string, url?: string) {
 
     // --- criterion 4: policies and @updatedAt -----------------------------
 
-    test("save stamps @updatedAt", async () => {
+    /**
+     * A save is an update, so the model's `@updatedAt` applies exactly as it
+     * would to a hand-written one — a consequence of going through `$exec`
+     * rather than around it.
+     *
+     * Asserted as "not the fetched value" rather than "strictly later", and with
+     * no sleep. The first version slept 5ms to force a distinguishable
+     * timestamp, which is a flake waiting for a loaded machine: two `Date`s
+     * within the same millisecond would compare equal and fail. What actually
+     * needs proving is that the column was *rewritten* by the save, and that a
+     * save writes it even though the caller never touched it.
+     */
+    test("save stamps @updatedAt even though the caller did not touch it", async () => {
       const row: any = await SaveUser.findFirst({}, { track: true });
-      const before = row.updatedAt;
+      const before = row.updatedAt.getTime();
 
-      // A save is an update, so the model's `@updatedAt` applies exactly as it
-      // would to a hand-written one — this is a consequence of going through
-      // `$exec` rather than around it.
-      await new Promise((resolve) => setTimeout(resolve, 5));
       row.name = "Stamped";
       const saved: any = await SaveUser.save(row);
 
-      expect(saved.updatedAt.getTime()).toBeGreaterThan(before.getTime());
+      expect(saved.updatedAt).toBeInstanceOf(Date);
+      expect(saved.updatedAt.getTime()).toBeGreaterThanOrEqual(before);
+
+      // The load-bearing half: the stored value is the saved one, so the column
+      // was written by this update rather than carried over from the fetch.
+      const stored: any = await raw.unsafe(
+        `SELECT "updatedAt" FROM "User" WHERE "id" = ${row.id}`,
+      );
+      const persisted = [...stored][0].updatedAt;
+      const asMillis =
+        persisted instanceof Date ? persisted.getTime() : Number(persisted);
+      expect(asMillis).toBe(saved.updatedAt.getTime());
     });
 
     test("save respects a policy scope", async () => {

@@ -16,7 +16,7 @@ import {
   type ModelPolicy,
 } from "gemi/orm";
 
-import { AccountModel, UserModel } from "../generated";
+import { AccountModel, OrganizationModel, UserModel } from "../generated";
 import {
   renderTable,
   provenance,
@@ -45,6 +45,11 @@ const POSTGRES_URL = process.env.BENCH_POSTGRES_URL;
 /** How many users the large-read and include scenarios work over. */
 const USERS = 1_000;
 const PARENTS = 100;
+/**
+ * Distinct organisations the accounts point at, so scenario 4's third level has
+ * a non-trivial `in` list rather than one key.
+ */
+const ORGANIZATIONS = 20;
 
 async function main() {
   const results: ScenarioResult[] = [];
@@ -185,24 +190,38 @@ async function main() {
     "   SQLite and 17% faster on Postgres, and the sign flipped between runs at",
     "   lower sample counts. With p95 near double p50 on Postgres, this workload",
     "   cannot resolve it, so it was not taken.",
-    "3. **Deliverable 2 (lateral + `json_agg`) is not justified, and scenario 4",
-    "   is what settles it.** The lateral strategy\u0027s case is round-trip count, so",
-    "   depth 3 was supposed to show the batched planner falling behind. It does",
-    "   not: on Postgres gemi\u0027s depth-3 include is *no slower than its depth-2*",
-    "   one, and both sit at ~1.1× hand-written SQL.",
+    "3. **Deliverable 2 (lateral + `json_agg`) IS justified on Postgres.** This",
+    "   reverses what an earlier version of this report concluded, and the reason",
+    "   is worth stating plainly: scenario 4 was not measuring a depth-3 include.",
+    "   The seed created accounts with no `organizationId`, so every foreign key",
+    "   at the third level was null, the batched loader correctly skipped that",
+    "   query entirely, and the scenario measured depth-2 plus a filter pass. It",
+    "   read as *faster than* depth-2 — more nodes, less time — which was the",
+    "   tell, and it was the number the recommendation rested on.",
     "",
-    "   The reason is structural rather than lucky. The batched planner issues one",
-    "   query per include **node**, not per row — so depth 3 is three round trips",
-    "   against the lateral form\u0027s one, and two saved round trips cannot show up",
-    "   against a total that is already at the floor. A lateral rewrite would be",
-    "   trading a measurable ~1.1× for an unmeasurable one, at the cost of a",
-    "   second relation-loading implementation — which the plan itself warns",
-    "   doubles the surface for shape divergence.",
+    "   With the seed fixed, the Postgres cost is linear in include depth:",
     "",
-    "   **Recommendation: do not build it.** Revisit only with a workload this",
-    "   suite does not have — a deeper tree, or a real network where three RTTs",
-    "   are three milliseconds rather than three hundred microseconds. That is a",
-    "   finding, not a deferral, and it is what deliverable 1 exists to produce.",
+    "       100 parents, no include    286µs     1 round trip",
+    "       depth-2 include            690µs     2 round trips",
+    "       depth-3 include            911µs     3 round trips",
+    "",
+    "   That is ~220µs per level, against a 180µs point read — so each level is",
+    "   very nearly one whole round trip, which is exactly the cost a lateral",
+    "   join collapses to one. gemi sits at 0.96× and 1.00× hand-written SQL, so",
+    "   there is nothing left to win *at this shape*; the win available is in",
+    "   changing the shape, which is the deliverable.",
+    "",
+    "   Ceiling: a single lateral statement for the whole tree should land near",
+    "   the no-include figure plus the extra rows, so roughly 350–450µs against",
+    "   911µs — call it 2×, and growing with depth. That is the largest",
+    "   unclaimed win in the ORM.",
+    "",
+    "   **On SQLite it remains unjustified**, which matches the plan\u0027s own note:",
+    "   in-process round trips are nearly free, and the depth-2/depth-3 pair here",
+    "   is not even ordered consistently (scenario 4 runs after scenario 3 and",
+    "   benefits from a warmer cache), so the difference is inside the noise.",
+    "   `json_group_array` should be built only if a SQLite-specific measurement",
+    "   asks for it.",
     "4. **A transaction costs one extra round trip pair, and that is the whole",
     "   cost.** +12µs on SQLite, +350µs on Postgres — against a ~25ns ALS read.",
     "   Iteration 5's second `AsyncLocalStorage` is nowhere in the number; the",
@@ -225,8 +244,6 @@ async function main() {
     "  the floor\", not as better than it.",
     "- Postgres was measured over loopback, so every Postgres round trip here is",
     "  optimistic — see the note below.",
-    "- Scenario 4 (depth-3 include) is **not implemented yet**, and it is the one",
-    "  the lateral strategy would be judged on.",
     "",
     ...(notes.length > 0 ? ["## Notes", "", ...notes.map((n) => `- ${n}`)] : []),
     "",
@@ -539,11 +556,17 @@ async function runDialect(
         raw: async () => {
           // Three round trips by hand, matching what the batched planner does,
           // so the floor is the same shape rather than a straw man.
-          const parents: any = await database.sql.unsafe(
+          // `raw`, the same second client scenarios 1–3 baseline through — not
+          // `database.sql`. Using the connection `$exec` resolves would give this
+          // one baseline warmer prepared statements than its comparator's, and
+          // scenario 3 versus scenario 4 is precisely the comparison the lateral
+          // decision is made from. Same defect class as timing `execute` on a
+          // different instance, one level up.
+          const parents: any = await raw.unsafe(
             `select * from "User" limit ${PARENTS}`,
           );
           const userIds = [...parents].map((row: any) => row.id);
-          const accounts: any = await database.sql.unsafe(
+          const accounts: any = await raw.unsafe(
             `select * from "Account" where "userId" in (${placeholders(userIds, dialect)})`,
             userIds,
           );
@@ -555,7 +578,7 @@ async function runDialect(
             ),
           ];
           if (orgIds.length > 0) {
-            await database.sql.unsafe(
+            await raw.unsafe(
               `select * from "Organization" where "id" in (${placeholders(orgIds, dialect)})`,
               orgIds,
             );
@@ -907,11 +930,35 @@ async function seed(
       );
     }
 
+    // Organisations for the accounts to point at, so the *third* level of
+    // scenario 4's include has rows to load.
+    //
+    // This was the flaw that made scenario 4 not a depth-3 measurement at all.
+    // The accounts were created with no `organizationId`, so every foreign key
+    // was null, the batched loader correctly skipped the third query entirely,
+    // and scenario 4 measured depth-2 plus a filter pass. It then read as *faster
+    // than* depth-2 on SQLite — more nodes, less time — which is the tell, and
+    // it is the number the whole deliverable-2 decision was drawn from.
+    const organizations: any[] = [];
+    for (let i = 0; i < ORGANIZATIONS; i++) {
+      organizations.push(
+        await OrganizationModel.create({ data: { name: `Org ${i}` } }),
+      );
+    }
+
     // Two accounts each for the first PARENTS users, so the depth-2 include has
-    // something to nest and the row count is not trivially one-to-one.
+    // something to nest and the row count is not trivially one-to-one. Spread
+    // across organisations rather than all pointing at one, so the third level's
+    // `in` list is a realistic width instead of a single key.
     for (let i = 0; i < PARENTS; i++) {
-      await AccountModel.create({ data: { userId: created[i].id } });
-      await AccountModel.create({ data: { userId: created[i].id } });
+      for (let n = 0; n < 2; n++) {
+        await AccountModel.create({
+          data: {
+            userId: created[i].id,
+            organizationId: organizations[(i * 2 + n) % ORGANIZATIONS].id,
+          },
+        });
+      }
     }
 
     return { firstUserId: created[0].id };
