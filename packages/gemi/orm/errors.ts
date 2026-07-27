@@ -196,6 +196,13 @@ export class PolicyDeniedError extends Error {
  * Raised at the first query through the unregistered class, naming the one-line
  * fix, because the alternative is data crossing a tenant boundary with nothing
  * to notice it.
+ *
+ * It fires on a divergence in the resolved policy *chain*, not merely on the two
+ * classes differing. A plain subclass that adds no policy of its own inherits
+ * the same policy objects in the same order, so a nested read resolving to its
+ * parent applies exactly what the root query applied — no divergence, nothing
+ * to refuse. An earlier version compared class identity and rejected
+ * `class AdminUser extends User {}` for policies it had not written.
  */
 export class UnregisteredPolicyClassError extends Error {
   constructor(

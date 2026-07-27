@@ -208,21 +208,40 @@ export abstract class Model {
     let effective = args;
 
     if (policies.length > 0) {
-      // The registry must resolve this model's name to *this* class, or nested
-      // relation reads — which go through the registry — would run on a
-      // different class and skip these policies entirely. Scoped at the root,
-      // unscoped inside an include; see `UnregisteredPolicyClassError`. Checked
-      // here rather than at registration because a class can acquire a policy
-      // at any point after it is defined.
+      // A nested relation read resolves its target through the registry, so it
+      // runs whatever is registered under this model's name — not necessarily
+      // the class the caller queried. If the two disagree about *policies*, the
+      // same query is scoped at the root and unscoped inside an include. See
+      // `UnregisteredPolicyClassError`.
+      //
+      // The comparison is on the resolved policy **chain**, not on class
+      // identity, and the difference matters: a plain subclass of a registered,
+      // policied class carries the same policy objects in the same order by
+      // inheritance, so a nested read resolving to the parent applies exactly
+      // what the root query applied. There is no divergence and nothing to
+      // refuse. Checking identity instead rejected `class AdminUser extends User
+      // {}` — a typed view that adds nothing — with an error about policies it
+      // did not write.
+      //
+      // Checked here rather than at registration because a class can acquire a
+      // policy at any point after it is defined.
       const registered = registry.has(schema.name)
         ? registry.get<unknown>(schema.name)
         : undefined;
+
       if (registered !== undefined && registered !== this) {
-        throw new UnregisteredPolicyClassError(
-          schema.name,
-          (registered as { name?: string }).name ?? String(registered),
-          this.name,
-        );
+        const theirs = policiesFor(registered);
+        const diverges =
+          policies.length !== theirs.length ||
+          policies.some((policy, index) => policy !== theirs[index]);
+
+        if (diverges) {
+          throw new UnregisteredPolicyClassError(
+            schema.name,
+            (registered as { name?: string }).name ?? String(registered),
+            this.name,
+          );
+        }
       }
 
       // Deny-by-default lives on the context's `user` accessor, not here: a
