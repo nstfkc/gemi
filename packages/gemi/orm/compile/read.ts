@@ -13,7 +13,7 @@ import {
   sql,
 } from "./fragment";
 import { compileOrderBy, parseOrderBy, reverse, type OrderTerm } from "./orderBy";
-import { planRelations } from "./plan-relations";
+import { planRelations, strategiesOf } from "./plan-relations";
 import { resolveSelection, withKeyFields } from "./select";
 import { assertUniqueWhere } from "./unique";
 import { compileWhere } from "./where";
@@ -159,6 +159,7 @@ export function compileRead(
     text,
     bind: bindValues(binders),
     relations: plans.length > 0 ? plans : undefined,
+    strategies: plans.length > 0 ? strategiesOf(plans) : undefined,
     hidden,
     shape(rows) {
       const shaped = shaper(rows);

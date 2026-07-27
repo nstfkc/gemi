@@ -24,7 +24,7 @@ import {
   type NestedWritePlanning,
   planNestedWrites,
 } from "./nested-writes";
-import { planRelations } from "./plan-relations";
+import { planRelations, strategiesOf } from "./plan-relations";
 import { resolveSelection, withKeyFields } from "./select";
 import { matchUniqueKey } from "./unique";
 import { compileWhere } from "./where";
@@ -1195,6 +1195,10 @@ function plan(
     text,
     bind: bindValues(binders),
     relations: returning.relations.length > 0 ? returning.relations : undefined,
+    strategies:
+      returning.relations.length > 0
+        ? strategiesOf(returning.relations)
+        : undefined,
     hidden: returning.hidden,
     before: nested && nested.before.length > 0 ? nested.before : undefined,
     after: nested && nested.after.length > 0 ? nested.after : undefined,

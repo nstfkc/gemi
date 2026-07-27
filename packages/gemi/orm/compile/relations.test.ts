@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { SqliteDialect } from "../dialect/sqlite";
 import {
@@ -9,10 +9,12 @@ import {
   UnsupportedQueryError,
 } from "../errors";
 import { account, organization, post, tag, user } from "../fixtures";
+import * as registry from "../registry";
 import { clearRegistry, get, register } from "../registry";
 import type { ModelSchema } from "../schema";
 import { attachRelations } from "./plan-relations";
 import { compileRead } from "./read";
+import { compileWrite } from "./write";
 
 const sqlite = new SqliteDialect();
 
@@ -653,5 +655,84 @@ describe("implicit many-to-many", () => {
     expect(() =>
       compileRead(self, "findMany", { include: { related: true } }, sqlite),
     ).toThrow(/self-referential implicit many-to-many/);
+  });
+});
+
+/**
+ * Iteration 7, deliverable 3 / acceptance criterion 5: which strategy ran has to
+ * be answerable from outside the planner.
+ *
+ * The field existed from iteration 3 — `RelationPlan.strategy` — and nothing
+ * read it, which made it a comment rather than a guarantee. Once a second
+ * strategy can be chosen, "a silent planner is untestable" stops being a slogan:
+ * a query that picked the wrong one is only slower, not wrong, so there is no
+ * failing assertion to find it by.
+ */
+describe("strategy observability", () => {
+  beforeEach(() => {
+    registry.clearRegistry();
+    registry.register("User", class { static $schema = user });
+    registry.register("Account", class { static $schema = account });
+    registry.register("Organization", class { static $schema = organization });
+  });
+
+  afterEach(() => {
+    registry.clearRegistry();
+  });
+
+  test("a query with no relations reports no strategies", () => {
+    const plan = compileRead(user, "findMany", {}, sqlite);
+    expect(plan.strategies).toBeUndefined();
+  });
+
+  test("an include reports the strategy that planned it", () => {
+    const plan = compileRead(
+      user,
+      "findMany",
+      { include: { accounts: true } },
+      sqlite,
+    );
+    expect(plan.strategies).toEqual(["batched"]);
+  });
+
+  test("several nodes at one level deduplicate", () => {
+    const plan = compileRead(
+      user,
+      "findMany",
+      { include: { accounts: true, organization: true } },
+      sqlite,
+    );
+    // Two nodes, one strategy — the value is a set, not a per-node list, so it
+    // stays readable as the tree grows.
+    expect(plan.relations).toHaveLength(2);
+    expect(plan.strategies).toEqual(["batched"]);
+  });
+
+  test("a write's returning relations report theirs too", () => {
+    const plan = compileWrite(
+      user,
+      "create",
+      { data: { email: "a@b.c" }, include: { accounts: true } },
+      sqlite,
+    );
+    expect(plan.strategies).toEqual(["batched"]);
+  });
+
+  /**
+   * The boundary of the claim, asserted so it is not mistaken for a whole-tree
+   * answer. A nested level is loaded by `$exec` on the child model, which
+   * compiles its own plan and chooses its own strategy — so the root reports one
+   * entry for its own node and the depth-2 decision does not exist yet.
+   */
+  test("a nested include reports this level only, not the whole tree", () => {
+    const plan = compileRead(
+      user,
+      "findMany",
+      { include: { accounts: { include: { organization: true } } } },
+      sqlite,
+    );
+
+    expect(plan.relations).toHaveLength(1);
+    expect(plan.strategies).toEqual(["batched"]);
   });
 });
