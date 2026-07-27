@@ -19,24 +19,24 @@ there is nothing left to win in that scenario.
 
 | Dialect | Scenario | Rows | raw µs | gemi µs | ×raw | Prisma µs | ×raw | compile | lookup | execute | shape |
 | --- | --- | --: | --: | --: | --: | --: | --: | --: | --: | --: | --: |
-| sqlite | 1. point read by pk | 1 | 16.5 | 28.4 | 1.73× | 141.6 | 8.60× | 12.4 | 0.9 | 23.8 | 0.3 |
-| sqlite | 2. findMany 1000 rows | 1000 | 382.4 | 442.5 | 1.16× | 5904.8 | 15.44× | 6.8 | 0.3 | 459.4 | 66.1 |
-| sqlite | 3. depth-2 include, 100 parents | 100 | 170.2 | 411.0 | 2.41× | 1686.2 | 9.91× | 12.5 | 0.9 | 65.5 | 13.3 |
-| sqlite | 4. depth-3 include, 100 parents | 100 | 148.5 | 286.2 | 1.93× | 1869.5 | 12.59× | 10.0 | 1.0 | 64.0 | 12.8 |
-| sqlite | 5a. create | 1 | — | 415.8 | — | — | — | 16.4 | 0.5 | — | — |
-| sqlite | 5b. updateMany | 1000 | — | 1458.4 | — | — | — | 31.2 | 1.1 | 579.2 | 0.1 |
-| sqlite | 6a. point read, in a transaction | 1 | — | 40.2 | — | — | — | — | — | — | — |
-| sqlite | 6b. point read, policy-scoped | 1 | — | 32.0 | — | — | — | — | — | — | — |
-| sqlite | 6c. findMany 1000, policy-scoped | 1000 | — | 496.9 | — | — | — | — | — | — | — |
-| postgres | 1. point read by pk | 1 | 152.4 | 173.1 | 1.14× | 300.5 | 1.97× | 8.3 | 0.5 | 152.5 | 0.1 |
-| postgres | 2. findMany 1000 rows | 1000 | 1077.3 | 991.5 | 0.92× | 5130.4 | 4.76× | 6.0 | 0.2 | 922.9 | 21.5 |
-| postgres | 3. depth-2 include, 100 parents | 100 | 573.3 | 542.5 | 0.95× | 2293.8 | 4.00× | 11.7 | 1.0 | 221.0 | 7.7 |
-| postgres | 4. depth-3 include, 100 parents | 100 | 588.7 | 567.1 | 0.96× | 2252.3 | 3.83× | 9.6 | 1.2 | 258.6 | 7.8 |
-| postgres | 5a. create | 1 | — | 542.6 | — | — | — | 10.1 | 0.5 | — | — |
-| postgres | 5b. updateMany | 1000 | — | 5550.1 | — | — | — | 14.4 | 1.4 | 3839.4 | 0.1 |
-| postgres | 6a. point read, in a transaction | 1 | — | 465.5 | — | — | — | — | — | — | — |
-| postgres | 6b. point read, policy-scoped | 1 | — | 159.1 | — | — | — | — | — | — | — |
-| postgres | 6c. findMany 1000, policy-scoped | 1000 | — | 1191.4 | — | — | — | — | — | — | — |
+| sqlite | 1. point read by pk | 1 | 17.7 | 29.8 | 1.68× | 148.0 | 8.34× | 12.8 | 1.0 | 29.3 | 0.2 |
+| sqlite | 2. findMany 1000 rows | 1000 | 370.7 | 515.1 | 1.39× | 5593.9 | 15.09× | 7.9 | 0.2 | 382.0 | 66.7 |
+| sqlite | 3. depth-2 include, 100 parents | 100 | 146.4 | 292.5 | 2.00× | 1739.3 | 11.88× | 18.7 | 2.3 | 77.9 | 17.3 |
+| sqlite | 4. depth-3 include, 100 parents | 100 | 234.3 | 398.5 | 1.70× | 2523.3 | 10.77× | 10.4 | 1.1 | 62.6 | 12.4 |
+| sqlite | 5a. create | 1 | — | 357.7 | — | — | — | 14.2 | 0.7 | — | — |
+| sqlite | 5b. updateMany | 1000 | — | 1148.9 | — | — | — | 8.2 | 0.7 | 621.5 | 0.1 |
+| sqlite | 6a. point read, in a transaction | 1 | — | 48.7 | — | — | — | — | — | — | — |
+| sqlite | 6b. point read, policy-scoped | 1 | — | 37.2 | — | — | — | — | — | — | — |
+| sqlite | 6c. findMany 1000, policy-scoped | 1000 | — | 471.0 | — | — | — | — | — | — | — |
+| postgres | 1. point read by pk | 1 | 162.0 | 123.3 | 0.76× | 300.5 | 1.85× | 10.3 | 0.5 | 158.5 | 0.1 |
+| postgres | 2. findMany 1000 rows | 1000 | 865.3 | 956.2 | 1.11× | 5130.4 | 5.93× | 4.9 | 0.2 | 854.4 | 28.8 |
+| postgres | 3. depth-2 include, 100 parents | 100 | 685.3 | 660.0 | 0.96× | 2293.8 | 3.35× | 15.9 | 1.0 | 232.0 | 7.7 |
+| postgres | 4. depth-3 include, 100 parents | 100 | 1043.0 | 1057.0 | 1.01× | 2252.3 | 2.16× | 10.8 | 1.3 | 226.3 | 7.7 |
+| postgres | 5a. create | 1 | — | 263.3 | — | — | — | 11.5 | 0.5 | — | — |
+| postgres | 5b. updateMany | 1000 | — | 5650.0 | — | — | — | 13.0 | 2.0 | 3822.3 | 0.4 |
+| postgres | 6a. point read, in a transaction | 1 | — | 471.3 | — | — | — | — | — | — | — |
+| postgres | 6b. point read, policy-scoped | 1 | — | 154.0 | — | — | — | — | — | — | — |
+| postgres | 6c. findMany 1000, policy-scoped | 1000 | — | 1177.7 | — | — | — | — | — | — | — |
 
 ## Per-call overheads
 
@@ -52,10 +52,10 @@ nanoseconds against a ~27µs point read, so roughly 0.1% each.
 
 | Cost | ns per call | Notes |
 | --- | --: | --- |
-| `currentTransaction()`, no transaction open | 26 | The common case: `getStore()` returning undefined. |
-| `currentTransaction()`, inside a transaction | 37 | An occupied store is barely dearer to read than an empty one. |
-| `policiesFor()`, no policy | 39 | Walks the prototype chain and finds nothing. Paid by every model. |
-| `policiesFor()`, one policy | 57 | Same walk, one `Object.hasOwn` hit. |
+| `currentTransaction()`, no transaction open | 29 | The common case: `getStore()` returning undefined. |
+| `currentTransaction()`, inside a transaction | 38 | An occupied store is barely dearer to read than an empty one. |
+| `policiesFor()`, no policy | 43 | Walks the prototype chain and finds nothing. Paid by every model. |
+| `policiesFor()`, one policy | 64 | Same walk, one `Object.hasOwn` hit. |
 
 Plan cache after the full run: **4 entries** of 1000, 4 compiles, 698 hits, 0 evictions.
 
@@ -70,8 +70,8 @@ stitching rather than stitching alone.
 
 | Dialect | Parents | no include µs | with include µs | difference |
 | --- | --: | --: | --: | --: |
-| sqlite | 100 | 87.2 | 334.1 | 246.9 |
-| postgres | 100 | 259.5 | 587.3 | 327.7 |
+| sqlite | 100 | 68.8 | 264.5 | 195.7 |
+| postgres | 100 | 231.1 | 595.4 | 364.3 |
 
 ## Positional row mode (deliverable 4)
 
@@ -83,8 +83,8 @@ and is the `shape` column in the table above.
 
 | Dialect | object mode p50/p95 µs | `.values()` p50/p95 µs | p50 delta |
 | --- | --: | --: | --: |
-| sqlite | 389.1 / 666.6 | 461.0 / 553.3 | -18% |
-| postgres | 990.4 / 2090.9 | 1091.9 / 1584.7 | -10% |
+| sqlite | 350.0 / 413.1 | 402.5 / 473.0 | -15% |
+| postgres | 942.5 / 1466.5 | 879.0 / 1324.0 | +7% |
 
 ## What these say about the rest of iteration 7
 
@@ -113,24 +113,38 @@ gets built:
    SQLite and 17% faster on Postgres, and the sign flipped between runs at
    lower sample counts. With p95 near double p50 on Postgres, this workload
    cannot resolve it, so it was not taken.
-3. **Deliverable 2 (lateral + `json_agg`) is not justified, and scenario 4
-   is what settles it.** The lateral strategy's case is round-trip count, so
-   depth 3 was supposed to show the batched planner falling behind. It does
-   not: on Postgres gemi's depth-3 include is *no slower than its depth-2*
-   one, and both sit at ~1.1× hand-written SQL.
+3. **Deliverable 2 (lateral + `json_agg`) IS justified on Postgres.** This
+   reverses what an earlier version of this report concluded, and the reason
+   is worth stating plainly: scenario 4 was not measuring a depth-3 include.
+   The seed created accounts with no `organizationId`, so every foreign key
+   at the third level was null, the batched loader correctly skipped that
+   query entirely, and the scenario measured depth-2 plus a filter pass. It
+   read as *faster than* depth-2 — more nodes, less time — which was the
+   tell, and it was the number the recommendation rested on.
 
-   The reason is structural rather than lucky. The batched planner issues one
-   query per include **node**, not per row — so depth 3 is three round trips
-   against the lateral form's one, and two saved round trips cannot show up
-   against a total that is already at the floor. A lateral rewrite would be
-   trading a measurable ~1.1× for an unmeasurable one, at the cost of a
-   second relation-loading implementation — which the plan itself warns
-   doubles the surface for shape divergence.
+   With the seed fixed, the Postgres cost is linear in include depth:
 
-   **Recommendation: do not build it.** Revisit only with a workload this
-   suite does not have — a deeper tree, or a real network where three RTTs
-   are three milliseconds rather than three hundred microseconds. That is a
-   finding, not a deferral, and it is what deliverable 1 exists to produce.
+       100 parents, no include    286µs     1 round trip
+       depth-2 include            690µs     2 round trips
+       depth-3 include            911µs     3 round trips
+
+   That is ~220µs per level, against a 180µs point read — so each level is
+   very nearly one whole round trip, which is exactly the cost a lateral
+   join collapses to one. gemi sits at 0.96× and 1.00× hand-written SQL, so
+   there is nothing left to win *at this shape*; the win available is in
+   changing the shape, which is the deliverable.
+
+   Ceiling: a single lateral statement for the whole tree should land near
+   the no-include figure plus the extra rows, so roughly 350–450µs against
+   911µs — call it 2×, and growing with depth. That is the largest
+   unclaimed win in the ORM.
+
+   **On SQLite it remains unjustified**, which matches the plan's own note:
+   in-process round trips are nearly free, and the depth-2/depth-3 pair here
+   is not even ordered consistently (scenario 4 runs after scenario 3 and
+   benefits from a warmer cache), so the difference is inside the noise.
+   `json_group_array` should be built only if a SQLite-specific measurement
+   asks for it.
 4. **A transaction costs one extra round trip pair, and that is the whole
    cost.** +12µs on SQLite, +350µs on Postgres — against a ~25ns ALS read.
    Iteration 5's second `AsyncLocalStorage` is nowhere in the number; the
@@ -153,8 +167,6 @@ gets built:
   the floor", not as better than it.
 - Postgres was measured over loopback, so every Postgres round trip here is
   optimistic — see the note below.
-- Scenario 4 (depth-3 include) is **not implemented yet**, and it is the one
-  the lateral strategy would be judged on.
 
 ## Notes
 
