@@ -43,6 +43,22 @@ export interface SqlDialect {
    */
   readonly bindsListAsOneParameter: boolean;
 
+  /**
+   * Whether `insert`/`update`/`delete` can return the rows they touched.
+   *
+   * True on both implemented dialects — Postgres has had `RETURNING` forever,
+   * and SQLite since 3.35 (Bun 1.3.14 bundles 3.51.0, verified by querying
+   * `sqlite_version()` rather than by reading a changelog).
+   *
+   * It is a capability rather than an assumption because MySQL and MariaDB have
+   * no `RETURNING` at all. Their fallback — `lastInsertRowid` plus a re-select,
+   * and no way to identify the rows an `updateMany` touched — is a different
+   * statement shape, not a different spelling. Iteration 4 does not build it,
+   * but it must stay expressible, so the write compiler asks rather than
+   * assumes and raises a clear error when the answer is no.
+   */
+  readonly supportsReturning: boolean;
+
   /** Quote a table or column name. Only ever called with names from the schema. */
   quoteIdent(name: string): string;
 
@@ -94,6 +110,30 @@ export interface SqlDialect {
    * single most tempting place in the compiler to inline a number.
    */
   paginate(take: Binder | null, skip: Binder | null): Fragment;
+
+  /**
+   * Recognise a driver error as a constraint violation, and say which columns
+   * it names.
+   *
+   * Returns `null` for anything else, including the *other* constraint kinds:
+   * SQLite reports NOT NULL and FOREIGN KEY failures through the same exception
+   * type, and reporting one of those as a duplicate-key error would send a
+   * caller looking for a row that does not exist.
+   *
+   * Columns, not fields — the driver only knows the database's names. The
+   * caller maps them back through the schema, where `@map` is in scope.
+   */
+  constraintViolation(error: unknown): ConstraintViolation | null;
+}
+
+/** A driver error identified as a constraint failure, in dialect-neutral terms. */
+export interface ConstraintViolation {
+  /** Only `unique` is translated today; the rest surface as the raw error. */
+  kind: "unique";
+  /** Database column names, in the order the driver reported them. */
+  columns: string[];
+  /** The constraint's own name, when the driver gives one. Postgres does. */
+  constraint?: string;
 }
 
 export class UnsupportedDialectError extends Error {

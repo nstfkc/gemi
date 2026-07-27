@@ -103,3 +103,41 @@ export function resolveSelection(
   // function and then hidden again from the result.
   return selected;
 }
+
+/**
+ * Adds the columns the relation planner needs to stitch on, and reports which
+ * of them the caller did not ask for.
+ *
+ * `select: { name: true, accounts: true }` returns `{ name, accounts }` — no
+ * `id` — but the accounts cannot be found without `User.id`. So it is selected,
+ * shaped, used, and then deleted (see `attachRelations`). Under an `include`,
+ * or a `select` that names the key itself, nothing is hidden and nothing is
+ * deleted.
+ *
+ * Writes use it for the same reason through a different clause: a nested
+ * `create` on the far side of a relation needs the parent's key before it can
+ * write the child, so the `RETURNING` list has to carry that key even when the
+ * caller's `select` never asked for it.
+ */
+export function withKeyFields(
+  schema: ModelSchema,
+  selection: FieldSchema[],
+  keyFields: readonly string[],
+): { fields: FieldSchema[]; hidden?: string[] } {
+  if (keyFields.length === 0) return { fields: selection };
+
+  const present = new Set(selection.map((field) => field.name));
+  const missing = keyFields.filter((name) => !present.has(name));
+  if (missing.length === 0) return { fields: selection };
+
+  const wanted = new Set([...present, ...missing]);
+  return {
+    // Rebuilt in schema order rather than appended, so the emitted column list
+    // depends only on *which* fields are selected and never on how they were
+    // reached.
+    fields: Object.values(schema.fields).filter((field) =>
+      wanted.has(field.name),
+    ),
+    hidden: missing,
+  };
+}

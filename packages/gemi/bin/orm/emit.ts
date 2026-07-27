@@ -356,6 +356,69 @@ function countOperation(model: string): string {
 `;
 }
 
+/**
+ * The write surface.
+ *
+ * `create`, `update`, `delete` and `upsert` return a payload narrowed by the
+ * caller's `select` / `include`, exactly as the reads do — and, like the
+ * `*OrThrow` reads, they never resolve to `null`: Prisma raises when an
+ * `update` or a `delete` matches nothing, and `$exec` does the same.
+ *
+ * The three `*Many` writes return Prisma's `BatchPayload` — `{ count: number }`
+ * — rather than rows. Prisma's own `createManyAndReturn` is a separate
+ * operation and is not emitted.
+ *
+ * `args` is required on every one of them: there is no meaningful `create()`
+ * with no data, and a `deleteMany()` with no arguments is spelled
+ * `deleteMany({})` so that emptying a table stays something you typed on purpose.
+ */
+const WRITE_OPERATIONS: ReadOperation[] = [
+  {
+    name: "create",
+    args: "CreateArgs",
+    returns: (m) => `Prisma.${m}GetPayload<T>`,
+    required: true,
+  },
+  {
+    name: "update",
+    args: "UpdateArgs",
+    returns: (m) => `Prisma.${m}GetPayload<T>`,
+    required: true,
+  },
+  {
+    name: "delete",
+    args: "DeleteArgs",
+    returns: (m) => `Prisma.${m}GetPayload<T>`,
+    required: true,
+  },
+  {
+    name: "upsert",
+    args: "UpsertArgs",
+    returns: (m) => `Prisma.${m}GetPayload<T>`,
+    required: true,
+  },
+];
+
+/** The writes whose result is a count rather than a payload. */
+const BATCH_OPERATIONS = [
+  { name: "createMany", args: "CreateManyArgs" },
+  { name: "updateMany", args: "UpdateManyArgs" },
+  { name: "deleteMany", args: "DeleteManyArgs" },
+] as const;
+
+function batchOperation(
+  model: string,
+  op: (typeof BATCH_OPERATIONS)[number],
+): string {
+  return `
+  static ${op.name}(
+    args?: Prisma.${model}${op.args},
+  ): Promise<{ count: number }> {
+    return this.$exec("${op.name}", args) as Promise<{ count: number }>;
+  }
+`;
+}
+
 export function emitModelsFile(schemas: ModelSchema[]): string {
   const parts = [
     HEADER,
@@ -377,7 +440,11 @@ type Subset<T, U> = {
     parts.push(`
 export class ${schema.name}Model extends Model {
   static $schema = schema.${schema.name};
-${READ_OPERATIONS.map((op) => operation(schema.name, op)).join("")}${countOperation(schema.name)}}
+${READ_OPERATIONS.map((op) => operation(schema.name, op)).join("")}${countOperation(
+      schema.name,
+    )}${WRITE_OPERATIONS.map((op) => operation(schema.name, op)).join(
+      "",
+    )}${BATCH_OPERATIONS.map((op) => batchOperation(schema.name, op)).join("")}}
 `);
   }
 

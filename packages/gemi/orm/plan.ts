@@ -1,5 +1,6 @@
 import { compile } from "./compile";
-import type { RelationPlan } from "./compile/plan-relations";
+import type { BindContext } from "./compile/fragment";
+import type { NestedWriteStep, RelationPlan } from "./compile/plan-relations";
 import type { SqlDialect } from "./dialect";
 import type { ModelSchema } from "./schema";
 
@@ -32,8 +33,15 @@ export type Operation =
  */
 export interface QueryPlan {
   text: string;
-  bind(args: any): unknown[];
+  bind(args: any, context?: BindContext): unknown[];
   shape(rows: unknown[]): unknown;
+  /**
+   * Nested-write steps that run before the statement, contributing foreign keys
+   * into the bind context, and after it, writing rows that reference the one
+   * just created. Both left undefined for a query with no nested writes.
+   */
+  before?: NestedWriteStep[];
+  after?: NestedWriteStep[];
   /**
    * The relation nodes this query's `include` / `select` asks for, one plan per
    * node. Empty — and left undefined — for a query with no relations, so the

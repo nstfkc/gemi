@@ -6,8 +6,9 @@ import {
   param,
   sql,
 } from "../compile/fragment";
+import { DecodeError } from "../errors";
 import type { FieldSchema } from "../schema";
-import type { SqlDialect } from "./index";
+import type { ConstraintViolation, SqlDialect } from "./index";
 
 // Postgres has real `timestamptz`, `boolean`, `numeric` and `jsonb` types, so
 // its driver already returns what Prisma returns and `decode` is almost
@@ -25,6 +26,8 @@ export class PostgresDialect implements SqlDialect {
 
   // `= any($1)`: one parameter, one SQL text, one plan for every list length.
   readonly bindsListAsOneParameter = true;
+
+  readonly supportsReturning = true;
 
   quoteIdent(name: string): string {
     // See the SQLite implementation: NUL is the parameter sentinel in
@@ -85,6 +88,57 @@ export class PostgresDialect implements SqlDialect {
     return concat(...parts);
   }
 
+  // Postgres reports a duplicate key as SQLSTATE 23505, and unlike SQLite it
+  // carries structured fields alongside the message. Read off a live server
+  // through Bun rather than from the Postgres manual, because the placement is
+  // the surprise:
+  //
+  //   name:       'PostgresError'
+  //   code:       'ERR_POSTGRES_SERVER_ERROR'   <- Bun's own code, not the SQLSTATE
+  //   errno:      '23505'                       <- the SQLSTATE lives here
+  //   constraint: 'User_email_key'
+  //   detail:     'Key (email)=(a@x) already exists.'
+  //   table:      'User'
+  //
+  // Checking `code` alone — the obvious reading, and the one this started with
+  // — matches nothing at all, so every unique violation escaped as a raw driver
+  // error. Both are consulted now: `errno` is where Bun puts it today, and
+  // `code` is where a driver following the `pg` convention would.
+  //
+  // The class code `23` covers integrity violations generally — 23502 not-null,
+  // 23503 foreign key, 23514 check — so matching the *full* five characters is
+  // what keeps those from being reported as duplicate keys.
+  //
+  // Only the constraint name is taken as authoritative. `detail` is parsed
+  // best-effort for the column list because Postgres localises it: on a server
+  // with `lc_messages` set to anything but English the prefix is not `Key`, and
+  // the regex simply does not match. That degrades to a violation with no
+  // columns — still typed, still catchable, still naming the constraint — rather
+  // than to a wrong column list.
+  constraintViolation(error: unknown): ConstraintViolation | null {
+    const source = error as Record<string, unknown> | null;
+    if (!source) return null;
+
+    const sqlstate = String(source.errno ?? source.code ?? "");
+    if (sqlstate !== "23505") return null;
+
+    const constraint =
+      typeof source.constraint === "string" && source.constraint !== ""
+        ? source.constraint
+        : undefined;
+
+    const detail = typeof source.detail === "string" ? source.detail : "";
+    const listed = /\((.+?)\)=/.exec(detail);
+    const columns = listed
+      ? listed[1]
+          .split(",")
+          .map((entry) => entry.trim())
+          .filter((entry) => entry !== "")
+      : [];
+
+    return { kind: "unique", columns, constraint };
+  }
+
   encode(value: unknown, field: FieldSchema): unknown {
     if (value === null || value === undefined) return null;
     // `Date`, `boolean` and `bigint` all bind natively. JSON is the one case the
@@ -93,6 +147,52 @@ export class PostgresDialect implements SqlDialect {
       return JSON.stringify(value);
     }
     return value;
+  }
+
+  // Postgres returns real `timestamptz`, `boolean` and `double precision`, so
+  // most columns need nothing. Two do, and neither is reachable from the
+  // template's schema — which is why they went unnoticed until a fixture with
+  // every scalar type existed. Read off a live server through Bun:
+  //
+  //   integer            -> number      ✓
+  //   double precision   -> number      ✓
+  //   boolean            -> boolean     ✓
+  //   text               -> string      ✓
+  //   timestamp(3)       -> Date        ✓ (but see the protocol note below)
+  //   bytea              -> Buffer      ✓ (a Uint8Array, which is what Prisma gives)
+  //   bigint             -> "123"       ✗ string, where Prisma gives 123n
+  //   jsonb / json       -> '{"a":1}'   ✗ unparsed text, where Prisma gives an object
+  //
+  // `numeric` also arrives as a string, which is the correct thing for it to
+  // do — but `Decimal` is refused at *generation* time (iteration 1), so no
+  // such field can reach this.
+  needsDecode(field: FieldSchema): boolean {
+    return field.type === "BigInt" || field.type === "Json";
+  }
+
+  decode(value: unknown, field: FieldSchema): unknown {
+    if (value === null || value === undefined) return null;
+
+    switch (field.type) {
+      case "BigInt":
+        if (typeof value === "bigint") return value;
+        try {
+          return BigInt(value as string);
+        } catch {
+          throw new DecodeError(field, value);
+        }
+      case "Json":
+        // `jsonb` arrives as text over the wire. A driver that starts parsing
+        // it for us is handled by the typeof check rather than by a version
+        // test, so this keeps working either way.
+        try {
+          return typeof value === "string" ? JSON.parse(value) : value;
+        } catch {
+          throw new DecodeError(field, value);
+        }
+      default:
+        return value;
+    }
   }
 
   // KNOWN DIVERGENCE, and not one this can fix: Prisma maps `DateTime` to
@@ -111,13 +211,9 @@ export class PostgresDialect implements SqlDialect {
   // A `decode` cannot correct it, because the value alone does not say which
   // protocol produced it; nothing below the plan does. Until it is fixed
   // upstream, run the process with TZ=UTC, where both paths agree.
-  needsDecode(_field: FieldSchema): boolean {
-    return false;
-  }
-
-  decode(value: unknown, _field: FieldSchema): unknown {
-    return value ?? null;
-  }
+  //
+  // Note this is why `DateTime` stays out of `needsDecode` above: there is no
+  // correction to apply, only a caveat to record.
 }
 
 /**
