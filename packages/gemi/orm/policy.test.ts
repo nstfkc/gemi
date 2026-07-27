@@ -315,6 +315,48 @@ describe("scope", () => {
 });
 
 describe("onCreate", () => {
+  /**
+   * The promise that the caller's args are never mutated has to be one the
+   * mechanism keeps, not one every policy author remembers. The natural way to
+   * write an `onCreate` is `data.x = ...; return data`, and handing over the
+   * caller's own object makes that mutate it — which then applies a second time
+   * if the same args are reused, the exact double-apply hazard the guarantee
+   * exists to prevent.
+   */
+  test("a mutating onCreate cannot reach the caller's data object", () => {
+    const mutating: ModelPolicy = {
+      onCreate: (context, data) => {
+        data.organizationId = (context.user as any).organizationId;
+        return data;
+      },
+    };
+
+    const args = { data: { email: "a@b.c" } };
+    const out = applyPolicies(
+      [mutating],
+      context({ operation: "create" as any }),
+      args,
+    );
+
+    expect(out.data).toEqual({ email: "a@b.c", organizationId: 7 });
+    expect(args.data).toEqual({ email: "a@b.c" });
+  });
+
+  test("every row of a createMany is copied, not just the first", () => {
+    const mutating: ModelPolicy = {
+      onCreate: (_context, data) => {
+        data.locale = "en-GB";
+        return data;
+      },
+    };
+
+    const rows = [{ email: "a@b.c" }, { email: "d@e.f" }];
+    const args = { data: rows };
+    applyPolicies([mutating], context({ operation: "createMany" as any }), args);
+
+    expect(rows).toEqual([{ email: "a@b.c" }, { email: "d@e.f" }]);
+  });
+
   const tenant: ModelPolicy = {
     onCreate: (context, data) => ({
       ...data,
@@ -481,6 +523,47 @@ describe("deny-by-default, on access", () => {
       ),
     ).toThrow(PolicyDeniedError);
     expect(built).toBe(false);
+  });
+
+  /**
+   * `undefined` must deny exactly as `null` does.
+   *
+   * `user` is `unknown` and reaches `policyContext` verbatim from
+   * `Model.asUser`, so `undefined` is reachable — `asUser(byId.get(job.userId))`
+   * on a miss. Under strict equality `hasUser` said true and the accessor did
+   * not raise, so a scope reading `ctx.user?.organizationId` collapsed to `{}`,
+   * which is an *absent* filter, and the query returned every tenant's rows.
+   * The request path normalises with `?? null` and so could never produce it.
+   */
+  test.each([
+    ["null", null],
+    ["undefined", undefined],
+  ])("a %s user denies a policy that reads it", (_label, absent) => {
+    const tenant: ModelPolicy = {
+      // Written defensively, which is what makes the bug silent rather than a
+      // TypeError: optional chaining yields undefined, and `{ x: undefined }`
+      // compiles to no filter at all.
+      scope: (context) => ({
+        organizationId: (context.user as any)?.organizationId,
+      }),
+    };
+
+    expect(() =>
+      applyPolicies(
+        [tenant],
+        policyContext("User", "findMany" as any, absent, false),
+        {},
+      ),
+    ).toThrow(PolicyDeniedError);
+  });
+
+  test.each([
+    ["null", null],
+    ["undefined", undefined],
+  ])("hasUser is false for a %s user", (_label, absent) => {
+    expect(
+      policyContext("User", "findMany" as any, absent, false).hasUser,
+    ).toBe(false);
   });
 
   test("under system, reading the user gives null rather than raising", () => {

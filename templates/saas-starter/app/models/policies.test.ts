@@ -462,6 +462,52 @@ function suite(label: string, url?: string) {
       expect(rows).toHaveLength(2);
     });
 
+    /**
+     * `asUser` inside `asSystem` must narrow back.
+     *
+     * Acting as a user is strictly narrower than acting as the system, and the
+     * realistic shape is a worker that enters `asSystem` to read its job queue
+     * and then narrows to the job's owner for the work. Before the fix
+     * `runAsUser` spread `system: true` forward, so `$exec` short-circuited to
+     * no policies at all while `currentUser()` returned the actor — the actor
+     * was set and nothing scoped on it. Silently unscoped, which is the failure
+     * this whole iteration is arranged against.
+     */
+    test("asUser inside asSystem narrows back to the user", async () => {
+      (UserModel as any).$policy = tenantScoped;
+
+      const rows = await Model.asSystem(() =>
+        Model.asUser(ALICE, () => UserModel.findMany({})),
+      );
+
+      expect(rows.map((row: any) => row.email)).toEqual(["alice@x.test"]);
+    });
+
+    // The reverse nesting is unchanged and correct: naming the system inside a
+    // user scope suspends policies, because that is what asSystem means.
+    test("asSystem inside asUser still suspends", async () => {
+      (UserModel as any).$policy = tenantScoped;
+
+      const rows = await Model.asUser(ALICE, () =>
+        Model.asSystem(() => UserModel.findMany({})),
+      );
+
+      expect(rows).toHaveLength(2);
+    });
+
+    // `asUser` with nothing to act as is the "user failed to turn up" case, and
+    // it must deny rather than read unscoped — `asUser(byId.get(id))` on a miss.
+    test.each([
+      ["undefined", undefined],
+      ["null", null],
+    ])("asUser(%s) is denied, not unscoped", async (_label, absent) => {
+      (UserModel as any).$policy = tenantScoped;
+
+      await expect(
+        Model.asUser(absent, () => UserModel.findMany({})),
+      ).rejects.toThrow(PolicyDeniedError);
+    });
+
     test("an unpolicied model is untouched by any of this", async () => {
       const rows = await OrganizationModel.findMany({});
       expect(rows).toHaveLength(2);

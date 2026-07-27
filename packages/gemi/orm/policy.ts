@@ -85,7 +85,15 @@ export function policyContext(
   user: unknown,
   system: boolean,
 ): PolicyContext {
-  const context = { model, operation, hasUser: user !== null } as {
+  // `!= null` and `== null` below, not `!==` / `===`. `user` is `unknown` and
+  // arrives verbatim from `Model.asUser`, so `undefined` is reachable —
+  // `asUser(usersById.get(job.userId), ...)` on a miss, which is exactly the
+  // "user failed to turn up" case deny-by-default exists for. Strict equality
+  // let it through: `hasUser` said true and the accessor did not raise, so a
+  // scope reading `ctx.user?.organizationId` collapsed to `{}` — an *absent*
+  // filter — and returned every tenant's rows. The request path normalises with
+  // `?? null` and so never produced it, which is why only `asUser` could.
+  const context = { model, operation, hasUser: user != null } as {
     model: string;
     operation: Operation;
     hasUser: boolean;
@@ -95,7 +103,7 @@ export function policyContext(
   Object.defineProperty(context, "user", {
     enumerable: true,
     get() {
-      if (user === null && !system) {
+      if (user == null && !system) {
         throw new PolicyDeniedError(model, operation, "no-user");
       }
       return user;
@@ -312,7 +320,14 @@ function withScope(args: any, scope: unknown): any {
 
 /** Runs an `onCreate` over whichever shape the operation's payload takes. */
 function withCreated(args: any, context: PolicyContext, policy: ModelPolicy): any {
-  const run = (data: any) => policy.onCreate!(context, data ?? {});
+  // A shallow copy, so `applyPolicies`' promise that the caller's args are never
+  // mutated is one the *mechanism* keeps rather than one every policy author has
+  // to remember. The natural way to write an `onCreate` is
+  // `data.organizationId = ...; return data`, and without the copy that mutates
+  // the caller's object — which then applies a second time if the same args are
+  // reused for another call, the exact hazard the promise cites. `redact` is
+  // deliberately different: there the mutation *is* the interface.
+  const run = (data: any) => policy.onCreate!(context, { ...data });
 
   if (context.operation === "createMany") {
     const rows = args?.data;
