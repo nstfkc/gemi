@@ -1,4 +1,5 @@
 import { RequestContext } from "../http/requestContext";
+import { currentActor } from "./context";
 import { PolicyDeniedError, UnsupportedQueryError } from "./errors";
 import type { Operation } from "./plan";
 import type { ModelSchema } from "./schema";
@@ -118,6 +119,14 @@ const SCOPABLE = new Set<string>([
 const CREATING = new Set<string>(["create", "createMany", "upsert"]);
 
 /**
+ * Operations that write a new row and have no `where` at all, so a `scope`
+ * cannot apply to them even in principle. `upsert` is not here: it *has* a
+ * where, it just cannot carry a predicate — a different problem with a
+ * different message.
+ */
+const INSERTING = new Set<string>(["create", "createMany"]);
+
+/**
  * Every policy that applies to a model class, base first.
  *
  * Walks the prototype chain so a `TenantModel` or `SoftDeletes` base
@@ -173,6 +182,16 @@ export function applyPolicies(
   for (const policy of policies) {
     if (!policy.scope) continue;
 
+    // An insert has no `where`, so there is nothing for a scope to narrow —
+    // `onCreate` is the mechanism there. Skipping silently is only safe when the
+    // policy has actually said how creates work; a `scope` with no `onCreate` is
+    // an author who expressed an intent this operation cannot honour, and
+    // running it would write a row into whatever tenant the caller named.
+    if (INSERTING.has(context.operation)) {
+      assertCreateCovered(policies, context);
+      continue;
+    }
+
     const scope = policy.scope(context);
     if (scope === undefined || scope === null) continue;
 
@@ -226,6 +245,33 @@ function withCreated(args: any, context: PolicyContext, policy: ModelPolicy): an
   }
 
   return { ...args, data: run(args?.data) };
+}
+
+/**
+ * Refuses a `create` whose policy scopes reads but says nothing about writes.
+ *
+ * The natural tenant policy carries both `scope` and `onCreate`, and for it this
+ * is a no-op. The dangerous shape is `scope` alone: reads are confined to the
+ * caller's tenant and an insert can name any tenant it likes, which is a policy
+ * that looks complete and is half of one. Refused with the missing piece named.
+ */
+function assertCreateCovered(
+  policies: readonly ModelPolicy[],
+  context: PolicyContext,
+): void {
+  if (policies.some((policy) => policy.onCreate)) return;
+
+  throw new UnsupportedQueryError(
+    context.operation,
+    context.model,
+    context.operation,
+    `${context.model} has a policy that scopes reads but no 'onCreate', and ` +
+      `${context.operation} has no where clause for a scope to narrow. As ` +
+      `written the policy would confine reads to the caller and let an insert ` +
+      `name any value it likes. Add an onCreate that sets the scoped ` +
+      `column — or, if unscoped creates are intended, say so with an onCreate ` +
+      `that returns its data unchanged.`,
+  );
 }
 
 /**
@@ -343,6 +389,12 @@ export function redactNullable(
  * queries — off this path entirely.
  */
 export function currentUser(): unknown {
+  // An explicit actor wins over the ambient request. A job that has said who it
+  // is acting as must not be quietly re-scoped by a request that happens to
+  // enclose it — and in a test, that is the only user there is.
+  const actor = currentActor();
+  if (actor) return actor.user;
+
   // `RequestContext.getStore()` is non-null-asserted at its definition, so it
   // is `undefined` rather than a throw outside a request. Cron ticks, queue
   // workers and CLI never enter it; that case is the null.

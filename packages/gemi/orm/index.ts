@@ -19,6 +19,7 @@ export {
   MissingRequiredValueError,
   ModelNotRegisteredError,
   ParameterLimitError,
+  PolicyDeniedError,
   RecordNotFoundError,
   RelationDepthExceededError,
   ReturningUnsupportedError,
@@ -50,12 +51,26 @@ export {
 // uses; these are for code that has to *observe* the scope rather than open one
 // — a raw query joining it, or a test asserting a statement ran inside it.
 export {
+  currentActor,
   currentTransaction,
+  isSystemScope,
   ormContext,
+  runAsSystem,
+  runAsUser,
   transactionDepth,
   withTransaction,
   type OrmScope,
 } from "./context";
+
+export {
+  applyPolicies,
+  applyRedaction,
+  currentUser,
+  policiesFor,
+  redactNullable,
+  type ModelPolicy,
+  type PolicyContext,
+} from "./policy";
 
 export { compile, compileRead, compileWrite } from "./compile";
 export { buildRowShaper, type RowShaper, type ShapedRelation } from "./shape";

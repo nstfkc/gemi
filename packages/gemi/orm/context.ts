@@ -39,6 +39,15 @@ export interface OrmScope {
    * result of a missing user.
    */
   system?: boolean;
+  /**
+   * The user policies should scope to, when there is no request to read one
+   * from. Set only by `Model.asUser`.
+   *
+   * A sentinel wrapper rather than the bare value, so that "a scope was entered
+   * with `null`" stays distinguishable from "no scope was entered" — the two
+   * mean different things under deny-by-default.
+   */
+  actor?: { user: unknown };
 }
 
 /**
@@ -94,6 +103,36 @@ export function isSystemScope(): boolean {
 export function runAsSystem<T>(fn: () => Promise<T>): Promise<T> {
   const current = ormContext.getStore();
   return ormContext.run({ ...current, depth: current?.depth ?? 0, system: true }, fn);
+}
+
+/** The explicitly-set actor, or `undefined` when none was. */
+export function currentActor(): { user: unknown } | undefined {
+  return ormContext.getStore()?.actor;
+}
+
+/**
+ * Run `fn` with policies scoped to `user`, for code with no request to read one
+ * from.
+ *
+ * The counterpart to `runAsSystem`, and the reason that one is not the only
+ * escape hatch. A queue worker processing "send the invoice for organisation 7"
+ * genuinely acts *as somebody*; giving it `asSystem` would suspend policies
+ * entirely and leave it hand-scoping every query — which is precisely the
+ * unscoped-by-accident failure the deny-by-default rule exists to prevent. The
+ * narrow tool should be the easy one.
+ *
+ * It is also what makes policies testable without reaching into
+ * `RequestContext`'s internals.
+ *
+ * Takes precedence over the request store, so a job that says who it is acting
+ * as is not quietly overridden by an ambient request that happens to enclose it.
+ */
+export function runAsUser<T>(user: unknown, fn: () => Promise<T>): Promise<T> {
+  const current = ormContext.getStore();
+  return ormContext.run(
+    { ...current, depth: current?.depth ?? 0, actor: { user } },
+    fn,
+  );
 }
 
 /**

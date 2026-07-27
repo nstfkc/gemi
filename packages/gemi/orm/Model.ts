@@ -2,7 +2,13 @@ import type { SQL } from "bun";
 import { DatabaseManager } from "../database/DatabaseManager";
 import { app } from "../foundation/app";
 import { type BindContext, createBindContext } from "./compile/fragment";
-import { currentTransaction, isSystemScope, runAsSystem, withTransaction } from "./context";
+import {
+  currentTransaction,
+  isSystemScope,
+  runAsSystem,
+  runAsUser,
+  withTransaction,
+} from "./context";
 import {
   type NestedWriteStep,
   type RelationExecutor,
@@ -78,6 +84,23 @@ export abstract class Model {
    */
   static asSystem<T>(fn: () => Promise<T>): Promise<T> {
     return runAsSystem(fn);
+  }
+
+  /**
+   * Runs `fn` with policies scoped to `user`, for code that acts on somebody's
+   * behalf without a request to read them from — a queue job, a scheduled
+   * report, a test.
+   *
+   * The narrow counterpart to `asSystem`, and deliberately the easier of the
+   * two to reach for. A worker handling "send the invoice for organisation 7"
+   * acts *as* a user; giving it only `asSystem` would suspend policies outright
+   * and leave it hand-scoping every query, which is the unscoped-by-accident
+   * outcome deny-by-default exists to prevent.
+   *
+   *     await Model.asUser(owner, () => Invoice.findMany({}))
+   */
+  static asUser<T>(user: unknown, fn: () => Promise<T>): Promise<T> {
+    return runAsUser(user, fn);
   }
 
   static $modelSchema(): ModelSchema {
