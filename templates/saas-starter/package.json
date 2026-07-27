@@ -4,7 +4,7 @@
     "dev": "gemi dev",
     "build": "gemi build",
     "start": "gemi start",
-    "test": "vitest"
+    "test": "bun --bun vitest"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.6",
