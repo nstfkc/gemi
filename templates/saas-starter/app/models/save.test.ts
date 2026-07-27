@@ -244,22 +244,98 @@ function suite(label: string, url?: string) {
       expect(only.email).toBe("a@x.test");
     });
 
-    test("a field the row never fetched is not written", async () => {
+    /**
+     * Assigning to a column the query never fetched is **refused**, not dropped.
+     *
+     * The diff walks the snapshot's keys, so a field outside it cannot be seen as
+     * changed — which meant an explicit assignment silently disappeared and `save`
+     * reported success. That is the divergence class this codebase refuses
+     * everywhere else: an operation doing less than it was told and saying nothing.
+     *
+     * The detection is exact rather than heuristic: a key the schema declares as a
+     * field, which is not a relation, and which is absent from the snapshot, can
+     * only be an assignment to something unfetched.
+     */
+    test("assigning to an unfetched column is refused", async () => {
       const row: any = await SaveUser.findFirst(
         { select: { id: true, name: true } },
         { track: true },
       );
 
-      // Assigning an unfetched column does nothing, because it is not in the
-      // snapshot and so cannot be in the diff.
-      row.locale = "xx-XX";
+      row.email = "changed@x.test";
+
+      await expect(SaveUser.save(row)).rejects.toThrow(/was not fetched/);
+      await expect(SaveUser.save(row)).rejects.toThrow(/add .*email.* to the select|Select 'email'/);
+
+      // Nothing was written, including the field that *was* fetched — the refusal
+      // happens before the statement.
+      const stored: any = await raw.unsafe(
+        `SELECT "email" FROM "User" WHERE "id" = ${row.id}`,
+      );
+      expect([...stored][0].email).toBe("a@x.test");
+    });
+
+    /**
+     * A row fetched without its primary key cannot be saved, and the error names
+     * that rather than the generic unique-field failure.
+     *
+     * Before this, `track` captured `{ id: undefined }`, `matchUniqueKey` dropped
+     * the undefined member, and the caller got "update needs a unique field" —
+     * pointing at a `where` they never wrote.
+     */
+    test("a row fetched without its primary key names that as the problem", async () => {
+      const row: any = await SaveUser.findFirst(
+        { select: { name: true } },
+        { track: true },
+      );
+      row.name = "Changed";
+
+      await expect(SaveUser.save(row)).rejects.toThrow(/without id/);
+      await expect(SaveUser.save(row)).rejects.toThrow(/add id: true to the select/);
+    });
+
+    /**
+     * After a save the in-memory row must match the database, including columns
+     * the caller never touched.
+     *
+     * `@updatedAt` is stamped by the compiler and is therefore never in the diff,
+     * so resnapshotting only the values *sent* left the row holding the timestamp
+     * it was fetched with while the database held a newer one. The row stayed
+     * "clean" — it agreed with its stale snapshot — so nothing was written wrong;
+     * a caller reading `user.updatedAt` just got the wrong instant.
+     */
+    test("the row is refreshed from what the database returned", async () => {
+      const row: any = await SaveUser.findFirst({}, { track: true });
+      const fetched = row.updatedAt.getTime();
+
+      row.name = "Refreshed";
+      const returned: any = await SaveUser.save(row);
+
+      expect(row.updatedAt.getTime()).toBe(returned.updatedAt.getTime());
+      expect(row.updatedAt.getTime()).toBeGreaterThanOrEqual(fetched);
+
+      // ...and the snapshot moved with it, so a second save is still a no-op.
+      expect(await SaveUser.save(row)).toBeNull();
+    });
+
+    // The partial-save case that *is* legal: touching only fetched columns. The
+    // unfetched ones are simply not in the statement, which is the behaviour the
+    // docs describe — "can be saved, cannot write what it never read".
+    test("a partial row writes its fetched columns and leaves the rest", async () => {
+      const row: any = await SaveUser.findFirst(
+        { select: { id: true, name: true } },
+        { track: true },
+      );
+
       row.name = "Named";
       await SaveUser.save(row);
 
       const stored: any = await raw.unsafe(
-        `SELECT "locale" FROM "User" WHERE "id" = ${row.id}`,
+        `SELECT "locale", "name" FROM "User" WHERE "id" = ${row.id}`,
       );
-      expect([...stored][0].locale).toBe("en-US");
+      const [only] = [...stored];
+      expect(only.name).toBe("Named");
+      expect(only.locale).toBe("en-US");
     });
 
     // --- identity semantics, end to end -----------------------------------

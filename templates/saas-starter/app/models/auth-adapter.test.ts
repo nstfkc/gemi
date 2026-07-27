@@ -129,19 +129,46 @@ function suite(label: string, url?: string) {
     });
 
     /**
-     * A documented divergence from the Prisma adapter, asserted so it cannot
-     * change silently. Prisma's uses `omit: { password: true }`; the ORM does not
-     * implement `omit`, so the column comes back. Emulating it with a `select`
-     * listing every other column would drift as the schema grows, which is worse
-     * than a difference someone can read.
+     * The password must not come back, and this is not defensive tidying:
+     * `auth/routes.ts` maps `POST /sign-up` to `AuthController.signUp`, whose
+     * handler ends `return newUser` — so whatever `createUser` returns is the
+     * response body of an unauthenticated endpoint. The same object reaches
+     * `config.onSignUp`, so a hook that logs its argument would log a credential
+     * hash.
+     *
+     * An earlier version of this adapter returned the row whole and documented
+     * the difference. That was wrong: the framework itself is the caller that
+     * serialises it.
      */
-    test("createUser returns password, unlike the Prisma adapter", async () => {
+    test("createUser does not return the password", async () => {
       const user: any = await auth.createUser({
         name: "Alice",
         email: "alice@x.test",
         password: "hashed",
       });
-      expect(user.password).toBe("hashed");
+
+      expect("password" in user).toBe(false);
+
+      // ...and it was still stored, so the strip is on the way out only.
+      const stored: any = await raw.unsafe(
+        `SELECT "password" FROM "User" WHERE "email" = 'alice@x.test'`,
+      );
+      expect([...stored][0].password).toBe("hashed");
+    });
+
+    test("updateUserPassword does not return the password either", async () => {
+      const user: any = await auth.createUser({ name: "A", email: "a@x.test" });
+      const updated: any = await auth.updateUserPassword({
+        id: user.id,
+        password: "new-hash",
+      });
+
+      expect("password" in updated).toBe(false);
+
+      const stored: any = await raw.unsafe(
+        `SELECT "password" FROM "User" WHERE "id" = ${user.id}`,
+      );
+      expect([...stored][0].password).toBe("new-hash");
     });
 
     test("findUserByEmailAddress without verification", async () => {
@@ -184,7 +211,6 @@ function suite(label: string, url?: string) {
         password: "new-hash",
       });
 
-      expect(updated.password).toBe("new-hash");
       // `@updatedAt` is stamped by the ORM on every update.
       expect(updated.updatedAt.getTime()).toBeGreaterThanOrEqual(
         user.updatedAt.getTime(),

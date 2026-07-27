@@ -70,18 +70,37 @@ all lose it.
 `save` raises there rather than guessing. The guess would be "write every column", and writing a
 column that was never fetched is how a partial `select` silently reverts data.
 
-### A partial row can be saved
+### A partial row can be saved — and assigning to an unfetched column is refused
 
 ```ts
 const user = await User.findUnique({ where: { id }, select: { id: true, name: true } }, { track: true })
 user.name = "Renamed"
-user.email = "nope@example.com"   // never fetched — not written
-await User.save(user)             // update "User" set "name" = ? … 
+await User.save(user)             // update "User" set "name" = ? …
 ```
 
-A partial row saves the columns it read and cannot write the ones it did not. That is correct
-behaviour rather than a limitation: the alternative writes a default over a column holding
-something else.
+A partial row saves the columns it read. It cannot write the ones it did not, because there is
+nothing to compare them against and writing them blind would overwrite whatever the column
+actually holds.
+
+Assigning to one is an **error**, not a silent no-op:
+
+```ts
+user.email = "nope@example.com"   // never fetched
+await User.save(user)             // ✗ 'email' was not fetched by the query this row came from
+```
+
+Two ways forward, and the error names both: select the column, or update it explicitly with
+`User.update({ where, data: { email } })`.
+
+The row must also carry its **primary key** — a `select` without it leaves nothing to identify
+which row to update, and `save` says so rather than failing further down with a confusing
+`where` error.
+
+### The row is refreshed after a save
+
+`save` copies the database's version of the row back over yours, so `user.updatedAt` is the
+instant the update happened rather than the one you fetched. Anything else the database rewrote
+comes back too.
 
 ### Everything else still applies
 

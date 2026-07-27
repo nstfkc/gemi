@@ -92,7 +92,10 @@ export function provenanceOf(row: unknown): Provenance | undefined {
  * `sameEncoded` in the write compiler handles, and for the same reason: without
  * it, every save of a row carrying a timestamp would rewrite that timestamp.
  */
-export function changedFields(row: object): Record<string, unknown> {
+export function changedFields(
+  row: object,
+  schema?: ModelSchema,
+): Record<string, unknown> {
   const record = provenanceOf(row);
   if (!record) return {};
 
@@ -105,7 +108,41 @@ export function changedFields(row: object): Record<string, unknown> {
     }
   }
 
+  // A value assigned to a column the query never fetched cannot be seen as
+  // changed, because the diff walks the *snapshot's* keys — so it would be
+  // silently dropped. That is the divergence class this codebase refuses
+  // everywhere else: `save` returning happily having done less than it was told.
+  //
+  // The detection is exact rather than heuristic. A key on the row that the schema
+  // declares as a field, is not a relation, and is *absent from the snapshot* can
+  // only be an assignment to something unfetched — a fetched column is in the
+  // snapshot by construction.
+  if (schema) assertNothingUnfetched(row, record, schema);
+
   return changed;
+}
+
+function assertNothingUnfetched(
+  row: object,
+  record: Provenance,
+  schema: ModelSchema,
+): void {
+  for (const name of Object.keys(row as Record<string, unknown>)) {
+    if (name in record.snapshot) continue;
+    if (!(name in schema.fields)) continue;
+    if (name in schema.relations) continue;
+
+    throw new UnsupportedQueryError(
+      `save.${name}`,
+      schema.name,
+      "save",
+      `'${name}' was not fetched by the query this row came from, so save ` +
+        `cannot write it — the diff has nothing to compare it against, and ` +
+        `writing it blind would overwrite whatever the column actually holds. ` +
+        `Select '${name}' in the query, or update it explicitly with ` +
+        `${schema.name}.update({ where, data: { ${name} } }).`,
+    );
+  }
 }
 
 /** Replaces the snapshot after a successful save, so a second save is a no-op. */
