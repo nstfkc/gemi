@@ -53,12 +53,26 @@ import type {
  * correct rather than a mistake, so it says so explicitly at the call site,
  * which is what `asSystem` is for.
  *
- * **`password` is returned where Prisma's adapter omitted it.** Prisma's uses
- * `omit: { password: true }`, which the ORM does not implement — see
- * `createUser`. Callers that hand a user object straight to a client must not
- * assume the field is absent. This is a real difference and not a shim, because
- * a silent partial `select` would be worse.
+ * **`password` is stripped from returned users**, matching Prisma's adapter. The
+ * ORM does not implement `omit`, so it is deleted from the returned object rather
+ * than excluded by the query — see `createUser` for why that is the right shape
+ * and why it matters: `POST /sign-up` returns this object as its response body.
  */
+
+/**
+ * Drops the password from a user object.
+ *
+ * By deletion rather than by a `select` naming every other column, which would
+ * have to be maintained against the schema and would silently start returning a
+ * new sensitive column the day one is added. Mutates and returns the same object
+ * because it is the freshly-created row and nothing else holds a reference to it.
+ */
+function withoutPassword<T>(user: T): T {
+  if (user && typeof user === "object") {
+    delete (user as { password?: unknown }).password;
+  }
+  return user;
+}
 
 /** The generated model classes this adapter needs, by their Prisma names. */
 export interface AuthModels {
@@ -114,23 +128,41 @@ export class OrmAuthenticationAdapter implements IAuthenticationAdapter {
     return this.models.User.asSystem(fn);
   }
 
+  /**
+   * Note the password is **removed from the returned object**, matching Prisma's
+   * adapter, which uses `omit: { password: true }`.
+   *
+   * This is not defensive tidying. `auth/routes.ts` maps `POST /sign-up` to
+   * `AuthController.signUp`, and that handler ends `return newUser` — so whatever
+   * `createUser` returns *is the response body of an unauthenticated endpoint*.
+   * The same object reaches `config.onSignUp`, so an application hook that logs
+   * its argument would log a credential hash.
+   *
+   * An earlier version returned the row whole and documented the difference on
+   * the class, on the grounds that emulating `omit` with a `select` naming every
+   * other column would drift as the schema grows. That objection is fair and this
+   * avoids it entirely: deleting the key needs no column list and cannot drift.
+   * It also brings `createUser` in line with `SESSION_USER` above, which already
+   * names its columns explicitly for exactly this reason.
+   */
   async createUser(args: CreateUserArgs): Promise<User> {
-    // Prisma's adapter uses `omit: { password: true }`, which the ORM does not
-    // implement — `omit` arrived in Prisma 5.16 and iteration 2 built the read
-    // surface without it. Rather than emulate it with a `select` listing every
-    // other column (which would silently drift as the schema grows), the field
-    // is returned and the difference is documented on the class. A caller that
-    // serialises this to a client must strip it.
-    return await this.run(() => this.models.User.create({ data: args }));
+    const user: User = await this.run(() =>
+      this.models.User.create({ data: args }),
+    );
+    return withoutPassword(user);
   }
 
   async updateUserPassword(args: UpdateUserPasswordArgs): Promise<User> {
-    return await this.run(() =>
+    // Same treatment. No path was found that serialises this one, but a method
+    // whose entire purpose is to set a password should not hand it back — and
+    // "no path today" is not a property that stays true.
+    const user: User = await this.run(() =>
       this.models.User.update({
         where: { id: args.id },
         data: { password: args.password },
       }),
     );
+    return withoutPassword(user);
   }
 
   async findUserByEmailAddress(

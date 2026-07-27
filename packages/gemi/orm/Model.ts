@@ -173,7 +173,27 @@ export abstract class Model {
       );
     }
 
-    const changed = changedFields(row);
+    // A row selected without its primary key has `key = { id: undefined }`, and
+    // `matchUniqueKey` drops undefined members — so the update fails with
+    // "update needs a unique field", pointing at a `where` the caller never
+    // wrote. Named here instead, where the actual mistake is knowable: this can
+    // only mean the select omitted the key.
+    const missingKey = schema.primaryKey.filter(
+      (name) => record.key[name] === undefined,
+    );
+    if (missingKey.length > 0) {
+      throw new UnsupportedQueryError(
+        "save",
+        schema.name,
+        "save",
+        `This row was fetched without ${missingKey.join(", ")}, so there is no ` +
+          `way to identify which row to update. A tracked row needs its primary ` +
+          `key: add ${missingKey.map((name) => `${name}: true`).join(", ")} to ` +
+          `the select, or drop the select to fetch every column.`,
+      );
+    }
+
+    const changed = changedFields(row, schema);
     if (Object.keys(changed).length === 0) return null;
 
     const updated = await this.$exec("update", {
@@ -181,9 +201,31 @@ export abstract class Model {
       data: changed,
     });
 
-    // The row is now what the database holds, so a second `save` is a no-op
-    // rather than rewriting the same columns.
-    resnapshot(row, changed);
+    // Copy the *returned* row back over the caller's, not just the values sent.
+    //
+    // `@updatedAt` is stamped by the compiler and is therefore never in
+    // `changed`, so without this the in-memory row keeps the timestamp it was
+    // fetched with while the database holds a newer one — a caller reading
+    // `user.updatedAt` after a successful save silently gets the old instant. The
+    // same applies to anything else the database rewrote.
+    //
+    // Resnapshotting from the same source is what keeps the row and its snapshot
+    // in agreement, so a second `save` is still a no-op.
+    if (updated && typeof updated === "object" && !Array.isArray(updated)) {
+      const fresh = updated as Record<string, unknown>;
+      const target = row as Record<string, unknown>;
+      const persisted: Record<string, unknown> = {};
+
+      for (const name of Object.keys(fresh)) {
+        if (!(name in schema.fields)) continue;
+        target[name] = fresh[name];
+        persisted[name] = fresh[name];
+      }
+
+      resnapshot(row, persisted);
+    } else {
+      resnapshot(row, changed);
+    }
 
     return updated;
   }
