@@ -1,4 +1,5 @@
 import type { PrismaClient } from "@prisma/client";
+import { Model } from "gemi/orm";
 import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 
 import {
@@ -287,6 +288,42 @@ const CASES: [string, string, unknown][] = [
   }],
   ["include to-many ordered desc", "findMany", {
     include: { accounts: { orderBy: { organizationRole: "desc" } } },
+  }],
+  // Ordering an include by a *relation* rather than by a column. It compiles to
+  // a correlated subquery, which the lateral strategy has no `OrderContext` to
+  // build — so these are the shapes that must reach batching whichever strategy
+  // planned them, and the ones that would otherwise work on SQLite in
+  // development and throw on Postgres in production.
+  //
+  // **Every one carries an `id` tiebreaker, and it is not padding.** gemi orders
+  // by a correlated subquery and Prisma by a join, so the two statements are
+  // free to break a tie differently — and the fixture ties on purpose, since
+  // both of Ada's accounts point at the same user and therefore at the same
+  // email. Comparing an unspecified order would make these tests fail for a
+  // correct implementation, which is the failure mode a differential harness
+  // must not have.
+  ["include ordered by a relation field", "findMany", {
+    orderBy: { id: "asc" },
+    include: {
+      accounts: { orderBy: [{ user: { email: "asc" } }, { id: "asc" }] },
+    },
+  }],
+  ["include ordered by a relation, with a nested include", "findMany", {
+    orderBy: { id: "asc" },
+    include: {
+      accounts: {
+        orderBy: [{ user: { email: "asc" } }, { id: "asc" }],
+        include: { organization: true },
+      },
+    },
+  }],
+  ["include ordered by a column, then a relation", "findMany", {
+    orderBy: { id: "asc" },
+    include: {
+      accounts: {
+        orderBy: [{ organizationRole: "asc" }, { user: { email: "asc" } }],
+      },
+    },
   }],
   ["include to-many with select", "findMany", {
     include: { accounts: { select: { publicId: true }, orderBy: { id: "asc" } } },
@@ -642,6 +679,127 @@ const SQLITE_ONLY: [string, string, unknown][] = [
   ],
 ];
 
+/**
+ * Per-parent `take` / `skip` inside a to-many, which only the lateral strategy
+ * can express — so these are Postgres-only by construction rather than by
+ * convenience, and every one of them is compared against Prisma's own answer.
+ *
+ * The shapes here are the ones where a plausible-but-wrong implementation
+ * survives the obvious test: a limit applied to the parents' children as one set
+ * returns the *right rows for the first parent*, which is exactly why a fixture
+ * with several parents holding several children each is the discriminating one.
+ */
+const PER_PARENT: [string, string, unknown][] = [
+  [
+    "take inside a to-many is per parent",
+    "findMany",
+    { orderBy: { id: "asc" }, include: { accounts: { take: 1, orderBy: { id: "asc" } } } },
+  ],
+  [
+    "take larger than any parent's child count",
+    "findMany",
+    { orderBy: { id: "asc" }, include: { accounts: { take: 50, orderBy: { id: "asc" } } } },
+  ],
+  [
+    "take zero",
+    "findMany",
+    { orderBy: { id: "asc" }, include: { accounts: { take: 0, orderBy: { id: "asc" } } } },
+  ],
+  [
+    "skip inside a to-many is per parent",
+    "findMany",
+    { orderBy: { id: "asc" }, include: { accounts: { skip: 1, orderBy: { id: "asc" } } } },
+  ],
+  [
+    "take and skip together",
+    "findMany",
+    {
+      orderBy: { id: "asc" },
+      include: { accounts: { take: 1, skip: 1, orderBy: { id: "asc" } } },
+    },
+  ],
+  [
+    "a skip past the end leaves an empty array, not null",
+    "findMany",
+    { orderBy: { id: "asc" }, include: { accounts: { skip: 99, orderBy: { id: "asc" } } } },
+  ],
+  [
+    // The half a global limit gets right by accident is the first parent's page,
+    // so "the last N" in the caller's own order is the sharper case.
+    "a negative take is the last N, in the caller's order",
+    "findMany",
+    { orderBy: { id: "asc" }, include: { accounts: { take: -1, orderBy: { id: "asc" } } } },
+  ],
+  [
+    "a negative take under a descending orderBy",
+    "findMany",
+    { orderBy: { id: "asc" }, include: { accounts: { take: -2, orderBy: { id: "desc" } } } },
+  ],
+  [
+    "pagination with no orderBy falls back to the primary key",
+    "findMany",
+    { orderBy: { id: "asc" }, include: { accounts: { take: 1 } } },
+  ],
+  [
+    "a where narrows the set before the page is taken",
+    "findMany",
+    {
+      orderBy: { id: "asc" },
+      include: {
+        accounts: { where: { deletedAt: null }, take: 1, orderBy: { id: "asc" } },
+      },
+    },
+  ],
+  [
+    "a select alongside the page",
+    "findMany",
+    {
+      orderBy: { id: "asc" },
+      include: {
+        accounts: { select: { publicId: true }, take: 1, orderBy: { id: "asc" } },
+      },
+    },
+  ],
+  [
+    "a page on a single-row operation",
+    "findFirst",
+    { orderBy: { id: "asc" }, include: { accounts: { take: 1, orderBy: { id: "asc" } } } },
+  ],
+];
+
+/** The issue's second acceptance criterion: a page under a page. */
+const PER_PARENT_NESTED: [string, string, unknown][] = [
+  [
+    "Organization",
+    "findMany",
+    {
+      orderBy: { id: "asc" },
+      include: {
+        users: {
+          take: 2,
+          orderBy: { name: "asc" },
+          include: { accounts: { take: 1, orderBy: { id: "desc" } } },
+        },
+      },
+    },
+  ],
+  [
+    "Organization",
+    "findMany",
+    {
+      orderBy: { id: "asc" },
+      include: {
+        users: {
+          take: -1,
+          skip: 1,
+          orderBy: { id: "asc" },
+          include: { accounts: { take: 1, skip: 1, orderBy: { id: "asc" } } },
+        },
+      },
+    },
+  ],
+];
+
 const POSTGRES_ONLY: [string, string, unknown][] = [
   [
     "mode insensitive matches case-blind on postgres",
@@ -720,6 +878,32 @@ function suite(label: string, url?: string) {
         // A filter that silently matched nothing would make every case above
         // vacuous, and the suite would report a row of passes for no work.
         expect(RELATION_CASES.length).toBeGreaterThan(15);
+      });
+
+      test.each(PER_PARENT)("%s", async (_name, operation, args) => {
+        await differential.expectSame("User", operation, args);
+      });
+
+      test.each(PER_PARENT_NESTED)(
+        "per parent under per parent — %s.%o",
+        async (model, operation, args) => {
+          await differential.expectSame(model, operation, args);
+        },
+      );
+
+      /**
+       * The batched strategy still refuses, and it is worth pinning next to the
+       * cases that now work: the point is not that pagination landed, it is that
+       * the strategy that cannot express it still says so rather than computing
+       * a page that looks right for the first parent.
+       */
+      test("the same query under batched refuses rather than paging globally", async () => {
+        await expect(
+          UserModel.findMany(
+            { include: { accounts: { take: 1 } } },
+            { strategy: "batched" },
+          ),
+        ).rejects.toThrow(/per parent[\s\S]*lateral join strategy/);
       });
     }
 
@@ -823,11 +1007,10 @@ function suite(label: string, url?: string) {
     /**
      * The lateral counterpart, and the reason the default flipped on Postgres.
      *
-     * Only the outer level folds here — `accounts` carries its own `include`, so
-     * the strategy declines that node — which still removes one statement of the
-     * four. Asserting the *specific* number rather than "fewer" is what would
-     * catch a regression in either direction: a node that stopped folding, or one
-     * that folded when it should have declined.
+     * The whole tree folds now that the strategy recurses, so four statements
+     * become one. Asserting the *specific* number rather than "fewer" is what
+     * would catch a regression in either direction: a node that stopped folding,
+     * or one that folded when it should have declined.
      */
     test("lateral: folding removes a statement per folded node", async () => {
       if (!url) return;
@@ -843,25 +1026,32 @@ function suite(label: string, url?: string) {
         },
         lateral,
       );
-      // Two, and working out why is the useful part. `organization` folds into
-      // the root. `accounts` declines, because it carries its own include — but
-      // the strategy *propagates* to that nested `$exec`, so `accounts` runs as
-      // its own query with *its* `organization` folded in. So four becomes two,
-      // not three: the decline costs a statement, it does not cost the whole
-      // subtree.
-      //
-      // My first guess here was three, from assuming a declined node reverts its
-      // descendants to batching. It does not, and that is the propagation the
-      // batched case above proved was missing.
-      expect(differential.queries()).toBe(2);
+      // One. Every node folds, including the grandchild — a nested `include` is
+      // the same builder one level down rather than a decline.
+      expect(differential.queries()).toBe(1);
 
-      // A tree with nothing to decline collapses to one.
       differential.resetQueries();
       await UserModel.findMany(
         { include: { organization: true, accounts: true } },
         lateral,
       );
       expect(differential.queries()).toBe(1);
+
+      // A decline still costs exactly one statement, not the subtree: the node
+      // runs as its own query with *its* children folded in. `_count` on a node
+      // is the decline that is easiest to reach from the template's schema.
+      differential.resetQueries();
+      await UserModel.findMany(
+        {
+          include: {
+            organization: { include: { _count: { select: { users: true } } } },
+            accounts: { include: { organization: true } },
+          },
+        },
+        lateral,
+      );
+      // root + organization; `accounts` and its `organization` fold.
+      expect(differential.queries()).toBe(2);
     });
 
     // A node whose parents have no keys at all is not worth a round trip: the
@@ -934,17 +1124,80 @@ function suite(label: string, url?: string) {
       }
     });
 
-    test("take and skip inside a to-many relation throw rather than lie", async () => {
-      // Prisma implements these; gemi refuses them under the batched planner
-      // rather than applying the limit globally, which would return a
-      // plausible and wrong answer. See the iteration 7 note in
-      // plan-relations.ts.
+    /**
+     * The half of the fold that cannot ride along in the argument tree.
+     *
+     * `scope` survives folding because policies rewrite the arguments before the
+     * plan key, so a scoped `where` lands inside the subquery. `redact` cannot —
+     * it is a row transform in the shaping stage, with nothing to rewrite — so
+     * the parent runs it on the child's behalf. Now that a fold recurses, the
+     * parent has to run it for the *whole subtree*, and a grandchild is exactly
+     * the row nobody thinks to check.
+     *
+     * Not in `policies.test.ts` because that suite is SQLite, where the strategy
+     * declines everything and this path is unreachable.
+     */
+    test("lateral: a folded grandchild is still redacted", async () => {
+      if (!url) return;
+
+      const previous = (OrganizationModel as any).$policies;
+      (OrganizationModel as any).$policies = [
+        {
+          redact: (_context: unknown, row: Record<string, unknown>) => {
+            if ("description" in row) row.description = null;
+          },
+        },
+      ];
+
+      try {
+        const rows: any[] = await Model.asUser({ id: 1 }, () =>
+          UserModel.findMany(
+            { include: { accounts: { include: { organization: true } } } },
+            { strategy: "lateral" },
+          ),
+        );
+
+        const organizations = rows
+          .flatMap((row) => row.accounts)
+          .map((account: any) => account.organization)
+          .filter(Boolean);
+
+        // The fixture has to reach the grandchild at all, or this passes
+        // vacuously — which is precisely how the depth-1-only version looked.
+        expect(organizations.length).toBeGreaterThan(0);
+        expect(
+          organizations.every((org: any) => org.description === null),
+        ).toBe(true);
+      } finally {
+        (OrganizationModel as any).$policies = previous;
+      }
+    });
+
+    test("take and skip inside a to-many relation throw under batched rather than lie", async () => {
+      // The lateral strategy implements these — see the per-parent cases in the
+      // matrix above. Batched refuses rather than applying the limit to the
+      // combined set, which would return a plausible and wrong answer, and its
+      // message names the strategy that would work.
+      const batched = { strategy: "batched" } as const;
+
       await expect(
-        UserModel.findMany({ include: { accounts: { take: 1 } } }),
+        UserModel.findMany({ include: { accounts: { take: 1 } } }, batched),
       ).rejects.toThrow(/per parent/);
       await expect(
-        UserModel.findMany({ include: { accounts: { skip: 1 } } }),
+        UserModel.findMany({ include: { accounts: { skip: 1 } } }, batched),
       ).rejects.toThrow(/lateral join strategy/);
+
+      // And asking for lateral on a dialect that has none refuses too, rather
+      // than falling back and computing a page for the combined set. The
+      // message says which of the two it was.
+      if (!url) {
+        await expect(
+          UserModel.findMany(
+            { include: { accounts: { take: 1 } } },
+            { strategy: "lateral" },
+          ),
+        ).rejects.toThrow(/declined to fold \(not postgres\)/);
+      }
     });
 
     test("select and include together throw at any level", async () => {

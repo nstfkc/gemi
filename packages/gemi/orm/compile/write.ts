@@ -42,12 +42,20 @@ import { compileWhere } from "./where";
  *
  * **1. Row counts come from `RETURNING`, not from driver metadata.**
  * `updateMany` and `deleteMany` return `{ count }`, and the obvious source is
- * whatever the driver reports about the statement. Measured, that source is not
- * portable: Bun's SQLite driver leaves `affectedRows` **null** on every
- * statement and puts the number on a `count` property instead, and neither is
- * documented or verifiable against Postgres from here. So the count is the
- * number of rows a `RETURNING <primary key>` gives back — one statement shape on
- * every dialect, exact by construction, and dependent on nothing undocumented.
+ * whatever the driver reports about the statement. Measured, that source is
+ * undocumented: Bun's SQLite driver leaves `affectedRows` **null** on every
+ * statement and puts the number on a `count` property instead. So the count is
+ * the number of rows a `RETURNING <primary key>` gives back — one statement
+ * shape on every dialect, exact by construction, and dependent on nothing
+ * undocumented.
+ *
+ * `count` has since been measured on Postgres too, and it agrees: same property,
+ * same value, `affectedRows` null on both, across `update`, `delete`, `insert`,
+ * a statement matching nothing and one carrying `returning`. That does not
+ * change the decision here — `RETURNING` is still exact and still asks the
+ * driver for nothing — but it is what lets `DB.execute` report a *raw* write's
+ * rowcount, where the statement is the caller's and there is no `RETURNING` to
+ * add. See `facades/DB.ts`.
  * It costs one key column per affected row on the wire, which is a real cost on
  * a very large `deleteMany`; iteration 7 owns performance and can revisit it
  * with a benchmark rather than a guess.

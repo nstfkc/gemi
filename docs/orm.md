@@ -197,14 +197,25 @@ them, and they return identical rows:
 
 - **`batched`** — one query per include node, with the children stitched onto the parents in
   process. Works on every dialect.
-- **`lateral`** — the children folded into the root statement with a `LATERAL` join and
-  `json_agg`. **Postgres only, and the default there.** One round trip instead of one per node.
+- **`lateral`** — the whole include tree folded into the root statement with `LATERAL` joins and
+  `json_agg`. **Postgres only, and the default there.** One round trip for the tree instead of one
+  per node.
 
 The lateral strategy **declines per node** rather than emitting SQL it cannot get right, falling
-back to batching for that node alone. It declines a node that has its own `include`, a relation
-inside a `select`, and an implicit many-to-many. A mixed include tree therefore uses both, which
-is fine — the results are the same either way, and there are tests asserting exactly that against
-Prisma across thirty relation shapes.
+back to batching for that node alone. It declines:
+
+- an implicit many-to-many,
+- a self-relation (a relation onto the same table),
+- a node carrying a `_count`,
+- a node ordered by a *relation* — `orderBy: { user: { email: "asc" } }` or
+  `orderBy: { accounts: { _count: "desc" } }` — which compiles to a correlated subquery,
+- and any node with one of those below it: half a fold is not a thing, so a descendant that cannot
+  be expressed declines its whole node.
+
+A declined node still runs under this strategy one level down, so a decline costs one statement, not
+the subtree. A mixed include tree therefore uses both, which is fine — the results are the same
+either way, and there are tests asserting exactly that against Prisma across thirty relation
+shapes.
 
 Override per call when you need to:
 
@@ -214,6 +225,45 @@ await User.findMany({ include: { accounts: true } }, { strategy: "batched" })
 
 Unlike `track`, `strategy` **does** reach the compiler and **is** part of the plan cache key: two
 strategies emit different SQL for the same arguments.
+
+### Paging a relation
+
+```ts
+await Store.findMany({
+  include: {
+    products: {
+      orderBy: { position: "asc" },
+      take: 10,                                       // ten products *per store*
+      include: { media: { take: 1, orderBy: { position: "asc" } } },
+    },
+  },
+})
+```
+
+`take` and `skip` inside a to-many are **per parent**, exactly as they are in Prisma — ten products
+for each store, not ten in total. A negative `take` means "the last N" and comes back in the order
+your `orderBy` describes, the same as at the root. Paginating without an `orderBy` orders by the
+child's primary key, because "the first ten" is otherwise only meaningful if the scan happens to be
+stable.
+
+**This needs the `lateral` strategy, so it needs Postgres.** The batched strategy serves every
+parent from one query, so the only `limit` it could emit would page every parent's children as a
+single set — plausible, and wrong. It refuses instead:
+
+```
+UnsupportedQueryError: gemi ORM does not support 'products.take' yet (Store.findMany).
+A 'take' inside a to-many relation is per parent, and the batched relation planner serves
+every parent from one query — so the only limit it could emit would page every parent's
+children as one set. Only the lateral join strategy can express it, by paginating inside a
+subquery that already runs once per parent row, and it needs Postgres: this node declined to
+fold (not postgres). Load 'products' as its own query, or narrow it with 'where'.
+```
+
+The tail of that message is the part to read: it says *why* this node reached a strategy that
+cannot page it — the dialect, an explicit `strategy: "batched"`, or a decline. There is no
+workaround that is both correct and affordable, which is why the refusal is loud: fetching every
+child and slicing in JavaScript reads the whole table, and one query per parent is the N+1 the
+`include` exists to avoid.
 
 ### Filtering on a relation
 
@@ -642,6 +692,124 @@ Measured numbers, the methodology, and the reasoning behind the lateral default 
 `plans/orm/benchmarks.md` in the repository — deliberately not here, because they are tied to a
 machine and a dataset and would go stale as documentation.
 
+## Raw SQL
+
+The ORM does not implement every SQL shape, and that is deliberate. What it owes you is somewhere
+for the rest to go — not just a way to run one hand-written statement, but a way to *compose* SQL,
+because a predicate built conditionally and passed around is the shape raw SQL actually takes in an
+application.
+
+```ts
+import { DB } from "gemi/facades"
+import { sql, join, empty } from "gemi/orm"
+
+const filters = []
+if (q) filters.push(sql`"name" ilike ${`%${q}%`}`)
+if (organizationId) filters.push(sql`"organizationId" = ${organizationId}`)
+
+const where = filters.length ? sql`where ${join(filters, " and ")}` : empty
+
+const rows = await DB.query<Product>(
+  sql`select * from "Product" ${where} order by "position" limit ${20}`,
+)
+```
+
+| | |
+| --- | --- |
+| `` sql`…` `` | A fragment. Every `${value}` is **bound**; a `${fragment}` is spliced in, carrying its own parameters. Nests to any depth. |
+| `join(items, sep)` | Fragments *or* values, joined. `join(ids)` is `$1, $2, $3`. An empty list is `empty`, not a dangling separator. The separator is **glue only** — see below. |
+| `empty` | The fragment that contributes nothing, so a conditional predicate stays a value instead of becoming a branch. |
+| `DB.query(fragment)` | The rows. |
+| `DB.execute(fragment)` | How many rows the statement **touched**. |
+
+Three properties worth knowing, because they are the reason this is not just `DB.sql`:
+
+- **Placeholders are assigned at assembly, not at authoring.** SQLite writes `?` and Postgres
+  writes `$1`; a fragment does not know where it will land, so the numbering happens once the whole
+  statement exists. The same fragment can be nested, reused twice in one statement, or built before
+  the dialect is known.
+- **It runs on the ambient transaction.** A `DB.query` inside `Model.transaction` joins it, exactly
+  as a `User.create` does. A raw statement that quietly committed while its neighbours rolled back
+  would be worse than no raw statement at all.
+- **A plain string is refused.** Accepting one would make an interpolated template literal the path
+  of least resistance, which is the injection everything else here exists to prevent.
+
+**Policies do not apply here, and cannot.** A policy scopes a *model's* queries by rewriting the
+argument tree; a raw statement has no argument tree and no model behind it, so nothing scopes it and
+nothing redacts its rows. That is not a gap to be closed later — it is what "raw" means. If the
+statement reads a policied model, the tenant predicate is yours to write, and
+[`Every path that reaches another model carries that model's policies`](#every-path-that-reaches-another-model-carries-that-models-policies)
+stops at this door.
+
+Values are handed to the driver as they arrive, with two exceptions that exist so a fragment means
+the same thing on both dialects: a `Date` binds as milliseconds on SQLite — which is what the ORM
+stores — and a boolean as `0`/`1`.
+
+A plain object is **not** JSON-encoded for you. The compiler only knows to do that because a field
+says `Json`, and guessing from the value would turn a mistyped parameter into a successfully-written
+string. What the driver then does with it differs: Bun binds an object into a Postgres `jsonb`
+column correctly, and on SQLite binds it to something no row matches. Stringify it yourself if the
+column is JSON and you want the same answer on both.
+
+**The separator `join` takes is written into the SQL**, so it is not a free string: whitespace,
+commas, or `and` / `or`, and nothing else. Anything more expressive is legitimate but has to say so
+with `unsafeSql`, which keeps that the only door:
+
+```ts
+join(filters, " and ")               // fine
+join(parts, unsafeSql(") and ("))    // fine, and visibly a decision
+join(ids, req.query.sep)             // refused
+```
+
+That is an allowlist rather than a blocklist on purpose. The obvious blocklist — reject quotes,
+semicolons and comment markers — lets `") or 1=1 union select password from Users where 1=(1"`
+through, which has none of them and is still an injection.
+
+**Only a fragment built by `sql`, `join`, `unsafeSql` or `empty` is spliced.** Anything else in an
+interpolation slot is bound — including an object that merely *looks* like a fragment, which is what
+a parsed request body can be made to contain. That check is membership, not shape, precisely so that
+`{"text": "…", "binders": []}` arriving from outside the program is a parameter and not a statement.
+
+### The rowcount is a primitive, not a diagnostic
+
+```ts
+const won = await DB.execute(
+  sql`update "Reservation" set "status" = 'claimed'
+      where "id" = ${id} and "status" = 'reserved'`,
+)
+if (won === 0) throw new AlreadyClaimed()
+```
+
+`1` means this caller won the compare-and-swap and `0` means it lost. That is the whole concurrency
+control for a large class of code, so an API that discarded the number could not express it.
+
+### `unsafeSql` — the one door into the SQL text
+
+```ts
+import { unsafeSql } from "gemi/orm"
+
+// A literal in this file. Never a request, a form, a header or a database row.
+const REAPER = unsafeSql(`'reaper'`)
+
+await DB.query(sql`
+  select … from "Job" where "name" is distinct from ${REAPER} …
+`)
+```
+
+**Never give it a value that came from outside the program.** There is no escaping and there will
+not be — escaping that is "usually right" is worse than none, because it survives review.
+
+It exists because plan quality can depend on *not* parameterising. A partial index declared
+`where "name" is distinct from 'reaper'` is only usable if the planner can prove the query's
+predicate matches the index's, and a bound parameter is opaque at plan time — so `$1` there means a
+sequential scan of the whole table instead of an index hit. The constant has to be in the text. The
+same applies to identifiers and sort directions, which cannot be parameters in SQL at all; the rule
+is the same for those, and it is about where the value came from, not what it is.
+
+`DB.sql` is unchanged and still Bun's own tagged template, for a single self-contained statement
+that needs none of this. It does **not** join the ambient transaction — use `DB.query` when that
+matters.
+
 ## Dialects
 
 **SQLite and Postgres** are built and tested, on every operation, against a differential harness
@@ -661,6 +829,8 @@ Stated so you can plan around them rather than discover them:
   touched.
 - **No `omit`.** Use `select`, or a policy's `redact`.
 - **No migrations, no schema DSL.** Prisma owns both, and gemi must not shadow the Prisma CLI.
+- **No `groupBy`, `aggregate`, `distinct` or cursor pagination.** These land in
+  [Raw SQL](#raw-sql), which exists so that "not implemented" has an answer rather than a shrug.
 
 ## See also
 

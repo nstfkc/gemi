@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, test } from "vitest";
 
+import { lateralStrategy } from "./compile/lateral";
 import { PostgresDialect } from "./dialect/postgres";
 import { SqliteDialect } from "./dialect/sqlite";
 import { account, organization, user } from "./fixtures";
@@ -239,6 +240,84 @@ describe("plan cache discrimination", () => {
     expect(planKey(sqlite, "User", "findMany", { take: 10 })).not.toBe(
       planKey(sqlite, "User", "findMany", { take: -10 }),
     );
+  });
+
+  /**
+   * The same rule one level down, where it is easier to get wrong: a relation
+   * node's `take` / `skip` sit inside `include`, which is a *literal* subtree —
+   * every value there is recorded verbatim, because `"asc"` and `"desc"` have to
+   * be two keys. A number recorded verbatim would mint one plan entry per page,
+   * so both keys have to opt out of that, and only the `take`'s sign may stay.
+   *
+   * Compiled on Postgres because that is the only dialect that can page a
+   * relation at all; on SQLite these are refusals rather than plans.
+   */
+  describe("a relation node's take and skip", () => {
+    const key = (args: unknown) =>
+      planKey(postgres, "User", "findMany", args, "lateral");
+
+    test("magnitude shares a key, sign does not", () => {
+      expect(key({ include: { accounts: { take: 10 } } })).toBe(
+        key({ include: { accounts: { take: 20 } } }),
+      );
+      expect(key({ include: { accounts: { take: 10 } } })).not.toBe(
+        key({ include: { accounts: { take: -10 } } }),
+      );
+    });
+
+    test("a skip's value is a parameter, its presence is not", () => {
+      expect(key({ include: { accounts: { skip: 1 } } })).toBe(
+        key({ include: { accounts: { skip: 9 } } }),
+      );
+      expect(key({ include: { accounts: { skip: 1 } } })).not.toBe(
+        key({ include: { accounts: true } }),
+      );
+      expect(key({ include: { accounts: { skip: 1 } } })).not.toBe(
+        key({ include: { accounts: { take: 1 } } }),
+      );
+    });
+
+    test("and the shapes that share a key really do share a plan", () => {
+      const wide = getOrCompile(
+        user,
+        "findMany",
+        { include: { accounts: { take: 10, skip: 1 } } },
+        postgres,
+        lateralStrategy,
+      );
+      const narrow = getOrCompile(
+        user,
+        "findMany",
+        { include: { accounts: { take: 20, skip: 9 } } },
+        postgres,
+        lateralStrategy,
+      );
+
+      expect(narrow.text).toBe(wide.text);
+      expect(
+        narrow.bind({ include: { accounts: { take: 20, skip: 9 } } }),
+      ).toEqual([20, 9]);
+    });
+
+    test("...and the shapes that do not share a key compile differently", () => {
+      const forwards = getOrCompile(
+        user,
+        "findMany",
+        { include: { accounts: { take: 1, orderBy: { id: "asc" } } } },
+        postgres,
+        lateralStrategy,
+      );
+      const backwards = getOrCompile(
+        user,
+        "findMany",
+        { include: { accounts: { take: -1, orderBy: { id: "asc" } } } },
+        postgres,
+        lateralStrategy,
+      );
+
+      // The sign flips the page's ordering, which is why it is structural.
+      expect(backwards.text).not.toBe(forwards.text);
+    });
   });
 
   /**
