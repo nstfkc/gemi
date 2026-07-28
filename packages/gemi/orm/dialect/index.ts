@@ -159,6 +159,24 @@ export interface SqlDialect {
   paginate(take: Binder | null, skip: Binder | null): Fragment;
 
   /**
+   * The clause that makes an insert skip rows violating a unique constraint —
+   * `createMany({ skipDuplicates: true })` — or `null` where it is not offered.
+   *
+   * **`null` is a parity decision, not a missing feature**, and that is worth
+   * knowing before someone "fixes" SQLite by returning `insert or ignore`.
+   * SQLite has `on conflict do nothing` and has since 3.24; Prisma nonetheless
+   * rejects the *argument* on SQLite — `Unknown argument 'skipDuplicates'`,
+   * whatever its value, verified against a generated 6.19 client. Offering it
+   * here would make gemi a silent superset of Prisma on the one dialect the
+   * differential harness could then no longer compare, which is the trade this
+   * project has declined every other time it came up.
+   *
+   * A method rather than a boolean because the SQL differs where it exists, and
+   * a `Fragment` because everything the compiler emits is one.
+   */
+  ignoreConflicts(): Fragment | null;
+
+  /**
    * Recognise a driver error as a constraint violation, and say which columns
    * it names.
    *
@@ -183,18 +201,85 @@ export interface ConstraintViolation {
   constraint?: string;
 }
 
+/**
+ * The ORM was asked to compile against a dialect it does not implement.
+ *
+ * **The split this message has to convey**, because it is the surprising part:
+ * `DatabaseManager` connects to MySQL and MariaDB perfectly well — Bun's client
+ * speaks all four — so raw SQL through `DB.query` / `DB.sql` works, and
+ * transactions work. What does not exist is a `SqlDialect` for them, so
+ * everything that *compiles* a statement stops here.
+ *
+ * A caller who reads only "not supported" reasonably concludes the connection
+ * is unusable, which is wrong and is the more expensive misreading: it is the
+ * ORM that is unavailable, not the database.
+ */
 export class UnsupportedDialectError extends Error {
   constructor(dialect: Dialect) {
     super(
-      `The gemi ORM does not support the '${dialect}' dialect yet. ` +
-        `Only sqlite and postgres are implemented.`,
+      `The gemi ORM does not support the '${dialect}' dialect. Only sqlite ` +
+        `and postgres are implemented — see the supported matrix in ` +
+        `docs/orm.md.\n\n` +
+        `The *connection* is fine: Bun's client speaks ${dialect}, so raw SQL ` +
+        `through DB.query / DB.sql and transactions all work. It is the query ` +
+        `compiler that has no ${dialect} dialect, so every model operation ` +
+        `raises this.\n\n` +
+        `Point DATABASE_URL at Postgres or SQLite to use the ORM, or keep ` +
+        `using Prisma's own client for this database.`,
     );
     this.name = "UnsupportedDialectError";
   }
 }
 
-const sqlite = new SqliteDialect();
-const postgres = new PostgresDialect();
+/**
+ * Whether the ORM can compile for this dialect at all.
+ *
+ * Exported so an application can find out at **boot** rather than on its first
+ * query. That is the whole gap this closes: `DatabaseManager` constructs
+ * happily against MySQL, so a deploy pointed at one starts, passes a health
+ * check, serves traffic, and fails on the first model read — which is the
+ * latest and most expensive moment to learn it.
+ */
+export function ormSupports(dialect: Dialect): boolean {
+  return COMPILERS[dialect] !== null;
+}
+
+/** Every dialect `Dialect` names, for anything that has to walk them all. */
+export function everyDialect(): Dialect[] {
+  return Object.keys(COMPILERS) as Dialect[];
+}
+
+/**
+ * The compiler for each dialect, or `null` where the ORM has none.
+ *
+ * **One map rather than two lists, and `satisfies` rather than a lookup.** The
+ * supported set used to be written three times — `ormSupports`' `||` chain,
+ * `dialectFor`'s `if` chain, and a test enumerating a hand-written copy of the
+ * `Dialect` union — so adding a fifth member to that union changed nothing
+ * anywhere: `tsc` clean, tests green, the new dialect silently reported as
+ * unsupported by one function and unknown to the other.
+ *
+ * That moment is exactly what the guard exists for. Adding a dialect to the
+ * union is the *first step of implementing one*, and it is the step where a
+ * half-added dialect would disagree with itself.
+ *
+ * `satisfies Record<Dialect, …>` makes it a compile error in a file the build
+ * actually checks. It has to live here rather than in a test: `tsconfig.json`
+ * excludes test files and vitest transpiles without type-checking, so an
+ * exhaustiveness check written there is a type error nothing ever evaluates.
+ *
+ * The sixth thing in this codebase made `tsc`'s job rather than a convention's
+ * — see the note on `resolveLink`'s `operation`.
+ */
+const COMPILERS = {
+  sqlite: new SqliteDialect(),
+  postgres: new PostgresDialect(),
+  // Bun's client speaks both; the ORM has no compiler for either. See
+  // `UnsupportedDialectError`, which is careful to say that the *connection*
+  // still works.
+  mysql: null,
+  mariadb: null,
+} satisfies Record<Dialect, SqlDialect | null>;
 
 /**
  * Resolved per call from `DatabaseManager.dialect`, never baked into a
@@ -202,9 +287,9 @@ const postgres = new PostgresDialect();
  * the one `prisma generate` saw.
  */
 export function dialectFor(dialect: Dialect): SqlDialect {
-  if (dialect === "sqlite") return sqlite;
-  if (dialect === "postgres") return postgres;
-  throw new UnsupportedDialectError(dialect);
+  const compiler = COMPILERS[dialect];
+  if (compiler === null) throw new UnsupportedDialectError(dialect);
+  return compiler;
 }
 
 export { PostgresDialect, SqliteDialect };

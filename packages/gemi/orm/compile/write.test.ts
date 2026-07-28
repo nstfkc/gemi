@@ -185,6 +185,95 @@ describe("createMany", () => {
     ).toThrow(UnsupportedQueryError);
   });
 
+  /**
+   * `skipDuplicates` — the check and the insert in one statement, which is the
+   * whole point: reading first to find out which rows exist is a second query
+   * *and* a race, since a concurrent importer can write one of them in between
+   * and the insert fails on a unique violation anyway.
+   */
+  describe("skipDuplicates", () => {
+    const rows = { data: [{ email: "a@b.c" }, { email: "d@e.f" }] };
+
+    test("true emits an untargeted conflict clause, before returning", () => {
+      const emitted = text("createMany", { ...rows, skipDuplicates: true }, postgres);
+
+      // Untargeted, so it covers every unique constraint and the primary key at
+      // once — which is what `skipDuplicates` means, and what Prisma emits. A
+      // targeted `on conflict (col)` would still fail on any other constraint.
+      expect(emitted).toContain(` on conflict do nothing returning "id"`);
+    });
+
+    test("false is the same statement as not asking", () => {
+      expect(text("createMany", { ...rows, skipDuplicates: false }, postgres)).toBe(
+        text("createMany", rows, postgres),
+      );
+    });
+
+    /**
+     * The count has to be the number *inserted*, not the number supplied —
+     * the part the issue flags as most likely to be got wrong. It falls out:
+     * a row a conflict skipped never reaches `RETURNING`.
+     */
+    test("the count is what was inserted, not what was offered", () => {
+      const plan = compileWrite(
+        user,
+        "createMany",
+        { ...rows, skipDuplicates: true },
+        postgres,
+      );
+
+      expect(plan.shape([{ id: 1 }])).toEqual({ count: 1 });
+      expect(plan.shape([])).toEqual({ count: 0 });
+    });
+
+    /**
+     * SQLite *can* express it, and Prisma still rejects the argument there —
+     * for `false` as well as `true`, verified against a generated 6.19 client.
+     * Accepting `false` because it happens to be a no-op would make the two
+     * dialects disagree about which calls are legal.
+     */
+    test.each([true, false])("%s is refused on sqlite, naming the dialect", (value) => {
+      expect(() =>
+        text("createMany", { ...rows, skipDuplicates: value }),
+      ).toThrow(/not available on sqlite/);
+      expect(() =>
+        text("createMany", { ...rows, skipDuplicates: value }),
+      ).toThrow(/Prisma does not offer it there either/);
+    });
+
+    /**
+     * Validation must not depend on how much data happened to be supplied. The
+     * empty-list shortcut returns before the statement is built, so the check
+     * has to come first or `createMany({ data: [], skipDuplicates: true })`
+     * succeeds on SQLite and the same call with one row throws.
+     */
+    test("an empty list is validated too", () => {
+      expect(() =>
+        text("createMany", { data: [], skipDuplicates: true }),
+      ).toThrow(/not available on sqlite/);
+      expect(() =>
+        compileWrite(user, "createMany", { data: [], skipDuplicates: true }, postgres),
+      ).not.toThrow();
+    });
+
+    test("a non-boolean is refused", () => {
+      expect(() =>
+        compileWrite(user, "createMany", { ...rows, skipDuplicates: "yes" }, postgres),
+      ).toThrow(/Expected true or false/);
+    });
+
+    test("it is only an argument of createMany", () => {
+      expect(() =>
+        compileWrite(
+          user,
+          "create",
+          { data: { email: "a@b.c" }, skipDuplicates: true },
+          postgres,
+        ),
+      ).toThrow(UnsupportedQueryError);
+    });
+  });
+
   // `default values` inserts exactly one row, and there is no portable
   // multi-row spelling of it — so this used to succeed and insert one row for
   // three, reporting `{ count: 1 }`.

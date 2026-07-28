@@ -106,6 +106,7 @@ function countPlan(
     dialect,
     `_c${index}`,
     `${dialect.quoteIdent(schema.table)}.`,
+    operation,
   );
 
   const where = node === true ? undefined : (node as any)?.where;

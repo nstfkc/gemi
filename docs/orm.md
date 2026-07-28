@@ -117,9 +117,35 @@ const user = await User.findUniqueOrThrow({
 })
 ```
 
+**`take` and `skip` must be integers, and are refused rather than coerced.** They are the only
+arguments whose *sign* decides the SQL — a negative `take` means "the last N", which flips every
+ordering term — so a `take` arriving as a string does not merely have the wrong type, it takes the
+wrong branch: `take: "-2"` used to return the **first** two rows, in the opposite order, with no
+error. A query string is exactly where a string `take` comes from, so parse it before you pass it:
+
+```
+UnsupportedQueryError: gemi ORM does not support 'take' yet (User.findMany).
+Expected an integer, got "-2".
+```
+
+A negative `skip` is refused too — it counts rows to pass over — and both rules are the ones that
+already applied inside an `include`.
+
+> **Divergence from Prisma, on purpose.** Prisma accepts a *fractional* `take` and truncates toward
+> zero; this refuses it. Binding one instead is a `datatype mismatch` error from SQLite and a
+> silently different row count on Postgres, which rounds — so the fraction has no single meaning to
+> match. One rule at both levels, failing loudly, beats three behaviours.
+
 `select` and `include` narrow the **return type**, exactly as they do in Prisma — `user.email`
 type-checks, `user.name` does not. A key outside the operation's argument type collapses to
 `never` rather than being quietly accepted.
+
+**Foreign keys are enforced on both dialects.** SQLite leaves `pragma foreign_keys` off by
+default and so does Bun's driver, so gemi turns it on for every SQLite connection — otherwise a
+`references` in your migration would mean nothing there while meaning everything on Postgres. An
+insert naming a parent that does not exist is refused, and `onDelete: Cascade` / `SetNull` actually
+run. If you have been developing against SQLite, writes that quietly succeeded may now raise; they
+were already raising in production.
 
 Queries return **plain objects**, never class instances. That is the default and it is not a
 stepping stone: a `Pick<User, "id">` hydrated as a `User` would carry methods reading fields the
@@ -174,6 +200,27 @@ Results are typed by Prisma's own mapped types, so `_max: { position: true }` na
 **`groupBy` is not implemented.** `having` is a predicate compiler over aggregate expressions rather
 than columns, which is its own piece of work; shipping half of it typed as though it worked would be
 worse than not shipping it.
+
+### Importing a batch that may overlap
+
+```ts
+await Product.createMany({ data: rows, skipDuplicates: true })   // Postgres only
+```
+
+`ON CONFLICT DO NOTHING`, untargeted — so it covers every unique constraint and the primary key at
+once, which is what `skipDuplicates` means. The returned `{ count }` is the number of rows
+**inserted**, not the number supplied, so it answers "how many were new".
+
+The check and the insert being one statement is the whole point. Reading first to find out which
+rows exist is a second query *and* a race: between the read and the insert a concurrent importer
+writes one of them, and the insert fails on a unique violation anyway.
+
+**Postgres only, and that is Prisma's line rather than SQL's.** SQLite can express the same clause;
+Prisma rejects the argument there — for `false` as well as `true` — so gemi does too, rather than
+becoming a silent superset on the one dialect the differential harness could then no longer compare.
+On SQLite the error names the dialect and says so. If a batch is too large for one statement it is
+split inside a transaction, and `skipDuplicates` survives the split: the counts sum, and a conflict
+in a later chunk does not roll back an earlier one, because `do nothing` is not an error.
 
 ### Per-call options
 
@@ -566,6 +613,19 @@ a shared model base can impose a policy a subclass can only narrow, never drop.
 | `onUpdate(ctx, data)` | `update` / `updateMany` / `upsert` | Defaults or validates the payload of a write to existing rows. |
 | `redact(ctx, row)` | Shaping | Removes fields from a fetched row. |
 
+**Anything that names another model is scoped as a read of that model**, whatever the statement
+around it is doing. That covers all four ways a query reaches a model it did not name — an
+`include` / `select` node, a `_count` entry, a relation filter in a `where`, and a relation
+ordering in an `orderBy` — and it means `context.operation` is `findMany` inside each of them:
+
+```ts
+User.create({ data, include: { accounts: true } })      // Account's scope, not its onCreate
+User.updateMany({ where: { accounts: { some: {} } } })  // Account's read scope, not its write one
+```
+
+The children are being *read back*; only the row named by the statement itself is being written.
+Nested writes under `data` are a different tree and scope themselves as writes.
+
 **A scope alone does not protect writes, and the ORM says so rather than assuming.** A `scope`
 narrows *which rows* a statement may touch and says nothing about the values written, so a
 tenant-scoped `update` could hand one of your own rows to another tenant — after which you can
@@ -856,14 +916,52 @@ is the same for those, and it is about where the value came from, not what it is
 that needs none of this. It does **not** join the ambient transaction — use `DB.query` when that
 matters.
 
+## `Json` columns
+
+A `Json` column round-trips whatever you give it: an object, an array, a string, a number, `null`.
+The value is stored as JSON and comes back as the same JavaScript value, on both dialects and
+whether it is read at the root or nested inside an `include`.
+
+Two things are worth knowing:
+
+- **A bare JSON number or boolean is refused on Postgres.** `metadata: 42` raises rather than being
+  stored, because the driver binds it as an integer and the column is `jsonb`. Wrap it — `{ value:
+  42 }` — or store it as a string. SQLite has no such limit. This is the one shape where the two
+  dialects disagree, and it fails loudly rather than storing the wrong thing.
+- **A string is a string.** `metadata: "42"` stores the JSON string `"42"`, not the number, and
+  `metadata: '{"a":1}'` stores that text as a string rather than as an object. If you want an
+  object, pass an object.
+
+> **Upgrading:** `Json` values written by a *pre-release* build of this ORM on Postgres were stored
+> as JSON **strings** rather than as objects — `{ a: 1 }` landed as `"{\"a\":1}"`. Reads undid it,
+> so nothing looked wrong from inside the ORM, but the column was wrong for anything else that read
+> it. Those rows now read back as strings. Re-seed development databases; there is no released
+> version affected.
+
 ## Dialects
 
 **SQLite and Postgres** are built and tested, on every operation, against a differential harness
 that runs each query through both gemi and Prisma and compares the rows. `DatabaseManager` infers
 the dialect from `DATABASE_URL`.
 
-MySQL and MariaDB are **not** implemented. The dialect seam is there and `DatabaseManager` already
-recognises them, but nothing is built or tested behind it.
+MySQL and MariaDB are **not** implemented, and that is a statement about the supported matrix rather
+than a release that is coming. The dialect seam is there and `DatabaseManager` already recognises
+them, but nothing is built or tested behind it.
+
+**The connection still works, which is the part worth being precise about.** Bun's client speaks all
+four dialects, so pointed at MySQL an application connects, `DB.query` / `DB.sql` run, and
+transactions work. What is missing is a `SqlDialect` for the query *compiler*, so every model
+operation raises `UnsupportedDialectError` — with a message that says exactly that, rather than
+leaving you to conclude the database is unusable.
+
+In development the mismatch is reported **at boot** instead of on the first model query, since
+otherwise an application pointed at MySQL starts, passes a health check, and fails on the first
+`findMany`. `ormSupports(dialect)` is exported if you would rather assert it yourself:
+
+```ts
+import { ormSupports } from "gemi/orm"
+if (!ormSupports(DB.dialect)) throw new Error("this deployment needs Postgres")
+```
 
 ## Not in scope
 
@@ -874,6 +972,12 @@ Stated so you can plan around them rather than discover them:
 - **No lazy loading.** A relation you did not `include` is absent, not a proxy that queries when
   touched.
 - **No `omit`.** Use `select`, or a policy's `redact`.
+- **No multi-field relations.** `@relation(fields: [a, b], references: [c, d])` is refused wherever
+  a relation is correlated — `include` under either strategy, a relation filter, `_count`, an
+  `orderBy` through a relation, and nested writes — rather than joining on the first field and
+  returning plausible wrong rows. The error names the fields on both sides and the operation it came
+  from. This one *is* pending rather than declined; it needs a composite key comparison on both
+  sides (a tuple `in` for the batched strategy, a conjunction for the lateral one).
 - **No migrations, no schema DSL.** Prisma owns both, and gemi must not shadow the Prisma CLI.
 - **No `groupBy`, `aggregate`, `distinct` or cursor pagination.** These land in
   [Raw SQL](#raw-sql), which exists so that "not implemented" has an answer rather than a shrug.

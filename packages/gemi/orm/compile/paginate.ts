@@ -1,7 +1,95 @@
 import type { SqlDialect } from "../dialect";
+import { UnsupportedQueryError } from "../errors";
 import type { ModelSchema } from "../schema";
 import type { Binder, Fragment } from "./fragment";
 import { reverse, type OrderTerm } from "./orderBy";
+
+/**
+ * `take` / `skip` have to be integers, and Prisma is stricter than "a number":
+ * a `skip` counts rows to pass over, so a negative one is meaningless and is
+ * rejected rather than clamped. A negative *`take`* is not — it means "the last
+ * N".
+ *
+ * **Why refusing rather than coercing**, which is the cheaper fix and the wrong
+ * one. The sign of a `take` decides the *SQL*: it flips every ordering term and
+ * reverses the result set. Everything else about these two arguments is a bound
+ * value. So a `take` that is a string does not merely arrive in the wrong type —
+ * it takes the wrong branch, because the branch is `typeof take === "number" &&
+ * take < 0` and a string is not a number:
+ *
+ *     { take: -2 }    ->  order flipped, bind 2   the last two rows
+ *     { take: "-2" }  ->  order as written, bind 2   the *first* two rows
+ *
+ * `Math.abs(Number(...))` then binds `2` either way, so the statement is valid,
+ * the result set is the right size, and the rows are wrong. No error anywhere.
+ *
+ * Coercing early would fix that one case — `Number("-2")` is negative — and
+ * would keep accepting `take: "abc"`, which binds `NaN`. Prisma types these as
+ * `number` and rejects a string outright, and #72 already chose refusal for the
+ * same arguments on a *relation* node. This is that decision reaching the root,
+ * where it should have been in the first place.
+ *
+ * **A fraction is the one deliberate divergence, and it is deliberate because
+ * of what the alternative measures at.** Prisma accepts `take: 1.5` and
+ * truncates toward zero. Binding it, which is what this did, does not:
+ *
+ *     prisma    take: 1.5   ->  1 row     truncates
+ *     sqlite    limit ? = 1.5   ->  SQLiteError: datatype mismatch (SQLITE_MISMATCH)
+ *     postgres  limit $1 = 1.5  ->  2 rows    rounds to nearest
+ *
+ * Measured through Bun against both engines. So the status quo is an opaque
+ * driver error on one dialect and a silent disagreement with Prisma *and* with
+ * the other dialect on the second — from one argument, with no line naming
+ * `take`. Matching Prisma would mean truncating here and also changing #72's
+ * relation-node rule, which refuses fractions today; refusing keeps one rule at
+ * both levels and fails in the loud direction. `docs/orm.md` records it as a
+ * divergence rather than leaving it to be discovered.
+ *
+ * `argument` is the name to report: `take` at the root, `accounts.take` on a
+ * relation node.
+ *
+ * **The error type is wrong here, and deliberately left wrong until #78 lands.**
+ * `UnsupportedQueryError` spells "does not support 'take' *yet*", and there is
+ * no future in which `take: "-2"` becomes supported — the word promises
+ * something nobody intends. For the fraction it contradicts this file's own
+ * comment, which calls the refusal deliberate. That word is load-bearing in
+ * this codebase: #78 adds `UnsupportedByDesignError` for "a decision rather
+ * than a gap", and #82 removed "yet" from the dialect message for exactly this
+ * reason.
+ *
+ * Validation is a fourth category again — not unimplemented, not a design
+ * refusal of a feature, but invalid input — so the fix is a category, not a
+ * reworded string, and inventing one here while #78 is in flight would be the
+ * second copy this function exists to avoid. When #78 merges: the fraction
+ * refusal moves to the by-design category it is already documented as, and the
+ * type-mismatch messages lose the word. The two branches merge clean today, so
+ * this is an order note rather than a conflict.
+ */
+export function assertPageArgument(
+  model: string,
+  operation: string,
+  argument: string,
+  key: "take" | "skip",
+  value: unknown,
+): void {
+  if (typeof value !== "number" || !Number.isInteger(value)) {
+    throw new UnsupportedQueryError(
+      argument,
+      model,
+      operation,
+      `Expected an integer, got ${JSON.stringify(value)}.`,
+    );
+  }
+  if (key === "skip" && value < 0) {
+    throw new UnsupportedQueryError(
+      argument,
+      model,
+      operation,
+      `A 'skip' counts rows to pass over, so it cannot be negative. Prisma ` +
+        `rejects one too.`,
+    );
+  }
+}
 
 /**
  * `skip` / `take`, plus the two pieces of Prisma behaviour around them that are
@@ -13,9 +101,22 @@ import { reverse, type OrderTerm } from "./orderBy";
  * - A *negative* `take` means "the last N": Prisma flips every ordering term,
  *   takes `abs(take)`, and then reverses the result set so the caller still
  *   sees their own ordering. `reversed` carries that last part out to `shape`.
+ *
+ * **Validation happens here rather than in each caller's argument check.** Three
+ * operations page — `findMany` and friends, `count`, `aggregate` — and they
+ * validate their arguments in two different files. Putting the check at the one
+ * place that *reads* `take` and `skip` means a fourth pager cannot be added
+ * without it, which is the same reason invariant 1 puts every query through one
+ * door.
  */
 export function pagination(
   schema: ModelSchema,
+  /**
+   * The operation being compiled, for the error message. Required rather than
+   * defaulted: this exists to report which call was refused, and a default
+   * would name the wrong one on every caller that forgot it.
+   */
+  operation: string,
   args: any,
   dialect: SqlDialect,
   parsed: OrderTerm[],
@@ -28,6 +129,17 @@ export function pagination(
    */
   single = false,
 ): { clause: Fragment; terms: OrderTerm[]; reversed: boolean } {
+  // Against the caller's own arguments, before `single` pins anything. A
+  // `findFirst` ignores the value of `take` — but it still accepts the
+  // argument, and Prisma still rejects a string there, so refusing what was
+  // written beats refusing what survived.
+  if (args?.take !== undefined) {
+    assertPageArgument(schema.name, operation, "take", "take", args.take);
+  }
+  if (args?.skip !== undefined) {
+    assertPageArgument(schema.name, operation, "skip", "skip", args.skip);
+  }
+
   const take = single ? 1 : args?.take;
   const skip = args?.skip;
 

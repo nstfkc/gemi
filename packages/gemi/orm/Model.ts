@@ -506,7 +506,6 @@ export abstract class Model {
       effective = applyNestedPolicies(
         schema,
         effective,
-        op,
         currentUser(),
         system,
         (model) => {
