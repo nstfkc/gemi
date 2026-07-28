@@ -211,6 +211,24 @@ const CASES: Case[] = [
     update: { name: "U" },
     select: { name: true },
   }],
+
+  // `create` leaves the conflict key unset, which `on conflict` cannot express:
+  // the insert could never collide on the target. Prisma means find-then-write,
+  // and its semantics here are surprising enough to be worth comparing rather
+  // than reasoning about — the inserted row's `publicId` is **generated**, not
+  // the one the `where` named. Both branches, and a `select` over each.
+  ["upsert omitting the key, missing", "upsert", {
+    where: { publicId: "no-such-public-id" },
+    create: { email: "omitted@example.dev" },
+    update: { name: "Updated" },
+    select: { email: true, name: true },
+  }],
+  ["upsert omitting the key, hitting", "upsert", {
+    where: { publicId: "p1" },
+    create: { email: "unused@example.dev" },
+    update: { name: "Updated" },
+    select: { email: true, name: true },
+  }],
 ];
 
 function suite(label: string, url?: string) {
@@ -433,19 +451,57 @@ function suite(label: string, url?: string) {
       ).rejects.not.toBeInstanceOf(UniqueConstraintError);
     });
 
-    // The two upsert shapes that `on conflict` cannot express, refused rather
-    // than silently turned into an insert. See compileUpsert.
-    test("upsert whose create omits the conflict key is refused", async () => {
+    /**
+     * Used to be refused; now runs as a read and a write inside one
+     * transaction, which is what Prisma means by it. The differential cases
+     * above compare the *result*; this one pins the part they cannot see —
+     * that the row is created rather than the call raising, and that the
+     * `where`'s key is not what lands in it.
+     */
+    test("upsert whose create omits the conflict key creates a row", async () => {
       await differential.reset();
-      await expect(
-        UserModel.upsert({
-          where: { id: 1 },
-          create: { email: "x@example.dev" },
-          update: { name: "N" },
-        }),
-      ).rejects.toThrow(/could never conflict on that key/);
+
+      const before = await UserModel.count({});
+      const created: any = await UserModel.upsert({
+        where: { id: 987_654 },
+        create: { email: "omitted@example.dev" },
+        update: { name: "N" },
+      });
+
+      expect(await UserModel.count({})).toBe(before + 1);
+      // The `where` selects; it does not contribute to the insert. Prisma does
+      // the same, which the matrix above is what actually establishes.
+      expect(created.id).not.toBe(987_654);
+      expect(created.email).toBe("omitted@example.dev");
     });
 
+    /** And the other branch: a hit updates rather than inserting. */
+    test("upsert whose create omits the key updates when the row exists", async () => {
+      await differential.reset();
+
+      const ada: any = await UserModel.findFirstOrThrow({
+        where: { email: "ada@example.dev" },
+      });
+      const before = await UserModel.count({});
+
+      const updated: any = await UserModel.upsert({
+        where: { publicId: ada.publicId },
+        create: { email: "unused@example.dev" },
+        update: { name: "Renamed" },
+      });
+
+      expect(await UserModel.count({})).toBe(before);
+      expect(updated.id).toBe(ada.id);
+      expect(updated.name).toBe("Renamed");
+    });
+
+    /**
+     * Still refused, and deliberately. Prisma ignores the `where` and inserts
+     * the `create`'s value; a caller who wrote two different keys in one call
+     * almost certainly meant one of them, and a loud error beats silently
+     * picking the second. Unlike the omitted-key case, nothing about iteration 5
+     * changes this — it is a divergence we are choosing.
+     */
     test("upsert whose create disagrees with the where key is refused", async () => {
       await differential.reset();
       await expect(

@@ -16,6 +16,8 @@ import {
   attachRelations,
 } from "./compile/plan-relations";
 import { resolveStrategy } from "./compile/strategy";
+import { matchUniqueKey } from "./compile/unique";
+import { upsertAbsentConflictKey } from "./compile/write";
 import { dialectFor, type SqlDialect } from "./dialect";
 import {
   MissingModelSchemaError,
@@ -488,6 +490,49 @@ export abstract class Model {
     // would run one request's statement for the other's.
     const strategy = resolveStrategy(options?.strategy, dialect);
 
+    // `upsert` whose `create` does not set the conflict key, which used to raise.
+    //
+    // The last of iteration 4's three "not before iteration 5" items. That note:
+    // "Prisma means find-then-write there; expressing that takes a read and a
+    // write inside one transaction, which is iteration 5's."
+    //
+    // Checked against a generated Prisma 6 client rather than reasoned about,
+    // because the semantics are surprising: `upsert({ where: { publicId: "X" },
+    // create: { email } })` inserts a row whose `publicId` is **generated**, not
+    // "X". The `where` selects; it does not contribute to the insert.
+    //
+    // **`on conflict` is kept wherever it works.** It is one atomic statement,
+    // and read-then-write is not — two callers can both miss and both insert.
+    // Prisma's upsert has that race and this inherits it, but only on calls that
+    // previously raised: nothing that worked becomes racy.
+    //
+    // The divertable set comes from `upsertAbsentConflictKey`, the same function
+    // the compiler refuses on, so the two cannot disagree about which calls
+    // belong on which path.
+    if (op === "upsert" && findThenWrite(schema, effective, op)) {
+      const { where, create, update, ...projection } = effective;
+
+      return withTransaction(db.sql, async () => {
+        const found = await this.$exec(
+          "findFirst",
+          { where },
+          markPreScoped({ strategy: options?.strategy }) as never,
+        );
+
+        return found === null
+          ? await this.$exec(
+              "create",
+              { data: create, ...projection },
+              markPreScoped({ strategy: options?.strategy }) as never,
+            )
+          : await this.$exec(
+              "update",
+              { where, data: update, ...projection },
+              markPreScoped({ strategy: options?.strategy }) as never,
+            );
+      });
+    }
+
     // `createMany` past the driver's parameter ceiling, which used to raise.
     //
     // Iteration 4 refused to chunk and said why: "it would make this several
@@ -831,5 +876,25 @@ function chunkedCreateMany(
       chunks.push(rows.slice(at, at + size));
     }
     return chunks;
+  }
+}
+
+/**
+ * Whether an `upsert` has to become a read and a write.
+ *
+ * True exactly when `create` leaves part of the conflict key unset, which is the
+ * case `on conflict` cannot express — the insert could never collide on the
+ * target, so the update branch would be unreachable.
+ *
+ * A `where` that names no unique key, or names several, is not this function's
+ * to report: it returns false and lets the ordinary path raise the error it
+ * already has for that, with the message it already has.
+ */
+function findThenWrite(schema: ModelSchema, args: any, op: Operation): boolean {
+  try {
+    const key = matchUniqueKey(schema, args?.where, op);
+    return upsertAbsentConflictKey(schema, args, key).length > 0;
+  } catch {
+    return false;
   }
 }

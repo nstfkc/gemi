@@ -445,14 +445,22 @@ describe("upsert", () => {
   // target, so an upsert whose `create` cannot produce that key would always
   // insert — never update. Prisma means find-then-write there, which needs a
   // transaction (iteration 5). Refused rather than silently diverging.
-  test("a create that omits the conflict key is refused", () => {
+  /**
+   * The compiler still refuses it — `on conflict` genuinely cannot express an
+   * upsert whose insert can never collide on the target. What changed is that
+   * `Model.$exec` diverts these calls to a read-then-write before compiling, so
+   * reaching this error means somebody compiled the statement directly. The
+   * message says so rather than telling an application author to restructure a
+   * call that now works.
+   */
+  test("a create that omits the conflict key is refused by the compiler", () => {
     expect(() =>
       text("upsert", {
         where: { id: 1 },
         create: { email: "a@b.c" },
         update: { name: "N" },
       }),
-    ).toThrow(/could never conflict on that key/);
+    ).toThrow(/'on conflict' cannot express it/);
   });
 
   // Presence is a compile-time property; agreement is not, because values do

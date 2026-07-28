@@ -524,18 +524,16 @@ function compileUpsert(
   // So the case is refused rather than silently turned into an insert. This is
   // narrow: the ordinary shape — `where: { email }, create: { email, ... }` —
   // supplies the key and works.
-  const createFields = suppliedFields(schema, args?.create);
-  const absent = key.filter((name) => !createFields.has(name));
+  const absent = upsertAbsentConflictKey(schema, args, key);
   if (absent.length > 0) {
     throw new UnsupportedQueryError(
       "upsert",
       schema.name,
       op,
       `The where clause selects on ${key.join(", ")}, but 'create' does not ` +
-        `set ${absent.join(", ")}. The insert could never conflict on that ` +
-        `key, so the update branch would be unreachable and the row would ` +
-        `always be created. Set ${absent.join(", ")} in 'create' too, or use ` +
-        `update and create separately.`,
+        `set ${absent.join(", ")}, so 'on conflict' cannot express it. ` +
+        `Model.upsert runs this as a read and a write inside one transaction ` +
+        `instead; reaching this means the statement was compiled directly.`,
     );
   }
 
@@ -600,6 +598,25 @@ function compileUpsert(
   );
 
   return plan(schema, statement, dialect, op, returning, undefined);
+}
+
+/**
+ * Which of the conflict key's fields `create` leaves unset — empty when
+ * `on conflict` can express the upsert.
+ *
+ * **Exported because two callers must agree about it**, and a second copy of the
+ * rule would be a rule that can drift: `compileUpsert` throws when it is
+ * non-empty, and `Model.$exec` diverts the same calls to a read-then-write
+ * before ever compiling them. If the two disagreed, either a divertable call
+ * would raise or a raising call would be diverted into SQL that cannot conflict.
+ */
+export function upsertAbsentConflictKey(
+  schema: ModelSchema,
+  args: any,
+  key: string[],
+): string[] {
+  const supplied = suppliedFields(schema, args?.create);
+  return key.filter((name) => !supplied.has(name));
 }
 
 /**

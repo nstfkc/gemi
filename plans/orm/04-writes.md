@@ -157,10 +157,36 @@ does, which is the failure this iteration is arranged to prevent.
   nowhere to put `deletedAt: null`, and `on conflict` takes exactly one target.
   So a migrating application will hit a compile error on a call Prisma ran
   happily. The fix at the call site is `findFirst` plus `update` / `create`.
-- **`upsert` refuses a `create` that omits the conflict key**, and refuses a
-  `create` whose key value disagrees with the `where` (checked at bind time,
-  where values exist). Prisma means find-then-write there; expressing that takes
-  a read and a write inside one transaction, which is iteration 5's.
+- ~~**`upsert` refuses a `create` that omits the conflict key**~~ — **done after
+  iteration 9.** `Model.$exec` diverts those calls to a read and a write inside
+  one transaction, which is what Prisma means by them. The compiler still
+  refuses the shape, because `on conflict` genuinely cannot express it; the two
+  agree because they share one predicate (`upsertAbsentConflictKey`) rather than
+  two copies of the rule.
+
+  **Prisma's semantics here are surprising, and were checked rather than
+  reasoned about.** `upsert({ where: { publicId: "X" }, create: { email } })`
+  inserts a row whose `publicId` is *generated* — the `where` selects, and
+  contributes nothing to the insert. Two differential cases pin both branches.
+
+  `on conflict` is kept wherever it works. It is one atomic statement and
+  read-then-write is not: two callers can both miss and both insert. Prisma's
+  upsert has that race and this inherits it — but only on calls that previously
+  raised, so nothing that worked becomes racy.
+
+  **It also broke an invariant the differential harness had written down.** That
+  harness handed `$exec` a `{ unsafe }` stub, on the reasoning that `$exec`
+  reads exactly `sql.unsafe` and `dialect` — "a test seam the runtime does not
+  know about cannot drift". It drifted the moment `$exec` needed `begin`. It is
+  a Proxy now, delegating everything and intercepting one method, which is what
+  `bench/run.ts` had already concluded after the same error. A stub that lists
+  what the runtime uses today is a promise about tomorrow.
+
+- **`upsert` still refuses a `create` whose key value disagrees with the
+  `where`** (checked at bind time, where values exist). This one stays, and it
+  is a divergence we are choosing rather than one waiting on anything: Prisma
+  ignores the `where` and inserts the `create`'s value, and a caller who wrote
+  two different keys in one call almost certainly meant one of them.
 - **`createMany` refuses a partially-supplied database default** — some rows
   setting a column and others leaving it to the database. `NULL` would overwrite
   the default rather than request it, and SQLite rejects `DEFAULT` inside a

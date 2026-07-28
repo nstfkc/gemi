@@ -247,19 +247,38 @@ export async function createDifferential(options: {
   });
 
   // What the container hands `$exec` is a counting stand-in rather than the
-  // manager itself. `$exec` resolves the manager per call and reads exactly
-  // `sql.unsafe` and `dialect` off it, so this needs no cooperation from the
-  // ORM — and a test seam the runtime does not know about cannot drift.
+  // manager itself.
+  //
+  // **A Proxy, not a hand-written object.** This used to be `{ unsafe }` alone,
+  // on the reasoning that `$exec` reads exactly `sql.unsafe` and `dialect` — "a
+  // test seam the runtime does not know about cannot drift". It drifted the
+  // first time `$exec` needed a second method: the read-then-write paths
+  // (`delete` with an include over a cascade, a chunked `createMany`, an
+  // `upsert` whose create omits the conflict key) open a transaction, and the
+  // stub failed with `pool.begin is not a function`.
+  //
+  // A stub that lists what the runtime uses today is a promise about what it
+  // will use tomorrow. Delegating everything and intercepting one method cannot
+  // fall behind — which is the conclusion `bench/run.ts` reached independently,
+  // after the same error.
   let executed = 0;
+  const counting = new Proxy(database.sql, {
+    get(target, property, receiver) {
+      if (property === "unsafe") {
+        return (text: string, values: unknown[]) => {
+          executed++;
+          return target.unsafe(text, values);
+        };
+      }
+      const value = Reflect.get(target, property, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+
   app.instance(DatabaseManager, {
     dialect: database.dialect,
     url: database.url,
-    sql: {
-      unsafe(text: string, values: unknown[]) {
-        executed++;
-        return database.sql.unsafe(text, values);
-      },
-    },
+    sql: counting,
   } as never);
   Application.setInstance(app);
 
