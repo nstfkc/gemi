@@ -197,6 +197,104 @@ describe("policies on nested writes", () => {
   });
 
   /**
+   * The same rule for `createMany`, and it is the one that would be easiest to
+   * lose: the children go through *one* `$exec` rather than one per row, so a
+   * policy applied per statement instead of per row would leave every row after
+   * the first belonging to nobody.
+   *
+   * `createMany` is in the set an `onCreate` applies to, and `withCreated` maps
+   * it over the array — this asserts that end to end rather than trusting it.
+   */
+  test("a nested createMany carries the child's onCreate onto every row", async () => {
+    await Model.asUser(OURS, () =>
+      Folder.$exec("create", {
+        data: {
+          code: "ours",
+          notes: {
+            createMany: { data: [{ label: "a" }, { label: "b" }, { label: "c" }] },
+          },
+        },
+      }),
+    );
+
+    const notes: any = await raw.unsafe(`SELECT * FROM "Note" ORDER BY "id"`);
+    expect(notes).toHaveLength(3);
+    // Every one of them, not just the first.
+    expect([...notes].map((note: any) => note.orgId)).toEqual([7, 7, 7]);
+    // ...and they are all attached to the folder that was just written.
+    expect(new Set([...notes].map((note: any) => note.folderId)).size).toBe(1);
+  });
+
+  /**
+   * Whether the ORM refuses a misconfigured child policy must not depend on how
+   * many rows the caller happened to pass.
+   *
+   * `Note` here carries a `scope` with no `onCreate`, which `assertCreateCovered`
+   * refuses — an author who said "these rows belong to a tenant" without saying
+   * which tenant a new row joins. A short-circuit on the empty list would skip
+   * the child's `$exec`, and with it that check, so the same call would raise
+   * with one row and succeed with none: the misconfiguration hides behind data
+   * that happens to be empty in development and reports itself on the first
+   * request whose list is not.
+   *
+   * Nothing is written either way, so this is not a leak — it is a refusal
+   * arriving late, which is what deciding everything from the argument *shape*
+   * exists to prevent.
+   */
+  test("an empty createMany refuses a bad child policy just as a full one does", async () => {
+    const previous = (Note as any).$policies;
+    (Note as any).$policies = [{ scope: () => ({ orgId: 7 }) } as ModelPolicy];
+
+    try {
+      const withRows = Model.asUser(OURS, () =>
+        Folder.$exec("create", {
+          data: { code: "a", notes: { createMany: { data: [{ label: "n" }] } } },
+        }),
+      );
+      await expect(withRows).rejects.toThrow(/onCreate/);
+
+      const withNone = Model.asUser(OURS, () =>
+        Folder.$exec("create", {
+          data: { code: "b", notes: { createMany: { data: [] } } },
+        }),
+      );
+      await expect(withNone).rejects.toThrow(/onCreate/);
+
+      // ...and neither wrote a folder, since the refusal rolls the parent back.
+      expect(await raw.unsafe(`SELECT * FROM "Folder" WHERE "code" != 'theirs'`))
+        .toHaveLength(0);
+    } finally {
+      (Note as any).$policies = previous;
+    }
+  });
+
+  /**
+   * A row that names the foreign key itself is describing a different parent
+   * than the call is. The nested `create` beside it has always overridden it;
+   * `createMany` does the same, and this pins that a caller cannot use it to
+   * attach rows to somebody else's parent.
+   */
+  test("a nested createMany row cannot choose its own parent", async () => {
+    await raw.unsafe(
+      `INSERT INTO "Folder" ("id", "code", "orgId") VALUES (2, 'ours', 7)`,
+    );
+
+    await Model.asUser(OURS, () =>
+      Folder.$exec("create", {
+        data: {
+          code: "fresh",
+          notes: { createMany: { data: [{ label: "a", folderId: 1 }] } },
+        },
+      }),
+    );
+
+    const notes: any = await raw.unsafe(`SELECT * FROM "Note"`);
+    expect(notes).toHaveLength(1);
+    // Not folder 1, which belongs to org 99.
+    expect(notes[0].folderId).not.toBe(1);
+  });
+
+  /**
    * `connect` by a unique key that is *not* the referenced field resolves with a
    * `findUniqueOrThrow` on the target — a read of another model, and therefore
    * that model's policies. Unscoped, this attaches org 99's folder to org 7's

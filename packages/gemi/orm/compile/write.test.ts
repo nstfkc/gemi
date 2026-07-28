@@ -185,6 +185,95 @@ describe("createMany", () => {
     ).toThrow(UnsupportedQueryError);
   });
 
+  /**
+   * `skipDuplicates` — the check and the insert in one statement, which is the
+   * whole point: reading first to find out which rows exist is a second query
+   * *and* a race, since a concurrent importer can write one of them in between
+   * and the insert fails on a unique violation anyway.
+   */
+  describe("skipDuplicates", () => {
+    const rows = { data: [{ email: "a@b.c" }, { email: "d@e.f" }] };
+
+    test("true emits an untargeted conflict clause, before returning", () => {
+      const emitted = text("createMany", { ...rows, skipDuplicates: true }, postgres);
+
+      // Untargeted, so it covers every unique constraint and the primary key at
+      // once — which is what `skipDuplicates` means, and what Prisma emits. A
+      // targeted `on conflict (col)` would still fail on any other constraint.
+      expect(emitted).toContain(` on conflict do nothing returning "id"`);
+    });
+
+    test("false is the same statement as not asking", () => {
+      expect(text("createMany", { ...rows, skipDuplicates: false }, postgres)).toBe(
+        text("createMany", rows, postgres),
+      );
+    });
+
+    /**
+     * The count has to be the number *inserted*, not the number supplied —
+     * the part the issue flags as most likely to be got wrong. It falls out:
+     * a row a conflict skipped never reaches `RETURNING`.
+     */
+    test("the count is what was inserted, not what was offered", () => {
+      const plan = compileWrite(
+        user,
+        "createMany",
+        { ...rows, skipDuplicates: true },
+        postgres,
+      );
+
+      expect(plan.shape([{ id: 1 }])).toEqual({ count: 1 });
+      expect(plan.shape([])).toEqual({ count: 0 });
+    });
+
+    /**
+     * SQLite *can* express it, and Prisma still rejects the argument there —
+     * for `false` as well as `true`, verified against a generated 6.19 client.
+     * Accepting `false` because it happens to be a no-op would make the two
+     * dialects disagree about which calls are legal.
+     */
+    test.each([true, false])("%s is refused on sqlite, naming the dialect", (value) => {
+      expect(() =>
+        text("createMany", { ...rows, skipDuplicates: value }),
+      ).toThrow(/not available on sqlite/);
+      expect(() =>
+        text("createMany", { ...rows, skipDuplicates: value }),
+      ).toThrow(/Prisma does not offer it there either/);
+    });
+
+    /**
+     * Validation must not depend on how much data happened to be supplied. The
+     * empty-list shortcut returns before the statement is built, so the check
+     * has to come first or `createMany({ data: [], skipDuplicates: true })`
+     * succeeds on SQLite and the same call with one row throws.
+     */
+    test("an empty list is validated too", () => {
+      expect(() =>
+        text("createMany", { data: [], skipDuplicates: true }),
+      ).toThrow(/not available on sqlite/);
+      expect(() =>
+        compileWrite(user, "createMany", { data: [], skipDuplicates: true }, postgres),
+      ).not.toThrow();
+    });
+
+    test("a non-boolean is refused", () => {
+      expect(() =>
+        compileWrite(user, "createMany", { ...rows, skipDuplicates: "yes" }, postgres),
+      ).toThrow(/Expected true or false/);
+    });
+
+    test("it is only an argument of createMany", () => {
+      expect(() =>
+        compileWrite(
+          user,
+          "create",
+          { data: { email: "a@b.c" }, skipDuplicates: true },
+          postgres,
+        ),
+      ).toThrow(UnsupportedQueryError);
+    });
+  });
+
   // `default values` inserts exactly one row, and there is no portable
   // multi-row spelling of it — so this used to succeed and insert one row for
   // three, reporting `{ count: 1 }`.
@@ -751,6 +840,168 @@ describe("nested writes", () => {
         data: { email: "a@b.c", organization: { [operation]: {} } },
       }),
     ).toThrow(new RegExp(`data\\.organization\\.${operation}`));
+  });
+
+  /**
+   * The refusals now say *why*, which is the difference between "wait" and
+   * "rewrite this call site". Every one of them writes rows that already exist,
+   * which is the line: what is supported writes new rows or repoints a key.
+   */
+  test("a refusal explains what the operand would take", () => {
+    expect(() =>
+      text("create", {
+        data: { email: "a@b.c", organization: { connectOrCreate: {} } },
+      }),
+    ).toThrow(/upsert against the child/);
+    expect(() =>
+      text("create", { data: { email: "a@b.c", accounts: { deleteMany: {} } } }),
+    ).toThrow(/deletes rows this call did not name/);
+  });
+
+  /**
+   * `createMany` — one statement for the children instead of one per row, which
+   * is the whole reason the shape is worth having over a nested `create`.
+   */
+  describe("createMany", () => {
+    test("plans one after step on the foreign side", () => {
+      const plan = compileWrite(
+        user,
+        "create",
+        {
+          data: {
+            email: "a@b.c",
+            accounts: { createMany: { data: [{ organizationRole: 1 }] } },
+          },
+        },
+        sqlite,
+      );
+
+      expect(plan.after).toHaveLength(1);
+      expect(plan.after?.[0].operation).toBe("createMany");
+      expect(plan.after?.[0].relation).toBe("accounts");
+      // The parent's key has to come back for the children to point at.
+      expect(plan.text).toContain(`returning`);
+    });
+
+    test("it is one step however many rows there are", () => {
+      const plan = compileWrite(
+        user,
+        "create",
+        {
+          data: {
+            email: "a@b.c",
+            accounts: {
+              createMany: {
+                data: [
+                  { organizationRole: 0 },
+                  { organizationRole: 1 },
+                  { organizationRole: 2 },
+                ],
+              },
+            },
+          },
+        },
+        sqlite,
+      );
+
+      // A nested `create` of three rows is three steps; this is the difference.
+      expect(plan.after).toHaveLength(1);
+    });
+
+    test("it composes with a create on the same relation", () => {
+      const plan = compileWrite(
+        user,
+        "create",
+        {
+          data: {
+            email: "a@b.c",
+            accounts: {
+              create: [{ organizationRole: 0 }],
+              createMany: { data: [{ organizationRole: 1 }] },
+            },
+          },
+        },
+        sqlite,
+      );
+
+      // Sorted, so `create` runs before `createMany` — which is the order
+      // Prisma writes them in, verified by the ids it hands back.
+      expect(plan.after?.map((step) => step.operation)).toEqual([
+        "create",
+        "createMany",
+      ]);
+    });
+
+    test("update takes it too", () => {
+      const plan = compileWrite(
+        user,
+        "update",
+        {
+          where: { id: 1 },
+          data: { accounts: { createMany: { data: [{ organizationRole: 1 }] } } },
+        },
+        sqlite,
+      );
+
+      expect(plan.after).toHaveLength(1);
+    });
+
+    /**
+     * The one place Prisma's nested grammar adds a level: the rows go inside
+     * `data`, not directly under `createMany`. Checked at plan time so it fails
+     * when the query compiles rather than after the parent row is written and
+     * the transaction has to unwind it.
+     */
+    test.each([
+      ["the rows directly", { createMany: [{ organizationRole: 1 }] }, /with a 'data' key/],
+      ["no data key", { createMany: { rows: [] } }, /Expected a 'data' key/],
+      ["an extra key", { createMany: { data: [], nope: 1 } }, /Expected only 'data'/],
+    ])("%s is refused", (_label, node, message) => {
+      expect(() =>
+        text("create", { data: { email: "a@b.c", accounts: node } }),
+      ).toThrow(message);
+    });
+
+    /**
+     * Scoped to the *nested* form, and pointing at the spelling that works.
+     * The message used to say "at any level", which stops being true once
+     * top-level `skipDuplicates` lands (#69) — and a refusal that is false
+     * about the rest of the API is worse than a generic one.
+     */
+    test("skipDuplicates names the level, and where it does work", () => {
+      const refuse = () =>
+        text("create", {
+          data: {
+            email: "a@b.c",
+            accounts: { createMany: { data: [], skipDuplicates: true } },
+          },
+        });
+
+      expect(refuse).toThrow(/not implemented on a \*nested\* 'createMany'/);
+      expect(refuse).toThrow(/Account\.createMany/);
+    });
+
+    /**
+     * A to-one holds a single foreign key, so there is nothing to create many
+     * of — and a caller who reached for it has the direction of the relation
+     * wrong, which is worth saying rather than answering with the grammar.
+     */
+    test("a to-one refuses it, from either side of the key", () => {
+      expect(() =>
+        text("create", {
+          data: { email: "a@b.c", organization: { createMany: { data: [] } } },
+        }),
+      ).toThrow(/is a to-one/);
+
+      expect(() =>
+        compileWrite(
+          account,
+          "create",
+          { data: { user: { createMany: { data: [] } } } },
+          sqlite,
+        ),
+      ).toThrow(/is a to-one/);
+    });
   });
 });
 

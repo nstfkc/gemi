@@ -126,15 +126,16 @@ export function compileGroupBy(
   // key" fallback cannot fire — correctly, because the primary key is not
   // grouped and Prisma does not add one either.
   //
-  // **This is the fourth pager, and #88 predicted it.** That PR moves `take` /
-  // `skip` validation into `pagination` itself rather than into each caller's
-  // argument allowlist, on the argument that a fourth one should not be able to
-  // arrive without it. On this branch's base it has not merged, so `groupBy`
-  // inherits the #84 behaviour — a string `take` binds its magnitude and does
-  // not flip anything. It gains the check the moment #88 lands, with no change
-  // here, which is the claim being demonstrated rather than restated.
+  // **This is the fourth pager, and it inherited #84's validation for free.**
+  // #88 moved the `take` / `skip` integer check into `pagination` itself rather
+  // than into each caller's argument allowlist, arguing that a fourth pager
+  // should not be able to arrive without one. This is that fourth pager: it was
+  // written against a base where #88 had not merged, gained the check when it
+  // did, and the only line that had to change is the `operation` argument here.
   const paginating = args?.take !== undefined || args?.skip !== undefined;
-  const page = paginating ? pagination(schema, args, dialect, []).clause : sql("");
+  const page = paginating
+    ? pagination(schema, op, args, dialect, []).clause
+    : sql("");
 
   const statement = concat(
     sql("select "),

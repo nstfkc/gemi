@@ -200,7 +200,6 @@ describe("policies", () => {
     const out = applyNestedPolicies(
       root,
       { orderBy: { accounts: { _count: "desc" } } },
-      "findMany" as any,
       { organizationId: 7 },
       false,
       lookup([tenant]),
@@ -216,7 +215,6 @@ describe("policies", () => {
     const out = applyNestedPolicies(
       root,
       { orderBy: [{ email: "asc" }, { accounts: { _count: "desc" } }] },
-      "findMany" as any,
       { organizationId: 7 },
       false,
       lookup([tenant]),
@@ -232,7 +230,6 @@ describe("policies", () => {
       applyNestedPolicies(
         root,
         args,
-        "findMany" as any,
         { organizationId: 7 },
         true,
         lookup([tenant]),
@@ -243,7 +240,7 @@ describe("policies", () => {
   test("an unpolicied ordering is returned unchanged, identically", () => {
     const args = { orderBy: { accounts: { _count: "desc" } } };
     expect(
-      applyNestedPolicies(root, args, "findMany" as any, {}, false, lookup([])),
+      applyNestedPolicies(root, args, {}, false, lookup([])),
     ).toBe(args);
   });
 

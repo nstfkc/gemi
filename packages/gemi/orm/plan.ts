@@ -6,10 +6,10 @@ import type { RelationStrategy } from "./compile/plan-relations";
 import type { ModelSchema } from "./schema";
 
 /**
- * The public operations. `groupBy` and the raw operations are deliberately not
- * among them: they are excluded at the operation level rather than narrowed out
- * of the argument types, because narrowing Prisma's recursive where-inputs with
- * `Omit` is miserable.
+ * The public operations. The raw operations are deliberately not among them:
+ * they are excluded at the operation level rather than narrowed out of the
+ * argument types, because narrowing Prisma's recursive where-inputs with `Omit`
+ * is miserable.
  *
  * `aggregate` joined the list once there was a measured account of what Prisma
  * returns for one — see `compile/aggregate.ts`. `groupBy` followed in its own
@@ -182,6 +182,13 @@ const LITERAL_KEYS = new Set([
   "_sum",
   "_min",
   "_max",
+  // `skipDuplicates: true` emits `on conflict do nothing` and `false` does not,
+  // so the *value* is in the SQL text. Without it here both shape to `boolean`,
+  // share one entry, and whichever call compiled first decides whether the
+  // other one skips conflicts — an insert that raises where the caller asked it
+  // not to, or worse, one that silently swallows a duplicate the caller wanted
+  // to hear about.
+  "skipDuplicates",
   // `groupBy`'s grouped columns, which reach the SQL as *identifiers* — both
   // the select list and the `group by`. `["role"]` and `["locale"]` have the
   // same shape, `[string]`, so without this they would be one cache entry and

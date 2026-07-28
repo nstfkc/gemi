@@ -86,6 +86,28 @@ describe("what it emits", () => {
     expect(plan(args).bind(args)).toEqual([2, 1]);
   });
 
+  /**
+   * The claim #88 made, checked from the other side.
+   *
+   * It moved `take` / `skip` validation into `pagination` rather than into each
+   * caller's argument allowlist, arguing a fourth pager should not be able to
+   * arrive without it. `groupBy` is that fourth pager, written against a base
+   * where #88 had not merged — and it acquired the check on the merge, with no
+   * line here doing anything about it.
+   */
+  test("take and skip are validated, without this file knowing the rule", () => {
+    expect(() => text({ by: ["globalRole"], _count: true, take: "-2" })).toThrow(
+      /Expected an integer, got "-2"/,
+    );
+    expect(() => text({ by: ["globalRole"], _count: true, skip: -1 })).toThrow(
+      /'skip' counts rows to pass over/,
+    );
+    // ...and the refusal names this operation, not the one the check lives in.
+    expect(() => text({ by: ["globalRole"], _count: true, take: 1.5 })).toThrow(
+      /User\.groupBy/,
+    );
+  });
+
   test("a where filters rows before grouping, and binds", () => {
     const args = { by: ["globalRole"], _count: true, where: { locale: "fr-FR" } };
     expect(text(args)).toContain(`where "locale" = ? group by`);

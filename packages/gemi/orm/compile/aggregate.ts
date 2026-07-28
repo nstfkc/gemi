@@ -2,7 +2,14 @@ import type { SqlDialect } from "../dialect";
 import { UnknownFieldError, UnsupportedQueryError } from "../errors";
 import type { QueryPlan } from "../plan";
 import type { FieldSchema, ModelSchema, ScalarType } from "../schema";
-import { type Fragment, bindValues, concat, joinFragments, render, sql } from "./fragment";
+import {
+  type Fragment,
+  bindValues,
+  concat,
+  joinFragments,
+  render,
+  sql,
+} from "./fragment";
 import { compileOrderBy, parseOrderBy } from "./orderBy";
 import { pagination } from "./paginate";
 import { compileWhere } from "./where";
@@ -132,11 +139,16 @@ export function compileAggregate(
       flat
         ? `A 'select' on a count must name at least one field, or '_all'.`
         : `An aggregate needs at least one of ${KINDS.join(", ")}. Prisma ` +
-          `rejects an empty one too.`,
+            `rejects an empty one too.`,
     );
   }
 
-  const where = compileWhere(schema, args?.where, { dialect, operation: op }, (a) => a?.where);
+  const where = compileWhere(
+    schema,
+    args?.where,
+    { dialect, operation: op },
+    (a) => a?.where,
+  );
   const whereClause = where ? concat(sql(" where "), where) : sql("");
   const from = sql(` from ${dialect.quoteIdent(schema.table)}`);
 
@@ -164,7 +176,13 @@ export function compileAggregate(
   if (!paginating) {
     statement = concat(sql("select "), projection, from, whereClause);
   } else {
-    const { clause, terms: order } = pagination(schema, args, dialect, parsed);
+    const { clause, terms: order } = pagination(
+      schema,
+      op,
+      args,
+      dialect,
+      parsed,
+    );
     const ordering = compileOrderBy(order, dialect);
 
     // The subquery selects every column an aggregate names — an `order by` may
@@ -213,7 +231,8 @@ export function compileAggregate(
 
       if (flat) {
         const out: Record<string, unknown> = {};
-        for (const term of terms) out[term.as] = coerce(term, row[term.alias], dialect);
+        for (const term of terms)
+          out[term.as] = coerce(term, row[term.alias], dialect);
         return out;
       }
 
@@ -252,7 +271,11 @@ export function aggregateTerms(
       continue;
     }
 
-    if (typeof requested !== "object" || requested === null || Array.isArray(requested)) {
+    if (
+      typeof requested !== "object" ||
+      requested === null ||
+      Array.isArray(requested)
+    ) {
       throw new UnsupportedQueryError(
         kind,
         schema.name,
@@ -282,7 +305,11 @@ export function aggregateTerms(
 }
 
 /** `count({ select: { _all: true, email: true } })` — every term a `count`. */
-function countSelectTerms(schema: ModelSchema, op: string, select: any): Term[] {
+function countSelectTerms(
+  schema: ModelSchema,
+  op: string,
+  select: any,
+): Term[] {
   if (typeof select !== "object" || select === null || Array.isArray(select)) {
     throw new UnsupportedQueryError(
       "select",
@@ -298,12 +325,21 @@ function countSelectTerms(schema: ModelSchema, op: string, select: any): Term[] 
     if (wanted === undefined || wanted === false) continue;
 
     if (key === "_all") {
-      terms.push({ kind: "_count", as: "_all", alias: alias("_count", terms.length) });
+      terms.push({
+        kind: "_count",
+        as: "_all",
+        alias: alias("_count", terms.length),
+      });
       continue;
     }
 
     const field = resolveField(schema, op, "_count", key);
-    terms.push({ kind: "_count", field, as: key, alias: alias("_count", terms.length) });
+    terms.push({
+      kind: "_count",
+      field,
+      as: key,
+      alias: alias("_count", terms.length),
+    });
   }
   return terms;
 }
@@ -459,7 +495,12 @@ function assertArgs(
   }
 
   if (typeof args !== "object" || Array.isArray(args)) {
-    throw new UnsupportedQueryError(String(args), schema.name, op, "Expected an object.");
+    throw new UnsupportedQueryError(
+      String(args),
+      schema.name,
+      op,
+      "Expected an object.",
+    );
   }
 
   if (flat) return;
