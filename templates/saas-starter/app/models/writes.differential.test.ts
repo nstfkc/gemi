@@ -425,6 +425,57 @@ function suite(label: string, url?: string) {
       );
     });
 
+    /**
+     * A `_count` beside the `include` that produced the children.
+     *
+     * The count is a correlated subquery inside the write's own `RETURNING`, so
+     * it is evaluated before any `after` step has run — while `include` is
+     * attached after them. Unfixed, the two keys describe the same relation on
+     * the same row and disagree:
+     *
+     *     accounts.length  2
+     *     _count           { accounts: 0 }
+     *
+     * Asserting both in one comparison is the point: a test that checked only
+     * `_count` would pass against a version that also lost the children, and one
+     * that checked only `accounts` never saw the bug at all.
+     */
+    test("a _count beside a nested create counts what the steps wrote", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "create",
+        {
+          data: {
+            email: "counted-nested@example.dev",
+            accounts: {
+              create: [{ organizationRole: 1 }, { organizationRole: 2 }],
+            },
+          },
+          include: {
+            accounts: true,
+            _count: { select: { accounts: true } },
+          },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    /** The same, through `select`, where `_count` is the only key asked for. */
+    test("a _count in a select sees the nested create too", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "create",
+        {
+          data: {
+            email: "counted-select@example.dev",
+            accounts: { create: { organizationRole: 1 } },
+          },
+          select: { email: true, _count: { select: { accounts: true } } },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
     test("nested connect on the foreign side repoints the child", async () => {
       await differential.reset();
       await differential.prisma.account.create({

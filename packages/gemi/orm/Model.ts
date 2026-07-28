@@ -795,6 +795,39 @@ export abstract class Model {
       // so an `include` on the same call sees what was just written.
       await runSteps(plan.after, effective, context, executor, rowsOf(result));
 
+      // ...and a `_count` on the same call has to be recomputed once they have,
+      // for the same reason `include` is attached after them rather than before.
+      //
+      // A count is a correlated subquery inside the write's own `RETURNING`, so
+      // it is evaluated at the instant the parent row is inserted — before any
+      // `after` step has written a child. That produced a single response
+      // contradicting itself:
+      //
+      //   User.create({ data: { …, accounts: { create: [a, b] } },
+      //                 include: { accounts: true, _count: { … } } })
+      //
+      //   accounts.length  2      attached after the steps
+      //   _count           0      projected before them
+      //
+      // Both keys describe the same relation on the same row. The row itself was
+      // never wrong — reading it back gives 2 — so this is the projection being
+      // frozen, which is the mirror of the `delete` case above: there the count
+      // is taken too late, here too early.
+      //
+      // **Only when there is something to be wrong about.** A write with no
+      // `after` steps keeps the projected value and costs nothing extra; one
+      // with both pays a single read. `plan.counts` is what makes that condition
+      // cheap enough to ask on every write.
+      if (plan.counts && plan.after !== undefined) {
+        await recountAfterSteps(
+          schema,
+          this as unknown as typeof Model,
+          effective,
+          rowsOf(result),
+          options,
+        );
+      }
+
       // Relations are loaded after the root rows are shaped, one query per node
       // in the include tree. Each of those queries is `$exec` on the *related
       // model's own class*, recursively — not a private helper — so a nested read
@@ -953,6 +986,48 @@ function fieldsForColumns(
     }
     return column;
   });
+}
+
+/**
+ * Re-reads the `_count` for rows whose children were written by an `after` step.
+ *
+ * One read per row rather than one for all of them, and that is not a
+ * concession: every write that can carry both a `_count` and an `after` step is
+ * a single-row operation — `create`, `update`, `upsert`. `createMany` takes no
+ * `include` at all. So the loop runs once, and writing it as a loop keeps a
+ * compound primary key expressible without an `in` list over tuples.
+ *
+ * **Pre-scoped, deliberately.** `effective` has already been through this
+ * model's policies and `applyNestedPolicies` has already scoped the `_count`
+ * node, so re-applying them would `AND` the same predicate twice — the same
+ * rows, a different plan key. This is the same reasoning `delete`'s read-first
+ * path uses, a few hundred lines up.
+ */
+async function recountAfterSteps(
+  schema: ModelSchema,
+  model: typeof Model,
+  effective: any,
+  rows: Record<string, unknown>[],
+  options: unknown,
+): Promise<void> {
+  const node = effective?.include?._count ?? effective?.select?._count;
+  if (node === undefined || rows.length === 0) return;
+
+  for (const row of rows) {
+    const where: Record<string, unknown> = {};
+    for (const field of schema.primaryKey) where[field] = row[field];
+
+    const fresh = (await (model as any).$exec(
+      "findFirst",
+      { where, select: { _count: node } },
+      markPreScoped({ strategy: (options as any)?.strategy }),
+    )) as Record<string, unknown> | null;
+
+    // `null` only if the row vanished between the write and this read, which
+    // inside the write's own transaction it cannot. Leaving the projected value
+    // alone is still the right fallback: it is stale, not invented.
+    if (fresh && fresh._count !== undefined) row._count = fresh._count;
+  }
 }
 
 function rowsOf(result: unknown): Record<string, unknown>[] {
