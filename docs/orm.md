@@ -898,8 +898,24 @@ Two things are worth knowing:
 that runs each query through both gemi and Prisma and compares the rows. `DatabaseManager` infers
 the dialect from `DATABASE_URL`.
 
-MySQL and MariaDB are **not** implemented. The dialect seam is there and `DatabaseManager` already
-recognises them, but nothing is built or tested behind it.
+MySQL and MariaDB are **not** implemented, and that is a statement about the supported matrix rather
+than a release that is coming. The dialect seam is there and `DatabaseManager` already recognises
+them, but nothing is built or tested behind it.
+
+**The connection still works, which is the part worth being precise about.** Bun's client speaks all
+four dialects, so pointed at MySQL an application connects, `DB.query` / `DB.sql` run, and
+transactions work. What is missing is a `SqlDialect` for the query *compiler*, so every model
+operation raises `UnsupportedDialectError` — with a message that says exactly that, rather than
+leaving you to conclude the database is unusable.
+
+In development the mismatch is reported **at boot** instead of on the first model query, since
+otherwise an application pointed at MySQL starts, passes a health check, and fails on the first
+`findMany`. `ormSupports(dialect)` is exported if you would rather assert it yourself:
+
+```ts
+import { ormSupports } from "gemi/orm"
+if (!ormSupports(DB.dialect)) throw new Error("this deployment needs Postgres")
+```
 
 ## Not in scope
 
