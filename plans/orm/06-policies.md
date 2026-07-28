@@ -168,3 +168,70 @@ policy DSL. Keep policies as plain functions for now.
 - **Do not let policies see SQL.** The moment a policy can manipulate compiled
   text, invariant 2 is dead, the plan cache becomes unsound, and the relation
   strategies stop being interchangeable. Args in, args out.
+
+## Residual: an unregistered policied subclass, read only through includes
+
+**Recorded here because until now it lived only in a PR review thread.** It is a
+cross-tenant read path with no home in the durable record, which is the worst
+place for one to sit.
+
+`Model.$exec` raises `UnregisteredPolicyClassError` when a class carrying
+policies is queried while a different class owns its name. That closed the two
+shapes found in #51's review. Its condition begins `registered !== this`, and
+there is a third shape where that is false:
+
+```ts
+export class Membership extends MembershipModel {
+  static $policy = { scope: (ctx) => ({ orgId: ctx.user.orgId }) }
+}
+// ...and no register("Membership", Membership)
+```
+
+If nothing ever queries `Membership` **at its root** — because memberships are
+only read through `include: { memberships: true }` — the include resolves the
+name to the generated base, `this` *is* that base, and the comparison is never
+reached. Rows come back unscoped, with no error. Reproduced during #51's review:
+two organisations' accounts returned to a caller scoped to one.
+
+The residual runs the wrong way. A model reached only through includes is
+usually a membership or a pivot, which is exactly the kind that carries a tenant
+scope, so the guard is weakest where the data is most sensitive.
+
+**Partly closed** by `assertPoliciesRegistered(...modules)` — the same divergence
+comparison, applied to the classes in a module namespace rather than to the class
+of a query, so an unqueried class is still visible. Run it in a test or at boot.
+It is not a full closure and must not be described as one: it can only see
+modules it is handed.
+
+**Full closure needs the registration to stop being something an author writes.**
+The generator emits `register(...)` for the classes it generates; it cannot emit
+one for a subclass in application code it never sees. Options, none built:
+
+- Have the generator emit an application-side barrel that re-exports and
+  registers every `app/models/*.ts` subclass it finds. Codegen reading
+  application source is a new kind of coupling and wants its own decision.
+- Register on first *definition* rather than on first import. There is no hook —
+  `static $policy = …` in a subclass body is a `[[DefineOwnProperty]]` on the
+  subclass, so a setter on the base is bypassed. Verified rather than reasoned
+  about: the setter does not fire and `Object.hasOwn(Child, "$policy")` is true.
+
+  **The dependency is worth naming, because the reason could expire.** Define
+  semantics are what ES2022 specifies and what Bun does, and this monorepo sets
+  `target: ES2022` in `@repo/typescript-config/base.json`. Under *assignment*
+  semantics — `useDefineForClassFields: false`, or an older target —
+  `static $policy = …` compiles to `Child.$policy = …` and an inherited setter
+  **would** fire.
+
+  That does not revive the option, and the reason it does not is the sharper
+  version of the point: **the subclass is application code**, compiled by the
+  application's toolchain, not by ours. A registration mechanism resting on a
+  setter would therefore work or silently not work depending on a consumer's
+  build configuration — and "silently not" here is an unscoped cross-tenant
+  read. A hook that is load-bearing for data access cannot be one that a
+  downstream `tsconfig.json` can turn off without any error. So: ruled out for
+  portability rather than for impossibility, which is the stronger reason and
+  the one that survives a change of target.
+- Make `$policy` a method call — `static $policy = policy(Membership, {…})` —
+  so declaring one registers it. Changes the documented shape of every policy,
+  and the `docs/authorization.md` examples with it.
+
