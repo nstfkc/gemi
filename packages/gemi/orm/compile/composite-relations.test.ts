@@ -279,6 +279,56 @@ describe("plan discrimination", () => {
   });
 });
 
+/**
+ * `$compositeIn` is internal, and that is enforced rather than claimed.
+ *
+ * The branch that compiles it sits **above** the field lookup in
+ * `compileWhere`, so a caller writing the key by hand used to be honoured. Not
+ * an injection — the fields are resolved against the schema, the columns go
+ * through `quoteIdent`, the values are bound — but an undocumented input
+ * surface with none of the operand validation its neighbours have, and one
+ * shape that compiled clean and deferred its failure to bind time.
+ *
+ * The operand now has to carry a module-private `Symbol` the planner attaches,
+ * which an application cannot reach. Same mechanism as `markPreScoped` and
+ * `markOrmAuthored`, for the same reason: a claim about who may do something is
+ * worth only as much as the thing that enforces it.
+ */
+describe("the composite-in key is the planner's alone", () => {
+  const attempt = (operand: unknown) => () =>
+    compileRead(ledgerEntry, "findMany", { where: { $compositeIn: operand } }, postgres);
+
+  test("a hand-written one is refused, however well formed", () => {
+    expect(
+      attempt({ fields: ["tenantId", "ledgerCode"], values: [[1, "a"]] }),
+    ).toThrow(UnsupportedQueryError);
+    expect(
+      attempt({ fields: ["tenantId", "ledgerCode"], values: [[1, "a"]] }),
+    ).toThrow(/not part of the query grammar/);
+  });
+
+  /**
+   * The three shapes that used to escape validation: two raw `TypeError`s from
+   * a destructure and a `.map`, and one that compiled with no `values` at all.
+   * Every one is now an `UnsupportedQueryError` naming the key.
+   */
+  test.each([
+    ["null", null],
+    ["fields not an array", { fields: "tenantId", values: [[1]] }],
+    ["no values at all", { fields: ["tenantId"] }],
+    ["a tuple of the wrong width", { fields: ["tenantId", "ledgerCode"], values: [[1]] }],
+  ])("a malformed one is refused with a path: %s", (_label, operand) => {
+    expect(attempt(operand)).toThrow(UnsupportedQueryError);
+    expect(attempt(operand)).not.toThrow(TypeError);
+  });
+
+  /** ...and the planner's own still compiles, on the dialect that binds it. */
+  test("the planner's own is accepted", () => {
+    const plan = compileRead(ledgerEntry, "findMany", { include: { ledger: true } }, postgres);
+    expect(plan.relations).toHaveLength(1);
+  });
+});
+
 describe("a nested write still refuses, and says why", () => {
   const run = () =>
     compileWrite(

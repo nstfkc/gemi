@@ -25,7 +25,7 @@ import {
   sql,
 } from "./fragment";
 import { resolveSelection } from "./select";
-import { COMPOSITE_IN } from "./where";
+import { COMPOSITE_IN, plannerCompositeIn } from "./where";
 
 /**
  * The relation planner: an include tree plus a root model in, a *strategy* out.
@@ -1398,7 +1398,7 @@ function compositeFilter(
     types.every((type) => type !== undefined) &&
     dialect.canBindCompositeIn(types as ScalarType[])
   ) {
-    return { [COMPOSITE_IN]: { fields: childFields, values: keys } };
+    return { [COMPOSITE_IN]: plannerCompositeIn(childFields, keys) };
   }
 
   return {
