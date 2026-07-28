@@ -662,22 +662,24 @@ function jsonConverter(
         value === null || value === undefined ? null : BigInt(String(value));
 
     case "Json":
-      // A `jsonb` column embedded in `json_build_object` should arrive as a
-      // nested object, and does — unless the value was stored as a JSON *string*,
-      // which is what `PostgresDialect.encode` produces and what the column then
-      // holds if it is text-typed rather than `jsonb`. The batched path handles
-      // exactly this with the same `typeof` check in `PostgresDialect.decode`, so
-      // the two paths agree either way rather than only when the column type is
-      // what one of them assumed.
-      return (value) => {
-        if (value === null || value === undefined) return null;
-        if (typeof value !== "string") return value;
-        try {
-          return JSON.parse(value);
-        } catch {
-          return value;
-        }
-      };
+      // Nothing to do, for the same reason `PostgresDialect.decode` does
+      // nothing: the value arrives already parsed. A `jsonb` column embedded in
+      // `json_build_object` is a nested JSON value, and Bun parses the whole
+      // `data` payload — so by the time it reaches here it is an object, an
+      // array, a string, a number or null, exactly as stored.
+      //
+      // This used to re-parse anything that was a string, on the reasoning that
+      // it might be raw JSON text. **A JS string is ambiguous** between "text
+      // nobody parsed" and "a JSON string value somebody did", and here the
+      // ambiguity is worse than on the batched path, because the value has been
+      // through JSON *twice* — once for the column, once for `json_agg`. A
+      // column holding the JSON string `"42"` came back as the number 42 from a
+      // folded include and as `"42"` from a batched one: the same query, two
+      // answers, decided by which strategy the dialect happened to pick.
+      //
+      // Caught by seeding a JSON string one relation down. Nothing reached it
+      // before, because the template's schema had no `Json` column at all.
+      return undefined;
 
     case "Bytes":
       // Postgres renders `bytea` into JSON as `\x` followed by hex.
