@@ -229,7 +229,6 @@ describe("policies", () => {
     const out = applyNestedPolicies(
       root,
       { include: { _count: { select: { accounts: true } } } },
-      "findMany" as any,
       { organizationId: 7 },
       false,
       lookup([tenant]),
@@ -248,7 +247,6 @@ describe("policies", () => {
           _count: { select: { accounts: { where: { organizationRole: 1 } } } },
         },
       },
-      "findMany" as any,
       { organizationId: 7 },
       false,
       lookup([tenant]),
@@ -265,7 +263,6 @@ describe("policies", () => {
     const out = applyNestedPolicies(
       root,
       args,
-      "findMany" as any,
       { organizationId: 7 },
       true,
       lookup([tenant]),
@@ -280,7 +277,6 @@ describe("policies", () => {
     const out = applyNestedPolicies(
       root,
       args,
-      "findMany" as any,
       {},
       false,
       lookup([]),
