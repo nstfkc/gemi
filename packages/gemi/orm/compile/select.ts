@@ -1,4 +1,5 @@
 import { UnknownFieldError, UnsupportedQueryError } from "../errors";
+import { COUNT_KEY } from "../relation-filters";
 import type { FieldSchema, ModelSchema } from "../schema";
 
 /**
@@ -68,6 +69,15 @@ export function resolveSelection(
     // to be counted, so that a selection of nothing but relations is not
     // mistaken for an empty one.
     if (key in schema.relations) {
+      if (value !== false) relations++;
+      continue;
+    }
+
+    // `_count` is neither a field nor a relation. It projects a correlated
+    // subquery, which `planRelationCounts` owns — including validating its own
+    // shape — so here it only has to count as *something selected*, or a
+    // selection of nothing but counts would be reported as empty.
+    if (key === COUNT_KEY) {
       if (value !== false) relations++;
       continue;
     }

@@ -2885,8 +2885,30 @@ before it is compiled. Worth stating because the leak here is quieter than an un
 `where: { memberships: { some: {} } }` returns no membership rows at all, so an unscoped version
 would leak *existence* — which users have a membership in a tenant you cannot see.
 
-**Not implemented yet:** ordering by a relation, and filtering across an implicit many-to-many.
-Both raise `UnsupportedQueryError` rather than being silently ignored.
+### Counting a relation
+
+```ts
+const users = await User.findMany({
+  include: { _count: { select: { accounts: true } } },
+})
+users[0]._count.accounts        // 3
+
+// counting a subset
+include: { _count: { select: { accounts: { where: { role: "owner" } } } } }
+```
+
+A correlated `count(*)` in the same statement — no second round trip, and no change to the row
+set. The counted relation's policies scope it, so a count only ever counts rows you could have
+read. That matters more than it looks: an unscoped count returns a *number*, so what it would leak
+is how many rows exist in tenants you cannot see.
+
+`_count: true` (Prisma's "count every to-many relation") is **not** implemented. Name the relations
+instead — the shorthand names none, so a policy has nowhere to attach, and what it returns changes
+silently when the schema grows a relation.
+
+**Not implemented yet:** ordering by a relation, counting or filtering across an implicit
+many-to-many, and `_count` on a to-one (which can only ever be 0 or 1 — its nullability already
+says which). All raise `UnsupportedQueryError` rather than being silently ignored.
 
 ### One value that will surprise you
 

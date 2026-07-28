@@ -141,10 +141,26 @@ error should say so.
 
 ## Out of scope
 
-Lateral / `json_agg` strategies (iteration 7), `_count` on relations, relation
-filters in `where` (`some` / `every` / `none` — they belong with the where
-compiler and are worth scheduling explicitly, likely alongside iteration 4),
-all writes, transactions, policies.
+Lateral / `json_agg` strategies (iteration 7), ~~`_count` on relations~~,
+~~relation filters in `where`~~ (`some` / `every` / `none` — they belong with the
+where compiler and are worth scheduling explicitly, likely alongside iteration
+4), all writes, transactions, policies.
+
+Both of the struck items are **done**, after iteration 9 rather than alongside
+iteration 4. `_count` turned out to be the same machinery as the relation
+filters — a correlated subquery over the child, aliased so a self-relation
+cannot shadow the outer table — projected instead of predicated, so it landed in
+the same pass. Nine differential cases compare it against Prisma.
+
+It is also a **third** instance of the rule this project keeps rediscovering:
+every path that reaches another model's rows is a read of that model and carries
+its policies. Nested includes were the first (iteration 6), the lateral
+strategy's folded subquery the second (iteration 9), relation filters and
+`_count` the third and fourth. The counts are the quietest of them — an unscoped
+count returns a *number*, so what leaks is how many rows exist in tenants the
+caller cannot see. Worth stating as a rule rather than as four fixes: **if a
+compiled statement names another model's table, that model's policies belong in
+it.**
 
 ## Notes and risks
 

@@ -18,6 +18,7 @@ import {
   strategiesOf,
   type RelationStrategy,
 } from "./plan-relations";
+import { planRelationCounts } from "./relation-count";
 import { resolveSelection, withKeyFields } from "./select";
 import { assertUniqueWhere } from "./unique";
 import { compileWhere } from "./where";
@@ -157,12 +158,18 @@ export function compileRead(
   // harness compares.
   const contributed = plans.filter((plan) => plan.root !== undefined);
 
+  // `_count` projects a correlated subquery per relation. It goes last for the
+  // same reason a folded relation's column does: the shaper reads scalars by
+  // position, and `_count` is attached afterwards from the raw row.
+  const counts = planRelationCounts(schema, args, dialect, op);
+
   const columns = joinFragments(
     [
       ...fields.map((field) =>
         sql(`${qualifier ?? ""}${dialect.quoteIdent(field.column)}`),
       ),
       ...contributed.map((plan) => plan.root!.column),
+      ...counts.map((count) => count.column),
     ],
     ", ",
   );
@@ -216,6 +223,20 @@ export function compileRead(
       // Per-row rather than once, and per-relation rather than in the shaper,
       // because `decode` is the strategy's — `json_agg` returns text, so this is
       // where dates stop being strings and an empty to-many becomes `[]`.
+      // `_count` arrived as extra columns the shaper does not know about, under
+      // aliases carrying a dot. Assembled into one object per row, because that
+      // is the shape Prisma returns and the differential harness compares.
+      if (counts.length > 0) {
+        for (let i = 0; i < shaped.length; i++) {
+          const raw = (rows[i] as Record<string, unknown>) ?? {};
+          const totals: Record<string, number> = {};
+          for (const count of counts) {
+            totals[count.as] = Number(raw[count.alias] ?? 0);
+          }
+          shaped[i]._count = totals;
+        }
+      }
+
       if (contributed.length > 0) {
         for (let i = 0; i < shaped.length; i++) {
           const row = shaped[i];

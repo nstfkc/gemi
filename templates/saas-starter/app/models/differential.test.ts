@@ -391,6 +391,49 @@ const CASES: [string, string, unknown][] = [
     where: { accounts: { some: {} } },
   }],
 
+  // --- _count on relations -----------------------------------------------
+  //
+  // A correlated subquery in the select list, compared against whatever Prisma
+  // does — which is a second query on some versions and a lateral join on
+  // others. The point of comparing is that the *result* is the same either way.
+  ["count a relation", "findMany", {
+    include: { _count: { select: { accounts: true } } }, orderBy: { id: "asc" },
+  }],
+  ["count a relation with no rows", "findMany", {
+    include: { _count: { select: { session: true } } }, orderBy: { id: "asc" },
+  }],
+  ["a filtered count", "findMany", {
+    include: { _count: { select: { accounts: { where: { organizationRole: 1 } } } } },
+    orderBy: { id: "asc" },
+  }],
+  ["a filtered count matching nothing", "findMany", {
+    include: { _count: { select: { accounts: { where: { organizationRole: 99 } } } } },
+    orderBy: { id: "asc" },
+  }],
+  ["count beside a real include", "findMany", {
+    include: {
+      accounts: { orderBy: { id: "asc" } },
+      _count: { select: { accounts: true } },
+    },
+    orderBy: { id: "asc" },
+  }],
+  ["count inside a select, beside a scalar", "findMany", {
+    select: { name: true, _count: { select: { accounts: true } } },
+    orderBy: { id: "asc" },
+  }],
+  ["count as the only thing selected", "findMany", {
+    select: { _count: { select: { accounts: true } } }, orderBy: { id: "asc" },
+  }],
+  ["two relations counted at once", "findMany", {
+    include: { _count: { select: { accounts: true, session: true } } },
+    orderBy: { id: "asc" },
+  }],
+  ["a count with a relation filter", "findMany", {
+    where: { accounts: { some: {} } },
+    include: { _count: { select: { accounts: true } } },
+    orderBy: { id: "asc" },
+  }],
+
   // --- relations inside select ------------------------------------------
   ["select a relation beside a scalar", "findMany", {
     select: { name: true, accounts: { orderBy: { id: "asc" } } },

@@ -7,6 +7,7 @@ import {
   UnregisteredRelationTargetError,
   UnsupportedQueryError,
 } from "../errors";
+import { COUNT_KEY } from "../relation-filters";
 import * as registry from "../registry";
 import type { FieldSchema, ModelSchema, RelationSchema } from "../schema";
 import {
@@ -361,6 +362,11 @@ function relationNodes(
     for (const key of Object.keys(include).sort()) {
       const node = include[key];
       if (node === undefined || node === false) continue;
+
+      // `_count` is a projected subquery rather than a relation node — see
+      // `planRelationCounts`. It sits in the same container, so every walk over
+      // that container has to step past it.
+      if (key === COUNT_KEY) continue;
 
       const relation = schema.relations[key];
       if (!relation) {

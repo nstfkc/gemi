@@ -3,6 +3,7 @@ import { currentActor } from "./context";
 import { PolicyDeniedError, UnsupportedQueryError } from "./errors";
 import type { Operation } from "./plan";
 import {
+  COUNT_KEY,
   isOperatorForm,
   relationFilterOperators,
 } from "./relation-filters";
@@ -602,6 +603,27 @@ export function applyNestedPolicies(
     let rewritten: Record<string, unknown> | undefined;
 
     for (const key of Object.keys(tree)) {
+      // `_count` counts another model's rows, so it is a read of that model and
+      // carries its policies — the third shape of the same rule, after nested
+      // includes and relation filters. An unscoped count is the quietest of the
+      // three: it returns a *number*, so what leaks is how many rows exist in
+      // tenants the caller cannot see.
+      if (key === COUNT_KEY) {
+        const scopedCounts = scopeCounts(
+          schema,
+          (tree as Record<string, unknown>)[key],
+          operation,
+          user,
+          system,
+          lookup,
+        );
+        if (scopedCounts !== (tree as Record<string, unknown>)[key]) {
+          rewritten ??= { ...(tree as Record<string, unknown>) };
+          rewritten[key] = scopedCounts;
+        }
+        continue;
+      }
+
       const relation = schema.relations[key];
       if (!relation) continue;
 
@@ -668,6 +690,69 @@ export function applyNestedPolicies(
   if (filtered !== out.where) out = { ...out, where: filtered };
 
   return out;
+}
+
+/**
+ * Scopes each relation named inside `_count: { select: { … } }`.
+ *
+ * `true` becomes `{ where: <scope> }` for the same reason an `include: true`
+ * does — a scope has to go somewhere — and stays `true` when nothing applies, so
+ * an unpolicied count does not move the plan key.
+ */
+function scopeCounts(
+  schema: { relations: Record<string, { model: string; kind: "one" | "many" }> },
+  node: unknown,
+  operation: Operation,
+  user: unknown,
+  system: boolean,
+  lookup: PolicyLookup,
+): unknown {
+  if (system) return node;
+  if (typeof node !== "object" || node === null || Array.isArray(node)) {
+    return node;
+  }
+
+  const selection = (node as Record<string, unknown>).select;
+  if (
+    typeof selection !== "object" ||
+    selection === null ||
+    Array.isArray(selection)
+  ) {
+    // Every other shape is the compiler's to report, with the message it has.
+    return node;
+  }
+
+  let rewritten: Record<string, unknown> | undefined;
+  const source = selection as Record<string, unknown>;
+
+  for (const key of Object.keys(source)) {
+    const value = source[key];
+    if (value === undefined || value === false) continue;
+
+    const relation = schema.relations[key];
+    if (!relation) continue;
+
+    const target = lookup(relation.model);
+    if (!target || target.policies.length === 0) continue;
+
+    const nodeArgs = value === true ? {} : value;
+    if (typeof nodeArgs !== "object" || Array.isArray(nodeArgs)) continue;
+
+    const scoped = applyPolicies(
+      target.policies,
+      policyContext(target.schema.name, operation, user, system),
+      nodeArgs,
+    );
+
+    if (scoped !== nodeArgs) {
+      rewritten ??= { ...source };
+      rewritten[key] = scoped;
+    }
+  }
+
+  return rewritten
+    ? { ...(node as Record<string, unknown>), select: rewritten }
+    : node;
 }
 
 /**

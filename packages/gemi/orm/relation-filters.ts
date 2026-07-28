@@ -52,3 +52,14 @@ export function isOperatorForm(
   const keys = Object.keys(value);
   return keys.length > 0 && keys.every((key) => operators.includes(key));
 }
+
+/**
+ * The key `_count` occupies inside an `include` or a `select`.
+ *
+ * Named here for the same reason the operators are: the compiler projects it and
+ * the policy walk has to scope it, and if the two disagreed about the key one of
+ * them would silently do nothing. It is also the one key in either container
+ * that is neither a field nor a relation, so every walk over them needs to know
+ * to skip it.
+ */
+export const COUNT_KEY = "_count";
