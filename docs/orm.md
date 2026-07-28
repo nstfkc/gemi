@@ -262,6 +262,11 @@ The third is the one worth knowing about. `take: "-2"` used to report that the O
 All three subclass `UnsupportedQueryError`, so `catch (e) { if (e instanceof UnsupportedQueryError) }`
 still catches every one. The specific classes are for the person reading the message.
 
+One edge is deliberate: an argument that is not in the grammar **at all** — a typo — keeps
+`UnsupportedQueryError` and its "yet", because the same check also refuses real Prisma arguments this
+ORM has not implemented, and nothing there can tell the two apart. The sentence immediately after it
+lists what the operation *does* take, which is what tells you a typo is a typo.
+
 Every refusal carries a second sentence saying what to do instead — that is a required argument
 rather than a convention, so it cannot be dropped by a call site added later.
 

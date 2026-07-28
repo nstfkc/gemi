@@ -733,6 +733,20 @@ describe("a refusal says which kind of refusal it is", () => {
     expect(() => text(args)).not.toThrow(/yet/);
   });
 
+  /**
+   * The edge, asserted so it is a decision rather than an oversight.
+   *
+   * An argument that is not in the grammar at all keeps "yet", because the same
+   * check refuses a typo and a real Prisma argument this ORM has not
+   * implemented, and nothing there can tell them apart. What carries the reader
+   * is the *next* sentence, which #102 made mandatory: it lists what the
+   * operation does take.
+   */
+  test("an argument outside the grammar keeps 'yet', and says what is taken", () => {
+    expect(() => text({ nope: 1 })).toThrow(/yet/);
+    expect(() => text({ nope: 1 })).toThrow(/findMany takes .*where/);
+  });
+
   /** ...and every one of them still answers to the base class. */
   test("all three are catchable as UnsupportedQueryError", () => {
     for (const args of [{ take: "-2" }, { nope: 1 }, { distinct: ["id"] }]) {

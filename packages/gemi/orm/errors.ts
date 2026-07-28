@@ -77,6 +77,23 @@ export class UnsupportedQueryError extends Error {
  * `UnsupportedByDesignError` made, and it is what lets a taxonomy be added to a
  * shipped ORM without a breaking change: the specific classes are for the
  * reader, the base class is for the handler.
+ *
+ * **Where the taxonomy stops, and why it stops there.** An argument that is not
+ * in the grammar at all keeps the base class and its "yet" — `{ nope: 1 }`
+ * reports "does not support 'nope' yet". That is right for half of what reaches
+ * that path and wrong for the other half: the same check refuses a typo and a
+ * real Prisma argument this ORM has genuinely not implemented, and nothing at
+ * that point can tell them apart. Splitting it would mean carrying Prisma's
+ * full argument grammar per operation, which is a large amount of duplicated
+ * schema for a small gain.
+ *
+ * What makes it tolerable is the sentence after it. Since #61's other half made
+ * `detail` mandatory, that refusal always continues *"findMany takes include,
+ * omit, orderBy, select, skip, take, where"* — so a caller who typed `nope`
+ * learns it is not coming from the very next clause, without the class having
+ * to know. Recorded here rather than left to be re-derived, because "the third
+ * class did not cover this one" is the obvious first reading and it is not the
+ * interesting part.
  */
 export class InvalidArgumentError extends UnsupportedQueryError {
   constructor(
