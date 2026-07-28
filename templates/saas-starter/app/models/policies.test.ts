@@ -30,7 +30,13 @@ import {
 } from "vitest";
 
 import { POSTGRES_URL, applyMigrations } from "./differential";
-import { AccountModel, OrganizationModel, UserModel } from "./generated";
+import {
+  AccountModel,
+  OrganizationModel,
+  PostModel,
+  TagModel,
+  UserModel,
+} from "./generated";
 
 /**
  * Policies are declared on **registered subclasses**, exactly as an application
@@ -111,6 +117,16 @@ function suite(label: string, url?: string) {
     let raw: SQL;
     let previous: Application | undefined;
 
+    // Children before parents: the SQLite branch below issues plain `DELETE`s
+    // in this order, where a foreign key still has to be satisfied. The
+    // Postgres branch truncates them in one statement and does not care.
+    //
+    // `_PostToTag`, `Post` and `Tag` are here because the many-to-many tests
+    // write rows that outlive the test that made them, and `Tag.label` is
+    // unique. On SQLite that is invisible — every run gets a fresh temp
+    // database — so the failure only appears on Postgres, on the *second* run
+    // against the same one, as a primary key collision in a seed. Cheaper to
+    // truncate them than to explain that.
     const TABLES = [
       "SocialAccount",
       "Session",
@@ -120,6 +136,9 @@ function suite(label: string, url?: string) {
       "User",
       "OrganizationInvitation",
       "Organization",
+      "_PostToTag",
+      "Post",
+      "Tag",
     ];
 
     beforeAll(async () => {
@@ -257,6 +276,156 @@ function suite(label: string, url?: string) {
         ScopedUser.count({ select: { _all: true, email: true } }),
       );
       expect(counts).toEqual({ _all: 1, email: 1 });
+    });
+
+    /**
+     * `set` on an implicit many-to-many replaces the whole set, so it has to
+     * delete what is there now — and the deletion must not reach links pointing
+     * at children the caller cannot see.
+     *
+     * The boundary has to agree with itself: `disconnect` refuses that row
+     * outright, because it resolves through the child's own
+     * `findUniqueOrThrow`. An unscoped `set` would permit the *same effect*
+     * whenever it was reached through the other operand.
+     *
+     * Not a read leak — nothing comes back, and the caller cannot tell the
+     * hidden link existed. It is an unscoped **write** to state they could not
+     * otherwise reach.
+     */
+    test("set on a many-to-many cannot delete links the caller cannot see", async () => {
+      class ScopedTag extends TagModel {
+        static $policies = [
+          {
+            scope: () => ({ label: { startsWith: "mine" } }),
+          } satisfies ModelPolicy,
+        ];
+      }
+      register("Tag", ScopedTag);
+
+      try {
+        const { post, hidden } = await Model.asSystem(async () => {
+          const mine: any = await TagModel.create({
+            data: { label: "mine-a" },
+          });
+          const theirs: any = await TagModel.create({
+            data: { label: "theirs-b" },
+          });
+          const post: any = await PostModel.create({
+            data: {
+              title: "p",
+              tags: { connect: [{ id: mine.id }, { id: theirs.id }] },
+            },
+          });
+          return { post, hidden: theirs.id };
+        });
+
+        // The caller cannot see the second tag at all.
+        const visible: any = await Model.asUser(ALICE, () =>
+          ScopedTag.findMany({}),
+        );
+        expect(visible.map((row: any) => row.label)).toEqual(["mine-a"]);
+
+        // `set` to nothing: it may clear what this caller can see, and must
+        // leave the rest alone.
+        await Model.asUser(ALICE, () =>
+          PostModel.update({
+            where: { id: post.id },
+            data: { tags: { set: [] } },
+          }),
+        );
+
+        const remaining: any = await Model.asSystem(() =>
+          TagModel.findMany({ where: { posts: { some: { id: post.id } } } }),
+        );
+
+        expect(remaining.map((row: any) => row.id)).toEqual([hidden]);
+      } finally {
+        register("Tag", TagModel);
+      }
+    });
+
+    /**
+     * ...and with no policy on the child, `set` still clears everything — the
+     * scoping narrows, it does not change the operand's meaning. Without this
+     * the fix above could have been "delete nothing" and the test would agree.
+     */
+    /**
+     * The boundary case of the scoped delete, and the one the single-statement
+     * form has to state where the loop it replaced did not.
+     *
+     * Clearing "the links I can see" when I can see none of them is a `delete
+     * … in ()`, which is a syntax error on both dialects. A per-link loop
+     * degenerated to zero iterations here and said nothing; one statement over
+     * an `in` list has to check first.
+     */
+    test("set clears nothing when every existing link is hidden", async () => {
+      class ScopedTag extends TagModel {
+        static $policies = [
+          {
+            scope: () => ({ label: { startsWith: "mine" } }),
+          } satisfies ModelPolicy,
+        ];
+      }
+      register("Tag", ScopedTag);
+
+      try {
+        const { post, hidden } = await Model.asSystem(async () => {
+          const one: any = await TagModel.create({
+            data: { label: "theirs-a" },
+          });
+          const two: any = await TagModel.create({
+            data: { label: "theirs-b" },
+          });
+          const post: any = await PostModel.create({
+            data: {
+              title: "p",
+              tags: { connect: [{ id: one.id }, { id: two.id }] },
+            },
+          });
+          return { post, hidden: [one.id, two.id] };
+        });
+
+        await expect(
+          Model.asUser(ALICE, () =>
+            PostModel.update({
+              where: { id: post.id },
+              data: { tags: { set: [] } },
+            }),
+          ),
+        ).resolves.toBeDefined();
+
+        // Both survive, and nothing raised on the way there.
+        const remaining: any = await Model.asSystem(() =>
+          TagModel.findMany({ where: { posts: { some: { id: post.id } } } }),
+        );
+        expect(remaining.map((row: any) => row.id).sort()).toEqual(
+          [...hidden].sort(),
+        );
+      } finally {
+        register("Tag", TagModel);
+      }
+    });
+
+    test("set still replaces the whole set when the child is unpolicied", async () => {
+      const post = await Model.asSystem(async () => {
+        const a: any = await TagModel.create({ data: { label: "a" } });
+        const b: any = await TagModel.create({ data: { label: "b" } });
+        return (await PostModel.create({
+          data: { title: "p", tags: { connect: [{ id: a.id }, { id: b.id }] } },
+        })) as any;
+      });
+
+      await Model.asSystem(() =>
+        PostModel.update({
+          where: { id: post.id },
+          data: { tags: { set: [] } },
+        }),
+      );
+
+      const remaining: any = await Model.asSystem(() =>
+        TagModel.findMany({ where: { posts: { some: { id: post.id } } } }),
+      );
+      expect(remaining).toEqual([]);
     });
 
     /**

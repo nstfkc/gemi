@@ -208,6 +208,44 @@ Results are typed by Prisma's own mapped types, so `_max: { position: true }` na
 than columns, which is its own piece of work; shipping half of it typed as though it worked would be
 worse than not shipping it.
 
+### Looking a row up by a composite key
+
+`findUnique`, `update`, `delete` and `upsert` need a key that is unique. A composite one — whether
+it is a compound `@@id([a, b])` or an `@@unique([a, b])` — is named in Prisma's compound form:
+
+```ts
+await Membership.findUnique({
+  where: { organizationId_userId: { organizationId, userId } },
+})
+```
+
+Every member is required. A composite key is only unique as a whole, so a partial one would quietly
+become a non-unique lookup — which is the failure `findUnique` exists to prevent, and it is refused
+by name.
+
+### Returning everything except one column
+
+```ts
+const user = await User.findUnique({ where: { id }, omit: { password: true } })
+```
+
+`omit` is the complement of `select`, and the reason to have both is what happens when the model
+gains a column. With `select` the exclusion list has to be rewritten every time, and the day
+somebody forgets is the day the new column silently stops being returned. `omit` says the thing that
+is actually stable about the query — *this column must never leave the process* — so a column added
+later is included by default.
+
+It is a real projection: the omitted column never enters the `SELECT` list, so it is not read, not
+shaped and not decoded. `select` and `omit` together are refused, because one names what to keep and
+the other what to drop; Prisma rejects that pair too. It works on every operation that returns a
+payload, reads and writes alike, and **inside an `include`** — which is where it usually matters,
+since a column you never want to leave the process is as likely to be on a related row as on the
+root one. Both relation strategies honour it.
+
+**It is not a substitute for a policy's `redact`.** `omit` is the caller choosing; `redact` is the
+model refusing, and a caller cannot opt out of it. Use `redact` for "nobody may read this", and
+`omit` for "I do not need this here".
+
 ### Importing a batch that may overlap
 
 ```ts
@@ -447,6 +485,21 @@ Ordering by a relation is not a total order, so add a tiebreak if you need a sta
 Filtering, counting and ordering all work across an **implicit many-to-many** too — the join
 table is a second table inside the subquery and changes nothing else about how you write the
 query.
+
+**Writing one works too**, through the same relation key inside `data`: `connect`, `disconnect`,
+`set` and `create`. `set` replaces the whole set — a delete and then inserts, inside the same
+transaction — and connecting a pair that is already there is a no-op rather than an error, as it is
+in Prisma. An `update` whose `data` names only relations is fine: there is no column to set, so the
+row is read rather than written and the relation work still happens.
+
+Only the join table itself is written directly; it has no model and nothing an application could
+scope. The rows the pairs point at still go through the related model's own operations, so a
+`connect` cannot reach a row that model's policies hide, and a `create` gets its `onCreate`.
+
+That extends to `set`, which has to delete before it inserts: it clears **the links you can see**,
+not every link — in one `delete … in (…)`, not one statement per link. A pair pointing at a row the related model's policies hide survives — otherwise
+`set` would quietly do what `disconnect` refuses. With no policy on that model every link is
+visible and `set` clears all of them, exactly as Prisma does.
 
 Self-referential ones work too — `Thing.related Thing[]` — as long as the generated files are
 current. Prisma assigns that join table's two columns by *field name*, which the generator now
@@ -971,7 +1024,6 @@ Stated so you can plan around them rather than discover them:
   an identity map is worse than none.
 - **No lazy loading.** A relation you did not `include` is absent, not a proxy that queries when
   touched.
-- **No `omit`.** Use `select`, or a policy's `redact`.
 - **No multi-field relations.** `@relation(fields: [a, b], references: [c, d])` is refused wherever
   a relation is correlated — `include` under either strategy, a relation filter, `_count`, an
   `orderBy` through a relation, and nested writes — rather than joining on the first field and
@@ -979,8 +1031,20 @@ Stated so you can plan around them rather than discover them:
   from. This one *is* pending rather than declined; it needs a composite key comparison on both
   sides (a tuple `in` for the batched strategy, a conjunction for the lateral one).
 - **No migrations, no schema DSL.** Prisma owns both, and gemi must not shadow the Prisma CLI.
-- **No `groupBy`, `aggregate`, `distinct` or cursor pagination.** These land in
-  [Raw SQL](#raw-sql), which exists so that "not implemented" has an answer rather than a shrug.
+- **No `groupBy` or `aggregate`.** These land in [Raw SQL](#raw-sql), which exists so that "not
+  implemented" has an answer rather than a shrug.
+- **No `distinct`, and this one is deliberate rather than pending.** Prisma applies it **in
+  memory** — its query log shows no `DISTINCT` at all, so `take` neither reduces the rows pulled
+  nor paginates by group. Reproducing that faithfully would mean reading the whole result set and
+  deduplicating in JavaScript behind an argument that reads like a database operation; emitting a
+  real `DISTINCT ON` instead would silently diverge from Prisma. Write it as SQL.
+- **No `cursor`, also deliberate.** It is only correct under a *total* ordering, which Prisma does
+  not enforce — under a non-unique `orderBy` it skips or repeats rows at the page boundary. Use
+  `take` with a `where` on the last row's sort key, or compose the keyset comparison with `sql`.
+
+Both of the last two throw `UnsupportedByDesignError`, which says *"and this is a decision rather
+than a gap"* rather than *"yet"* — so a refusal you can plan around reads differently from one that
+might lift next release.
 
 ## See also
 
