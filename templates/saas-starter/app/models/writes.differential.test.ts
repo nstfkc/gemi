@@ -229,6 +229,39 @@ const CASES: Case[] = [
     update: { name: "Updated" },
     select: { email: true, name: true },
   }],
+
+  // --- foreign keys (#89) -----------------------------------------------
+  //
+  // Every one of these **succeeded on SQLite** before the pragma was turned on,
+  // writing a row that points at an organisation which does not exist, while
+  // Prisma refused it. They are in the shared matrix rather than a Postgres-only
+  // block precisely because the dialect that used to be wrong is the default
+  // one.
+  ["create naming a parent that does not exist", "create", {
+    data: { email: "orphan@example.dev", organizationId: 99999 },
+  }],
+  ["createMany naming a parent that does not exist", "createMany", {
+    data: [
+      { email: "orphan2@example.dev" },
+      { email: "orphan3@example.dev", organizationId: 99999 },
+    ],
+  }],
+  ["update repointing at a parent that does not exist", "update", {
+    where: { id: 1 }, data: { organizationId: 99999 },
+  }],
+  ["upsert inserting against a parent that does not exist", "upsert", {
+    where: { email: "orphan4@example.dev" },
+    create: { email: "orphan4@example.dev", organizationId: 99999 },
+    update: { name: "Updated" },
+  }],
+  // The nested form, where the foreign key is written by an `after` step rather
+  // than by the statement itself — a different code path to the same constraint.
+  ["nested create naming a parent that does not exist", "create", {
+    data: {
+      email: "orphan5@example.dev",
+      accounts: { create: { organizationRole: 1, organizationId: 99999 } },
+    },
+  }, ["User", "Account"]],
 ];
 
 function suite(label: string, url?: string) {

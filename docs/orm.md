@@ -121,6 +121,13 @@ const user = await User.findUniqueOrThrow({
 type-checks, `user.name` does not. A key outside the operation's argument type collapses to
 `never` rather than being quietly accepted.
 
+**Foreign keys are enforced on both dialects.** SQLite leaves `pragma foreign_keys` off by
+default and so does Bun's driver, so gemi turns it on for every SQLite connection — otherwise a
+`references` in your migration would mean nothing there while meaning everything on Postgres. An
+insert naming a parent that does not exist is refused, and `onDelete: Cascade` / `SetNull` actually
+run. If you have been developing against SQLite, writes that quietly succeeded may now raise; they
+were already raising in production.
+
 Queries return **plain objects**, never class instances. That is the default and it is not a
 stepping stone: a `Pick<User, "id">` hydrated as a `User` would carry methods reading fields the
 query never fetched. See [Rows and entities](./orm-rows-and-entities.md) for the two opt-in levels
