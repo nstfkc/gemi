@@ -520,13 +520,27 @@ export abstract class Model {
       });
     }
 
-    if (policies.length > 0 && !preScoped) {
+    if (policies.length > 0) {
       // Deny-by-default lives on the context's `user` accessor, not here: a
       // policy that never consults the user — a soft-delete scope, say — has
       // nothing to deny and must keep working with no request in sight. See
       // `policyContext`.
       policy = policyContext(schema.name, op, currentUser(), system);
-      effective = applyPolicies(policies, policy, args);
+
+      // **The context is built even when pre-scoped; only the rewrite is
+      // skipped.** `preScoped` means "the scope is already in these args" — not
+      // "this model has no policies". Guarding the whole block on it left
+      // `policy` undefined for every nested relation read, and `policy` is what
+      // `applyRedaction` below is keyed on. So a `redact` protected a root query
+      // and was skipped inside every `include`: scoped one way, unscoped the
+      // other, which is the failure iteration 6 exists to prevent.
+      //
+      // Only `applyPolicies` is idempotency-sensitive. Re-running it would `AND`
+      // the same predicate twice; re-running `redact` on an already-redacted row
+      // is a no-op.
+      if (!preScoped) {
+        effective = applyPolicies(policies, policy, args);
+      }
     }
 
     // Which strategy plans the include tree. Named per call or chosen by
@@ -726,6 +740,24 @@ export abstract class Model {
       }
     }
 
+    // A **folded** relation's rows never entered the child's `$exec`, so nothing
+    // has run the child's `redact` over them. The comment below — "a related row
+    // was shaped by its own model's `$exec`" — is true of the batched strategy
+    // and false of the lateral one, which is precisely the kind of assumption
+    // iteration 9 had to revisit for `scope`.
+    //
+    // `scope` survived the fold because policies rewrite the *argument tree*
+    // before planning, and a scoped `where` lands inside the subquery. `redact`
+    // cannot: it is a row transform in the shaping stage, with no argument to
+    // rewrite. So the parent runs it on the child's behalf, which is the only
+    // place that can.
+    if (plan.relations !== undefined && !system) {
+      for (const relation of plan.relations) {
+        if (relation.root === undefined) continue;
+        redactFolded(relation, result, op, system);
+      }
+    }
+
     // Redaction last, on the shaped result. After relations, not before: a
     // related row was shaped by its own model's `$exec` and has already been
     // through its own policy's `redact` — this one only owns its own rows.
@@ -900,5 +932,43 @@ function findThenWrite(schema: ModelSchema, args: any, op: Operation): boolean {
     return upsertAbsentConflictKey(schema, args, key).length > 0;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Runs a folded relation's own `redact` over the rows the strategy inlined.
+ *
+ * Only for a plan carrying `root` — a batched child came back through its own
+ * `$exec` and has already redacted itself, and doing it twice is harmless but
+ * pointless. Only outside `asSystem`, like every other policy.
+ *
+ * The child's policies are resolved through the registry by name, so this obeys
+ * the same rule every nested read does: whatever is registered under that name
+ * is the class whose policies apply.
+ */
+function redactFolded(
+  relation: { as: string; model: string },
+  result: unknown,
+  op: Operation,
+  system: boolean,
+): void {
+  if (!registry.has(relation.model)) return;
+
+  const target = registry.get<unknown>(relation.model);
+  const policies = policiesFor(target);
+  if (policies.length === 0) return;
+
+  const schema = (target as { $schema?: { name?: string } }).$schema;
+  const context = policyContext(
+    schema?.name ?? relation.model,
+    op,
+    currentUser(),
+    system,
+  );
+
+  for (const parent of rowsOf(result)) {
+    const children = parent?.[relation.as];
+    if (children === undefined || children === null) continue;
+    applyRedaction(policies, context, children);
   }
 }

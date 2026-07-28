@@ -178,6 +178,18 @@ export interface NestedWriteStep {
 export interface RelationPlan {
   /** The key this relation is written to on each parent row. */
   as: string;
+  /**
+   * The related model's *name*, for anything above the compiler that has to
+   * reach the child's own policies — resolved through the registry at call
+   * time, never imported (invariant 6).
+   *
+   * `Model.$exec` needs it for exactly one thing: redacting a relation the
+   * strategy **folded**. A batched child is shaped by its own `$exec` and
+   * redacts itself; a folded one never enters that call, so the parent has to
+   * run the child's `redact` on its behalf — and it cannot do that without
+   * knowing whose rows they are.
+   */
+  model: string;
   kind: "one" | "many";
   /**
    * The parent *field* whose value keys the stitch. The root query must select
@@ -816,6 +828,7 @@ export const batchedStrategy: RelationStrategy = {
 
     return {
       as: request.as,
+      model: request.relation.model,
       kind: request.relation.kind,
       parentField: link.parentField,
       strategy: BATCHED,

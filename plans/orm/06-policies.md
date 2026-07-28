@@ -299,3 +299,38 @@ Two consequences worth stating:
 - The refusal that remains is narrower and its message says so, including the
   escape. `on conflict` is still refused for a scoped model, and still should
   be.
+
+### `redact` was skipped for every nested relation, under both strategies
+
+Third audit finding, and the same root cause as the first: `markPreScoped`
+suppressing more than it was meant to.
+
+`$exec` built the policy *context* inside `if (policies.length > 0 &&
+!preScoped)`, and `applyRedaction` is keyed on that context. Every nested
+relation read is pre-scoped, so `policy` was undefined for all of them and
+redaction never ran. **A `redact` protected a root query and was skipped inside
+every `include`** — scoped one way, unscoped the other, which is the exact
+failure this iteration exists to prevent.
+
+`preScoped` means "the scope is already in these args". It does not mean "this
+model has no policies", and only `applyPolicies` is idempotency-sensitive:
+re-running it would `AND` the same predicate twice, while re-running `redact` on
+an already-redacted row is a no-op. The context is now built either way and only
+the rewrite is skipped.
+
+**The lateral half needed a different fix**, and it is worth separating because
+iteration 9's argument does not carry over. `scope` survives the fold because
+policies rewrite the argument tree before planning, so the scoped `where` lands
+inside the subquery. `redact` has no argument to rewrite — it is a row transform
+in the shaping stage — and a folded child never enters the child's `$exec` at
+all. So the parent runs the child's `redact` on its behalf, which required
+`RelationPlan` to carry the related model's *name*.
+
+The test is Postgres-only and compares the two strategies, because lateral is
+the default there: a divergence would have been on in production and off in a
+SQLite development environment.
+
+**And the first version of the test was wrong**: it drove both strategies inside
+`Model.asSystem`, which suspends policies for the whole subtree. It reported a
+redaction hole in the root query too — a hole that was not there. A test for a
+policy cannot run in the scope that turns policies off.
