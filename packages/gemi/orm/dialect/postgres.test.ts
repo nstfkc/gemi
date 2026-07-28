@@ -177,13 +177,35 @@ describe("decoding the types the template schema cannot reach", () => {
     );
   });
 
-  test("jsonb arrives as text and is parsed", () => {
-    expect(postgres.needsDecode(field("Json") as any)).toBe(true);
-    expect(postgres.decode('{"a":[1,2]}', field("Json") as any)).toEqual({
+  /**
+   * Bun parses `json` and `jsonb`, so decoding is a pass-through — and it has
+   * to be. This used to re-parse anything that was a string, which cannot work:
+   * a JS string is ambiguous between "raw JSON text" and "a JSON string value",
+   * so the guard turned a column holding `"42"` into the number 42.
+   */
+  test("json arrives parsed, and is passed through untouched", () => {
+    expect(postgres.decode({ a: [1, 2] }, field("Json") as any)).toEqual({
       a: [1, 2],
     });
-    // A driver that starts parsing it for us keeps working.
-    expect(postgres.decode({ a: 1 }, field("Json") as any)).toEqual({ a: 1 });
+    // The shapes that broke: a JSON string, and one whose contents are
+    // themselves valid JSON.
+    expect(postgres.decode("42", field("Json") as any)).toBe("42");
+    expect(postgres.decode("true", field("Json") as any)).toBe("true");
+    expect(postgres.decode('{"a":1}', field("Json") as any)).toBe('{"a":1}');
+    // ...and the ones that always worked.
+    expect(postgres.decode("text", field("Json") as any)).toBe("text");
+    expect(postgres.decode(42, field("Json") as any)).toBe(42);
+    expect(postgres.decode([], field("Json") as any)).toEqual([]);
+  });
+
+  /**
+   * `needsDecode` stays true even though `decode` is now a pass-through for
+   * `Json`: it is asked per *field type*, and the shaper skips the call
+   * entirely when it is false. Flipping it would be a micro-optimisation that
+   * silently stops `null` becoming `null`.
+   */
+  test("Json still reports that it needs decoding", () => {
+    expect(postgres.needsDecode(field("Json") as any)).toBe(true);
   });
 
   test.each(["Int", "String", "Boolean", "Float", "DateTime"])(
@@ -234,9 +256,15 @@ describe("decoding the types the template schema cannot reach", () => {
     expect(postgres.decode(bytes, field("Bytes") as any)).toBe(bytes);
   });
 
+  /**
+   * `Json` is no longer in this set, and cannot be: every value the driver
+   * hands back is already a parsed JSON value, so there is nothing left that
+   * *could* fail to decode. It used to raise for a string that would not parse
+   * — which, after the fix, is simply a JSON string.
+   */
   test("a value that cannot be decoded raises rather than returning nonsense", () => {
-    expect(() => postgres.decode("not json", field("Json") as any)).toThrow();
     expect(() => postgres.decode("3.5", field("BigInt") as any)).toThrow();
+    expect(postgres.decode("not json", field("Json") as any)).toBe("not json");
   });
 
   test("null stays null", () => {

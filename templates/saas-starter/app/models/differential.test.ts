@@ -42,6 +42,10 @@ async function seed(prisma: PrismaClient) {
         organizationId: acme.id,
         createdAt: new Date(EPOCH),
         updatedAt: new Date(EPOCH),
+        // A nested object, and bytes with a high byte and a zero in them —
+        // the two values a hex round-trip gets wrong in different ways.
+        metadata: { plan: "pro", limits: { seats: 3 }, tags: ["a", "b"] },
+        avatar: Buffer.from([0x00, 0x01, 0xff, 0x7f]),
       },
       {
         publicId: "p2",
@@ -52,6 +56,10 @@ async function seed(prisma: PrismaClient) {
         createdAt: new Date(EPOCH + 1000),
         updatedAt: new Date(EPOCH + 1000),
         deletedAt: new Date(EPOCH + 5000),
+        // An empty object and empty bytes: distinct from null, and the pair a
+        // truthiness check collapses into it.
+        metadata: {},
+        avatar: Buffer.from([]),
       },
       {
         publicId: "p3",
@@ -61,6 +69,9 @@ async function seed(prisma: PrismaClient) {
         organizationId: globex.id,
         createdAt: new Date(EPOCH + 2000),
         updatedAt: new Date(EPOCH + 2000),
+        // An empty *array* — JSON's other empty, which decodes to a different
+        // type from the empty object above.
+        metadata: [],
       },
       // No organization: the row that makes a to-one include return `null`
       // rather than an object, which is the divergence to catch.
@@ -79,6 +90,10 @@ async function seed(prisma: PrismaClient) {
         globalRole: 2,
         createdAt: new Date(EPOCH + 4000),
         updatedAt: new Date(EPOCH + 4000),
+        // A JSON *string* that looks like a number, and a JSON scalar rather
+        // than a container — both are legal Json values and both are places a
+        // decoder that reaches for `JSON.parse` can hand back the wrong type.
+        metadata: "42",
       },
     ],
   });
@@ -99,6 +114,11 @@ async function seed(prisma: PrismaClient) {
         organizationRole: 0,
         createdAt: new Date(EPOCH),
         updatedAt: new Date(EPOCH),
+        // Nested inside an include, this is the value `json_agg` flattens and
+        // the lateral decoder has to parse back — twice, since it is JSON
+        // inside JSON.
+        settings: { theme: "dark", nested: { deep: [1, 2, { x: null }] } },
+        token: Buffer.from([0xde, 0xad, 0xbe, 0xef]),
       },
       {
         publicId: "ac2",
@@ -108,6 +128,10 @@ async function seed(prisma: PrismaClient) {
         createdAt: new Date(EPOCH + 1000),
         updatedAt: new Date(EPOCH + 1000),
         deletedAt: new Date(EPOCH + 6000),
+        // A JSON null, which is not the same as a SQL NULL — Prisma spells the
+        // difference `Prisma.JsonNull` vs `Prisma.DbNull`, and a decoder that
+        // conflates them returns the wrong one of two legal answers.
+        settings: null,
       },
       {
         publicId: "ac3",
@@ -116,6 +140,11 @@ async function seed(prisma: PrismaClient) {
         organizationRole: 1,
         createdAt: new Date(EPOCH + 2000),
         updatedAt: new Date(EPOCH + 2000),
+        // A JSON *string* nested one relation down. This is the value the
+        // lateral strategy carries through `json_agg` and then parses back, so
+        // it is the one that goes through JSON twice — and the one a decoder
+        // that re-parses turns into the number 42.
+        settings: "42",
       },
       {
         publicId: "ac4",

@@ -319,6 +319,75 @@ function suite(label: string, url?: string) {
       expect(updated.optional).toBe("now set");
     });
 
+    /**
+     * The `Json` shapes that are not containers, which is where both dialects
+     * used to be wrong in the same way and for the same reason: a JS string is
+     * ambiguous between "already JSON text" and "a JSON string value", and both
+     * encoders guessed by `typeof`.
+     *
+     * `"42"` was stored as the bare text `42` and read back as the *number* 42;
+     * `'{"a":1}'` came back as an object. Round-tripping is the only way to see
+     * it — the write looks fine and the read looks fine, and only together do
+     * they disagree with what was handed in.
+     */
+    test.each([
+      ["a JSON string", "42"],
+      ["a string whose contents are JSON", '{"a":1}'],
+      ["a string that is not JSON", "plain text"],
+      ["a JSON array", [1, "two", null]],
+      ["an empty object", {}],
+      ["an empty array", []],
+    ])("%s round-trips through Json unchanged", async (_label, payload) => {
+      const created: any = await EverythingModel.$exec("create", {
+        data: { ...values, payload },
+      });
+      expect(created.payload).toEqual(payload);
+
+      // Read back through a second statement, so this is the stored value
+      // rather than whatever the write happened to return.
+      const read: any = await EverythingModel.$exec("findUniqueOrThrow", {
+        where: { id: created.id },
+      });
+      expect(read.payload).toEqual(payload);
+      expect(typeof read.payload).toBe(typeof payload);
+    });
+
+    /**
+     * The one `Json` shape that does **not** work on Postgres, pinned so it is
+     * a known boundary rather than a surprise.
+     *
+     * A bare JSON number or boolean is bound as its own type — Bun has no way
+     * to know the parameter is destined for a `jsonb` column — and Postgres
+     * answers `column "payload" is of type jsonb but expression is of type
+     * integer`. It **raises**, so this is a narrower surface than Prisma rather
+     * than a wrong value, which is the direction this project prefers when it
+     * has to pick.
+     *
+     * Fixing it means always serialising *and* emitting an explicit `::jsonb`
+     * cast on the parameter — which has to reach the insert, the update's set
+     * clause and any `where` comparing a Json column, so it is a compiler
+     * change with its own differential pass rather than a dialect tweak. Left
+     * out of the change that found it deliberately.
+     *
+     * SQLite has no such limit: it stores JSON as text, so every shape works.
+     */
+    test.each([
+      ["a JSON number", 7],
+      ["a JSON boolean", true],
+    ])("%s is a known boundary on postgres", async (_label, payload) => {
+      const write = EverythingModel.$exec("create", {
+        data: { ...values, payload },
+      });
+
+      if (url) {
+        await expect(write).rejects.toThrow(/jsonb/);
+        return;
+      }
+
+      const created: any = await write;
+      expect(created.payload).toEqual(payload);
+    });
+
     test("createMany round-trips every row", async () => {
       const result: any = await EverythingModel.$exec("createMany", {
         data: [
