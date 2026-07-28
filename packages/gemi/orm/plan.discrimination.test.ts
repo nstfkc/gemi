@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, test } from "vitest";
 
 import { PostgresDialect } from "./dialect/postgres";
 import { SqliteDialect } from "./dialect/sqlite";
-import { user } from "./fixtures";
+import { account, organization, user } from "./fixtures";
+import * as registry from "./registry";
 import {
   clearPlanCache,
   getOrCompile,
@@ -13,7 +14,15 @@ import {
 const sqlite = new SqliteDialect();
 const postgres = new PostgresDialect();
 
-beforeEach(() => clearPlanCache());
+beforeEach(() => {
+  clearPlanCache();
+  // The relation shapes below resolve their target through the registry, the
+  // same way every relation does.
+  registry.clearRegistry();
+  registry.register("User", class { static $schema = user });
+  registry.register("Account", class { static $schema = account });
+  registry.register("Organization", class { static $schema = organization });
+});
 
 /**
  * A plan-cache collision does not fail — it silently runs the wrong SQL for the
@@ -66,6 +75,56 @@ const DISTINCT_SHAPES: [string, unknown][] = [
   ["select both", { select: { id: true, email: true } }],
 
   ["NOT", { where: { NOT: { id: 1 } } }],
+
+  // --- relation filters ---------------------------------------------------
+  //
+  // Each operator is its own SQL: `some` is `exists`, `none` is `not exists`,
+  // and `every` is `not exists` over the *negated* condition. Sharing a plan
+  // between any two of them would answer a different question than the caller
+  // asked, and `every` against `some` would answer close to the opposite one.
+  ["some empty", { where: { accounts: { some: {} } } }],
+  ["some filtered", { where: { accounts: { some: { organizationRole: 1 } } } }],
+  ["none empty", { where: { accounts: { none: {} } } }],
+  ["none filtered", { where: { accounts: { none: { organizationRole: 1 } } } }],
+  ["every filtered", { where: { accounts: { every: { organizationRole: 1 } } } }],
+  ["two operators", {
+    where: { accounts: { some: {}, none: { organizationRole: 1 } } },
+  }],
+  ["to-one shorthand", { where: { organization: { name: "x" } } }],
+  ["to-one isNot", { where: { organization: { isNot: { name: "x" } } } }],
+  ["to-one is null", { where: { organization: null } }],
+  ["to-one isNot null", { where: { organization: { isNot: null } } }],
+  ["nested relation filter", {
+    where: { accounts: { some: { organization: { name: "x" } } } },
+  }],
+
+  // --- _count -------------------------------------------------------------
+  //
+  // The relations named decide the projected columns, and a filtered count adds
+  // a predicate inside the subquery.
+  ["count accounts", { include: { _count: { select: { accounts: true } } } }],
+  ["count filtered", {
+    include: {
+      _count: { select: { accounts: { where: { organizationRole: 1 } } } },
+    },
+  }],
+  ["count in select", { select: { _count: { select: { accounts: true } } } }],
+  ["count beside an include", {
+    include: { accounts: true, _count: { select: { accounts: true } } },
+  }],
+
+  // --- ordering by a relation ---------------------------------------------
+  ["order by relation field", { orderBy: { organization: { name: "asc" } } }],
+  ["order by relation field desc", { orderBy: { organization: { name: "desc" } } }],
+  ["order by relation id", { orderBy: { organization: { id: "asc" } } }],
+  ["order by count", { orderBy: { accounts: { _count: "desc" } } }],
+  ["order by count asc", { orderBy: { accounts: { _count: "asc" } } }],
+  // What the policy walk writes into an ordering node — the key is not in
+  // Prisma's grammar and only that walk produces it, but it changes the SQL and
+  // so must change the plan.
+  ["order by count, scoped", {
+    orderBy: { accounts: { _count: "desc", where: { organizationRole: 1 } } },
+  }],
 ];
 
 describe("plan cache discrimination", () => {
@@ -84,15 +143,38 @@ describe("plan cache discrimination", () => {
   // same *plan* would mean the extra entries buy nothing; two shapes hashing
   // together and compiling differently is the dangerous direction.
   //
-  // A plan is the text *and* its binders, not the text alone: `contains`,
-  // `startsWith` and `endsWith` all emit `"email" like ?` and differ only in
-  // the wildcards the binder wraps around the value — which is exactly where
-  // the wildcards belong.
+  // A plan is the text, its binders **and its relation list** — not the text
+  // alone: `contains`, `startsWith` and `endsWith` all emit `"email" like ?`
+  // and differ only in the wildcards the binder wraps around the value, which
+  // is exactly where the wildcards belong.
+  //
+  // The relation list joined that sentence when `_count` arrived. A batched
+  // relation contributes *no root column* — it is a separate query — so
+  // `include: { accounts: true, _count: … }` and `include: { _count: … }`
+  // compile to the same root statement and differ only in what runs afterwards.
+  // Comparing text and binders alone reported that as a collision, which it is
+  // not: the keys differ, and so do the plans. The identity was too narrow, not
+  // the cache too coarse.
+  const identityOf = (plan: ReturnType<typeof getOrCompile>, args: unknown) =>
+    [
+      plan.text,
+      JSON.stringify(plan.bind(args)),
+      JSON.stringify(
+        (plan.relations ?? []).map((relation) => [
+          relation.as,
+          relation.model,
+          relation.kind,
+          relation.strategy,
+          relation.root !== undefined,
+        ]),
+      ),
+    ].join(" ");
+
   test("every shape in the table produces its own plan", () => {
     const plans = new Map<string, string>();
     for (const [label, args] of DISTINCT_SHAPES) {
       const plan = getOrCompile(user, "findMany", args, sqlite);
-      const identity = `${plan.text} ${JSON.stringify(plan.bind(args))}`;
+      const identity = identityOf(plan, args);
       const clash = plans.get(identity);
       expect(
         clash,
@@ -321,6 +403,97 @@ describe("structural keying stops at a value boundary", () => {
       planKey(sqlite, "User", "findMany", {
         include: { accounts: { orderBy: { id: "desc" } } },
       }),
+    );
+  });
+});
+
+/**
+ * The other direction, and the one the plan document calls out as dangerous:
+ * two callers whose arguments differ only in *values* must share a plan, and
+ * two whose scopes differ in *shape* must not.
+ *
+ * This matters most on the surfaces where a **policy** writes the argument.
+ * Iteration 6 established it for a root `where`; relation filters, `_count` and
+ * relation orderings each put a policy's fragment somewhere new, and each is
+ * one more place where "same shape, different tenant" has to mean one plan and
+ * "different shape" has to mean two. Getting the first wrong is a cache that
+ * never hits; getting the second wrong is one tenant running another's SQL.
+ */
+describe("policy-written arguments key on shape, not on value", () => {
+  const shared: [string, unknown, unknown][] = [
+    [
+      "a relation filter's scope",
+      { where: { accounts: { some: { organizationRole: 1 } } } },
+      { where: { accounts: { some: { organizationRole: 2 } } } },
+    ],
+    [
+      "a filtered _count",
+      {
+        include: {
+          _count: { select: { accounts: { where: { organizationRole: 1 } } } },
+        },
+      },
+      {
+        include: {
+          _count: { select: { accounts: { where: { organizationRole: 9 } } } },
+        },
+      },
+    ],
+    [
+      "a scoped relation ordering",
+      { orderBy: { accounts: { _count: "desc", where: { organizationRole: 1 } } } },
+      { orderBy: { accounts: { _count: "desc", where: { organizationRole: 9 } } } },
+    ],
+  ];
+
+  test.each(shared)("%s: two values, one plan", (_label, mine, theirs) => {
+    expect(planKey(sqlite, "User", "findMany", mine)).toBe(
+      planKey(sqlite, "User", "findMany", theirs),
+    );
+
+    clearPlanCache();
+    getOrCompile(user, "findMany", mine, sqlite);
+    getOrCompile(user, "findMany", theirs, sqlite);
+    expect(planCacheStats().compiles).toBe(1);
+    expect(planCacheStats().hits).toBe(1);
+  });
+
+  const distinct: [string, unknown, unknown][] = [
+    [
+      "a relation filter scoped on a different column",
+      { where: { accounts: { some: { organizationRole: 1 } } } },
+      { where: { accounts: { some: { userId: 1 } } } },
+    ],
+    [
+      "a _count scoped and unscoped",
+      { include: { _count: { select: { accounts: true } } } },
+      {
+        include: {
+          _count: { select: { accounts: { where: { organizationRole: 1 } } } },
+        },
+      },
+    ],
+    [
+      "an ordering scoped and unscoped",
+      { orderBy: { accounts: { _count: "desc" } } },
+      { orderBy: { accounts: { _count: "desc", where: { organizationRole: 1 } } } },
+    ],
+  ];
+
+  test.each(distinct)("%s: two plans", (_label, mine, theirs) => {
+    expect(planKey(sqlite, "User", "findMany", mine)).not.toBe(
+      planKey(sqlite, "User", "findMany", theirs),
+    );
+    expect(getOrCompile(user, "findMany", mine, sqlite).text).not.toBe(
+      getOrCompile(user, "findMany", theirs, sqlite).text,
+    );
+  });
+
+  /** And the dialect is in the key, as it is for every other shape. */
+  test("the two dialects do not share a relation-filter plan", () => {
+    const args = { where: { accounts: { some: { organizationRole: 1 } } } };
+    expect(planKey(sqlite, "User", "findMany", args)).not.toBe(
+      planKey(postgres, "User", "findMany", args),
     );
   });
 });
