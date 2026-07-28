@@ -18,6 +18,23 @@ import { compileWrite } from "./write";
 
 const sqlite = new SqliteDialect();
 
+/** A placeholder Fragment for tests that only care whether one was provided. */
+function sqlFragment() {
+  return { text: "", binders: [] };
+}
+
+/** An executor that fails loudly if anything tries to query through it. */
+function executorStub() {
+  return {
+    exec: () => {
+      throw new Error("no query expected");
+    },
+    query: () => {
+      throw new Error("no query expected");
+    },
+  } as any;
+}
+
 // The batched strategy's own queries are `$exec` calls on the related model's
 // class, and `$exec` is where the database is. So the whole planner — planning,
 // batching, stitching, key hiding — is testable with no database at all, by
@@ -668,6 +685,94 @@ describe("implicit many-to-many", () => {
  * a query that picked the wrong one is only slower, not wrong, so there is no
  * failing assertion to find it by.
  */
+/**
+ * The seam widening from iteration 9's deliverable 1, tested before the strategy
+ * that uses it exists.
+ *
+ * `RelationPlan.root` lets a strategy fold children into the *root* statement
+ * rather than fetching them separately, which the interface could not express —
+ * see `plans/orm/09-lateral-strategy.md` for why that is a finding rather than an
+ * omission. Nothing sets it yet, so without these it would be unexercised code
+ * that looks correct until the first strategy relies on it.
+ */
+describe("root contributions", () => {
+  function planWith(root: unknown): any {
+    let loaded = 0;
+    return {
+      plan: {
+        as: "accounts",
+        kind: "many" as const,
+        parentField: "id",
+        strategy: "test",
+        root,
+        load: async () => {
+          loaded++;
+        },
+      },
+      loads: () => loaded,
+    };
+  }
+
+  test("a plan carrying a root contribution is not loaded", async () => {
+    const { plan, loads } = planWith({
+      column: sqlFragment(),
+      join: sqlFragment(),
+      decode: (value: unknown) => value,
+    });
+
+    await attachRelations([plan], undefined, [{ id: 1 }], {}, executorStub());
+
+    // Calling `load` here would issue the very query the strategy exists to
+    // avoid, and overwrite the folded-in result with it.
+    expect(loads()).toBe(0);
+  });
+
+  test("a plan without one is still loaded", async () => {
+    const { plan, loads } = planWith(undefined);
+
+    await attachRelations([plan], undefined, [{ id: 1 }], {}, executorStub());
+
+    expect(loads()).toBe(1);
+  });
+
+  test("the two kinds mix in one query", async () => {
+    const folded = planWith({
+      column: sqlFragment(),
+      join: sqlFragment(),
+      decode: (value: unknown) => value,
+    });
+    const fetched = planWith(undefined);
+
+    await attachRelations(
+      [folded.plan, fetched.plan],
+      undefined,
+      [{ id: 1 }],
+      {},
+      executorStub(),
+    );
+
+    // Which is what makes a mixed-strategy tree expressible rather than
+    // all-or-nothing.
+    expect(folded.loads()).toBe(0);
+    expect(fetched.loads()).toBe(1);
+  });
+
+  test("key hiding still runs for a folded relation", async () => {
+    const { plan } = planWith({
+      column: sqlFragment(),
+      join: sqlFragment(),
+      decode: (value: unknown) => value,
+    });
+    const row: any = { id: 1, organizationId: 7 };
+
+    await attachRelations([plan], ["organizationId"], [row], {}, executorStub());
+
+    // The root still had to *select* the key even when the children came back
+    // folded in, so it still has to be stripped from the caller's result.
+    expect("organizationId" in row).toBe(false);
+  });
+});
+
 describe("strategy observability", () => {
   beforeEach(() => {
     registry.clearRegistry();

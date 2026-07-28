@@ -510,3 +510,137 @@ function requestStore(): { user?: unknown } | undefined {
     return undefined;
   }
 }
+
+
+// --- nested policy application ---------------------------------------------
+
+/**
+ * Marks an `$exec` call as having had its policies applied by the caller.
+ *
+ * A module-private `Symbol`, deliberately, and **not exported from
+ * `orm/index.ts`**. An application cannot forge it without importing something
+ * that is not reachable, so it cannot become a way to skip policies — which is
+ * the one thing iteration 6 spent three review rounds closing. `ExecOptions` is
+ * public and a `policiesApplied?: boolean` there would have been exactly that
+ * door.
+ */
+const PRE_SCOPED = Symbol("gemi.orm.policiesAppliedByCaller");
+
+export function markPreScoped(options: object | undefined): object {
+  return { ...options, [PRE_SCOPED]: true };
+}
+
+export function isPreScoped(options: unknown): boolean {
+  return (
+    typeof options === "object" &&
+    options !== null &&
+    (options as Record<symbol, unknown>)[PRE_SCOPED] === true
+  );
+}
+
+/** Resolves a model name to its policies, so this file need not import the registry. */
+export type PolicyLookup = (model: string) => {
+  policies: readonly ModelPolicy[];
+  schema: { name: string; relations: Record<string, { model: string }> };
+} | undefined;
+
+/**
+ * Applies every *nested* model's policies to its own node in the argument tree,
+ * recursively, returning a new tree.
+ *
+ * **Why this has to happen here rather than in the strategy.** A nested read under
+ * the batched strategy acquires its policies by recursing through the child's own
+ * `$exec`. A lateral join has no such call — the child's SQL is compiled inside
+ * the parent's compile step — so the child's policies would never be consulted and
+ * the subquery would be unscoped. That is a cross-tenant read arriving through a
+ * new door, and iteration 9's plan doc has the full reasoning.
+ *
+ * The alternative was to let the strategy resolve policies while building the
+ * subquery, which would give `compile/` knowledge of the registry and the ambient
+ * user. It would then no longer be a pure function of the argument shape and the
+ * plan cache would stop being sound — which invariant 2 and iteration 6's "do not
+ * let policies see SQL" both exist to prevent.
+ *
+ * Doing it on the arg tree, before the plan key, keeps the compiler pure: it
+ * receives a tree whose nested `where`s are already scoped, and the scope lands
+ * inside whatever SQL the strategy chooses to emit. It also makes the README's
+ * claim — that scoping applies under every strategy because policies rewrite the
+ * arg tree before planning — *true*, where before it was true only of the
+ * strategy that happened to recurse.
+ */
+export function applyNestedPolicies(
+  schema: { relations: Record<string, { model: string }> },
+  args: any,
+  operation: Operation,
+  user: unknown,
+  system: boolean,
+  lookup: PolicyLookup,
+): any {
+  if (args === undefined || args === null) return args;
+  if (typeof args !== "object") return args;
+
+  let out = args;
+
+  for (const container of ["include", "select"] as const) {
+    const tree = args[container];
+    if (typeof tree !== "object" || tree === null || Array.isArray(tree)) {
+      continue;
+    }
+
+    let rewritten: Record<string, unknown> | undefined;
+
+    for (const key of Object.keys(tree)) {
+      const relation = schema.relations[key];
+      if (!relation) continue;
+
+      const node = (tree as Record<string, unknown>)[key];
+      if (node === undefined || node === false) continue;
+
+      const target = lookup(relation.model);
+      // An unregistered relation target is the relation planner's error to raise,
+      // with the message it has for it — not this walk's.
+      if (!target) continue;
+
+      // `true` is shorthand for "this relation, no arguments", and it has to
+      // *stay* `true` unless something actually applies. Turning it into `{}`
+      // unconditionally changes the argument tree — and therefore the plan key —
+      // for every include on an unpolicied model, which is a cache invalidation
+      // and a canonical-shape change in exchange for nothing.
+      const nodeArgs = node === true ? {} : node;
+      if (typeof nodeArgs !== "object" || Array.isArray(nodeArgs)) continue;
+
+      // Depth first, so a grandchild's scope is in place before its parent's
+      // node is rewritten around it.
+      const deeper = applyNestedPolicies(
+        target.schema,
+        nodeArgs,
+        operation,
+        user,
+        system,
+        lookup,
+      );
+
+      // `system` short-circuits here as well as at the root: `asSystem` suspends
+      // policies for the whole subtree, not just the model that was queried.
+      const scoped =
+        !system && target.policies.length > 0
+          ? applyPolicies(
+              target.policies,
+              policyContext(target.schema.name, operation, user, system),
+              deeper,
+            )
+          : deeper;
+
+      // Only when something changed. `deeper !== nodeArgs` covers a grandchild's
+      // rewrite; `scoped !== deeper` covers this level's own scope.
+      if (scoped !== nodeArgs) {
+        rewritten ??= { ...(tree as Record<string, unknown>) };
+        rewritten[key] = scoped;
+      }
+    }
+
+    if (rewritten) out = { ...out, [container]: rewritten };
+  }
+
+  return out;
+}

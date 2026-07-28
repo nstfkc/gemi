@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 import { PostgresDialect } from "../dialect/postgres";
 import { SqliteDialect } from "../dialect/sqlite";
@@ -7,8 +7,13 @@ import {
   UnknownFieldError,
   UnsupportedQueryError,
 } from "../errors";
-import { USER_COLUMNS, mapped, user } from "../fixtures";
+import { USER_COLUMNS, account, mapped, user } from "../fixtures";
 import { compileRead } from "./read";
+import { compileWhere } from "./where";
+import * as registry from "../registry";
+import type { RelationStrategy } from "./plan-relations";
+import { render, sql } from "./fragment";
+
 
 const sqlite = new SqliteDialect();
 const postgres = new PostgresDialect();
@@ -655,5 +660,220 @@ describe("the parameter ceiling applies to reads", () => {
     expect(() => compileRead(user, "findMany", args, sqlite)).toThrow(
       ParameterLimitError,
     );
+  });
+});
+
+/**
+ * Column qualification, for iteration 9.
+ *
+ * A lateral relation strategy folds children into the root statement, which puts a
+ * second table in scope and makes a bare `"id"` ambiguous. `WhereContext.qualifier`
+ * is how a column reference becomes `"User"."id"` — the table's own name rather
+ * than an invented alias, because Postgres lets a lateral subquery reference the
+ * outer table by name.
+ *
+ * The property that matters most here is the *absence* case: with no qualifier the
+ * emitted SQL is byte-identical to what it was before this existed, which is what
+ * keeps invariant 2 and every assertion above untouched. An earlier version of the
+ * iteration-9 plan called for unconditional aliasing and predicted it would change
+ * emitted SQL for every read; making it conditional means it changes none.
+ */
+describe("column qualification", () => {
+  test("no qualifier emits exactly what it always did", () => {
+    // The same assertion as the equality test at the top of this file, restated
+    // here as the guarantee rather than as a coincidence.
+    expect(
+      compileWhere(user, { email: "a@b.c" }, { dialect: sqlite, operation: "findMany" }, (a) => a),
+    ).not.toBeNull();
+
+    expect(text({ where: { email: "a@b.c" } })).toBe(
+      `${SELECT_USER} where "email" = ?`,
+    );
+  });
+
+  test("a qualifier prefixes every column the where names", () => {
+    const compiled = compileWhere(
+      user,
+      { email: "a@b.c", globalRole: 2 },
+      { dialect: sqlite, operation: "findMany", qualifier: `"User".` },
+      (args) => args,
+    );
+
+    const { text: rendered } = render(compiled!, sqlite, {
+      model: "User",
+      operation: "findMany",
+    });
+
+    // Parenthesised, as any multi-predicate group is — the qualifier does not
+    // change the grouping, only the identifiers inside it.
+    expect(rendered).toBe(`("User"."email" = ? and "User"."globalRole" = ?)`);
+  });
+
+  test("it reaches nested groups and negations too", () => {
+    const compiled = compileWhere(
+      user,
+      { OR: [{ email: "a@b.c" }, { NOT: { globalRole: 2 } }] },
+      { dialect: sqlite, operation: "findMany", qualifier: `"User".` },
+      (args) => args,
+    );
+
+    const { text: rendered } = render(compiled!, sqlite, {
+      model: "User",
+      operation: "findMany",
+    });
+
+    // Every column, at every depth — a qualifier that only reached the top level
+    // would produce ambiguity errors on exactly the queries a lateral join makes
+    // interesting.
+    expect(rendered).not.toMatch(/(?<!")\bemail"/);
+    expect(rendered).toContain(`"User"."email"`);
+    expect(rendered).toContain(`"User"."globalRole"`);
+  });
+
+  test("a qualifier does not disturb the parameters", () => {
+    const args = { email: "a@b.c" };
+    const compiled = compileWhere(
+      user,
+      args,
+      { dialect: sqlite, operation: "findMany", qualifier: `"User".` },
+      () => args,
+    );
+
+    const { binders } = render(compiled!, sqlite, {
+      model: "User",
+      operation: "findMany",
+    });
+
+    // Qualification is an identifier concern; values stay parameters.
+    expect(binders).toHaveLength(1);
+  });
+});
+
+/**
+ * The compiler side of a fold-into-the-root strategy — iteration 9's deliverable 2.
+ *
+ * Tested with a *fake* strategy rather than the lateral one, deliberately. What is
+ * being checked here is the compiler's contract: does it qualify, append, join and
+ * decode. Doing that against a real lateral strategy would test both at once and
+ * blame the wrong one when either broke — and the fake can produce shapes a real
+ * strategy would not, which is how the qualifier's reach gets checked.
+ */
+describe("root contributions in compileRead", () => {
+  beforeEach(() => {
+    registry.clearRegistry();
+    registry.register("User", class { static $schema = user });
+    registry.register("Account", class { static $schema = account });
+  });
+
+  afterEach(() => registry.clearRegistry());
+
+  /** A strategy that folds, with SQL simple enough to assert on exactly. */
+  function foldingStrategy(): RelationStrategy {
+    return {
+      name: "folded",
+      plan(request) {
+        return {
+          as: request.as,
+          kind: request.relation.kind,
+          parentField: "id",
+          strategy: "folded",
+          root: {
+            column: sql(`"folded"."data" as ${request.dialect.quoteIdent(request.as)}`),
+            join: sql(` left join lateral (select 1 as "data") as "folded" on true`),
+            decode: (value) => ({ decoded: value }),
+          },
+          load: async () => {
+            throw new Error("a folded relation must not be loaded");
+          },
+        };
+      },
+    };
+  }
+
+  function compiled(args: any) {
+    return compileRead(user, "findMany", args, sqlite, foldingStrategy());
+  }
+
+  test("the root's columns are qualified when a relation folds", () => {
+    // A relation has to be in the args for anything to fold — the qualifier is
+    // derived from the plans, so no relation means no qualifier, which is the
+    // whole point of it being conditional.
+    const { text: rendered } = compiled({
+      select: { id: true, email: true, accounts: true },
+    });
+
+    // Qualified by the table's own name — no alias is introduced, because
+    // Postgres lets a lateral subquery reference the outer table by name.
+    expect(rendered).toContain(`"User"."id"`);
+    expect(rendered).toContain(`"User"."email"`);
+  });
+
+  test("the contributed column and join are both emitted", () => {
+    const { text: rendered } = compiled({ include: { accounts: true } });
+
+    expect(rendered).toContain(`"folded"."data" as "accounts"`);
+    expect(rendered).toContain(`left join lateral`);
+    // The join lands after the `from` and before the `where`.
+    expect(rendered.indexOf("left join")).toBeGreaterThan(rendered.indexOf(" from "));
+  });
+
+  test("the where and orderBy are qualified too", () => {
+    const { text: rendered } = compiled({
+      include: { accounts: true },
+      where: { email: "a@b.c" },
+      orderBy: { id: "asc" },
+    });
+
+    // An unqualified column in either position is an ambiguity error on exactly
+    // the queries a fold makes interesting, so both have to be reached.
+    expect(rendered).toContain(`where "User"."email" = ?`);
+    expect(rendered).toContain(`order by "User"."id" asc`);
+  });
+
+  test("the contributed column is placed after the scalars", () => {
+    const { text: rendered } = compiled({ select: { id: true, accounts: true } });
+
+    const columns = rendered.slice("select ".length, rendered.indexOf(" from "));
+    expect(columns.split(", ")).toEqual([
+      `"User"."id"`,
+      `"folded"."data" as "accounts"`,
+    ]);
+  });
+
+  test("shape runs the strategy's decode instead of the empty placeholder", () => {
+    const plan = compiled({ include: { accounts: true } });
+
+    const shaped = plan.shape([{ id: 1, accounts: "raw" }]) as any[];
+
+    // The shaper wrote `[]` because it knows nothing about strategies; the
+    // decode replaced it.
+    expect(shaped[0].accounts).toEqual({ decoded: "raw" });
+  });
+
+  test("a decode that sees no column still runs, so an absent value is its problem", () => {
+    const plan = compiled({ include: { accounts: true } });
+    const shaped = plan.shape([{ id: 1 }]) as any[];
+
+    // `json_agg` over zero rows returns NULL, so handling absence is exactly what
+    // a real strategy's decode must do — the compiler must not decide for it.
+    expect(shaped[0].accounts).toEqual({ decoded: undefined });
+  });
+
+  test("the plan reports the folding strategy", () => {
+    expect(compiled({ include: { accounts: true } }).strategies).toEqual([
+      "folded",
+    ]);
+  });
+
+  /** The load-bearing negative: nothing folds, nothing changes. */
+  test("with the batched strategy the SQL is byte-identical", () => {
+    const args = { where: { email: "a@b.c" }, include: { accounts: true } };
+    const withFold = compiled(args).text;
+    const without = compileRead(user, "findMany", args, sqlite).text;
+
+    // The batched path emits exactly what it always did — unqualified, no join.
+    expect(without).toBe(`${SELECT_USER} where "email" = ?`);
+    // ...and the folding one is genuinely different, or this proves nothing.
+    expect(withFold).not.toBe(without);
   });
 });

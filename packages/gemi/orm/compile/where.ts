@@ -123,6 +123,20 @@ export function compileWhere(
 export interface WhereContext {
   dialect: SqlDialect;
   operation: string;
+  /**
+   * Prefix for every column this `where` names — `"User".` — set only when the
+   * statement has more than one table in scope.
+   *
+   * That happens when a relation strategy folds children in with a lateral join
+   * (iteration 9): the subquery introduces a second scope and a bare `"id"`
+   * becomes ambiguous. It is the table's own name rather than an invented alias,
+   * because Postgres lets a lateral subquery reference the outer table by name.
+   *
+   * Absent otherwise, and absence is the common case — so a query with no folded
+   * relation emits byte-identical SQL to what it did before this existed, which
+   * is what keeps invariant 2 and every compiler text assertion untouched.
+   */
+  qualifier?: string;
 }
 
 /**
@@ -268,7 +282,7 @@ function compileFieldFilter(
   locate: (args: any) => any,
 ): Fragment {
   const { dialect } = context;
-  const column = dialect.quoteIdent(field.column);
+  const column = `${context.qualifier ?? ""}${dialect.quoteIdent(field.column)}`;
 
   // A bare value is shorthand for `equals`. A `Date` is a value, not a filter
   // object, even though `typeof` cannot tell them apart.

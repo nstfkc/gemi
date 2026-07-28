@@ -448,6 +448,49 @@ function suite(label: string, url?: string) {
       await differential.expectSame("User", operation, args);
     });
 
+    /**
+     * Iteration 9's acceptance criterion 2: the **full** nested matrix against the
+     * lateral strategy, not a subset.
+     *
+     * Derived from `CASES` rather than listed separately, so it cannot drift from
+     * what batched covers — a hand-maintained second list would inevitably lag,
+     * and the whole risk of two strategies is a shape one handles and the other
+     * does not.
+     *
+     * Postgres only, because the strategy declines every other dialect by design;
+     * on SQLite this would compare batched against batched and prove nothing.
+     * Cases the strategy declines still run — they exercise the fallback, and a
+     * fallback that returned the wrong rows would be the worst outcome of all.
+     */
+    const RELATION_CASES = CASES.filter(([, , args]) => {
+      const shape = args as { include?: unknown; select?: unknown } | undefined;
+      if (!shape) return false;
+      if (shape.include !== undefined) return true;
+      // A relation named inside a `select` is a nested tree by another name.
+      const select = shape.select as Record<string, unknown> | undefined;
+      return (
+        select !== undefined &&
+        Object.keys(select).some((key) => key === "accounts" || key === "organization" || key === "session")
+      );
+    });
+
+    if (url) {
+      test.each(RELATION_CASES)(
+        "%s — under the lateral strategy",
+        async (_name, operation, args) => {
+          await differential.expectSame("User", operation, args, {
+            strategy: "lateral",
+          });
+        },
+      );
+
+      test("the lateral matrix is not empty", () => {
+        // A filter that silently matched nothing would make every case above
+        // vacuous, and the suite would report a row of passes for no work.
+        expect(RELATION_CASES.length).toBeGreaterThan(15);
+      });
+    }
+
     test.each(url ? POSTGRES_ONLY : SQLITE_ONLY)(
       "%s",
       async (_name, operation, args) => {
@@ -498,18 +541,34 @@ function suite(label: string, url?: string) {
     // branches over five users is 4 queries, not 20 — and the count is what
     // catches an accidental N+1 later, since the results look identical either
     // way.
-    test("query count follows the include tree, not the row count", async () => {
+    /**
+     * Pinned to `batched` explicitly, because it is a property *of that strategy*
+     * rather than of the ORM: one query per include node. Under lateral the same
+     * tree is fewer statements, which is the point of lateral — see the case
+     * below.
+     *
+     * Before iteration 9 this ran against the default and did not need to say
+     * which strategy it meant. Flipping the Postgres default is exactly the kind
+     * of change that turns an unstated assumption into a failure, and the fix is
+     * to state it rather than to widen the assertion.
+     */
+    test("batched: query count follows the include tree, not the row count", async () => {
+      const batched = { strategy: "batched" } as const;
+
       differential.resetQueries();
-      await UserModel.findMany({});
+      await UserModel.findMany({}, batched);
       expect(differential.queries()).toBe(1);
 
       differential.resetQueries();
-      const rows = await UserModel.findMany({
-        include: {
-          organization: true,
-          accounts: { include: { organization: true } },
+      const rows = await UserModel.findMany(
+        {
+          include: {
+            organization: true,
+            accounts: { include: { organization: true } },
+          },
         },
-      });
+        batched,
+      );
       // root + organization + accounts + accounts.organization
       expect(differential.queries()).toBe(4);
       expect(rows).toHaveLength(5);
@@ -517,13 +576,60 @@ function suite(label: string, url?: string) {
       // And the same tree over one row costs the same four queries, which is
       // the other half of "proportional to the tree".
       differential.resetQueries();
-      await UserModel.findFirst({
-        include: {
-          organization: true,
-          accounts: { include: { organization: true } },
+      await UserModel.findFirst(
+        {
+          include: {
+            organization: true,
+            accounts: { include: { organization: true } },
+          },
         },
-      });
+        batched,
+      );
       expect(differential.queries()).toBe(4);
+    });
+
+    /**
+     * The lateral counterpart, and the reason the default flipped on Postgres.
+     *
+     * Only the outer level folds here — `accounts` carries its own `include`, so
+     * the strategy declines that node — which still removes one statement of the
+     * four. Asserting the *specific* number rather than "fewer" is what would
+     * catch a regression in either direction: a node that stopped folding, or one
+     * that folded when it should have declined.
+     */
+    test("lateral: folding removes a statement per folded node", async () => {
+      if (!url) return;
+      const lateral = { strategy: "lateral" } as const;
+
+      differential.resetQueries();
+      await UserModel.findMany(
+        {
+          include: {
+            organization: true,
+            accounts: { include: { organization: true } },
+          },
+        },
+        lateral,
+      );
+      // Two, and working out why is the useful part. `organization` folds into
+      // the root. `accounts` declines, because it carries its own include — but
+      // the strategy *propagates* to that nested `$exec`, so `accounts` runs as
+      // its own query with *its* `organization` folded in. So four becomes two,
+      // not three: the decline costs a statement, it does not cost the whole
+      // subtree.
+      //
+      // My first guess here was three, from assuming a declined node reverts its
+      // descendants to batching. It does not, and that is the propagation the
+      // batched case above proved was missing.
+      expect(differential.queries()).toBe(2);
+
+      // A tree with nothing to decline collapses to one.
+      differential.resetQueries();
+      await UserModel.findMany(
+        { include: { organization: true, accounts: true } },
+        lateral,
+      );
+      expect(differential.queries()).toBe(1);
     });
 
     // A node whose parents have no keys at all is not worth a round trip: the
@@ -537,23 +643,61 @@ function suite(label: string, url?: string) {
       expect(differential.queries()).toBe(1);
     });
 
-    // Iteration 6 attaches policies to `$exec`, so "the nested read went
-    // through the related model's own choke point" is the property that makes
-    // policies apply to nested reads at all. Asserted by observation.
-    test("each relation query is $exec on the related model's class", async () => {
+    /**
+     * Under **batched**, every relation query is `$exec` on the related model's
+     * own class — which is how iteration 6's policies reach nested reads.
+     */
+    test("batched: each relation query is $exec on the related model's class", async () => {
       const account = vi.spyOn(AccountModel, "$exec");
       const organization = vi.spyOn(OrganizationModel, "$exec");
 
       try {
-        await UserModel.findMany({
-          include: { accounts: true, organization: true },
-        });
+        await UserModel.findMany(
+          { include: { accounts: true, organization: true } },
+          { strategy: "batched" },
+        );
 
         expect(account).toHaveBeenCalledTimes(1);
         expect(account.mock.calls[0][0]).toBe("findMany");
         expect(organization).toHaveBeenCalledTimes(1);
       } finally {
         account.mockRestore();
+        organization.mockRestore();
+      }
+    });
+
+    /**
+     * Under **lateral** it is not, and that is the whole reason iteration 9's
+     * deliverable 1c had to land before the strategy.
+     *
+     * A folded child's SQL is compiled inside the parent's compile step, so the
+     * child's `$exec` is never entered — the mechanism that carried policies to
+     * nested reads is simply absent. The *guarantee* survives because nested
+     * policies are now applied to the argument tree before the plan key, so the
+     * scope is inside the subquery rather than applied by a call that no longer
+     * happens.
+     *
+     * Asserting the absence here, next to the batched case, is what stops someone
+     * reading the test above and concluding that recursion is the guarantee. It is
+     * not; it was one of two ways of delivering it. `policies.test.ts` holds the
+     * proof that scoping still applies.
+     */
+    test("lateral: a folded relation does not call the child's $exec at all", async () => {
+      if (!url) return;
+
+      const organization = vi.spyOn(OrganizationModel, "$exec");
+
+      try {
+        const rows: any[] = await UserModel.findMany(
+          { include: { organization: true } },
+          { strategy: "lateral" },
+        );
+
+        expect(organization).not.toHaveBeenCalled();
+        // ...and the children are still there, which is what makes the absence
+        // interesting rather than a broken query.
+        expect(rows.some((row) => row.organization !== null)).toBe(true);
+      } finally {
         organization.mockRestore();
       }
     });

@@ -3,6 +3,7 @@ import { describe, expect, test } from "vitest";
 import { PolicyDeniedError, UnsupportedQueryError } from "./errors";
 import { organization, user } from "./fixtures";
 import {
+  applyNestedPolicies,
   applyPolicies,
   applyRedaction,
   policiesFor,
@@ -602,5 +603,190 @@ describe("no policies", () => {
     const row = { password: "secret" };
     applyRedaction([], context(), row);
     expect(row.password).toBe("secret");
+  });
+});
+
+/**
+ * Nested policy application — iteration 9's deliverable 1c.
+ *
+ * A nested read under the batched strategy gets its policies by recursing through
+ * the child's own `$exec`. A lateral join has no such call, so the child's
+ * policies would never be consulted and the subquery would be unscoped — a
+ * cross-tenant read through a new door. Applying them to the *argument tree*
+ * instead keeps the compiler pure and puts the scope inside whatever SQL a
+ * strategy emits.
+ *
+ * These test the walk directly, with a lookup rather than a registry, because the
+ * property is about the tree it produces.
+ */
+describe("applyNestedPolicies", () => {
+  const tenant: ModelPolicy = {
+    scope: (context) => ({
+      organizationId: (context.user as any).organizationId,
+    }),
+    onCreate: (_c, data) => data,
+  };
+
+  const relations = (map: Record<string, string>) => ({
+    relations: Object.fromEntries(
+      Object.entries(map).map(([key, model]) => [key, { model }]),
+    ),
+  });
+
+  /** A lookup over a small fixed graph: User -> accounts -> organization. */
+  function lookup(policies: Record<string, ModelPolicy[]>) {
+    const schemas: Record<string, any> = {
+      Account: {
+        name: "Account",
+        ...relations({ organization: "Organization" }),
+      },
+      Organization: { name: "Organization", ...relations({}) },
+    };
+    return (model: string) =>
+      schemas[model]
+        ? { policies: policies[model] ?? [], schema: schemas[model] }
+        : undefined;
+  }
+
+  const USER = { id: 1, organizationId: 7 };
+
+  test("a nested model's scope lands on its own node", () => {
+    const out = applyNestedPolicies(
+      relations({ accounts: "Account" }),
+      { include: { accounts: true } },
+      "findMany" as any,
+      USER,
+      false,
+      lookup({ Account: [tenant] }),
+    );
+
+    // `true` becomes an object, because a scope has to go somewhere.
+    expect(out.include.accounts).toEqual({ where: { organizationId: 7 } });
+  });
+
+  test("an existing nested where is narrowed, not replaced", () => {
+    const out = applyNestedPolicies(
+      relations({ accounts: "Account" }),
+      { include: { accounts: { where: { organizationRole: 0 } } } },
+      "findMany" as any,
+      USER,
+      false,
+      lookup({ Account: [tenant] }),
+    );
+
+    expect(out.include.accounts.where).toEqual({
+      organizationRole: 0,
+      AND: [{ organizationId: 7 }],
+    });
+  });
+
+  test("it reaches a grandchild", () => {
+    const out = applyNestedPolicies(
+      relations({ accounts: "Account" }),
+      { include: { accounts: { include: { organization: true } } } },
+      "findMany" as any,
+      USER,
+      false,
+      lookup({ Organization: [tenant] }),
+    );
+
+    // Depth first: the grandchild's scope is in place inside the child's node.
+    expect(out.include.accounts.include.organization).toEqual({
+      where: { organizationId: 7 },
+    });
+  });
+
+  test("relations inside a select are walked too", () => {
+    const out = applyNestedPolicies(
+      relations({ accounts: "Account" }),
+      { select: { id: true, accounts: true } },
+      "findMany" as any,
+      USER,
+      false,
+      lookup({ Account: [tenant] }),
+    );
+
+    expect(out.select.accounts).toEqual({ where: { organizationId: 7 } });
+    // A scalar key is left exactly as it was.
+    expect(out.select.id).toBe(true);
+  });
+
+  test("an unpolicied nested model is left untouched, by identity", () => {
+    const args = { include: { accounts: true } };
+    const out = applyNestedPolicies(
+      relations({ accounts: "Account" }),
+      args,
+      "findMany" as any,
+      USER,
+      false,
+      lookup({}),
+    );
+
+    // No rewrite at all when nothing applies, so the common case allocates
+    // nothing and the plan key is unchanged.
+    expect(out).toBe(args);
+  });
+
+  test("the caller's argument tree is not mutated", () => {
+    const args = { include: { accounts: { where: { organizationRole: 0 } } } };
+    const before = JSON.stringify(args);
+
+    applyNestedPolicies(
+      relations({ accounts: "Account" }),
+      args,
+      "findMany" as any,
+      USER,
+      false,
+      lookup({ Account: [tenant] }),
+    );
+
+    expect(JSON.stringify(args)).toBe(before);
+  });
+
+  test("under system nothing is applied", () => {
+    const args = { include: { accounts: true } };
+    const out = applyNestedPolicies(
+      relations({ accounts: "Account" }),
+      args,
+      "findMany" as any,
+      null,
+      true,
+      lookup({ Account: [tenant] }),
+    );
+
+    // `asSystem` suspends policies for the whole subtree, not just the root — and
+    // leaves the tree untouched, so no plan key moves for a system query.
+    expect(out).toBe(args);
+  });
+
+  // Deny-by-default reaches nested models too: a nested policy that reads the
+  // user with none in scope raises rather than producing an absent filter.
+  test("a nested policy needing a user is denied when there is none", () => {
+    expect(() =>
+      applyNestedPolicies(
+        relations({ accounts: "Account" }),
+        { include: { accounts: true } },
+        "findMany" as any,
+        null,
+        false,
+        lookup({ Account: [tenant] }),
+      ),
+    ).toThrow(PolicyDeniedError);
+  });
+
+  test("an unregistered relation target is left for the planner to report", () => {
+    const args = { include: { unknown: true } };
+    const out = applyNestedPolicies(
+      relations({ unknown: "Missing" }),
+      args,
+      "findMany" as any,
+      USER,
+      false,
+      lookup({}),
+    );
+
+    // The relation planner has a specific error for this with a specific
+    // message; this walk raising a different one first would replace it.
+    expect(out).toBe(args);
   });
 });

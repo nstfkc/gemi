@@ -1,6 +1,7 @@
 import type { SqlDialect } from "../dialect";
 import { UnsupportedQueryError } from "../errors";
 import type { Operation, QueryPlan } from "../plan";
+import type { RelationStrategy } from "./plan-relations";
 import type { ModelSchema } from "../schema";
 import { compileRead, isReadOperation } from "./read";
 import { compileWrite, isWriteOperation } from "./write";
@@ -16,8 +17,18 @@ export function compile(
   op: Operation,
   args: any,
   dialect: SqlDialect,
+  /**
+   * Which relation strategy plans this query's include tree, if not the default.
+   *
+   * Reads only. A write's relations are loaded from its `returning` rows, and
+   * `insert … returning` cannot carry a lateral join — so `compileWrite` has
+   * nothing to do with a strategy and is not given one.
+   */
+  strategy?: RelationStrategy,
 ): QueryPlan {
-  if (isReadOperation(op)) return compileRead(schema, op, args, dialect);
+  if (isReadOperation(op)) {
+    return compileRead(schema, op, args, dialect, strategy);
+  }
   if (isWriteOperation(op)) return compileWrite(schema, op, args, dialect);
   throw new UnsupportedQueryError(op, schema.name, op);
 }
@@ -44,3 +55,5 @@ export {
   type RelationStrategy,
 } from "./plan-relations";
 export * from "./fragment";
+
+export { lateralStrategy } from "./lateral";

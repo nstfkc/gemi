@@ -160,6 +160,36 @@ tree** before planning (invariant 2), scoping applies under every strategy — t
 scoped `where` lands inside the lateral subquery exactly as it would in a
 separate query.
 
+**Correction 2, found while designing the lateral strategy.** The last sentence
+above — that scoping applies under every strategy because policies rewrite the arg
+tree before planning — is **not true today**. Policies are applied in
+`Model.$exec` to the model being queried, and a nested read acquires its own only
+because the batched strategy recurses through the child's `$exec`. A lateral join
+compiles the child's SQL inside the parent's compile step and never enters that
+call, so the child's policies would be skipped and the subquery would be unscoped.
+
+Making the claim true means applying nested models' policies to the arg tree in
+`$exec`, before the plan key — which is what the sentence describes and what the
+code does not do. That is iteration 9's deliverable 1c, and it is blocking: the
+first version of the lateral strategy must not be one that silently bypasses
+policies. See [09](./09-lateral-strategy.md).
+
+**Correction 1, found while starting the lateral strategy.** The seam iteration 3
+built is narrower than this claims. A `RelationStrategy` produces a `load()` that
+runs *after* the root query, plus a list of field names the root must select for
+stitching — and nothing else. It cannot contribute a column expression, a join
+clause or a table alias to the root statement, which is all three of the things a
+lateral join needs.
+
+So it is genuinely swappable for *"fetch children separately, by some means"* and
+closed to *"fold children into the root statement"*. The batching strategy and any
+future n+1-avoiding variant fit it; the two single-round-trip strategies in the
+table above do not. Widening it is iteration 9's first deliverable —
+[09](./09-lateral-strategy.md) — and the widening is additive, so batching is
+unaffected. The claim is left standing above with this correction beneath it
+rather than quietly rewritten, because the gap between what an invariant promised
+and what it delivered is the useful part.
+
 Caveat for iteration 7: JSON aggregation flattens types. Dates come back as
 strings, numerics may come back as strings. Coercion must be aware of both
 dialect *and* strategy.
@@ -362,6 +392,7 @@ with no prior context.
 | 6 | Car | First-class policies, including nested reads | [06](./06-policies.md) |
 | 7 | | Performance: lateral+json planner, generated shapers, benchmark suite | [07](./07-performance.md) |
 | 8 | | Eloquent doorway: opt-in provenance, `save(row)`, entity tier | [08](./08-eloquent-doorway.md) |
+| 9 | | `LATERAL` + `json_agg`: iteration 7's deliverable 2, declined then re-justified on corrected measurements | [09](./09-lateral-strategy.md) |
 
 Iterations 5 and 6 are the reason the project exists, but they are cheap *once
 the choke point exists*, which is why they come after the query engine rather
@@ -392,15 +423,28 @@ than before it.
 - **MySQL / MariaDB.** Deferred. `DatabaseManager` already infers all four
   dialects, and the strategy seam keeps the door open, but only SQLite and
   Postgres are built and tested. Confirm this is acceptable.
-- **Implicit many-to-many.** The template schema has none (all relations are
-  1-1 / 1-n), so Prisma's implicit `_RelationName` join tables cannot be
-  exercised there. Iteration 3 needs a dedicated fixture schema to cover them.
-- **Coexistence.** `packages/gemi/auth/adapters/prisma.ts` and the template's
-  `app/database/prisma.ts` keep working untouched. A gemi-ORM auth adapter lands
-  alongside the Prisma one so apps migrate model by model, not in one jump.
-  Not scheduled yet — but see the PR #33 follow-ups above: this is the same work
-  as the `SqlUserProvider` proposed there, and it should be scheduled once
-  iteration 4 lands rather than hand-written separately.
+- ~~**Implicit many-to-many.**~~ **Covered.** Iteration 3 built the dedicated
+  fixture this asked for —
+  `templates/saas-starter/app/models/relations.many-to-many.test.ts` — a
+  `Post`/`Tag` pair with the DDL taken verbatim from
+  `prisma migrate diff`, exercising the two-hop load through `_PostToTag` in both
+  directions, on both dialects. Iteration 9 added the case that the lateral
+  strategy *declines* this shape and falls back to batching with identical rows.
+  Still true, and worth keeping in view: the template's own schema has no m-n, so
+  the differential harness cannot reach one and this fixture asserts against
+  Prisma's documented shape rather than a second generated client.
+- ~~**Coexistence.**~~ **Built.** `OrmAuthenticationAdapter` ships alongside the
+  Prisma one — both satisfy `IAuthenticationAdapter`, so an application selects
+  one and nothing else in `auth/` knows which. All twenty-two methods translated
+  with no changes to the ORM, which is the first evidence the query surface is
+  *sufficient* rather than merely tested: they were written against a real
+  application's needs rather than against the compiler's known capabilities.
+  `packages/gemi/auth/adapters/prisma.ts` and the template's
+  `app/database/prisma.ts` are untouched.
+
+  **Still open, and a decision rather than work:** the template's
+  `app/config/auth.ts` is not pointed at it. That is a behaviour change to a
+  working application and wants its own call.
 - **Where this stack merges.** PRs #30 and #33 are both open. If they land before
   the ORM is ready, rebase onto whatever they merge into rather than carrying a
   three-deep stack longer than necessary.

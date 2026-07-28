@@ -116,10 +116,14 @@ export {
   planRelations,
   strategiesOf,
   type RelationPlan,
+  type RootContribution,
   type RelationPlanning,
   type RelationRequest,
   type RelationStrategy,
 } from "./compile/plan-relations";
+
+export { lateralStrategy } from "./compile/lateral";
+export { defaultStrategy, resolveStrategy } from "./compile/strategy";
 
 export {
   PostgresDialect,

@@ -130,6 +130,12 @@ export function reverse(terms: OrderTerm[]): OrderTerm[] {
 export function compileOrderBy(
   terms: OrderTerm[],
   dialect: SqlDialect,
+  /**
+   * Prefix for every column — `"User".` — when the statement has a second table
+   * in scope. See `WhereContext.qualifier`; absent is the common case and emits
+   * byte-identical SQL to what it did before this existed.
+   */
+  qualifier?: string,
 ): Fragment | null {
   if (terms.length === 0) return null;
 
@@ -140,7 +146,7 @@ export function compileOrderBy(
   return joinFragments(
     terms.map((term) =>
       sql(
-        `${dialect.quoteIdent(term.column)} ${term.direction}` +
+        `${qualifier ?? ""}${dialect.quoteIdent(term.column)} ${term.direction}` +
           (term.nulls ? ` nulls ${term.nulls}` : ""),
       ),
     ),

@@ -223,6 +223,35 @@ if (postgresUrl) {
 }
 
 function cases() {
+  /**
+   * Iteration 9: the lateral strategy **declines** an implicit many-to-many, and
+   * this is the one place with a fixture that can prove the fallback works.
+   *
+   * It declines because the join table needs a second lateral to reach through,
+   * and the self-referential case cannot say which of `A` and `B` is which end.
+   * A decline is only as good as what it falls back to, so the assertion is not
+   * that it declined — it is that asking for lateral returns *the same rows* as
+   * asking for batched. A fallback that returned the wrong answer would be worse
+   * than no fallback at all.
+   */
+  test("lateral declines an implicit m-n and falls back correctly", async () => {
+    const args = {
+      orderBy: { id: "asc" as const },
+      include: { tags: { orderBy: { id: "asc" as const } } },
+    };
+
+    const batched = await (Post as any).findMany(args, { strategy: "batched" });
+    const lateral = await (Post as any).findMany(args, { strategy: "lateral" });
+
+    expect(lateral).toEqual(batched);
+
+    // ...and it really did decline, or the equality above would be trivially
+    // true for the wrong reason.
+    expect(
+      lateral.map((post: any) => post.tags.map((tag: any) => tag.label)),
+    ).toEqual([["red", "blue"], ["blue"], []]);
+  });
+
   test("loads through the join table, in both directions", async () => {
     const posts = await Post.findMany({
       orderBy: { id: "asc" },
