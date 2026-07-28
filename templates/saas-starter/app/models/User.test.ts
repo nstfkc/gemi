@@ -131,6 +131,8 @@ describe("User.findMany()", () => {
       "createdAt",
       "updatedAt",
       "deletedAt",
+      "metadata",
+      "avatar",
     ]);
   });
 

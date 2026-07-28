@@ -187,6 +187,13 @@ const LITERAL_KEYS = new Set([
   "_sum",
   "_min",
   "_max",
+  // `skipDuplicates: true` emits `on conflict do nothing` and `false` does not,
+  // so the *value* is in the SQL text. Without it here both shape to `boolean`,
+  // share one entry, and whichever call compiled first decides whether the
+  // other one skips conflicts — an insert that raises where the caller asked it
+  // not to, or worse, one that silently swallows a duplicate the caller wanted
+  // to hear about.
+  "skipDuplicates",
 ]);
 
 export function canonicalShape(
