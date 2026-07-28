@@ -114,6 +114,14 @@ export class AccountModel extends Model {
     >;
   }
 
+  static groupBy<T extends Prisma.AccountGroupByArgs>(
+    args: Prisma.Subset<T, Prisma.AccountGroupByArgs>,
+  ): Promise<Prisma.GetAccountGroupByPayload<T>> {
+    return this.$exec("groupBy", args) as Promise<
+      Prisma.GetAccountGroupByPayload<T>
+    >;
+  }
+
   static create<T extends Prisma.AccountCreateArgs>(
     args: Subset<T, Prisma.AccountCreateArgs>,
     options?: ExecOptions,
@@ -257,6 +265,14 @@ export class MagicLinkTokenModel extends Model {
   ): Promise<Prisma.GetMagicLinkTokenAggregateType<T>> {
     return this.$exec("aggregate", args) as Promise<
       Prisma.GetMagicLinkTokenAggregateType<T>
+    >;
+  }
+
+  static groupBy<T extends Prisma.MagicLinkTokenGroupByArgs>(
+    args: Prisma.Subset<T, Prisma.MagicLinkTokenGroupByArgs>,
+  ): Promise<Prisma.GetMagicLinkTokenGroupByPayload<T>> {
+    return this.$exec("groupBy", args) as Promise<
+      Prisma.GetMagicLinkTokenGroupByPayload<T>
     >;
   }
 
@@ -406,6 +422,14 @@ export class OrganizationModel extends Model {
     >;
   }
 
+  static groupBy<T extends Prisma.OrganizationGroupByArgs>(
+    args: Prisma.Subset<T, Prisma.OrganizationGroupByArgs>,
+  ): Promise<Prisma.GetOrganizationGroupByPayload<T>> {
+    return this.$exec("groupBy", args) as Promise<
+      Prisma.GetOrganizationGroupByPayload<T>
+    >;
+  }
+
   static create<T extends Prisma.OrganizationCreateArgs>(
     args: Subset<T, Prisma.OrganizationCreateArgs>,
     options?: ExecOptions,
@@ -549,6 +573,14 @@ export class OrganizationInvitationModel extends Model {
   ): Promise<Prisma.GetOrganizationInvitationAggregateType<T>> {
     return this.$exec("aggregate", args) as Promise<
       Prisma.GetOrganizationInvitationAggregateType<T>
+    >;
+  }
+
+  static groupBy<T extends Prisma.OrganizationInvitationGroupByArgs>(
+    args: Prisma.Subset<T, Prisma.OrganizationInvitationGroupByArgs>,
+  ): Promise<Prisma.GetOrganizationInvitationGroupByPayload<T>> {
+    return this.$exec("groupBy", args) as Promise<
+      Prisma.GetOrganizationInvitationGroupByPayload<T>
     >;
   }
 
@@ -698,6 +730,14 @@ export class PasswordResetTokenModel extends Model {
     >;
   }
 
+  static groupBy<T extends Prisma.PasswordResetTokenGroupByArgs>(
+    args: Prisma.Subset<T, Prisma.PasswordResetTokenGroupByArgs>,
+  ): Promise<Prisma.GetPasswordResetTokenGroupByPayload<T>> {
+    return this.$exec("groupBy", args) as Promise<
+      Prisma.GetPasswordResetTokenGroupByPayload<T>
+    >;
+  }
+
   static create<T extends Prisma.PasswordResetTokenCreateArgs>(
     args: Subset<T, Prisma.PasswordResetTokenCreateArgs>,
     options?: ExecOptions,
@@ -841,6 +881,14 @@ export class SessionModel extends Model {
   ): Promise<Prisma.GetSessionAggregateType<T>> {
     return this.$exec("aggregate", args) as Promise<
       Prisma.GetSessionAggregateType<T>
+    >;
+  }
+
+  static groupBy<T extends Prisma.SessionGroupByArgs>(
+    args: Prisma.Subset<T, Prisma.SessionGroupByArgs>,
+  ): Promise<Prisma.GetSessionGroupByPayload<T>> {
+    return this.$exec("groupBy", args) as Promise<
+      Prisma.GetSessionGroupByPayload<T>
     >;
   }
 
@@ -990,6 +1038,14 @@ export class SocialAccountModel extends Model {
     >;
   }
 
+  static groupBy<T extends Prisma.SocialAccountGroupByArgs>(
+    args: Prisma.Subset<T, Prisma.SocialAccountGroupByArgs>,
+  ): Promise<Prisma.GetSocialAccountGroupByPayload<T>> {
+    return this.$exec("groupBy", args) as Promise<
+      Prisma.GetSocialAccountGroupByPayload<T>
+    >;
+  }
+
   static create<T extends Prisma.SocialAccountCreateArgs>(
     args: Subset<T, Prisma.SocialAccountCreateArgs>,
     options?: ExecOptions,
@@ -1133,6 +1189,14 @@ export class UserModel extends Model {
   ): Promise<Prisma.GetUserAggregateType<T>> {
     return this.$exec("aggregate", args) as Promise<
       Prisma.GetUserAggregateType<T>
+    >;
+  }
+
+  static groupBy<T extends Prisma.UserGroupByArgs>(
+    args: Prisma.Subset<T, Prisma.UserGroupByArgs>,
+  ): Promise<Prisma.GetUserGroupByPayload<T>> {
+    return this.$exec("groupBy", args) as Promise<
+      Prisma.GetUserGroupByPayload<T>
     >;
   }
 

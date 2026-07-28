@@ -100,7 +100,7 @@ read. It can only see modules you hand it, so it does not replace the `register`
 Fourteen operations, with Prisma's argument types verbatim:
 
 ```
-findMany   findFirst   findFirstOrThrow   findUnique   findUniqueOrThrow   count   aggregate
+findMany   findFirst   findFirstOrThrow   findUnique   findUniqueOrThrow   count   aggregate   groupBy
 create     createMany  update             updateMany   upsert              delete   deleteMany
 ```
 
@@ -171,9 +171,37 @@ await User.count({ select: { _all: true, email: true } })  // { _all: 3, email: 
 Results are typed by Prisma's own mapped types, so `_max: { position: true }` narrows to
 `{ _max: { position: number | null } }` and nothing else.
 
-**`groupBy` is not implemented.** `having` is a predicate compiler over aggregate expressions rather
-than columns, which is its own piece of work; shipping half of it typed as though it worked would be
-worse than not shipping it.
+### `groupBy`
+
+```ts
+const perOperation = await Usage.groupBy({
+  by: ["operation"],                       // or "operation" — Prisma takes both
+  where: { occurredAt: { gte: since } },
+  _sum: { credits: true },
+  _count: true,
+  having: { credits: { _sum: { gt: 0 } } },
+  orderBy: { _count: { operation: "desc" } },
+})
+// [{ operation: "render", _count: 42, _sum: { credits: 1200 } }, …]
+```
+
+The grouped columns come back flat and the aggregates nested under their kind, which is Prisma's
+shape. Four rules are worth knowing because they are not what the arguments suggest:
+
+- **`orderBy` may only name grouped columns — or an aggregate.** A group has one value for a column
+  in `by` and many for everything else, so ordering by anything else is a question with no answer.
+  SQLite answers it anyway, by picking an arbitrary row's value, so this is refused rather than
+  passed through. `orderBy: { _count: { field: "desc" } }` is the top-N-by-count query and is fine.
+- **`orderBy` is optional.** `groupBy` with none is a legal query.
+- **`having` filters groups, `where` filters rows.** `having: { role: { gt: 0 } }` needs `role` to be
+  in `by`; `having: { email: { _count: { gt: 1 } } }` does not, because a count has one value per
+  group either way. That split is Prisma's, and it is easy to read as stricter than it is.
+- **`take` / `skip` page the groups**, not the rows — unlike `aggregate`, where they page the rows
+  being aggregated.
+
+One divergence, and it is a refusal rather than a difference: `having: { role: { gt: 0, _count: { gt: 1 } } }`
+mixes a column comparison and an aggregate filter under one key. Prisma's query engine panics on that
+shape rather than answering it, so there is no behaviour to match — spell it as an `AND` of the two.
 
 ### Per-call options
 

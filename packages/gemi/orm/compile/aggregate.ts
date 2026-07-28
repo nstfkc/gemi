@@ -46,8 +46,8 @@ import { compileWhere } from "./where";
  */
 
 /** The aggregate functions Prisma exposes, in the order it returns them. */
-const KINDS = ["_count", "_avg", "_sum", "_min", "_max"] as const;
-type Kind = (typeof KINDS)[number];
+export const KINDS = ["_count", "_avg", "_sum", "_min", "_max"] as const;
+export type Kind = (typeof KINDS)[number];
 
 const AGGREGATE_ARGS = new Set<string>([
   "where",
@@ -73,7 +73,7 @@ const NUMERIC = new Set<ScalarType>(["Int", "Float", "BigInt", "Decimal"]);
 const UNORDERABLE = new Set<ScalarType>(["Json", "Bytes"]);
 
 /** The SQL function each kind compiles to. */
-const FUNCTION: Record<Kind, string> = {
+export const FUNCTION: Record<Kind, string> = {
   _count: "count",
   _avg: "avg",
   _sum: "sum",
@@ -81,7 +81,7 @@ const FUNCTION: Record<Kind, string> = {
   _max: "max",
 };
 
-interface Term {
+export interface Term {
   kind: Kind;
   /** Absent for `_count`'s `_all`, which is `count(*)`. */
   field?: FieldSchema;
@@ -234,9 +234,9 @@ export function compileAggregate(
 }
 
 /** The `as` a bare `_count: true` carries, which no field name can be. */
-const BARE = "";
+export const BARE = "";
 
-function aggregateTerms(
+export function aggregateTerms(
   schema: ModelSchema,
   op: string,
   args: any,
@@ -315,7 +315,7 @@ function countSelectTerms(schema: ModelSchema, op: string, select: any): Term[] 
  */
 const alias = (kind: Kind, index: number) => `${kind}_${index}`;
 
-function resolveField(
+export function resolveField(
   schema: ModelSchema,
   op: string,
   kind: Kind,
@@ -339,7 +339,7 @@ function resolveField(
   return field;
 }
 
-function assertAggregable(
+export function assertAggregable(
   schema: ModelSchema,
   op: string,
   kind: Kind,
@@ -403,7 +403,11 @@ function assertAggregable(
  *   dialect's own `decode` is exactly right. It is what turns SQLite's integer
  *   milliseconds back into a `Date`.
  */
-function coerce(term: Term, value: unknown, dialect: SqlDialect): unknown {
+export function coerce(
+  term: Term,
+  value: unknown,
+  dialect: SqlDialect,
+): unknown {
   if (term.kind === "_count") return Number(value ?? 0);
 
   // Every other aggregate is null over an empty set, and per field.

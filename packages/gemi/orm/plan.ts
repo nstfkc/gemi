@@ -12,9 +12,11 @@ import type { ModelSchema } from "./schema";
  * `Omit` is miserable.
  *
  * `aggregate` joined the list once there was a measured account of what Prisma
- * returns for one — see `compile/aggregate.ts`. `groupBy` did not follow it in
- * the same change: `having` is a second predicate compiler over aggregate
- * expressions rather than columns, which is its own piece of work.
+ * returns for one — see `compile/aggregate.ts`. `groupBy` followed in its own
+ * change, for the reason this note gave for separating them: `having` is a
+ * second predicate compiler over aggregate expressions rather than columns, and
+ * `orderBy` carries a restriction no other operation has. See
+ * `compile/group-by.ts`.
  */
 export type Operation =
   | "findUnique"
@@ -24,6 +26,7 @@ export type Operation =
   | "findMany"
   | "count"
   | "aggregate"
+  | "groupBy"
   | "create"
   | "createMany"
   | "update"
@@ -179,6 +182,12 @@ const LITERAL_KEYS = new Set([
   "_sum",
   "_min",
   "_max",
+  // `groupBy`'s grouped columns, which reach the SQL as *identifiers* — both
+  // the select list and the `group by`. `["role"]` and `["locale"]` have the
+  // same shape, `[string]`, so without this they would be one cache entry and
+  // the second caller would be grouped by the first caller's column. Silently:
+  // the result is well-formed, just grouped by something else.
+  "by",
 ]);
 
 export function canonicalShape(
