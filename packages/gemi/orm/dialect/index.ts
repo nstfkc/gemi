@@ -138,6 +138,24 @@ export interface SqlDialect {
   paginate(take: Binder | null, skip: Binder | null): Fragment;
 
   /**
+   * The clause that makes an insert skip rows violating a unique constraint —
+   * `createMany({ skipDuplicates: true })` — or `null` where it is not offered.
+   *
+   * **`null` is a parity decision, not a missing feature**, and that is worth
+   * knowing before someone "fixes" SQLite by returning `insert or ignore`.
+   * SQLite has `on conflict do nothing` and has since 3.24; Prisma nonetheless
+   * rejects the *argument* on SQLite — `Unknown argument 'skipDuplicates'`,
+   * whatever its value, verified against a generated 6.19 client. Offering it
+   * here would make gemi a silent superset of Prisma on the one dialect the
+   * differential harness could then no longer compare, which is the trade this
+   * project has declined every other time it came up.
+   *
+   * A method rather than a boolean because the SQL differs where it exists, and
+   * a `Fragment` because everything the compiler emits is one.
+   */
+  ignoreConflicts(): Fragment | null;
+
+  /**
    * Recognise a driver error as a constraint violation, and say which columns
    * it names.
    *

@@ -66,7 +66,7 @@ import { compileWhere } from "./where";
 
 const WRITE_ARGS: Record<string, Set<string>> = {
   create: new Set(["data", "select", "include"]),
-  createMany: new Set(["data"]),
+  createMany: new Set(["data", "skipDuplicates"]),
   update: new Set(["data", "where", "select", "include"]),
   updateMany: new Set(["data", "where"]),
   delete: new Set(["where", "select", "include"]),
@@ -161,6 +161,13 @@ function compileCreateMany(
 ): QueryPlan {
   const rows = args?.data === undefined ? [] : listOf(args.data);
 
+  // Before the empty-list shortcut below, so that an unsupported argument is
+  // refused whether or not there was anything to write. Prisma rejects it on
+  // SQLite for an empty list too, and validation that depends on how much data
+  // happened to be supplied is the kind that passes in a test and fails in
+  // production.
+  const ignore = skipDuplicatesClause(schema, op, args, dialect);
+
   // Prisma returns `{ count: 0 }` for an empty list without touching the
   // database, but a plan must have a statement. A constant-false select is the
   // cheapest thing that yields zero rows on both dialects, and it keeps the
@@ -212,6 +219,7 @@ function compileCreateMany(
   const statement = concat(
     sql(`insert into ${dialect.quoteIdent(schema.table)}`),
     valuesClause(grid, dialect),
+    ignore ?? sql(""),
     returning.clause,
   );
 
@@ -219,8 +227,62 @@ function compileCreateMany(
   return {
     text,
     bind: bindValues(binders),
+    // The rows a conflict skipped never reach `RETURNING`, so this is the
+    // number *inserted* rather than the number supplied — which is what Prisma
+    // returns, and what makes the count usable for "how many were new".
     shape: (returned) => ({ count: returned.length }),
   };
+}
+
+/**
+ * `skipDuplicates`, or `null` when the caller did not ask for it.
+ *
+ * The whole point is that the check and the insert are one statement. Without
+ * it a caller reads first to find out which rows exist, which is a second query
+ * *and* a race: between the read and the insert a concurrent importer writes one
+ * of them, and the insert fails on a unique violation anyway.
+ *
+ * Refused on a dialect that does not offer it, naming the dialect rather than
+ * saying "yet" — the answer there is not "wait", it is "Prisma does not offer
+ * this on SQLite either, so neither do we". See `SqlDialect.ignoreConflicts`
+ * for why that is a parity decision rather than a gap.
+ */
+function skipDuplicatesClause(
+  schema: ModelSchema,
+  op: Operation,
+  args: any,
+  dialect: SqlDialect,
+): Fragment | null {
+  const requested = args?.skipDuplicates;
+  if (requested === undefined) return null;
+
+  if (typeof requested !== "boolean") {
+    throw new UnsupportedQueryError(
+      "skipDuplicates",
+      schema.name,
+      op,
+      `Expected true or false, got ${JSON.stringify(requested)}.`,
+    );
+  }
+
+  const clause = dialect.ignoreConflicts();
+  if (clause === null) {
+    // Refused whatever the value, which is exactly what Prisma does: on SQLite
+    // it reports `skipDuplicates` as an unknown argument for `false` as well as
+    // for `true`. Accepting `false` because it happens to be a no-op would make
+    // the two dialects disagree about which calls are legal.
+    throw new UnsupportedQueryError(
+      "skipDuplicates",
+      schema.name,
+      op,
+      `'skipDuplicates' is not available on ${dialect.name}. Prisma does not ` +
+        `offer it there either — it is a Postgres and MySQL argument. To ` +
+        `import a batch that may overlap, write the rows one at a time and ` +
+        `catch UniqueConstraintError, or move this model to Postgres.`,
+    );
+  }
+
+  return requested ? clause : null;
 }
 
 /**

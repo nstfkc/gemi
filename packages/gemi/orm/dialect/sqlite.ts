@@ -123,6 +123,14 @@ export class SqliteDialect implements SqlDialect {
     return concat(sql(`${lhs} like `), param(pattern));
   }
 
+  // Not offered, and deliberately: see `SqlDialect.ignoreConflicts`. SQLite can
+  // express it — `on conflict do nothing` works here — but Prisma rejects the
+  // argument on this dialect, so implementing it would put gemi ahead of Prisma
+  // on the one dialect where the differential harness could no longer check it.
+  ignoreConflicts(): Fragment | null {
+    return null;
+  }
+
   // SQLite cannot parse `offset` without a preceding `limit`, so a bare `skip`
   // needs a limit anyway. `-1` is SQLite's "no limit", and it goes through a
   // parameter rather than into the text like everything else.

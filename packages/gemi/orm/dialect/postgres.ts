@@ -84,6 +84,20 @@ export class PostgresDialect implements SqlDialect {
     );
   }
 
+  // `on conflict do nothing` with no target: it covers every unique constraint
+  // and the primary key at once, which is what `skipDuplicates` means — Prisma
+  // names no conflict target either. A targeted `on conflict (col)` would skip
+  // rows that collide on that column and still fail on any other constraint,
+  // which is the plausible wrong version.
+  //
+  // Rows it skips are absent from `RETURNING`, so the `{ count }` the compiler
+  // builds from the returned rows is the number *inserted* rather than the
+  // number supplied — which is the part the issue flags as most likely to be
+  // got wrong, and it falls out rather than needing a second count.
+  ignoreConflicts(): Fragment {
+    return sql(" on conflict do nothing");
+  }
+
   // Unlike SQLite, Postgres accepts `offset` on its own, so neither clause has
   // to be invented to satisfy the other.
   paginate(take: Binder | null, skip: Binder | null): Fragment {

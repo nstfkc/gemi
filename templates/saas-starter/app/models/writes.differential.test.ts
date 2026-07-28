@@ -271,6 +271,167 @@ function suite(label: string, url?: string) {
       );
     });
 
+    /**
+     * `skipDuplicates` — Postgres only, and that is Prisma's line rather than
+     * SQL's: SQLite can express `on conflict do nothing`, and Prisma rejects
+     * the *argument* there for `false` as well as `true`. So these are guarded
+     * rather than listed in `CASES`, and the SQLite refusal is asserted in
+     * `write.test.ts` where it needs no database.
+     */
+    describe("skipDuplicates", () => {
+      test("skips the rows that exist and counts only the new ones", async () => {
+        if (!url) return;
+
+        await differential.expectSameWrite(
+          "User",
+          "createMany",
+          {
+            // `p1` is seeded, so it conflicts on `publicId`; the other two are
+            // new. A count of 3 would mean the conflict clause did nothing, and
+            // a count of 0 would mean the whole statement was skipped.
+            data: [
+              { publicId: "p1", email: "dup@example.dev" },
+              { publicId: "new-1", email: "new1@example.dev" },
+              { publicId: "new-2", email: "new2@example.dev" },
+            ],
+            skipDuplicates: true,
+          },
+          { tables: ["User"] },
+        );
+      });
+
+      test("without it, the same batch raises", async () => {
+        if (!url) return;
+        await differential.reset();
+
+        await expect(
+          UserModel.createMany({
+            data: [
+              { publicId: "p1", email: "dup@example.dev" },
+              { publicId: "new-3", email: "new3@example.dev" },
+            ],
+          }),
+        ).rejects.toThrow();
+      });
+
+      test("every row conflicting is a count of zero, not an error", async () => {
+        if (!url) return;
+
+        await differential.expectSameWrite(
+          "User",
+          "createMany",
+          {
+            data: [{ publicId: "p1", email: "a@example.dev" }],
+            skipDuplicates: true,
+          },
+          { tables: ["User"] },
+        );
+      });
+
+      test("false behaves as though it were absent", async () => {
+        if (!url) return;
+
+        await differential.expectSameWrite(
+          "User",
+          "createMany",
+          {
+            data: [{ publicId: "new-4", email: "new4@example.dev" }],
+            skipDuplicates: false,
+          },
+          { tables: ["User"] },
+        );
+      });
+
+      /**
+       * A conflict on a **composite** unique, not only a single column.
+       * `SocialAccount` carries `@@unique([username, provider])` and is the
+       * only model in the template that can reach one.
+       *
+       * The untargeted `on conflict do nothing` is what makes this work: it
+       * covers every constraint at once, where a targeted `on conflict (col)`
+       * would skip collisions on the named column and still raise here.
+       *
+       * Self-contained — the two conflicting rows are in the *same* call, which
+       * `do nothing` also deduplicates. Measured rather than assumed:
+       * `values ('x','1'),('x','1'),('y','2') on conflict do nothing` inserts
+       * two rows, not three and not one.
+       */
+      test("a conflict on a composite unique is skipped too", async () => {
+        if (!url) return;
+
+        const base = {
+          userId: 1,
+          accessToken: "t",
+          refreshToken: "r",
+          expiresAt: new Date(EPOCH),
+        };
+
+        await differential.expectSameWrite(
+          "SocialAccount",
+          "createMany",
+          {
+            data: [
+              { ...base, provider: "github", providerId: "gh-1", username: "ada" },
+              // Same (username, provider) as the row above, different
+              // providerId — so only the composite constraint catches it.
+              { ...base, provider: "github", providerId: "gh-2", username: "ada" },
+              { ...base, provider: "gitlab", providerId: "gl-1", username: "ada" },
+            ],
+            skipDuplicates: true,
+          },
+          { tables: ["SocialAccount"] },
+        );
+      });
+
+      /**
+       * The interaction the issue calls out: `createMany` splits itself across
+       * statements past the parameter ceiling, inside one transaction, and
+       * `skipDuplicates` has to survive that split — the counts sum, and a
+       * conflict in a later chunk must not roll back an earlier one, since
+       * `do nothing` is not an error.
+       *
+       * Postgres binds 65 535 parameters and `User` writes 6 columns per row,
+       * so ~11 000 rows is two statements. Not compared against Prisma: it
+       * chunks differently, and what is under test is *our* split.
+       */
+      test("a batch that splits across statements returns the total", async () => {
+        if (!url) return;
+        await differential.reset();
+
+        const rows = Array.from({ length: 11_000 }, (_, i) => ({
+          publicId: `bulk-${i}`,
+          email: `bulk-${i}@example.dev`,
+        }));
+        // One row in the *second* chunk collides with one in the first, so the
+        // conflict lands after a chunk has already been written.
+        rows[10_500] = { ...rows[0] };
+
+        // **Succeeding at all is the proof that it split.** `User` binds 6
+        // client-side columns per row, so this is 66 000 parameters against
+        // Postgres's 65 535 ceiling: unsplit, `render` raises
+        // `ParameterLimitError` rather than quietly running one statement.
+        //
+        // Asserted rather than left in prose, because the margin is thin — if
+        // the row count, the column count or the ceiling ever moved, the case
+        // would keep passing while silently no longer exercising the split.
+        // (`differential.queries()` cannot see it: the chunks run on a
+        // transaction handle, and the counting stand-in wraps the pool.)
+        expect(rows.length * 6).toBeGreaterThan(65_535);
+
+        const written = await UserModel.createMany({
+          data: rows,
+          skipDuplicates: true,
+        });
+
+        expect(written.count).toBe(10_999);
+
+        const stored = await UserModel.count({
+          where: { publicId: { startsWith: "bulk-" } },
+        });
+        expect(stored).toBe(10_999);
+      }, 120_000);
+    });
+
     test("create on a model with no @updatedAt", async () => {
       await differential.expectSameWrite(
         "Organization",
