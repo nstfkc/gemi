@@ -123,6 +123,29 @@ class EverythingModel extends Model {
 
 const WHEN = new Date("2021-03-04T05:06:07.008Z");
 
+/**
+ * A `Bytes` value, asserted by **container** as well as contents.
+ *
+ * Contents alone cannot see the divergence that matters here. `Buffer` is a
+ * `Uint8Array` subclass, so `[...a]` and `toEqual` treat the two as identical
+ * — and until this helper existed, every assertion in this file did exactly
+ * that. What the two do not share is `toString`: `Buffer.prototype.toString`
+ * takes an encoding, `Uint8Array.prototype.toString` ignores its argument. So
+ * `row.blob.toString("hex")` returned `"0102ff"` on Postgres and `"1,2,255"`
+ * on SQLite, from the same schema, with nothing failing.
+ *
+ * `Uint8Array` is the contract because it is what Prisma 6 returns, on every
+ * dialect — verified against a generated client rather than assumed. This
+ * helper runs in both dialects' suites, which is what makes it a cross-dialect
+ * pin rather than two independent checks.
+ */
+function expectBytes(actual: unknown, expected: ArrayLike<number>) {
+  expect(ArrayBuffer.isView(actual)).toBe(true);
+  expect(Buffer.isBuffer(actual)).toBe(false);
+  expect((actual as object).constructor.name).toBe("Uint8Array");
+  expect([...(actual as Uint8Array)]).toEqual(Array.from(expected));
+}
+
 function suite(label: string, url?: string) {
   describe(label, () => {
     let workspace: string | undefined;
@@ -186,7 +209,7 @@ function suite(label: string, url?: string) {
       expect(created.count).toBe(9007199254740991n);
       expect(created.ratio).toBe(1.5);
       expect(created.payload).toEqual(values.payload);
-      expect([...created.blob]).toEqual([...values.blob]);
+      expectBytes(created.blob, values.blob);
       expect(created.when).toBeInstanceOf(Date);
       expect(created.when.getTime()).toBe(WHEN.getTime());
       expect(created.optional).toBeNull();
@@ -201,7 +224,7 @@ function suite(label: string, url?: string) {
       expect(read.count).toBe(9007199254740991n);
       expect(read.ratio).toBe(1.5);
       expect(read.payload).toEqual(values.payload);
-      expect([...read.blob]).toEqual([...values.blob]);
+      expectBytes(read.blob, values.blob);
       expect(read.when.getTime()).toBe(WHEN.getTime());
       expect(read.optional).toBeNull();
     });
@@ -291,7 +314,7 @@ function suite(label: string, url?: string) {
       expect(updated.flag).toBe(false);
       expect(updated.count).toBe(-42n);
       expect(updated.payload).toEqual([1, "two", null]);
-      expect([...updated.blob]).toEqual([9, 8, 7]);
+      expectBytes(updated.blob, [9, 8, 7]);
       expect(updated.when.toISOString()).toBe("1999-12-31T23:59:59.999Z");
       expect(updated.optional).toBe("now set");
     });
@@ -350,7 +373,7 @@ function suite(label: string, url?: string) {
         where: { id: created.id },
       });
       expect(deleted.count).toBe(9007199254740991n);
-      expect([...deleted.blob]).toEqual([...values.blob]);
+      expectBytes(deleted.blob, values.blob);
 
       expect(await EverythingModel.$exec("count", {})).toBe(0);
     });

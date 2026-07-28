@@ -123,7 +123,16 @@ function normalize(value: unknown, volatile?: Set<string>): unknown {
   if (value === null) return null;
   if (value instanceof Date) return `date:${value.toISOString()}`;
   if (typeof value === "bigint") return `bigint:${value.toString()}`;
-  if (ArrayBuffer.isView(value)) return `bytes:${[...(value as any)].join(",")}`;
+  // The constructor name is part of the comparison, not decoration. `Buffer`
+  // is a `Uint8Array` subclass, so a divergence between the two survives
+  // `ArrayBuffer.isView`, the generated type, and any element-wise comparison —
+  // and spreading to an array, which is what this line used to do, erased the
+  // one thing that distinguishes them. `.toString("hex")` returns `"0102ff"`
+  // from one and `"1,2,255"` from the other, so it is a real divergence that
+  // this harness could not see. See the `Bytes` case in `PostgresDialect`.
+  if (ArrayBuffer.isView(value)) {
+    return `bytes:${value.constructor.name}:${[...(value as any)].join(",")}`;
+  }
   if (Array.isArray(value)) return value.map((item) => normalize(item, volatile));
   if (typeof value === "object") {
     const out: Record<string, unknown> = {};

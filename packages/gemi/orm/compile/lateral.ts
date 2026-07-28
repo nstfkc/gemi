@@ -317,25 +317,29 @@ function jsonConverter(
     case "Bytes":
       // Postgres renders `bytea` into JSON as `\x` followed by hex.
       //
-      // **`Buffer`, not `Uint8Array`**, and the container matters as much as the
-      // contents. The driver gives the batched path a `Buffer`, and this
-      // codebase's rule is that a strategy must be invisible to callers — so
-      // returning a bare `Uint8Array` here made `row.digest.toString("hex")`
-      // return `"1,2,255"` instead of `"0102ff"`. A wrong answer with no error,
-      // because `Uint8Array.prototype.toString` ignores its argument.
-      // `Buffer.isBuffer` and the rest of that surface went the same way.
+      // **`Uint8Array`, not `Buffer`**, and the container matters as much as
+      // the contents — see `PostgresDialect.decode`, which normalises the
+      // driver's `Buffer` to the same thing for the batched path. Prisma 6
+      // returns `Uint8Array` on every dialect; that is the contract, and
+      // `Buffer.prototype.toString("hex")` versus
+      // `Uint8Array.prototype.toString("hex")` is the observable difference.
       //
-      // My own coercion fixture missed this: it compared `[...folded]` against
-      // `[...fetched]`, which spreads both to plain arrays and so passes for two
-      // different containers holding the same bytes. Contents were equal; the
-      // type was not.
+      // `Buffer.from(text, "hex")` for the parse — it is the parser the driver
+      // would have used, and faster than a manual nibble loop — then a view
+      // over the same bytes. No copy.
       return (value) => {
         if (value === null || value === undefined) return null;
-        if (Buffer.isBuffer(value)) return value;
-        if (ArrayBuffer.isView(value)) return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
-        // `Buffer.from(text, "hex")` rather than a manual loop — same result,
-        // and it is the parser the driver would have used.
-        return Buffer.from(String(value).replace(/^\\?x/, ""), "hex");
+        if (ArrayBuffer.isView(value)) {
+          return Buffer.isBuffer(value)
+            ? new Uint8Array(value.buffer, value.byteOffset, value.byteLength)
+            : value;
+        }
+        const buffer = Buffer.from(String(value).replace(/^\\?x/, ""), "hex");
+        return new Uint8Array(
+          buffer.buffer,
+          buffer.byteOffset,
+          buffer.byteLength,
+        );
       };
 
     default:
