@@ -269,6 +269,40 @@ function suite(label: string, url?: string) {
       expect(everything._count).toBe(2);
     });
 
+    /**
+     * `groupBy`'s `where` filters the rows *before* they are grouped, so a
+     * scope narrows which rows any group can contain. Same failure mode as the
+     * aggregate above and one step worse: the operation would throw on every
+     * policied model — and `softDeletes()` carries a `scope`, so that is most
+     * of them.
+     */
+    test("scope narrows a groupBy, and the groups themselves change", async () => {
+      (ScopedUser as any).$policies = [tenantScoped];
+
+      const mine: any = await Model.asUser(ALICE, () =>
+        (ScopedUser as any).groupBy({
+          by: ["organizationId"],
+          _count: true,
+          orderBy: { organizationId: "asc" },
+        }),
+      );
+
+      // Not just a smaller count — Bob's organisation is a *group* that must
+      // not appear at all, which a scope applied after grouping would leave in.
+      expect(mine).toEqual([
+        { organizationId: ALICE.organizationId, _count: 1 },
+      ]);
+
+      const everything: any = await Model.asSystem(() =>
+        (ScopedUser as any).groupBy({
+          by: ["organizationId"],
+          _count: true,
+          orderBy: { organizationId: "asc" },
+        }),
+      );
+      expect(everything).toHaveLength(2);
+    });
+
     test("scope narrows count's per-field form too", async () => {
       (ScopedUser as any).$policies = [tenantScoped];
 
