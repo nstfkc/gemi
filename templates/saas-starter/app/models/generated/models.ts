@@ -96,10 +96,22 @@ export class AccountModel extends Model {
     return this.$exec("findUniqueOrThrow", args, options) as Promise<Prisma.AccountGetPayload<T>>;
   }
 
-  static count(
-    args?: Omit<Prisma.AccountCountArgs, "select">,
-  ): Promise<number> {
-    return this.$exec("count", args) as Promise<number>;
+  static count(args?: Omit<Prisma.AccountCountArgs, "select">): Promise<number>;
+  static count<T extends Prisma.AccountCountArgs>(
+    args: Prisma.SelectSubset<T, Prisma.AccountCountArgs> & {
+      select: NonNullable<T["select"]>;
+    },
+  ): Promise<Prisma.GetScalarType<T["select"], Prisma.AccountCountAggregateOutputType>>;
+  static count(args?: unknown): Promise<unknown> {
+    return this.$exec("count", args as never);
+  }
+
+  static aggregate<T extends Prisma.AccountAggregateArgs>(
+    args: Prisma.Subset<T, Prisma.AccountAggregateArgs>,
+  ): Promise<Prisma.GetAccountAggregateType<T>> {
+    return this.$exec("aggregate", args) as Promise<
+      Prisma.GetAccountAggregateType<T>
+    >;
   }
 
   static create<T extends Prisma.AccountCreateArgs>(
@@ -230,10 +242,22 @@ export class MagicLinkTokenModel extends Model {
     return this.$exec("findUniqueOrThrow", args, options) as Promise<Prisma.MagicLinkTokenGetPayload<T>>;
   }
 
-  static count(
-    args?: Omit<Prisma.MagicLinkTokenCountArgs, "select">,
-  ): Promise<number> {
-    return this.$exec("count", args) as Promise<number>;
+  static count(args?: Omit<Prisma.MagicLinkTokenCountArgs, "select">): Promise<number>;
+  static count<T extends Prisma.MagicLinkTokenCountArgs>(
+    args: Prisma.SelectSubset<T, Prisma.MagicLinkTokenCountArgs> & {
+      select: NonNullable<T["select"]>;
+    },
+  ): Promise<Prisma.GetScalarType<T["select"], Prisma.MagicLinkTokenCountAggregateOutputType>>;
+  static count(args?: unknown): Promise<unknown> {
+    return this.$exec("count", args as never);
+  }
+
+  static aggregate<T extends Prisma.MagicLinkTokenAggregateArgs>(
+    args: Prisma.Subset<T, Prisma.MagicLinkTokenAggregateArgs>,
+  ): Promise<Prisma.GetMagicLinkTokenAggregateType<T>> {
+    return this.$exec("aggregate", args) as Promise<
+      Prisma.GetMagicLinkTokenAggregateType<T>
+    >;
   }
 
   static create<T extends Prisma.MagicLinkTokenCreateArgs>(
@@ -364,10 +388,22 @@ export class OrganizationModel extends Model {
     return this.$exec("findUniqueOrThrow", args, options) as Promise<Prisma.OrganizationGetPayload<T>>;
   }
 
-  static count(
-    args?: Omit<Prisma.OrganizationCountArgs, "select">,
-  ): Promise<number> {
-    return this.$exec("count", args) as Promise<number>;
+  static count(args?: Omit<Prisma.OrganizationCountArgs, "select">): Promise<number>;
+  static count<T extends Prisma.OrganizationCountArgs>(
+    args: Prisma.SelectSubset<T, Prisma.OrganizationCountArgs> & {
+      select: NonNullable<T["select"]>;
+    },
+  ): Promise<Prisma.GetScalarType<T["select"], Prisma.OrganizationCountAggregateOutputType>>;
+  static count(args?: unknown): Promise<unknown> {
+    return this.$exec("count", args as never);
+  }
+
+  static aggregate<T extends Prisma.OrganizationAggregateArgs>(
+    args: Prisma.Subset<T, Prisma.OrganizationAggregateArgs>,
+  ): Promise<Prisma.GetOrganizationAggregateType<T>> {
+    return this.$exec("aggregate", args) as Promise<
+      Prisma.GetOrganizationAggregateType<T>
+    >;
   }
 
   static create<T extends Prisma.OrganizationCreateArgs>(
@@ -498,10 +534,22 @@ export class OrganizationInvitationModel extends Model {
     return this.$exec("findUniqueOrThrow", args, options) as Promise<Prisma.OrganizationInvitationGetPayload<T>>;
   }
 
-  static count(
-    args?: Omit<Prisma.OrganizationInvitationCountArgs, "select">,
-  ): Promise<number> {
-    return this.$exec("count", args) as Promise<number>;
+  static count(args?: Omit<Prisma.OrganizationInvitationCountArgs, "select">): Promise<number>;
+  static count<T extends Prisma.OrganizationInvitationCountArgs>(
+    args: Prisma.SelectSubset<T, Prisma.OrganizationInvitationCountArgs> & {
+      select: NonNullable<T["select"]>;
+    },
+  ): Promise<Prisma.GetScalarType<T["select"], Prisma.OrganizationInvitationCountAggregateOutputType>>;
+  static count(args?: unknown): Promise<unknown> {
+    return this.$exec("count", args as never);
+  }
+
+  static aggregate<T extends Prisma.OrganizationInvitationAggregateArgs>(
+    args: Prisma.Subset<T, Prisma.OrganizationInvitationAggregateArgs>,
+  ): Promise<Prisma.GetOrganizationInvitationAggregateType<T>> {
+    return this.$exec("aggregate", args) as Promise<
+      Prisma.GetOrganizationInvitationAggregateType<T>
+    >;
   }
 
   static create<T extends Prisma.OrganizationInvitationCreateArgs>(
@@ -632,10 +680,22 @@ export class PasswordResetTokenModel extends Model {
     return this.$exec("findUniqueOrThrow", args, options) as Promise<Prisma.PasswordResetTokenGetPayload<T>>;
   }
 
-  static count(
-    args?: Omit<Prisma.PasswordResetTokenCountArgs, "select">,
-  ): Promise<number> {
-    return this.$exec("count", args) as Promise<number>;
+  static count(args?: Omit<Prisma.PasswordResetTokenCountArgs, "select">): Promise<number>;
+  static count<T extends Prisma.PasswordResetTokenCountArgs>(
+    args: Prisma.SelectSubset<T, Prisma.PasswordResetTokenCountArgs> & {
+      select: NonNullable<T["select"]>;
+    },
+  ): Promise<Prisma.GetScalarType<T["select"], Prisma.PasswordResetTokenCountAggregateOutputType>>;
+  static count(args?: unknown): Promise<unknown> {
+    return this.$exec("count", args as never);
+  }
+
+  static aggregate<T extends Prisma.PasswordResetTokenAggregateArgs>(
+    args: Prisma.Subset<T, Prisma.PasswordResetTokenAggregateArgs>,
+  ): Promise<Prisma.GetPasswordResetTokenAggregateType<T>> {
+    return this.$exec("aggregate", args) as Promise<
+      Prisma.GetPasswordResetTokenAggregateType<T>
+    >;
   }
 
   static create<T extends Prisma.PasswordResetTokenCreateArgs>(
@@ -766,10 +826,22 @@ export class SessionModel extends Model {
     return this.$exec("findUniqueOrThrow", args, options) as Promise<Prisma.SessionGetPayload<T>>;
   }
 
-  static count(
-    args?: Omit<Prisma.SessionCountArgs, "select">,
-  ): Promise<number> {
-    return this.$exec("count", args) as Promise<number>;
+  static count(args?: Omit<Prisma.SessionCountArgs, "select">): Promise<number>;
+  static count<T extends Prisma.SessionCountArgs>(
+    args: Prisma.SelectSubset<T, Prisma.SessionCountArgs> & {
+      select: NonNullable<T["select"]>;
+    },
+  ): Promise<Prisma.GetScalarType<T["select"], Prisma.SessionCountAggregateOutputType>>;
+  static count(args?: unknown): Promise<unknown> {
+    return this.$exec("count", args as never);
+  }
+
+  static aggregate<T extends Prisma.SessionAggregateArgs>(
+    args: Prisma.Subset<T, Prisma.SessionAggregateArgs>,
+  ): Promise<Prisma.GetSessionAggregateType<T>> {
+    return this.$exec("aggregate", args) as Promise<
+      Prisma.GetSessionAggregateType<T>
+    >;
   }
 
   static create<T extends Prisma.SessionCreateArgs>(
@@ -900,10 +972,22 @@ export class SocialAccountModel extends Model {
     return this.$exec("findUniqueOrThrow", args, options) as Promise<Prisma.SocialAccountGetPayload<T>>;
   }
 
-  static count(
-    args?: Omit<Prisma.SocialAccountCountArgs, "select">,
-  ): Promise<number> {
-    return this.$exec("count", args) as Promise<number>;
+  static count(args?: Omit<Prisma.SocialAccountCountArgs, "select">): Promise<number>;
+  static count<T extends Prisma.SocialAccountCountArgs>(
+    args: Prisma.SelectSubset<T, Prisma.SocialAccountCountArgs> & {
+      select: NonNullable<T["select"]>;
+    },
+  ): Promise<Prisma.GetScalarType<T["select"], Prisma.SocialAccountCountAggregateOutputType>>;
+  static count(args?: unknown): Promise<unknown> {
+    return this.$exec("count", args as never);
+  }
+
+  static aggregate<T extends Prisma.SocialAccountAggregateArgs>(
+    args: Prisma.Subset<T, Prisma.SocialAccountAggregateArgs>,
+  ): Promise<Prisma.GetSocialAccountAggregateType<T>> {
+    return this.$exec("aggregate", args) as Promise<
+      Prisma.GetSocialAccountAggregateType<T>
+    >;
   }
 
   static create<T extends Prisma.SocialAccountCreateArgs>(
@@ -1034,10 +1118,22 @@ export class UserModel extends Model {
     return this.$exec("findUniqueOrThrow", args, options) as Promise<Prisma.UserGetPayload<T>>;
   }
 
-  static count(
-    args?: Omit<Prisma.UserCountArgs, "select">,
-  ): Promise<number> {
-    return this.$exec("count", args) as Promise<number>;
+  static count(args?: Omit<Prisma.UserCountArgs, "select">): Promise<number>;
+  static count<T extends Prisma.UserCountArgs>(
+    args: Prisma.SelectSubset<T, Prisma.UserCountArgs> & {
+      select: NonNullable<T["select"]>;
+    },
+  ): Promise<Prisma.GetScalarType<T["select"], Prisma.UserCountAggregateOutputType>>;
+  static count(args?: unknown): Promise<unknown> {
+    return this.$exec("count", args as never);
+  }
+
+  static aggregate<T extends Prisma.UserAggregateArgs>(
+    args: Prisma.Subset<T, Prisma.UserAggregateArgs>,
+  ): Promise<Prisma.GetUserAggregateType<T>> {
+    return this.$exec("aggregate", args) as Promise<
+      Prisma.GetUserAggregateType<T>
+    >;
   }
 
   static create<T extends Prisma.UserCreateArgs>(

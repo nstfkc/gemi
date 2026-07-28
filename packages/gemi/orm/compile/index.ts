@@ -3,6 +3,7 @@ import { UnsupportedQueryError } from "../errors";
 import type { Operation, QueryPlan } from "../plan";
 import type { RelationStrategy } from "./plan-relations";
 import type { ModelSchema } from "../schema";
+import { compileAggregate, isAggregateOperation } from "./aggregate";
 import { compileRead, isReadOperation } from "./read";
 import { compileWrite, isWriteOperation } from "./write";
 
@@ -26,6 +27,10 @@ export function compile(
    */
   strategy?: RelationStrategy,
 ): QueryPlan {
+  // Before the read check, because `aggregate` is a read whose result is
+  // neither rows nor a number and so shares none of `compileRead`'s shaping.
+  if (isAggregateOperation(op)) return compileAggregate(schema, op, args, dialect);
+
   if (isReadOperation(op)) {
     return compileRead(schema, op, args, dialect, strategy);
   }
@@ -34,6 +39,7 @@ export function compile(
 }
 
 export { compileRead, isReadOperation };
+export { compileAggregate, isAggregateOperation } from "./aggregate";
 export { compileWrite, isWriteOperation };
 export {
   planNestedWrites,
