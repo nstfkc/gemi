@@ -916,6 +916,18 @@ export type PolicyLookup = (model: string) => {
  * arg tree before planning — *true*, where before it was true only of the
  * strategy that happened to recurse.
  */
+/**
+ * The operation a nested `include` / `select` node is scoped as.
+ *
+ * `findMany` because that is what a relation node *is* — one query for the
+ * children of the rows in hand — and because a policy reading
+ * `context.operation` should see the read it is being asked about rather than
+ * the statement that happens to enclose it. It is also in `SCOPABLE`, which an
+ * insert operation is not, and that mismatch is what produced the bug this
+ * constant exists to prevent.
+ */
+const NESTED_READ: Operation = "findMany";
+
 export function applyNestedPolicies(
   schema: {
     relations: Record<string, { model: string; kind: "one" | "many" }>;
@@ -982,10 +994,31 @@ export function applyNestedPolicies(
 
       // Depth first, so a grandchild's scope is in place before its parent's
       // node is rewritten around it.
+      //
+      // **`NESTED_READ`, not the root's operation.** An `include` / `select`
+      // node is a *read* whatever the statement around it is doing, and passing
+      // the root operation down scoped it as an insert under a root `create`.
+      // Two ways that went wrong, and the quiet one was worse:
+      //
+      //   User.create({ data, include: { accounts: true } })
+      //
+      // - A child with a `scope` and no `onCreate` raised
+      //   `Account has a policy that scopes reads but no 'onCreate'` — naming
+      //   an operation the caller never asked for, about a row being read back
+      //   rather than written.
+      // - A child with both took `applyPolicies`' inserting branch, which skips
+      //   `withScope` and then runs `onCreate` over the include node. The node
+      //   came out carrying `data: {}` where its `where` should have been, so
+      //   the child's read scope — a tenant filter, or `softDeletes`' own
+      //   `deletedAt: null` — silently disappeared from the nested read.
+      //
+      // Nested *write* nodes under `data` are a different path entirely
+      // (`planNestedWrites`), and they already scope themselves as writes. This
+      // walk only ever sees the read tree.
       const deeper = applyNestedPolicies(
         target.schema,
         nodeArgs,
-        operation,
+        NESTED_READ,
         user,
         system,
         lookup,
@@ -997,7 +1030,7 @@ export function applyNestedPolicies(
         !system && target.policies.length > 0
           ? applyPolicies(
               target.policies,
-              policyContext(target.schema.name, operation, user, system),
+              policyContext(target.schema.name, NESTED_READ, user, system),
               deeper,
             )
           : deeper;

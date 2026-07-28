@@ -223,6 +223,105 @@ function suite(label: string, url?: string) {
       expect(others.map((row: any) => row.email)).toEqual(["bob@x.test"]);
     });
 
+    /**
+     * A nested `include` is a **read**, whatever the statement around it is
+     * doing. It used to be scoped as the root operation, so under a `create`
+     * the child was scoped as an insert — see #85.
+     *
+     * Two failures, and the second is the one a careless test misses: it is
+     * silent. Asserting only that the call does not throw would pass against
+     * the bug, because the bug *is* the scope quietly not being applied.
+     */
+    test("an include under a create applies the child's read scope", async () => {
+      (ScopedAccount as any).$policies = [tenantScoped];
+
+      const created: any = await Model.asUser(ALICE, () =>
+        ScopedUser.create({
+          data: { email: "fresh@x.test", organizationId: ALICE.organizationId },
+          include: { accounts: true },
+        }),
+      );
+
+      // The new row has no accounts, so the interesting assertion is not the
+      // count — it is that the read was *scoped at all*, which the next test
+      // pins directly.
+      expect(created.accounts).toEqual([]);
+    });
+
+    /**
+     * **The silent half, and the only shape that can show it.**
+     *
+     * Under a root `create` the included children belong to a row that has just
+     * been made, so they are empty whether the scope was applied or dropped —
+     * which is why #85 calls the blast radius small *today*. `upsert` is in the
+     * same inserting branch and can land on a row that **already has
+     * children**, so a dropped scope is visible as rows that should not be
+     * there.
+     *
+     * Without the fix this returns both accounts; with it, one.
+     */
+    test("...and the scope actually filters, rather than being skipped", async () => {
+      (ScopedAccount as any).$policies = [tenantScoped];
+
+      // An account in Alice's org, and one in Bob's, both pointing at the user
+      // about to be created — so only the scope can tell them apart.
+      const fresh: any = await Model.asSystem(() =>
+        UserModel.create({ data: { email: "target@x.test", organizationId: ALICE.organizationId } }),
+      );
+      await Model.asSystem(async () => {
+        await AccountModel.create({
+          data: { userId: fresh.id, organizationId: ALICE.organizationId },
+        });
+        await AccountModel.create({
+          data: { userId: fresh.id, organizationId: BOB.organizationId },
+        });
+      });
+
+      // The baseline: a plain read, which was never affected.
+      const read: any = await Model.asUser(ALICE, () =>
+        ScopedUser.findUniqueOrThrow({
+          where: { id: fresh.id },
+          include: { accounts: true },
+        }),
+      );
+      expect(read.accounts).toHaveLength(1);
+
+      // The same include reached through an *inserting* operation that lands on
+      // the existing row. `upsert` is in the branch that used to drop the
+      // scope, and unlike `create` it can see children.
+      const upserted: any = await Model.asUser(ALICE, () =>
+        ScopedUser.upsert({
+          where: { id: fresh.id },
+          create: { id: fresh.id, email: "target@x.test" },
+          update: { name: "renamed" },
+          include: { accounts: true },
+        }),
+      );
+
+      expect(upserted.accounts).toHaveLength(1);
+      expect(upserted.accounts[0].organizationId).toBe(ALICE.organizationId);
+    });
+
+    /**
+     * The hard failure from #85(a): a child that scopes reads and declares no
+     * `onCreate` is a legal policy — it simply never creates rows — and
+     * including it from a `create` raised about an operation nobody asked for.
+     */
+    test("a child that scopes but never creates can still be included from a write", async () => {
+      (ScopedAccount as any).$policies = [
+        { scope: () => ({ organizationId: ALICE.organizationId }) } satisfies ModelPolicy,
+      ];
+
+      await expect(
+        Model.asUser(ALICE, () =>
+          ScopedUser.create({
+            data: { email: "nothrow@x.test" },
+            include: { accounts: true },
+          }),
+        ),
+      ).resolves.toBeDefined();
+    });
+
     test("a caller's own where still applies alongside the scope", async () => {
       (ScopedUser as any).$policies = [tenantScoped];
 

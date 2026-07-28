@@ -468,6 +468,10 @@ a shared model base can impose a policy a subclass can only narrow, never drop.
 | `before(ctx)` | First | Return `false` (or throw) to deny outright. |
 | `scope(ctx)` | Reads and row-matching writes | Returns a `where` fragment `AND`ed into `args.where`. A policy can only ever **narrow**. |
 | `onCreate(ctx, data)` | `create` / `createMany` / `upsert` | Defaults or validates the payload. An insert has no `where` for a scope to narrow. |
+
+A relation reached through `include` or `select` is always scoped as a **read**, whatever the
+statement around it is doing — so `User.create({ data, include: { accounts: true } })` applies
+`Account`'s `scope`, not its `onCreate`. The children are being read back, not written.
 | `onUpdate(ctx, data)` | `update` / `updateMany` / `upsert` | Defaults or validates the payload of a write to existing rows. |
 | `redact(ctx, row)` | Shaping | Removes fields from a fetched row. |
 
