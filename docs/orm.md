@@ -293,6 +293,19 @@ await List.create({
 | `createMany` | The same rows in **one** statement. To-many only, and the rows go inside `data`. |
 | `connect` | Points at an existing row — a bound column when it names the referenced key, a lookup otherwise. |
 
+**A relation may join on more than one field.** `@relation(fields: [tenantId, orderId], references:
+[tenantId, id])` is the tenant-scoped composite-key style, and every read surface handles it: an
+`include` under either strategy, a relation filter, a `_count`, and an `orderBy` through the
+relation. The correlation becomes one equality per field; the batched strategy filters its children
+with an `OR` of `AND`s rather than a tuple `in`, because that is one shape both dialects already
+compile.
+
+Two consequences worth knowing. A composite join uses one placeholder *per field per parent*, so
+SQLite's parameter ceiling arrives proportionally sooner on a wide `include` — `ParameterLimitError`
+still names it rather than letting the driver fail. And a **nested write** through a composite
+relation is refused: it would have to contribute that many foreign-key columns to the insert, which
+is not implemented. Write the child separately with its keys set.
+
 Which direction a nested write runs in is decided by **who holds the foreign key**. When this model
 holds it, the far row is resolved or created *first* and collapses into one more column. When the
 child holds it, nothing can be written until this row exists, so those run after — which is why the

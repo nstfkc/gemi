@@ -177,6 +177,298 @@ export class AccountModel extends Model {
 // accepted: `Model`'s constructor is `protected`, so the only way to get an
 // instance is `wrap`, which assigns a complete row. See bin/orm/emit.ts.
 // oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
+export interface LedgerModel extends Prisma.LedgerGetPayload<{}> {}
+
+export type LedgerPolicy = ModelPolicy<
+  Prisma.LedgerWhereInput,
+  Prisma.LedgerCreateInput,
+  Prisma.LedgerGetPayload<{}>
+>;
+
+// The same shape with `scope`, `onCreate` and `onUpdate` abstract, so a policy
+// that scopes cannot omit the write halves. The runtime refuses those
+// combinations too — this makes it `TS2515` at the class declaration instead of
+// an error on the first write that reaches production.
+export abstract class LedgerScopedPolicy extends ScopedPolicy<
+  Prisma.LedgerWhereInput,
+  Prisma.LedgerCreateInput,
+  Prisma.LedgerGetPayload<{}>
+> {}
+
+export class LedgerModel extends Model {
+  static $schema = schema.Ledger;
+
+  // Narrowed from `Model`'s `PolicyEntry[]` to this model's own, so a policy
+  // written for another model is a type error here rather than a scope compiled
+  // against columns that do not exist.
+  static $policies?: readonly PolicyEntry<
+    Prisma.LedgerWhereInput,
+    Prisma.LedgerCreateInput,
+    Prisma.LedgerGetPayload<{}>
+  >[];
+
+  static findMany<T extends Prisma.LedgerFindManyArgs>(
+    args?: Subset<T, Prisma.LedgerFindManyArgs>,
+    options?: ExecOptions,
+  ): Promise<Prisma.LedgerGetPayload<T>[]> {
+    return this.$exec("findMany", args, options) as Promise<Prisma.LedgerGetPayload<T>[]>;
+  }
+
+  static findFirst<T extends Prisma.LedgerFindFirstArgs>(
+    args?: Subset<T, Prisma.LedgerFindFirstArgs>,
+    options?: ExecOptions,
+  ): Promise<Prisma.LedgerGetPayload<T> | null> {
+    return this.$exec("findFirst", args, options) as Promise<Prisma.LedgerGetPayload<T> | null>;
+  }
+
+  static findFirstOrThrow<T extends Prisma.LedgerFindFirstOrThrowArgs>(
+    args?: Subset<T, Prisma.LedgerFindFirstOrThrowArgs>,
+    options?: ExecOptions,
+  ): Promise<Prisma.LedgerGetPayload<T>> {
+    return this.$exec("findFirstOrThrow", args, options) as Promise<Prisma.LedgerGetPayload<T>>;
+  }
+
+  static findUnique<T extends Prisma.LedgerFindUniqueArgs>(
+    args: Subset<T, Prisma.LedgerFindUniqueArgs>,
+    options?: ExecOptions,
+  ): Promise<Prisma.LedgerGetPayload<T> | null> {
+    return this.$exec("findUnique", args, options) as Promise<Prisma.LedgerGetPayload<T> | null>;
+  }
+
+  static findUniqueOrThrow<T extends Prisma.LedgerFindUniqueOrThrowArgs>(
+    args: Subset<T, Prisma.LedgerFindUniqueOrThrowArgs>,
+    options?: ExecOptions,
+  ): Promise<Prisma.LedgerGetPayload<T>> {
+    return this.$exec("findUniqueOrThrow", args, options) as Promise<Prisma.LedgerGetPayload<T>>;
+  }
+
+  static count(args?: Omit<Prisma.LedgerCountArgs, "select">): Promise<number>;
+  static count<T extends Prisma.LedgerCountArgs>(
+    args: Prisma.SelectSubset<T, Prisma.LedgerCountArgs> & {
+      select: NonNullable<T["select"]>;
+    },
+  ): Promise<Prisma.GetScalarType<T["select"], Prisma.LedgerCountAggregateOutputType>>;
+  static count(args?: unknown): Promise<unknown> {
+    return this.$exec("count", args as never);
+  }
+
+  static aggregate<T extends Prisma.LedgerAggregateArgs>(
+    args: Prisma.Subset<T, Prisma.LedgerAggregateArgs>,
+  ): Promise<Prisma.GetLedgerAggregateType<T>> {
+    return this.$exec("aggregate", args) as Promise<
+      Prisma.GetLedgerAggregateType<T>
+    >;
+  }
+
+  static create<T extends Prisma.LedgerCreateArgs>(
+    args: Subset<T, Prisma.LedgerCreateArgs>,
+    options?: ExecOptions,
+  ): Promise<Prisma.LedgerGetPayload<T>> {
+    return this.$exec("create", args, options) as Promise<Prisma.LedgerGetPayload<T>>;
+  }
+
+  static update<T extends Prisma.LedgerUpdateArgs>(
+    args: Subset<T, Prisma.LedgerUpdateArgs>,
+    options?: ExecOptions,
+  ): Promise<Prisma.LedgerGetPayload<T>> {
+    return this.$exec("update", args, options) as Promise<Prisma.LedgerGetPayload<T>>;
+  }
+
+  static delete<T extends Prisma.LedgerDeleteArgs>(
+    args: Subset<T, Prisma.LedgerDeleteArgs>,
+    options?: ExecOptions,
+  ): Promise<Prisma.LedgerGetPayload<T>> {
+    return this.$exec("delete", args, options) as Promise<Prisma.LedgerGetPayload<T>>;
+  }
+
+  static upsert<T extends Prisma.LedgerUpsertArgs>(
+    args: Subset<T, Prisma.LedgerUpsertArgs>,
+    options?: ExecOptions,
+  ): Promise<Prisma.LedgerGetPayload<T>> {
+    return this.$exec("upsert", args, options) as Promise<Prisma.LedgerGetPayload<T>>;
+  }
+
+  static createMany(
+    args?: Prisma.LedgerCreateManyArgs,
+  ): Promise<{ count: number }> {
+    return this.$exec("createMany", args) as Promise<{ count: number }>;
+  }
+
+  static updateMany(
+    args?: Prisma.LedgerUpdateManyArgs,
+  ): Promise<{ count: number }> {
+    return this.$exec("updateMany", args) as Promise<{ count: number }>;
+  }
+
+  static deleteMany(
+    args?: Prisma.LedgerDeleteManyArgs,
+  ): Promise<{ count: number }> {
+    return this.$exec("deleteMany", args) as Promise<{ count: number }>;
+  }
+
+  static wrap<C extends { prototype: unknown }, R extends Prisma.LedgerGetPayload<{}>>(
+    this: C,
+    row: R,
+  ): C["prototype"] & R {
+    return (Model.wrap as (row: object) => any).call(this, row);
+  }
+}
+
+// Merges the row's columns into the instance type, so a method on a subclass can
+// read `this.email`. No runtime output.
+//
+// oxlint flags class/interface merging because TypeScript does not check the
+// merged properties are initialised — a directly constructed instance would type
+// as carrying every column while holding none. That hazard is closed rather than
+// accepted: `Model`'s constructor is `protected`, so the only way to get an
+// instance is `wrap`, which assigns a complete row. See bin/orm/emit.ts.
+// oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
+export interface LedgerEntryModel extends Prisma.LedgerEntryGetPayload<{}> {}
+
+export type LedgerEntryPolicy = ModelPolicy<
+  Prisma.LedgerEntryWhereInput,
+  Prisma.LedgerEntryCreateInput,
+  Prisma.LedgerEntryGetPayload<{}>
+>;
+
+// The same shape with `scope`, `onCreate` and `onUpdate` abstract, so a policy
+// that scopes cannot omit the write halves. The runtime refuses those
+// combinations too — this makes it `TS2515` at the class declaration instead of
+// an error on the first write that reaches production.
+export abstract class LedgerEntryScopedPolicy extends ScopedPolicy<
+  Prisma.LedgerEntryWhereInput,
+  Prisma.LedgerEntryCreateInput,
+  Prisma.LedgerEntryGetPayload<{}>
+> {}
+
+export class LedgerEntryModel extends Model {
+  static $schema = schema.LedgerEntry;
+
+  // Narrowed from `Model`'s `PolicyEntry[]` to this model's own, so a policy
+  // written for another model is a type error here rather than a scope compiled
+  // against columns that do not exist.
+  static $policies?: readonly PolicyEntry<
+    Prisma.LedgerEntryWhereInput,
+    Prisma.LedgerEntryCreateInput,
+    Prisma.LedgerEntryGetPayload<{}>
+  >[];
+
+  static findMany<T extends Prisma.LedgerEntryFindManyArgs>(
+    args?: Subset<T, Prisma.LedgerEntryFindManyArgs>,
+    options?: ExecOptions,
+  ): Promise<Prisma.LedgerEntryGetPayload<T>[]> {
+    return this.$exec("findMany", args, options) as Promise<Prisma.LedgerEntryGetPayload<T>[]>;
+  }
+
+  static findFirst<T extends Prisma.LedgerEntryFindFirstArgs>(
+    args?: Subset<T, Prisma.LedgerEntryFindFirstArgs>,
+    options?: ExecOptions,
+  ): Promise<Prisma.LedgerEntryGetPayload<T> | null> {
+    return this.$exec("findFirst", args, options) as Promise<Prisma.LedgerEntryGetPayload<T> | null>;
+  }
+
+  static findFirstOrThrow<T extends Prisma.LedgerEntryFindFirstOrThrowArgs>(
+    args?: Subset<T, Prisma.LedgerEntryFindFirstOrThrowArgs>,
+    options?: ExecOptions,
+  ): Promise<Prisma.LedgerEntryGetPayload<T>> {
+    return this.$exec("findFirstOrThrow", args, options) as Promise<Prisma.LedgerEntryGetPayload<T>>;
+  }
+
+  static findUnique<T extends Prisma.LedgerEntryFindUniqueArgs>(
+    args: Subset<T, Prisma.LedgerEntryFindUniqueArgs>,
+    options?: ExecOptions,
+  ): Promise<Prisma.LedgerEntryGetPayload<T> | null> {
+    return this.$exec("findUnique", args, options) as Promise<Prisma.LedgerEntryGetPayload<T> | null>;
+  }
+
+  static findUniqueOrThrow<T extends Prisma.LedgerEntryFindUniqueOrThrowArgs>(
+    args: Subset<T, Prisma.LedgerEntryFindUniqueOrThrowArgs>,
+    options?: ExecOptions,
+  ): Promise<Prisma.LedgerEntryGetPayload<T>> {
+    return this.$exec("findUniqueOrThrow", args, options) as Promise<Prisma.LedgerEntryGetPayload<T>>;
+  }
+
+  static count(args?: Omit<Prisma.LedgerEntryCountArgs, "select">): Promise<number>;
+  static count<T extends Prisma.LedgerEntryCountArgs>(
+    args: Prisma.SelectSubset<T, Prisma.LedgerEntryCountArgs> & {
+      select: NonNullable<T["select"]>;
+    },
+  ): Promise<Prisma.GetScalarType<T["select"], Prisma.LedgerEntryCountAggregateOutputType>>;
+  static count(args?: unknown): Promise<unknown> {
+    return this.$exec("count", args as never);
+  }
+
+  static aggregate<T extends Prisma.LedgerEntryAggregateArgs>(
+    args: Prisma.Subset<T, Prisma.LedgerEntryAggregateArgs>,
+  ): Promise<Prisma.GetLedgerEntryAggregateType<T>> {
+    return this.$exec("aggregate", args) as Promise<
+      Prisma.GetLedgerEntryAggregateType<T>
+    >;
+  }
+
+  static create<T extends Prisma.LedgerEntryCreateArgs>(
+    args: Subset<T, Prisma.LedgerEntryCreateArgs>,
+    options?: ExecOptions,
+  ): Promise<Prisma.LedgerEntryGetPayload<T>> {
+    return this.$exec("create", args, options) as Promise<Prisma.LedgerEntryGetPayload<T>>;
+  }
+
+  static update<T extends Prisma.LedgerEntryUpdateArgs>(
+    args: Subset<T, Prisma.LedgerEntryUpdateArgs>,
+    options?: ExecOptions,
+  ): Promise<Prisma.LedgerEntryGetPayload<T>> {
+    return this.$exec("update", args, options) as Promise<Prisma.LedgerEntryGetPayload<T>>;
+  }
+
+  static delete<T extends Prisma.LedgerEntryDeleteArgs>(
+    args: Subset<T, Prisma.LedgerEntryDeleteArgs>,
+    options?: ExecOptions,
+  ): Promise<Prisma.LedgerEntryGetPayload<T>> {
+    return this.$exec("delete", args, options) as Promise<Prisma.LedgerEntryGetPayload<T>>;
+  }
+
+  static upsert<T extends Prisma.LedgerEntryUpsertArgs>(
+    args: Subset<T, Prisma.LedgerEntryUpsertArgs>,
+    options?: ExecOptions,
+  ): Promise<Prisma.LedgerEntryGetPayload<T>> {
+    return this.$exec("upsert", args, options) as Promise<Prisma.LedgerEntryGetPayload<T>>;
+  }
+
+  static createMany(
+    args?: Prisma.LedgerEntryCreateManyArgs,
+  ): Promise<{ count: number }> {
+    return this.$exec("createMany", args) as Promise<{ count: number }>;
+  }
+
+  static updateMany(
+    args?: Prisma.LedgerEntryUpdateManyArgs,
+  ): Promise<{ count: number }> {
+    return this.$exec("updateMany", args) as Promise<{ count: number }>;
+  }
+
+  static deleteMany(
+    args?: Prisma.LedgerEntryDeleteManyArgs,
+  ): Promise<{ count: number }> {
+    return this.$exec("deleteMany", args) as Promise<{ count: number }>;
+  }
+
+  static wrap<C extends { prototype: unknown }, R extends Prisma.LedgerEntryGetPayload<{}>>(
+    this: C,
+    row: R,
+  ): C["prototype"] & R {
+    return (Model.wrap as (row: object) => any).call(this, row);
+  }
+}
+
+// Merges the row's columns into the instance type, so a method on a subclass can
+// read `this.email`. No runtime output.
+//
+// oxlint flags class/interface merging because TypeScript does not check the
+// merged properties are initialised — a directly constructed instance would type
+// as carrying every column while holding none. That hazard is closed rather than
+// accepted: `Model`'s constructor is `protected`, so the only way to get an
+// instance is `wrap`, which assigns a complete row. See bin/orm/emit.ts.
+// oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
 export interface MagicLinkTokenModel extends Prisma.MagicLinkTokenGetPayload<{}> {}
 
 export type MagicLinkTokenPolicy = ModelPolicy<

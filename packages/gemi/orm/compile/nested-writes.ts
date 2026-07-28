@@ -5,6 +5,7 @@ import {
   type NestedWriteStep,
   relatedSchema,
   resolveLink,
+  singleFieldLink,
 } from "./plan-relations";
 import { matchUniqueKey } from "./unique";
 
@@ -192,7 +193,19 @@ function planOne(
   if (keys.length === 0) return;
 
   const child = relatedSchema(schema, relation);
-  const link = resolveLink(schema, child, relation, operation);
+
+  // **Narrowed to one field, deliberately.** Reading across a composite
+  // relation works (#67); writing through one would have to contribute that
+  // many foreign-key columns to this insert, which is a different piece of
+  // work — so it is refused here by name rather than silently writing the
+  // first field. The narrowing is a function call rather than an index, so
+  // there is no single-field property on `Link` to reach for by accident.
+  const link = singleFieldLink(
+    resolveLink(schema, child, relation, operation),
+    schema,
+    relation,
+    operation,
+  );
 
   // `from` is non-empty exactly on the side that holds the foreign key.
   const owning = relation.from.length > 0;

@@ -146,6 +146,124 @@ export const Account: ModelSchema = {
   }
 };
 
+export const Ledger: ModelSchema = {
+  "name": "Ledger",
+  "table": "Ledger",
+  "fields": {
+    "tenantId": {
+      "name": "tenantId",
+      "column": "tenantId",
+      "type": "Int",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false
+    },
+    "code": {
+      "name": "code",
+      "column": "code",
+      "type": "String",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false
+    },
+    "title": {
+      "name": "title",
+      "column": "title",
+      "type": "String",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false
+    }
+  },
+  "primaryKey": [
+    "tenantId",
+    "code"
+  ],
+  "uniques": [],
+  "relations": {
+    "entries": {
+      "name": "entries",
+      "model": "LedgerEntry",
+      "kind": "many",
+      "relationName": "LedgerToLedgerEntry",
+      "from": [],
+      "to": [],
+      "nullable": false
+    }
+  }
+};
+
+export const LedgerEntry: ModelSchema = {
+  "name": "LedgerEntry",
+  "table": "LedgerEntry",
+  "fields": {
+    "id": {
+      "name": "id",
+      "column": "id",
+      "type": "Int",
+      "nullable": false,
+      "isId": true,
+      "isUpdatedAt": false,
+      "default": {
+        "kind": "autoincrement"
+      }
+    },
+    "tenantId": {
+      "name": "tenantId",
+      "column": "tenantId",
+      "type": "Int",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false
+    },
+    "ledgerCode": {
+      "name": "ledgerCode",
+      "column": "ledgerCode",
+      "type": "String",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false
+    },
+    "amount": {
+      "name": "amount",
+      "column": "amount",
+      "type": "Int",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false
+    },
+    "memo": {
+      "name": "memo",
+      "column": "memo",
+      "type": "String",
+      "nullable": true,
+      "isId": false,
+      "isUpdatedAt": false
+    }
+  },
+  "primaryKey": [
+    "id"
+  ],
+  "uniques": [],
+  "relations": {
+    "ledger": {
+      "name": "ledger",
+      "model": "Ledger",
+      "kind": "one",
+      "relationName": "LedgerToLedgerEntry",
+      "from": [
+        "tenantId",
+        "ledgerCode"
+      ],
+      "to": [
+        "tenantId",
+        "code"
+      ],
+      "nullable": false
+    }
+  }
+};
+
 export const MagicLinkToken: ModelSchema = {
   "name": "MagicLinkToken",
   "table": "MagicLinkToken",

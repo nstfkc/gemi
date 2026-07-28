@@ -866,7 +866,7 @@ describe("root contributions in compileRead", () => {
         return {
           as: request.as,
           kind: request.relation.kind,
-          parentField: "id",
+          parentFields: ["id"],
           strategy: "folded",
           root: {
             column: sql(`"folded"."data" as ${request.dialect.quoteIdent(request.as)}`),

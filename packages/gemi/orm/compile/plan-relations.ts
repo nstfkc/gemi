@@ -201,10 +201,13 @@ export interface RelationPlan {
   model: string;
   kind: "one" | "many";
   /**
-   * The parent *field* whose value keys the stitch. The root query must select
-   * it even when the caller's `select` did not ask for it.
+   * The parent *fields* whose values key the stitch. The root query must select
+   * every one of them even when the caller's `select` did not ask for it.
+   *
+   * A list because a relation may join on more than one field; for the ordinary
+   * single-field case it holds one.
    */
-  parentField: string;
+  parentFields: string[];
   /** Which strategy produced this plan. Reported by tests and, later, metrics. */
   strategy: string;
   /** Fetches the children for these parents and attaches them in place. */
@@ -337,7 +340,7 @@ export function planRelations(
     });
 
     plans.push(plan);
-    keyFields.add(plan.parentField);
+    for (const field of plan.parentFields) keyFields.add(field);
   }
 
   return { plans, keyFields: [...keyFields] };
@@ -669,12 +672,60 @@ function validateSubtree(
 // --- topology --------------------------------------------------------------
 
 export interface Link {
-  /** Field on the parent whose value the child is matched against. */
-  parentField: string;
-  /** Field on the child holding the matching value. */
-  childField: string;
+  /**
+   * Fields on the parent whose values the child is matched against, paired
+   * positionally with {@link childFields}.
+   *
+   * **A list, because a relation may join on more than one field.**
+   * `@relation(fields: [tenantId, orderId], references: [tenantId, id])` is a
+   * deliberate schema style — every table carries the tenant — and it used to
+   * be refused on every surface. The pairing is positional and Prisma
+   * guarantees the two sides are the same length, which `resolveLink` checks
+   * rather than assumes.
+   *
+   * Singular access is a *narrowing* and has to be justified: nested writes
+   * still take one field at a time, so they go through {@link singleFieldLink},
+   * which refuses a composite relation by name. That is a type-level guard
+   * rather than a convention — there is no `parentField` to reach for.
+   */
+  parentFields: string[];
+  /** Fields on the child holding the matching values. */
+  childFields: string[];
   /** Set for Prisma's implicit many-to-many, which joins through a table. */
   join?: { table: string; parentColumn: string; childColumn: string };
+}
+
+/**
+ * The one-field view of a link, for the callers that genuinely cannot take more.
+ *
+ * A nested write contributes a *column* to an insert, so a composite relation
+ * would be several — a different piece of work from reading across one, and
+ * refused here rather than silently writing the first field. #67's acceptance
+ * list is the read surfaces; this keeps the write side honest about the gap.
+ */
+export function singleFieldLink(
+  link: Link,
+  parent: ModelSchema,
+  relation: RelationSchema,
+  operation: string,
+): { parentField: string; childField: string; join?: Link["join"] } {
+  if (link.parentFields.length !== 1) {
+    throw new UnsupportedQueryError(
+      relation.name,
+      parent.name,
+      operation,
+      `${relation.name} joins on ${link.parentFields.length} fields ` +
+        `(${link.parentFields.join(", ")}). Reading across a composite ` +
+        `relation works; writing through one would have to contribute that ` +
+        `many foreign-key columns to this insert, which is not implemented. ` +
+        `Write the child separately with its keys set.`,
+    );
+  }
+  return {
+    parentField: link.parentFields[0],
+    childField: link.childFields[0],
+    join: link.join,
+  };
 }
 
 /**
@@ -713,10 +764,7 @@ export function resolveLink(
   if (relation.joinTable) return joinTableLink(parent, child, relation);
 
   if (relation.from.length > 0) {
-    return {
-      parentField: single(parent, relation, relation.from, "from", operation),
-      childField: single(parent, relation, relation.to, "to", operation),
-    };
+    return paired(parent, relation, relation.from, relation.to, operation);
   }
 
   const other = otherSide(parent, child, relation);
@@ -729,10 +777,46 @@ export function resolveLink(
     );
   }
 
-  return {
-    parentField: single(parent, relation, other.to, "to", operation),
-    childField: single(parent, relation, other.from, "from", operation),
-  };
+  // Read from the far side, so `to` is what *this* model holds.
+  return paired(parent, relation, other.to, other.from, operation);
+}
+
+/**
+ * The two sides of a join, checked to line up.
+ *
+ * Prisma guarantees `fields` and `references` are the same length — it refuses
+ * the schema otherwise — so a mismatch here means the generated artifact and
+ * the schema disagree, which is a `MalformedRelationError` rather than an
+ * unsupported query. Checked rather than assumed because the pairing is
+ * positional: a silent length mismatch would join on whichever fields happened
+ * to line up.
+ */
+function paired(
+  parent: ModelSchema,
+  relation: RelationSchema,
+  parentFields: string[],
+  childFields: string[],
+  operation: string,
+): Link {
+  if (parentFields.length === 0) {
+    throw new UnsupportedQueryError(
+      relation.name,
+      parent.name,
+      operation,
+      `${relation.name} names no join fields.`,
+    );
+  }
+
+  if (parentFields.length !== childFields.length) {
+    throw new MalformedRelationError(
+      parent.name,
+      relation.name,
+      `it joins ${parentFields.length} field(s) to ${childFields.length}: ` +
+        `${parentFields.join(", ")} against ${childFields.join(", ")}.`,
+    );
+  }
+
+  return { parentFields, childFields };
 }
 
 /** The far end of the relation, found by the name both sides share. */
@@ -780,28 +864,6 @@ function otherSide(
  * `create`. A refusal that misnames where it came from sends the reader to a
  * query they did not write — see #61.
  */
-function single(
-  parent: ModelSchema,
-  relation: RelationSchema,
-  fields: string[],
-  side: string,
-  operation: string,
-): string {
-  if (fields.length !== 1) {
-    throw new UnsupportedQueryError(
-      relation.name,
-      parent.name,
-      operation,
-      `${relation.name} joins on ${fields.length} fields (${side}: ` +
-        `${fields.join(", ") || "none"}). A multi-field relation needs a ` +
-        `composite key comparison on both sides — a tuple 'in' for the ` +
-        `batched strategy, a conjunction for the lateral one — which is not ` +
-        `implemented. Query the two models separately and join them in ` +
-        `process, or write the join with 'sql' and 'DB.query'.`,
-    );
-  }
-  return fields[0];
-}
 
 /**
  * Prisma's implicit many-to-many has no join *model*: it is a bare
@@ -834,8 +896,8 @@ function joinTableLink(
     }
 
     return {
-      parentField: primaryKey(parent, relation),
-      childField: primaryKey(child, relation),
+      parentFields: [primaryKey(parent, relation)],
+      childFields: [primaryKey(child, relation)],
       join: {
         table,
         parentColumn: owner,
@@ -856,8 +918,8 @@ function joinTableLink(
   const parentColumn = parent.name === a ? "A" : "B";
 
   return {
-    parentField: primaryKey(parent, relation),
-    childField: primaryKey(child, relation),
+    parentFields: [primaryKey(parent, relation)],
+    childFields: [primaryKey(child, relation)],
     join: {
       table,
       parentColumn,
@@ -954,19 +1016,37 @@ export const batchedStrategy: RelationStrategy = {
     );
 
     // Resolved at plan time so a stale artifact fails when the query is
-    // compiled rather than after the root query has already run.
+    // compiled rather than after the root query has already run. Every joined
+    // field is checked, not only the first — a composite relation whose second
+    // field is unkeyable would otherwise fail mid-stitch.
+    for (const name of link.parentFields) {
+      assertKeyable(
+        request.parent,
+        request.relation,
+        field(request.parent, request.relation, name),
+      );
+    }
+    for (const name of link.childFields) {
+      assertKeyable(
+        request.child,
+        request.relation,
+        field(request.child, request.relation, name),
+      );
+    }
+
+    // The join-table hops below encode and decode through the *first* field,
+    // which is exact: `_PostToTag` has two columns and `resolveLink` gives a
+    // one-element list for it.
     const parentKeyField = field(
       request.parent,
       request.relation,
-      link.parentField,
+      link.parentFields[0],
     );
     const childKeyField = field(
       request.child,
       request.relation,
-      link.childField,
+      link.childFields[0],
     );
-    assertKeyable(request.parent, request.relation, parentKeyField);
-    assertKeyable(request.child, request.relation, childKeyField);
 
     const many = request.relation.kind === "many";
 
@@ -974,7 +1054,7 @@ export const batchedStrategy: RelationStrategy = {
       as: request.as,
       model: request.relation.model,
       kind: request.relation.kind,
-      parentField: link.parentField,
+      parentFields: link.parentFields,
       strategy: BATCHED,
       load(parents, args, executor) {
         const context = {
@@ -1007,13 +1087,13 @@ async function loadDirect(
   link: Link,
   context: LoadContext,
 ): Promise<void> {
-  const { keys, byKey } = index(context.parents, link.parentField);
+  const { keys, byKey } = index(context.parents, link.parentFields);
   // Every parent's key is null: nothing can match, and the defaults the shaper
   // already wrote (`null` / `[]`) are the answer.
   if (keys.length === 0) return;
 
   const node = request.locate(context.args);
-  const query = childQuery(node, link.childField, keys);
+  const query = childQuery(node, link.childFields, keys);
 
   const rows = (await context.executor.exec(
     request.relation.model,
@@ -1025,13 +1105,17 @@ async function loadDirect(
   )) as Row[];
 
   for (const row of rows) {
-    const bucket = byKey.get(keyOf(row[link.childField]));
+    const bucket = byKey.get(
+      compositeKey(link.childFields.map((field) => row[field])),
+    );
     if (!bucket) continue;
     for (const parent of bucket) attach(parent, request.as, row, context.many);
   }
 
   if (query.hidden) {
-    for (const row of rows) delete row[link.childField];
+    for (const row of rows) {
+      for (const field of link.childFields) delete row[field];
+    }
   }
 }
 
@@ -1057,7 +1141,10 @@ async function loadThroughJoinTable(
   link: Link,
   context: LoadContext,
 ): Promise<void> {
-  const { keys, byKey } = index(context.parents, link.parentField);
+  // A join table has exactly two columns, so this hop is single-field by
+  // construction — `resolveLink` returns one-element lists for it, and the
+  // `[0]` below is that fact rather than an assumption about relations.
+  const { keys, byKey } = index(context.parents, link.parentFields);
   if (keys.length === 0) return;
 
   const { dialect } = request;
@@ -1066,19 +1153,19 @@ async function loadThroughJoinTable(
   const pairs = (await readPairs(
     dialect,
     join,
-    keys.map((key) => dialect.encode(key, context.parentKeyField)),
+    keys.map((key) => dialect.encode(key[0], context.parentKeyField)),
     context.executor,
   )) as Row[];
 
   // Parents keyed by the *child* id they link to, so the second hop can stitch
   // in one pass over its rows. Built once, not searched per row.
-  const owners = new Map<unknown, Row[]>();
-  const childKeys: unknown[] = [];
+  const owners = new Map<string, Row[]>();
+  const childKeys: unknown[][] = [];
 
   for (const pair of pairs) {
-    const parentKey = keyOf(
+    const parentKey = compositeKey([
       dialect.decode(pair[join.parentColumn], context.parentKeyField),
-    );
+    ]);
     const linked = byKey.get(parentKey);
     if (!linked) continue;
 
@@ -1086,13 +1173,13 @@ async function loadThroughJoinTable(
       pair[join.childColumn],
       context.childKeyField,
     );
-    const childKey = keyOf(childValue);
+    const childKey = compositeKey([childValue]);
 
     let bucket = owners.get(childKey);
     if (bucket === undefined) {
       bucket = [];
       owners.set(childKey, bucket);
-      childKeys.push(childValue);
+      childKeys.push([childValue]);
     }
     for (const parent of linked) bucket.push(parent);
   }
@@ -1100,7 +1187,7 @@ async function loadThroughJoinTable(
   if (childKeys.length === 0) return;
 
   const node = request.locate(context.args);
-  const query = childQuery(node, link.childField, childKeys);
+  const query = childQuery(node, link.childFields, childKeys);
 
   const rows = (await context.executor.exec(
     request.relation.model,
@@ -1114,13 +1201,13 @@ async function loadThroughJoinTable(
   // Iterated in the child query's order rather than the pairs' order, so a
   // relation-level `orderBy` still describes what each parent receives.
   for (const row of rows) {
-    const bucket = owners.get(keyOf(row[link.childField]));
+    const bucket = owners.get(compositeKey([row[link.childFields[0]]]));
     if (!bucket) continue;
     for (const parent of bucket) attach(parent, request.as, row, context.many);
   }
 
   if (query.hidden) {
-    for (const row of rows) delete row[link.childField];
+    for (const row of rows) delete row[link.childFields[0]];
   }
 }
 
@@ -1186,14 +1273,39 @@ async function readPairs(
  */
 function childQuery(
   node: unknown,
-  childField: string,
-  keys: unknown[],
+  childFields: string[],
+  keys: unknown[][],
 ): { args: Record<string, unknown>; hidden: boolean } {
   const relationArgs = (
     node === true || node === null || typeof node !== "object" ? {} : node
   ) as Record<string, unknown>;
 
-  const filter = { [childField]: { in: keys } };
+  /**
+   * One field is an `in`; several are an `OR` of `AND`s.
+   *
+   * **Written in argument space rather than as a tuple `in`**, which is the
+   * decision worth recording. Postgres has `(a, b) in ((…),(…))` and SQLite
+   * does not, so emitting it would mean a new dialect method and two spellings
+   * of the same predicate. `OR: [{ a: 1, b: 2 }, …]` is one shape both dialects
+   * already compile, through the `where` compiler that every other filter goes
+   * through — so it inherits the parameter accounting, the plan key and the
+   * injection rules instead of needing its own.
+   *
+   * It costs one placeholder per field per parent, where a tuple `in` would
+   * cost the same. `ParameterLimitError` therefore fires proportionally sooner
+   * on a composite relation, which is the honest behaviour: the ceiling is on
+   * placeholders and a composite key uses more of them.
+   */
+  const filter =
+    childFields.length === 1
+      ? { [childFields[0]]: { in: keys.map((key) => key[0]) } }
+      : {
+          OR: keys.map((key) =>
+            Object.fromEntries(
+              childFields.map((field, index) => [field, key[index]]),
+            ),
+          ),
+        };
   const args: Record<string, unknown> = {
     where:
       relationArgs.where === undefined
@@ -1207,15 +1319,33 @@ function childQuery(
   const select = relationArgs.select as Record<string, unknown> | undefined;
   if (select === undefined) return { args, hidden: false };
 
-  if (select[childField] === true) {
+  const missing = childFields.filter((field) => select[field] !== true);
+  if (missing.length === 0) {
     args.select = select;
     return { args, hidden: false };
   }
 
-  // The stitch key has to come back even when the caller did not ask for it.
-  // `attachRelations`' counterpart on the parent side deletes it again.
-  args.select = { ...select, [childField]: true };
+  // The stitch key has to come back even when the caller did not ask for it —
+  // every field of it. `attachRelations`' counterpart on the parent side
+  // deletes them again.
+  args.select = { ...select };
+  for (const field of missing) {
+    (args.select as Record<string, unknown>)[field] = true;
+  }
   return { args, hidden: true };
+}
+
+/**
+ * A map key for a tuple of values that cannot collide with a different tuple.
+ *
+ * `JSON.stringify` of the *normalised* values, not concatenation: `"a" + "b"`
+ * and `"ab" + ""` are the same string, and these are user data. Normalising
+ * first is what makes a `Date` and a `Bytes` key work at all, since neither
+ * compares by identity — `keyOf` already had to solve that for the single-field
+ * case, so this reuses it rather than restating it.
+ */
+function compositeKey(values: unknown[]): string {
+  return JSON.stringify(values.map(keyOf));
 }
 
 /**
@@ -1249,25 +1379,27 @@ function attach(parent: Row, as: string, row: Row, many: boolean): void {
  */
 function index(
   parents: Row[],
-  on: string,
-): { keys: unknown[]; byKey: Map<unknown, Row[]> } {
-  const byKey = new Map<unknown, Row[]>();
-  const keys: unknown[] = [];
+  on: string[],
+): { keys: unknown[][]; byKey: Map<string, Row[]> } {
+  const byKey = new Map<string, Row[]>();
+  const keys: unknown[][] = [];
 
   for (const parent of parents) {
-    const value = parent[on];
-    // A null foreign key matches nothing — `in` would not match it either —
-    // and the shaper has already written the `null` the caller sees.
-    if (value === null || value === undefined) continue;
+    const values = on.map((field) => parent[field]);
+    // A null anywhere in the key matches nothing — `in` would not match it
+    // either — and the shaper has already written the `null` the caller sees.
+    // For a composite key one null is enough: SQL equality on the other fields
+    // cannot rescue it.
+    if (values.some((value) => value === null || value === undefined)) continue;
 
-    const key = keyOf(value);
+    const key = compositeKey(values);
     let bucket = byKey.get(key);
     if (bucket === undefined) {
       bucket = [];
       byKey.set(key, bucket);
-      // The raw value, not the map key: this is what gets bound into the `in`
+      // The raw values, not the map key: these are what get bound into the `in`
       // list, and the dialect's encoder expects the value Prisma would hold.
-      keys.push(value);
+      keys.push(values);
     }
     bucket.push(parent);
   }

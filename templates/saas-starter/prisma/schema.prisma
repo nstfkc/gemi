@@ -174,3 +174,32 @@ model MagicLinkToken {
   @@unique([token, email])
   @@unique([pin, email])
 }
+
+/// A relation that joins on **two** fields (#67).
+///
+/// The shape is the tenant-scoped composite key: every table carries `tenantId`
+/// and every relation joins on `(tenantId, …)`. It is a deliberate schema style
+/// rather than an exotic one, and an application using it could not `include`
+/// at all until composite joins existed — so the differential harness needs a
+/// model with one to compare against Prisma.
+model Ledger {
+  tenantId Int
+  code     String
+  title    String
+
+  entries LedgerEntry[]
+
+  @@id([tenantId, code])
+}
+
+model LedgerEntry {
+  id         Int    @id @default(autoincrement())
+  tenantId   Int
+  ledgerCode String
+  amount     Int
+  memo       String?
+
+  ledger Ledger @relation(fields: [tenantId, ledgerCode], references: [tenantId, code])
+
+  @@index([tenantId, ledgerCode])
+}
