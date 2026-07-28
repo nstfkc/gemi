@@ -183,14 +183,47 @@ export interface ConstraintViolation {
   constraint?: string;
 }
 
+/**
+ * The ORM was asked to compile against a dialect it does not implement.
+ *
+ * **The split this message has to convey**, because it is the surprising part:
+ * `DatabaseManager` connects to MySQL and MariaDB perfectly well — Bun's client
+ * speaks all four — so raw SQL through `DB.query` / `DB.sql` works, and
+ * transactions work. What does not exist is a `SqlDialect` for them, so
+ * everything that *compiles* a statement stops here.
+ *
+ * A caller who reads only "not supported" reasonably concludes the connection
+ * is unusable, which is wrong and is the more expensive misreading: it is the
+ * ORM that is unavailable, not the database.
+ */
 export class UnsupportedDialectError extends Error {
   constructor(dialect: Dialect) {
     super(
-      `The gemi ORM does not support the '${dialect}' dialect yet. ` +
-        `Only sqlite and postgres are implemented.`,
+      `The gemi ORM does not support the '${dialect}' dialect. Only sqlite ` +
+        `and postgres are implemented — see the supported matrix in ` +
+        `docs/orm.md.\n\n` +
+        `The *connection* is fine: Bun's client speaks ${dialect}, so raw SQL ` +
+        `through DB.query / DB.sql and transactions all work. It is the query ` +
+        `compiler that has no ${dialect} dialect, so every model operation ` +
+        `raises this.\n\n` +
+        `Point DATABASE_URL at Postgres or SQLite to use the ORM, or keep ` +
+        `using Prisma's own client for this database.`,
     );
     this.name = "UnsupportedDialectError";
   }
+}
+
+/**
+ * Whether the ORM can compile for this dialect at all.
+ *
+ * Exported so an application can find out at **boot** rather than on its first
+ * query. That is the whole gap this closes: `DatabaseManager` constructs
+ * happily against MySQL, so a deploy pointed at one starts, passes a health
+ * check, serves traffic, and fails on the first model read — which is the
+ * latest and most expensive moment to learn it.
+ */
+export function ormSupports(dialect: Dialect): boolean {
+  return dialect === "sqlite" || dialect === "postgres";
 }
 
 const sqlite = new SqliteDialect();

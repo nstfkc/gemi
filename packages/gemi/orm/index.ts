@@ -147,6 +147,7 @@ export {
   SqliteDialect,
   UnsupportedDialectError,
   dialectFor,
+  ormSupports,
   type ConstraintViolation,
   type SqlDialect,
 } from "./dialect";
