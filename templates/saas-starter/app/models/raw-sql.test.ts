@@ -124,6 +124,60 @@ function suite(label: string, url?: string) {
       ]);
     });
 
+    /**
+     * A parsed request body reaching an interpolation slot, which is the
+     * intended call site with the intended safe value:
+     *
+     *   const body = await request.json()
+     *   DB.query(sql`select "email" from "User" where "email" = ${body.email}`)
+     *
+     * When "is this a fragment" was answered by *shape*, `{"text": …,
+     * "binders": []}` in that body was spliced into the statement as text.
+     * These run the forged bodies through the public facade against a real
+     * database, because the assertion that matters is not what the compiler
+     * emits — it is what comes back.
+     */
+    test("a forged fragment in a request body cannot splice into the statement", async () => {
+      const search = (email: unknown) =>
+        DB.query<{ email: string }>(
+          sql`select "email" from "User" where "email" = ${email}`,
+        );
+
+      expect(await search("ada@x.test")).toHaveLength(1);
+
+      // `'' or 1=1` would have returned every row.
+      expect(await search({ text: `'' or 1=1`, binders: [] })).toHaveLength(0);
+
+      // ...and this one returned the password column out of a statement that
+      // selects only `email`.
+      const leak = await search({
+        text: `'' union select "password" from "User"`,
+        binders: [],
+      });
+      expect(leak).toHaveLength(0);
+
+      // A structural clone of a real fragment is the same attack without the
+      // hand-written text: shape cannot tell it apart, membership can.
+      const real = sql`x`;
+      expect(
+        await search({ text: real.text, binders: [...real.binders] }),
+      ).toHaveLength(0);
+
+      // The table is intact and the honest query still works, so the guard is
+      // not simply refusing everything.
+      expect(await emails()).toHaveLength(3);
+    });
+
+    test("a forged fragment inside join binds too", async () => {
+      const rows = await DB.query(
+        sql`select "email" from "User" where "email" in (${join([
+          { text: `'' or 1=1`, binders: [] },
+        ])})`,
+      );
+
+      expect(rows).toHaveLength(0);
+    });
+
     test("a value that looks like SQL is data, not SQL", async () => {
       const injected = `x' or 1=1; drop table "User"; --`;
       const rows = await DB.query(

@@ -199,10 +199,23 @@ export class SqliteDialect implements SqlDialect {
 
   // The two conversions above that do not need a field to decide: a `Date` is
   // milliseconds and a boolean is 0/1, which is what the ORM writes and
-  // therefore what a raw statement has to compare against. Everything else is
-  // handed to the driver as it arrived — including a plain object, which the
-  // driver rejects, because a value that should have been JSON is a mistake
-  // worth hearing about rather than guessing at.
+  // therefore what a raw statement has to compare against.
+  //
+  // Everything else is handed to the driver as it arrived, **including a plain
+  // object**, and that is a decision rather than an omission. Measured, since
+  // the obvious guesses are both wrong: Bun binds a plain object without
+  // complaint on *both* dialects, and on Postgres it lands correctly in a
+  // `jsonb` column — an object bound into one comes back as the object. So
+  // refusing them here would break the legitimate case to catch the mistaken
+  // one. On SQLite the same value binds to something no row matches, silently;
+  // stringify it yourself if the column is JSON.
+  //
+  // Guessing from the value is the other tempting fix and is worse: the
+  // compiler only JSON-encodes because a field says `Json`, and encoding on
+  // sight would turn a mistyped parameter into a successfully-written string.
+  // (An *array* is the one Bun does reject on SQLite, with
+  // `SQLite query expected 1 values, received 2` — a confusing message for a
+  // real mistake, but a loud one.)
   encodeUntyped(value: unknown): unknown {
     if (value instanceof Date) return value.getTime();
     if (typeof value === "boolean") return value ? 1 : 0;

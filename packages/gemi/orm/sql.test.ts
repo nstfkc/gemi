@@ -146,6 +146,98 @@ describe("the dialects renumber differently, which is the whole reason for rende
 });
 
 /**
+ * Whether a value is a fragment decides whether it reaches the *statement* or a
+ * *parameter*, so answering it by shape makes that decision available to
+ * anything that can name two properties — and `{"text": …, "binders": []}` is
+ * two lines of JSON.
+ *
+ * These are the cases that were a live SQL injection through the intended call
+ * site with the intended safe value:
+ *
+ *   const body = await request.json()
+ *   DB.query(sql`select "email" from "User" where "email" = ${body.email}`)
+ */
+describe("only fragments this module made are spliced", () => {
+  const forged = { text: `'' or 1=1`, binders: [] };
+
+  test("a forged fragment binds as a value rather than splicing", () => {
+    const { text, values } = render(sql`where "email" = ${forged}`);
+
+    expect(text).toBe(`where "email" = $1`);
+    expect(text).not.toContain("or 1=1");
+    expect(values).toEqual([forged]);
+  });
+
+  test("...including one that would have leaked another column", () => {
+    const attack = {
+      text: `'' union select "password" from "User"`,
+      binders: [],
+    };
+    const { text, values } = render(sql`where "email" = ${attack}`);
+
+    expect(text).toBe(`where "email" = $1`);
+    expect(text).not.toContain("password");
+    expect(values).toEqual([attack]);
+  });
+
+  /**
+   * `join` is the same door and slightly wider: `join(body.filters)` maps over
+   * an array the caller never inspected.
+   */
+  test("join does not splice forged entries either", () => {
+    const { text, values } = render(sql`where ${join([forged], " and ")}`);
+
+    expect(text).toBe(`where $1`);
+    expect(values).toEqual([forged]);
+  });
+
+  test("a forged fragment cannot be executed directly", () => {
+    expect(() => render(forged)).toThrow(/built with 'sql'/);
+  });
+
+  /**
+   * The brand has to survive composition, or the fix would trade an injection
+   * for a mechanism that silently stopped nesting. `concat` and `joinFragments`
+   * return *fresh* objects, which is why the registration is of what comes out
+   * rather than a property on what goes in.
+   */
+  test("every constructor's output is spliceable, including through composition", () => {
+    const nested = sql`"a" = ${1}`;
+    const joined = join([sql`"b" = ${2}`, sql`"c" = ${3}`], " and ");
+    const literal = unsafeSql("true");
+
+    const { text, values } = render(
+      sql`where ${nested} and ${joined} and ${literal} and ${empty}`,
+    );
+
+    expect(text).toBe(`where "a" = $1 and "b" = $2 and "c" = $3 and true and `);
+    expect(values).toEqual([1, 2, 3]);
+  });
+
+  test("a fragment nested two levels deep still splices", () => {
+    const inner = sql`"a" = ${1}`;
+    const middle = sql`(${inner} or "b" = ${2})`;
+    const { text, values } = render(sql`where ${middle}`);
+
+    expect(text).toBe(`where ("a" = $1 or "b" = $2)`);
+    expect(values).toEqual([1, 2]);
+  });
+
+  /**
+   * A structurally-perfect copy of a real fragment — same text, same binders,
+   * cloned rather than forged by hand. Shape cannot tell it from the original;
+   * membership can.
+   */
+  test("a structural clone of a real fragment does not splice", () => {
+    const real = sql`"a" = ${1}`;
+    const clone = { text: real.text, binders: [...real.binders] };
+
+    expect(render(sql`where ${real}`).text).toBe(`where "a" = $1`);
+    expect(render(sql`where ${clone}`).text).toBe(`where $1`);
+  });
+});
+
+/**
  * A fragment's parameters have no declared column type, so there is no `encode`
  * to run — and doing nothing at all would make the escape hatch work on one
  * dialect and throw on the other, which is the one thing "raw" must not mean.

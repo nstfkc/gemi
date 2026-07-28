@@ -62,6 +62,49 @@ import {
 export type SqlFragment = Fragment;
 
 /**
+ * Every fragment this module has produced.
+ *
+ * **Identity, not shape, and the difference is a SQL injection.** `interpolate`
+ * splices a fragment as text and binds everything else, so "is this a fragment"
+ * decides whether a value reaches the statement or a parameter. Asking the
+ * *shape* — a `text` string and a `binders` array — makes that decision
+ * answerable by anything that can name two properties, and `{"text": "…",
+ * "binders": []}` is two lines of JSON:
+ *
+ * ```ts
+ * const body = await request.json()
+ * await DB.query(sql`select "email" from "User" where "email" = ${body.email}`)
+ * // body.email = { text: `'' union select "password" from "User"`, binders: [] }
+ * // -> select "email" from "User" where "email" = '' union select "password" from "User"
+ * ```
+ *
+ * That is the intended call site with the intended safe value, and it returned
+ * the password column out of a statement selecting only `email`. The internal
+ * `Fragment` never had the problem because nothing outside `compile/` could
+ * construct one; making the type public is what turned "text plus binders" from
+ * an implementation detail into a shape an attacker can name. `unsafeSql` is
+ * built so that reaching for the escape hatch is a decision — a structural check
+ * is a second, unmarked door beside it.
+ *
+ * A `WeakSet` the module owns cannot be forged: membership is granted only by
+ * the constructors below. It registers the *returned* object rather than
+ * stamping a property, because `concat` and `joinFragments` return fresh objects
+ * — a marker property on the inputs would not survive them, and the version that
+ * cannot drift is the one that brands what actually comes out.
+ */
+const FRAGMENTS = new WeakSet<object>();
+
+function brand(fragment: Fragment): SqlFragment {
+  FRAGMENTS.add(fragment);
+  return fragment;
+}
+
+/** Whether a value is a fragment *this module made*, so it splices rather than binds. */
+function isFragment(value: unknown): value is Fragment {
+  return typeof value === "object" && value !== null && FRAGMENTS.has(value);
+}
+
+/**
  * A SQL fragment. Every `${value}` is bound as a parameter; a `${fragment}` is
  * spliced in, carrying its own parameters with it.
  *
@@ -102,7 +145,7 @@ export function sql(
     if (i < values.length) parts.push(interpolate(values[i]));
   }
 
-  return concat(...parts);
+  return brand(concat(...parts));
 }
 
 /**
@@ -133,7 +176,7 @@ export function join(
   }
   if (values.length === 0) return empty;
 
-  return joinFragments(values.map(interpolate), separator);
+  return brand(joinFragments(values.map(interpolate), separator));
 }
 
 /**
@@ -144,10 +187,9 @@ export function join(
  * statement. Frozen, because it is shared by every caller and a fragment is read
  * as immutable everywhere else.
  */
-export const empty: SqlFragment = Object.freeze({
-  text: "",
-  binders: Object.freeze([]) as [],
-});
+export const empty: SqlFragment = brand(
+  Object.freeze({ text: "", binders: Object.freeze([]) as [] }),
+);
 
 /**
  * **Text straight into the SQL, with no parameter around it.** The one door in
@@ -202,7 +244,7 @@ export function unsafeSql(literal: string): SqlFragment {
         `never do.`,
     );
   }
-  return text(literal);
+  return brand(text(literal));
 }
 
 /**
@@ -250,16 +292,6 @@ export function renderFragment(
         : dialect.encodeUntyped(value),
     ),
   };
-}
-
-/** Whether a value is a fragment, so it splices rather than binds. */
-function isFragment(value: unknown): value is Fragment {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    typeof (value as Fragment).text === "string" &&
-    Array.isArray((value as Fragment).binders)
-  );
 }
 
 /**

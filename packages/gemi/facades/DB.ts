@@ -76,7 +76,14 @@ export class DB extends Facade {
   // **Where the number comes from.** Bun puts it on `count`, and leaves
   // `affectedRows` null — measured on both dialects rather than read from a
   // changelog, for `update`, `delete`, `insert`, a statement matching nothing,
-  // and one with `returning`. `compile/write.ts` records the same measurement
+  // and one with `returning`.
+  //
+  // `result.count` on what is otherwise an *array* reads like a bug, so: Bun
+  // returns an array with `count`, `command` and `lastInsertRowid` hung off it,
+  // on every statement including the ones that return no rows at all. A write
+  // without `returning` is therefore a zero-length array whose `count` is the
+  // number of rows it touched, and a write *with* one is an array of the rows
+  // whose `count` matches their number. `compile/write.ts` records the same measurement
   // from the other side: the *ORM's* counts come from `RETURNING` instead,
   // because there the statement shape is ours to choose and an exact count that
   // depends on nothing undocumented is worth a key column per row. Here the

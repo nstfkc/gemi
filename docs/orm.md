@@ -644,9 +644,18 @@ stops at this door.
 
 Values are handed to the driver as they arrive, with two exceptions that exist so a fragment means
 the same thing on both dialects: a `Date` binds as milliseconds on SQLite — which is what the ORM
-stores — and a boolean as `0`/`1`. A plain object is **not** JSON-encoded for you; the compiler only
-knows to do that because a field says `Json`, and guessing from the value would turn a mistyped
-parameter into a successfully-written string.
+stores — and a boolean as `0`/`1`.
+
+A plain object is **not** JSON-encoded for you. The compiler only knows to do that because a field
+says `Json`, and guessing from the value would turn a mistyped parameter into a successfully-written
+string. What the driver then does with it differs: Bun binds an object into a Postgres `jsonb`
+column correctly, and on SQLite binds it to something no row matches. Stringify it yourself if the
+column is JSON and you want the same answer on both.
+
+**Only a fragment built by `sql`, `join`, `unsafeSql` or `empty` is spliced.** Anything else in an
+interpolation slot is bound — including an object that merely *looks* like a fragment, which is what
+a parsed request body can be made to contain. That check is membership, not shape, precisely so that
+`{"text": "…", "binders": []}` arriving from outside the program is a parameter and not a statement.
 
 ### The rowcount is a primitive, not a diagnostic
 
