@@ -456,53 +456,58 @@ describe("plan cache discrimination", () => {
   });
 
   /**
-   * The gap `collapsedList` does not cover, pinned so it changes deliberately.
+   * The gap `collapsedList` did not cover, now closed on Postgres (#97).
    *
-   * A composite relation cannot be filtered with a single `in`, so the batched
-   * loader builds an `OR` of `AND`s — whose text varies with its branch count,
-   * so it cannot be collapsed the way `= any($1)` can. The result is that
-   * Postgres, otherwise immune to parent-count churn, is not immune for a
-   * composite relation.
+   * This test was added by #95 asserting the *churn* — a composite `include`
+   * minting one plan per parent count on both dialects — and written to flip
+   * rather than be deleted when the fix landed. This is the flip.
    *
-   * Asserted rather than left as a comment because the *asymmetry* is the
-   * surprising part: same include, same query shape, different relation arity.
-   * If a future change makes the composite path collapse too, this is what
-   * should say so.
+   * A composite key now binds one array per **column** through `unnest`, so the
+   * SQL text is fixed however many parents arrive and every length is one
+   * entry. SQLite keeps the `OR`, whose text genuinely does grow, and churns as
+   * it always has — `plan.ts` records that a coarser key cannot fix that side.
    */
-  test("a composite parent filter churns on both dialects, unlike a single-field one", () => {
+  test("a composite parent filter is one plan on postgres, many on sqlite", () => {
     const counts = [2, 3, 10, 50];
-
     const composite = (dialect: SqliteDialect | PostgresDialect) =>
       new Set(
         counts.map((n) =>
-          planKey(dialect, "Ledger", "findMany", {
+          planKey(dialect, "LedgerEntry", "findMany", {
             where: {
-              OR: Array.from({ length: n }, (_, i) => ({
-                tenantId: 1,
-                code: `c${i}`,
-              })),
+              $compositeIn: {
+                fields: ["tenantId", "ledgerCode"],
+                values: Array.from({ length: n }, (_, i) => [1, `c${i}`]),
+              },
             },
           }),
         ),
       ).size;
 
-    const single = (dialect: SqliteDialect | PostgresDialect) =>
-      new Set(
-        counts.map((n) =>
-          planKey(dialect, "User", "findMany", {
-            where: { id: { in: Array.from({ length: n }, (_, i) => i) } },
+    expect(composite(postgres)).toBe(1);
+    expect(composite(sqlite)).toBe(counts.length);
+  });
+
+  /**
+   * The half the collapse must **not** take with it: the joined columns are
+   * *identifiers* in the emitted SQL, so two relations joining on different
+   * ones — or on the same ones in a different order, which pairs the sides
+   * differently — must not share an entry.
+   */
+  test("the joined columns still discriminate, on both dialects", () => {
+    for (const dialect of [sqlite, postgres]) {
+      const keys = new Set(
+        [
+          ["tenantId", "ledgerCode"],
+          ["ledgerCode", "tenantId"],
+          ["tenantId", "id"],
+        ].map((fields) =>
+          planKey(dialect, "LedgerEntry", "findMany", {
+            where: { $compositeIn: { fields, values: [[1, "a"]] } },
           }),
         ),
-      ).size;
-
-    // SQLite expands an `in` to one placeholder per element, so it churns
-    // either way and always has.
-    expect(single(sqlite)).toBe(counts.length);
-    expect(composite(sqlite)).toBe(counts.length);
-
-    // Postgres collapses an `in` to one key — and cannot collapse the `OR`.
-    expect(single(postgres)).toBe(1);
-    expect(composite(postgres)).toBe(counts.length);
+      );
+      expect(keys.size).toBe(3);
+    }
   });
 
   // Postgres is the exception that proves the point: there, every in-length

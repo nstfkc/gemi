@@ -10,7 +10,12 @@ import {
 import { assertPageArgument } from "./paginate";
 import { COUNT_KEY } from "../relation-filters";
 import * as registry from "../registry";
-import type { FieldSchema, ModelSchema, RelationSchema } from "../schema";
+import type {
+  FieldSchema,
+  ModelSchema,
+  RelationSchema,
+  ScalarType,
+} from "../schema";
 import {
   type BindContext,
   type Fragment,
@@ -20,6 +25,7 @@ import {
   sql,
 } from "./fragment";
 import { resolveSelection } from "./select";
+import { COMPOSITE_IN } from "./where";
 
 /**
  * The relation planner: an include tree plus a root model in, a *strategy* out.
@@ -1093,7 +1099,13 @@ async function loadDirect(
   if (keys.length === 0) return;
 
   const node = request.locate(context.args);
-  const query = childQuery(node, link.childFields, keys);
+  const query = childQuery(
+    node,
+    link.childFields,
+    keys,
+    request.child,
+    request.dialect,
+  );
 
   const rows = (await context.executor.exec(
     request.relation.model,
@@ -1187,7 +1199,13 @@ async function loadThroughJoinTable(
   if (childKeys.length === 0) return;
 
   const node = request.locate(context.args);
-  const query = childQuery(node, link.childFields, childKeys);
+  const query = childQuery(
+    node,
+    link.childFields,
+    childKeys,
+    request.child,
+    request.dialect,
+  );
 
   const rows = (await context.executor.exec(
     request.relation.model,
@@ -1275,6 +1293,8 @@ function childQuery(
   node: unknown,
   childFields: string[],
   keys: unknown[][],
+  childSchema: ModelSchema,
+  dialect: SqlDialect,
 ): { args: Record<string, unknown>; hidden: boolean } {
   const relationArgs = (
     node === true || node === null || typeof node !== "object" ? {} : node
@@ -1310,23 +1330,16 @@ function childQuery(
    *        sqlite    composite: 4 keys    single: 4 keys
    *        postgres  composite: 4 keys    single: 1 key
    *
-   *    SQLite churns either way and always has. The Postgres asymmetry is new,
-   *    and it is the churn `collapsedList` was written to prevent arriving
-   *    through the door it does not cover. A form where the parent keys ride in
-   *    one parameter — `(a, b) in (select * from unnest($1::int[], $2::text[]))`
-   *    — would fix it there and is filed rather than guessed at here, because
-   *    it needs the column types and its own coverage on both dialects. #97.
+    *    **Closed on Postgres by #97**, which is why `compositeFilter` below asks
+   *    the dialect rather than always building the `OR`: `unnest` binds one
+   *    array per *column*, so the text is fixed and every parent count is one
+   *    entry. SQLite has no such form and keeps the `OR`, churning as it always
+   *    has — `plan.ts` records that a coarser key cannot fix that side.
    */
   const filter =
     childFields.length === 1
       ? { [childFields[0]]: { in: keys.map((key) => key[0]) } }
-      : {
-          OR: keys.map((key) =>
-            Object.fromEntries(
-              childFields.map((field, index) => [field, key[index]]),
-            ),
-          ),
-        };
+      : compositeFilter(childSchema, childFields, keys, dialect);
   const args: Record<string, unknown> = {
     where:
       relationArgs.where === undefined
@@ -1354,6 +1367,45 @@ function childQuery(
     (args.select as Record<string, unknown>)[field] = true;
   }
   return { args, hidden: true };
+}
+
+/**
+ * The filter for a composite join key: a tuple `in` where the dialect can bind
+ * one, and an `OR` of `AND`s where it cannot.
+ *
+ * **The `OR` is the portable form and stays the fallback**, for the reasons it
+ * was chosen originally: it is one shape both dialects compile, through the
+ * `where` compiler every other filter goes through, so it inherits the
+ * parameter accounting and the injection rules. What it does not inherit is a
+ * fixed SQL text — its length grows with the parent count, so the plan cache
+ * mints an entry per page size (#97).
+ *
+ * `unnest` fixes that on Postgres by binding one array per *column* instead of
+ * one placeholder per parent, so the text is constant. The dialect is asked
+ * whether it can spell every column's type rather than told: an unmappable
+ * type keeps the `OR`, because a cast that does not round-trip exactly is
+ * silently wrong rows rather than an error.
+ */
+function compositeFilter(
+  child: ModelSchema,
+  childFields: string[],
+  keys: unknown[][],
+  dialect: SqlDialect,
+): Record<string, unknown> {
+  const types = childFields.map((name) => child.fields[name]?.type);
+
+  if (
+    types.every((type) => type !== undefined) &&
+    dialect.canBindCompositeIn(types as ScalarType[])
+  ) {
+    return { [COMPOSITE_IN]: { fields: childFields, values: keys } };
+  }
+
+  return {
+    OR: keys.map((key) =>
+      Object.fromEntries(childFields.map((field, index) => [field, key[index]])),
+    ),
+  };
 }
 
 /**

@@ -88,6 +88,11 @@ export function compileWhere(
       continue;
     }
 
+    if (key === COMPOSITE_IN) {
+      predicates.push(compileCompositeIn(schema, value, context, at));
+      continue;
+    }
+
     if (key === "NOT") {
       const negated = compileGroup(schema, value, context, at, "AND");
       // `NOT` of nothing is vacuously true, so it contributes no predicate.
@@ -485,6 +490,64 @@ const COMPARISONS: Record<string, string> = {
   gt: ">",
   gte: ">=",
 };
+
+/**
+ * The internal key a batched relation loader uses to match a **tuple** of
+ * columns against a list of tuples — the composite-relation counterpart of
+ * `in`, and the reason #97 exists.
+ *
+ * **`$`-prefixed because a Prisma field cannot be.** Field names match
+ * `[A-Za-z][A-Za-z0-9_]*`, so this cannot collide with a column, which a
+ * `__`-prefixed name could not promise. It is not part of the public argument
+ * grammar: nothing outside `plan-relations.ts` builds one, and a caller writing
+ * it by hand gets the same treatment as any unknown key everywhere else,
+ * because the schema has no such field.
+ */
+export const COMPOSITE_IN = "$compositeIn";
+
+/** `{ fields: ["a", "b"], values: [[1, "x"], [2, "y"]] }`. */
+interface CompositeInOperand {
+  fields: string[];
+  values: unknown[][];
+}
+
+/**
+ * `(a, b) in (…)`, in whichever form the dialect can bind.
+ *
+ * Only ever reached on a dialect whose `canBindCompositeIn` said yes for these
+ * column types — `plan-relations.ts` asks before it emits this key, and keeps
+ * the portable `OR` of `AND`s otherwise. So there is no fallback here: arriving
+ * with a dialect that cannot express it is a bug in that decision, not a shape
+ * to degrade.
+ */
+function compileCompositeIn(
+  schema: ModelSchema,
+  operand: unknown,
+  context: WhereContext,
+  locate: (args: any) => any,
+): Fragment {
+  const { dialect } = context;
+  const { fields } = operand as CompositeInOperand;
+
+  const resolved = fields.map((name) => {
+    const field = schema.fields[name];
+    if (!field) {
+      throw new UnknownFieldError(name, schema.name, Object.keys(schema.fields));
+    }
+    return field;
+  });
+
+  const columns = resolved.map(
+    (field) =>
+      `${context.qualifier ?? ""}${dialect.quoteIdent(field.column)}`,
+  );
+
+  return dialect.compositeIn(
+    columns,
+    resolved.map((field) => field.type),
+    (args) => (locate(args) as CompositeInOperand).values,
+  );
+}
 
 function compileFieldFilter(
   schema: ModelSchema,
