@@ -24,7 +24,7 @@ import { assertUniqueWhere } from "./unique";
 import { compileWhere } from "./where";
 
 /** Every read operation, and what each accepts. */
-const READ_ARGS: Record<string, Set<string>> = {
+export const READ_ARGS: Record<string, Set<string>> = {
   findMany: new Set(["where", "orderBy", "skip", "take", "select", "include", "omit"]),
   findFirst: new Set(["where", "orderBy", "skip", "take", "select", "include", "omit"]),
   findFirstOrThrow: new Set([

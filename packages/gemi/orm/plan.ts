@@ -159,6 +159,14 @@ let evictions = 0;
 const LITERAL_KEYS = new Set([
   "orderBy",
   "select",
+  // `omit` is `select`'s complement and decides the same thing — which columns
+  // the statement asks for — so it fails the same way and in the worse
+  // direction. `omit: { password: true }` and `{ password: false }` both shape
+  // to `boolean`, so whichever compiled first decided for the other: an admin
+  // screen that keeps the column warms the cache, and the public endpoint that
+  // asked to hide it gets the column back. The reverse order is harmless, which
+  // is exactly the wrong asymmetry.
+  "omit",
   "include",
   "distinct",
   "mode",

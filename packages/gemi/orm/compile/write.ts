@@ -76,7 +76,7 @@ import { compileWhere } from "./where";
 // the three that return a count — Prisma types it the same way. It is resolved
 // by `resolveSelection`, so the `RETURNING` list narrows exactly as a read's
 // column list does and the omitted column is never read.
-const WRITE_ARGS: Record<string, Set<string>> = {
+export const WRITE_ARGS: Record<string, Set<string>> = {
   create: new Set(["data", "select", "include", "omit"]),
   createMany: new Set(["data"]),
   update: new Set(["data", "where", "select", "include", "omit"]),

@@ -617,6 +617,29 @@ const CASES: [string, string, unknown][] = [
     omit: { id: true }, include: { accounts: { orderBy: { id: "asc" } } },
   }],
 
+  // Nested, which is where the motivating shape actually bites: a column you
+  // never want to leave the process is as likely to be on an *included*
+  // relation as on the root. Both strategies have to agree — the lateral one
+  // resolves the node's selection directly, the batched one forwards the
+  // argument to the child's own query.
+  ["omit inside an include", "findMany", {
+    orderBy: { id: "asc" },
+    include: { accounts: { omit: { organizationRole: true }, orderBy: { id: "asc" } } },
+  }],
+  ["omit the column an include stitches on", "findMany", {
+    orderBy: { id: "asc" },
+    include: { accounts: { omit: { userId: true }, orderBy: { id: "asc" } } },
+  }],
+  ["omit on a to-one include", "findMany", {
+    orderBy: { id: "asc" },
+    include: { organization: { omit: { logoUrl: true } } },
+  }],
+  ["omit at both levels", "findMany", {
+    orderBy: { id: "asc" },
+    omit: { password: true },
+    include: { accounts: { omit: { organizationRole: true }, orderBy: { id: "asc" } } },
+  }],
+
   // --- count ------------------------------------------------------------
   ["count", "count", undefined],
   ["count with where", "count", { where: { deletedAt: null } }],

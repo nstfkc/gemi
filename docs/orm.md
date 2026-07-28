@@ -141,7 +141,9 @@ later is included by default.
 It is a real projection: the omitted column never enters the `SELECT` list, so it is not read, not
 shaped and not decoded. `select` and `omit` together are refused, because one names what to keep and
 the other what to drop; Prisma rejects that pair too. It works on every operation that returns a
-payload, reads and writes alike.
+payload, reads and writes alike, and **inside an `include`** — which is where it usually matters,
+since a column you never want to leave the process is as likely to be on a related row as on the
+root one. Both relation strategies honour it.
 
 **It is not a substitute for a policy's `redact`.** `omit` is the caller choosing; `redact` is the
 model refusing, and a caller cannot opt out of it. Use `redact` for "nobody may read this", and
