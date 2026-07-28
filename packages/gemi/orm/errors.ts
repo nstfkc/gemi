@@ -22,6 +22,36 @@ export class UnsupportedQueryError extends Error {
 }
 
 /**
+ * An argument the ORM has **decided not to implement**, as opposed to one it has
+ * not implemented yet.
+ *
+ * The distinction is the whole point, and it is a distinction a caller can act
+ * on: "yet" means wait for a release, "will not" means change the code. Sharing
+ * one error for both meant `docs/orm.md` could list `omit` under *Not in scope*
+ * while the runtime said "yet" — a contradiction a reader has no way to
+ * resolve, and the one #68 exists to end.
+ *
+ * A subclass rather than a sibling, so `catch (e) { if (e instanceof
+ * UnsupportedQueryError) … }` keeps working for callers that do not care which
+ * kind it is.
+ */
+export class UnsupportedByDesignError extends UnsupportedQueryError {
+  constructor(
+    argument: string,
+    model: string,
+    operation: string,
+    /** What to use instead. Required — see #61: a refusal owes the caller a next step. */
+    reason: string,
+  ) {
+    super(argument, model, operation);
+    this.name = "UnsupportedByDesignError";
+    this.message =
+      `gemi ORM does not implement '${argument}' (${model}.${operation}), ` +
+      `and this is a decision rather than a gap. ${reason}`;
+  }
+}
+
+/**
  * Thrown when an argument names something that is not a field on the model. A
  * `where` key with no matching field is an error, never a passthrough — that is
  * the rule that keeps user input out of the identifier positions in the SQL.

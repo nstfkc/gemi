@@ -21,6 +21,7 @@ export function resolveSelection(
   operation: string,
 ): FieldSchema[] {
   const select = args?.select;
+  const omit = args?.omit;
 
   // Prisma rejects using both, because the result shape would be ambiguous.
   if (select !== undefined && args?.include !== undefined) {
@@ -32,10 +33,26 @@ export function resolveSelection(
     );
   }
 
+  // ...and rejects `select` with `omit` for the same reason: one names what to
+  // keep and the other what to drop, so together they describe two different
+  // column lists. Verified against a generated client, which raises rather
+  // than picking one.
+  if (select !== undefined && omit !== undefined) {
+    throw new UnsupportedQueryError(
+      "select + omit",
+      schema.name,
+      operation,
+      `'select' names what to keep and 'omit' what to drop, so the two ` +
+        `describe different column lists. Prisma allows only one of them on ` +
+        `the same query. Drop the 'omit' — a 'select' already excludes ` +
+        `everything it does not name.`,
+    );
+  }
+
   // `include` keeps every scalar and adds relations beside them, which is
   // precisely the default column list.
   if (select === undefined || select === null) {
-    return Object.values(schema.fields);
+    return omitted(schema, omit, operation);
   }
 
   if (typeof select !== "object" || Array.isArray(select)) {
@@ -112,6 +129,97 @@ export function resolveSelection(
   // because the relation's own key column is added by the caller of this
   // function and then hidden again from the result.
   return selected;
+}
+
+/**
+ * The default column list minus whatever `omit` names.
+ *
+ * **The complement of `select`, and the reason to have both.** With `select`
+ * the exclusion list is rewritten every time the model gains a column, and the
+ * day somebody forgets is the day the new column silently stops being
+ * returned. `omit: { password: true }` says the thing that is actually stable
+ * about the query — *this one column must never leave the process* — so a
+ * column added later is included by default, which is the safer direction for
+ * everything except the field you named.
+ *
+ * A real projection, not a post-filter: the omitted column never enters the
+ * `select` list, so it is not read, not shaped and not decoded. Prisma does the
+ * same — verified from its query log, where the column is simply absent.
+ *
+ * Note this deliberately does *not* replace a policy's `redact`. `omit` is the
+ * caller choosing; `redact` is the model refusing, and a caller cannot opt out
+ * of it. See `docs/orm.md`.
+ */
+function omitted(
+  schema: ModelSchema,
+  omit: unknown,
+  operation: string,
+): FieldSchema[] {
+  if (omit === undefined || omit === null) return Object.values(schema.fields);
+
+  if (typeof omit !== "object" || Array.isArray(omit)) {
+    throw new UnsupportedQueryError(
+      "omit",
+      schema.name,
+      operation,
+      "Expected an object of fields.",
+    );
+  }
+
+  const dropped = new Set<string>();
+
+  for (const key of Object.keys(omit as Record<string, unknown>)) {
+    const value = (omit as Record<string, unknown>)[key];
+    if (value === undefined) continue;
+
+    // A relation cannot be omitted — it is not a column, and it is absent
+    // unless an `include` asked for it. Named separately from the unknown-field
+    // case, which would send the caller looking for a typo.
+    if (key in schema.relations) {
+      throw new UnsupportedQueryError(
+        `omit.${key}`,
+        schema.name,
+        operation,
+        `'${key}' is a relation, not a column. A relation is already absent ` +
+          `unless an 'include' asks for it.`,
+      );
+    }
+
+    if (!(key in schema.fields)) {
+      throw new UnknownFieldError(key, schema.name, Object.keys(schema.fields));
+    }
+
+    if (typeof value !== "boolean") {
+      throw new UnsupportedQueryError(
+        `omit.${key}`,
+        schema.name,
+        operation,
+        "Expected true or false.",
+      );
+    }
+
+    // `false` means keep it, exactly as it does in a `select`.
+    if (value) dropped.add(key);
+  }
+
+  const kept = Object.values(schema.fields).filter(
+    (field) => !dropped.has(field.name),
+  );
+
+  if (kept.length === 0) {
+    // Prisma raises rather than returning rows of empty objects, and a
+    // `select ... from` with no columns is not valid SQL either way — the same
+    // reasoning as an empty `select`.
+    throw new UnsupportedQueryError(
+      "omit",
+      schema.name,
+      operation,
+      `It omits every field on ${schema.name}, which leaves no column to ` +
+        `select. Prisma rejects that too.`,
+    );
+  }
+
+  return kept;
 }
 
 /**
