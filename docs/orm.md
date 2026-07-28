@@ -48,7 +48,7 @@ generator gemi {
 Then `bunx prisma generate`. You get three files under `app/models/generated/`:
 
 - `schema.ts` — runtime metadata: tables, columns, types, defaults, relations.
-- `models.ts` — a typed base class per model, carrying the thirteen operations.
+- `models.ts` — a typed base class per model, carrying the fourteen operations.
 - `index.ts` — registers every model by name.
 
 **The output is committed on purpose.** Diffs stay reviewable and CI needs no codegen step.
@@ -97,10 +97,10 @@ read. It can only see modules you hand it, so it does not replace the `register`
 
 ## Querying
 
-Thirteen operations, with Prisma's argument types verbatim:
+Fourteen operations, with Prisma's argument types verbatim:
 
 ```
-findMany   findFirst   findFirstOrThrow   findUnique   findUniqueOrThrow   count
+findMany   findFirst   findFirstOrThrow   findUnique   findUniqueOrThrow   count   aggregate
 create     createMany  update             updateMany   upsert              delete   deleteMany
 ```
 
@@ -125,6 +125,55 @@ Queries return **plain objects**, never class instances. That is the default and
 stepping stone: a `Pick<User, "id">` hydrated as a `User` would carry methods reading fields the
 query never fetched. See [Rows and entities](./orm-rows-and-entities.md) for the two opt-in levels
 above it — `track` + `save`, and `wrap`.
+
+### Aggregates
+
+```ts
+const { _max } = await Post.aggregate({
+  where: { boardId },
+  _max: { position: true },
+})
+const next = (_max.position ?? 0) + 1
+```
+
+That is the shape most reaches for `aggregate`: the next sort index when reordering a list, not
+analytics. All five of Prisma's functions are here, and they compose into one statement:
+
+```ts
+await User.aggregate({
+  where: { globalRole: { gt: 0 } },
+  _count: { _all: true, email: true },
+  _sum: { globalRole: true },
+  _avg: { globalRole: true },
+  _min: { createdAt: true },
+  _max: { createdAt: true },
+})
+```
+
+Three behaviours are Prisma's and are easy to get wrong in the other direction:
+
+- **`_count` has two shapes.** `_count: true` returns a number; `_count: { _all: true, email: true }`
+  returns an object — and a **per-field count counts rows where that column is not null**, which is
+  a different number from `_all` and the reason to ask per field.
+- **The empty set is not zeroes.** Over no matching rows `_count` is `0`, but `_sum`, `_avg`, `_min`
+  and `_max` are each `null`, per field.
+- **`take` / `skip` page the rows being aggregated**, not the one row that comes back — so
+  `take: 2` with `orderBy: { position: "asc" }` sums the first two rows, not the whole table.
+  (`orderBy` on its own, with no pagination, changes nothing and is dropped.)
+
+`count` gains Prisma's per-field form for the same reason:
+
+```ts
+await User.count()                                   // 3
+await User.count({ select: { _all: true, email: true } })  // { _all: 3, email: 2 }
+```
+
+Results are typed by Prisma's own mapped types, so `_max: { position: true }` narrows to
+`{ _max: { position: number | null } }` and nothing else.
+
+**`groupBy` is not implemented.** `having` is a predicate compiler over aggregate expressions rather
+than columns, which is its own piece of work; shipping half of it typed as though it worked would be
+worse than not shipping it.
 
 ### Per-call options
 

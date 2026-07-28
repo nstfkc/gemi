@@ -4,7 +4,6 @@ import type { Operation, QueryPlan } from "../plan";
 import type { ModelSchema } from "../schema";
 import { buildRowShaper } from "../shape";
 import {
-  type Binder,
   type Fragment,
   bindValues,
   concat,
@@ -12,7 +11,7 @@ import {
   render,
   sql,
 } from "./fragment";
-import { compileOrderBy, parseOrderBy, reverse, type OrderTerm } from "./orderBy";
+import { compileOrderBy, parseOrderBy } from "./orderBy";
 import {
   planRelations,
   strategiesOf,
@@ -21,6 +20,8 @@ import {
 import { planRelationCounts } from "./relation-count";
 import { resolveSelection, withKeyFields } from "./select";
 import { assertUniqueWhere } from "./unique";
+import { compileAggregate } from "./aggregate";
+import { pagination } from "./paginate";
 import { compileWhere } from "./where";
 
 /** Every read operation, and what each accepts. */
@@ -37,11 +38,11 @@ const READ_ARGS: Record<string, Set<string>> = {
   ]),
   findUnique: new Set(["where", "select", "include"]),
   findUniqueOrThrow: new Set(["where", "select", "include"]),
-  // No `select`: Prisma's `count` uses it to return an object of per-field
-  // counts, which is aggregate territory and is not emitted onto the generated
-  // bases. Accepting it here and then ignoring it would return the plain total
-  // under a shape the caller did not ask for.
-  count: new Set(["where", "orderBy", "skip", "take"]),
+  // `select` on a count returns an object of per-field counts rather than a
+  // number — `{ _all: 3, email: 2 }`. It was refused here while there was no
+  // aggregate to put it beside; now there is, and `compileAggregate` owns it,
+  // so this only has to let it through.
+  count: new Set(["where", "orderBy", "skip", "take", "select"]),
 };
 
 export function isReadOperation(op: Operation): boolean {
@@ -73,6 +74,14 @@ export function compileRead(
   strategy?: RelationStrategy,
 ): QueryPlan {
   assertArgs(schema, op, args);
+
+  // A count with a `select` is an aggregate wearing a count's name: same
+  // statement, flatter result. Routed rather than reimplemented, so the two
+  // cannot disagree about what a per-field count means (rows where the column
+  // is not null).
+  if (op === "count" && args?.select !== undefined && args.select !== null) {
+    return compileAggregate(schema, op, args, dialect);
+  }
 
   // Relations are planned *before* the `where` is compiled, because whether any
   // strategy folds children into the root statement decides whether the root's
@@ -124,7 +133,7 @@ export function compileRead(
     if (!paginated) {
       statement = concat(counted, from, whereClause);
     } else {
-      const { clause, terms } = pagination(schema, op, args, dialect, parsed);
+      const { clause, terms } = pagination(schema, args, dialect, parsed, SINGLE_ROW.has(op));
       const order = compileOrderBy(terms, dialect);
       // One column, not `*`: the subquery exists to be counted, so the narrowest
       // thing that keeps a row identity is right.
@@ -185,13 +194,13 @@ export function compileRead(
     reversed,
   } = pagination(
     schema,
-    op,
     args,
     dialect,
     parseOrderBy(schema, args?.orderBy, op, {
       dialect,
       locate: (a: any) => a?.orderBy,
     }),
+    SINGLE_ROW.has(op),
   );
   const order = compileOrderBy(terms, dialect, qualifier);
 
@@ -264,58 +273,6 @@ export function compileRead(
       // where the model's name is in scope for the message.
       return single ? (shaped[0] ?? null) : shaped;
     },
-  };
-}
-
-/**
- * `skip` / `take`, plus the two pieces of Prisma behaviour around them that are
- * invisible until you read the SQL it emits:
- *
- * - Paginating without an `orderBy` injects `order by <primary key> asc`.
- *   Without it, "page 2" is only meaningful if the storage engine happens to
- *   return a stable order, which is not guaranteed on either dialect.
- * - A *negative* `take` means "the last N": Prisma flips every ordering term,
- *   takes `abs(take)`, and then reverses the result set so the caller still
- *   sees their own ordering. `reversed` carries that last part out to `shape`.
- */
-function pagination(
-  schema: ModelSchema,
-  op: Operation,
-  args: any,
-  dialect: SqlDialect,
-  parsed: OrderTerm[],
-): { clause: Fragment; terms: OrderTerm[]; reversed: boolean } {
-  const single = SINGLE_ROW.has(op);
-  const take = single ? 1 : args?.take;
-  const skip = args?.skip;
-
-  let terms = parsed;
-  const paginating = take !== undefined || skip !== undefined;
-
-  if (paginating && terms.length === 0 && !single) {
-    terms = schema.primaryKey.map((name) => ({
-      column: schema.fields[name]?.column ?? name,
-      direction: "asc" as const,
-    }));
-  }
-
-  const negative = typeof take === "number" && take < 0;
-  if (negative) terms = reverse(terms);
-
-  const takeBinder: Binder | null =
-    take === undefined
-      ? null
-      : single
-        ? () => 1
-        : (callArgs: any) => Math.abs(Number(callArgs?.take));
-
-  const skipBinder: Binder | null =
-    skip === undefined ? null : (callArgs: any) => Number(callArgs?.skip);
-
-  return {
-    clause: dialect.paginate(takeBinder, skipBinder),
-    terms,
-    reversed: negative,
   };
 }
 
