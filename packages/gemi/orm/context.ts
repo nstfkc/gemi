@@ -149,6 +149,78 @@ export function runAsUser<T>(user: unknown, fn: () => Promise<T>): Promise<T> {
   );
 }
 
+/** Default threshold for the development-mode long-transaction warning. */
+const SLOW_TRANSACTION_MS = 2_000;
+
+function slowTransactionThreshold(): number | null {
+  // Read per call, never cached at module scope. `scripts/build.ts` rewrites
+  // `process.env.NODE_ENV` to `Bun.env.NODE_ENV` precisely so mode stays a
+  // runtime question in the built framework; caching it here would undo that.
+  if (process.env.NODE_ENV !== "development") return null;
+
+  const configured = process.env.GEMI_SLOW_TRANSACTION_MS;
+  if (configured === undefined) return SLOW_TRANSACTION_MS;
+
+  const parsed = Number(configured);
+  // A malformed value falls back rather than throwing or disabling: a typo in
+  // an env var should not silently switch a diagnostic off.
+  if (!Number.isFinite(parsed) || parsed <= 0) return SLOW_TRANSACTION_MS;
+  return parsed;
+}
+
+/**
+ * Warn, in development only, about a transaction that has been open too long.
+ *
+ * The risk is structural rather than occasional: an open transaction holds one
+ * reserved connection for as long as its callback runs, and nothing about
+ * `Model.transaction(async () => { ... })` stops that callback from awaiting a
+ * `fetch`, an S3 upload or a slow queue push. Under concurrency that drains the
+ * pool, and the symptom — every unrelated query in the process blocking on
+ * connection acquisition — names neither the callback nor the I/O in it.
+ *
+ * A timer rather than measuring elapsed time on the way out, for one reason:
+ * the worst case is the transaction that *never* settles (a hung request, a
+ * lock wait, a deadlock). After-the-fact measurement is silent for exactly that
+ * case; a timer fires while it is still open and still holding the connection.
+ *
+ * The `Error` is constructed up front and read only if the timer fires — V8
+ * formats `.stack` lazily on first access, so an ordinary fast transaction pays
+ * for an object allocation and nothing else.
+ *
+ * The clock starts at the `begin` call, not at the moment a connection is
+ * acquired, and stops when `begin` settles rather than when the callback
+ * returns — so it spans the pool wait and the commit round-trip as well as the
+ * callback. That is deliberate: all three are time this transaction is in
+ * flight, and a warning that only covered the callback would stay silent for a
+ * transaction stuck waiting on an exhausted pool, which is the exact situation
+ * a long transaction elsewhere creates. Hence "not settled" rather than "open
+ * for" — the message must not claim a connection was held for the whole span.
+ */
+function watchForSlowTransaction(): () => void {
+  const threshold = slowTransactionThreshold();
+  if (threshold === null) return () => {};
+
+  const site = new Error("transaction opened here");
+
+  const timer = setTimeout(() => {
+    const stack = site.stack?.split("\n").slice(1).join("\n") ?? "";
+    console.warn(
+      `[gemi] A database transaction has not settled after ${threshold}ms. It ` +
+        `reserves a pooled connection until it does — check for network or ` +
+        `filesystem I/O inside the callback, and move it outside the ` +
+        `transaction if you find any.\n${stack}\n` +
+        `(development only; set GEMI_SLOW_TRANSACTION_MS to change the threshold)`,
+    );
+  }, threshold);
+
+  // Otherwise the warning timer is itself a reason the process stays alive,
+  // which would turn a diagnostic into a hang in short-lived commands and
+  // scripts.
+  timer.unref?.();
+
+  return () => clearTimeout(timer);
+}
+
 /**
  * Run `fn` inside a transaction, entering the ambient scope for its whole async
  * subtree.
@@ -172,6 +244,12 @@ export function runAsUser<T>(user: unknown, fn: () => Promise<T>): Promise<T> {
  * because Bun types a savepoint handle as plain `SQL` — without `savepoint` on
  * it — while the runtime object does carry the method, which is what makes
  * three levels of nesting work.
+ *
+ * In development, an outermost transaction that stays open past
+ * `GEMI_SLOW_TRANSACTION_MS` (2s by default) warns — see
+ * `watchForSlowTransaction`. Nothing here *prevents* a long transaction; the
+ * warning exists because the cost of one is paid by unrelated queries
+ * elsewhere in the process, which makes it hard to trace back.
  *
  * The return type is asserted rather than inferred for one reason worth
  * knowing: Bun's `begin` unwraps a callback that resolves to an *array of
@@ -211,9 +289,22 @@ export function withTransaction<T>(
     }) as Promise<T>;
   }
 
+  // Only the outermost scope is watched. A savepoint reserves no connection of
+  // its own — its lifetime is bounded by the transaction it sits in, which is
+  // already being timed — so warning per depth would report one slow block as
+  // several warnings and point at the innermost frame rather than the one
+  // holding the connection.
+  const stopWatching = watchForSlowTransaction();
+
   // Spread rather than replace: a `Model.transaction` inside a `Model.asSystem`
   // must not silently re-enable policies for its whole subtree.
-  return pool.begin((tx) =>
-    ormContext.run({ ...current, tx, depth: 0 }, () => fn(tx)),
-  ) as Promise<T>;
+  return (
+    pool
+      .begin((tx) => ormContext.run({ ...current, tx, depth: 0 }, () => fn(tx)))
+      // `finally` and not a `then`/`catch` pair: the connection is released on
+      // rollback exactly as it is on commit, so a throwing callback must clear
+      // the timer too or every failed transaction leaves a warning armed
+      // against a connection that has already gone back to the pool.
+      .finally(stopWatching) as Promise<T>
+  );
 }

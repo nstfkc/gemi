@@ -18,7 +18,7 @@ import type { ModelSchema } from "./schema";
  * real:
  *
  *     export class Membership extends MembershipModel {
- *       static $policy = { scope: (ctx) => ({ orgId: ctx.user.orgId }) }
+ *       static $policies = [{ scope: (ctx) => ({ orgId: ctx.user.orgId }) }]
  *     }
  *     // ...and no `register("Membership", Membership)`
  *

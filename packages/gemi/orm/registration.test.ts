@@ -41,7 +41,7 @@ describe("the case the $exec guard cannot see", () => {
    */
   test("a policied subclass that was never registered is refused", () => {
     class User extends UserBase {
-      static $policy = scope;
+      static $policies = [scope];
     }
 
     register("User", UserBase);
@@ -53,7 +53,7 @@ describe("the case the $exec guard cannot see", () => {
 
   test("the error names both classes and the fix", () => {
     class Membership extends UserBase {
-      static $policy = scope;
+      static $policies = [scope];
     }
 
     register("User", UserBase);
@@ -71,7 +71,7 @@ describe("the case the $exec guard cannot see", () => {
 
   test("registering the subclass is what makes it pass", () => {
     class User extends UserBase {
-      static $policy = scope;
+      static $policies = [scope];
     }
 
     register("User", User);
@@ -89,7 +89,7 @@ describe("what it must not reject", () => {
    */
   test("a plain subclass of the registered class inherits and is fine", () => {
     class User extends UserBase {
-      static $policy = scope;
+      static $policies = [scope];
     }
     class AdminUser extends User {}
 
@@ -134,7 +134,7 @@ describe("what it must not reject", () => {
    */
   test("a name nothing is registered under is left alone", () => {
     class User extends UserBase {
-      static $policy = scope;
+      static $policies = [scope];
     }
 
     expect(() => assertPoliciesRegistered({ User })).not.toThrow();
@@ -149,7 +149,7 @@ describe("the other direction", () => {
    */
   test("an exported base is refused when a policied class owns the name", () => {
     class User extends UserBase {
-      static $policy = scope;
+      static $policies = [scope];
     }
 
     register("User", User);
@@ -166,10 +166,10 @@ describe("the other direction", () => {
 
   test("two different policies on the same name diverge", () => {
     class Ours extends UserBase {
-      static $policy = scope;
+      static $policies = [scope];
     }
     class Theirs extends UserBase {
-      static $policy = other;
+      static $policies = [other];
     }
 
     register("User", Theirs);
@@ -183,10 +183,10 @@ describe("the other direction", () => {
 describe("more than one module", () => {
   test("every module handed over is checked", () => {
     class Good extends UserBase {
-      static $policy = scope;
+      static $policies = [scope];
     }
     class Bad extends UserBase {
-      static $policy = other;
+      static $policies = [other];
     }
 
     register("User", Good);

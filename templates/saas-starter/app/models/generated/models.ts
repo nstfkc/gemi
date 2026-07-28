@@ -4,7 +4,13 @@
 // It is committed on purpose: diffs stay reviewable and CI needs no codegen step.
 
 import type { Prisma } from "@prisma/client";
-import { Model, type ExecOptions } from "gemi/orm";
+import {
+  Model,
+  ScopedPolicy,
+  type ExecOptions,
+  type ModelPolicy,
+  type PolicyEntry,
+} from "gemi/orm";
 
 import * as schema from "./schema";
 
@@ -27,8 +33,33 @@ type Subset<T, U> = {
 // oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
 export interface AccountModel extends Prisma.AccountGetPayload<{}> {}
 
+export type AccountPolicy = ModelPolicy<
+  Prisma.AccountWhereInput,
+  Prisma.AccountCreateInput,
+  Prisma.AccountGetPayload<{}>
+>;
+
+// The same shape with `scope`, `onCreate` and `onUpdate` abstract, so a policy
+// that scopes cannot omit the write halves. The runtime refuses those
+// combinations too — this makes it `TS2515` at the class declaration instead of
+// an error on the first write that reaches production.
+export abstract class AccountScopedPolicy extends ScopedPolicy<
+  Prisma.AccountWhereInput,
+  Prisma.AccountCreateInput,
+  Prisma.AccountGetPayload<{}>
+> {}
+
 export class AccountModel extends Model {
   static $schema = schema.Account;
+
+  // Narrowed from `Model`'s `PolicyEntry[]` to this model's own, so a policy
+  // written for another model is a type error here rather than a scope compiled
+  // against columns that do not exist.
+  static $policies?: readonly PolicyEntry<
+    Prisma.AccountWhereInput,
+    Prisma.AccountCreateInput,
+    Prisma.AccountGetPayload<{}>
+  >[];
 
   static findMany<T extends Prisma.AccountFindManyArgs>(
     args?: Subset<T, Prisma.AccountFindManyArgs>,
@@ -136,8 +167,33 @@ export class AccountModel extends Model {
 // oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
 export interface MagicLinkTokenModel extends Prisma.MagicLinkTokenGetPayload<{}> {}
 
+export type MagicLinkTokenPolicy = ModelPolicy<
+  Prisma.MagicLinkTokenWhereInput,
+  Prisma.MagicLinkTokenCreateInput,
+  Prisma.MagicLinkTokenGetPayload<{}>
+>;
+
+// The same shape with `scope`, `onCreate` and `onUpdate` abstract, so a policy
+// that scopes cannot omit the write halves. The runtime refuses those
+// combinations too — this makes it `TS2515` at the class declaration instead of
+// an error on the first write that reaches production.
+export abstract class MagicLinkTokenScopedPolicy extends ScopedPolicy<
+  Prisma.MagicLinkTokenWhereInput,
+  Prisma.MagicLinkTokenCreateInput,
+  Prisma.MagicLinkTokenGetPayload<{}>
+> {}
+
 export class MagicLinkTokenModel extends Model {
   static $schema = schema.MagicLinkToken;
+
+  // Narrowed from `Model`'s `PolicyEntry[]` to this model's own, so a policy
+  // written for another model is a type error here rather than a scope compiled
+  // against columns that do not exist.
+  static $policies?: readonly PolicyEntry<
+    Prisma.MagicLinkTokenWhereInput,
+    Prisma.MagicLinkTokenCreateInput,
+    Prisma.MagicLinkTokenGetPayload<{}>
+  >[];
 
   static findMany<T extends Prisma.MagicLinkTokenFindManyArgs>(
     args?: Subset<T, Prisma.MagicLinkTokenFindManyArgs>,
@@ -245,8 +301,33 @@ export class MagicLinkTokenModel extends Model {
 // oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
 export interface OrganizationModel extends Prisma.OrganizationGetPayload<{}> {}
 
+export type OrganizationPolicy = ModelPolicy<
+  Prisma.OrganizationWhereInput,
+  Prisma.OrganizationCreateInput,
+  Prisma.OrganizationGetPayload<{}>
+>;
+
+// The same shape with `scope`, `onCreate` and `onUpdate` abstract, so a policy
+// that scopes cannot omit the write halves. The runtime refuses those
+// combinations too — this makes it `TS2515` at the class declaration instead of
+// an error on the first write that reaches production.
+export abstract class OrganizationScopedPolicy extends ScopedPolicy<
+  Prisma.OrganizationWhereInput,
+  Prisma.OrganizationCreateInput,
+  Prisma.OrganizationGetPayload<{}>
+> {}
+
 export class OrganizationModel extends Model {
   static $schema = schema.Organization;
+
+  // Narrowed from `Model`'s `PolicyEntry[]` to this model's own, so a policy
+  // written for another model is a type error here rather than a scope compiled
+  // against columns that do not exist.
+  static $policies?: readonly PolicyEntry<
+    Prisma.OrganizationWhereInput,
+    Prisma.OrganizationCreateInput,
+    Prisma.OrganizationGetPayload<{}>
+  >[];
 
   static findMany<T extends Prisma.OrganizationFindManyArgs>(
     args?: Subset<T, Prisma.OrganizationFindManyArgs>,
@@ -354,8 +435,33 @@ export class OrganizationModel extends Model {
 // oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
 export interface OrganizationInvitationModel extends Prisma.OrganizationInvitationGetPayload<{}> {}
 
+export type OrganizationInvitationPolicy = ModelPolicy<
+  Prisma.OrganizationInvitationWhereInput,
+  Prisma.OrganizationInvitationCreateInput,
+  Prisma.OrganizationInvitationGetPayload<{}>
+>;
+
+// The same shape with `scope`, `onCreate` and `onUpdate` abstract, so a policy
+// that scopes cannot omit the write halves. The runtime refuses those
+// combinations too — this makes it `TS2515` at the class declaration instead of
+// an error on the first write that reaches production.
+export abstract class OrganizationInvitationScopedPolicy extends ScopedPolicy<
+  Prisma.OrganizationInvitationWhereInput,
+  Prisma.OrganizationInvitationCreateInput,
+  Prisma.OrganizationInvitationGetPayload<{}>
+> {}
+
 export class OrganizationInvitationModel extends Model {
   static $schema = schema.OrganizationInvitation;
+
+  // Narrowed from `Model`'s `PolicyEntry[]` to this model's own, so a policy
+  // written for another model is a type error here rather than a scope compiled
+  // against columns that do not exist.
+  static $policies?: readonly PolicyEntry<
+    Prisma.OrganizationInvitationWhereInput,
+    Prisma.OrganizationInvitationCreateInput,
+    Prisma.OrganizationInvitationGetPayload<{}>
+  >[];
 
   static findMany<T extends Prisma.OrganizationInvitationFindManyArgs>(
     args?: Subset<T, Prisma.OrganizationInvitationFindManyArgs>,
@@ -463,8 +569,33 @@ export class OrganizationInvitationModel extends Model {
 // oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
 export interface PasswordResetTokenModel extends Prisma.PasswordResetTokenGetPayload<{}> {}
 
+export type PasswordResetTokenPolicy = ModelPolicy<
+  Prisma.PasswordResetTokenWhereInput,
+  Prisma.PasswordResetTokenCreateInput,
+  Prisma.PasswordResetTokenGetPayload<{}>
+>;
+
+// The same shape with `scope`, `onCreate` and `onUpdate` abstract, so a policy
+// that scopes cannot omit the write halves. The runtime refuses those
+// combinations too — this makes it `TS2515` at the class declaration instead of
+// an error on the first write that reaches production.
+export abstract class PasswordResetTokenScopedPolicy extends ScopedPolicy<
+  Prisma.PasswordResetTokenWhereInput,
+  Prisma.PasswordResetTokenCreateInput,
+  Prisma.PasswordResetTokenGetPayload<{}>
+> {}
+
 export class PasswordResetTokenModel extends Model {
   static $schema = schema.PasswordResetToken;
+
+  // Narrowed from `Model`'s `PolicyEntry[]` to this model's own, so a policy
+  // written for another model is a type error here rather than a scope compiled
+  // against columns that do not exist.
+  static $policies?: readonly PolicyEntry<
+    Prisma.PasswordResetTokenWhereInput,
+    Prisma.PasswordResetTokenCreateInput,
+    Prisma.PasswordResetTokenGetPayload<{}>
+  >[];
 
   static findMany<T extends Prisma.PasswordResetTokenFindManyArgs>(
     args?: Subset<T, Prisma.PasswordResetTokenFindManyArgs>,
@@ -572,8 +703,33 @@ export class PasswordResetTokenModel extends Model {
 // oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
 export interface SessionModel extends Prisma.SessionGetPayload<{}> {}
 
+export type SessionPolicy = ModelPolicy<
+  Prisma.SessionWhereInput,
+  Prisma.SessionCreateInput,
+  Prisma.SessionGetPayload<{}>
+>;
+
+// The same shape with `scope`, `onCreate` and `onUpdate` abstract, so a policy
+// that scopes cannot omit the write halves. The runtime refuses those
+// combinations too — this makes it `TS2515` at the class declaration instead of
+// an error on the first write that reaches production.
+export abstract class SessionScopedPolicy extends ScopedPolicy<
+  Prisma.SessionWhereInput,
+  Prisma.SessionCreateInput,
+  Prisma.SessionGetPayload<{}>
+> {}
+
 export class SessionModel extends Model {
   static $schema = schema.Session;
+
+  // Narrowed from `Model`'s `PolicyEntry[]` to this model's own, so a policy
+  // written for another model is a type error here rather than a scope compiled
+  // against columns that do not exist.
+  static $policies?: readonly PolicyEntry<
+    Prisma.SessionWhereInput,
+    Prisma.SessionCreateInput,
+    Prisma.SessionGetPayload<{}>
+  >[];
 
   static findMany<T extends Prisma.SessionFindManyArgs>(
     args?: Subset<T, Prisma.SessionFindManyArgs>,
@@ -681,8 +837,33 @@ export class SessionModel extends Model {
 // oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
 export interface SocialAccountModel extends Prisma.SocialAccountGetPayload<{}> {}
 
+export type SocialAccountPolicy = ModelPolicy<
+  Prisma.SocialAccountWhereInput,
+  Prisma.SocialAccountCreateInput,
+  Prisma.SocialAccountGetPayload<{}>
+>;
+
+// The same shape with `scope`, `onCreate` and `onUpdate` abstract, so a policy
+// that scopes cannot omit the write halves. The runtime refuses those
+// combinations too — this makes it `TS2515` at the class declaration instead of
+// an error on the first write that reaches production.
+export abstract class SocialAccountScopedPolicy extends ScopedPolicy<
+  Prisma.SocialAccountWhereInput,
+  Prisma.SocialAccountCreateInput,
+  Prisma.SocialAccountGetPayload<{}>
+> {}
+
 export class SocialAccountModel extends Model {
   static $schema = schema.SocialAccount;
+
+  // Narrowed from `Model`'s `PolicyEntry[]` to this model's own, so a policy
+  // written for another model is a type error here rather than a scope compiled
+  // against columns that do not exist.
+  static $policies?: readonly PolicyEntry<
+    Prisma.SocialAccountWhereInput,
+    Prisma.SocialAccountCreateInput,
+    Prisma.SocialAccountGetPayload<{}>
+  >[];
 
   static findMany<T extends Prisma.SocialAccountFindManyArgs>(
     args?: Subset<T, Prisma.SocialAccountFindManyArgs>,
@@ -790,8 +971,33 @@ export class SocialAccountModel extends Model {
 // oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
 export interface UserModel extends Prisma.UserGetPayload<{}> {}
 
+export type UserPolicy = ModelPolicy<
+  Prisma.UserWhereInput,
+  Prisma.UserCreateInput,
+  Prisma.UserGetPayload<{}>
+>;
+
+// The same shape with `scope`, `onCreate` and `onUpdate` abstract, so a policy
+// that scopes cannot omit the write halves. The runtime refuses those
+// combinations too — this makes it `TS2515` at the class declaration instead of
+// an error on the first write that reaches production.
+export abstract class UserScopedPolicy extends ScopedPolicy<
+  Prisma.UserWhereInput,
+  Prisma.UserCreateInput,
+  Prisma.UserGetPayload<{}>
+> {}
+
 export class UserModel extends Model {
   static $schema = schema.User;
+
+  // Narrowed from `Model`'s `PolicyEntry[]` to this model's own, so a policy
+  // written for another model is a type error here rather than a scope compiled
+  // against columns that do not exist.
+  static $policies?: readonly PolicyEntry<
+    Prisma.UserWhereInput,
+    Prisma.UserCreateInput,
+    Prisma.UserGetPayload<{}>
+  >[];
 
   static findMany<T extends Prisma.UserFindManyArgs>(
     args?: Subset<T, Prisma.UserFindManyArgs>,

@@ -327,28 +327,99 @@ await Model.transaction(async () => {
 `Promise.all` over several ORM calls inside the callback is not safe — the ordinary, encouraged
 thing everywhere else in a Bun codebase. Await them in sequence.
 
+### Keep slow work out of the callback
+
+The reserved connection is held for as long as the callback runs, whether or not it is running
+queries. A `fetch`, an upload or a queue push inside a transaction holds a connection for the
+length of that I/O, and under load the symptom is unrelated queries elsewhere in the process
+blocking on connection acquisition — an error that names neither the transaction nor the I/O.
+
+In development, a transaction still open after 2 seconds warns with the stack of the call that
+opened it:
+
+```
+[gemi] A database transaction has not settled after 2000ms. It reserves a pooled connection
+until it does — check for network or filesystem I/O inside the callback…
+```
+
+Set `GEMI_SLOW_TRANSACTION_MS` to change the threshold. The warning is development-only and
+never fires in production; it is a diagnostic, not a limit — nothing cancels a long transaction.
+
+**A multi-statement write is atomic on its own.** A write with a nested `create` or `connect` runs
+more than one statement, and `$exec` opens a transaction for exactly those calls — so a nested
+step that fails, or a child policy that denies, rolls back the parent row too. A plain `create`
+still compiles to one statement and opens nothing, and inside a transaction you opened the nested
+one becomes a savepoint. You do not need `Model.transaction` to make a single nested write whole;
+you need it to make *several separate calls* whole.
+
 ## Policies
 
-A policy is a plain object on the model class. Every member is optional; a model with none pays a
-single `undefined` check per query.
+A model carries a **list** of policies. Every member of a policy is optional; a model with none
+pays a single `undefined` check per query.
 
 ```ts
+import { AccountPolicy } from "./generated"
+
 export class Account extends AccountModel {
-  static $policy = {
-    scope: (ctx) => ({ organizationId: ctx.user.organizationId }),
-    onCreate: (ctx, data) => ({ ...data, organizationId: ctx.user.organizationId }),
-  }
+  static $policies: AccountPolicy[] = [
+    {
+      scope: (ctx) => ({ organizationId: ctx.user.organizationId }),
+      onCreate: (ctx, data) => ({ ...data, organizationId: ctx.user.organizationId }),
+      onUpdate: (ctx, data) => ({ ...data, organizationId: ctx.user.organizationId }),
+    },
+  ]
 }
 
 register("Account", Account)
 ```
+
+The `AccountPolicy` annotation is not decoration. TypeScript does not contextually type an
+initializer from an inherited static declaration, so without it `ctx` and `data` are implicitly
+`any` — the generator emits one of these per model so you never write the generic form by hand.
+
+Policies compose by listing them, in the order they apply:
+
+```ts
+static $policies: AccountPolicy[] = [softDeletes<Account>(), new TenantPolicy()]
+```
+
+Entries may be objects or classes. A class is instantiated once, and extending the generated
+`AccountScopedPolicy` makes `scope`, `onCreate` and `onUpdate` abstract members — so a policy that
+scopes reads but forgets the write halves is a compile error rather than a runtime refusal:
+
+```ts
+class TenantPolicy extends AccountScopedPolicy {
+  scope(ctx: PolicyContext) { return { organizationId: (ctx.user as User).organizationId } }
+  onCreate(ctx: PolicyContext, data: Prisma.AccountCreateInput) { … }
+  onUpdate(ctx: PolicyContext, data: Partial<Prisma.AccountCreateInput>) { … }
+}
+```
+
+Each level of the prototype chain contributes its own array and they concatenate **base first**, so
+a shared model base can impose a policy a subclass can only narrow, never drop.
 
 | Member | When it runs | What it does |
 | --- | --- | --- |
 | `before(ctx)` | First | Return `false` (or throw) to deny outright. |
 | `scope(ctx)` | Reads and row-matching writes | Returns a `where` fragment `AND`ed into `args.where`. A policy can only ever **narrow**. |
 | `onCreate(ctx, data)` | `create` / `createMany` / `upsert` | Defaults or validates the payload. An insert has no `where` for a scope to narrow. |
+| `onUpdate(ctx, data)` | `update` / `updateMany` / `upsert` | Defaults or validates the payload of a write to existing rows. |
 | `redact(ctx, row)` | Shaping | Removes fields from a fetched row. |
+
+**A scope alone does not protect writes, and the ORM says so rather than assuming.** A `scope`
+narrows *which rows* a statement may touch and says nothing about the values written, so a
+tenant-scoped `update` could hand one of your own rows to another tenant — after which you can
+neither read it back nor put it right. Two guards, each asked of the policy that carries the scope
+rather than of the list as a whole:
+
+- a `create` under a policy with `scope` and no `onCreate` is refused;
+- an `update` writing a column that policy's own `scope` selects on is refused with
+  `ScopeEscapeError` unless it has an `onUpdate`.
+
+`onUpdate: (_ctx, data) => data` is a complete and legitimate answer. The point is that the policy
+says which. The guard reads scope-owned columns off the top level of the returned fragment, so
+`{ organizationId: 7 }` is understood and a combinator scope such as `{ OR: [...] }` is not
+attributed to any column and is not checked.
 
 **Policies rewrite the argument tree, never SQL.** That is what makes a scope two lines instead of
 string surgery, what keeps the two relation strategies interchangeable, and what keeps the plan
@@ -449,8 +520,8 @@ Ships as a policy, which is the proof the hook is expressive enough to be worth 
 import { softDelete, softDeleteMany, softDeletes } from "gemi/orm"
 
 export class User extends UserModel {
-  static $policy = softDeletes()          // reads skip rows with a deletedAt
-  static delete = softDelete(User)        // delete becomes an update
+  static $policies = [softDeletes<User>()]  // reads skip rows with a deletedAt
+  static delete = softDelete(User)          // delete becomes an update
   static deleteMany = softDeleteMany(User)
 }
 ```
@@ -460,14 +531,18 @@ read half applies to nested reads for the same reason every policy does — a de
 not appear under `User.findMany({ include: { accounts: true } })` without anything being written at
 the include site, which is the half ORM-level soft deletes usually get wrong.
 
-A class has one `$policy`, so composing with your own means composing the objects. The base-class
-route is usually cleaner and gets the ordering right for free (`policiesFor` walks base to
-derived, so the soft-delete scope applies first and yours narrows further):
+Composing it with your own is one list:
 
 ```ts
-class SoftDeleted extends UserModel { static $policy = softDeletes() }
-export class User extends SoftDeleted { static $policy = { …mine } }
+static $policies: UserPolicy[] = [softDeletes<User>(), new TenantPolicy()]
 ```
+
+`softDeletes()` carries an `onUpdate` pass-through, because `softDelete()` writes the very column
+the policy scopes on and something has to say that is intended. That permission is **per policy**:
+a tenant policy sitting beside it in the same list still has to answer for its own column.
+
+`field` is constrained to the model's own keys, so pointing it at a column that does not exist is a
+compile error rather than a `no such column` on the first read.
 
 ## Errors
 
@@ -478,6 +553,7 @@ Every failure is a typed error from `gemi/orm`, not a driver string.
 | `RecordNotFoundError` | An `…OrThrow` operation matched nothing. |
 | `UniqueConstraintError` | A unique constraint was violated, with the constraint identified. |
 | `PolicyDeniedError` | A `before` denied, or `ctx.user` was read with no user. |
+| `ScopeEscapeError` | An `update` wrote a column its own policy's `scope` selects on, with no `onUpdate`. |
 | `UnknownFieldError` / `UnknownRelationError` | A name that is not on the model. |
 | `UnsupportedQueryError` | A query shape the compiler does not implement — with what and why. |
 | `ModelNotRegisteredError` / `UnregisteredPolicyClassError` | Registry problems (see [Setup](#your-model-class)). |

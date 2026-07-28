@@ -24,6 +24,7 @@ export {
   RecordNotFoundError,
   RelationDepthExceededError,
   ReturningUnsupportedError,
+  ScopeEscapeError,
   UniqueConstraintError,
   UnknownFieldError,
   UnknownRelationError,
@@ -75,6 +76,8 @@ export {
 } from "./soft-deletes";
 
 export {
+  Policy,
+  ScopedPolicy,
   applyPolicies,
   applyRedaction,
   currentUser,
@@ -83,6 +86,7 @@ export {
   redactNullable,
   type ModelPolicy,
   type PolicyContext,
+  type PolicyEntry,
 } from "./policy";
 
 export {

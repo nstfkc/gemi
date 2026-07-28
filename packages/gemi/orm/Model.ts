@@ -42,7 +42,7 @@ import {
   markPreScoped,
   policiesFor,
   policyContext,
-  type ModelPolicy,
+  type PolicyEntry,
   type PolicyContext,
 } from "./policy";
 import {
@@ -103,11 +103,25 @@ export abstract class Model {
   static $schema: ModelSchema;
 
   /**
-   * The model's own policy. Optional, inherited through the prototype chain so
-   * a shared base can contribute one to every subclass — see `policiesFor` for
-   * the order, which is base first and narrowing-only.
+   * The model's own policies, in the order they should apply.
+   *
+   * A list rather than the single `$policy` this replaced, because composition
+   * is the normal case and the two ways of expressing it against one slot were
+   * both bad. Spreading (`{ ...softDeletes(), ...mine }`) silently drops
+   * whichever `scope` came first, and an intermediate base class per combination
+   * means one throwaway class for every model a shared policy applies to — the
+   * generated bases all differ, so a `TenantScoped` used on three models needed
+   * three of them.
+   *
+   * Each level of the prototype chain contributes its own array and they
+   * concatenate base first, so a shared model base can still impose a policy
+   * that a subclass can only narrow. See `policiesFor`.
+   *
+   * Entries may be policy objects or classes; a class is instantiated once. The
+   * generated `<Model>Policy` type gives an object literal here full contextual
+   * typing, which a bare `$policies = [...]` does not get on its own.
    */
-  static $policy?: ModelPolicy;
+  static $policies?: readonly PolicyEntry[];
 
   /**
    * Runs `fn` with policies suspended, for code that has no user and knows it:
@@ -343,6 +357,11 @@ export abstract class Model {
    * not safe here — the ordinary, encouraged thing everywhere else in a Bun
    * codebase. Await them in sequence. (`$exec` already runs its own nested
    * writes and relation reads sequentially for this reason.)
+   *
+   * **The connection is held for as long as the callback runs**, including
+   * while it awaits things that are not queries. In development a transaction
+   * still open after 2s warns (`GEMI_SLOW_TRANSACTION_MS`); in production it
+   * just holds the connection. Keep network and filesystem I/O outside.
    */
   static transaction<T>(fn: () => Promise<T>): Promise<T> {
     return withTransaction(app(DatabaseManager).sql, () => fn());
@@ -366,7 +385,11 @@ export abstract class Model {
     // operation that acquired a private path to the database would show up
     // here as a statement silently running outside the transaction, committed
     // while its neighbours roll back.
-    const conn = currentTransaction() ?? db.sql;
+    // `let`, because a multi-statement write opens a transaction of its own
+    // further down and every statement after that point — including the
+    // `executor.query` closure below, which captures this binding rather than
+    // its value — has to run on the new handle rather than back on the pool.
+    let conn = currentTransaction() ?? db.sql;
 
     // POLICIES, AND THE ORDER MATTERS MORE HERE THAN ANYWHERE ELSE IN THE ORM.
     //
@@ -677,107 +700,134 @@ export abstract class Model {
       });
     }
 
-    // A write with a nested `create` / `connect` runs more than one statement.
-    // Atomic exactly when the caller wrapped the call in `Model.transaction` —
-    // *not* implicitly. A write does not open its own transaction, because
-    // `$exec` cannot know whether it is one step of a larger unit; opening one
-    // per call would put a `BEGIN` around every query in the framework and turn
-    // a caller's transaction into a nest of savepoints it never asked for.
-    // Outside one, a failing later step still leaves the earlier rows written.
-    await runSteps(plan.before, effective, context, executor, []);
-
-    // `unsafe` despite the name. Bun's tagged template cannot express a query
-    // whose *shape* is dynamic, which every ORM query is. Safety here does not
-    // come from the template syntax: it comes from the compiler's two rules —
-    // identifiers only ever come from the generated schema, and every value is
-    // a bound parameter. Do not "fix" this into a tagged template.
-    const rows = await execute(
-      conn,
-      dialect,
-      schema,
-      op,
-      plan.text,
-      plan.bind(effective, context),
-    );
-
-    const result = this.$shape(plan, rows as unknown[]);
-
-    // The plan shapes a single-row operation to `null` when nothing matched;
-    // turning that into an error belongs here rather than in the plan, because
-    // this is where the model's name is in scope for the message.
-    if (result === null && ORTHROW.has(op)) {
-      throw new RecordNotFoundError(schema.name, op);
-    }
-
-    // Rows that could not exist until this one did: the far side of a relation
-    // whose foreign key lives on the child. Run before relations are attached,
-    // so an `include` on the same call sees what was just written.
-    await runSteps(plan.after, effective, context, executor, rowsOf(result));
-
-    // Relations are loaded after the root rows are shaped, one query per node
-    // in the include tree. Each of those queries is `$exec` on the *related
-    // model's own class*, recursively — not a private helper — so a nested read
-    // is subject to everything a top-level read is.
+    // A write with a nested `create` / `connect` runs more than one statement,
+    // and those statements are one unit: the parent row and the children it was
+    // asked for either all land or none do.
     //
-    // The planner is handed the database rather than reaching for it: that is
-    // what keeps `compile/` free of a runtime import, and it is why the one
-    // query with no model behind it — the implicit m-n join table — still runs
-    // on the connection this call resolved.
-    if (plan.relations !== undefined) {
-      await attachRelations(
-        plan.relations,
-        plan.hidden,
-        result,
-        effective,
-        executor,
+    // This used to be left to the caller — "atomic exactly when the caller
+    // wrapped the call in `Model.transaction`, *not* implicitly" — on the
+    // reasoning that `$exec` cannot know whether it is one step of a larger unit
+    // and that opening one per call would put a `BEGIN` around every query in
+    // the framework. The second half of that is right and is why the condition
+    // below is what it is; the first half does not survive contact with
+    // policies. A nested write step runs the *child's* `$exec`, so the child's
+    // policies are consulted mid-sequence, after the parent row is already
+    // written. A child that denies therefore left a half-written parent behind,
+    // and "your policy stopped the write" and "your policy stopped half the
+    // write" are not the same promise.
+    //
+    // So: implicit, but only for the calls that are actually multi-statement.
+    // A plain `create` still compiles to one statement and opens nothing, which
+    // is what keeps the `BEGIN`-around-everything objection answered — and
+    // inside a caller's own transaction `withTransaction` takes a savepoint
+    // rather than nesting a second one.
+    const finish = async (): Promise<unknown> => {
+      // Re-resolved rather than reused: if the branch below opened a
+      // transaction, every statement from here on belongs to it. Outside one
+      // this is the same handle it already was.
+      conn = currentTransaction() ?? conn;
+
+      await runSteps(plan.before, effective, context, executor, []);
+
+      // `unsafe` despite the name. Bun's tagged template cannot express a query
+      // whose *shape* is dynamic, which every ORM query is. Safety here does not
+      // come from the template syntax: it comes from the compiler's two rules —
+      // identifiers only ever come from the generated schema, and every value is
+      // a bound parameter. Do not "fix" this into a tagged template.
+      const rows = await execute(
+        conn,
+        dialect,
+        schema,
+        op,
+        plan.text,
+        plan.bind(effective, context),
       );
-    } else if (plan.hidden !== undefined && plan.hidden.length > 0) {
-      // A write can hide a key column without having any relation to attach:
-      // a nested `after` step needs the parent's key returned, but the caller's
-      // `select` never asked for it.
-      for (const row of rowsOf(result)) {
-        for (const key of plan.hidden) delete row[key];
+
+      const result = this.$shape(plan, rows as unknown[]);
+
+      // The plan shapes a single-row operation to `null` when nothing matched;
+      // turning that into an error belongs here rather than in the plan, because
+      // this is where the model's name is in scope for the message.
+      if (result === null && ORTHROW.has(op)) {
+        throw new RecordNotFoundError(schema.name, op);
       }
-    }
 
-    // A **folded** relation's rows never entered the child's `$exec`, so nothing
-    // has run the child's `redact` over them. The comment below — "a related row
-    // was shaped by its own model's `$exec`" — is true of the batched strategy
-    // and false of the lateral one, which is precisely the kind of assumption
-    // iteration 9 had to revisit for `scope`.
-    //
-    // `scope` survived the fold because policies rewrite the *argument tree*
-    // before planning, and a scoped `where` lands inside the subquery. `redact`
-    // cannot: it is a row transform in the shaping stage, with no argument to
-    // rewrite. So the parent runs it on the child's behalf, which is the only
-    // place that can.
-    if (plan.relations !== undefined && !system) {
-      for (const relation of plan.relations) {
-        if (relation.root === undefined) continue;
-        redactFolded(relation, result, op, system);
+      // Rows that could not exist until this one did: the far side of a relation
+      // whose foreign key lives on the child. Run before relations are attached,
+      // so an `include` on the same call sees what was just written.
+      await runSteps(plan.after, effective, context, executor, rowsOf(result));
+
+      // Relations are loaded after the root rows are shaped, one query per node
+      // in the include tree. Each of those queries is `$exec` on the *related
+      // model's own class*, recursively — not a private helper — so a nested read
+      // is subject to everything a top-level read is.
+      //
+      // The planner is handed the database rather than reaching for it: that is
+      // what keeps `compile/` free of a runtime import, and it is why the one
+      // query with no model behind it — the implicit m-n join table — still runs
+      // on the connection this call resolved.
+      if (plan.relations !== undefined) {
+        await attachRelations(
+          plan.relations,
+          plan.hidden,
+          result,
+          effective,
+          executor,
+        );
+      } else if (plan.hidden !== undefined && plan.hidden.length > 0) {
+        // A write can hide a key column without having any relation to attach:
+        // a nested `after` step needs the parent's key returned, but the caller's
+        // `select` never asked for it.
+        for (const row of rowsOf(result)) {
+          for (const key of plan.hidden) delete row[key];
+        }
       }
-    }
 
-    // Redaction last, on the shaped result. After relations, not before: a
-    // related row was shaped by its own model's `$exec` and has already been
-    // through its own policy's `redact` — this one only owns its own rows.
-    if (policy) applyRedaction(policies, policy, result);
+      // A **folded** relation's rows never entered the child's `$exec`, so nothing
+      // has run the child's `redact` over them. The comment below — "a related row
+      // was shaped by its own model's `$exec`" — is true of the batched strategy
+      // and false of the lateral one, which is precisely the kind of assumption
+      // iteration 9 had to revisit for `scope`.
+      //
+      // `scope` survived the fold because policies rewrite the *argument tree*
+      // before planning, and a scoped `where` lands inside the subquery. `redact`
+      // cannot: it is a row transform in the shaping stage, with no argument to
+      // rewrite. So the parent runs it on the child's behalf, which is the only
+      // place that can.
+      if (plan.relations !== undefined && !system) {
+        for (const relation of plan.relations) {
+          if (relation.root === undefined) continue;
+          redactFolded(relation, result, op, system);
+        }
+      }
 
-    // Provenance, after redaction so a redacted field is not snapshotted as its
-    // original value and then written back by `save`.
-    //
-    // Here rather than inside `$shape`, which is where the plan sketched it, for
-    // one reason: `$shape` is the seam an `ActiveRecordModel` overrides to
-    // return instances, and tracking there would make every such override
-    // responsible for reimplementing it. Doing it at the choke point means an
-    // override gets provenance for free — which is the same argument that put
-    // everything else in `$exec`.
-    if (options?.track === true) {
-      const relationKeys = (plan.relations ?? []).map((relation) => relation.as);
-      for (const row of rowsOf(result)) track(row, schema, relationKeys);
-    }
+      // Redaction last, on the shaped result. After relations, not before: a
+      // related row was shaped by its own model's `$exec` and has already been
+      // through its own policy's `redact` — this one only owns its own rows.
+      if (policy) applyRedaction(policies, policy, result);
 
-    return result;
+      // Provenance, after redaction so a redacted field is not snapshotted as its
+      // original value and then written back by `save`.
+      //
+      // Here rather than inside `$shape`, which is where the plan sketched it, for
+      // one reason: `$shape` is the seam an `ActiveRecordModel` overrides to
+      // return instances, and tracking there would make every such override
+      // responsible for reimplementing it. Doing it at the choke point means an
+      // override gets provenance for free — which is the same argument that put
+      // everything else in `$exec`.
+      if (options?.track === true) {
+        const relationKeys = (plan.relations ?? []).map((relation) => relation.as);
+        for (const row of rowsOf(result)) track(row, schema, relationKeys);
+      }
+
+      return result;
+    };
+
+    const atomic =
+      (plan.before !== undefined && plan.before.length > 0) ||
+      (plan.after !== undefined && plan.after.length > 0);
+
+    return atomic ? withTransaction(db.sql, finish) : finish();
   }
 
   /**

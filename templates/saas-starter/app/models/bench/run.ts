@@ -374,7 +374,7 @@ async function microbenchmarks(): Promise<string> {
       `Walks the prototype chain and finds nothing. Paid by every model. |`,
   );
 
-  (UserModel as any).$policy = { scope: () => ({ deletedAt: null }) };
+  (UserModel as any).$policies = [{ scope: () => ({ deletedAt: null }) }];
   try {
     const policed = await time(() => policiesFor(UserModel), {
       runs: 200,
@@ -385,7 +385,7 @@ async function microbenchmarks(): Promise<string> {
         `Same walk, one \`Object.hasOwn\` hit. |`,
     );
   } finally {
-    delete (UserModel as any).$policy;
+    delete (UserModel as any).$policies;
   }
 
   // §5 also asks whether the plan cache's bound is the right one. The answer is
@@ -1168,7 +1168,7 @@ async function runDialect(
       onCreate: (_context, data) => data,
     };
 
-    (UserModel as any).$policy = scopedPolicy;
+    (UserModel as any).$policies = [scopedPolicy];
     try {
       results.push(
         await scenario({
@@ -1193,7 +1193,7 @@ async function runDialect(
         }),
       );
     } finally {
-      delete (UserModel as any).$policy;
+      delete (UserModel as any).$policies;
     }
 
     return results;

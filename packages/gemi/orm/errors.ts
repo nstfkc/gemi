@@ -175,6 +175,58 @@ export class PolicyDeniedError extends Error {
 }
 
 /**
+ * Thrown when an `update` writes to a column its own policy's `scope` selects on,
+ * and the policy has no `onUpdate` saying what that should mean.
+ *
+ * The shape it catches:
+ *
+ *     scope: (ctx) => ({ organizationId: ctx.user.organizationId })
+ *     // ...and then
+ *     User.update({ where: { id }, data: { organizationId: 999 } })
+ *
+ * The scope did its job — only rows in the caller's own tenant could be selected
+ * — and the statement still hands one of them to another tenant. Afterwards the
+ * row is outside the scope, so it cannot be read back and cannot be put right by
+ * the same caller: a one-way door rather than a visible failure. The usual way in
+ * is not malice but mass assignment, a handler forwarding request fields into
+ * `data`.
+ *
+ * This is `assertCreateCovered`'s question asked of the other write. There it is
+ * "you scoped reads but never said what an insert means"; here it is "you scoped
+ * reads but never said whether an update may move a row out". Both are answered
+ * by writing the hook, including when the answer is "allow it" —
+ * `onUpdate: (_ctx, data) => data` is a complete and legitimate answer, and
+ * saying it out loud is the point.
+ *
+ * **What it cannot see.** The scope-owned columns are read off the top level of
+ * the fragment the policy returned, so `{ organizationId: 7 }` is understood and
+ * `{ OR: [...] }` is not — a scope built from combinators is not attributed to
+ * any column and an update through it is not checked. Narrowing that would mean
+ * either interpreting arbitrary `where` grammar or refusing every update on such
+ * a model, and neither is worth it: the guard is a rail on the common shape, not
+ * a proof.
+ */
+export class ScopeEscapeError extends Error {
+  constructor(
+    public readonly model: string,
+    public readonly operation: string,
+    public readonly fields: readonly string[],
+  ) {
+    const named = fields.map((field) => `'${field}'`).join(", ");
+    super(
+      `${model}.${operation} writes ${named}, which ${model}'s policy also ` +
+        `scopes on — so this update can move a row outside the scope that ` +
+        `selected it, where the caller can no longer read or repair it.\n\n` +
+        `Add an onUpdate to that policy. It may reassert the column ` +
+        `(data => ({ ...data, ${fields[0]}: ctx.user.${fields[0]} })), reject ` +
+        `the write, or allow it explicitly with (_ctx, data) => data — all ` +
+        `three are fine, and the point is that the policy says which.`,
+    );
+    this.name = "ScopeEscapeError";
+  }
+}
+
+/**
  * Thrown when a model class carries policies but is not the class the registry
  * resolves its name to.
  *
@@ -183,7 +235,7 @@ export class PolicyDeniedError extends Error {
  * AccountModel)` — while an application authors its policy on a subclass:
  *
  *     export class Account extends AccountModel {
- *       static $policy = { scope: (ctx) => ({ organizationId: … }) }
+ *       static $policies = [{ scope: (ctx) => ({ organizationId: … }) }]
  *     }
  *
  * A root query goes through `Account`, so `policiesFor(this)` finds the policy

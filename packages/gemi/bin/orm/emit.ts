@@ -454,6 +454,52 @@ export interface ${model}Model extends Prisma.${model}GetPayload<{}> {}
 `;
 }
 
+/**
+ * The model's policy types, emitted so an application never writes
+ * `ModelPolicy<Prisma.UserWhereInput, Prisma.UserCreateInput, …>` by hand.
+ *
+ * Two names because the two authoring forms need different things, and one name
+ * cannot be both a class to extend and a plain type alias:
+ *
+ *   static $policies: UserPolicy[] = [{ scope: (ctx) => … }]   // object form
+ *   class Tenant extends UserScopedPolicy { … }                // class form
+ *
+ * The annotation on the object form is load-bearing rather than decorative.
+ * TypeScript does not contextually type an initializer from an inherited static
+ * declaration, so a bare `static $policies = [{ scope: (ctx) => … }]` leaves
+ * `ctx` an implicit `any` — the return type is still checked against the base's
+ * declaration, but the author gets no help writing the body. Naming the type is
+ * what turns the hook into a typed one.
+ *
+ * `${model}Policy` is a `type` and `${model}ScopedPolicy` is a class, which is
+ * the split their uses actually want. The scoped one *has* to be a class —
+ * abstract members are the entire mechanism. The plain one is only ever an
+ * annotation (`static $policies: UserPolicy[] = [...]`), and emitting it as a
+ * class would put two runtime declarations plus a value import of `Policy` into
+ * every generated `models.ts`, once per model, to serve a use nobody has: an
+ * author who wants methods without the mandatory write halves extends
+ * `Policy<…>` from `gemi/orm` directly.
+ */
+function policyTypes(model: string): string {
+  return `
+export type ${model}Policy = ModelPolicy<
+  Prisma.${model}WhereInput,
+  Prisma.${model}CreateInput,
+  Prisma.${model}GetPayload<{}>
+>;
+
+// The same shape with \`scope\`, \`onCreate\` and \`onUpdate\` abstract, so a policy
+// that scopes cannot omit the write halves. The runtime refuses those
+// combinations too — this makes it \`TS2515\` at the class declaration instead of
+// an error on the first write that reaches production.
+export abstract class ${model}ScopedPolicy extends ScopedPolicy<
+  Prisma.${model}WhereInput,
+  Prisma.${model}CreateInput,
+  Prisma.${model}GetPayload<{}>
+> {}
+`;
+}
+
 function operation(model: string, op: ReadOperation): string {
   const argsType = `Prisma.${model}${op.args}`;
   const returns = op.returns(model);
@@ -556,7 +602,13 @@ export function emitModelsFile(schemas: ModelSchema[]): string {
   const parts = [
     HEADER,
     `\nimport type { Prisma } from "@prisma/client";\n`,
-    `import { Model, type ExecOptions } from "gemi/orm";\n`,
+    `import {
+  Model,
+  ScopedPolicy,
+  type ExecOptions,
+  type ModelPolicy,
+  type PolicyEntry,
+} from "gemi/orm";\n`,
     `\nimport * as schema from "./schema";\n`,
     `
 // Copied from Prisma's own generated client. It is what makes \`select\` and
@@ -571,9 +623,19 @@ type Subset<T, U> = {
 
   for (const schema of schemas) {
     parts.push(instanceShape(schema.name));
+    parts.push(policyTypes(schema.name));
     parts.push(`
 export class ${schema.name}Model extends Model {
   static $schema = schema.${schema.name};
+
+  // Narrowed from \`Model\`'s \`PolicyEntry[]\` to this model's own, so a policy
+  // written for another model is a type error here rather than a scope compiled
+  // against columns that do not exist.
+  static $policies?: readonly PolicyEntry<
+    Prisma.${schema.name}WhereInput,
+    Prisma.${schema.name}CreateInput,
+    Prisma.${schema.name}GetPayload<{}>
+  >[];
 ${READ_OPERATIONS.map((op) => operation(schema.name, op)).join("")}${countOperation(
       schema.name,
     )}${WRITE_OPERATIONS.map((op) => operation(schema.name, op)).join(

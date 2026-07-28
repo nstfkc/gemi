@@ -1,6 +1,10 @@
 import { RequestContext } from "../http/requestContext";
 import { currentActor } from "./context";
-import { PolicyDeniedError, UnsupportedQueryError } from "./errors";
+import {
+  PolicyDeniedError,
+  ScopeEscapeError,
+  UnsupportedQueryError,
+} from "./errors";
 import type { Operation } from "./plan";
 import {
   COUNT_KEY,
@@ -122,7 +126,7 @@ export function policyContext(
  * What a model contributes. Every member is optional; a model with none is
  * unpolicied and pays a single `undefined` check per query.
  */
-export interface ModelPolicy {
+export interface ModelPolicy<TWhere = any, TCreate = any, TRow = any> {
   /**
    * Runs first, and may throw to deny outright. Return `false` to deny with the
    * framework's own message.
@@ -136,7 +140,7 @@ export interface ModelPolicy {
    * replacement for it, so a caller's own filters always still apply and a
    * policy can only ever *narrow*. Returning `undefined` means no scope.
    */
-  scope?(context: PolicyContext): unknown;
+  scope?(context: PolicyContext): TWhere | undefined;
 
   /**
    * Defaults or validates the payload of a `create`. Separate from `scope`
@@ -144,22 +148,127 @@ export interface ModelPolicy {
    * on an insert, and "restrict which rows are affected" has no meaning for one
    * that does not exist yet. Receives and returns plain `data`.
    */
-  onCreate?(context: PolicyContext, data: any): any;
+  onCreate?(context: PolicyContext, data: TCreate): TCreate;
+
+  /**
+   * The same job for an `update`, and the reason it is a separate hook rather
+   * than something `scope` covers.
+   *
+   * A scope narrows *which rows* an update may touch. It says nothing about the
+   * values being written — so a tenant-scoped model could only ever update its
+   * own rows, and could set `organizationId` on one of them to any tenant it
+   * liked. Read-scoped, write-open: the row leaves the caller's scope and cannot
+   * be read back, which makes it a one-way door rather than a visible error.
+   *
+   * That is the same hole `onCreate` exists to close, arriving through `data`
+   * instead of through a missing `where`, and `plans/orm/06-policies.md` §5 asked
+   * for exactly this — "define what `scope` means per operation rather than
+   * assuming the read semantics generalise" — for every write. It was answered
+   * for `create` and `delete` and left open for `update`.
+   *
+   * Receives and returns plain `data`. A policy that does not define it is not
+   * penalised on ordinary updates; it is only required when an update actually
+   * names a column the policy's own scope constrains. See `assertNoScopeEscape`.
+   */
+  onUpdate?(context: PolicyContext, data: Partial<TCreate>): Partial<TCreate>;
 
   /**
    * Removes fields from a row after it is fetched. Runs in the shaping stage.
    *
    * The one policy capability that deliberately makes gemi's result differ from
    * Prisma's, so the differential harness must compare against the
-   * *pre-redaction* payload. It also has a type-honesty problem — the generated
-   * type says the field is there — which is why `redactable` below restricts it.
+   * *pre-redaction* payload.
+   *
+   * `Partial<TRow>` rather than `TRow`, because redaction's whole problem is that
+   * it makes the generated type a lie — the type says the field is there and the
+   * value is gone. A `redact` also runs over rows shaped by a `select`, where
+   * most fields genuinely are absent. `redactNullable` is the guard rail that
+   * keeps the lie out of the *caller's* type; this keeps it out of the policy's.
    */
-  redact?(context: PolicyContext, row: any): void;
+  redact?(context: PolicyContext, row: Partial<TRow>): void;
 }
 
-/** A model class carrying an optional policy, as seen from here. */
+/**
+ * A policy as it may be written in a `$policies` array: the object itself, or a
+ * class to be instantiated once.
+ *
+ * Both forms are accepted because neither dominates. A class gets contextual
+ * *return* checking against {@link Policy} and — through {@link ScopedPolicy} —
+ * lets `scope`/`onCreate`/`onUpdate` be abstract members, so the pairing this
+ * file otherwise enforces at runtime becomes a compile error. An object comes
+ * out of a factory, which is the only form that can carry configuration and be
+ * reused across models: `softDeletes<User>({ field })` cannot be a bare
+ * constructor, because a constructor in an array has nowhere to put arguments
+ * or type parameters.
+ */
+export type PolicyEntry<TWhere = any, TCreate = any, TRow = any> =
+  | ModelPolicy<TWhere, TCreate, TRow>
+  | (new () => ModelPolicy<TWhere, TCreate, TRow>);
+
+/**
+ * The optional base class for the class-authoring form.
+ *
+ * The members are declared through an interface merged with the class rather
+ * than in the class body, and that is not a style choice. A class *field*
+ * declaration — `scope?: (ctx) => T` — emits `Object.defineProperty(this,
+ * "scope", { value: undefined })` under `useDefineForClassFields`, which is the
+ * default at this target. That own property would shadow the derived class's
+ * prototype method and every policy written this way would silently do nothing.
+ * Declaration merging gives the instance type the same members and emits no
+ * field at all.
+ *
+ * Extending this is optional in both directions: a plain object satisfies
+ * `ModelPolicy` structurally, and an instance of a subclass satisfies it the
+ * same way. Nothing in the runtime checks for it.
+ *
+ * Note what it does *not* buy: TypeScript never contextually types an
+ * overriding method's parameters from its base, so `scope(ctx)` in a subclass is
+ * an implicit `any`. Write `scope(ctx: PolicyContext)`. What it does buy is the
+ * return type being checked against the model's `WhereInput`.
+ */
+// Both suppressions are the merge described above, seen from the linter's side.
+//
+// `no-unsafe-declaration-merging` fires because merging a class with an
+// interface lets the interface claim members the constructor never initialises.
+// That is exactly what is wanted here and it is safe for the same reason the
+// generated model bases' merge is: every member is optional, so "not
+// initialised" is a value the type already permits. The unsafe version of this
+// pattern declares *required* members.
+//
+// `no-unused-vars` fires because the type parameters appear only on the
+// interface half. Dropping them from the class is not an option — `ScopedPolicy`
+// extends it with the same three — and renaming them to `_TWhere` would put the
+// underscores in every author's hover text.
+// oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging, eslint/no-unused-vars
+export abstract class Policy<TWhere = any, TCreate = any, TRow = any> {}
+export interface Policy<TWhere = any, TCreate = any, TRow = any>
+  extends ModelPolicy<TWhere, TCreate, TRow> {}
+
+/**
+ * A policy that scopes, with the write halves made mandatory by the type system.
+ *
+ * `assertCreateCovered` and `assertNoScopeEscape` enforce this at runtime, and
+ * have to: an object literal can always omit a key. Extending this class moves
+ * the same rule to compile time for the authors who want it — a missing
+ * `onCreate` becomes `TS2515` at the class declaration rather than an error on
+ * the first `create` that reaches production.
+ */
+export abstract class ScopedPolicy<
+  TWhere = any,
+  TCreate = any,
+  TRow = any,
+> extends Policy<TWhere, TCreate, TRow> {
+  abstract scope(context: PolicyContext): TWhere | undefined;
+  abstract onCreate(context: PolicyContext, data: TCreate): TCreate;
+  abstract onUpdate(
+    context: PolicyContext,
+    data: Partial<TCreate>,
+  ): Partial<TCreate>;
+}
+
+/** A model class carrying optional policies, as seen from here. */
 export interface PolicedModel {
-  $policy?: ModelPolicy;
+  $policies?: readonly PolicyEntry[];
   $schema?: ModelSchema;
 }
 
@@ -189,6 +298,20 @@ const SCOPABLE = new Set<string>([
 const CREATING = new Set<string>(["create", "createMany", "upsert"]);
 
 /**
+ * Operations whose payload an `onUpdate` applies to. `upsert` is here and absent
+ * from {@link UPDATING} below for the same reason it is in `CREATING`: it has an
+ * update payload to default, but a scope can never reach it (see
+ * `assertScopable`), so there is nothing for the scope-escape guard to check.
+ */
+const MUTATING = new Set<string>(["update", "updateMany", "upsert"]);
+
+/**
+ * Operations that write to existing rows *and* carry a scope, so an update can
+ * move a row out of the scope that selected it.
+ */
+const UPDATING = new Set<string>(["update", "updateMany"]);
+
+/**
  * Operations that write a new row and have no `where` at all, so a `scope`
  * cannot apply to them even in principle. `upsert` is not here: it *has* a
  * where, it just cannot carry a predicate — a different problem with a
@@ -197,32 +320,115 @@ const CREATING = new Set<string>(["create", "createMany", "upsert"]);
 const INSERTING = new Set<string>(["create", "createMany"]);
 
 /**
+ * Instances made from constructor entries, so identity is stable across calls.
+ *
+ * Not an optimisation. `$exec`'s divergence guard and `assertPoliciesRegistered`
+ * both compare two policy chains element by element, and a fresh instance per
+ * call would make every comparison fail — every query on a class-form policy
+ * would raise `UnregisteredPolicyClassError` against itself. Keyed on the
+ * constructor, which is as stable as the class object.
+ *
+ * Keyed on the constructor and nothing else, so a policy class listed in two
+ * models' `$policies` is **one instance shared across both** — once per process,
+ * not once per model. Correct for every policy that exists today, all of which
+ * are stateless, and the reason the class form is documented as a place for
+ * behaviour rather than for state: a policy that memoised anything per model
+ * would silently serve one model's cache to the other. A policy that genuinely
+ * needs per-model state should be a factory returning a fresh object, which is
+ * what `PolicyEntry`'s other half is for.
+ */
+const instantiated = new WeakMap<object, ModelPolicy>();
+
+function resolveEntry(entry: PolicyEntry): ModelPolicy {
+  if (typeof entry !== "function") return entry;
+
+  const existing = instantiated.get(entry);
+  if (existing !== undefined) return existing;
+
+  const made = new (entry as new () => ModelPolicy)();
+  instantiated.set(entry, made);
+  return made;
+}
+
+/**
  * Every policy that applies to a model class, base first.
  *
  * Walks the prototype chain so a `TenantModel` or `SoftDeletes` base
- * contributes to every subclass. The order is **base to derived**, and it is
- * chosen rather than incidental: a subclass's `scope` is `AND`ed after its
- * base's, so a base can only ever be narrowed further, never widened. A derived
- * policy that could drop its base's scope would make a shared tenant guard
- * unenforceable, which is the opposite of why a base class would carry one.
+ * contributes to every subclass, and concatenates each level's `$policies`.
+ * The order is **base to derived**, and it is chosen rather than incidental: a
+ * subclass's `scope` is `AND`ed after its base's, so a base can only ever be
+ * narrowed further, never widened. A derived policy that could drop its base's
+ * scope would make a shared tenant guard unenforceable, which is the opposite of
+ * why a base class would carry one. Within one level, array order is the
+ * author's and is preserved.
  *
- * `Object.hasOwn` rather than a property read: an inherited `$policy` would
+ * `Object.hasOwn` rather than a property read: an inherited `$policies` would
  * otherwise be collected once per level of the chain.
+ *
+ * **Deliberately uncached.** This runs per query per node of an include tree, so
+ * a cache is tempting — but `$policies` is an ordinary static that tests and
+ * feature flags reassign at runtime, and a cache keyed on the class would serve
+ * the stale chain with no way to notice. The single-level fast path below is
+ * what keeps the common case free: one `Object.hasOwn` per level and no
+ * allocation at all when nothing needs instantiating.
  */
-export function policiesFor(model: unknown): ModelPolicy[] {
-  const found: ModelPolicy[] = [];
+export function policiesFor(model: unknown): readonly ModelPolicy[] {
+  let found: ModelPolicy[] | undefined;
+  let only: readonly PolicyEntry[] | undefined;
 
   let current = model as PolicedModel | null;
   while (current && current !== Function.prototype) {
-    if (Object.hasOwn(current, "$policy") && current.$policy) {
-      // Unshifted, so the walk's derived-to-base order comes back base-first.
-      found.unshift(current.$policy);
+    // The rename tripwire, and it earns its keep because the failure it catches
+    // is silent in both directions: `Model` no longer declares `$policy`, so a
+    // class still carrying it neither fails to compile nor gets read — the model
+    // is simply unpolicied, and a tenant scope stops applying with nothing to
+    // notice it. Every call site in this repository is migrated; the window this
+    // covers is a branch rebased across the rename, or a stack still on the old
+    // name. Same argument `UnregisteredPolicyClassError` makes one function over:
+    // a policy that is present but not in effect has to be loud.
+    //
+    // Delete once `feat/orm` merges and nothing can still be carrying it.
+    if (Object.hasOwn(current, "$policy")) {
+      throw new Error(
+        `${(current as { name?: string }).name ?? "This model"} declares ` +
+          `\`$policy\`, which is now \`$policies\` and takes a list. The old ` +
+          `name is not read, so this model is currently unpolicied — every ` +
+          `scope, onCreate and redact on it is being skipped.`,
+      );
+    }
+
+    if (Object.hasOwn(current, "$policies") && current.$policies) {
+      const level = current.$policies;
+      if (level.length > 0) {
+        if (only === undefined && found === undefined) {
+          // First contributing level, walking derived to base. Held rather than
+          // copied, in case it turns out to be the only one.
+          only = level;
+        } else {
+          // A second level exists, so the held one has to be materialised.
+          // Unshifted, so the walk's derived-to-base order comes back
+          // base-first.
+          found ??= (only as readonly PolicyEntry[]).map(resolveEntry);
+          only = undefined;
+          found.unshift(...level.map(resolveEntry));
+        }
+      }
     }
     current = Object.getPrototypeOf(current);
   }
 
-  return found;
+  if (found !== undefined) return found;
+  if (only === undefined) return EMPTY;
+
+  // The overwhelmingly common shape: policies on exactly one class. Returned
+  // without copying when every entry is already an object, which is every
+  // factory-authored policy.
+  return only.some((entry) => typeof entry === "function")
+    ? only.map(resolveEntry)
+    : (only as readonly ModelPolicy[]);
 }
+
+const EMPTY: readonly ModelPolicy[] = Object.freeze([]);
 
 /**
  * Applies every policy to the argument tree, returning a new tree.
@@ -239,6 +445,13 @@ export function applyPolicies(
   if (policies.length === 0) return args;
 
   let out = args;
+
+  /**
+   * Scope-owned columns whose policy has no `onUpdate`, so nobody has said what
+   * writing them should mean. Accumulated during the scope loop and checked once
+   * at the end, against the payload as it will actually be written.
+   */
+  let unguarded: string[] | undefined;
 
   for (const policy of policies) {
     if (policy.before) {
@@ -258,7 +471,7 @@ export function applyPolicies(
     // an author who expressed an intent this operation cannot honour, and
     // running it would write a row into whatever tenant the caller named.
     if (INSERTING.has(context.operation)) {
-      assertCreateCovered(policies, context);
+      assertCreateCovered(policy, context);
       continue;
     }
 
@@ -266,6 +479,15 @@ export function applyPolicies(
     if (scope === undefined || scope === null) continue;
 
     assertScopable(context);
+
+    // Collected from *this* policy's own fragment — only this iteration knows
+    // what its scope constrains — but checked after the rewrites below rather
+    // than here. See `unguarded` and `assertNoScopeEscape`.
+    if (UPDATING.has(context.operation) && !policy.onUpdate) {
+      const owned = scopeOwnedFields(scope);
+      if (owned.length > 0) (unguarded ??= []).push(...owned);
+    }
+
     out = withScope(out, scope);
   }
 
@@ -273,6 +495,34 @@ export function applyPolicies(
     for (const policy of policies) {
       if (policy.onCreate) out = withCreated(out, context, policy);
     }
+  }
+
+  if (MUTATING.has(context.operation)) {
+    for (const policy of policies) {
+      if (policy.onUpdate) out = withUpdated(out, context, policy);
+    }
+  }
+
+  // **After the `onUpdate` pass, not before it**, and that ordering is the whole
+  // point of hoisting the check out of the scope loop.
+  //
+  // Checking the caller's `data` where the fragment is computed is the obvious
+  // placement and it leaves a gap the same shape as the `assertCreateCovered`
+  // bug this guard was written alongside: one policy acting on another's behalf.
+  // There it was a `some()` over the list; here it is the rewrite. A policy
+  // carrying only an `onUpdate` can write a column that a *different* policy
+  // scopes on, and if that policy has no `onUpdate` of its own then nobody has
+  // taken responsibility for the column — yet the value lands anyway, because
+  // the check already ran against a `data` that did not contain it.
+  //
+  //     [{ onUpdate: (_c, d) => ({ ...d, orgId: 999 }) },
+  //      { scope: () => ({ orgId: 7 }) }]
+  //
+  // Running last means the question is asked of what will actually be written,
+  // whoever put it there — which is the only version of the question worth
+  // asking.
+  if (unguarded !== undefined) {
+    assertNoScopeEscape(unguarded, context, out);
   }
 
   return out;
@@ -352,18 +602,101 @@ function withCreated(args: any, context: PolicyContext, policy: ModelPolicy): an
 }
 
 /**
+ * Runs an `onUpdate` over whichever shape the operation's payload takes.
+ *
+ * The same shallow copy as `withCreated`, for the same reason, and the same
+ * split for `upsert` — there the update branch is `args.update` rather than
+ * `args.data`, and the create branch is `onCreate`'s.
+ */
+function withUpdated(
+  args: any,
+  context: PolicyContext,
+  policy: ModelPolicy,
+): any {
+  const key = context.operation === "upsert" ? "update" : "data";
+  const payload = args?.[key];
+
+  // Nothing to default. An `update` with no `data` is the compiler's error to
+  // report, and manufacturing `{}` here would turn it into a silent no-op write.
+  if (payload === undefined || payload === null) return args;
+
+  return { ...args, [key]: policy.onUpdate!(context, { ...payload }) };
+}
+
+/**
+ * Refuses an update whose payload writes a scope-owned column that no policy has
+ * taken responsibility for.
+ *
+ * See {@link ScopeEscapeError} for what the shape is and why it is dangerous.
+ * The check is deliberately narrow — it fires only when the payload actually
+ * names such a column — so an ordinary `update({ data: { name } })` on a
+ * tenant-scoped model costs one `Object.keys` and passes, and nobody has to
+ * write an `onUpdate` they do not need.
+ *
+ * `unguarded` is already filtered to policies without an `onUpdate`: a policy
+ * that has one owns its columns, and whatever it does with them is its business.
+ */
+function assertNoScopeEscape(
+  unguarded: readonly string[],
+  context: PolicyContext,
+  args: any,
+): void {
+  const data = args?.data;
+  if (typeof data !== "object" || data === null) return;
+
+  const escaping = unguarded.filter((field) => field in data);
+  if (escaping.length === 0) return;
+
+  throw new ScopeEscapeError(context.model, context.operation, [
+    ...new Set(escaping),
+  ]);
+}
+
+/**
+ * The columns a scope fragment constrains, as far as they can be known.
+ *
+ * Top-level keys only, and combinators excluded: `{ organizationId: 7 }` names
+ * a column, `{ OR: [...] }` names a structure whose columns cannot be attributed
+ * to this policy without interpreting the whole `where` grammar. Returning
+ * nothing for those is the permissive answer and is the documented limit of the
+ * guard rather than an oversight.
+ */
+function scopeOwnedFields(scope: unknown): string[] {
+  if (typeof scope !== "object" || scope === null || Array.isArray(scope)) {
+    return [];
+  }
+
+  const owned: string[] = [];
+  for (const key of Object.keys(scope as Record<string, unknown>)) {
+    if (key === "AND" || key === "OR" || key === "NOT") continue;
+    owned.push(key);
+  }
+  return owned;
+}
+
+/**
  * Refuses a `create` whose policy scopes reads but says nothing about writes.
  *
  * The natural tenant policy carries both `scope` and `onCreate`, and for it this
  * is a no-op. The dangerous shape is `scope` alone: reads are confined to the
  * caller's tenant and an insert can name any tenant it likes, which is a policy
  * that looks complete and is half of one. Refused with the missing piece named.
+ *
+ * **Asks about one policy, not the chain.** It used to take the whole list and
+ * pass if *any* member had an `onCreate`, which meant one policy could satisfy
+ * the check on another's behalf — and `softDeletes()` ships a pass-through
+ * `onCreate` precisely so that its own scope does not trip this. So adding soft
+ * deletes to a model disarmed the guard for that model's tenant policy, and the
+ * insert ran with the scoped column unset: the exact outcome the message below
+ * describes, produced by the guard meant to prevent it. Composition is the
+ * normal case now that `$policies` is a list, so the question has to be asked of
+ * the policy that carries the scope.
  */
 function assertCreateCovered(
-  policies: readonly ModelPolicy[],
+  policy: ModelPolicy,
   context: PolicyContext,
 ): void {
-  if (policies.some((policy) => policy.onCreate)) return;
+  if (policy.onCreate) return;
 
   throw new UnsupportedQueryError(
     context.operation,

@@ -14,25 +14,36 @@ import type { ModelPolicy } from "./policy";
  * Usage — `deletedAt` must be a nullable `DateTime` on the model:
  *
  *     export class User extends UserModel {
- *       static $policy = softDeletes()
+ *       static $policies = [softDeletes<User>()]
  *     }
  *
  *     await User.findMany({})        // deleted rows are not there
  *     await User.delete({ where })   // sets deletedAt, does not remove the row
  *
- * Composing it with a policy of your own means composing the objects, since a
- * class has one `$policy`. The base-class route is usually cleaner:
+ * Composing it with a policy of your own is now just a longer list, in the order
+ * they should apply:
  *
- *     class SoftDeleted extends UserModel { static $policy = softDeletes() }
- *     export class User extends SoftDeleted { static $policy = { ...mine } }
+ *     static $policies = [softDeletes<User>(), new TenantPolicy()]
  *
- * ...which also gets the ordering right for free: `policiesFor` walks base to
- * derived, so the soft-delete scope is applied first and yours narrows further.
+ * That ordering is the author's, and within a class it is the array's. Across
+ * classes `policiesFor` still walks base to derived, so a `$policies` on a
+ * shared base is applied before a subclass's and can only be narrowed further.
+ *
+ * It stays a **factory** rather than a class because it takes configuration and
+ * a model type parameter, and a bare constructor in a `$policies` array has
+ * nowhere to put either. `PolicyEntry` accepts both forms for exactly this
+ * reason.
  */
 
-export interface SoftDeleteOptions {
-  /** The timestamp column. Defaults to `deletedAt`, which the template uses. */
-  field?: string;
+export interface SoftDeleteOptions<M> {
+  /**
+   * The timestamp column. Defaults to `deletedAt`, which the template uses.
+   *
+   * Constrained to the model's own keys, so a typo or a model that has no such
+   * column is a compile error instead of a `no such column` from the database on
+   * the first read.
+   */
+  field?: keyof M & string;
 }
 
 /**
@@ -44,7 +55,9 @@ export interface SoftDeleteOptions {
  * under `User.findMany({ include: { accounts: true } })` without anything being
  * written at the include site.
  */
-export function softDeletes(options: SoftDeleteOptions = {}): ModelPolicy {
+export function softDeletes<M = any>(
+  options: SoftDeleteOptions<M> = {},
+): ModelPolicy<any, any, M> {
   const field = options.field ?? "deletedAt";
 
   return {
@@ -56,6 +69,19 @@ export function softDeletes(options: SoftDeleteOptions = {}): ModelPolicy {
     // combination is a half-written policy. Here the pass-through *is* the
     // correct behaviour, so it is stated rather than implied.
     onCreate: (_context, data) => data,
+
+    // The same statement for updates, and here it is doing real work rather than
+    // satisfying a formality. This policy scopes on `deletedAt`, and
+    // `softDelete()` below turns a delete into an update that *writes*
+    // `deletedAt` — which is precisely the "an update moves a row out of the
+    // scope that selected it" shape `ScopeEscapeError` refuses. It is also
+    // exactly what soft deleting means, so this policy is the one that gets to
+    // say the write is intended.
+    //
+    // Note it does not authorise anything else: the guard is per policy, so a
+    // tenant policy sitting beside this one in `$policies` still has to answer
+    // for its own column. That separation is the point of the per-policy check.
+    onUpdate: (_context, data) => data,
   };
 }
 
@@ -70,7 +96,7 @@ export function softDeletes(options: SoftDeleteOptions = {}): ModelPolicy {
  * a much larger claim than scoping a `where`.
  *
  *     export class User extends UserModel {
- *       static $policy = softDeletes()
+ *       static $policies = [softDeletes<User>()]
  *       static delete = softDelete(User)
  *       static deleteMany = softDeleteMany(User)
  *     }
@@ -81,9 +107,9 @@ export function softDeletes(options: SoftDeleteOptions = {}): ModelPolicy {
  * `delete({ where })` naming an already-deleted row finds nothing, exactly as
  * a hard delete of a missing row would.
  */
-export function softDelete<T>(
+export function softDelete<T, M = any>(
   model: { update(args: any): Promise<T> },
-  options: SoftDeleteOptions = {},
+  options: SoftDeleteOptions<M> = {},
 ): (args: any) => Promise<T> {
   const field = options.field ?? "deletedAt";
 
@@ -96,9 +122,9 @@ export function softDelete<T>(
   };
 }
 
-export function softDeleteMany<T>(
+export function softDeleteMany<T, M = any>(
   model: { updateMany(args: any): Promise<T> },
-  options: SoftDeleteOptions = {},
+  options: SoftDeleteOptions<M> = {},
 ): (args: any) => Promise<T> {
   const field = options.field ?? "deletedAt";
 
