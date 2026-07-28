@@ -256,6 +256,33 @@ describe("skip and take", () => {
   });
 });
 
+/**
+ * The hazard `recountAfterSteps` guards against, pinned where the behaviour
+ * actually lives.
+ *
+ * Dropping `undefined` keys is right — it is how an optional filter is spelled
+ * — but it means a `where` built *entirely* from missing values is not a
+ * narrower query, it is an unfiltered one. Any caller assembling a `where` from
+ * fields it believes are on a row has to check they are there first, because
+ * the failure is an arbitrary row rather than an error.
+ */
+describe("a where whose keys are all undefined", () => {
+  test("compiles to no predicate at all, not to a miss", () => {
+    const unfiltered = text({});
+    expect(text({ where: { id: undefined } })).toBe(unfiltered);
+    expect(text({ where: {} })).toBe(unfiltered);
+    expect(text({ where: { id: undefined, email: undefined } })).toBe(
+      unfiltered,
+    );
+  });
+
+  test("one present key is still a predicate", () => {
+    expect(text({ where: { id: 1, email: undefined } })).toBe(
+      `${SELECT_USER} where "id" = ?`,
+    );
+  });
+});
+
 describe("select", () => {
   test("restricts the column list and the result keys", () => {
     const plan = compileRead(

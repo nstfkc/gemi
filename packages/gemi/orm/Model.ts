@@ -818,6 +818,13 @@ export abstract class Model {
       // `after` steps keeps the projected value and costs nothing extra; one
       // with both pays a single read. `plan.counts` is what makes that condition
       // cheap enough to ask on every write.
+      //
+      // **Between `runSteps` and the `hidden` deletion, and that is
+      // load-bearing.** `select: { email, _count: … }` never asks for the
+      // primary key, so the key the recount reads the row by is on it only
+      // because the plan added it for the nested write and has not stripped it
+      // yet. Move this after the strip and the recount loses its identifier;
+      // move it before `runSteps` and there is nothing new to count.
       if (plan.counts && plan.after !== undefined) {
         await recountAfterSteps(
           schema,
@@ -1014,8 +1021,34 @@ async function recountAfterSteps(
   if (node === undefined || rows.length === 0) return;
 
   for (const row of rows) {
+    // **Every component present, or nothing.** What the plan guarantees is on
+    // the row is the *link* field — `planForeignSide` pushes `link.parentField`
+    // into `keyFields`, which is the column the relation `references`, and that
+    // is the primary key only by convention. Declare a relation
+    // `references: [publicId]`, ask for `select: { email, _count }`, and `id` is
+    // simply not there.
+    //
+    // The failure that would produce is the bad kind. `compileWhere` drops
+    // `undefined` keys, so a `where` built entirely from missing components
+    // compiles to **no predicate at all**:
+    //
+    //   findFirst({ where: { id: undefined } })  ->  select … from "User" limit ?
+    //
+    // — an arbitrary row, whose count is a plausible number rather than an
+    // error. So an incomplete key means the projected value stands, which is
+    // the same answer this already gives for a missing row: stale, not
+    // invented. Nothing here can be salvaged by guessing.
     const where: Record<string, unknown> = {};
-    for (const field of schema.primaryKey) where[field] = row[field];
+    let identified = schema.primaryKey.length > 0;
+    for (const field of schema.primaryKey) {
+      const value = row[field];
+      if (value === undefined) {
+        identified = false;
+        break;
+      }
+      where[field] = value;
+    }
+    if (!identified) continue;
 
     const fresh = (await (model as any).$exec(
       "findFirst",
