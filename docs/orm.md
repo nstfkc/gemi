@@ -148,14 +148,18 @@ them, and they return identical rows:
 
 - **`batched`** — one query per include node, with the children stitched onto the parents in
   process. Works on every dialect.
-- **`lateral`** — the children folded into the root statement with a `LATERAL` join and
-  `json_agg`. **Postgres only, and the default there.** One round trip instead of one per node.
+- **`lateral`** — the whole include tree folded into the root statement with `LATERAL` joins and
+  `json_agg`. **Postgres only, and the default there.** One round trip for the tree instead of one
+  per node.
 
 The lateral strategy **declines per node** rather than emitting SQL it cannot get right, falling
-back to batching for that node alone. It declines a node that has its own `include`, a relation
-inside a `select`, and an implicit many-to-many. A mixed include tree therefore uses both, which
-is fine — the results are the same either way, and there are tests asserting exactly that against
-Prisma across thirty relation shapes.
+back to batching for that node alone. It declines an implicit many-to-many, a self-relation (a
+relation onto the same table), a node carrying a `_count`, and any node with one of those below it
+— half a fold is not a thing, so a descendant that cannot be expressed declines its whole node. A
+declined node still runs under this strategy one level down, so a decline costs one statement, not
+the subtree. A mixed include tree therefore uses both, which is fine — the results are the same
+either way, and there are tests asserting exactly that against Prisma across thirty relation
+shapes.
 
 Override per call when you need to:
 
@@ -165,6 +169,45 @@ await User.findMany({ include: { accounts: true } }, { strategy: "batched" })
 
 Unlike `track`, `strategy` **does** reach the compiler and **is** part of the plan cache key: two
 strategies emit different SQL for the same arguments.
+
+### Paging a relation
+
+```ts
+await Store.findMany({
+  include: {
+    products: {
+      orderBy: { position: "asc" },
+      take: 10,                                       // ten products *per store*
+      include: { media: { take: 1, orderBy: { position: "asc" } } },
+    },
+  },
+})
+```
+
+`take` and `skip` inside a to-many are **per parent**, exactly as they are in Prisma — ten products
+for each store, not ten in total. A negative `take` means "the last N" and comes back in the order
+your `orderBy` describes, the same as at the root. Paginating without an `orderBy` orders by the
+child's primary key, because "the first ten" is otherwise only meaningful if the scan happens to be
+stable.
+
+**This needs the `lateral` strategy, so it needs Postgres.** The batched strategy serves every
+parent from one query, so the only `limit` it could emit would page every parent's children as a
+single set — plausible, and wrong. It refuses instead:
+
+```
+UnsupportedQueryError: gemi ORM does not support 'products.take' yet (Store.findMany).
+A 'take' inside a to-many relation is per parent, and the batched relation planner serves
+every parent from one query — so the only limit it could emit would page every parent's
+children as one set. Only the lateral join strategy can express it, by paginating inside a
+subquery that already runs once per parent row, and it needs Postgres: this node declined to
+fold (not postgres). Load 'products' as its own query, or narrow it with 'where'.
+```
+
+The tail of that message is the part to read: it says *why* this node reached a strategy that
+cannot page it — the dialect, an explicit `strategy: "batched"`, or a decline. There is no
+workaround that is both correct and affordable, which is why the refusal is loud: fetching every
+child and slicing in JavaScript reads the whole table, and one query per parent is the N+1 the
+`include` exists to avoid.
 
 ### Filtering on a relation
 
