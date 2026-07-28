@@ -217,6 +217,7 @@ function compileRelationFilter(
     dialect,
     `_r${depth}`,
     parentQualifier,
+    context.operation,
   );
   const child = source.child;
   const correlation = sql(source.correlation);

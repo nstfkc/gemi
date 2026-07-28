@@ -90,6 +90,22 @@ export const Account: ModelSchema = {
       "nullable": true,
       "isId": false,
       "isUpdatedAt": false
+    },
+    "settings": {
+      "name": "settings",
+      "column": "settings",
+      "type": "Json",
+      "nullable": true,
+      "isId": false,
+      "isUpdatedAt": false
+    },
+    "token": {
+      "name": "token",
+      "column": "token",
+      "type": "Bytes",
+      "nullable": true,
+      "isId": false,
+      "isUpdatedAt": false
     }
   },
   "primaryKey": [
@@ -860,6 +876,22 @@ export const User: ModelSchema = {
       "name": "deletedAt",
       "column": "deletedAt",
       "type": "DateTime",
+      "nullable": true,
+      "isId": false,
+      "isUpdatedAt": false
+    },
+    "metadata": {
+      "name": "metadata",
+      "column": "metadata",
+      "type": "Json",
+      "nullable": true,
+      "isId": false,
+      "isUpdatedAt": false
+    },
+    "avatar": {
+      "name": "avatar",
+      "column": "avatar",
+      "type": "Bytes",
       "nullable": true,
       "isId": false,
       "isUpdatedAt": false

@@ -155,6 +155,22 @@ describe("pagination", () => {
     expect(compiled.text).toContain(`order by "globalRole" desc`);
     expect(compiled.bind(args)).toEqual([2]);
   });
+
+  /**
+   * #84 reaches here because `aggregate` pages, and it validates its arguments
+   * in a different file from `read.ts`. The check lives in `paginate.ts` — the
+   * one place that *reads* these two — rather than in each caller's allowlist,
+   * so this passes without `aggregate.ts` knowing the rule exists.
+   */
+  test("a take that is not an integer is refused here too", () => {
+    expect(() => plan({ take: "-2", _count: true })).toThrow(
+      /Expected an integer, got "-2"/,
+    );
+    expect(() => plan({ skip: -1, _count: true })).toThrow(
+      /'skip' counts rows to pass over/,
+    );
+    expect(() => plan({ take: "-2", _count: true })).toThrow(/User\.aggregate/);
+  });
 });
 
 /**

@@ -84,6 +84,20 @@ export class PostgresDialect implements SqlDialect {
     );
   }
 
+  // `on conflict do nothing` with no target: it covers every unique constraint
+  // and the primary key at once, which is what `skipDuplicates` means — Prisma
+  // names no conflict target either. A targeted `on conflict (col)` would skip
+  // rows that collide on that column and still fail on any other constraint,
+  // which is the plausible wrong version.
+  //
+  // Rows it skips are absent from `RETURNING`, so the `{ count }` the compiler
+  // builds from the returned rows is the number *inserted* rather than the
+  // number supplied — which is the part the issue flags as most likely to be
+  // got wrong, and it falls out rather than needing a second count.
+  ignoreConflicts(): Fragment {
+    return sql(" on conflict do nothing");
+  }
+
   // Unlike SQLite, Postgres accepts `offset` on its own, so neither clause has
   // to be invented to satisfy the other.
   paginate(take: Binder | null, skip: Binder | null): Fragment {
@@ -144,13 +158,40 @@ export class PostgresDialect implements SqlDialect {
     return { kind: "unique", columns, constraint };
   }
 
-  encode(value: unknown, field: FieldSchema): unknown {
+  // Every type binds natively here, including `Json`, so nothing in the body
+  // reads `field` any more — the signature is the interface's, the disuse is
+  // this dialect's. `Date`, `boolean`, `bigint` and arrays are Bun's to
+  // serialize, and so, it turns out, is JSON.
+  encode(value: unknown, _field: FieldSchema): unknown {
     if (value === null || value === undefined) return null;
-    // `Date`, `boolean` and `bigint` all bind natively. JSON is the one case the
-    // driver cannot guess at, since an object could be a composite type.
-    if (field.type === "Json" && typeof value !== "string") {
-      return JSON.stringify(value);
-    }
+    // **`Json` is handed over raw**, because Bun serializes it for a `jsonb`
+    // parameter and doing it here first is the mirror of the decode bug beside
+    // it: `JSON.stringify({a:1})` produces the *string* `{"a":1}`, and Bun then
+    // stores that as the JSON string `"{\"a\":1}"` rather than as an object.
+    //
+    // The two used to cancel: encode over-serialized, decode re-parsed, and the
+    // round trip looked right as long as nothing else read the column. What it
+    // could not survive was a value that is legitimately a JSON *string* —
+    // `"42"` went in as the number 42 — and nothing noticed, because the
+    // template's schema had no `Json` column for the differential harness to
+    // compare.
+    //
+    // Measured through Bun 1.3.14 against Postgres 16: an object, an array, a
+    // string and null all round-trip identically when bound raw.
+    //
+    // A bare number or boolean is the one shape Bun binds as its own type, so
+    // it now raises — `column is of type jsonb but expression is of type
+    // boolean`. That reads like a regression and is not one: under the old
+    // encoder `42` was stored as the jsonb **string** `"42"` (checked with
+    // `jsonb_typeof`, which answered `string` for a number, a boolean and an
+    // object alike). It only looked correct because the old decoder re-parsed
+    // it on the way out — so the value was wrong in the database the whole
+    // time, and anything reading that column *other than this ORM* saw a
+    // string. A loud failure replaces a silent mis-store.
+    //
+    // Fixing it properly means serialising and emitting an explicit `::jsonb`
+    // cast, which has to reach the insert, the update's set clause and any
+    // `where` on a Json column. Not done here.
     return value;
   }
 
@@ -188,9 +229,12 @@ export class PostgresDialect implements SqlDialect {
   // do — but `Decimal` is refused at *generation* time (iteration 1), so no
   // such field can reach this.
   needsDecode(field: FieldSchema): boolean {
-    return (
-      field.type === "BigInt" || field.type === "Json" || field.type === "Bytes"
-    );
+    // `Json` is deliberately absent: Bun hands back a parsed JSON value, so
+    // `decode` returns it unchanged, and this predicate documents itself as
+    // "false when the driver already returns exactly what Prisma would" — which
+    // is now exactly true. Leaving it in cost a function call per Json value on
+    // every read for nothing.
+    return field.type === "BigInt" || field.type === "Bytes";
   }
 
   decode(value: unknown, field: FieldSchema): unknown {
@@ -205,14 +249,28 @@ export class PostgresDialect implements SqlDialect {
           throw new DecodeError(field, value);
         }
       case "Json":
-        // `jsonb` arrives as text over the wire. A driver that starts parsing
-        // it for us is handled by the typeof check rather than by a version
-        // test, so this keeps working either way.
-        try {
-          return typeof value === "string" ? JSON.parse(value) : value;
-        } catch {
-          throw new DecodeError(field, value);
-        }
+        // **Bun parses `json` and `jsonb` for us**, so there is nothing to do.
+        // Measured against Postgres 16 through Bun 1.3.14, one row per shape:
+        //
+        //   '{"a":1}'  -> object     '[]'    -> object (array)
+        //   '"42"'     -> string     '42'    -> number
+        //   '"text"'   -> string     'null'  -> null
+        //
+        // This used to read `typeof value === "string" ? JSON.parse(value) :
+        // value`, on the reasoning that jsonb "arrives as text" and that the
+        // `typeof` check would cope either way. It does not cope, and cannot:
+        // **a JS string is ambiguous** between "raw JSON text the driver did
+        // not parse" and "a JSON string value the driver did parse", and the
+        // two are indistinguishable by inspection. So the guard silently
+        // re-parsed legitimate string values — a column holding the JSON string
+        // `"42"` came back as the *number* 42, `"true"` as a boolean, and
+        // `"{\"a\":1}"` as an object. `"text"` survived only because
+        // `JSON.parse` threw and the catch handed the value back.
+        //
+        // Found by adding a `Json` column to the template schema: the
+        // differential harness had never seen one, and every unit test that
+        // "covered" this was written against the same assumption as the code.
+        return value;
       case "Bytes":
         // The driver hands back a `Buffer`; Prisma 6 returns a `Uint8Array`,
         // on **every** dialect, and so does this ORM on SQLite where the

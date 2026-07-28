@@ -71,6 +71,12 @@ model Account {
   updatedAt DateTime  @updatedAt
   deletedAt DateTime?
 
+  // The same two, one relation away: a Json column *nested inside an include*
+  // is the case the lateral strategy flattens through `json_agg`, so it has to
+  // survive `JSON.parse` twice and still match the batched path.
+  settings Json?
+  token    Bytes?
+
   @@index([organizationId])
   @@index([userId])
 }
@@ -91,6 +97,13 @@ model User {
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
   deletedAt DateTime?
+
+  // Json and Bytes exist here so the differential harness sees them. Every
+  // other scalar the ORM implements was already reachable from this schema;
+  // these two were not, so their encode/decode paths were only ever checked
+  // against fixtures that the same code wrote the expectations for.
+  metadata Json?
+  avatar   Bytes?
 
   accounts           Account[]
   session            Session[]
