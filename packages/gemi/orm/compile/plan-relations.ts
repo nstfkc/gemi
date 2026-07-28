@@ -168,12 +168,12 @@ export interface NestedWriteStep {
   /** The relation field this step was planned for. Named in errors. */
   relation: string;
   /**
-   * The Prisma nested-write key this step implements — `connect` or `create`.
-   * Two steps on the same relation can produce byte-identical SQL and differ
-   * only in what the step itself does, so this is what makes a plan legible
-   * from the outside: to a test, and to whatever logs queries later.
+   * The Prisma nested-write key this step implements. Two steps on the same
+   * relation can produce byte-identical SQL and differ only in what the step
+   * itself does, so this is what makes a plan legible from the outside: to a
+   * test, and to whatever logs queries later.
    */
-  operation: "connect" | "create";
+  operation: "connect" | "create" | "createMany";
   run(
     args: any,
     context: BindContext,
