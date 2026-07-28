@@ -357,6 +357,11 @@ export abstract class Model {
    * not safe here — the ordinary, encouraged thing everywhere else in a Bun
    * codebase. Await them in sequence. (`$exec` already runs its own nested
    * writes and relation reads sequentially for this reason.)
+   *
+   * **The connection is held for as long as the callback runs**, including
+   * while it awaits things that are not queries. In development a transaction
+   * still open after 2s warns (`GEMI_SLOW_TRANSACTION_MS`); in production it
+   * just holds the connection. Keep network and filesystem I/O outside.
    */
   static transaction<T>(fn: () => Promise<T>): Promise<T> {
     return withTransaction(app(DatabaseManager).sql, () => fn());

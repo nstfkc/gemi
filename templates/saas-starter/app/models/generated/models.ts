@@ -6,9 +6,9 @@
 import type { Prisma } from "@prisma/client";
 import {
   Model,
-  Policy,
   ScopedPolicy,
   type ExecOptions,
+  type ModelPolicy,
   type PolicyEntry,
 } from "gemi/orm";
 
@@ -33,11 +33,11 @@ type Subset<T, U> = {
 // oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
 export interface AccountModel extends Prisma.AccountGetPayload<{}> {}
 
-export abstract class AccountPolicy extends Policy<
+export type AccountPolicy = ModelPolicy<
   Prisma.AccountWhereInput,
   Prisma.AccountCreateInput,
   Prisma.AccountGetPayload<{}>
-> {}
+>;
 
 // The same shape with `scope`, `onCreate` and `onUpdate` abstract, so a policy
 // that scopes cannot omit the write halves. The runtime refuses those
@@ -167,11 +167,11 @@ export class AccountModel extends Model {
 // oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
 export interface MagicLinkTokenModel extends Prisma.MagicLinkTokenGetPayload<{}> {}
 
-export abstract class MagicLinkTokenPolicy extends Policy<
+export type MagicLinkTokenPolicy = ModelPolicy<
   Prisma.MagicLinkTokenWhereInput,
   Prisma.MagicLinkTokenCreateInput,
   Prisma.MagicLinkTokenGetPayload<{}>
-> {}
+>;
 
 // The same shape with `scope`, `onCreate` and `onUpdate` abstract, so a policy
 // that scopes cannot omit the write halves. The runtime refuses those
@@ -301,11 +301,11 @@ export class MagicLinkTokenModel extends Model {
 // oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
 export interface OrganizationModel extends Prisma.OrganizationGetPayload<{}> {}
 
-export abstract class OrganizationPolicy extends Policy<
+export type OrganizationPolicy = ModelPolicy<
   Prisma.OrganizationWhereInput,
   Prisma.OrganizationCreateInput,
   Prisma.OrganizationGetPayload<{}>
-> {}
+>;
 
 // The same shape with `scope`, `onCreate` and `onUpdate` abstract, so a policy
 // that scopes cannot omit the write halves. The runtime refuses those
@@ -435,11 +435,11 @@ export class OrganizationModel extends Model {
 // oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
 export interface OrganizationInvitationModel extends Prisma.OrganizationInvitationGetPayload<{}> {}
 
-export abstract class OrganizationInvitationPolicy extends Policy<
+export type OrganizationInvitationPolicy = ModelPolicy<
   Prisma.OrganizationInvitationWhereInput,
   Prisma.OrganizationInvitationCreateInput,
   Prisma.OrganizationInvitationGetPayload<{}>
-> {}
+>;
 
 // The same shape with `scope`, `onCreate` and `onUpdate` abstract, so a policy
 // that scopes cannot omit the write halves. The runtime refuses those
@@ -569,11 +569,11 @@ export class OrganizationInvitationModel extends Model {
 // oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
 export interface PasswordResetTokenModel extends Prisma.PasswordResetTokenGetPayload<{}> {}
 
-export abstract class PasswordResetTokenPolicy extends Policy<
+export type PasswordResetTokenPolicy = ModelPolicy<
   Prisma.PasswordResetTokenWhereInput,
   Prisma.PasswordResetTokenCreateInput,
   Prisma.PasswordResetTokenGetPayload<{}>
-> {}
+>;
 
 // The same shape with `scope`, `onCreate` and `onUpdate` abstract, so a policy
 // that scopes cannot omit the write halves. The runtime refuses those
@@ -703,11 +703,11 @@ export class PasswordResetTokenModel extends Model {
 // oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
 export interface SessionModel extends Prisma.SessionGetPayload<{}> {}
 
-export abstract class SessionPolicy extends Policy<
+export type SessionPolicy = ModelPolicy<
   Prisma.SessionWhereInput,
   Prisma.SessionCreateInput,
   Prisma.SessionGetPayload<{}>
-> {}
+>;
 
 // The same shape with `scope`, `onCreate` and `onUpdate` abstract, so a policy
 // that scopes cannot omit the write halves. The runtime refuses those
@@ -837,11 +837,11 @@ export class SessionModel extends Model {
 // oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
 export interface SocialAccountModel extends Prisma.SocialAccountGetPayload<{}> {}
 
-export abstract class SocialAccountPolicy extends Policy<
+export type SocialAccountPolicy = ModelPolicy<
   Prisma.SocialAccountWhereInput,
   Prisma.SocialAccountCreateInput,
   Prisma.SocialAccountGetPayload<{}>
-> {}
+>;
 
 // The same shape with `scope`, `onCreate` and `onUpdate` abstract, so a policy
 // that scopes cannot omit the write halves. The runtime refuses those
@@ -971,11 +971,11 @@ export class SocialAccountModel extends Model {
 // oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
 export interface UserModel extends Prisma.UserGetPayload<{}> {}
 
-export abstract class UserPolicy extends Policy<
+export type UserPolicy = ModelPolicy<
   Prisma.UserWhereInput,
   Prisma.UserCreateInput,
   Prisma.UserGetPayload<{}>
-> {}
+>;
 
 // The same shape with `scope`, `onCreate` and `onUpdate` abstract, so a policy
 // that scopes cannot omit the write halves. The runtime refuses those

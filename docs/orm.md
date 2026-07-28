@@ -327,6 +327,24 @@ await Model.transaction(async () => {
 `Promise.all` over several ORM calls inside the callback is not safe — the ordinary, encouraged
 thing everywhere else in a Bun codebase. Await them in sequence.
 
+### Keep slow work out of the callback
+
+The reserved connection is held for as long as the callback runs, whether or not it is running
+queries. A `fetch`, an upload or a queue push inside a transaction holds a connection for the
+length of that I/O, and under load the symptom is unrelated queries elsewhere in the process
+blocking on connection acquisition — an error that names neither the transaction nor the I/O.
+
+In development, a transaction still open after 2 seconds warns with the stack of the call that
+opened it:
+
+```
+[gemi] A database transaction has not settled after 2000ms. It reserves a pooled connection
+until it does — check for network or filesystem I/O inside the callback…
+```
+
+Set `GEMI_SLOW_TRANSACTION_MS` to change the threshold. The warning is development-only and
+never fires in production; it is a diagnostic, not a limit — nothing cancels a long transaction.
+
 **A multi-statement write is atomic on its own.** A write with a nested `create` or `connect` runs
 more than one statement, and `$exec` opens a transaction for exactly those calls — so a nested
 step that fails, or a child policy that denies, rolls back the parent row too. A plain `create`

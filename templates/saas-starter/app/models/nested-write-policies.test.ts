@@ -401,21 +401,22 @@ describe("a denied nested write leaves nothing behind", () => {
       },
     });
 
-    const application = new Application();
-    application.instance(DatabaseManager, counted as never);
-    Application.setInstance(application);
+    const proxied = new Application();
+    proxied.instance(DatabaseManager, counted as never);
 
-    await Model.asSystem(() =>
-      OpenFolder.$exec("create", { data: { code: "plain" } }),
-    );
-
-    Application.setInstance(
-      (() => {
-        const app = new Application();
-        app.instance(DatabaseManager, database as never);
-        return app;
-      })(),
-    );
+    // `finally`, and restoring the instance `beforeAll` built rather than a
+    // fresh one. A throw here is precisely what a regression in the atomicity
+    // change looks like, and leaving the counting proxy installed would surface
+    // it as an unrelated failure in whatever test ran next.
+    const before = Application.getInstance();
+    try {
+      Application.setInstance(proxied);
+      await Model.asSystem(() =>
+        OpenFolder.$exec("create", { data: { code: "plain" } }),
+      );
+    } finally {
+      Application.setInstance(before!);
+    }
 
     expect(statements.some((text) => /^\s*begin/i.test(text))).toBe(false);
     expect(statements).toHaveLength(1);

@@ -327,6 +327,15 @@ const INSERTING = new Set<string>(["create", "createMany"]);
  * call would make every comparison fail — every query on a class-form policy
  * would raise `UnregisteredPolicyClassError` against itself. Keyed on the
  * constructor, which is as stable as the class object.
+ *
+ * Keyed on the constructor and nothing else, so a policy class listed in two
+ * models' `$policies` is **one instance shared across both** — once per process,
+ * not once per model. Correct for every policy that exists today, all of which
+ * are stateless, and the reason the class form is documented as a place for
+ * behaviour rather than for state: a policy that memoised anything per model
+ * would silently serve one model's cache to the other. A policy that genuinely
+ * needs per-model state should be a factory returning a fresh object, which is
+ * what `PolicyEntry`'s other half is for.
  */
 const instantiated = new WeakMap<object, ModelPolicy>();
 
@@ -369,6 +378,25 @@ export function policiesFor(model: unknown): readonly ModelPolicy[] {
 
   let current = model as PolicedModel | null;
   while (current && current !== Function.prototype) {
+    // The rename tripwire, and it earns its keep because the failure it catches
+    // is silent in both directions: `Model` no longer declares `$policy`, so a
+    // class still carrying it neither fails to compile nor gets read — the model
+    // is simply unpolicied, and a tenant scope stops applying with nothing to
+    // notice it. Every call site in this repository is migrated; the window this
+    // covers is a branch rebased across the rename, or a stack still on the old
+    // name. Same argument `UnregisteredPolicyClassError` makes one function over:
+    // a policy that is present but not in effect has to be loud.
+    //
+    // Delete once `feat/orm` merges and nothing can still be carrying it.
+    if (Object.hasOwn(current, "$policy")) {
+      throw new Error(
+        `${(current as { name?: string }).name ?? "This model"} declares ` +
+          `\`$policy\`, which is now \`$policies\` and takes a list. The old ` +
+          `name is not read, so this model is currently unpolicied — every ` +
+          `scope, onCreate and redact on it is being skipped.`,
+      );
+    }
+
     if (Object.hasOwn(current, "$policies") && current.$policies) {
       const level = current.$policies;
       if (level.length > 0) {
@@ -418,6 +446,13 @@ export function applyPolicies(
 
   let out = args;
 
+  /**
+   * Scope-owned columns whose policy has no `onUpdate`, so nobody has said what
+   * writing them should mean. Accumulated during the scope loop and checked once
+   * at the end, against the payload as it will actually be written.
+   */
+  let unguarded: string[] | undefined;
+
   for (const policy of policies) {
     if (policy.before) {
       const verdict = policy.before(context);
@@ -445,12 +480,12 @@ export function applyPolicies(
 
     assertScopable(context);
 
-    // Checked against *this* policy's own fragment, which is why it lives inside
-    // the loop rather than beside `assertCreateCovered`'s call: the question is
-    // whether the columns this scope constrains are being written, and only this
-    // iteration knows what they are.
-    if (UPDATING.has(context.operation)) {
-      assertNoScopeEscape(policy, scope, context, out);
+    // Collected from *this* policy's own fragment — only this iteration knows
+    // what its scope constrains — but checked after the rewrites below rather
+    // than here. See `unguarded` and `assertNoScopeEscape`.
+    if (UPDATING.has(context.operation) && !policy.onUpdate) {
+      const owned = scopeOwnedFields(scope);
+      if (owned.length > 0) (unguarded ??= []).push(...owned);
     }
 
     out = withScope(out, scope);
@@ -466,6 +501,28 @@ export function applyPolicies(
     for (const policy of policies) {
       if (policy.onUpdate) out = withUpdated(out, context, policy);
     }
+  }
+
+  // **After the `onUpdate` pass, not before it**, and that ordering is the whole
+  // point of hoisting the check out of the scope loop.
+  //
+  // Checking the caller's `data` where the fragment is computed is the obvious
+  // placement and it leaves a gap the same shape as the `assertCreateCovered`
+  // bug this guard was written alongside: one policy acting on another's behalf.
+  // There it was a `some()` over the list; here it is the rewrite. A policy
+  // carrying only an `onUpdate` can write a column that a *different* policy
+  // scopes on, and if that policy has no `onUpdate` of its own then nobody has
+  // taken responsibility for the column — yet the value lands anyway, because
+  // the check already ran against a `data` that did not contain it.
+  //
+  //     [{ onUpdate: (_c, d) => ({ ...d, orgId: 999 }) },
+  //      { scope: () => ({ orgId: 7 }) }]
+  //
+  // Running last means the question is asked of what will actually be written,
+  // whoever put it there — which is the only version of the question worth
+  // asking.
+  if (unguarded !== undefined) {
+    assertNoScopeEscape(unguarded, context, out);
   }
 
   return out;
@@ -567,35 +624,32 @@ function withUpdated(
 }
 
 /**
- * Refuses an update that writes a column this policy's own `scope` selects on,
- * unless the policy has an `onUpdate` that has taken responsibility for it.
+ * Refuses an update whose payload writes a scope-owned column that no policy has
+ * taken responsibility for.
  *
  * See {@link ScopeEscapeError} for what the shape is and why it is dangerous.
- * The check is deliberately narrow — it fires only when the update actually
+ * The check is deliberately narrow — it fires only when the payload actually
  * names such a column — so an ordinary `update({ data: { name } })` on a
  * tenant-scoped model costs one `Object.keys` and passes, and nobody has to
  * write an `onUpdate` they do not need.
+ *
+ * `unguarded` is already filtered to policies without an `onUpdate`: a policy
+ * that has one owns its columns, and whatever it does with them is its business.
  */
 function assertNoScopeEscape(
-  policy: ModelPolicy,
-  scope: unknown,
+  unguarded: readonly string[],
   context: PolicyContext,
   args: any,
 ): void {
-  // The policy has said what an update means. Whatever it does with the column
-  // is its business from here.
-  if (policy.onUpdate) return;
-
-  const owned = scopeOwnedFields(scope);
-  if (owned.length === 0) return;
-
   const data = args?.data;
   if (typeof data !== "object" || data === null) return;
 
-  const escaping = owned.filter((field) => field in data);
+  const escaping = unguarded.filter((field) => field in data);
   if (escaping.length === 0) return;
 
-  throw new ScopeEscapeError(context.model, context.operation, escaping);
+  throw new ScopeEscapeError(context.model, context.operation, [
+    ...new Set(escaping),
+  ]);
 }
 
 /**

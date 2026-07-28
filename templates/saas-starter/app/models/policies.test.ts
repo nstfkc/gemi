@@ -15,10 +15,19 @@ import {
   softDeleteMany,
   register,
   softDeletes,
+  ScopeEscapeError,
   UnregisteredPolicyClassError,
   type ModelPolicy,
 } from "gemi/orm";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  test,
+} from "vitest";
 
 import { POSTGRES_URL, applyMigrations } from "./differential";
 import { AccountModel, OrganizationModel, UserModel } from "./generated";
@@ -84,6 +93,16 @@ const tenantScoped: ModelPolicy = {
     organizationId: (context.user as { organizationId: number }).organizationId,
   }),
 };
+
+/**
+ * Soft deletes and a tenant scope on one model, which is the composition the
+ * per-policy write guards exist to keep separate.
+ */
+class GuardedUser extends UserModel {
+  static $policies = [softDeletes<GuardedUser>(), tenantScoped];
+
+  static softDelete = softDelete(GuardedUser);
+}
 
 function suite(label: string, url?: string) {
   describe(label, () => {
@@ -185,7 +204,9 @@ function suite(label: string, url?: string) {
     // --- criterion 1: deny, scope, redact on a root query -----------------
 
     test("before denies", async () => {
-      (ScopedUser as any).$policies = [{ before: () => false } satisfies ModelPolicy];
+      (ScopedUser as any).$policies = [
+        { before: () => false } satisfies ModelPolicy,
+      ];
 
       await expect(
         Model.asUser(ALICE, () => ScopedUser.findMany({})),
@@ -213,11 +234,13 @@ function suite(label: string, url?: string) {
     });
 
     test("redact removes a field from the result", async () => {
-      (ScopedUser as any).$policies = [{
-        redact: (_context, row) => {
-          if ("email" in row) row.email = null;
-        },
-      } satisfies ModelPolicy];
+      (ScopedUser as any).$policies = [
+        {
+          redact: (_context, row) => {
+            if ("email" in row) row.email = null;
+          },
+        } satisfies ModelPolicy,
+      ];
 
       const rows = await Model.asUser(ALICE, () => ScopedUser.findMany({}));
       expect(rows).toHaveLength(2);
@@ -330,10 +353,12 @@ function suite(label: string, url?: string) {
       (ScopedAccount as any).$policies = [tenantScoped];
 
       class Narrower extends ScopedAccount {
-        static $policies: ModelPolicy[] = [{
-          scope: () => ({ deletedAt: null }),
-          onCreate: (_c, data) => data,
-        }];
+        static $policies: ModelPolicy[] = [
+          {
+            scope: () => ({ deletedAt: null }),
+            onCreate: (_c, data) => data,
+          },
+        ];
       }
 
       await expect(
@@ -393,7 +418,9 @@ function suite(label: string, url?: string) {
     });
 
     test("a deny on the related model denies the whole include", async () => {
-      (ScopedAccount as any).$policies = [{ before: () => false } satisfies ModelPolicy];
+      (ScopedAccount as any).$policies = [
+        { before: () => false } satisfies ModelPolicy,
+      ];
 
       await expect(
         Model.asUser(ALICE, () =>
@@ -414,13 +441,15 @@ function suite(label: string, url?: string) {
      */
     test("a nested scope applies exactly once, not twice", async () => {
       let scopeCalls = 0;
-      (ScopedAccount as any).$policies = [{
-        scope: (context: any) => {
-          scopeCalls++;
-          return { organizationId: context.user.organizationId };
-        },
-        onCreate: (_c: any, data: any) => data,
-      } satisfies ModelPolicy];
+      (ScopedAccount as any).$policies = [
+        {
+          scope: (context: any) => {
+            scopeCalls++;
+            return { organizationId: context.user.organizationId };
+          },
+          onCreate: (_c: any, data: any) => data,
+        } satisfies ModelPolicy,
+      ];
 
       const rows = await Model.asUser(ALICE, () =>
         ScopedUser.findMany({ include: { accounts: true } }),
@@ -462,7 +491,9 @@ function suite(label: string, url?: string) {
         static $policies = [tenantScoped];
       }
       class Named extends Tenanted {
-        static $policies: ModelPolicy[] = [{ scope: () => ({ email: "alice@x.test" }) }];
+        static $policies: ModelPolicy[] = [
+          { scope: () => ({ email: "alice@x.test" }) },
+        ];
       }
 
       // The leaf carries a policy, so the leaf owns the name — the same rule
@@ -518,12 +549,16 @@ function suite(label: string, url?: string) {
     test("differently-shaped scopes get different plans", async () => {
       const ADMIN = { ...ALICE, admin: true };
 
-      (ScopedUser as any).$policies = [{
-        scope: (context) => {
-          const user = context.user as any;
-          return user.admin ? undefined : { organizationId: user.organizationId };
-        },
-      } satisfies ModelPolicy];
+      (ScopedUser as any).$policies = [
+        {
+          scope: (context) => {
+            const user = context.user as any;
+            return user.admin
+              ? undefined
+              : { organizationId: user.organizationId };
+          },
+        } satisfies ModelPolicy,
+      ];
 
       clearPlanCache();
 
@@ -625,7 +660,10 @@ function suite(label: string, url?: string) {
       (ScopedUser as any).$policies = [tenantScoped];
 
       const updated: any = await Model.asUser(ALICE, () =>
-        ScopedUser.update({ where: { id: ALICE.id }, data: { name: "renamed" } }),
+        ScopedUser.update({
+          where: { id: ALICE.id },
+          data: { name: "renamed" },
+        }),
       );
       expect(updated.name).toBe("renamed");
     });
@@ -730,6 +768,80 @@ function suite(label: string, url?: string) {
       );
       expect(rows).toHaveLength(2);
     });
+
+    /**
+     * The update guard, through the real `$exec` rather than through
+     * `applyPolicies`.
+     *
+     * `packages/gemi/orm/policy.test.ts` pins the rule as a pure function, which
+     * is where it belongs. What that cannot show is that the refusal survives the
+     * path a caller actually takes — the plan cache, the compiler, `softDelete`'s
+     * operation rewrite. The differential harness cannot see it either: a guard
+     * that throws before any SQL is emitted produces no statement to compare
+     * against Prisma, so this is the only place the behaviour is observable
+     * against a real database.
+     *
+     * The arrangement mirrors the create-guard bug this iteration fixed — soft
+     * deletes beside a tenant scope. Soft deletes writes the column it scopes on
+     * and says so with an `onUpdate`; that permission must not extend to the
+     * tenant policy's column sitting next to it in the same list.
+     */
+    describe("scope escape", () => {
+      beforeEach(() => {
+        register("User", GuardedUser);
+      });
+
+      afterEach(() => {
+        register("User", UserModel);
+      });
+
+      test("an ordinary update goes through", async () => {
+        await expect(
+          Model.asUser(ALICE, () =>
+            GuardedUser.update({
+              where: { id: ALICE.id },
+              data: { name: "renamed" },
+            }),
+          ),
+        ).resolves.toBeTruthy();
+      });
+
+      test("writing the tenant column is refused, and nothing is written", async () => {
+        await expect(
+          Model.asUser(ALICE, () =>
+            GuardedUser.update({
+              where: { id: ALICE.id },
+              data: { organizationId: -1 } as never,
+            }),
+          ),
+        ).rejects.toThrow(ScopeEscapeError);
+
+        const rows: any = await raw.unsafe(
+          `SELECT "organizationId" FROM "User" WHERE "id" = ${ALICE.id}`,
+        );
+        expect([...rows][0].organizationId).toBe(ALICE.organizationId);
+      });
+
+      /**
+       * The interaction the per-policy split exists for. `softDelete` issues
+       * `update({ data: { deletedAt } })` — a write to a scope-owned column — and
+       * it has to succeed, because the policy owning that column has an
+       * `onUpdate`. Under the old chain-wide check this would have been
+       * indistinguishable from the case above.
+       */
+      test("softDelete writes its own scoped column without tripping the guard", async () => {
+        await expect(
+          Model.asUser(ALICE, () =>
+            GuardedUser.softDelete({ where: { id: ALICE.id } }),
+          ),
+        ).resolves.toBeTruthy();
+
+        const rows: any = await raw.unsafe(
+          `SELECT "deletedAt" FROM "User" WHERE "id" = ${ALICE.id}`,
+        );
+        expect([...rows][0].deletedAt).not.toBeNull();
+      });
+    });
   });
 }
 
@@ -788,9 +900,7 @@ function softDeleteSuite(label: string, url?: string) {
       register("User", SoftUser);
       register("Account", SoftAccount);
       if (url) {
-        await raw.unsafe(
-          `TRUNCATE "Account", "User" RESTART IDENTITY CASCADE`,
-        );
+        await raw.unsafe(`TRUNCATE "Account", "User" RESTART IDENTITY CASCADE`);
       } else {
         await raw.unsafe(`DELETE FROM "Account"`);
         await raw.unsafe(`DELETE FROM "User"`);
@@ -842,8 +952,12 @@ function softDeleteSuite(label: string, url?: string) {
         `SELECT "email", "deletedAt" FROM "User" ORDER BY "id"`,
       );
       const rows = [...stored];
-      expect(rows.find((row: any) => row.email === "alice@x.test").deletedAt).toBeNull();
-      expect(rows.find((row: any) => row.email === "bob@x.test").deletedAt).not.toBeNull();
+      expect(
+        rows.find((row: any) => row.email === "alice@x.test").deletedAt,
+      ).toBeNull();
+      expect(
+        rows.find((row: any) => row.email === "bob@x.test").deletedAt,
+      ).not.toBeNull();
     });
 
     /**
@@ -913,10 +1027,12 @@ function softDeleteSuite(label: string, url?: string) {
         static $policies = [softDeletes()];
       }
       class Restricted extends SoftDeleted {
-        static $policies: ModelPolicy[] = [{
-          scope: () => ({ email: { contains: "alice" } }),
-          onCreate: (_c, data) => data,
-        }];
+        static $policies: ModelPolicy[] = [
+          {
+            scope: () => ({ email: { contains: "alice" } }),
+            onCreate: (_c, data) => data,
+          },
+        ];
       }
 
       // One class owns the name — the leaf, which is the one carrying a policy

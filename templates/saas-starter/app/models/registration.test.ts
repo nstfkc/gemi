@@ -60,10 +60,14 @@ describe("the case the query-time guard cannot reach", () => {
 
   test("an unregistered policied subclass is invisible to the guard", () => {
     class ScopedOrganization extends generated.OrganizationModel {
-      static $policies = [
+      // Typed through the generated alias, which is what an application would
+      // write. It is also what catches the loose version of this: an `onCreate`
+      // returning `unknown` is not an `OrganizationCreateInput`, and the
+      // narrowed `$policies` on the generated base says so.
+      static $policies: generated.OrganizationPolicy[] = [
         {
           scope: () => ({ id: -1 }),
-          onCreate: (_context: unknown, data: unknown) => data,
+          onCreate: (_context, data) => data,
         },
       ];
     }
@@ -93,10 +97,14 @@ describe("the case the query-time guard cannot reach", () => {
 
   test("and writing the register line is what clears it", () => {
     class ScopedOrganization extends generated.OrganizationModel {
-      static $policies = [
+      // Typed through the generated alias, which is what an application would
+      // write. It is also what catches the loose version of this: an `onCreate`
+      // returning `unknown` is not an `OrganizationCreateInput`, and the
+      // narrowed `$policies` on the generated base says so.
+      static $policies: generated.OrganizationPolicy[] = [
         {
           scope: () => ({ id: -1 }),
-          onCreate: (_context: unknown, data: unknown) => data,
+          onCreate: (_context, data) => data,
         },
       ];
     }

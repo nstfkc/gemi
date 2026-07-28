@@ -1217,3 +1217,83 @@ describe("scope escape on update", () => {
     ).not.toThrow();
   });
 });
+
+/**
+ * The gap review found in the first version of the guard: it inspected the
+ * caller's `data` from inside the scope loop, which runs *before* any `onUpdate`
+ * rewrites it. A policy carrying only an `onUpdate` could therefore write a
+ * column a different policy scopes on, and the check had already run against a
+ * payload that did not contain it.
+ *
+ * The same shape as the `assertCreateCovered` bug — one policy acting on
+ * another's behalf — arriving through the rewrite instead of through a `some()`.
+ * Fixed by asking the question last, of what will actually be written.
+ */
+describe("scope escape via another policy's onUpdate", () => {
+  const injector: ModelPolicy = {
+    onUpdate: (_context, data) => ({ ...data, orgId: 999 }),
+  };
+  const tenant: ModelPolicy = {
+    scope: (ctx: any) => ({ orgId: ctx.user.organizationId }),
+    onCreate: (_context, data) => data,
+  };
+
+  test("an injected write to an unguarded scoped column is refused", () => {
+    expect(() =>
+      applyPolicies([injector, tenant], context({ operation: "update" as any }), {
+        where: { id: 1 },
+        data: { name: "x" },
+      }),
+    ).toThrow(ScopeEscapeError);
+  });
+
+  test("order in the list does not matter — the check runs after every rewrite", () => {
+    expect(() =>
+      applyPolicies([tenant, injector], context({ operation: "update" as any }), {
+        where: { id: 1 },
+        data: { name: "x" },
+      }),
+    ).toThrow(ScopeEscapeError);
+  });
+
+  test("but the owning policy's own onUpdate is still free to write it", () => {
+    const owning: ModelPolicy = {
+      ...tenant,
+      onUpdate: (_context, data) => ({ ...data, orgId: 999 }),
+    };
+
+    const out = applyPolicies(
+      [injector, owning],
+      context({ operation: "update" as any }),
+      { where: { id: 1 }, data: { name: "x" } },
+    );
+
+    expect(out.data).toEqual({ name: "x", orgId: 999 });
+  });
+});
+
+/**
+ * The rename tripwire. `Model` no longer declares `$policy`, so a class still
+ * carrying it compiles clean and is simply never read — the model is unpolicied
+ * with nothing to notice it.
+ */
+describe("the old $policy name", () => {
+  test("is refused rather than silently ignored", () => {
+    class Legacy {
+      static $policy = { scope: () => ({ orgId: 7 }) };
+    }
+
+    expect(() => policiesFor(Legacy)).toThrow(/\$policies/);
+  });
+
+  test("is caught on a base class too, not just the one queried", () => {
+    class Base {
+      static $policy = { scope: () => ({ orgId: 7 }) };
+    }
+    class Derived extends Base {
+      static $policies = [{ scope: () => ({ a: 1 }) }];
+    }
+
+    expect(() => policiesFor(Derived)).toThrow(/\$policies/);
+  });
+});

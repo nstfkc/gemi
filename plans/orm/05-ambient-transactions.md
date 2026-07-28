@@ -151,6 +151,13 @@ territory, and only if the Eloquent tier is pursued).
 - **Long-lived transactions hold a pooled connection.** Nothing here prevents a
   callback from doing network I/O while holding one. A development-mode warning
   above a duration threshold is cheap and worth considering, though not required.
+
+  *Shipped.* `watchForSlowTransaction` in `orm/context.ts`: a warning at
+  `GEMI_SLOW_TRANSACTION_MS` (default 2s), development only, outermost scope
+  only. A timer rather than an elapsed-time measurement on the way out, because
+  the case that matters most is the transaction that never settles at all — an
+  after-the-fact measurement is silent for exactly that one. It reports; it does
+  not cancel.
 - **ALS has a real cost** under heavy concurrency. It is already used per request
   by the kernel, so the marginal cost of a second, shallower store should be
   small — but iteration 7 should measure it rather than assume, since this is on

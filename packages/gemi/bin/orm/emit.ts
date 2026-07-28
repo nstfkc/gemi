@@ -471,18 +471,22 @@ export interface ${model}Model extends Prisma.${model}GetPayload<{}> {}
  * declaration, but the author gets no help writing the body. Naming the type is
  * what turns the hook into a typed one.
  *
- * `${model}Policy` is a class rather than a `type` so that it serves both uses:
- * a class is also a type, its members are all optional through `Policy`'s merged
- * interface, and it carries no private members — so an object literal satisfies
- * it structurally and `extends` works for anyone who prefers methods.
+ * `${model}Policy` is a `type` and `${model}ScopedPolicy` is a class, which is
+ * the split their uses actually want. The scoped one *has* to be a class —
+ * abstract members are the entire mechanism. The plain one is only ever an
+ * annotation (`static $policies: UserPolicy[] = [...]`), and emitting it as a
+ * class would put two runtime declarations plus a value import of `Policy` into
+ * every generated `models.ts`, once per model, to serve a use nobody has: an
+ * author who wants methods without the mandatory write halves extends
+ * `Policy<…>` from `gemi/orm` directly.
  */
 function policyTypes(model: string): string {
   return `
-export abstract class ${model}Policy extends Policy<
+export type ${model}Policy = ModelPolicy<
   Prisma.${model}WhereInput,
   Prisma.${model}CreateInput,
   Prisma.${model}GetPayload<{}>
-> {}
+>;
 
 // The same shape with \`scope\`, \`onCreate\` and \`onUpdate\` abstract, so a policy
 // that scopes cannot omit the write halves. The runtime refuses those
@@ -600,9 +604,9 @@ export function emitModelsFile(schemas: ModelSchema[]): string {
     `\nimport type { Prisma } from "@prisma/client";\n`,
     `import {
   Model,
-  Policy,
   ScopedPolicy,
   type ExecOptions,
+  type ModelPolicy,
   type PolicyEntry,
 } from "gemi/orm";\n`,
     `\nimport * as schema from "./schema";\n`,

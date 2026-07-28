@@ -54,7 +54,7 @@ Attached to the model class, inherited through the prototype chain so a
 ```ts
 // sketch
 export class Account extends AccountModel {
-  static $policy = {
+  static $policies = [{
     // deny outright
     before(ctx) { if (!ctx.user) throw new ForbiddenError(); },
     // rewrite the arg tree — this is the part extensions cannot do
@@ -63,7 +63,7 @@ export class Account extends AccountModel {
     },
     // post-fetch field removal
     redact(ctx, row) { ... },
-  };
+  }];
 }
 ```
 
@@ -195,7 +195,7 @@ there is a third shape where that is false:
 
 ```ts
 export class Membership extends MembershipModel {
-  static $policy = { scope: (ctx) => ({ orgId: ctx.user.orgId }) }
+  static $policies = [{ scope: (ctx) => ({ orgId: ctx.user.orgId }) }]
 }
 // ...and no register("Membership", Membership)
 ```
@@ -224,16 +224,17 @@ one for a subclass in application code it never sees. Options, none built:
   registers every `app/models/*.ts` subclass it finds. Codegen reading
   application source is a new kind of coupling and wants its own decision.
 - Register on first *definition* rather than on first import. There is no hook —
-  `static $policy = …` in a subclass body is a `[[DefineOwnProperty]]` on the
+  `static $policies = …` in a subclass body is a `[[DefineOwnProperty]]` on the
   subclass, so a setter on the base is bypassed. Verified rather than reasoned
-  about: the setter does not fire and `Object.hasOwn(Child, "$policy")` is true.
+  about: the setter does not fire and `Object.hasOwn(Child, "$policies")` is
+  true.
 
   **The dependency is worth naming, because the reason could expire.** Define
   semantics are what ES2022 specifies and what Bun does, and this monorepo sets
   `target: ES2022` in `@repo/typescript-config/base.json`. Under *assignment*
   semantics — `useDefineForClassFields: false`, or an older target —
-  `static $policy = …` compiles to `Child.$policy = …` and an inherited setter
-  **would** fire.
+  `static $policies = …` compiles to `Child.$policies = …` and an inherited
+  setter **would** fire.
 
   That does not revive the option, and the reason it does not is the sharper
   version of the point: **the subclass is application code**, compiled by the
@@ -244,9 +245,9 @@ one for a subclass in application code it never sees. Options, none built:
   downstream `tsconfig.json` can turn off without any error. So: ruled out for
   portability rather than for impossibility, which is the stronger reason and
   the one that survives a change of target.
-- Make `$policy` a method call — `static $policy = policy(Membership, {…})` —
-  so declaring one registers it. Changes the documented shape of every policy,
-  and the `docs/authorization.md` examples with it.
+- Make the declaration a method call — `static $policies = policies(Membership,
+  […])` — so declaring one registers it. Changes the documented shape of every
+  policy, and the `docs/authorization.md` examples with it.
 
 ## Found by audit: nested writes were unscoped
 
