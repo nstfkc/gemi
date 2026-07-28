@@ -231,6 +231,64 @@ describe("policies on nested writes", () => {
     expect(notes[0].orgId).toBe(7);
   });
 
+  /**
+   * A scoped model could not upsert at all: `assertScopable` refuses to put a
+   * scope on one, because its where becomes an `on conflict` target and a
+   * target cannot carry a predicate.
+   *
+   * That reason is exactly true of the `on conflict` path and **false** of the
+   * read-then-write path, which is three ordinary statements. So the shape that
+   * takes the second path — a `create` that leaves the conflict key unset — now
+   * works, and is scoped by each of the three `$exec` calls it becomes.
+   *
+   * Recorded here rather than with the other upsert tests because the point is
+   * the *policy*: a refusal whose justification had expired.
+   */
+  test("a scoped model can upsert through the read-then-write path", async () => {
+    // `create` omits `id`, which is the conflict key the `where` names — the
+    // shape `on conflict` cannot express and this path handles.
+    const created: any = await Model.asUser(OURS, () =>
+      Folder.$exec("upsert", {
+        where: { id: 999_999 },
+        create: { code: "made" },
+        update: { code: "unused" },
+      }),
+    );
+
+    expect(created.orgId).toBe(7);
+
+    // And the read half is scoped, which is the half that matters: folder 1
+    // belongs to org 99, so our user does not find it and creates instead of
+    // updating somebody else's row.
+    const second: any = await Model.asUser(OURS, () =>
+      Folder.$exec("upsert", {
+        where: { id: 1 },
+        create: { code: "ours-not-theirs" },
+        update: { code: "hijacked" },
+      }),
+    );
+
+    expect(second.orgId).toBe(7);
+    const theirs: any = await raw.unsafe(
+      `SELECT * FROM "Folder" WHERE "id" = 1`,
+    );
+    expect(theirs[0].code).toBe("theirs");
+    expect(theirs[0].orgId).toBe(99);
+  });
+
+  /** The `on conflict` shape still refuses, and its reason still holds. */
+  test("a scoped model still cannot upsert through on conflict", async () => {
+    await expect(
+      Model.asUser(OURS, () =>
+        Folder.$exec("upsert", {
+          where: { code: "ours" },
+          create: { code: "ours" },
+          update: { code: "ours" },
+        }),
+      ),
+    ).rejects.toThrow(/'on conflict' target/);
+  });
+
   /** `asSystem` suspends both, as it does everywhere else. */
   test("asSystem reaches across tenants, deliberately", async () => {
     await Model.asSystem(() =>

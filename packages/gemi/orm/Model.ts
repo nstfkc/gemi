@@ -475,22 +475,8 @@ export abstract class Model {
       );
     }
 
-    if (policies.length > 0 && !preScoped) {
-      // Deny-by-default lives on the context's `user` accessor, not here: a
-      // policy that never consults the user — a soft-delete scope, say — has
-      // nothing to deny and must keep working with no request in sight. See
-      // `policyContext`.
-      policy = policyContext(schema.name, op, currentUser(), system);
-      effective = applyPolicies(policies, policy, args);
-    }
-
-    // Which strategy plans the include tree. Named per call or chosen by
-    // `defaultStrategy`, and either way it reaches the plan key — two strategies
-    // emit different SQL for the same arguments, so sharing a plan between them
-    // would run one request's statement for the other's.
-    const strategy = resolveStrategy(options?.strategy, dialect);
-
-    // `upsert` whose `create` does not set the conflict key, which used to raise.
+    // `upsert` whose `create` does not set the conflict key, which used to
+    // raise — and which is decided **before** policies are applied, on purpose.
     //
     // The last of iteration 4's three "not before iteration 5" items. That note:
     // "Prisma means find-then-write there; expressing that takes a read and a
@@ -506,32 +492,48 @@ export abstract class Model {
     // Prisma's upsert has that race and this inherits it, but only on calls that
     // previously raised: nothing that worked becomes racy.
     //
-    // The divertable set comes from `upsertAbsentConflictKey`, the same function
-    // the compiler refuses on, so the two cannot disagree about which calls
-    // belong on which path.
-    if (op === "upsert" && findThenWrite(schema, effective, op)) {
-      const { where, create, update, ...projection } = effective;
+    // **Before policies, and that is what lets a scoped model upsert at all.**
+    // `assertScopable` refuses to put a scope on an `upsert`, because its where
+    // becomes an `on conflict` target and a target cannot carry a predicate.
+    // That reason is exactly true of the `on conflict` path and false of this
+    // one, which is three ordinary statements. Deciding here means the three run
+    // as `findFirst`, `create` and `update`, each scoped normally by its own
+    // `$exec` — so this branch is *not* marked pre-scoped, and a policied model
+    // gets a working upsert instead of a refusal whose justification expired.
+    //
+    // A policy that branches on `context.operation` therefore sees the three it
+    // actually runs rather than the one the caller named. That is the honest
+    // reading: the operation really is three statements here.
+    if (op === "upsert" && !preScoped && findThenWrite(schema, args, op)) {
+      const { where, create, update, ...projection } = args;
 
       return withTransaction(db.sql, async () => {
-        const found = await this.$exec(
-          "findFirst",
-          { where },
-          markPreScoped({ strategy: options?.strategy }) as never,
-        );
+        const found = await this.$exec("findFirst", { where }, options);
 
         return found === null
-          ? await this.$exec(
-              "create",
-              { data: create, ...projection },
-              markPreScoped({ strategy: options?.strategy }) as never,
-            )
+          ? await this.$exec("create", { data: create, ...projection }, options)
           : await this.$exec(
               "update",
               { where, data: update, ...projection },
-              markPreScoped({ strategy: options?.strategy }) as never,
+              options,
             );
       });
     }
+
+    if (policies.length > 0 && !preScoped) {
+      // Deny-by-default lives on the context's `user` accessor, not here: a
+      // policy that never consults the user — a soft-delete scope, say — has
+      // nothing to deny and must keep working with no request in sight. See
+      // `policyContext`.
+      policy = policyContext(schema.name, op, currentUser(), system);
+      effective = applyPolicies(policies, policy, args);
+    }
+
+    // Which strategy plans the include tree. Named per call or chosen by
+    // `defaultStrategy`, and either way it reaches the plan key — two strategies
+    // emit different SQL for the same arguments, so sharing a plan between them
+    // would run one request's statement for the other's.
+    const strategy = resolveStrategy(options?.strategy, dialect);
 
     // `createMany` past the driver's parameter ceiling, which used to raise.
     //

@@ -273,3 +273,29 @@ decision.** Anything that can suppress a policy needs its call sites to be
 countable. It was designed to be unforgeable by applications — a module-private
 Symbol — and then applied by default inside the framework, which is the same
 mistake one layer in.
+
+### A refusal whose reason had expired
+
+Found in the same pass, and the same shape as the class-fields note #57 caught:
+a rule recorded with a reason, kept after the reason stopped being true.
+
+`assertScopable` refuses to put a scope on an `upsert`, because "its where
+clause compiles to an `on conflict` target, which is a key rather than a
+filter". That is exactly true of the `on conflict` path — and false of the
+read-then-write path added for a `create` that omits the conflict key, which is
+three ordinary statements. A tenant-scoped model could not upsert at all,
+including in the shape that would have been perfectly scopable.
+
+Fixed by **deciding the fallback before policies are applied**, not by relaxing
+the check. The three statements then run as `findFirst`, `create` and `update`,
+each scoped normally by its own `$exec`, so the branch is not marked pre-scoped
+and nothing had to be special-cased in the policy layer.
+
+Two consequences worth stating:
+
+- A policy that branches on `context.operation` sees the three operations that
+  actually run rather than the one the caller named. That is the honest reading
+  — the operation really is three statements here.
+- The refusal that remains is narrower and its message says so, including the
+  escape. `on conflict` is still refused for a scoped model, and still should
+  be.

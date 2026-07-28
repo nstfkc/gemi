@@ -398,7 +398,11 @@ function assertScopable(context: PolicyContext): void {
     `${context.model} has a policy with a scope, and ${context.operation} ` +
       `cannot carry one: its where clause compiles to an 'on conflict' target, ` +
       `which is a key rather than a filter. Running it would write outside the ` +
-      `scope. Use update and create separately, which both scope normally.`,
+      `scope.\n\n` +
+      `Two ways out. Use update and create separately, which both scope ` +
+      `normally — or leave the conflict key out of 'create', which Model.upsert ` +
+      `runs as a scoped read and a scoped write inside one transaction. The ` +
+      `refusal is about 'on conflict' specifically, not about upsert.`,
   );
 }
 
