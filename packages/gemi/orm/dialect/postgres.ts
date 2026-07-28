@@ -164,15 +164,24 @@ export class PostgresDialect implements SqlDialect {
   //   boolean            -> boolean     ✓
   //   text               -> string      ✓
   //   timestamp(3)       -> Date        ✓ (but see the protocol note below)
-  //   bytea              -> Buffer      ✓ (a Uint8Array, which is what Prisma gives)
+  //   bytea              -> Buffer      ✗ where Prisma gives a plain Uint8Array
   //   bigint             -> "123"       ✗ string, where Prisma gives 123n
   //   jsonb / json       -> '{"a":1}'   ✗ unparsed text, where Prisma gives an object
+  //
+  // The `bytea` line carried a ✓ and the parenthetical "a Uint8Array, which is
+  // what Prisma gives". Both halves are true and the conclusion was still wrong:
+  // a `Buffer` *is* a `Uint8Array`, so the type checks out, but it is not the
+  // one Prisma returns and it does not behave the same. Checked against a
+  // generated Prisma 6 client on both dialects rather than reasoned about —
+  // Prisma returns a plain `Uint8Array` for `Bytes` everywhere.
   //
   // `numeric` also arrives as a string, which is the correct thing for it to
   // do — but `Decimal` is refused at *generation* time (iteration 1), so no
   // such field can reach this.
   needsDecode(field: FieldSchema): boolean {
-    return field.type === "BigInt" || field.type === "Json";
+    return (
+      field.type === "BigInt" || field.type === "Json" || field.type === "Bytes"
+    );
   }
 
   decode(value: unknown, field: FieldSchema): unknown {
@@ -195,6 +204,25 @@ export class PostgresDialect implements SqlDialect {
         } catch {
           throw new DecodeError(field, value);
         }
+      case "Bytes":
+        // The driver hands back a `Buffer`; Prisma 6 returns a `Uint8Array`,
+        // on **every** dialect, and so does this ORM on SQLite where the
+        // driver's own value already is one. Returning the `Buffer` verbatim
+        // therefore diverged from Prisma and from our own SQLite path at the
+        // same time — and `Buffer` being a `Uint8Array` subclass is exactly
+        // what made it invisible: it satisfies the generated type, survives
+        // `ArrayBuffer.isView`, and compares equal element by element.
+        //
+        // What it does not survive is `toString`. `Buffer.prototype.toString`
+        // takes an encoding; `Uint8Array.prototype.toString` ignores its
+        // argument and joins with commas. So `row.digest.toString("hex")` read
+        // `"0102ff"` in production on Postgres and `"1,2,255"` in development
+        // on SQLite, with no error on either.
+        //
+        // A view, not a copy: same bytes, same lifetime, no allocation.
+        return Buffer.isBuffer(value)
+          ? new Uint8Array(value.buffer, value.byteOffset, value.byteLength)
+          : value;
       default:
         return value;
     }

@@ -258,19 +258,25 @@ RUN("every scalar through a relation, lateral vs batched", () => {
     expect([...folded]).toEqual([...VALUES.blob]);
     expect([...folded]).toEqual([...fetched]);
 
-    // The *container*, not just the contents — and this is the assertion the
-    // first version of this test was missing. `[...x]` spreads a `Buffer` and a
+    // The *container*, not just the contents. `[...x]` spreads a `Buffer` and a
     // `Uint8Array` to the same plain array, so a content-only comparison passes
-    // for two different types. The difference is observable and bites the
-    // ordinary things a caller does with a `bytea`.
-    expect(Buffer.isBuffer(folded)).toBe(true);
-    expect(Buffer.isBuffer(fetched)).toBe(true);
+    // for two different types — which is how the first version of this test
+    // missed a real divergence it was written to catch.
+    //
+    // `Uint8Array` on both sides, because that is what Prisma 6 returns on
+    // every dialect and what this ORM returns on SQLite. The first fix here
+    // converged both Postgres paths on `Buffer` instead, which made the two
+    // strategies agree with each other and with nothing else.
+    expect(Buffer.isBuffer(folded)).toBe(false);
+    expect(Buffer.isBuffer(fetched)).toBe(false);
+    expect(folded.constructor.name).toBe("Uint8Array");
+    expect(fetched.constructor.name).toBe("Uint8Array");
 
-    // The specific way it bit: `Uint8Array.prototype.toString` ignores its
-    // argument, so this returned "0,1,2,253,254,255" instead of hex — a wrong
-    // answer with no error.
+    // The call that made the difference observable rather than academic.
+    // `Uint8Array.prototype.toString` ignores its argument, so this is the
+    // comma form on both paths — the same answer a caller gets from Prisma.
     expect(folded.toString("hex")).toBe(fetched.toString("hex"));
-    expect(folded.toString("hex")).toBe("000102fdfeff");
+    expect(folded.toString("hex")).toBe("0,1,2,253,254,255");
   });
 
   /** ISO text out of the aggregate, where the driver would have given a `Date`. */
@@ -308,6 +314,9 @@ RUN("every scalar through a relation, lateral vs batched", () => {
     expect([...lateral[0].items[0].blob]).toEqual([
       ...batched[0].items[0].blob,
     ]);
+    expect(lateral[0].items[0].blob.constructor.name).toBe(
+      batched[0].items[0].blob.constructor.name,
+    );
   });
 
   /** The to-one direction, which takes the non-aggregate path in the strategy. */

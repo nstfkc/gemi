@@ -186,12 +186,53 @@ describe("decoding the types the template schema cannot reach", () => {
     expect(postgres.decode({ a: 1 }, field("Json") as any)).toEqual({ a: 1 });
   });
 
-  test.each(["Int", "String", "Boolean", "Float", "DateTime", "Bytes"])(
+  test.each(["Int", "String", "Boolean", "Float", "DateTime"])(
     "%s needs no decoding",
     (type) => {
       expect(postgres.needsDecode(field(type) as any)).toBe(false);
     },
   );
+
+  /**
+   * `Bytes` used to be on that list, and the driver's `Buffer` went straight
+   * through. Prisma 6 returns a `Uint8Array` on every dialect, and so does this
+   * ORM on SQLite, where the driver's own value already is one — so passing the
+   * `Buffer` through diverged from Prisma and from our other dialect at once.
+   *
+   * It stayed invisible because `Buffer` *is* a `Uint8Array`: it satisfies the
+   * generated type, passes `ArrayBuffer.isView`, and compares equal element by
+   * element. `toString` is where they part company.
+   */
+  test("Bytes is normalised to a Uint8Array, not the driver's Buffer", () => {
+    expect(postgres.needsDecode(field("Bytes") as any)).toBe(true);
+
+    const buffer = Buffer.from([1, 2, 255]);
+    const decoded = postgres.decode(buffer, field("Bytes") as any) as Uint8Array;
+
+    expect(Buffer.isBuffer(decoded)).toBe(false);
+    expect(decoded.constructor.name).toBe("Uint8Array");
+    expect([...decoded]).toEqual([1, 2, 255]);
+
+    // The observable difference, and the reason the container is worth a test:
+    // `Buffer.prototype.toString` takes an encoding, `Uint8Array`'s ignores it.
+    expect(buffer.toString("hex")).toBe("0102ff");
+    expect(decoded.toString("hex")).toBe("1,2,255");
+  });
+
+  /** A view over the driver's bytes, so a large row costs no copy. */
+  test("the normalised Bytes shares memory with the driver's buffer", () => {
+    const buffer = Buffer.from([7, 8, 9]);
+    const decoded = postgres.decode(buffer, field("Bytes") as any) as Uint8Array;
+
+    expect(decoded.buffer).toBe(buffer.buffer);
+    expect(decoded.byteOffset).toBe(buffer.byteOffset);
+  });
+
+  /** A driver that already hands back a plain view is left alone. */
+  test("a Uint8Array from the driver passes through untouched", () => {
+    const bytes = new Uint8Array([4, 5]);
+    expect(postgres.decode(bytes, field("Bytes") as any)).toBe(bytes);
+  });
 
   test("a value that cannot be decoded raises rather than returning nonsense", () => {
     expect(() => postgres.decode("not json", field("Json") as any)).toThrow();

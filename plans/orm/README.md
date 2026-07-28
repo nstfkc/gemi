@@ -398,6 +398,31 @@ Iterations 5 and 6 are the reason the project exists, but they are cheap *once
 the choke point exists*, which is why they come after the query engine rather
 than before it.
 
+**All nine have shipped.** What remains on this plan is not another vehicle: it
+is the two entries under [Open decisions](#open-decisions) that are decisions
+rather than work, and whatever the ORM's first real users find.
+
+### Documentation
+
+`docs/orm.md` is the user-facing page — setup through the Prisma generator
+block, the thirteen operations, relations and the two strategies, ambient
+transactions, policies, soft deletes, the typed errors, and an explicit
+*not in scope* section. It sits beside `docs/orm-rows-and-entities.md`, which
+iteration 8 wrote and which nothing linked to: neither page was reachable from
+`docs/README.md`, `docs/index.html`, `docs/llms.txt` or `docs/llms-full.txt`
+until the doc pass. Both are now in all four.
+
+Two deliberate omissions, so the next person does not read them as oversights:
+
+- **No measured numbers.** They live in `plans/orm/benchmarks.md`, generated
+  from `benchmarks.json`. Copying them into `docs/` would produce prose that
+  drifts from its own source — which happened three times inside the benchmark
+  document itself before the numbers were derived rather than written.
+- **Nothing about internals.** `$exec`, the plan key, `Fragment`/`Binder`, the
+  strategy seam and the six invariants are all in this directory. An
+  application author does not need them, and documenting them in `docs/` would
+  make them a compatibility surface.
+
 ## Picking up an iteration
 
 0. Confirm you are on a branch descended from `feat/database-layer` (see
