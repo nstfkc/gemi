@@ -72,14 +72,18 @@ import { compileWhere } from "./where";
  * is refused with an error naming the column, rather than silently written wrong.
  */
 
+// `omit` rides along wherever a payload comes back, which is every write but
+// the three that return a count — Prisma types it the same way. It is resolved
+// by `resolveSelection`, so the `RETURNING` list narrows exactly as a read's
+// column list does and the omitted column is never read.
 const WRITE_ARGS: Record<string, Set<string>> = {
-  create: new Set(["data", "select", "include"]),
+  create: new Set(["data", "select", "include", "omit"]),
   createMany: new Set(["data"]),
-  update: new Set(["data", "where", "select", "include"]),
+  update: new Set(["data", "where", "select", "include", "omit"]),
   updateMany: new Set(["data", "where"]),
-  delete: new Set(["where", "select", "include"]),
+  delete: new Set(["where", "select", "include", "omit"]),
   deleteMany: new Set(["where"]),
-  upsert: new Set(["where", "create", "update", "select", "include"]),
+  upsert: new Set(["where", "create", "update", "select", "include", "omit"]),
 };
 
 /** The writes that return one row, and raise when they match none. */

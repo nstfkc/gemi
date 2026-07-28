@@ -30,6 +30,7 @@ export {
   UnknownRelationError,
   UnregisteredPolicyClassError,
   UnregisteredRelationTargetError,
+  UnsupportedByDesignError,
   UnsupportedQueryError,
 } from "./errors";
 

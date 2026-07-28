@@ -575,6 +575,48 @@ const CASES: [string, string, unknown][] = [
     where: { publicId: "p4" }, include: { organization: true },
   }],
 
+  // --- omit ---------------------------------------------------------------
+  //
+  // The complement of `select`, and a real projection: the omitted column never
+  // enters the SELECT list, which Prisma's query log confirms. The cases that
+  // discriminate are the ones where `omit` and `select` would *differ* — a
+  // model gaining a column is included by an `omit` and dropped by a `select`.
+  ["omit one column", "findMany", { omit: { password: true } }],
+  ["omit several", "findMany", {
+    omit: { password: true, verificationToken: true, locale: true },
+  }],
+  // `false` means keep it, exactly as in a `select`.
+  ["omit false keeps the column", "findMany", { omit: { password: false } }],
+  ["omit mixed true and false", "findMany", {
+    omit: { password: true, locale: false },
+  }],
+  ["omit an empty object", "findMany", { omit: {} }],
+  ["omit a nullable column", "findMany", { omit: { deletedAt: true } }],
+  ["omit the primary key", "findMany", { omit: { id: true } }],
+  ["omit beside a where", "findMany", {
+    where: { globalRole: 2 }, omit: { password: true },
+  }],
+  ["omit beside an orderBy and take", "findMany", {
+    orderBy: { id: "asc" }, take: 2, omit: { password: true },
+  }],
+  ["omit on findFirst", "findFirst", {
+    orderBy: { id: "asc" }, omit: { password: true },
+  }],
+  ["omit on findUnique", "findUnique", {
+    where: { publicId: "p1" }, omit: { password: true },
+  }],
+  // With an `include`, the omission applies to the parent's own columns and
+  // leaves the relation alone.
+  ["omit beside an include", "findMany", {
+    omit: { password: true }, include: { accounts: { orderBy: { id: "asc" } } },
+  }],
+  // ...and the omitted column is the *stitch key*, which the planner has to
+  // fetch anyway and then hide again — the same path a `select` without the key
+  // takes.
+  ["omit the key an include stitches on", "findMany", {
+    omit: { id: true }, include: { accounts: { orderBy: { id: "asc" } } },
+  }],
+
   // --- count ------------------------------------------------------------
   ["count", "count", undefined],
   ["count with where", "count", { where: { deletedAt: null } }],

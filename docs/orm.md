@@ -126,6 +126,27 @@ stepping stone: a `Pick<User, "id">` hydrated as a `User` would carry methods re
 query never fetched. See [Rows and entities](./orm-rows-and-entities.md) for the two opt-in levels
 above it — `track` + `save`, and `wrap`.
 
+### Returning everything except one column
+
+```ts
+const user = await User.findUnique({ where: { id }, omit: { password: true } })
+```
+
+`omit` is the complement of `select`, and the reason to have both is what happens when the model
+gains a column. With `select` the exclusion list has to be rewritten every time, and the day
+somebody forgets is the day the new column silently stops being returned. `omit` says the thing that
+is actually stable about the query — *this column must never leave the process* — so a column added
+later is included by default.
+
+It is a real projection: the omitted column never enters the `SELECT` list, so it is not read, not
+shaped and not decoded. `select` and `omit` together are refused, because one names what to keep and
+the other what to drop; Prisma rejects that pair too. It works on every operation that returns a
+payload, reads and writes alike.
+
+**It is not a substitute for a policy's `redact`.** `omit` is the caller choosing; `redact` is the
+model refusing, and a caller cannot opt out of it. Use `redact` for "nobody may read this", and
+`omit` for "I do not need this here".
+
 ### Per-call options
 
 A second parameter, not a key inside `args` — intersecting Prisma's own arg types with a
@@ -778,10 +799,21 @@ Stated so you can plan around them rather than discover them:
   an identity map is worse than none.
 - **No lazy loading.** A relation you did not `include` is absent, not a proxy that queries when
   touched.
-- **No `omit`.** Use `select`, or a policy's `redact`.
 - **No migrations, no schema DSL.** Prisma owns both, and gemi must not shadow the Prisma CLI.
-- **No `groupBy`, `aggregate`, `distinct` or cursor pagination.** These land in
-  [Raw SQL](#raw-sql), which exists so that "not implemented" has an answer rather than a shrug.
+- **No `groupBy` or `aggregate`.** These land in [Raw SQL](#raw-sql), which exists so that "not
+  implemented" has an answer rather than a shrug.
+- **No `distinct`, and this one is deliberate rather than pending.** Prisma applies it **in
+  memory** — its query log shows no `DISTINCT` at all, so `take` neither reduces the rows pulled
+  nor paginates by group. Reproducing that faithfully would mean reading the whole result set and
+  deduplicating in JavaScript behind an argument that reads like a database operation; emitting a
+  real `DISTINCT ON` instead would silently diverge from Prisma. Write it as SQL.
+- **No `cursor`, also deliberate.** It is only correct under a *total* ordering, which Prisma does
+  not enforce — under a non-unique `orderBy` it skips or repeats rows at the page boundary. Use
+  `take` with a `where` on the last row's sort key, or compose the keyset comparison with `sql`.
+
+Both of the last two throw `UnsupportedByDesignError`, which says *"and this is a decision rather
+than a gap"* rather than *"yet"* — so a refusal you can plan around reads differently from one that
+might lift next release.
 
 ## See also
 
