@@ -314,6 +314,33 @@ function suite(label: string, url?: string) {
         ).rejects.toThrow();
       });
 
+      /**
+       * A conflict against a row **this same statement is inserting**, rather
+       * than one already committed — which is a different thing for
+       * `on conflict do nothing` to resolve, and the shape a caller hits when
+       * their input list is simply not deduplicated.
+       *
+       * Measured before it was pinned: `values ('x','1'),('x','1'),('y','2')
+       * on conflict do nothing` inserts two rows, not three and not one.
+       */
+      test("two identical rows in one call insert once", async () => {
+        if (!url) return;
+
+        await differential.expectSameWrite(
+          "User",
+          "createMany",
+          {
+            data: [
+              { publicId: "dup-1", email: "dup1@example.dev" },
+              { publicId: "dup-1", email: "dup2@example.dev" },
+              { publicId: "dup-2", email: "dup3@example.dev" },
+            ],
+            skipDuplicates: true,
+          },
+          { tables: ["User"] },
+        );
+      });
+
       test("every row conflicting is a count of zero, not an error", async () => {
         if (!url) return;
 
