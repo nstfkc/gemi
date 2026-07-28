@@ -47,6 +47,23 @@ import { reverse, type OrderTerm } from "./orderBy";
  *
  * `argument` is the name to report: `take` at the root, `accounts.take` on a
  * relation node.
+ *
+ * **The error type is wrong here, and deliberately left wrong until #78 lands.**
+ * `UnsupportedQueryError` spells "does not support 'take' *yet*", and there is
+ * no future in which `take: "-2"` becomes supported — the word promises
+ * something nobody intends. For the fraction it contradicts this file's own
+ * comment, which calls the refusal deliberate. That word is load-bearing in
+ * this codebase: #78 adds `UnsupportedByDesignError` for "a decision rather
+ * than a gap", and #82 removed "yet" from the dialect message for exactly this
+ * reason.
+ *
+ * Validation is a fourth category again — not unimplemented, not a design
+ * refusal of a feature, but invalid input — so the fix is a category, not a
+ * reworded string, and inventing one here while #78 is in flight would be the
+ * second copy this function exists to avoid. When #78 merges: the fraction
+ * refusal moves to the by-design category it is already documented as, and the
+ * type-mismatch messages lose the word. The two branches merge clean today, so
+ * this is an order note rather than a conflict.
  */
 export function assertPageArgument(
   model: string,
