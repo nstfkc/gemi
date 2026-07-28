@@ -65,6 +65,8 @@ export {
   type OrmScope,
 } from "./context";
 
+export { assertPoliciesRegistered } from "./registration";
+
 export {
   softDelete,
   softDeleteMany,

@@ -79,6 +79,22 @@ nothing, and the rows come back unscoped with no error. That is the shape a memb
 model usually has, and it is exactly the kind that carries a tenant scope. Write the line next to
 every subclass regardless — the guard is a backstop for the cases it can see, not a substitute.
 
+For the case it cannot see, there is an audit you can run once instead of trusting thirteen
+subclasses:
+
+```ts
+import { assertPoliciesRegistered } from "gemi/orm"
+import * as generated from "@/app/models/generated"
+import * as models from "@/app/models/User"
+
+assertPoliciesRegistered(generated, models)
+```
+
+Same rule, triggered differently: it reads the classes out of the module namespace, so a policied
+class that nothing queries is still visible. In a test it closes the hole for CI at no runtime cost;
+at boot it turns a deploy of the mistake into a failure to start rather than a quiet cross-tenant
+read. It can only see modules you hand it, so it does not replace the `register` line either.
+
 ## Querying
 
 Thirteen operations, with Prisma's argument types verbatim:
