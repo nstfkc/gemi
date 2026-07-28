@@ -197,6 +197,20 @@ const LITERAL_KEYS = new Set([
   "by",
 ]);
 
+/**
+ * The aggregate kinds, which mean **two different things by position**.
+ *
+ * As a *projection* — `_count: { email: true }` — their contents decide the
+ * select list, so they are in {@link LITERAL_KEYS} and recorded verbatim.
+ * Inside a `having` the same keys introduce a *comparison*, and its operand is
+ * a bound parameter like any other.
+ *
+ * Nothing else in the walk is ambiguous this way, which is why this is a set
+ * rather than a general rule: the position is what disambiguates, and only
+ * these five keys have two positions.
+ */
+const AGGREGATE_KINDS = new Set(["_count", "_avg", "_sum", "_min", "_max"]);
+
 export function canonicalShape(
   value: unknown,
   literal = false,
@@ -205,6 +219,17 @@ export function canonicalShape(
    * list's *length* stops being part of the key. See `collapsedList`.
    */
   collapseLists = false,
+  /**
+   * Set inside a `having`, where an aggregate kind is an operator rather than a
+   * projection selector.
+   *
+   * A separate flag rather than clearing `literal`, because clearing it would
+   * be wrong: `mode` lives inside `where` — already a value subtree — and
+   * *must* stay literal, since `insensitive` and `default` compile to `ilike`
+   * and `like`. So "nothing below a value key is structural" is not the rule;
+   * "an aggregate kind below a `having` is not" is.
+   */
+  inHaving = false,
 ): string {
   if (value === null) return "null";
   if (value === undefined) return "undefined";
@@ -226,14 +251,17 @@ export function canonicalShape(
     // The exception is the `in` / `notIn` operand on a dialect that binds it as
     // one parameter, which `shapeOfMember` takes before this is reached.
     return `[${value
-      .map((item) => canonicalShape(item, literal, collapseLists))
+      .map((item) => canonicalShape(item, literal, collapseLists, inHaving))
       .join(",")}]`;
   }
 
   const entries = Object.entries(value as Record<string, unknown>)
     .filter(([, v]) => v !== undefined)
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-    .map(([key, v]) => `${key}:${shapeOfMember(key, v, literal, collapseLists)}`);
+    .map(
+      ([key, v]) =>
+        `${key}:${shapeOfMember(key, v, literal, collapseLists, inHaving)}`,
+    );
   return `{${entries.join(",")}}`;
 }
 
@@ -276,6 +304,7 @@ function shapeOfMember(
   value: unknown,
   literal: boolean,
   collapseLists: boolean,
+  inHaving: boolean,
 ): string {
   // `take` is a parameter, but its *sign* is not: a negative take means "the
   // last N", which flips every ordering term and so changes the SQL text. The
@@ -293,11 +322,39 @@ function shapeOfMember(
   if (collapseLists && LIST_KEYS.has(key) && Array.isArray(value)) {
     return collapsedList(value);
   }
-  if (VALUE_KEYS.has(key)) return canonicalShape(value, false, collapseLists);
+  if (VALUE_KEYS.has(key)) {
+    return canonicalShape(value, false, collapseLists, inHaving);
+  }
+
+  /**
+   * `having` is a predicate, so its operands are parameters — and unlike every
+   * other value key it contains keys that {@link LITERAL_KEYS} would otherwise
+   * re-raise one level down.
+   *
+   * Without this, `having: { role: { _count: { gt: 5 } } }` records `gt:5`
+   * verbatim and mints one cache entry per threshold, each holding
+   * byte-identical SQL. The cap is 1000 and a threshold off a query string is
+   * ordinary, so it fills the cache and evicts every other query's plan — the
+   * same pathology `plan.ts` already describes for `in`-list lengths, and the
+   * thing `VALUE_KEYS`' own comment warns about: it would put user data into a
+   * long-lived global map.
+   *
+   * The equivalent `where` — `{ role: { gt: 5 } }` — has always been one entry,
+   * which is the behaviour this matches.
+   */
+  if (key === "having") return canonicalShape(value, false, collapseLists, true);
+
+  // In a `having`, an aggregate kind is a comparison rather than a projection,
+  // so it does not raise `literal` for its subtree.
+  if (inHaving && AGGREGATE_KINDS.has(key)) {
+    return canonicalShape(value, false, collapseLists, true);
+  }
+
   return canonicalShape(
     value,
     literal || LITERAL_KEYS.has(key),
     collapseLists,
+    inHaving,
   );
 }
 
