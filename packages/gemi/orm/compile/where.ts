@@ -586,6 +586,39 @@ function assertCompositeInOperand(
   operand: unknown,
   context: WhereContext,
 ): string[] {
+  /**
+   * A caller's key gets the **unknown-key treatment**, which is what the
+   * original comment promised and what every other key it is not a field for
+   * already gets. `UnsupportedQueryError` would render "does not support
+   * '$compositeIn' *yet*" — a promise about a key that is deliberately not in
+   * the grammar and never will be. That word has now been corrected once each
+   * on #82 and #88; this is the third time it has been raised, which is enough
+   * to stop treating it as a wording nit and use the error that is simply
+   * accurate: `$compositeIn` is not a field on this model.
+   */
+  const notAField = (): never => {
+    throw new UnknownFieldError(
+      COMPOSITE_IN,
+      schema.name,
+      Object.keys(schema.fields),
+    );
+  };
+
+  if (typeof operand !== "object" || operand === null || Array.isArray(operand)) {
+    return notAField();
+  }
+
+  if ((operand as Record<symbol, unknown>)[PLANNER] !== true) {
+    return notAField();
+  }
+
+  /**
+   * Below here the operand *is* the planner's, so a bad shape is this ORM's bug
+   * rather than a caller's — and `UnsupportedQueryError` is the right class for
+   * it: an internal invariant that does not hold is genuinely something the
+   * ORM does not support, and "yet" is the honest word for a state it should
+   * not be in.
+   */
   const refuse = (detail: string): never => {
     throw new UnsupportedQueryError(
       COMPOSITE_IN,
@@ -594,21 +627,6 @@ function assertCompositeInOperand(
       detail,
     );
   };
-
-  if (typeof operand !== "object" || operand === null || Array.isArray(operand)) {
-    return refuse(
-      `'${COMPOSITE_IN}' is not part of the query grammar — it is how the ` +
-        `relation planner matches a composite key, and nothing else builds one.`,
-    );
-  }
-
-  if ((operand as Record<symbol, unknown>)[PLANNER] !== true) {
-    return refuse(
-      `'${COMPOSITE_IN}' is not part of the query grammar — it is how the ` +
-        `relation planner matches a composite key. To filter on several ` +
-        `columns, write them as ordinary keys, or as an 'OR' of them.`,
-    );
-  }
 
   const { fields, values } = operand as CompositeInOperand;
 
