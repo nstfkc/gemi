@@ -316,15 +316,26 @@ function jsonConverter(
 
     case "Bytes":
       // Postgres renders `bytea` into JSON as `\x` followed by hex.
+      //
+      // **`Buffer`, not `Uint8Array`**, and the container matters as much as the
+      // contents. The driver gives the batched path a `Buffer`, and this
+      // codebase's rule is that a strategy must be invisible to callers — so
+      // returning a bare `Uint8Array` here made `row.digest.toString("hex")`
+      // return `"1,2,255"` instead of `"0102ff"`. A wrong answer with no error,
+      // because `Uint8Array.prototype.toString` ignores its argument.
+      // `Buffer.isBuffer` and the rest of that surface went the same way.
+      //
+      // My own coercion fixture missed this: it compared `[...folded]` against
+      // `[...fetched]`, which spreads both to plain arrays and so passes for two
+      // different containers holding the same bytes. Contents were equal; the
+      // type was not.
       return (value) => {
         if (value === null || value === undefined) return null;
-        if (ArrayBuffer.isView(value)) return value;
-        const text = String(value).replace(/^\\?x/, "");
-        const bytes = new Uint8Array(text.length / 2);
-        for (let i = 0; i < bytes.length; i++) {
-          bytes[i] = Number.parseInt(text.slice(i * 2, i * 2 + 2), 16);
-        }
-        return bytes;
+        if (Buffer.isBuffer(value)) return value;
+        if (ArrayBuffer.isView(value)) return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+        // `Buffer.from(text, "hex")` rather than a manual loop — same result,
+        // and it is the parser the driver would have used.
+        return Buffer.from(String(value).replace(/^\\?x/, ""), "hex");
       };
 
     default:

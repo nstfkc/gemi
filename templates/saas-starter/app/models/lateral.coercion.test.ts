@@ -255,9 +255,22 @@ RUN("every scalar through a relation, lateral vs batched", () => {
     const folded = lateral[0].items[0].blob;
     const fetched = batched[0].items[0].blob;
 
-    expect(ArrayBuffer.isView(folded)).toBe(true);
     expect([...folded]).toEqual([...VALUES.blob]);
     expect([...folded]).toEqual([...fetched]);
+
+    // The *container*, not just the contents — and this is the assertion the
+    // first version of this test was missing. `[...x]` spreads a `Buffer` and a
+    // `Uint8Array` to the same plain array, so a content-only comparison passes
+    // for two different types. The difference is observable and bites the
+    // ordinary things a caller does with a `bytea`.
+    expect(Buffer.isBuffer(folded)).toBe(true);
+    expect(Buffer.isBuffer(fetched)).toBe(true);
+
+    // The specific way it bit: `Uint8Array.prototype.toString` ignores its
+    // argument, so this returned "0,1,2,253,254,255" instead of hex — a wrong
+    // answer with no error.
+    expect(folded.toString("hex")).toBe(fetched.toString("hex"));
+    expect(folded.toString("hex")).toBe("000102fdfeff");
   });
 
   /** ISO text out of the aggregate, where the driver would have given a `Date`. */
