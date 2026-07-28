@@ -316,6 +316,12 @@ same answer you would get if it truly did not exist. That is deliberate. `connec
 `connectOrCreate` succeeded would together tell you a row with that key exists in someone else's
 tenant.
 
+> **Known gap (#98).** A child whose policy *scopes on the foreign key itself* — `scope: () => ({
+> folderId: mine })` — cannot use any relation operand that writes that key, including `connect`,
+> unless it also declares an `onUpdate`. The scope-escape guard reads the payload and cannot tell a
+> column you supplied from one the nested step put there. Pre-existing rather than new to
+> `disconnect`, and tracked separately because the decision affects `connect` too.
+
 `disconnect` and `delete` only exist on an `update` — a `create` has nothing linked to it yet, and
 Prisma reports them as an unknown argument there too. They differ on a row that is **not** linked to
 this parent, and the difference is Prisma's: `disconnect` succeeds and changes nothing, `delete`

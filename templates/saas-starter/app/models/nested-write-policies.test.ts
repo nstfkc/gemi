@@ -9,6 +9,7 @@ import { Application } from "gemi/foundation";
 import {
   Model,
   RecordNotFoundError,
+  ScopeEscapeError,
   clearPlanCache,
   register,
   type ModelPolicy,
@@ -479,6 +480,59 @@ describe("policies on nested writes", () => {
     ).rejects.toThrow(/is not connected/);
 
     expect(await raw.unsafe(`SELECT * FROM "Note"`)).toHaveLength(1);
+  });
+
+  /**
+   * **Pinned, not endorsed** — #98.
+   *
+   * A child scoped on its own foreign key loses every relation operand that
+   * writes that key, because `assertNoScopeEscape` reads `args.data` and cannot
+   * tell a column the caller supplied from one the nested step put there. The
+   * caller wrote `disconnect: { id }`; `folderId` is in `data` because the ORM
+   * chose it.
+   *
+   * This is **not** new to `disconnect`. `connect` has the same shape and the
+   * same failure on `feat/orm` today, which is why it is filed rather than
+   * fixed here: the decision affects an operand that already shipped.
+   *
+   * Asserted so the current behaviour is deliberate. When #98 lands this test
+   * should flip to expecting success, rather than being deleted.
+   */
+  test("a foreign-key scope refuses relation operands today", async () => {
+    class KeyScoped extends Model {
+      static $schema = noteSchema;
+      static $policies = [{ scope: () => ({ folderId: 2 }) } as ModelPolicy];
+    }
+    register("Note", KeyScoped);
+
+    try {
+      await raw.unsafe(
+        `INSERT INTO "Folder" ("id", "code", "orgId") VALUES (2, 'ours', 7)`,
+      );
+      await raw.unsafe(
+        `INSERT INTO "Note" ("id", "folderId", "label", "orgId") ` +
+          `VALUES (20, 2, 'ours', 7)`,
+      );
+
+      const attempt = (operand: unknown) =>
+        Model.asUser(OURS, () =>
+          Folder.$exec("update", {
+            where: { id: 2 },
+            data: { code: "ours", notes: operand },
+          }),
+        );
+
+      // Both operands, so the pin records that this is a property of the
+      // guard rather than of the one this PR added.
+      await expect(attempt({ disconnect: { id: 20 } })).rejects.toThrow(
+        ScopeEscapeError,
+      );
+      await expect(attempt({ connect: { id: 20 } })).rejects.toThrow(
+        ScopeEscapeError,
+      );
+    } finally {
+      register("Note", Note);
+    }
   });
 
   /**
