@@ -71,9 +71,13 @@ That `register` line is not bookkeeping. A relation read resolves its target thr
 by name, so whatever is registered under `"User"` is the class that runs inside every nested
 `include`. If that is the generated base while your policy lives on your subclass, the policy
 applies to root queries and is skipped inside includes — scoped one way, unscoped the other, with
-nothing to notice it. `Model.$exec` raises `UnregisteredPolicyClassError` if a class carrying
-policies is not the registered one, so forgetting the line fails loudly rather than leaking. Write
-it next to every subclass regardless.
+nothing to notice it. `Model.$exec` raises `UnregisteredPolicyClassError` when a class carrying
+policies is queried while a *different* class owns its name — but that guard is narrower than it
+sounds, and the gap runs the wrong way. **A model you only ever read through an `include` never
+trips it:** the include resolves the name to the unpolicied generated base, nothing diverges from
+nothing, and the rows come back unscoped with no error. That is the shape a membership or pivot
+model usually has, and it is exactly the kind that carries a tenant scope. Write the line next to
+every subclass regardless — the guard is a backstop for the cases it can see, not a substitute.
 
 ## Querying
 
