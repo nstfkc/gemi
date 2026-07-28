@@ -305,6 +305,10 @@ Three things follow from that, and all three are load-bearing:
 - **The child's policies apply.** Each nested row goes through the related model's own `$exec`, so
   its `onCreate` stamps the tenant column and its `scope` decides which rows a `connect` can reach.
   A `createMany` writes its rows in one statement and they are *each* scoped.
+  A relation operand writes one column — the relation's own key — and the
+  scope-escape guard knows the ORM wrote it, so a child scoped on its foreign
+  key can still be connected. A column *you* name in `data` is judged exactly as
+  before.
 - **A failure anywhere rolls the whole thing back**, including the parent row.
 
 Everything else in Prisma's nested grammar — `connectOrCreate`, `set`, `disconnect`, `update`,

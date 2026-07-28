@@ -113,6 +113,17 @@ export interface RelationExecutor {
     op: string,
     args: unknown,
     preScoped: boolean,
+    /**
+     * Columns of `args.data` this step wrote itself — a relation operand's own
+     * foreign key, whose value is the parent this statement is about.
+     *
+     * Only the scope-escape guard reads it, so that a child scoped on its
+     * foreign key is not refused for a write the caller did not make (#98).
+     * Optional, and omitting it makes the guard *stricter*: an omission is a
+     * refused query rather than a silent escape, which is why this one may be
+     * optional where `preScoped` may not.
+     */
+    ormAuthored?: readonly string[],
   ): Promise<unknown>;
   /**
    * A statement with no model behind it. Exactly one query in the ORM is like

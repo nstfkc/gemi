@@ -9,6 +9,7 @@ import { Application } from "gemi/foundation";
 import {
   Model,
   RecordNotFoundError,
+  ScopeEscapeError,
   clearPlanCache,
   register,
   type ModelPolicy,
@@ -327,6 +328,82 @@ describe("policies on nested writes", () => {
     const notes: any = await raw.unsafe(`SELECT * FROM "Note"`);
     expect(notes[0].folderId).toBe(2);
     expect(notes[0].orgId).toBe(7);
+  });
+
+  /**
+   * A child whose policy scopes on its **own foreign key** — `{ folderId: … }`,
+   * a plausible "my notes" scope — and which declares no `onUpdate` (#98).
+   *
+   * `connect` writes exactly that column, so `assertNoScopeEscape` used to
+   * refuse it: the guard reads `args.data` and could not tell a column the
+   * caller supplied from one the nested step put there. The caller wrote
+   * `connect: { id }`; `folderId` was in `data` because the ORM chose it.
+   *
+   * The row is still only reachable through the child's own scope — that is a
+   * different mechanism and it is untouched, which the second test pins.
+   */
+  test("a foreign-key scope no longer refuses a nested connect", async () => {
+    class KeyScoped extends Model {
+      static $schema = noteSchema;
+      static $policies = [{ scope: () => ({ folderId: 2 }) } as ModelPolicy];
+    }
+    register("Note", KeyScoped);
+
+    try {
+      await raw.unsafe(
+        `INSERT INTO "Folder" ("id", "code", "orgId") VALUES (2, 'ours', 7)`,
+      );
+      await raw.unsafe(
+        `INSERT INTO "Note" ("id", "folderId", "label", "orgId") ` +
+          `VALUES (20, 2, 'ours', 7)`,
+      );
+
+      await Model.asUser(OURS, () =>
+        Folder.$exec("update", {
+          where: { id: 2 },
+          data: { code: "ours", notes: { connect: { id: 20 } } },
+        }),
+      );
+
+      const notes: any = await raw.unsafe(`SELECT "folderId" FROM "Note"`);
+      expect(notes[0].folderId).toBe(2);
+    } finally {
+      register("Note", Note);
+    }
+  });
+
+  /**
+   * The half that must not move: a **caller** naming the scoped column in
+   * `data` is still refused. The marker lists the columns the ORM wrote, so
+   * anything else in the payload is judged exactly as before.
+   */
+  test("a caller naming the scoped column is still refused", async () => {
+    class KeyScoped extends Model {
+      static $schema = noteSchema;
+      static $policies = [{ scope: () => ({ folderId: 2 }) } as ModelPolicy];
+    }
+    register("Note", KeyScoped);
+
+    try {
+      await raw.unsafe(
+        `INSERT INTO "Folder" ("id", "code", "orgId") VALUES (2, 'ours', 7)`,
+      );
+      await raw.unsafe(
+        `INSERT INTO "Note" ("id", "folderId", "label", "orgId") ` +
+          `VALUES (21, 2, 'ours', 7)`,
+      );
+
+      await expect(
+        Model.asUser(OURS, () =>
+          KeyScoped.$exec("update", {
+            where: { id: 21 },
+            data: { folderId: 9 },
+          }),
+        ),
+      ).rejects.toThrow(ScopeEscapeError);
+    } finally {
+      register("Note", Note);
+    }
   });
 
   /**

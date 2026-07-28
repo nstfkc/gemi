@@ -490,6 +490,10 @@ function planForeignSide(
           // to the child, and the child's scope decides which rows are reachable
           // — otherwise `connect` re-parents another tenant's row.
           false,
+          // ...and the column being written is *ours*, not the caller's. Without
+          // this, a child whose policy scopes on its foreign key is refused for
+          // a write it never made — see #98 and `ormAuthoredFields`.
+          [childField],
         );
       }
     },
