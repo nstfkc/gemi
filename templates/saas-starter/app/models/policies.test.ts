@@ -223,6 +223,42 @@ function suite(label: string, url?: string) {
       expect(others.map((row: any) => row.email)).toEqual(["bob@x.test"]);
     });
 
+    /**
+     * An aggregate's `where` is an ordinary predicate over the rows being
+     * aggregated, so a scope narrows it exactly as it narrows a `count`.
+     *
+     * Worth its own test because the failure is not a leak: an operation
+     * missing from `SCOPABLE` *throws*, with `upsert`'s reason about `on
+     * conflict` targets — so the feature disappears on every policied model
+     * while the message points somewhere unrelated. `softDeletes()` is what
+     * makes that broad rather than niche: it ships with the framework and it
+     * carries a `scope`.
+     */
+    test("scope narrows an aggregate, not just a read", async () => {
+      (ScopedUser as any).$policies = [tenantScoped];
+
+      const mine = await Model.asUser(ALICE, () =>
+        ScopedUser.aggregate({ _count: true }),
+      );
+      expect(mine._count).toBe(1);
+
+      // The whole table is two rows, so an unscoped aggregate would say 2 —
+      // which is what makes this discriminating rather than vacuous.
+      const everything = await Model.asSystem(() =>
+        ScopedUser.aggregate({ _count: true }),
+      );
+      expect(everything._count).toBe(2);
+    });
+
+    test("scope narrows count's per-field form too", async () => {
+      (ScopedUser as any).$policies = [tenantScoped];
+
+      const counts = await Model.asUser(ALICE, () =>
+        ScopedUser.count({ select: { _all: true, email: true } }),
+      );
+      expect(counts).toEqual({ _all: 1, email: 1 });
+    });
+
     test("a caller's own where still applies alongside the scope", async () => {
       (ScopedUser as any).$policies = [tenantScoped];
 

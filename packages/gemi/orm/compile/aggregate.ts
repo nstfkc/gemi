@@ -57,7 +57,12 @@ const AGGREGATE_ARGS = new Set<string>([
   ...KINDS,
 ]);
 
-/** `_sum` and `_avg` need arithmetic, so Prisma restricts them to these. */
+/**
+ * `_sum` and `_avg` need arithmetic, so Prisma restricts them to these.
+ *
+ * `Decimal` is listed for completeness and cannot occur: `emit.ts` refuses a
+ * Decimal field at generation time, so no generated schema has one.
+ */
 const NUMERIC = new Set<ScalarType>(["Int", "Float", "BigInt", "Decimal"]);
 
 /**
@@ -99,6 +104,12 @@ export function isAggregateOperation(op: string): boolean {
  * says what the numbers are. It was refused here until now as "aggregate
  * territory", which was the right call while there was no aggregate to put it
  * beside; the two decisions belong together and this is the together.
+ *
+ * **No `ExecOptions`**, unlike every neighbouring read, and that is deliberate
+ * rather than an omission: `strategy` chooses how an include tree loads and an
+ * aggregate has no relations, `track` records where a row came from so `save`
+ * can update it and an aggregate returns no rows. Accepting either and ignoring
+ * it would be worse than not accepting it.
  */
 export function compileAggregate(
   schema: ModelSchema,
@@ -403,10 +414,17 @@ function coerce(term: Term, value: unknown, dialect: SqlDialect): unknown {
   if (term.kind === "_sum") {
     const type = term.field?.type;
     if (type === "BigInt") return BigInt(String(value));
-    // `Decimal` is left as the driver gave it. The template's schema has no
-    // Decimal column, so nothing here has ever been compared against Prisma's
-    // `Decimal` instance — claiming a conversion that has not been measured
-    // would be worse than passing the value through and saying so.
+    // `Decimal` is **unreachable**, not merely untested: `emit.ts`'s
+    // `UNSUPPORTED_SCALARS` refuses a Decimal field at generation time, so no
+    // generated schema can carry one and neither this branch nor `Decimal`'s
+    // membership of `NUMERIC` can be entered.
+    //
+    // Kept, and kept as a pass-through, because the day Decimal becomes
+    // supported is the day this needs a real decision — Postgres returns
+    // `sum(numeric)` as text, and whether that becomes a `Prisma.Decimal`, a
+    // string or a number is the same question the generator declined to answer.
+    // Silently `Number()`-ing it would answer it wrongly and lose exactly the
+    // precision the type exists to keep.
     if (type === "Decimal") return value;
     return Number(value);
   }
