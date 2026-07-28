@@ -191,8 +191,24 @@ it.**
     restrict which children are *considered*, which in argument space is
     `every: { OR: [{ NOT: S }, X] }`.
 
-  Still open: ordering by a relation, and filtering across an implicit
-  many-to-many (two hops through the join table).
+  ~~Still open: ordering by a relation~~ — also done, in the same pass. It is
+  the *third* use of the correlated subquery: `exists` for a filter, `count(*)`
+  for `_count`, a scalar in `order by` for this. Eight differential cases, which
+  matter more here than elsewhere because Prisma emits a `left join` and gemi
+  emits a subquery — the check is that the two orderings agree, which reading
+  either statement would not tell you.
+
+  It also turned up the one place Prisma's grammar has **no slot for a policy
+  scope**. An `include` node takes a `where`, a relation filter's operand is one,
+  a `_count` entry takes one; `orderBy: { rel: { field: "asc" } }` takes nothing.
+  It still needs scoping — ordering by a column of rows you cannot read leaks
+  their contents by comparison, and ordering by `_count` leaks their number
+  outright — so the policy walk writes a `where` into that node and the compiler
+  reads it. The key is not in Prisma's `orderBy` type, so the generated bases
+  cannot accept it from application code: the policy pass is its only producer.
+
+  Still open: filtering, counting or ordering across an implicit many-to-many
+  (two hops through the join table).
 - **Stitching cost is real** on wide results. Build the parent-key `Map` once per
   child query; do not `find()` per row. Iteration 7 will measure this, so leave
   it in a shape that can be measured.

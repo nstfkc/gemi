@@ -115,7 +115,10 @@ export function compileRead(
     // terms: validation must not depend on whether a *different* argument was
     // also supplied, or `orderBy: { nonexistent: "asc" }` is an error with a
     // `take` and silently fine without one.
-    const parsed = parseOrderBy(schema, args?.orderBy, op);
+    const parsed = parseOrderBy(schema, args?.orderBy, op, {
+      dialect,
+      locate: (a: any) => a?.orderBy,
+    });
 
     let statement: Fragment;
     if (!paginated) {
@@ -185,7 +188,10 @@ export function compileRead(
     op,
     args,
     dialect,
-    parseOrderBy(schema, args?.orderBy, op),
+    parseOrderBy(schema, args?.orderBy, op, {
+      dialect,
+      locate: (a: any) => a?.orderBy,
+    }),
   );
   const order = compileOrderBy(terms, dialect, qualifier);
 

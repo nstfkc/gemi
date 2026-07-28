@@ -676,6 +676,20 @@ export function applyNestedPolicies(
     if (rewritten) out = { ...out, [container]: rewritten };
   }
 
+  // Relation *orderings*. `orderBy: { organization: { name: "asc" } }` reads
+  // another model's rows to sort by them, so the same rule applies — and this is
+  // the one path where Prisma's grammar has no slot for the scope, so the walk
+  // adds one. See `compile/order-relation.ts`.
+  const ordered = scopeRelationOrderings(
+    schema,
+    out.orderBy,
+    operation,
+    user,
+    system,
+    lookup,
+  );
+  if (ordered !== out.orderBy) out = { ...out, orderBy: ordered };
+
   // Relation *filters*, which reach another model's rows through `where` rather
   // than through `include`. Same rule, and it has to be the same walk: a filter
   // that reads a model is a read of that model.
@@ -690,6 +704,82 @@ export function applyNestedPolicies(
   if (filtered !== out.where) out = { ...out, where: filtered };
 
   return out;
+}
+
+/**
+ * Adds a `where` to every relation ordering whose target carries policies.
+ *
+ * The other three paths all have somewhere for a scope to go: an `include` node
+ * takes a `where`, a relation filter's operand *is* one, a `_count` entry takes
+ * one. `orderBy: { rel: { field: "asc" } }` has none in Prisma's grammar, so this
+ * writes the key the compiler reads.
+ *
+ * It has to happen. Ordering by a column of rows the caller cannot read leaks
+ * their contents by comparison — sort ascending, sort descending, and the
+ * invisible row's position tells you where its value falls. Ordering by
+ * `_count` leaks the number outright.
+ *
+ * Unscoped rows then sort as `NULL`, because the correlated subquery finds
+ * nothing. That is the same answer the caller would get if the row did not
+ * exist, which is the whole point.
+ */
+function scopeRelationOrderings(
+  schema: { relations: Record<string, { model: string; kind: "one" | "many" }> },
+  orderBy: unknown,
+  operation: Operation,
+  user: unknown,
+  system: boolean,
+  lookup: PolicyLookup,
+): unknown {
+  if (system) return orderBy;
+  if (typeof orderBy !== "object" || orderBy === null) return orderBy;
+
+  if (Array.isArray(orderBy)) {
+    let changed = false;
+    const out = orderBy.map((entry) => {
+      const scoped = scopeRelationOrderings(
+        schema,
+        entry,
+        operation,
+        user,
+        system,
+        lookup,
+      );
+      if (scoped !== entry) changed = true;
+      return scoped;
+    });
+    return changed ? out : orderBy;
+  }
+
+  let rewritten: Record<string, unknown> | undefined;
+  const source = orderBy as Record<string, unknown>;
+
+  for (const key of Object.keys(source)) {
+    const relation = schema.relations[key];
+    if (!relation) continue;
+
+    const node = source[key];
+    if (typeof node !== "object" || node === null || Array.isArray(node)) {
+      // Malformed, and the compiler reports it with the message it has.
+      continue;
+    }
+
+    const target = lookup(relation.model);
+    if (!target || target.policies.length === 0) continue;
+
+    const scoped = applyPolicies(
+      target.policies,
+      policyContext(target.schema.name, operation, user, system),
+      node,
+    );
+
+    if (scoped !== node) {
+      rewritten ??= { ...source };
+      rewritten[key] = scoped;
+    }
+  }
+
+  return rewritten ?? orderBy;
 }
 
 /**

@@ -229,9 +229,24 @@ filters, which are the same shape. Numbers and method in `plans/orm/benchmarks.m
 instead — the shorthand names none, so a policy has nowhere to attach, and what it returns changes
 silently when the schema grows a relation.
 
-**Not implemented yet:** ordering by a relation, counting or filtering across an implicit
-many-to-many, and `_count` on a to-one (which can only ever be 0 or 1 — its nullability already
-says which). All raise `UnsupportedQueryError` rather than being silently ignored.
+### Ordering by a relation
+
+```ts
+await User.findMany({ orderBy: { organization: { name: "asc" } } })   // to-one: a field
+await User.findMany({ orderBy: { accounts: { _count: "desc" } } })    // to-many: the count
+```
+
+A to-one orders by one of the related row's fields; a to-many orders by `_count`, because
+"order by the child's name" has no single answer for a parent with several children. Both compile
+to a correlated subquery, so the same index advice applies — and a parent with no related row (or
+none you can read) sorts as `NULL`.
+
+Ordering by a relation is not a total order, so add a tiebreak if you need a stable page:
+`orderBy: [{ accounts: { _count: "desc" } }, { id: "asc" }]`.
+
+**Not implemented yet:** counting, filtering or ordering across an implicit many-to-many, and
+`_count` on a to-one (which can only ever be 0 or 1 — its nullability already says which). All
+raise `UnsupportedQueryError` rather than being silently ignored.
 
 ### One value that will surprise you
 

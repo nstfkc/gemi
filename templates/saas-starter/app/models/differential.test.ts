@@ -434,6 +434,41 @@ const CASES: [string, string, unknown][] = [
     orderBy: { id: "asc" },
   }],
 
+  // --- ordering by a relation ---------------------------------------------
+  //
+  // Prisma emits a `left join` here and gemi emits a correlated subquery, so
+  // these cases are the check that the two orderings agree — which is the only
+  // thing that matters, and not something reading either SQL would tell you.
+  // A tiebreak on `id` everywhere, because ordering by a relation is not a total
+  // order and the clients are free to disagree about ties.
+  ["order by a to-one field", "findMany", {
+    orderBy: [{ organization: { name: "asc" } }, { id: "asc" }],
+  }],
+  ["order by a to-one field, desc", "findMany", {
+    orderBy: [{ organization: { name: "desc" } }, { id: "asc" }],
+  }],
+  ["order by a relation count", "findMany", {
+    orderBy: [{ accounts: { _count: "desc" } }, { id: "asc" }],
+  }],
+  ["order by a relation count, asc", "findMany", {
+    orderBy: [{ accounts: { _count: "asc" } }, { id: "asc" }],
+  }],
+  ["a relation ordering beside a column", "findMany", {
+    orderBy: [{ globalRole: "asc" }, { organization: { name: "asc" } }, { id: "asc" }],
+  }],
+  ["a relation ordering with a take", "findMany", {
+    orderBy: [{ accounts: { _count: "desc" } }, { id: "asc" }], take: 3,
+  }],
+  // The negative-take path: every term flips, including the subquery's, and the
+  // page is reversed back. A relation term must flip like any other.
+  ["a relation ordering with a negative take", "findMany", {
+    orderBy: [{ accounts: { _count: "desc" } }, { id: "asc" }], take: -3,
+  }],
+  ["a relation ordering with an include", "findMany", {
+    orderBy: [{ accounts: { _count: "desc" } }, { id: "asc" }],
+    include: { accounts: { orderBy: { id: "asc" } } },
+  }],
+
   // --- relations inside select ------------------------------------------
   ["select a relation beside a scalar", "findMany", {
     select: { name: true, accounts: { orderBy: { id: "asc" } } },
