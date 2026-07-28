@@ -428,6 +428,177 @@ function suite(label: string, url?: string) {
       expect(remaining).toEqual([]);
     });
 
+    /**
+     * A nested `include` is a **read**, whatever the statement around it is
+     * doing. It used to be scoped as the root operation, so under a `create`
+     * the child was scoped as an insert — see #85.
+     *
+     * Two failures, and the second is the one a careless test misses: it is
+     * silent. Asserting only that the call does not throw would pass against
+     * the bug, because the bug *is* the scope quietly not being applied.
+     */
+    test("an include under a create applies the child's read scope", async () => {
+      (ScopedAccount as any).$policies = [tenantScoped];
+
+      const created: any = await Model.asUser(ALICE, () =>
+        ScopedUser.create({
+          data: { email: "fresh@x.test", organizationId: ALICE.organizationId },
+          include: { accounts: true },
+        }),
+      );
+
+      // The new row has no accounts, so the interesting assertion is not the
+      // count — it is that the read was *scoped at all*, which the next test
+      // pins directly.
+      expect(created.accounts).toEqual([]);
+    });
+
+    /**
+     * **The silent half, and the only shape that can show it.**
+     *
+     * Under a root `create` the included children belong to a row that has just
+     * been made, so they are empty whether the scope was applied or dropped —
+     * which is why #85 calls the blast radius small *today*. `upsert` is in the
+     * same inserting branch and can land on a row that **already has
+     * children**, so a dropped scope is visible as rows that should not be
+     * there.
+     *
+     * Without the fix this returns both accounts; with it, one.
+     */
+    test("...and the scope actually filters, rather than being skipped", async () => {
+      (ScopedAccount as any).$policies = [tenantScoped];
+
+      // An account in Alice's org, and one in Bob's, both pointing at the user
+      // about to be created — so only the scope can tell them apart.
+      const fresh: any = await Model.asSystem(() =>
+        UserModel.create({ data: { email: "target@x.test", organizationId: ALICE.organizationId } }),
+      );
+      await Model.asSystem(async () => {
+        await AccountModel.create({
+          data: { userId: fresh.id, organizationId: ALICE.organizationId },
+        });
+        await AccountModel.create({
+          data: { userId: fresh.id, organizationId: BOB.organizationId },
+        });
+      });
+
+      // The baseline: a plain read, which was never affected.
+      const read: any = await Model.asUser(ALICE, () =>
+        ScopedUser.findUniqueOrThrow({
+          where: { id: fresh.id },
+          include: { accounts: true },
+        }),
+      );
+      expect(read.accounts).toHaveLength(1);
+
+      // The same include reached through an *inserting* operation that lands on
+      // the existing row. `upsert` is in the branch that used to drop the
+      // scope, and unlike `create` it can see children.
+      const upserted: any = await Model.asUser(ALICE, () =>
+        ScopedUser.upsert({
+          where: { id: fresh.id },
+          create: { id: fresh.id, email: "target@x.test" },
+          update: { name: "renamed" },
+          include: { accounts: true },
+        }),
+      );
+
+      expect(upserted.accounts).toHaveLength(1);
+      expect(upserted.accounts[0].organizationId).toBe(ALICE.organizationId);
+    });
+
+    /**
+     * The hard failure from #85(a): a child that scopes reads and declares no
+     * `onCreate` is a legal policy — it simply never creates rows — and
+     * including it from a `create` raised about an operation nobody asked for.
+     */
+    test("a child that scopes but never creates can still be included from a write", async () => {
+      (ScopedAccount as any).$policies = [
+        { scope: () => ({ organizationId: ALICE.organizationId }) } satisfies ModelPolicy,
+      ];
+
+      await expect(
+        Model.asUser(ALICE, () =>
+          ScopedUser.create({
+            data: { email: "nothrow@x.test" },
+            include: { accounts: true },
+          }),
+        ),
+      ).resolves.toBeDefined();
+    });
+
+    /**
+     * **The same bug, one node type over.** `applyNestedPolicies` handles four
+     * kinds of node and the first fix reached only one of them. A `_count`
+     * entry counts another model's rows, so it is as much a read as an
+     * `include` is, and it was still scoped as the enclosing statement.
+     *
+     * This is the loud half again, on the same legal policy: a model that
+     * scopes reads and never creates rows. Before the fix this raised
+     * `Account has a policy that scopes reads but no 'onCreate'` from a
+     * `create` on `User`.
+     *
+     * **What it cannot assert is the count**, and the reason is a gap rather
+     * than an oversight: `planRelationCounts` is called from `compile/read.ts`
+     * only, so a `_count` in a *write's* `include` is dropped and the returned
+     * row has no `_count` key at all. An unknown relation name in the same
+     * position raises `UnknownRelationError`, so this one key is the exception.
+     * Filed separately — it is a Prisma divergence, not a policy bug, and the
+     * quiet half of this finding becomes reachable the day it is fixed.
+     */
+    test("a _count under a create is scoped as a read too", async () => {
+      (ScopedAccount as any).$policies = [
+        { scope: () => ({ organizationId: ALICE.organizationId }) } satisfies ModelPolicy,
+      ];
+
+      await expect(
+        Model.asUser(ALICE, () =>
+          ScopedUser.create({
+            data: { email: "counted@x.test" },
+            include: { _count: { select: { accounts: true } } },
+          }),
+        ),
+      ).resolves.toBeDefined();
+    });
+
+    /**
+     * The third node type, and the one that shows why the operation stopped
+     * being a *parameter* of the walk rather than being passed correctly at
+     * each of its call sites.
+     *
+     * A relation filter is not reachable from an insert — `create` accepts no
+     * `where` — so it never appeared in #85. It was still being scoped as the
+     * enclosing statement, and under a root `update` that is an operation a
+     * policy is perfectly entitled to answer differently for.
+     *
+     * The scope below is the shape that makes it observable: read scope and
+     * write scope disagree, so the subquery over `Account` gives different
+     * answers depending on which one it is asked for. Reading is what the
+     * filter does, so the read scope is the correct one.
+     */
+    test("a relation filter under an update is scoped as a read", async () => {
+      (ScopedAccount as any).$policies = [
+        {
+          scope: (context) =>
+            context.operation === "findMany"
+              ? { organizationId: ALICE.organizationId }
+              : // No account is ever in organisation -1, so if the filter is
+                // scoped as the enclosing `update` it matches nothing and no
+                // user is touched.
+                { organizationId: -1 },
+        } satisfies ModelPolicy,
+      ];
+
+      const touched = await Model.asUser(ALICE, () =>
+        ScopedUser.updateMany({
+          where: { accounts: { some: {} } },
+          data: { name: "has-an-account" },
+        }),
+      );
+
+      expect(touched.count).toBeGreaterThan(0);
+    });
+
     test("a caller's own where still applies alongside the scope", async () => {
       (ScopedUser as any).$policies = [tenantScoped];
 

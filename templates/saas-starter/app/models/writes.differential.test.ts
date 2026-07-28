@@ -231,6 +231,39 @@ const CASES: Case[] = [
     update: { name: "Updated" },
     select: { email: true, name: true },
   }],
+
+  // --- foreign keys (#89) -----------------------------------------------
+  //
+  // Every one of these **succeeded on SQLite** before the pragma was turned on,
+  // writing a row that points at an organisation which does not exist, while
+  // Prisma refused it. They are in the shared matrix rather than a Postgres-only
+  // block precisely because the dialect that used to be wrong is the default
+  // one.
+  ["create naming a parent that does not exist", "create", {
+    data: { email: "orphan@example.dev", organizationId: 99999 },
+  }],
+  ["createMany naming a parent that does not exist", "createMany", {
+    data: [
+      { email: "orphan2@example.dev" },
+      { email: "orphan3@example.dev", organizationId: 99999 },
+    ],
+  }],
+  ["update repointing at a parent that does not exist", "update", {
+    where: { id: 1 }, data: { organizationId: 99999 },
+  }],
+  ["upsert inserting against a parent that does not exist", "upsert", {
+    where: { email: "orphan4@example.dev" },
+    create: { email: "orphan4@example.dev", organizationId: 99999 },
+    update: { name: "Updated" },
+  }],
+  // The nested form, where the foreign key is written by an `after` step rather
+  // than by the statement itself — a different code path to the same constraint.
+  ["nested create naming a parent that does not exist", "create", {
+    data: {
+      email: "orphan5@example.dev",
+      accounts: { create: { organizationRole: 1, organizationId: 99999 } },
+    },
+  }, ["User", "Account"]],
 ];
 
 function suite(label: string, url?: string) {
@@ -436,6 +469,194 @@ function suite(label: string, url?: string) {
       });
     });
 
+    /**
+     * `skipDuplicates` — Postgres only, and that is Prisma's line rather than
+     * SQL's: SQLite can express `on conflict do nothing`, and Prisma rejects
+     * the *argument* there for `false` as well as `true`. So these are guarded
+     * rather than listed in `CASES`, and the SQLite refusal is asserted in
+     * `write.test.ts` where it needs no database.
+     */
+    describe("skipDuplicates", () => {
+      test("skips the rows that exist and counts only the new ones", async () => {
+        if (!url) return;
+
+        await differential.expectSameWrite(
+          "User",
+          "createMany",
+          {
+            // `p1` is seeded, so it conflicts on `publicId`; the other two are
+            // new. A count of 3 would mean the conflict clause did nothing, and
+            // a count of 0 would mean the whole statement was skipped.
+            data: [
+              { publicId: "p1", email: "dup@example.dev" },
+              { publicId: "new-1", email: "new1@example.dev" },
+              { publicId: "new-2", email: "new2@example.dev" },
+            ],
+            skipDuplicates: true,
+          },
+          { tables: ["User"] },
+        );
+      });
+
+      test("without it, the same batch raises", async () => {
+        if (!url) return;
+        await differential.reset();
+
+        await expect(
+          UserModel.createMany({
+            data: [
+              { publicId: "p1", email: "dup@example.dev" },
+              { publicId: "new-3", email: "new3@example.dev" },
+            ],
+          }),
+        ).rejects.toThrow();
+      });
+
+      /**
+       * A conflict against a row **this same statement is inserting**, rather
+       * than one already committed — which is a different thing for
+       * `on conflict do nothing` to resolve, and the shape a caller hits when
+       * their input list is simply not deduplicated.
+       *
+       * Measured before it was pinned: `values ('x','1'),('x','1'),('y','2')
+       * on conflict do nothing` inserts two rows, not three and not one.
+       */
+      test("two identical rows in one call insert once", async () => {
+        if (!url) return;
+
+        await differential.expectSameWrite(
+          "User",
+          "createMany",
+          {
+            data: [
+              { publicId: "dup-1", email: "dup1@example.dev" },
+              { publicId: "dup-1", email: "dup2@example.dev" },
+              { publicId: "dup-2", email: "dup3@example.dev" },
+            ],
+            skipDuplicates: true,
+          },
+          { tables: ["User"] },
+        );
+      });
+
+      test("every row conflicting is a count of zero, not an error", async () => {
+        if (!url) return;
+
+        await differential.expectSameWrite(
+          "User",
+          "createMany",
+          {
+            data: [{ publicId: "p1", email: "a@example.dev" }],
+            skipDuplicates: true,
+          },
+          { tables: ["User"] },
+        );
+      });
+
+      test("false behaves as though it were absent", async () => {
+        if (!url) return;
+
+        await differential.expectSameWrite(
+          "User",
+          "createMany",
+          {
+            data: [{ publicId: "new-4", email: "new4@example.dev" }],
+            skipDuplicates: false,
+          },
+          { tables: ["User"] },
+        );
+      });
+
+      /**
+       * A conflict on a **composite** unique, not only a single column.
+       * `SocialAccount` carries `@@unique([username, provider])` and is the
+       * only model in the template that can reach one.
+       *
+       * The untargeted `on conflict do nothing` is what makes this work: it
+       * covers every constraint at once, where a targeted `on conflict (col)`
+       * would skip collisions on the named column and still raise here.
+       *
+       * Self-contained — the two conflicting rows are in the *same* call, which
+       * `do nothing` also deduplicates. Measured rather than assumed:
+       * `values ('x','1'),('x','1'),('y','2') on conflict do nothing` inserts
+       * two rows, not three and not one.
+       */
+      test("a conflict on a composite unique is skipped too", async () => {
+        if (!url) return;
+
+        const base = {
+          userId: 1,
+          accessToken: "t",
+          refreshToken: "r",
+          expiresAt: new Date(EPOCH),
+        };
+
+        await differential.expectSameWrite(
+          "SocialAccount",
+          "createMany",
+          {
+            data: [
+              { ...base, provider: "github", providerId: "gh-1", username: "ada" },
+              // Same (username, provider) as the row above, different
+              // providerId — so only the composite constraint catches it.
+              { ...base, provider: "github", providerId: "gh-2", username: "ada" },
+              { ...base, provider: "gitlab", providerId: "gl-1", username: "ada" },
+            ],
+            skipDuplicates: true,
+          },
+          { tables: ["SocialAccount"] },
+        );
+      });
+
+      /**
+       * The interaction the issue calls out: `createMany` splits itself across
+       * statements past the parameter ceiling, inside one transaction, and
+       * `skipDuplicates` has to survive that split — the counts sum, and a
+       * conflict in a later chunk must not roll back an earlier one, since
+       * `do nothing` is not an error.
+       *
+       * Postgres binds 65 535 parameters and `User` writes 6 columns per row,
+       * so ~11 000 rows is two statements. Not compared against Prisma: it
+       * chunks differently, and what is under test is *our* split.
+       */
+      test("a batch that splits across statements returns the total", async () => {
+        if (!url) return;
+        await differential.reset();
+
+        const rows = Array.from({ length: 11_000 }, (_, i) => ({
+          publicId: `bulk-${i}`,
+          email: `bulk-${i}@example.dev`,
+        }));
+        // One row in the *second* chunk collides with one in the first, so the
+        // conflict lands after a chunk has already been written.
+        rows[10_500] = { ...rows[0] };
+
+        // **Succeeding at all is the proof that it split.** `User` binds 6
+        // client-side columns per row, so this is 66 000 parameters against
+        // Postgres's 65 535 ceiling: unsplit, `render` raises
+        // `ParameterLimitError` rather than quietly running one statement.
+        //
+        // Asserted rather than left in prose, because the margin is thin — if
+        // the row count, the column count or the ceiling ever moved, the case
+        // would keep passing while silently no longer exercising the split.
+        // (`differential.queries()` cannot see it: the chunks run on a
+        // transaction handle, and the counting stand-in wraps the pool.)
+        expect(rows.length * 6).toBeGreaterThan(65_535);
+
+        const written = await UserModel.createMany({
+          data: rows,
+          skipDuplicates: true,
+        });
+
+        expect(written.count).toBe(10_999);
+
+        const stored = await UserModel.count({
+          where: { publicId: { startsWith: "bulk-" } },
+        });
+        expect(stored).toBe(10_999);
+      }, 120_000);
+    });
+
     test("create on a model with no @updatedAt", async () => {
       await differential.expectSameWrite(
         "Organization",
@@ -521,6 +742,208 @@ function suite(label: string, url?: string) {
         },
         { tables: ["User", "Account"] },
       );
+    });
+
+    /**
+     * `createMany` — the shape #65 calls the biggest single item: parent and
+     * children in one call, and one statement for the children rather than one
+     * per row.
+     */
+    test("nested createMany writes every child in one statement", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "create",
+        {
+          data: {
+            email: "many@example.dev",
+            accounts: {
+              createMany: {
+                data: [
+                  { organizationRole: 0 },
+                  { organizationRole: 1 },
+                  { organizationRole: 2 },
+                ],
+              },
+            },
+          },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    test("nested createMany, read back through include", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "create",
+        {
+          data: {
+            email: "many2@example.dev",
+            accounts: { createMany: { data: [{ organizationRole: 1 }] } },
+          },
+          include: { accounts: true },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    // Prisma accepts a bare object where the rows go, not only an array.
+    test("nested createMany accepts a single object as its data", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "create",
+        {
+          data: {
+            email: "many3@example.dev",
+            accounts: { createMany: { data: { organizationRole: 1 } } },
+          },
+          include: { accounts: true },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    // Verified against Prisma: an empty list writes nothing and does not error,
+    // and the parent still comes back with `accounts: []`.
+    test("nested createMany with no rows writes the parent alone", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "create",
+        {
+          data: {
+            email: "many4@example.dev",
+            accounts: { createMany: { data: [] } },
+          },
+          include: { accounts: true },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    test("nested createMany alongside a create on the same relation", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "create",
+        {
+          data: {
+            email: "many5@example.dev",
+            accounts: {
+              create: [{ organizationRole: 0 }],
+              createMany: { data: [{ organizationRole: 1 }] },
+            },
+          },
+          include: { accounts: true },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    /**
+     * The other pair on one relation, and the one whose order is *not*
+     * observable: repointing an existing child and inserting new ones do not
+     * interact, so both apply and the result is the same either way.
+     *
+     * Pinned anyway. The step order falls out of `Object.keys(node).sort()`,
+     * which is sorted for plan-cache determinism rather than for this — so
+     * "both happen" is a property worth holding rather than a coincidence
+     * nobody would notice breaking.
+     */
+    test("nested createMany alongside a connect on the same relation", async () => {
+      await differential.reset();
+
+      // The connect target has to pre-exist, and the harness seeds no accounts
+      // — so this is asserted directly rather than through `expectSameWrite`,
+      // the same way the connect-repoints-a-child case beside it is. Prisma's
+      // answer was measured separately: both apply, giving the loose account
+      // and the new one.
+      await differential.prisma.account.create({
+        data: { publicId: "loose-1", organizationRole: 9 },
+      });
+
+      await UserModel.create({
+        data: {
+          email: "many7@example.dev",
+          accounts: {
+            connect: { publicId: "loose-1" },
+            createMany: { data: [{ organizationRole: 1 }] },
+          },
+        },
+      });
+
+      const attached = await differential.prisma.account.findMany({
+        where: { user: { email: "many7@example.dev" } },
+        orderBy: { id: "asc" },
+      });
+
+      expect(attached.map((row) => row.organizationRole)).toEqual([9, 1]);
+    });
+
+    test("nested createMany under update", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { id: 1 },
+          data: { accounts: { createMany: { data: [{ organizationRole: 1 }] } } },
+          include: { accounts: true },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    test("nested createMany with a select on the parent", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "create",
+        {
+          data: {
+            email: "many6@example.dev",
+            accounts: { createMany: { data: [{ organizationRole: 1 }] } },
+          },
+          select: { email: true },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    /**
+     * #65's third acceptance criterion: a failure anywhere in the tree rolls the
+     * whole write back. Verified against Prisma's own behaviour — a duplicate
+     * mid-array leaves *no* parent row either.
+     *
+     * Not `expectSameWrite`, because the two clients cannot both run a failing
+     * write against one database and see the same state; this asserts the
+     * rollback directly, which is the half that matters.
+     */
+    test("a child that violates a constraint rolls the parent back too", async () => {
+      await differential.reset();
+
+      await expect(
+        UserModel.create({
+          data: {
+            email: "rollback@example.dev",
+            accounts: {
+              createMany: {
+                data: [
+                  { publicId: "keep-1", organizationRole: 0 },
+                  // The same publicId twice: the second row of the same
+                  // statement violates the unique index.
+                  { publicId: "keep-1", organizationRole: 1 },
+                ],
+              },
+            },
+          },
+        }),
+      ).rejects.toThrow();
+
+      const parent = await differential.prisma.user.findFirst({
+        where: { email: "rollback@example.dev" },
+      });
+      expect(parent).toBeNull();
+
+      const children = await differential.prisma.account.findMany({
+        where: { publicId: "keep-1" },
+      });
+      expect(children).toHaveLength(0);
     });
 
     test("nested connect on the foreign side repoints the child", async () => {

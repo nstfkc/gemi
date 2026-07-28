@@ -217,6 +217,39 @@ describe("plan cache discrimination — writes", () => {
     expect(planCacheStats().hits).toBe(3);
   });
 
+  /**
+   * `skipDuplicates` puts its *value* in the SQL text — `true` emits
+   * `on conflict do nothing` and `false` does not — so it is structural, for
+   * exactly the reason `select` is.
+   *
+   * Sharing an entry would be the dangerous direction twice over: whichever
+   * call compiled first would decide for the other, so an import asking to skip
+   * conflicts could raise, or an insert that wanted to hear about a duplicate
+   * could silently swallow it. On Postgres, since SQLite refuses the argument.
+   */
+  test("skipDuplicates discriminates, because its value is in the statement", () => {
+    const data = [{ email: "a@x" }];
+
+    const on = planKey(postgres, "User", "createMany", { data, skipDuplicates: true });
+    const off = planKey(postgres, "User", "createMany", { data, skipDuplicates: false });
+    const absent = planKey(postgres, "User", "createMany", { data });
+
+    expect(new Set([on, off, absent]).size).toBe(3);
+
+    // ...and they really do compile differently, which is why they must not
+    // share an entry.
+    const emitted = getOrCompile(
+      user,
+      "createMany",
+      { data, skipDuplicates: true },
+      postgres,
+    ).text;
+    expect(emitted).toContain("on conflict do nothing");
+    expect(
+      getOrCompile(user, "createMany", { data, skipDuplicates: false }, postgres).text,
+    ).not.toContain("on conflict");
+  });
+
   test("the same write on two dialects is two plans", () => {
     const args = { data: { email: "x" } };
     expect(planKey(sqlite, "User", "create", args)).not.toBe(
