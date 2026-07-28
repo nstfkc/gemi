@@ -201,6 +201,21 @@ Results are typed by Prisma's own mapped types, so `_max: { position: true }` na
 than columns, which is its own piece of work; shipping half of it typed as though it worked would be
 worse than not shipping it.
 
+### Looking a row up by a composite key
+
+`findUnique`, `update`, `delete` and `upsert` need a key that is unique. A composite one — whether
+it is a compound `@@id([a, b])` or an `@@unique([a, b])` — is named in Prisma's compound form:
+
+```ts
+await Membership.findUnique({
+  where: { organizationId_userId: { organizationId, userId } },
+})
+```
+
+Every member is required. A composite key is only unique as a whole, so a partial one would quietly
+become a non-unique lookup — which is the failure `findUnique` exists to prevent, and it is refused
+by name.
+
 ### Returning everything except one column
 
 ```ts
