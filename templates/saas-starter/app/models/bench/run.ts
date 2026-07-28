@@ -216,9 +216,24 @@ async function main() {
     "**The index columns are the measurement, not a refinement.** A correlated",
     "subquery runs once per parent row, so without an index on the child's",
     "foreign key each run is a scan of the child table — and Prisma declares no",
-    "index for a relation's foreign key on either dialect. The unindexed column",
-    "is what an author gets by default; the indexed one is what they get after",
-    "one `@@index` line.",
+    "index for a relation's foreign key on either dialect, so a schema gets one",
+    "only by asking.",
+    "",
+    "**The template's schema now asks, on the strength of this table**, which is",
+    "why the unindexed column is no longer \"what an author gets by default\" —",
+    "it is the counterfactual. The suite drops `Account_userId_idx` for the first",
+    "half and recreates it for the second, and refuses to run if any index on",
+    "`userId` survives that drop: measuring \"unindexed\" against an indexed table",
+    "would produce two identical columns and a derived sentence reading \"the",
+    "index is worth 1.0x\", which is a measurement answering a different question",
+    "than its own heading.",
+    "",
+    "**A ratio near 1 on Postgres here is a limit of this fixture, not a finding",
+    "about Postgres.** The child table is 200 rows and the connection is",
+    "loopback, so the round trip dominates and a scan of 200 rows is free either",
+    "way — the numbers below can go either side of 1.0x on noise alone. This",
+    "table says the index is decisive on SQLite and says *nothing* about how a",
+    "real child table behaves over a real socket.",
     "",
     "| Dialect | Parents | plain µs | `_count` µs | `_count` +index µs | include+`.length` µs | `exists` µs | `exists` +index µs |",
     "| --- | --: | --: | --: | --: | --: | --: | --: |",
@@ -940,6 +955,38 @@ async function runDialect(
       // JavaScript, which is what an author does without it — a per-parent
       // count query is not a thing anyone writes, so measuring against one
       // would flatter the feature by comparing it to a strawman.
+      //
+      // A correlated subquery runs once per parent row, so without an index on
+      // the child's foreign key each run is a scan of the child table. **Prisma
+      // declares no index for a relation's foreign key** on either dialect, so a
+      // schema gets one only by asking — and the template's schema now asks, on
+      // the strength of these numbers.
+      //
+      // Which makes the unindexed half *dependent on dropping it first*.
+      // Measuring "unindexed" against a table carrying `Account_userId_idx`
+      // would produce two identical columns and a derived sentence reading "the
+      // index is worth 1.0x": the measurement quietly answering a different
+      // question than its own heading. So it is dropped here and restored below,
+      // and the two columns are a real with/without.
+      await raw.unsafe(`DROP INDEX IF EXISTS "Account_userId_idx"`);
+
+      // Guard the premise rather than trusting it. If that name ever stops
+      // matching what the schema declares, this section silently becomes a
+      // comparison of an indexed table against itself — which is the failure the
+      // drop exists to prevent, arriving through a typo.
+      const indexes: any = await raw.unsafe(
+        dialect === "postgres"
+          ? `SELECT indexname AS name FROM pg_indexes WHERE tablename = 'Account'`
+          : `SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'Account'`,
+      );
+      if (indexes.some((row: any) => /userid/i.test(String(row.name)))) {
+        throw new Error(
+          `The unindexed half of the correlated-subquery benchmark would have ` +
+            `run against an indexed "Account". Indexes present: ` +
+            `${indexes.map((row: any) => row.name).join(", ")}.`,
+        );
+      }
+
       const counted = await time(
         () =>
           UserModel.findMany({
@@ -967,19 +1014,12 @@ async function runDialect(
         { runs: 50 },
       );
 
-      // The same two shapes with an index on the child's foreign key.
-      //
-      // This is not a refinement, it is the measurement. A correlated subquery
-      // runs once per parent row, so without an index each run is a scan of the
-      // child table — and **Prisma declares no index for a relation's foreign
-      // key**, on either dialect. The template's `Account.userId` has none, so
-      // the unindexed column is what an author gets by default and the indexed
-      // one is what they get after one line of schema.
-      await raw.unsafe(
-        `CREATE INDEX "bench_account_user" ON "Account" ("userId")`,
-      );
+      // And the same two shapes with the index back.
       let countedIndexed;
       let filteredIndexed;
+      await raw.unsafe(
+        `CREATE INDEX "Account_userId_idx" ON "Account" ("userId")`,
+      );
       try {
         countedIndexed = await time(
           () =>
@@ -998,7 +1038,8 @@ async function runDialect(
           { runs: 50 },
         );
       } finally {
-        await raw.unsafe(`DROP INDEX "bench_account_user"`);
+        // Left in place: it is what the schema declares, so restoring it is
+        // restoring the state every other scenario in this run expects.
       }
 
       // Derived, never written. Every number in the sentence comes out of the

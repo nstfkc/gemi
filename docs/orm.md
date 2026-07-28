@@ -220,10 +220,18 @@ model Account {
 }
 ```
 
-Measured on 100 parents, that one line is worth **6.3×** on `_count` and **4.0×** on an `exists`
-filter on SQLite. It flips the advice, too: unindexed, `_count` is 2.4× *slower* than loading the
-children and counting them in JavaScript; indexed, it is 2.6× faster. The same applies to relation
-filters, which are the same shape. Numbers and method in `plans/orm/benchmarks.md`.
+On SQLite that one line is worth several times the query — enough to *flip* the advice: unindexed,
+`_count` is slower than loading the children and counting them in JavaScript; indexed, it is
+comfortably faster. The same applies to relation filters and relation orderings, which are the same
+shape.
+
+Exact multipliers, the method, and what the measurement does **not** establish are in
+`plans/orm/benchmarks.md`, which is generated. They are deliberately not repeated here: a number
+copied into prose drifts from its source the first time the source is re-run, which happened three
+times inside that report before its own sentences were derived rather than written.
+
+The starter template indexes every foreign key for this reason, so a new application starts on the
+right side of it.
 
 `_count: true` (Prisma's "count every to-many relation") is **not** implemented. Name the relations
 instead — the shorthand names none, so a policy has nowhere to attach, and what it returns changes
