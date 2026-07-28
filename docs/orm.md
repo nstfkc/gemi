@@ -618,7 +618,7 @@ const rows = await DB.query<Product>(
 | | |
 | --- | --- |
 | `` sql`…` `` | A fragment. Every `${value}` is **bound**; a `${fragment}` is spliced in, carrying its own parameters. Nests to any depth. |
-| `join(items, sep)` | Fragments *or* values, joined. `join(ids)` is `$1, $2, $3`. An empty list is `empty`, not a dangling separator. |
+| `join(items, sep)` | Fragments *or* values, joined. `join(ids)` is `$1, $2, $3`. An empty list is `empty`, not a dangling separator. The separator is **glue only** — see below. |
 | `empty` | The fragment that contributes nothing, so a conditional predicate stays a value instead of becoming a branch. |
 | `DB.query(fragment)` | The rows. |
 | `DB.execute(fragment)` | How many rows the statement **touched**. |
@@ -651,6 +651,20 @@ says `Json`, and guessing from the value would turn a mistyped parameter into a 
 string. What the driver then does with it differs: Bun binds an object into a Postgres `jsonb`
 column correctly, and on SQLite binds it to something no row matches. Stringify it yourself if the
 column is JSON and you want the same answer on both.
+
+**The separator `join` takes is written into the SQL**, so it is not a free string: whitespace,
+commas, or `and` / `or`, and nothing else. Anything more expressive is legitimate but has to say so
+with `unsafeSql`, which keeps that the only door:
+
+```ts
+join(filters, " and ")               // fine
+join(parts, unsafeSql(") and ("))    // fine, and visibly a decision
+join(ids, req.query.sep)             // refused
+```
+
+That is an allowlist rather than a blocklist on purpose. The obvious blocklist — reject quotes,
+semicolons and comment markers — lets `") or 1=1 union select password from Users where 1=(1"`
+through, which has none of them and is still an injection.
 
 **Only a fragment built by `sql`, `join`, `unsafeSql` or `empty` is spliced.** Anything else in an
 interpolation slot is bound — including an object that merely *looks* like a fragment, which is what

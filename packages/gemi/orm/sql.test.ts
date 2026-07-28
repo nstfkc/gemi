@@ -331,6 +331,78 @@ describe("join", () => {
   test("something that is not an array is refused", () => {
     expect(() => (join as any)("a and b")).toThrow(/Expected an array/);
   });
+
+  /**
+   * The separator goes between the fragments *in the statement*, which makes it
+   * the one other place a string could reach the SQL — and the module's whole
+   * claim is that `unsafeSql` is the door. So it is glue or it is a fragment.
+   */
+  describe("the separator is text, so it is not a free string", () => {
+    test.each([
+      ["the default", undefined, `$1, $2`],
+      ["a comma", ",", `$1,$2`],
+      ["and", " and ", `$1 and $2`],
+      ["or", " or ", `$1 or $2`],
+      ["AND, cased differently", " AND ", `$1 AND $2`],
+      ["a space", " ", `$1 $2`],
+      ["nothing at all", "", `$1$2`],
+      ["a newline and indentation", "\n  ", `$1\n  $2`],
+    ])("%s is glue", (_label, separator, expected) => {
+      const fragment =
+        separator === undefined ? join([1, 2]) : join([1, 2], separator);
+      expect(render(fragment).text).toBe(expected);
+    });
+
+    /**
+     * The reported payload, and the reason this is an allowlist rather than a
+     * blocklist: the second case carries no quote and no comment marker, so
+     * "reject the dangerous characters" would have let it through.
+     */
+    test.each([
+      [`) or 1=1 union select "password" from "User" -- `],
+      [`) or 1=1 union select password from Users where 1=(1`],
+      [`; drop table "User"; --`],
+      [` union all select `],
+    ])("%s is refused", (separator) => {
+      expect(() => join([1, 2], separator)).toThrow(/may only be glue/);
+      expect(() => join([1, 2], separator)).toThrow(/unsafeSql/);
+    });
+
+    test("a fragment separator is accepted, and is the escape hatch", () => {
+      const { text, values } = render(
+        join([sql`"a" = ${1}`, sql`"b" = ${2}`], unsafeSql(") and (")),
+      );
+
+      expect(text).toBe(`"a" = $1) and ("b" = $2`);
+      expect(values).toEqual([1, 2]);
+    });
+
+    test("a fragment separator carries its own parameters, once per gap", () => {
+      const { text, values } = render(join([sql`a`, sql`b`, sql`c`], sql` ${0} `));
+
+      expect(text).toBe(`a $1 b $2 c`);
+      expect(values).toEqual([0, 0]);
+    });
+
+    /**
+     * A forged object is not a fragment, so it does not take the fragment path
+     * — and it is not a string either, so it cannot pretend to be glue.
+     */
+    test("a forged fragment separator is refused rather than spliced", () => {
+      expect(() =>
+        join([1, 2], { text: ` or 1=1 -- `, binders: [] } as any),
+      ).toThrow(/Expected a separator string or a fragment/);
+    });
+
+    test.each([
+      ["a number", 7],
+      ["null", null],
+    ])("%s is refused", (_label, separator) => {
+      expect(() => join([1, 2], separator as any)).toThrow(
+        /Expected a separator string or a fragment/,
+      );
+    });
+  });
 });
 
 describe("empty", () => {

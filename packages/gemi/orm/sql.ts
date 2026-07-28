@@ -161,10 +161,33 @@ export function sql(
  * `join` composes with a list that turned out to have nothing in it. That is the
  * case a caller forgets, and it is the one that would otherwise emit `where ` and
  * fail at the database rather than here.
+ *
+ * ## The separator is text, so it is not a free string
+ *
+ * It goes between the fragments *in the statement*, which makes it the one other
+ * place a string could reach the SQL — and this module's whole claim is that
+ * `unsafeSql` is **the** door. So a plain-string separator has to be glue and
+ * nothing else: whitespace, commas, or a boolean connective. Anything more
+ * expressive is legitimate and has to say so:
+ *
+ * ```ts
+ * join(filters, " and ")                 // fine
+ * join(parts, unsafeSql(") and ("))      // fine, and visibly a decision
+ * join(ids, request.query.sep)           // refused
+ * ```
+ *
+ * A **blocklist would not do**, which is why this is an allowlist. The obvious
+ * one — reject quotes, semicolons and comment markers — lets this through:
+ *
+ *     join([1, 2], ") or 1=1 union select password from Users where 1=(1")
+ *
+ * No quote, no `--`, still an injection. There is no sound way to say "this
+ * arbitrary text is safe glue", so the rule is that glue is a small closed set
+ * and everything else is a fragment somebody built on purpose.
  */
 export function join(
   values: readonly unknown[],
-  separator = ", ",
+  separator: string | SqlFragment = ", ",
 ): SqlFragment {
   if (!Array.isArray(values)) {
     throw new UnsupportedQueryError(
@@ -176,7 +199,48 @@ export function join(
   }
   if (values.length === 0) return empty;
 
-  return brand(joinFragments(values.map(interpolate), separator));
+  const parts = values.map(interpolate);
+
+  if (isFragment(separator)) {
+    const woven: Fragment[] = [];
+    for (let i = 0; i < parts.length; i++) {
+      if (i > 0) woven.push(separator);
+      woven.push(parts[i]);
+    }
+    return brand(concat(...woven));
+  }
+
+  assertGlue(separator);
+  return brand(joinFragments(parts, separator));
+}
+
+/**
+ * Whitespace and commas, or a boolean connective surrounded by whitespace.
+ *
+ * Deliberately small. Every separator a composed statement actually needs is in
+ * here — `", "`, `" and "`, `" or "`, `" "` — and everything outside it is
+ * expressive enough to change what the statement *does*, which is the property
+ * that makes it a `unsafeSql` decision rather than a string argument.
+ */
+const GLUE = /^[\s,]*$|^\s*(?:and|or)\s*$/i;
+
+function assertGlue(separator: unknown): void {
+  if (typeof separator === "string" && GLUE.test(separator)) return;
+
+  throw new UnsupportedQueryError(
+    "join",
+    "DB",
+    "sql",
+    typeof separator === "string"
+      ? `A separator is written into the SQL text, so it may only be glue: ` +
+        `whitespace, commas, or 'and' / 'or'. Got ` +
+        `${JSON.stringify(separator)}. If that is deliberate, say so with ` +
+        `unsafeSql(...) — and never build one from anything that came from ` +
+        `outside the program.`
+      : `Expected a separator string or a fragment, got ${
+          separator === null ? "null" : typeof separator
+        }.`,
+  );
 }
 
 /**
