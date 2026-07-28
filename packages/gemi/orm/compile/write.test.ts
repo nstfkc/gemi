@@ -825,20 +825,16 @@ describe("nested writes", () => {
     ).toThrow(/set both directly and through a nested relation write/);
   });
 
-  test.each([
-    "disconnect",
-    "update",
-    "upsert",
-    "delete",
-    "deleteMany",
-    "updateMany",
-  ])("%s is refused, naming itself", (operation) => {
-    expect(() =>
-      text("create", {
-        data: { email: "a@b.c", organization: { [operation]: {} } },
-      }),
-    ).toThrow(new RegExp(`data\\.organization\\.${operation}`));
-  });
+  test.each(["disconnect", "update", "upsert", "delete"])(
+    "%s is refused on a create, naming itself",
+    (operation) => {
+      expect(() =>
+        text("create", {
+          data: { email: "a@b.c", organization: { [operation]: {} } },
+        }),
+      ).toThrow(new RegExp(`data\\.organization\\.${operation}`));
+    },
+  );
 
   /**
    * The refusals now say *why*, which is the difference between "wait" and
@@ -847,11 +843,11 @@ describe("nested writes", () => {
    */
   test("a refusal explains what the operand would take", () => {
     expect(() =>
-      text("create", { data: { email: "a@b.c", accounts: { updateMany: {} } } }),
-    ).toThrow(/names a \*predicate\* rather than a row|predicate, not a key/);
+      text("create", { data: { email: "a@b.c", organization: { upsert: {} } } }),
+    ).toThrow(/deciding which branch ran/);
     expect(() =>
       text("create", { data: { email: "a@b.c", accounts: { deleteMany: {} } } }),
-    ).toThrow(/deletes rows this call did not name/);
+    ).toThrow(/has none yet/);
   });
 
   /**

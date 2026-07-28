@@ -76,6 +76,8 @@ const SUPPORTED = new Set([
   "delete",
   "update",
   "set",
+  "updateMany",
+  "deleteMany",
 ]);
 
 /**
@@ -86,7 +88,14 @@ const SUPPORTED = new Set([
  * row that does not exist yet. Refused here rather than accepted and made a
  * no-op, so a caller who wrote one on the wrong operation hears about it.
  */
-const EXISTING_ROW_ONLY = new Set(["disconnect", "delete", "update", "set"]);
+const EXISTING_ROW_ONLY = new Set([
+  "disconnect",
+  "delete",
+  "update",
+  "set",
+  "updateMany",
+  "deleteMany",
+]);
 
 /** Statements that insert a new row, so nothing is linked to it yet. */
 const CREATE_ONLY_STATEMENTS = new Set(["create", "createMany"]);
@@ -101,11 +110,6 @@ const CREATE_ONLY_STATEMENTS = new Set(["create", "createMany"]);
  * key, and none of it has to reason about what was there before.
  */
 const REFUSED: Record<string, string> = {
-  deleteMany: `It deletes rows this call did not name.`,
-  updateMany:
-    `It writes caller-supplied columns to rows this call did not name — a ` +
-    `predicate, not a key — so there is no lookup for the child's scope to ` +
-    `narrow. 'update' names its row and is implemented.`,
   upsert:
     `It is 'update' and 'connectOrCreate' at once and needs a third thing ` +
     `neither has: deciding which branch ran, from inside a nested step.`,
@@ -665,6 +669,64 @@ function planForeignSide(
    * one the caller did. #99 fixes that for every relation operand at once, and
    * this needs no change when it lands.
    */
+  /**
+   * `updateMany` and `deleteMany` — a **filter**, applied to this parent's rows.
+   *
+   * These were the last two refused on the "names a predicate rather than a
+   * row" reading of #94's line, and that reading was too strong. What the line
+   * is really asking is whether there is a `where` the child's scope can be
+   * `AND`ed into — and a predicate is exactly that. Both operations are in
+   * `SCOPABLE`, so routing them through the child's own `$exec` gives the scope
+   * on which rows match, and `updateMany` gets `onUpdate` and the scope-escape
+   * guard over its payload, the same way #101's `update` does.
+   *
+   * The parent key goes into the filter for the same reason it does everywhere
+   * else here: Prisma applies these to *this* parent's children only, verified
+   * before implementing, and without it a `deleteMany: {}` would empty the
+   * table.
+   *
+   * **The two operands are shaped differently**, which is easy to get backwards:
+   *
+   *     updateMany: { where: { … }, data: { … } }
+   *     deleteMany: { … }                            the filter directly
+   *
+   * `upsert` stays refused, and its reason is the one that has not moved: it
+   * needs to know which branch ran from inside a nested step, which neither
+   * half of it provides.
+   */
+  if (key === "updateMany" || key === "deleteMany") {
+    const updating = key === "updateMany";
+    assertManyOperand(schema, relation, operand, key, operation);
+
+    out.after.push({
+      relation: relation.name,
+      operation: key,
+      async run(args, _context, executor, rows) {
+        const parent = rows[0];
+        if (!parent) return;
+
+        const operandAt = at(args) as Record<string, unknown>;
+        const filter = updating ? operandAt?.where : operandAt;
+
+        const where = {
+          ...(filter as object),
+          [childField]: parent[parentField],
+        };
+
+        await executor.exec(
+          relation.model,
+          key,
+          updating ? { where, data: operandAt?.data } : { where },
+          // NOT pre-scoped. The child's scope narrows which rows match, and for
+          // `updateMany` its `onUpdate` and scope-escape guard judge the
+          // payload — which is the whole reason these are expressible.
+          false,
+        );
+      },
+    });
+    return;
+  }
+
   if (key === "set") {
     assertNamedRows(schema, relation, child, operand, "set", operation);
     assertDisconnectable(child, relation, childField, operation);
@@ -1045,6 +1107,56 @@ function planForeignSide(
       }
     },
   });
+}
+
+/**
+ * The filter operands, which are shaped differently from each other.
+ *
+ * `updateMany` wraps its filter in `where` and carries a `data` beside it;
+ * `deleteMany` *is* the filter. Checked at plan time, so a caller who wrote one
+ * shape for the other hears about it before the parent row is written.
+ *
+ * `UnsupportedQueryError` here because that is what this branch has; both are
+ * argument *validation* and belong in #103's `InvalidArgumentError`. They need
+ * no edit when it lands — its conversion selects sites by whether their detail
+ * already says what a valid value looks like, and these say `Expected an
+ * object with 'where' and 'data'`.
+ */
+function assertManyOperand(
+  schema: ModelSchema,
+  relation: RelationSchema,
+  operand: unknown,
+  key: string,
+  operation: string,
+): void {
+  const at = `data.${relation.name}.${key}`;
+
+  if (typeof operand !== "object" || operand === null || Array.isArray(operand)) {
+    throw new UnsupportedQueryError(
+      at,
+      schema.name,
+      operation,
+      key === "updateMany"
+        ? `Expected an object with 'where' and 'data'.`
+        : `Expected an object of filters — 'deleteMany' takes the filter ` +
+          `directly, not wrapped in a 'where'.`,
+    );
+  }
+
+  if (key !== "updateMany") return;
+
+  const record = operand as Record<string, unknown>;
+  for (const required of ["where", "data"] as const) {
+    if (record[required] === undefined) {
+      throw new UnsupportedQueryError(
+        at,
+        schema.name,
+        operation,
+        `Expected a '${required}' key — 'updateMany' names which rows to ` +
+          `write and what to write to them.`,
+      );
+    }
+  }
 }
 
 /**

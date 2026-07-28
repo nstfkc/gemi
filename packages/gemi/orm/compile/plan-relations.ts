@@ -182,7 +182,9 @@ export interface NestedWriteStep {
     | "disconnect"
     | "delete"
     | "update"
-    | "set";
+    | "set"
+    | "updateMany"
+    | "deleteMany";
   run(
     args: any,
     context: BindContext,

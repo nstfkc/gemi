@@ -297,6 +297,8 @@ await List.create({
 | `delete` | Deletes the named rows outright, not just the link. |
 | `update` | Writes your columns to the named row. The child's own `onUpdate` and scope rules apply to the payload. |
 | `set` | Replaces the whole set — detaches what is linked now, attaches what you name. |
+| `updateMany` | Writes your columns to this parent's rows matching a filter. |
+| `deleteMany` | Deletes this parent's rows matching a filter — the filter goes directly under the key, not inside a `where`. |
 
 Which direction a nested write runs in is decided by **who holds the foreign key**. When this model
 holds it, the far row is resolved or created *first* and collapses into one more column. When the
@@ -343,7 +345,11 @@ With no policy on the child that is Prisma's `set` exactly. Two of its behaviour
 because the name does not suggest them — it will repoint a row belonging to another parent, exactly
 as `connect` does, and it silently ignores a named row that does not exist.
 
-Everything else in Prisma's nested grammar — `updateMany`, `upsert`, `deleteMany` — is refused, by name and with the reason. The line is **which rows an
+`updateMany` and `deleteMany` take a **filter** rather than a key, and it applies to this parent's
+rows only. Their operands are shaped differently and it is easy to get backwards: `updateMany` wraps
+its filter in `where` and carries a `data` beside it, while `deleteMany` *is* the filter.
+
+Only `upsert` in Prisma's nested grammar is refused, by name and with the reason. The line is **which rows an
 operand can name, and whose columns it writes**: everything supported names its rows (a new one, or
 one you identified by unique key) and writes either a whole new row or one foreign key the ORM
 chose. `set`, `disconnect`, `delete`, `deleteMany` and `updateMany` act on rows the call did not

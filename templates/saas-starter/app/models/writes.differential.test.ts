@@ -1217,6 +1217,72 @@ function suite(label: string, url?: string) {
       );
     });
 
+    /**
+     * `updateMany` and `deleteMany` — a filter, applied to **this parent's**
+     * rows. The seeded `acc-theirs` belongs to another user and must survive
+     * both, which is what the parent-key filter is for.
+     *
+     * Their operands are shaped differently and it is easy to get backwards:
+     * `updateMany` wraps its filter in `where`, `deleteMany` *is* the filter.
+     */
+    test("updateMany writes this parent's matching rows", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { id: 1 },
+          data: {
+            accounts: {
+              updateMany: {
+                where: { organizationRole: 1 },
+                data: { organizationRole: 9 },
+              },
+            },
+          },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    test("updateMany with an empty where takes every row of this parent", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { id: 1 },
+          data: {
+            accounts: { updateMany: { where: {}, data: { organizationRole: 8 } } },
+          },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    test("deleteMany takes the filter directly", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { id: 1 },
+          data: { accounts: { deleteMany: { organizationRole: 1 } } },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    /** The one that would empty the table without the parent-key filter. */
+    test("deleteMany with an empty filter stops at this parent", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { id: 1 },
+          data: { accounts: { deleteMany: {} } },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
     test("nested connect on the foreign side repoints the child", async () => {
       await differential.reset();
       await differential.prisma.account.create({
