@@ -117,6 +117,62 @@ export class SqliteDialect implements SqlDialect {
     );
   }
 
+  /**
+   * `path: "$.a.b"` — a JSONPath *string*, where Postgres takes an array.
+   *
+   * Prisma's own split, measured on both: the generated client refuses
+   * `["a","b"]` here with *"Expected String, provided (String)"* and refuses
+   * `"$.a.b"` on Postgres with *"Expected String[], provided String"*. So the
+   * argument a caller writes is dialect-specific before it reaches this ORM,
+   * and reproducing that is what compatibility means.
+   */
+  readonly jsonPathSyntax = "jsonpath" as const;
+
+  /**
+   * What Prisma will apply to an extracted value here — and the absences are
+   * the point. `array_contains` and the numeric comparisons are refused by the
+   * generated client on SQLite with *"Unknown argument"*, so accepting them
+   * would put gemi ahead of Prisma on a dialect where a differential test has
+   * no oracle to check it against.
+   */
+  readonly jsonFilters: ReadonlySet<string> = new Set([
+    "equals",
+    "not",
+    "string_contains",
+    "string_starts_with",
+    "string_ends_with",
+  ]);
+
+  /**
+   * `json_extract` returns a *native* value — an INTEGER for a JSON number —
+   * so `equals: 3` binds `3`. Binding `"3"` compares INTEGER to TEXT, which
+   * SQLite answers `false` rather than refusing: no rows, no error, and the
+   * differential harness catching it against Prisma is the only reason it did
+   * not ship that way.
+   */
+  readonly jsonComparesAsText = false;
+
+  /**
+   * `json_extract("col", ?)`, with the path bound.
+   *
+   * SQLite has no separate text-returning extraction: `json_extract` already
+   * yields a SQL value rather than a JSON document for a scalar at the path, so
+   * `asText` changes nothing. That is why the string filters can compare
+   * against it directly.
+   */
+  jsonExtract(column: string, path: Binder, _asText: boolean): Fragment {
+    return concat(sql(`json_extract(${column}, `), param(path), sql(")"));
+  }
+
+  jsonArrayContains(): Fragment {
+    // Unreachable: `jsonFilters` does not list it, so `where.ts` refuses first
+    // with a message naming the dialect. Throwing here rather than returning
+    // something plausible keeps the two from disagreeing silently.
+    throw new Error(
+      "SQLite cannot express array_contains; `jsonFilters` is the guard.",
+    );
+  }
+
   like(lhs: string, _insensitive: boolean, pattern: Binder): Fragment {
     // `_insensitive` is unreachable — the compiler checks
     // `supportsInsensitiveMode` and raises a contextful error first.

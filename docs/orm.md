@@ -126,6 +126,36 @@ stepping stone: a `Pick<User, "id">` hydrated as a `User` would carry methods re
 query never fetched. See [Rows and entities](./orm-rows-and-entities.md) for the two opt-in levels
 above it — `track` + `save`, and `wrap`.
 
+### JSON path filters
+
+```ts
+// postgres
+await User.findMany({ where: { metadata: { path: ["plan"], equals: "pro" } } })
+// sqlite
+await User.findMany({ where: { metadata: { path: "$.plan", equals: "pro" } } })
+```
+
+**The path grammar differs by dialect, and that is Prisma's split rather than this ORM's.** Its
+generated client takes an array of keys on Postgres and a JSONPath string on SQLite, and refuses the
+other form on each — so the argument is dialect-specific before it reaches gemi. The refusal here
+says which form the database you are on wants.
+
+Which filters apply also differs, again following Prisma:
+
+| | SQLite | Postgres |
+| --- | --- | --- |
+| `equals`, `not` | yes | yes |
+| `string_contains`, `string_starts_with`, `string_ends_with` | yes | yes |
+| `array_contains` | no | yes |
+| `lt`, `lte`, `gt`, `gte` | no | yes |
+
+Prisma refuses the bottom two rows on SQLite with *"Unknown argument"*, so gemi refuses them too:
+implementing them there would answer a query the differential harness has no oracle for.
+
+**The path is always a bound parameter.** It is the one place a caller's value decides part of an
+expression's meaning, and both dialects take it natively — Postgres's `#>` accepts a `text[]`,
+SQLite's `json_extract` a string — so the feature fits inside invariant 2 rather than bending it.
+
 ### Per-call options
 
 A second parameter, not a key inside `args` — intersecting Prisma's own arg types with a
