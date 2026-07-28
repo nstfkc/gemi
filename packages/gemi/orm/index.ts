@@ -1,4 +1,5 @@
 export { Model } from "./Model";
+export { ActiveRecordModel } from "./active-record";
 
 export {
   SCHEMA_ARTIFACT_VERSION,
@@ -44,6 +45,7 @@ export {
   getOrCompile,
   planCacheStats,
   planKey,
+  type ExecOptions,
   type Operation,
   type QueryPlan,
 } from "./plan";
@@ -80,6 +82,15 @@ export {
   type ModelPolicy,
   type PolicyContext,
 } from "./policy";
+
+export {
+  changedFields,
+  isTracked,
+  provenanceOf,
+  resnapshot,
+  track,
+  type Provenance,
+} from "./provenance";
 
 export { compile, compileRead, compileWrite } from "./compile";
 export {

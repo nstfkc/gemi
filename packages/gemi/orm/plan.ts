@@ -26,6 +26,29 @@ export type Operation =
   | "deleteMany";
 
 /**
+ * Per-call options that are *not* part of the query.
+ *
+ * A second parameter rather than a key inside `args`, deliberately: `args` is
+ * typed as Prisma's own `FindManyArgs` and friends, and intersecting every one
+ * of them with a gemi-specific key would mean `Prisma.UserFindManyArgs` no longer
+ * describes what the operation accepts. Keeping it outside leaves those types
+ * usable verbatim, which is the DX parity the project is built on.
+ *
+ * It also keeps the plan cache honest: these do not affect the SQL, so they must
+ * not affect the plan key, and they cannot if they never reach the compiler.
+ */
+export interface ExecOptions {
+  /**
+   * Record where each returned row came from, so `Model.save(row)` can update it.
+   *
+   * Off by default: it costs a `WeakMap` insert and a snapshot clone per row, and
+   * iteration 7 measured shaping at ~55µs per 1000 rows — so the default path
+   * does not pay for a feature most queries do not use.
+   */
+  track?: boolean;
+}
+
+/**
  * The output of compilation. `text` is a pure function of the argument
  * *shape*; `bind` is the only thing that ever sees a value. Splitting them is
  * what makes the plan cacheable, what will let Postgres reuse prepared

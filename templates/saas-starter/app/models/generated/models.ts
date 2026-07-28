@@ -4,7 +4,7 @@
 // It is committed on purpose: diffs stay reviewable and CI needs no codegen step.
 
 import type { Prisma } from "@prisma/client";
-import { Model } from "gemi/orm";
+import { Model, type ExecOptions } from "gemi/orm";
 
 import * as schema from "./schema";
 
@@ -16,37 +16,53 @@ type Subset<T, U> = {
   [key in keyof T]: key extends keyof U ? T[key] : never;
 };
 
+// Merges the row's columns into the instance type, so a method on a subclass can
+// read `this.email`. No runtime output.
+//
+// oxlint flags class/interface merging because TypeScript does not check the
+// merged properties are initialised — a directly constructed instance would type
+// as carrying every column while holding none. That hazard is closed rather than
+// accepted: `Model`'s constructor is `protected`, so the only way to get an
+// instance is `wrap`, which assigns a complete row. See bin/orm/emit.ts.
+// oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
+export interface AccountModel extends Prisma.AccountGetPayload<{}> {}
+
 export class AccountModel extends Model {
   static $schema = schema.Account;
 
   static findMany<T extends Prisma.AccountFindManyArgs>(
     args?: Subset<T, Prisma.AccountFindManyArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.AccountGetPayload<T>[]> {
-    return this.$exec("findMany", args) as Promise<Prisma.AccountGetPayload<T>[]>;
+    return this.$exec("findMany", args, options) as Promise<Prisma.AccountGetPayload<T>[]>;
   }
 
   static findFirst<T extends Prisma.AccountFindFirstArgs>(
     args?: Subset<T, Prisma.AccountFindFirstArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.AccountGetPayload<T> | null> {
-    return this.$exec("findFirst", args) as Promise<Prisma.AccountGetPayload<T> | null>;
+    return this.$exec("findFirst", args, options) as Promise<Prisma.AccountGetPayload<T> | null>;
   }
 
   static findFirstOrThrow<T extends Prisma.AccountFindFirstOrThrowArgs>(
     args?: Subset<T, Prisma.AccountFindFirstOrThrowArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.AccountGetPayload<T>> {
-    return this.$exec("findFirstOrThrow", args) as Promise<Prisma.AccountGetPayload<T>>;
+    return this.$exec("findFirstOrThrow", args, options) as Promise<Prisma.AccountGetPayload<T>>;
   }
 
   static findUnique<T extends Prisma.AccountFindUniqueArgs>(
     args: Subset<T, Prisma.AccountFindUniqueArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.AccountGetPayload<T> | null> {
-    return this.$exec("findUnique", args) as Promise<Prisma.AccountGetPayload<T> | null>;
+    return this.$exec("findUnique", args, options) as Promise<Prisma.AccountGetPayload<T> | null>;
   }
 
   static findUniqueOrThrow<T extends Prisma.AccountFindUniqueOrThrowArgs>(
     args: Subset<T, Prisma.AccountFindUniqueOrThrowArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.AccountGetPayload<T>> {
-    return this.$exec("findUniqueOrThrow", args) as Promise<Prisma.AccountGetPayload<T>>;
+    return this.$exec("findUniqueOrThrow", args, options) as Promise<Prisma.AccountGetPayload<T>>;
   }
 
   static count(
@@ -57,26 +73,30 @@ export class AccountModel extends Model {
 
   static create<T extends Prisma.AccountCreateArgs>(
     args: Subset<T, Prisma.AccountCreateArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.AccountGetPayload<T>> {
-    return this.$exec("create", args) as Promise<Prisma.AccountGetPayload<T>>;
+    return this.$exec("create", args, options) as Promise<Prisma.AccountGetPayload<T>>;
   }
 
   static update<T extends Prisma.AccountUpdateArgs>(
     args: Subset<T, Prisma.AccountUpdateArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.AccountGetPayload<T>> {
-    return this.$exec("update", args) as Promise<Prisma.AccountGetPayload<T>>;
+    return this.$exec("update", args, options) as Promise<Prisma.AccountGetPayload<T>>;
   }
 
   static delete<T extends Prisma.AccountDeleteArgs>(
     args: Subset<T, Prisma.AccountDeleteArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.AccountGetPayload<T>> {
-    return this.$exec("delete", args) as Promise<Prisma.AccountGetPayload<T>>;
+    return this.$exec("delete", args, options) as Promise<Prisma.AccountGetPayload<T>>;
   }
 
   static upsert<T extends Prisma.AccountUpsertArgs>(
     args: Subset<T, Prisma.AccountUpsertArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.AccountGetPayload<T>> {
-    return this.$exec("upsert", args) as Promise<Prisma.AccountGetPayload<T>>;
+    return this.$exec("upsert", args, options) as Promise<Prisma.AccountGetPayload<T>>;
   }
 
   static createMany(
@@ -96,39 +116,62 @@ export class AccountModel extends Model {
   ): Promise<{ count: number }> {
     return this.$exec("deleteMany", args) as Promise<{ count: number }>;
   }
+
+  static wrap<C extends { prototype: unknown }, R extends Prisma.AccountGetPayload<{}>>(
+    this: C,
+    row: R,
+  ): C["prototype"] & R {
+    return (Model.wrap as (row: object) => any).call(this, row);
+  }
 }
+
+// Merges the row's columns into the instance type, so a method on a subclass can
+// read `this.email`. No runtime output.
+//
+// oxlint flags class/interface merging because TypeScript does not check the
+// merged properties are initialised — a directly constructed instance would type
+// as carrying every column while holding none. That hazard is closed rather than
+// accepted: `Model`'s constructor is `protected`, so the only way to get an
+// instance is `wrap`, which assigns a complete row. See bin/orm/emit.ts.
+// oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
+export interface MagicLinkTokenModel extends Prisma.MagicLinkTokenGetPayload<{}> {}
 
 export class MagicLinkTokenModel extends Model {
   static $schema = schema.MagicLinkToken;
 
   static findMany<T extends Prisma.MagicLinkTokenFindManyArgs>(
     args?: Subset<T, Prisma.MagicLinkTokenFindManyArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.MagicLinkTokenGetPayload<T>[]> {
-    return this.$exec("findMany", args) as Promise<Prisma.MagicLinkTokenGetPayload<T>[]>;
+    return this.$exec("findMany", args, options) as Promise<Prisma.MagicLinkTokenGetPayload<T>[]>;
   }
 
   static findFirst<T extends Prisma.MagicLinkTokenFindFirstArgs>(
     args?: Subset<T, Prisma.MagicLinkTokenFindFirstArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.MagicLinkTokenGetPayload<T> | null> {
-    return this.$exec("findFirst", args) as Promise<Prisma.MagicLinkTokenGetPayload<T> | null>;
+    return this.$exec("findFirst", args, options) as Promise<Prisma.MagicLinkTokenGetPayload<T> | null>;
   }
 
   static findFirstOrThrow<T extends Prisma.MagicLinkTokenFindFirstOrThrowArgs>(
     args?: Subset<T, Prisma.MagicLinkTokenFindFirstOrThrowArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.MagicLinkTokenGetPayload<T>> {
-    return this.$exec("findFirstOrThrow", args) as Promise<Prisma.MagicLinkTokenGetPayload<T>>;
+    return this.$exec("findFirstOrThrow", args, options) as Promise<Prisma.MagicLinkTokenGetPayload<T>>;
   }
 
   static findUnique<T extends Prisma.MagicLinkTokenFindUniqueArgs>(
     args: Subset<T, Prisma.MagicLinkTokenFindUniqueArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.MagicLinkTokenGetPayload<T> | null> {
-    return this.$exec("findUnique", args) as Promise<Prisma.MagicLinkTokenGetPayload<T> | null>;
+    return this.$exec("findUnique", args, options) as Promise<Prisma.MagicLinkTokenGetPayload<T> | null>;
   }
 
   static findUniqueOrThrow<T extends Prisma.MagicLinkTokenFindUniqueOrThrowArgs>(
     args: Subset<T, Prisma.MagicLinkTokenFindUniqueOrThrowArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.MagicLinkTokenGetPayload<T>> {
-    return this.$exec("findUniqueOrThrow", args) as Promise<Prisma.MagicLinkTokenGetPayload<T>>;
+    return this.$exec("findUniqueOrThrow", args, options) as Promise<Prisma.MagicLinkTokenGetPayload<T>>;
   }
 
   static count(
@@ -139,26 +182,30 @@ export class MagicLinkTokenModel extends Model {
 
   static create<T extends Prisma.MagicLinkTokenCreateArgs>(
     args: Subset<T, Prisma.MagicLinkTokenCreateArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.MagicLinkTokenGetPayload<T>> {
-    return this.$exec("create", args) as Promise<Prisma.MagicLinkTokenGetPayload<T>>;
+    return this.$exec("create", args, options) as Promise<Prisma.MagicLinkTokenGetPayload<T>>;
   }
 
   static update<T extends Prisma.MagicLinkTokenUpdateArgs>(
     args: Subset<T, Prisma.MagicLinkTokenUpdateArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.MagicLinkTokenGetPayload<T>> {
-    return this.$exec("update", args) as Promise<Prisma.MagicLinkTokenGetPayload<T>>;
+    return this.$exec("update", args, options) as Promise<Prisma.MagicLinkTokenGetPayload<T>>;
   }
 
   static delete<T extends Prisma.MagicLinkTokenDeleteArgs>(
     args: Subset<T, Prisma.MagicLinkTokenDeleteArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.MagicLinkTokenGetPayload<T>> {
-    return this.$exec("delete", args) as Promise<Prisma.MagicLinkTokenGetPayload<T>>;
+    return this.$exec("delete", args, options) as Promise<Prisma.MagicLinkTokenGetPayload<T>>;
   }
 
   static upsert<T extends Prisma.MagicLinkTokenUpsertArgs>(
     args: Subset<T, Prisma.MagicLinkTokenUpsertArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.MagicLinkTokenGetPayload<T>> {
-    return this.$exec("upsert", args) as Promise<Prisma.MagicLinkTokenGetPayload<T>>;
+    return this.$exec("upsert", args, options) as Promise<Prisma.MagicLinkTokenGetPayload<T>>;
   }
 
   static createMany(
@@ -178,39 +225,62 @@ export class MagicLinkTokenModel extends Model {
   ): Promise<{ count: number }> {
     return this.$exec("deleteMany", args) as Promise<{ count: number }>;
   }
+
+  static wrap<C extends { prototype: unknown }, R extends Prisma.MagicLinkTokenGetPayload<{}>>(
+    this: C,
+    row: R,
+  ): C["prototype"] & R {
+    return (Model.wrap as (row: object) => any).call(this, row);
+  }
 }
+
+// Merges the row's columns into the instance type, so a method on a subclass can
+// read `this.email`. No runtime output.
+//
+// oxlint flags class/interface merging because TypeScript does not check the
+// merged properties are initialised — a directly constructed instance would type
+// as carrying every column while holding none. That hazard is closed rather than
+// accepted: `Model`'s constructor is `protected`, so the only way to get an
+// instance is `wrap`, which assigns a complete row. See bin/orm/emit.ts.
+// oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
+export interface OrganizationModel extends Prisma.OrganizationGetPayload<{}> {}
 
 export class OrganizationModel extends Model {
   static $schema = schema.Organization;
 
   static findMany<T extends Prisma.OrganizationFindManyArgs>(
     args?: Subset<T, Prisma.OrganizationFindManyArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.OrganizationGetPayload<T>[]> {
-    return this.$exec("findMany", args) as Promise<Prisma.OrganizationGetPayload<T>[]>;
+    return this.$exec("findMany", args, options) as Promise<Prisma.OrganizationGetPayload<T>[]>;
   }
 
   static findFirst<T extends Prisma.OrganizationFindFirstArgs>(
     args?: Subset<T, Prisma.OrganizationFindFirstArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.OrganizationGetPayload<T> | null> {
-    return this.$exec("findFirst", args) as Promise<Prisma.OrganizationGetPayload<T> | null>;
+    return this.$exec("findFirst", args, options) as Promise<Prisma.OrganizationGetPayload<T> | null>;
   }
 
   static findFirstOrThrow<T extends Prisma.OrganizationFindFirstOrThrowArgs>(
     args?: Subset<T, Prisma.OrganizationFindFirstOrThrowArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.OrganizationGetPayload<T>> {
-    return this.$exec("findFirstOrThrow", args) as Promise<Prisma.OrganizationGetPayload<T>>;
+    return this.$exec("findFirstOrThrow", args, options) as Promise<Prisma.OrganizationGetPayload<T>>;
   }
 
   static findUnique<T extends Prisma.OrganizationFindUniqueArgs>(
     args: Subset<T, Prisma.OrganizationFindUniqueArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.OrganizationGetPayload<T> | null> {
-    return this.$exec("findUnique", args) as Promise<Prisma.OrganizationGetPayload<T> | null>;
+    return this.$exec("findUnique", args, options) as Promise<Prisma.OrganizationGetPayload<T> | null>;
   }
 
   static findUniqueOrThrow<T extends Prisma.OrganizationFindUniqueOrThrowArgs>(
     args: Subset<T, Prisma.OrganizationFindUniqueOrThrowArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.OrganizationGetPayload<T>> {
-    return this.$exec("findUniqueOrThrow", args) as Promise<Prisma.OrganizationGetPayload<T>>;
+    return this.$exec("findUniqueOrThrow", args, options) as Promise<Prisma.OrganizationGetPayload<T>>;
   }
 
   static count(
@@ -221,26 +291,30 @@ export class OrganizationModel extends Model {
 
   static create<T extends Prisma.OrganizationCreateArgs>(
     args: Subset<T, Prisma.OrganizationCreateArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.OrganizationGetPayload<T>> {
-    return this.$exec("create", args) as Promise<Prisma.OrganizationGetPayload<T>>;
+    return this.$exec("create", args, options) as Promise<Prisma.OrganizationGetPayload<T>>;
   }
 
   static update<T extends Prisma.OrganizationUpdateArgs>(
     args: Subset<T, Prisma.OrganizationUpdateArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.OrganizationGetPayload<T>> {
-    return this.$exec("update", args) as Promise<Prisma.OrganizationGetPayload<T>>;
+    return this.$exec("update", args, options) as Promise<Prisma.OrganizationGetPayload<T>>;
   }
 
   static delete<T extends Prisma.OrganizationDeleteArgs>(
     args: Subset<T, Prisma.OrganizationDeleteArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.OrganizationGetPayload<T>> {
-    return this.$exec("delete", args) as Promise<Prisma.OrganizationGetPayload<T>>;
+    return this.$exec("delete", args, options) as Promise<Prisma.OrganizationGetPayload<T>>;
   }
 
   static upsert<T extends Prisma.OrganizationUpsertArgs>(
     args: Subset<T, Prisma.OrganizationUpsertArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.OrganizationGetPayload<T>> {
-    return this.$exec("upsert", args) as Promise<Prisma.OrganizationGetPayload<T>>;
+    return this.$exec("upsert", args, options) as Promise<Prisma.OrganizationGetPayload<T>>;
   }
 
   static createMany(
@@ -260,39 +334,62 @@ export class OrganizationModel extends Model {
   ): Promise<{ count: number }> {
     return this.$exec("deleteMany", args) as Promise<{ count: number }>;
   }
+
+  static wrap<C extends { prototype: unknown }, R extends Prisma.OrganizationGetPayload<{}>>(
+    this: C,
+    row: R,
+  ): C["prototype"] & R {
+    return (Model.wrap as (row: object) => any).call(this, row);
+  }
 }
+
+// Merges the row's columns into the instance type, so a method on a subclass can
+// read `this.email`. No runtime output.
+//
+// oxlint flags class/interface merging because TypeScript does not check the
+// merged properties are initialised — a directly constructed instance would type
+// as carrying every column while holding none. That hazard is closed rather than
+// accepted: `Model`'s constructor is `protected`, so the only way to get an
+// instance is `wrap`, which assigns a complete row. See bin/orm/emit.ts.
+// oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
+export interface OrganizationInvitationModel extends Prisma.OrganizationInvitationGetPayload<{}> {}
 
 export class OrganizationInvitationModel extends Model {
   static $schema = schema.OrganizationInvitation;
 
   static findMany<T extends Prisma.OrganizationInvitationFindManyArgs>(
     args?: Subset<T, Prisma.OrganizationInvitationFindManyArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.OrganizationInvitationGetPayload<T>[]> {
-    return this.$exec("findMany", args) as Promise<Prisma.OrganizationInvitationGetPayload<T>[]>;
+    return this.$exec("findMany", args, options) as Promise<Prisma.OrganizationInvitationGetPayload<T>[]>;
   }
 
   static findFirst<T extends Prisma.OrganizationInvitationFindFirstArgs>(
     args?: Subset<T, Prisma.OrganizationInvitationFindFirstArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.OrganizationInvitationGetPayload<T> | null> {
-    return this.$exec("findFirst", args) as Promise<Prisma.OrganizationInvitationGetPayload<T> | null>;
+    return this.$exec("findFirst", args, options) as Promise<Prisma.OrganizationInvitationGetPayload<T> | null>;
   }
 
   static findFirstOrThrow<T extends Prisma.OrganizationInvitationFindFirstOrThrowArgs>(
     args?: Subset<T, Prisma.OrganizationInvitationFindFirstOrThrowArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.OrganizationInvitationGetPayload<T>> {
-    return this.$exec("findFirstOrThrow", args) as Promise<Prisma.OrganizationInvitationGetPayload<T>>;
+    return this.$exec("findFirstOrThrow", args, options) as Promise<Prisma.OrganizationInvitationGetPayload<T>>;
   }
 
   static findUnique<T extends Prisma.OrganizationInvitationFindUniqueArgs>(
     args: Subset<T, Prisma.OrganizationInvitationFindUniqueArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.OrganizationInvitationGetPayload<T> | null> {
-    return this.$exec("findUnique", args) as Promise<Prisma.OrganizationInvitationGetPayload<T> | null>;
+    return this.$exec("findUnique", args, options) as Promise<Prisma.OrganizationInvitationGetPayload<T> | null>;
   }
 
   static findUniqueOrThrow<T extends Prisma.OrganizationInvitationFindUniqueOrThrowArgs>(
     args: Subset<T, Prisma.OrganizationInvitationFindUniqueOrThrowArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.OrganizationInvitationGetPayload<T>> {
-    return this.$exec("findUniqueOrThrow", args) as Promise<Prisma.OrganizationInvitationGetPayload<T>>;
+    return this.$exec("findUniqueOrThrow", args, options) as Promise<Prisma.OrganizationInvitationGetPayload<T>>;
   }
 
   static count(
@@ -303,26 +400,30 @@ export class OrganizationInvitationModel extends Model {
 
   static create<T extends Prisma.OrganizationInvitationCreateArgs>(
     args: Subset<T, Prisma.OrganizationInvitationCreateArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.OrganizationInvitationGetPayload<T>> {
-    return this.$exec("create", args) as Promise<Prisma.OrganizationInvitationGetPayload<T>>;
+    return this.$exec("create", args, options) as Promise<Prisma.OrganizationInvitationGetPayload<T>>;
   }
 
   static update<T extends Prisma.OrganizationInvitationUpdateArgs>(
     args: Subset<T, Prisma.OrganizationInvitationUpdateArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.OrganizationInvitationGetPayload<T>> {
-    return this.$exec("update", args) as Promise<Prisma.OrganizationInvitationGetPayload<T>>;
+    return this.$exec("update", args, options) as Promise<Prisma.OrganizationInvitationGetPayload<T>>;
   }
 
   static delete<T extends Prisma.OrganizationInvitationDeleteArgs>(
     args: Subset<T, Prisma.OrganizationInvitationDeleteArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.OrganizationInvitationGetPayload<T>> {
-    return this.$exec("delete", args) as Promise<Prisma.OrganizationInvitationGetPayload<T>>;
+    return this.$exec("delete", args, options) as Promise<Prisma.OrganizationInvitationGetPayload<T>>;
   }
 
   static upsert<T extends Prisma.OrganizationInvitationUpsertArgs>(
     args: Subset<T, Prisma.OrganizationInvitationUpsertArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.OrganizationInvitationGetPayload<T>> {
-    return this.$exec("upsert", args) as Promise<Prisma.OrganizationInvitationGetPayload<T>>;
+    return this.$exec("upsert", args, options) as Promise<Prisma.OrganizationInvitationGetPayload<T>>;
   }
 
   static createMany(
@@ -342,39 +443,62 @@ export class OrganizationInvitationModel extends Model {
   ): Promise<{ count: number }> {
     return this.$exec("deleteMany", args) as Promise<{ count: number }>;
   }
+
+  static wrap<C extends { prototype: unknown }, R extends Prisma.OrganizationInvitationGetPayload<{}>>(
+    this: C,
+    row: R,
+  ): C["prototype"] & R {
+    return (Model.wrap as (row: object) => any).call(this, row);
+  }
 }
+
+// Merges the row's columns into the instance type, so a method on a subclass can
+// read `this.email`. No runtime output.
+//
+// oxlint flags class/interface merging because TypeScript does not check the
+// merged properties are initialised — a directly constructed instance would type
+// as carrying every column while holding none. That hazard is closed rather than
+// accepted: `Model`'s constructor is `protected`, so the only way to get an
+// instance is `wrap`, which assigns a complete row. See bin/orm/emit.ts.
+// oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
+export interface PasswordResetTokenModel extends Prisma.PasswordResetTokenGetPayload<{}> {}
 
 export class PasswordResetTokenModel extends Model {
   static $schema = schema.PasswordResetToken;
 
   static findMany<T extends Prisma.PasswordResetTokenFindManyArgs>(
     args?: Subset<T, Prisma.PasswordResetTokenFindManyArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.PasswordResetTokenGetPayload<T>[]> {
-    return this.$exec("findMany", args) as Promise<Prisma.PasswordResetTokenGetPayload<T>[]>;
+    return this.$exec("findMany", args, options) as Promise<Prisma.PasswordResetTokenGetPayload<T>[]>;
   }
 
   static findFirst<T extends Prisma.PasswordResetTokenFindFirstArgs>(
     args?: Subset<T, Prisma.PasswordResetTokenFindFirstArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.PasswordResetTokenGetPayload<T> | null> {
-    return this.$exec("findFirst", args) as Promise<Prisma.PasswordResetTokenGetPayload<T> | null>;
+    return this.$exec("findFirst", args, options) as Promise<Prisma.PasswordResetTokenGetPayload<T> | null>;
   }
 
   static findFirstOrThrow<T extends Prisma.PasswordResetTokenFindFirstOrThrowArgs>(
     args?: Subset<T, Prisma.PasswordResetTokenFindFirstOrThrowArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.PasswordResetTokenGetPayload<T>> {
-    return this.$exec("findFirstOrThrow", args) as Promise<Prisma.PasswordResetTokenGetPayload<T>>;
+    return this.$exec("findFirstOrThrow", args, options) as Promise<Prisma.PasswordResetTokenGetPayload<T>>;
   }
 
   static findUnique<T extends Prisma.PasswordResetTokenFindUniqueArgs>(
     args: Subset<T, Prisma.PasswordResetTokenFindUniqueArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.PasswordResetTokenGetPayload<T> | null> {
-    return this.$exec("findUnique", args) as Promise<Prisma.PasswordResetTokenGetPayload<T> | null>;
+    return this.$exec("findUnique", args, options) as Promise<Prisma.PasswordResetTokenGetPayload<T> | null>;
   }
 
   static findUniqueOrThrow<T extends Prisma.PasswordResetTokenFindUniqueOrThrowArgs>(
     args: Subset<T, Prisma.PasswordResetTokenFindUniqueOrThrowArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.PasswordResetTokenGetPayload<T>> {
-    return this.$exec("findUniqueOrThrow", args) as Promise<Prisma.PasswordResetTokenGetPayload<T>>;
+    return this.$exec("findUniqueOrThrow", args, options) as Promise<Prisma.PasswordResetTokenGetPayload<T>>;
   }
 
   static count(
@@ -385,26 +509,30 @@ export class PasswordResetTokenModel extends Model {
 
   static create<T extends Prisma.PasswordResetTokenCreateArgs>(
     args: Subset<T, Prisma.PasswordResetTokenCreateArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.PasswordResetTokenGetPayload<T>> {
-    return this.$exec("create", args) as Promise<Prisma.PasswordResetTokenGetPayload<T>>;
+    return this.$exec("create", args, options) as Promise<Prisma.PasswordResetTokenGetPayload<T>>;
   }
 
   static update<T extends Prisma.PasswordResetTokenUpdateArgs>(
     args: Subset<T, Prisma.PasswordResetTokenUpdateArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.PasswordResetTokenGetPayload<T>> {
-    return this.$exec("update", args) as Promise<Prisma.PasswordResetTokenGetPayload<T>>;
+    return this.$exec("update", args, options) as Promise<Prisma.PasswordResetTokenGetPayload<T>>;
   }
 
   static delete<T extends Prisma.PasswordResetTokenDeleteArgs>(
     args: Subset<T, Prisma.PasswordResetTokenDeleteArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.PasswordResetTokenGetPayload<T>> {
-    return this.$exec("delete", args) as Promise<Prisma.PasswordResetTokenGetPayload<T>>;
+    return this.$exec("delete", args, options) as Promise<Prisma.PasswordResetTokenGetPayload<T>>;
   }
 
   static upsert<T extends Prisma.PasswordResetTokenUpsertArgs>(
     args: Subset<T, Prisma.PasswordResetTokenUpsertArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.PasswordResetTokenGetPayload<T>> {
-    return this.$exec("upsert", args) as Promise<Prisma.PasswordResetTokenGetPayload<T>>;
+    return this.$exec("upsert", args, options) as Promise<Prisma.PasswordResetTokenGetPayload<T>>;
   }
 
   static createMany(
@@ -424,39 +552,62 @@ export class PasswordResetTokenModel extends Model {
   ): Promise<{ count: number }> {
     return this.$exec("deleteMany", args) as Promise<{ count: number }>;
   }
+
+  static wrap<C extends { prototype: unknown }, R extends Prisma.PasswordResetTokenGetPayload<{}>>(
+    this: C,
+    row: R,
+  ): C["prototype"] & R {
+    return (Model.wrap as (row: object) => any).call(this, row);
+  }
 }
+
+// Merges the row's columns into the instance type, so a method on a subclass can
+// read `this.email`. No runtime output.
+//
+// oxlint flags class/interface merging because TypeScript does not check the
+// merged properties are initialised — a directly constructed instance would type
+// as carrying every column while holding none. That hazard is closed rather than
+// accepted: `Model`'s constructor is `protected`, so the only way to get an
+// instance is `wrap`, which assigns a complete row. See bin/orm/emit.ts.
+// oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
+export interface SessionModel extends Prisma.SessionGetPayload<{}> {}
 
 export class SessionModel extends Model {
   static $schema = schema.Session;
 
   static findMany<T extends Prisma.SessionFindManyArgs>(
     args?: Subset<T, Prisma.SessionFindManyArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.SessionGetPayload<T>[]> {
-    return this.$exec("findMany", args) as Promise<Prisma.SessionGetPayload<T>[]>;
+    return this.$exec("findMany", args, options) as Promise<Prisma.SessionGetPayload<T>[]>;
   }
 
   static findFirst<T extends Prisma.SessionFindFirstArgs>(
     args?: Subset<T, Prisma.SessionFindFirstArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.SessionGetPayload<T> | null> {
-    return this.$exec("findFirst", args) as Promise<Prisma.SessionGetPayload<T> | null>;
+    return this.$exec("findFirst", args, options) as Promise<Prisma.SessionGetPayload<T> | null>;
   }
 
   static findFirstOrThrow<T extends Prisma.SessionFindFirstOrThrowArgs>(
     args?: Subset<T, Prisma.SessionFindFirstOrThrowArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.SessionGetPayload<T>> {
-    return this.$exec("findFirstOrThrow", args) as Promise<Prisma.SessionGetPayload<T>>;
+    return this.$exec("findFirstOrThrow", args, options) as Promise<Prisma.SessionGetPayload<T>>;
   }
 
   static findUnique<T extends Prisma.SessionFindUniqueArgs>(
     args: Subset<T, Prisma.SessionFindUniqueArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.SessionGetPayload<T> | null> {
-    return this.$exec("findUnique", args) as Promise<Prisma.SessionGetPayload<T> | null>;
+    return this.$exec("findUnique", args, options) as Promise<Prisma.SessionGetPayload<T> | null>;
   }
 
   static findUniqueOrThrow<T extends Prisma.SessionFindUniqueOrThrowArgs>(
     args: Subset<T, Prisma.SessionFindUniqueOrThrowArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.SessionGetPayload<T>> {
-    return this.$exec("findUniqueOrThrow", args) as Promise<Prisma.SessionGetPayload<T>>;
+    return this.$exec("findUniqueOrThrow", args, options) as Promise<Prisma.SessionGetPayload<T>>;
   }
 
   static count(
@@ -467,26 +618,30 @@ export class SessionModel extends Model {
 
   static create<T extends Prisma.SessionCreateArgs>(
     args: Subset<T, Prisma.SessionCreateArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.SessionGetPayload<T>> {
-    return this.$exec("create", args) as Promise<Prisma.SessionGetPayload<T>>;
+    return this.$exec("create", args, options) as Promise<Prisma.SessionGetPayload<T>>;
   }
 
   static update<T extends Prisma.SessionUpdateArgs>(
     args: Subset<T, Prisma.SessionUpdateArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.SessionGetPayload<T>> {
-    return this.$exec("update", args) as Promise<Prisma.SessionGetPayload<T>>;
+    return this.$exec("update", args, options) as Promise<Prisma.SessionGetPayload<T>>;
   }
 
   static delete<T extends Prisma.SessionDeleteArgs>(
     args: Subset<T, Prisma.SessionDeleteArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.SessionGetPayload<T>> {
-    return this.$exec("delete", args) as Promise<Prisma.SessionGetPayload<T>>;
+    return this.$exec("delete", args, options) as Promise<Prisma.SessionGetPayload<T>>;
   }
 
   static upsert<T extends Prisma.SessionUpsertArgs>(
     args: Subset<T, Prisma.SessionUpsertArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.SessionGetPayload<T>> {
-    return this.$exec("upsert", args) as Promise<Prisma.SessionGetPayload<T>>;
+    return this.$exec("upsert", args, options) as Promise<Prisma.SessionGetPayload<T>>;
   }
 
   static createMany(
@@ -506,39 +661,62 @@ export class SessionModel extends Model {
   ): Promise<{ count: number }> {
     return this.$exec("deleteMany", args) as Promise<{ count: number }>;
   }
+
+  static wrap<C extends { prototype: unknown }, R extends Prisma.SessionGetPayload<{}>>(
+    this: C,
+    row: R,
+  ): C["prototype"] & R {
+    return (Model.wrap as (row: object) => any).call(this, row);
+  }
 }
+
+// Merges the row's columns into the instance type, so a method on a subclass can
+// read `this.email`. No runtime output.
+//
+// oxlint flags class/interface merging because TypeScript does not check the
+// merged properties are initialised — a directly constructed instance would type
+// as carrying every column while holding none. That hazard is closed rather than
+// accepted: `Model`'s constructor is `protected`, so the only way to get an
+// instance is `wrap`, which assigns a complete row. See bin/orm/emit.ts.
+// oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
+export interface SocialAccountModel extends Prisma.SocialAccountGetPayload<{}> {}
 
 export class SocialAccountModel extends Model {
   static $schema = schema.SocialAccount;
 
   static findMany<T extends Prisma.SocialAccountFindManyArgs>(
     args?: Subset<T, Prisma.SocialAccountFindManyArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.SocialAccountGetPayload<T>[]> {
-    return this.$exec("findMany", args) as Promise<Prisma.SocialAccountGetPayload<T>[]>;
+    return this.$exec("findMany", args, options) as Promise<Prisma.SocialAccountGetPayload<T>[]>;
   }
 
   static findFirst<T extends Prisma.SocialAccountFindFirstArgs>(
     args?: Subset<T, Prisma.SocialAccountFindFirstArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.SocialAccountGetPayload<T> | null> {
-    return this.$exec("findFirst", args) as Promise<Prisma.SocialAccountGetPayload<T> | null>;
+    return this.$exec("findFirst", args, options) as Promise<Prisma.SocialAccountGetPayload<T> | null>;
   }
 
   static findFirstOrThrow<T extends Prisma.SocialAccountFindFirstOrThrowArgs>(
     args?: Subset<T, Prisma.SocialAccountFindFirstOrThrowArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.SocialAccountGetPayload<T>> {
-    return this.$exec("findFirstOrThrow", args) as Promise<Prisma.SocialAccountGetPayload<T>>;
+    return this.$exec("findFirstOrThrow", args, options) as Promise<Prisma.SocialAccountGetPayload<T>>;
   }
 
   static findUnique<T extends Prisma.SocialAccountFindUniqueArgs>(
     args: Subset<T, Prisma.SocialAccountFindUniqueArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.SocialAccountGetPayload<T> | null> {
-    return this.$exec("findUnique", args) as Promise<Prisma.SocialAccountGetPayload<T> | null>;
+    return this.$exec("findUnique", args, options) as Promise<Prisma.SocialAccountGetPayload<T> | null>;
   }
 
   static findUniqueOrThrow<T extends Prisma.SocialAccountFindUniqueOrThrowArgs>(
     args: Subset<T, Prisma.SocialAccountFindUniqueOrThrowArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.SocialAccountGetPayload<T>> {
-    return this.$exec("findUniqueOrThrow", args) as Promise<Prisma.SocialAccountGetPayload<T>>;
+    return this.$exec("findUniqueOrThrow", args, options) as Promise<Prisma.SocialAccountGetPayload<T>>;
   }
 
   static count(
@@ -549,26 +727,30 @@ export class SocialAccountModel extends Model {
 
   static create<T extends Prisma.SocialAccountCreateArgs>(
     args: Subset<T, Prisma.SocialAccountCreateArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.SocialAccountGetPayload<T>> {
-    return this.$exec("create", args) as Promise<Prisma.SocialAccountGetPayload<T>>;
+    return this.$exec("create", args, options) as Promise<Prisma.SocialAccountGetPayload<T>>;
   }
 
   static update<T extends Prisma.SocialAccountUpdateArgs>(
     args: Subset<T, Prisma.SocialAccountUpdateArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.SocialAccountGetPayload<T>> {
-    return this.$exec("update", args) as Promise<Prisma.SocialAccountGetPayload<T>>;
+    return this.$exec("update", args, options) as Promise<Prisma.SocialAccountGetPayload<T>>;
   }
 
   static delete<T extends Prisma.SocialAccountDeleteArgs>(
     args: Subset<T, Prisma.SocialAccountDeleteArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.SocialAccountGetPayload<T>> {
-    return this.$exec("delete", args) as Promise<Prisma.SocialAccountGetPayload<T>>;
+    return this.$exec("delete", args, options) as Promise<Prisma.SocialAccountGetPayload<T>>;
   }
 
   static upsert<T extends Prisma.SocialAccountUpsertArgs>(
     args: Subset<T, Prisma.SocialAccountUpsertArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.SocialAccountGetPayload<T>> {
-    return this.$exec("upsert", args) as Promise<Prisma.SocialAccountGetPayload<T>>;
+    return this.$exec("upsert", args, options) as Promise<Prisma.SocialAccountGetPayload<T>>;
   }
 
   static createMany(
@@ -588,39 +770,62 @@ export class SocialAccountModel extends Model {
   ): Promise<{ count: number }> {
     return this.$exec("deleteMany", args) as Promise<{ count: number }>;
   }
+
+  static wrap<C extends { prototype: unknown }, R extends Prisma.SocialAccountGetPayload<{}>>(
+    this: C,
+    row: R,
+  ): C["prototype"] & R {
+    return (Model.wrap as (row: object) => any).call(this, row);
+  }
 }
+
+// Merges the row's columns into the instance type, so a method on a subclass can
+// read `this.email`. No runtime output.
+//
+// oxlint flags class/interface merging because TypeScript does not check the
+// merged properties are initialised — a directly constructed instance would type
+// as carrying every column while holding none. That hazard is closed rather than
+// accepted: `Model`'s constructor is `protected`, so the only way to get an
+// instance is `wrap`, which assigns a complete row. See bin/orm/emit.ts.
+// oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
+export interface UserModel extends Prisma.UserGetPayload<{}> {}
 
 export class UserModel extends Model {
   static $schema = schema.User;
 
   static findMany<T extends Prisma.UserFindManyArgs>(
     args?: Subset<T, Prisma.UserFindManyArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.UserGetPayload<T>[]> {
-    return this.$exec("findMany", args) as Promise<Prisma.UserGetPayload<T>[]>;
+    return this.$exec("findMany", args, options) as Promise<Prisma.UserGetPayload<T>[]>;
   }
 
   static findFirst<T extends Prisma.UserFindFirstArgs>(
     args?: Subset<T, Prisma.UserFindFirstArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.UserGetPayload<T> | null> {
-    return this.$exec("findFirst", args) as Promise<Prisma.UserGetPayload<T> | null>;
+    return this.$exec("findFirst", args, options) as Promise<Prisma.UserGetPayload<T> | null>;
   }
 
   static findFirstOrThrow<T extends Prisma.UserFindFirstOrThrowArgs>(
     args?: Subset<T, Prisma.UserFindFirstOrThrowArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.UserGetPayload<T>> {
-    return this.$exec("findFirstOrThrow", args) as Promise<Prisma.UserGetPayload<T>>;
+    return this.$exec("findFirstOrThrow", args, options) as Promise<Prisma.UserGetPayload<T>>;
   }
 
   static findUnique<T extends Prisma.UserFindUniqueArgs>(
     args: Subset<T, Prisma.UserFindUniqueArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.UserGetPayload<T> | null> {
-    return this.$exec("findUnique", args) as Promise<Prisma.UserGetPayload<T> | null>;
+    return this.$exec("findUnique", args, options) as Promise<Prisma.UserGetPayload<T> | null>;
   }
 
   static findUniqueOrThrow<T extends Prisma.UserFindUniqueOrThrowArgs>(
     args: Subset<T, Prisma.UserFindUniqueOrThrowArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.UserGetPayload<T>> {
-    return this.$exec("findUniqueOrThrow", args) as Promise<Prisma.UserGetPayload<T>>;
+    return this.$exec("findUniqueOrThrow", args, options) as Promise<Prisma.UserGetPayload<T>>;
   }
 
   static count(
@@ -631,26 +836,30 @@ export class UserModel extends Model {
 
   static create<T extends Prisma.UserCreateArgs>(
     args: Subset<T, Prisma.UserCreateArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.UserGetPayload<T>> {
-    return this.$exec("create", args) as Promise<Prisma.UserGetPayload<T>>;
+    return this.$exec("create", args, options) as Promise<Prisma.UserGetPayload<T>>;
   }
 
   static update<T extends Prisma.UserUpdateArgs>(
     args: Subset<T, Prisma.UserUpdateArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.UserGetPayload<T>> {
-    return this.$exec("update", args) as Promise<Prisma.UserGetPayload<T>>;
+    return this.$exec("update", args, options) as Promise<Prisma.UserGetPayload<T>>;
   }
 
   static delete<T extends Prisma.UserDeleteArgs>(
     args: Subset<T, Prisma.UserDeleteArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.UserGetPayload<T>> {
-    return this.$exec("delete", args) as Promise<Prisma.UserGetPayload<T>>;
+    return this.$exec("delete", args, options) as Promise<Prisma.UserGetPayload<T>>;
   }
 
   static upsert<T extends Prisma.UserUpsertArgs>(
     args: Subset<T, Prisma.UserUpsertArgs>,
+    options?: ExecOptions,
   ): Promise<Prisma.UserGetPayload<T>> {
-    return this.$exec("upsert", args) as Promise<Prisma.UserGetPayload<T>>;
+    return this.$exec("upsert", args, options) as Promise<Prisma.UserGetPayload<T>>;
   }
 
   static createMany(
@@ -669,5 +878,12 @@ export class UserModel extends Model {
     args?: Prisma.UserDeleteManyArgs,
   ): Promise<{ count: number }> {
     return this.$exec("deleteMany", args) as Promise<{ count: number }>;
+  }
+
+  static wrap<C extends { prototype: unknown }, R extends Prisma.UserGetPayload<{}>>(
+    this: C,
+    row: R,
+  ): C["prototype"] & R {
+    return (Model.wrap as (row: object) => any).call(this, row);
   }
 }

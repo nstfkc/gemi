@@ -18,10 +18,16 @@ import { dialectFor, type SqlDialect } from "./dialect";
 import {
   MissingModelSchemaError,
   RecordNotFoundError,
+  UnsupportedQueryError,
   UniqueConstraintError,
   UnregisteredPolicyClassError,
 } from "./errors";
-import { getOrCompile, type Operation, type QueryPlan } from "./plan";
+import {
+  getOrCompile,
+  type ExecOptions,
+  type Operation,
+  type QueryPlan,
+} from "./plan";
 import {
   applyPolicies,
   applyRedaction,
@@ -31,6 +37,13 @@ import {
   type ModelPolicy,
   type PolicyContext,
 } from "./policy";
+import {
+  changedFields,
+  provenanceOf,
+  resnapshot,
+  track,
+  untracked,
+} from "./provenance";
 import * as registry from "./registry";
 import type { ModelSchema } from "./schema";
 
@@ -62,6 +75,22 @@ const ORTHROW = new Set([
 ]);
 
 export abstract class Model {
+  /**
+   * Protected, so `new UserModel()` is a type error.
+   *
+   * Not stylistic. The generated bases merge the row's columns into their
+   * instance type via a same-named interface, which is what lets a method on a
+   * subclass read `this.email` — and the cost of declaration merging is that
+   * TypeScript does not check those properties are ever initialised. A directly
+   * constructed instance would therefore type as carrying every column while
+   * holding none.
+   *
+   * Closing the constructor removes that hazard rather than documenting it: the
+   * only way to get an instance is `wrap`, which assigns a complete row. Every
+   * other operation returns plain objects and never constructs one.
+   */
+  protected constructor() {}
+
   /** Assigned by the generated subclass from `app/models/generated/schema.ts`. */
   static $schema: ModelSchema;
 
@@ -102,6 +131,148 @@ export abstract class Model {
    */
   static asUser<T>(user: unknown, fn: () => Promise<T>): Promise<T> {
     return runAsUser(user, fn);
+  }
+
+  /**
+   * Persists the changes made to a *tracked* row: `update` with only the columns
+   * whose value differs from what was fetched.
+   *
+   *     const user = await User.findUnique({ where: { id } }, { track: true })
+   *     user.name = "new name"
+   *     await User.save(user)     // update "User" set "name" = ?, … where "id" = ?
+   *
+   * Most of Eloquent's write ergonomics while returns stay plain objects — no
+   * proxies, no conditional return types, no signature that changes with a flag.
+   * That is invariant 5's whole claim, and this is the thing that tests it.
+   *
+   * Goes through `$exec("update", …)` rather than around it, so policies,
+   * `@updatedAt`, the ambient transaction and the plan cache all apply exactly as
+   * they do to a hand-written update. The changed-column *set* is the plan's
+   * shape and the values are parameters, so two saves touching the same columns
+   * share one plan.
+   *
+   * Returns `null` when nothing changed, having issued no statement — a save of
+   * an untouched row should not stamp `@updatedAt`.
+   *
+   * Raises when handed an object with no provenance. See `untracked` for why
+   * that is a loud failure rather than a fallback to writing everything.
+   */
+  static async save<T extends object>(row: T): Promise<unknown> {
+    const schema = this.$modelSchema();
+    const record = provenanceOf(row);
+
+    if (!record) throw untracked(row, schema.name);
+
+    if (record.model !== schema.name) {
+      throw new UnsupportedQueryError(
+        "save",
+        schema.name,
+        "save",
+        `This row came from ${record.model}, not ${schema.name}. Save it ` +
+          `through the model it was read from.`,
+      );
+    }
+
+    // A row selected without its primary key has `key = { id: undefined }`, and
+    // `matchUniqueKey` drops undefined members — so the update fails with
+    // "update needs a unique field", pointing at a `where` the caller never
+    // wrote. Named here instead, where the actual mistake is knowable: this can
+    // only mean the select omitted the key.
+    const missingKey = schema.primaryKey.filter(
+      (name) => record.key[name] === undefined,
+    );
+    if (missingKey.length > 0) {
+      throw new UnsupportedQueryError(
+        "save",
+        schema.name,
+        "save",
+        `This row was fetched without ${missingKey.join(", ")}, so there is no ` +
+          `way to identify which row to update. A tracked row needs its primary ` +
+          `key: add ${missingKey.map((name) => `${name}: true`).join(", ")} to ` +
+          `the select, or drop the select to fetch every column.`,
+      );
+    }
+
+    const changed = changedFields(row, schema);
+    if (Object.keys(changed).length === 0) return null;
+
+    const updated = await this.$exec("update", {
+      where: record.key,
+      data: changed,
+    });
+
+    // Copy the *returned* row back over the caller's, not just the values sent.
+    //
+    // `@updatedAt` is stamped by the compiler and is therefore never in
+    // `changed`, so without this the in-memory row keeps the timestamp it was
+    // fetched with while the database holds a newer one — a caller reading
+    // `user.updatedAt` after a successful save silently gets the old instant. The
+    // same applies to anything else the database rewrote.
+    //
+    // Resnapshotting from the same source is what keeps the row and its snapshot
+    // in agreement, so a second `save` is still a no-op.
+    if (updated && typeof updated === "object" && !Array.isArray(updated)) {
+      const fresh = updated as Record<string, unknown>;
+      const target = row as Record<string, unknown>;
+      const persisted: Record<string, unknown> = {};
+
+      for (const name of Object.keys(fresh)) {
+        if (!(name in schema.fields)) continue;
+        target[name] = fresh[name];
+        persisted[name] = fresh[name];
+      }
+
+      resnapshot(row, persisted);
+    } else {
+      resnapshot(row, changed);
+    }
+
+    return updated;
+  }
+
+  /**
+   * Turns a **complete** row into an instance of this class, for code that wants
+   * behaviour rather than data.
+   *
+   *     const user = User.wrap(await User.findUniqueOrThrow({ where: { id } }))
+   *     user.displayName          // a method on your subclass
+   *     await user.save()
+   *
+   * Explicit, never implicit, and that is the whole design. The moment queries
+   * hydrate by default, the `select` conflict comes back: a method that reads
+   * `this.email` on a row fetched as `select: { id: true }` is a runtime crash
+   * the type system cannot see. Keeping `wrap` a call the author makes means
+   * narrowing and behaviour never meet.
+   *
+   * **Completeness is required, and the requirement is not arbitrary.** The
+   * generated signature takes the full scalar payload, so a `Pick` of it is a
+   * compile error rather than a runtime surprise (there is a type test for
+   * exactly that). It is the same constraint that makes `save()` work on the
+   * result: a complete row is one this can snapshot in full, so an instance is
+   * tracked without the caller asking. The type constraint and the save
+   * capability are one constraint, not two.
+   *
+   * Note the instance is a *copy*: mutating it does not touch the row that was
+   * passed in, and `save()` diffs against what `wrap` received.
+   */
+  static wrap(row: object): any {
+    const schema = this.$modelSchema();
+    const instance = new (this as unknown as new () => any)();
+
+    Object.assign(instance, row);
+    // Tracked on the instance, not the argument — `save()` on the instance has
+    // to diff against the values it was constructed from.
+    track(instance, schema, []);
+
+    return instance;
+  }
+
+  /**
+   * Persists this instance's changes. The instance counterpart of the static, and
+   * a one-line delegation to it so there is one implementation.
+   */
+  save(): Promise<unknown> {
+    return (this.constructor as typeof Model).save(this);
   }
 
   static $modelSchema(): ModelSchema {
@@ -169,7 +340,11 @@ export abstract class Model {
     return withTransaction(app(DatabaseManager).sql, () => fn());
   }
 
-  static async $exec(op: Operation, args: any = {}): Promise<unknown> {
+  static async $exec(
+    op: Operation,
+    args: any = {},
+    options?: ExecOptions,
+  ): Promise<unknown> {
     const schema = this.$modelSchema();
 
     // Resolved per call, never captured at module scope: that is what keeps the
@@ -353,6 +528,20 @@ export abstract class Model {
     // related row was shaped by its own model's `$exec` and has already been
     // through its own policy's `redact` — this one only owns its own rows.
     if (policy) applyRedaction(policies, policy, result);
+
+    // Provenance, after redaction so a redacted field is not snapshotted as its
+    // original value and then written back by `save`.
+    //
+    // Here rather than inside `$shape`, which is where the plan sketched it, for
+    // one reason: `$shape` is the seam an `ActiveRecordModel` overrides to
+    // return instances, and tracking there would make every such override
+    // responsible for reimplementing it. Doing it at the choke point means an
+    // override gets provenance for free — which is the same argument that put
+    // everything else in `$exec`.
+    if (options?.track === true) {
+      const relationKeys = (plan.relations ?? []).map((relation) => relation.as);
+      for (const row of rowsOf(result)) track(row, schema, relationKeys);
+    }
 
     return result;
   }
