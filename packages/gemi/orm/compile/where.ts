@@ -10,6 +10,7 @@ import {
 } from "../relation-filters";
 import type { FieldSchema, ModelSchema, RelationSchema } from "../schema";
 import { type Correlated, correlate } from "./correlate";
+import { uniqueKeys } from "./unique";
 import {
   type Binder,
   type Fragment,
@@ -365,7 +366,19 @@ function compileCompoundKey(
   context: WhereContext,
   locate: (args: any) => any,
 ): Fragment | null {
-  const members = schema.uniques.find(
+  // `uniqueKeys`, not `schema.uniques` — the primary key is a unique key, and a
+  // compound `@@id` lives only in `schema.primaryKey`. Searching `uniques`
+  // alone made the two halves of this disagree: `matchUniqueKey` accepted
+  // `tenantId_code` (it asks `uniqueKeys`, which includes the primary key), so
+  // the operation compiled, and then this returned `null` and the caller
+  // reported an unknown field. Both spellings failed and each error pointed at
+  // the other.
+  //
+  // Invisible until now because the template's only compound key is
+  // `SocialAccount`'s `@@unique([username, provider])`. A compound `@@id` — a
+  // join table, or any tenant-scoped `@@id([tenantId, id])` — was unreachable
+  // by key at all.
+  const members = uniqueKeys(schema).find(
     (group) => group.length > 1 && group.join("_") === key,
   );
   if (!members) return null;

@@ -9,6 +9,7 @@ import { ARTIFACT_VERSION } from "./schema";
 import {
   AccountModel,
   MagicLinkTokenModel,
+  MembershipModel,
   OrganizationModel,
   OrganizationInvitationModel,
   PasswordResetTokenModel,
@@ -26,6 +27,7 @@ assertSchemaArtifactVersion(ARTIFACT_VERSION);
 // import cycle.
 register("Account", AccountModel);
 register("MagicLinkToken", MagicLinkTokenModel);
+register("Membership", MembershipModel);
 register("Organization", OrganizationModel);
 register("OrganizationInvitation", OrganizationInvitationModel);
 register("PasswordResetToken", PasswordResetTokenModel);

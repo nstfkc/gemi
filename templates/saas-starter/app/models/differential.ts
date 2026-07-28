@@ -193,6 +193,7 @@ export async function createDifferential(options: {
     "_PostToTag",
     "Post",
     "Tag",
+    "Membership",
     "SocialAccount",
     "Session",
     "PasswordResetToken",
@@ -224,6 +225,7 @@ export async function createDifferential(options: {
 
     await prisma.post.deleteMany({});
     await prisma.tag.deleteMany({});
+    await prisma.membership.deleteMany({});
     await prisma.socialAccount.deleteMany({});
     await prisma.session.deleteMany({});
     await prisma.passwordResetToken.deleteMany({});
@@ -367,7 +369,7 @@ export async function createDifferential(options: {
       const fromPrisma = await settle(() =>
         prismaDelegate(prisma, model)[operation](args),
       );
-      const afterPrisma = await readTables(prisma, tables);
+      const afterPrisma = await readTables(prisma, tables, options.models);
 
       await this.reset();
       clearPlanCache();
@@ -376,7 +378,7 @@ export async function createDifferential(options: {
       const fromGemi = await settle(() =>
         unpoliced(() => (gemiModel as any)[operation](args)),
       );
-      const afterGemi = await readTables(prisma, tables);
+      const afterGemi = await readTables(prisma, tables, options.models);
 
       if (fromPrisma.threw || fromGemi.threw) {
         // The `kind` is compared too, not just the fact of throwing: without it
@@ -503,11 +505,25 @@ async function assertPrismaSpeaks(
 async function readTables(
   prisma: PrismaClient,
   models: readonly string[],
+  /** The gemi model classes, for the primary key of each. */
+  registry: ModelMap,
 ): Promise<Record<string, unknown>> {
   const out: Record<string, unknown> = {};
   for (const model of models) {
+    // Ordered by the model's **primary key**, not by `id`. Hardcoding `id`
+    // assumed every model has one — true of this schema until a model with a
+    // compound `@@id` arrived, where Prisma answers
+    // `Unknown argument 'id'` and the comparison never runs.
+    //
+    // A stable order still matters: the two clients write from the same seeded
+    // state, so an unordered read could differ by storage order alone and
+    // report a divergence that is not one.
+    const schema = (registry[model] as unknown as { $schema?: { primaryKey?: string[] } })
+      ?.$schema;
+    const key = schema?.primaryKey?.length ? schema.primaryKey : ["id"];
+
     out[model] = await prismaDelegate(prisma, model).findMany({
-      orderBy: { id: "asc" },
+      orderBy: key.map((field) => ({ [field]: "asc" })),
     });
   }
   return out;
