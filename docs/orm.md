@@ -117,6 +117,12 @@ const user = await User.findUniqueOrThrow({
 })
 ```
 
+A write's `include` takes `_count` as a read's does — `User.create({ data, include: { _count: {
+select: { accounts: true } } } })` comes back with `_count.accounts`. It compiles to a correlated
+subquery inside the `RETURNING`, so it costs no extra statement; a `delete` carrying one reads the
+count before the row goes, for the same reason a `delete` carrying an `include` reads its children
+first.
+
 `select` and `include` narrow the **return type**, exactly as they do in Prisma — `user.email`
 type-checks, `user.name` does not. A key outside the operation's argument type collapses to
 `never` rather than being quietly accepted.

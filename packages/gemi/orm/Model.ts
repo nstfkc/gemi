@@ -690,7 +690,24 @@ export abstract class Model {
     //
     // Only when there is something to read. A plain `delete` still compiles to
     // one statement and opens no transaction.
-    if (op === "delete" && plan.relations !== undefined) {
+    //
+    // `plan.counts` is here for the same hazard in its quietest form, and the
+    // two dialects disagree about it. A `_count` compiles to a correlated
+    // subquery inside the `RETURNING`, and where the schema cascades:
+    //
+    //   postgres  delete … returning (select count(*) from ch …)  ->  3
+    //   sqlite    delete … returning (select count(*) from ch …)  ->  0
+    //
+    // Measured through Bun against a real `on delete cascade` on both. Postgres
+    // evaluates the subquery against the pre-statement snapshot, which is what
+    // Prisma returns; SQLite evaluates it after the cascade has run, so the
+    // count is 0 — a *number*, so nothing looks missing and no error is raised.
+    //
+    // Reading first answers it the same way it already answers the `include`
+    // case, and on both dialects rather than one. A count is not a relation
+    // plan, so `relations` stays empty for an `include: { _count: … }` on its
+    // own — hence the separate flag rather than a wider check.
+    if (op === "delete" && (plan.relations !== undefined || plan.counts)) {
       const { where } = effective;
       const projection =
         effective.select !== undefined
