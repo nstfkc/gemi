@@ -240,6 +240,65 @@ describe("what it declines, falling back to batched", () => {
   });
 
   /**
+   * A relation ordering on a node compiles to a correlated subquery, and
+   * `foldNode` parses the node's `orderBy` with no `OrderContext` to build one
+   * with — so folding it raises rather than emitting anything.
+   *
+   * The depth-1 case is older than the recursive fold and was already broken:
+   * it folded, and threw. What recursion changed is *reach* — a node carrying a
+   * nested `include` used to decline for that reason and land on batched, where
+   * the ordering works, so making the fold recurse turned a working query into a
+   * throwing one. One decline covers both, which is why they are asserted
+   * together rather than as a regression and a fix.
+   */
+  test.each([
+    ["by a relation's field", { orderBy: { user: { email: "asc" } } }],
+    ["by a relation's count", { orderBy: { user: { _count: "desc" } } }],
+    [
+      "in the array form",
+      { orderBy: [{ organizationRole: "asc" }, { user: { email: "asc" } }] },
+    ],
+    [
+      "beneath a node that would otherwise fold",
+      {
+        orderBy: { user: { email: "asc" } },
+        include: { organization: true },
+      },
+    ],
+  ])("a node ordered %s declines", (_label, node) => {
+    const plan = compiled({ include: { accounts: node } });
+
+    expect(plan.strategies).toEqual(["batched"]);
+    expect(plan.text).not.toContain("lateral");
+  });
+
+  /**
+   * ...and an ordering by a *column* still folds, or the decline above would be
+   * matching every `orderBy` and nobody would notice.
+   */
+  test("an ordering by a column is unaffected", () => {
+    const plan = compiled({
+      include: { accounts: { orderBy: { organizationRole: "desc" } } },
+    });
+
+    expect(plan.strategies).toEqual(["lateral"]);
+    expect(plan.text).toContain(`order by "Account"."organizationRole" desc`);
+  });
+
+  /**
+   * The two declines meeting: batching cannot page per parent, so the query is
+   * refused rather than run — and the message says which of the two boundaries
+   * it hit.
+   */
+  test("a per-parent page under a relation ordering is refused, not silently batched", () => {
+    expect(() =>
+      compiled({
+        include: { accounts: { orderBy: { user: { email: "asc" } }, take: 2 } },
+      }),
+    ).toThrow(/declined to fold \(relation ordering on a folded node\)/);
+  });
+
+  /**
    * The correlation names both tables, so a relation onto the same table would
    * read `"Category"."parentId" = "Category"."id"` — which inside the subquery
    * compares its own row against itself rather than against the outer one.

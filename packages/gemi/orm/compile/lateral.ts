@@ -176,6 +176,22 @@ function decline(
   // return rows missing a key the caller asked for.
   if (hasCount(args)) return "_count on a folded node";
 
+  // `orderBy: { user: { email: "asc" } }` on a node compiles to a correlated
+  // subquery, and `foldNode` parses the node's `orderBy` with no `OrderContext`
+  // to build one with — so `parseOrderBy` raises rather than emitting anything.
+  // Declining sends the node to the batched strategy, which compiles the
+  // ordering as part of the child's own query and gets it right.
+  //
+  // It reads like the `_count` case above and is the same shape: a node that
+  // would fold *without* something the caller asked for has to decline instead.
+  // Supporting it properly means threading an `OrderContext` down through
+  // `foldNode` so `order-relation.ts` can build the subquery against the child's
+  // qualifier — a bigger change than this one, and one that owes the
+  // differential harness its own coverage.
+  if (ordersByRelation(child, args.orderBy)) {
+    return "relation ordering on a folded node";
+  }
+
   for (const nested of relationNodes(child, args, operation)) {
     const reason = decline(
       child,
@@ -189,6 +205,28 @@ function decline(
   }
 
   return undefined;
+}
+
+/**
+ * Whether an `orderBy` sorts by a *relation* rather than by a column.
+ *
+ * Both of Prisma's relation-ordering forms name the relation as the key —
+ * `{ organization: { name: "asc" } }` and `{ accounts: { _count: "desc" } }` —
+ * so the check is the same one `parseOrderBy` makes, and both of its accepted
+ * containers (one object, or an array of them) are walked.
+ */
+function ordersByRelation(schema: ModelSchema, orderBy: unknown): boolean {
+  if (orderBy === undefined || orderBy === null) return false;
+
+  for (const entry of Array.isArray(orderBy) ? orderBy : [orderBy]) {
+    if (typeof entry !== "object" || entry === null) continue;
+    for (const [key, value] of Object.entries(entry)) {
+      if (value === undefined) continue;
+      if (key in schema.relations) return true;
+    }
+  }
+
+  return false;
 }
 
 function hasCount(args: Record<string, unknown>): boolean {

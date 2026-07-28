@@ -153,10 +153,17 @@ them, and they return identical rows:
   per node.
 
 The lateral strategy **declines per node** rather than emitting SQL it cannot get right, falling
-back to batching for that node alone. It declines an implicit many-to-many, a self-relation (a
-relation onto the same table), a node carrying a `_count`, and any node with one of those below it
-— half a fold is not a thing, so a descendant that cannot be expressed declines its whole node. A
-declined node still runs under this strategy one level down, so a decline costs one statement, not
+back to batching for that node alone. It declines:
+
+- an implicit many-to-many,
+- a self-relation (a relation onto the same table),
+- a node carrying a `_count`,
+- a node ordered by a *relation* — `orderBy: { user: { email: "asc" } }` or
+  `orderBy: { accounts: { _count: "desc" } }` — which compiles to a correlated subquery,
+- and any node with one of those below it: half a fold is not a thing, so a descendant that cannot
+  be expressed declines its whole node.
+
+A declined node still runs under this strategy one level down, so a decline costs one statement, not
 the subtree. A mixed include tree therefore uses both, which is fine — the results are the same
 either way, and there are tests asserting exactly that against Prisma across thirty relation
 shapes.

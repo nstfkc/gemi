@@ -289,6 +289,42 @@ const CASES: [string, string, unknown][] = [
   ["include to-many ordered desc", "findMany", {
     include: { accounts: { orderBy: { organizationRole: "desc" } } },
   }],
+  // Ordering an include by a *relation* rather than by a column. It compiles to
+  // a correlated subquery, which the lateral strategy has no `OrderContext` to
+  // build — so these are the shapes that must reach batching whichever strategy
+  // planned them, and the ones that would otherwise work on SQLite in
+  // development and throw on Postgres in production.
+  //
+  // **Every one carries an `id` tiebreaker, and it is not padding.** gemi orders
+  // by a correlated subquery and Prisma by a join, so the two statements are
+  // free to break a tie differently — and the fixture ties on purpose, since
+  // both of Ada's accounts point at the same user and therefore at the same
+  // email. Comparing an unspecified order would make these tests fail for a
+  // correct implementation, which is the failure mode a differential harness
+  // must not have.
+  ["include ordered by a relation field", "findMany", {
+    orderBy: { id: "asc" },
+    include: {
+      accounts: { orderBy: [{ user: { email: "asc" } }, { id: "asc" }] },
+    },
+  }],
+  ["include ordered by a relation, with a nested include", "findMany", {
+    orderBy: { id: "asc" },
+    include: {
+      accounts: {
+        orderBy: [{ user: { email: "asc" } }, { id: "asc" }],
+        include: { organization: true },
+      },
+    },
+  }],
+  ["include ordered by a column, then a relation", "findMany", {
+    orderBy: { id: "asc" },
+    include: {
+      accounts: {
+        orderBy: [{ organizationRole: "asc" }, { user: { email: "asc" } }],
+      },
+    },
+  }],
   ["include to-many with select", "findMany", {
     include: { accounts: { select: { publicId: true }, orderBy: { id: "asc" } } },
   }],
