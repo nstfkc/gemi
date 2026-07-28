@@ -518,6 +518,63 @@ export abstract class Model {
     // on this operation shares, plus whatever the `before` steps resolve.
     const context = createBindContext();
 
+    // `delete` with an `include` on a **cascading** relation, which returned the
+    // children empty until now.
+    //
+    // The relation reads run after the delete statement, so where the schema
+    // declares `onDelete: Cascade` the database has already removed the children
+    // by the time they are read. Prisma runs the whole thing in a transaction and
+    // returns them as they were. `compileDelete` recorded this as "not fixable at
+    // this layer — the fix is to read the relations before the delete inside one
+    // transaction, which is iteration 5's to provide".
+    //
+    // Iteration 5 provided it. Read first, delete second, return what was read:
+    //
+    // - **A transaction, so the pair is atomic.** Without one, a delete that
+    //   fails after the read would leave the caller holding a row that still
+    //   exists. Nested inside a caller's transaction it is a savepoint, which is
+    //   what `withTransaction` already does.
+    // - **`markPreScoped` on both**, because `effective` has been through this
+    //   model's policies once already; re-applying them would `AND` the same
+    //   predicate twice — same rows, different plan key.
+    // - **The read is scoped as the delete was**, including its nested policies.
+    //   A policy that varies by `context.operation` therefore sees "delete" for
+    //   the children of a row being deleted, which is the conservative reading:
+    //   these are the rows the delete is about to remove.
+    //
+    // Only when there is something to read. A plain `delete` still compiles to
+    // one statement and opens no transaction.
+    if (op === "delete" && plan.relations !== undefined) {
+      const { where } = effective;
+      const projection =
+        effective.select !== undefined
+          ? { select: effective.select }
+          : { include: effective.include };
+
+      // The pool, not `conn`: when a transaction is already open `withTransaction`
+      // savepoints against the ambient handle and ignores this argument, and
+      // passing a transaction handle here would read as though we begin on it.
+      return withTransaction(db.sql, async () => {
+        const before = await this.$exec(
+          "findFirst",
+          { where, ...projection },
+          markPreScoped({ strategy: options?.strategy }) as never,
+        );
+
+        // `findFirst` shapes a miss to `null`; the caller asked for a delete, so
+        // the error has to name that rather than the read this used underneath.
+        if (before === null) throw new RecordNotFoundError(schema.name, op);
+
+        await this.$exec(
+          "delete",
+          { where },
+          markPreScoped({ strategy: options?.strategy }) as never,
+        );
+
+        return before;
+      });
+    }
+
     // A write with a nested `create` / `connect` runs more than one statement.
     // Atomic exactly when the caller wrapped the call in `Model.transaction` —
     // *not* implicitly. A write does not open its own transaction, because

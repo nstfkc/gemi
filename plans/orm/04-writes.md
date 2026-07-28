@@ -170,10 +170,30 @@ does, which is the failure this iteration is arranged to prevent.
 - **No automatic chunking.** Prisma splits a large `createMany`; gemi raises
   `ParameterLimitError` naming the model and the driver limit. Chunking means
   several statements, which cannot be made atomic before iteration 5.
-- **`delete` with `include` on a cascading relation** returns the children
-  empty, because the relation reads run after the delete has cascaded. Prisma
-  does the whole thing in a transaction. Recorded at `compileDelete`; fixable
-  once iteration 5 lands, and not before.
+- ~~**`delete` with `include` on a cascading relation** returns the children
+  empty~~ — **fixed after iteration 9**, once iteration 5's transactions
+  existed. `Model.$exec` now reads the projection first and deletes second,
+  inside one transaction (a savepoint when the caller already has one), and
+  returns what it read.
+
+  Three things this iteration's note did not say, all of which the fix had to
+  decide:
+
+  - **The miss has to be reported as a `delete`.** The pre-read is a `findFirst`
+    underneath, and an error naming an operation the caller never issued is
+    worse than no error.
+  - **A `delete` with no relation to read is untouched** — one statement, no
+    transaction. Opening one unconditionally would put a `BEGIN` around every
+    delete in the framework.
+  - **The pre-read is scoped as the delete was**, policies included, rather than
+    re-scoped as a read. These are the rows the delete is about to remove.
+
+  The test for it needed a fixture, for the reason the note gives: the
+  template's schema declares no cascades. It also needed
+  `PRAGMA foreign_keys = ON` **on the ORM's own connection** — the pragma is per
+  connection, and setting it only on the test's raw handle made the suite pass
+  for the wrong reason. With cascades off the children survive the delete, so
+  reading them afterwards finds them and the bug does not reproduce.
 
 ## Notes and risks
 

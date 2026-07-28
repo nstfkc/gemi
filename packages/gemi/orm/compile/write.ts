@@ -393,19 +393,21 @@ function compileUpdate(
 // --- delete / deleteMany ---------------------------------------------------
 
 /**
- * KNOWN DIVERGENCE — `delete` with an `include` on a cascading relation.
+ * ~~KNOWN DIVERGENCE~~ — **fixed**, in `Model.$exec`, once iteration 5 existed.
  *
- * The relation reads run *after* the delete statement, from `$exec`. Where the
- * schema declares `onDelete: Cascade`, the database has already removed the
- * children by then, so the `include` comes back empty; Prisma runs the whole
- * thing in a transaction and returns the children as they were.
+ * `delete` with an `include` on a cascading relation used to come back with the
+ * children empty: the relation reads ran *after* the delete statement, and where
+ * the schema declares `onDelete: Cascade` the database had already removed them.
  *
- * Not fixable at this layer. The fix is to read the relations before the delete
- * inside one transaction, which is iteration 5's to provide — and once it does,
- * this is the case to write the test for. Recorded here rather than left to be
- * discovered because the template's schema declares no cascades, so the
- * differential harness cannot see it: the first cascading model added to any
- * application would.
+ * This note said the fix was "to read the relations before the delete inside one
+ * transaction, which is iteration 5's to provide — and once it does, this is the
+ * case to write the test for". Both happened:
+ * `templates/saas-starter/app/models/delete-include.test.ts`.
+ *
+ * Nothing changed *here*. A `delete` with no relation to read still compiles to
+ * one statement and opens no transaction; the read-then-delete pair lives at the
+ * choke point, where a transaction is available and where the decision to open
+ * one belongs.
  */
 function compileDelete(
   schema: ModelSchema,
