@@ -1,7 +1,9 @@
 import type { SQL } from "bun";
 import { DatabaseManager } from "../database/DatabaseManager";
 import type { Dialect } from "../database/dialect";
-import { withTransaction } from "../orm/context";
+import { currentTransaction, withTransaction } from "../orm/context";
+import { dialectFor } from "../orm/dialect";
+import { renderFragment, type SqlFragment } from "../orm/sql";
 import { Facade } from "./Facade";
 
 // Access to the app's database connection. Bun's `SQL` client is a tagged
@@ -27,6 +29,73 @@ export class DB extends Facade {
   // autoincrement, boolean and timestamp types).
   static get dialect(): Dialect {
     return this.getFacadeRoot().dialect;
+  }
+
+  // Runs a composed fragment and returns its rows.
+  //
+  //   const where = filters.length ? sql`where ${join(filters, " and ")}` : empty
+  //   const rows = await DB.query(sql`select * from "Product" ${where}`)
+  //
+  // Two things it does that `DB.sql` does not, and they are the reason it
+  // exists rather than being sugar:
+  //
+  // - It takes a **fragment**, so a predicate can be built as a value and
+  //   passed around. See `orm/sql.ts` for why that shape is the one raw SQL
+  //   actually needs.
+  // - It runs on the **ambient transaction** when there is one. A raw statement
+  //   that quietly escapes `Model.transaction` and commits while its neighbours
+  //   roll back is worse than no raw statement at all — so this resolves the
+  //   handle exactly as `Model.$exec` does, through `currentTransaction()`.
+  //
+  // A plain string is refused. That is deliberate: accepting one would make an
+  // interpolated template the path of least resistance, which is the injection
+  // this whole mechanism exists to keep closed. `unsafeSql` is the door, and it
+  // is named so that using it is a decision.
+  //
+  // `async` rather than returning the driver's promise directly, so that a
+  // rejected fragment — a plain string, a parameter count over the ceiling —
+  // *rejects* instead of throwing synchronously. An API that does one sometimes
+  // and the other otherwise is a footgun: `DB.query(...).catch(…)` would miss
+  // exactly the errors this refuses to run.
+  static async query<T = any>(fragment: SqlFragment): Promise<T[]> {
+    return (await this.run(fragment, "query")) as T[];
+  }
+
+  // The same, for a statement whose answer is *how many rows it touched*.
+  //
+  //   const won = await DB.execute(
+  //     sql`update "Reservation" set status = 'claimed'
+  //         where id = ${id} and status = 'reserved'`,
+  //   )
+  //   if (won === 0) { /* somebody else claimed it first */ }
+  //
+  // The count is the concurrency primitive there, not a diagnostic: 1 means this
+  // caller won the compare-and-swap and 0 means it lost, and an API that
+  // discarded it could not express that at all.
+  //
+  // **Where the number comes from.** Bun puts it on `count`, and leaves
+  // `affectedRows` null — measured on both dialects rather than read from a
+  // changelog, for `update`, `delete`, `insert`, a statement matching nothing,
+  // and one with `returning`. `compile/write.ts` records the same measurement
+  // from the other side: the *ORM's* counts come from `RETURNING` instead,
+  // because there the statement shape is ours to choose and an exact count that
+  // depends on nothing undocumented is worth a key column per row. Here the
+  // statement is the caller's, so there is nothing to add a `RETURNING` to.
+  static async execute(fragment: SqlFragment): Promise<number> {
+    const result = await this.run(fragment, "execute");
+    return Number((result as { count?: unknown })?.count ?? 0);
+  }
+
+  private static run(fragment: SqlFragment, operation: string) {
+    const db = this.getFacadeRoot();
+    // Per call, never captured: the same rule `Model.$exec` follows, and what
+    // keeps the connection swappable in tests.
+    const { text, values } = renderFragment(
+      fragment,
+      dialectFor(db.dialect),
+      operation,
+    );
+    return (currentTransaction() ?? db.sql).unsafe(text, values);
   }
 
   // Runs the callback inside a transaction, committing when it resolves and

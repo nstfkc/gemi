@@ -154,6 +154,15 @@ export class PostgresDialect implements SqlDialect {
     return value;
   }
 
+  // Nothing to do without a field: the only conversion `encode` makes here is
+  // the JSON one, and that is precisely the one that needs the column's
+  // declared type to be legitimate. `Date`, `boolean`, `bigint` and arrays all
+  // bind natively, which is why a raw fragment is portable across the two
+  // dialects even though only SQLite has to normalise anything.
+  encodeUntyped(value: unknown): unknown {
+    return value;
+  }
+
   // Postgres returns real `timestamptz`, `boolean` and `double precision`, so
   // most columns need nothing. Two do, and neither is reachable from the
   // template's schema — which is why they went unnoticed until a fixture with
