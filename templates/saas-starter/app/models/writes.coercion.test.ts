@@ -359,9 +359,18 @@ function suite(label: string, url?: string) {
      * A bare JSON number or boolean is bound as its own type — Bun has no way
      * to know the parameter is destined for a `jsonb` column — and Postgres
      * answers `column "payload" is of type jsonb but expression is of type
-     * integer`. It **raises**, so this is a narrower surface than Prisma rather
-     * than a wrong value, which is the direction this project prefers when it
-     * has to pick.
+     * integer`.
+     *
+     * **This reads like a regression and is not one**, which is worth stating
+     * here because a bisect will land on this commit and conclude otherwise.
+     * Under the previous encoder the same call *appeared* to work — but the
+     * stored value was the jsonb **string** `"42"`, not the number.
+     * `jsonb_typeof` answered `string` for a bare number, a bare boolean and an
+     * object alike; it only looked correct because the old decoder re-parsed on
+     * the way out. So the column was wrong in the database the whole time, and
+     * anything reading it other than this ORM — Prisma, `psql`, a report — saw
+     * a string. A loud failure replaces a silent mis-store, which is the trade
+     * this project takes every time.
      *
      * Fixing it means always serialising *and* emitting an explicit `::jsonb`
      * cast on the parameter — which has to reach the insert, the update's set

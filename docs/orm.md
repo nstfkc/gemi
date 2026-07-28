@@ -761,6 +761,28 @@ is the same for those, and it is about where the value came from, not what it is
 that needs none of this. It does **not** join the ambient transaction — use `DB.query` when that
 matters.
 
+## `Json` columns
+
+A `Json` column round-trips whatever you give it: an object, an array, a string, a number, `null`.
+The value is stored as JSON and comes back as the same JavaScript value, on both dialects and
+whether it is read at the root or nested inside an `include`.
+
+Two things are worth knowing:
+
+- **A bare JSON number or boolean is refused on Postgres.** `metadata: 42` raises rather than being
+  stored, because the driver binds it as an integer and the column is `jsonb`. Wrap it — `{ value:
+  42 }` — or store it as a string. SQLite has no such limit. This is the one shape where the two
+  dialects disagree, and it fails loudly rather than storing the wrong thing.
+- **A string is a string.** `metadata: "42"` stores the JSON string `"42"`, not the number, and
+  `metadata: '{"a":1}'` stores that text as a string rather than as an object. If you want an
+  object, pass an object.
+
+> **Upgrading:** `Json` values written by a *pre-release* build of this ORM on Postgres were stored
+> as JSON **strings** rather than as objects — `{ a: 1 }` landed as `"{\"a\":1}"`. Reads undid it,
+> so nothing looked wrong from inside the ORM, but the column was wrong for anything else that read
+> it. Those rows now read back as strings. Re-seed development databases; there is no released
+> version affected.
+
 ## Dialects
 
 **SQLite and Postgres** are built and tested, on every operation, against a differential harness

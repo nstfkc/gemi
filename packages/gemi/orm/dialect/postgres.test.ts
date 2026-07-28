@@ -199,13 +199,19 @@ describe("decoding the types the template schema cannot reach", () => {
   });
 
   /**
-   * `needsDecode` stays true even though `decode` is now a pass-through for
-   * `Json`: it is asked per *field type*, and the shaper skips the call
-   * entirely when it is false. Flipping it would be a micro-optimisation that
-   * silently stops `null` becoming `null`.
+   * `needsDecode` is "false when the driver already returns exactly what Prisma
+   * would", and that is now true of `Json` here — so the shaper skips the call
+   * rather than paying for one per value to be handed back unchanged.
+   *
+   * Safe because a NULL column arrives as `null` from the driver, which is
+   * already what Prisma returns; the same reason `Int` and `DateTime` are not
+   * in this set either.
    */
-  test("Json still reports that it needs decoding", () => {
-    expect(postgres.needsDecode(field("Json") as any)).toBe(true);
+  test("Json needs no decoding, since the driver already parsed it", () => {
+    expect(postgres.needsDecode(field("Json") as any)).toBe(false);
+    // The two that genuinely do: `bigint` crosses as text, `bytea` as a Buffer.
+    expect(postgres.needsDecode(field("BigInt") as any)).toBe(true);
+    expect(postgres.needsDecode(field("Bytes") as any)).toBe(true);
   });
 
   test.each(["Int", "String", "Boolean", "Float", "DateTime"])(

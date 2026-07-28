@@ -144,9 +144,10 @@ export class PostgresDialect implements SqlDialect {
     return { kind: "unique", columns, constraint };
   }
 
-  // Every type binds natively here, including `Json` — which is why this takes
-  // no `field` at all any more. `Date`, `boolean`, `bigint` and arrays are
-  // Bun's to serialize, and so, it turns out, is JSON.
+  // Every type binds natively here, including `Json`, so nothing in the body
+  // reads `field` any more — the signature is the interface's, the disuse is
+  // this dialect's. `Date`, `boolean`, `bigint` and arrays are Bun's to
+  // serialize, and so, it turns out, is JSON.
   encode(value: unknown, _field: FieldSchema): unknown {
     if (value === null || value === undefined) return null;
     // **`Json` is handed over raw**, because Bun serializes it for a `jsonb`
@@ -162,11 +163,21 @@ export class PostgresDialect implements SqlDialect {
     // compare.
     //
     // Measured through Bun 1.3.14 against Postgres 16: an object, an array, a
-    // string and null all round-trip identically when bound raw. A bare number
-    // or boolean is the one shape Bun binds as its own type — Postgres answers
-    // `column is of type jsonb but expression is of type boolean` — which is a
-    // loud failure rather than a wrong value, and needs an explicit `::jsonb`
-    // cast in the compiler to fix. Not done here.
+    // string and null all round-trip identically when bound raw.
+    //
+    // A bare number or boolean is the one shape Bun binds as its own type, so
+    // it now raises — `column is of type jsonb but expression is of type
+    // boolean`. That reads like a regression and is not one: under the old
+    // encoder `42` was stored as the jsonb **string** `"42"` (checked with
+    // `jsonb_typeof`, which answered `string` for a number, a boolean and an
+    // object alike). It only looked correct because the old decoder re-parsed
+    // it on the way out — so the value was wrong in the database the whole
+    // time, and anything reading that column *other than this ORM* saw a
+    // string. A loud failure replaces a silent mis-store.
+    //
+    // Fixing it properly means serialising and emitting an explicit `::jsonb`
+    // cast, which has to reach the insert, the update's set clause and any
+    // `where` on a Json column. Not done here.
     return value;
   }
 
@@ -204,9 +215,12 @@ export class PostgresDialect implements SqlDialect {
   // do — but `Decimal` is refused at *generation* time (iteration 1), so no
   // such field can reach this.
   needsDecode(field: FieldSchema): boolean {
-    return (
-      field.type === "BigInt" || field.type === "Json" || field.type === "Bytes"
-    );
+    // `Json` is deliberately absent: Bun hands back a parsed JSON value, so
+    // `decode` returns it unchanged, and this predicate documents itself as
+    // "false when the driver already returns exactly what Prisma would" — which
+    // is now exactly true. Leaving it in cost a function call per Json value on
+    // every read for nothing.
+    return field.type === "BigInt" || field.type === "Bytes";
   }
 
   decode(value: unknown, field: FieldSchema): unknown {
