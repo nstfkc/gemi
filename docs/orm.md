@@ -347,12 +347,35 @@ string surgery, what keeps the two relation strategies interchangeable, and what
 cache sound — policies run *before* the plan key is computed, so two differently-scoped users
 never share a plan.
 
-Because the rewrite happens on the arg tree, a nested read is scoped too:
+### Every path that reaches another model carries that model's policies
+
+This is the guarantee the whole hook exists for, and it is worth stating as a rule rather than as
+a list of cases — because it was found and fixed one case at a time, and the list is longer than
+it looks. A model's policies apply when its rows are reached through:
+
+| | |
+| --- | --- |
+| `include` / nested `select` | the child's scope narrows the child query |
+| a folded relation (the `lateral` strategy) | the scope lands *inside* the subquery |
+| `where: { rel: { some: … } }` | the `exists` subquery is scoped |
+| `_count: { select: { rel: … } }` | you can only count rows you could read |
+| `orderBy: { rel: … }` | you can only sort by rows you could read |
+| `data: { rel: { create / connect: … } }` | the child's `onCreate` runs; a `connect` cannot reach a row you cannot read |
 
 ```ts
 await User.findMany({ include: { accounts: true } })
 // the accounts subquery carries Account's scope, under either strategy
 ```
+
+**`redact` applies to nested rows too**, including relations folded into the parent's statement by
+the `lateral` strategy. It is the one policy member that cannot be expressed as an argument — it is
+a row transform — so it is applied after shaping rather than before planning.
+
+Two limits, both deliberate:
+
+- **`asSystem` suspends all of it**, for the whole async subtree, not just the model you named.
+- **A policy only applies if its class is the registered one.** See [Setup](#your-model-class) —
+  this is the gap the guarantee genuinely has, and `assertPoliciesRegistered` is the backstop.
 
 ### `ctx.user` denies by default
 
@@ -388,6 +411,27 @@ would turn "wrong password" into a 500.
 If a policy scopes reads but says nothing about creates, `create` raises rather than writing a row
 into whatever tenant the caller named. Add an `onCreate` that sets the scoped column — or, if
 unscoped creates really are intended, say so with a pass-through `onCreate`.
+
+### A scoped model and `upsert`
+
+`upsert` compiles its `where` into an `on conflict` target, which is a key rather than a filter, so
+there is nowhere for a scope to go — and running it anyway would write outside the scope. A
+scoped model is therefore refused on that path.
+
+There is a second path, and it is not refused: leave the conflict key out of `create`, and the
+call runs as a scoped read and a scoped write inside one transaction.
+
+```ts
+// refused on a scoped model — the where becomes an `on conflict` target
+Account.upsert({ where: { publicId }, create: { publicId, … }, update: { … } })
+
+// runs, and both halves are scoped
+Account.upsert({ where: { publicId }, create: { … }, update: { … } })
+```
+
+That second form is also what Prisma means by an upsert generally, and its semantics are worth
+knowing: the `where` **selects** and contributes nothing to the insert, so the created row's
+`publicId` above is the schema default, not the one you searched for.
 
 ### Soft deletes
 
