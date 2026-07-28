@@ -877,3 +877,131 @@ describe("root contributions in compileRead", () => {
     expect(withFold).not.toBe(without);
   });
 });
+
+/**
+ * JSON path filters (#70's second half).
+ *
+ * The differential harness owns "does it match Prisma" — and it has to, twice,
+ * because the *path grammar itself* differs between the dialects. What lives
+ * here is the injection invariant and the refusals, neither of which a result
+ * comparison can see.
+ */
+describe("json path filters", () => {
+  const jsonUser: any = {
+    ...user,
+    fields: {
+      ...user.fields,
+      metadata: { name: "metadata", column: "metadata", type: "Json" },
+    },
+  };
+
+  const sqliteText = (args: any) =>
+    compileRead(jsonUser, "findMany", args, sqlite).text;
+  const pgText = (args: any) =>
+    compileRead(jsonUser, "findMany", args, postgres).text;
+
+  /**
+   * The point of the whole feature, and the one place a caller's *value*
+   * decides part of an expression's meaning. Both dialects take the path as a
+   * parameter — Postgres's `#>` a `text[]`, SQLite's `json_extract` a string —
+   * so nothing has to be bent to keep it out of the SQL text.
+   */
+  test("the path is bound, never interpolated", () => {
+    const args = { where: { metadata: { path: "$.plan", equals: "pro" } } };
+    expect(sqliteText(args)).not.toContain("plan");
+    expect(sqliteText(args)).toContain(`json_extract("metadata", ?)`);
+    expect(
+      compileRead(jsonUser, "findMany", args, sqlite).bind(args),
+    ).toEqual(["$.plan", "pro"]);
+
+    const pgArgs = { where: { metadata: { path: ["plan"], equals: "pro" } } };
+    expect(pgText(pgArgs)).not.toContain("plan");
+    expect(pgText(pgArgs)).toContain(`"metadata" #>> $1`);
+  });
+
+  /** A path that is trying to be SQL is a value like any other. */
+  test("a path that looks like SQL stays a parameter", () => {
+    const args = {
+      where: { metadata: { path: `$."a'); drop table User; --"`, equals: "x" } },
+    };
+    expect(sqliteText(args)).not.toContain("drop table");
+    expect(sqliteText(args)).toContain(`json_extract("metadata", ?)`);
+  });
+
+  /**
+   * Prisma's own split, measured on both: the generated client refuses an array
+   * path on SQLite and a string path on Postgres. The refusal here says which
+   * form *this* database wants rather than letting the driver fail.
+   */
+  test("each dialect refuses the other's path grammar", () => {
+    expect(() =>
+      sqliteText({ where: { metadata: { path: ["plan"], equals: "x" } } }),
+    ).toThrow(/JSONPath string/);
+
+    expect(() =>
+      pgText({ where: { metadata: { path: "$.plan", equals: "x" } } }),
+    ).toThrow(/array of keys/);
+  });
+
+  test("a path on a column that is not Json is refused by type", () => {
+    expect(() =>
+      sqliteText({ where: { email: { path: "$.a", equals: "x" } } }),
+    ).toThrow(/is a String column/);
+  });
+
+  test("a bare path with no filter is refused, as Prisma refuses it", () => {
+    expect(() =>
+      sqliteText({ where: { metadata: { path: "$.plan" } } }),
+    ).toThrow(/needs a filter beside it/);
+  });
+
+  /**
+   * `array_contains` and the numeric comparisons are refused by Prisma's own
+   * client on SQLite — *"Unknown argument"* — so implementing them would make
+   * gemi answer a query the oracle cannot check. The message says it is a
+   * difference between the databases rather than a gap.
+   */
+  test("a filter this dialect cannot express names the dialect", () => {
+    for (const filter of [{ array_contains: "a" }, { gt: 2 }, { lte: 9 }]) {
+      expect(() =>
+        sqliteText({ where: { metadata: { path: "$.a", ...filter } } }),
+      ).toThrow(/not available on sqlite/);
+    }
+
+    // ...and all three compile on postgres.
+    for (const filter of [{ array_contains: "a" }, { gt: 2 }, { lte: 9 }]) {
+      expect(() =>
+        pgText({ where: { metadata: { path: ["a"], ...filter } } }),
+      ).not.toThrow();
+    }
+  });
+
+  test("an operator that is not a JSON filter names itself", () => {
+    expect(() =>
+      sqliteText({ where: { metadata: { path: "$.a", startsWith: "x" } } }),
+    ).toThrow(/metadata.startsWith/);
+  });
+
+  /**
+   * Both extractions yield text on Postgres, so a numeric comparison has to
+   * compare numbers rather than their spellings — otherwise "10" sorts before
+   * "9". The cast is structural; the value is still bound.
+   */
+  test("a numeric comparison casts, and still binds its value", () => {
+    const args = { where: { metadata: { path: ["n"], gt: 2 } } };
+    expect(pgText(args)).toContain(`cast(("metadata" #>> $1) as real) > $2`);
+    expect(compileRead(jsonUser, "findMany", args, postgres).bind(args)).toEqual([
+      "{\"n\"}",
+      2,
+    ]);
+  });
+
+  test("two filters on one path are ANDed", () => {
+    const args = {
+      where: {
+        metadata: { path: "$.plan", string_starts_with: "p", not: "pro" },
+      },
+    };
+    expect(sqliteText(args)).toContain(" and ");
+  });
+});

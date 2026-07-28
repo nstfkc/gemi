@@ -153,6 +153,53 @@ export interface SqlDialect {
   like(lhs: string, insensitive: boolean, pattern: Binder): Fragment;
 
   /**
+   * How this dialect spells a JSON path, and which filters it can apply to one.
+   *
+   * The **path grammar itself differs**, which is unusual enough to be worth
+   * stating rather than hiding: Prisma takes `path: ["a", "b"]` on Postgres and
+   * `path: "$.a.b"` on SQLite, and refuses the other form on each. That is not
+   * a gemi choice — it is the shape the generated client accepts, measured on
+   * both — so reproducing it is what "Prisma-compatible" means here.
+   *
+   * `jsonFilters` is the set of scalar filters the dialect can apply to an
+   * extracted value. Prisma refuses `array_contains` and the numeric
+   * comparisons on SQLite with *"Unknown argument"*, so refusing them here is
+   * matching it rather than falling short of it.
+   */
+  readonly jsonPathSyntax: "array" | "jsonpath";
+  readonly jsonFilters: ReadonlySet<string>;
+
+  /**
+   * Whether an extracted value compares as **text**.
+   *
+   * Postgres's `#>>` yields `text`, so `equals: 3` has to bind `"3"` — comparing
+   * text to an integer parameter is a type error there. SQLite's `json_extract`
+   * yields a native value, so the same filter has to bind `3`: bind `"3"` and
+   * SQLite compares an INTEGER to a TEXT, which is silently *false* rather than
+   * an error. One filter, two encodings, and the wrong one is a returned-no-rows
+   * bug on one dialect and a raised error on the other.
+   */
+  readonly jsonComparesAsText: boolean;
+
+  /**
+   * The extracted value, as a fragment whose path is **bound**.
+   *
+   * A JSON path is the one place a caller's *value* decides part of an
+   * expression's meaning, which makes it the obvious place to interpolate by
+   * accident and break invariant 2. Both dialects can take it as a parameter —
+   * Postgres's `#>` accepts a `text[]`, SQLite's `json_extract` a string — so
+   * nothing has to be bent to keep it out of the SQL text.
+   *
+   * `asText` picks the extraction that yields SQL text rather than JSON, which
+   * is what the string filters compare against; the JSON form is what `equals`
+   * and `array_contains` need.
+   */
+  jsonExtract(column: string, path: Binder, asText: boolean): Fragment;
+
+  /** `<extracted> @> <value>` — Postgres only; see `jsonFilters`. */
+  jsonArrayContains(column: string, path: Binder, value: Binder): Fragment;
+
+  /**
    * `limit`/`offset`. Both are values and therefore parameters — this is the
    * single most tempting place in the compiler to inline a number.
    */

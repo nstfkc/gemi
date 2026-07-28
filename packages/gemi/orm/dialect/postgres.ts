@@ -77,6 +77,79 @@ export class PostgresDialect implements SqlDialect {
     );
   }
 
+  /** `path: ["a", "b"]`, where SQLite takes `"$.a.b"`. Prisma's own split. */
+  readonly jsonPathSyntax = "array" as const;
+
+  /** Everything, which is what `jsonb` can express and Prisma exposes here. */
+  readonly jsonFilters: ReadonlySet<string> = new Set([
+    "equals",
+    "not",
+    "string_contains",
+    "string_starts_with",
+    "string_ends_with",
+    "array_contains",
+    "lt",
+    "lte",
+    "gt",
+    "gte",
+  ]);
+
+  /** `#>>` yields `text`, so a comparison binds the value's text form. */
+  readonly jsonComparesAsText = true;
+
+  /**
+   * `"col" #> $1` for the JSON value, `#>>` for its text.
+   *
+   * Both take the path as a **`text[]` parameter**, which is the whole reason
+   * this is expressible without bending invariant 2 — the one place a caller's
+   * value decides part of an expression's meaning, and it still never reaches
+   * the SQL text. The array is serialized the same way `inList` serializes
+   * one, for the same driver reason.
+   */
+  jsonExtract(column: string, path: Binder, asText: boolean): Fragment {
+    return concat(
+      sql(`${column} ${asText ? "#>>" : "#>"} `),
+      param((args, context) => arrayLiteral(path(args, context) as unknown[])),
+    );
+  }
+
+  /**
+   * `("col" #> $1) @> $2` — containment, which is what Prisma's
+   * `array_contains` compiles to and why it accepts both a scalar and a list:
+   * `@>` asks whether the left document contains the right one, and a bare
+   * value is a one-element containment test.
+   */
+  jsonArrayContains(column: string, path: Binder, value: Binder): Fragment {
+    return concat(
+      sql("("),
+      this.jsonExtract(column, path, false),
+      sql(") @> "),
+      // **Raw, not `JSON.stringify`d**, and the cast is what makes that safe.
+      // Bun already encodes a parameter bound against `jsonb` as JSON, so
+      // stringifying first sends the *string* `"[\"a\"]"` rather than the
+      // array — containment then asks whether a JSON array contains a JSON
+      // string spelling of itself, which is `false`. No error, no rows.
+      // Measured through the driver:
+      //
+      //   raw scalar "a"          -> true
+      //   raw array  ["a"]        -> true
+      //   JSON.stringify(["a"])   -> false      <- what this used to send
+      //   raw number 3            -> cannot cast type integer to jsonb
+      //
+      // The last line is why the cast is explicit and the value is normalised:
+      // a number has to become JSON text for the driver to type it as `jsonb`
+      // at all.
+      param((args, context) => {
+        const raw = value(args, context);
+        if (raw === null || raw === undefined) return null;
+        return typeof raw === "string" || typeof raw === "object"
+          ? raw
+          : JSON.stringify(raw);
+      }),
+      sql("::jsonb"),
+    );
+  }
+
   like(lhs: string, insensitive: boolean, pattern: Binder): Fragment {
     return concat(
       sql(`${lhs} ${insensitive ? "ilike" : "like"} `),
