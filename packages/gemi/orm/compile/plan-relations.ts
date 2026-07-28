@@ -7,6 +7,7 @@ import {
   UnregisteredRelationTargetError,
   UnsupportedQueryError,
 } from "../errors";
+import { assertPageArgument } from "./paginate";
 import { COUNT_KEY } from "../relation-filters";
 import * as registry from "../registry";
 import type { FieldSchema, ModelSchema, RelationSchema } from "../schema";
@@ -523,7 +524,7 @@ function assertNodeArgs(
   for (const key of Object.keys(args).sort()) {
     if (args[key] === undefined) continue;
     if (many && (key === "take" || key === "skip")) {
-      assertPageArgument(schema, node, operation, key, args[key]);
+      assertNodePageArgument(schema, node, operation, key, args[key]);
       continue;
     }
     if (many ? RELATION_ARGS.has(key) : TO_ONE_ARGS.has(key)) continue;
@@ -555,43 +556,34 @@ function assertNodeArgs(
       );
     }
 
-    throw new UnsupportedQueryError(`${node.as}.${key}`, schema.name, operation);
+    throw new UnsupportedQueryError(
+      `${node.as}.${key}`,
+      schema.name,
+      operation,
+    );
   }
 }
 
 /**
- * `take` / `skip` on a to-many node have to be numbers, and Prisma is stricter
- * than "a number": a `skip` is a count of rows to pass over, so a negative one
- * is meaningless and rejected rather than clamped.
+ * The relation-node spelling of the root check, which lives in `paginate.ts`
+ * beside the code that reads these two arguments.
  *
- * A *negative* `take` is not — it means "the last N", the same as at the root,
- * and it changes the emitted SQL rather than a bound value. That is why the
- * plan key records a `take`'s sign; see `shapeOfMember`.
+ * One function rather than two with the same body: #84 was the root path *not*
+ * having this check, and the fix landing as a second copy is how the two drift
+ * — a `take` refused inside an `include` and coerced at the root is a worse
+ * story than either rule alone. The only difference is the name reported, and
+ * that is a parameter.
+ *
+ * That is also why the plan key records a `take`'s sign; see `shapeOfMember`.
  */
-function assertPageArgument(
+function assertNodePageArgument(
   schema: ModelSchema,
   node: RelationNode,
   operation: string,
   key: "take" | "skip",
   value: unknown,
 ): void {
-  if (typeof value !== "number" || !Number.isInteger(value)) {
-    throw new UnsupportedQueryError(
-      `${node.as}.${key}`,
-      schema.name,
-      operation,
-      `Expected an integer, got ${JSON.stringify(value)}.`,
-    );
-  }
-  if (key === "skip" && value < 0) {
-    throw new UnsupportedQueryError(
-      `${node.as}.skip`,
-      schema.name,
-      operation,
-      `A 'skip' counts rows to pass over, so it cannot be negative. Prisma ` +
-        `rejects one too.`,
-    );
-  }
+  assertPageArgument(schema.name, operation, `${node.as}.${key}`, key, value);
 }
 
 /**
@@ -764,7 +756,7 @@ function otherSide(
       candidates.length === 0
         ? `${child.name} declares no relation named '${relation.relationName}'.`
         : `${child.name} declares ${candidates.length} relations named ` +
-          `'${relation.relationName}'.`,
+            `'${relation.relationName}'.`,
     );
   }
 
@@ -963,8 +955,16 @@ export const batchedStrategy: RelationStrategy = {
 
     // Resolved at plan time so a stale artifact fails when the query is
     // compiled rather than after the root query has already run.
-    const parentKeyField = field(request.parent, request.relation, link.parentField);
-    const childKeyField = field(request.child, request.relation, link.childField);
+    const parentKeyField = field(
+      request.parent,
+      request.relation,
+      link.parentField,
+    );
+    const childKeyField = field(
+      request.child,
+      request.relation,
+      link.childField,
+    );
     assertKeyable(request.parent, request.relation, parentKeyField);
     assertKeyable(request.child, request.relation, childKeyField);
 

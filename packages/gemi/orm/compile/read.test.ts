@@ -254,6 +254,81 @@ describe("skip and take", () => {
     const rows = plan.shape([{ id: 1 }, { id: 2 }, { id: 3 }]) as any[];
     expect(rows.map((row) => row.id)).toEqual([1, 2, 3]);
   });
+
+  /**
+   * #84. These two arguments are the only ones whose *sign* decides the SQL, so
+   * a wrong type here does not fail — it takes the other branch.
+   *
+   * `take: "-2"` asks for the last two rows. `typeof take === "number"` is
+   * false for a string, so the order is not flipped; `Math.abs(Number(...))`
+   * then binds `2`. The statement is valid, the page is the right size, and the
+   * rows are the first two in the opposite order. Nothing raises.
+   *
+   * A query string is exactly where a string `take` comes from — `?take=-2` —
+   * and the ORM's own types say `number`, so nothing in between has a reason to
+   * coerce it.
+   */
+  test("a string take is refused, rather than silently paging the wrong end", () => {
+    expect(() => text({ take: "-2" })).toThrow(UnsupportedQueryError);
+    expect(() => text({ take: "-2" })).toThrow(/Expected an integer, got "-2"/);
+
+    // The shape of the bug, pinned so a future coercion cannot reintroduce it
+    // quietly: with a real -2 the order flips, which is what "-2" did not do.
+    expect(text({ take: -2 })).toBe(`${SELECT_USER} order by "id" desc limit ?`);
+    expect(text({ take: 2 })).toBe(`${SELECT_USER} order by "id" asc limit ?`);
+  });
+
+  /**
+   * The one place this is deliberately *stricter* than Prisma, which accepts a
+   * fraction and truncates toward zero. Binding it does not, and the three
+   * behaviours are the argument for refusing rather than picking one:
+   *
+   *     prisma           take: 1.5  ->  1 row   truncates
+   *     sqlite   limit ? = 1.5      ->  SQLiteError: datatype mismatch
+   *     postgres limit $1 = 1.5     ->  2 rows  rounds to nearest
+   *
+   * Measured through Bun against both engines rather than reasoned about.
+   */
+  test("a fractional take is refused, which Prisma would have truncated", () => {
+    expect(() => text({ take: 1.5 })).toThrow(/Expected an integer, got 1.5/);
+    expect(() => text({ skip: 1.5 })).toThrow(/Expected an integer, got 1.5/);
+  });
+
+  // Quieter than the `take` case and still not a number the caller meant:
+  // `Number("x")` is `NaN`, which binds as `null` and offsets nothing.
+  test("a non-numeric skip is refused rather than bound as null", () => {
+    expect(() => text({ skip: "x" })).toThrow(/Expected an integer, got "x"/);
+  });
+
+  // Already the rule inside an `include` since #72. A `skip` counts rows to
+  // pass over, so there is no reading of a negative one.
+  test("a negative skip is refused, as it already was on a relation node", () => {
+    expect(() => text({ skip: -1 })).toThrow(
+      /'skip' counts rows to pass over/,
+    );
+  });
+
+  test("the refusal names the operation that was asked for", () => {
+    for (const op of ["findMany", "findFirst", "count"]) {
+      expect(() => text({ take: "5" }, op)).toThrow(
+        new RegExp(`User\\.${op}`),
+      );
+    }
+  });
+
+  /**
+   * `findFirst` pins `take` to 1 and never reads the caller's value, so this is
+   * the one operation where the argument could have been ignored rather than
+   * refused. It is refused: Prisma rejects a string there too, and refusing
+   * what was *written* rather than what survived is what keeps the rule one
+   * sentence long.
+   */
+  test("a single-row operation refuses it too, though it ignores the value", () => {
+    expect(() => text({ take: "1" }, "findFirst")).toThrow(
+      UnsupportedQueryError,
+    );
+    expect(text({ take: 1 }, "findFirst")).toBe(`${SELECT_USER} limit ?`);
+  });
 });
 
 describe("select", () => {

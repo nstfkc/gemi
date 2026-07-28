@@ -117,6 +117,25 @@ const user = await User.findUniqueOrThrow({
 })
 ```
 
+**`take` and `skip` must be integers, and are refused rather than coerced.** They are the only
+arguments whose *sign* decides the SQL — a negative `take` means "the last N", which flips every
+ordering term — so a `take` arriving as a string does not merely have the wrong type, it takes the
+wrong branch: `take: "-2"` used to return the **first** two rows, in the opposite order, with no
+error. A query string is exactly where a string `take` comes from, so parse it before you pass it:
+
+```
+UnsupportedQueryError: gemi ORM does not support 'take' yet (User.findMany).
+Expected an integer, got "-2".
+```
+
+A negative `skip` is refused too — it counts rows to pass over — and both rules are the ones that
+already applied inside an `include`.
+
+> **Divergence from Prisma, on purpose.** Prisma accepts a *fractional* `take` and truncates toward
+> zero; this refuses it. Binding one instead is a `datatype mismatch` error from SQLite and a
+> silently different row count on Postgres, which rounds — so the fraction has no single meaning to
+> match. One rule at both levels, failing loudly, beats three behaviours.
+
 `select` and `include` narrow the **return type**, exactly as they do in Prisma — `user.email`
 type-checks, `user.name` does not. A key outside the operation's argument type collapses to
 `never` rather than being quietly accepted.
