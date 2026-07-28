@@ -12,6 +12,7 @@ import {
 import {
   type NestedWriteStep,
   type RelationExecutor,
+  type RelationStrategy,
   attachRelations,
 } from "./compile/plan-relations";
 import { resolveStrategy } from "./compile/strategy";
@@ -21,6 +22,7 @@ import {
   RecordNotFoundError,
   UnsupportedQueryError,
   UniqueConstraintError,
+  ParameterLimitError,
   UnregisteredPolicyClassError,
 } from "./errors";
 import {
@@ -486,6 +488,43 @@ export abstract class Model {
     // would run one request's statement for the other's.
     const strategy = resolveStrategy(options?.strategy, dialect);
 
+    // `createMany` past the driver's parameter ceiling, which used to raise.
+    //
+    // Iteration 4 refused to chunk and said why: "it would make this several
+    // statements, which cannot be made atomic until transactions land." They
+    // landed in iteration 5. So the split happens here, inside one transaction,
+    // and the caller gets the same `{ count }` a single statement would have
+    // returned.
+    //
+    // **Only on the call that would otherwise have failed.** The ceiling is
+    // checked in `render`, so the ordinary path pays nothing for this — it is a
+    // `catch`, not a size check on every write. A `createMany` small enough to
+    // compile never enters it.
+    if (op === "createMany" && Array.isArray(effective?.data)) {
+      const chunks = chunkedCreateMany(
+        schema,
+        effective,
+        dialect,
+        strategy,
+        op,
+      );
+
+      if (chunks !== null) {
+        return withTransaction(db.sql, async () => {
+          let count = 0;
+          for (const data of chunks) {
+            const written = (await this.$exec(
+              "createMany",
+              { ...effective, data },
+              markPreScoped({ strategy: options?.strategy }) as never,
+            )) as { count: number };
+            count += written.count;
+          }
+          return { count };
+        });
+      }
+    }
+
     const plan = getOrCompile(schema, op, effective, dialect, strategy);
 
     const executor: RelationExecutor = {
@@ -743,4 +782,54 @@ function rowsOf(result: unknown): Record<string, unknown>[] {
   if (result === null || result === undefined) return [];
   if (typeof result !== "object") return [];
   return [result as Record<string, unknown>];
+}
+
+/**
+ * Splits a `createMany` that would exceed the driver's parameter ceiling, or
+ * returns `null` when it fits.
+ *
+ * The ceiling is enforced in `render`, so the only way to learn that a call is
+ * too large is to try compiling it. That is deliberate rather than lazy: a size
+ * check ahead of every write would cost every write, and the plan cache means
+ * the compile is paid once per shape anyway.
+ *
+ * The chunk size comes from **binding one row**, not from dividing the reported
+ * total. Division looks equivalent and is not: `required` includes whatever the
+ * statement binds besides the rows, so on a shape with any fixed overhead it
+ * understates the per-row cost and produces a chunk that is still too large.
+ * Binding a single row asks the compiler the question directly.
+ */
+function chunkedCreateMany(
+  schema: ModelSchema,
+  args: any,
+  dialect: SqlDialect,
+  strategy: RelationStrategy,
+  op: Operation,
+): unknown[][] | null {
+  const rows = args.data as unknown[];
+  if (rows.length < 2) return null;
+
+  try {
+    getOrCompile(schema, op, args, dialect, strategy);
+    return null;
+  } catch (error) {
+    if (!(error instanceof ParameterLimitError)) throw error;
+
+    const single = { ...args, data: [rows[0]] };
+    const perRow = getOrCompile(schema, op, single, dialect, strategy).bind(
+      single,
+      createBindContext(),
+    ).length;
+
+    // One row on its own over the ceiling is not a chunking problem — no split
+    // can help, and the original error says the useful thing.
+    if (perRow === 0 || perRow > error.limit) throw error;
+
+    const size = Math.floor(error.limit / perRow);
+    const chunks: unknown[][] = [];
+    for (let at = 0; at < rows.length; at += size) {
+      chunks.push(rows.slice(at, at + size));
+    }
+    return chunks;
+  }
 }

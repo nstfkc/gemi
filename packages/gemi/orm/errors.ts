@@ -271,9 +271,13 @@ export class ParameterLimitError extends Error {
     super(
       `${model}.${operation} would bind ${required} parameters, and the ` +
         `'${dialect}' driver accepts at most ${limit} in one statement. ` +
-        `${detail} Automatic chunking is not implemented: it would make this ` +
-        `several statements, which cannot be made atomic until transactions ` +
-        `land. Split the call.`,
+        `${detail}` +
+        (operation === "createMany"
+          ? ` A createMany over the ceiling is normally split across statements ` +
+            `inside one transaction, so reaching this means splitting cannot ` +
+            `help: a single row binds more than the driver accepts.`
+          : ` Splitting is not something this operation can do for you — one ` +
+            `statement has to carry one answer. Narrow the query.`),
     );
     this.name = "ParameterLimitError";
   }

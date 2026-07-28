@@ -167,9 +167,30 @@ does, which is the failure this iteration is arranged to prevent.
   `VALUES` list.
 - **`createMany` refuses more than one all-empty row.** `default values` inserts
   exactly one and has no portable multi-row spelling.
-- **No automatic chunking.** Prisma splits a large `createMany`; gemi raises
-  `ParameterLimitError` naming the model and the driver limit. Chunking means
-  several statements, which cannot be made atomic before iteration 5.
+- ~~**No automatic chunking.**~~ — **added after iteration 9**, once iteration
+  5's transactions existed. `Model.$exec` splits a `createMany` that would
+  exceed the driver's ceiling and runs the chunks inside one transaction, so the
+  caller gets the `{ count }` a single statement would have returned.
+
+  The assertion this was waiting for is not "all the rows arrive" — it is **what
+  happens when a later chunk fails.** Several statements that are not atomic
+  leave the first chunk written, which is a worse answer than the refusal they
+  replaced. The test puts a duplicate in the second chunk and asserts the table
+  is empty afterwards.
+
+  Two details worth keeping:
+
+  - **The split is a `catch`, not a size check.** The ceiling is enforced in
+    `render`, so the ordinary path pays nothing: a `createMany` small enough to
+    compile never enters the branch.
+  - **The chunk size comes from binding one row**, not from dividing the
+    reported total. `required` includes anything the statement binds besides the
+    rows, so division understates the per-row cost on any shape with fixed
+    overhead — and produces a chunk that is still too large.
+
+  `ParameterLimitError` still exists and its message no longer claims chunking
+  is unimplemented. Reaching it on a `createMany` now means splitting cannot
+  help: one row alone binds more than the driver accepts.
 - ~~**`delete` with `include` on a cascading relation** returns the children
   empty~~ — **fixed after iteration 9**, once iteration 5's transactions
   existed. `Model.$exec` now reads the projection first and deletes second,
