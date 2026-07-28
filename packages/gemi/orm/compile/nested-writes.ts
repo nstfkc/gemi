@@ -533,16 +533,30 @@ function assertCreateManyOperand(
   for (const key of keys) {
     if (key === "data") continue;
 
-    // `skipDuplicates` is the one a caller will actually reach for, and it is a
-    // gap in `createMany` itself rather than in this nesting — so it gets the
-    // reason instead of the generic message. Prisma refuses it on SQLite too,
-    // where there is no `on conflict do nothing` for it to compile to.
+    // `skipDuplicates` is the one a caller will actually reach for, so it gets
+    // the reason instead of the generic message.
+    //
+    // **Scoped to the nested form on purpose.** This used to say "at any
+    // level", which was true when it was written and stops being true the
+    // moment #69 lands: a top-level `Account.createMany({ data, skipDuplicates
+    // })` compiles to `on conflict do nothing` on Postgres. Naming the level
+    // keeps the sentence true either way, and points at the spelling that
+    // works today rather than at a wait.
+    //
+    // Whether the nested form should simply pass it through is a real question
+    // and not this change's: the step below already calls the child's own
+    // `$exec("createMany", …)`, so forwarding the flag is close to free — but
+    // it would need the top-level support to exist first, and until then it
+    // would fail with an error about an unknown argument on a model the caller
+    // did not name.
     throw new UnsupportedQueryError(
       `${at}.${key}`,
       schema.name,
       operation,
       key === "skipDuplicates"
-        ? `'skipDuplicates' is not implemented on 'createMany' at any level.`
+        ? `'skipDuplicates' is not implemented on a *nested* 'createMany'. ` +
+          `Write the children with their own '${relation.model}.createMany' ` +
+          `call, which takes it.`
         : `Expected only 'data'.`,
     );
   }

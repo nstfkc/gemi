@@ -873,15 +873,23 @@ describe("nested writes", () => {
       ).toThrow(message);
     });
 
-    test("skipDuplicates says which gap it is", () => {
-      expect(() =>
+    /**
+     * Scoped to the *nested* form, and pointing at the spelling that works.
+     * The message used to say "at any level", which stops being true once
+     * top-level `skipDuplicates` lands (#69) — and a refusal that is false
+     * about the rest of the API is worse than a generic one.
+     */
+    test("skipDuplicates names the level, and where it does work", () => {
+      const refuse = () =>
         text("create", {
           data: {
             email: "a@b.c",
             accounts: { createMany: { data: [], skipDuplicates: true } },
           },
-        }),
-      ).toThrow(/'skipDuplicates' is not implemented on 'createMany' at any level/);
+        });
+
+      expect(refuse).toThrow(/not implemented on a \*nested\* 'createMany'/);
+      expect(refuse).toThrow(/Account\.createMany/);
     });
 
     /**
