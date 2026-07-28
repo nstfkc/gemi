@@ -54,8 +54,11 @@ export function correlate(
   alias: string,
   /** How the outer row is named: the parent's table, or an enclosing alias. */
   parentQualifier: string,
-  /** The caller's operation, so a refused link names where it came from. */
-  operation = "include",
+  /**
+   * The caller's operation, so a refused link names where it came from.
+   * Required for the same reason `resolveLink`'s is — see the note there.
+   */
+  operation: string,
 ): Correlated {
   const child = relatedSchema(parent, relation);
   // Throws for a self-referential implicit m-n, where the artifact cannot say

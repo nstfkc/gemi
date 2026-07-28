@@ -699,10 +699,24 @@ export function resolveLink(
   relation: RelationSchema,
   /**
    * The operation the link is being resolved for, so a refusal names where it
-   * came from. Defaulted for the callers that predate it; every call site in
-   * the compiler passes a real one.
+   * came from.
+   *
+   * **Required, and deliberately so.** The bug this argument exists to fix *is*
+   * a wrongly-defaulted operation: `single` hardcoded `"include"`, so a
+   * composite relation named in a `where` or in a nested `connect` reported a
+   * query the caller had not written. A default here would reintroduce exactly
+   * that, one call site later — the next surface to correlate over a relation
+   * would inherit `include` by omission, silently, and the seven-surface test
+   * cannot catch it because it only knows about the seven that exist.
+   *
+   * It is the fifth parameter in this codebase made required for this reason,
+   * after `render`'s `origin`, `changedFields`' `schema` and
+   * `RelationExecutor.exec`'s `preScoped`. The rule they share: where omitting
+   * an argument silently produces the *wrong* behaviour rather than an error,
+   * requiring it is the difference between a convention and something `tsc`
+   * enforces.
    */
-  operation = "include",
+  operation: string,
 ): Link {
   if (relation.joinTable) return joinTableLink(parent, child, relation);
 
