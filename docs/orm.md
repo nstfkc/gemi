@@ -327,6 +327,13 @@ await Model.transaction(async () => {
 `Promise.all` over several ORM calls inside the callback is not safe — the ordinary, encouraged
 thing everywhere else in a Bun codebase. Await them in sequence.
 
+**A multi-statement write is atomic on its own.** A write with a nested `create` or `connect` runs
+more than one statement, and `$exec` opens a transaction for exactly those calls — so a nested
+step that fails, or a child policy that denies, rolls back the parent row too. A plain `create`
+still compiles to one statement and opens nothing, and inside a transaction you opened the nested
+one becomes a savepoint. You do not need `Model.transaction` to make a single nested write whole;
+you need it to make *several separate calls* whole.
+
 ### Keep slow work out of the callback
 
 The reserved connection is held for as long as the callback runs, whether or not it is running
@@ -342,15 +349,23 @@ opened it:
 until it does — check for network or filesystem I/O inside the callback…
 ```
 
-Set `GEMI_SLOW_TRANSACTION_MS` to change the threshold. The warning is development-only and
-never fires in production; it is a diagnostic, not a limit — nothing cancels a long transaction.
+The threshold is `slowTransactionThreshold` in `app/config/database.ts`:
 
-**A multi-statement write is atomic on its own.** A write with a nested `create` or `connect` runs
-more than one statement, and `$exec` opens a transaction for exactly those calls — so a nested
-step that fails, or a child policy that denies, rolls back the parent row too. A plain `create`
-still compiles to one statement and opens nothing, and inside a transaction you opened the nested
-one becomes a savepoint. You do not need `Model.transaction` to make a single nested write whole;
-you need it to make *several separate calls* whole.
+```typescript
+export default defineDatabaseConfig({
+  url: process.env.DATABASE_URL,
+
+  slowTransactionThreshold: 5_000,   // milliseconds, or `false` to switch it off
+});
+```
+
+`false` is the only way to disable it. Any other unusable value — `0`, a negative, `Infinity`,
+`NaN` — falls back to the 2-second default rather than turning the warning off, so it cannot be
+lost to a mistake. Say `false` when you mean off; raise the number for a seed script or a data
+migration whose transactions are legitimately long.
+
+The warning is development-only and never fires in production, whatever the config says. It is a
+diagnostic, not a limit: nothing cancels a long transaction.
 
 ## Policies
 

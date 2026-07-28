@@ -13,7 +13,15 @@ import {
   planCacheStats,
   transactionDepth,
 } from "gemi/orm";
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  test,
+} from "vitest";
 
 import { POSTGRES_URL, applyMigrations } from "./differential";
 import { AccountModel } from "./generated";
@@ -552,6 +560,76 @@ function suite(label: string, url?: string) {
       // Same shape, same plan: one more hit, no new entry.
       expect(afterTx.size).toBe(afterPool.size);
       expect(afterTx.hits).toBe(afterPool.hits + 1);
+    });
+
+    // --- the slow-transaction warning -------------------------------------
+
+    /**
+     * The wiring, end to end: `app/config/database.ts` →
+     * `DatabaseManager.config` → `transact` → `withTransaction`.
+     *
+     * `context.test.ts` covers the warning's behaviour against a fake pool, and
+     * proves nothing about whether the configured number ever reaches it.
+     * Between the two sits the seam that actually broke during this change — a
+     * container stand-in without a `config` — so it is worth one real
+     * transaction on a real connection.
+     */
+    describe("the slow-transaction warning", () => {
+      const env = process.env;
+      let warnings: string[];
+      let restoreWarn: () => void;
+      let configured: number | false | undefined;
+
+      beforeEach(() => {
+        process.env = { ...env, NODE_ENV: "development" };
+        configured = database.config.slowTransactionThreshold;
+        warnings = [];
+        const original = console.warn;
+        console.warn = (message: string) => void warnings.push(message);
+        restoreWarn = () => {
+          console.warn = original;
+          process.env = env;
+          database.config.slowTransactionThreshold = configured;
+        };
+      });
+
+      afterEach(() => restoreWarn());
+
+      test("the configured threshold is the one that fires", async () => {
+        database.config.slowTransactionThreshold = 10;
+
+        await Model.transaction(async () => {
+          await User.create({ data: { email: "slow@x.test" } });
+          await new Promise((resolve) => setTimeout(resolve, 200));
+        });
+
+        expect(warnings).toHaveLength(1);
+        expect(warnings[0]).toContain("not settled after 10ms");
+      });
+
+      test("false switches it off", async () => {
+        database.config.slowTransactionThreshold = false;
+
+        await Model.transaction(async () => {
+          await User.create({ data: { email: "quiet@x.test" } });
+          await new Promise((resolve) => setTimeout(resolve, 200));
+        });
+
+        expect(warnings).toEqual([]);
+      });
+
+      // `DB.transaction` reads the same config, so raw-SQL transactions are not
+      // a hole in the diagnostic.
+      test("DB.transaction warns on the same setting", async () => {
+        database.config.slowTransactionThreshold = 10;
+
+        await DB.transaction(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 200));
+        });
+
+        expect(warnings).toHaveLength(1);
+        expect(warnings[0]).toContain("not settled after 10ms");
+      });
     });
   });
 }

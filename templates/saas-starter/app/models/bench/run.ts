@@ -670,12 +670,20 @@ async function runDialect(
       },
     });
 
-    application.instance(DatabaseManager, {
-      dialect: database.dialect,
-      url: (database as unknown as { url: string }).url,
-      sql: counting,
-      close: () => database.close(),
-    } as never);
+    // A Proxy over the manager for the same reason `counting` is one over the
+    // client: a hand-written `{ dialect, url, sql, close }` is a list of what
+    // the ORM reads today, and it falls behind the first time it reads
+    // something else — `config`, most recently.
+    application.instance(
+      DatabaseManager,
+      new Proxy(database, {
+        get(target, property, receiver) {
+          if (property === "sql") return counting;
+          const value = Reflect.get(target, property, receiver);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      }),
+    );
 
     try {
       await fn();

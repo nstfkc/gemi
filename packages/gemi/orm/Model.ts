@@ -1,4 +1,4 @@
-import type { SQL } from "bun";
+import type { SQL, TransactionSQL } from "bun";
 import { DatabaseManager } from "../database/DatabaseManager";
 import { app } from "../foundation/app";
 import { type BindContext, createBindContext } from "./compile/fragment";
@@ -81,6 +81,25 @@ const ORTHROW = new Set([
   "update",
   "delete",
 ]);
+
+/**
+ * `withTransaction` with the connection's configured warning threshold attached.
+ *
+ * Every transaction the ORM opens goes through here rather than calling
+ * `withTransaction` directly, so `database.slowTransactionThreshold` is read in
+ * one place instead of at each call site — and a call site added later cannot
+ * quietly open a transaction that ignores the setting. `withTransaction` itself
+ * takes the threshold as an argument on purpose; it knows nothing about the
+ * container, and this is the seam where the two meet.
+ */
+function transact<T>(
+  db: DatabaseManager,
+  fn: (tx: TransactionSQL) => Promise<T>,
+): Promise<T> {
+  return withTransaction(db.sql, fn, {
+    slowTransactionThreshold: db.config.slowTransactionThreshold,
+  });
+}
 
 export abstract class Model {
   /**
@@ -360,11 +379,12 @@ export abstract class Model {
    *
    * **The connection is held for as long as the callback runs**, including
    * while it awaits things that are not queries. In development a transaction
-   * still open after 2s warns (`GEMI_SLOW_TRANSACTION_MS`); in production it
-   * just holds the connection. Keep network and filesystem I/O outside.
+   * still open after 2s warns — `database.slowTransactionThreshold` sets that
+   * bound, or `false` switches it off. In production it just holds the
+   * connection. Keep network and filesystem I/O outside.
    */
   static transaction<T>(fn: () => Promise<T>): Promise<T> {
-    return withTransaction(app(DatabaseManager).sql, () => fn());
+    return transact(app(DatabaseManager), () => fn());
   }
 
   static async $exec(
@@ -530,7 +550,7 @@ export abstract class Model {
     if (op === "upsert" && !preScoped && findThenWrite(schema, args, op)) {
       const { where, create, update, ...projection } = args;
 
-      return withTransaction(db.sql, async () => {
+      return transact(db, async () => {
         const found = await this.$exec("findFirst", { where }, options);
 
         return found === null
@@ -594,7 +614,7 @@ export abstract class Model {
       );
 
       if (chunks !== null) {
-        return withTransaction(db.sql, async () => {
+        return transact(db, async () => {
           let count = 0;
           for (const data of chunks) {
             const written = (await this.$exec(
@@ -679,7 +699,7 @@ export abstract class Model {
       // The pool, not `conn`: when a transaction is already open `withTransaction`
       // savepoints against the ambient handle and ignores this argument, and
       // passing a transaction handle here would read as though we begin on it.
-      return withTransaction(db.sql, async () => {
+      return transact(db, async () => {
         const before = await this.$exec(
           "findFirst",
           { where, ...projection },
@@ -827,7 +847,7 @@ export abstract class Model {
       (plan.before !== undefined && plan.before.length > 0) ||
       (plan.after !== undefined && plan.after.length > 0);
 
-    return atomic ? withTransaction(db.sql, finish) : finish();
+    return atomic ? transact(db, finish) : finish();
   }
 
   /**

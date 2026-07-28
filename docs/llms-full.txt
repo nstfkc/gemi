@@ -3029,6 +3029,39 @@ still compiles to one statement and opens nothing, and inside a transaction you 
 one becomes a savepoint. You do not need `Model.transaction` to make a single nested write whole;
 you need it to make *several separate calls* whole.
 
+### Keep slow work out of the callback
+
+The reserved connection is held for as long as the callback runs, whether or not it is running
+queries. A `fetch`, an upload or a queue push inside a transaction holds a connection for the
+length of that I/O, and under load the symptom is unrelated queries elsewhere in the process
+blocking on connection acquisition — an error that names neither the transaction nor the I/O.
+
+In development, a transaction still open after 2 seconds warns with the stack of the call that
+opened it:
+
+```
+[gemi] A database transaction has not settled after 2000ms. It reserves a pooled connection
+until it does — check for network or filesystem I/O inside the callback…
+```
+
+The threshold is `slowTransactionThreshold` in `app/config/database.ts`:
+
+```typescript
+export default defineDatabaseConfig({
+  url: process.env.DATABASE_URL,
+
+  slowTransactionThreshold: 5_000,   // milliseconds, or `false` to switch it off
+});
+```
+
+`false` is the only way to disable it. Any other unusable value — `0`, a negative, `Infinity`,
+`NaN` — falls back to the 2-second default rather than turning the warning off, so it cannot be
+lost to a mistake. Say `false` when you mean off; raise the number for a seed script or a data
+migration whose transactions are legitimately long.
+
+The warning is development-only and never fires in production, whatever the config says. It is a
+diagnostic, not a limit: nothing cancels a long transaction.
+
 ## Policies
 
 A model carries a **list** of policies. Every member of a policy is optional; a model with none

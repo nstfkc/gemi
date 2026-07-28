@@ -268,18 +268,32 @@ async function setup(url: string, ddl: string[]) {
   previous = Application.getInstance();
   const app = new Application();
   database = new DatabaseManager({ url });
-  // `$exec` resolves the manager per call and reads exactly `sql.unsafe` and
-  // `dialect` off it, so a counting stand-in needs no cooperation from the ORM.
-  app.instance(DatabaseManager, {
-    dialect: database.dialect,
-    url: database.url,
-    sql: {
-      unsafe(text: string, values: unknown[]) {
-        queries++;
-        return database.sql.unsafe(text, values);
-      },
+  // `$exec` resolves the manager per call, so a counting stand-in needs no
+  // cooperation from the ORM. It delegates rather than listing the properties
+  // the ORM reads: the hand-written version of this drifted in
+  // `differential.ts` the moment `$exec` read one more of them.
+  const counting = new Proxy(database.sql, {
+    get(target, property, receiver) {
+      if (property === "unsafe") {
+        return (text: string, values: unknown[]) => {
+          queries++;
+          return target.unsafe(text, values);
+        };
+      }
+      const value = Reflect.get(target, property, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
     },
-  } as never);
+  });
+  app.instance(
+    DatabaseManager,
+    new Proxy(database, {
+      get(target, property, receiver) {
+        if (property === "sql") return counting;
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }),
+  );
   Application.setInstance(app);
 
   register("Post", Post);

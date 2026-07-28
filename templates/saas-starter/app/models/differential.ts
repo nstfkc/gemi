@@ -275,11 +275,23 @@ export async function createDifferential(options: {
     },
   });
 
-  app.instance(DatabaseManager, {
-    dialect: database.dialect,
-    url: database.url,
-    sql: counting,
-  } as never);
+  // And the manager is a Proxy for exactly the reason above, one level up.
+  // This was `{ dialect, url, sql }` — a hand-written object listing what
+  // `$exec` read at the time — and it drifted the moment `$exec` read one more
+  // thing: `config`, for the slow-transaction threshold, which failed with
+  // `undefined is not an object (evaluating 'db.config.slowTransactionThreshold')`.
+  // The same lesson as `counting`, so the same shape: delegate everything to
+  // the real manager, override only `sql`.
+  app.instance(
+    DatabaseManager,
+    new Proxy(database, {
+      get(target, property, receiver) {
+        if (property === "sql") return counting;
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }),
+  );
   Application.setInstance(app);
 
   return {

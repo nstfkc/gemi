@@ -41,8 +41,15 @@ export class DB extends Facade {
   // `begin` inside a transaction). Two systems that silently ignored each other
   // would be worse than either alone — a rollback would leave half the work
   // committed.
+  //
+  // The slow-transaction threshold comes from the same `database` config as it
+  // does for the ORM, so a `DB.transaction` holding a connection too long warns
+  // exactly as a `Model.transaction` would. Same reason as above: one system.
   static transaction<T>(fn: (tx: SQL) => Promise<T>): Promise<T> {
-    return withTransaction(this.sql, fn as (tx: SQL) => Promise<T>);
+    const db = this.getFacadeRoot();
+    return withTransaction(db.sql, fn as (tx: SQL) => Promise<T>, {
+      slowTransactionThreshold: db.config.slowTransactionThreshold,
+    });
   }
 
   static close(): Promise<void> {
