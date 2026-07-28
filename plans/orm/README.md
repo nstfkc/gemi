@@ -423,6 +423,19 @@ Two deliberate omissions, so the next person does not read them as oversights:
   application author does not need them, and documenting them in `docs/` would
   make them a compatibility surface.
 
+## Running the Postgres suites
+
+`templates/saas-starter/app/models/postgres.sh`. Four steps have to happen in
+order — a server, `provider = "postgresql"`, `db push`, `prisma generate` — and
+**getting it wrong does not error.** The suite runs, the Postgres describes skip
+or fail, and the number at the bottom looks like a result: 121 failures that are
+nothing but a client generated for the other dialect.
+
+That misread happened three times in one sitting, each time costing a few
+minutes of reading a "regression" that was not one. The script also restores
+`provider = "sqlite"` on the way out, because a left-over `postgresql` provider
+makes the *SQLite* suites fail for an unrelated reason afterwards.
+
 ## Picking up an iteration
 
 0. Confirm you are on a branch descended from `feat/database-layer` (see

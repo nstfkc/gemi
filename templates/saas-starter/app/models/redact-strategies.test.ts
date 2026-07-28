@@ -39,7 +39,8 @@ const DDL = [
   `DROP TABLE IF EXISTS "Book"`,
   `CREATE TABLE "Book" (
      "id" SERIAL NOT NULL PRIMARY KEY,
-     "title" TEXT NOT NULL
+     "title" TEXT NOT NULL,
+     "note" TEXT
    )`,
   `CREATE TABLE "Ledger" (
      "id" SERIAL NOT NULL PRIMARY KEY,
@@ -67,6 +68,7 @@ const bookSchema: ModelSchema = {
   fields: {
     id: field("id", "Int", { isId: true, default: { kind: "autoincrement" } }),
     title: field("title", "String"),
+    note: field("note", "String", { nullable: true }),
   },
   primaryKey: ["id"],
   uniques: [],
@@ -115,8 +117,17 @@ const hideSecret: ModelPolicy = {
   },
 };
 
+const hideNote: ModelPolicy = {
+  redact: (_context, row) => {
+    if ("note" in row) row.note = null;
+  },
+};
+
 class Book extends Model {
   static $schema = bookSchema;
+  // A policy on the *to-one* side, so the fold can be checked in the direction
+  // where the folded value is a single object rather than an array.
+  static $policy = hideNote;
 }
 
 class Ledger extends Model {
@@ -156,7 +167,9 @@ RUN("redact on a nested model, both strategies", () => {
   beforeEach(async () => {
     clearPlanCache();
     await raw.unsafe(`TRUNCATE "Ledger", "Book" RESTART IDENTITY CASCADE`);
-    await raw.unsafe(`INSERT INTO "Book" ("title") VALUES ('ours')`);
+    await raw.unsafe(
+      `INSERT INTO "Book" ("title", "note") VALUES ('ours', 'private')`,
+    );
     await raw.unsafe(
       `INSERT INTO "Ledger" ("bookId", "label", "secret")
        VALUES (1, 'a', 'classified'), (1, 'b', 'classified')`,
@@ -201,6 +214,30 @@ RUN("redact on a nested model, both strategies", () => {
     for (const row of batched[0].ledgers) expect(row.secret).toBeNull();
     for (const row of lateral[0].ledgers) expect(row.secret).toBeNull();
     expect(lateral[0].ledgers).toEqual(batched[0].ledgers);
+  });
+
+  /**
+   * The to-one direction, where the folded value is a single object rather than
+   * an array. The fix hands it to `applyRedaction`, which normalises one row and
+   * many rows the same way — worth an actual case, because "it happens to also
+   * accept an object" is the kind of thing that is true until it is not.
+   */
+  test("a folded to-one is redacted too", async () => {
+    const batched = (await Model.asUser(READER, () =>
+      Ledger.$exec("findMany", { include: { book: true } }, {
+        strategy: "batched",
+      } as never),
+    )) as any[];
+    const lateral = (await Model.asUser(READER, () =>
+      Ledger.$exec("findMany", { include: { book: true } }, {
+        strategy: "lateral",
+      } as never),
+    )) as any[];
+
+    expect(batched[0].book.title).toBe("ours");
+    expect(batched[0].book.note).toBeNull();
+    expect(lateral[0].book.note).toBeNull();
+    expect(lateral[0].book).toEqual(batched[0].book);
   });
 
   /** And through a `select`, which takes a different path into the same fold. */
