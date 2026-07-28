@@ -316,6 +316,11 @@ Only the join table itself is written directly; it has no model and nothing an a
 scope. The rows the pairs point at still go through the related model's own operations, so a
 `connect` cannot reach a row that model's policies hide, and a `create` gets its `onCreate`.
 
+That extends to `set`, which has to delete before it inserts: it clears **the links you can see**,
+not every link. A pair pointing at a row the related model's policies hide survives — otherwise
+`set` would quietly do what `disconnect` refuses. With no policy on that model every link is
+visible and `set` clears all of them, exactly as Prisma does.
+
 Self-referential ones work too — `Thing.related Thing[]` — as long as the generated files are
 current. Prisma assigns that join table's two columns by *field name*, which the generator now
 records; an artifact from before it does raises rather than guessing, and `prisma generate` fixes

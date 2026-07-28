@@ -436,6 +436,14 @@ function planJoinTable(
   const parentField = link.parentField;
   const childField = link.childField;
 
+  // `dialect.quoteIdent`, not a local helper. It does the same escaping *and*
+  // rejects a NUL byte, which exists because NUL is the parameter sentinel in
+  // `compile/fragment.ts`. Prisma generates these identifiers so nothing can
+  // reach that check today — but this is the one file emitting SQL without the
+  // `Fragment` pipeline, which makes it the one most worth holding to the rule
+  // rather than the one to excuse from it.
+  const quoted = (name: string) => dialect.quoteIdent(name);
+
   out.keyFields.push(parentField);
 
   out.after.push({
@@ -451,13 +459,59 @@ function planJoinTable(
       // `set` replaces the whole set, so what is there now goes first. Prisma
       // does the same, and it is why this operand needs the transaction the
       // step already runs in.
+      // `set` replaces the whole set, so what is there now goes first — but
+      // **only the part of it this caller can see**.
+      //
+      // A bare `delete … where "A" = ?` removes every pair, including ones
+      // pointing at children the child model's policies hide, and nothing on
+      // that path consults the child. `disconnect` right below refuses the same
+      // effect when it is named explicitly — it resolves through the child's
+      // own `findUniqueOrThrow`, which raises for a row the caller cannot see —
+      // so an unscoped `set` would make the authorization boundary disagree
+      // with itself depending on which operand you reached for.
+      //
+      // Not a read leak: nothing comes back, and the caller cannot tell a
+      // hidden link existed. It is an unscoped *write* to state they could not
+      // otherwise reach, which is the thing this layer exists to prevent.
+      //
+      // So the existing links are read, filtered through the child's own
+      // `findMany` — where its scope applies exactly as it does anywhere else —
+      // and only those are deleted. `set` therefore means "replace the set I
+      // can see", which is what every other policy in this ORM does: narrow,
+      // never widen. With no policy on the child, every link is visible and
+      // this is byte-for-byte the old behaviour, so Prisma parity is unchanged
+      // wherever there is no policy to apply.
       if (key === "set") {
-        await runPairStatement(
-          executor,
-          `delete from ${quote(join.table)} where ` +
-            `${quote(join.parentColumn)} = ${dialect.placeholder(0)}`,
+        const linked = (await executor.query(
+          `select ${quoted(join.childColumn)} from ${quoted(join.table)} ` +
+            `where ${quoted(join.parentColumn)} = ${dialect.placeholder(0)}`,
           [parentKey],
-        );
+        )) as Record<string, unknown>[];
+
+        const existing = Array.from(linked, (row) => row[join.childColumn]);
+
+        if (existing.length > 0) {
+          const visible = (await executor.exec(
+            relation.model,
+            "findMany",
+            {
+              where: { [childField]: { in: existing } },
+              select: { [childField]: true },
+            },
+            // NOT pre-scoped: the child's scope is the whole point here.
+            false,
+          )) as Record<string, unknown>[];
+
+          for (const row of visible) {
+            await runPairStatement(
+              executor,
+              `delete from ${quoted(join.table)} where ` +
+                `${quoted(join.parentColumn)} = ${dialect.placeholder(0)} and ` +
+                `${quoted(join.childColumn)} = ${dialect.placeholder(1)}`,
+              [parentKey, row[childField]],
+            );
+          }
+        }
       }
 
       const items = listOf(at(args));
@@ -496,9 +550,9 @@ function planJoinTable(
         if (key === "disconnect") {
           await runPairStatement(
             executor,
-            `delete from ${quote(join.table)} where ` +
-              `${quote(join.parentColumn)} = ${dialect.placeholder(0)} and ` +
-              `${quote(join.childColumn)} = ${dialect.placeholder(1)}`,
+            `delete from ${quoted(join.table)} where ` +
+              `${quoted(join.parentColumn)} = ${dialect.placeholder(0)} and ` +
+              `${quoted(join.childColumn)} = ${dialect.placeholder(1)}`,
             [parentKey, childKey],
           );
           continue;
@@ -512,8 +566,8 @@ function planJoinTable(
         // since 3.24 — so this needs no dialect branch.
         await runPairStatement(
           executor,
-          `insert into ${quote(join.table)} ` +
-            `(${quote(join.parentColumn)}, ${quote(join.childColumn)}) ` +
+          `insert into ${quoted(join.table)} ` +
+            `(${quoted(join.parentColumn)}, ${quoted(join.childColumn)}) ` +
             `values (${dialect.placeholder(0)}, ${dialect.placeholder(1)}) ` +
             `on conflict do nothing`,
           [parentKey, childKey],
@@ -522,14 +576,6 @@ function planJoinTable(
     },
   });
 }
-
-/**
- * The join table's identifiers are `_PostToTag`, `A` and `B` — generated by
- * Prisma from model names, never caller input — so they are quoted the same way
- * a column from the schema is. Double-quoting works on both implemented
- * dialects.
- */
-const quote = (name: string) => `"${name.replace(/"/g, '""')}"`;
 
 /**
  * One statement against a table with no model, on the connection this call
