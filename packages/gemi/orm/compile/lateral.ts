@@ -203,10 +203,22 @@ function jsonObject(
   qualifier: string,
   dialect: SqlDialect,
 ): Fragment {
-  const parts = fields.map(
-    (field) =>
-      `'${field.name}', ${qualifier}${dialect.quoteIdent(field.column)}`,
-  );
+  const parts = fields.map((field) => {
+    const column = `${qualifier}${dialect.quoteIdent(field.column)}`;
+    // `::text` for BigInt, and this is a correctness fix rather than a
+    // formality: JSON has no integer type, so `json_build_object` renders a
+    // `bigint` as a JSON *number*, and `JSON.parse` turns that into a float64
+    // before any decoder can see it. 9007199254740993 came back as
+    // ...992 — the low bit gone, silently, in a value whose entire reason for
+    // being a `BigInt` is that it does not fit a double.
+    //
+    // Casting in SQL means the value crosses as a string and `BigInt(string)` is
+    // exact. Found by the all-scalars-through-a-relation fixture, which exists
+    // because the template's schema has no BigInt behind a relation and the
+    // differential matrix therefore cannot reach this.
+    const expression = field.type === "BigInt" ? `${column}::text` : column;
+    return `'${field.name}', ${expression}`;
+  });
   return sql(`json_build_object(${parts.join(", ")})`);
 }
 
@@ -283,6 +295,24 @@ function jsonConverter(
     case "BigInt":
       return (value) =>
         value === null || value === undefined ? null : BigInt(String(value));
+
+    case "Json":
+      // A `jsonb` column embedded in `json_build_object` should arrive as a
+      // nested object, and does — unless the value was stored as a JSON *string*,
+      // which is what `PostgresDialect.encode` produces and what the column then
+      // holds if it is text-typed rather than `jsonb`. The batched path handles
+      // exactly this with the same `typeof` check in `PostgresDialect.decode`, so
+      // the two paths agree either way rather than only when the column type is
+      // what one of them assumed.
+      return (value) => {
+        if (value === null || value === undefined) return null;
+        if (typeof value !== "string") return value;
+        try {
+          return JSON.parse(value);
+        } catch {
+          return value;
+        }
+      };
 
     case "Bytes":
       // Postgres renders `bytea` into JSON as `\x` followed by hex.
