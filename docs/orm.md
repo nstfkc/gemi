@@ -153,6 +153,23 @@ strategies emit different SQL for the same arguments.
 **Not implemented yet:** filtering on a relation (`where: { accounts: { some: … } }`) and ordering
 by one. Both raise `UnsupportedQueryError` rather than being silently ignored.
 
+### One value that will surprise you
+
+A `Bytes` column comes back as a plain `Uint8Array`, on every dialect and under either strategy —
+which is what Prisma returns, so it is parity rather than a gemi choice. The surprise is that
+`Uint8Array.prototype.toString` **ignores its argument**:
+
+```ts
+row.blob.toString("hex")                 // "1,2,255" — not an error, just wrong
+Buffer.from(row.blob).toString("hex")    // "0102ff"
+```
+
+Worth knowing because the wrong form looks right and throws nothing. It is also the reason the
+container is asserted rather than only the contents in the coercion tests: `Buffer` is a
+`Uint8Array` subclass, so the two compare equal element by element while behaving differently here.
+Postgres' driver hands back a `Buffer` and the dialect normalises it, so this stays one answer
+across dialects.
+
 ## Transactions
 
 ```ts
