@@ -1037,6 +1037,98 @@ function suite(label: string, url?: string) {
       );
     });
 
+    /**
+     * `update` — caller columns, written to a row they named by unique key.
+     *
+     * The seeded accounts make the "not linked" case mean something: two
+     * belong to user 1 and one to user 2, so an `update` naming the third has
+     * to raise rather than reach across.
+     */
+    test("update writes the named child", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { id: 1 },
+          data: {
+            accounts: {
+              update: {
+                where: { publicId: "acc-mine-1" },
+                data: { organizationRole: 9 },
+              },
+            },
+          },
+          include: { accounts: true },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    test("update takes a list", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { id: 1 },
+          data: {
+            accounts: {
+              update: [
+                { where: { publicId: "acc-mine-1" }, data: { organizationRole: 8 } },
+                { where: { publicId: "acc-mine-2" }, data: { organizationRole: 7 } },
+              ],
+            },
+          },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    test("updating a row that is not linked raises, as Prisma does", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { id: 1 },
+          data: {
+            accounts: {
+              update: {
+                where: { publicId: "acc-theirs" },
+                data: { organizationRole: 9 },
+              },
+            },
+          },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    /** Prisma accepts both spellings on a to-one; so does this. */
+    test("update through a to-one, bare data", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { id: 1 },
+          data: { organization: { update: { name: "Renamed" } } },
+          include: { organization: true },
+        },
+        { tables: ["User", "Organization"] },
+      );
+    });
+
+    test("update through a to-one, wrapped in data", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { id: 1 },
+          data: { organization: { update: { data: { name: "Wrapped" } } } },
+          include: { organization: true },
+        },
+        { tables: ["User", "Organization"] },
+      );
+    });
+
     test("nested connect on the foreign side repoints the child", async () => {
       await differential.reset();
       await differential.prisma.account.create({

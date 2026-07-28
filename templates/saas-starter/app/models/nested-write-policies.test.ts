@@ -483,6 +483,72 @@ describe("policies on nested writes", () => {
   });
 
   /**
+   * The claim `update` is implemented on: **the child's own `$exec` already
+   * carries the pass the refusal said was missing.**
+   *
+   * `REFUSED` used to say a nested `update` "needs its own scoping pass" for
+   * `onUpdate` and the scope-escape guard. Both live in `applyPolicies`, which
+   * runs because the step is not pre-scoped — so the pass was never missing,
+   * it was one layer down. These two assert that, from the outside.
+   */
+  test("a nested update is scoped by the child, not by the caller", async () => {
+    await raw.unsafe(
+      `INSERT INTO "Folder" ("id", "code", "orgId") VALUES (2, 'ours', 7)`,
+    );
+    // Linked to our folder, but owned by the other tenant.
+    await raw.unsafe(
+      `INSERT INTO "Note" ("id", "folderId", "label", "orgId") ` +
+        `VALUES (30, 2, 'theirs', 99)`,
+    );
+
+    await expect(
+      Model.asUser(OURS, () =>
+        Folder.$exec("update", {
+          where: { id: 2 },
+          data: {
+            code: "ours",
+            notes: { update: { where: { id: 30 }, data: { label: "hacked" } } },
+          },
+        }),
+      ),
+    ).rejects.toThrow(RecordNotFoundError);
+
+    const notes: any = await raw.unsafe(`SELECT "label" FROM "Note"`);
+    expect(notes[0].label).toBe("theirs");
+  });
+
+  /**
+   * ...and the payload is judged by the child too: naming a column the child's
+   * policy scopes on is refused, exactly as it would be at the top level. The
+   * caller wrote this one, so #98's provenance exemption does not apply — which
+   * is the distinction that makes both tests worth having.
+   */
+  test("a nested update cannot write the child's scoped column", async () => {
+    await raw.unsafe(
+      `INSERT INTO "Folder" ("id", "code", "orgId") VALUES (2, 'ours', 7)`,
+    );
+    await raw.unsafe(
+      `INSERT INTO "Note" ("id", "folderId", "label", "orgId") ` +
+        `VALUES (31, 2, 'ours', 7)`,
+    );
+
+    await expect(
+      Model.asUser(OURS, () =>
+        Folder.$exec("update", {
+          where: { id: 2 },
+          data: {
+            code: "ours",
+            notes: { update: { where: { id: 31 }, data: { orgId: 99 } } },
+          },
+        }),
+      ),
+    ).rejects.toThrow(ScopeEscapeError);
+
+    const notes: any = await raw.unsafe(`SELECT "orgId" FROM "Note"`);
+    expect(notes[0].orgId).toBe(7);
+  });
+
+  /**
    * **Pinned, not endorsed** — #98.
    *
    * A child scoped on its own foreign key loses every relation operand that

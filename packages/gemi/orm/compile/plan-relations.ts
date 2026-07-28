@@ -180,7 +180,8 @@ export interface NestedWriteStep {
     | "create"
     | "createMany"
     | "disconnect"
-    | "delete";
+    | "delete"
+    | "update";
   run(
     args: any,
     context: BindContext,

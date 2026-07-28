@@ -295,6 +295,7 @@ await List.create({
 | `connectOrCreate` | Looks the row up by a unique key and creates it only if it is not there. **A hit ignores `create` entirely** — it is connect-*or*-create, not upsert. |
 | `disconnect` | Clears the link. `true` on a to-one; a unique key, or a list of them, on a to-many. The column has to be nullable. |
 | `delete` | Deletes the named rows outright, not just the link. |
+| `update` | Writes your columns to the named row. The child's own `onUpdate` and scope rules apply to the payload. |
 
 Which direction a nested write runs in is decided by **who holds the foreign key**. When this model
 holds it, the far row is resolved or created *first* and collapses into one more column. When the
@@ -329,8 +330,14 @@ raises. Both filter on the parent's key as well as yours, so neither can reach a
 somebody else — and a row your policies hide is not reachable either, which `delete` reports as "not
 connected" rather than as denied, since that is the same answer a genuinely unlinked row gets.
 
-Everything else in Prisma's nested grammar — `set`, `update`, `updateMany`, `upsert`, `deleteMany` —
-is refused, by name and with the reason. The line is **which rows an
+`update` is where the two halves of the line meet: it names its row like `disconnect`, and it writes
+your columns like a top-level `update` — so the payload goes through the child's own operation and
+is judged by the child's policies. Naming a column the child scopes on is refused exactly as it
+would be at the top level. On a to-one both spellings work, `update: { … }` and
+`update: { data: { … } }`, because Prisma accepts both.
+
+Everything else in Prisma's nested grammar — `set`, `updateMany`, `upsert`, `deleteMany` — is
+refused, by name and with the reason. The line is **which rows an
 operand can name, and whose columns it writes**: everything supported names its rows (a new one, or
 one you identified by unique key) and writes either a whole new row or one foreign key the ORM
 chose. `set`, `disconnect`, `delete`, `deleteMany` and `updateMany` act on rows the call did not

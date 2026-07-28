@@ -1,4 +1,4 @@
-import { UnsupportedQueryError } from "../errors";
+import { RecordNotFoundError, UnsupportedQueryError } from "../errors";
 import type { ModelSchema, RelationSchema } from "../schema";
 import type { Binder } from "./fragment";
 import {
@@ -74,6 +74,7 @@ const SUPPORTED = new Set([
   "createMany",
   "disconnect",
   "delete",
+  "update",
 ]);
 
 /**
@@ -84,7 +85,7 @@ const SUPPORTED = new Set([
  * row that does not exist yet. Refused here rather than accepted and made a
  * no-op, so a caller who wrote one on the wrong operation hears about it.
  */
-const EXISTING_ROW_ONLY = new Set(["disconnect", "delete"]);
+const EXISTING_ROW_ONLY = new Set(["disconnect", "delete", "update"]);
 
 /** Statements that insert a new row, so nothing is linked to it yet. */
 const CREATE_ONLY_STATEMENTS = new Set(["create", "createMany"]);
@@ -101,22 +102,13 @@ const CREATE_ONLY_STATEMENTS = new Set(["create", "createMany"]);
 const REFUSED: Record<string, string> = {
   set: `It replaces the whole set, so it has to disconnect what is there now.`,
   deleteMany: `It deletes rows this call did not name.`,
-  // Not "it writes a row that already exists" — `connectOrCreate` does that
-  // too, on the foreign side, and is supported. The difference is *whose*
-  // columns: this one writes caller-supplied data, so the child's `onUpdate`
-  // and the scope-escape guard both have to run over it, where a `connect`
-  // writes one foreign key the ORM chose.
-  update:
-    `It writes caller-supplied columns to a row that already exists, so the ` +
-    `child's 'onUpdate' and the scope-escape guard have to run over the ` +
-    `payload — a pass this does not have yet.`,
   updateMany:
-    `It writes caller-supplied columns to rows this call did not name, so it ` +
-    `needs both halves: a scope on which rows match, and the child's ` +
-    `'onUpdate' over the payload.`,
+    `It writes caller-supplied columns to rows this call did not name — a ` +
+    `predicate, not a key — so there is no lookup for the child's scope to ` +
+    `narrow. 'update' names its row and is implemented.`,
   upsert:
-    `It is 'update' and 'connectOrCreate' at once, and only the second half ` +
-    `is implemented.`,
+    `It is 'update' and 'connectOrCreate' at once and needs a third thing ` +
+    `neither has: deciding which branch ran, from inside a nested step.`,
 };
 
 /** A foreign-key column on *this* model that a nested write supplies. */
@@ -401,6 +393,63 @@ function planOwningSide(
     );
   }
 
+  /**
+   * `update` through a to-one — this row holds the key, so the row being
+   * written is the one it points at.
+   *
+   * Prisma accepts both spellings, measured: `update: { name: "x" }` and
+   * `update: { data: { name: "x" } }`. The second is the documented one and the
+   * first is what people write; accepting only one would refuse a legal query.
+   *
+   * An `after` step rather than a `before` one, and it needs the foreign key in
+   * the statement's `RETURNING` — the far row is identified by *this* row's
+   * column, whose current value the arguments do not carry. That is why
+   * `keyFields` gains it here, where the other owning-side operands need
+   * nothing returned at all.
+   */
+  if (key === "update") {
+    out.keyFields.push(fkField);
+
+    out.after.push({
+      relation: relation.name,
+      operation: "update",
+      async run(args, _context, executor, rows) {
+        const parent = rows[0];
+        if (!parent) return;
+
+        const linked = parent[fkField];
+        if (linked === null || linked === undefined) {
+          throw new UnsupportedQueryError(
+            `data.${relation.name}.update`,
+            schema.name,
+            operation,
+            `this ${schema.name} has no '${relation.name}' to update — ` +
+              `'${fkField}' is null. Prisma raises here too.`,
+          );
+        }
+
+        const operandAt = at(args);
+        const data =
+          operandAt !== null &&
+          typeof operandAt === "object" &&
+          "data" in operandAt
+            ? (operandAt as Record<string, unknown>).data
+            : operandAt;
+
+        await executor.exec(
+          relation.model,
+          "updateMany",
+          { where: { [referenced]: linked }, data },
+          // NOT pre-scoped: the child's own policies decide whether this row is
+          // reachable and whether the payload is allowed to write what it
+          // names — its `onUpdate` and its scope-escape guard.
+          false,
+        );
+      },
+    });
+    return;
+  }
+
   if (key === "connectOrCreate") {
     assertConnectOrCreateOperand(
       schema,
@@ -555,6 +604,83 @@ function planForeignSide(
    * hidden row reports "not connected" rather than "denied" — the same answer
    * as a row that genuinely is not linked, which is the conservative one.
    */
+  /**
+   * `update: { where, data }` — the caller's columns, written to a row they
+   * named by unique key.
+   *
+   * **The pass this was refused for turns out to exist**, one layer down. The
+   * `REFUSED` entry said it "needs its own scoping pass" for `onUpdate` and the
+   * scope-escape guard; both of those live in `applyPolicies`, which the
+   * child's own `$exec` runs because this step is not pre-scoped. Verified
+   * rather than assumed:
+   *
+   *     another tenant's row  ->  { count: 0 }        the child's scope
+   *     caller names a scoped column  ->  ScopeEscapeError
+   *
+   * So the refusal was describing a gap in the wrong place. What `update`
+   * genuinely needs beyond `disconnect` is nothing: the parent-key filter that
+   * keeps it off another parent's row is the same one, and the payload is the
+   * child's business.
+   *
+   * `updateMany` stays refused because it names a *predicate* rather than a
+   * row, which is the half of the line this file draws that has not moved.
+   */
+  if (key === "update") {
+    assertNamedUpdates(schema, relation, child, operand, operation);
+
+    out.after.push({
+      relation: relation.name,
+      operation: "update",
+      async run(args, _context, executor, rows) {
+        const parent = rows[0];
+        if (!parent) return;
+
+        const list = listOf(at(args));
+
+        for (let index = 0; index < list.length; index++) {
+          const entry = list[index] as Record<string, unknown>;
+          // The caller's key *and* the link, so an `update` cannot reach a row
+          // attached to a different parent — the same filter `delete` uses,
+          // and it does the same two jobs.
+          const where = {
+            ...(entry.where as object),
+            [childField]: parent[parentField],
+          };
+
+          const found = (await executor.exec(
+            relation.model,
+            "findFirst",
+            { where, select: { [childField]: true } },
+            false,
+          )) as Record<string, unknown> | null;
+
+          if (!found) {
+            // `RecordNotFoundError`, not `UnsupportedQueryError`: nothing here
+            // is unsupported, the row simply is not there. Prisma agrees —
+            // P2025, *"depends on one or more records that were required but
+            // not found"* — and the differential harness compares the failure
+            // *kind* precisely so a refusal cannot pass as agreement with a
+            // miss. This one was `other` against Prisma's `notFound` until the
+            // harness said so.
+            throw new RecordNotFoundError(relation.model, "update");
+          }
+
+          await executor.exec(
+            relation.model,
+            "updateMany",
+            { where, data: entry.data },
+            // NOT pre-scoped, and this is the whole reason `update` is
+            // expressible: the child's own policies run over `data` — its
+            // `onUpdate` defaults, its scope-escape guard refuses a caller
+            // naming a scoped column — because they have not run yet.
+            false,
+          );
+        }
+      },
+    });
+    return;
+  }
+
   if (key === "disconnect" || key === "delete") {
     const deleting = key === "delete";
     if (!deleting) assertDisconnectable(child, relation, childField, operation);
@@ -834,6 +960,55 @@ function planForeignSide(
       }
     },
   });
+}
+
+/**
+ * `update`'s operand: `{ where, data }`, or a list of them on a to-many.
+ *
+ * `data` is *not* inspected here — it is the child's, and the child's own
+ * `$exec` validates it against the child's schema and policies. Checking it
+ * against this model would be checking the wrong shape.
+ */
+function assertNamedUpdates(
+  schema: ModelSchema,
+  relation: RelationSchema,
+  child: ModelSchema,
+  operand: unknown,
+  operation: string,
+): Record<string, unknown>[] {
+  const at = `data.${relation.name}.update`;
+  const entries = (Array.isArray(operand) ? operand : [operand]) as unknown[];
+  const out: Record<string, unknown>[] = [];
+
+  for (const entry of entries) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      throw new UnsupportedQueryError(
+        at,
+        schema.name,
+        operation,
+        `Expected an object with 'where' and 'data'.`,
+      );
+    }
+
+    const record = entry as Record<string, unknown>;
+
+    for (const required of ["where", "data"] as const) {
+      if (record[required] === undefined) {
+        throw new UnsupportedQueryError(
+          at,
+          schema.name,
+          operation,
+          `Expected a '${required}' key — 'update' names the row to write and ` +
+            `the columns to write to it.`,
+        );
+      }
+    }
+
+    matchUniqueKey(child, record.where, `${operation}.${relation.name}.update`);
+    out.push(record);
+  }
+
+  return out;
 }
 
 /**
