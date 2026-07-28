@@ -790,3 +790,200 @@ describe("applyNestedPolicies", () => {
     expect(out).toBe(args);
   });
 });
+
+/**
+ * Relation *filters* — the other way a query reads a model it did not name.
+ *
+ * `where: { accounts: { some: {} } }` returns no account rows, so an unscoped
+ * subquery here leaks **existence** rather than data: which users have an
+ * account in a tenant you cannot see. Quieter than an unscoped `include`, and
+ * the same rule applies — every read of a model carries that model's policies,
+ * applied to the arg tree before the plan key so the compiler stays pure.
+ */
+describe("relation filters in where", () => {
+  const tenant: ModelPolicy = {
+    scope: (context) => ({
+      organizationId: (context.user as any).organizationId,
+    }),
+    onCreate: (_c, data) => data,
+  };
+
+  const relations = (map: Record<string, ["one" | "many", string]>) => ({
+    relations: Object.fromEntries(
+      Object.entries(map).map(([key, [kind, model]]) => [
+        key,
+        { model, kind },
+      ]),
+    ),
+  });
+
+  const USER = { id: 1, organizationId: 7 };
+
+  const schemas: Record<string, any> = {
+    Account: {
+      name: "Account",
+      ...relations({ organization: ["one", "Organization"] }),
+    },
+    Organization: { name: "Organization", ...relations({}) },
+  };
+
+  const lookup =
+    (policies: Record<string, ModelPolicy[]>) => (model: string) =>
+      schemas[model]
+        ? { policies: policies[model] ?? [], schema: schemas[model] }
+        : undefined;
+
+  const root = relations({
+    accounts: ["many", "Account"],
+    organization: ["one", "Organization"],
+  });
+
+  function scoped(where: any, policies: Record<string, ModelPolicy[]>) {
+    return applyNestedPolicies(
+      root,
+      { where },
+      "findMany" as any,
+      USER,
+      false,
+      lookup(policies),
+    ).where;
+  }
+
+  test("some is narrowed by the child's scope", () => {
+    expect(
+      scoped({ accounts: { some: { organizationRole: 0 } } }, {
+        Account: [tenant],
+      }),
+    ).toEqual({
+      accounts: {
+        some: { organizationRole: 0, AND: [{ organizationId: 7 }] },
+      },
+    });
+  });
+
+  test("an empty some still gets the scope", () => {
+    expect(scoped({ accounts: { some: {} } }, { Account: [tenant] })).toEqual({
+      accounts: { some: { AND: [{ organizationId: 7 }] } },
+    });
+  });
+
+  test("none is narrowed the same way", () => {
+    expect(scoped({ accounts: { none: {} } }, { Account: [tenant] })).toEqual({
+      accounts: { none: { AND: [{ organizationId: 7 }] } },
+    });
+  });
+
+  /**
+   * The one place ANDing the scope in would be **wrong**, and wrong in the
+   * direction that returns more rows.
+   *
+   * `every: X` compiles to `not exists (child where correlated and not X)`. AND
+   * a scope S into X and it becomes "every child either matches X or is
+   * invisible" — so a parent whose only non-matching child belongs to another
+   * tenant now passes, and a parent whose children are *all* invisible passes
+   * too. The scope has to restrict which children are considered rather than
+   * which ones count as matching, which in argument space is
+   * `{ OR: [{ NOT: S }, X] }`: `not (not S or X)` is `S and not X`.
+   */
+  test("every puts the scope outside the negation", () => {
+    expect(
+      scoped({ accounts: { every: { organizationRole: 0 } } }, {
+        Account: [tenant],
+      }),
+    ).toEqual({
+      accounts: {
+        every: {
+          OR: [
+            { NOT: { organizationId: 7 } },
+            { organizationRole: 0 },
+          ],
+        },
+      },
+    });
+  });
+
+  test("a to-one is is narrowed", () => {
+    expect(
+      scoped({ organization: { is: { name: "acme" } } }, {
+        Organization: [tenant],
+      }),
+    ).toEqual({
+      organization: { is: { name: "acme", AND: [{ organizationId: 7 }] } },
+    });
+  });
+
+  /** The shorthand has to become the explicit form once it carries a scope. */
+  test("a to-one shorthand becomes an explicit is", () => {
+    expect(
+      scoped({ organization: { name: "acme" } }, { Organization: [tenant] }),
+    ).toEqual({
+      organization: { is: { name: "acme", AND: [{ organizationId: 7 }] } },
+    });
+  });
+
+  test("null is left alone — there is no nested where to scope", () => {
+    expect(
+      scoped({ organization: null }, { Organization: [tenant] }),
+    ).toEqual({ organization: null });
+  });
+
+  test("combinators are walked", () => {
+    expect(
+      scoped(
+        { OR: [{ accounts: { some: {} } }, { email: "a@b.c" }] },
+        { Account: [tenant] },
+      ),
+    ).toEqual({
+      OR: [
+        { accounts: { some: { AND: [{ organizationId: 7 }] } } },
+        { email: "a@b.c" },
+      ],
+    });
+  });
+
+  test("a filter nested inside a filter is scoped too", () => {
+    expect(
+      scoped({ accounts: { some: { organization: { name: "acme" } } } }, {
+        Organization: [tenant],
+      }),
+    ).toEqual({
+      accounts: {
+        some: {
+          organization: { is: { name: "acme", AND: [{ organizationId: 7 }] } },
+        },
+      },
+    });
+  });
+
+  test("asSystem suspends it, like every other policy", () => {
+    const out = applyNestedPolicies(
+      root,
+      { where: { accounts: { some: {} } } },
+      "findMany" as any,
+      USER,
+      true,
+      lookup({ Account: [tenant] }),
+    );
+
+    expect(out.where).toEqual({ accounts: { some: {} } });
+  });
+
+  /**
+   * Structural sharing: an unpolicied filter must come back as the *same*
+   * object, or every query with a relation filter gets a new canonical shape
+   * and a fresh plan-cache entry for nothing.
+   */
+  test("an unpolicied filter is returned unchanged, identically", () => {
+    const where = { accounts: { some: { organizationRole: 0 } } };
+    const out = applyNestedPolicies(
+      root,
+      { where },
+      "findMany" as any,
+      USER,
+      false,
+      lookup({}),
+    );
+
+    expect(out.where).toBe(where);
+  });
+});

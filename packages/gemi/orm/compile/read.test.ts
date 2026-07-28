@@ -491,9 +491,9 @@ describe("unimplemented arguments still throw", () => {
     );
   });
 
-  test("a relation filter in where", () => {
-    expect(() => text({ where: { accounts: { some: {} } } })).toThrow(
-      /'accounts'/,
+  test("a to-many relation filter with no operator names the operators", () => {
+    expect(() => text({ where: { accounts: { email: "a@b.c" } } })).toThrow(
+      /every, none, some/,
     );
   });
 

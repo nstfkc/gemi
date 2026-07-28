@@ -2861,8 +2861,32 @@ await User.findMany({ include: { accounts: true } }, { strategy: "batched" })
 Unlike `track`, `strategy` **does** reach the compiler and **is** part of the plan cache key: two
 strategies emit different SQL for the same arguments.
 
-**Not implemented yet:** filtering on a relation (`where: { accounts: { some: … } }`) and ordering
-by one. Both raise `UnsupportedQueryError` rather than being silently ignored.
+### Filtering on a relation
+
+```ts
+await User.findMany({ where: { accounts: { some: { role: "owner" } } } })
+await User.findMany({ where: { organization: { name: "acme" } } })
+await User.findMany({ where: { organization: null } })          // has none
+```
+
+`some` / `every` / `none` on a to-many, `is` / `isNot` (or the object directly) on a to-one. Each
+compiles to a correlated `exists` subquery, so a filter only ever *removes* parent rows — a join
+would multiply them and then need a `distinct` to put them back.
+
+Two of these read less obviously than they look:
+
+- **`every` includes parents with no children at all.** It means "no child fails this", not "some
+  child passes this", which is the vacuous-truth reading Prisma has.
+- **`isNot` matches rows with no related record**, as well as rows whose related record does not
+  match.
+
+**The child's policies apply**, the same as they do inside an `include` — the subquery is scoped
+before it is compiled. Worth stating because the leak here is quieter than an unscoped `include`:
+`where: { memberships: { some: {} } }` returns no membership rows at all, so an unscoped version
+would leak *existence* — which users have a membership in a tenant you cannot see.
+
+**Not implemented yet:** ordering by a relation, and filtering across an implicit many-to-many.
+Both raise `UnsupportedQueryError` rather than being silently ignored.
 
 ### One value that will surprise you
 

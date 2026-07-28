@@ -1,6 +1,15 @@
 import type { SqlDialect } from "../dialect";
-import { UnknownFieldError, UnsupportedQueryError } from "../errors";
-import type { FieldSchema, ModelSchema } from "../schema";
+import {
+  MalformedRelationError,
+  UnknownFieldError,
+  UnsupportedQueryError,
+} from "../errors";
+import {
+  isOperatorForm,
+  relationFilterOperators,
+} from "../relation-filters";
+import type { FieldSchema, ModelSchema, RelationSchema } from "../schema";
+import { relatedSchema, resolveLink } from "./plan-relations";
 import {
   type Binder,
   type Fragment,
@@ -90,12 +99,15 @@ export function compileWhere(
     }
 
     if (key in schema.relations) {
-      throw new UnsupportedQueryError(
-        key,
-        schema.name,
-        context.operation,
-        "Filtering on a relation is not implemented yet.",
+      const filter = compileRelationFilter(
+        schema,
+        schema.relations[key],
+        value,
+        context,
+        at,
       );
+      if (filter) predicates.push(filter);
+      continue;
     }
 
     const field = schema.fields[key];
@@ -137,6 +149,244 @@ export interface WhereContext {
    * is what keeps invariant 2 and every compiler text assertion untouched.
    */
   qualifier?: string;
+  /**
+   * How many relation-filter subqueries enclose this one. Zero at the root.
+   *
+   * It exists only to name the child alias — `_r0`, `_r1` — and the aliases only
+   * have to be distinct from the ones *enclosing* them, not from their siblings:
+   * each `exists (…)` is its own scope, so two relation filters at the same level
+   * cannot see each other. Depth is therefore sufficient, and it keeps the SQL
+   * text a pure function of the argument shape, which a counter threaded through
+   * compilation would not be.
+   */
+  relationDepth?: number;
+}
+
+/**
+ * `where: { accounts: { some: { … } } }` -> `exists (select 1 from "Account" …)`.
+ *
+ * A correlated subquery rather than a join, for the reason iteration 3 gave when
+ * it deferred this: a join against a to-many multiplies the parent rows and then
+ * needs a `distinct` to put them back, which changes the row count of the outer
+ * query for a filter that should only ever *remove* rows. `exists` cannot.
+ *
+ * ### The child is always aliased
+ *
+ * Even when the tables differ and nothing is ambiguous. A self-relation —
+ * `Employee.manager` — puts the same table on both sides, and there the
+ * subquery's own `from` shadows the outer one, so the correlation silently
+ * compares a row to itself. Aliasing conditionally would mean the dangerous case
+ * is the one that takes the rarely-exercised branch; aliasing always means the
+ * self-relation is compiled by the same code as everything else.
+ *
+ * The outer side is qualified by table name (or by the enclosing alias, when this
+ * filter is itself nested), which is what makes the correlation refer outwards.
+ * That needs nothing from the outer statement — `from "User"` puts `"User"` in
+ * scope as a qualifier whether or not any other column uses one — so a query with
+ * a relation filter leaves the rest of its SQL byte-identical.
+ */
+function compileRelationFilter(
+  schema: ModelSchema,
+  relation: RelationSchema,
+  value: unknown,
+  context: WhereContext,
+  locate: (args: any) => any,
+): Fragment | null {
+  const path = `where.${relation.name}`;
+
+  if (relation.joinTable) {
+    // Two hops through a join table, which is a different shape: `exists` over
+    // the join table with a second `exists` inside it. Refused rather than
+    // guessed at, the same call `lateralStrategy` makes for the same relation
+    // kind — and for the same reason, that the template's schema has no implicit
+    // m-n, so anything built here would ship untested against Prisma.
+    throw new UnsupportedQueryError(
+      path,
+      schema.name,
+      context.operation,
+      `${relation.name} is an implicit many-to-many. Filtering across its join ` +
+        `table is not implemented yet.`,
+    );
+  }
+
+  // Shape before environment: `readOperators` only reads the relation's own
+  // `kind`, so a malformed filter is reported as one even when the registry is
+  // empty. The other order let a missing `register` call mask a plain typo.
+  const operators = relationFilterOperators(relation.kind);
+  const requested = readOperators(schema, relation, value, operators, context);
+
+  const child = relatedSchema(schema, relation);
+  const link = resolveLink(schema, child, relation);
+  const depth = context.relationDepth ?? 0;
+
+  const dialect = context.dialect;
+  const alias = `_r${depth}`;
+  const childQualifier = `${dialect.quoteIdent(alias)}.`;
+  // At depth 0 the outer scope is the queried table; deeper, it is the alias of
+  // the subquery this one sits inside. `context.qualifier` already holds the
+  // right answer in both cases when something set it — the lateral strategy does
+  // at the root — so it wins, and the table name is the fallback.
+  const parentQualifier =
+    context.qualifier ?? `${dialect.quoteIdent(schema.table)}.`;
+
+  const correlation = sql(
+    `${childQualifier}${dialect.quoteIdent(column(child, relation, link.childField))} = ` +
+      `${parentQualifier}${dialect.quoteIdent(column(schema, relation, link.parentField))}`,
+  );
+
+  const inner: WhereContext = {
+    ...context,
+    qualifier: childQualifier,
+    relationDepth: depth + 1,
+  };
+
+  const parts: Fragment[] = [];
+
+  for (const operator of operators) {
+    if (!(operator in requested)) continue;
+
+    const argument = requested[operator];
+    const at = (args: any) => requested.direct ? locate(args) : locate(args)?.[operator];
+
+    // `is: null` / a bare `null` on a to-one: "there is no related row". Prisma
+    // spells the opposite `isNot: null`.
+    if (argument === null) {
+      parts.push(existence(child, alias, correlation, null, dialect, operator === "is"));
+      continue;
+    }
+
+    const condition = compileWhere(child, argument, inner, at);
+
+    if (operator === "every") {
+      // `every` is "no child fails it", not "some child passes it" — the two
+      // differ on a parent with no children at all, which `every` matches and
+      // `some` does not. An empty `every: {}` therefore constrains nothing.
+      if (!condition) continue;
+      parts.push(
+        existence(
+          child,
+          alias,
+          correlation,
+          concat(sql("not "), parenthesize(condition)),
+          dialect,
+          true,
+        ),
+      );
+      continue;
+    }
+
+    const negate = operator === "none" || operator === "isNot";
+    parts.push(
+      existence(child, alias, correlation, condition, dialect, negate),
+    );
+  }
+
+  if (parts.length === 0) return null;
+  if (parts.length === 1) return parts[0];
+  return group(parts, " and ");
+}
+
+/** `exists (select 1 from "Child" as "_r0" where <correlation> [and <rest>])`. */
+function existence(
+  child: ModelSchema,
+  alias: string,
+  correlation: Fragment,
+  rest: Fragment | null,
+  dialect: SqlDialect,
+  negated: boolean,
+): Fragment {
+  const parts: Fragment[] = [
+    sql(
+      `${negated ? "not " : ""}exists (select 1 from ` +
+        `${dialect.quoteIdent(child.table)} as ${dialect.quoteIdent(alias)} where `,
+    ),
+    correlation,
+  ];
+
+  if (rest) parts.push(sql(" and "), rest);
+  parts.push(sql(")"));
+
+  return concat(...parts);
+}
+
+/**
+ * Which operators a relation filter asked for, with Prisma's shorthands folded
+ * into the same shape.
+ *
+ * A to-one accepts the filter directly — `where: { user: { email } }` means
+ * `is` — and accepts `null` for "no related row". A to-many does not: Prisma
+ * requires one of `some` / `every` / `none`, because a bare object there has no
+ * unambiguous reading.
+ */
+function readOperators(
+  schema: ModelSchema,
+  relation: RelationSchema,
+  value: unknown,
+  operators: readonly string[],
+  context: WhereContext,
+): Record<string, unknown> & { direct?: boolean } {
+  const path = `where.${relation.name}`;
+  const many = relation.kind === "many";
+
+  if (value === null) {
+    if (many) {
+      throw new UnsupportedQueryError(
+        path,
+        schema.name,
+        context.operation,
+        `${relation.name} is a to-many relation, so null is not a filter for ` +
+          `it. Use { none: {} } for "has no related rows".`,
+      );
+    }
+    return { is: null, direct: true };
+  }
+
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new UnsupportedQueryError(
+      path,
+      schema.name,
+      context.operation,
+      many
+        ? `Expected an object holding ${operators.join(", ")}.`
+        : `Expected an object, or null.`,
+    );
+  }
+
+  if (isOperatorForm(value as object, operators)) {
+    return value as Record<string, unknown>;
+  }
+
+  if (many) {
+    throw new UnsupportedQueryError(
+      path,
+      schema.name,
+      context.operation,
+      `Expected one of ${operators.join(", ")}. A to-many relation has no ` +
+        `single reading of a bare filter — { some: … } and { every: … } mean ` +
+        `different things.`,
+    );
+  }
+
+  // The to-one shorthand. Marked so the binder path stays on the object the
+  // caller wrote rather than descending into an `is` key that is not there.
+  return { is: value, direct: true };
+}
+
+/** A relation's key column, by field name. */
+function column(
+  schema: ModelSchema,
+  relation: RelationSchema,
+  name: string,
+): string {
+  const field = schema.fields[name];
+  if (!field) {
+    throw new MalformedRelationError(
+      schema.name,
+      relation.name,
+      `it joins on '${name}', which is not a field on ${schema.name}.`,
+    );
+  }
+  return field.column;
 }
 
 /**

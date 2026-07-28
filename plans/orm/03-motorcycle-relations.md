@@ -157,6 +157,26 @@ all writes, transactions, policies.
   `EXISTS (SELECT 1 ...)` subqueries in the where compiler. They are cheap to add
   and often assumed present. Consider scheduling them as a small follow-up
   rather than letting them creep into this iteration.
+
+  **Done, after iteration 9.** `some` / `every` / `none` and `is` / `isNot`, as
+  correlated `exists` subqueries, verified against Prisma by twenty new cases in
+  the differential matrix. Two things this note did not anticipate:
+
+  - **They are a policy surface, not just a where-compiler feature.** A filter
+    that reaches another model's rows is a read of that model, so the child's
+    policies have to scope the subquery — the same rule iteration 9 had to make
+    true for the lateral strategy, arriving from a third direction. The leak is
+    quieter here: the query returns no child rows, so an unscoped subquery leaks
+    *existence* rather than data.
+  - **`every` cannot be scoped by ANDing.** It compiles to
+    `not exists (child where correlated and not X)`, so a scope ANDed into `X`
+    means "every child either matches or is invisible" — a parent whose only
+    non-matching child is another tenant's would start passing. The scope has to
+    restrict which children are *considered*, which in argument space is
+    `every: { OR: [{ NOT: S }, X] }`.
+
+  Still open: ordering by a relation, and filtering across an implicit
+  many-to-many (two hops through the join table).
 - **Stitching cost is real** on wide results. Build the parent-key `Map` once per
   child query; do not `find()` per row. Iteration 7 will measure this, so leave
   it in a shape that can be measured.

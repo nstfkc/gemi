@@ -317,6 +317,80 @@ const CASES: [string, string, unknown][] = [
     include: { organization: true, accounts: { orderBy: { id: "asc" } } },
   }],
 
+  // --- relation filters in where -----------------------------------------
+  //
+  // The follow-up iteration 3 scheduled: `exists` subqueries, compared against
+  // Prisma's own. Ordered by `id` everywhere a to-many is involved so the two
+  // clients cannot disagree about row order for a reason unrelated to the
+  // filter.
+  ["some, empty", "findMany", {
+    where: { accounts: { some: {} } }, orderBy: { id: "asc" },
+  }],
+  ["some, with a filter", "findMany", {
+    where: { accounts: { some: { organizationRole: 1 } } }, orderBy: { id: "asc" },
+  }],
+  ["some, matching nothing", "findMany", {
+    where: { accounts: { some: { organizationRole: 99 } } }, orderBy: { id: "asc" },
+  }],
+  ["none", "findMany", {
+    where: { accounts: { none: {} } }, orderBy: { id: "asc" },
+  }],
+  ["none, with a filter", "findMany", {
+    where: { accounts: { none: { organizationRole: 1 } } }, orderBy: { id: "asc" },
+  }],
+  // The case that distinguishes `every` from `some`: a user with no accounts
+  // satisfies `every` vacuously and fails `some`. If the seed ever loses its
+  // account-less users these two stop being different questions.
+  ["every", "findMany", {
+    where: { accounts: { every: { organizationRole: 1 } } }, orderBy: { id: "asc" },
+  }],
+  ["every, matching nothing", "findMany", {
+    where: { accounts: { every: { organizationRole: 99 } } }, orderBy: { id: "asc" },
+  }],
+  ["every, empty", "findMany", {
+    where: { accounts: { every: {} } }, orderBy: { id: "asc" },
+  }],
+  ["to-one shorthand", "findMany", {
+    where: { organization: { name: "Acme" } }, orderBy: { id: "asc" },
+  }],
+  ["to-one is", "findMany", {
+    where: { organization: { is: { name: "Acme" } } }, orderBy: { id: "asc" },
+  }],
+  // `isNot` has to match rows with *no* organization as well as rows whose
+  // organization does not match, which is the half a naive `exists (… and not …)`
+  // silently drops.
+  ["to-one isNot", "findMany", {
+    where: { organization: { isNot: { name: "Acme" } } }, orderBy: { id: "asc" },
+  }],
+  ["to-one is null", "findMany", {
+    where: { organization: null }, orderBy: { id: "asc" },
+  }],
+  ["to-one isNot null", "findMany", {
+    where: { organization: { isNot: null } }, orderBy: { id: "asc" },
+  }],
+  ["a relation filter beside a scalar", "findMany", {
+    where: { globalRole: { gte: 0 }, accounts: { some: {} } }, orderBy: { id: "asc" },
+  }],
+  ["a relation filter inside OR", "findMany", {
+    where: { OR: [{ accounts: { some: {} } }, { name: "Ada" }] },
+    orderBy: { id: "asc" },
+  }],
+  ["a relation filter under NOT", "findMany", {
+    where: { NOT: { accounts: { some: {} } } }, orderBy: { id: "asc" },
+  }],
+  ["a relation filter inside a relation filter", "findMany", {
+    where: { accounts: { some: { organization: { name: "Acme" } } } },
+    orderBy: { id: "asc" },
+  }],
+  ["a relation filter with an include", "findMany", {
+    where: { accounts: { some: {} } },
+    include: { accounts: { orderBy: { id: "asc" } } },
+    orderBy: { id: "asc" },
+  }],
+  ["count with a relation filter", "count", {
+    where: { accounts: { some: {} } },
+  }],
+
   // --- relations inside select ------------------------------------------
   ["select a relation beside a scalar", "findMany", {
     select: { name: true, accounts: { orderBy: { id: "asc" } } },

@@ -2,6 +2,10 @@ import { RequestContext } from "../http/requestContext";
 import { currentActor } from "./context";
 import { PolicyDeniedError, UnsupportedQueryError } from "./errors";
 import type { Operation } from "./plan";
+import {
+  isOperatorForm,
+  relationFilterOperators,
+} from "./relation-filters";
 import type { ModelSchema } from "./schema";
 
 /**
@@ -541,7 +545,13 @@ export function isPreScoped(options: unknown): boolean {
 /** Resolves a model name to its policies, so this file need not import the registry. */
 export type PolicyLookup = (model: string) => {
   policies: readonly ModelPolicy[];
-  schema: { name: string; relations: Record<string, { model: string }> };
+  schema: {
+    name: string;
+    // `kind` because a relation filter reads differently per kind — `some` /
+    // `every` / `none` on a to-many, `is` / `isNot` on a to-one — and the walk
+    // has to know which nested `where` it is scoping.
+    relations: Record<string, { model: string; kind: "one" | "many" }>;
+  };
 } | undefined;
 
 /**
@@ -569,7 +579,9 @@ export type PolicyLookup = (model: string) => {
  * strategy that happened to recurse.
  */
 export function applyNestedPolicies(
-  schema: { relations: Record<string, { model: string }> },
+  schema: {
+    relations: Record<string, { model: string; kind: "one" | "many" }>;
+  },
   args: any,
   operation: Operation,
   user: unknown,
@@ -642,5 +654,213 @@ export function applyNestedPolicies(
     if (rewritten) out = { ...out, [container]: rewritten };
   }
 
+  // Relation *filters*, which reach another model's rows through `where` rather
+  // than through `include`. Same rule, and it has to be the same walk: a filter
+  // that reads a model is a read of that model.
+  const filtered = scopeRelationFilters(
+    schema,
+    out.where,
+    operation,
+    user,
+    system,
+    lookup,
+  );
+  if (filtered !== out.where) out = { ...out, where: filtered };
+
   return out;
+}
+
+/**
+ * Scopes every relation filter inside a `where`, recursively.
+ *
+ * `where: { memberships: { some: {} } }` compiles to a correlated subquery over
+ * `Membership`. Unscoped, it answers "does this user have a membership *in any
+ * tenant*" — which returns no membership rows, so the leak is existence rather
+ * than data, and correspondingly harder to notice. It is still a cross-tenant
+ * read, and iteration 6's rule is that every read of a model carries that
+ * model's policies.
+ *
+ * Structural sharing throughout: an unpolicied tree comes back as the same
+ * object, so the plan key does not move for the queries this does not touch.
+ */
+function scopeRelationFilters(
+  schema: { relations: Record<string, { model: string; kind: "one" | "many" }> },
+  where: unknown,
+  operation: Operation,
+  user: unknown,
+  system: boolean,
+  lookup: PolicyLookup,
+): unknown {
+  if (typeof where !== "object" || where === null) return where;
+
+  if (Array.isArray(where)) {
+    let changed = false;
+    const out = where.map((entry) => {
+      const scoped = scopeRelationFilters(
+        schema,
+        entry,
+        operation,
+        user,
+        system,
+        lookup,
+      );
+      if (scoped !== entry) changed = true;
+      return scoped;
+    });
+    return changed ? out : where;
+  }
+
+  let rewritten: Record<string, unknown> | undefined;
+  const source = where as Record<string, unknown>;
+
+  for (const key of Object.keys(source)) {
+    const value = source[key];
+    if (value === undefined) continue;
+
+    // Combinators hold more `where`s on the *same* model, so they recurse with
+    // this schema rather than a child's.
+    if (key === "AND" || key === "OR" || key === "NOT") {
+      const scoped = scopeRelationFilters(
+        schema,
+        value,
+        operation,
+        user,
+        system,
+        lookup,
+      );
+      if (scoped !== value) {
+        rewritten ??= { ...source };
+        rewritten[key] = scoped;
+      }
+      continue;
+    }
+
+    const relation = schema.relations[key];
+    if (!relation) continue;
+
+    const scoped = scopeRelationNode(
+      relation,
+      value,
+      operation,
+      user,
+      system,
+      lookup,
+    );
+    if (scoped !== value) {
+      rewritten ??= { ...source };
+      rewritten[key] = scoped;
+    }
+  }
+
+  return rewritten ?? where;
+}
+
+/** One relation filter: `{ some: … }`, `{ is: … }`, or a to-one shorthand. */
+function scopeRelationNode(
+  relation: { model: string; kind: "one" | "many" },
+  value: unknown,
+  operation: Operation,
+  user: unknown,
+  system: boolean,
+  lookup: PolicyLookup,
+): unknown {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    // `null` is `is: null` — "no related row at all". There is no nested `where`
+    // to scope, and narrowing what counts as "related" here would change the
+    // meaning of the filter rather than restrict it. The compiler reports every
+    // other non-object.
+    return value;
+  }
+
+  const target = lookup(relation.model);
+  if (!target) return value;
+
+  const operators = relationFilterOperators(relation.kind);
+  const shorthand = !isOperatorForm(value, operators);
+  const entries: Array<[string, unknown]> = shorthand
+    ? [["is", value]]
+    : Object.entries(value as Record<string, unknown>);
+
+  let rewritten: Record<string, unknown> | undefined;
+
+  for (const [operator, argument] of entries) {
+    if (argument === null || argument === undefined) continue;
+
+    // Depth first: a filter nested inside this one is scoped before this level
+    // wraps anything around it.
+    const deeper = scopeRelationFilters(
+      target.schema,
+      argument,
+      operation,
+      user,
+      system,
+      lookup,
+    );
+
+    const scope =
+      !system && target.policies.length > 0
+        ? applyPolicies(
+            target.policies,
+            policyContext(target.schema.name, operation, user, system),
+            { where: deeper },
+          ).where
+        : deeper;
+
+    const final = operator === "every" ? invertForEvery(deeper, scope) : scope;
+
+    if (final !== argument) {
+      rewritten ??= shorthand
+        ? {}
+        : { ...(value as Record<string, unknown>) };
+      rewritten[operator] = final;
+    }
+  }
+
+  if (!rewritten) return value;
+  // A scoped shorthand becomes the explicit form, because there is nowhere else
+  // to put the operator once the argument is no longer the whole object.
+  return rewritten;
+}
+
+/**
+ * `every` needs the scope **outside** the negation, and this is the one place
+ * where ANDing a scope into a nested `where` would be wrong.
+ *
+ * `every: X` compiles to `not exists (child where correlated and not X)`. AND a
+ * scope S into X and you get `not exists (… and not (X and S))`, which is
+ * "every child either matches X or is invisible" — a parent with one hidden
+ * non-matching child now *passes*, and worse, a parent whose only children are
+ * invisible passes too. The scope has to restrict which children are considered,
+ * not which ones count as matching:
+ *
+ *     not exists (child where correlated and S and not X)
+ *
+ * In argument space that is `every: { OR: [{ NOT: S }, X] }` — because
+ * `not (not S or X)` is `S and not X`. Expressed as arguments rather than as SQL
+ * so the compiler stays a pure function of the shape and the plan cache stays
+ * sound; it is the same move iteration 9 made when it put nested policies on the
+ * arg tree instead of teaching the lateral strategy about the registry.
+ */
+function invertForEvery(inner: unknown, scoped: unknown): unknown {
+  if (scoped === inner) return inner;
+
+  // `applyPolicies` adds its fragments as `AND` members beside the caller's own
+  // keys, so what it added is exactly the tail of `AND` that was not there
+  // before.
+  const before = andMembers(inner);
+  const after = andMembers(scoped);
+  const added = after.slice(before.length);
+  if (added.length === 0) return inner;
+
+  const restriction =
+    added.length === 1 ? added[0] : { AND: added };
+
+  return { OR: [{ NOT: restriction }, inner] };
+}
+
+function andMembers(where: unknown): unknown[] {
+  if (typeof where !== "object" || where === null) return [];
+  const value = (where as Record<string, unknown>).AND;
+  if (value === undefined) return [];
+  return Array.isArray(value) ? value : [value];
 }
