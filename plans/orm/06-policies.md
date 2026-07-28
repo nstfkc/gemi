@@ -116,6 +116,19 @@ affected; scoping a `create` means validating or defaulting the tenant column.
 Define what `scope` means per operation rather than assuming the read semantics
 generalise.
 
+**Answered, and one part of it was missed the first time.** `create` got `onCreate`
+plus a guard refusing a scope that has none; `delete`/`deleteMany` scope their
+`where` like a read. `update` scoped its `where` and left `data` untouched — so a
+tenant-scoped update could move a row to another tenant, which is this section's
+own question left unanswered for the one operation where it is least visible.
+Closed by `onUpdate` and `ScopeEscapeError`.
+
+The guards are asked of **the policy that carries the scope**, not of the list.
+Asking the list was a real hole rather than a nicety: `softDeletes()` ships a
+pass-through `onCreate` so its own scope does not trip the create guard, which
+meant adding soft deletes to a model disarmed that guard for the model's tenant
+policy — and the insert ran with the scoped column unset.
+
 ### 6. Redaction
 
 Post-fetch field removal in the shaping stage. Note that this is the one policy

@@ -133,7 +133,7 @@ class Person extends Model {
 
 class Acct extends Model {
   static $schema = acctSchema;
-  static $policy = tenant;
+  static $policies = [tenant];
 }
 
 const ALICE = { id: 1, orgId: 1 };

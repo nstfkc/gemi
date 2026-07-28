@@ -127,12 +127,12 @@ const tenant = (): ModelPolicy => ({
 
 class Folder extends Model {
   static $schema = folderSchema;
-  static $policy = tenant();
+  static $policies = [tenant()];
 }
 
 class Note extends Model {
   static $schema = noteSchema;
-  static $policy = tenant();
+  static $policies = [tenant()];
 }
 
 const OURS = { orgId: 7 };
@@ -299,5 +299,125 @@ describe("policies on nested writes", () => {
 
     const notes: any = await raw.unsafe(`SELECT * FROM "Note"`);
     expect(notes[0].folderId).toBe(1);
+  });
+});
+
+/**
+ * Atomicity of a multi-statement write, which is what makes the policies above
+ * mean anything on the write side.
+ *
+ * A nested write runs the *child's* `$exec`, so the child's policies are
+ * consulted mid-sequence — after the parent row has already been inserted. When
+ * the child denies, "your policy stopped the write" has to mean the whole write,
+ * not the half that ran before the hook was reached. `$exec` therefore opens a
+ * transaction for exactly the calls that are multi-statement, which it can tell
+ * from the compiled plan's `before`/`after` steps.
+ *
+ * Deliberately observed through the raw connection rather than through the ORM:
+ * a scoped read would hide a leftover row belonging to another tenant, which is
+ * the very thing being checked for.
+ */
+describe("a denied nested write leaves nothing behind", () => {
+  let workspace: string;
+  let database: DatabaseManager;
+  let raw: SQL;
+  let previous: Application | undefined;
+
+  beforeAll(async () => {
+    workspace = mkdtempSync(join(tmpdir(), "gemi-orm-atomic-"));
+    const url = `sqlite://${join(workspace, "atomic.db")}`;
+
+    database = new DatabaseManager({ url });
+    raw = new SQL(url);
+    for (const statement of DDL) await raw.unsafe(statement);
+
+    previous = Application.getInstance();
+    const application = new Application();
+    application.instance(DatabaseManager, database as never);
+    Application.setInstance(application);
+  }, 120_000);
+
+  afterAll(async () => {
+    await raw?.unsafe(`DROP TABLE IF EXISTS "Note"`).catch(() => {});
+    await raw?.unsafe(`DROP TABLE IF EXISTS "Folder"`).catch(() => {});
+    await raw?.close();
+    await database?.close();
+    if (previous) Application.setInstance(previous);
+    rmSync(workspace, { recursive: true, force: true });
+  });
+
+  beforeEach(async () => {
+    clearPlanCache();
+    await raw.unsafe(`DELETE FROM "Note"`);
+    await raw.unsafe(`DELETE FROM "Folder"`);
+  });
+
+  test("the parent insert is rolled back when the child's policy denies", async () => {
+    class OpenFolder extends Model {
+      static $schema = folderSchema;
+    }
+    class RefusingNote extends Model {
+      static $schema = noteSchema;
+      static $policies = [{ before: () => false }];
+    }
+    register("Folder", OpenFolder);
+    register("Note", RefusingNote);
+
+    await expect(
+      Model.asUser(OURS, () =>
+        OpenFolder.$exec("create", {
+          data: { code: "ours", notes: { create: { label: "n" } } },
+        }),
+      ),
+    ).rejects.toThrow();
+
+    // The parent was written before the nested step ran, so this is the
+    // assertion that the transaction is real.
+    const folders: any = await raw.unsafe(`SELECT * FROM "Folder"`);
+    const notes: any = await raw.unsafe(`SELECT * FROM "Note"`);
+    expect([...folders]).toHaveLength(0);
+    expect([...notes]).toHaveLength(0);
+  });
+
+  test("a single-statement write still opens no transaction", async () => {
+    class OpenFolder extends Model {
+      static $schema = folderSchema;
+    }
+    register("Folder", OpenFolder);
+
+    const statements: string[] = [];
+    const counted = new Proxy(database, {
+      get(target: any, key) {
+        if (key !== "sql") return target[key];
+        return new Proxy(target.sql, {
+          get(sql: any, method) {
+            if (method !== "unsafe") return sql[method];
+            return (text: string, values?: unknown[]) => {
+              statements.push(text);
+              return sql.unsafe(text, values);
+            };
+          },
+        });
+      },
+    });
+
+    const application = new Application();
+    application.instance(DatabaseManager, counted as never);
+    Application.setInstance(application);
+
+    await Model.asSystem(() =>
+      OpenFolder.$exec("create", { data: { code: "plain" } }),
+    );
+
+    Application.setInstance(
+      (() => {
+        const app = new Application();
+        app.instance(DatabaseManager, database as never);
+        return app;
+      })(),
+    );
+
+    expect(statements.some((text) => /^\s*begin/i.test(text))).toBe(false);
+    expect(statements).toHaveLength(1);
   });
 });

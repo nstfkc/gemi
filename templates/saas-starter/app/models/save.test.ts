@@ -77,7 +77,7 @@ function suite(label: string, url?: string) {
     });
 
     afterEach(() => {
-      delete (SaveUser as any).$policy;
+      delete (SaveUser as any).$policies;
       register("User", UserModel);
     });
 
@@ -203,10 +203,10 @@ function suite(label: string, url?: string) {
       const bob = rows.find((row) => row.email === "b@x.test");
 
       // Scoped to Alice's row only. Bob's save has to find nothing.
-      (SaveUser as any).$policy = {
+      (SaveUser as any).$policies = [{
         scope: () => ({ email: "a@x.test" }),
         onCreate: (_c: any, data: any) => data,
-      } satisfies ModelPolicy;
+      } satisfies ModelPolicy];
 
       bob.name = "Robert";
       await expect(

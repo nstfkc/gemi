@@ -434,7 +434,8 @@ describe("emitArtifacts()", () => {
     const models = files["models.ts"];
 
     expect(models).toContain("options?: ExecOptions,");
-    expect(models).toContain('import { Model, type ExecOptions } from "gemi/orm";');
+    expect(models).toContain("type ExecOptions,");
+    expect(models).toMatch(/^} from "gemi\/orm";$/m);
 
     // The args type is Prisma's, unintersected.
     expect(models).toMatch(

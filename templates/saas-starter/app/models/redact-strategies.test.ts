@@ -127,12 +127,12 @@ class Book extends Model {
   static $schema = bookSchema;
   // A policy on the *to-one* side, so the fold can be checked in the direction
   // where the folded value is a single object rather than an array.
-  static $policy = hideNote;
+  static $policies = [hideNote];
 }
 
 class Ledger extends Model {
   static $schema = ledgerSchema;
-  static $policy = hideSecret;
+  static $policies = [hideSecret];
 }
 
 const RUN = POSTGRES_URL ? describe : describe.skip;

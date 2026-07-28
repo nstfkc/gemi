@@ -60,10 +60,12 @@ describe("the case the query-time guard cannot reach", () => {
 
   test("an unregistered policied subclass is invisible to the guard", () => {
     class ScopedOrganization extends generated.OrganizationModel {
-      static $policy = {
-        scope: () => ({ id: -1 }),
-        onCreate: (_context: unknown, data: unknown) => data,
-      };
+      static $policies = [
+        {
+          scope: () => ({ id: -1 }),
+          onCreate: (_context: unknown, data: unknown) => data,
+        },
+      ];
     }
 
     // Deliberately no `register("Organization", ScopedOrganization)` — that
@@ -91,10 +93,12 @@ describe("the case the query-time guard cannot reach", () => {
 
   test("and writing the register line is what clears it", () => {
     class ScopedOrganization extends generated.OrganizationModel {
-      static $policy = {
-        scope: () => ({ id: -1 }),
-        onCreate: (_context: unknown, data: unknown) => data,
-      };
+      static $policies = [
+        {
+          scope: () => ({ id: -1 }),
+          onCreate: (_context: unknown, data: unknown) => data,
+        },
+      ];
     }
 
     register("Organization", ScopedOrganization);

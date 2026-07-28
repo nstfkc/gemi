@@ -1,6 +1,10 @@
 import { describe, expect, test } from "vitest";
 
-import { PolicyDeniedError, UnsupportedQueryError } from "./errors";
+import {
+  PolicyDeniedError,
+  ScopeEscapeError,
+  UnsupportedQueryError,
+} from "./errors";
 import { organization, user } from "./fixtures";
 import {
   applyNestedPolicies,
@@ -43,7 +47,7 @@ describe("dispatch through the prototype chain", () => {
   test("a model's own policy is found", () => {
     const own: ModelPolicy = { scope: () => ({ a: 1 }) };
     class Owner {
-      static $policy = own;
+      static $policies = [own];
     }
     expect(policiesFor(Owner)).toEqual([own]);
   });
@@ -57,10 +61,10 @@ describe("dispatch through the prototype chain", () => {
     const derived: ModelPolicy = { scope: () => ({ organizationId: 7 }) };
 
     class Base {
-      static $policy = base;
+      static $policies = [base];
     }
     class Derived extends Base {
-      static $policy = derived;
+      static $policies = [derived];
     }
 
     expect(policiesFor(Derived)).toEqual([base, derived]);
@@ -72,24 +76,24 @@ describe("dispatch through the prototype chain", () => {
     const c: ModelPolicy = { before: () => true };
 
     class A {
-      static $policy = a;
+      static $policies = [a];
     }
     class B extends A {
-      static $policy = b;
+      static $policies = [b];
     }
     class C extends B {
-      static $policy = c;
+      static $policies = [c];
     }
 
     expect(policiesFor(C)).toEqual([a, b, c]);
   });
 
-  // A plain property read would find the base's `$policy` at every level of the
+  // A plain property read would find the base's `$policies` at every level of the
   // chain and collect it once per level.
   test("an inherited policy is not counted twice", () => {
     const base: ModelPolicy = { scope: () => ({ a: 1 }) };
     class Base {
-      static $policy = base;
+      static $policies = [base];
     }
     class Derived extends Base {}
     class Grandchild extends Derived {}
@@ -985,5 +989,231 @@ describe("relation filters in where", () => {
     );
 
     expect(out.where).toBe(where);
+  });
+});
+
+/**
+ * Composition, which is the whole reason `$policies` is a list.
+ *
+ * The single `$policy` it replaced left two ways to combine policies and both
+ * were traps. Spreading two objects that each carry a `scope` silently keeps
+ * only the last — no error, no warning, and the dropped one is usually the
+ * shared guard rather than the local rule. The alternative was an intermediate
+ * model class per combination, which does not compose across models at all
+ * because every generated base is a different class.
+ */
+describe("$policies as a list", () => {
+  test("entries apply in array order", () => {
+    const first: ModelPolicy = { scope: () => ({ a: 1 }) };
+    const second: ModelPolicy = { scope: () => ({ b: 2 }) };
+    class Model {
+      static $policies = [first, second];
+    }
+
+    expect(policiesFor(Model)).toEqual([first, second]);
+  });
+
+  test("a base's list comes before a derived one's, so a base can only be narrowed", () => {
+    const shared: ModelPolicy = { scope: () => ({ tenant: 1 }) };
+    const local: ModelPolicy = { scope: () => ({ own: 2 }) };
+    class Base {
+      static $policies = [shared];
+    }
+    class Derived extends Base {
+      static $policies = [local];
+    }
+
+    expect(policiesFor(Derived)).toEqual([shared, local]);
+  });
+
+  test("both scopes reach the where, rather than one replacing the other", () => {
+    const out = applyPolicies(
+      [{ scope: () => ({ deletedAt: null }) }, { scope: () => ({ orgId: 7 }) }],
+      context(),
+      { where: { name: "a" } },
+    );
+
+    expect(out.where).toEqual({
+      name: "a",
+      AND: [{ deletedAt: null }, { orgId: 7 }],
+    });
+  });
+
+  /**
+   * A class entry is instantiated once and the *same* instance comes back on
+   * every call. Not a performance point: `$exec`'s divergence guard and
+   * `assertPoliciesRegistered` both compare two chains element by element, so a
+   * fresh instance per call would make a class-form policy fail that comparison
+   * against itself.
+   */
+  test("a class entry is instantiated once, with stable identity", () => {
+    class Tenant {
+      scope() {
+        return { orgId: 1 };
+      }
+    }
+    class Owner {
+      static $policies = [Tenant];
+    }
+
+    const first = policiesFor(Owner);
+    const second = policiesFor(Owner);
+
+    expect(first[0]).toBeInstanceOf(Tenant);
+    expect(first[0]).toBe(second[0]);
+  });
+});
+
+/**
+ * The create guard, asked of one policy rather than of the chain.
+ *
+ * It used to pass when *any* policy in the list had an `onCreate`, and
+ * `softDeletes()` ships a pass-through one so that its own scope does not trip
+ * the check. Composing the two therefore disarmed the guard for the tenant
+ * policy, and the insert ran with the scoped column unset — the exact outcome
+ * the error message describes, produced by the guard meant to prevent it.
+ */
+describe("assertCreateCovered is per policy", () => {
+  const tenant: ModelPolicy = { scope: (ctx: any) => ({ orgId: ctx.user.id }) };
+  const passThrough: ModelPolicy = {
+    scope: () => ({ deletedAt: null }),
+    onCreate: (_ctx, data) => data,
+  };
+
+  test("a scope with no onCreate is still refused on its own", () => {
+    expect(() =>
+      applyPolicies([tenant], context({ operation: "create" as any }), {
+        data: { name: "a" },
+      }),
+    ).toThrow(UnsupportedQueryError);
+  });
+
+  test("another policy's onCreate no longer covers for it", () => {
+    expect(() =>
+      applyPolicies(
+        [passThrough, tenant],
+        context({ operation: "create" as any }),
+        { data: { name: "a" } },
+      ),
+    ).toThrow(UnsupportedQueryError);
+  });
+
+  test("a policy that answers for itself passes, beside one that does not need to", () => {
+    const covered: ModelPolicy = {
+      scope: (ctx: any) => ({ orgId: ctx.user.id }),
+      onCreate: (ctx: any, data) => ({ ...data, orgId: ctx.user.id }),
+    };
+
+    const out = applyPolicies(
+      [passThrough, covered],
+      context({ operation: "create" as any }),
+      { data: { name: "a" } },
+    );
+
+    expect(out.data).toEqual({ name: "a", orgId: 1 });
+  });
+});
+
+/**
+ * The update half of the same question. A scope says which rows may be touched
+ * and nothing about the values written, so a tenant-scoped update could hand one
+ * of its own rows to another tenant — after which the caller can neither read it
+ * back nor put it right.
+ */
+describe("scope escape on update", () => {
+  const tenant: ModelPolicy = {
+    scope: (ctx: any) => ({ orgId: ctx.user.organizationId }),
+    onCreate: (_ctx, data) => data,
+  };
+
+  test("an ordinary update is untouched", () => {
+    const out = applyPolicies([tenant], context({ operation: "update" as any }), {
+      where: { id: 1 },
+      data: { name: "x" },
+    });
+
+    expect(out.data).toEqual({ name: "x" });
+    expect(out.where).toEqual({ id: 1, AND: [{ orgId: 7 }] });
+  });
+
+  test("writing the scoped column is refused", () => {
+    expect(() =>
+      applyPolicies([tenant], context({ operation: "update" as any }), {
+        where: { id: 1 },
+        data: { orgId: 999 },
+      }),
+    ).toThrow(ScopeEscapeError);
+  });
+
+  test("updateMany too, where there is no where at all to look at", () => {
+    expect(() =>
+      applyPolicies([tenant], context({ operation: "updateMany" as any }), {
+        data: { orgId: 999 },
+      }),
+    ).toThrow(ScopeEscapeError);
+  });
+
+  test("an onUpdate takes responsibility and the write proceeds", () => {
+    const owning: ModelPolicy = {
+      ...tenant,
+      onUpdate: (ctx: any, data) => ({ ...data, orgId: ctx.user.organizationId }),
+    };
+
+    const out = applyPolicies([owning], context({ operation: "update" as any }), {
+      where: { id: 1 },
+      data: { orgId: 999 },
+    });
+
+    // Reasserted rather than accepted, which is what this policy chose to mean.
+    expect(out.data).toEqual({ orgId: 7 });
+  });
+
+  /**
+   * Per policy, like the create guard. Soft deletes writes its own scoped column
+   * on purpose and says so with a pass-through `onUpdate`; that must not become
+   * permission for the tenant policy's column.
+   */
+  test("one policy's onUpdate does not cover another's column", () => {
+    const soft: ModelPolicy = {
+      scope: () => ({ deletedAt: null }),
+      onCreate: (_ctx, data) => data,
+      onUpdate: (_ctx, data) => data,
+    };
+
+    expect(() =>
+      applyPolicies([soft, tenant], context({ operation: "update" as any }), {
+        where: { id: 1 },
+        data: { orgId: 999 },
+      }),
+    ).toThrow(ScopeEscapeError);
+
+    // ...and the soft-delete write itself is allowed, by the policy that owns it.
+    expect(() =>
+      applyPolicies([soft, tenant], context({ operation: "update" as any }), {
+        where: { id: 1 },
+        data: { deletedAt: new Date() },
+      }),
+    ).not.toThrow();
+  });
+
+  /**
+   * The documented limit. A scope built from combinators is not attributed to
+   * any column, so the guard cannot fire — stated as a test so that changing it
+   * is a decision rather than an accident.
+   */
+  test("a combinator scope is not attributed, and is not guarded", () => {
+    const complex: ModelPolicy = {
+      scope: (ctx: any) => ({
+        OR: [{ orgId: ctx.user.organizationId }, { public: true }],
+      }),
+      onCreate: (_ctx, data) => data,
+    };
+
+    expect(() =>
+      applyPolicies([complex], context({ operation: "update" as any }), {
+        where: { id: 1 },
+        data: { orgId: 999 },
+      }),
+    ).not.toThrow();
   });
 });

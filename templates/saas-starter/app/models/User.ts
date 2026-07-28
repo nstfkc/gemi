@@ -9,6 +9,24 @@ import { UserModel } from "./generated";
 // Queries return plain objects, never instances of this class — `select` makes
 // that unavoidable, since a `Pick<User, "id">` hydrated as a `User` would carry
 // methods reading fields the query never fetched.
+// Policies go in `$policies`, which is a list so that composition needs no
+// intermediate class and no object spread:
+//
+//   import { softDeletes } from "gemi/orm"
+//   import { UserPolicy } from "./generated"
+//
+//   export class User extends UserModel {
+//     static $policies: UserPolicy[] = [
+//       softDeletes<User>(),
+//       { scope: (ctx) => ({ organizationId: ctx.user.organizationId }),
+//         onCreate: (ctx, data) => ({ ...data, organizationId: ctx.user.organizationId }),
+//         onUpdate: (_ctx, data) => data },
+//     ]
+//   }
+//
+// The `UserPolicy` annotation is what types `ctx`, `data` and the returned
+// `where` against this model — without it the entries are inferred from the
+// literal and the parameters are implicitly `any`.
 export class User extends UserModel {}
 
 // Re-registers the name against *this* class, replacing the generated base that
