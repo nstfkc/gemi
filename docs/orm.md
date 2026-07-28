@@ -126,6 +126,21 @@ stepping stone: a `Pick<User, "id">` hydrated as a `User` would carry methods re
 query never fetched. See [Rows and entities](./orm-rows-and-entities.md) for the two opt-in levels
 above it — `track` + `save`, and `wrap`.
 
+### Looking a row up by a composite key
+
+`findUnique`, `update`, `delete` and `upsert` need a key that is unique. A composite one — whether
+it is a compound `@@id([a, b])` or an `@@unique([a, b])` — is named in Prisma's compound form:
+
+```ts
+await Membership.findUnique({
+  where: { organizationId_userId: { organizationId, userId } },
+})
+```
+
+Every member is required. A composite key is only unique as a whole, so a partial one would quietly
+become a non-unique lookup — which is the failure `findUnique` exists to prevent, and it is refused
+by name.
+
 ### Per-call options
 
 A second parameter, not a key inside `args` — intersecting Prisma's own arg types with a

@@ -150,6 +150,19 @@ model PasswordResetToken {
   @@index([userId])
 }
 
+// A compound `@@id`, which nothing else in this schema has: the only other
+// composite key here is SocialAccount's `@@unique([username, provider])`, and
+// that is a different code path. A compound *primary* key was therefore never
+// compared against Prisma, and was unreachable by key at all — see #80.
+model Membership {
+  organizationId Int
+  userId         Int
+  role           Int      @default(2)
+  createdAt      DateTime @default(now())
+
+  @@id([organizationId, userId])
+}
+
 model MagicLinkToken {
   id    Int    @id @default(autoincrement())
   token String

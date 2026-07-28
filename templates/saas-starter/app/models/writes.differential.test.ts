@@ -9,6 +9,7 @@ import {
 } from "./differential";
 import {
   AccountModel,
+  MembershipModel,
   OrganizationModel,
   SocialAccountModel,
   UserModel,
@@ -239,6 +240,7 @@ function suite(label: string, url?: string) {
       differential = await createDifferential({
         models: {
           User: UserModel as never,
+          Membership: MembershipModel as never,
           SocialAccount: SocialAccountModel as never,
           Account: AccountModel as never,
           Organization: OrganizationModel as never,
@@ -269,6 +271,61 @@ function suite(label: string, url?: string) {
         },
         { tables: ["Organization"] },
       );
+    });
+
+    /**
+     * A compound `@@id`, which was unreachable by key at all (#80): the
+     * compound form was rejected as an unknown field and the field-by-field
+     * form for not naming a unique key, each error pointing at the other.
+     *
+     * Against Prisma, so the *shape* of the compound argument is its answer
+     * rather than mine — including `upsert`, which compiles the key into an
+     * `on conflict` target and would resolve against the wrong constraint if it
+     * named the wrong columns.
+     */
+    describe("a compound @@id", () => {
+      const key = { organizationId_userId: { organizationId: 1, userId: 7 } };
+
+      test("findUnique by the compound key", async () => {
+        await differential.reset();
+        await differential.prisma.membership.create({
+          data: { organizationId: 1, userId: 7, role: 0 },
+        });
+
+        await differential.expectSame("Membership", "findUnique", { where: key });
+        await differential.expectSame("Membership", "findUnique", {
+          where: { organizationId_userId: { organizationId: 9, userId: 9 } },
+        });
+      });
+
+      test.each([
+        ["update", { where: key, data: { role: 1 } }],
+        ["delete", { where: key }],
+        [
+          "upsert inserting",
+          {
+            where: { organizationId_userId: { organizationId: 2, userId: 8 } },
+            create: { organizationId: 2, userId: 8, role: 1 },
+            update: { role: 2 },
+          },
+        ],
+        [
+          "upsert updating",
+          { where: key, create: { organizationId: 1, userId: 7 }, update: { role: 2 } },
+        ],
+      ])("%s by the compound key", async (_label, args) => {
+        await differential.reset();
+        await differential.prisma.membership.create({
+          data: { organizationId: 1, userId: 7, role: 0 },
+        });
+
+        await differential.expectSameWrite(
+          "Membership",
+          _label.startsWith("upsert") ? "upsert" : (_label as string),
+          args,
+          { tables: ["Membership"] },
+        );
+      });
     });
 
     test("create on a model with no @updatedAt", async () => {

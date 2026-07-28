@@ -197,6 +197,58 @@ export const MagicLinkToken: ModelSchema = {
   "relations": {}
 };
 
+export const Membership: ModelSchema = {
+  "name": "Membership",
+  "table": "Membership",
+  "fields": {
+    "organizationId": {
+      "name": "organizationId",
+      "column": "organizationId",
+      "type": "Int",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false
+    },
+    "userId": {
+      "name": "userId",
+      "column": "userId",
+      "type": "Int",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false
+    },
+    "role": {
+      "name": "role",
+      "column": "role",
+      "type": "Int",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false,
+      "default": {
+        "kind": "value",
+        "value": 2
+      }
+    },
+    "createdAt": {
+      "name": "createdAt",
+      "column": "createdAt",
+      "type": "DateTime",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false,
+      "default": {
+        "kind": "now"
+      }
+    }
+  },
+  "primaryKey": [
+    "organizationId",
+    "userId"
+  ],
+  "uniques": [],
+  "relations": {}
+};
+
 export const Organization: ModelSchema = {
   "name": "Organization",
   "table": "Organization",

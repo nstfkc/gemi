@@ -299,6 +299,140 @@ export class MagicLinkTokenModel extends Model {
 // accepted: `Model`'s constructor is `protected`, so the only way to get an
 // instance is `wrap`, which assigns a complete row. See bin/orm/emit.ts.
 // oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
+export interface MembershipModel extends Prisma.MembershipGetPayload<{}> {}
+
+export type MembershipPolicy = ModelPolicy<
+  Prisma.MembershipWhereInput,
+  Prisma.MembershipCreateInput,
+  Prisma.MembershipGetPayload<{}>
+>;
+
+// The same shape with `scope`, `onCreate` and `onUpdate` abstract, so a policy
+// that scopes cannot omit the write halves. The runtime refuses those
+// combinations too — this makes it `TS2515` at the class declaration instead of
+// an error on the first write that reaches production.
+export abstract class MembershipScopedPolicy extends ScopedPolicy<
+  Prisma.MembershipWhereInput,
+  Prisma.MembershipCreateInput,
+  Prisma.MembershipGetPayload<{}>
+> {}
+
+export class MembershipModel extends Model {
+  static $schema = schema.Membership;
+
+  // Narrowed from `Model`'s `PolicyEntry[]` to this model's own, so a policy
+  // written for another model is a type error here rather than a scope compiled
+  // against columns that do not exist.
+  static $policies?: readonly PolicyEntry<
+    Prisma.MembershipWhereInput,
+    Prisma.MembershipCreateInput,
+    Prisma.MembershipGetPayload<{}>
+  >[];
+
+  static findMany<T extends Prisma.MembershipFindManyArgs>(
+    args?: Subset<T, Prisma.MembershipFindManyArgs>,
+    options?: ExecOptions,
+  ): Promise<Prisma.MembershipGetPayload<T>[]> {
+    return this.$exec("findMany", args, options) as Promise<Prisma.MembershipGetPayload<T>[]>;
+  }
+
+  static findFirst<T extends Prisma.MembershipFindFirstArgs>(
+    args?: Subset<T, Prisma.MembershipFindFirstArgs>,
+    options?: ExecOptions,
+  ): Promise<Prisma.MembershipGetPayload<T> | null> {
+    return this.$exec("findFirst", args, options) as Promise<Prisma.MembershipGetPayload<T> | null>;
+  }
+
+  static findFirstOrThrow<T extends Prisma.MembershipFindFirstOrThrowArgs>(
+    args?: Subset<T, Prisma.MembershipFindFirstOrThrowArgs>,
+    options?: ExecOptions,
+  ): Promise<Prisma.MembershipGetPayload<T>> {
+    return this.$exec("findFirstOrThrow", args, options) as Promise<Prisma.MembershipGetPayload<T>>;
+  }
+
+  static findUnique<T extends Prisma.MembershipFindUniqueArgs>(
+    args: Subset<T, Prisma.MembershipFindUniqueArgs>,
+    options?: ExecOptions,
+  ): Promise<Prisma.MembershipGetPayload<T> | null> {
+    return this.$exec("findUnique", args, options) as Promise<Prisma.MembershipGetPayload<T> | null>;
+  }
+
+  static findUniqueOrThrow<T extends Prisma.MembershipFindUniqueOrThrowArgs>(
+    args: Subset<T, Prisma.MembershipFindUniqueOrThrowArgs>,
+    options?: ExecOptions,
+  ): Promise<Prisma.MembershipGetPayload<T>> {
+    return this.$exec("findUniqueOrThrow", args, options) as Promise<Prisma.MembershipGetPayload<T>>;
+  }
+
+  static count(
+    args?: Omit<Prisma.MembershipCountArgs, "select">,
+  ): Promise<number> {
+    return this.$exec("count", args) as Promise<number>;
+  }
+
+  static create<T extends Prisma.MembershipCreateArgs>(
+    args: Subset<T, Prisma.MembershipCreateArgs>,
+    options?: ExecOptions,
+  ): Promise<Prisma.MembershipGetPayload<T>> {
+    return this.$exec("create", args, options) as Promise<Prisma.MembershipGetPayload<T>>;
+  }
+
+  static update<T extends Prisma.MembershipUpdateArgs>(
+    args: Subset<T, Prisma.MembershipUpdateArgs>,
+    options?: ExecOptions,
+  ): Promise<Prisma.MembershipGetPayload<T>> {
+    return this.$exec("update", args, options) as Promise<Prisma.MembershipGetPayload<T>>;
+  }
+
+  static delete<T extends Prisma.MembershipDeleteArgs>(
+    args: Subset<T, Prisma.MembershipDeleteArgs>,
+    options?: ExecOptions,
+  ): Promise<Prisma.MembershipGetPayload<T>> {
+    return this.$exec("delete", args, options) as Promise<Prisma.MembershipGetPayload<T>>;
+  }
+
+  static upsert<T extends Prisma.MembershipUpsertArgs>(
+    args: Subset<T, Prisma.MembershipUpsertArgs>,
+    options?: ExecOptions,
+  ): Promise<Prisma.MembershipGetPayload<T>> {
+    return this.$exec("upsert", args, options) as Promise<Prisma.MembershipGetPayload<T>>;
+  }
+
+  static createMany(
+    args?: Prisma.MembershipCreateManyArgs,
+  ): Promise<{ count: number }> {
+    return this.$exec("createMany", args) as Promise<{ count: number }>;
+  }
+
+  static updateMany(
+    args?: Prisma.MembershipUpdateManyArgs,
+  ): Promise<{ count: number }> {
+    return this.$exec("updateMany", args) as Promise<{ count: number }>;
+  }
+
+  static deleteMany(
+    args?: Prisma.MembershipDeleteManyArgs,
+  ): Promise<{ count: number }> {
+    return this.$exec("deleteMany", args) as Promise<{ count: number }>;
+  }
+
+  static wrap<C extends { prototype: unknown }, R extends Prisma.MembershipGetPayload<{}>>(
+    this: C,
+    row: R,
+  ): C["prototype"] & R {
+    return (Model.wrap as (row: object) => any).call(this, row);
+  }
+}
+
+// Merges the row's columns into the instance type, so a method on a subclass can
+// read `this.email`. No runtime output.
+//
+// oxlint flags class/interface merging because TypeScript does not check the
+// merged properties are initialised — a directly constructed instance would type
+// as carrying every column while holding none. That hazard is closed rather than
+// accepted: `Model`'s constructor is `protected`, so the only way to get an
+// instance is `wrap`, which assigns a complete row. See bin/orm/emit.ts.
+// oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
 export interface OrganizationModel extends Prisma.OrganizationGetPayload<{}> {}
 
 export type OrganizationPolicy = ModelPolicy<
