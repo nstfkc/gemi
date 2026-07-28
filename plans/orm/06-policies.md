@@ -210,9 +210,27 @@ one for a subclass in application code it never sees. Options, none built:
 - Have the generator emit an application-side barrel that re-exports and
   registers every `app/models/*.ts` subclass it finds. Codegen reading
   application source is a new kind of coupling and wants its own decision.
-- Register on first *definition* rather than on first import. There is no hook:
-  `static $policy = …` in a subclass body is a [[Define]] on the subclass, so a
-  setter on the base is bypassed.
+- Register on first *definition* rather than on first import. There is no hook —
+  `static $policy = …` in a subclass body is a `[[DefineOwnProperty]]` on the
+  subclass, so a setter on the base is bypassed. Verified rather than reasoned
+  about: the setter does not fire and `Object.hasOwn(Child, "$policy")` is true.
+
+  **The dependency is worth naming, because the reason could expire.** Define
+  semantics are what ES2022 specifies and what Bun does, and this monorepo sets
+  `target: ES2022` in `@repo/typescript-config/base.json`. Under *assignment*
+  semantics — `useDefineForClassFields: false`, or an older target —
+  `static $policy = …` compiles to `Child.$policy = …` and an inherited setter
+  **would** fire.
+
+  That does not revive the option, and the reason it does not is the sharper
+  version of the point: **the subclass is application code**, compiled by the
+  application's toolchain, not by ours. A registration mechanism resting on a
+  setter would therefore work or silently not work depending on a consumer's
+  build configuration — and "silently not" here is an unscoped cross-tenant
+  read. A hook that is load-bearing for data access cannot be one that a
+  downstream `tsconfig.json` can turn off without any error. So: ruled out for
+  portability rather than for impossibility, which is the stronger reason and
+  the one that survives a change of target.
 - Make `$policy` a method call — `static $policy = policy(Membership, {…})` —
   so declaring one registers it. Changes the documented shape of every policy,
   and the `docs/authorization.md` examples with it.
