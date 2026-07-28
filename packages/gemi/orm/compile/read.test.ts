@@ -9,7 +9,9 @@ import {
   UnsupportedQueryError,
 } from "../errors";
 import { USER_COLUMNS, account, mapped, user } from "../fixtures";
+import { compile } from "./index";
 import { compileRead } from "./read";
+import { compileWrite } from "./write";
 import { compileWhere } from "./where";
 import * as registry from "../registry";
 import type { RelationStrategy } from "./plan-relations";
@@ -670,6 +672,59 @@ describe("arguments refused by design", () => {
 });
 
 // The property the plan cache is built on, asserted directly.
+/**
+ * #61's second half: **every refusal says what to do instead.**
+ *
+ * The first half — separating "not yet" from "out of scope" — landed in #78 as
+ * `UnsupportedByDesignError`. This is the other one: `detail` was optional, and
+ * the call sites that omitted it were the highest-traffic ones, on the path a
+ * typo takes. They said only *that* something was refused, to the reader least
+ * likely to know why.
+ *
+ * `detail` is required now, so `tsc` enforces it rather than a convention —
+ * and the enforcement found three more sites than a search for the pattern
+ * did, which is the argument for the type over the grep.
+ *
+ * The assertion is deliberately not "the message contains X": it is that a
+ * refusal is more than its first sentence. A call site added later with an
+ * empty string would satisfy the compiler and fail here.
+ */
+describe("every refusal says what to do instead", () => {
+  const REFUSALS: [string, () => unknown][] = [
+    ["an argument the read does not take", () => text({ nope: 1 })],
+    ["an argument the write does not take", () =>
+      compileWrite(user, "create", { data: { email: "a@b.c" }, nope: 1 } as any, sqlite)],
+    ["an operator that is not one", () => text({ where: { email: { weird: 1 } } })],
+    ["a mode that is neither", () =>
+      text({ where: { email: { contains: "x", mode: "loud" } } })],
+    ["an operation that is not one", () => compile(user, "frobnicate" as any, {}, sqlite)],
+  ];
+
+  test.each(REFUSALS)("%s", (_label, run) => {
+    let message = "";
+    try {
+      run();
+    } catch (error) {
+      message = (error as Error).message;
+    }
+
+    expect(message).not.toBe("");
+
+    // The prefix is `does not support 'x' yet (Model.op).` — a refusal that
+    // stops there is the thing #61 is about, so the detail has to follow it.
+    const detail = message.slice(message.indexOf(").") + 2).trim();
+    expect(detail.length).toBeGreaterThan(0);
+  });
+
+  /**
+   * The two errors that already met this standard, and set it: both enumerate
+   * the valid names rather than only rejecting the invalid one.
+   */
+  test("an unknown field still lists the fields", () => {
+    expect(() => text({ where: { nope: 1 } })).toThrow(/Known fields:/);
+  });
+});
+
 describe("compile is a function of shape, not values", () => {
   test("the same shape with different values is byte identical", () => {
     const a = compileRead(user, "findMany", { where: { email: "a" } }, sqlite);

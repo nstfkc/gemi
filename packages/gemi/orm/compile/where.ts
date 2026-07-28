@@ -514,6 +514,7 @@ function compileFieldFilter(
         `mode: ${JSON.stringify(filter.mode)}`,
         schema.name,
         context.operation,
+        `Prisma takes 'default' or 'insensitive'.`,
       );
     }
     if (!dialect.supportsInsensitiveMode) {
@@ -538,6 +539,7 @@ function compileFieldFilter(
         `where.${field.name}.${key}`,
         schema.name,
         context.operation,
+        `A scalar filter takes ${[...OPERATORS].sort().join(", ")}.`,
       );
     }
 

@@ -124,7 +124,13 @@ export function compileWrite(
     case "upsert":
       return compileUpsert(schema, op, args, dialect);
     default:
-      throw new UnsupportedQueryError(op, schema.name, op);
+      throw new UnsupportedQueryError(
+        op,
+        schema.name,
+        op,
+        `'${op}' is not a write operation. The writes are ` +
+          `${Object.keys(WRITE_ARGS).sort().join(", ")}.`,
+      );
   }
 }
 
@@ -1346,7 +1352,12 @@ function assertArgs(schema: ModelSchema, op: Operation, args: any): void {
   for (const key of Object.keys(args).sort()) {
     if (args[key] === undefined) continue;
     if (!allowed.has(key)) {
-      throw new UnsupportedQueryError(key, schema.name, op);
+      throw new UnsupportedQueryError(
+        key,
+        schema.name,
+        op,
+        `${op} takes ${[...allowed].sort().join(", ")}.`,
+      );
     }
   }
 

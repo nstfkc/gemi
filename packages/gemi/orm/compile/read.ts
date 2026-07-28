@@ -356,6 +356,11 @@ function assertArgs(schema: ModelSchema, op: Operation, args: any): void {
       throw new UnsupportedByDesignError(key, schema.name, op, permanent);
     }
 
-    throw new UnsupportedQueryError(key, schema.name, op);
+    throw new UnsupportedQueryError(
+      key,
+      schema.name,
+      op,
+      `${op} takes ${[...allowed].sort().join(", ")}.`,
+    );
   }
 }

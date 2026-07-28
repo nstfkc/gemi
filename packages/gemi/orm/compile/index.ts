@@ -35,7 +35,14 @@ export function compile(
     return compileRead(schema, op, args, dialect, strategy);
   }
   if (isWriteOperation(op)) return compileWrite(schema, op, args, dialect);
-  throw new UnsupportedQueryError(op, schema.name, op);
+  throw new UnsupportedQueryError(
+    op,
+    schema.name,
+    op,
+    `'${op}' is not an operation this ORM compiles — the reads, the writes, ` +
+      `'aggregate' and 'groupBy' are, and a raw statement goes through ` +
+      `'DB.query' or 'DB.execute'.`,
+  );
 }
 
 export { compileRead, isReadOperation };
