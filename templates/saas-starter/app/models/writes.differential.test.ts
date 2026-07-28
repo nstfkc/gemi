@@ -1129,6 +1129,28 @@ function suite(label: string, url?: string) {
       );
     });
 
+    /**
+     * The owning-side miss — the case that was missing, and the reason its
+     * twin's fix did not carry over.
+     *
+     * The third seeded user has no organisation, so the foreign key is null and
+     * there is nothing to update. Prisma answers P2025 (`notFound`); the
+     * harness compares the failure *kind*, so an `UnsupportedQueryError` here
+     * reads as `other` and disagrees. The connected to-one cases above never
+     * touch this branch.
+     */
+    test("updating a to-one that is not there raises, as Prisma does", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { publicId: "p3" },
+          data: { organization: { update: { name: "Nowhere" } } },
+        },
+        { tables: ["User", "Organization"] },
+      );
+    });
+
     test("nested connect on the foreign side repoints the child", async () => {
       await differential.reset();
       await differential.prisma.account.create({

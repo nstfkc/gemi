@@ -419,13 +419,19 @@ function planOwningSide(
 
         const linked = parent[fkField];
         if (linked === null || linked === undefined) {
-          throw new UnsupportedQueryError(
-            `data.${relation.name}.update`,
-            schema.name,
-            operation,
-            `this ${schema.name} has no '${relation.name}' to update — ` +
-              `'${fkField}' is null. Prisma raises here too.`,
-          );
+          // The same error as the foreign side's miss, and for the same reason
+          // — this is one condition with two spellings, not two conditions.
+          // Measured rather than inferred: Prisma answers P2025 here too,
+          // *"depends on one or more records that were required but not
+          // found"*, which `failureKind` maps to `notFound`.
+          //
+          // `UnsupportedQueryError` was wrong twice over. It classifies as
+          // `other`, so the differential harness would have called it agreement
+          // with a Prisma refusal of a different kind — and it prefixes "does
+          // not support … yet", which reports a fully-implemented operation as
+          // unimplemented because a row is missing. That vocabulary has been
+          // corrected once each on #82 and #88.
+          throw new RecordNotFoundError(relation.model, "update");
         }
 
         const operandAt = at(args);
