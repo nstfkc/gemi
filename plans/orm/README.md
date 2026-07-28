@@ -18,8 +18,28 @@ This work is a **third level in an open PR stack**. Branch from
 main
  └── refactor/laravel-container-architecture   PR #30, OPEN — container/providers
       └── feat/database-layer                  PR #33, OPEN — DatabaseManager, DB facade
-           └── feat/orm                        this work
+           └── feat/orm                        PR #45, OPEN — iterations 1-6
 ```
+
+### Where it actually is now
+
+Nine levels, not three. Recorded because the diagram above described the state on
+the day this plan was written and a reader following it would branch under work
+that has since landed on top. **Every one of these is `MERGEABLE`/`CLEAN`** and
+each was verified at its own tip; they are listed in merge order.
+
+| PR | Branch | What it adds |
+| --- | --- | --- |
+| #53 | `feat/orm-08-eloquent-doorway` | opt-in provenance, `save(row)`, `wrap`, the ORM auth adapter |
+| #54 | `feat/orm-09-lateral-strategy` | `LATERAL` + `json_agg`, nested policies on the arg tree |
+| #56 | `fix/orm-bytes-container` | `Bytes` is a `Uint8Array` on every dialect; the differential harness stops erasing containers |
+| #55 | `docs/orm` | `docs/orm.md`, and the two ORM pages linked from all four indexes |
+| #57 | `feat/orm-registration-audit` | `assertPoliciesRegistered`, for the policied subclass nobody registered |
+| #58 | `feat/orm-relation-filters` | relation filters, `_count`, relation orderings, implicit m-n, and six audit findings |
+
+Iterations 1–7 are on `feat/orm` (#45) and below. The two entries under
+[Open decisions](#open-decisions) are the only remaining items on this plan; the
+rest of it is built, and #58's description carries the audit trail.
 
 `feat/database-layer` is at `e3c2e0b`. Everything this plan depends on exists
 there — `database/`, `container/`, `foundation/`, `kernel/`, `support/`,
