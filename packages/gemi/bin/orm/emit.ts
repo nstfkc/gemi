@@ -520,17 +520,53 @@ function operation(model: string, op: ReadOperation): string {
 }
 
 /**
- * `count` is the one read whose return type is not a payload. Prisma's own
- * `count` also accepts a `select` that turns the result into an object of
- * per-field counts; that is aggregate territory, so it is omitted and the
- * return type is plainly `number`.
+ * `count`, whose result depends on whether it was given a `select`.
+ *
+ * Without one it is a plain `number`. With one it is Prisma's object of
+ * per-field counts — `{ _all: 3, email: 2 }`, where each field's number is the
+ * rows whose column is *not null*. Both spellings are Prisma's, so the overload
+ * is what keeps the return type exact rather than widening it to
+ * `number | object` for every caller.
+ *
+ * `GetScalarType` is Prisma's own mapper for this: it turns the caller's select
+ * into the shape of the payload it produces, which is how `count({ select: {
+ * email: true } })` narrows to `{ email: number }` and not to the whole model.
  */
 function countOperation(model: string): string {
   return `
-  static count(
-    args?: Omit<Prisma.${model}CountArgs, "select">,
-  ): Promise<number> {
-    return this.$exec("count", args) as Promise<number>;
+  static count(args?: Omit<Prisma.${model}CountArgs, "select">): Promise<number>;
+  static count<T extends Prisma.${model}CountArgs>(
+    args: Prisma.SelectSubset<T, Prisma.${model}CountArgs> & {
+      select: NonNullable<T["select"]>;
+    },
+  ): Promise<Prisma.GetScalarType<T["select"], Prisma.${model}CountAggregateOutputType>>;
+  static count(args?: unknown): Promise<unknown> {
+    return this.$exec("count", args as never);
+  }
+`;
+}
+
+/**
+ * `aggregate` — `_count`, `_avg`, `_sum`, `_min`, `_max` over a filtered set.
+ *
+ * The payload type is Prisma's `GetXAggregateType<T>`, which is what makes
+ * `_max: { position: true }` narrow to `{ _max: { position: number | null } }`
+ * rather than to every field of every function. Same rule as everywhere else
+ * here: the types are Prisma's own, so narrowing stays exact and there is no
+ * second definition of the shape to drift.
+ *
+ * `groupBy` is deliberately not beside it. `having` is a predicate compiler over
+ * aggregate expressions rather than columns, and shipping half of it typed as
+ * though it worked would be worse than not shipping it.
+ */
+function aggregateOperation(model: string): string {
+  return `
+  static aggregate<T extends Prisma.${model}AggregateArgs>(
+    args: Prisma.Subset<T, Prisma.${model}AggregateArgs>,
+  ): Promise<Prisma.Get${model}AggregateType<T>> {
+    return this.$exec("aggregate", args) as Promise<
+      Prisma.Get${model}AggregateType<T>
+    >;
   }
 `;
 }
@@ -638,7 +674,7 @@ export class ${schema.name}Model extends Model {
   >[];
 ${READ_OPERATIONS.map((op) => operation(schema.name, op)).join("")}${countOperation(
       schema.name,
-    )}${WRITE_OPERATIONS.map((op) => operation(schema.name, op)).join(
+    )}${aggregateOperation(schema.name)}${WRITE_OPERATIONS.map((op) => operation(schema.name, op)).join(
       "",
     )}${BATCH_OPERATIONS.map((op) => batchOperation(schema.name, op)).join(
       "",
