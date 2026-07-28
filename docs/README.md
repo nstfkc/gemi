@@ -42,6 +42,10 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 - **[Forms](./forms.md)** — the `Form` component, surfacing validation errors, form status hooks.
 - **[Navigation](./navigation.md)** — `Link`, `useNavigate`, `useParams`, `useSearchParams`, and the `Redirect` component vs. facade.
 
+### Data
+- **[ORM](./orm.md)** — the Prisma-typed, gemi-executed query layer: models, relations, ambient transactions, policies, soft deletes.
+- **[Rows & Entities](./orm-rows-and-entities.md)** — plain objects by default, `track` + `save`, and `wrap`.
+
 ### Auth
 - **[Authentication](./authentication.md)** — `app/config/auth.ts`, adapters, sessions, magic links, OAuth, the `Auth` facade, and client auth hooks.
 - **[Authorization](./authorization.md)** — role-based middleware and authorization errors.

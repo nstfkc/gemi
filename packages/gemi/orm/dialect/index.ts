@@ -1,22 +1,99 @@
 import type { Dialect } from "../../database/dialect";
+import type { Binder, Fragment } from "../compile/fragment";
 import type { FieldSchema } from "../schema";
+import { PostgresDialect } from "./postgres";
 import { SqliteDialect } from "./sqlite";
 
 /**
- * The per-database strategy. SQLite and Postgres diverge on enough — parameter
- * placeholders, boolean and date storage, `RETURNING`, case-insensitive
- * `contains` — that branching inline at each call site multiplies fast. Behind
- * an interface from iteration 1, even though only SQLite implements it.
+ * The per-database strategy.
+ *
+ * The rule this interface exists to enforce: no `if (dialect === "postgres")`
+ * ever appears inside the compiler. When something genuinely cannot be
+ * expressed through the interface, the interface widens — which is why
+ * `inList`, `like` and `paginate` return `Fragment`s rather than strings. Each
+ * of the three is a place where SQLite and Postgres disagree about *structure*,
+ * not just spelling:
+ *
+ * - `inList` — SQLite expands one placeholder per element, so `in: [1,2]` and
+ *   `in: [1,2,3]` are different SQL and different plans. Postgres binds the
+ *   whole array to one parameter with `= any($1)`, so every length shares a
+ *   single plan and a single prepared statement.
+ * - `like` — Postgres has `ilike` for `mode: "insensitive"`; SQLite has no
+ *   equivalent, and Prisma rejects the argument there outright.
+ * - `paginate` — SQLite cannot parse `offset` without a preceding `limit`.
  */
 export interface SqlDialect {
   readonly name: Dialect;
+
+  /**
+   * Whether `mode: "insensitive"` can be expressed at all. False on SQLite,
+   * where Prisma rejects the argument rather than emulating it.
+   */
+  readonly supportsInsensitiveMode: boolean;
+
+  /**
+   * Whether an `in` list binds as a single parameter however long it is.
+   *
+   * True on Postgres (`= any($1)`), false on SQLite (`in (?, ?, ?)`). It is the
+   * plan *cache* that needs to know: where the length does not change the SQL
+   * text, it must not change the cache key either, or every distinct list
+   * length mints another entry holding SQL identical to its neighbours'. That
+   * matters most for relations, where the list length is the parent row count
+   * and so varies with the data rather than with the code.
+   */
+  readonly bindsListAsOneParameter: boolean;
+
+  /**
+   * Whether `insert`/`update`/`delete` can return the rows they touched.
+   *
+   * True on both implemented dialects — Postgres has had `RETURNING` forever,
+   * and SQLite since 3.35 (Bun 1.3.14 bundles 3.51.0, verified by querying
+   * `sqlite_version()` rather than by reading a changelog).
+   *
+   * It is a capability rather than an assumption because MySQL and MariaDB have
+   * no `RETURNING` at all. Their fallback — `lastInsertRowid` plus a re-select,
+   * and no way to identify the rows an `updateMany` touched — is a different
+   * statement shape, not a different spelling. Iteration 4 does not build it,
+   * but it must stay expressible, so the write compiler asks rather than
+   * assumes and raises a clear error when the answer is no.
+   */
+  readonly supportsReturning: boolean;
+
+  /**
+   * How many parameters one statement may bind.
+   *
+   * A hard protocol/driver limit, not a tuning knob: Postgres sends the
+   * parameter count as an int16 in the Bind message, and SQLite compiles
+   * `SQLITE_MAX_VARIABLE_NUMBER` in.
+   *
+   * Three shapes can approach it, all of them scaling with the caller's *data*
+   * rather than with the query's shape:
+   *
+   * - `createMany`, at `rows × columns`.
+   * - An `in` list on SQLite, which binds one placeholder per element — and
+   *   such a list is routinely request-derived (`?ids=…`).
+   * - A to-many `include` on SQLite, which batches an `in` over the parent
+   *   keys, so a large enough `findMany` reaches it with no big list in sight.
+   *
+   * Postgres escapes the last two: `= any($1)` is one parameter however long
+   * the array. The check itself lives in `compile/fragment.ts`'s `render`,
+   * because that is the one place that sees a statement's final count.
+   *
+   * It lives *here* rather than as a constant in the compiler for the usual
+   * reason: the number differs per dialect, and the compiler is not allowed to
+   * know which dialect it is compiling for.
+   */
+  readonly maxBoundParameters: number;
+
   /** Quote a table or column name. Only ever called with names from the schema. */
   quoteIdent(name: string): string;
+
   /**
    * The parameter marker for the `index`-th (0-based) parameter in a statement.
    * SQLite ignores the index and returns `?`; Postgres returns `$1`, `$2`, ...
    */
   placeholder(index: number): string;
+
   /**
    * Prisma-shaped value -> the value the driver must be handed for this field.
    * The mirror of `decode`, and just as load-bearing: Bun's SQLite driver binds
@@ -27,26 +104,76 @@ export interface SqlDialect {
    * Which encoder runs is still decided from the schema, so compile stays pure.
    */
   encode(value: unknown, field: FieldSchema): unknown;
+
   /** Driver value -> the value Prisma would have returned for this field. */
   decode(value: unknown, field: FieldSchema): unknown;
+
   /**
    * False when the driver already returns exactly what Prisma would for this
    * field, letting the shaper skip the call entirely on the hot path.
    */
   needsDecode(field: FieldSchema): boolean;
+
+  /**
+   * `<lhs> in (...)` / `<lhs> not in (...)`.
+   *
+   * `length` is the element count, which is shape information and is already
+   * part of the plan key. `values` returns the whole array at bind time; how it
+   * is spread across parameters is the dialect's business.
+   */
+  inList(
+    lhs: string,
+    negated: boolean,
+    length: number,
+    values: Binder,
+  ): Fragment;
+
+  /** `<lhs> like <pattern>`, case-insensitively when the dialect can. */
+  like(lhs: string, insensitive: boolean, pattern: Binder): Fragment;
+
+  /**
+   * `limit`/`offset`. Both are values and therefore parameters — this is the
+   * single most tempting place in the compiler to inline a number.
+   */
+  paginate(take: Binder | null, skip: Binder | null): Fragment;
+
+  /**
+   * Recognise a driver error as a constraint violation, and say which columns
+   * it names.
+   *
+   * Returns `null` for anything else, including the *other* constraint kinds:
+   * SQLite reports NOT NULL and FOREIGN KEY failures through the same exception
+   * type, and reporting one of those as a duplicate-key error would send a
+   * caller looking for a row that does not exist.
+   *
+   * Columns, not fields — the driver only knows the database's names. The
+   * caller maps them back through the schema, where `@map` is in scope.
+   */
+  constraintViolation(error: unknown): ConstraintViolation | null;
+}
+
+/** A driver error identified as a constraint failure, in dialect-neutral terms. */
+export interface ConstraintViolation {
+  /** Only `unique` is translated today; the rest surface as the raw error. */
+  kind: "unique";
+  /** Database column names, in the order the driver reported them. */
+  columns: string[];
+  /** The constraint's own name, when the driver gives one. Postgres does. */
+  constraint?: string;
 }
 
 export class UnsupportedDialectError extends Error {
   constructor(dialect: Dialect) {
     super(
       `The gemi ORM does not support the '${dialect}' dialect yet. ` +
-        `Only sqlite is implemented.`,
+        `Only sqlite and postgres are implemented.`,
     );
     this.name = "UnsupportedDialectError";
   }
 }
 
 const sqlite = new SqliteDialect();
+const postgres = new PostgresDialect();
 
 /**
  * Resolved per call from `DatabaseManager.dialect`, never baked into a
@@ -55,7 +182,8 @@ const sqlite = new SqliteDialect();
  */
 export function dialectFor(dialect: Dialect): SqlDialect {
   if (dialect === "sqlite") return sqlite;
+  if (dialect === "postgres") return postgres;
   throw new UnsupportedDialectError(dialect);
 }
 
-export { SqliteDialect };
+export { PostgresDialect, SqliteDialect };

@@ -4,7 +4,12 @@ import { join } from "node:path";
 
 import { DatabaseManager } from "gemi/database";
 import { Application } from "gemi/foundation";
-import { UnsupportedQueryError, clearPlanCache, planCacheStats } from "gemi/orm";
+import {
+  RecordNotFoundError,
+  UnsupportedQueryError,
+  clearPlanCache,
+  planCacheStats,
+} from "gemi/orm";
 import {
   afterAll,
   beforeAll,
@@ -153,17 +158,67 @@ describe("User.findMany()", () => {
   // not implemented yet has to say so rather than silently returning the wrong
   // rows.
   test("throws on an argument that is not implemented yet", async () => {
-    await expect(User.findMany({ orderBy: { id: "asc" } })).rejects.toThrow(
+    await expect(User.findMany({ cursor: { id: 1 } })).rejects.toThrow(
       UnsupportedQueryError,
     );
-    await expect(User.findMany({ orderBy: { id: "asc" } })).rejects.toThrow(
-      "gemi ORM does not support 'orderBy' yet (User.findMany).",
+    await expect(User.findMany({ cursor: { id: 1 } })).rejects.toThrow(
+      "gemi ORM does not support 'cursor' yet (User.findMany).",
     );
   });
 
-  test("throws on take rather than returning the whole table", async () => {
-    await expect(User.findMany({ take: 1 })).rejects.toThrow(
-      "gemi ORM does not support 'take' yet (User.findMany).",
-    );
+  // The relation is loaded through the *generated* artifact's topology: this
+  // model class was never told where `accounts` lives, only that it is a
+  // relation named `AccountToUser` on a model named `Account`.
+  test("include loads the relation, and an empty one is an array", async () => {
+    const [user] = await User.findMany({
+      where: { email: SEEDED.email },
+      include: { accounts: true },
+    });
+
+    expect(user.accounts).toEqual([]);
+    expect("accounts" in user).toBe(true);
+  });
+});
+
+describe("the single-row reads", () => {
+  test("findUnique returns the row or null", async () => {
+    const found = await User.findUnique({ where: { email: SEEDED.email } });
+    expect(found?.publicId).toBe(SEEDED.publicId);
+
+    expect(await User.findUnique({ where: { email: "nobody@example.dev" } }))
+      .toBe(null);
+  });
+
+  // Anything else would be a query that silently returns the first of several
+  // matches.
+  test("findUnique refuses a non-unique field, naming what it accepts", async () => {
+    await expect(User.findUnique({ where: { name: "Ada" } } as never)).rejects
+      .toThrow(/declares: id, publicId, email/);
+  });
+
+  test("findUniqueOrThrow raises RecordNotFoundError when nothing matches", async () => {
+    await expect(
+      User.findUniqueOrThrow({ where: { email: "nobody@example.dev" } }),
+    ).rejects.toThrow(RecordNotFoundError);
+
+    const found = await User.findUniqueOrThrow({
+      where: { email: SEEDED.email },
+    });
+    expect(found.publicId).toBe(SEEDED.publicId);
+  });
+
+  test("findFirst applies orderBy", async () => {
+    const newest = await User.findFirst({ orderBy: { createdAt: "desc" } });
+    const oldest = await User.findFirst({ orderBy: { createdAt: "asc" } });
+    expect(newest?.id).not.toBe(oldest?.id);
+  });
+
+  test("count returns a number", async () => {
+    const total = await User.count();
+    expect(typeof total).toBe("number");
+    expect(total).toBeGreaterThanOrEqual(1);
+
+    expect(await User.count({ where: { email: SEEDED.email } })).toBe(1);
+    expect(await User.count({ where: { email: "nobody@example.dev" } })).toBe(0);
   });
 });

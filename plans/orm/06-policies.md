@@ -168,3 +168,169 @@ policy DSL. Keep policies as plain functions for now.
 - **Do not let policies see SQL.** The moment a policy can manipulate compiled
   text, invariant 2 is dead, the plan cache becomes unsound, and the relation
   strategies stop being interchangeable. Args in, args out.
+
+## Residual: an unregistered policied subclass, read only through includes
+
+**Recorded here because until now it lived only in a PR review thread.** It is a
+cross-tenant read path with no home in the durable record, which is the worst
+place for one to sit.
+
+`Model.$exec` raises `UnregisteredPolicyClassError` when a class carrying
+policies is queried while a different class owns its name. That closed the two
+shapes found in #51's review. Its condition begins `registered !== this`, and
+there is a third shape where that is false:
+
+```ts
+export class Membership extends MembershipModel {
+  static $policy = { scope: (ctx) => ({ orgId: ctx.user.orgId }) }
+}
+// ...and no register("Membership", Membership)
+```
+
+If nothing ever queries `Membership` **at its root** — because memberships are
+only read through `include: { memberships: true }` — the include resolves the
+name to the generated base, `this` *is* that base, and the comparison is never
+reached. Rows come back unscoped, with no error. Reproduced during #51's review:
+two organisations' accounts returned to a caller scoped to one.
+
+The residual runs the wrong way. A model reached only through includes is
+usually a membership or a pivot, which is exactly the kind that carries a tenant
+scope, so the guard is weakest where the data is most sensitive.
+
+**Partly closed** by `assertPoliciesRegistered(...modules)` — the same divergence
+comparison, applied to the classes in a module namespace rather than to the class
+of a query, so an unqueried class is still visible. Run it in a test or at boot.
+It is not a full closure and must not be described as one: it can only see
+modules it is handed.
+
+**Full closure needs the registration to stop being something an author writes.**
+The generator emits `register(...)` for the classes it generates; it cannot emit
+one for a subclass in application code it never sees. Options, none built:
+
+- Have the generator emit an application-side barrel that re-exports and
+  registers every `app/models/*.ts` subclass it finds. Codegen reading
+  application source is a new kind of coupling and wants its own decision.
+- Register on first *definition* rather than on first import. There is no hook —
+  `static $policy = …` in a subclass body is a `[[DefineOwnProperty]]` on the
+  subclass, so a setter on the base is bypassed. Verified rather than reasoned
+  about: the setter does not fire and `Object.hasOwn(Child, "$policy")` is true.
+
+  **The dependency is worth naming, because the reason could expire.** Define
+  semantics are what ES2022 specifies and what Bun does, and this monorepo sets
+  `target: ES2022` in `@repo/typescript-config/base.json`. Under *assignment*
+  semantics — `useDefineForClassFields: false`, or an older target —
+  `static $policy = …` compiles to `Child.$policy = …` and an inherited setter
+  **would** fire.
+
+  That does not revive the option, and the reason it does not is the sharper
+  version of the point: **the subclass is application code**, compiled by the
+  application's toolchain, not by ours. A registration mechanism resting on a
+  setter would therefore work or silently not work depending on a consumer's
+  build configuration — and "silently not" here is an unscoped cross-tenant
+  read. A hook that is load-bearing for data access cannot be one that a
+  downstream `tsconfig.json` can turn off without any error. So: ruled out for
+  portability rather than for impossibility, which is the stronger reason and
+  the one that survives a change of target.
+- Make `$policy` a method call — `static $policy = policy(Membership, {…})` —
+  so declaring one registers it. Changes the documented shape of every policy,
+  and the `docs/authorization.md` examples with it.
+
+## Found by audit: nested writes were unscoped
+
+Not a residual this time — a hole, found by going looking for one rather than by
+a review.
+
+The rule this iteration established is *every read of a model carries that
+model's policies*, and five paths have now been made to obey it: nested
+includes, the lateral strategy's folded subquery, relation filters, `_count`,
+and relation orderings. The sixth is the first on the **write** side, and it was
+open:
+
+```ts
+// the child's onCreate never ran — the row landed with the scoped column unset
+Folder.create({ data: { code: "ours", notes: { create: { label: "n" } } } })
+
+// the lookup saw every tenant's rows — this attached org 99's folder
+Note.create({ data: { label: "n", folder: { connect: { code: "theirs" } } } })
+```
+
+**The cause was one boolean that had no call site.** `RelationExecutor.exec`
+routed every nested operation through the target model's `$exec` — correctly —
+but always with `markPreScoped`, which says *"this model's policies are already
+applied to these args."* For a relation read that is true, because
+`applyNestedPolicies` walks the include tree before the plan key is computed.
+For a nested write it is false: nothing walks `data.<relation>.create`. The
+marker meant "skip policies", and they were skipped.
+
+`preScoped` is now a **required parameter** on `exec`, so every call site has to
+answer it. Defaulted either way, one of the two callers would have the quiet
+wrong answer — and this is the fourth parameter in this codebase made required
+for exactly that reason.
+
+Worth stating as a general observation rather than a fix note: **`markPreScoped`
+is a capability, and it was being handed out by position rather than by
+decision.** Anything that can suppress a policy needs its call sites to be
+countable. It was designed to be unforgeable by applications — a module-private
+Symbol — and then applied by default inside the framework, which is the same
+mistake one layer in.
+
+### A refusal whose reason had expired
+
+Found in the same pass, and the same shape as the class-fields note #57 caught:
+a rule recorded with a reason, kept after the reason stopped being true.
+
+`assertScopable` refuses to put a scope on an `upsert`, because "its where
+clause compiles to an `on conflict` target, which is a key rather than a
+filter". That is exactly true of the `on conflict` path — and false of the
+read-then-write path added for a `create` that omits the conflict key, which is
+three ordinary statements. A tenant-scoped model could not upsert at all,
+including in the shape that would have been perfectly scopable.
+
+Fixed by **deciding the fallback before policies are applied**, not by relaxing
+the check. The three statements then run as `findFirst`, `create` and `update`,
+each scoped normally by its own `$exec`, so the branch is not marked pre-scoped
+and nothing had to be special-cased in the policy layer.
+
+Two consequences worth stating:
+
+- A policy that branches on `context.operation` sees the three operations that
+  actually run rather than the one the caller named. That is the honest reading
+  — the operation really is three statements here.
+- The refusal that remains is narrower and its message says so, including the
+  escape. `on conflict` is still refused for a scoped model, and still should
+  be.
+
+### `redact` was skipped for every nested relation, under both strategies
+
+Third audit finding, and the same root cause as the first: `markPreScoped`
+suppressing more than it was meant to.
+
+`$exec` built the policy *context* inside `if (policies.length > 0 &&
+!preScoped)`, and `applyRedaction` is keyed on that context. Every nested
+relation read is pre-scoped, so `policy` was undefined for all of them and
+redaction never ran. **A `redact` protected a root query and was skipped inside
+every `include`** — scoped one way, unscoped the other, which is the exact
+failure this iteration exists to prevent.
+
+`preScoped` means "the scope is already in these args". It does not mean "this
+model has no policies", and only `applyPolicies` is idempotency-sensitive:
+re-running it would `AND` the same predicate twice, while re-running `redact` on
+an already-redacted row is a no-op. The context is now built either way and only
+the rewrite is skipped.
+
+**The lateral half needed a different fix**, and it is worth separating because
+iteration 9's argument does not carry over. `scope` survives the fold because
+policies rewrite the argument tree before planning, so the scoped `where` lands
+inside the subquery. `redact` has no argument to rewrite — it is a row transform
+in the shaping stage — and a folded child never enters the child's `$exec` at
+all. So the parent runs the child's `redact` on its behalf, which required
+`RelationPlan` to carry the related model's *name*.
+
+The test is Postgres-only and compares the two strategies, because lateral is
+the default there: a divergence would have been on in production and off in a
+SQLite development environment.
+
+**And the first version of the test was wrong**: it drove both strategies inside
+`Model.asSystem`, which suspends policies for the whole subtree. It reported a
+redaction hole in the root query too — a hole that was not there. A test for a
+policy cannot run in the scope that turns policies off.

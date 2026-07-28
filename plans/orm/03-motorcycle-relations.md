@@ -141,10 +141,26 @@ error should say so.
 
 ## Out of scope
 
-Lateral / `json_agg` strategies (iteration 7), `_count` on relations, relation
-filters in `where` (`some` / `every` / `none` — they belong with the where
-compiler and are worth scheduling explicitly, likely alongside iteration 4),
-all writes, transactions, policies.
+Lateral / `json_agg` strategies (iteration 7), ~~`_count` on relations~~,
+~~relation filters in `where`~~ (`some` / `every` / `none` — they belong with the
+where compiler and are worth scheduling explicitly, likely alongside iteration
+4), all writes, transactions, policies.
+
+Both of the struck items are **done**, after iteration 9 rather than alongside
+iteration 4. `_count` turned out to be the same machinery as the relation
+filters — a correlated subquery over the child, aliased so a self-relation
+cannot shadow the outer table — projected instead of predicated, so it landed in
+the same pass. Nine differential cases compare it against Prisma.
+
+It is also a **third** instance of the rule this project keeps rediscovering:
+every path that reaches another model's rows is a read of that model and carries
+its policies. Nested includes were the first (iteration 6), the lateral
+strategy's folded subquery the second (iteration 9), relation filters and
+`_count` the third and fourth. The counts are the quietest of them — an unscoped
+count returns a *number*, so what leaks is how many rows exist in tenants the
+caller cannot see. Worth stating as a rule rather than as four fixes: **if a
+compiled statement names another model's table, that model's policies belong in
+it.**
 
 ## Notes and risks
 
@@ -157,6 +173,76 @@ all writes, transactions, policies.
   `EXISTS (SELECT 1 ...)` subqueries in the where compiler. They are cheap to add
   and often assumed present. Consider scheduling them as a small follow-up
   rather than letting them creep into this iteration.
+
+  **Done, after iteration 9.** `some` / `every` / `none` and `is` / `isNot`, as
+  correlated `exists` subqueries, verified against Prisma by twenty new cases in
+  the differential matrix. Two things this note did not anticipate:
+
+  - **They are a policy surface, not just a where-compiler feature.** A filter
+    that reaches another model's rows is a read of that model, so the child's
+    policies have to scope the subquery — the same rule iteration 9 had to make
+    true for the lateral strategy, arriving from a third direction. The leak is
+    quieter here: the query returns no child rows, so an unscoped subquery leaks
+    *existence* rather than data.
+  - **`every` cannot be scoped by ANDing.** It compiles to
+    `not exists (child where correlated and not X)`, so a scope ANDed into `X`
+    means "every child either matches or is invisible" — a parent whose only
+    non-matching child is another tenant's would start passing. The scope has to
+    restrict which children are *considered*, which in argument space is
+    `every: { OR: [{ NOT: S }, X] }`.
+
+  ~~Still open: ordering by a relation~~ — also done, in the same pass. It is
+  the *third* use of the correlated subquery: `exists` for a filter, `count(*)`
+  for `_count`, a scalar in `order by` for this. Eight differential cases, which
+  matter more here than elsewhere because Prisma emits a `left join` and gemi
+  emits a subquery — the check is that the two orderings agree, which reading
+  either statement would not tell you.
+
+  It also turned up the one place Prisma's grammar has **no slot for a policy
+  scope**. An `include` node takes a `where`, a relation filter's operand is one,
+  a `_count` entry takes one; `orderBy: { rel: { field: "asc" } }` takes nothing.
+  It still needs scoping — ordering by a column of rows you cannot read leaks
+  their contents by comparison, and ordering by `_count` leaks their number
+  outright — so the policy walk writes a `where` into that node and the compiler
+  reads it. The key is not in Prisma's `orderBy` type, so the generated bases
+  cannot accept it from application code: the policy pass is its only producer.
+
+  ~~Still open: filtering, counting or ordering across an implicit
+  many-to-many~~ — **also done**, and it is the clearest argument in this
+  sequence for fixing the shape rather than the instances.
+
+  All three refused m-n *separately*, with three messages, because the join
+  table needs a second table inside the subquery and none of the three had
+  anywhere to put one. Hoisting the `from` clause and the correlation into one
+  `correlate()` made m-n a property of that function instead of a capability
+  each caller had to grow — and the three call sites got shorter rather than
+  longer. Three duplicated key-column lookups went with it.
+
+  Exercised against a real database in
+  `templates/saas-starter/app/models/relations.many-to-many.test.ts`, because
+  the emitted SQL is asserted in the compiler's own tests and what those cannot
+  say is whether it returns the right rows.
+
+  ~~Still open … a **self-referential** implicit m-n~~ — **closed**, and it was
+  the artifact's limit, so the fix was in the generator rather than the
+  compiler. The note here said "Prisma disambiguates by field order", which was
+  half right and the wrong half to guess at: it is field *name* order, not
+  declaration order. The two rules agree on every schema whose relation fields
+  happen to be declared alphabetically and disagree on the rest — so a guess
+  would have passed its own tests and reversed the relation on somebody else's
+  schema.
+
+  Established by experiment against a generated Prisma 6 client: connect
+  through each of the two fields in turn and read the join table. The
+  alphabetically-first field's owner is in `A`. The generator emits that per
+  field as `joinTable.ownerColumn`, and an artifact generated before it raises
+  rather than guessing — which is why the field is optional rather than
+  required.
+
+  The fixture declares its fields `zeta` then `alpha` on purpose, so the two
+  candidate rules give opposite answers and a wrong one shows up as the two
+  directions exchanged rather than as empty results. A reversed relation
+  returns plausible rows.
 - **Stitching cost is real** on wide results. Build the parent-key `Map` once per
   child query; do not `find()` per row. Iteration 7 will measure this, so leave
   it in a shape that can be measured.

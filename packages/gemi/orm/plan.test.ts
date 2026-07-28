@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, test } from "vitest";
 
+import { PostgresDialect } from "./dialect/postgres";
 import { SqliteDialect } from "./dialect/sqlite";
 import { USER_COLUMNS, user } from "./fixtures";
 import {
@@ -11,6 +12,7 @@ import {
 } from "./plan";
 
 const sqlite = new SqliteDialect();
+const postgres = new PostgresDialect();
 
 beforeEach(() => clearPlanCache());
 
@@ -66,12 +68,65 @@ describe("canonicalShape()", () => {
 
 describe("planKey()", () => {
   test("separates dialect, model and operation", () => {
-    expect(planKey("sqlite", "User", "findMany", { where: { id: 1 } })).not.toBe(
-      planKey("postgres", "User", "findMany", { where: { id: 1 } }),
+    expect(planKey(sqlite, "User", "findMany", { where: { id: 1 } })).not.toBe(
+      planKey(postgres, "User", "findMany", { where: { id: 1 } }),
     );
-    expect(planKey("sqlite", "User", "findMany", {})).not.toBe(
-      planKey("sqlite", "Account", "findMany", {}),
+    expect(planKey(sqlite, "User", "findMany", {})).not.toBe(
+      planKey(sqlite, "Account", "findMany", {}),
     );
+  });
+
+  // The length of an `in` list is part of the *text* only where the dialect
+  // expands it into one placeholder per element. Where it binds as a single
+  // parameter, keying on the length mints one entry per distinct length, each
+  // holding SQL identical to its neighbours' — which from iteration 3 is one
+  // entry per distinct parent row count on every relation query.
+  test("an in-list's length is a plan on SQLite and not on Postgres", () => {
+    const two = { where: { id: { in: [1, 2] } } };
+    const three = { where: { id: { in: [1, 2, 3] } } };
+
+    expect(planKey(sqlite, "User", "findMany", two)).not.toBe(
+      planKey(sqlite, "User", "findMany", three),
+    );
+    expect(planKey(postgres, "User", "findMany", two)).toBe(
+      planKey(postgres, "User", "findMany", three),
+    );
+
+    // ...and the collapse is exactly as wide as the SQL is identical: an empty
+    // list compiles to a constant-false predicate on both dialects.
+    expect(planKey(postgres, "User", "findMany", two)).not.toBe(
+      planKey(postgres, "User", "findMany", { where: { id: { in: [] } } }),
+    );
+  });
+
+  test("the collapse does not reach arrays that are structure", () => {
+    // `AND: [a, b]` and `AND: [a]` are different predicates on every dialect.
+    expect(
+      planKey(postgres, "User", "findMany", {
+        where: { AND: [{ id: 1 }, { email: "x" }] },
+      }),
+    ).not.toBe(
+      planKey(postgres, "User", "findMany", { where: { AND: [{ id: 1 }] } }),
+    );
+    expect(
+      planKey(postgres, "User", "findMany", {
+        orderBy: [{ id: "asc" }, { email: "desc" }],
+      }),
+    ).not.toBe(
+      planKey(postgres, "User", "findMany", { orderBy: [{ id: "asc" }] }),
+    );
+  });
+
+  test("one Postgres plan serves every in-list length", () => {
+    for (const length of [1, 2, 3, 50]) {
+      getOrCompile(
+        user,
+        "findMany",
+        { where: { id: { in: Array.from({ length }, (_, i) => i) } } },
+        postgres,
+      );
+    }
+    expect(planCacheStats()).toMatchObject({ compiles: 1, size: 1 });
   });
 });
 
@@ -92,7 +147,7 @@ describe("the plan cache", () => {
       sqlite,
     );
 
-    expect(planCacheStats()).toEqual({ size: 1, compiles: 1, hits: 1 });
+    expect(planCacheStats()).toMatchObject({ size: 1, compiles: 1, hits: 1 });
     expect(second).toBe(first);
     expect(second.text).toBe(
       `select ${USER_COLUMNS} from "User" where "email" = ?`,
@@ -121,7 +176,7 @@ describe("the plan cache", () => {
 
   test("does not cache a compile that threw", () => {
     expect(() =>
-      getOrCompile(user, "findMany", { orderBy: { id: "asc" } }, sqlite),
+      getOrCompile(user, "findMany", { cursor: { id: 1 } }, sqlite),
     ).toThrow();
     expect(planCacheStats().size).toBe(0);
   });

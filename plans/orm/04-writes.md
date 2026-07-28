@@ -143,6 +143,105 @@ apply and that is fine), MySQL / MariaDB write paths, transactions (iteration 5 
 though this iteration should note every place it wants one), policies on writes
 (iteration 6).
 
+## Known differences from Prisma, as shipped
+
+Each of these is a deliberate refusal rather than a gap. The alternative in
+every case is a write that succeeds and does something other than what Prisma
+does, which is the failure this iteration is arranged to prevent.
+
+- **`upsert` refuses a `where` that carries anything beside one unique key.**
+  Prisma 5 allows extra non-unique filters in a `WhereUniqueInput`, and allows
+  naming two different unique keys. `update` and `delete` honour both, since
+  their whole `where` is compiled. An upsert's `where` becomes an
+  `on conflict (...)` target, which is a key and not a predicate — there is
+  nowhere to put `deletedAt: null`, and `on conflict` takes exactly one target.
+  So a migrating application will hit a compile error on a call Prisma ran
+  happily. The fix at the call site is `findFirst` plus `update` / `create`.
+- ~~**`upsert` refuses a `create` that omits the conflict key**~~ — **done after
+  iteration 9.** `Model.$exec` diverts those calls to a read and a write inside
+  one transaction, which is what Prisma means by them. The compiler still
+  refuses the shape, because `on conflict` genuinely cannot express it; the two
+  agree because they share one predicate (`upsertAbsentConflictKey`) rather than
+  two copies of the rule.
+
+  **Prisma's semantics here are surprising, and were checked rather than
+  reasoned about.** `upsert({ where: { publicId: "X" }, create: { email } })`
+  inserts a row whose `publicId` is *generated* — the `where` selects, and
+  contributes nothing to the insert. Two differential cases pin both branches.
+
+  `on conflict` is kept wherever it works. It is one atomic statement and
+  read-then-write is not: two callers can both miss and both insert. Prisma's
+  upsert has that race and this inherits it — but only on calls that previously
+  raised, so nothing that worked becomes racy.
+
+  **It also broke an invariant the differential harness had written down.** That
+  harness handed `$exec` a `{ unsafe }` stub, on the reasoning that `$exec`
+  reads exactly `sql.unsafe` and `dialect` — "a test seam the runtime does not
+  know about cannot drift". It drifted the moment `$exec` needed `begin`. It is
+  a Proxy now, delegating everything and intercepting one method, which is what
+  `bench/run.ts` had already concluded after the same error. A stub that lists
+  what the runtime uses today is a promise about tomorrow.
+
+- **`upsert` still refuses a `create` whose key value disagrees with the
+  `where`** (checked at bind time, where values exist). This one stays, and it
+  is a divergence we are choosing rather than one waiting on anything: Prisma
+  ignores the `where` and inserts the `create`'s value, and a caller who wrote
+  two different keys in one call almost certainly meant one of them.
+- **`createMany` refuses a partially-supplied database default** — some rows
+  setting a column and others leaving it to the database. `NULL` would overwrite
+  the default rather than request it, and SQLite rejects `DEFAULT` inside a
+  `VALUES` list.
+- **`createMany` refuses more than one all-empty row.** `default values` inserts
+  exactly one and has no portable multi-row spelling.
+- ~~**No automatic chunking.**~~ — **added after iteration 9**, once iteration
+  5's transactions existed. `Model.$exec` splits a `createMany` that would
+  exceed the driver's ceiling and runs the chunks inside one transaction, so the
+  caller gets the `{ count }` a single statement would have returned.
+
+  The assertion this was waiting for is not "all the rows arrive" — it is **what
+  happens when a later chunk fails.** Several statements that are not atomic
+  leave the first chunk written, which is a worse answer than the refusal they
+  replaced. The test puts a duplicate in the second chunk and asserts the table
+  is empty afterwards.
+
+  Two details worth keeping:
+
+  - **The split is a `catch`, not a size check.** The ceiling is enforced in
+    `render`, so the ordinary path pays nothing: a `createMany` small enough to
+    compile never enters the branch.
+  - **The chunk size comes from binding one row**, not from dividing the
+    reported total. `required` includes anything the statement binds besides the
+    rows, so division understates the per-row cost on any shape with fixed
+    overhead — and produces a chunk that is still too large.
+
+  `ParameterLimitError` still exists and its message no longer claims chunking
+  is unimplemented. Reaching it on a `createMany` now means splitting cannot
+  help: one row alone binds more than the driver accepts.
+- ~~**`delete` with `include` on a cascading relation** returns the children
+  empty~~ — **fixed after iteration 9**, once iteration 5's transactions
+  existed. `Model.$exec` now reads the projection first and deletes second,
+  inside one transaction (a savepoint when the caller already has one), and
+  returns what it read.
+
+  Three things this iteration's note did not say, all of which the fix had to
+  decide:
+
+  - **The miss has to be reported as a `delete`.** The pre-read is a `findFirst`
+    underneath, and an error naming an operation the caller never issued is
+    worse than no error.
+  - **A `delete` with no relation to read is untouched** — one statement, no
+    transaction. Opening one unconditionally would put a `BEGIN` around every
+    delete in the framework.
+  - **The pre-read is scoped as the delete was**, policies included, rather than
+    re-scoped as a read. These are the rows the delete is about to remove.
+
+  The test for it needed a fixture, for the reason the note gives: the
+  template's schema declares no cascades. It also needed
+  `PRAGMA foreign_keys = ON` **on the ORM's own connection** — the pragma is per
+  connection, and setting it only on the test's raw handle made the suite pass
+  for the wrong reason. With cascades off the children survive the delete, so
+  reading them afterwards finds them and the bug does not reproduce.
+
 ## Notes and risks
 
 - **Column order in a multi-row `createMany` must be canonical**, derived from the

@@ -65,6 +65,338 @@ export class DecodeError extends Error {
   }
 }
 
+/**
+ * Thrown by the `*OrThrow` operations when the query matched nothing. Prisma
+ * raises `NotFoundError` / `P2025` for the same case; the differential harness
+ * compares the fact of throwing, not the error type.
+ */
+export class RecordNotFoundError extends Error {
+  constructor(
+    public readonly model: string,
+    public readonly operation: string,
+  ) {
+    super(`No ${model} found (${model}.${operation}).`);
+    this.name = "RecordNotFoundError";
+  }
+}
+
+/**
+ * Thrown when a write violates a unique constraint.
+ *
+ * DECISION — gemi defines its own error rather than mirroring Prisma's codes.
+ *
+ * Prisma raises `PrismaClientKnownRequestError` with code `P2002` and
+ * `meta.target` holding the field names. Mirroring that would ease a migration
+ * for code already branching on `P2002` — but nothing in this repository does
+ * (checked), and carrying a `P` code implies the rest of the taxonomy is
+ * implemented too: `P2003`, `P2025`, and the fifty others an application might
+ * reasonably then expect to catch. Claiming a compatibility surface we have not
+ * built is worse than asking the few call sites that need it to catch a gemi
+ * error instead.
+ *
+ * What the contract does promise is the part that matters: the error is typed,
+ * catchable, and names the fields — as *field* names, the way Prisma's
+ * `meta.target` does, not as the database columns the driver reported.
+ */
+export class UniqueConstraintError extends Error {
+  constructor(
+    public readonly model: string,
+    public readonly operation: string,
+    /** Field names, mapped back through the schema from the driver's columns. */
+    public readonly fields: string[],
+    /** The constraint's own name, when the dialect reports one. */
+    public readonly constraint?: string,
+    options?: { cause?: unknown },
+  ) {
+    super(
+      `Unique constraint violated on ${model}.${operation}` +
+        (fields.length > 0 ? ` for ${fields.join(", ")}` : "") +
+        (constraint ? ` (constraint '${constraint}')` : "") +
+        `. A ${model} with those values already exists.`,
+      options,
+    );
+    this.name = "UniqueConstraintError";
+  }
+}
+
+/**
+ * Thrown when a write needs `RETURNING` and the dialect has none.
+ *
+ * Unreachable on SQLite and Postgres, which both support it. It exists so that
+ * the MySQL / MariaDB path is a named gap rather than a wrong answer: the
+ * fallback there is `lastInsertRowid` plus a re-select, which is a different
+ * statement shape and is not implemented.
+ */
+export class ReturningUnsupportedError extends Error {
+  constructor(
+    public readonly model: string,
+    public readonly operation: string,
+    public readonly dialect: string,
+  ) {
+    super(
+      `${model}.${operation} needs RETURNING to report its result, and the ` +
+        `'${dialect}' dialect does not support it. The fallback — ` +
+        `lastInsertRowid plus a re-select — is not implemented.`,
+    );
+    this.name = "ReturningUnsupportedError";
+  }
+}
+
+/**
+ * Thrown when a policy denies an operation.
+ *
+ * Two ways to get here, and the message distinguishes them because the fixes
+ * are different: a policy's `before` returned false, or the model is policied
+ * and there is no user in scope at all.
+ *
+ * The second is the deny-by-default rule, and it is the reason this error is
+ * loud. A cron tick or a queue worker reading a policied model has no user, and
+ * the alternative — treating "no user" as "no policy" — means the dangerous
+ * case is the silent one: a request whose auth middleware was misconfigured
+ * would read every tenant's rows rather than failing. So unscoped access is
+ * always a decision written at the call site, through `Model.asSystem`.
+ */
+export class PolicyDeniedError extends Error {
+  constructor(
+    public readonly model: string,
+    public readonly operation: string,
+    public readonly reason: "denied" | "no-user" = "denied",
+  ) {
+    super(
+      reason === "no-user"
+        ? `${model}.${operation} is governed by a policy and there is no user ` +
+            `in scope. If this is a cron tick, a queue worker or a script, say ` +
+            `so at the call site: Model.asSystem(() => ...). Policies are ` +
+            `never skipped just because a user failed to turn up.`
+        : `${model}.${operation} was denied by ${model}'s policy.`,
+    );
+    this.name = "PolicyDeniedError";
+  }
+}
+
+/**
+ * Thrown when a model class carries policies but is not the class the registry
+ * resolves its name to.
+ *
+ * This exists because of a cross-tenant leak that shipped past review. The
+ * generated `index.ts` registers the *generated* base — `register("Account",
+ * AccountModel)` — while an application authors its policy on a subclass:
+ *
+ *     export class Account extends AccountModel {
+ *       static $policy = { scope: (ctx) => ({ organizationId: … }) }
+ *     }
+ *
+ * A root query goes through `Account`, so `policiesFor(this)` finds the policy
+ * and the scope applies. A **nested** relation read resolves through the
+ * registry, gets `AccountModel`, and walks a prototype chain the policy is not
+ * on — so `User.findMany({ include: { accounts: true } })` returned every
+ * tenant's accounts. Root queries scoped, nested reads unscoped: exactly the
+ * Prisma behaviour policies exist to fix, and silent.
+ *
+ * Raised at the first query through the unregistered class, naming the one-line
+ * fix, because the alternative is data crossing a tenant boundary with nothing
+ * to notice it.
+ *
+ * It fires on a divergence in the resolved policy *chain*, not merely on the two
+ * classes differing. A plain subclass that adds no policy of its own inherits
+ * the same policy objects in the same order, so a nested read resolving to its
+ * parent applies exactly what the root query applied — no divergence, nothing
+ * to refuse. An earlier version compared class identity and rejected
+ * `class AdminUser extends User {}` for policies it had not written.
+ */
+export class UnregisteredPolicyClassError extends Error {
+  constructor(
+    public readonly model: string,
+    public readonly registered: string,
+    public readonly queried: string,
+    /**
+     * Which side carries the policies that would be skipped. The two directions
+     * need different advice: one is a missing registration, the other is a
+     * query through the wrong class.
+     */
+    public readonly carries: "queried" | "registered" = "queried",
+  ) {
+    super(
+      carries === "queried"
+        ? `${queried} carries policies but the registry resolves '${model}' to ` +
+            `${registered}. Nested relation reads go through the registry, so ` +
+            `they would run on ${registered} and skip every policy on ` +
+            `${queried} — scoped at the root, unscoped inside an include. ` +
+            `Register the class that carries the policy:\n\n` +
+            `    import { register } from "gemi/orm"\n` +
+            `    export class ${queried} extends ${registered} { … }\n` +
+            `    register("${model}", ${queried})\n`
+        : `This query goes through ${queried}, but the registry resolves ` +
+            `'${model}' to ${registered}, which carries policies ${queried} ` +
+            `does not. Nested relation reads would be scoped and this query is ` +
+            `not — the same policy applying to some queries and not others. ` +
+            `Query ${registered} instead:\n\n` +
+            `    ${registered}.findMany(…)\n\n` +
+            `If skipping policies is intended, say so at the call site — that ` +
+            `is what Model.asSystem() is for, and it is the only way to do it ` +
+            `that a reader can see.\n`,
+    );
+    this.name = "UnregisteredPolicyClassError";
+  }
+}
+
+/**
+ * Thrown when a statement would bind more parameters than the driver's wire
+ * protocol can carry.
+ *
+ * Three shapes reach it, all of them scaling with the caller's *data* rather
+ * than with the query's shape: `createMany` at `rows × columns`, an `in` list on
+ * SQLite (one placeholder per element, and such a list is routinely
+ * request-derived), and a to-many `include` on SQLite, which batches an `in`
+ * over the parent keys. Both limits are hard and low enough to hit with an
+ * ordinary import — Postgres counts parameters in an int16 (65535), SQLite
+ * defaults `SQLITE_MAX_VARIABLE_NUMBER` to 32766. Postgres escapes the last two
+ * either way: `= any($1)` is one parameter however long the array.
+ *
+ * Prisma chunks the insert automatically. Doing that here means several
+ * statements, which without a transaction is a partially-applied `createMany`
+ * on failure — so it waits for iteration 5, and until then this is a named gap
+ * rather than a driver error naming neither the model nor the cause. Same
+ * treatment as `ReturningUnsupportedError`, for the same reason.
+ */
+export class ParameterLimitError extends Error {
+  constructor(
+    public readonly model: string,
+    public readonly operation: string,
+    public readonly required: number,
+    public readonly limit: number,
+    public readonly dialect: string,
+    detail: string,
+  ) {
+    super(
+      `${model}.${operation} would bind ${required} parameters, and the ` +
+        `'${dialect}' driver accepts at most ${limit} in one statement. ` +
+        `${detail}` +
+        (operation === "createMany"
+          ? ` A createMany over the ceiling is normally split across statements ` +
+            `inside one transaction, so reaching this means splitting cannot ` +
+            `help: a single row binds more than the driver accepts.`
+          : ` Splitting is not something this operation can do for you — one ` +
+            `statement has to carry one answer. Narrow the query.`),
+    );
+    this.name = "ParameterLimitError";
+  }
+}
+
+/**
+ * Thrown when a write omits a column that has no value to fall back on: not
+ * supplied, no client-side default, no database default, and not nullable.
+ *
+ * Raised in the compiler rather than left to the database so the message names
+ * the field and the model, instead of surfacing as `NOT NULL constraint failed`
+ * with a column name and no context.
+ */
+export class MissingRequiredValueError extends Error {
+  constructor(
+    public readonly model: string,
+    public readonly operation: string,
+    public readonly field: string,
+  ) {
+    super(
+      `${model}.${operation} is missing a value for '${field}', which is ` +
+        `required and has no default.`,
+    );
+    this.name = "MissingRequiredValueError";
+  }
+}
+
+/**
+ * Thrown when an `include` — or a relation-shaped key inside a `select` — names
+ * something the model does not declare as a relation.
+ */
+export class UnknownRelationError extends Error {
+  constructor(
+    public readonly relation: string,
+    public readonly model: string,
+    known: string[],
+  ) {
+    super(
+      `'${relation}' is not a relation on model ${model}. ` +
+        (known.length > 0
+          ? `Known relations: ${known.join(", ")}.`
+          : `${model} declares no relations.`),
+    );
+    this.name = "UnknownRelationError";
+  }
+}
+
+/**
+ * Thrown when an include tree nests deeper than the guard allows.
+ *
+ * A cyclic include is legal and finite — `user -> accounts -> user` terminates
+ * because the caller wrote a finite tree. What this catches is an *unbounded*
+ * one: an argument tree built by a loop, or forwarded from a request body, that
+ * describes a thousand levels. Under the batched planner every level is at least
+ * one query, so the guard is what stops a malformed argument from becoming a
+ * self-inflicted denial of service.
+ */
+export class RelationDepthExceededError extends Error {
+  constructor(
+    public readonly model: string,
+    public readonly limit: number,
+  ) {
+    super(
+      `The include tree nests more than ${limit} relations deep (at model ` +
+        `${model}). Deeply nested includes are legal, so this is a guard ` +
+        `against a generated or malformed argument tree rather than a limit on ` +
+        `modelling — every level costs at least one query.`,
+    );
+    this.name = "RelationDepthExceededError";
+  }
+}
+
+/**
+ * Thrown when a relation names a model the registry does not hold. Every
+ * relation in a generated artifact was emitted from a model in the same
+ * `schema.prisma`, so this can only mean the artifact and the registry disagree.
+ */
+export class UnregisteredRelationTargetError extends Error {
+  constructor(
+    public readonly model: string,
+    public readonly relation: string,
+    public readonly target: string,
+    known: string[],
+  ) {
+    super(
+      `${model}.${relation} points at model '${target}', which nothing has ` +
+        `registered. The generated artifact and the registry disagree: re-run ` +
+        `\`prisma generate\`, and check that app/models/generated/index.ts is ` +
+        `imported. ` +
+        (known.length > 0
+          ? `Registered models: ${known.join(", ")}.`
+          : `Nothing is registered at all.`),
+    );
+    this.name = "UnregisteredRelationTargetError";
+  }
+}
+
+/**
+ * Thrown when a relation is registered on both sides but the two sides do not
+ * describe a link the planner can follow: no matching `relationName` on the
+ * other model, or a `from` / `to` naming a field that is not there. Like
+ * `UnregisteredRelationTargetError`, it means a stale generated artifact — a
+ * consistent one cannot produce it.
+ */
+export class MalformedRelationError extends Error {
+  constructor(
+    public readonly model: string,
+    public readonly relation: string,
+    detail: string,
+  ) {
+    super(
+      `Cannot resolve how ${model}.${relation} joins: ${detail} This means ` +
+        `app/models/generated is stale or hand-edited — re-run ` +
+        `\`prisma generate\`.`,
+    );
+    this.name = "MalformedRelationError";
+  }
+}
+
 /** Thrown when a relation resolves to a model name nothing registered. */
 export class ModelNotRegisteredError extends Error {
   constructor(name: string, known: string[]) {

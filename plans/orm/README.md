@@ -18,8 +18,91 @@ This work is a **third level in an open PR stack**. Branch from
 main
  └── refactor/laravel-container-architecture   PR #30, OPEN — container/providers
       └── feat/database-layer                  PR #33, OPEN — DatabaseManager, DB facade
-           └── feat/orm                        this work
+           └── feat/orm                        PR #45, OPEN — iterations 1-6
 ```
+
+### Where it actually is now
+
+Nine levels, not three. Recorded because the diagram above described the state on
+the day this plan was written and a reader following it would branch under work
+that has since landed on top. **Every one of these is `MERGEABLE`/`CLEAN`** and
+each was verified at its own tip; they are listed in merge order.
+
+| PR | Branch | What it adds |
+| --- | --- | --- |
+| #53 | `feat/orm-08-eloquent-doorway` | opt-in provenance, `save(row)`, `wrap`, the ORM auth adapter |
+| #54 | `feat/orm-09-lateral-strategy` | `LATERAL` + `json_agg`, nested policies on the arg tree |
+| #56 | `fix/orm-bytes-container` | `Bytes` is a `Uint8Array` on every dialect; the differential harness stops erasing containers |
+| #55 | `docs/orm` | `docs/orm.md`, and the two ORM pages linked from all four indexes |
+| #57 | `feat/orm-registration-audit` | `assertPoliciesRegistered`, for the policied subclass nobody registered |
+| #58 | `feat/orm-relation-filters` | relation filters, `_count`, relation orderings, implicit m-n, and six audit findings |
+
+The two entries under [Open decisions](#open-decisions) are the only remaining
+items on this plan; the rest of it is built, and #58's description carries the
+audit trail.
+
+### A stacked PR merges into its parent, not into the trunk
+
+Worth its own heading, because it is a property of the shape rather than a
+mistake anybody made, and the next stacked effort will meet it again.
+
+Every PR here targets its **parent**, so merging one lands its content on the
+immediate parent and **nowhere below**. Nothing re-merges downward on its own. So
+after nine PRs were marked merged, `feat/orm` — the branch #45 proposes to
+`feat/database-layer` — still carried **iteration 1 alone**, 91 commits behind the
+stack tip, with relations, writes, transactions, policies, provenance and lateral
+all absent from it.
+
+Merge *order* compounds it. Five of those merges landed within 100 seconds,
+bottom-up, and each base was merged before its own child had received the next
+one — so the work pooled at different heights:
+
+| branch | had the Bytes fix | had the docs | had the audit |
+| --- | --- | --- | --- |
+| `feat/orm-07-performance` | no | no | no |
+| `feat/orm-09-lateral-strategy` | yes | no | no |
+| `docs/orm` | yes | yes | yes |
+
+**The stall starts partway up, not at the bottom**, which narrows where to look.
+Each level holds its own child's work and passes none of it down:
+
+```
+feat/database-layer                0 ahead of feat/orm              <- landed
+feat/orm-03-motorcycle            11 ahead of feat/database-layer   <- stalls here
+feat/orm-04-writes                11 ahead of feat/orm-03-motorcycle
+feat/orm-05-ambient-transactions  12 ahead of feat/orm-04-writes
+feat/orm-06-policies              13 ahead of feat/orm-05-…
+feat/orm-07-performance           14 ahead of feat/orm-06-policies
+feat/orm-08-eloquent-doorway      15 ahead of feat/orm-07-performance
+```
+
+### The runbook
+
+**Detect it.** One command, worth running before treating a stack as shipped,
+because every PR showing `MERGED` looks exactly like success:
+
+```
+git rev-list --count origin/<trunkward-branch>..origin/<stack-tip>
+```
+
+Non-zero means the trunkward branch has not received the stack.
+
+**Then check how much of a repair it is**, because that number reads like one
+job per level and is usually one job in total:
+
+```
+git rev-list --no-merges --count origin/<stack-tip>..origin/<each-branch>
+```
+
+Zero everywhere means no branch holds unique work — what they hold that the tip
+does not is only the merge commits their own child PRs created. Measured across
+all thirteen branches of this stack: **zero non-merge commits on every one of
+them.**
+
+**So the repair is a single merge** of the stack tip into the trunkward branch,
+and the intermediates can be deleted rather than repaired one at a time. Without
+that second check the first number is alarming and misleading in the expensive
+direction: "nine PRs merged and nothing landed" reads as nine repairs.
 
 `feat/database-layer` is at `e3c2e0b`. Everything this plan depends on exists
 there — `database/`, `container/`, `foundation/`, `kernel/`, `support/`,
@@ -159,6 +242,36 @@ batching, iteration 7 adds lateral+json. Because policies rewrite the **arg
 tree** before planning (invariant 2), scoping applies under every strategy — the
 scoped `where` lands inside the lateral subquery exactly as it would in a
 separate query.
+
+**Correction 2, found while designing the lateral strategy.** The last sentence
+above — that scoping applies under every strategy because policies rewrite the arg
+tree before planning — is **not true today**. Policies are applied in
+`Model.$exec` to the model being queried, and a nested read acquires its own only
+because the batched strategy recurses through the child's `$exec`. A lateral join
+compiles the child's SQL inside the parent's compile step and never enters that
+call, so the child's policies would be skipped and the subquery would be unscoped.
+
+Making the claim true means applying nested models' policies to the arg tree in
+`$exec`, before the plan key — which is what the sentence describes and what the
+code does not do. That is iteration 9's deliverable 1c, and it is blocking: the
+first version of the lateral strategy must not be one that silently bypasses
+policies. See [09](./09-lateral-strategy.md).
+
+**Correction 1, found while starting the lateral strategy.** The seam iteration 3
+built is narrower than this claims. A `RelationStrategy` produces a `load()` that
+runs *after* the root query, plus a list of field names the root must select for
+stitching — and nothing else. It cannot contribute a column expression, a join
+clause or a table alias to the root statement, which is all three of the things a
+lateral join needs.
+
+So it is genuinely swappable for *"fetch children separately, by some means"* and
+closed to *"fold children into the root statement"*. The batching strategy and any
+future n+1-avoiding variant fit it; the two single-round-trip strategies in the
+table above do not. Widening it is iteration 9's first deliverable —
+[09](./09-lateral-strategy.md) — and the widening is additive, so batching is
+unaffected. The claim is left standing above with this correction beneath it
+rather than quietly rewritten, because the gap between what an invariant promised
+and what it delivered is the useful part.
 
 Caveat for iteration 7: JSON aggregation flattens types. Dates come back as
 strings, numerics may come back as strings. Coercion must be aware of both
@@ -312,7 +425,7 @@ packages/gemi/orm/
   errors.ts           UnsupportedQueryError, RecordNotFoundError, ...
   compile/            arg tree → SQL fragments
   dialect/            Dialect strategy: sqlite.ts, postgres.ts
-  context.ts          ambient transaction ALS            (iteration 5)
+  context.ts          ambient transaction ALS
   policy.ts           policy hook                        (iteration 6)
 
 packages/gemi/bin/orm-generator.ts  Prisma generator plugin: DMMF → artifacts.
@@ -362,10 +475,49 @@ with no prior context.
 | 6 | Car | First-class policies, including nested reads | [06](./06-policies.md) |
 | 7 | | Performance: lateral+json planner, generated shapers, benchmark suite | [07](./07-performance.md) |
 | 8 | | Eloquent doorway: opt-in provenance, `save(row)`, entity tier | [08](./08-eloquent-doorway.md) |
+| 9 | | `LATERAL` + `json_agg`: iteration 7's deliverable 2, declined then re-justified on corrected measurements | [09](./09-lateral-strategy.md) |
 
 Iterations 5 and 6 are the reason the project exists, but they are cheap *once
 the choke point exists*, which is why they come after the query engine rather
 than before it.
+
+**All nine have shipped.** What remains on this plan is not another vehicle: it
+is the two entries under [Open decisions](#open-decisions) that are decisions
+rather than work, and whatever the ORM's first real users find.
+
+### Documentation
+
+`docs/orm.md` is the user-facing page — setup through the Prisma generator
+block, the thirteen operations, relations and the two strategies, ambient
+transactions, policies, soft deletes, the typed errors, and an explicit
+*not in scope* section. It sits beside `docs/orm-rows-and-entities.md`, which
+iteration 8 wrote and which nothing linked to: neither page was reachable from
+`docs/README.md`, `docs/index.html`, `docs/llms.txt` or `docs/llms-full.txt`
+until the doc pass. Both are now in all four.
+
+Two deliberate omissions, so the next person does not read them as oversights:
+
+- **No measured numbers.** They live in `plans/orm/benchmarks.md`, generated
+  from `benchmarks.json`. Copying them into `docs/` would produce prose that
+  drifts from its own source — which happened three times inside the benchmark
+  document itself before the numbers were derived rather than written.
+- **Nothing about internals.** `$exec`, the plan key, `Fragment`/`Binder`, the
+  strategy seam and the six invariants are all in this directory. An
+  application author does not need them, and documenting them in `docs/` would
+  make them a compatibility surface.
+
+## Running the Postgres suites
+
+`templates/saas-starter/app/models/postgres.sh`. Four steps have to happen in
+order — a server, `provider = "postgresql"`, `db push`, `prisma generate` — and
+**getting it wrong does not error.** The suite runs, the Postgres describes skip
+or fail, and the number at the bottom looks like a result: 121 failures that are
+nothing but a client generated for the other dialect.
+
+That misread happened three times in one sitting, each time costing a few
+minutes of reading a "regression" that was not one. The script also restores
+`provider = "sqlite"` on the way out, because a left-over `postgresql` provider
+makes the *SQLite* suites fail for an unrelated reason afterwards.
 
 ## Picking up an iteration
 
@@ -379,24 +531,41 @@ than before it.
 
 ## Open decisions
 
-- **Ambient transaction storage.** `packages/gemi/kernel/context.ts` deliberately
-  holds the framework's *only* `AsyncLocalStorage`, and it carries the
-  Application. A transaction scope must nest inside a request without replacing
-  it, so iteration 5 proposes a second, ORM-owned ALS. That is a conscious
-  deviation from a documented design choice and needs sign-off — see
-  [05](./05-ambient-transactions.md).
+- ~~**Ambient transaction storage.**~~ **Settled in iteration 5: a second,
+  ORM-owned `AsyncLocalStorage`** in `packages/gemi/orm/context.ts`, holding
+  `{ tx, depth }` and nothing else. `packages/gemi/kernel/context.ts` keeps
+  carrying only the Application, and the reasoning for a second store rather
+  than a wider one is written up there so the "exactly one ALS" claim does not
+  silently become false. The two alternatives were rejected on the record:
+  re-entering the kernel store with a `{ app, tx }` wrapper makes every reader
+  of it — `app()` above all — handle two shapes forever, and hanging the handle
+  off the Application shares it across concurrent requests, which is data
+  corruption rather than a style question.
 - **MySQL / MariaDB.** Deferred. `DatabaseManager` already infers all four
   dialects, and the strategy seam keeps the door open, but only SQLite and
   Postgres are built and tested. Confirm this is acceptable.
-- **Implicit many-to-many.** The template schema has none (all relations are
-  1-1 / 1-n), so Prisma's implicit `_RelationName` join tables cannot be
-  exercised there. Iteration 3 needs a dedicated fixture schema to cover them.
-- **Coexistence.** `packages/gemi/auth/adapters/prisma.ts` and the template's
-  `app/database/prisma.ts` keep working untouched. A gemi-ORM auth adapter lands
-  alongside the Prisma one so apps migrate model by model, not in one jump.
-  Not scheduled yet — but see the PR #33 follow-ups above: this is the same work
-  as the `SqlUserProvider` proposed there, and it should be scheduled once
-  iteration 4 lands rather than hand-written separately.
+- ~~**Implicit many-to-many.**~~ **Covered.** Iteration 3 built the dedicated
+  fixture this asked for —
+  `templates/saas-starter/app/models/relations.many-to-many.test.ts` — a
+  `Post`/`Tag` pair with the DDL taken verbatim from
+  `prisma migrate diff`, exercising the two-hop load through `_PostToTag` in both
+  directions, on both dialects. Iteration 9 added the case that the lateral
+  strategy *declines* this shape and falls back to batching with identical rows.
+  Still true, and worth keeping in view: the template's own schema has no m-n, so
+  the differential harness cannot reach one and this fixture asserts against
+  Prisma's documented shape rather than a second generated client.
+- ~~**Coexistence.**~~ **Built.** `OrmAuthenticationAdapter` ships alongside the
+  Prisma one — both satisfy `IAuthenticationAdapter`, so an application selects
+  one and nothing else in `auth/` knows which. All twenty-two methods translated
+  with no changes to the ORM, which is the first evidence the query surface is
+  *sufficient* rather than merely tested: they were written against a real
+  application's needs rather than against the compiler's known capabilities.
+  `packages/gemi/auth/adapters/prisma.ts` and the template's
+  `app/database/prisma.ts` are untouched.
+
+  **Still open, and a decision rather than work:** the template's
+  `app/config/auth.ts` is not pointed at it. That is a behaviour change to a
+  working application and wants its own call.
 - **Where this stack merges.** PRs #30 and #33 are both open. If they land before
   the ORM is ready, rebase onto whatever they merge into rather than carrying a
   three-deep stack longer than necessary.

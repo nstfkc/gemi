@@ -84,7 +84,30 @@ export interface RelationSchema {
   to: string[];
   nullable: boolean;
   /** Implicit many-to-many join table. Emitted now, unused until iteration 3. */
-  joinTable?: { table: string; a: string; b: string };
+  joinTable?: {
+    table: string;
+    a: string;
+    b: string;
+    /**
+     * Which column holds the owner of **this** relation field, for a
+     * *self*-referential implicit m-n where `a === b` and the model names
+     * cannot say.
+     *
+     * Prisma assigns the columns by **field name, alphabetically**: the
+     * alphabetically-first of the relation's two fields has its owner in `A`.
+     * Determined by experiment against a generated client, in both directions,
+     * rather than from the docs — the two candidate rules (declaration order
+     * and field-name order) disagree only when a schema declares the fields out
+     * of alphabetical order, which is exactly the case that would have shipped
+     * reversed.
+     *
+     * Absent for a non-self m-n, where comparing the model names answers it,
+     * and absent in artifacts generated before this existed — which is why
+     * reading it is optional rather than required. Such an artifact behaves
+     * exactly as it did: a self-referential m-n is refused.
+     */
+    ownerColumn?: "A" | "B";
+  };
 }
 
 export interface ModelSchema {

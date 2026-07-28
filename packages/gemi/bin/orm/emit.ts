@@ -79,11 +79,40 @@ function scalarType(model: string, field: DMMF.Field): ScalarType {
   return mapped;
 }
 
+/**
+ * Is this DMMF default a *function* call — `autoincrement()`, `cuid()`, `now()`
+ * — rather than a literal or a list?
+ *
+ * A hand-written predicate rather than the inline
+ * `typeof value === "object" && !Array.isArray(value)` this replaces, for two
+ * reasons. TypeScript does not narrow a `readonly T[]` out of a union through
+ * `Array.isArray`, whose signature asserts `arg is any[]` — so the inline form
+ * left `value.name` unresolved, which is the error that surfaced the moment
+ * `bin/orm` entered the tsconfig. And `typeof null === "object"`, so the inline
+ * form would have dereferenced a null default rather than falling through to
+ * the literal branch.
+ *
+ * Note it does **not** additionally require a string `name`, though the first
+ * version of it did. That looked like a tightening and was a behaviour change:
+ * an object default carrying no `name` used to reach `switch (undefined)` and
+ * come out as `{ kind: "dbgenerated" }`, and requiring the name sent it to
+ * `{ kind: "value" }` instead. DMMF's `FieldDefault` always carries one, so
+ * neither path is reachable — but the two are not equally safe if it ever is:
+ * `dbgenerated` omits the column and lets the database supply it, while `value`
+ * would try to bind the object itself as the column's value. The safer of two
+ * unreachable branches is still the one to keep.
+ */
+function isFunctionDefault(
+  value: unknown,
+): value is { name?: string; args?: readonly (string | number)[] } {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function defaultSpec(field: DMMF.Field): DefaultSpec | undefined {
   if (!field.hasDefaultValue || field.default === undefined) return undefined;
 
   const value = field.default;
-  if (typeof value === "object" && !Array.isArray(value)) {
+  if (isFunctionDefault(value)) {
     switch (value.name) {
       case "autoincrement":
       case "cuid":
@@ -158,12 +187,30 @@ function implicitJoinTable(
   if (sides.length !== 2) return undefined;
   if (!sides.every((side) => side.field.isList)) return undefined;
 
-  // NOTE for iteration 3: on a *self*-referential implicit m-n both names are
-  // the same string, so `a === b` and this record cannot say which column holds
-  // which end. Prisma disambiguates by field order rather than by model name.
-  // The planner will need that extra signal before it can join one.
   const [first, second] = [model.name, field.type].sort();
-  return { table: `_${field.relationName}`, a: first, b: second };
+  const table = `_${field.relationName}`;
+
+  // On a *self*-referential implicit m-n both names are the same string, so
+  // `a === b` and the model names cannot say which column holds which end.
+  //
+  // Prisma assigns them by **field name, alphabetically**: the
+  // alphabetically-first of the relation's two fields has its owner in `A`.
+  // Established by experiment against a generated client — connecting through
+  // each field in turn and reading the join table — because the plausible rule
+  // (declaration order) is indistinguishable from this one on any schema whose
+  // fields happen to be declared alphabetically, and disagrees on every other.
+  // Guessing would have reversed the relation silently on exactly those.
+  if (first === second) {
+    const names = sides.map((side) => side.field.name).sort();
+    return {
+      table,
+      a: first,
+      b: second,
+      ownerColumn: field.name === names[0] ? ("A" as const) : ("B" as const),
+    };
+  }
+
+  return { table, a: first, b: second };
 }
 
 /** Single-field `@unique` plus composite `@@unique`, deduplicated, in order. */
@@ -282,11 +329,234 @@ export function emitSchemaFile(schemas: ModelSchema[]): string {
   return parts.join("");
 }
 
+/**
+ * The read surface, and how each operation's return type is built from Prisma's
+ * own generated types.
+ *
+ * `returns` is a template over the model name. The three shapes are: many rows,
+ * one row or `null`, and one row (the `*OrThrow` variants, which never resolve
+ * to `null` because `$exec` raises instead).
+ */
+interface ReadOperation {
+  name: string;
+  args: string;
+  returns: (model: string) => string;
+  /** `findUnique` cannot be called without a `where`, so its args are required. */
+  required?: boolean;
+}
+
+const READ_OPERATIONS: ReadOperation[] = [
+  {
+    name: "findMany",
+    args: "FindManyArgs",
+    returns: (m) => `Prisma.${m}GetPayload<T>[]`,
+  },
+  {
+    name: "findFirst",
+    args: "FindFirstArgs",
+    returns: (m) => `Prisma.${m}GetPayload<T> | null`,
+  },
+  {
+    name: "findFirstOrThrow",
+    args: "FindFirstOrThrowArgs",
+    returns: (m) => `Prisma.${m}GetPayload<T>`,
+  },
+  {
+    name: "findUnique",
+    args: "FindUniqueArgs",
+    returns: (m) => `Prisma.${m}GetPayload<T> | null`,
+    required: true,
+  },
+  {
+    name: "findUniqueOrThrow",
+    args: "FindUniqueOrThrowArgs",
+    returns: (m) => `Prisma.${m}GetPayload<T>`,
+    required: true,
+  },
+];
+
+/**
+ * `wrap`, typed to reject a partial row at compile time.
+ *
+ * The parameter is the model's full scalar payload — `Prisma.<M>GetPayload<{}>` —
+ * so a `Pick` of it fails to type-check for the ordinary reason that it is
+ * missing properties. That single constraint is what lets instances and `select`
+ * coexist: a method reading `this.email` can only ever run on a row that
+ * actually fetched `email`.
+ *
+ * The return type intersects the row with the class, so the instance carries both
+ * the columns and whatever the application's subclass adds. `this: C` plus
+ * `C["prototype"]` is what makes it the *subclass's* instance type rather than
+ * the generated base's — `Account.wrap(...)` returns an `Account`, not an
+ * `AccountModel`, so a method defined on the subclass is visible on the result.
+ *
+ * `{ prototype: unknown }` rather than the more obvious
+ * `new (...args: never[]) => any`, because `Model`'s constructor is `protected`
+ * (which is what stops a directly constructed instance from lying about its
+ * columns) and a protected constructor does not satisfy a public construct
+ * signature. Constraining on the prototype reads the instance type without
+ * caring how — or whether — the class can be constructed from outside.
+ *
+ * `R` is generic rather than fixed to the payload so a row carrying `include`d
+ * relations keeps them in the result type. The constraint still requires *at
+ * least* the full scalar set, which is the property that matters.
+ */
+function wrapOperation(model: string): string {
+  const payload = `Prisma.${model}GetPayload<{}>`;
+  return `
+  static wrap<C extends { prototype: unknown }, R extends ${payload}>(
+    this: C,
+    row: R,
+  ): C["prototype"] & R {
+    return (Model.wrap as (row: object) => any).call(this, row);
+  }
+`;
+}
+
+/**
+ * Declaration merging, so an instance's *columns* are visible to methods written
+ * on the subclass.
+ *
+ * An `interface` sharing the class's name merges into its instance type, which is
+ * what makes this work:
+ *
+ *     export class User extends UserModel {
+ *       get displayName() { return this.name ?? this.email ?? "anonymous" }
+ *     }
+ *
+ * Without it `this.name` does not exist and the entity tier is useless — a
+ * wrapper whose methods cannot read the row is not a wrapper. The first version
+ * of `wrap` intersected the columns into its *return* type only, which typed the
+ * call site correctly and left the class body blind.
+ *
+ * Emitted as an interface rather than as `declare` fields for two reasons: it
+ * reuses Prisma's own payload type instead of re-deriving TypeScript types from
+ * the DMMF, so the two cannot drift; and it is zero runtime output, which
+ * `declare` also is but less obviously.
+ *
+ * The honest cost: `new UserModel()` now type-checks as having columns it does
+ * not have. These classes are constructed by `wrap` and by nothing else — the
+ * twelve operations return plain objects — so the lie is confined to a
+ * constructor call no application has a reason to make.
+ */
+function instanceShape(model: string): string {
+  return `
+// Merges the row's columns into the instance type, so a method on a subclass can
+// read \`this.email\`. No runtime output.
+//
+// oxlint flags class/interface merging because TypeScript does not check the
+// merged properties are initialised — a directly constructed instance would type
+// as carrying every column while holding none. That hazard is closed rather than
+// accepted: \`Model\`'s constructor is \`protected\`, so the only way to get an
+// instance is \`wrap\`, which assigns a complete row. See bin/orm/emit.ts.
+// oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
+export interface ${model}Model extends Prisma.${model}GetPayload<{}> {}
+`;
+}
+
+function operation(model: string, op: ReadOperation): string {
+  const argsType = `Prisma.${model}${op.args}`;
+  const returns = op.returns(model);
+  // `options` is a *second parameter* rather than a key inside `args`, so
+  // `Prisma.${model}${op.args}` keeps describing exactly what the operation
+  // accepts. Intersecting every args type with a gemi-specific key would make
+  // Prisma's own types wrong about our surface, which is the DX parity this
+  // project is built on. It also keeps the flag away from the compiler, so it
+  // cannot reach the plan key — which it must not, since it does not change SQL.
+  return `
+  static ${op.name}<T extends ${argsType}>(
+    args${op.required ? "" : "?"}: Subset<T, ${argsType}>,
+    options?: ExecOptions,
+  ): Promise<${returns}> {
+    return this.$exec("${op.name}", args, options) as Promise<${returns}>;
+  }
+`;
+}
+
+/**
+ * `count` is the one read whose return type is not a payload. Prisma's own
+ * `count` also accepts a `select` that turns the result into an object of
+ * per-field counts; that is aggregate territory, so it is omitted and the
+ * return type is plainly `number`.
+ */
+function countOperation(model: string): string {
+  return `
+  static count(
+    args?: Omit<Prisma.${model}CountArgs, "select">,
+  ): Promise<number> {
+    return this.$exec("count", args) as Promise<number>;
+  }
+`;
+}
+
+/**
+ * The write surface.
+ *
+ * `create`, `update`, `delete` and `upsert` return a payload narrowed by the
+ * caller's `select` / `include`, exactly as the reads do — and, like the
+ * `*OrThrow` reads, they never resolve to `null`: Prisma raises when an
+ * `update` or a `delete` matches nothing, and `$exec` does the same.
+ *
+ * The three `*Many` writes return Prisma's `BatchPayload` — `{ count: number }`
+ * — rather than rows. Prisma's own `createManyAndReturn` is a separate
+ * operation and is not emitted.
+ *
+ * `args` is required on every one of them: there is no meaningful `create()`
+ * with no data, and a `deleteMany()` with no arguments is spelled
+ * `deleteMany({})` so that emptying a table stays something you typed on purpose.
+ */
+const WRITE_OPERATIONS: ReadOperation[] = [
+  {
+    name: "create",
+    args: "CreateArgs",
+    returns: (m) => `Prisma.${m}GetPayload<T>`,
+    required: true,
+  },
+  {
+    name: "update",
+    args: "UpdateArgs",
+    returns: (m) => `Prisma.${m}GetPayload<T>`,
+    required: true,
+  },
+  {
+    name: "delete",
+    args: "DeleteArgs",
+    returns: (m) => `Prisma.${m}GetPayload<T>`,
+    required: true,
+  },
+  {
+    name: "upsert",
+    args: "UpsertArgs",
+    returns: (m) => `Prisma.${m}GetPayload<T>`,
+    required: true,
+  },
+];
+
+/** The writes whose result is a count rather than a payload. */
+const BATCH_OPERATIONS = [
+  { name: "createMany", args: "CreateManyArgs" },
+  { name: "updateMany", args: "UpdateManyArgs" },
+  { name: "deleteMany", args: "DeleteManyArgs" },
+] as const;
+
+function batchOperation(
+  model: string,
+  op: (typeof BATCH_OPERATIONS)[number],
+): string {
+  return `
+  static ${op.name}(
+    args?: Prisma.${model}${op.args},
+  ): Promise<{ count: number }> {
+    return this.$exec("${op.name}", args) as Promise<{ count: number }>;
+  }
+`;
+}
+
 export function emitModelsFile(schemas: ModelSchema[]): string {
   const parts = [
     HEADER,
     `\nimport type { Prisma } from "@prisma/client";\n`,
-    `import { Model } from "gemi/orm";\n`,
+    `import { Model, type ExecOptions } from "gemi/orm";\n`,
     `\nimport * as schema from "./schema";\n`,
     `
 // Copied from Prisma's own generated client. It is what makes \`select\` and
@@ -300,19 +570,17 @@ type Subset<T, U> = {
   ];
 
   for (const schema of schemas) {
-    const name = schema.name;
+    parts.push(instanceShape(schema.name));
     parts.push(`
-export class ${name}Model extends Model {
-  static $schema = schema.${name};
-
-  static findMany<T extends Prisma.${name}FindManyArgs>(
-    args?: Subset<T, Prisma.${name}FindManyArgs>,
-  ): Promise<Prisma.${name}GetPayload<T>[]> {
-    return this.$exec("findMany", args) as Promise<
-      Prisma.${name}GetPayload<T>[]
-    >;
-  }
-}
+export class ${schema.name}Model extends Model {
+  static $schema = schema.${schema.name};
+${READ_OPERATIONS.map((op) => operation(schema.name, op)).join("")}${countOperation(
+      schema.name,
+    )}${WRITE_OPERATIONS.map((op) => operation(schema.name, op)).join(
+      "",
+    )}${BATCH_OPERATIONS.map((op) => batchOperation(schema.name, op)).join(
+      "",
+    )}${wrapOperation(schema.name)}}
 `);
   }
 

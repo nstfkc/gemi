@@ -22,7 +22,7 @@ datasource db {
 
 model Organization {
   id          Int                      @id @default(autoincrement())
-  publicId     String                   @unique @default(cuid())
+  publicId    String                   @unique @default(cuid())
   name        String
   logoUrl     String?
   description String?
@@ -41,6 +41,20 @@ model OrganizationInvitation {
   acceptedAt     DateTime?
 
   createdAt DateTime @default(now())
+
+  // Every foreign key is indexed, because every relation read goes through one.
+  //
+  // Prisma declares no index for a relation's foreign key on either dialect, and
+  // the ORM's relation work leans on it twice over: a batched include filters
+  // the child by `in (<parent keys>)`, and `_count`, relation filters and
+  // relation orderings each run a correlated subquery **once per parent row**.
+  // Without an index that subquery is a scan of the child table per row.
+  //
+  // Measured on 100 parents in `plans/orm/benchmarks.md`: one index line is
+  // worth 6.3x on `_count` and 4.0x on an `exists` filter on SQLite, and it
+  // reverses the advice — unindexed, `_count` is 2.4x slower than loading the
+  // children and counting them in JavaScript; indexed, 2.6x faster.
+  @@index([organizationId])
 }
 
 model Account {
@@ -56,6 +70,9 @@ model Account {
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
   deletedAt DateTime?
+
+  @@index([organizationId])
+  @@index([userId])
 }
 
 model User {
@@ -79,6 +96,8 @@ model User {
   session            Session[]
   passwordResetToken PasswordResetToken[]
   socialAccount      SocialAccount[]
+
+  @@index([organizationId])
 }
 
 model SocialAccount {
@@ -91,7 +110,7 @@ model SocialAccount {
   providerId String
 
   username String?
-  email   String?
+  email    String?
 
   accessToken  String
   refreshToken String
@@ -101,6 +120,7 @@ model SocialAccount {
   updatedAt DateTime @updatedAt
 
   @@unique([username, provider])
+  @@index([userId])
 }
 
 model Session {
@@ -115,6 +135,8 @@ model Session {
   updatedAt         DateTime? @updatedAt
   expiresAt         DateTime
   absoluteExpiresAt DateTime
+
+  @@index([userId])
 }
 
 model PasswordResetToken {
@@ -124,6 +146,8 @@ model PasswordResetToken {
   user   User   @relation(fields: [userId], references: [id])
 
   createdAt DateTime @default(now())
+
+  @@index([userId])
 }
 
 model MagicLinkToken {
