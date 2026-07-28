@@ -1283,18 +1283,39 @@ function childQuery(
   /**
    * One field is an `in`; several are an `OR` of `AND`s.
    *
-   * **Written in argument space rather than as a tuple `in`**, which is the
-   * decision worth recording. Postgres has `(a, b) in ((…),(…))` and SQLite
-   * does not, so emitting it would mean a new dialect method and two spellings
-   * of the same predicate. `OR: [{ a: 1, b: 2 }, …]` is one shape both dialects
-   * already compile, through the `where` compiler that every other filter goes
-   * through — so it inherits the parameter accounting, the plan key and the
-   * injection rules instead of needing its own.
+   * **Written in argument space rather than as a tuple `in`, and the trade is
+   * portability and reuse against plan quality — not the absence of a seam.**
+   * `SqlDialect.inList` is already a dialect method that exists because the two
+   * databases disagree about structure rather than spelling, so a tuple form
+   * would sit exactly where the architecture expects it. The reason to prefer
+   * `OR` anyway is that it is one shape both dialects already compile, through
+   * the `where` compiler every other filter goes through — so it inherits the
+   * parameter accounting, the plan key and the injection rules instead of
+   * needing its own. An N-branch `OR` and a tuple `IN` are not equivalent to a
+   * query planner on a large parent set, and that is the cost being paid.
    *
-   * It costs one placeholder per field per parent, where a tuple `in` would
-   * cost the same. `ParameterLimitError` therefore fires proportionally sooner
-   * on a composite relation, which is the honest behaviour: the ceiling is on
-   * placeholders and a composite key uses more of them.
+   * Two consequences, and the second is the one that is easy to miss:
+   *
+   * 1. It costs one placeholder per field per parent, so `ParameterLimitError`
+   *    fires proportionally sooner on a composite relation. The ceiling is on
+   *    placeholders and a composite key uses more of them.
+   *
+   * 2. **It does not reach `collapsedList`, so the plan key varies with the
+   *    parent count on Postgres too.** That collapse covers `in` / `notIn`,
+   *    where `= any($1)` makes every length one SQL text; an `OR`'s text
+   *    genuinely varies, so a shared key would hand a plan the wrong number of
+   *    placeholders — the trap `collapsedList` already describes for SQLite.
+   *    Measured over parent counts 2, 3, 10, 50:
+   *
+   *        sqlite    composite: 4 keys    single: 4 keys
+   *        postgres  composite: 4 keys    single: 1 key
+   *
+   *    SQLite churns either way and always has. The Postgres asymmetry is new,
+   *    and it is the churn `collapsedList` was written to prevent arriving
+   *    through the door it does not cover. A form where the parent keys ride in
+   *    one parameter — `(a, b) in (select * from unnest($1::int[], $2::text[]))`
+   *    — would fix it there and is filed rather than guessed at here, because
+   *    it needs the column types and its own coverage on both dialects. #97.
    */
   const filter =
     childFields.length === 1
