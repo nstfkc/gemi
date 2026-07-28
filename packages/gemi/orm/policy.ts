@@ -280,6 +280,14 @@ export interface PolicedModel {
  * refuses a `where` carrying anything beside that key. A scoped upsert is
  * therefore not expressible at all, and is refused by name rather than run
  * unscoped — see `assertScopable`.
+ *
+ * **Every other operation with a `where` has to be in here, and adding one is
+ * the step that is easy to forget.** `assertScopable` is written for `upsert`,
+ * so an operation missing from this set does not run unscoped — it fails, with
+ * `upsert`'s reason about `on conflict` targets, which sends the reader
+ * somewhere unrelated. That is the safe direction and a confusing one, and it
+ * takes the operation away from exactly the models the ORM's headline
+ * capability is for: anything carrying `softDeletes()` has a `scope`.
  */
 const SCOPABLE = new Set<string>([
   "findMany",
@@ -288,6 +296,10 @@ const SCOPABLE = new Set<string>([
   "findUnique",
   "findUniqueOrThrow",
   "count",
+  // Its `where` is an ordinary predicate over the rows being aggregated, so a
+  // scope narrows it exactly as it narrows a `count` — which is the same
+  // statement with one function in it.
+  "aggregate",
   "update",
   "updateMany",
   "delete",
