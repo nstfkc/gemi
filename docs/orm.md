@@ -207,6 +207,24 @@ set. The counted relation's policies scope it, so a count only ever counts rows 
 read. That matters more than it looks: an unscoped count returns a *number*, so what it would leak
 is how many rows exist in tenants you cannot see.
 
+**Index the child's foreign key.** A correlated subquery runs once per parent row, so without an
+index each run scans the child table — and Prisma declares no index for a relation's foreign key
+on either dialect, so by default there is none:
+
+```prisma
+model Account {
+  userId Int?
+  user   User? @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+}
+```
+
+Measured on 100 parents, that one line is worth **6.3×** on `_count` and **4.0×** on an `exists`
+filter on SQLite. It flips the advice, too: unindexed, `_count` is 2.4× *slower* than loading the
+children and counting them in JavaScript; indexed, it is 2.6× faster. The same applies to relation
+filters, which are the same shape. Numbers and method in `plans/orm/benchmarks.md`.
+
 `_count: true` (Prisma's "count every to-many relation") is **not** implemented. Name the relations
 instead — the shorthand names none, so a policy has nowhere to attach, and what it returns changes
 silently when the schema grows a relation.

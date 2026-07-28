@@ -58,6 +58,10 @@ async function main() {
   let micro = "";
   const positional: string[] = [];
   const stitching: string[] = [];
+  /** Correlated-subquery shapes: `_count` and `exists`. See the section below. */
+  const subqueries: string[] = [];
+  /** One derived sentence per dialect — see the section. Never hand-written. */
+  const subqueryNotes: string[] = [];
   const tracking: string[] = [];
   /**
    * Per-dialect 100-parent read with *no* include — the one-round-trip anchor
@@ -79,6 +83,8 @@ async function main() {
         `file:${sqlite.path}`,
         positional,
         stitching,
+        subqueries,
+        subqueryNotes,
         tracking,
         anchors,
         roundTrips,
@@ -102,6 +108,8 @@ async function main() {
         POSTGRES_URL,
         positional,
         stitching,
+        subqueries,
+        subqueryNotes,
         tracking,
         anchors,
         roundTrips,
@@ -192,6 +200,31 @@ async function main() {
     "| Dialect | Parents | no include µs | with include µs | difference |",
     "| --- | --: | --: | --: | --: |",
     ...stitching,
+    "",
+    "## Correlated subqueries: `_count` and `exists`",
+    "",
+    "The two shapes added after iteration 9. Both fold work that would otherwise",
+    "be a second query into the root statement, so the question for each is what",
+    "it costs against the thing an author would do instead.",
+    "",
+    "`_count` is measured against **loading the children and counting them in",
+    "JavaScript**, which is the alternative when there is no `_count` — not",
+    "against a per-parent count query, which nobody writes. The `exists` filter",
+    "is measured against the same read with no filter, since there is no",
+    "single-statement alternative to compare it to.",
+    "",
+    "**The index columns are the measurement, not a refinement.** A correlated",
+    "subquery runs once per parent row, so without an index on the child's",
+    "foreign key each run is a scan of the child table — and Prisma declares no",
+    "index for a relation's foreign key on either dialect. The unindexed column",
+    "is what an author gets by default; the indexed one is what they get after",
+    "one `@@index` line.",
+    "",
+    "| Dialect | Parents | plain µs | `_count` µs | `_count` +index µs | include+`.length` µs | `exists` µs | `exists` +index µs |",
+    "| --- | --: | --: | --: | --: | --: | --: | --: |",
+    ...subqueries,
+    "",
+    ...subqueryNotes,
     "",
     "## Positional row mode (deliverable 4)",
     "",
@@ -566,6 +599,8 @@ async function runDialect(
   prismaUrl: string,
   positional: string[],
   stitching: string[],
+  subqueries: string[],
+  subqueryNotes: string[],
   tracking: string[],
   anchors: Record<string, number>,
   roundTrips: string[],
@@ -898,6 +933,97 @@ async function runDialect(
       // The 1-round-trip anchor conclusion 3 measures per-level cost against.
       // Not one of the numbered scenarios, so it is handed back explicitly.
       anchors[dialect] = withoutInclude.p50;
+
+      // --- 4a-bis. correlated subqueries ----------------------------------
+      // Both shapes fold a second query into the root statement. `_count`'s
+      // real alternative is loading the children and counting them in
+      // JavaScript, which is what an author does without it — a per-parent
+      // count query is not a thing anyone writes, so measuring against one
+      // would flatter the feature by comparing it to a strawman.
+      const counted = await time(
+        () =>
+          UserModel.findMany({
+            take: PARENTS,
+            include: { _count: { select: { accounts: true } } },
+          }),
+        { runs: 50 },
+      );
+      const countedInJs = await time(
+        async () => {
+          const rows = await UserModel.findMany({
+            take: PARENTS,
+            include: { accounts: true },
+          });
+          return rows.map((row: any) => row.accounts.length);
+        },
+        { runs: 50 },
+      );
+      const filtered = await time(
+        () =>
+          UserModel.findMany({
+            take: PARENTS,
+            where: { accounts: { some: {} } },
+          }),
+        { runs: 50 },
+      );
+
+      // The same two shapes with an index on the child's foreign key.
+      //
+      // This is not a refinement, it is the measurement. A correlated subquery
+      // runs once per parent row, so without an index each run is a scan of the
+      // child table — and **Prisma declares no index for a relation's foreign
+      // key**, on either dialect. The template's `Account.userId` has none, so
+      // the unindexed column is what an author gets by default and the indexed
+      // one is what they get after one line of schema.
+      await raw.unsafe(
+        `CREATE INDEX "bench_account_user" ON "Account" ("userId")`,
+      );
+      let countedIndexed;
+      let filteredIndexed;
+      try {
+        countedIndexed = await time(
+          () =>
+            UserModel.findMany({
+              take: PARENTS,
+              include: { _count: { select: { accounts: true } } },
+            }),
+          { runs: 50 },
+        );
+        filteredIndexed = await time(
+          () =>
+            UserModel.findMany({
+              take: PARENTS,
+              where: { accounts: { some: {} } },
+            }),
+          { runs: 50 },
+        );
+      } finally {
+        await raw.unsafe(`DROP INDEX "bench_account_user"`);
+      }
+
+      // Derived, never written. Every number in the sentence comes out of the
+      // measurement beside it — the report has drifted from its own tables
+      // before, and the fix was to stop writing prose that could.
+      const ratio = (a: number, b: number) => (a / b).toFixed(1);
+      subqueryNotes.push(
+        `- **${dialect}:** the index is worth ${ratio(counted.p50, countedIndexed.p50)}× on ` +
+          `\`_count\` and ${ratio(filtered.p50, filteredIndexed.p50)}× on the \`exists\` filter. ` +
+          `Indexed, \`_count\` is ` +
+          (countedIndexed.p50 < countedInJs.p50
+            ? `${ratio(countedInJs.p50, countedIndexed.p50)}× **faster** than`
+            : `${ratio(countedIndexed.p50, countedInJs.p50)}× **slower** than`) +
+          ` loading the children and counting them in JavaScript; unindexed it is ` +
+          (counted.p50 < countedInJs.p50
+            ? `${ratio(countedInJs.p50, counted.p50)}× faster.`
+            : `${ratio(counted.p50, countedInJs.p50)}× slower.`),
+      );
+
+      subqueries.push(
+        `| ${dialect} | ${PARENTS} | ${withoutInclude.p50.toFixed(1)} | ` +
+          `${counted.p50.toFixed(1)} | ${countedIndexed.p50.toFixed(1)} | ` +
+          `${countedInJs.p50.toFixed(1)} | ` +
+          `${filtered.p50.toFixed(1)} | ${filteredIndexed.p50.toFixed(1)} |`,
+      );
     }
 
     // --- 4b. positional row mode ------------------------------------------
