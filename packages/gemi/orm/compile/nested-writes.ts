@@ -1,7 +1,9 @@
 import { UnsupportedQueryError } from "../errors";
+import type { SqlDialect } from "../dialect";
 import type { ModelSchema, RelationSchema } from "../schema";
 import type { Binder } from "./fragment";
 import {
+  type Link,
   type NestedWriteStep,
   relatedSchema,
   resolveLink,
@@ -71,6 +73,12 @@ export function planNestedWrites(
   operation: string,
   /** Re-locates `data` inside the call's argument tree at bind time. */
   locateData: (args: any) => any,
+  /**
+   * Needed only by the implicit many-to-many path, which emits statements
+   * against a table with no model and therefore has no `Fragment` pipeline to
+   * number its placeholders — SQLite writes `?` and Postgres `$1`.
+   */
+  dialect: SqlDialect,
 ): NestedWritePlanning {
   if (typeof data !== "object" || data === null || Array.isArray(data)) {
     return EMPTY;
@@ -95,7 +103,7 @@ export function planNestedWrites(
     const node = (data as Record<string, unknown>)[key];
     const locate = (args: any) => locateData(args)?.[key];
 
-    planOne(schema, relation, node, operation, locate, planning);
+    planOne(schema, relation, node, operation, locate, planning, dialect);
   }
 
   return planning;
@@ -108,6 +116,7 @@ function planOne(
   operation: string,
   locate: (args: any) => any,
   out: NestedWritePlanning,
+  dialect: SqlDialect,
 ): void {
   if (typeof node !== "object" || node === null || Array.isArray(node)) {
     throw new UnsupportedQueryError(
@@ -118,21 +127,36 @@ function planOne(
     );
   }
 
-  // Prisma's implicit many-to-many writes rows into a join table that has no
-  // model, so nothing here can express them.
-  if (relation.joinTable) {
-    throw new UnsupportedQueryError(
-      `data.${relation.name}`,
-      schema.name,
-      operation,
-      `${relation.name} is an implicit many-to-many. Writing through its join ` +
-        `table is not implemented yet.`,
-    );
-  }
-
   const keys = Object.keys(node as Record<string, unknown>)
     .sort()
     .filter((key) => (node as Record<string, unknown>)[key] !== undefined);
+
+  if (keys.length === 0) return;
+
+  const child = relatedSchema(schema, relation);
+  const link = resolveLink(schema, child, relation);
+
+  // An implicit many-to-many is *neither* side: the keys live in a third table
+  // with no model, so both directions are the same work and the operand set is
+  // wider — `disconnect` and `set` are a delete against the join table, which
+  // needs no schema to compile.
+  if (link.join) {
+    for (const key of keys) {
+      planJoinTable(
+        schema,
+        relation,
+        child,
+        link,
+        key,
+        (node as Record<string, unknown>)[key],
+        operation,
+        (args: any) => locate(args)?.[key],
+        out,
+        dialect,
+      );
+    }
+    return;
+  }
 
   for (const key of keys) {
     if (!SUPPORTED.has(key)) {
@@ -145,11 +169,6 @@ function planOne(
       );
     }
   }
-
-  if (keys.length === 0) return;
-
-  const child = relatedSchema(schema, relation);
-  const link = resolveLink(schema, child, relation);
 
   // `from` is non-empty exactly on the side that holds the foreign key.
   const owning = relation.from.length > 0;
@@ -354,6 +373,178 @@ function planForeignSide(
       }
     },
   });
+}
+
+/** What an implicit many-to-many accepts, which is wider than an ordinary relation. */
+const JOIN_TABLE_SUPPORTED = new Set([
+  "connect",
+  "disconnect",
+  "set",
+  "create",
+]);
+
+/**
+ * Writes through Prisma's implicit many-to-many join table.
+ *
+ * The table has **no model**: no registered class, no generated base, no
+ * `$schema` — just `_PostToTag` with an `A` and a `B` column, named from the
+ * two model names in alphabetical order, with the pair as its primary key. So
+ * the two operands that work for an ordinary relation have nothing to compile
+ * *to*, and these statements are emitted directly, the way the read side's
+ * `readPairs` already does.
+ *
+ * Which column is which end comes from `resolveLink`, never from declaration
+ * order. That distinction is invisible on `Post` / `Tag` and wrong on a
+ * self-relation, where both ends are the same model and only the *field* name
+ * separates them.
+ *
+ * Every operand is an `after` step: the pair cannot be written until this row
+ * has a key. Two of them are more than one statement — `set` deletes before it
+ * inserts — and `$exec` already opens a transaction for any plan carrying
+ * steps, so the whole thing is atomic.
+ *
+ * **The rows the pairs point at are still read and written through the child's
+ * own `$exec`**, so a `connect` cannot reach a row the child's policies hide,
+ * and a `create` gets the child's `onCreate`. Only the join table itself —
+ * which has no model and nothing an application could scope — is written
+ * directly.
+ */
+function planJoinTable(
+  schema: ModelSchema,
+  relation: RelationSchema,
+  child: ModelSchema,
+  link: Link,
+  key: string,
+  operand: unknown,
+  operation: string,
+  at: (args: any) => any,
+  out: NestedWritePlanning,
+  dialect: SqlDialect,
+): void {
+  if (!JOIN_TABLE_SUPPORTED.has(key)) {
+    throw new UnsupportedQueryError(
+      `data.${relation.name}.${key}`,
+      schema.name,
+      operation,
+      `'${relation.name}' is an implicit many-to-many. Only ` +
+        `${[...JOIN_TABLE_SUPPORTED].sort().join(", ")} are implemented ` +
+        `through its join table.`,
+    );
+  }
+
+  const join = link.join!;
+  const parentField = link.parentField;
+  const childField = link.childField;
+
+  out.keyFields.push(parentField);
+
+  out.after.push({
+    relation: relation.name,
+    operation: key === "create" ? "create" : "connect",
+    async run(args, _context, executor, rows) {
+      const parent = rows[0];
+      if (!parent) return;
+
+      const parentKey = parent[parentField];
+      if (parentKey === null || parentKey === undefined) return;
+
+      // `set` replaces the whole set, so what is there now goes first. Prisma
+      // does the same, and it is why this operand needs the transaction the
+      // step already runs in.
+      if (key === "set") {
+        await runPairStatement(
+          executor,
+          `delete from ${quote(join.table)} where ` +
+            `${quote(join.parentColumn)} = ${dialect.placeholder(0)}`,
+          [parentKey],
+        );
+      }
+
+      const items = listOf(at(args));
+      if (items.length === 0) return;
+
+      const childKeys: unknown[] = [];
+
+      for (const item of items) {
+        if (key === "create") {
+          const created = (await executor.exec(
+            relation.model,
+            "create",
+            { data: item, select: { [childField]: true } },
+            // NOT pre-scoped: the child's own `onCreate` is what scopes the row.
+            false,
+          )) as Record<string, unknown> | null;
+          if (created) childKeys.push(created[childField]);
+          continue;
+        }
+
+        // `connect`, `disconnect` and `set` all name existing rows by a unique
+        // key. Resolved through the child's own `$exec`, so its policies decide
+        // which rows exist — otherwise a connect by any unique key reaches
+        // every tenant's.
+        matchUniqueKey(child, item, `${operation}.${relation.name}.${key}`);
+        const found = (await executor.exec(
+          relation.model,
+          "findUniqueOrThrow",
+          { where: item, select: { [childField]: true } },
+          false,
+        )) as Record<string, unknown> | null;
+        if (found) childKeys.push(found[childField]);
+      }
+
+      for (const childKey of childKeys) {
+        if (key === "disconnect") {
+          await runPairStatement(
+            executor,
+            `delete from ${quote(join.table)} where ` +
+              `${quote(join.parentColumn)} = ${dialect.placeholder(0)} and ` +
+              `${quote(join.childColumn)} = ${dialect.placeholder(1)}`,
+            [parentKey, childKey],
+          );
+          continue;
+        }
+
+        // `on conflict do nothing`, because the pair is the join table's
+        // primary key and Prisma treats a repeated `connect` as a no-op rather
+        // than an error. Without it the second connect of the same pair is a
+        // raw driver unique violation, which is neither Prisma's behaviour nor
+        // a useful one. Both dialects spell it the same way — SQLite has had it
+        // since 3.24 — so this needs no dialect branch.
+        await runPairStatement(
+          executor,
+          `insert into ${quote(join.table)} ` +
+            `(${quote(join.parentColumn)}, ${quote(join.childColumn)}) ` +
+            `values (${dialect.placeholder(0)}, ${dialect.placeholder(1)}) ` +
+            `on conflict do nothing`,
+          [parentKey, childKey],
+        );
+      }
+    },
+  });
+}
+
+/**
+ * The join table's identifiers are `_PostToTag`, `A` and `B` — generated by
+ * Prisma from model names, never caller input — so they are quoted the same way
+ * a column from the schema is. Double-quoting works on both implemented
+ * dialects.
+ */
+const quote = (name: string) => `"${name.replace(/"/g, '""')}"`;
+
+/**
+ * One statement against a table with no model, on the connection this call
+ * resolved — which is what keeps it inside the caller's transaction.
+ *
+ * Placeholders come from the dialect rather than being hardcoded, for the same
+ * reason `readPairs` renders its statement: SQLite writes `?` and Postgres
+ * `$1`, and this path has no `Fragment` pipeline to do it automatically.
+ */
+async function runPairStatement(
+  executor: { query(text: string, values: unknown[]): Promise<unknown> },
+  text: string,
+  values: unknown[],
+): Promise<void> {
+  await executor.query(text, values);
 }
 
 /**
