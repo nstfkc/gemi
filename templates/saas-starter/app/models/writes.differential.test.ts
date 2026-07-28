@@ -358,6 +358,168 @@ function suite(label: string, url?: string) {
       );
     });
 
+    /**
+     * `createMany` — the shape #65 calls the biggest single item: parent and
+     * children in one call, and one statement for the children rather than one
+     * per row.
+     */
+    test("nested createMany writes every child in one statement", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "create",
+        {
+          data: {
+            email: "many@example.dev",
+            accounts: {
+              createMany: {
+                data: [
+                  { organizationRole: 0 },
+                  { organizationRole: 1 },
+                  { organizationRole: 2 },
+                ],
+              },
+            },
+          },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    test("nested createMany, read back through include", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "create",
+        {
+          data: {
+            email: "many2@example.dev",
+            accounts: { createMany: { data: [{ organizationRole: 1 }] } },
+          },
+          include: { accounts: true },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    // Prisma accepts a bare object where the rows go, not only an array.
+    test("nested createMany accepts a single object as its data", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "create",
+        {
+          data: {
+            email: "many3@example.dev",
+            accounts: { createMany: { data: { organizationRole: 1 } } },
+          },
+          include: { accounts: true },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    // Verified against Prisma: an empty list writes nothing and does not error,
+    // and the parent still comes back with `accounts: []`.
+    test("nested createMany with no rows writes the parent alone", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "create",
+        {
+          data: {
+            email: "many4@example.dev",
+            accounts: { createMany: { data: [] } },
+          },
+          include: { accounts: true },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    test("nested createMany alongside a create on the same relation", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "create",
+        {
+          data: {
+            email: "many5@example.dev",
+            accounts: {
+              create: [{ organizationRole: 0 }],
+              createMany: { data: [{ organizationRole: 1 }] },
+            },
+          },
+          include: { accounts: true },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    test("nested createMany under update", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { id: 1 },
+          data: { accounts: { createMany: { data: [{ organizationRole: 1 }] } } },
+          include: { accounts: true },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    test("nested createMany with a select on the parent", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "create",
+        {
+          data: {
+            email: "many6@example.dev",
+            accounts: { createMany: { data: [{ organizationRole: 1 }] } },
+          },
+          select: { email: true },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    /**
+     * #65's third acceptance criterion: a failure anywhere in the tree rolls the
+     * whole write back. Verified against Prisma's own behaviour — a duplicate
+     * mid-array leaves *no* parent row either.
+     *
+     * Not `expectSameWrite`, because the two clients cannot both run a failing
+     * write against one database and see the same state; this asserts the
+     * rollback directly, which is the half that matters.
+     */
+    test("a child that violates a constraint rolls the parent back too", async () => {
+      await differential.reset();
+
+      await expect(
+        UserModel.create({
+          data: {
+            email: "rollback@example.dev",
+            accounts: {
+              createMany: {
+                data: [
+                  { publicId: "keep-1", organizationRole: 0 },
+                  // The same publicId twice: the second row of the same
+                  // statement violates the unique index.
+                  { publicId: "keep-1", organizationRole: 1 },
+                ],
+              },
+            },
+          },
+        }),
+      ).rejects.toThrow();
+
+      const parent = await differential.prisma.user.findFirst({
+        where: { email: "rollback@example.dev" },
+      });
+      expect(parent).toBeNull();
+
+      const children = await differential.prisma.account.findMany({
+        where: { publicId: "keep-1" },
+      });
+      expect(children).toHaveLength(0);
+    });
+
     test("nested connect on the foreign side repoints the child", async () => {
       await differential.reset();
       await differential.prisma.account.create({

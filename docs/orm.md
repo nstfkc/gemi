@@ -166,6 +166,45 @@ await User.findMany({ include: { accounts: true } }, { strategy: "batched" })
 Unlike `track`, `strategy` **does** reach the compiler and **is** part of the plan cache key: two
 strategies emit different SQL for the same arguments.
 
+### Nested writes
+
+A relation key inside `data` writes the far side in the same call:
+
+```ts
+await List.create({
+  data: {
+    name,
+    organizationId,
+    items: { createMany: { data: rows } },   // one statement for every row
+  },
+})
+```
+
+| Operand | What it does |
+| --- | --- |
+| `create` | Writes new related rows. One statement each. |
+| `createMany` | The same rows in **one** statement. To-many only, and the rows go inside `data`. |
+| `connect` | Points at an existing row — a bound column when it names the referenced key, a lookup otherwise. |
+
+Which direction a nested write runs in is decided by **who holds the foreign key**. When this model
+holds it, the far row is resolved or created *first* and collapses into one more column. When the
+child holds it, nothing can be written until this row exists, so those run after — which is why the
+statement returns the parent's key even when your `select` did not ask for it.
+
+Three things follow from that, and all three are load-bearing:
+
+- **The foreign key is ours to set, not yours.** A nested row that also named it would be describing
+  a different parent than the call is, so it is overwritten.
+- **The child's policies apply.** Each nested row goes through the related model's own `$exec`, so
+  its `onCreate` stamps the tenant column and its `scope` decides which rows a `connect` can reach.
+  A `createMany` writes its rows in one statement and they are *each* scoped.
+- **A failure anywhere rolls the whole thing back**, including the parent row.
+
+Everything else in Prisma's nested grammar — `connectOrCreate`, `set`, `disconnect`, `update`,
+`updateMany`, `upsert`, `delete`, `deleteMany` — is refused, by name and with the reason. They share
+one property: each writes rows that already exist, which needs a scoping pass of its own rather than
+the child's `onCreate`. `skipDuplicates` is not implemented on `createMany` at any level.
+
 ### Filtering on a relation
 
 ```ts
@@ -327,8 +366,8 @@ await Model.transaction(async () => {
 `Promise.all` over several ORM calls inside the callback is not safe — the ordinary, encouraged
 thing everywhere else in a Bun codebase. Await them in sequence.
 
-**A multi-statement write is atomic on its own.** A write with a nested `create` or `connect` runs
-more than one statement, and `$exec` opens a transaction for exactly those calls — so a nested
+**A multi-statement write is atomic on its own.** A write with a nested `create`, `createMany` or
+`connect` runs more than one statement, and `$exec` opens a transaction for exactly those calls — so a nested
 step that fails, or a child policy that denies, rolls back the parent row too. A plain `create`
 still compiles to one statement and opens nothing, and inside a transaction you opened the nested
 one becomes a savepoint. You do not need `Model.transaction` to make a single nested write whole;

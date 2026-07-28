@@ -37,7 +37,30 @@ import { matchUniqueKey } from "./unique";
  * separate statement with no transaction around it until iteration 5.
  */
 
-const SUPPORTED = new Set(["connect", "create"]);
+const SUPPORTED = new Set(["connect", "create", "createMany"]);
+
+/**
+ * The operands still refused, and what each would take.
+ *
+ * Named individually rather than covered by one message, because "not
+ * implemented" is much less useful than knowing whether the thing you reached
+ * for is a rewrite or a wait. Each of these is a *write to rows that already
+ * exist*, which is the line: everything supported writes new rows or repoints a
+ * key, and none of it has to reason about what was there before.
+ */
+const REFUSED: Record<string, string> = {
+  connectOrCreate:
+    `It is an upsert against the child, which needs the read-then-write ` +
+    `fallback 'upsert' uses when 'on conflict' cannot express the target.`,
+  set: `It replaces the whole set, so it has to disconnect what is there now.`,
+  disconnect: `It clears a foreign key on rows this call did not name.`,
+  delete: `It deletes rows this call did not name.`,
+  deleteMany: `It deletes rows this call did not name.`,
+  update: `It writes rows that already exist, which needs its own scoping pass.`,
+  updateMany:
+    `It writes rows that already exist, which needs its own scoping pass.`,
+  upsert: `It is 'update' and 'connectOrCreate' at once.`,
+};
 
 /** A foreign-key column on *this* model that a nested write supplies. */
 export interface ForeignKeyContribution {
@@ -136,12 +159,13 @@ function planOne(
 
   for (const key of keys) {
     if (!SUPPORTED.has(key)) {
+      const why = REFUSED[key];
       throw new UnsupportedQueryError(
         `data.${relation.name}.${key}`,
         schema.name,
         operation,
-        `Only 'connect' and 'create' are implemented. Deep nested writes are ` +
-          `a later iteration.`,
+        `Only 'connect', 'create' and 'createMany' are implemented.` +
+          (why ? ` '${key}' is not: ${why}` : ""),
       );
     }
   }
@@ -189,6 +213,21 @@ function planOwningSide(
   // references on the other one.
   const fkField = link.parentField;
   const referenced = link.childField;
+
+  // This side is a to-one by construction — it holds a single foreign key — so
+  // there is nothing for a `createMany` to write many of. Prisma does not offer
+  // it here either; refused with the reason rather than the grammar, because a
+  // caller who reached for it has the direction of the relation wrong.
+  if (key === "createMany") {
+    throw new UnsupportedQueryError(
+      `data.${relation.name}.createMany`,
+      schema.name,
+      operation,
+      `'${relation.name}' is a to-one: this row holds the foreign key, so ` +
+        `there is one related row at most and nothing to create many of. ` +
+        `Prisma does not accept it here either.`,
+    );
+  }
 
   if (key === "create") {
     // The far row does not exist yet: create it first, through its own model's
@@ -327,6 +366,68 @@ function planForeignSide(
     return;
   }
 
+  /**
+   * `createMany`: the same rows as a nested `create`, in **one statement**.
+   *
+   * The biggest single item on #65 — parent-and-children in one call — and the
+   * work is sequencing rather than SQL: `compileCreateMany` already exists, and
+   * the parent's `RETURNING` already yields the key the children need. What this
+   * step adds is running it once with the key stamped onto every row, instead of
+   * once per row.
+   *
+   * That difference is the point. A nested `create` of forty rows is forty
+   * statements; this is one, which is what makes the shape worth porting rather
+   * than rewriting into a transaction with explicit foreign keys.
+   */
+  if (key === "createMany") {
+    if (relation.kind !== "many") {
+      throw new UnsupportedQueryError(
+        `data.${relation.name}.createMany`,
+        schema.name,
+        operation,
+        `'${relation.name}' is a to-one, so there is nothing to create many ` +
+          `of. Prisma does not accept it here either.`,
+      );
+    }
+
+    assertCreateManyOperand(schema, relation, operand, operation);
+
+    out.after.push({
+      relation: relation.name,
+      operation: "createMany",
+      async run(args, _context, executor, rows) {
+        const parent = rows[0];
+        if (!parent) return;
+
+        const items = listOf(at(args)?.data).map((item) => ({
+          // Same rule as the nested `create` beside this one: the foreign key
+          // is ours to set, not the caller's. Prisma leaves it out of the
+          // nested input type entirely, so a row naming it is describing a
+          // different parent than the call is.
+          ...(item as object),
+          [childField]: parent[parentField],
+        }));
+
+        // Prisma accepts an empty list and writes nothing, rather than erroring
+        // — verified — and a `createMany` with no rows is not a statement worth
+        // sending.
+        if (items.length === 0) return;
+
+        await executor.exec(
+          relation.model,
+          "createMany",
+          { data: items },
+          // NOT pre-scoped. `createMany` is in the set an `onCreate` applies
+          // to, and it applies per row — so the child's policy stamps the
+          // tenant column onto every one of these, exactly as it would for a
+          // top-level `createMany`.
+          false,
+        );
+      },
+    });
+    return;
+  }
+
   // `connect` on this side means "point that existing row at me", which is an
   // update of the child's foreign key — not something this row's insert can do.
   out.after.push({
@@ -354,6 +455,58 @@ function planForeignSide(
       }
     },
   });
+}
+
+/**
+ * `createMany`'s operand is `{ data }` — not the rows directly, which is the
+ * one place Prisma's nested grammar adds a level.
+ *
+ * Checked at plan time, so a misspelled key fails when the query is compiled
+ * rather than after the parent row has already been written and the transaction
+ * has to unwind it.
+ */
+function assertCreateManyOperand(
+  schema: ModelSchema,
+  relation: RelationSchema,
+  operand: unknown,
+  operation: string,
+): void {
+  const at = `data.${relation.name}.createMany`;
+
+  if (typeof operand !== "object" || operand === null || Array.isArray(operand)) {
+    throw new UnsupportedQueryError(
+      at,
+      schema.name,
+      operation,
+      `Expected an object with a 'data' key — the rows go inside it, not ` +
+        `directly under 'createMany'.`,
+    );
+  }
+
+  const keys = Object.keys(operand as Record<string, unknown>).filter(
+    (key) => (operand as Record<string, unknown>)[key] !== undefined,
+  );
+
+  if (!keys.includes("data")) {
+    throw new UnsupportedQueryError(at, schema.name, operation, `Expected a 'data' key.`);
+  }
+
+  for (const key of keys) {
+    if (key === "data") continue;
+
+    // `skipDuplicates` is the one a caller will actually reach for, and it is a
+    // gap in `createMany` itself rather than in this nesting — so it gets the
+    // reason instead of the generic message. Prisma refuses it on SQLite too,
+    // where there is no `on conflict do nothing` for it to compile to.
+    throw new UnsupportedQueryError(
+      `${at}.${key}`,
+      schema.name,
+      operation,
+      key === "skipDuplicates"
+        ? `'skipDuplicates' is not implemented on 'createMany' at any level.`
+        : `Expected only 'data'.`,
+    );
+  }
 }
 
 /**

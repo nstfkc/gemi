@@ -197,6 +197,61 @@ describe("policies on nested writes", () => {
   });
 
   /**
+   * The same rule for `createMany`, and it is the one that would be easiest to
+   * lose: the children go through *one* `$exec` rather than one per row, so a
+   * policy applied per statement instead of per row would leave every row after
+   * the first belonging to nobody.
+   *
+   * `createMany` is in the set an `onCreate` applies to, and `withCreated` maps
+   * it over the array — this asserts that end to end rather than trusting it.
+   */
+  test("a nested createMany carries the child's onCreate onto every row", async () => {
+    await Model.asUser(OURS, () =>
+      Folder.$exec("create", {
+        data: {
+          code: "ours",
+          notes: {
+            createMany: { data: [{ label: "a" }, { label: "b" }, { label: "c" }] },
+          },
+        },
+      }),
+    );
+
+    const notes: any = await raw.unsafe(`SELECT * FROM "Note" ORDER BY "id"`);
+    expect(notes).toHaveLength(3);
+    // Every one of them, not just the first.
+    expect([...notes].map((note: any) => note.orgId)).toEqual([7, 7, 7]);
+    // ...and they are all attached to the folder that was just written.
+    expect(new Set([...notes].map((note: any) => note.folderId)).size).toBe(1);
+  });
+
+  /**
+   * A row that names the foreign key itself is describing a different parent
+   * than the call is. The nested `create` beside it has always overridden it;
+   * `createMany` does the same, and this pins that a caller cannot use it to
+   * attach rows to somebody else's parent.
+   */
+  test("a nested createMany row cannot choose its own parent", async () => {
+    await raw.unsafe(
+      `INSERT INTO "Folder" ("id", "code", "orgId") VALUES (2, 'ours', 7)`,
+    );
+
+    await Model.asUser(OURS, () =>
+      Folder.$exec("create", {
+        data: {
+          code: "fresh",
+          notes: { createMany: { data: [{ label: "a", folderId: 1 }] } },
+        },
+      }),
+    );
+
+    const notes: any = await raw.unsafe(`SELECT * FROM "Note"`);
+    expect(notes).toHaveLength(1);
+    // Not folder 1, which belongs to org 99.
+    expect(notes[0].folderId).not.toBe(1);
+  });
+
+  /**
    * `connect` by a unique key that is *not* the referenced field resolves with a
    * `findUniqueOrThrow` on the target — a read of another model, and therefore
    * that model's policies. Unscoped, this attaches org 99's folder to org 7's
