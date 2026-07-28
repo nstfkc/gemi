@@ -3,7 +3,7 @@ import { UnknownRelationError, UnsupportedQueryError } from "../errors";
 import type { ModelSchema, RelationSchema } from "../schema";
 import { COUNT_KEY } from "../relation-filters";
 import { type Fragment, concat, sql } from "./fragment";
-import { relatedSchema, resolveLink } from "./plan-relations";
+import { correlate } from "./correlate";
 import { compileWhere } from "./where";
 
 /**
@@ -100,22 +100,13 @@ function countPlan(
     );
   }
 
-  if (relation.joinTable) {
-    throw new UnsupportedQueryError(
-      path,
-      schema.name,
-      operation,
-      `${relation.name} is an implicit many-to-many. Counting across its join ` +
-        `table is not implemented yet.`,
-    );
-  }
-
-  const child = relatedSchema(schema, relation);
-  const link = resolveLink(schema, child, relation);
-
-  const alias = `_c${index}`;
-  const childQualifier = `${dialect.quoteIdent(alias)}.`;
-  const parentQualifier = `${dialect.quoteIdent(schema.table)}.`;
+  const source = correlate(
+    schema,
+    relation,
+    dialect,
+    `_c${index}`,
+    `${dialect.quoteIdent(schema.table)}.`,
+  );
 
   const where = node === true ? undefined : (node as any)?.where;
   const container = args?.include !== undefined ? "include" : "select";
@@ -123,21 +114,14 @@ function countPlan(
     a?.[container]?.[COUNT_KEY]?.select?.[relation.name]?.where;
 
   const filter = compileWhere(
-    child,
+    source.child,
     where,
-    { dialect, operation, qualifier: childQualifier },
+    { dialect, operation, qualifier: source.qualifier },
     locate,
   );
 
-  const correlation =
-    `${childQualifier}${dialect.quoteIdent(column(child, link.childField))} = ` +
-    `${parentQualifier}${dialect.quoteIdent(column(schema, link.parentField))}`;
-
   const parts: Fragment[] = [
-    sql(
-      `(select count(*) from ${dialect.quoteIdent(child.table)} ` +
-        `as ${dialect.quoteIdent(alias)} where ${correlation}`,
-    ),
+    sql(`(select count(*) from ${source.source} where ${source.correlation}`),
   ];
   if (filter) parts.push(sql(" and "), filter);
   // The alias carries a dot on purpose: it cannot collide with a column, since
@@ -198,10 +182,3 @@ function readCountSelection(
   return selection as Record<string, unknown>;
 }
 
-function column(schema: ModelSchema, name: string): string {
-  const field = schema.fields[name];
-  if (!field) {
-    throw new UnknownRelationError(name, schema.name, Object.keys(schema.fields));
-  }
-  return field.column;
-}

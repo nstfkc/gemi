@@ -207,8 +207,26 @@ it.**
   reads it. The key is not in Prisma's `orderBy` type, so the generated bases
   cannot accept it from application code: the policy pass is its only producer.
 
-  Still open: filtering, counting or ordering across an implicit many-to-many
-  (two hops through the join table).
+  ~~Still open: filtering, counting or ordering across an implicit
+  many-to-many~~ — **also done**, and it is the clearest argument in this
+  sequence for fixing the shape rather than the instances.
+
+  All three refused m-n *separately*, with three messages, because the join
+  table needs a second table inside the subquery and none of the three had
+  anywhere to put one. Hoisting the `from` clause and the correlation into one
+  `correlate()` made m-n a property of that function instead of a capability
+  each caller had to grow — and the three call sites got shorter rather than
+  longer. Three duplicated key-column lookups went with it.
+
+  Exercised against a real database in
+  `templates/saas-starter/app/models/relations.many-to-many.test.ts`, because
+  the emitted SQL is asserted in the compiler's own tests and what those cannot
+  say is whether it returns the right rows.
+
+  Still open, and it is the artifact's limit rather than the compiler's: a
+  **self-referential** implicit m-n, where the same model is on both ends and
+  the generated record cannot say which join column is which. Prisma
+  disambiguates by field order, which the artifact does not carry.
 - **Stitching cost is real** on wide results. Build the parent-key `Map` once per
   child query; do not `find()` per row. Iteration 7 will measure this, so leave
   it in a shape that can be measured.

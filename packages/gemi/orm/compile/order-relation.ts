@@ -3,7 +3,7 @@ import { UnsupportedQueryError } from "../errors";
 import { COUNT_KEY } from "../relation-filters";
 import type { ModelSchema, RelationSchema } from "../schema";
 import { type Fragment, concat, sql } from "./fragment";
-import { relatedSchema, resolveLink } from "./plan-relations";
+import { correlate } from "./correlate";
 import { compileWhere } from "./where";
 
 /**
@@ -68,16 +68,6 @@ export function relationOrderExpression(
     );
   }
 
-  if (relation.joinTable) {
-    throw new UnsupportedQueryError(
-      path,
-      schema.name,
-      operation,
-      `${relation.name} is an implicit many-to-many. Ordering across its join ` +
-        `table is not implemented yet.`,
-    );
-  }
-
   const node = value as Record<string, unknown>;
   // `where` is the policy walk's, not the caller's — see the note above.
   const keys = Object.keys(node).filter((key) => key !== "where");
@@ -95,39 +85,36 @@ export function relationOrderExpression(
   }
 
   const [key] = keys;
-  const child = relatedSchema(schema, relation);
-  const link = resolveLink(schema, child, relation);
-
-  const alias = `_o${index}`;
-  const childQualifier = `${dialect.quoteIdent(alias)}.`;
-  const parentQualifier = `${dialect.quoteIdent(schema.table)}.`;
+  const source = correlate(
+    schema,
+    relation,
+    dialect,
+    `_o${index}`,
+    `${dialect.quoteIdent(schema.table)}.`,
+  );
 
   const selected = projection(
     schema,
     relation,
-    child,
+    source.child,
     key,
     node[key],
     operation,
-    childQualifier,
+    source.qualifier,
     dialect,
   );
 
   const filter = compileWhere(
-    child,
+    source.child,
     node.where,
-    { dialect, operation, qualifier: childQualifier },
+    { dialect, operation, qualifier: source.qualifier },
     (args) => locate(args)?.where,
   );
 
-  const correlation =
-    `${childQualifier}${dialect.quoteIdent(column(child, link.childField))} = ` +
-    `${parentQualifier}${dialect.quoteIdent(column(schema, link.parentField))}`;
-
   const parts: Fragment[] = [
     sql(
-      `(select ${selected.expression} from ${dialect.quoteIdent(child.table)} ` +
-        `as ${dialect.quoteIdent(alias)} where ${correlation}`,
+      `(select ${selected.expression} from ${source.source} ` +
+        `where ${source.correlation}`,
     ),
   ];
   if (filter) parts.push(sql(" and "), filter);
@@ -242,12 +229,3 @@ function readDirection(
   );
 }
 
-function column(schema: ModelSchema, name: string): string {
-  const field = schema.fields[name];
-  if (!field) {
-    throw new Error(
-      `${schema.name} has no field '${name}' to join a relation ordering on.`,
-    );
-  }
-  return field.column;
-}

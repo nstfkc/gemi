@@ -262,12 +262,41 @@ describe("what it refuses", () => {
   });
 
   /**
-   * Refused rather than guessed at — the same call `lateralStrategy` makes for
-   * this relation kind, and for the same reason: the template's schema has no
-   * implicit m-n, so anything built here would ship untested against Prisma.
+   * Implicit many-to-many, which was refused here — and in `_count`, and in
+   * `orderBy` — until the join table became a property of one shared function
+   * rather than a capability each of the three had to grow.
+   *
+   * The join table is a second table inside the subquery and nothing else: the
+   * correlation moves onto it, and the child is reached through it.
    */
-  test("an implicit many-to-many", () => {
-    const post = {
+  test("an implicit many-to-many joins through its table", () => {
+    const tag: any = {
+      name: "Tag",
+      table: "Tag",
+      fields: {
+        id: {
+          name: "id",
+          column: "id",
+          type: "Int",
+          nullable: false,
+          isId: true,
+          isUpdatedAt: false,
+        },
+        label: {
+          name: "label",
+          column: "label",
+          type: "String",
+          nullable: false,
+          isId: false,
+          isUpdatedAt: false,
+        },
+      },
+      primaryKey: ["id"],
+      uniques: [],
+      relations: {},
+    };
+
+    const post: any = {
       ...user,
       name: "Post",
       table: "Post",
@@ -285,8 +314,50 @@ describe("what it refuses", () => {
       },
     };
 
+    registry.register("Tag", class { static $schema = tag });
+
+    const text = compileRead(
+      post,
+      "findMany",
+      { where: { tags: { some: { label: "red" } } } },
+      sqlite,
+    ).text;
+
+    expect(text.slice(text.indexOf(" where ") + 7)).toBe(
+      `exists (select 1 from "Tag" as "_r0" ` +
+        `join "_PostToTag" as "_r0j" on "_r0j"."B" = "_r0"."id" ` +
+        `where "_r0j"."A" = "Post"."id" and "_r0"."label" = ?)`,
+    );
+  });
+
+  /**
+   * The one m-n shape still refused, and it is the artifact's limit rather than
+   * this compiler's: with the same model on both ends, the generated record
+   * cannot say which join column is which.
+   */
+  test("a self-referential implicit many-to-many is still refused", () => {
+    const node: any = {
+      ...user,
+      name: "Node",
+      table: "Node",
+      relations: {
+        related: {
+          name: "related",
+          model: "Node",
+          kind: "many" as const,
+          relationName: "NodeToNode",
+          from: [],
+          to: [],
+          nullable: false,
+          joinTable: { table: "_NodeToNode", a: "Node", b: "Node" },
+        },
+      },
+    };
+
+    registry.register("Node", class { static $schema = node });
+
     expect(() =>
-      compileRead(post, "findMany", { where: { tags: { some: {} } } }, sqlite),
-    ).toThrow(/implicit many-to-many/);
+      compileRead(node, "findMany", { where: { related: { some: {} } } }, sqlite),
+    ).toThrow(/self-referential implicit many-to-many/);
   });
 });

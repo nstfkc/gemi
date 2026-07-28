@@ -2939,9 +2939,14 @@ none you can read) sorts as `NULL`.
 Ordering by a relation is not a total order, so add a tiebreak if you need a stable page:
 `orderBy: [{ accounts: { _count: "desc" } }, { id: "asc" }]`.
 
-**Not implemented yet:** counting, filtering or ordering across an implicit many-to-many, and
-`_count` on a to-one (which can only ever be 0 or 1 — its nullability already says which). All
-raise `UnsupportedQueryError` rather than being silently ignored.
+Filtering, counting and ordering all work across an **implicit many-to-many** too — the join
+table is a second table inside the subquery and changes nothing else about how you write the
+query.
+
+**Not implemented yet:** a *self-referential* implicit many-to-many (the generated artifact cannot
+say which of the join table's two columns is which end), and `_count` on a to-one (which can only
+ever be 0 or 1 — its nullability already says which). Both raise `UnsupportedQueryError` rather
+than being silently ignored.
 
 ### One value that will surprise you
 

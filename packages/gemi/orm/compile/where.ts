@@ -9,7 +9,7 @@ import {
   relationFilterOperators,
 } from "../relation-filters";
 import type { FieldSchema, ModelSchema, RelationSchema } from "../schema";
-import { relatedSchema, resolveLink } from "./plan-relations";
+import { type Correlated, correlate } from "./correlate";
 import {
   type Binder,
   type Fragment,
@@ -194,34 +194,15 @@ function compileRelationFilter(
 ): Fragment | null {
   const path = `where.${relation.name}`;
 
-  if (relation.joinTable) {
-    // Two hops through a join table, which is a different shape: `exists` over
-    // the join table with a second `exists` inside it. Refused rather than
-    // guessed at, the same call `lateralStrategy` makes for the same relation
-    // kind — and for the same reason, that the template's schema has no implicit
-    // m-n, so anything built here would ship untested against Prisma.
-    throw new UnsupportedQueryError(
-      path,
-      schema.name,
-      context.operation,
-      `${relation.name} is an implicit many-to-many. Filtering across its join ` +
-        `table is not implemented yet.`,
-    );
-  }
-
   // Shape before environment: `readOperators` only reads the relation's own
   // `kind`, so a malformed filter is reported as one even when the registry is
   // empty. The other order let a missing `register` call mask a plain typo.
   const operators = relationFilterOperators(relation.kind);
   const requested = readOperators(schema, relation, value, operators, context);
 
-  const child = relatedSchema(schema, relation);
-  const link = resolveLink(schema, child, relation);
   const depth = context.relationDepth ?? 0;
 
   const dialect = context.dialect;
-  const alias = `_r${depth}`;
-  const childQualifier = `${dialect.quoteIdent(alias)}.`;
   // At depth 0 the outer scope is the queried table; deeper, it is the alias of
   // the subquery this one sits inside. `context.qualifier` already holds the
   // right answer in both cases when something set it — the lateral strategy does
@@ -229,14 +210,19 @@ function compileRelationFilter(
   const parentQualifier =
     context.qualifier ?? `${dialect.quoteIdent(schema.table)}.`;
 
-  const correlation = sql(
-    `${childQualifier}${dialect.quoteIdent(column(child, relation, link.childField))} = ` +
-      `${parentQualifier}${dialect.quoteIdent(column(schema, relation, link.parentField))}`,
+  const source = correlate(
+    schema,
+    relation,
+    dialect,
+    `_r${depth}`,
+    parentQualifier,
   );
+  const child = source.child;
+  const correlation = sql(source.correlation);
 
   const inner: WhereContext = {
     ...context,
-    qualifier: childQualifier,
+    qualifier: source.qualifier,
     relationDepth: depth + 1,
   };
 
@@ -251,7 +237,7 @@ function compileRelationFilter(
     // `is: null` / a bare `null` on a to-one: "there is no related row". Prisma
     // spells the opposite `isNot: null`.
     if (argument === null) {
-      parts.push(existence(child, alias, correlation, null, dialect, operator === "is"));
+      parts.push(existence(source, correlation, null, operator === "is"));
       continue;
     }
 
@@ -264,11 +250,9 @@ function compileRelationFilter(
       if (!condition) continue;
       parts.push(
         existence(
-          child,
-          alias,
+          source,
           correlation,
           concat(sql("not "), parenthesize(condition)),
-          dialect,
           true,
         ),
       );
@@ -276,9 +260,7 @@ function compileRelationFilter(
     }
 
     const negate = operator === "none" || operator === "isNot";
-    parts.push(
-      existence(child, alias, correlation, condition, dialect, negate),
-    );
+    parts.push(existence(source, correlation, condition, negate));
   }
 
   if (parts.length === 0) return null;
@@ -288,18 +270,13 @@ function compileRelationFilter(
 
 /** `exists (select 1 from "Child" as "_r0" where <correlation> [and <rest>])`. */
 function existence(
-  child: ModelSchema,
-  alias: string,
+  source: Correlated,
   correlation: Fragment,
   rest: Fragment | null,
-  dialect: SqlDialect,
   negated: boolean,
 ): Fragment {
   const parts: Fragment[] = [
-    sql(
-      `${negated ? "not " : ""}exists (select 1 from ` +
-        `${dialect.quoteIdent(child.table)} as ${dialect.quoteIdent(alias)} where `,
-    ),
+    sql(`${negated ? "not " : ""}exists (select 1 from ${source.source} where `),
     correlation,
   ];
 
@@ -372,22 +349,6 @@ function readOperators(
   return { is: value, direct: true };
 }
 
-/** A relation's key column, by field name. */
-function column(
-  schema: ModelSchema,
-  relation: RelationSchema,
-  name: string,
-): string {
-  const field = schema.fields[name];
-  if (!field) {
-    throw new MalformedRelationError(
-      schema.name,
-      relation.name,
-      `it joins on '${name}', which is not a field on ${schema.name}.`,
-    );
-  }
-  return field.column;
-}
 
 /**
  * `{ username_provider: { username, provider } }` -> `username = ? and

@@ -340,4 +340,80 @@ function cases() {
     // root + join table, and then nothing to fetch.
     expect(queries).toBe(2);
   });
+
+  /**
+   * The three correlated-subquery surfaces, across the join table.
+   *
+   * All three refused an implicit m-n until the join table became a property of
+   * one shared function rather than something each had to grow. Here against a
+   * real database, because the shape of the emitted SQL is asserted in
+   * `packages/gemi/orm/compile` and what those unit tests cannot tell you is
+   * whether it returns the right rows.
+   *
+   * The fixture: post 1 has red and blue, post 2 has blue, post 3 has none.
+   */
+  test("a relation filter reaches through the join table", async () => {
+    const withRed = await Post.findMany({
+      where: { tags: { some: { label: "red" } } },
+      orderBy: { id: "asc" },
+    });
+    expect(withRed.map((post: any) => post.id)).toEqual([1]);
+
+    const withAny = await Post.findMany({
+      where: { tags: { some: {} } },
+      orderBy: { id: "asc" },
+    });
+    expect(withAny.map((post: any) => post.id)).toEqual([1, 2]);
+
+    // The untagged post is the one `none` finds and `some` does not.
+    const untagged = await Post.findMany({
+      where: { tags: { none: {} } },
+      orderBy: { id: "asc" },
+    });
+    expect(untagged.map((post: any) => post.id)).toEqual([3]);
+  });
+
+  /** `every` is vacuously true for the post with no tags, as everywhere else. */
+  test("every is vacuous across the join table too", async () => {
+    const all = await Post.findMany({
+      where: { tags: { every: { label: "blue" } } },
+      orderBy: { id: "asc" },
+    });
+    expect(all.map((post: any) => post.id)).toEqual([2, 3]);
+  });
+
+  test("_count counts links, not rows of the join table alone", async () => {
+    const counted = await Post.findMany({
+      include: { _count: { select: { tags: true } } },
+      orderBy: { id: "asc" },
+    });
+
+    expect(counted.map((post: any) => post._count.tags)).toEqual([2, 1, 0]);
+  });
+
+  test("a filtered _count applies to the far side", async () => {
+    const counted = await Post.findMany({
+      include: { _count: { select: { tags: { where: { label: "blue" } } } } },
+      orderBy: { id: "asc" },
+    });
+
+    expect(counted.map((post: any) => post._count.tags)).toEqual([1, 1, 0]);
+  });
+
+  test("ordering by the count sorts across the join table", async () => {
+    const ordered = await Post.findMany({
+      orderBy: [{ tags: { _count: "desc" } }, { id: "asc" }],
+    });
+
+    expect(ordered.map((post: any) => post.id)).toEqual([1, 2, 3]);
+  });
+
+  /** The reverse direction, so the ordering is not passing by luck of insertion. */
+  test("ordering by the count ascending", async () => {
+    const ordered = await Post.findMany({
+      orderBy: [{ tags: { _count: "asc" } }, { id: "asc" }],
+    });
+
+    expect(ordered.map((post: any) => post.id)).toEqual([3, 2, 1]);
+  });
 }
