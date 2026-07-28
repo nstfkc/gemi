@@ -113,6 +113,17 @@ export interface QueryPlan {
    * `select` did not ask for. Dropped once the relations are attached.
    */
   hidden?: string[];
+  /**
+   * Whether this plan projects a `_count`. Undefined when it does not.
+   *
+   * A write needs this for the same reason it needs `relations`: a `delete`
+   * with either one is read *before* the row goes, so the choke point has to
+   * know there is something to read. A count is not a relation plan — it is a
+   * column in the statement, not a second query — so it cannot be discovered by
+   * looking at `relations`, and `include: { _count: … }` on its own leaves that
+   * list empty.
+   */
+  counts?: boolean;
 }
 
 /**

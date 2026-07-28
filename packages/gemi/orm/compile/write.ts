@@ -25,6 +25,7 @@ import {
   planNestedWrites,
 } from "./nested-writes";
 import { planRelations, strategiesOf } from "./plan-relations";
+import { type CountPlan, planRelationCounts } from "./relation-count";
 import { resolveSelection, withKeyFields } from "./select";
 import { matchUniqueKey } from "./unique";
 import { compileWhere } from "./where";
@@ -1226,6 +1227,7 @@ interface Returning {
   fields: FieldSchema[];
   hidden?: string[];
   relations: ReturnType<typeof planRelations>["plans"];
+  counts: CountPlan[];
 }
 
 /**
@@ -1252,6 +1254,7 @@ function returningClause(
       selected: sql(keyColumn(schema, dialect)),
       fields: [],
       relations: [],
+      counts: [],
     };
   }
 
@@ -1261,9 +1264,17 @@ function returningClause(
     ...keyFields,
     ...(nested?.keyFields ?? []),
   ]);
+  const counts = planRelationCounts(schema, args, dialect, op);
 
   const columns = joinFragments(
-    fields.map((field) => sql(dialect.quoteIdent(field.column))),
+    [
+      ...fields.map((field) => sql(dialect.quoteIdent(field.column))),
+      // Last, for the same reason they go last on a read: the shaper reads
+      // scalars by position and `_count` is attached afterwards from the raw
+      // row. The relation-only `select` below projects the same list, so a
+      // `_count` survives that path too.
+      ...counts.map((count) => count.column),
+    ],
     ", ",
   );
 
@@ -1275,6 +1286,7 @@ function returningClause(
     fields,
     hidden,
     relations: plans,
+    counts,
   };
 }
 
@@ -1325,12 +1337,28 @@ function plan(
     hidden: returning.hidden,
     before: nested && nested.before.length > 0 ? nested.before : undefined,
     after: nested && nested.after.length > 0 ? nested.after : undefined,
+    counts: returning.counts.length > 0 ? true : undefined,
     shape(rows) {
       // The count *is* the number of returned rows — see the note at the top of
       // this file on why it does not come from driver metadata.
       if (counting) return { count: rows.length };
 
       const shaped = shaper(rows);
+
+      // `_count` came back as extra columns the shaper knows nothing about,
+      // under aliases carrying a dot. Assembled into one object per row,
+      // because that is the shape Prisma returns — and the same assembly
+      // `compileRead` does, deliberately spelled the same way.
+      if (returning.counts.length > 0) {
+        for (let i = 0; i < shaped.length; i++) {
+          const raw = (rows[i] as Record<string, unknown>) ?? {};
+          const totals: Record<string, number> = {};
+          for (const count of returning.counts) {
+            totals[count.as] = Number(raw[count.alias] ?? 0);
+          }
+          shaped[i]._count = totals;
+        }
+      }
       // `null` when nothing matched. `$exec` turns that into
       // `RecordNotFoundError` for the operations Prisma raises on, where the
       // model's name is in scope for the message.

@@ -68,6 +68,21 @@ async function seed(prisma: PrismaClient) {
       },
     ],
   });
+
+  // Two accounts on Ada, so a `_count` has a number to be wrong about. Without
+  // children every count is 0 and a dropped `_count` is indistinguishable from
+  // a correct one — which is how #87 stayed invisible.
+  //
+  // Safe for the existing delete cases: `Account_userId_fkey` is
+  // `ON DELETE SET NULL`, so removing a user detaches its accounts on both
+  // sides rather than failing a constraint.
+  const [ada] = await prisma.user.findMany({ orderBy: { id: "asc" } });
+  await prisma.account.createMany({
+    data: [
+      { publicId: "a1", userId: ada.id, organizationId: acme.id },
+      { publicId: "a2", userId: ada.id, organizationId: acme.id },
+    ],
+  });
 }
 
 /** `[name, operation, args, tables]` — tables default to the model written. */
@@ -231,6 +246,58 @@ const CASES: Case[] = [
     create: { email: "unused@example.dev" },
     update: { name: "Updated" },
     select: { email: true, name: true },
+  }],
+
+  // --- _count on a write (#87) ------------------------------------------
+  //
+  // It used to be accepted and dropped: the row came back with no `_count` key
+  // and no error, while an unknown relation name in the same `include` raised.
+  // Every case below returns a number Prisma also returns, and the `update` /
+  // `upsert` / `delete` ones return a *non-zero* one, which is what separates
+  // "projected correctly" from "projected as zero".
+  ["create with _count", "create", {
+    data: { email: "c1@example.dev" },
+    include: { _count: { select: { accounts: true } } },
+  }],
+  ["update with _count", "update", {
+    where: { publicId: "p1" }, data: { name: "Counted" },
+    include: { _count: { select: { accounts: true } } },
+  }],
+  ["update with _count beside a relation", "update", {
+    where: { publicId: "p1" }, data: { name: "Counted" },
+    include: { accounts: true, _count: { select: { accounts: true } } },
+  }],
+  ["update with _count in a select", "update", {
+    where: { publicId: "p1" }, data: { name: "Counted" },
+    select: { email: true, _count: { select: { accounts: true } } },
+  }],
+  ["update with a filtered _count", "update", {
+    where: { publicId: "p1" }, data: { name: "Counted" },
+    include: {
+      _count: { select: { accounts: { where: { organizationRole: 2 } } } },
+    },
+  }],
+  ["upsert hitting, with _count", "upsert", {
+    where: { publicId: "p1" },
+    create: { email: "unused2@example.dev" },
+    update: { name: "Counted" },
+    include: { _count: { select: { accounts: true } } },
+  }],
+  // The one where the order of operations decides the answer. `Account`'s FK is
+  // `ON DELETE SET NULL`, so a count taken *after* the statement is 0 and one
+  // taken before it is 2 — which is why a `delete` carrying a `_count` is read
+  // first, the same way one carrying an `include` already was.
+  //
+  // **Discriminating on Postgres only, and the reason is its own bug.** Bun's
+  // SQLite driver leaves `pragma foreign_keys` at 0 and nothing in gemi turns it
+  // on, so no referential action ever fires there: the accounts keep pointing at
+  // the deleted user and a count taken after the delete would read 2 as well.
+  // Prisma enables the pragma, so the two disagree about the *table* — #89, and
+  // the reason this case compares `User` alone rather than asserting a
+  // difference that is really about foreign keys.
+  ["delete with _count", "delete", {
+    where: { publicId: "p1" },
+    include: { _count: { select: { accounts: true } } },
   }],
 
   // --- foreign keys (#89) -----------------------------------------------
@@ -796,6 +863,57 @@ function suite(label: string, url?: string) {
             accounts: { create: { organizationRole: 1 } },
           },
           include: { accounts: true },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    /**
+     * A `_count` beside the `include` that produced the children.
+     *
+     * The count is a correlated subquery inside the write's own `RETURNING`, so
+     * it is evaluated before any `after` step has run — while `include` is
+     * attached after them. Unfixed, the two keys describe the same relation on
+     * the same row and disagree:
+     *
+     *     accounts.length  2
+     *     _count           { accounts: 0 }
+     *
+     * Asserting both in one comparison is the point: a test that checked only
+     * `_count` would pass against a version that also lost the children, and one
+     * that checked only `accounts` never saw the bug at all.
+     */
+    test("a _count beside a nested create counts what the steps wrote", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "create",
+        {
+          data: {
+            email: "counted-nested@example.dev",
+            accounts: {
+              create: [{ organizationRole: 1 }, { organizationRole: 2 }],
+            },
+          },
+          include: {
+            accounts: true,
+            _count: { select: { accounts: true } },
+          },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    /** The same, through `select`, where `_count` is the only key asked for. */
+    test("a _count in a select sees the nested create too", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "create",
+        {
+          data: {
+            email: "counted-select@example.dev",
+            accounts: { create: { organizationRole: 1 } },
+          },
+          select: { email: true, _count: { select: { accounts: true } } },
         },
         { tables: ["User", "Account"] },
       );

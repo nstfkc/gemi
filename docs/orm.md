@@ -117,6 +117,13 @@ const user = await User.findUniqueOrThrow({
 })
 ```
 
+A write's `include` takes `_count` as a read's does — `User.create({ data, include: { _count: {
+select: { accounts: true } } } })` comes back with `_count.accounts`. It compiles to a correlated
+subquery inside the `RETURNING`, so it costs no extra statement. Two orderings are handled so the
+number agrees with the row beside it: a `delete` carrying one reads the count *before* the row
+goes, and a write whose nested `create` writes children *after* the statement recomputes it once
+they have — otherwise `include` and `_count` would describe the same relation and disagree.
+
 **`take` and `skip` must be integers, and are refused rather than coerced.** They are the only
 arguments whose *sign* decides the SQL — a negative `take` means "the last N", which flips every
 ordering term — so a `take` arriving as a string does not merely have the wrong type, it takes the
