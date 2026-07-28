@@ -327,6 +327,13 @@ await Model.transaction(async () => {
 `Promise.all` over several ORM calls inside the callback is not safe — the ordinary, encouraged
 thing everywhere else in a Bun codebase. Await them in sequence.
 
+**A multi-statement write is atomic on its own.** A write with a nested `create` or `connect` runs
+more than one statement, and `$exec` opens a transaction for exactly those calls — so a nested
+step that fails, or a child policy that denies, rolls back the parent row too. A plain `create`
+still compiles to one statement and opens nothing, and inside a transaction you opened the nested
+one becomes a savepoint. You do not need `Model.transaction` to make a single nested write whole;
+you need it to make *several separate calls* whole.
+
 ### Keep slow work out of the callback
 
 The reserved connection is held for as long as the callback runs, whether or not it is running
@@ -342,15 +349,14 @@ opened it:
 until it does — check for network or filesystem I/O inside the callback…
 ```
 
-Set `GEMI_SLOW_TRANSACTION_MS` to change the threshold. The warning is development-only and
-never fires in production; it is a diagnostic, not a limit — nothing cancels a long transaction.
+Set `GEMI_SLOW_TRANSACTION_MS` to change the threshold. There is no separate off-switch: a seed
+script or a dev-time migration with legitimately long transactions silences the warning by setting
+a threshold longer than they take. A value that is not a positive finite number — `0`, `-1`,
+`Infinity`, a typo — falls back to the 2-second default rather than disabling, so it cannot be
+switched off by accident.
 
-**A multi-statement write is atomic on its own.** A write with a nested `create` or `connect` runs
-more than one statement, and `$exec` opens a transaction for exactly those calls — so a nested
-step that fails, or a child policy that denies, rolls back the parent row too. A plain `create`
-still compiles to one statement and opens nothing, and inside a transaction you opened the nested
-one becomes a savepoint. You do not need `Model.transaction` to make a single nested write whole;
-you need it to make *several separate calls* whole.
+The warning is development-only and never fires in production. It is a diagnostic, not a limit:
+nothing cancels a long transaction.
 
 ## Policies
 

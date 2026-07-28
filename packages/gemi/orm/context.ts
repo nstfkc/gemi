@@ -152,7 +152,17 @@ export function runAsUser<T>(user: unknown, fn: () => Promise<T>): Promise<T> {
 /** Default threshold for the development-mode long-transaction warning. */
 const SLOW_TRANSACTION_MS = 2_000;
 
-function slowTransactionThreshold(): number | null {
+/**
+ * The warning threshold in milliseconds, or `null` when the warning is off.
+ *
+ * Exported for its tests. The behaviour worth pinning is the fallback — that a
+ * malformed `GEMI_SLOW_TRANSACTION_MS` lands on the default rather than
+ * disabling — and that cannot be observed through `withTransaction`: "no
+ * warning fired" is what a disabled warning looks like too, so a behavioural
+ * test of it passes just as happily when the fallback is gone. Asserting the
+ * number directly is the only form of that test that can fail.
+ */
+export function slowTransactionThreshold(): number | null {
   // Read per call, never cached at module scope. `scripts/build.ts` rewrites
   // `process.env.NODE_ENV` to `Bun.env.NODE_ENV` precisely so mode stays a
   // runtime question in the built framework; caching it here would undo that.
@@ -296,15 +306,28 @@ export function withTransaction<T>(
   // holding the connection.
   const stopWatching = watchForSlowTransaction();
 
-  // Spread rather than replace: a `Model.transaction` inside a `Model.asSystem`
-  // must not silently re-enable policies for its whole subtree.
-  return (
-    pool
-      .begin((tx) => ormContext.run({ ...current, tx, depth: 0 }, () => fn(tx)))
-      // `finally` and not a `then`/`catch` pair: the connection is released on
-      // rollback exactly as it is on commit, so a throwing callback must clear
-      // the timer too or every failed transaction leaves a warning armed
-      // against a connection that has already gone back to the pool.
-      .finally(stopWatching) as Promise<T>
-  );
+  // The `try` covers a *synchronous* throw from `begin` — a closed pool, say.
+  // `.finally` alone would not: it is only attached once `begin` has returned a
+  // promise, so a synchronous throw escapes with the timer still armed and
+  // eventually warns about a transaction that never opened. `unref` keeps that
+  // from holding the process, which makes it cosmetic rather than a leak, but
+  // it is the same gap the `.finally` below exists to close.
+  try {
+    // Spread rather than replace: a `Model.transaction` inside a
+    // `Model.asSystem` must not silently re-enable policies for its subtree.
+    return (
+      pool
+        .begin((tx) =>
+          ormContext.run({ ...current, tx, depth: 0 }, () => fn(tx)),
+        )
+        // `finally` and not a `then`/`catch` pair: the connection is released on
+        // rollback exactly as it is on commit, so a throwing callback must clear
+        // the timer too or every failed transaction leaves a warning armed
+        // against a connection that has already gone back to the pool.
+        .finally(stopWatching) as Promise<T>
+    );
+  } catch (error) {
+    stopWatching();
+    throw error;
+  }
 }

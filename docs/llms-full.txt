@@ -3029,6 +3029,30 @@ still compiles to one statement and opens nothing, and inside a transaction you 
 one becomes a savepoint. You do not need `Model.transaction` to make a single nested write whole;
 you need it to make *several separate calls* whole.
 
+### Keep slow work out of the callback
+
+The reserved connection is held for as long as the callback runs, whether or not it is running
+queries. A `fetch`, an upload or a queue push inside a transaction holds a connection for the
+length of that I/O, and under load the symptom is unrelated queries elsewhere in the process
+blocking on connection acquisition — an error that names neither the transaction nor the I/O.
+
+In development, a transaction still open after 2 seconds warns with the stack of the call that
+opened it:
+
+```
+[gemi] A database transaction has not settled after 2000ms. It reserves a pooled connection
+until it does — check for network or filesystem I/O inside the callback…
+```
+
+Set `GEMI_SLOW_TRANSACTION_MS` to change the threshold. There is no separate off-switch: a seed
+script or a dev-time migration with legitimately long transactions silences the warning by setting
+a threshold longer than they take. A value that is not a positive finite number — `0`, `-1`,
+`Infinity`, a typo — falls back to the 2-second default rather than disabling, so it cannot be
+switched off by accident.
+
+The warning is development-only and never fires in production. It is a diagnostic, not a limit:
+nothing cancels a long transaction.
+
 ## Policies
 
 A model carries a **list** of policies. Every member of a policy is optional; a model with none

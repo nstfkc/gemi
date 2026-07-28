@@ -3,6 +3,7 @@ import { afterEach, describe, expect, test } from "vitest";
 import {
   currentTransaction,
   ormContext,
+  slowTransactionThreshold,
   transactionDepth,
   withTransaction,
 } from "./context";
@@ -258,6 +259,17 @@ describe("the slow-transaction warning", () => {
   const sleep = (ms: number) =>
     new Promise((resolve) => setTimeout(resolve, ms));
 
+  /**
+   * How long a "this should warn" test stays inside its transaction.
+   *
+   * 20× the 10ms threshold. The obvious 4× is enough on an idle machine and
+   * thinner than it looks on a loaded CI box running the suite in parallel,
+   * where the timer competes with every other worker for the event loop. The
+   * headroom costs a fraction of a second across the whole file and removes the
+   * only source of flake here.
+   */
+  const PAST_THRESHOLD = 200;
+
   afterEach(() => {
     process.env = env;
   });
@@ -269,7 +281,7 @@ describe("the slow-transaction warning", () => {
 
     const warnings = await capture((seen) =>
       withTransaction(pool, async () => {
-        await sleep(40);
+        await sleep(PAST_THRESHOLD);
         warnedDuringCallback = [...seen];
       }),
     );
@@ -321,7 +333,7 @@ describe("the slow-transaction warning", () => {
       withTransaction(pool, () =>
         withTransaction(pool, () =>
           withTransaction(pool, async () => {
-            await sleep(40);
+            await sleep(PAST_THRESHOLD);
           }),
         ),
       ),
@@ -340,28 +352,32 @@ describe("the slow-transaction warning", () => {
 
     const warnings = await capture(() =>
       withTransaction(pool, async () => {
-        await sleep(40);
+        await sleep(PAST_THRESHOLD);
       }),
     );
 
     expect(warnings).toEqual([]);
   });
 
-  // A typo in the env var must not switch the diagnostic off — silently losing
-  // a warning is worse than ignoring an unreadable threshold.
-  test("an unusable threshold falls back to the default rather than disabling", async () => {
+  // A synchronous throw from `begin` — a closed pool — never reaches the
+  // `.finally`, because there is no promise to attach it to. Without the
+  // `try`/`catch` the timer stays armed and warns about a transaction that
+  // never opened.
+  test("a pool that throws synchronously disarms the warning", async () => {
     inDevelopment(10);
-    process.env.GEMI_SLOW_TRANSACTION_MS = "soon";
-    const pool = fakePool("a");
+    const pool: any = {
+      begin() {
+        throw new Error("pool is closed");
+      },
+    };
 
-    const warnings = await capture(() =>
-      withTransaction(pool, async () => {
-        await sleep(40);
-      }),
-    );
+    const warnings = await capture(async () => {
+      expect(() => withTransaction(pool, async () => {})).toThrow(
+        "pool is closed",
+      );
+      await sleep(PAST_THRESHOLD);
+    });
 
-    // The default is 2s, so nothing fires inside this test — the assertion is
-    // that it fell back to *some* real threshold instead of returning null.
     expect(warnings).toEqual([]);
   });
 
@@ -371,10 +387,108 @@ describe("the slow-transaction warning", () => {
 
     const warnings = await capture(() =>
       withTransaction(pool, async () => {
-        await sleep(40);
+        await sleep(PAST_THRESHOLD);
       }),
     );
 
     expect(warnings[0]).toContain("context.test.ts");
+  });
+
+  /**
+   * The `unref` is the stated reason this file uses a real clock instead of
+   * vitest's fake one, so it has to be asserted somewhere or the justification
+   * is unbacked — deleting the call would otherwise pass the whole suite.
+   *
+   * A pending warning that kept the event loop alive would turn a diagnostic
+   * into a hang: `gemi db:seed` finishing its work and then sitting there for
+   * the remainder of a two-second threshold, for a transaction that already
+   * committed.
+   */
+  test("the warning timer does not hold the process open", async () => {
+    inDevelopment(10);
+    const pool = fakePool("a");
+    const realSetTimeout = globalThis.setTimeout;
+    const unreffed: boolean[] = [];
+
+    globalThis.setTimeout = ((fn: () => void, ms: number) => {
+      const timer = realSetTimeout(fn, ms);
+      const realUnref = timer.unref?.bind(timer);
+      timer.unref = () => {
+        unreffed.push(true);
+        return realUnref ? realUnref() : timer;
+      };
+      return timer;
+    }) as typeof globalThis.setTimeout;
+
+    try {
+      await withTransaction(pool, async () => {});
+    } finally {
+      globalThis.setTimeout = realSetTimeout;
+    }
+
+    expect(unreffed).toEqual([true]);
+  });
+});
+
+/**
+ * The threshold itself, asserted as a value rather than through the warning.
+ *
+ * The fallback — a malformed `GEMI_SLOW_TRANSACTION_MS` landing on the default
+ * instead of switching the warning off — cannot be tested behaviourally at all.
+ * "No warning fired" is what you observe when the fallback works (the default
+ * is 2s, longer than any sane test) *and* when it is missing entirely, so a
+ * behavioural test of it passes under the very mutation it is meant to catch.
+ * Reading the number is the only version that can fail.
+ */
+describe("the slow-transaction threshold", () => {
+  const env = process.env;
+
+  function withEnv(nodeEnv: string, configured?: string) {
+    process.env = { ...env, NODE_ENV: nodeEnv };
+    if (configured === undefined) delete process.env.GEMI_SLOW_TRANSACTION_MS;
+    else process.env.GEMI_SLOW_TRANSACTION_MS = configured;
+  }
+
+  afterEach(() => {
+    process.env = env;
+  });
+
+  test("the warning is off outside development", () => {
+    for (const nodeEnv of ["production", "test", ""]) {
+      withEnv(nodeEnv, "10");
+      expect(slowTransactionThreshold()).toBeNull();
+    }
+  });
+
+  test("unset means the two-second default", () => {
+    withEnv("development");
+    expect(slowTransactionThreshold()).toBe(2_000);
+  });
+
+  test("a usable value is honoured", () => {
+    withEnv("development", "500");
+    expect(slowTransactionThreshold()).toBe(500);
+  });
+
+  /**
+   * Every one of these falls back rather than returning `null`.
+   *
+   * Silently losing a diagnostic to a typo is worse than ignoring the typo:
+   * the warning would simply stop appearing, and nothing would say why. Note
+   * `Infinity` — finite-looking to a reader, and the reason the check is
+   * `Number.isFinite` rather than `!Number.isNaN`; without it the timer would
+   * be scheduled for never.
+   */
+  test.each([
+    ["a typo", "soon"],
+    ["empty", ""],
+    ["whitespace", "   "],
+    ["zero", "0"],
+    ["negative", "-1"],
+    ["infinite", "Infinity"],
+    ["not a number", "NaN"],
+  ])("%s falls back to the default", (_label, configured) => {
+    withEnv("development", configured);
+    expect(slowTransactionThreshold()).toBe(2_000);
   });
 });
