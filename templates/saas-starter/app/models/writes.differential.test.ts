@@ -451,6 +451,46 @@ function suite(label: string, url?: string) {
       );
     });
 
+    /**
+     * The other pair on one relation, and the one whose order is *not*
+     * observable: repointing an existing child and inserting new ones do not
+     * interact, so both apply and the result is the same either way.
+     *
+     * Pinned anyway. The step order falls out of `Object.keys(node).sort()`,
+     * which is sorted for plan-cache determinism rather than for this — so
+     * "both happen" is a property worth holding rather than a coincidence
+     * nobody would notice breaking.
+     */
+    test("nested createMany alongside a connect on the same relation", async () => {
+      await differential.reset();
+
+      // The connect target has to pre-exist, and the harness seeds no accounts
+      // — so this is asserted directly rather than through `expectSameWrite`,
+      // the same way the connect-repoints-a-child case beside it is. Prisma's
+      // answer was measured separately: both apply, giving the loose account
+      // and the new one.
+      await differential.prisma.account.create({
+        data: { publicId: "loose-1", organizationRole: 9 },
+      });
+
+      await UserModel.create({
+        data: {
+          email: "many7@example.dev",
+          accounts: {
+            connect: { publicId: "loose-1" },
+            createMany: { data: [{ organizationRole: 1 }] },
+          },
+        },
+      });
+
+      const attached = await differential.prisma.account.findMany({
+        where: { user: { email: "many7@example.dev" } },
+        orderBy: { id: "asc" },
+      });
+
+      expect(attached.map((row) => row.organizationRole)).toEqual([9, 1]);
+    });
+
     test("nested createMany under update", async () => {
       await differential.expectSameWrite(
         "User",

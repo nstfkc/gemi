@@ -226,6 +226,49 @@ describe("policies on nested writes", () => {
   });
 
   /**
+   * Whether the ORM refuses a misconfigured child policy must not depend on how
+   * many rows the caller happened to pass.
+   *
+   * `Note` here carries a `scope` with no `onCreate`, which `assertCreateCovered`
+   * refuses — an author who said "these rows belong to a tenant" without saying
+   * which tenant a new row joins. A short-circuit on the empty list would skip
+   * the child's `$exec`, and with it that check, so the same call would raise
+   * with one row and succeed with none: the misconfiguration hides behind data
+   * that happens to be empty in development and reports itself on the first
+   * request whose list is not.
+   *
+   * Nothing is written either way, so this is not a leak — it is a refusal
+   * arriving late, which is what deciding everything from the argument *shape*
+   * exists to prevent.
+   */
+  test("an empty createMany refuses a bad child policy just as a full one does", async () => {
+    const previous = (Note as any).$policies;
+    (Note as any).$policies = [{ scope: () => ({ orgId: 7 }) } as ModelPolicy];
+
+    try {
+      const withRows = Model.asUser(OURS, () =>
+        Folder.$exec("create", {
+          data: { code: "a", notes: { createMany: { data: [{ label: "n" }] } } },
+        }),
+      );
+      await expect(withRows).rejects.toThrow(/onCreate/);
+
+      const withNone = Model.asUser(OURS, () =>
+        Folder.$exec("create", {
+          data: { code: "b", notes: { createMany: { data: [] } } },
+        }),
+      );
+      await expect(withNone).rejects.toThrow(/onCreate/);
+
+      // ...and neither wrote a folder, since the refusal rolls the parent back.
+      expect(await raw.unsafe(`SELECT * FROM "Folder" WHERE "code" != 'theirs'`))
+        .toHaveLength(0);
+    } finally {
+      (Note as any).$policies = previous;
+    }
+  });
+
+  /**
    * A row that names the foreign key itself is describing a different parent
    * than the call is. The nested `create` beside it has always overridden it;
    * `createMany` does the same, and this pins that a caller cannot use it to
