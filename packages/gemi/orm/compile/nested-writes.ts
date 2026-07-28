@@ -179,11 +179,27 @@ function planOne(
 
     if (owning) {
       planOwningSide(
-        schema, relation, child, link, key, operand, operation, at, out,
+        schema,
+        relation,
+        child,
+        link,
+        key,
+        operand,
+        operation,
+        at,
+        out,
       );
     } else {
       planForeignSide(
-        schema, relation, child, link, key, operand, operation, at, out,
+        schema,
+        relation,
+        child,
+        link,
+        key,
+        operand,
+        operation,
+        at,
+        out,
       );
     }
   }
@@ -242,7 +258,11 @@ function planOwningSide(
   // Whether that is the case is a property of the argument *shape*, not of its
   // values, so the choice is made here at compile time and the two forms are two
   // plans. That is what keeps a `connect` from silently costing a round trip.
-  if (typeof operand !== "object" || operand === null || Array.isArray(operand)) {
+  if (
+    typeof operand !== "object" ||
+    operand === null ||
+    Array.isArray(operand)
+  ) {
     throw new UnsupportedQueryError(
       `data.${relation.name}.connect`,
       schema.name,
@@ -456,9 +476,6 @@ function planJoinTable(
       const parentKey = parent[parentField];
       if (parentKey === null || parentKey === undefined) return;
 
-      // `set` replaces the whole set, so what is there now goes first. Prisma
-      // does the same, and it is why this operand needs the transaction the
-      // step already runs in.
       // `set` replaces the whole set, so what is there now goes first — but
       // **only the part of it this caller can see**.
       //
@@ -502,13 +519,38 @@ function planJoinTable(
             false,
           )) as Record<string, unknown>[];
 
-          for (const row of visible) {
+          // One statement, not one per link. The scoped form is a `delete`
+          // over an `in` list rather than a loop, because this repo counts
+          // *statements*: `plans/orm/benchmarks.md` measures include trees that
+          // way, and the lateral strategy exists to remove `N - 1` of them. A
+          // loop here would have made `set` the one write that reintroduces
+          // them — invisible on SQLite, where round trips are in-process, and
+          // paid in full on Postgres, where they are not.
+          //
+          // Placeholders are built per length rather than bound as one array
+          // parameter. `dialect.inList` does the latter on Postgres, but it
+          // returns a `Fragment` and this is the one path that emits SQL
+          // without that pipeline — there is no model to route the join table
+          // through. The cost is one server-side plan per distinct link count;
+          // the ORM's own plan cache is unaffected, since it keys on the
+          // argument shape and this text never reaches it.
+          const targets = Array.from(visible, (row) => row[childField]);
+
+          // Every existing link points at a row this caller cannot see, so
+          // there is nothing to clear and `in ()` is a syntax error on both
+          // dialects. The loop this replaced degenerated to zero iterations
+          // here; the single statement has to say so explicitly.
+          if (targets.length > 0) {
             await runPairStatement(
               executor,
               `delete from ${quoted(join.table)} where ` +
                 `${quoted(join.parentColumn)} = ${dialect.placeholder(0)} and ` +
-                `${quoted(join.childColumn)} = ${dialect.placeholder(1)}`,
-              [parentKey, row[childField]],
+                `${quoted(join.childColumn)} in (` +
+                targets
+                  .map((_, index) => dialect.placeholder(index + 1))
+                  .join(", ") +
+                `)`,
+              [parentKey, ...targets],
             );
           }
         }
