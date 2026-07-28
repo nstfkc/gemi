@@ -153,6 +153,21 @@ tests.
 6. A `select` naming a relation throws `UnsupportedQueryError`.
 7. Not one value is inlined into SQL text anywhere. Verifiable by asserting no
    compiled text contains a digit outside an identifier — worth an actual test.
+
+   **Held, and the proxy has since needed a companion.** The digit check is
+   exactly right for the shapes iteration 2 emits and *too strict* for the
+   correlated subqueries added after iteration 9: a relation filter emits
+   `exists (select 1 from …)`, and that `1` is a structural constant with no
+   relation to any argument.
+
+   The two ways to keep using the proxy are both worse than a second check.
+   Emitting `select null` changes the SQL to fit its measurement; a
+   `.replace("select 1", "")` puts a hole in a security check, and the next
+   exception goes through the same hole. So those surfaces assert the property
+   itself: no supplied value appears anywhere in the text, **and** every one of
+   them comes back from `bind`. The second half is not decoration — "the value is
+   not in the SQL" is also satisfied by dropping it, which would be a filter that
+   silently matches everything.
 8. `bun run lint` and `bun run test` pass.
 
 ## Out of scope

@@ -323,6 +323,96 @@ describe("no value ever reaches the SQL text", () => {
   });
 });
 
+/**
+ * The same invariant for the surfaces added after iteration 9, checked a
+ * different way — and the difference is worth explaining rather than hiding.
+ *
+ * The digit proxy above is exactly right for the shapes it covers, and **too
+ * strict** for these: a relation filter emits `exists (select 1 from …)`, and
+ * that `1` is a structural constant with no relation to any argument. The two
+ * ways to keep using the proxy would both be worse. Emitting `select null` to
+ * satisfy a test changes the SQL to fit its measurement; adding
+ * `.replace("select 1", "")` puts a hole in a security check, and the next
+ * exception would go through the same hole.
+ *
+ * So these assert the property itself instead of a proxy for it: **no supplied
+ * value appears anywhere in the text, and every one of them comes back from
+ * `bind`.** The second half is not decoration — "the value is not in the SQL"
+ * is also satisfied by dropping the value entirely, which would be a filter
+ * that silently matches everything.
+ */
+describe("values stay parameters on the post-iteration-9 surfaces", () => {
+  const CASES: [string, unknown, unknown[]][] = [
+    [
+      "a relation filter",
+      { where: { accounts: { some: { organizationRole: 314159 } } } },
+      [314159],
+    ],
+    [
+      "a relation filter with a string",
+      { where: { organization: { name: "27-hyphen-8" } } },
+      ["27-hyphen-8"],
+    ],
+    [
+      "two operators on one relation",
+      {
+        where: {
+          accounts: { some: { organizationRole: 271828 }, none: { userId: 161803 } },
+        },
+      },
+      // `none` sorts before `some`, and the compiler emits them in that order.
+      [161803, 271828],
+    ],
+    [
+      "a nested relation filter",
+      { where: { accounts: { some: { organization: { name: "99-bottles" } } } } },
+      ["99-bottles"],
+    ],
+    [
+      "a filtered _count",
+      {
+        include: {
+          _count: { select: { accounts: { where: { organizationRole: 141421 } } } },
+        },
+      },
+      [141421],
+    ],
+    [
+      "a scoped relation ordering",
+      {
+        orderBy: {
+          accounts: { _count: "desc", where: { organizationRole: 173205 } },
+        },
+      },
+      [173205],
+    ],
+    [
+      "a relation filter beside a scalar and a take",
+      {
+        where: { id: 223606, accounts: { some: { organizationRole: 236067 } } },
+        take: 977,
+      },
+      [236067, 223606, 977],
+    ],
+  ];
+
+  test.each(CASES)("%s — sqlite", (_label, args, values) => {
+    const plan = getOrCompile(user, "findMany", args as any, sqlite);
+    for (const value of values) {
+      expect(plan.text).not.toContain(String(value));
+    }
+    expect(plan.bind(args)).toEqual(values);
+  });
+
+  test.each(CASES)("%s — postgres", (_label, args, values) => {
+    const plan = getOrCompile(user, "findMany", args as any, postgres);
+    for (const value of values) {
+      expect(plan.text).not.toContain(String(value));
+    }
+    expect(plan.bind(args)).toEqual(values);
+  });
+});
+
 function stripIdentifiers(text: string): string {
   return text.replace(/"(?:[^"]|"")*"/g, "");
 }
