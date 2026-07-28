@@ -77,11 +77,34 @@ interface RelatedModel {
  */
 export interface RelationExecutor {
   /**
-   * A read on another model, through *that model's own* `$exec` (invariant 1).
-   * Named rather than passed as a class so resolution stays at call time
-   * (invariant 6).
+   * An operation on another model, through *that model's own* `$exec`
+   * (invariant 1). Named rather than passed as a class so resolution stays at
+   * call time (invariant 6).
+   *
+   * `preScoped` says whether the target model's policies have **already** been
+   * applied to `args`, and every call site has to answer it. Required rather
+   * than defaulted, because the two callers need opposite answers and the wrong
+   * one is silent in both directions:
+   *
+   * - A **relation read** from an include tree is pre-scoped: `applyNestedPolicies`
+   *   walked the tree before the plan key was computed. Re-applying would `AND`
+   *   the same predicate twice — same rows, different SQL, a second plan-cache
+   *   entry.
+   * - A **nested write** step is not. `data: { notes: { create: … } }` is never
+   *   visited by that walk, so the child's policies have not run. Marking it
+   *   pre-scoped skipped them entirely: a nested `create` wrote a row with the
+   *   scoped column unset, and a nested `connect` resolved its lookup against
+   *   every tenant's rows.
+   *
+   * Defaulting it either way would have made one of those the quiet case. It is
+   * the fourth parameter in this codebase to be made required for that reason.
    */
-  exec(model: string, op: string, args: unknown): Promise<unknown>;
+  exec(
+    model: string,
+    op: string,
+    args: unknown,
+    preScoped: boolean,
+  ): Promise<unknown>;
   /**
    * A statement with no model behind it. Exactly one query in the ORM is like
    * this: Prisma's implicit many-to-many join table, which has no model, no
@@ -839,6 +862,9 @@ async function loadDirect(
     request.relation.model,
     "findMany",
     query.args,
+    // Pre-scoped: `applyNestedPolicies` walked this include tree before the
+    // plan key was computed.
+    true,
   )) as Row[];
 
   for (const row of rows) {
@@ -923,6 +949,9 @@ async function loadThroughJoinTable(
     request.relation.model,
     "findMany",
     query.args,
+    // Pre-scoped: `applyNestedPolicies` walked this include tree before the
+    // plan key was computed.
+    true,
   )) as Row[];
 
   // Iterated in the child query's order rather than the pairs' order, so a

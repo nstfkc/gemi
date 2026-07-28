@@ -235,3 +235,41 @@ one for a subclass in application code it never sees. Options, none built:
   so declaring one registers it. Changes the documented shape of every policy,
   and the `docs/authorization.md` examples with it.
 
+## Found by audit: nested writes were unscoped
+
+Not a residual this time — a hole, found by going looking for one rather than by
+a review.
+
+The rule this iteration established is *every read of a model carries that
+model's policies*, and five paths have now been made to obey it: nested
+includes, the lateral strategy's folded subquery, relation filters, `_count`,
+and relation orderings. The sixth is the first on the **write** side, and it was
+open:
+
+```ts
+// the child's onCreate never ran — the row landed with the scoped column unset
+Folder.create({ data: { code: "ours", notes: { create: { label: "n" } } } })
+
+// the lookup saw every tenant's rows — this attached org 99's folder
+Note.create({ data: { label: "n", folder: { connect: { code: "theirs" } } } })
+```
+
+**The cause was one boolean that had no call site.** `RelationExecutor.exec`
+routed every nested operation through the target model's `$exec` — correctly —
+but always with `markPreScoped`, which says *"this model's policies are already
+applied to these args."* For a relation read that is true, because
+`applyNestedPolicies` walks the include tree before the plan key is computed.
+For a nested write it is false: nothing walks `data.<relation>.create`. The
+marker meant "skip policies", and they were skipped.
+
+`preScoped` is now a **required parameter** on `exec`, so every call site has to
+answer it. Defaulted either way, one of the two callers would have the quiet
+wrong answer — and this is the fourth parameter in this codebase made required
+for exactly that reason.
+
+Worth stating as a general observation rather than a fix note: **`markPreScoped`
+is a capability, and it was being handed out by position rather than by
+decision.** Anything that can suppress a policy needs its call sites to be
+countable. It was designed to be unforgeable by applications — a module-private
+Symbol — and then applied by default inside the framework, which is the same
+mistake one layer in.

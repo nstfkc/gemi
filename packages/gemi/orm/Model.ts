@@ -584,13 +584,15 @@ export abstract class Model {
       // grandchild folded anyway and the statement count was one lower than the
       // caller asked for. Found by the query-count test, which is the only thing
       // that could have found it: the results were identical either way.
-      exec: (model, operation, relationArgs) =>
+      exec: (model, operation, relationArgs, preScoped) =>
         registry
           .get<typeof Model>(model)
           .$exec(
             operation as Operation,
             relationArgs,
-            markPreScoped({ strategy: options?.strategy }) as never,
+            (preScoped
+              ? markPreScoped({ strategy: options?.strategy })
+              : { strategy: options?.strategy }) as never,
           ),
       // The one query with no model behind it — the implicit m-n join table —
       // resolves its connection here rather than reaching for the pool, so it

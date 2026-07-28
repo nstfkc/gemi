@@ -197,10 +197,14 @@ function planOwningSide(
       relation: relation.name,
       operation: "create",
       async run(args, context, executor) {
-        const created = (await executor.exec(relation.model, "create", {
-          data: at(args),
-          select: { [referenced]: true },
-        })) as Record<string, unknown> | null;
+        const created = (await executor.exec(
+          relation.model,
+          "create",
+          { data: at(args), select: { [referenced]: true } },
+          // NOT pre-scoped. Nothing walks `data.<relation>.create`, so the
+          // child's own `onCreate` is the only thing that can scope this row.
+          false,
+        )) as Record<string, unknown> | null;
 
         context.resolved[fkField] = created?.[referenced] ?? null;
       },
@@ -252,10 +256,15 @@ function planOwningSide(
     relation: relation.name,
     operation: "connect",
     async run(args, context, executor) {
-      const found = (await executor.exec(relation.model, "findUniqueOrThrow", {
-        where: at(args),
-        select: { [referenced]: true },
-      })) as Record<string, unknown> | null;
+      const found = (await executor.exec(
+        relation.model,
+        "findUniqueOrThrow",
+        { where: at(args), select: { [referenced]: true } },
+        // NOT pre-scoped. This lookup reads another model's rows to decide what
+        // to attach, so it is that model's policies that say which rows exist —
+        // otherwise a `connect` by any unique key reaches every tenant's.
+        false,
+      )) as Record<string, unknown> | null;
 
       context.resolved[fkField] = found?.[referenced] ?? null;
     },
@@ -298,14 +307,20 @@ function planForeignSide(
         if (!parent) return;
 
         for (const item of listOf(at(args))) {
-          await executor.exec(relation.model, "create", {
-            // The foreign key is set by us, not by the caller: a nested create
-            // that also named it would be describing two different parents.
-            data: { ...(item as object), [childField]: parent[parentField] },
-            // Nothing reads the result, and the narrowest select keeps the
-            // returned payload from growing with the child's column count.
-            select: { [childField]: true },
-          });
+          await executor.exec(
+            relation.model,
+            "create",
+            {
+              // The foreign key is set by us, not by the caller: a nested create
+              // that also named it would be describing two different parents.
+              data: { ...(item as object), [childField]: parent[parentField] },
+              // Nothing reads the result, and the narrowest select keeps the
+              // returned payload from growing with the child's column count.
+              select: { [childField]: true },
+            },
+            // NOT pre-scoped — the child's `onCreate` is what scopes this row.
+            false,
+          );
         }
       },
     });
@@ -323,11 +338,19 @@ function planForeignSide(
 
       for (const item of listOf(at(args))) {
         matchUniqueKey(child, item, `${operation}.${relation.name}.connect`);
-        await executor.exec(relation.model, "update", {
-          where: item,
-          data: { [childField]: parent[parentField] },
-          select: { [childField]: true },
-        });
+        await executor.exec(
+          relation.model,
+          "update",
+          {
+            where: item,
+            data: { [childField]: parent[parentField] },
+            select: { [childField]: true },
+          },
+          // NOT pre-scoped. Repointing an existing row at this parent is a write
+          // to the child, and the child's scope decides which rows are reachable
+          // — otherwise `connect` re-parents another tenant's row.
+          false,
+        );
       }
     },
   });
