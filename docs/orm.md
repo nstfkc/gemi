@@ -296,6 +296,7 @@ await List.create({
 | `disconnect` | Clears the link. `true` on a to-one; a unique key, or a list of them, on a to-many. The column has to be nullable. |
 | `delete` | Deletes the named rows outright, not just the link. |
 | `update` | Writes your columns to the named row. The child's own `onUpdate` and scope rules apply to the payload. |
+| `set` | Replaces the whole set — detaches what is linked now, attaches what you name. |
 
 Which direction a nested write runs in is decided by **who holds the foreign key**. When this model
 holds it, the far row is resolved or created *first* and collapses into one more column. When the
@@ -336,8 +337,13 @@ is judged by the child's policies. Naming a column the child scopes on is refuse
 would be at the top level. On a to-one both spellings work, `update: { … }` and
 `update: { data: { … } }`, because Prisma accepts both.
 
-Everything else in Prisma's nested grammar — `set`, `updateMany`, `upsert`, `deleteMany` — is
-refused, by name and with the reason. The line is **which rows an
+`set` is the one supported operand that acts on rows you did **not** name, so it means *replace the
+set I can see*: it detaches the linked rows your policies let you read, and leaves the rest attached.
+With no policy on the child that is Prisma's `set` exactly. Two of its behaviours are worth knowing
+because the name does not suggest them — it will repoint a row belonging to another parent, exactly
+as `connect` does, and it silently ignores a named row that does not exist.
+
+Everything else in Prisma's nested grammar — `updateMany`, `upsert`, `deleteMany` — is refused, by name and with the reason. The line is **which rows an
 operand can name, and whose columns it writes**: everything supported names its rows (a new one, or
 one you identified by unique key) and writes either a whole new row or one foreign key the ORM
 chose. `set`, `disconnect`, `delete`, `deleteMany` and `updateMany` act on rows the call did not

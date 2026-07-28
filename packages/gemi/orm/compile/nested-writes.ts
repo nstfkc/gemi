@@ -75,6 +75,7 @@ const SUPPORTED = new Set([
   "disconnect",
   "delete",
   "update",
+  "set",
 ]);
 
 /**
@@ -85,7 +86,7 @@ const SUPPORTED = new Set([
  * row that does not exist yet. Refused here rather than accepted and made a
  * no-op, so a caller who wrote one on the wrong operation hears about it.
  */
-const EXISTING_ROW_ONLY = new Set(["disconnect", "delete", "update"]);
+const EXISTING_ROW_ONLY = new Set(["disconnect", "delete", "update", "set"]);
 
 /** Statements that insert a new row, so nothing is linked to it yet. */
 const CREATE_ONLY_STATEMENTS = new Set(["create", "createMany"]);
@@ -100,7 +101,6 @@ const CREATE_ONLY_STATEMENTS = new Set(["create", "createMany"]);
  * key, and none of it has to reason about what was there before.
  */
 const REFUSED: Record<string, string> = {
-  set: `It replaces the whole set, so it has to disconnect what is there now.`,
   deleteMany: `It deletes rows this call did not name.`,
   updateMany:
     `It writes caller-supplied columns to rows this call did not name — a ` +
@@ -631,6 +631,85 @@ function planForeignSide(
    * `updateMany` stays refused because it names a *predicate* rather than a
    * row, which is the half of the line this file draws that has not moved.
    */
+  /**
+   * `set` — replace the whole set with the named rows.
+   *
+   * The one supported operand that acts on rows the **call** did not name: it
+   * disconnects whatever is currently linked before connecting what was asked
+   * for. That is the half of this file's line it appears to fail, and #83
+   * already answered how — its implicit many-to-many `set` had the identical
+   * problem and the fix was to give the disconnect a *lookup*: read the linked
+   * rows through the child's own `findMany`, and clear only the ones the
+   * caller can see.
+   *
+   * So `set` means **"replace the set I can see"**. With no policy on the child
+   * every row is visible and it is Prisma's `set` exactly; with one, a row the
+   * caller cannot see stays attached rather than being silently detached —
+   * which is the same choice `disconnect` makes one operand over, and the
+   * opposite of what an unscoped delete would do.
+   *
+   * Three measured details that are not obvious from the name:
+   *
+   *   set [one of two]   the unnamed row's key becomes null, the named stays
+   *   set []             every linked row is detached
+   *   set [another parent's row]   it is repointed here, as `connect` does
+   *   set [a row that does not exist]   silently ignored — no error
+   *
+   * The last is why the connect half is an `updateMany` rather than the
+   * `update` a nested `connect` uses: Prisma does not raise here, and matching
+   * that means not raising either.
+   *
+   * Both halves write the child's foreign key, so `set` inherits #98 exactly as
+   * `connect` does: a child whose policy scopes on that column is refused by
+   * the scope-escape guard, because it cannot tell a column the ORM wrote from
+   * one the caller did. #99 fixes that for every relation operand at once, and
+   * this needs no change when it lands.
+   */
+  if (key === "set") {
+    assertNamedRows(schema, relation, child, operand, "set", operation);
+    assertDisconnectable(child, relation, childField, operation);
+
+    out.after.push({
+      relation: relation.name,
+      operation: "set",
+      async run(args, _context, executor, rows) {
+        const parent = rows[0];
+        if (!parent) return;
+
+        const parentKey = parent[parentField];
+
+        // Everything currently linked *that this caller can see*. Not
+        // pre-scoped, which is the whole mechanism: the child's own policies
+        // decide what "currently linked" means for this caller.
+        const linked = (await executor.exec(
+          relation.model,
+          "findMany",
+          { where: { [childField]: parentKey }, select: { [childField]: true } },
+          false,
+        )) as Record<string, unknown>[];
+
+        if (linked.length > 0) {
+          await executor.exec(
+            relation.model,
+            "updateMany",
+            { where: { [childField]: parentKey }, data: { [childField]: null } },
+            false,
+          );
+        }
+
+        for (const entry of listOf(at(args))) {
+          await executor.exec(
+            relation.model,
+            "updateMany",
+            { where: entry as object, data: { [childField]: parentKey } },
+            false,
+          );
+        }
+      },
+    });
+    return;
+  }
+
   if (key === "update") {
     assertNamedUpdates(schema, relation, child, operand, operation);
 

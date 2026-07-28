@@ -826,7 +826,6 @@ describe("nested writes", () => {
   });
 
   test.each([
-    "set",
     "disconnect",
     "update",
     "upsert",
@@ -848,8 +847,8 @@ describe("nested writes", () => {
    */
   test("a refusal explains what the operand would take", () => {
     expect(() =>
-      text("create", { data: { email: "a@b.c", organization: { set: {} } } }),
-    ).toThrow(/replaces the whole set/);
+      text("create", { data: { email: "a@b.c", accounts: { updateMany: {} } } }),
+    ).toThrow(/names a \*predicate\* rather than a row|predicate, not a key/);
     expect(() =>
       text("create", { data: { email: "a@b.c", accounts: { deleteMany: {} } } }),
     ).toThrow(/deletes rows this call did not name/);
