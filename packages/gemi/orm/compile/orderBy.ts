@@ -1,5 +1,9 @@
 import type { SqlDialect } from "../dialect";
-import { UnknownFieldError, UnsupportedQueryError } from "../errors";
+import {
+  InvalidArgumentError,
+  UnknownFieldError,
+  UnsupportedQueryError,
+} from "../errors";
 import type { ModelSchema } from "../schema";
 import { type Fragment, joinFragments, sql } from "./fragment";
 import { relationOrderExpression } from "./order-relation";
@@ -74,7 +78,7 @@ export function parseOrderBy(
       return array ? found?.[index] : found;
     };
     if (typeof entry !== "object" || entry === null) {
-      throw new UnsupportedQueryError(
+      throw new InvalidArgumentError(
         "orderBy",
         schema.name,
         operation,
@@ -143,7 +147,7 @@ function parseDirection(
 ): { direction: "asc" | "desc"; nulls?: "first" | "last" } {
   if (typeof value === "string") {
     if (!DIRECTIONS.has(value)) {
-      throw new UnsupportedQueryError(
+      throw new InvalidArgumentError(
         `orderBy.${key}: ${JSON.stringify(value)}`,
         schema.name,
         operation,

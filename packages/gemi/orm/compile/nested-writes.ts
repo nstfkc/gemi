@@ -1,4 +1,7 @@
-import { UnsupportedQueryError } from "../errors";
+import {
+  InvalidArgumentError,
+  UnsupportedQueryError,
+} from "../errors";
 import type { ModelSchema, RelationSchema } from "../schema";
 import type { Binder } from "./fragment";
 import {
@@ -137,7 +140,7 @@ function planOne(
   out: NestedWritePlanning,
 ): void {
   if (typeof node !== "object" || node === null || Array.isArray(node)) {
-    throw new UnsupportedQueryError(
+    throw new InvalidArgumentError(
       `data.${relation.name}`,
       schema.name,
       operation,
@@ -286,7 +289,7 @@ function planOwningSide(
   // values, so the choice is made here at compile time and the two forms are two
   // plans. That is what keeps a `connect` from silently costing a round trip.
   if (typeof operand !== "object" || operand === null || Array.isArray(operand)) {
-    throw new UnsupportedQueryError(
+    throw new InvalidArgumentError(
       `data.${relation.name}.connect`,
       schema.name,
       operation,
@@ -513,7 +516,7 @@ function assertCreateManyOperand(
   const at = `data.${relation.name}.createMany`;
 
   if (typeof operand !== "object" || operand === null || Array.isArray(operand)) {
-    throw new UnsupportedQueryError(
+    throw new InvalidArgumentError(
       at,
       schema.name,
       operation,
@@ -527,7 +530,7 @@ function assertCreateManyOperand(
   );
 
   if (!keys.includes("data")) {
-    throw new UnsupportedQueryError(at, schema.name, operation, `Expected a 'data' key.`);
+    throw new InvalidArgumentError(at, schema.name, operation, `Expected a 'data' key.`);
   }
 
   for (const key of keys) {

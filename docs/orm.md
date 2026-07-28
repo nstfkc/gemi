@@ -245,6 +245,26 @@ On SQLite the error names the dialect and says so. If a batch is too large for o
 split inside a transaction, and `skipDuplicates` survives the split: the counts sum, and a conflict
 in a later chunk does not roll back an earlier one, because `do nothing` is not an error.
 
+### What a refusal tells you
+
+Three classes, and which one you get says what to do next:
+
+| Error | Means | Do |
+| --- | --- | --- |
+| `UnsupportedQueryError` | not implemented **yet** | wait for a release, or use what the message names |
+| `UnsupportedByDesignError` | decided against | change the call — the message says to what |
+| `InvalidArgumentError` | the argument exists, the value cannot mean anything | fix the value |
+
+The third is the one worth knowing about. `take: "-2"` used to report that the ORM "does not support
+`take` yet" — wrong on both halves: it does, and there is nothing to wait for. It now says
+`Invalid 'take' (User.findMany). Expected an integer, got "-2".`
+
+All three subclass `UnsupportedQueryError`, so `catch (e) { if (e instanceof UnsupportedQueryError) }`
+still catches every one. The specific classes are for the person reading the message.
+
+Every refusal carries a second sentence saying what to do instead — that is a required argument
+rather than a convention, so it cannot be dropped by a call site added later.
+
 ### Per-call options
 
 A second parameter, not a key inside `args` — intersecting Prisma's own arg types with a

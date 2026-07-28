@@ -56,6 +56,42 @@ export class UnsupportedQueryError extends Error {
  * UnsupportedQueryError) … }` keeps working for callers that do not care which
  * kind it is.
  */
+/**
+ * An argument the ORM **does** implement, given a value it cannot mean.
+ *
+ * The third category, and the one that made "yet" wrong four separate times —
+ * #82, #88, #100 and #101 each corrected it at their own call site before #61
+ * was found to own the problem. The taxonomy the three classes now draw:
+ *
+ *   not implemented yet     UnsupportedQueryError      wait for a release
+ *   decided against         UnsupportedByDesignError   change the call  (#78)
+ *   implemented, bad value  InvalidArgumentError       fix the value
+ *
+ * `take: "-2"` is the clearest case. `take` is implemented; `"-2"` is not a
+ * take. Telling that caller the ORM "does not support 'take' yet" is wrong on
+ * both halves — it does, and there is nothing to wait for — and it sends them
+ * to a changelog when the fix is one character in their own code.
+ *
+ * **Extends `UnsupportedQueryError`**, so every existing `catch` and every test
+ * asserting the base class keeps working. That is the same choice
+ * `UnsupportedByDesignError` made, and it is what lets a taxonomy be added to a
+ * shipped ORM without a breaking change: the specific classes are for the
+ * reader, the base class is for the handler.
+ */
+export class InvalidArgumentError extends UnsupportedQueryError {
+  constructor(
+    argument: string,
+    model: string,
+    operation: string,
+    /** What is wrong with the value, and what a good one looks like. */
+    reason: string,
+  ) {
+    super(argument, model, operation, reason);
+    this.name = "InvalidArgumentError";
+    this.message = `Invalid '${argument}' (${model}.${operation}). ${reason}`;
+  }
+}
+
 export class UnsupportedByDesignError extends UnsupportedQueryError {
   constructor(
     argument: string,

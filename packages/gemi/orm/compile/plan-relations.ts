@@ -1,5 +1,6 @@
 import type { SqlDialect } from "../dialect";
 import {
+  InvalidArgumentError,
   MalformedRelationError,
   MissingModelSchemaError,
   RelationDepthExceededError,
@@ -419,7 +420,7 @@ export function relationNodes(
 
   if (include !== undefined && include !== null) {
     if (typeof include !== "object" || Array.isArray(include)) {
-      throw new UnsupportedQueryError(
+      throw new InvalidArgumentError(
         "include",
         schema.name,
         operation,
@@ -509,7 +510,7 @@ function assertNodeArgs(
   if (value === true) return;
 
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new UnsupportedQueryError(
+    throw new InvalidArgumentError(
       node.as,
       schema.name,
       operation,

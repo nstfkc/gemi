@@ -1,5 +1,9 @@
 import type { SqlDialect } from "../dialect";
-import { UnknownRelationError, UnsupportedQueryError } from "../errors";
+import {
+  InvalidArgumentError,
+  UnknownRelationError,
+  UnsupportedQueryError,
+} from "../errors";
 import type { ModelSchema, RelationSchema } from "../schema";
 import { COUNT_KEY } from "../relation-filters";
 import { type Fragment, concat, sql } from "./fragment";
@@ -158,7 +162,7 @@ function readCountSelection(
   }
 
   if (typeof node !== "object" || node === null || Array.isArray(node)) {
-    throw new UnsupportedQueryError(
+    throw new InvalidArgumentError(
       "_count",
       schema.name,
       operation,
@@ -172,7 +176,7 @@ function readCountSelection(
     selection === null ||
     Array.isArray(selection)
   ) {
-    throw new UnsupportedQueryError(
+    throw new InvalidArgumentError(
       "_count.select",
       schema.name,
       operation,

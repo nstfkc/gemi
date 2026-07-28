@@ -1,6 +1,7 @@
 import { clientSideValue, hasClientSideValue } from "../defaults";
 import type { SqlDialect } from "../dialect";
 import {
+  InvalidArgumentError,
   MissingRequiredValueError,
   ReturningUnsupportedError,
   UnknownFieldError,
@@ -275,7 +276,7 @@ function skipDuplicatesClause(
   if (requested === undefined) return null;
 
   if (typeof requested !== "boolean") {
-    throw new UnsupportedQueryError(
+    throw new InvalidArgumentError(
       "skipDuplicates",
       schema.name,
       op,
@@ -322,7 +323,7 @@ function createManyColumns(
 ): WriteColumn[][] {
   const supplied = rows.map((row, index) => {
     if (typeof row !== "object" || row === null || Array.isArray(row)) {
-      throw new UnsupportedQueryError(
+      throw new InvalidArgumentError(
         `data[${index}]`,
         schema.name,
         op,
@@ -901,7 +902,7 @@ function insertColumns(
 ): WriteColumn[] {
   if (data !== undefined && data !== null) {
     if (typeof data !== "object" || Array.isArray(data)) {
-      throw new UnsupportedQueryError(
+      throw new InvalidArgumentError(
         "data",
         schema.name,
         op,
@@ -1043,7 +1044,7 @@ function updateAssignments(
 ): Fragment[] {
   if (data !== undefined && data !== null) {
     if (typeof data !== "object" || Array.isArray(data)) {
-      throw new UnsupportedQueryError(
+      throw new InvalidArgumentError(
         "data",
         schema.name,
         op,
@@ -1331,7 +1332,7 @@ function assertArgs(schema: ModelSchema, op: Operation, args: any): void {
   }
 
   if (typeof args !== "object" || Array.isArray(args)) {
-    throw new UnsupportedQueryError(
+    throw new InvalidArgumentError(
       String(args),
       schema.name,
       op,

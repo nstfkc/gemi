@@ -1,6 +1,6 @@
 import type { SqlDialect } from "../dialect";
 import {
-  MalformedRelationError,
+  InvalidArgumentError,
   UnknownFieldError,
   UnsupportedQueryError,
 } from "../errors";
@@ -61,7 +61,7 @@ export function compileWhere(
   if (where === undefined || where === null) return null;
 
   if (typeof where !== "object" || Array.isArray(where)) {
-    throw new UnsupportedQueryError(
+    throw new InvalidArgumentError(
       "where",
       schema.name,
       context.operation,
@@ -320,7 +320,7 @@ function readOperators(
   }
 
   if (typeof value !== "object" || Array.isArray(value)) {
-    throw new UnsupportedQueryError(
+    throw new InvalidArgumentError(
       path,
       schema.name,
       context.operation,
@@ -371,7 +371,7 @@ function compileCompoundKey(
   if (!members) return null;
 
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new UnsupportedQueryError(
+    throw new InvalidArgumentError(
       `where.${key}`,
       schema.name,
       context.operation,
@@ -510,7 +510,7 @@ function compileFieldFilter(
   const insensitive = filter.mode === "insensitive";
   if (filter.mode !== undefined && filter.mode !== "default") {
     if (!insensitive) {
-      throw new UnsupportedQueryError(
+      throw new InvalidArgumentError(
         `mode: ${JSON.stringify(filter.mode)}`,
         schema.name,
         context.operation,
@@ -535,7 +535,7 @@ function compileFieldFilter(
     if (operand === undefined || key === "mode") continue;
 
     if (!OPERATORS.has(key)) {
-      throw new UnsupportedQueryError(
+      throw new InvalidArgumentError(
         `where.${field.name}.${key}`,
         schema.name,
         context.operation,
@@ -583,7 +583,7 @@ function compileFieldFilter(
         // query that runs and returns the wrong rows. The types catch the
         // static case but not a value that arrives dynamically.
         if (typeof operand !== "string") {
-          throw new UnsupportedQueryError(
+          throw new InvalidArgumentError(
             `where.${field.name}.${key}`,
             schema.name,
             context.operation,
@@ -659,7 +659,7 @@ function inList(
   const { dialect } = context;
 
   if (!Array.isArray(operand)) {
-    throw new UnsupportedQueryError(
+    throw new InvalidArgumentError(
       `where.${field.name}.${negated ? "notIn" : "in"}`,
       schema.name,
       context.operation,
