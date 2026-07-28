@@ -1019,6 +1019,18 @@ function scopeRelationNode(
  * so the compiler stays a pure function of the shape and the plan cache stays
  * sound; it is the same move iteration 9 made when it put nested policies on the
  * arg tree instead of teaching the lateral strategy about the registry.
+ *
+ * **This logic is outside the differential harness's reach, deliberately, and
+ * therefore rests on its own tests.** Those 147 cases compare gemi against
+ * Prisma, and Prisma has no policies — so nothing in them exercises a scoped
+ * path at all. Do not read the matrix being green as coverage of this rewrite.
+ * What stands over it is the unit tests on `applyNestedPolicies` and the
+ * database test in `templates/saas-starter/app/models/relation-filter-policies.test.ts`,
+ * which is arranged so the two candidate rewrites give *different* answers.
+ *
+ * The failure this guards against is not a crash or an obviously wrong row
+ * count. It is a filter that silently consults rows the caller cannot see, and
+ * the tempting "simplification" to `AND` is exactly how it comes back.
  */
 function invertForEvery(inner: unknown, scoped: unknown): unknown {
   if (scoped === inner) return inner;
