@@ -322,6 +322,78 @@ function suite(label: string, url?: string) {
       ).resolves.toBeDefined();
     });
 
+    /**
+     * **The same bug, one node type over.** `applyNestedPolicies` handles four
+     * kinds of node and the first fix reached only one of them. A `_count`
+     * entry counts another model's rows, so it is as much a read as an
+     * `include` is, and it was still scoped as the enclosing statement.
+     *
+     * This is the loud half again, on the same legal policy: a model that
+     * scopes reads and never creates rows. Before the fix this raised
+     * `Account has a policy that scopes reads but no 'onCreate'` from a
+     * `create` on `User`.
+     *
+     * **What it cannot assert is the count**, and the reason is a gap rather
+     * than an oversight: `planRelationCounts` is called from `compile/read.ts`
+     * only, so a `_count` in a *write's* `include` is dropped and the returned
+     * row has no `_count` key at all. An unknown relation name in the same
+     * position raises `UnknownRelationError`, so this one key is the exception.
+     * Filed separately — it is a Prisma divergence, not a policy bug, and the
+     * quiet half of this finding becomes reachable the day it is fixed.
+     */
+    test("a _count under a create is scoped as a read too", async () => {
+      (ScopedAccount as any).$policies = [
+        { scope: () => ({ organizationId: ALICE.organizationId }) } satisfies ModelPolicy,
+      ];
+
+      await expect(
+        Model.asUser(ALICE, () =>
+          ScopedUser.create({
+            data: { email: "counted@x.test" },
+            include: { _count: { select: { accounts: true } } },
+          }),
+        ),
+      ).resolves.toBeDefined();
+    });
+
+    /**
+     * The third node type, and the one that shows why the operation stopped
+     * being a *parameter* of the walk rather than being passed correctly at
+     * each of its call sites.
+     *
+     * A relation filter is not reachable from an insert — `create` accepts no
+     * `where` — so it never appeared in #85. It was still being scoped as the
+     * enclosing statement, and under a root `update` that is an operation a
+     * policy is perfectly entitled to answer differently for.
+     *
+     * The scope below is the shape that makes it observable: read scope and
+     * write scope disagree, so the subquery over `Account` gives different
+     * answers depending on which one it is asked for. Reading is what the
+     * filter does, so the read scope is the correct one.
+     */
+    test("a relation filter under an update is scoped as a read", async () => {
+      (ScopedAccount as any).$policies = [
+        {
+          scope: (context) =>
+            context.operation === "findMany"
+              ? { organizationId: ALICE.organizationId }
+              : // No account is ever in organisation -1, so if the filter is
+                // scoped as the enclosing `update` it matches nothing and no
+                // user is touched.
+                { organizationId: -1 },
+        } satisfies ModelPolicy,
+      ];
+
+      const touched = await Model.asUser(ALICE, () =>
+        ScopedUser.updateMany({
+          where: { accounts: { some: {} } },
+          data: { name: "has-an-account" },
+        }),
+      );
+
+      expect(touched.count).toBeGreaterThan(0);
+    });
+
     test("a caller's own where still applies alongside the scope", async () => {
       (ScopedUser as any).$policies = [tenantScoped];
 

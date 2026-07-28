@@ -658,7 +658,6 @@ describe("applyNestedPolicies", () => {
     const out = applyNestedPolicies(
       relations({ accounts: "Account" }),
       { include: { accounts: true } },
-      "findMany" as any,
       USER,
       false,
       lookup({ Account: [tenant] }),
@@ -672,7 +671,6 @@ describe("applyNestedPolicies", () => {
     const out = applyNestedPolicies(
       relations({ accounts: "Account" }),
       { include: { accounts: { where: { organizationRole: 0 } } } },
-      "findMany" as any,
       USER,
       false,
       lookup({ Account: [tenant] }),
@@ -688,7 +686,6 @@ describe("applyNestedPolicies", () => {
     const out = applyNestedPolicies(
       relations({ accounts: "Account" }),
       { include: { accounts: { include: { organization: true } } } },
-      "findMany" as any,
       USER,
       false,
       lookup({ Organization: [tenant] }),
@@ -704,7 +701,6 @@ describe("applyNestedPolicies", () => {
     const out = applyNestedPolicies(
       relations({ accounts: "Account" }),
       { select: { id: true, accounts: true } },
-      "findMany" as any,
       USER,
       false,
       lookup({ Account: [tenant] }),
@@ -720,7 +716,6 @@ describe("applyNestedPolicies", () => {
     const out = applyNestedPolicies(
       relations({ accounts: "Account" }),
       args,
-      "findMany" as any,
       USER,
       false,
       lookup({}),
@@ -738,7 +733,6 @@ describe("applyNestedPolicies", () => {
     applyNestedPolicies(
       relations({ accounts: "Account" }),
       args,
-      "findMany" as any,
       USER,
       false,
       lookup({ Account: [tenant] }),
@@ -752,7 +746,6 @@ describe("applyNestedPolicies", () => {
     const out = applyNestedPolicies(
       relations({ accounts: "Account" }),
       args,
-      "findMany" as any,
       null,
       true,
       lookup({ Account: [tenant] }),
@@ -770,7 +763,6 @@ describe("applyNestedPolicies", () => {
       applyNestedPolicies(
         relations({ accounts: "Account" }),
         { include: { accounts: true } },
-        "findMany" as any,
         null,
         false,
         lookup({ Account: [tenant] }),
@@ -778,12 +770,61 @@ describe("applyNestedPolicies", () => {
     ).toThrow(PolicyDeniedError);
   });
 
+  /**
+   * **The rule, stated once over all four node types.**
+   *
+   * The walk touches an `include` / `select` node, a `_count` entry, a relation
+   * filter and a relation ordering, and each of them reads another model. It
+   * used to take the root operation as a parameter and pass it to all four, so
+   * the wrong value was expressible four times over — and two of the four were
+   * getting it. The parameter is gone; this pins what replaced it.
+   *
+   * The scope reads `context.operation` straight into the filter, so the
+   * assertion names the value rather than inferring it from a side effect. Any
+   * node that starts being told something else fails here by showing what.
+   */
+  test("every node is scoped as a read, and says so", () => {
+    const reportsOperation: ModelPolicy = {
+      scope: (context) => ({ seenOperation: context.operation }),
+    };
+
+    const out = applyNestedPolicies(
+      {
+        relations: {
+          accounts: { model: "Account", kind: "many" as const },
+        },
+      },
+      {
+        include: {
+          accounts: true,
+          _count: { select: { accounts: true } },
+        },
+        where: { accounts: { some: {} } },
+        orderBy: { accounts: { _count: "asc" } },
+      },
+      USER,
+      false,
+      (model: string) =>
+        model === "Account"
+          ? {
+              policies: [reportsOperation],
+              schema: { name: "Account", relations: {} },
+            }
+          : undefined,
+    );
+
+    const seen = { seenOperation: "findMany" };
+    expect(out.include.accounts).toEqual({ where: seen });
+    expect(out.include._count.select.accounts).toEqual({ where: seen });
+    expect(out.where.accounts.some).toEqual({ AND: [seen] });
+    expect(out.orderBy.accounts).toEqual({ _count: "asc", where: seen });
+  });
+
   test("an unregistered relation target is left for the planner to report", () => {
     const args = { include: { unknown: true } };
     const out = applyNestedPolicies(
       relations({ unknown: "Missing" }),
       args,
-      "findMany" as any,
       USER,
       false,
       lookup({}),
@@ -846,7 +887,6 @@ describe("relation filters in where", () => {
     return applyNestedPolicies(
       root,
       { where },
-      "findMany" as any,
       USER,
       false,
       lookup(policies),
@@ -963,7 +1003,6 @@ describe("relation filters in where", () => {
     const out = applyNestedPolicies(
       root,
       { where: { accounts: { some: {} } } },
-      "findMany" as any,
       USER,
       true,
       lookup({ Account: [tenant] }),
@@ -982,7 +1021,6 @@ describe("relation filters in where", () => {
     const out = applyNestedPolicies(
       root,
       { where },
-      "findMany" as any,
       USER,
       false,
       lookup({}),

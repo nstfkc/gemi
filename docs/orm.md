@@ -468,12 +468,21 @@ a shared model base can impose a policy a subclass can only narrow, never drop.
 | `before(ctx)` | First | Return `false` (or throw) to deny outright. |
 | `scope(ctx)` | Reads and row-matching writes | Returns a `where` fragment `AND`ed into `args.where`. A policy can only ever **narrow**. |
 | `onCreate(ctx, data)` | `create` / `createMany` / `upsert` | Defaults or validates the payload. An insert has no `where` for a scope to narrow. |
-
-A relation reached through `include` or `select` is always scoped as a **read**, whatever the
-statement around it is doing — so `User.create({ data, include: { accounts: true } })` applies
-`Account`'s `scope`, not its `onCreate`. The children are being read back, not written.
 | `onUpdate(ctx, data)` | `update` / `updateMany` / `upsert` | Defaults or validates the payload of a write to existing rows. |
 | `redact(ctx, row)` | Shaping | Removes fields from a fetched row. |
+
+**Anything that names another model is scoped as a read of that model**, whatever the statement
+around it is doing. That covers all four ways a query reaches a model it did not name — an
+`include` / `select` node, a `_count` entry, a relation filter in a `where`, and a relation
+ordering in an `orderBy` — and it means `context.operation` is `findMany` inside each of them:
+
+```ts
+User.create({ data, include: { accounts: true } })      // Account's scope, not its onCreate
+User.updateMany({ where: { accounts: { some: {} } } })  // Account's read scope, not its write one
+```
+
+The children are being *read back*; only the row named by the statement itself is being written.
+Nested writes under `data` are a different tree and scope themselves as writes.
 
 **A scope alone does not protect writes, and the ORM says so rather than assuming.** A `scope`
 narrows *which rows* a statement may touch and says nothing about the values written, so a

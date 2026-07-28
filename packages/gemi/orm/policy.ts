@@ -893,6 +893,26 @@ export type PolicyLookup = (model: string) => {
 } | undefined;
 
 /**
+ * The operation every node this walk touches is scoped as.
+ *
+ * `findMany` because that is what each of them *is* — one query for rows of
+ * another model, named from inside somebody else's arguments — and because a
+ * policy reading `context.operation` should see the read it is being asked
+ * about rather than the statement that happens to enclose it. It is also in
+ * `SCOPABLE`, which an inserting operation is not, and that mismatch is what
+ * produced the bug this constant exists to prevent.
+ *
+ * **It is a constant rather than a parameter, and that is the fix.** The walk
+ * used to take the root operation and pass it down; every node type then had
+ * its own opportunity to be scoped as the enclosing statement instead of as
+ * the read it is, and two of the four took it. Threading the right value
+ * through four call sites leaves the wrong value expressible at all four. Not
+ * accepting one at all is what makes it unrepresentable — the same reason #79
+ * made `resolveLink`'s `operation` required rather than defaulted.
+ */
+const NESTED_READ: Operation = "findMany";
+
+/**
  * Applies every *nested* model's policies to its own node in the argument tree,
  * recursively, returning a new tree.
  *
@@ -915,25 +935,49 @@ export type PolicyLookup = (model: string) => {
  * claim — that scoping applies under every strategy because policies rewrite the
  * arg tree before planning — *true*, where before it was true only of the
  * strategy that happened to recurse.
- */
-/**
- * The operation a nested `include` / `select` node is scoped as.
  *
- * `findMany` because that is what a relation node *is* — one query for the
- * children of the rows in hand — and because a policy reading
- * `context.operation` should see the read it is being asked about rather than
- * the statement that happens to enclose it. It is also in `SCOPABLE`, which an
- * insert operation is not, and that mismatch is what produced the bug this
- * constant exists to prevent.
+ * **Every node it touches is a read.** There are four kinds — an `include` /
+ * `select` node, a `_count` entry, a relation filter in a `where`, a relation
+ * ordering in an `orderBy` — and each names *another model's rows*, whatever
+ * the statement around it is doing. So each is scoped as {@link NESTED_READ}
+ * rather than as the enclosing operation.
+ *
+ * Passing the root operation down broke two of the four, and only the ones
+ * reachable from an insert were visible:
+ *
+ *   User.create({ data, include: { accounts: true } })
+ *   User.create({ data, include: { _count: { select: { accounts: true } } } })
+ *
+ * - A child with a `scope` and no `onCreate` **raised**, with
+ *   `Account has a policy that scopes reads but no 'onCreate'` — naming an
+ *   operation the caller never asked for, about rows being read back rather
+ *   than written. That is a legal policy: a model can scope reads and never
+ *   create rows.
+ * - A child with both took `applyPolicies`' inserting branch, which skips
+ *   `withScope` and then runs `onCreate` over the node. It came out carrying
+ *   `data: {}` where its `where` should have been, so the child's read scope —
+ *   a tenant filter, or `softDeletes`' own `deletedAt: null` — silently
+ *   disappeared from the nested read.
+ *
+ * The other two are not reachable from an insert, and the reason is worth
+ * recording so the asymmetry is not rediscovered: `create` accepts only
+ * `data` / `select` / `include` and `createMany` only `data`, so neither has a
+ * `where` or an `orderBy` for a relation to be named in. They were still
+ * wrong, just more quietly — under a root `update` a policy whose `scope`
+ * reads `context.operation` saw `"update"` for what is a read, and answered
+ * the question it was not asked.
+ *
+ * Nested *write* nodes under `data` are a different path entirely
+ * (`planNestedWrites`), and already scope themselves as writes. This walk only
+ * ever sees the read tree, which is why it can take the operation as a
+ * constant at all.
  */
-const NESTED_READ: Operation = "findMany";
 
 export function applyNestedPolicies(
   schema: {
     relations: Record<string, { model: string; kind: "one" | "many" }>;
   },
   args: any,
-  operation: Operation,
   user: unknown,
   system: boolean,
   lookup: PolicyLookup,
@@ -961,7 +1005,6 @@ export function applyNestedPolicies(
         const scopedCounts = scopeCounts(
           schema,
           (tree as Record<string, unknown>)[key],
-          operation,
           user,
           system,
           lookup,
@@ -994,31 +1037,9 @@ export function applyNestedPolicies(
 
       // Depth first, so a grandchild's scope is in place before its parent's
       // node is rewritten around it.
-      //
-      // **`NESTED_READ`, not the root's operation.** An `include` / `select`
-      // node is a *read* whatever the statement around it is doing, and passing
-      // the root operation down scoped it as an insert under a root `create`.
-      // Two ways that went wrong, and the quiet one was worse:
-      //
-      //   User.create({ data, include: { accounts: true } })
-      //
-      // - A child with a `scope` and no `onCreate` raised
-      //   `Account has a policy that scopes reads but no 'onCreate'` — naming
-      //   an operation the caller never asked for, about a row being read back
-      //   rather than written.
-      // - A child with both took `applyPolicies`' inserting branch, which skips
-      //   `withScope` and then runs `onCreate` over the include node. The node
-      //   came out carrying `data: {}` where its `where` should have been, so
-      //   the child's read scope — a tenant filter, or `softDeletes`' own
-      //   `deletedAt: null` — silently disappeared from the nested read.
-      //
-      // Nested *write* nodes under `data` are a different path entirely
-      // (`planNestedWrites`), and they already scope themselves as writes. This
-      // walk only ever sees the read tree.
       const deeper = applyNestedPolicies(
         target.schema,
         nodeArgs,
-        NESTED_READ,
         user,
         system,
         lookup,
@@ -1053,7 +1074,6 @@ export function applyNestedPolicies(
   const ordered = scopeRelationOrderings(
     schema,
     out.orderBy,
-    operation,
     user,
     system,
     lookup,
@@ -1066,7 +1086,6 @@ export function applyNestedPolicies(
   const filtered = scopeRelationFilters(
     schema,
     out.where,
-    operation,
     user,
     system,
     lookup,
@@ -1096,7 +1115,6 @@ export function applyNestedPolicies(
 function scopeRelationOrderings(
   schema: { relations: Record<string, { model: string; kind: "one" | "many" }> },
   orderBy: unknown,
-  operation: Operation,
   user: unknown,
   system: boolean,
   lookup: PolicyLookup,
@@ -1110,7 +1128,6 @@ function scopeRelationOrderings(
       const scoped = scopeRelationOrderings(
         schema,
         entry,
-        operation,
         user,
         system,
         lookup,
@@ -1139,7 +1156,7 @@ function scopeRelationOrderings(
 
     const scoped = applyPolicies(
       target.policies,
-      policyContext(target.schema.name, operation, user, system),
+      policyContext(target.schema.name, NESTED_READ, user, system),
       node,
     );
 
@@ -1162,7 +1179,6 @@ function scopeRelationOrderings(
 function scopeCounts(
   schema: { relations: Record<string, { model: string; kind: "one" | "many" }> },
   node: unknown,
-  operation: Operation,
   user: unknown,
   system: boolean,
   lookup: PolicyLookup,
@@ -1200,7 +1216,7 @@ function scopeCounts(
 
     const scoped = applyPolicies(
       target.policies,
-      policyContext(target.schema.name, operation, user, system),
+      policyContext(target.schema.name, NESTED_READ, user, system),
       nodeArgs,
     );
 
@@ -1231,7 +1247,6 @@ function scopeCounts(
 function scopeRelationFilters(
   schema: { relations: Record<string, { model: string; kind: "one" | "many" }> },
   where: unknown,
-  operation: Operation,
   user: unknown,
   system: boolean,
   lookup: PolicyLookup,
@@ -1244,7 +1259,6 @@ function scopeRelationFilters(
       const scoped = scopeRelationFilters(
         schema,
         entry,
-        operation,
         user,
         system,
         lookup,
@@ -1268,7 +1282,6 @@ function scopeRelationFilters(
       const scoped = scopeRelationFilters(
         schema,
         value,
-        operation,
         user,
         system,
         lookup,
@@ -1286,7 +1299,6 @@ function scopeRelationFilters(
     const scoped = scopeRelationNode(
       relation,
       value,
-      operation,
       user,
       system,
       lookup,
@@ -1304,7 +1316,6 @@ function scopeRelationFilters(
 function scopeRelationNode(
   relation: { model: string; kind: "one" | "many" },
   value: unknown,
-  operation: Operation,
   user: unknown,
   system: boolean,
   lookup: PolicyLookup,
@@ -1336,7 +1347,6 @@ function scopeRelationNode(
     const deeper = scopeRelationFilters(
       target.schema,
       argument,
-      operation,
       user,
       system,
       lookup,
@@ -1346,7 +1356,7 @@ function scopeRelationNode(
       !system && target.policies.length > 0
         ? applyPolicies(
             target.policies,
-            policyContext(target.schema.name, operation, user, system),
+            policyContext(target.schema.name, NESTED_READ, user, system),
             { where: deeper },
           ).where
         : deeper;
