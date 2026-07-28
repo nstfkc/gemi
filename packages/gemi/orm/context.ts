@@ -1,5 +1,6 @@
 import type { SQL, TransactionSQL } from "bun";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { SLOW_TRANSACTION_THRESHOLD } from "../database/config";
 
 /**
  * The ambient transaction: the ORM's own `AsyncLocalStorage`, holding nothing
@@ -149,33 +150,39 @@ export function runAsUser<T>(user: unknown, fn: () => Promise<T>): Promise<T> {
   );
 }
 
-/** Default threshold for the development-mode long-transaction warning. */
-const SLOW_TRANSACTION_MS = 2_000;
-
 /**
  * The warning threshold in milliseconds, or `null` when the warning is off.
  *
- * Exported for its tests. The behaviour worth pinning is the fallback — that a
- * malformed `GEMI_SLOW_TRANSACTION_MS` lands on the default rather than
- * disabling — and that cannot be observed through `withTransaction`: "no
- * warning fired" is what a disabled warning looks like too, so a behavioural
- * test of it passes just as happily when the fallback is gone. Asserting the
- * number directly is the only form of that test that can fail.
+ * `configured` is `database.slowTransactionThreshold` — see `DatabaseConfig`.
+ * It arrives as a value rather than being read from here so that this file
+ * keeps knowing nothing about the container: `withTransaction` is reachable
+ * with a bare pool, and its tests use one.
+ *
+ * Exported for its own tests. The behaviour worth pinning is the fallback —
+ * that a malformed threshold lands on the default rather than disabling — and
+ * that cannot be observed through `withTransaction`: "no warning fired" is what
+ * a disabled warning looks like too, so a behavioural test of it passes just as
+ * happily when the fallback is gone. Asserting the number directly is the only
+ * form of that test that can fail.
  */
-export function slowTransactionThreshold(): number | null {
+export function slowTransactionThreshold(
+  configured?: number | false,
+): number | null {
   // Read per call, never cached at module scope. `scripts/build.ts` rewrites
   // `process.env.NODE_ENV` to `Bun.env.NODE_ENV` precisely so mode stays a
   // runtime question in the built framework; caching it here would undo that.
   if (process.env.NODE_ENV !== "development") return null;
 
-  const configured = process.env.GEMI_SLOW_TRANSACTION_MS;
-  if (configured === undefined) return SLOW_TRANSACTION_MS;
+  // The one way to switch it off, and it has to be spelled. Everything else
+  // falls back, so the warning is never lost to a mistyped value — only to an
+  // explicit `false`.
+  if (configured === false) return null;
 
-  const parsed = Number(configured);
-  // A malformed value falls back rather than throwing or disabling: a typo in
-  // an env var should not silently switch a diagnostic off.
-  if (!Number.isFinite(parsed) || parsed <= 0) return SLOW_TRANSACTION_MS;
-  return parsed;
+  if (configured === undefined) return SLOW_TRANSACTION_THRESHOLD;
+  if (!Number.isFinite(configured) || configured <= 0) {
+    return SLOW_TRANSACTION_THRESHOLD;
+  }
+  return configured;
 }
 
 /**
@@ -206,8 +213,8 @@ export function slowTransactionThreshold(): number | null {
  * a long transaction elsewhere creates. Hence "not settled" rather than "open
  * for" — the message must not claim a connection was held for the whole span.
  */
-function watchForSlowTransaction(): () => void {
-  const threshold = slowTransactionThreshold();
+function watchForSlowTransaction(configured?: number | false): () => void {
+  const threshold = slowTransactionThreshold(configured);
   if (threshold === null) return () => {};
 
   const site = new Error("transaction opened here");
@@ -219,7 +226,8 @@ function watchForSlowTransaction(): () => void {
         `reserves a pooled connection until it does — check for network or ` +
         `filesystem I/O inside the callback, and move it outside the ` +
         `transaction if you find any.\n${stack}\n` +
-        `(development only; set GEMI_SLOW_TRANSACTION_MS to change the threshold)`,
+        `(development only; set database.slowTransactionThreshold to change ` +
+        `the threshold, or false to switch this off)`,
     );
   }, threshold);
 
@@ -256,10 +264,15 @@ function watchForSlowTransaction(): () => void {
  * three levels of nesting work.
  *
  * In development, an outermost transaction that stays open past
- * `GEMI_SLOW_TRANSACTION_MS` (2s by default) warns — see
- * `watchForSlowTransaction`. Nothing here *prevents* a long transaction; the
- * warning exists because the cost of one is paid by unrelated queries
+ * `options.slowTransactionThreshold` (2s by default, `false` to disable) warns
+ * — see `watchForSlowTransaction`. Nothing here *prevents* a long transaction;
+ * the warning exists because the cost of one is paid by unrelated queries
  * elsewhere in the process, which makes it hard to trace back.
+ *
+ * The threshold is passed in rather than read from `app(DatabaseManager)` here.
+ * Every caller already holds the manager — it is where `pool` came from — and
+ * taking it as an argument keeps this file free of the container, so a bare
+ * `SQL` is still enough to call it. Its tests rely on that.
  *
  * The return type is asserted rather than inferred for one reason worth
  * knowing: Bun's `begin` unwraps a callback that resolves to an *array of
@@ -270,6 +283,7 @@ function watchForSlowTransaction(): () => void {
 export function withTransaction<T>(
   pool: SQL,
   fn: (tx: TransactionSQL) => Promise<T>,
+  options?: { slowTransactionThreshold?: number | false },
 ): Promise<T> {
   const current = ormContext.getStore();
 
@@ -304,7 +318,9 @@ export function withTransaction<T>(
   // already being timed — so warning per depth would report one slow block as
   // several warnings and point at the innermost frame rather than the one
   // holding the connection.
-  const stopWatching = watchForSlowTransaction();
+  const stopWatching = watchForSlowTransaction(
+    options?.slowTransactionThreshold,
+  );
 
   // The `try` covers a *synchronous* throw from `begin` — a closed pool, say.
   // `.finally` alone would not: it is only attached once `begin` has returned a

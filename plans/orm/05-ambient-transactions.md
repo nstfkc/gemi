@@ -153,7 +153,8 @@ territory, and only if the Eloquent tier is pursued).
   above a duration threshold is cheap and worth considering, though not required.
 
   *Shipped.* `watchForSlowTransaction` in `orm/context.ts`: a warning at
-  `GEMI_SLOW_TRANSACTION_MS` (default 2s), development only, outermost scope
+  `database.slowTransactionThreshold` (default 2s, `false` to disable),
+  development only, outermost scope
   only. A timer rather than an elapsed-time measurement on the way out, because
   the case that matters most is the transaction that never settles at all — an
   after-the-fact measurement is silent for exactly that one. It reports; it does

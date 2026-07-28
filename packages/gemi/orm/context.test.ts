@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "vitest";
 
+import { SLOW_TRANSACTION_THRESHOLD } from "../database/config";
 import {
   currentTransaction,
   ormContext,
@@ -224,12 +225,16 @@ describe("the ambient transaction scope", () => {
 describe("the slow-transaction warning", () => {
   const env = process.env;
 
-  function inDevelopment(thresholdMs: number) {
-    process.env = {
-      ...env,
-      NODE_ENV: "development",
-      GEMI_SLOW_TRANSACTION_MS: String(thresholdMs),
-    };
+  /**
+   * The threshold is config now, so it is passed to `withTransaction` rather
+   * than set in the environment. Only `NODE_ENV` is still ambient — the
+   * warning is development-only regardless of what the config says.
+   */
+  const THRESHOLD = 10;
+  const options = { slowTransactionThreshold: THRESHOLD };
+
+  function inDevelopment() {
+    process.env = { ...env, NODE_ENV: "development" };
   }
 
   /**
@@ -275,15 +280,19 @@ describe("the slow-transaction warning", () => {
   });
 
   test("a transaction past the threshold warns while it is still open", async () => {
-    inDevelopment(10);
+    inDevelopment();
     const pool = fakePool("a");
     let warnedDuringCallback: string[] = [];
 
     const warnings = await capture((seen) =>
-      withTransaction(pool, async () => {
-        await sleep(PAST_THRESHOLD);
-        warnedDuringCallback = [...seen];
-      }),
+      withTransaction(
+        pool,
+        async () => {
+          await sleep(PAST_THRESHOLD);
+          warnedDuringCallback = [...seen];
+        },
+        options,
+      ),
     );
 
     expect(warnings).toHaveLength(1);
@@ -297,10 +306,12 @@ describe("the slow-transaction warning", () => {
   // warned, the warning would be noise and get muted, which is the same as not
   // having it.
   test("a transaction inside the threshold says nothing", async () => {
-    inDevelopment(50);
+    inDevelopment();
     const pool = fakePool("a");
 
-    const warnings = await capture(() => withTransaction(pool, async () => {}));
+    const warnings = await capture(() =>
+      withTransaction(pool, async () => {}, { slowTransactionThreshold: 50 }),
+    );
 
     expect(warnings).toEqual([]);
   });
@@ -308,14 +319,18 @@ describe("the slow-transaction warning", () => {
   // A rollback releases the connection exactly as a commit does, so a throwing
   // callback has to disarm the timer too.
   test("a throwing transaction disarms the warning", async () => {
-    inDevelopment(10);
+    inDevelopment();
     const pool = fakePool("a");
 
     const warnings = await capture(async () => {
       await expect(
-        withTransaction(pool, async () => {
-          throw new Error("boom");
-        }),
+        withTransaction(
+          pool,
+          async () => {
+            throw new Error("boom");
+          },
+          options,
+        ),
       ).rejects.toThrow("boom");
     });
 
@@ -326,16 +341,26 @@ describe("the slow-transaction warning", () => {
   // report one slow block three times and name the innermost frame rather than
   // the one actually holding the connection.
   test("nesting warns once, for the outermost scope", async () => {
-    inDevelopment(10);
+    inDevelopment();
     const pool = fakePool("a");
 
     const warnings = await capture(() =>
-      withTransaction(pool, () =>
-        withTransaction(pool, () =>
-          withTransaction(pool, async () => {
-            await sleep(PAST_THRESHOLD);
-          }),
-        ),
+      withTransaction(
+        pool,
+        () =>
+          withTransaction(
+            pool,
+            () =>
+              withTransaction(
+                pool,
+                async () => {
+                  await sleep(PAST_THRESHOLD);
+                },
+                options,
+              ),
+            options,
+          ),
+        options,
       ),
     );
 
@@ -343,17 +368,17 @@ describe("the slow-transaction warning", () => {
   });
 
   test("production is silent, however long the transaction runs", async () => {
-    process.env = {
-      ...env,
-      NODE_ENV: "production",
-      GEMI_SLOW_TRANSACTION_MS: "10",
-    };
+    process.env = { ...env, NODE_ENV: "production" };
     const pool = fakePool("a");
 
     const warnings = await capture(() =>
-      withTransaction(pool, async () => {
-        await sleep(PAST_THRESHOLD);
-      }),
+      withTransaction(
+        pool,
+        async () => {
+          await sleep(PAST_THRESHOLD);
+        },
+        options,
+      ),
     );
 
     expect(warnings).toEqual([]);
@@ -364,7 +389,7 @@ describe("the slow-transaction warning", () => {
   // `try`/`catch` the timer stays armed and warns about a transaction that
   // never opened.
   test("a pool that throws synchronously disarms the warning", async () => {
-    inDevelopment(10);
+    inDevelopment();
     const pool: any = {
       begin() {
         throw new Error("pool is closed");
@@ -372,7 +397,7 @@ describe("the slow-transaction warning", () => {
     };
 
     const warnings = await capture(async () => {
-      expect(() => withTransaction(pool, async () => {})).toThrow(
+      expect(() => withTransaction(pool, async () => {}, options)).toThrow(
         "pool is closed",
       );
       await sleep(PAST_THRESHOLD);
@@ -382,13 +407,17 @@ describe("the slow-transaction warning", () => {
   });
 
   test("the warning names the call site", async () => {
-    inDevelopment(10);
+    inDevelopment();
     const pool = fakePool("a");
 
     const warnings = await capture(() =>
-      withTransaction(pool, async () => {
-        await sleep(PAST_THRESHOLD);
-      }),
+      withTransaction(
+        pool,
+        async () => {
+          await sleep(PAST_THRESHOLD);
+        },
+        options,
+      ),
     );
 
     expect(warnings[0]).toContain("context.test.ts");
@@ -405,7 +434,7 @@ describe("the slow-transaction warning", () => {
    * committed.
    */
   test("the warning timer does not hold the process open", async () => {
-    inDevelopment(10);
+    inDevelopment();
     const pool = fakePool("a");
     const realSetTimeout = globalThis.setTimeout;
     const unreffed: boolean[] = [];
@@ -421,7 +450,7 @@ describe("the slow-transaction warning", () => {
     }) as typeof globalThis.setTimeout;
 
     try {
-      await withTransaction(pool, async () => {});
+      await withTransaction(pool, async () => {}, options);
     } finally {
       globalThis.setTimeout = realSetTimeout;
     }
@@ -433,20 +462,18 @@ describe("the slow-transaction warning", () => {
 /**
  * The threshold itself, asserted as a value rather than through the warning.
  *
- * The fallback — a malformed `GEMI_SLOW_TRANSACTION_MS` landing on the default
- * instead of switching the warning off — cannot be tested behaviourally at all.
- * "No warning fired" is what you observe when the fallback works (the default
- * is 2s, longer than any sane test) *and* when it is missing entirely, so a
- * behavioural test of it passes under the very mutation it is meant to catch.
- * Reading the number is the only version that can fail.
+ * The fallback — a malformed `database.slowTransactionThreshold` landing on the
+ * default instead of switching the warning off — cannot be tested behaviourally
+ * at all. "No warning fired" is what you observe when the fallback works (the
+ * default is 2s, longer than any sane test) *and* when it is missing entirely,
+ * so a behavioural test of it passes under the very mutation it is meant to
+ * catch. Reading the number is the only version that can fail.
  */
 describe("the slow-transaction threshold", () => {
   const env = process.env;
 
-  function withEnv(nodeEnv: string, configured?: string) {
+  function inMode(nodeEnv: string) {
     process.env = { ...env, NODE_ENV: nodeEnv };
-    if (configured === undefined) delete process.env.GEMI_SLOW_TRANSACTION_MS;
-    else process.env.GEMI_SLOW_TRANSACTION_MS = configured;
   }
 
   afterEach(() => {
@@ -455,40 +482,52 @@ describe("the slow-transaction threshold", () => {
 
   test("the warning is off outside development", () => {
     for (const nodeEnv of ["production", "test", ""]) {
-      withEnv(nodeEnv, "10");
-      expect(slowTransactionThreshold()).toBeNull();
+      inMode(nodeEnv);
+      expect(slowTransactionThreshold(10)).toBeNull();
     }
   });
 
-  test("unset means the two-second default", () => {
-    withEnv("development");
+  test("unconfigured means the two-second default", () => {
+    inMode("development");
+    expect(slowTransactionThreshold()).toBe(SLOW_TRANSACTION_THRESHOLD);
     expect(slowTransactionThreshold()).toBe(2_000);
   });
 
   test("a usable value is honoured", () => {
-    withEnv("development", "500");
-    expect(slowTransactionThreshold()).toBe(500);
+    inMode("development");
+    expect(slowTransactionThreshold(500)).toBe(500);
+  });
+
+  /**
+   * `false` is the only off-switch, and the reason the config type is
+   * `number | false` rather than just `number`.
+   *
+   * Under the old env var there was no way to say "off" that a typo could not
+   * also say by accident. Now the two are different shapes: anything malformed
+   * falls back, and only the literal `false` disables.
+   */
+  test("false is the off switch", () => {
+    inMode("development");
+    expect(slowTransactionThreshold(false)).toBeNull();
   });
 
   /**
    * Every one of these falls back rather than returning `null`.
    *
-   * Silently losing a diagnostic to a typo is worse than ignoring the typo:
-   * the warning would simply stop appearing, and nothing would say why. Note
-   * `Infinity` — finite-looking to a reader, and the reason the check is
+   * Silently losing a diagnostic to a bad value is worse than ignoring the bad
+   * value: the warning would simply stop appearing, and nothing would say why.
+   * Note `Infinity` — finite-looking to a reader, and the reason the check is
    * `Number.isFinite` rather than `!Number.isNaN`; without it the timer would
    * be scheduled for never.
    */
   test.each([
-    ["a typo", "soon"],
-    ["empty", ""],
-    ["whitespace", "   "],
-    ["zero", "0"],
-    ["negative", "-1"],
-    ["infinite", "Infinity"],
-    ["not a number", "NaN"],
+    ["zero", 0],
+    ["negative", -1],
+    ["infinite", Infinity],
+    ["negative infinite", -Infinity],
+    ["not a number", NaN],
   ])("%s falls back to the default", (_label, configured) => {
-    withEnv("development", configured);
-    expect(slowTransactionThreshold()).toBe(2_000);
+    inMode("development");
+    expect(slowTransactionThreshold(configured)).toBe(2_000);
   });
 });
