@@ -175,6 +175,27 @@ Results are typed by Prisma's own mapped types, so `_max: { position: true }` na
 than columns, which is its own piece of work; shipping half of it typed as though it worked would be
 worse than not shipping it.
 
+### Importing a batch that may overlap
+
+```ts
+await Product.createMany({ data: rows, skipDuplicates: true })   // Postgres only
+```
+
+`ON CONFLICT DO NOTHING`, untargeted — so it covers every unique constraint and the primary key at
+once, which is what `skipDuplicates` means. The returned `{ count }` is the number of rows
+**inserted**, not the number supplied, so it answers "how many were new".
+
+The check and the insert being one statement is the whole point. Reading first to find out which
+rows exist is a second query *and* a race: between the read and the insert a concurrent importer
+writes one of them, and the insert fails on a unique violation anyway.
+
+**Postgres only, and that is Prisma's line rather than SQL's.** SQLite can express the same clause;
+Prisma rejects the argument there — for `false` as well as `true` — so gemi does too, rather than
+becoming a silent superset on the one dialect the differential harness could then no longer compare.
+On SQLite the error names the dialect and says so. If a batch is too large for one statement it is
+split inside a transaction, and `skipDuplicates` survives the split: the counts sum, and a conflict
+in a later chunk does not roll back an earlier one, because `do nothing` is not an error.
+
 ### Per-call options
 
 A second parameter, not a key inside `args` — intersecting Prisma's own arg types with a
