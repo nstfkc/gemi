@@ -63,17 +63,46 @@ one — so the work pooled at different heights:
 | `feat/orm-09-lateral-strategy` | yes | no | no |
 | `docs/orm` | yes | yes | yes |
 
-**The check is one command**, and it is worth running before treating a stack as
-shipped, because every PR showing `MERGED` looks exactly like success:
+**The stall starts partway up, not at the bottom**, which narrows where to look.
+Each level holds its own child's work and passes none of it down:
+
+```
+feat/database-layer                0 ahead of feat/orm              <- landed
+feat/orm-03-motorcycle            11 ahead of feat/database-layer   <- stalls here
+feat/orm-04-writes                11 ahead of feat/orm-03-motorcycle
+feat/orm-05-ambient-transactions  12 ahead of feat/orm-04-writes
+feat/orm-06-policies              13 ahead of feat/orm-05-…
+feat/orm-07-performance           14 ahead of feat/orm-06-policies
+feat/orm-08-eloquent-doorway      15 ahead of feat/orm-07-performance
+```
+
+### The runbook
+
+**Detect it.** One command, worth running before treating a stack as shipped,
+because every PR showing `MERGED` looks exactly like success:
 
 ```
 git rev-list --count origin/<trunkward-branch>..origin/<stack-tip>
 ```
 
-Non-zero means the trunkward branch has not received the stack. The one-step
-repair is to merge the stack tip into it directly; the intermediate branches stop
-mattering once the bottom PR merges, and they keep their per-iteration history
-either way.
+Non-zero means the trunkward branch has not received the stack.
+
+**Then check how much of a repair it is**, because that number reads like one
+job per level and is usually one job in total:
+
+```
+git rev-list --no-merges --count origin/<stack-tip>..origin/<each-branch>
+```
+
+Zero everywhere means no branch holds unique work — what they hold that the tip
+does not is only the merge commits their own child PRs created. Measured across
+all thirteen branches of this stack: **zero non-merge commits on every one of
+them.**
+
+**So the repair is a single merge** of the stack tip into the trunkward branch,
+and the intermediates can be deleted rather than repaired one at a time. Without
+that second check the first number is alarming and misleading in the expensive
+direction: "nine PRs merged and nothing landed" reads as nine repairs.
 
 `feat/database-layer` is at `e3c2e0b`. Everything this plan depends on exists
 there — `database/`, `container/`, `foundation/`, `kernel/`, `support/`,
