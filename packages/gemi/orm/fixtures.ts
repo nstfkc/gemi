@@ -583,6 +583,50 @@ export const category: ModelSchema = {
   },
 };
 
+/**
+ * A model whose primary key is a **compound `@@id`**, and which declares no
+ * `@@unique`.
+ *
+ * The template's only compound key is `SocialAccount`'s
+ * `@@unique([username, provider])`, which is a different path — so a compound
+ * *primary* key had no coverage anywhere, and was unreachable by key at all.
+ * See #80.
+ */
+export const membership: ModelSchema = {
+  name: "Membership",
+  table: "Membership",
+  fields: {
+    organizationId: {
+      name: "organizationId",
+      column: "organizationId",
+      type: "Int",
+      nullable: false,
+      isId: true,
+      isUpdatedAt: false,
+    },
+    userId: {
+      name: "userId",
+      column: "userId",
+      type: "Int",
+      nullable: false,
+      isId: true,
+      isUpdatedAt: false,
+    },
+    role: {
+      name: "role",
+      column: "role",
+      type: "Int",
+      nullable: false,
+      isId: false,
+      isUpdatedAt: false,
+      default: { kind: "value", value: 2 },
+    },
+  },
+  primaryKey: ["organizationId", "userId"],
+  uniques: [],
+  relations: {},
+};
+
 /** `@@map("audit_log")` with `@map`ped columns, plus every decoded scalar type. */
 export const mapped: ModelSchema = {
   name: "AuditLog",

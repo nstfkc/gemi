@@ -9,7 +9,7 @@ import {
   UnknownFieldError,
   UnsupportedQueryError,
 } from "../errors";
-import { account, bare, organization, reading, user } from "../fixtures";
+import { account, bare, organization, post, reading, tag, user } from "../fixtures";
 import * as registry from "../registry";
 import { compileWrite } from "./write";
 
@@ -749,6 +749,9 @@ describe("nested writes", () => {
     registry.register("User", class { static $schema = user });
     registry.register("Account", class { static $schema = account });
     registry.register("Organization", class { static $schema = organization });
+    // The implicit many-to-many pair, for the two-operand-set reconciliation.
+    registry.register("Post", class { static $schema = post });
+    registry.register("Tag", class { static $schema = tag });
   });
 
   // The registry is process-global. Vitest isolates modules per file so this
@@ -848,6 +851,56 @@ describe("nested writes", () => {
     expect(() =>
       text("create", { data: { email: "a@b.c", accounts: { deleteMany: {} } } }),
     ).toThrow(/has none yet/);
+  });
+
+  /**
+   * The two operand sets, reconciled — and asserted, because nothing else can
+   * see the divergence.
+   *
+   * `planOne` checks `link.join` first and returns, so the join-table path
+   * never consults `SUPPORTED`. The sets can drift with nothing failing to
+   * compile and no test noticing, which is exactly what happened while #83 and
+   * four other branches were in flight at once.
+   */
+  describe("ordinary relations and implicit many-to-many", () => {
+    const BOTH = ["connect", "create", "disconnect", "set"];
+    const ORDINARY_ONLY = [
+      "connectOrCreate",
+      "createMany",
+      "delete",
+      "update",
+      "updateMany",
+      "deleteMany",
+    ];
+
+    /**
+     * The operands that are about the *link* work on both. The ones about the
+     * far **row** do not, because a join table has two foreign keys and no row
+     * of its own to act on — and each says which of those it is.
+     */
+    test.each(ORDINARY_ONLY)("%s is refused through a join table, with a reason", (operand) => {
+      expect(() =>
+        compileWrite(
+          post,
+          "update",
+          { where: { id: 1 }, data: { tags: { [operand]: {} } } },
+          sqlite,
+        ),
+      ).toThrow(/means something different through a join table/);
+    });
+
+    test("the shared operands are not refused there", () => {
+      for (const operand of BOTH) {
+        expect(() =>
+          compileWrite(
+            post,
+            "update",
+            { where: { id: 1 }, data: { tags: { [operand]: {} } } },
+            sqlite,
+          ),
+        ).not.toThrow(/means something different/);
+      }
+    });
   });
 
   /**
@@ -1143,6 +1196,103 @@ describe("arguments", () => {
     expect(() =>
       text("createMany", { data: [{ email: "a" }], skipDuplicates: true }),
     ).toThrow(/skipDuplicates/);
+  });
+});
+
+/**
+ * `_count` in a write's `include` (#87).
+ *
+ * It used to be accepted and dropped — the row came back without the key and
+ * without an error — while an unknown relation name in the same `include`
+ * raised. The inconsistency is the sharper half of the complaint: the write
+ * path validated relation names and then discarded the one key that is not one.
+ */
+describe("_count on a write", () => {
+  const COUNT = { _count: { select: { accounts: true } } };
+
+  // The count correlates against the child's table, so its schema has to be
+  // resolvable — same requirement the relation planner has.
+  beforeEach(() => {
+    registry.clearRegistry();
+    registry.register("User", class { static $schema = user });
+    registry.register("Account", class { static $schema = account });
+    registry.register("Organization", class { static $schema = organization });
+  });
+
+  afterEach(() => registry.clearRegistry());
+
+  test("projects a correlated subquery into the returning list", () => {
+    const emitted = text("create", { data: { email: "a@b.c" }, include: COUNT });
+
+    expect(emitted).toContain(`select count(*)`);
+    expect(emitted).toContain(`from "Account"`);
+    // In `returning`, not as a second statement: both dialects evaluate a
+    // subquery there, so this costs no extra round trip.
+    expect(emitted.slice(emitted.indexOf(" returning "))).toContain(`count(*)`);
+  });
+
+  test("it reaches every row-returning write", () => {
+    for (const [op, args] of [
+      ["create", { data: { email: "a@b.c" } }],
+      ["update", { where: { id: 1 }, data: { name: "x" } }],
+      ["delete", { where: { id: 1 } }],
+      ["upsert", { where: { id: 1 }, create: { id: 1, email: "a@b.c" }, update: {} }],
+    ] as const) {
+      expect(text(op, { ...args, include: COUNT })).toContain(`count(*)`);
+    }
+  });
+
+  test("the filter inside a _count is bound, never inlined", () => {
+    const args = {
+      data: { email: "a@b.c" },
+      include: {
+        _count: { select: { accounts: { where: { organizationRole: 7 } } } },
+      },
+    };
+    const plan = compileWrite(user, "create", args, sqlite);
+
+    expect(plan.text).not.toContain("7");
+    expect(plan.bind(args, createBindContext())).toContain(7);
+  });
+
+  /**
+   * The flag `$exec` reads to decide that a `delete` has something to read
+   * *before* the row goes. A count is not a relation plan, so `relations` is
+   * empty for a `_count` on its own and cannot carry this.
+   *
+   * It matters because the two dialects disagree: under `on delete cascade`
+   * Postgres evaluates the subquery against the pre-statement snapshot and
+   * returns the old count, SQLite evaluates it after the cascade and returns 0.
+   * Prisma returns the old count on both.
+   */
+  test("a write carrying a _count says so, and one without does not", () => {
+    expect(
+      compileWrite(user, "delete", { where: { id: 1 }, include: COUNT }, sqlite)
+        .counts,
+    ).toBe(true);
+
+    expect(
+      compileWrite(user, "delete", { where: { id: 1 } }, sqlite).counts,
+    ).toBeUndefined();
+
+    // An `include` of a real relation is a relation plan, not a count.
+    expect(
+      compileWrite(
+        user,
+        "delete",
+        { where: { id: 1 }, include: { accounts: true } },
+        sqlite,
+      ).counts,
+    ).toBeUndefined();
+  });
+
+  test("an unknown relation inside a _count still raises", () => {
+    expect(() =>
+      text("create", {
+        data: { email: "a@b.c" },
+        include: { _count: { select: { nosuchrelation: true } } },
+      }),
+    ).toThrow(/nosuchrelation/);
   });
 });
 

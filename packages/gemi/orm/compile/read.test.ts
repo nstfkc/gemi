@@ -5,6 +5,7 @@ import { SqliteDialect } from "../dialect/sqlite";
 import {
   ParameterLimitError,
   UnknownFieldError,
+  UnsupportedByDesignError,
   UnsupportedQueryError,
 } from "../errors";
 import { USER_COLUMNS, account, mapped, user } from "../fixtures";
@@ -331,6 +332,33 @@ describe("skip and take", () => {
   });
 });
 
+/**
+ * The hazard `recountAfterSteps` guards against, pinned where the behaviour
+ * actually lives.
+ *
+ * Dropping `undefined` keys is right — it is how an optional filter is spelled
+ * — but it means a `where` built *entirely* from missing values is not a
+ * narrower query, it is an unfiltered one. Any caller assembling a `where` from
+ * fields it believes are on a row has to check they are there first, because
+ * the failure is an arbitrary row rather than an error.
+ */
+describe("a where whose keys are all undefined", () => {
+  test("compiles to no predicate at all, not to a miss", () => {
+    const unfiltered = text({});
+    expect(text({ where: { id: undefined } })).toBe(unfiltered);
+    expect(text({ where: {} })).toBe(unfiltered);
+    expect(text({ where: { id: undefined, email: undefined } })).toBe(
+      unfiltered,
+    );
+  });
+
+  test("one present key is still a predicate", () => {
+    expect(text({ where: { id: 1, email: undefined } })).toBe(
+      `${SELECT_USER} where "id" = ?`,
+    );
+  });
+});
+
 describe("select", () => {
   test("restricts the column list and the result keys", () => {
     const plan = compileRead(
@@ -556,13 +584,43 @@ describe("postgres", () => {
   });
 });
 
-describe("unimplemented arguments still throw", () => {
+/**
+ * `cursor` and `distinct` are **decisions, not gaps**, and the error says so.
+ *
+ * The distinction is one a caller can act on: "yet" means wait for a release,
+ * "will not" means change the code. They shared one error until #68, which is
+ * how `docs/orm.md` came to list an argument under *Not in scope* while the
+ * runtime said "yet".
+ */
+describe("arguments refused by design", () => {
   test.each([
     ["cursor", { cursor: { id: 1 } }],
     ["distinct", { distinct: ["email"] }],
-  ])("%s", (argument, args) => {
+  ])("%s says it is a decision, not a gap", (argument, args) => {
+    expect(() => text(args)).toThrow(UnsupportedByDesignError);
     expect(() => text(args)).toThrow(
-      `gemi ORM does not support '${argument}' yet (User.findMany).`,
+      `gemi ORM does not implement '${argument}' (User.findMany), and this is ` +
+        `a decision rather than a gap.`,
+    );
+    // Still an `UnsupportedQueryError`, so a caller that does not care which
+    // kind it is keeps working.
+    expect(() => text(args)).toThrow(UnsupportedQueryError);
+  });
+
+  /** Each names what to reach for instead — #61's rule. */
+  test("distinct explains why Prisma's own version is the problem", () => {
+    expect(() => text({ distinct: ["email"] })).toThrow(/in memory/);
+    expect(() => text({ distinct: ["email"] })).toThrow(/DB\.query/);
+  });
+
+  test("cursor names the failure it would have", () => {
+    expect(() => text({ cursor: { id: 1 } })).toThrow(/total.* ordering/);
+    expect(() => text({ cursor: { id: 1 } })).toThrow(/skips or repeats rows/);
+  });
+
+  test("an argument that really is unimplemented still says 'yet'", () => {
+    expect(() => text({ nonsense: 1 } as never)).toThrow(
+      `gemi ORM does not support 'nonsense' yet (User.findMany).`,
     );
   });
 
