@@ -192,7 +192,7 @@ function planOne(
   if (keys.length === 0) return;
 
   const child = relatedSchema(schema, relation);
-  const link = resolveLink(schema, child, relation);
+  const link = resolveLink(schema, child, relation, operation);
 
   // `from` is non-empty exactly on the side that holds the foreign key.
   const owning = relation.from.length > 0;

@@ -409,6 +409,118 @@ export const tag: ModelSchema = {
 };
 
 /**
+ * A **multi-field relation** — `@relation(fields: [tenantId, ledgerCode],
+ * references: [tenantId, code])` — which the template's schema has no example
+ * of and Prisma allows.
+ *
+ * The shape is not exotic: it is what a tenant-scoped schema looks like when
+ * every table carries `tenantId` and every relation joins on
+ * `(tenantId, parentId)`. An application written that way cannot use `include`
+ * at all today, which is what #67 is about.
+ *
+ * These exist so the *refusal* can be tested on every surface that correlates
+ * over a relation. Until the feature lands, the property worth holding is that
+ * none of them quietly joins on the first field.
+ */
+export const ledger: ModelSchema = {
+  name: "Ledger",
+  table: "Ledger",
+  fields: {
+    tenantId: {
+      name: "tenantId",
+      column: "tenantId",
+      type: "Int",
+      nullable: false,
+      isId: true,
+      isUpdatedAt: false,
+    },
+    code: {
+      name: "code",
+      column: "code",
+      type: "String",
+      nullable: false,
+      isId: true,
+      isUpdatedAt: false,
+    },
+    title: {
+      name: "title",
+      column: "title",
+      type: "String",
+      nullable: false,
+      isId: false,
+      isUpdatedAt: false,
+    },
+  },
+  primaryKey: ["tenantId", "code"],
+  uniques: [],
+  relations: {
+    entries: {
+      name: "entries",
+      model: "LedgerEntry",
+      kind: "many",
+      relationName: "LedgerToEntry",
+      from: [],
+      to: [],
+      nullable: false,
+    },
+  },
+};
+
+/** The owning side of {@link ledger}'s two-field relation. */
+export const ledgerEntry: ModelSchema = {
+  name: "LedgerEntry",
+  table: "LedgerEntry",
+  fields: {
+    id: {
+      name: "id",
+      column: "id",
+      type: "Int",
+      nullable: false,
+      isId: true,
+      isUpdatedAt: false,
+      default: { kind: "autoincrement" },
+    },
+    tenantId: {
+      name: "tenantId",
+      column: "tenantId",
+      type: "Int",
+      nullable: false,
+      isId: false,
+      isUpdatedAt: false,
+    },
+    ledgerCode: {
+      name: "ledgerCode",
+      column: "ledgerCode",
+      type: "String",
+      nullable: false,
+      isId: false,
+      isUpdatedAt: false,
+    },
+    amount: {
+      name: "amount",
+      column: "amount",
+      type: "Int",
+      nullable: false,
+      isId: false,
+      isUpdatedAt: false,
+    },
+  },
+  primaryKey: ["id"],
+  uniques: [],
+  relations: {
+    ledger: {
+      name: "ledger",
+      model: "Ledger",
+      kind: "one",
+      relationName: "LedgerToEntry",
+      from: ["tenantId", "ledgerCode"],
+      to: ["tenantId", "code"],
+      nullable: false,
+    },
+  },
+};
+
+/**
  * A self-relation — the one topology where the parent and the child are the same
  * table, which the template's schema has no example of.
  *
