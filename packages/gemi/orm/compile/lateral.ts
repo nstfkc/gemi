@@ -97,7 +97,12 @@ export const lateralStrategy: RelationStrategy = {
 
     const { dialect } = request;
     const child = relatedSchema(request.parent, request.relation, request.as);
-    const link = resolveLink(request.parent, child, request.relation);
+    const link = resolveLink(
+      request.parent,
+      child,
+      request.relation,
+      request.operation,
+    );
 
     const fold = foldNode({
       parent: request.parent,
@@ -302,7 +307,7 @@ function foldNode(input: FoldInput): Fold {
         // *shape*, so a nested `where`'s values are read from the call through
         // the whole chain of `locate`s.
         locate: (args: any) => relationNode.locate(input.locate(args)),
-        link: resolveLink(child, grandchild, relationNode.relation),
+        link: resolveLink(child, grandchild, relationNode.relation, operation),
         dialect,
         operation,
         depth: input.depth + 1,

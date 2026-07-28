@@ -54,12 +54,14 @@ export function correlate(
   alias: string,
   /** How the outer row is named: the parent's table, or an enclosing alias. */
   parentQualifier: string,
+  /** The caller's operation, so a refused link names where it came from. */
+  operation = "include",
 ): Correlated {
   const child = relatedSchema(parent, relation);
   // Throws for a self-referential implicit m-n, where the artifact cannot say
   // which join column is which end. That refusal is the planner's and predates
   // this; it is reached here rather than duplicated.
-  const link = resolveLink(parent, child, relation);
+  const link = resolveLink(parent, child, relation, operation);
 
   const quoted = dialect.quoteIdent(alias);
   const qualifier = `${quoted}.`;

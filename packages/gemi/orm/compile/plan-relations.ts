@@ -697,13 +697,19 @@ export function resolveLink(
   parent: ModelSchema,
   child: ModelSchema,
   relation: RelationSchema,
+  /**
+   * The operation the link is being resolved for, so a refusal names where it
+   * came from. Defaulted for the callers that predate it; every call site in
+   * the compiler passes a real one.
+   */
+  operation = "include",
 ): Link {
   if (relation.joinTable) return joinTableLink(parent, child, relation);
 
   if (relation.from.length > 0) {
     return {
-      parentField: single(parent, relation, relation.from, "from"),
-      childField: single(parent, relation, relation.to, "to"),
+      parentField: single(parent, relation, relation.from, "from", operation),
+      childField: single(parent, relation, relation.to, "to", operation),
     };
   }
 
@@ -718,8 +724,8 @@ export function resolveLink(
   }
 
   return {
-    parentField: single(parent, relation, other.to, "to"),
-    childField: single(parent, relation, other.from, "from"),
+    parentField: single(parent, relation, other.to, "to", operation),
+    childField: single(parent, relation, other.from, "from", operation),
   };
 }
 
@@ -752,24 +758,40 @@ function otherSide(
 }
 
 /**
- * Multi-field relations (`@relation(fields: [a, b], references: [c, d])`) would
- * need a row-value `in`, which the two dialects spell differently and neither
- * indexes well. Refused rather than quietly matching on the first field.
+ * Multi-field relations — `@relation(fields: [a, b], references: [c, d])` —
+ * refused rather than quietly matching on the first field.
+ *
+ * **Refused everywhere, which is the property that matters**, and it is a
+ * property rather than a coincidence: every surface that correlates over a
+ * relation resolves its link through here. `include` under either strategy, a
+ * relation filter, a `_count`, an `orderBy` through a relation, and every
+ * nested write all arrive at this function, so none of them can reach a
+ * one-field assumption. There is a test walking all seven.
+ *
+ * The `operation` argument exists because they do not all arrive from an
+ * `include`, and this used to say so anyway: a composite relation named in a
+ * `where` reported `(Order.include)`, and so did a nested `connect` on a
+ * `create`. A refusal that misnames where it came from sends the reader to a
+ * query they did not write — see #61.
  */
 function single(
   parent: ModelSchema,
   relation: RelationSchema,
   fields: string[],
   side: string,
+  operation: string,
 ): string {
   if (fields.length !== 1) {
     throw new UnsupportedQueryError(
       relation.name,
       parent.name,
-      "include",
+      operation,
       `${relation.name} joins on ${fields.length} fields (${side}: ` +
-        `${fields.join(", ") || "none"}). Multi-field relations are not ` +
-        `implemented yet.`,
+        `${fields.join(", ") || "none"}). A multi-field relation needs a ` +
+        `composite key comparison on both sides — a tuple 'in' for the ` +
+        `batched strategy, a conjunction for the lateral one — which is not ` +
+        `implemented. Query the two models separately and join them in ` +
+        `process, or write the join with 'sql' and 'DB.query'.`,
     );
   }
   return fields[0];
@@ -918,7 +940,12 @@ export const batchedStrategy: RelationStrategy = {
     // compile time rather than returning a page nobody asked for.
     assertPaginable(request, `this query planned with the batched strategy`);
 
-    const link = resolveLink(request.parent, request.child, request.relation);
+    const link = resolveLink(
+      request.parent,
+      request.child,
+      request.relation,
+      request.operation,
+    );
 
     // Resolved at plan time so a stale artifact fails when the query is
     // compiled rather than after the root query has already run.

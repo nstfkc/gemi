@@ -779,6 +779,12 @@ Stated so you can plan around them rather than discover them:
 - **No lazy loading.** A relation you did not `include` is absent, not a proxy that queries when
   touched.
 - **No `omit`.** Use `select`, or a policy's `redact`.
+- **No multi-field relations.** `@relation(fields: [a, b], references: [c, d])` is refused wherever
+  a relation is correlated — `include` under either strategy, a relation filter, `_count`, an
+  `orderBy` through a relation, and nested writes — rather than joining on the first field and
+  returning plausible wrong rows. The error names the fields on both sides and the operation it came
+  from. This one *is* pending rather than declined; it needs a composite key comparison on both
+  sides (a tuple `in` for the batched strategy, a conjunction for the lateral one).
 - **No migrations, no schema DSL.** Prisma owns both, and gemi must not shadow the Prisma CLI.
 - **No `groupBy`, `aggregate`, `distinct` or cursor pagination.** These land in
   [Raw SQL](#raw-sql), which exists so that "not implemented" has an answer rather than a shrug.
