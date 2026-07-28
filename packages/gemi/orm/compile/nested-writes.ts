@@ -9,7 +9,8 @@ import {
 import { matchUniqueKey } from "./unique";
 
 /**
- * Nested writes: `connect`, shallow `create`, and `createMany`.
+ * Nested writes: `connect`, `connectOrCreate`, shallow `create`, and
+ * `createMany`.
  *
  * Which direction a nested write runs in is decided by *who holds the foreign
  * key*, and the two directions are genuinely different operations:
@@ -29,12 +30,37 @@ import { matchUniqueKey } from "./unique";
  * `createMany` is the second shape and only exists on the foreign side: the same
  * rows as a nested `create`, in one statement rather than one per row.
  *
- * Everything else in Prisma's nested-write grammar — `connectOrCreate`, `set`,
- * `disconnect`, `update`, `upsert`, `delete`, `deleteMany`, `updateMany` —
- * throws `UnsupportedQueryError` naming the operation *and the reason*; see
- * `REFUSED`. They share one property, and it is the line this file draws: each
- * writes rows that **already exist**, which needs a scoping pass of its own
- * rather than the child's `onCreate`.
+ * Everything else in Prisma's nested-write grammar — `set`, `disconnect`,
+ * `update`, `upsert`, `delete`, `deleteMany`, `updateMany` — throws
+ * `UnsupportedQueryError` naming the operation *and the reason*; see `REFUSED`.
+ *
+ * **The line this file draws has two halves: which rows an operand can name,
+ * and whose columns it writes.**
+ *
+ * Every supported operand names its rows — a new one, or an existing one the
+ * caller identified by unique key — so it goes through the child's own
+ * `findUnique`, `create` or `update`, and the child's policies decide whether
+ * it is reachable at all. `set`, `disconnect`, `delete`, `deleteMany` and
+ * `updateMany` act on rows the *call* did not name, and "whatever is there" has
+ * no lookup to hang a scope on.
+ *
+ * `update` is the operand that shows the second half is needed, because it
+ * *does* name its row: `update: { where, data }`. It is refused because of what
+ * it writes — caller-supplied columns, which need the child's `onUpdate` and
+ * the scope-escape guard run over the payload. Every supported operand writes
+ * either a whole new row through the child's `create` (where `onCreate`
+ * applies) or one foreign key the ORM itself chose.
+ *
+ * This used to say the line was "each writes rows that **already exist**", and
+ * that was true until `connectOrCreate` arrived: on the foreign side a hit is
+ * an `update` of the child's foreign key, because Prisma repoints the existing
+ * row rather than duplicating it. So a supported operand does now write a row
+ * that was already there. Restated rather than deleted, because the criterion
+ * is what the next operand gets judged against — #75 built the whole `REFUSED`
+ * table on it, with a per-entry reason derived from it, and #83's `set` on an
+ * implicit many-to-many was fixed by exactly this reading: scope the delete to
+ * the rows the caller can see. A stale criterion is worse than none, because it
+ * is the one the next reader applies.
  *
  * Atomic since iteration 5: `$exec` opens a transaction for any plan carrying
  * steps, so a nested step that fails — or a child policy that denies — rolls
@@ -62,9 +88,19 @@ const REFUSED: Record<string, string> = {
   disconnect: `It clears a foreign key on rows this call did not name.`,
   delete: `It deletes rows this call did not name.`,
   deleteMany: `It deletes rows this call did not name.`,
-  update: `It writes rows that already exist, which needs its own scoping pass.`,
+  // Not "it writes a row that already exists" — `connectOrCreate` does that
+  // too, on the foreign side, and is supported. The difference is *whose*
+  // columns: this one writes caller-supplied data, so the child's `onUpdate`
+  // and the scope-escape guard both have to run over it, where a `connect`
+  // writes one foreign key the ORM chose.
+  update:
+    `It writes caller-supplied columns to a row that already exists, so the ` +
+    `child's 'onUpdate' and the scope-escape guard have to run over the ` +
+    `payload — a pass this does not have yet.`,
   updateMany:
-    `It writes rows that already exist, which needs its own scoping pass.`,
+    `It writes caller-supplied columns to rows this call did not name, so it ` +
+    `needs both halves: a scope on which rows match, and the child's ` +
+    `'onUpdate' over the payload.`,
   upsert:
     `It is 'update' and 'connectOrCreate' at once, and only the second half ` +
     `is implemented.`,

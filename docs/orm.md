@@ -315,9 +315,14 @@ same answer you would get if it truly did not exist. That is deliberate. `connec
 tenant.
 
 Everything else in Prisma's nested grammar — `set`, `disconnect`, `update`, `updateMany`, `upsert`,
-`delete`, `deleteMany` — is refused, by name and with the reason. They share one property: each
-writes rows that already exist, which needs a scoping pass of its own rather than the child's
-`onCreate`. `skipDuplicates` is not implemented on `createMany` at any level.
+`delete`, `deleteMany` — is refused, by name and with the reason. The line is **which rows an
+operand can name, and whose columns it writes**: everything supported names its rows (a new one, or
+one you identified by unique key) and writes either a whole new row or one foreign key the ORM
+chose. `set`, `disconnect`, `delete`, `deleteMany` and `updateMany` act on rows the call did not
+name; `update` names its row but writes your columns to it, which needs the child's `onUpdate` and
+the scope-escape guard run over the payload.
+
+`skipDuplicates` is not implemented on `createMany` at any level.
 
 ### Paging a relation
 
