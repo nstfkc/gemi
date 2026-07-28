@@ -11,7 +11,8 @@ import {
 import { matchUniqueKey } from "./unique";
 
 /**
- * Nested writes: `connect`, shallow `create`, and `createMany`.
+ * Nested writes: `connect`, `connectOrCreate`, shallow `create`, and
+ * `createMany`.
  *
  * Which direction a nested write runs in is decided by *who holds the foreign
  * key*, and the two directions are genuinely different operations:
@@ -31,19 +32,49 @@ import { matchUniqueKey } from "./unique";
  * `createMany` is the second shape and only exists on the foreign side: the same
  * rows as a nested `create`, in one statement rather than one per row.
  *
- * Everything else in Prisma's nested-write grammar — `connectOrCreate`, `set`,
- * `disconnect`, `update`, `upsert`, `delete`, `deleteMany`, `updateMany` —
- * throws `UnsupportedQueryError` naming the operation *and the reason*; see
- * `REFUSED`. They share one property, and it is the line this file draws: each
- * writes rows that **already exist**, which needs a scoping pass of its own
- * rather than the child's `onCreate`.
+ * Everything else in Prisma's nested-write grammar — `set`, `disconnect`,
+ * `update`, `upsert`, `delete`, `deleteMany`, `updateMany` — throws
+ * `UnsupportedQueryError` naming the operation *and the reason*; see `REFUSED`.
+ *
+ * **The line this file draws has two halves: which rows an operand can name,
+ * and whose columns it writes.**
+ *
+ * Every supported operand names its rows — a new one, or an existing one the
+ * caller identified by unique key — so it goes through the child's own
+ * `findUnique`, `create` or `update`, and the child's policies decide whether
+ * it is reachable at all. `set`, `disconnect`, `delete`, `deleteMany` and
+ * `updateMany` act on rows the *call* did not name, and "whatever is there" has
+ * no lookup to hang a scope on.
+ *
+ * `update` is the operand that shows the second half is needed, because it
+ * *does* name its row: `update: { where, data }`. It is refused because of what
+ * it writes — caller-supplied columns, which need the child's `onUpdate` and
+ * the scope-escape guard run over the payload. Every supported operand writes
+ * either a whole new row through the child's `create` (where `onCreate`
+ * applies) or one foreign key the ORM itself chose.
+ *
+ * This used to say the line was "each writes rows that **already exist**", and
+ * that was true until `connectOrCreate` arrived: on the foreign side a hit is
+ * an `update` of the child's foreign key, because Prisma repoints the existing
+ * row rather than duplicating it. So a supported operand does now write a row
+ * that was already there. Restated rather than deleted, because the criterion
+ * is what the next operand gets judged against — #75 built the whole `REFUSED`
+ * table on it, with a per-entry reason derived from it, and #83's `set` on an
+ * implicit many-to-many was fixed by exactly this reading: scope the delete to
+ * the rows the caller can see. A stale criterion is worse than none, because it
+ * is the one the next reader applies.
  *
  * Atomic since iteration 5: `$exec` opens a transaction for any plan carrying
  * steps, so a nested step that fails — or a child policy that denies — rolls
  * back the parent row too.
  */
 
-const SUPPORTED = new Set(["connect", "create", "createMany"]);
+const SUPPORTED = new Set([
+  "connect",
+  "connectOrCreate",
+  "create",
+  "createMany",
+]);
 
 /**
  * The operands still refused, and what each would take.
@@ -55,17 +86,26 @@ const SUPPORTED = new Set(["connect", "create", "createMany"]);
  * key, and none of it has to reason about what was there before.
  */
 const REFUSED: Record<string, string> = {
-  connectOrCreate:
-    `It is an upsert against the child, which needs the read-then-write ` +
-    `fallback 'upsert' uses when 'on conflict' cannot express the target.`,
   set: `It replaces the whole set, so it has to disconnect what is there now.`,
   disconnect: `It clears a foreign key on rows this call did not name.`,
   delete: `It deletes rows this call did not name.`,
   deleteMany: `It deletes rows this call did not name.`,
-  update: `It writes rows that already exist, which needs its own scoping pass.`,
+  // Not "it writes a row that already exists" — `connectOrCreate` does that
+  // too, on the foreign side, and is supported. The difference is *whose*
+  // columns: this one writes caller-supplied data, so the child's `onUpdate`
+  // and the scope-escape guard both have to run over it, where a `connect`
+  // writes one foreign key the ORM chose.
+  update:
+    `It writes caller-supplied columns to a row that already exists, so the ` +
+    `child's 'onUpdate' and the scope-escape guard have to run over the ` +
+    `payload — a pass this does not have yet.`,
   updateMany:
-    `It writes rows that already exist, which needs its own scoping pass.`,
-  upsert: `It is 'update' and 'connectOrCreate' at once.`,
+    `It writes caller-supplied columns to rows this call did not name, so it ` +
+    `needs both halves: a scope on which rows match, and the child's ` +
+    `'onUpdate' over the payload.`,
+  upsert:
+    `It is 'update' and 'connectOrCreate' at once, and only the second half ` +
+    `is implemented.`,
 };
 
 /** A foreign-key column on *this* model that a nested write supplies. */
@@ -313,6 +353,73 @@ function planOwningSide(
     return;
   }
 
+  /**
+   * `connectOrCreate` — find the row by a unique key, and create it only if it
+   * is not there.
+   *
+   * **A hit ignores `create` entirely**, which is not what the name suggests
+   * and is worth pinning: it is `connect`-or-create, not upsert. Measured — an
+   * existing organisation kept its own name where the `create` payload named a
+   * different one.
+   *
+   * `findUnique`, not `findUniqueOrThrow`: a miss is the *other branch* here,
+   * where for a plain `connect` it is an error.
+   *
+   * Object only on this side. The relation holds one foreign key, so there is
+   * one row to point at, and Prisma refuses an array here too.
+   */
+  if (key === "connectOrCreate") {
+    assertConnectOrCreateOperand(
+      schema,
+      relation,
+      child,
+      operand,
+      operation,
+      false,
+    );
+
+    out.before.push({
+      relation: relation.name,
+      operation: "connectOrCreate",
+      async run(args, context, executor) {
+        const where = at(args)?.where;
+
+        const found = (await executor.exec(
+          relation.model,
+          "findUnique",
+          { where, select: { [referenced]: true } },
+          // NOT pre-scoped, for the reason `connect` is not: this reads another
+          // model's rows to decide what to attach, so that model's policies say
+          // which rows exist. Scoped away, a hit becomes a miss and the row is
+          // *created* — so the fallback branch is what keeps this from being a
+          // way to observe another tenant's keys.
+          false,
+        )) as Record<string, unknown> | null;
+
+        if (found) {
+          context.resolved[fkField] = found[referenced] ?? null;
+          return;
+        }
+
+        const created = (await executor.exec(
+          relation.model,
+          "create",
+          { data: at(args)?.create, select: { [referenced]: true } },
+          // NOT pre-scoped — the child's own `onCreate` scopes the new row.
+          false,
+        )) as Record<string, unknown> | null;
+
+        context.resolved[fkField] = created?.[referenced] ?? null;
+      },
+    });
+
+    out.contributions.push({
+      field: fkField,
+      value: (_args, context) => context.resolved[fkField],
+    });
+    return;
+  }
+
   // `connect`. In the common case the caller already handed us the referenced
   // value — `connect: { id: 1 }` where the relation references `id` — and no
   // query is needed at all: it is one more bound column.
@@ -501,6 +608,81 @@ function planForeignSide(
           // top-level `createMany`.
           false,
         );
+      },
+    });
+    return;
+  }
+
+  /**
+   * `connectOrCreate` on this side is the pair of branches the owning side has,
+   * with `connect` spelled as an update of the child's foreign key.
+   *
+   * Both branches go through the child's own `$exec`, so both are scoped by the
+   * child's policies — and they have to be, in opposite directions: an
+   * unscopeable *update* would re-parent another tenant's row, and an unscoped
+   * *read* would let a hit reveal that a row with that key exists. Scoped, a
+   * hidden row reads as absent and the call creates its own, which is the same
+   * answer the caller would get if it truly did not exist.
+   */
+  if (key === "connectOrCreate") {
+    assertConnectOrCreateOperand(
+      schema,
+      relation,
+      child,
+      operand,
+      operation,
+      true,
+    );
+
+    out.after.push({
+      relation: relation.name,
+      operation: "connectOrCreate",
+      async run(args, _context, executor, rows) {
+        const parent = rows[0];
+        if (!parent) return;
+
+        const list = listOf(at(args));
+
+        for (let index = 0; index < list.length; index++) {
+          const item = list[index] as Record<string, unknown>;
+
+          const found = (await executor.exec(
+            relation.model,
+            "findUnique",
+            { where: item.where, select: { [childField]: true } },
+            false,
+          )) as Record<string, unknown> | null;
+
+          if (found) {
+            await executor.exec(
+              relation.model,
+              "update",
+              {
+                where: item.where,
+                data: { [childField]: parent[parentField] },
+                select: { [childField]: true },
+              },
+              false,
+            );
+            continue;
+          }
+
+          await executor.exec(
+            relation.model,
+            "create",
+            {
+              // The foreign key is ours, not the caller's — the same rule the
+              // nested `create` above follows, and Prisma leaves it out of the
+              // nested input type entirely.
+              data: {
+                ...(item.create as object),
+                [childField]: parent[parentField],
+              },
+              select: { [childField]: true },
+            },
+            false,
+          );
+        }
       },
     });
     return;
@@ -773,6 +955,89 @@ async function runPairStatement(
   values: unknown[],
 ): Promise<void> {
   await executor.query(text, values);
+}
+
+/**
+ * `connectOrCreate`'s operand: `{ where, create }`, or a list of them on a
+ * to-many.
+ *
+ * Validated at plan time so a misspelled key fails when the query is compiled,
+ * rather than after the parent row has been written and the transaction has to
+ * unwind it — the same reason `createMany`'s operand is checked here.
+ *
+ * The `where` has to be a unique key, which is Prisma's rule and not merely
+ * ours: without it the lookup matches an arbitrary row and "connect or create"
+ * silently becomes "connect to whichever one came back first".
+ */
+function assertConnectOrCreateOperand(
+  schema: ModelSchema,
+  relation: RelationSchema,
+  child: ModelSchema,
+  operand: unknown,
+  operation: string,
+  many: boolean,
+): Record<string, unknown>[] {
+  const at = `data.${relation.name}.connectOrCreate`;
+
+  if (Array.isArray(operand) && !many) {
+    throw new UnsupportedQueryError(
+      at,
+      schema.name,
+      operation,
+      `'${relation.name}' is a to-one: this row holds the foreign key, so ` +
+        `there is one row to point at and a list has no meaning. Prisma ` +
+        `refuses an array here too.`,
+    );
+  }
+
+  const entries = (Array.isArray(operand) ? operand : [operand]) as unknown[];
+
+  if (entries.length === 0) return [];
+
+  const out: Record<string, unknown>[] = [];
+
+  for (const entry of entries) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      throw new UnsupportedQueryError(
+        at,
+        schema.name,
+        operation,
+        `Expected an object with 'where' and 'create'.`,
+      );
+    }
+
+    const record = entry as Record<string, unknown>;
+
+    for (const required of ["where", "create"] as const) {
+      if (record[required] === undefined) {
+        throw new UnsupportedQueryError(
+          at,
+          schema.name,
+          operation,
+          `Expected a '${required}' key — 'connectOrCreate' names the row to ` +
+            `look for and the row to write if it is not there.`,
+        );
+      }
+    }
+
+    const extra = Object.keys(record).filter(
+      (key) => key !== "where" && key !== "create" && record[key] !== undefined,
+    );
+    if (extra.length > 0) {
+      throw new UnsupportedQueryError(
+        at,
+        schema.name,
+        operation,
+        `Unexpected ${extra.sort().join(", ")} — 'connectOrCreate' takes ` +
+          `'where' and 'create'.`,
+      );
+    }
+
+    matchUniqueKey(child, record.where, `${operation}.${relation.name}.connectOrCreate`);
+    out.push(record);
+  }
+
+  return out;
 }
 
 /**

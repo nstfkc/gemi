@@ -365,6 +365,7 @@ await List.create({
 | `create` | Writes new related rows. One statement each. |
 | `createMany` | The same rows in **one** statement. To-many only, and the rows go inside `data`. |
 | `connect` | Points at an existing row — a bound column when it names the referenced key, a lookup otherwise. |
+| `connectOrCreate` | Looks the row up by a unique key and creates it only if it is not there. **A hit ignores `create` entirely** — it is connect-*or*-create, not upsert. |
 
 Which direction a nested write runs in is decided by **who holds the foreign key**. When this model
 holds it, the far row is resolved or created *first* and collapses into one more column. When the
@@ -380,10 +381,21 @@ Three things follow from that, and all three are load-bearing:
   A `createMany` writes its rows in one statement and they are *each* scoped.
 - **A failure anywhere rolls the whole thing back**, including the parent row.
 
-Everything else in Prisma's nested grammar — `connectOrCreate`, `set`, `disconnect`, `update`,
-`updateMany`, `upsert`, `delete`, `deleteMany` — is refused, by name and with the reason. They share
-one property: each writes rows that already exist, which needs a scoping pass of its own rather than
-the child's `onCreate`. `skipDuplicates` is not implemented on `createMany` at any level.
+`connectOrCreate` is worth one more line, because a scoped-away row makes it take the *create*
+branch rather than raise: a row your policies hide reads as absent, so the call writes its own — the
+same answer you would get if it truly did not exist. That is deliberate. `connect` raising where
+`connectOrCreate` succeeded would together tell you a row with that key exists in someone else's
+tenant.
+
+Everything else in Prisma's nested grammar — `set`, `disconnect`, `update`, `updateMany`, `upsert`,
+`delete`, `deleteMany` — is refused, by name and with the reason. The line is **which rows an
+operand can name, and whose columns it writes**: everything supported names its rows (a new one, or
+one you identified by unique key) and writes either a whole new row or one foreign key the ORM
+chose. `set`, `disconnect`, `delete`, `deleteMany` and `updateMany` act on rows the call did not
+name; `update` names its row but writes your columns to it, which needs the child's `onUpdate` and
+the scope-escape guard run over the payload.
+
+`skipDuplicates` is not implemented on `createMany` at any level.
 
 ### Paging a relation
 

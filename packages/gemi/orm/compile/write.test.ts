@@ -826,7 +826,6 @@ describe("nested writes", () => {
   });
 
   test.each([
-    "connectOrCreate",
     "set",
     "disconnect",
     "update",
@@ -849,13 +848,132 @@ describe("nested writes", () => {
    */
   test("a refusal explains what the operand would take", () => {
     expect(() =>
-      text("create", {
-        data: { email: "a@b.c", organization: { connectOrCreate: {} } },
-      }),
-    ).toThrow(/upsert against the child/);
+      text("create", { data: { email: "a@b.c", organization: { set: {} } } }),
+    ).toThrow(/replaces the whole set/);
     expect(() =>
       text("create", { data: { email: "a@b.c", accounts: { deleteMany: {} } } }),
     ).toThrow(/deletes rows this call did not name/);
+  });
+
+  /**
+   * `connectOrCreate` — find by a unique key, create only if it is not there.
+   *
+   * **A hit ignores `create` entirely**, which the name does not suggest: it is
+   * connect-*or*-create, not upsert. Measured against Prisma — an existing row
+   * kept its own values where the `create` payload named different ones — and
+   * the differential cases pin it.
+   */
+  describe("connectOrCreate", () => {
+    const entry = {
+      where: { publicId: "o1" },
+      create: { publicId: "o1", name: "Made" },
+    };
+
+    test("the owning side resolves before the parent insert", () => {
+      const plan = compileWrite(
+        user,
+        "create",
+        { data: { email: "a@b.c", organization: { connectOrCreate: entry } } },
+        sqlite,
+      );
+
+      expect(plan.before).toHaveLength(1);
+      expect(plan.before?.[0].operation).toBe("connectOrCreate");
+      // The foreign key is on this row, so it is a bound column rather than a
+      // second statement afterwards.
+      expect(plan.after).toBeUndefined();
+    });
+
+    test("the foreign side resolves after it, and returns the key", () => {
+      const plan = compileWrite(
+        user,
+        "create",
+        {
+          data: {
+            email: "a@b.c",
+            accounts: {
+              connectOrCreate: {
+                where: { publicId: "acc1" },
+                create: { organizationRole: 1 },
+              },
+            },
+          },
+        },
+        sqlite,
+      );
+
+      expect(plan.after).toHaveLength(1);
+      expect(plan.after?.[0].operation).toBe("connectOrCreate");
+      expect(plan.text).toContain(`"id"`);
+    });
+
+    test("a to-one refuses a list, as Prisma does", () => {
+      expect(() =>
+        text("create", {
+          data: { email: "a@b.c", organization: { connectOrCreate: [entry] } },
+        }),
+      ).toThrow(/a list has no meaning/);
+    });
+
+    test("a to-many takes one or a list", () => {
+      for (const operand of [entry, [entry, entry]]) {
+        expect(() =>
+          text("create", {
+            data: {
+              email: "a@b.c",
+              accounts: {
+                connectOrCreate: Array.isArray(operand)
+                  ? operand.map(() => ({
+                      where: { publicId: "acc1" },
+                      create: { organizationRole: 1 },
+                    }))
+                  : { where: { publicId: "acc1" }, create: { organizationRole: 1 } },
+              },
+            },
+          }),
+        ).not.toThrow();
+      }
+    });
+
+    test.each(["where", "create"])("a missing '%s' is refused by name", (key) => {
+      const partial: Record<string, unknown> = { ...entry };
+      delete partial[key];
+
+      expect(() =>
+        text("create", {
+          data: { email: "a@b.c", organization: { connectOrCreate: partial } },
+        }),
+      ).toThrow(new RegExp(`Expected a '${key}' key`));
+    });
+
+    test("an unexpected key is refused rather than ignored", () => {
+      expect(() =>
+        text("create", {
+          data: {
+            email: "a@b.c",
+            organization: { connectOrCreate: { ...entry, update: {} } },
+          },
+        }),
+      ).toThrow(/Unexpected update/);
+    });
+
+    /**
+     * Prisma's rule, and not merely ours: without a unique `where` the lookup
+     * matches an arbitrary row and "connect or create" quietly becomes
+     * "connect to whichever came back first".
+     */
+    test("a non-unique where is refused at compile time", () => {
+      expect(() =>
+        text("create", {
+          data: {
+            email: "a@b.c",
+            organization: {
+              connectOrCreate: { where: { name: "Acme" }, create: { name: "Acme" } },
+            },
+          },
+        }),
+      ).toThrow();
+    });
   });
 
   /**
