@@ -190,6 +190,9 @@ export async function createDifferential(options: {
   // Children before parents: the schema's foreign keys are enforced on both
   // dialects, and a scratch database is only scratch for this suite.
   const TABLES = [
+    "_PostToTag",
+    "Post",
+    "Tag",
     "Membership",
     "SocialAccount",
     "Session",
@@ -220,6 +223,8 @@ export async function createDifferential(options: {
       return;
     }
 
+    await prisma.post.deleteMany({});
+    await prisma.tag.deleteMany({});
     await prisma.membership.deleteMany({});
     await prisma.socialAccount.deleteMany({});
     await prisma.session.deleteMany({});

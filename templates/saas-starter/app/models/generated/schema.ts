@@ -522,6 +522,52 @@ export const PasswordResetToken: ModelSchema = {
   }
 };
 
+export const Post: ModelSchema = {
+  "name": "Post",
+  "table": "Post",
+  "fields": {
+    "id": {
+      "name": "id",
+      "column": "id",
+      "type": "Int",
+      "nullable": false,
+      "isId": true,
+      "isUpdatedAt": false,
+      "default": {
+        "kind": "autoincrement"
+      }
+    },
+    "title": {
+      "name": "title",
+      "column": "title",
+      "type": "String",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false
+    }
+  },
+  "primaryKey": [
+    "id"
+  ],
+  "uniques": [],
+  "relations": {
+    "tags": {
+      "name": "tags",
+      "model": "Tag",
+      "kind": "many",
+      "relationName": "PostToTag",
+      "from": [],
+      "to": [],
+      "nullable": false,
+      "joinTable": {
+        "table": "_PostToTag",
+        "a": "Post",
+        "b": "Tag"
+      }
+    }
+  }
+};
+
 export const Session: ModelSchema = {
   "name": "Session",
   "table": "Session",
@@ -751,6 +797,56 @@ export const SocialAccount: ModelSchema = {
         "id"
       ],
       "nullable": false
+    }
+  }
+};
+
+export const Tag: ModelSchema = {
+  "name": "Tag",
+  "table": "Tag",
+  "fields": {
+    "id": {
+      "name": "id",
+      "column": "id",
+      "type": "Int",
+      "nullable": false,
+      "isId": true,
+      "isUpdatedAt": false,
+      "default": {
+        "kind": "autoincrement"
+      }
+    },
+    "label": {
+      "name": "label",
+      "column": "label",
+      "type": "String",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false
+    }
+  },
+  "primaryKey": [
+    "id"
+  ],
+  "uniques": [
+    [
+      "label"
+    ]
+  ],
+  "relations": {
+    "posts": {
+      "name": "posts",
+      "model": "Post",
+      "kind": "many",
+      "relationName": "PostToTag",
+      "from": [],
+      "to": [],
+      "nullable": false,
+      "joinTable": {
+        "table": "_PostToTag",
+        "a": "Post",
+        "b": "Tag"
+      }
     }
   }
 };

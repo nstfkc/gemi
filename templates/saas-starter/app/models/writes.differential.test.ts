@@ -11,6 +11,8 @@ import {
   AccountModel,
   MembershipModel,
   OrganizationModel,
+  PostModel,
+  TagModel,
   SocialAccountModel,
   UserModel,
 } from "./generated";
@@ -273,6 +275,8 @@ function suite(label: string, url?: string) {
       differential = await createDifferential({
         models: {
           User: UserModel as never,
+          Post: PostModel as never,
+          Tag: TagModel as never,
           Membership: MembershipModel as never,
           SocialAccount: SocialAccountModel as never,
           Account: AccountModel as never,
@@ -304,6 +308,167 @@ function suite(label: string, url?: string) {
         },
         { tables: ["Organization"] },
       );
+    });
+
+    /**
+     * Implicit many-to-many writes (#66), against a **real Prisma client**.
+     *
+     * The existing m-n coverage builds its own tables and asserts Prisma's
+     * *documented* shape — adequate for reads and thin for writes, where the
+     * failure is a value landing in the wrong column of a join table nobody
+     * looks at, and a fixture asserting its own expectations agrees with it.
+     * Comparing the table contents afterwards is what catches that.
+     */
+    describe("an implicit many-to-many", () => {
+      const seedTags = async () => {
+        await differential.reset();
+        await differential.prisma.tag.createMany({
+          data: [{ label: "red" }, { label: "blue" }, { label: "green" }],
+        });
+      };
+
+      test("connect attaches existing rows", async () => {
+        await seedTags();
+        await differential.expectSameWrite(
+          "Post",
+          "create",
+          {
+            data: {
+              title: "first",
+              tags: { connect: [{ label: "red" }, { label: "blue" }] },
+            },
+            include: { tags: { orderBy: { id: "asc" } } },
+          },
+          { tables: ["Post", "Tag"] },
+        );
+      });
+
+      test("create writes the child and the pair", async () => {
+        await seedTags();
+        await differential.expectSameWrite(
+          "Post",
+          "create",
+          {
+            data: { title: "second", tags: { create: [{ label: "fresh" }] } },
+            include: { tags: { orderBy: { id: "asc" } } },
+          },
+          { tables: ["Post", "Tag"] },
+        );
+      });
+
+      test("connect and create together", async () => {
+        await seedTags();
+        await differential.expectSameWrite(
+          "Post",
+          "create",
+          {
+            data: {
+              title: "third",
+              tags: { connect: [{ label: "red" }], create: [{ label: "novel" }] },
+            },
+            include: { tags: { orderBy: { id: "asc" } } },
+          },
+          { tables: ["Post", "Tag"] },
+        );
+      });
+
+      test("disconnect removes one pair and leaves the row", async () => {
+        await seedTags();
+        await differential.prisma.post.create({
+          data: {
+            title: "existing",
+            tags: { connect: [{ label: "red" }, { label: "blue" }] },
+          },
+        });
+
+        await differential.expectSameWrite(
+          "Post",
+          "update",
+          {
+            where: { id: 1 },
+            data: { tags: { disconnect: [{ label: "red" }] } },
+            include: { tags: { orderBy: { id: "asc" } } },
+          },
+          { tables: ["Post", "Tag"] },
+        );
+      });
+
+      /** Two statements — delete then insert — inside the step's transaction. */
+      test("set replaces the whole set", async () => {
+        await seedTags();
+        await differential.prisma.post.create({
+          data: { title: "existing", tags: { connect: [{ label: "red" }] } },
+        });
+
+        await differential.expectSameWrite(
+          "Post",
+          "update",
+          {
+            where: { id: 1 },
+            data: { tags: { set: [{ label: "blue" }, { label: "green" }] } },
+            include: { tags: { orderBy: { id: "asc" } } },
+          },
+          { tables: ["Post", "Tag"] },
+        );
+      });
+
+      test("set to nothing clears them", async () => {
+        await seedTags();
+        await differential.prisma.post.create({
+          data: { title: "existing", tags: { connect: [{ label: "red" }] } },
+        });
+
+        await differential.expectSameWrite(
+          "Post",
+          "update",
+          {
+            where: { id: 1 },
+            data: { tags: { set: [] } },
+            include: { tags: true },
+          },
+          { tables: ["Post", "Tag"] },
+        );
+      });
+
+      /**
+       * Prisma treats a repeated `connect` as a no-op. Without
+       * `on conflict do nothing` the pair's primary key makes it a raw driver
+       * unique violation — neither Prisma's behaviour nor a useful one.
+       */
+      test("connecting the same pair twice is a no-op", async () => {
+        await seedTags();
+        await differential.prisma.post.create({
+          data: { title: "existing", tags: { connect: [{ label: "red" }] } },
+        });
+
+        await differential.expectSameWrite(
+          "Post",
+          "update",
+          {
+            where: { id: 1 },
+            data: { tags: { connect: [{ label: "red" }] } },
+            include: { tags: true },
+          },
+          { tables: ["Post", "Tag"] },
+        );
+      });
+
+      /** The far direction: the same relation written from `Tag`. */
+      test("the relation writes from the other side too", async () => {
+        await seedTags();
+        await differential.prisma.post.create({ data: { title: "a" } });
+
+        await differential.expectSameWrite(
+          "Tag",
+          "update",
+          {
+            where: { label: "red" },
+            data: { posts: { connect: [{ id: 1 }] } },
+            include: { posts: true },
+          },
+          { tables: ["Post", "Tag"] },
+        );
+      });
     });
 
     /**

@@ -13,8 +13,10 @@ import {
   OrganizationModel,
   OrganizationInvitationModel,
   PasswordResetTokenModel,
+  PostModel,
   SessionModel,
   SocialAccountModel,
+  TagModel,
   UserModel,
 } from "./models";
 
@@ -29,8 +31,10 @@ register("Membership", MembershipModel);
 register("Organization", OrganizationModel);
 register("OrganizationInvitation", OrganizationInvitationModel);
 register("PasswordResetToken", PasswordResetTokenModel);
+register("Post", PostModel);
 register("Session", SessionModel);
 register("SocialAccount", SocialAccountModel);
+register("Tag", TagModel);
 register("User", UserModel);
 
 export * from "./models";

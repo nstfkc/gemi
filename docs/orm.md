@@ -479,6 +479,21 @@ Filtering, counting and ordering all work across an **implicit many-to-many** to
 table is a second table inside the subquery and changes nothing else about how you write the
 query.
 
+**Writing one works too**, through the same relation key inside `data`: `connect`, `disconnect`,
+`set` and `create`. `set` replaces the whole set — a delete and then inserts, inside the same
+transaction — and connecting a pair that is already there is a no-op rather than an error, as it is
+in Prisma. An `update` whose `data` names only relations is fine: there is no column to set, so the
+row is read rather than written and the relation work still happens.
+
+Only the join table itself is written directly; it has no model and nothing an application could
+scope. The rows the pairs point at still go through the related model's own operations, so a
+`connect` cannot reach a row that model's policies hide, and a `create` gets its `onCreate`.
+
+That extends to `set`, which has to delete before it inserts: it clears **the links you can see**,
+not every link — in one `delete … in (…)`, not one statement per link. A pair pointing at a row the related model's policies hide survives — otherwise
+`set` would quietly do what `disconnect` refuses. With no policy on that model every link is
+visible and `set` clears all of them, exactly as Prisma does.
+
 Self-referential ones work too — `Thing.related Thing[]` — as long as the generated files are
 current. Prisma assigns that join table's two columns by *field name*, which the generator now
 records; an artifact from before it does raises rather than guessing, and `prisma generate` fixes

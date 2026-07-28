@@ -163,6 +163,26 @@ model PasswordResetToken {
   @@index([userId])
 }
 
+// An implicit many-to-many, which this schema had none of — so the differential
+// harness could not reach one, on the read side either. The existing coverage
+// (`relations.many-to-many.test.ts`) builds its own tables and asserts against
+// Prisma's *documented* shape rather than a real client; that is adequate for
+// reads and thin for writes, where the failure is a value landing in the wrong
+// column of a join table nobody looks at. See #66.
+model Post {
+  id    Int    @id @default(autoincrement())
+  title String
+
+  tags Tag[]
+}
+
+model Tag {
+  id    Int    @id @default(autoincrement())
+  label String @unique
+
+  posts Post[]
+}
+
 // A compound `@@id`, which nothing else in this schema has: the only other
 // composite key here is SocialAccount's `@@unique([username, provider])`, and
 // that is a different code path. A compound *primary* key was therefore never
