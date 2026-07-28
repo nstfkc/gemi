@@ -12,12 +12,9 @@ import {
 import {
   type NestedWriteStep,
   type RelationExecutor,
-  type RelationStrategy,
   attachRelations,
-  batchedStrategy,
-  defaultStrategy,
 } from "./compile/plan-relations";
-import { lateralStrategy } from "./compile/lateral";
+import { resolveStrategy } from "./compile/strategy";
 import { dialectFor, type SqlDialect } from "./dialect";
 import {
   MissingModelSchemaError,
@@ -497,13 +494,19 @@ export abstract class Model {
       // would `AND` the same predicate twice — same rows, different SQL,
       // different plan key. The marker is a module-private Symbol and is not
       // exported, so it cannot become a way for an application to skip policies.
+      // The strategy propagates too. Without it a nested `$exec` fell back to
+      // `defaultStrategy`, so a query explicitly asking for `batched` got the
+      // *default* for every level below the root — on Postgres that meant the
+      // grandchild folded anyway and the statement count was one lower than the
+      // caller asked for. Found by the query-count test, which is the only thing
+      // that could have found it: the results were identical either way.
       exec: (model, operation, relationArgs) =>
         registry
           .get<typeof Model>(model)
           .$exec(
             operation as Operation,
             relationArgs,
-            markPreScoped(undefined) as never,
+            markPreScoped({ strategy: options?.strategy }) as never,
           ),
       // The one query with no model behind it — the implicit m-n join table —
       // resolves its connection here rather than reaching for the pool, so it
@@ -609,29 +612,6 @@ export abstract class Model {
   static $shape(plan: QueryPlan, rows: unknown[]): unknown {
     return plan.shape(rows);
   }
-}
-
-/**
- * The named strategy, or the dialect's default.
- *
- * An unknown name raises rather than falling back: a typo that silently ran the
- * other strategy would be a performance mystery with no error attached, and the
- * set is two.
- */
-function resolveStrategy(
-  named: string | undefined,
-  dialect: SqlDialect,
-): RelationStrategy {
-  if (named === undefined) return defaultStrategy(dialect);
-  if (named === "batched") return batchedStrategy;
-  if (named === "lateral") return lateralStrategy;
-
-  throw new UnsupportedQueryError(
-    `strategy: ${JSON.stringify(named)}`,
-    "Model",
-    "$exec",
-    `Unknown relation strategy. Expected "batched" or "lateral".`,
-  );
 }
 
 async function runSteps(

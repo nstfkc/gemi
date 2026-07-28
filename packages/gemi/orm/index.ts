@@ -123,6 +123,7 @@ export {
 } from "./compile/plan-relations";
 
 export { lateralStrategy } from "./compile/lateral";
+export { defaultStrategy, resolveStrategy } from "./compile/strategy";
 
 export {
   PostgresDialect,

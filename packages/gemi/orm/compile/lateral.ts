@@ -10,6 +10,7 @@ import {
   resolveLink,
 } from "./plan-relations";
 import { resolveSelection } from "./select";
+import { compileOrderBy, parseOrderBy } from "./orderBy";
 import { compileWhere } from "./where";
 
 /**
@@ -81,6 +82,16 @@ export const lateralStrategy: RelationStrategy = {
       )}`,
     );
 
+    // `orderBy` on a relation node, which most real includes carry.
+    //
+    // Inside an aggregate it belongs to the aggregate — `json_agg(x order by y)` —
+    // not to the subquery, because a bare `order by` beside an aggregate orders
+    // the one row the aggregate produces and the children come back in whatever
+    // order the scan found them. A to-one takes the ordinary clause, since it is
+    // not aggregating.
+    const terms = parseOrderBy(child, node?.orderBy, request.operation);
+    const ordering = compileOrderBy(terms, dialect, childQualifier);
+
     const filter = compileWhere(
       child,
       node?.where,
@@ -93,7 +104,12 @@ export const lateralStrategy: RelationStrategy = {
         // to-many must shape to `[]`. Getting this wrong is the single most likely
         // divergence in the whole strategy, and the differential harness compares
         // key presence, so it would be caught — but it is cheaper to be right.
-        concat(sql(`coalesce(json_agg(`), object, sql(`), '[]'::json)`))
+        concat(
+          sql(`coalesce(json_agg(`),
+          object,
+          ordering ? concat(sql(" order by "), ordering) : sql(""),
+          sql(`), '[]'::json)`),
+        )
       : object;
 
     const subquery = concat(
@@ -103,7 +119,10 @@ export const lateralStrategy: RelationStrategy = {
       correlation,
       filter ? concat(sql(" and "), filter) : sql(""),
       // A to-one must not aggregate, and must not return two rows into a scalar
-      // subquery position if the data violates the relation's cardinality.
+      // subquery position if the data violates the relation's cardinality. Its
+      // ordering is the ordinary clause; the aggregate's is inside `json_agg`
+      // above.
+      many || !ordering ? sql("") : concat(sql(" order by "), ordering),
       many ? sql("") : sql(" limit 1"),
     );
 

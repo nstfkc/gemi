@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { PrismaClient } from "@prisma/client";
 import { DatabaseManager } from "gemi/database";
 import { Application } from "gemi/foundation";
-import { Model, clearPlanCache } from "gemi/orm";
+import { Model, clearPlanCache, type ExecOptions } from "gemi/orm";
 import { expect } from "vitest";
 
 /**
@@ -50,6 +50,7 @@ export interface Differential {
     model: string,
     operation: string,
     args?: unknown,
+    options?: ExecOptions,
   ): Promise<unknown>;
   /**
    * The same, for an operation that *mutates*.
@@ -261,7 +262,16 @@ export async function createDifferential(options: {
       executed = 0;
     },
 
-    async expectSame(model, operation, args) {
+    /**
+     * `execOptions` exists so the same matrix can run under both relation
+     * strategies — iteration 9's acceptance criterion 2, which asks for the
+     * *full* nested matrix against the lateral strategy rather than a subset.
+     *
+     * Threaded through the public API rather than through a test-only hook, so
+     * what the matrix exercises is exactly what an application naming a strategy
+     * gets.
+     */
+    async expectSame(model, operation, args, execOptions) {
       clearPlanCache();
 
       const gemiModel = options.models[model];
@@ -271,7 +281,9 @@ export async function createDifferential(options: {
 
       const [fromPrisma, fromGemi] = await Promise.all([
         settle(() => prismaDelegate(prisma, model)[operation](args)),
-        settle(() => unpoliced(() => (gemiModel as any)[operation](args))),
+        settle(() =>
+          unpoliced(() => (gemiModel as any)[operation](args, execOptions)),
+        ),
       ]);
 
       // Both throwing is agreement — Prisma's `*OrThrow` and ours raise
