@@ -418,6 +418,135 @@ function suite(label: string, url?: string) {
 
     // Verified against Prisma: an empty list writes nothing and does not error,
     // and the parent still comes back with `accounts: []`.
+    /**
+     * `connectOrCreate` — and the case that decides whether it is implemented
+     * or merely spelled: **a hit must ignore `create` entirely.** The seeded
+     * organisation is named "Acme"; the payload below names something else, and
+     * the row has to come back unchanged. An implementation that upserted would
+     * pass a test that only checked "one organisation exists".
+     */
+    test("connectOrCreate on the owning side connects, leaving the row alone", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "create",
+        {
+          data: {
+            email: "coc1@example.dev",
+            organization: {
+              connectOrCreate: {
+                where: { publicId: "o1" },
+                create: { publicId: "o1", name: "SHOULD-NOT-APPEAR" },
+              },
+            },
+          },
+          include: { organization: true },
+        },
+        { tables: ["User", "Organization"] },
+      );
+    });
+
+    test("connectOrCreate on the owning side creates when it misses", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "create",
+        {
+          data: {
+            email: "coc2@example.dev",
+            organization: {
+              connectOrCreate: {
+                where: { publicId: "brand-new" },
+                create: { publicId: "brand-new", name: "Made" },
+              },
+            },
+          },
+          include: { organization: true },
+        },
+        { tables: ["User", "Organization"] },
+      );
+    });
+
+    /**
+     * On this side a hit **repoints** the existing child at the new parent,
+     * which is what `connect` means here — so the assertion is on the `Account`
+     * table, not only on what came back.
+     */
+    test("connectOrCreate on the foreign side repoints an existing child", async () => {
+      await differential.reset();
+      await differential.prisma.account.create({
+        data: { publicId: "loose-coc", organizationRole: 1 },
+      });
+
+      await differential.expectSameWrite(
+        "User",
+        "create",
+        {
+          data: {
+            email: "coc3@example.dev",
+            accounts: {
+              connectOrCreate: {
+                where: { publicId: "loose-coc" },
+                create: { publicId: "loose-coc", organizationRole: 9 },
+              },
+            },
+          },
+          include: { accounts: true },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    test("connectOrCreate on the foreign side creates when it misses", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "create",
+        {
+          data: {
+            email: "coc4@example.dev",
+            accounts: {
+              connectOrCreate: {
+                where: { publicId: "no-such-account" },
+                create: { publicId: "no-such-account", organizationRole: 2 },
+              },
+            },
+          },
+          include: { accounts: true },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    /** A list where one entry hits and the other does not — both branches, one call. */
+    test("connectOrCreate takes a list, hitting and missing in one call", async () => {
+      await differential.reset();
+      await differential.prisma.account.create({
+        data: { publicId: "mixed-hit", organizationRole: 1 },
+      });
+
+      await differential.expectSameWrite(
+        "User",
+        "create",
+        {
+          data: {
+            email: "coc5@example.dev",
+            accounts: {
+              connectOrCreate: [
+                {
+                  where: { publicId: "mixed-hit" },
+                  create: { publicId: "mixed-hit", organizationRole: 9 },
+                },
+                {
+                  where: { publicId: "mixed-miss" },
+                  create: { publicId: "mixed-miss", organizationRole: 3 },
+                },
+              ],
+            },
+          },
+          include: { accounts: true },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
     test("nested createMany with no rows writes the parent alone", async () => {
       await differential.expectSameWrite(
         "User",
