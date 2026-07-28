@@ -648,6 +648,86 @@ const CASES: [string, string, unknown][] = [
   ["count with skip", "count", { skip: 2 }],
   ["count with take and skip", "count", { take: 2, skip: 1 }],
   ["count with orderBy", "count", { orderBy: { name: "asc" } }],
+
+  // --- count's per-field form ---------------------------------------------
+  //
+  // `{ _all: 3, email: 2 }` rather than a number, and the per-field entries
+  // count rows where the column is **not null** — which the fixture makes
+  // discriminating, since `email` and `name` are null on different rows.
+  ["count select _all", "count", { select: { _all: true } }],
+  ["count select a field", "count", { select: { email: true } }],
+  ["count select two fields", "count", { select: { email: true, name: true } }],
+  ["count select _all and a field", "count", { select: { _all: true, email: true } }],
+  ["count select with where", "count", {
+    where: { globalRole: 2 }, select: { _all: true, email: true },
+  }],
+  ["count select matching nothing", "count", {
+    where: { globalRole: 99 }, select: { _all: true, email: true },
+  }],
+
+  // --- aggregate ----------------------------------------------------------
+  //
+  // The empty-set row is the one that discriminates hardest: `_count` is 0 but
+  // every other function is `null`, per field, and an implementation that
+  // coalesced to 0 would look right everywhere else.
+  ["aggregate _count true", "aggregate", { _count: true }],
+  ["aggregate _count _all", "aggregate", { _count: { _all: true } }],
+  ["aggregate _count per field", "aggregate", { _count: { email: true, name: true } }],
+  ["aggregate _count mixed", "aggregate", { _count: { _all: true, email: true } }],
+  ["aggregate _sum", "aggregate", { _sum: { globalRole: true } }],
+  ["aggregate _avg", "aggregate", { _avg: { globalRole: true } }],
+  ["aggregate _min", "aggregate", { _min: { globalRole: true } }],
+  ["aggregate _max", "aggregate", { _max: { globalRole: true } }],
+  ["aggregate every function at once", "aggregate", {
+    _count: { _all: true, email: true },
+    _sum: { globalRole: true },
+    _avg: { globalRole: true },
+    _min: { globalRole: true },
+    _max: { globalRole: true },
+  }],
+  // A string and a DateTime through min/max, which come back as values of the
+  // column rather than as numbers — the DateTime is the one SQLite stores as
+  // integer milliseconds and therefore has to decode.
+  ["aggregate min/max on a string", "aggregate", {
+    _min: { email: true }, _max: { name: true },
+  }],
+  ["aggregate min/max on a DateTime", "aggregate", {
+    _min: { createdAt: true }, _max: { createdAt: true },
+  }],
+  ["aggregate min/max on a nullable DateTime", "aggregate", {
+    _min: { deletedAt: true }, _max: { deletedAt: true },
+  }],
+  ["aggregate with where", "aggregate", {
+    where: { globalRole: { gt: 0 } }, _sum: { globalRole: true }, _count: true,
+  }],
+  ["aggregate over no rows", "aggregate", {
+    where: { globalRole: 99 },
+    _count: true,
+    _sum: { globalRole: true },
+    _avg: { globalRole: true },
+    _min: { globalRole: true },
+    _max: { createdAt: true },
+  }],
+  ["aggregate over no rows, _count object", "aggregate", {
+    where: { globalRole: 99 }, _count: { _all: true, email: true },
+  }],
+  // `take` / `skip` describe the rows being aggregated, not the one row the
+  // aggregate produces — so these sum a *page* rather than the whole set.
+  ["aggregate with take", "aggregate", {
+    orderBy: { globalRole: "asc" }, take: 2, _sum: { globalRole: true }, _count: true,
+  }],
+  ["aggregate with skip", "aggregate", {
+    orderBy: { globalRole: "asc" }, skip: 1, _sum: { globalRole: true }, _count: true,
+  }],
+  ["aggregate with take and skip", "aggregate", {
+    orderBy: { globalRole: "asc" }, skip: 1, take: 2, _sum: { globalRole: true },
+  }],
+  ["aggregate with a negative take", "aggregate", {
+    orderBy: { globalRole: "asc" }, take: -2, _sum: { globalRole: true },
+  }],
+  ["aggregate paginating with no orderBy", "aggregate", {
+    take: 2, _count: true,
+  }],
 ];
 
 /**
