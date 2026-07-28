@@ -37,9 +37,43 @@ each was verified at its own tip; they are listed in merge order.
 | #57 | `feat/orm-registration-audit` | `assertPoliciesRegistered`, for the policied subclass nobody registered |
 | #58 | `feat/orm-relation-filters` | relation filters, `_count`, relation orderings, implicit m-n, and six audit findings |
 
-Iterations 1–7 are on `feat/orm` (#45) and below. The two entries under
-[Open decisions](#open-decisions) are the only remaining items on this plan; the
-rest of it is built, and #58's description carries the audit trail.
+The two entries under [Open decisions](#open-decisions) are the only remaining
+items on this plan; the rest of it is built, and #58's description carries the
+audit trail.
+
+### A stacked PR merges into its parent, not into the trunk
+
+Worth its own heading, because it is a property of the shape rather than a
+mistake anybody made, and the next stacked effort will meet it again.
+
+Every PR here targets its **parent**, so merging one lands its content on the
+immediate parent and **nowhere below**. Nothing re-merges downward on its own. So
+after nine PRs were marked merged, `feat/orm` — the branch #45 proposes to
+`feat/database-layer` — still carried **iteration 1 alone**, 91 commits behind the
+stack tip, with relations, writes, transactions, policies, provenance and lateral
+all absent from it.
+
+Merge *order* compounds it. Five of those merges landed within 100 seconds,
+bottom-up, and each base was merged before its own child had received the next
+one — so the work pooled at different heights:
+
+| branch | had the Bytes fix | had the docs | had the audit |
+| --- | --- | --- | --- |
+| `feat/orm-07-performance` | no | no | no |
+| `feat/orm-09-lateral-strategy` | yes | no | no |
+| `docs/orm` | yes | yes | yes |
+
+**The check is one command**, and it is worth running before treating a stack as
+shipped, because every PR showing `MERGED` looks exactly like success:
+
+```
+git rev-list --count origin/<trunkward-branch>..origin/<stack-tip>
+```
+
+Non-zero means the trunkward branch has not received the stack. The one-step
+repair is to merge the stack tip into it directly; the intermediate branches stop
+mattering once the bottom PR merges, and they keep their per-iteration history
+either way.
 
 `feat/database-layer` is at `e3c2e0b`. Everything this plan depends on exists
 there — `database/`, `container/`, `foundation/`, `kernel/`, `support/`,
