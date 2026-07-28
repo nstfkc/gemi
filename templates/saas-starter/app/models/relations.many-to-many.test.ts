@@ -54,6 +54,19 @@ const DDL = [
 )`,
   `CREATE UNIQUE INDEX "_PostToTag_AB_unique" ON "_PostToTag"("A", "B")`,
   `CREATE INDEX "_PostToTag_B_index" ON "_PostToTag"("B")`,
+  // A *self*-referential implicit m-n, verbatim from `prisma migrate diff` over
+  // `model Thing { zeta Thing[] @relation("Link") alpha Thing[] @relation("Link") }`.
+  `CREATE TABLE "Thing" (
+    "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    "label" TEXT NOT NULL
+)`,
+  `CREATE TABLE "_Link" (
+    "A" INTEGER NOT NULL,
+    "B" INTEGER NOT NULL,
+    CONSTRAINT "_Link_A_fkey" FOREIGN KEY ("A") REFERENCES "Thing" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT "_Link_B_fkey" FOREIGN KEY ("B") REFERENCES "Thing" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+)`,
+  `CREATE UNIQUE INDEX "_Link_AB_unique" ON "_Link"("A", "B")`,
 ];
 
 // What the gemi generator emits for the two models above — confirmed by running
@@ -107,6 +120,69 @@ const tagSchema: ModelSchema = {
   },
 };
 
+/**
+ * The self-referential side of the same feature.
+ *
+ * `zeta` is declared first and sorts second, which is the whole point: Prisma
+ * assigns the join columns by **field name**, so the two candidate rules give
+ * opposite answers here. `ownerColumn` is what the generator emits for it —
+ * verified against a real client in both directions, not read off the docs.
+ */
+const thingSchema: ModelSchema = {
+  name: "Thing",
+  table: "Thing",
+  fields: {
+    id: {
+      name: "id",
+      column: "id",
+      type: "Int",
+      nullable: false,
+      isId: true,
+      isUpdatedAt: false,
+      default: { kind: "autoincrement" },
+    },
+    label: {
+      name: "label",
+      column: "label",
+      type: "String",
+      nullable: false,
+      isId: false,
+      isUpdatedAt: false,
+    },
+  },
+  primaryKey: ["id"],
+  uniques: [],
+  relations: {
+    zeta: {
+      name: "zeta",
+      model: "Thing",
+      kind: "many",
+      relationName: "Link",
+      from: [],
+      to: [],
+      nullable: false,
+      joinTable: { table: "_Link", a: "Thing", b: "Thing", ownerColumn: "B" },
+    },
+    alpha: {
+      name: "alpha",
+      model: "Thing",
+      kind: "many",
+      relationName: "Link",
+      from: [],
+      to: [],
+      nullable: false,
+      joinTable: { table: "_Link", a: "Thing", b: "Thing", ownerColumn: "A" },
+    },
+  },
+};
+
+class Thing extends Model {
+  static $schema = thingSchema;
+  static findMany(args?: unknown) {
+    return this.$exec("findMany", args) as Promise<Record<string, any>[]>;
+  }
+}
+
 class Post extends Model {
   static $schema = postSchema;
   static findMany(args?: unknown) {
@@ -148,6 +224,20 @@ const PG_DDL = [
   `CREATE INDEX "_PostToTag_B_index" ON "_PostToTag"("B")`,
   `ALTER TABLE "_PostToTag" ADD CONSTRAINT "_PostToTag_A_fkey" FOREIGN KEY ("A") REFERENCES "Post"("id") ON DELETE CASCADE ON UPDATE CASCADE`,
   `ALTER TABLE "_PostToTag" ADD CONSTRAINT "_PostToTag_B_fkey" FOREIGN KEY ("B") REFERENCES "Tag"("id") ON DELETE CASCADE ON UPDATE CASCADE`,
+  `DROP TABLE IF EXISTS "_Link"`,
+  `DROP TABLE IF EXISTS "Thing"`,
+  `CREATE TABLE "Thing" (
+    "id" SERIAL NOT NULL,
+    "label" TEXT NOT NULL,
+    CONSTRAINT "Thing_pkey" PRIMARY KEY ("id")
+)`,
+  `CREATE TABLE "_Link" (
+    "A" INTEGER NOT NULL,
+    "B" INTEGER NOT NULL,
+    CONSTRAINT "_Link_AB_pkey" PRIMARY KEY ("A","B")
+)`,
+  `ALTER TABLE "_Link" ADD CONSTRAINT "_Link_A_fkey" FOREIGN KEY ("A") REFERENCES "Thing"("id") ON DELETE CASCADE ON UPDATE CASCADE`,
+  `ALTER TABLE "_Link" ADD CONSTRAINT "_Link_B_fkey" FOREIGN KEY ("B") REFERENCES "Thing"("id") ON DELETE CASCADE ON UPDATE CASCADE`,
 ];
 
 // Post 1 carries two tags, post 2 one, post 3 none — the many / one / empty
@@ -156,6 +246,10 @@ const ROWS = [
   `INSERT INTO "Post" ("id", "title") VALUES (1, 'first'), (2, 'second'), (3, 'untagged')`,
   `INSERT INTO "Tag" ("id", "label") VALUES (1, 'red'), (2, 'blue'), (3, 'unused')`,
   `INSERT INTO "_PostToTag" ("A", "B") VALUES (1, 1), (1, 2), (2, 2)`,
+  // one --zeta--> two, and one --zeta--> three. The owner of `zeta` sits in B,
+  // so those rows are (A = target, B = one).
+  `INSERT INTO "Thing" ("id", "label") VALUES (1, 'one'), (2, 'two'), (3, 'three')`,
+  `INSERT INTO "_Link" ("A", "B") VALUES (2, 1), (3, 1)`,
 ];
 
 let workspace: string | undefined;
@@ -190,6 +284,7 @@ async function setup(url: string, ddl: string[]) {
 
   register("Post", Post);
   register("Tag", Tag);
+  register("Thing", Thing);
   clearPlanCache();
 }
 
@@ -415,5 +510,68 @@ function cases() {
     });
 
     expect(ordered.map((post: any) => post.id)).toEqual([3, 2, 1]);
+  });
+
+  /**
+   * The **self-referential** implicit m-n, which was refused everywhere until
+   * the generator learned Prisma's rule for it: the two ends are the same
+   * model, so the model names cannot say which join column is which, and the
+   * answer is the relation *fields* in alphabetical order.
+   *
+   * `zeta` is declared first and sorts second, so a generator that used
+   * declaration order would emit the columns swapped — and every assertion
+   * below would come back with the two directions exchanged rather than empty.
+   * That is the failure this fixture is shaped to catch: a reversed relation
+   * returns plausible rows.
+   *
+   * The data: one points at two and three through `zeta`.
+   */
+  test("a self-referential m-n loads in both directions", async () => {
+    const forward = await Thing.findMany({
+      where: { id: 1 },
+      include: { zeta: true },
+    });
+    expect(
+      forward[0].zeta.map((thing: any) => thing.label).sort(),
+    ).toEqual(["three", "two"]);
+
+    // The other field is the same table read the other way round.
+    expect(
+      (await Thing.findMany({ where: { id: 1 }, include: { alpha: true } }))[0]
+        .alpha,
+    ).toEqual([]);
+
+    const backward = await Thing.findMany({
+      where: { id: 2 },
+      include: { alpha: true, zeta: true },
+    });
+    expect(backward[0].alpha.map((thing: any) => thing.label)).toEqual(["one"]);
+    expect(backward[0].zeta).toEqual([]);
+  });
+
+  test("a self-referential m-n filters and counts in both directions", async () => {
+    const pointing = await Thing.findMany({
+      where: { zeta: { some: {} } },
+      orderBy: { id: "asc" },
+    });
+    expect(pointing.map((thing: any) => thing.id)).toEqual([1]);
+
+    const pointedAt = await Thing.findMany({
+      where: { alpha: { some: {} } },
+      orderBy: { id: "asc" },
+    });
+    expect(pointedAt.map((thing: any) => thing.id)).toEqual([2, 3]);
+
+    const counted = await Thing.findMany({
+      include: { _count: { select: { zeta: true, alpha: true } } },
+      orderBy: { id: "asc" },
+    });
+    expect(
+      counted.map((thing: any) => [thing._count.zeta, thing._count.alpha]),
+    ).toEqual([
+      [2, 0],
+      [0, 1],
+      [0, 1],
+    ]);
   });
 }

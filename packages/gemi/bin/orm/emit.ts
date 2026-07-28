@@ -187,12 +187,30 @@ function implicitJoinTable(
   if (sides.length !== 2) return undefined;
   if (!sides.every((side) => side.field.isList)) return undefined;
 
-  // NOTE for iteration 3: on a *self*-referential implicit m-n both names are
-  // the same string, so `a === b` and this record cannot say which column holds
-  // which end. Prisma disambiguates by field order rather than by model name.
-  // The planner will need that extra signal before it can join one.
   const [first, second] = [model.name, field.type].sort();
-  return { table: `_${field.relationName}`, a: first, b: second };
+  const table = `_${field.relationName}`;
+
+  // On a *self*-referential implicit m-n both names are the same string, so
+  // `a === b` and the model names cannot say which column holds which end.
+  //
+  // Prisma assigns them by **field name, alphabetically**: the
+  // alphabetically-first of the relation's two fields has its owner in `A`.
+  // Established by experiment against a generated client — connecting through
+  // each field in turn and reading the join table — because the plausible rule
+  // (declaration order) is indistinguishable from this one on any schema whose
+  // fields happen to be declared alphabetically, and disagrees on every other.
+  // Guessing would have reversed the relation silently on exactly those.
+  if (first === second) {
+    const names = sides.map((side) => side.field.name).sort();
+    return {
+      table,
+      a: first,
+      b: second,
+      ownerColumn: field.name === names[0] ? ("A" as const) : ("B" as const),
+    };
+  }
+
+  return { table, a: first, b: second };
 }
 
 /** Single-field `@unique` plus composite `@@unique`, deduplicated, in order. */

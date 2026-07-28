@@ -223,10 +223,26 @@ it.**
   the emitted SQL is asserted in the compiler's own tests and what those cannot
   say is whether it returns the right rows.
 
-  Still open, and it is the artifact's limit rather than the compiler's: a
-  **self-referential** implicit m-n, where the same model is on both ends and
-  the generated record cannot say which join column is which. Prisma
-  disambiguates by field order, which the artifact does not carry.
+  ~~Still open … a **self-referential** implicit m-n~~ — **closed**, and it was
+  the artifact's limit, so the fix was in the generator rather than the
+  compiler. The note here said "Prisma disambiguates by field order", which was
+  half right and the wrong half to guess at: it is field *name* order, not
+  declaration order. The two rules agree on every schema whose relation fields
+  happen to be declared alphabetically and disagree on the rest — so a guess
+  would have passed its own tests and reversed the relation on somebody else's
+  schema.
+
+  Established by experiment against a generated Prisma 6 client: connect
+  through each of the two fields in turn and read the join table. The
+  alphabetically-first field's owner is in `A`. The generator emits that per
+  field as `joinTable.ownerColumn`, and an artifact generated before it raises
+  rather than guessing — which is why the field is optional rather than
+  required.
+
+  The fixture declares its fields `zeta` then `alpha` on purpose, so the two
+  candidate rules give opposite answers and a wrong one shows up as the two
+  directions exchanged rather than as empty results. A reversed relation
+  returns plausible rows.
 - **Stitching cost is real** on wide results. Build the parent-key `Map` once per
   child query; do not `find()` per row. Iteration 7 will measure this, so leave
   it in a shape that can be measured.

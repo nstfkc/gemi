@@ -248,10 +248,13 @@ Filtering, counting and ordering all work across an **implicit many-to-many** to
 table is a second table inside the subquery and changes nothing else about how you write the
 query.
 
-**Not implemented yet:** a *self-referential* implicit many-to-many (the generated artifact cannot
-say which of the join table's two columns is which end), and `_count` on a to-one (which can only
-ever be 0 or 1 — its nullability already says which). Both raise `UnsupportedQueryError` rather
-than being silently ignored.
+Self-referential ones work too — `Thing.related Thing[]` — as long as the generated files are
+current. Prisma assigns that join table's two columns by *field name*, which the generator now
+records; an artifact from before it does raises rather than guessing, and `prisma generate` fixes
+it.
+
+**Not implemented yet:** `_count` on a to-one, which can only ever be 0 or 1 — its nullability
+already says which. It raises `UnsupportedQueryError` rather than being silently ignored.
 
 ### One value that will surprise you
 

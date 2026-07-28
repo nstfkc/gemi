@@ -257,6 +257,94 @@ describe("buildModelSchemas()", () => {
     expect(tag.relations.posts.joinTable).toEqual(post.relations.tags.joinTable);
   });
 
+  /**
+   * A *self*-referential implicit m-n, where both ends are the same model and
+   * `a === b`. The model names cannot say which column is which, so the record
+   * carries the answer per field.
+   *
+   * **Prisma assigns the columns by field name, alphabetically** — the
+   * alphabetically-first of the relation's two fields has its owner in `A`.
+   * Established by experiment against a generated client, connecting through
+   * each field in turn and reading the join table, because the other plausible
+   * rule (declaration order) agrees on every schema whose fields happen to be
+   * declared alphabetically and disagrees on the rest. The fields below are
+   * declared `zeta` then `alpha` on purpose, so the two rules give opposite
+   * answers and this test can only pass under the right one.
+   */
+  test("a self-referential m-n names the column per field", () => {
+    const thing = model({
+      name: "Thing",
+      fields: [
+        field({ name: "id", isId: true }),
+        field({
+          kind: "object",
+          name: "zeta",
+          type: "Thing",
+          isList: true,
+          relationName: "Link",
+          relationFromFields: [],
+          relationToFields: [],
+        }),
+        field({
+          kind: "object",
+          name: "alpha",
+          type: "Thing",
+          isList: true,
+          relationName: "Link",
+          relationFromFields: [],
+          relationToFields: [],
+        }),
+      ],
+    });
+
+    const [schema] = buildModelSchemas([thing]);
+
+    expect(schema.relations.alpha.joinTable).toEqual({
+      table: "_Link",
+      a: "Thing",
+      b: "Thing",
+      ownerColumn: "A",
+    });
+    expect(schema.relations.zeta.joinTable?.ownerColumn).toBe("B");
+  });
+
+  /** A non-self m-n has no ambiguity, so it carries no extra key. */
+  test("a two-model m-n names no owner column", () => {
+    const tagged = model({
+      name: "Tag",
+      fields: [
+        field({ name: "id", isId: true }),
+        field({
+          kind: "object",
+          name: "posts",
+          type: "Post",
+          isList: true,
+          relationName: "PostToTag",
+          relationFromFields: [],
+          relationToFields: [],
+        }),
+      ],
+    });
+    const posts = model({
+      name: "Post",
+      fields: [
+        field({ name: "id", isId: true }),
+        field({
+          kind: "object",
+          name: "tags",
+          type: "Tag",
+          isList: true,
+          relationName: "PostToTag",
+          relationFromFields: [],
+          relationToFields: [],
+        }),
+      ],
+    });
+
+    const [post] = buildModelSchemas([tagged, posts]);
+    expect(post.relations.tags.joinTable).not.toHaveProperty("ownerColumn");
+  });
+
   // A one-to-many is not a many-to-many, and mistaking one for the other would
   // send iteration 3 looking for a table that does not exist.
   test("does not invent a join table for a one-to-many", () => {

@@ -655,17 +655,31 @@ function joinTableLink(
 
   if (a === b) {
     // A self-referential implicit m-n puts the same model on both ends, so the
-    // emitted record cannot say which column is which — Prisma disambiguates by
-    // field order, which the artifact does not carry. Refusing is honest;
-    // guessing would silently reverse the relation.
-    throw new UnsupportedQueryError(
-      relation.name,
-      parent.name,
-      "include",
-      `${relation.name} is a self-referential implicit many-to-many. The ` +
-        `generated artifact cannot say which of the join table's two columns ` +
-        `is which end, so it is not implemented yet.`,
-    );
+    // model names cannot say which column is which. The generator resolves it
+    // by field name — see `RelationSchema.joinTable.ownerColumn`.
+    const owner = relation.joinTable!.ownerColumn;
+    if (!owner) {
+      // An artifact generated before the generator knew the rule. Refusing is
+      // honest; guessing would silently reverse the relation.
+      throw new UnsupportedQueryError(
+        relation.name,
+        parent.name,
+        "include",
+        `${relation.name} is a self-referential implicit many-to-many, and the ` +
+          `generated artifact predates support for one. Re-run ` +
+          `\`prisma generate\`.`,
+      );
+    }
+
+    return {
+      parentField: primaryKey(parent, relation),
+      childField: primaryKey(child, relation),
+      join: {
+        table,
+        parentColumn: owner,
+        childColumn: owner === "A" ? "B" : "A",
+      },
+    };
   }
 
   if (parent.name !== a && parent.name !== b) {
