@@ -223,11 +223,45 @@ export class UnsupportedDialectError extends Error {
  * latest and most expensive moment to learn it.
  */
 export function ormSupports(dialect: Dialect): boolean {
-  return dialect === "sqlite" || dialect === "postgres";
+  return COMPILERS[dialect] !== null;
 }
 
-const sqlite = new SqliteDialect();
-const postgres = new PostgresDialect();
+/** Every dialect `Dialect` names, for anything that has to walk them all. */
+export function everyDialect(): Dialect[] {
+  return Object.keys(COMPILERS) as Dialect[];
+}
+
+/**
+ * The compiler for each dialect, or `null` where the ORM has none.
+ *
+ * **One map rather than two lists, and `satisfies` rather than a lookup.** The
+ * supported set used to be written three times — `ormSupports`' `||` chain,
+ * `dialectFor`'s `if` chain, and a test enumerating a hand-written copy of the
+ * `Dialect` union — so adding a fifth member to that union changed nothing
+ * anywhere: `tsc` clean, tests green, the new dialect silently reported as
+ * unsupported by one function and unknown to the other.
+ *
+ * That moment is exactly what the guard exists for. Adding a dialect to the
+ * union is the *first step of implementing one*, and it is the step where a
+ * half-added dialect would disagree with itself.
+ *
+ * `satisfies Record<Dialect, …>` makes it a compile error in a file the build
+ * actually checks. It has to live here rather than in a test: `tsconfig.json`
+ * excludes test files and vitest transpiles without type-checking, so an
+ * exhaustiveness check written there is a type error nothing ever evaluates.
+ *
+ * The sixth thing in this codebase made `tsc`'s job rather than a convention's
+ * — see the note on `resolveLink`'s `operation`.
+ */
+const COMPILERS = {
+  sqlite: new SqliteDialect(),
+  postgres: new PostgresDialect(),
+  // Bun's client speaks both; the ORM has no compiler for either. See
+  // `UnsupportedDialectError`, which is careful to say that the *connection*
+  // still works.
+  mysql: null,
+  mariadb: null,
+} satisfies Record<Dialect, SqlDialect | null>;
 
 /**
  * Resolved per call from `DatabaseManager.dialect`, never baked into a
@@ -235,9 +269,9 @@ const postgres = new PostgresDialect();
  * the one `prisma generate` saw.
  */
 export function dialectFor(dialect: Dialect): SqlDialect {
-  if (dialect === "sqlite") return sqlite;
-  if (dialect === "postgres") return postgres;
-  throw new UnsupportedDialectError(dialect);
+  const compiler = COMPILERS[dialect];
+  if (compiler === null) throw new UnsupportedDialectError(dialect);
+  return compiler;
 }
 
 export { PostgresDialect, SqliteDialect };

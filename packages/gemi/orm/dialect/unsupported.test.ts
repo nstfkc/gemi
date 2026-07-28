@@ -1,6 +1,11 @@
 import { describe, expect, test } from "vitest";
 
-import { UnsupportedDialectError, dialectFor, ormSupports } from "./index";
+import {
+  UnsupportedDialectError,
+  dialectFor,
+  everyDialect,
+  ormSupports,
+} from "./index";
 
 /**
  * MySQL and MariaDB: refused explicitly, which is #71's option (2) and the
@@ -69,9 +74,21 @@ describe("a dialect the ORM does not implement", () => {
   /**
    * The two have to agree, or the boot check and the query-time failure would
    * disagree about which databases work — the check would be worse than none.
+   *
+   * Walked from `everyDialect()` rather than a hand-written list. The list this
+   * used to carry was a *copy* of the `Dialect` union, so it only covered the
+   * members someone had remembered to add — and adding a fifth changed nothing
+   * anywhere, which is precisely the moment the guard exists for.
+   *
+   * The exhaustiveness itself is `tsc`'s now, via the `satisfies` on
+   * `COMPILERS`; this checks the two functions agree in *behaviour*, which a
+   * type cannot.
    */
   test("the predicate and the resolver cannot disagree", () => {
-    for (const dialect of ["sqlite", "postgres", "mysql", "mariadb"] as const) {
+    const dialects = everyDialect();
+    expect(dialects.length).toBeGreaterThan(1);
+
+    for (const dialect of dialects) {
       let resolved = true;
       try {
         dialectFor(dialect);
