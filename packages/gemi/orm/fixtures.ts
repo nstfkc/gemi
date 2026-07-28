@@ -408,6 +408,69 @@ export const tag: ModelSchema = {
   },
 };
 
+/**
+ * A self-relation — the one topology where the parent and the child are the same
+ * table, which the template's schema has no example of.
+ *
+ * It exists for the lateral strategy's decline: a correlation is written as
+ * `"<child>"."<fk>" = "<parent>"."<pk>"`, and when both names are `"Category"`
+ * that compares the subquery's own row against itself rather than against the
+ * outer one. Batching is unaffected, because it stitches in JavaScript.
+ */
+export const category: ModelSchema = {
+  name: "Category",
+  table: "Category",
+  fields: {
+    id: {
+      name: "id",
+      column: "id",
+      type: "Int",
+      nullable: false,
+      isId: true,
+      isUpdatedAt: false,
+      default: { kind: "autoincrement" },
+    },
+    name: {
+      name: "name",
+      column: "name",
+      type: "String",
+      nullable: false,
+      isId: false,
+      isUpdatedAt: false,
+    },
+    parentId: {
+      name: "parentId",
+      column: "parentId",
+      type: "Int",
+      nullable: true,
+      isId: false,
+      isUpdatedAt: false,
+    },
+  },
+  primaryKey: ["id"],
+  uniques: [],
+  relations: {
+    parent: {
+      name: "parent",
+      model: "Category",
+      kind: "one",
+      relationName: "CategoryTree",
+      from: ["parentId"],
+      to: ["id"],
+      nullable: true,
+    },
+    children: {
+      name: "children",
+      model: "Category",
+      kind: "many",
+      relationName: "CategoryTree",
+      from: [],
+      to: [],
+      nullable: false,
+    },
+  },
+};
+
 /** `@@map("audit_log")` with `@map`ped columns, plus every decoded scalar type. */
 export const mapped: ModelSchema = {
   name: "AuditLog",

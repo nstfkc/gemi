@@ -503,9 +503,25 @@ describe("unimplemented arguments still throw", () => {
     );
   });
 
-  test("count rejects select rather than ignoring it", () => {
-    expect(() => text({ select: { id: true } }, "count")).toThrow(
-      "gemi ORM does not support 'select' yet (User.count).",
+  /**
+   * `count({ select })` used to be refused as aggregate territory, and that was
+   * the right call while there was no aggregate to put it beside. It is a
+   * per-field count now — `count("email")`, the rows where the column is not
+   * null — and it routes through `compileAggregate` so the two cannot disagree
+   * about what that means.
+   */
+  test("count with a select is a per-field count, not the plain total", () => {
+    expect(text({ select: { email: true } }, "count")).toContain(
+      `count("email")`,
+    );
+    expect(text({ select: { _all: true } }, "count")).toContain(`count(*)`);
+    // ...and a count with no select is still the plain total.
+    expect(text({}, "count")).toContain(`count(*) as "_count"`);
+  });
+
+  test("a select naming nothing is refused rather than counted as everything", () => {
+    expect(() => text({ select: {} }, "count")).toThrow(
+      /must name at least one field/,
     );
   });
 

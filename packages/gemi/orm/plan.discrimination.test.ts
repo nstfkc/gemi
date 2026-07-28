@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, test } from "vitest";
 
+import { lateralStrategy } from "./compile/lateral";
 import { PostgresDialect } from "./dialect/postgres";
 import { SqliteDialect } from "./dialect/sqlite";
 import { account, organization, user } from "./fixtures";
@@ -239,6 +240,196 @@ describe("plan cache discrimination", () => {
     expect(planKey(sqlite, "User", "findMany", { take: 10 })).not.toBe(
       planKey(sqlite, "User", "findMany", { take: -10 }),
     );
+  });
+
+  /**
+   * The same rule one level down, where it is easier to get wrong: a relation
+   * node's `take` / `skip` sit inside `include`, which is a *literal* subtree —
+   * every value there is recorded verbatim, because `"asc"` and `"desc"` have to
+   * be two keys. A number recorded verbatim would mint one plan entry per page,
+   * so both keys have to opt out of that, and only the `take`'s sign may stay.
+   *
+   * Compiled on Postgres because that is the only dialect that can page a
+   * relation at all; on SQLite these are refusals rather than plans.
+   */
+  describe("a relation node's take and skip", () => {
+    const key = (args: unknown) =>
+      planKey(postgres, "User", "findMany", args, "lateral");
+
+    test("magnitude shares a key, sign does not", () => {
+      expect(key({ include: { accounts: { take: 10 } } })).toBe(
+        key({ include: { accounts: { take: 20 } } }),
+      );
+      expect(key({ include: { accounts: { take: 10 } } })).not.toBe(
+        key({ include: { accounts: { take: -10 } } }),
+      );
+    });
+
+    test("a skip's value is a parameter, its presence is not", () => {
+      expect(key({ include: { accounts: { skip: 1 } } })).toBe(
+        key({ include: { accounts: { skip: 9 } } }),
+      );
+      expect(key({ include: { accounts: { skip: 1 } } })).not.toBe(
+        key({ include: { accounts: true } }),
+      );
+      expect(key({ include: { accounts: { skip: 1 } } })).not.toBe(
+        key({ include: { accounts: { take: 1 } } }),
+      );
+    });
+
+    test("and the shapes that share a key really do share a plan", () => {
+      const wide = getOrCompile(
+        user,
+        "findMany",
+        { include: { accounts: { take: 10, skip: 1 } } },
+        postgres,
+        lateralStrategy,
+      );
+      const narrow = getOrCompile(
+        user,
+        "findMany",
+        { include: { accounts: { take: 20, skip: 9 } } },
+        postgres,
+        lateralStrategy,
+      );
+
+      expect(narrow.text).toBe(wide.text);
+      expect(
+        narrow.bind({ include: { accounts: { take: 20, skip: 9 } } }),
+      ).toEqual([20, 9]);
+    });
+
+    test("...and the shapes that do not share a key compile differently", () => {
+      const forwards = getOrCompile(
+        user,
+        "findMany",
+        { include: { accounts: { take: 1, orderBy: { id: "asc" } } } },
+        postgres,
+        lateralStrategy,
+      );
+      const backwards = getOrCompile(
+        user,
+        "findMany",
+        { include: { accounts: { take: -1, orderBy: { id: "asc" } } } },
+        postgres,
+        lateralStrategy,
+      );
+
+      // The sign flips the page's ordering, which is why it is structural.
+      expect(backwards.text).not.toBe(forwards.text);
+    });
+  });
+
+  /**
+   * An aggregate's functions decide the projection, so they are structural for
+   * exactly the reason `select` is — and a collision here is the dangerous
+   * direction: a caller who switched a field *off* would get the statement that
+   * counts it, and the extra key in the result would look like data.
+   *
+   * Its own describe rather than rows in `DISTINCT_SHAPES`, because that table
+   * is compiled as `findMany` and these are only meaningful as `aggregate`.
+   */
+  describe("aggregate", () => {
+    const AGGREGATE_SHAPES: [string, unknown][] = [
+      ["count bare", { _count: true }],
+      ["count off", { _count: false }],
+      ["count _all", { _count: { _all: true } }],
+      ["count a field", { _count: { email: true } }],
+      ["count that field off", { _count: { email: false } }],
+      ["count another field", { _count: { name: true } }],
+      ["count two fields", { _count: { email: true, name: true } }],
+      ["sum", { _sum: { globalRole: true } }],
+      ["sum another field", { _sum: { id: true } }],
+      ["avg", { _avg: { globalRole: true } }],
+      ["min", { _min: { globalRole: true } }],
+      ["max", { _max: { globalRole: true } }],
+      ["min and max", { _min: { globalRole: true }, _max: { globalRole: true } }],
+      ["sum with a take", { _sum: { globalRole: true }, take: 1 }],
+      ["sum with a skip", { _sum: { globalRole: true }, skip: 1 }],
+      ["sum with an orderBy", { _sum: { globalRole: true }, orderBy: { id: "asc" } }],
+    ];
+
+    test("every shape gets its own key", () => {
+      const keys = new Map<string, string>();
+      for (const [label, args] of AGGREGATE_SHAPES) {
+        const key = planKey(sqlite, "User", "aggregate", args);
+        const clash = keys.get(key);
+        expect(clash, `"${label}" collides with "${clash}"`).toBeUndefined();
+        keys.set(key, label);
+      }
+      expect(keys.size).toBe(AGGREGATE_SHAPES.length);
+    });
+
+    test("...and its own plan", () => {
+      const plans = new Map<string, string>();
+      for (const [label, args] of AGGREGATE_SHAPES) {
+        // `_count: false` leaves nothing to aggregate, which is a refusal
+        // rather than a plan — it earns its own *key*, which is what matters.
+        if (label === "count off" || label === "count that field off") continue;
+        // See the benign-duplicate test below.
+        if (label === "sum with an orderBy") continue;
+
+        const plan = getOrCompile(user, "aggregate", args, sqlite);
+        // The shaper is part of a plan's identity here, and it has to be:
+        // `_count: true` and `_count: { _all: true }` emit *the same*
+        // `count(*)` and differ only in whether the result is a number or an
+        // object. Comparing text and binders alone would report that as a
+        // collision, which it is not — the same widening `identityOf` above
+        // needed when `_count` relations arrived.
+        const identity = [
+          plan.text,
+          JSON.stringify(plan.bind(args)),
+          JSON.stringify(plan.shape([])),
+        ].join(" ");
+        const clash = plans.get(identity);
+        expect(
+          clash,
+          `"${label}" is indistinguishable from "${clash}":\n  ${identity}`,
+        ).toBeUndefined();
+        plans.set(identity, label);
+      }
+    });
+
+    /**
+     * The benign duplicate, pinned so it cannot quietly become the dangerous
+     * kind: an **unpaginated** aggregate drops its `orderBy`, because ordering
+     * the single row an aggregate produces means nothing. So it shares a plan
+     * with the same aggregate that had no `orderBy` at all — while still
+     * earning its own cache key, which costs a spare entry and never a wrong
+     * statement.
+     *
+     * It is still *parsed*, so a misspelled column is an error either way. That
+     * is the half worth keeping: validation must not depend on whether a
+     * different argument happened to be supplied.
+     */
+    test("an unpaginated orderBy is dropped, sharing a plan but not a key", () => {
+      const plain = { _sum: { globalRole: true } };
+      const ordered = { _sum: { globalRole: true }, orderBy: { id: "asc" } };
+
+      expect(getOrCompile(user, "aggregate", ordered, sqlite).text).toBe(
+        getOrCompile(user, "aggregate", plain, sqlite).text,
+      );
+      expect(planKey(sqlite, "User", "aggregate", ordered)).not.toBe(
+        planKey(sqlite, "User", "aggregate", plain),
+      );
+
+      // ...and paginating puts it back, which is what makes the drop safe.
+      expect(
+        getOrCompile(user, "aggregate", { ...ordered, take: 1 }, sqlite).text,
+      ).toContain(`order by "id" asc`);
+    });
+
+    // A count's `select` is the same rule under a different operation, and it
+    // already worked — pinned so that a change to `LITERAL_KEYS` cannot break
+    // one without the other noticing.
+    test("a count's select discriminates too", () => {
+      expect(planKey(sqlite, "User", "count", { select: { email: true } })).not.toBe(
+        planKey(sqlite, "User", "count", { select: { email: false } }),
+      );
+      expect(planKey(sqlite, "User", "count", { select: { email: true } })).not.toBe(
+        planKey(sqlite, "User", "count", {}),
+      );
+    });
   });
 
   test("the operation is part of the key", () => {

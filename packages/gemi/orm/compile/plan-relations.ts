@@ -37,13 +37,21 @@ import { resolveSelection } from "./select";
 
 /**
  * The keys a relation node accepts, which differ by kind. `take` / `skip` are
- * refused on both; see `assertNodeArgs`.
+ * a to-many's alone — on a to-one Prisma rejects them outright, since there is
+ * at most one row to page.
  *
  * Prisma's to-one include argument is `{ where?, select?, include? }` — it
  * takes a `where` (verified: it filters, and the relation comes back `null`
  * when nothing matches) but not an `orderBy`, since there is at most one row.
  */
-const RELATION_ARGS = new Set(["where", "orderBy", "select", "include"]);
+const RELATION_ARGS = new Set([
+  "where",
+  "orderBy",
+  "select",
+  "include",
+  "take",
+  "skip",
+]);
 const TO_ONE_ARGS = new Set(["where", "select", "include"]);
 
 /**
@@ -114,7 +122,7 @@ export interface RelationExecutor {
 }
 
 /** One relation as it appears in an `include` / `select` argument tree. */
-interface RelationNode {
+export interface RelationNode {
   /** The key on the parent's output object. */
   as: string;
   relation: RelationSchema;
@@ -224,6 +232,27 @@ export interface RelationPlan {
 }
 
 /**
+ * One relation a fold pulled in *below* the node itself, and what it pulled in
+ * turn.
+ *
+ * A folded tree is one statement, so nothing below the root ever reaches the
+ * related model's own `$exec` — and `redact` is the one policy capability that
+ * cannot ride along in the argument tree, because it is a row transform rather
+ * than a `where`. The parent runs it on the whole subtree's behalf, and it
+ * cannot do that without knowing the shape of what was folded. Depth-1 alone
+ * would leave a grandchild's redaction silently unapplied, which is the failure
+ * mode worth naming.
+ */
+export interface FoldedRelation {
+  as: string;
+  /** The related model's *name*, resolved through the registry at call time. */
+  model: string;
+  kind: "one" | "many";
+  /** What this relation folded in turn. Empty for a leaf. */
+  folded: FoldedRelation[];
+}
+
+/**
  * What a fold-into-the-root strategy adds to the root statement.
  *
  * Fragments rather than strings, like everything else the compiler emits, so a
@@ -236,6 +265,11 @@ export interface RootContribution {
   column: Fragment;
   /** Appended after the `from` clause — a `left join lateral (…) on true`. */
   join: Fragment;
+  /**
+   * The relations this one folded below itself. Empty when the node is a leaf,
+   * which is the common case.
+   */
+  folded: FoldedRelation[];
   /**
    * Turns the column's raw value into the shaped relation.
    *
@@ -367,7 +401,7 @@ export async function attachRelations(
  * *scalars*: `include` keeps them all, `select` keeps only what it names. What
  * they mean about relations is identical, so both funnel through here.
  */
-function relationNodes(
+export function relationNodes(
   schema: ModelSchema,
   args: any,
   operation: string,
@@ -488,6 +522,10 @@ function assertNodeArgs(
 
   for (const key of Object.keys(args).sort()) {
     if (args[key] === undefined) continue;
+    if (many && (key === "take" || key === "skip")) {
+      assertPageArgument(schema, node, operation, key, args[key]);
+      continue;
+    }
     if (many ? RELATION_ARGS.has(key) : TO_ONE_ARGS.has(key)) continue;
 
     // A to-one relation is at most one row, so ordering it is meaningless and
@@ -504,32 +542,93 @@ function assertNodeArgs(
       );
     }
 
-    // The decision recorded in the PR: `take` / `skip` on a to-many relation
-    // throw rather than being implemented under the batched strategy.
-    //
-    // `include: { accounts: { take: 5 } }` means five accounts *per user*, not
-    // five overall. Under batching, one query serves every parent, so a
-    // per-parent limit needs `row_number() over (partition by ...)` wrapped in
-    // a subquery — which cannot be expressed through `$exec` on the child's own
-    // model class, and so would need exactly the private query path invariant 1
-    // exists to prevent. It falls out for free from iteration 7's lateral
-    // strategy. The alternative — applying the limit globally — silently
-    // returns wrong data, which is worse than not supporting it.
+    // A to-one is at most one row, so there is nothing to page and Prisma says
+    // so. The to-many case is not refused here at all: whether a per-parent
+    // page can be expressed is a property of the *strategy*, not of the
+    // argument tree, and `assertPaginable` raises it where that is known.
     if (key === "take" || key === "skip") {
       throw new UnsupportedQueryError(
         `${node.as}.${key}`,
         schema.name,
         operation,
-        node.relation.kind === "many"
-          ? `A '${key}' inside a to-many relation is per parent, which the ` +
-            `batched relation planner cannot express. It arrives with the ` +
-            `lateral join strategy; until then, load '${node.as}' as its own ` +
-            `query, or narrow it with 'where'.`
-          : `Prisma does not accept '${key}' on a to-one relation.`,
+        `Prisma does not accept '${key}' on a to-one relation.`,
       );
     }
 
     throw new UnsupportedQueryError(`${node.as}.${key}`, schema.name, operation);
+  }
+}
+
+/**
+ * `take` / `skip` on a to-many node have to be numbers, and Prisma is stricter
+ * than "a number": a `skip` is a count of rows to pass over, so a negative one
+ * is meaningless and rejected rather than clamped.
+ *
+ * A *negative* `take` is not — it means "the last N", the same as at the root,
+ * and it changes the emitted SQL rather than a bound value. That is why the
+ * plan key records a `take`'s sign; see `shapeOfMember`.
+ */
+function assertPageArgument(
+  schema: ModelSchema,
+  node: RelationNode,
+  operation: string,
+  key: "take" | "skip",
+  value: unknown,
+): void {
+  if (typeof value !== "number" || !Number.isInteger(value)) {
+    throw new UnsupportedQueryError(
+      `${node.as}.${key}`,
+      schema.name,
+      operation,
+      `Expected an integer, got ${JSON.stringify(value)}.`,
+    );
+  }
+  if (key === "skip" && value < 0) {
+    throw new UnsupportedQueryError(
+      `${node.as}.skip`,
+      schema.name,
+      operation,
+      `A 'skip' counts rows to pass over, so it cannot be negative. Prisma ` +
+        `rejects one too.`,
+    );
+  }
+}
+
+/**
+ * Refuses a per-parent `take` / `skip` that the strategy about to plan this node
+ * cannot express, naming the one that can.
+ *
+ * `include: { accounts: { take: 5 } }` means five accounts *per user*, not five
+ * overall. The batched strategy serves every parent from one query, so the only
+ * `limit` it could emit would page the parents' children as a single set —
+ * plausible, and wrong. It refuses instead. The lateral strategy's subquery
+ * already runs once per parent row, so a `limit` inside it means exactly what
+ * Prisma means, which is why this is the one relation argument whose support is
+ * a property of the strategy rather than of the compiler.
+ *
+ * `why` says what put this node on a strategy that cannot page it — the dialect,
+ * a decline, or an explicit `strategy: "batched"` — because that is the part the
+ * caller can act on.
+ */
+export function assertPaginable(request: RelationRequest, why: string): void {
+  const node = request.node;
+  if (typeof node !== "object" || node === null || Array.isArray(node)) return;
+
+  for (const key of ["take", "skip"] as const) {
+    if ((node as Record<string, unknown>)[key] === undefined) continue;
+
+    throw new UnsupportedQueryError(
+      `${request.as}.${key}`,
+      request.parent.name,
+      request.operation,
+      `A '${key}' inside a to-many relation is per parent, and the batched ` +
+        `relation planner serves every parent from one query — so the only ` +
+        `limit it could emit would page every parent's children as one set. ` +
+        `Only the lateral join strategy can express it, by paginating inside ` +
+        `a subquery that already runs once per parent row, and it needs ` +
+        `Postgres: ${why}. Load '${request.as}' as its own query, or narrow ` +
+        `it with 'where'.`,
+    );
   }
 }
 
@@ -815,6 +914,10 @@ export const batchedStrategy: RelationStrategy = {
   name: BATCHED,
 
   plan(request: RelationRequest): RelationPlan {
+    // Before anything else, so that a node this strategy cannot serve fails at
+    // compile time rather than returning a page nobody asked for.
+    assertPaginable(request, `this query planned with the batched strategy`);
+
     const link = resolveLink(request.parent, request.child, request.relation);
 
     // Resolved at plan time so a stale artifact fails when the query is

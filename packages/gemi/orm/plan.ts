@@ -6,10 +6,15 @@ import type { RelationStrategy } from "./compile/plan-relations";
 import type { ModelSchema } from "./schema";
 
 /**
- * The public operations. `aggregate`, `groupBy` and the raw operations are
- * deliberately not among them: they are excluded at the operation level rather
- * than narrowed out of the argument types, because narrowing Prisma's recursive
- * where-inputs with `Omit` is miserable.
+ * The public operations. `groupBy` and the raw operations are deliberately not
+ * among them: they are excluded at the operation level rather than narrowed out
+ * of the argument types, because narrowing Prisma's recursive where-inputs with
+ * `Omit` is miserable.
+ *
+ * `aggregate` joined the list once there was a measured account of what Prisma
+ * returns for one — see `compile/aggregate.ts`. `groupBy` did not follow it in
+ * the same change: `having` is a second predicate compiler over aggregate
+ * expressions rather than columns, which is its own piece of work.
  */
 export type Operation =
   | "findUnique"
@@ -18,6 +23,7 @@ export type Operation =
   | "findFirstOrThrow"
   | "findMany"
   | "count"
+  | "aggregate"
   | "create"
   | "createMany"
   | "update"
@@ -162,6 +168,17 @@ const LITERAL_KEYS = new Set([
   "include",
   "distinct",
   "mode",
+  // An aggregate's functions decide the *projection*, so they are structural
+  // for exactly the reason `select` is — and they fail the same way. Without
+  // them, `_count: { email: true }` and `_count: { email: false }` both shape to
+  // `{_count:{email:boolean}}`, share one entry, and the second caller gets the
+  // first one's statement: a column they switched off, counted anyway. `_count:
+  // true` against `_count: false` is the same collision one level up.
+  "_count",
+  "_avg",
+  "_sum",
+  "_min",
+  "_max",
 ]);
 
 export function canonicalShape(
@@ -251,6 +268,12 @@ function shapeOfMember(
   if (key === "take" && typeof value === "number") {
     return `number:${Math.sign(value)}`;
   }
+  // `skip` is a parameter with no structural half at all, and it needs saying
+  // because a *relation node's* `skip` sits inside `include` — a literal
+  // subtree, where a bare number would otherwise be recorded verbatim and mint
+  // one plan entry per page. The root's `skip` never had the problem, which is
+  // exactly why it went unnoticed until a node could carry one.
+  if (key === "skip" && typeof value === "number") return "number";
   if (collapseLists && LIST_KEYS.has(key) && Array.isArray(value)) {
     return collapsedList(value);
   }

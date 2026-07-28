@@ -10,6 +10,7 @@ import {
   withTransaction,
 } from "./context";
 import {
+  type FoldedRelation,
   type NestedWriteStep,
   type RelationExecutor,
   type RelationStrategy,
@@ -817,7 +818,16 @@ export abstract class Model {
       if (plan.relations !== undefined && !system) {
         for (const relation of plan.relations) {
           if (relation.root === undefined) continue;
-          redactFolded(relation, result, op, system);
+          redactFolded(
+            {
+              as: relation.as,
+              model: relation.model,
+              folded: relation.root.folded,
+            },
+            result,
+            op,
+            system,
+          );
         }
       }
 
@@ -1006,39 +1016,58 @@ function findThenWrite(schema: ModelSchema, args: any, op: Operation): boolean {
 }
 
 /**
- * Runs a folded relation's own `redact` over the rows the strategy inlined.
+ * Runs a folded relation's own `redact` over the rows the strategy inlined, and
+ * then its descendants' over theirs.
  *
  * Only for a plan carrying `root` — a batched child came back through its own
  * `$exec` and has already redacted itself, and doing it twice is harmless but
  * pointless. Only outside `asSystem`, like every other policy.
+ *
+ * **Recursive, because the fold is.** A lateral node folds its whole subtree into
+ * one statement, so a grandchild's rows never enter its model's `$exec` either —
+ * and stopping at depth 1 would leave exactly the rows nobody thinks to check
+ * unredacted. `RootContribution.folded` is the shape of what was folded, which is
+ * the only thing that makes the walk possible.
  *
  * The child's policies are resolved through the registry by name, so this obeys
  * the same rule every nested read does: whatever is registered under that name
  * is the class whose policies apply.
  */
 function redactFolded(
-  relation: { as: string; model: string },
+  relation: { as: string; model: string; folded?: readonly FoldedRelation[] },
   result: unknown,
   op: Operation,
   system: boolean,
 ): void {
-  if (!registry.has(relation.model)) return;
+  const target = registry.has(relation.model)
+    ? registry.get<unknown>(relation.model)
+    : undefined;
+  const policies = target ? policiesFor(target) : [];
+  const nested = relation.folded ?? [];
 
-  const target = registry.get<unknown>(relation.model);
-  const policies = policiesFor(target);
-  if (policies.length === 0) return;
+  if (policies.length === 0 && nested.length === 0) return;
 
-  const schema = (target as { $schema?: { name?: string } }).$schema;
-  const context = policyContext(
-    schema?.name ?? relation.model,
-    op,
-    currentUser(),
-    system,
-  );
+  const context =
+    policies.length > 0
+      ? policyContext(
+          (target as { $schema?: { name?: string } }).$schema?.name ??
+            relation.model,
+          op,
+          currentUser(),
+          system,
+        )
+      : undefined;
+
+  // Collected whether or not *this* level redacts anything: an unpolicied model
+  // in the middle of the tree must not hide a policied one below it.
+  const children: Record<string, unknown>[] = [];
 
   for (const parent of rowsOf(result)) {
-    const children = parent?.[relation.as];
-    if (children === undefined || children === null) continue;
-    applyRedaction(policies, context, children);
+    const rows = parent?.[relation.as];
+    if (rows === undefined || rows === null) continue;
+    if (context) applyRedaction(policies, context, rows);
+    if (nested.length > 0) children.push(...rowsOf(rows));
   }
+
+  for (const child of nested) redactFolded(child, children, op, system);
 }

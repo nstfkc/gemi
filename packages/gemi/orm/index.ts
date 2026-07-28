@@ -66,6 +66,17 @@ export {
   type OrmScope,
 } from "./context";
 
+// Composable raw SQL. `DB.query` / `DB.execute` run what these build — the
+// place every shape the ORM declines is supposed to land.
+export {
+  empty,
+  join,
+  renderFragment,
+  sql,
+  unsafeSql,
+  type SqlFragment,
+} from "./sql";
+
 export { assertPoliciesRegistered } from "./registration";
 
 export {

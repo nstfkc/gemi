@@ -105,6 +105,27 @@ export interface SqlDialect {
    */
   encode(value: unknown, field: FieldSchema): unknown;
 
+  /**
+   * The same, for a value with **no declared column type** — a parameter
+   * interpolated into a composed raw fragment, where there is no schema to ask.
+   *
+   * It exists because "raw" cannot mean "unportable". Bun's SQLite driver
+   * rejects a `Date` outright (`Binding expected string, TypedArray, boolean,
+   * number, bigint or null`) while Postgres takes one, so
+   * ``sql`where "createdAt" > ${date}` `` would work on one dialect and throw on
+   * the other — and the caller has no dialect-independent value to reach for
+   * instead, because milliseconds are only correct if that is what the ORM
+   * stored. Which it is: this converts to exactly what `encode` writes for a
+   * `DateTime`, so a raw statement compares against ORM-written rows correctly.
+   *
+   * Deliberately narrow. It normalises the JavaScript types whose SQL form the
+   * ORM has already decided — a `Date`, a boolean — and touches nothing else. A
+   * plain object is *not* JSON-encoded here: the compiler only knows to do that
+   * because a field says `Json`, and guessing from the value would turn a
+   * mistyped parameter into a successfully-written string.
+   */
+  encodeUntyped(value: unknown): unknown;
+
   /** Driver value -> the value Prisma would have returned for this field. */
   decode(value: unknown, field: FieldSchema): unknown;
 
