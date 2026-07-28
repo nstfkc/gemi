@@ -90,7 +90,10 @@ export function compileRead(
   // unplanned path and pays nothing.
   const relations =
     op === "count"
-      ? { plans: [] as ReturnType<typeof planRelations>["plans"], keyFields: [] }
+      ? {
+          plans: [] as ReturnType<typeof planRelations>["plans"],
+          keyFields: [],
+        }
       : planRelations(schema, args, dialect, op, strategy);
 
   const folded = relations.plans.some((plan) => plan.root !== undefined);
@@ -133,7 +136,14 @@ export function compileRead(
     if (!paginated) {
       statement = concat(counted, from, whereClause);
     } else {
-      const { clause, terms } = pagination(schema, args, dialect, parsed, SINGLE_ROW.has(op));
+      const { clause, terms } = pagination(
+        schema,
+        op,
+        args,
+        dialect,
+        parsed,
+        SINGLE_ROW.has(op),
+      );
       const order = compileOrderBy(terms, dialect);
       // One column, not `*`: the subquery exists to be counted, so the narrowest
       // thing that keeps a row identity is right.
@@ -149,7 +159,10 @@ export function compileRead(
       );
     }
 
-    const { text, binders } = render(statement, dialect, { model: schema.name, operation: op });
+    const { text, binders } = render(statement, dialect, {
+      model: schema.name,
+      operation: op,
+    });
     return {
       text,
       bind: bindValues(binders),
@@ -194,6 +207,7 @@ export function compileRead(
     reversed,
   } = pagination(
     schema,
+    op,
     args,
     dialect,
     parseOrderBy(schema, args?.orderBy, op, {
@@ -214,7 +228,10 @@ export function compileRead(
     paginationClause,
   );
 
-  const { text, binders } = render(statement, dialect, { model: schema.name, operation: op });
+  const { text, binders } = render(statement, dialect, {
+    model: schema.name,
+    operation: op,
+  });
   const shaper = buildRowShaper(
     fields,
     dialect,
@@ -307,4 +324,3 @@ function assertArgs(schema: ModelSchema, op: Operation, args: any): void {
     }
   }
 }
-

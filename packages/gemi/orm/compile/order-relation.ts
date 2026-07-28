@@ -91,6 +91,7 @@ export function relationOrderExpression(
     dialect,
     `_o${index}`,
     `${dialect.quoteIdent(schema.table)}.`,
+    operation,
   );
 
   const selected = projection(

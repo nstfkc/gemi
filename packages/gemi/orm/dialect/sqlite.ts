@@ -123,6 +123,14 @@ export class SqliteDialect implements SqlDialect {
     return concat(sql(`${lhs} like `), param(pattern));
   }
 
+  // Not offered, and deliberately: see `SqlDialect.ignoreConflicts`. SQLite can
+  // express it — `on conflict do nothing` works here — but Prisma rejects the
+  // argument on this dialect, so implementing it would put gemi ahead of Prisma
+  // on the one dialect where the differential harness could no longer check it.
+  ignoreConflicts(): Fragment | null {
+    return null;
+  }
+
   // SQLite cannot parse `offset` without a preceding `limit`, so a bare `skip`
   // needs a limit anyway. `-1` is SQLite's "no limit", and it goes through a
   // parameter rather than into the text like everything else.
@@ -188,7 +196,17 @@ export class SqliteDialect implements SqlDialect {
         // stored representation the dialect's decision rather than the driver's.
         return typeof value === "boolean" ? (value ? 1 : 0) : value;
       case "Json":
-        return typeof value === "string" ? value : JSON.stringify(value);
+        // **Always serialized, never passed through.** SQLite stores JSON as
+        // text, so the column holds whatever string this returns — and the
+        // `typeof value === "string" ? value : …` guard it used to carry could
+        // not tell "already JSON text" from "a JSON string value". A field set
+        // to the string `"42"` was stored as the text `42` and decoded back as
+        // the *number* 42.
+        //
+        // `JSON.stringify` on every value is unambiguous: a string becomes
+        // `"42"` with its quotes, which is what `JSON.parse` needs to hand back
+        // a string. The mirror of `decode`, which parses unconditionally.
+        return JSON.stringify(value);
       default:
         // BigInt passes through. Bun's driver truncates integers above 2^53 on
         // the way in, which affects a raw `db.sql` query identically — it is

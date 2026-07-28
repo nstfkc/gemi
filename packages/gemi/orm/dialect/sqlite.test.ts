@@ -161,9 +161,27 @@ describe("encode()", () => {
     expect(sqlite.encode(false, field("Boolean"))).toBe(0);
   });
 
-  test("Json is serialised", () => {
+  /**
+   * Serialised unconditionally. The `typeof value === "string" ? value : …`
+   * guard this used to carry could not tell "already JSON text" from "a JSON
+   * string value", so a field set to `"42"` was stored as the text `42` and
+   * decoded back as the *number* 42.
+   */
+  test("Json is serialised, including when it is already a string", () => {
     expect(sqlite.encode({ a: 1 }, field("Json"))).toBe('{"a":1}');
-    expect(sqlite.encode('{"a":1}', field("Json"))).toBe('{"a":1}');
+    // The shapes that broke: quoting is what makes them survive `JSON.parse`.
+    expect(sqlite.encode("42", field("Json"))).toBe('"42"');
+    // A string whose *contents* are JSON is still a string, and comes back as
+    // one — the case the old guard silently turned into an object.
+    expect(sqlite.encode('{"a":1}', field("Json"))).toBe(
+      JSON.stringify('{"a":1}'),
+    );
+    expect(sqlite.encode("text", field("Json"))).toBe('"text"');
+    // ...and they round-trip through the decoder beside it.
+    for (const value of [{ a: 1 }, "42", "text", [1, 2], null]) {
+      const stored = sqlite.encode(value, field("Json"));
+      expect(sqlite.decode(stored, field("Json"))).toEqual(value);
+    }
   });
 
   test("scalars the driver already binds correctly pass through", () => {
