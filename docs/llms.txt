@@ -26,6 +26,11 @@ Each link below points to a self-contained Markdown page. For a single file cont
 - [Forms](https://nstfkc.github.io/gemi/forms.md): the Form component, surfacing validation errors, form-status hooks.
 - [Navigation](https://nstfkc.github.io/gemi/navigation.md): Link, useNavigate, useParams, useSearchParams, and the Redirect component vs facade.
 
+## Data
+
+- [ORM](https://nstfkc.github.io/gemi/orm.md): the Prisma-typed, gemi-executed query layer — the Prisma generator block, the thirteen operations, relations and the batched/lateral strategies, ambient transactions, policies that apply to nested reads, soft deletes.
+- [Rows & Entities](https://nstfkc.github.io/gemi/orm-rows-and-entities.md): plain objects by default, opt-in provenance with track + save, and wrap for methods on a record.
+
 ## Auth
 
 - [Authentication](https://nstfkc.github.io/gemi/authentication.md): app/config/auth.ts, adapters, sessions, magic links, OAuth, the Auth facade, and client auth hooks.
