@@ -1,5 +1,9 @@
 import type { SqlDialect } from "../dialect";
-import { UnknownFieldError, UnsupportedQueryError } from "../errors";
+import {
+  InvalidArgumentError,
+  UnknownFieldError,
+  UnsupportedQueryError,
+} from "../errors";
 import type { QueryPlan } from "../plan";
 import type { FieldSchema, ModelSchema, ScalarType } from "../schema";
 import {
@@ -276,7 +280,7 @@ export function aggregateTerms(
       requested === null ||
       Array.isArray(requested)
     ) {
-      throw new UnsupportedQueryError(
+      throw new InvalidArgumentError(
         kind,
         schema.name,
         op,
@@ -311,7 +315,7 @@ function countSelectTerms(
   select: any,
 ): Term[] {
   if (typeof select !== "object" || select === null || Array.isArray(select)) {
-    throw new UnsupportedQueryError(
+    throw new InvalidArgumentError(
       "select",
       schema.name,
       op,
@@ -495,7 +499,7 @@ function assertArgs(
   }
 
   if (typeof args !== "object" || Array.isArray(args)) {
-    throw new UnsupportedQueryError(
+    throw new InvalidArgumentError(
       String(args),
       schema.name,
       op,
@@ -523,6 +527,11 @@ function assertArgs(
       );
     }
 
-    throw new UnsupportedQueryError(key, schema.name, op);
+    throw new UnsupportedQueryError(
+      key,
+      schema.name,
+      op,
+      `${op} takes ${[...AGGREGATE_ARGS].sort().join(", ")}.`,
+    );
   }
 }

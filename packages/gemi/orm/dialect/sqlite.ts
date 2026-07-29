@@ -117,6 +117,28 @@ export class SqliteDialect implements SqlDialect {
     );
   }
 
+  /**
+   * Never. SQLite has no `unnest`, and its row-value `in` still needs one
+   * `(?, ?)` group per tuple — so the text grows with the list either way and
+   * there is nothing to gain over the `OR` the loader already builds.
+   *
+   * That is consistent with the single-column case: `plan.ts` records that "a
+   * coarser key cannot fix the SQLite side", because every distinct length is
+   * genuinely a different statement here.
+   */
+  canBindCompositeIn(): boolean {
+    return false;
+  }
+
+  compositeIn(): Fragment {
+    // Unreachable: the caller asks `canBindCompositeIn` first and keeps the
+    // portable `OR` when it says no. Throwing rather than emitting something
+    // plausible keeps the two from disagreeing silently.
+    throw new Error(
+      "SQLite cannot bind a composite `in`; `canBindCompositeIn` is the guard.",
+    );
+  }
+
   like(lhs: string, _insensitive: boolean, pattern: Binder): Fragment {
     // `_insensitive` is unreachable — the compiler checks
     // `supportsInsensitiveMode` and raises a contextful error first.

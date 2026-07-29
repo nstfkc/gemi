@@ -1,5 +1,9 @@
+import {
+  InvalidArgumentError,
+  RecordNotFoundError,
+  UnsupportedQueryError,
+} from "../errors";
 import type { SqlDialect } from "../dialect";
-import { RecordNotFoundError, UnsupportedQueryError } from "../errors";
 import type { ModelSchema, RelationSchema } from "../schema";
 import type { Binder } from "./fragment";
 import {
@@ -7,6 +11,7 @@ import {
   type NestedWriteStep,
   relatedSchema,
   resolveLink,
+  singleFieldLink,
 } from "./plan-relations";
 import { matchUniqueKey } from "./unique";
 
@@ -195,7 +200,7 @@ function planOne(
   dialect: SqlDialect,
 ): void {
   if (typeof node !== "object" || node === null || Array.isArray(node)) {
-    throw new UnsupportedQueryError(
+    throw new InvalidArgumentError(
       `data.${relation.name}`,
       schema.name,
       operation,
@@ -225,7 +230,23 @@ function planOne(
   if (keys.length === 0) return;
 
   const child = relatedSchema(schema, relation);
-  const link = resolveLink(schema, child, relation, operation);
+
+  // **Narrowed to one field, deliberately.** Reading across a composite
+  // relation works (#67); writing through one would have to contribute that
+  // many foreign-key columns to this insert, which is a different piece of
+  // work — so it is refused here by name rather than silently writing the
+  // first field. The narrowing is a function call rather than an index, so
+  // there is no single-field property on `Link` to reach for by accident.
+  //
+  // Safe to do before the join-table branch below: an implicit many-to-many
+  // links parent and child by their primary keys, one field each side, so the
+  // narrowing never refuses one — and it carries `join` through untouched.
+  const link = singleFieldLink(
+    resolveLink(schema, child, relation, operation),
+    schema,
+    relation,
+    operation,
+  );
 
   // An implicit many-to-many is *neither* side: the keys live in a third table
   // with no model, so both directions are the same work and the operand set is
@@ -559,7 +580,7 @@ function planOwningSide(
     operand === null ||
     Array.isArray(operand)
   ) {
-    throw new UnsupportedQueryError(
+    throw new InvalidArgumentError(
       `data.${relation.name}.connect`,
       schema.name,
       operation,
@@ -907,6 +928,11 @@ function planForeignSide(
               // NOT pre-scoped: clearing a foreign key is a write to the child,
               // so the child's scope decides which rows are reachable.
               false,
+              // ...but the column is *ours*: the caller wrote `disconnect: { id }`
+              // and the ORM chose to null the key. Without this a child scoped
+              // on its own foreign key is refused for a write it never made —
+              // the same case as `connect`, see #98 and `ormAuthoredFields`.
+              [childField],
             );
             continue;
           }
@@ -1151,6 +1177,10 @@ function planForeignSide(
           // to the child, and the child's scope decides which rows are reachable
           // — otherwise `connect` re-parents another tenant's row.
           false,
+          // ...and the column being written is *ours*, not the caller's. Without
+          // this, a child whose policy scopes on its foreign key is refused for
+          // a write it never made — see #98 and `ormAuthoredFields`.
+          [childField],
         );
       }
     },
@@ -1251,7 +1281,7 @@ function planJoinTable(
   schema: ModelSchema,
   relation: RelationSchema,
   child: ModelSchema,
-  link: Link,
+  link: { parentField: string; childField: string; join?: Link["join"] },
   key: string,
   operand: unknown,
   operation: string,
@@ -1750,7 +1780,7 @@ function assertCreateManyOperand(
   const at = `data.${relation.name}.createMany`;
 
   if (typeof operand !== "object" || operand === null || Array.isArray(operand)) {
-    throw new UnsupportedQueryError(
+    throw new InvalidArgumentError(
       at,
       schema.name,
       operation,
@@ -1764,7 +1794,7 @@ function assertCreateManyOperand(
   );
 
   if (!keys.includes("data")) {
-    throw new UnsupportedQueryError(at, schema.name, operation, `Expected a 'data' key.`);
+    throw new InvalidArgumentError(at, schema.name, operation, `Expected a 'data' key.`);
   }
 
   for (const key of keys) {

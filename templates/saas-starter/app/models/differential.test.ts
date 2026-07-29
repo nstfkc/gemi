@@ -9,6 +9,8 @@ import {
 } from "./differential";
 import {
   AccountModel,
+  LedgerEntryModel,
+  LedgerModel,
   OrganizationModel,
   SocialAccountModel,
   UserModel,
@@ -20,6 +22,27 @@ import {
 const EPOCH = 1600000000000;
 
 async function seed(prisma: PrismaClient) {
+  // A relation joining on two fields (#67), in the tenant-scoped shape: the
+  // *same* ledger code appears in two tenants, so a join that used only the
+  // first field — or only the second — returns the wrong entries rather than
+  // failing. Two ledgers in tenant 1 whose codes differ only in length also
+  // pin the stitch key against concatenation: `(1, "a")` and `(1, "ab")`.
+  await prisma.ledger.createMany({
+    data: [
+      { tenantId: 1, code: "a", title: "one-a" },
+      { tenantId: 1, code: "ab", title: "one-ab" },
+      { tenantId: 2, code: "a", title: "two-a" },
+    ],
+  });
+  await prisma.ledgerEntry.createMany({
+    data: [
+      { tenantId: 1, ledgerCode: "a", amount: 10, memo: "first" },
+      { tenantId: 1, ledgerCode: "a", amount: 20, memo: null },
+      { tenantId: 1, ledgerCode: "ab", amount: 30, memo: "ab only" },
+      { tenantId: 2, ledgerCode: "a", amount: 40, memo: "other tenant" },
+    ],
+  });
+
   // Two organizations so a to-one include has something to discriminate, and
   // so `organization.users` is a to-many with more than one member.
   await prisma.organization.createMany({
@@ -1003,6 +1026,8 @@ function suite(label: string, url?: string) {
           SocialAccount: SocialAccountModel as never,
           Account: AccountModel as never,
           Organization: OrganizationModel as never,
+          Ledger: LedgerModel as never,
+          LedgerEntry: LedgerEntryModel as never,
         },
         seed,
         url,
@@ -1011,6 +1036,62 @@ function suite(label: string, url?: string) {
 
     afterAll(async () => {
       await differential?.dispose();
+    });
+
+    /**
+     * A relation joining on **two** fields (#67).
+     *
+     * The seed is arranged so a partial join is *wrong* rather than empty: the
+     * code `"a"` exists in both tenants, so joining on the code alone pulls in
+     * the other tenant's entries, and joining on the tenant alone pulls in
+     * `"ab"`'s. Either mistake returns rows, which is why these compare against
+     * Prisma rather than asserting a count.
+     */
+    describe("composite relations", () => {
+      const COMPOSITE: [string, string, string, unknown][] = [
+        ["to-many include", "Ledger", "findMany", {
+          orderBy: [{ tenantId: "asc" }, { code: "asc" }],
+          include: { entries: { orderBy: { id: "asc" } } },
+        }],
+        ["to-one include", "LedgerEntry", "findMany", {
+          orderBy: { id: "asc" }, include: { ledger: true },
+        }],
+        ["to-many include with a select on the child", "Ledger", "findMany", {
+          orderBy: [{ tenantId: "asc" }, { code: "asc" }],
+          include: { entries: { select: { amount: true }, orderBy: { amount: "asc" } } },
+        }],
+        // The stitch key has to come back even when the select omits it, and
+        // then be removed again — for *both* fields.
+        ["to-one select that omits both key fields", "LedgerEntry", "findMany", {
+          orderBy: { id: "asc" }, select: { amount: true, ledger: true },
+        }],
+        ["relation filter through a composite join", "Ledger", "findMany", {
+          where: { entries: { some: { amount: { gte: 30 } } } },
+          orderBy: [{ tenantId: "asc" }, { code: "asc" }],
+        }],
+        ["relation filter, none", "Ledger", "findMany", {
+          where: { entries: { none: { amount: { gte: 30 } } } },
+          orderBy: [{ tenantId: "asc" }, { code: "asc" }],
+        }],
+        ["_count through a composite join", "Ledger", "findMany", {
+          orderBy: [{ tenantId: "asc" }, { code: "asc" }],
+          include: { _count: { select: { entries: true } } },
+        }],
+        ["orderBy through a composite join", "LedgerEntry", "findMany", {
+          orderBy: [{ ledger: { title: "desc" } }, { id: "asc" }],
+        }],
+        ["a where on the far side of a to-one", "LedgerEntry", "findMany", {
+          where: { ledger: { title: "one-a" } }, orderBy: { id: "asc" },
+        }],
+        ["nested include, two levels through the composite", "Ledger", "findMany", {
+          orderBy: [{ tenantId: "asc" }, { code: "asc" }],
+          include: { entries: { orderBy: { id: "asc" }, include: { ledger: true } } },
+        }],
+      ];
+
+      test.each(COMPOSITE)("%s", async (_name, model, operation, args) => {
+        await differential.expectSame(model, operation, args);
+      });
     });
 
     test.each(CASES)("%s", async (_name, operation, args) => {

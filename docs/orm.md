@@ -295,6 +295,31 @@ On SQLite the error names the dialect and says so. If a batch is too large for o
 split inside a transaction, and `skipDuplicates` survives the split: the counts sum, and a conflict
 in a later chunk does not roll back an earlier one, because `do nothing` is not an error.
 
+### What a refusal tells you
+
+Three classes, and which one you get says what to do next:
+
+| Error | Means | Do |
+| --- | --- | --- |
+| `UnsupportedQueryError` | not implemented **yet** | wait for a release, or use what the message names |
+| `UnsupportedByDesignError` | decided against | change the call — the message says to what |
+| `InvalidArgumentError` | the argument exists, the value cannot mean anything | fix the value |
+
+The third is the one worth knowing about. `take: "-2"` used to report that the ORM "does not support
+`take` yet" — wrong on both halves: it does, and there is nothing to wait for. It now says
+`Invalid 'take' (User.findMany). Expected an integer, got "-2".`
+
+All three subclass `UnsupportedQueryError`, so `catch (e) { if (e instanceof UnsupportedQueryError) }`
+still catches every one. The specific classes are for the person reading the message.
+
+One edge is deliberate: an argument that is not in the grammar **at all** — a typo — keeps
+`UnsupportedQueryError` and its "yet", because the same check also refuses real Prisma arguments this
+ORM has not implemented, and nothing there can tell the two apart. The sentence immediately after it
+lists what the operation *does* take, which is what tells you a typo is a typo.
+
+Every refusal carries a second sentence saying what to do instead — that is a required argument
+rather than a convention, so it cannot be dropped by a call site added later.
+
 ### Per-call options
 
 A second parameter, not a key inside `args` — intersecting Prisma's own arg types with a
@@ -373,6 +398,19 @@ await List.create({
 | `updateMany` | Writes your columns to this parent's rows matching a filter. |
 | `deleteMany` | Deletes this parent's rows matching a filter — the filter goes directly under the key, not inside a `where`. |
 
+**A relation may join on more than one field.** `@relation(fields: [tenantId, orderId], references:
+[tenantId, id])` is the tenant-scoped composite-key style, and every read surface handles it: an
+`include` under either strategy, a relation filter, a `_count`, and an `orderBy` through the
+relation. The correlation becomes one equality per field; the batched strategy filters its children
+with an `OR` of `AND`s rather than a tuple `in`, because that is one shape both dialects already
+compile.
+
+Two consequences worth knowing. A composite join uses one placeholder *per field per parent*, so
+SQLite's parameter ceiling arrives proportionally sooner on a wide `include` — `ParameterLimitError`
+still names it rather than letting the driver fail. And a **nested write** through a composite
+relation is refused: it would have to contribute that many foreign-key columns to the insert, which
+is not implemented. Write the child separately with its keys set.
+
 Which direction a nested write runs in is decided by **who holds the foreign key**. When this model
 holds it, the far row is resolved or created *first* and collapses into one more column. When the
 child holds it, nothing can be written until this row exists, so those run after — which is why the
@@ -385,6 +423,10 @@ Three things follow from that, and all three are load-bearing:
 - **The child's policies apply.** Each nested row goes through the related model's own `$exec`, so
   its `onCreate` stamps the tenant column and its `scope` decides which rows a `connect` can reach.
   A `createMany` writes its rows in one statement and they are *each* scoped.
+  A relation operand writes one column — the relation's own key — and the
+  scope-escape guard knows the ORM wrote it, so a child scoped on its foreign
+  key can still be connected. A column *you* name in `data` is judged exactly as
+  before.
 - **A failure anywhere rolls the whole thing back**, including the parent row.
 
 `connectOrCreate` is worth one more line, because a scoped-away row makes it take the *create*

@@ -40,7 +40,9 @@ import {
   applyRedaction,
   currentUser,
   isPreScoped,
+  markOrmAuthored,
   markPreScoped,
+  ormAuthoredFields,
   policiesFor,
   policyContext,
   type PolicyEntry,
@@ -582,7 +584,12 @@ export abstract class Model {
       // the same predicate twice; re-running `redact` on an already-redacted row
       // is a no-op.
       if (!preScoped) {
-        effective = applyPolicies(policies, policy, args);
+        effective = applyPolicies(
+          policies,
+          policy,
+          args,
+          ormAuthoredFields(options),
+        );
       }
     }
 
@@ -643,16 +650,20 @@ export abstract class Model {
       // grandchild folded anyway and the statement count was one lower than the
       // caller asked for. Found by the query-count test, which is the only thing
       // that could have found it: the results were identical either way.
-      exec: (model, operation, relationArgs, preScoped) =>
-        registry
+      exec: (model, operation, relationArgs, preScoped, ormAuthored) => {
+        const base = preScoped
+          ? markPreScoped({ strategy: options?.strategy })
+          : { strategy: options?.strategy };
+        return registry
           .get<typeof Model>(model)
           .$exec(
             operation as Operation,
             relationArgs,
-            (preScoped
-              ? markPreScoped({ strategy: options?.strategy })
-              : { strategy: options?.strategy }) as never,
-          ),
+            (ormAuthored && ormAuthored.length > 0
+              ? markOrmAuthored(base, ormAuthored)
+              : base) as never,
+          );
+      },
       // The one query with no model behind it — the implicit m-n join table —
       // resolves its connection here rather than reaching for the pool, so it
       // joins the transaction like everything else.

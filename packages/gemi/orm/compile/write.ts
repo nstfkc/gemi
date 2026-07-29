@@ -1,6 +1,7 @@
 import { clientSideValue, hasClientSideValue } from "../defaults";
 import type { SqlDialect } from "../dialect";
 import {
+  InvalidArgumentError,
   MissingRequiredValueError,
   ReturningUnsupportedError,
   UnknownFieldError,
@@ -125,7 +126,13 @@ export function compileWrite(
     case "upsert":
       return compileUpsert(schema, op, args, dialect);
     default:
-      throw new UnsupportedQueryError(op, schema.name, op);
+      throw new UnsupportedQueryError(
+        op,
+        schema.name,
+        op,
+        `'${op}' is not a write operation. The writes are ` +
+          `${Object.keys(WRITE_ARGS).sort().join(", ")}.`,
+      );
   }
 }
 
@@ -271,7 +278,7 @@ function skipDuplicatesClause(
   if (requested === undefined) return null;
 
   if (typeof requested !== "boolean") {
-    throw new UnsupportedQueryError(
+    throw new InvalidArgumentError(
       "skipDuplicates",
       schema.name,
       op,
@@ -318,7 +325,7 @@ function createManyColumns(
 ): WriteColumn[][] {
   const supplied = rows.map((row, index) => {
     if (typeof row !== "object" || row === null || Array.isArray(row)) {
-      throw new UnsupportedQueryError(
+      throw new InvalidArgumentError(
         `data[${index}]`,
         schema.name,
         op,
@@ -921,7 +928,7 @@ function insertColumns(
 ): WriteColumn[] {
   if (data !== undefined && data !== null) {
     if (typeof data !== "object" || Array.isArray(data)) {
-      throw new UnsupportedQueryError(
+      throw new InvalidArgumentError(
         "data",
         schema.name,
         op,
@@ -1063,7 +1070,7 @@ function updateAssignments(
 ): Fragment[] {
   if (data !== undefined && data !== null) {
     if (typeof data !== "object" || Array.isArray(data)) {
-      throw new UnsupportedQueryError(
+      throw new InvalidArgumentError(
         "data",
         schema.name,
         op,
@@ -1383,7 +1390,7 @@ function assertArgs(schema: ModelSchema, op: Operation, args: any): void {
   }
 
   if (typeof args !== "object" || Array.isArray(args)) {
-    throw new UnsupportedQueryError(
+    throw new InvalidArgumentError(
       String(args),
       schema.name,
       op,
@@ -1404,7 +1411,12 @@ function assertArgs(schema: ModelSchema, op: Operation, args: any): void {
   for (const key of Object.keys(args).sort()) {
     if (args[key] === undefined) continue;
     if (!allowed.has(key)) {
-      throw new UnsupportedQueryError(key, schema.name, op);
+      throw new UnsupportedQueryError(
+        key,
+        schema.name,
+        op,
+        `${op} takes ${[...allowed].sort().join(", ")}.`,
+      );
     }
   }
 

@@ -202,6 +202,13 @@ export async function createDifferential(options: {
     "User",
     "OrganizationInvitation",
     "Organization",
+    // The composite-relation pair (#67). Adding a model to the schema without
+    // adding it here is a *silent* omission on SQLite, where every run gets a
+    // fresh temp database, and a loud one on Postgres, where the second run's
+    // seed collides with the first's rows — which is exactly how this was
+    // found, and the second time in this suite's history.
+    "LedgerEntry",
+    "Ledger",
   ];
 
   /**

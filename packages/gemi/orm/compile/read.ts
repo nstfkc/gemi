@@ -1,5 +1,9 @@
 import type { SqlDialect } from "../dialect";
-import { UnsupportedByDesignError, UnsupportedQueryError } from "../errors";
+import {
+  InvalidArgumentError,
+  UnsupportedByDesignError,
+  UnsupportedQueryError,
+} from "../errors";
 import type { Operation, QueryPlan } from "../plan";
 import type { ModelSchema } from "../schema";
 import { buildRowShaper } from "../shape";
@@ -327,7 +331,7 @@ function assertArgs(schema: ModelSchema, op: Operation, args: any): void {
   if (args === undefined || args === null) return;
 
   if (typeof args !== "object" || Array.isArray(args)) {
-    throw new UnsupportedQueryError(
+    throw new InvalidArgumentError(
       String(args),
       schema.name,
       op,
@@ -356,6 +360,11 @@ function assertArgs(schema: ModelSchema, op: Operation, args: any): void {
       throw new UnsupportedByDesignError(key, schema.name, op, permanent);
     }
 
-    throw new UnsupportedQueryError(key, schema.name, op);
+    throw new UnsupportedQueryError(
+      key,
+      schema.name,
+      op,
+      `${op} takes ${[...allowed].sort().join(", ")}.`,
+    );
   }
 }

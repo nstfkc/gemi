@@ -3,13 +3,16 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { PostgresDialect } from "../dialect/postgres";
 import { SqliteDialect } from "../dialect/sqlite";
 import {
+  InvalidArgumentError,
   ParameterLimitError,
   UnknownFieldError,
   UnsupportedByDesignError,
   UnsupportedQueryError,
 } from "../errors";
 import { USER_COLUMNS, account, mapped, user } from "../fixtures";
+import { compile } from "./index";
 import { compileRead } from "./read";
+import { compileWrite } from "./write";
 import { compileWhere } from "./where";
 import * as registry from "../registry";
 import type { RelationStrategy } from "./plan-relations";
@@ -697,6 +700,124 @@ describe("arguments refused by design", () => {
 });
 
 // The property the plan cache is built on, asserted directly.
+/**
+ * #61's second half: **every refusal says what to do instead.**
+ *
+ * The first half — separating "not yet" from "out of scope" — landed in #78 as
+ * `UnsupportedByDesignError`. This is the other one: `detail` was optional, and
+ * the call sites that omitted it were the highest-traffic ones, on the path a
+ * typo takes. They said only *that* something was refused, to the reader least
+ * likely to know why.
+ *
+ * `detail` is required now, so `tsc` enforces it rather than a convention —
+ * and the enforcement found three more sites than a search for the pattern
+ * did, which is the argument for the type over the grep.
+ *
+ * The assertion is deliberately not "the message contains X": it is that a
+ * refusal is more than its first sentence. A call site added later with an
+ * empty string would satisfy the compiler and fail here.
+ */
+/**
+ * The three categories a refusal can be in, and the sentence each owes — the
+ * completion of #61.
+ *
+ *   not implemented yet     UnsupportedQueryError      wait for a release
+ *   decided against         UnsupportedByDesignError   change the call   (#78)
+ *   implemented, bad value  InvalidArgumentError       fix the value
+ *
+ * The third is why "yet" was corrected four times at four call sites (#82, #88,
+ * #100, #101) before the issue that owns it was found: `take` *is* implemented,
+ * `"-2"` is not a take, and telling that caller to wait for a release sends
+ * them to a changelog when the fix is one character in their own code.
+ *
+ * All three subclass `UnsupportedQueryError`, so a handler catching the base
+ * class is unaffected — the specific classes are for the reader.
+ */
+describe("a refusal says which kind of refusal it is", () => {
+  test.each([
+    ["a value of the wrong type", { take: "-2" }, InvalidArgumentError, /^Invalid 'take'/],
+    ["a value out of range", { skip: -1 }, InvalidArgumentError, /^Invalid 'skip'/],
+    ["a direction that is not one", { orderBy: { id: "sideways" } }, InvalidArgumentError, /^Invalid/],
+    ["a mode that is not one", { where: { email: { contains: "x", mode: "loud" } } }, InvalidArgumentError, /^Invalid/],
+    ["an argument that does not exist", { nope: 1 }, UnsupportedQueryError, /does not support .* yet/],
+    ["an argument refused by design", { distinct: ["id"] }, UnsupportedByDesignError, /decision rather than a gap/],
+  ])("%s", (_label, args, kind, shape) => {
+    expect(() => text(args)).toThrow(kind as never);
+    expect(() => text(args)).toThrow(shape as RegExp);
+  });
+
+  /**
+   * The property that matters more than the wording: a bad *value* must never
+   * be reported as a missing *feature*. That is the sentence that sent four
+   * PRs to four call sites.
+   */
+  test.each([
+    ["take", { take: "-2" }],
+    ["skip", { skip: -1 }],
+    ["orderBy", { orderBy: { id: "sideways" } }],
+    ["mode", { where: { email: { contains: "x", mode: "loud" } } }],
+  ])("a bad value for %s never says 'yet'", (_label, args) => {
+    expect(() => text(args)).not.toThrow(/yet/);
+  });
+
+  /**
+   * The edge, asserted so it is a decision rather than an oversight.
+   *
+   * An argument that is not in the grammar at all keeps "yet", because the same
+   * check refuses a typo and a real Prisma argument this ORM has not
+   * implemented, and nothing there can tell them apart. What carries the reader
+   * is the *next* sentence, which #102 made mandatory: it lists what the
+   * operation does take.
+   */
+  test("an argument outside the grammar keeps 'yet', and says what is taken", () => {
+    expect(() => text({ nope: 1 })).toThrow(/yet/);
+    expect(() => text({ nope: 1 })).toThrow(/findMany takes .*where/);
+  });
+
+  /** ...and every one of them still answers to the base class. */
+  test("all three are catchable as UnsupportedQueryError", () => {
+    for (const args of [{ take: "-2" }, { nope: 1 }, { distinct: ["id"] }]) {
+      expect(() => text(args)).toThrow(UnsupportedQueryError);
+    }
+  });
+});
+
+describe("every refusal says what to do instead", () => {
+  const REFUSALS: [string, () => unknown][] = [
+    ["an argument the read does not take", () => text({ nope: 1 })],
+    ["an argument the write does not take", () =>
+      compileWrite(user, "create", { data: { email: "a@b.c" }, nope: 1 } as any, sqlite)],
+    ["an operator that is not one", () => text({ where: { email: { weird: 1 } } })],
+    ["a mode that is neither", () =>
+      text({ where: { email: { contains: "x", mode: "loud" } } })],
+    ["an operation that is not one", () => compile(user, "frobnicate" as any, {}, sqlite)],
+  ];
+
+  test.each(REFUSALS)("%s", (_label, run) => {
+    let message = "";
+    try {
+      run();
+    } catch (error) {
+      message = (error as Error).message;
+    }
+
+    expect(message).not.toBe("");
+
+    // The prefix is `does not support 'x' yet (Model.op).` — a refusal that
+    // stops there is the thing #61 is about, so the detail has to follow it.
+    const detail = message.slice(message.indexOf(").") + 2).trim();
+    expect(detail.length).toBeGreaterThan(0);
+  });
+
+  /**
+   * The two errors that already met this standard, and set it: both enumerate
+   * the valid names rather than only rejecting the invalid one.
+   */
+  test("an unknown field still lists the fields", () => {
+    expect(() => text({ where: { nope: 1 } })).toThrow(/Known fields:/);
+  });
+});
+
 describe("compile is a function of shape, not values", () => {
   test("the same shape with different values is byte identical", () => {
     const a = compileRead(user, "findMany", { where: { email: "a" } }, sqlite);
@@ -924,7 +1045,7 @@ describe("root contributions in compileRead", () => {
         return {
           as: request.as,
           kind: request.relation.kind,
-          parentField: "id",
+          parentFields: ["id"],
           strategy: "folded",
           root: {
             column: sql(`"folded"."data" as ${request.dialect.quoteIdent(request.as)}`),

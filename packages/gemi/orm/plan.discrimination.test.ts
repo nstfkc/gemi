@@ -455,6 +455,61 @@ describe("plan cache discrimination", () => {
     );
   });
 
+  /**
+   * The gap `collapsedList` did not cover, now closed on Postgres (#97).
+   *
+   * This test was added by #95 asserting the *churn* — a composite `include`
+   * minting one plan per parent count on both dialects — and written to flip
+   * rather than be deleted when the fix landed. This is the flip.
+   *
+   * A composite key now binds one array per **column** through `unnest`, so the
+   * SQL text is fixed however many parents arrive and every length is one
+   * entry. SQLite keeps the `OR`, whose text genuinely does grow, and churns as
+   * it always has — `plan.ts` records that a coarser key cannot fix that side.
+   */
+  test("a composite parent filter is one plan on postgres, many on sqlite", () => {
+    const counts = [2, 3, 10, 50];
+    const composite = (dialect: SqliteDialect | PostgresDialect) =>
+      new Set(
+        counts.map((n) =>
+          planKey(dialect, "LedgerEntry", "findMany", {
+            where: {
+              $compositeIn: {
+                fields: ["tenantId", "ledgerCode"],
+                values: Array.from({ length: n }, (_, i) => [1, `c${i}`]),
+              },
+            },
+          }),
+        ),
+      ).size;
+
+    expect(composite(postgres)).toBe(1);
+    expect(composite(sqlite)).toBe(counts.length);
+  });
+
+  /**
+   * The half the collapse must **not** take with it: the joined columns are
+   * *identifiers* in the emitted SQL, so two relations joining on different
+   * ones — or on the same ones in a different order, which pairs the sides
+   * differently — must not share an entry.
+   */
+  test("the joined columns still discriminate, on both dialects", () => {
+    for (const dialect of [sqlite, postgres]) {
+      const keys = new Set(
+        [
+          ["tenantId", "ledgerCode"],
+          ["ledgerCode", "tenantId"],
+          ["tenantId", "id"],
+        ].map((fields) =>
+          planKey(dialect, "LedgerEntry", "findMany", {
+            where: { $compositeIn: { fields, values: [[1, "a"]] } },
+          }),
+        ),
+      );
+      expect(keys.size).toBe(3);
+    }
+  });
+
   // Postgres is the exception that proves the point: there, every in-length
   // shares one SQL text on purpose — so it shares one cache entry too, and the
   // extra entries are the cost of SQLite's expansion rather than a fact about
