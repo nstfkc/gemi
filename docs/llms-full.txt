@@ -3134,11 +3134,15 @@ same answer you would get if it truly did not exist. That is deliberate. `connec
 `connectOrCreate` succeeded would together tell you a row with that key exists in someone else's
 tenant.
 
-> **Known gap (#98).** A child whose policy *scopes on the foreign key itself* — `scope: () => ({
-> folderId: mine })` — cannot use any relation operand that writes that key, including `connect`,
-> unless it also declares an `onUpdate`. The scope-escape guard reads the payload and cannot tell a
-> column you supplied from one the nested step put there. Pre-existing rather than new to
-> `disconnect`, and tracked separately because the decision affects `connect` too.
+A child whose policy *scopes on the foreign key itself* — `scope: () => ({ folderId: mine })` — can
+still use the relation operands that write that key. `connect`, `disconnect` and the rest go
+through without an `onUpdate`, because the scope-escape guard judges **the columns you supplied**
+rather than the ones the nested step put there: the ORM records which columns it wrote and exempts
+those from the check.
+
+The exemption is provenance, not permission. A column *you* name is refused exactly as before —
+writing `folderId` yourself on a model scoped by it is still a scope escape, and still needs an
+`onUpdate` to say so deliberately.
 
 `disconnect` and `delete` only exist on an `update` — a `create` has nothing linked to it yet, and
 Prisma reports them as an unknown argument there too. They differ on a row that is **not** linked to
