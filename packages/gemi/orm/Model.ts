@@ -20,6 +20,7 @@ import { resolveStrategy } from "./compile/strategy";
 import { matchUniqueKey } from "./compile/unique";
 import { upsertAbsentConflictKey } from "./compile/write";
 import { dialectFor, type SqlDialect } from "./dialect";
+import { protocolSkewWarning } from "./protocol-skew";
 import {
   MissingModelSchemaError,
   RecordNotFoundError,
@@ -956,6 +957,9 @@ async function runSteps(
   }
 }
 
+/** Set the first time `protocolSkewWarning` fires; see the call site below. */
+let warnedProtocolSkew = false;
+
 /**
  * Runs the statement and translates the failures that have a typed home.
  *
@@ -974,6 +978,24 @@ async function execute(
   text: string,
   values: unknown[],
 ): Promise<unknown> {
+  // Said once per process, and only for the configuration that silently returns
+  // the wrong instant — see `protocol-skew.ts`. Behind `warnedProtocolSkew` so
+  // the check disappears after it fires, and ordered so a correctly configured
+  // process pays one boolean.
+  if (!warnedProtocolSkew) {
+    const warning = protocolSkewWarning(
+      dialect.name,
+      schema,
+      text,
+      values,
+      new Date().getTimezoneOffset(),
+    );
+    if (warning) {
+      warnedProtocolSkew = true;
+      console.warn(warning);
+    }
+  }
+
   try {
     return await conn.unsafe(text, values);
   } catch (error) {
