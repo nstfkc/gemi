@@ -69,29 +69,33 @@ async function seed(prisma: PrismaClient) {
     ],
   });
 
-  // Accounts for the `disconnect` / `delete` cases, **in the seed rather than
-  // in each test**. `expectSameWrite` resets to the seeded state before each
-  // client runs — that is the whole point of it — so rows written in a test
-  // body are gone by the time the comparison happens, and a case that depended
-  // on them would compare two runs against an empty table and pass whatever
-  // the code did. Two of these belong to the *second* user, which is what makes
-  // "not linked" mean something.
+  // One seed, two purposes, and both halves are load-bearing.
   //
-  // The last two are Ada's, so a `_count` has a number to be wrong about:
-  // without children every count is 0 and a dropped `_count` is
-  // indistinguishable from a correct one, which is how #87 stayed invisible.
+  // **The rows are here rather than in each test.** `expectSameWrite` resets to
+  // the seeded state before each client runs — that is the whole point of it —
+  // so rows written in a test body are gone by the time the comparison happens,
+  // and a case that depended on them would compare two runs against an empty
+  // table and pass whatever the code did.
   //
-  // Safe for the existing delete cases: `Account_userId_fkey` is
+  // `acc-theirs` belongs to the **second** user, which is what makes "not
+  // linked" mean something for `delete`, `update` and the parent-key filter on
+  // `updateMany` / `deleteMany`.
+  //
+  // `a1` / `a2` carry an `organizationId` so a `_count` has a number to be
+  // wrong about (#87): without children every count is 0 and a dropped one is
+  // indistinguishable from a correct one.
+  //
+  // Safe for the delete cases either way: `Account_userId_fkey` is
   // `ON DELETE SET NULL`, so removing a user detaches its accounts on both
   // sides rather than failing a constraint.
   const users = await prisma.user.findMany({ orderBy: { id: "asc" } });
   await prisma.account.createMany({
     data: [
+      { publicId: "a1", userId: users[0].id, organizationId: acme.id },
+      { publicId: "a2", userId: users[0].id, organizationId: acme.id },
       { publicId: "acc-mine-1", userId: users[0].id, organizationRole: 1 },
       { publicId: "acc-mine-2", userId: users[0].id, organizationRole: 2 },
       { publicId: "acc-theirs", userId: users[1].id, organizationRole: 1 },
-      { publicId: "a1", userId: users[0].id, organizationId: acme.id },
-      { publicId: "a2", userId: users[0].id, organizationId: acme.id },
     ],
   });
 }
@@ -1547,6 +1551,108 @@ function suite(label: string, url?: string) {
           where: { id: 1 },
           data: { accounts: { set: [{ publicId: "no-such-account" }] } },
           include: { accounts: true },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    /**
+     * `updateMany` and `deleteMany` — a filter, applied to **this parent's**
+     * rows. The seeded `acc-theirs` belongs to another user and must survive
+     * both, which is what the parent-key filter is for.
+     *
+     * Their operands are shaped differently and it is easy to get backwards:
+     * `updateMany` wraps its filter in `where`, `deleteMany` *is* the filter.
+     */
+    test("updateMany writes this parent's matching rows", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { id: 1 },
+          data: {
+            accounts: {
+              updateMany: {
+                where: { organizationRole: 1 },
+                data: { organizationRole: 9 },
+              },
+            },
+          },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    test("updateMany with an empty where takes every row of this parent", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { id: 1 },
+          data: {
+            accounts: { updateMany: { where: {}, data: { organizationRole: 8 } } },
+          },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    test("deleteMany takes the filter directly", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { id: 1 },
+          data: { accounts: { deleteMany: { organizationRole: 1 } } },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    /** The one that would empty the table without the parent-key filter. */
+    test("deleteMany with an empty filter stops at this parent", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { id: 1 },
+          data: { accounts: { deleteMany: {} } },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    /**
+     * The case the parent restriction has to survive: a caller filter naming
+     * the **foreign key column itself**, pointing at a different parent.
+     *
+     * Merging by key let the restriction overwrite it, so "this parent's
+     * children belonging to user 2" — nothing — became "all of this parent's
+     * children". Prisma conjoins and deletes nothing.
+     */
+    test("deleteMany with a filter on the foreign key deletes nothing", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { id: 1 },
+          data: { accounts: { deleteMany: { userId: 2 } } },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    test("updateMany with a filter on the foreign key writes nothing", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { id: 1 },
+          data: {
+            accounts: {
+              updateMany: { where: { userId: 2 }, data: { organizationRole: 7 } },
+            },
+          },
         },
         { tables: ["User", "Account"] },
       );
