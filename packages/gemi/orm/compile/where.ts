@@ -16,7 +16,6 @@ import {
   type Fragment,
   concat,
   joinFragments,
-  param,
   sql,
 } from "./fragment";
 import { fieldParam } from "./cast";
