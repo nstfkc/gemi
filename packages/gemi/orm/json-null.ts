@@ -37,9 +37,12 @@ const SENTINELS: Record<string, JsonNullKind> = {
 /**
  * Which sentinel this is, or `null` for any ordinary value.
  *
- * `Prisma.AnyNull` is deliberately absent: it means "either of the two" and is
- * only legal in a *filter*. Prisma rejects it in a write, and mapping it here
- * would quietly accept something Prisma does not.
+ * `Prisma.AnyNull` is absent, and **absent is not the same as refused** — it
+ * falls through to the data path, where a write stores it as the jsonb object
+ * `{}` and a filter compiles to `= '{}'`, returning the complement of the rows
+ * `AnyNull` asks for. Prisma raises on the write and answers both kinds of null
+ * on the filter. That gap is #259; it is stated here rather than left to be
+ * read off the omission as though the omission delivered a parity.
  */
 export function jsonNullKind(value: unknown): JsonNullKind | null {
   if (typeof value !== "object" || value === null) return null;

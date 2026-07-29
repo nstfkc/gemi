@@ -25,12 +25,27 @@ import { jsonNullKind } from "./json-null";
  * cases are the boundary of that rule, written as a table because the
  * interesting ones are the values that look like sentinels and are not.
  *
- * The real `Prisma.DbNull` and `Prisma.JsonNull` cannot be constructed here —
- * the ORM runtime may not import the Prisma client package, which
- * `runtime-isolation.test.ts` enforces against comments too — so they are
- * modelled by their shape: no own properties, no enumerable keys, and a
- * `toString` on the prototype. That is exactly how the real ones are built, and
- * the template's suites exercise the genuine articles end to end.
+ * **The real objects are not exercised here, and this file does not own that
+ * guarantee.** `Prisma.DbNull` and `Prisma.JsonNull` cannot be constructed in
+ * this package — the ORM runtime may not import the Prisma client package,
+ * which `runtime-isolation.test.ts` enforces against comments too, and the
+ * package has no generated client to import one from — so they are modelled by
+ * their shape: no own properties, no enumerable keys, and a `toString` on the
+ * prototype. That is exactly how the real ones are built.
+ *
+ * The genuine articles are covered end to end in the template, against a live
+ * database and both dialects:
+ *
+ *   templates/saas-starter/app/models/writes.differential.test.ts
+ *     `create with Prisma.DbNull` / `create with Prisma.JsonNull`
+ *   templates/saas-starter/app/models/differential.test.ts
+ *     `equals` / bare / `not` for both sentinels
+ *
+ * Worth naming, because the structural check is *tighter* than the `toString`
+ * one it replaced: a Prisma release that gave its sentinels any own property
+ * would stop them being recognised, and the failure would be a silent return to
+ * #222's `{}` mis-store. Nothing in this package would see it — only those two
+ * suites would, and they need a database, so a SQLite-only run does not.
  */
 const sentinelShaped = (tag: string): object => {
   // A **class** instance, not `Object.create({ toString() {…} })`. A method in
@@ -56,11 +71,18 @@ describe("jsonNullKind recognises a sentinel and nothing else", () => {
   });
 
   /**
-   * `AnyNull` is a filter-only value that Prisma rejects in a write, so mapping
-   * it would quietly accept something Prisma does not. Pinned as an omission
-   * rather than left to be inferred from its absence.
+   * `AnyNull` is not mapped — and this pins only that, because **not mapped is
+   * not refused**. It falls through to the data path, where a write stores it
+   * as the jsonb object `{}` and `{ equals: AnyNull }` compiles to `= '{}'`,
+   * returning the exact complement of the rows it asks for; Prisma raises on
+   * the first and answers both kinds of null on the second.
+   *
+   * So the assertion below says what the function does, not that the omission
+   * bought parity. Closing the gap means recognising `AnyNull` and refusing it
+   * in a write the way #225 refuses a bare sentinel in a filter, and deciding
+   * the filter half separately — #259.
    */
-  test("Prisma.AnyNull is deliberately not one", () => {
+  test("Prisma.AnyNull is not mapped to a kind (and is not refused either — #259)", () => {
     expect(jsonNullKind(sentinelShaped("Prisma.AnyNull"))).toBeNull();
   });
 
