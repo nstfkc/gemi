@@ -6,15 +6,17 @@ import type { RelationStrategy } from "./compile/plan-relations";
 import type { ModelSchema } from "./schema";
 
 /**
- * The public operations. `groupBy` and the raw operations are deliberately not
- * among them: they are excluded at the operation level rather than narrowed out
- * of the argument types, because narrowing Prisma's recursive where-inputs with
- * `Omit` is miserable.
+ * The public operations. The raw operations are deliberately not among them:
+ * they are excluded at the operation level rather than narrowed out of the
+ * argument types, because narrowing Prisma's recursive where-inputs with `Omit`
+ * is miserable.
  *
  * `aggregate` joined the list once there was a measured account of what Prisma
- * returns for one — see `compile/aggregate.ts`. `groupBy` did not follow it in
- * the same change: `having` is a second predicate compiler over aggregate
- * expressions rather than columns, which is its own piece of work.
+ * returns for one — see `compile/aggregate.ts`. `groupBy` followed in its own
+ * change, for the reason this note gave for separating them: `having` is a
+ * second predicate compiler over aggregate expressions rather than columns, and
+ * `orderBy` carries a restriction no other operation has. See
+ * `compile/group-by.ts`.
  */
 export type Operation =
   | "findUnique"
@@ -24,6 +26,7 @@ export type Operation =
   | "findMany"
   | "count"
   | "aggregate"
+  | "groupBy"
   | "create"
   | "createMany"
   | "update"
@@ -113,6 +116,17 @@ export interface QueryPlan {
    * `select` did not ask for. Dropped once the relations are attached.
    */
   hidden?: string[];
+  /**
+   * Whether this plan projects a `_count`. Undefined when it does not.
+   *
+   * A write needs this for the same reason it needs `relations`: a `delete`
+   * with either one is read *before* the row goes, so the choke point has to
+   * know there is something to read. A count is not a relation plan — it is a
+   * column in the statement, not a second query — so it cannot be discovered by
+   * looking at `relations`, and `include: { _count: … }` on its own leaves that
+   * list empty.
+   */
+  counts?: boolean;
 }
 
 /**
@@ -165,6 +179,14 @@ let evictions = 0;
 const LITERAL_KEYS = new Set([
   "orderBy",
   "select",
+  // `omit` is `select`'s complement and decides the same thing — which columns
+  // the statement asks for — so it fails the same way and in the worse
+  // direction. `omit: { password: true }` and `{ password: false }` both shape
+  // to `boolean`, so whichever compiled first decided for the other: an admin
+  // screen that keeps the column warms the cache, and the public endpoint that
+  // asked to hide it gets the column back. The reverse order is harmless, which
+  // is exactly the wrong asymmetry.
+  "omit",
   "include",
   "distinct",
   "mode",
@@ -186,7 +208,27 @@ const LITERAL_KEYS = new Set([
   // not to, or worse, one that silently swallows a duplicate the caller wanted
   // to hear about.
   "skipDuplicates",
+  // `groupBy`'s grouped columns, which reach the SQL as *identifiers* — both
+  // the select list and the `group by`. `["role"]` and `["locale"]` have the
+  // same shape, `[string]`, so without this they would be one cache entry and
+  // the second caller would be grouped by the first caller's column. Silently:
+  // the result is well-formed, just grouped by something else.
+  "by",
 ]);
+
+/**
+ * The aggregate kinds, which mean **two different things by position**.
+ *
+ * As a *projection* — `_count: { email: true }` — their contents decide the
+ * select list, so they are in {@link LITERAL_KEYS} and recorded verbatim.
+ * Inside a `having` the same keys introduce a *comparison*, and its operand is
+ * a bound parameter like any other.
+ *
+ * Nothing else in the walk is ambiguous this way, which is why this is a set
+ * rather than a general rule: the position is what disambiguates, and only
+ * these five keys have two positions.
+ */
+const AGGREGATE_KINDS = new Set(["_count", "_avg", "_sum", "_min", "_max"]);
 
 export function canonicalShape(
   value: unknown,
@@ -196,6 +238,17 @@ export function canonicalShape(
    * list's *length* stops being part of the key. See `collapsedList`.
    */
   collapseLists = false,
+  /**
+   * Set inside a `having`, where an aggregate kind is an operator rather than a
+   * projection selector.
+   *
+   * A separate flag rather than clearing `literal`, because clearing it would
+   * be wrong: `mode` lives inside `where` — already a value subtree — and
+   * *must* stay literal, since `insensitive` and `default` compile to `ilike`
+   * and `like`. So "nothing below a value key is structural" is not the rule;
+   * "an aggregate kind below a `having` is not" is.
+   */
+  inHaving = false,
 ): string {
   if (value === null) return "null";
   if (value === undefined) return "undefined";
@@ -217,14 +270,17 @@ export function canonicalShape(
     // The exception is the `in` / `notIn` operand on a dialect that binds it as
     // one parameter, which `shapeOfMember` takes before this is reached.
     return `[${value
-      .map((item) => canonicalShape(item, literal, collapseLists))
+      .map((item) => canonicalShape(item, literal, collapseLists, inHaving))
       .join(",")}]`;
   }
 
   const entries = Object.entries(value as Record<string, unknown>)
     .filter(([, v]) => v !== undefined)
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-    .map(([key, v]) => `${key}:${shapeOfMember(key, v, literal, collapseLists)}`);
+    .map(
+      ([key, v]) =>
+        `${key}:${shapeOfMember(key, v, literal, collapseLists, inHaving)}`,
+    );
   return `{${entries.join(",")}}`;
 }
 
@@ -293,6 +349,7 @@ function shapeOfMember(
   value: unknown,
   literal: boolean,
   collapseLists: boolean,
+  inHaving: boolean,
 ): string {
   // `take` is a parameter, but its *sign* is not: a negative take means "the
   // last N", which flips every ordering term and so changes the SQL text. The
@@ -337,11 +394,39 @@ function shapeOfMember(
     );
   }
 
-  if (VALUE_KEYS.has(key)) return canonicalShape(value, false, collapseLists);
+  if (VALUE_KEYS.has(key)) {
+    return canonicalShape(value, false, collapseLists, inHaving);
+  }
+
+  /**
+   * `having` is a predicate, so its operands are parameters — and unlike every
+   * other value key it contains keys that {@link LITERAL_KEYS} would otherwise
+   * re-raise one level down.
+   *
+   * Without this, `having: { role: { _count: { gt: 5 } } }` records `gt:5`
+   * verbatim and mints one cache entry per threshold, each holding
+   * byte-identical SQL. The cap is 1000 and a threshold off a query string is
+   * ordinary, so it fills the cache and evicts every other query's plan — the
+   * same pathology `plan.ts` already describes for `in`-list lengths, and the
+   * thing `VALUE_KEYS`' own comment warns about: it would put user data into a
+   * long-lived global map.
+   *
+   * The equivalent `where` — `{ role: { gt: 5 } }` — has always been one entry,
+   * which is the behaviour this matches.
+   */
+  if (key === "having") return canonicalShape(value, false, collapseLists, true);
+
+  // In a `having`, an aggregate kind is a comparison rather than a projection,
+  // so it does not raise `literal` for its subtree.
+  if (inHaving && AGGREGATE_KINDS.has(key)) {
+    return canonicalShape(value, false, collapseLists, true);
+  }
+
   return canonicalShape(
     value,
     literal || LITERAL_KEYS.has(key),
     collapseLists,
+    inHaving,
   );
 }
 

@@ -156,16 +156,36 @@ describe("User.findMany()", () => {
     expect(planCacheStats()).toMatchObject({ compiles: 1, hits: 1 });
   });
 
-  // Signatures accept the full Prisma argument type from iteration 1; anything
-  // not implemented yet has to say so rather than silently returning the wrong
-  // rows.
-  test("throws on an argument that is not implemented yet", async () => {
+  // Signatures accept the full Prisma argument type from iteration 1, so an
+  // argument the ORM does not run has to say so rather than silently returning
+  // the wrong rows — and has to say *which kind* of refusal it is, since "wait
+  // for a release" and "change the code" are different answers.
+  test("throws on an argument refused by design, and says it is a decision", async () => {
     await expect(User.findMany({ cursor: { id: 1 } })).rejects.toThrow(
       UnsupportedQueryError,
     );
     await expect(User.findMany({ cursor: { id: 1 } })).rejects.toThrow(
-      "gemi ORM does not support 'cursor' yet (User.findMany).",
+      "gemi ORM does not implement 'cursor' (User.findMany), and this is a " +
+        "decision rather than a gap.",
     );
+    // ...and it names what to reach for instead.
+    await expect(User.findMany({ cursor: { id: 1 } })).rejects.toThrow(
+      /DB\.query/,
+    );
+  });
+
+  /** The other half of the same decision: `omit` runs now. */
+  test("omit drops a column from the payload without a select", async () => {
+    const [user]: any = await User.findMany({
+      where: { email: SEEDED.email },
+      omit: { password: true },
+    });
+
+    expect("password" in user).toBe(false);
+    // Everything else is still there, which is the difference from `select`:
+    // a column added to the model later is included rather than forgotten.
+    expect(user.email).toBe(SEEDED.email);
+    expect("locale" in user).toBe(true);
   });
 
   // The relation is loaded through the *generated* artifact's topology: this

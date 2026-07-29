@@ -55,11 +55,12 @@ const RELATION_ARGS = new Set([
   "where",
   "orderBy",
   "select",
+  "omit",
   "include",
   "take",
   "skip",
 ]);
-const TO_ONE_ARGS = new Set(["where", "select", "include"]);
+const TO_ONE_ARGS = new Set(["where", "select", "omit", "include"]);
 
 /**
  * How deep an include tree may nest. Not a modelling limit — a legal tree can
@@ -119,6 +120,17 @@ export interface RelationExecutor {
     op: string,
     args: unknown,
     preScoped: boolean,
+    /**
+     * Columns of `args.data` this step wrote itself — a relation operand's own
+     * foreign key, whose value is the parent this statement is about.
+     *
+     * Only the scope-escape guard reads it, so that a child scoped on its
+     * foreign key is not refused for a write the caller did not make (#98).
+     * Optional, and omitting it makes the guard *stricter*: an omission is a
+     * refused query rather than a silent escape, which is why this one may be
+     * optional where `preScoped` may not.
+     */
+    ormAuthored?: readonly string[],
   ): Promise<unknown>;
   /**
    * A statement with no model behind it. Exactly one query in the ORM is like
@@ -180,7 +192,7 @@ export interface NestedWriteStep {
    * itself does, so this is what makes a plan legible from the outside: to a
    * test, and to whatever logs queries later.
    */
-  operation: "connect" | "create" | "createMany";
+  operation: "connect" | "connectOrCreate" | "create" | "createMany";
   run(
     args: any,
     context: BindContext,
@@ -1349,6 +1361,29 @@ function childQuery(
 
   if (relationArgs.orderBy !== undefined) args.orderBy = relationArgs.orderBy;
   if (relationArgs.include !== undefined) args.include = relationArgs.include;
+
+  // `omit` gets the same treatment as `select`, and it has to: the lateral
+  // strategy resolves a node's selection directly, so a node's `omit` already
+  // narrowed its columns there. Not forwarding it here would drop the omission
+  // on the batched path only — the same query returning the column under one
+  // strategy and not the other, decided by the dialect.
+  const omit = relationArgs.omit as Record<string, unknown> | undefined;
+  if (omit !== undefined) {
+    // Every stitch field, not just the first: a composite relation matches on
+    // all of them, so omitting any one is enough to break the stitch.
+    const omitted = childFields.filter((field) => omit[field] === true);
+    if (omitted.length === 0) {
+      args.omit = omit;
+    } else {
+      // The stitch key cannot be omitted from the *query* — nothing could
+      // match the children to their parents without it. So it is fetched and
+      // then deleted, exactly as a `select` that leaves it out is.
+      const rest = { ...omit };
+      for (const field of omitted) delete rest[field];
+      args.omit = rest;
+      return { args, hidden: true };
+    }
+  }
 
   const select = relationArgs.select as Record<string, unknown> | undefined;
   if (select === undefined) return { args, hidden: false };
