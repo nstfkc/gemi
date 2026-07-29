@@ -1109,16 +1109,22 @@ matters.
 
 ## `Json` columns
 
-A `Json` column round-trips whatever you give it: an object, an array, a string, a number, `null`.
-The value is stored as JSON and comes back as the same JavaScript value, on both dialects and
-whether it is read at the root or nested inside an `include`.
+A `Json` column round-trips whatever you give it: an object, an array, a string, `null` — and a
+number or boolean on SQLite, with the one exception below. The value is stored as JSON and comes
+back as the same JavaScript value, on both dialects and whether it is read at the root or nested
+inside an `include`.
 
 Two things are worth knowing:
 
 - **A bare JSON number or boolean is refused on Postgres.** `metadata: 42` raises rather than being
   stored, because the driver binds it as an integer and the column is `jsonb`. Wrap it — `{ value:
-  42 }` — or store it as a string. SQLite has no such limit. This is the one shape where the two
-  dialects disagree, and it fails loudly rather than storing the wrong thing.
+  42 }` — or store it as a string. SQLite has no such limit.
+
+  **This is the one shape where gemi diverges from Prisma**, which stores it on both dialects, so it
+  is worth knowing if you are porting code rather than writing it fresh. It is a trade rather than
+  an oversight: the encoder that accepted it serialised first, which stored `42` as the jsonb
+  *string* `"42"` — and only looked correct because the decoder re-parsed it on the way out, so the
+  value was wrong in the database the whole time. Failing loudly beats storing the wrong thing.
 - **A string is a string.** `metadata: "42"` stores the JSON string `"42"`, not the number, and
   `metadata: '{"a":1}'` stores that text as a string rather than as an object. If you want an
   object, pass an object.
