@@ -1,4 +1,8 @@
-import { UnknownFieldError, UnsupportedQueryError } from "../errors";
+import {
+  InvalidArgumentError,
+  UnknownFieldError,
+  UnsupportedQueryError,
+} from "../errors";
 import { COUNT_KEY } from "../relation-filters";
 import type { FieldSchema, ModelSchema } from "../schema";
 
@@ -56,7 +60,7 @@ export function resolveSelection(
   }
 
   if (typeof select !== "object" || Array.isArray(select)) {
-    throw new UnsupportedQueryError(
+    throw new InvalidArgumentError(
       "select",
       schema.name,
       operation,
@@ -104,7 +108,7 @@ export function resolveSelection(
     }
 
     if (typeof value !== "boolean") {
-      throw new UnsupportedQueryError(
+      throw new InvalidArgumentError(
         `select.${key}`,
         schema.name,
         operation,
@@ -158,7 +162,7 @@ function omitted(
   if (omit === undefined || omit === null) return Object.values(schema.fields);
 
   if (typeof omit !== "object" || Array.isArray(omit)) {
-    throw new UnsupportedQueryError(
+    throw new InvalidArgumentError(
       "omit",
       schema.name,
       operation,
@@ -190,7 +194,7 @@ function omitted(
     }
 
     if (typeof value !== "boolean") {
-      throw new UnsupportedQueryError(
+      throw new InvalidArgumentError(
         `omit.${key}`,
         schema.name,
         operation,

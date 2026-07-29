@@ -1,4 +1,8 @@
-import { RecordNotFoundError, UnsupportedQueryError } from "../errors";
+import {
+  InvalidArgumentError,
+  RecordNotFoundError,
+  UnsupportedQueryError,
+} from "../errors";
 import type { SqlDialect } from "../dialect";
 import type { ModelSchema, RelationSchema } from "../schema";
 import type { Binder } from "./fragment";
@@ -192,7 +196,7 @@ function planOne(
   dialect: SqlDialect,
 ): void {
   if (typeof node !== "object" || node === null || Array.isArray(node)) {
-    throw new UnsupportedQueryError(
+    throw new InvalidArgumentError(
       `data.${relation.name}`,
       schema.name,
       operation,
@@ -572,7 +576,7 @@ function planOwningSide(
     operand === null ||
     Array.isArray(operand)
   ) {
-    throw new UnsupportedQueryError(
+    throw new InvalidArgumentError(
       `data.${relation.name}.connect`,
       schema.name,
       operation,
@@ -1484,7 +1488,7 @@ function assertCreateManyOperand(
   const at = `data.${relation.name}.createMany`;
 
   if (typeof operand !== "object" || operand === null || Array.isArray(operand)) {
-    throw new UnsupportedQueryError(
+    throw new InvalidArgumentError(
       at,
       schema.name,
       operation,
@@ -1498,7 +1502,7 @@ function assertCreateManyOperand(
   );
 
   if (!keys.includes("data")) {
-    throw new UnsupportedQueryError(at, schema.name, operation, `Expected a 'data' key.`);
+    throw new InvalidArgumentError(at, schema.name, operation, `Expected a 'data' key.`);
   }
 
   for (const key of keys) {

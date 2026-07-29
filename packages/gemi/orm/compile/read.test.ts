@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { PostgresDialect } from "../dialect/postgres";
 import { SqliteDialect } from "../dialect/sqlite";
 import {
+  InvalidArgumentError,
   ParameterLimitError,
   UnknownFieldError,
   UnsupportedByDesignError,
@@ -716,6 +717,71 @@ describe("arguments refused by design", () => {
  * refusal is more than its first sentence. A call site added later with an
  * empty string would satisfy the compiler and fail here.
  */
+/**
+ * The three categories a refusal can be in, and the sentence each owes — the
+ * completion of #61.
+ *
+ *   not implemented yet     UnsupportedQueryError      wait for a release
+ *   decided against         UnsupportedByDesignError   change the call   (#78)
+ *   implemented, bad value  InvalidArgumentError       fix the value
+ *
+ * The third is why "yet" was corrected four times at four call sites (#82, #88,
+ * #100, #101) before the issue that owns it was found: `take` *is* implemented,
+ * `"-2"` is not a take, and telling that caller to wait for a release sends
+ * them to a changelog when the fix is one character in their own code.
+ *
+ * All three subclass `UnsupportedQueryError`, so a handler catching the base
+ * class is unaffected — the specific classes are for the reader.
+ */
+describe("a refusal says which kind of refusal it is", () => {
+  test.each([
+    ["a value of the wrong type", { take: "-2" }, InvalidArgumentError, /^Invalid 'take'/],
+    ["a value out of range", { skip: -1 }, InvalidArgumentError, /^Invalid 'skip'/],
+    ["a direction that is not one", { orderBy: { id: "sideways" } }, InvalidArgumentError, /^Invalid/],
+    ["a mode that is not one", { where: { email: { contains: "x", mode: "loud" } } }, InvalidArgumentError, /^Invalid/],
+    ["an argument that does not exist", { nope: 1 }, UnsupportedQueryError, /does not support .* yet/],
+    ["an argument refused by design", { distinct: ["id"] }, UnsupportedByDesignError, /decision rather than a gap/],
+  ])("%s", (_label, args, kind, shape) => {
+    expect(() => text(args)).toThrow(kind as never);
+    expect(() => text(args)).toThrow(shape as RegExp);
+  });
+
+  /**
+   * The property that matters more than the wording: a bad *value* must never
+   * be reported as a missing *feature*. That is the sentence that sent four
+   * PRs to four call sites.
+   */
+  test.each([
+    ["take", { take: "-2" }],
+    ["skip", { skip: -1 }],
+    ["orderBy", { orderBy: { id: "sideways" } }],
+    ["mode", { where: { email: { contains: "x", mode: "loud" } } }],
+  ])("a bad value for %s never says 'yet'", (_label, args) => {
+    expect(() => text(args)).not.toThrow(/yet/);
+  });
+
+  /**
+   * The edge, asserted so it is a decision rather than an oversight.
+   *
+   * An argument that is not in the grammar at all keeps "yet", because the same
+   * check refuses a typo and a real Prisma argument this ORM has not
+   * implemented, and nothing there can tell them apart. What carries the reader
+   * is the *next* sentence, which #102 made mandatory: it lists what the
+   * operation does take.
+   */
+  test("an argument outside the grammar keeps 'yet', and says what is taken", () => {
+    expect(() => text({ nope: 1 })).toThrow(/yet/);
+    expect(() => text({ nope: 1 })).toThrow(/findMany takes .*where/);
+  });
+
+  /** ...and every one of them still answers to the base class. */
+  test("all three are catchable as UnsupportedQueryError", () => {
+    for (const args of [{ take: "-2" }, { nope: 1 }, { distinct: ["id"] }]) {
+      expect(() => text(args)).toThrow(UnsupportedQueryError);
+    }
+  });
+});
+
 describe("every refusal says what to do instead", () => {
   const REFUSALS: [string, () => unknown][] = [
     ["an argument the read does not take", () => text({ nope: 1 })],

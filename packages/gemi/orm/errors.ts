@@ -56,6 +56,59 @@ export class UnsupportedQueryError extends Error {
  * UnsupportedQueryError) … }` keeps working for callers that do not care which
  * kind it is.
  */
+/**
+ * An argument the ORM **does** implement, given a value it cannot mean.
+ *
+ * The third category, and the one that made "yet" wrong four separate times —
+ * #82, #88, #100 and #101 each corrected it at their own call site before #61
+ * was found to own the problem. The taxonomy the three classes now draw:
+ *
+ *   not implemented yet     UnsupportedQueryError      wait for a release
+ *   decided against         UnsupportedByDesignError   change the call  (#78)
+ *   implemented, bad value  InvalidArgumentError       fix the value
+ *
+ * `take: "-2"` is the clearest case. `take` is implemented; `"-2"` is not a
+ * take. Telling that caller the ORM "does not support 'take' yet" is wrong on
+ * both halves — it does, and there is nothing to wait for — and it sends them
+ * to a changelog when the fix is one character in their own code.
+ *
+ * **Extends `UnsupportedQueryError`**, so every existing `catch` and every test
+ * asserting the base class keeps working. That is the same choice
+ * `UnsupportedByDesignError` made, and it is what lets a taxonomy be added to a
+ * shipped ORM without a breaking change: the specific classes are for the
+ * reader, the base class is for the handler.
+ *
+ * **Where the taxonomy stops, and why it stops there.** An argument that is not
+ * in the grammar at all keeps the base class and its "yet" — `{ nope: 1 }`
+ * reports "does not support 'nope' yet". That is right for half of what reaches
+ * that path and wrong for the other half: the same check refuses a typo and a
+ * real Prisma argument this ORM has genuinely not implemented, and nothing at
+ * that point can tell them apart. Splitting it would mean carrying Prisma's
+ * full argument grammar per operation, which is a large amount of duplicated
+ * schema for a small gain.
+ *
+ * What makes it tolerable is the sentence after it. Since #61's other half made
+ * `detail` mandatory, that refusal always continues *"findMany takes include,
+ * omit, orderBy, select, skip, take, where"* — so a caller who typed `nope`
+ * learns it is not coming from the very next clause, without the class having
+ * to know. Recorded here rather than left to be re-derived, because "the third
+ * class did not cover this one" is the obvious first reading and it is not the
+ * interesting part.
+ */
+export class InvalidArgumentError extends UnsupportedQueryError {
+  constructor(
+    argument: string,
+    model: string,
+    operation: string,
+    /** What is wrong with the value, and what a good one looks like. */
+    reason: string,
+  ) {
+    super(argument, model, operation, reason);
+    this.name = "InvalidArgumentError";
+    this.message = `Invalid '${argument}' (${model}.${operation}). ${reason}`;
+  }
+}
+
 export class UnsupportedByDesignError extends UnsupportedQueryError {
   constructor(
     argument: string,
