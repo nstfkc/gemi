@@ -35,16 +35,16 @@ import { POSTGRES_URL } from "./differential";
  */
 
 const DDL = [
-  `DROP TABLE IF EXISTS "Ledger"`,
-  `DROP TABLE IF EXISTS "Book"`,
-  `CREATE TABLE "Book" (
+  `DROP TABLE IF EXISTS "RedactLedger"`,
+  `DROP TABLE IF EXISTS "RedactBook"`,
+  `CREATE TABLE "RedactBook" (
      "id" SERIAL NOT NULL PRIMARY KEY,
      "title" TEXT NOT NULL,
      "note" TEXT
    )`,
-  `CREATE TABLE "Ledger" (
+  `CREATE TABLE "RedactLedger" (
      "id" SERIAL NOT NULL PRIMARY KEY,
-     "bookId" INTEGER NOT NULL REFERENCES "Book"("id"),
+     "bookId" INTEGER NOT NULL REFERENCES "RedactBook"("id"),
      "label" TEXT NOT NULL,
      "secret" TEXT
    )`,
@@ -63,8 +63,8 @@ function field(name: string, type: any, extra: Record<string, unknown> = {}) {
 }
 
 const bookSchema: ModelSchema = {
-  name: "Book",
-  table: "Book",
+  name: "RedactBook",
+  table: "RedactBook",
   fields: {
     id: field("id", "Int", { isId: true, default: { kind: "autoincrement" } }),
     title: field("title", "String"),
@@ -75,9 +75,9 @@ const bookSchema: ModelSchema = {
   relations: {
     ledgers: {
       name: "ledgers",
-      model: "Ledger",
+      model: "RedactLedger",
       kind: "many",
-      relationName: "BookToLedger",
+      relationName: "RedactBookToRedactLedger",
       from: [],
       to: [],
       nullable: false,
@@ -86,8 +86,8 @@ const bookSchema: ModelSchema = {
 };
 
 const ledgerSchema: ModelSchema = {
-  name: "Ledger",
-  table: "Ledger",
+  name: "RedactLedger",
+  table: "RedactLedger",
   fields: {
     id: field("id", "Int", { isId: true, default: { kind: "autoincrement" } }),
     bookId: field("bookId", "Int"),
@@ -101,9 +101,9 @@ const ledgerSchema: ModelSchema = {
   relations: {
     book: {
       name: "book",
-      model: "Book",
+      model: "RedactBook",
       kind: "one",
-      relationName: "BookToLedger",
+      relationName: "RedactBookToRedactLedger",
       from: ["bookId"],
       to: ["id"],
       nullable: false,
@@ -123,21 +123,21 @@ const hideNote: ModelPolicy = {
   },
 };
 
-class Book extends Model {
+class RedactBook extends Model {
   static $schema = bookSchema;
   // A policy on the *to-one* side, so the fold can be checked in the direction
   // where the folded value is a single object rather than an array.
   static $policies = [hideNote];
 }
 
-class Ledger extends Model {
+class RedactLedger extends Model {
   static $schema = ledgerSchema;
   static $policies = [hideSecret];
 }
 
 const RUN = POSTGRES_URL ? describe : describe.skip;
 
-RUN("redact on a nested model, both strategies", () => {
+RUN("redact on a nested model, both strategies — postgres", () => {
   let database: DatabaseManager;
   let raw: SQL;
   let previous: Application | undefined;
@@ -152,13 +152,13 @@ RUN("redact on a nested model, both strategies", () => {
     application.instance(DatabaseManager, database as never);
     Application.setInstance(application);
 
-    register("Book", Book);
-    register("Ledger", Ledger);
+    register("RedactBook", RedactBook);
+    register("RedactLedger", RedactLedger);
   }, 120_000);
 
   afterAll(async () => {
-    await raw?.unsafe(`DROP TABLE IF EXISTS "Ledger"`).catch(() => {});
-    await raw?.unsafe(`DROP TABLE IF EXISTS "Book"`).catch(() => {});
+    await raw?.unsafe(`DROP TABLE IF EXISTS "RedactLedger"`).catch(() => {});
+    await raw?.unsafe(`DROP TABLE IF EXISTS "RedactBook"`).catch(() => {});
     await raw?.close();
     await database?.close();
     if (previous) Application.setInstance(previous);
@@ -166,12 +166,12 @@ RUN("redact on a nested model, both strategies", () => {
 
   beforeEach(async () => {
     clearPlanCache();
-    await raw.unsafe(`TRUNCATE "Ledger", "Book" RESTART IDENTITY CASCADE`);
+    await raw.unsafe(`TRUNCATE "RedactLedger", "RedactBook" RESTART IDENTITY CASCADE`);
     await raw.unsafe(
-      `INSERT INTO "Book" ("title", "note") VALUES ('ours', 'private')`,
+      `INSERT INTO "RedactBook" ("title", "note") VALUES ('ours', 'private')`,
     );
     await raw.unsafe(
-      `INSERT INTO "Ledger" ("bookId", "label", "secret")
+      `INSERT INTO "RedactLedger" ("bookId", "label", "secret")
        VALUES (1, 'a', 'classified'), (1, 'b', 'classified')`,
     );
   });
@@ -184,10 +184,10 @@ RUN("redact on a nested model, both strategies", () => {
 
   async function bothStrategies(args: any) {
     const batched = (await Model.asUser(READER, () =>
-      Book.$exec("findMany", args, { strategy: "batched" } as never),
+      RedactBook.$exec("findMany", args, { strategy: "batched" } as never),
     )) as any[];
     const lateral = (await Model.asUser(READER, () =>
-      Book.$exec("findMany", args, { strategy: "lateral" } as never),
+      RedactBook.$exec("findMany", args, { strategy: "lateral" } as never),
     )) as any[];
     return { batched, lateral };
   }
@@ -195,7 +195,7 @@ RUN("redact on a nested model, both strategies", () => {
   /** A root read is redacted under either strategy — nothing folds. */
   test("the child's own query is redacted", async () => {
     const rows = (await Model.asUser(READER, () =>
-      Ledger.$exec("findMany", {}),
+      RedactLedger.$exec("findMany", {}),
     )) as any[];
 
     expect(rows).toHaveLength(2);
@@ -224,12 +224,12 @@ RUN("redact on a nested model, both strategies", () => {
    */
   test("a folded to-one is redacted too", async () => {
     const batched = (await Model.asUser(READER, () =>
-      Ledger.$exec("findMany", { include: { book: true } }, {
+      RedactLedger.$exec("findMany", { include: { book: true } }, {
         strategy: "batched",
       } as never),
     )) as any[];
     const lateral = (await Model.asUser(READER, () =>
-      Ledger.$exec("findMany", { include: { book: true } }, {
+      RedactLedger.$exec("findMany", { include: { book: true } }, {
         strategy: "lateral",
       } as never),
     )) as any[];

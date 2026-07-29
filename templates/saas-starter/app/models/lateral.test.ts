@@ -31,7 +31,7 @@ import { AccountModel, OrganizationModel, UserModel } from "./generated";
 
 const RUN = POSTGRES_URL ? describe : describe.skip;
 
-RUN("lateral vs batched, on Postgres", () => {
+RUN("lateral vs batched — postgres", () => {
   let database: DatabaseManager;
   let raw: SQL;
   let previous: Application | undefined;
@@ -239,7 +239,7 @@ RUN("lateral vs batched, on Postgres", () => {
  * Deliverable 6: selection is observable, overridable, and — the part that is a
  * correctness property rather than an ergonomic one — **does not share a plan**.
  */
-RUN("strategy selection", () => {
+RUN("strategy selection — postgres", () => {
   let database: DatabaseManager;
   let raw: SQL;
   let previous: Application | undefined;
