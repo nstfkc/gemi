@@ -4,7 +4,8 @@
     "dev": "gemi dev",
     "build": "gemi build",
     "start": "gemi start",
-    "test": "bun --bun vitest"
+    "test": "bun --bun vitest",
+    "test:types": "bun --bun vitest run --typecheck.only --typecheck.ignoreSourceErrors"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.6",

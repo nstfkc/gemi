@@ -106,6 +106,22 @@ jobs:
         env:
           TZ: UTC
 
+      # `.test-d.ts` files do not match vitest's default `include`, so the step
+      # above collects none of them: 15 type assertions in `wrap.test-d.ts` and
+      # `aggregate.test-d.ts` ran nowhere, locally or here. They are the only
+      # check on the compile-time half of the ORM's pitch — that `wrap` refuses
+      # a partial row, and that a narrowed `select` narrows the result type.
+      #
+      # `ignoreSourceErrors` because the template's own app code has 276 type
+      # errors unrelated to the ORM. Without it this step reports them and
+      # fails, which is why it could not simply be switched on; with it, the
+      # scope is exactly the assertions in the `.test-d.ts` files.
+      - name: Template type tests
+        run: bun run test:types
+        working-directory: templates/saas-starter
+        env:
+          TZ: UTC
+
       # Two lints, because the package and the ORM are in different states.
       #
       # `bun run lint` is `oxlint` over the whole package: 88 warnings, 0
