@@ -469,6 +469,46 @@ describe("delete", () => {
 });
 
 describe("upsert", () => {
+  /**
+   * A one-field unique whose key type varies — the shape the conflict-key
+   * agreement tests below need. They differ only in that type, so this is a
+   * factory rather than a fixture copied per test.
+   */
+  const digestSchema = (keyType: string): any => ({
+    name: "Digest",
+    table: "Digest",
+    fields: {
+      id: {
+        name: "id",
+        column: "id",
+        type: "Int",
+        nullable: false,
+        isId: true,
+        isUpdatedAt: false,
+        default: { kind: "autoincrement" },
+      },
+      key: {
+        name: "key",
+        column: "key",
+        type: keyType,
+        nullable: false,
+        isId: false,
+        isUpdatedAt: false,
+      },
+      note: {
+        name: "note",
+        column: "note",
+        type: "String",
+        nullable: true,
+        isId: false,
+        isUpdatedAt: false,
+      },
+    },
+    primaryKey: ["id"],
+    uniques: [["key"]],
+    relations: {},
+  });
+
   test("one statement: insert with on-conflict do update", () => {
     expect(
       text("upsert", {
@@ -675,40 +715,7 @@ describe("upsert", () => {
     ["sqlite", sqlite],
     ["postgres", postgres],
   ])("a Bytes conflict key compares by value on %s", (_name, dialect) => {
-    const digest: any = {
-      name: "Digest",
-      table: "Digest",
-      fields: {
-        id: {
-          name: "id",
-          column: "id",
-          type: "Int",
-          nullable: false,
-          isId: true,
-          isUpdatedAt: false,
-          default: { kind: "autoincrement" },
-        },
-        key: {
-          name: "key",
-          column: "key",
-          type: "Bytes",
-          nullable: false,
-          isId: false,
-          isUpdatedAt: false,
-        },
-        note: {
-          name: "note",
-          column: "note",
-          type: "String",
-          nullable: true,
-          isId: false,
-          isUpdatedAt: false,
-        },
-      },
-      primaryKey: ["id"],
-      uniques: [["key"]],
-      relations: {},
-    };
+    const digest = digestSchema("Bytes");
 
     // Equal bytes, two distinct objects — which is how they arrive from a
     // caller who built the `where` and the `create` separately.
@@ -719,7 +726,12 @@ describe("upsert", () => {
     };
 
     const compiled = compileWrite(digest, "upsert", args, dialect);
-    expect(() => compiled.bind(args, createBindContext())).not.toThrow();
+
+    // Binding the values is the assertion: it does not throw, *and* the bytes
+    // survive the check into the parameter list rather than being dropped or
+    // replaced by whatever the agreement check compared.
+    const values = compiled.bind(args, createBindContext());
+    expect(values).toContainEqual(new Uint8Array([1, 2, 3]));
   });
 
   test("a DateTime conflict key that genuinely differs is still refused", () => {
@@ -739,75 +751,55 @@ describe("upsert", () => {
    * "'x' is A ... but A" and looks like a framework bug rather than a wrong
    * argument. Fixing the `Date` case is easy to half-do: `String()` collapses
    * two different `Bytes` of the same length, and collapses `1n` against `1`.
+   *
+   * The last row is also what holds `sameEncoded`'s two-sided view test to
+   * `&&`. The `where` value and the `create` value are supplied independently
+   * and neither is type-checked before it arrives, so a mixed pair — one view,
+   * one not — is reachable, exactly as the `1n`/`1` row is. Under `||` the
+   * non-view side is rebuilt as `new Uint8Array(undefined, undefined,
+   * undefined)`, which is empty, and an empty `Bytes` key would then match a
+   * wrong-typed `create` and be silently accepted on a write.
    */
   test.each([
     [
       "Bytes of the same length",
       new Uint8Array([1, 2]),
       new Uint8Array([3, 4]),
+      "Bytes",
     ],
-    ["a bigint against a number", 1n, 1],
-  ])("a mismatched %s is described distinguishably", (_label, a, b) => {
-    const digest: any = {
-      name: "Digest",
-      table: "Digest",
-      fields: {
-        id: {
-          name: "id",
-          column: "id",
-          type: "Int",
-          nullable: false,
-          isId: true,
-          isUpdatedAt: false,
-          default: { kind: "autoincrement" },
-        },
-        key: {
-          name: "key",
-          column: "key",
-          type: typeof a === "bigint" ? "BigInt" : "Bytes",
-          nullable: false,
-          isId: false,
-          isUpdatedAt: false,
-        },
-        note: {
-          name: "note",
-          column: "note",
-          type: "String",
-          nullable: true,
-          isId: false,
-          isUpdatedAt: false,
-        },
-      },
-      primaryKey: ["id"],
-      uniques: [["key"]],
-      relations: {},
-    };
+    ["a bigint against a number", 1n, 1, "BigInt"],
+    ["an empty Bytes against a string", new Uint8Array([]), "abc", "Bytes"],
+  ])(
+    "a mismatched %s is described distinguishably",
+    (_label, a, b, keyType) => {
+      const digest = digestSchema(keyType as string);
 
-    const args = {
-      where: { key: a },
-      create: { key: b },
-      update: { note: "n" },
-    };
-    const compiled = compileWrite(digest, "upsert", args, postgres);
+      const args = {
+        where: { key: a },
+        create: { key: b },
+        update: { note: "n" },
+      };
+      const compiled = compileWrite(digest, "upsert", args, postgres);
 
-    let message = "";
-    try {
-      compiled.bind(args, createBindContext());
-    } catch (error: any) {
-      message = error.message;
-    }
+      let message = "";
+      try {
+        compiled.bind(args, createBindContext());
+      } catch (error: any) {
+        message = error.message;
+      }
 
-    expect(message).toMatch(/must agree on the key/);
+      expect(message).toMatch(/must agree on the key/);
 
-    // The two halves of "is X in the where clause but Y in 'create'" must not
-    // be the same string.
-    const [, left, right] =
-      /'key' is (.+?) in the where clause but (.+?) in 'create'/s.exec(
-        message,
-      ) ?? [];
-    expect(left).toBeDefined();
-    expect(left).not.toBe(right);
-  });
+      // The two halves of "is X in the where clause but Y in 'create'" must
+      // not be the same string.
+      const [, left, right] =
+        /'key' is (.+?) in the where clause but (.+?) in 'create'/s.exec(
+          message,
+        ) ?? [];
+      expect(left).toBeDefined();
+      expect(left).not.toBe(right);
+    },
+  );
 
   // Deliberate strictness, recorded in the plan's known-differences list:
   // Prisma accepts a `where` naming two unique keys, but `on conflict` takes
