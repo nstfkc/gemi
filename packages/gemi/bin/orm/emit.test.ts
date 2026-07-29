@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import type { DMMF } from "@prisma/generator-helper";
 import { describe, expect, test } from "vitest";
 
@@ -429,6 +432,50 @@ describe("buildModelSchemas()", () => {
 
     // ...and the composite primary key it references survives too.
     expect(ledger.primaryKey).toEqual(["tenantId", "code"]);
+  });
+});
+
+/**
+ * **The generator never imports `@prisma/client`**, which is what makes the
+ * generator block's position in `schema.prisma` a matter of convention.
+ *
+ * `docs/orm.md` used to say the gemi block had to come *after* the `client`
+ * one, because "the emitted bases type-import `@prisma/client`, and Prisma runs
+ * generators in declaration order". The premise is true and the conclusion does
+ * not follow: the emitted import is a **type** import, erased at build, and it
+ * only has to resolve when someone typechecks — by which point a single
+ * `prisma generate` has produced both outputs whatever order it ran them in.
+ *
+ * Measured before rewording: swapping the two blocks produces byte-identical
+ * `schema.ts`, `models.ts` and `index.ts`.
+ *
+ * This is the fact the corrected sentence rests on, so it is asserted rather
+ * than trusted. If the generator ever does need the client at generation time,
+ * the ordering advice comes back — and this fails first.
+ */
+describe("the generator's own dependencies", () => {
+  const sources = ["bin/orm/emit.ts", "bin/orm-generator.ts"];
+
+  test.each(sources)("%s does not import @prisma/client", (relative) => {
+    const source = readFileSync(join(import.meta.dirname, "../..", relative), "utf8");
+
+    const imports = [...source.matchAll(/^\s*import\s[^;]*?from\s+"([^"]+)"/gm)].map(
+      (match) => match[1],
+    );
+
+    // `@prisma/generator-helper` is the protocol and is expected; the client is
+    // the thing that must not be needed.
+    expect(imports).not.toContain("@prisma/client");
+    expect(imports.some((name) => name.startsWith("@prisma/"))).toBe(true);
+  });
+
+  /** ...while the *emitted* base does import it, as a type. */
+  test("the emitted models file imports Prisma as a type only", () => {
+    const models = emitArtifacts([USER, POST])["models.ts"];
+
+    expect(models).toContain('import type { Prisma } from "@prisma/client"');
+    // ...and never as a value import, which would make it a runtime dependency.
+    expect(models).not.toMatch(/^import \{[^}]*\} from "@prisma\/client"/m);
   });
 });
 
