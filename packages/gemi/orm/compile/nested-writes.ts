@@ -1578,7 +1578,12 @@ function planJoinTable(
 
   out.after.push({
     relation: relation.name,
-    operation: key === "create" ? "create" : "connect",
+    // The operand this step implements, not a two-way split of it. This read
+    // `key === "create" ? "create" : "connect"`, which labelled `disconnect`,
+    // `set` and `connectOrCreate` as `connect` — the first of those being the
+    // opposite operation. The field exists so a plan is legible from the
+    // outside, so a wrong label is the whole of its cost.
+    operation: key as NestedWriteStep["operation"],
     async run(args, _context, executor, rows) {
       const parent = rows[0];
       if (!parent) return;
