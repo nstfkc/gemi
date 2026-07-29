@@ -967,6 +967,7 @@ Every failure is a typed error from `gemi/orm`, not a driver string.
 | `MissingRequiredValueError` | A write leaving a required column with no value and no default. |
 | `DecodeError` | A column the driver returned that cannot be read as its declared type. |
 | `UnsupportedByDesignError` | A subclass of `UnsupportedQueryError` for the arguments under [Not in scope](#not-in-scope) — it says *decision*, where the parent says *not yet*. Catch this one to tell them apart. |
+| `InvalidArgumentError` | The other subclass: the argument exists and the *value* cannot mean anything — `take: "-2"`. Says what a good value looks like, rather than that the argument is unsupported. |
 | `UnsupportedDialectError` | A model operation on a dialect with no compiler — MySQL and MariaDB. See [Dialects](#dialects). |
 | `ReturningUnsupportedError` | A write on a dialect without `RETURNING`, which is the same gap seen from the write path. |
 | `StaleSchemaArtifactError` | Generated files predate the running gemi. Re-run `prisma generate`. |
