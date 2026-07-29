@@ -820,6 +820,86 @@ describe("applyNestedPolicies", () => {
     expect(out.orderBy.accounts).toEqual({ _count: "asc", where: seen });
   });
 
+  /**
+   * The **array** form of `orderBy`, which Prisma accepts and nothing covered.
+   *
+   * `scopeRelationOrderings` takes a list through its own branch, and neither
+   * suite entered it: mutating that branch's `changed` comparison left both
+   * green (#135).
+   *
+   * I expected the flag to be load-bearing and it is not — measured, because
+   * the first version of this comment claimed a scope could be dropped. Under
+   * the inversion the entries still come back scoped; what changes is only
+   * whether the array is rebuilt. So the flag is an allocation choice, and the
+   * two tests below split accordingly: this one pins that every entry is
+   * scoped, and the next pins the flag itself.
+   *
+   * Two entries, so the branch is exercised as a list rather than a
+   * single-element special case, and one of them a plain column so an untouched
+   * entry is asserted to come through intact.
+   */
+  test("every entry of an orderBy list is scoped, not just the object form", () => {
+    const reportsOperation: ModelPolicy = {
+      scope: (context) => ({ seenOperation: context.operation }),
+    };
+
+    const out = applyNestedPolicies(
+      {
+        relations: {
+          accounts: { model: "Account", kind: "many" as const },
+          posts: { model: "Post", kind: "many" as const },
+        },
+      },
+      {
+        orderBy: [
+          { name: "asc" },
+          { accounts: { _count: "asc" } },
+          { posts: { _count: "desc" } },
+        ],
+      },
+      USER,
+      false,
+      (model: string) =>
+        model === "Account" || model === "Post"
+          ? {
+              policies: [reportsOperation],
+              schema: { name: model, relations: {} },
+            }
+          : undefined,
+    );
+
+    const seen = { seenOperation: "findMany" };
+    expect(out.orderBy).toEqual([
+      // A plain column is not a relation and is returned untouched.
+      { name: "asc" },
+      { accounts: { _count: "asc", where: seen } },
+      { posts: { _count: "desc", where: seen } },
+    ]);
+  });
+
+  /**
+   * ...and a list whose entries name no policied relation is returned **as it
+   * was**, rather than as an equal copy.
+   *
+   * This is the assertion that kills the mutant. The `changed` flag exists so
+   * that an array nothing rewrote is not rebuilt per query, and identity is the
+   * only thing that can see that — `toEqual` passes either way, which is
+   * exactly why the branch went uncovered.
+   */
+  test("an orderBy list with nothing to scope is not rebuilt", () => {
+    const orderBy = [{ name: "asc" }, { email: "desc" }];
+
+    const out = applyNestedPolicies(
+      { relations: { accounts: { model: "Account", kind: "many" as const } } },
+      { orderBy },
+      USER,
+      false,
+      () => undefined,
+    );
+
+    expect(out.orderBy).toBe(orderBy);
+  });
+
   test("an unregistered relation target is left for the planner to report", () => {
     const args = { include: { unknown: true } };
     const out = applyNestedPolicies(
