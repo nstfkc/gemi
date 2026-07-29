@@ -86,6 +86,18 @@ export function softDeletes<M = any>(
 }
 
 /**
+ * What `softDelete` needs from the model it wraps: the write to delegate to,
+ * and the schema to name in a refusal.
+ *
+ * Structural rather than `typeof Model`, so a caller can pass anything that
+ * behaves like one — which is why `$schema` is optional here even though every
+ * generated model has it.
+ */
+type SoftDeletable<T, Op extends string> = {
+  [K in Op]: (args: any) => Promise<T>;
+} & { $schema?: { name: string } };
+
+/**
  * The write half: rewrites a `delete` into an `update` that sets the timestamp.
  *
  * Kept separate from `softDeletes()` and applied at the call site rather than
@@ -108,13 +120,13 @@ export function softDeletes<M = any>(
  * a hard delete of a missing row would.
  */
 export function softDelete<T, M = any>(
-  model: { update(args: any): Promise<T> },
+  model: SoftDeletable<T, "update">,
   options: SoftDeleteOptions<M> = {},
 ): (args: any) => Promise<T> {
   const field = options.field ?? "deletedAt";
 
   return (args: any) => {
-    assertNoData(args, "delete");
+    assertNoData(model, args, "delete");
     return model.update({
       ...args,
       data: { [field]: new Date() },
@@ -123,13 +135,13 @@ export function softDelete<T, M = any>(
 }
 
 export function softDeleteMany<T, M = any>(
-  model: { updateMany(args: any): Promise<T> },
+  model: SoftDeletable<T, "updateMany">,
   options: SoftDeleteOptions<M> = {},
 ): (args: any) => Promise<T> {
   const field = options.field ?? "deletedAt";
 
   return (args: any = {}) => {
-    assertNoData(args, "deleteMany");
+    assertNoData(model, args, "deleteMany");
     return model.updateMany({
       ...args,
       data: { [field]: new Date() },
@@ -142,12 +154,21 @@ export function softDeleteMany<T, M = any>(
  * are calling something else — most likely they wrote `update` and meant it.
  * Refused rather than silently overwritten by the timestamp.
  */
-function assertNoData(args: any, operation: string): void {
+function assertNoData(
+  model: { $schema?: { name: string } },
+  args: any,
+  operation: string,
+): void {
   if (args?.data === undefined) return;
 
   throw new UnsupportedQueryError(
     "data",
-    "soft delete",
+    // The real model, not the literal `"soft delete"` this used to pass.
+    // `UnsupportedQueryError` documents `model` as inspectable, and a string
+    // that is not a model name can never be what an application matches on
+    // (#112). `$schema` is optional only because the parameter is structural —
+    // every generated model carries it.
+    model.$schema?.name ?? "unknown",
     operation,
     `${operation} takes no 'data' — the soft-delete rewrite supplies it. ` +
       `Call update directly if you meant to change other fields at the same ` +

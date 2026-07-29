@@ -915,6 +915,102 @@ describe("nested writes", () => {
   });
 
   /**
+   * **`disconnect` on a required relation reports the caller's model, and says
+   * whose column is required.**
+   *
+   * `assertDisconnectable` has three call sites and they disagreed about what
+   * its first parameter meant. The owning side passed the caller's schema; the
+   * two foreign-side sites passed the *child*, whose name then landed in the
+   * structured `model` field. So `User.update` refused with `model = "Account"`
+   * from one branch and `model = "User"` from another, out of one function
+   * (#112).
+   *
+   * **It had no test at all** — nothing in the repo matched its message, which
+   * is how two of three sites stayed wrong. The fixtures could not reach it
+   * either: none has a required foreign key on a to-many child, so the clones
+   * below make one. That absence is the whole reason this needs saying.
+   *
+   * The two things the function needs are now separate parameters, because they
+   * are separate questions: the column's owner (for the message) and the caller
+   * (for the fields).
+   */
+  describe("disconnect on a required relation", () => {
+    // `Account.userId` required — the child holds the key, so the foreign-side
+    // branches are reachable.
+    const strictAccount = {
+      ...account,
+      fields: {
+        ...account.fields,
+        userId: { ...account.fields.userId, nullable: false },
+      },
+    } as typeof account;
+
+    // `User.organizationId` required — this row holds the key, for the owning
+    // side.
+    const strictUser = {
+      ...user,
+      fields: {
+        ...user.fields,
+        organizationId: { ...user.fields.organizationId, nullable: false },
+      },
+    } as typeof user;
+
+    const refuse = (schema: typeof user, data: unknown) => {
+      try {
+        compileWrite(schema, "update", { where: { id: 1 }, data } as never, sqlite);
+        return null;
+      } catch (error) {
+        return error as UnsupportedQueryError;
+      }
+    };
+
+    describe("the child holds the key", () => {
+      beforeEach(() => {
+        registry.clearRegistry();
+        registry.register("User", class { static $schema = user });
+        registry.register("Account", class { static $schema = strictAccount });
+        registry.register("Organization", class { static $schema = organization });
+      });
+
+      test.each([
+        ["disconnect", { accounts: { disconnect: { id: 1 } } }],
+        ["set", { accounts: { set: [{ id: 1 }] } }],
+      ])("%s reports User, and names Account's column", (operand, data) => {
+        const error = refuse(user, data);
+        expect(error).not.toBeNull();
+
+        // The caller's query — this was `Account` before.
+        expect(error!.model).toBe("User");
+        expect(error!.operation).toBe("update");
+        expect(error!.argument).toBe(`data.accounts.${operand}`);
+
+        // ...and the column is qualified, since it is not on the model above.
+        expect(error!.message).toContain("'Account.userId' is required");
+      });
+    });
+
+    describe("this row holds the key", () => {
+      beforeEach(() => {
+        registry.clearRegistry();
+        registry.register("User", class { static $schema = strictUser });
+        registry.register("Account", class { static $schema = account });
+        registry.register("Organization", class { static $schema = organization });
+      });
+
+      // The site that was already right. Kept so the two cannot drift apart
+      // again without a test noticing — the divergence was the defect.
+      test("disconnect reports User, and names User's own column", () => {
+        const error = refuse(strictUser, { organization: { disconnect: true } });
+        expect(error).not.toBeNull();
+        expect(error!.model).toBe("User");
+        expect(error!.operation).toBe("update");
+        expect(error!.argument).toBe("data.organization.disconnect");
+        expect(error!.message).toContain("'User.organizationId' is required");
+      });
+    });
+  });
+
+  /**
    * **A key the child does not declare is refused by the compiler, on every
    * path that names a row by one.**
    *

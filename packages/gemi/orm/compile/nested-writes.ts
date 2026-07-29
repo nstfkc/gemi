@@ -13,7 +13,7 @@ import {
   resolveLink,
   singleFieldLink,
 } from "./plan-relations";
-import { matchUniqueKey } from "./unique";
+import { matchUniqueKey, type RefusalOrigin } from "./unique";
 
 /**
  * Nested writes: `connect`, `connectOrCreate`, shallow `create`, and
@@ -438,7 +438,11 @@ function planOwningSide(
    * of an unrelated update is the kind of thing to implement deliberately.
    */
   if (key === "disconnect") {
-    assertDisconnectable(schema, relation, fkField, operation);
+    assertDisconnectable(schema, relation, fkField, {
+      model: schema.name,
+      operation,
+      argument: `data.${relation.name}.disconnect`,
+    });
 
     if (operand !== true) {
       throw new UnsupportedQueryError(
@@ -943,7 +947,11 @@ function planForeignSide(
 
   if (key === "set") {
     assertNamedRows(schema, relation, child, operand, "set", operation);
-    assertDisconnectable(child, relation, childField, operation);
+    assertDisconnectable(child, relation, childField, {
+      model: schema.name,
+      operation,
+      argument: `data.${relation.name}.set`,
+    });
 
     out.after.push({
       relation: relation.name,
@@ -1045,7 +1053,13 @@ function planForeignSide(
 
   if (key === "disconnect" || key === "delete") {
     const deleting = key === "delete";
-    if (!deleting) assertDisconnectable(child, relation, childField, operation);
+    if (!deleting) {
+      assertDisconnectable(child, relation, childField, {
+        model: schema.name,
+        operation,
+        argument: `data.${relation.name}.disconnect`,
+      });
+    }
 
     assertNamedRows(schema, relation, child, operand, key, operation);
 
@@ -1948,23 +1962,32 @@ function assertNamedRows(
  * is the only thing that knows, so the refusal says which column and why rather
  * than letting the database report a not-null violation from inside a nested
  * step.
+ *
+ * `owner` and `caller` are separate parameters because they are separate
+ * questions, and one parameter answering both is what went wrong. The column
+ * lives on whichever side holds the foreign key — the caller's row on a to-one,
+ * the child's on a to-many — and that is what the *message* has to name. The
+ * *structured* model is always the caller's. Passing `owner` for both meant a
+ * `User.update` reported `model = "Account"` on the foreign side while the
+ * owning side reported `User`, from the same function (#112).
  */
 function assertDisconnectable(
   owner: ModelSchema,
   relation: RelationSchema,
   fieldName: string,
-  operation: string,
+  caller: RefusalOrigin,
 ): void {
   const field = owner.fields[fieldName];
   if (field && field.nullable) return;
 
   throw new UnsupportedQueryError(
-    `data.${relation.name}.disconnect`,
-    owner.name,
-    operation,
-    `'${fieldName}' is required, so there is no value to leave behind — a ` +
-      `disconnected row would have to be deleted or repointed instead. Prisma ` +
-      `does not offer 'disconnect' on a required relation either.`,
+    caller.argument,
+    caller.model,
+    caller.operation,
+    `'${owner.name}.${fieldName}' is required, so there is no value to leave ` +
+      `behind — a disconnected row would have to be deleted or repointed ` +
+      `instead. Prisma does not offer 'disconnect' on a required relation ` +
+      `either.`,
   );
 }
 
