@@ -122,7 +122,7 @@ export const GROUPS: unknown[] = [
  * structural rather than bound. Kept here rather than imported so that
  * widening `LITERAL_KEYS` without thinking does not silently widen this too.
  */
-export const LITERAL = new Set([
+const LITERAL = new Set([
   "orderBy",
   "select",
   "omit",
