@@ -133,6 +133,26 @@ const CASES: Case[] = [
       password: "secret",
     },
   }],
+  /**
+   * Bare JSON scalars — the one shape `docs/orm.md` says the two dialects
+   * disagree on: refused on Postgres because the driver binds the value as an
+   * integer against a `jsonb` column, accepted on SQLite.
+   *
+   * Nothing wrote one. The seed carries objects, an empty object, an array and
+   * a JSON *string*, so every Json case the harness had was a shape where the
+   * dialects agree — which is how a documented divergence went unmeasured.
+   *
+   * The harness compares failure *kind*, so these assert the interesting
+   * thing without the test needing to know which dialect it is on: whatever
+   * Postgres does, gemi and Prisma have to do the same.
+   */
+  // The two bare-scalar shapes are *not* here: on Postgres gemi raises where
+  // Prisma succeeds, which the harness would report as a divergence because it
+  // is one. It is pinned as such in `json-scalars.test.ts` instead, so it stays
+  // visible without weakening this table.
+  ["create with a wrapped JSON number", "create", {
+    data: { email: "json-wrapped@example.dev", metadata: { value: 42 } },
+  }],
   // A nullable column explicitly set to null must stay null, not fall back to
   // a default — the difference between `?? default` and a key-presence check.
   ["create with an explicit null", "create", {
