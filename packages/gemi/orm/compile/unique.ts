@@ -2,6 +2,31 @@ import { UnsupportedQueryError } from "../errors";
 import type { ModelSchema } from "../schema";
 
 /**
+ * Where a refusal came from: the caller's model and operation, and the argument
+ * path inside them.
+ *
+ * A triple rather than a string, because the string was doing three jobs and
+ * getting two of them wrong. Nested callers passed
+ * `` `${operation}.${relation.name}.${key}` `` as the *operation*, so a
+ * `User.update` with a bad nested key reported
+ * `(Account.update.accounts.disconnect)` — the child's model, and an operation
+ * that is not one of the thirteen. `UnsupportedQueryError` documents those
+ * fields as structured and inspectable; an application branching on
+ * `error.operation` got something that can never match.
+ *
+ * Same defect #79 made `resolveLink`'s `operation` required for, and #85 was
+ * filed about, one layer down. See #108.
+ */
+export interface RefusalOrigin {
+  /** The model whose arguments these are — the *caller's*, not the child's. */
+  model: string;
+  /** The operation the caller wrote. */
+  operation: string;
+  /** The argument path, e.g. `data.accounts.disconnect.where`. */
+  argument: string;
+}
+
+/**
  * Which declared unique key a `where` names — the `@id`, a single-field
  * `@unique`, or a composite `@@unique` in Prisma's compound form
  * (`{ username_provider: { username, provider } }`).
@@ -22,7 +47,7 @@ import type { ModelSchema } from "../schema";
 export function matchUniqueKey(
   schema: ModelSchema,
   where: unknown,
-  op: string,
+  op: RefusalOrigin,
 ): string[] {
   const candidates = uniqueKeys(schema);
 
@@ -50,7 +75,11 @@ export function assertUniqueWhere(
   where: unknown,
   op: string,
 ): void {
-  matchUniqueKey(schema, where, op);
+  matchUniqueKey(schema, where, {
+    model: schema.name,
+    operation: op,
+    argument: "where",
+  });
 }
 
 export function uniqueKeys(schema: ModelSchema): string[][] {
@@ -62,19 +91,29 @@ export function uniqueKeys(schema: ModelSchema): string[][] {
 
 function missingUnique(
   schema: ModelSchema,
-  op: string,
+  op: RefusalOrigin,
   candidates: string[][],
 ): UnsupportedQueryError {
   const shown = candidates
+    // A compound key is shown in Prisma's own spelling — `tenantId_code` — so
+    // the name in the message is the one the caller has to type.
     .map((group) => (group.length === 1 ? group[0] : group.join("_")))
     .join(", ");
 
+  // The *child* is named in the message, because it is whose keys these are —
+  // that half was always the useful one. What moves is which model and
+  // operation the structured fields report.
+  const nested = op.argument.startsWith("data.");
+  const instead = nested
+    ? `Name it by one of those, or reach it through the ${schema.name} model ` +
+      `directly.`
+    : `Use ${op.operation === "delete" || op.operation === "update" ? `${op.operation}Many` : "findFirst"} ` +
+      `to query on anything else.`;
+
   return new UnsupportedQueryError(
-    "where",
-    schema.name,
-    op,
-    `${op} needs a unique field. ${schema.name} declares: ${shown}. ` +
-      `Use ${op === "delete" || op === "update" ? `${op}Many` : "findFirst"} ` +
-      `to query on anything else.`,
+    op.argument,
+    op.model,
+    op.operation,
+    `${schema.name} needs a unique field here. It declares: ${shown}. ${instead}`,
   );
 }

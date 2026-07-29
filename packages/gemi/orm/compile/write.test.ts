@@ -854,6 +854,67 @@ describe("nested writes", () => {
   });
 
   /**
+   * A refusal's **structured fields**, which are the part an application can
+   * act on — and were the part that was wrong (#108).
+   *
+   * `UnsupportedQueryError` documents `model`, `operation` and `argument` as
+   * inspectable. A nested unique-key refusal reported the *child's* model and a
+   * synthesized `update.accounts.disconnect` as the operation — a string that
+   * is not one of the thirteen, so anything branching on it could never match.
+   *
+   * Asserted on the fields rather than the message, because the message is
+   * allowed to change and these are not. The child still has to appear *in* the
+   * message, since it is whose keys are being listed.
+   */
+  describe("a refusal names the caller's query, not the child's", () => {
+    const caught = (data: unknown) => {
+      try {
+        compileWrite(user, "update", { where: { id: 1 }, data } as never, sqlite);
+        return null;
+      } catch (error) {
+        return error as UnsupportedQueryError;
+      }
+    };
+
+    test.each([
+      ["disconnect", { accounts: { disconnect: { nope: 1 } } }],
+      ["delete", { accounts: { delete: { nope: 1 } } }],
+      ["update", { accounts: { update: { where: { nope: 1 }, data: {} } } }],
+      ["upsert", { accounts: { upsert: { where: { nope: 1 }, create: {}, update: {} } } }],
+      ["connectOrCreate", { accounts: { connectOrCreate: { where: { nope: 1 }, create: {} } } }],
+      // `connect` on the foreign side is absent deliberately: it validates its
+      // key inside the `after` step rather than at plan time, so it does not
+      // refuse during compile at all. Its origin triple is converted with the
+      // rest, but the refusal arrives later — which is its own inconsistency
+      // with this file's "checked at plan time" rule, and not #108's.
+    ])("%s reports User.update and the operand path", (operand, data) => {
+      const error = caught(data);
+      expect(error).not.toBeNull();
+
+      // The caller's query, not the child's.
+      expect(error!.model).toBe("User");
+      expect(error!.operation).toBe("update");
+      expect(error!.argument).toContain(`data.accounts.${operand}`);
+
+      // ...and the child is still named, because these are its keys.
+      expect(error!.message).toContain("Account");
+    });
+
+    /** A root-level refusal is unchanged: there the caller's model *is* this one. */
+    test("a root unique-key refusal still reports itself", () => {
+      try {
+        compileWrite(user, "delete", { where: { nope: 1 } } as never, sqlite);
+        throw new Error("expected a refusal");
+      } catch (error) {
+        const refusal = error as UnsupportedQueryError;
+        expect(refusal.model).toBe("User");
+        expect(refusal.operation).toBe("delete");
+        expect(refusal.argument).toBe("where");
+      }
+    });
+  });
+
+  /**
    * **Every supported operand is answered on both sides, or refused by name.**
    *
    * `SUPPORTED` says which operands the ordinary-relation path accepts, but the
