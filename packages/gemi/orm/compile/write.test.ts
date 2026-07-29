@@ -840,17 +840,17 @@ describe("nested writes", () => {
   );
 
   /**
-   * The refusals now say *why*, which is the difference between "wait" and
-   * "rewrite this call site". Every one of them writes rows that already exist,
-   * which is the line: what is supported writes new rows or repoints a key.
+   * `REFUSED` is empty now: every entry it held described machinery that
+   * turned out to exist one layer down. What still refuses on a `create` is the
+   * *statement*, not the operand — a row that does not exist yet has nothing
+   * linked to it, and Prisma reports these as unknown arguments there too.
    */
-  test("a refusal explains what the operand would take", () => {
-    expect(() =>
-      text("create", { data: { email: "a@b.c", organization: { upsert: {} } } }),
-    ).toThrow(/deciding which branch ran/);
-    expect(() =>
-      text("create", { data: { email: "a@b.c", accounts: { deleteMany: {} } } }),
-    ).toThrow(/has none yet/);
+  test("an operand that needs an existing row says so on a create", () => {
+    for (const operand of ["upsert", "deleteMany", "disconnect", "update"]) {
+      expect(() =>
+        text("create", { data: { email: "a@b.c", accounts: { [operand]: {} } } }),
+      ).toThrow(/has none yet/);
+    }
   });
 
   /**

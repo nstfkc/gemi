@@ -80,6 +80,7 @@ const SUPPORTED = new Set([
   "set",
   "updateMany",
   "deleteMany",
+  "upsert",
 ]);
 
 /**
@@ -97,6 +98,7 @@ const EXISTING_ROW_ONLY = new Set([
   "set",
   "updateMany",
   "deleteMany",
+  "upsert",
 ]);
 
 /** Statements that insert a new row, so nothing is linked to it yet. */
@@ -111,11 +113,21 @@ const CREATE_ONLY_STATEMENTS = new Set(["create", "createMany"]);
  * exist*, which is the line: everything supported writes new rows or repoints a
  * key, and none of it has to reason about what was there before.
  */
-const REFUSED: Record<string, string> = {
-  upsert:
-    `It is 'update' and 'connectOrCreate' at once and needs a third thing ` +
-    `neither has: deciding which branch ran, from inside a nested step.`,
-};
+/**
+ * Nothing, now — and that is the point of leaving the table here.
+ *
+ * Every entry it once held described machinery that turned out to exist one
+ * layer down: five of them said a pass was missing that the child's own
+ * `$exec` already runs, and the sixth — `upsert`'s — said the branch could not
+ * be decided from inside a nested step, when `connectOrCreate` had been
+ * deciding one the same way since #94.
+ *
+ * Kept rather than deleted because the next operand added here should have to
+ * write its reason down, and because a reason naming *machinery* is checkable
+ * where one naming a *principle* is not. That distinction is the only thing
+ * that made six stale entries findable.
+ */
+const REFUSED: Record<string, string> = {};
 
 /** A foreign-key column on *this* model that a nested write supplies. */
 export interface ForeignKeyContribution {
@@ -733,6 +745,81 @@ function planForeignSide(
    * needs to know which branch ran from inside a nested step, which neither
    * half of it provides.
    */
+  /**
+   * `upsert` — find by a unique key **within this parent's rows**, update it or
+   * create it.
+   *
+   * Its refusal said it *"needs a third thing neither half has: deciding which
+   * branch ran, from inside a nested step"*. It does not: the lookup decides
+   * the branch, exactly as `connectOrCreate` has decided one since #94. That is
+   * the sixth `REFUSED` reason in this series to describe machinery that was
+   * already there.
+   *
+   * **Scoped to this parent, which is Prisma's own semantics and not an
+   * embellishment** — measured, because it is the detail that decides what the
+   * operand means:
+   *
+   *   upsert a row belonging to another parent
+   *     ->  Unique constraint failed on the fields: (`publicId`)
+   *
+   * Prisma looks only among *this* parent's children, does not find it, takes
+   * the create branch, and collides. So the conjunction that keeps every other
+   * filter operand on this parent is what produces the right branch here, not
+   * merely what keeps it safe.
+   */
+  if (key === "upsert") {
+    assertUpsertOperand(schema, relation, child, operand, operation);
+
+    out.after.push({
+      relation: relation.name,
+      operation: "upsert",
+      async run(args, _context, executor, rows) {
+        const parent = rows[0];
+        if (!parent) return;
+
+        for (const entry of listOf(at(args)) as Record<string, unknown>[]) {
+          const where = conjoin(entry.where, {
+            [childField]: parent[parentField],
+          });
+
+          const hit = (await executor.exec(
+            relation.model,
+            "findFirst",
+            { where, select: { [childField]: true } },
+            false,
+          )) as Record<string, unknown> | null;
+
+          if (hit) {
+            await executor.exec(
+              relation.model,
+              "updateMany",
+              { where, data: entry.update },
+              // NOT pre-scoped: the child's `onUpdate` and scope-escape guard
+              // judge the payload, as they do for a nested `update`.
+              false,
+            );
+            continue;
+          }
+
+          await executor.exec(
+            relation.model,
+            "create",
+            {
+              // The foreign key is ours, as it is for every create here.
+              data: {
+                ...(entry.create as object),
+                [childField]: parent[parentField],
+              },
+              select: { [childField]: true },
+            },
+            false,
+          );
+        }
+      },
+    });
+    return;
+  }
+
   if (key === "updateMany" || key === "deleteMany") {
     const updating = key === "updateMany";
     assertManyOperand(schema, relation, operand, key, operation);
@@ -1532,6 +1619,50 @@ async function runPairStatement(
   values: unknown[],
 ): Promise<void> {
   await executor.query(text, values);
+}
+
+/**
+ * `upsert`'s operand: `{ where, create, update }`, or a list of them.
+ *
+ * All three are required — the lookup, and one payload per branch. Checked at
+ * plan time like every other operand here, so a missing key fails when the
+ * query compiles rather than after the parent row is written.
+ */
+function assertUpsertOperand(
+  schema: ModelSchema,
+  relation: RelationSchema,
+  child: ModelSchema,
+  operand: unknown,
+  operation: string,
+): void {
+  const at = `data.${relation.name}.upsert`;
+  const entries = (Array.isArray(operand) ? operand : [operand]) as unknown[];
+
+  for (const entry of entries) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      throw new UnsupportedQueryError(
+        at,
+        schema.name,
+        operation,
+        `Expected an object with 'where', 'create' and 'update'.`,
+      );
+    }
+
+    const record = entry as Record<string, unknown>;
+    for (const required of ["where", "create", "update"] as const) {
+      if (record[required] === undefined) {
+        throw new UnsupportedQueryError(
+          at,
+          schema.name,
+          operation,
+          `Expected a '${required}' key — 'upsert' names the row to look for, ` +
+            `what to write if it is there, and what to write if it is not.`,
+        );
+      }
+    }
+
+    matchUniqueKey(child, record.where, `${operation}.${relation.name}.upsert`);
+  }
 }
 
 /**

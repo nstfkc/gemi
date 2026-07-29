@@ -372,6 +372,7 @@ await List.create({
 | `set` | Replaces the whole set — detaches what is linked now, attaches what you name. |
 | `updateMany` | Writes your columns to this parent's rows matching a filter. |
 | `deleteMany` | Deletes this parent's rows matching a filter — the filter goes directly under the key, not inside a `where`. |
+| `upsert` | Finds the row **among this parent's**, updates it, or creates it. |
 
 Which direction a nested write runs in is decided by **who holds the foreign key**. When this model
 holds it, the far row is resolved or created *first* and collapses into one more column. When the
@@ -428,12 +429,21 @@ reach the far row *through* the pairs, which that path does not do yet; Prisma i
 so these are gaps rather than decisions and the refusals say so. `createMany` is the exception:
 Prisma does not offer it through a join table either.
 
-Only `upsert` in Prisma's nested grammar is refused, by name and with the reason. The line is **which rows an
-operand can name, and whose columns it writes**: everything supported names its rows (a new one, or
-one you identified by unique key) and writes either a whole new row or one foreign key the ORM
-chose. `set`, `disconnect`, `delete`, `deleteMany` and `updateMany` act on rows the call did not
-name; `update` names its row but writes your columns to it, which needs the child's `onUpdate` and
-the scope-escape guard run over the payload.
+`upsert` looks for its row **among this parent's** rather than globally, which is Prisma's own
+semantics and is the detail that decides what it does: naming a row that exists but belongs
+elsewhere takes the *create* branch and collides on the unique key, rather than updating somebody
+else's row.
+
+Every operand in Prisma's nested grammar is now implemented for an ordinary relation. Ones that act
+on rows already linked to this one — `disconnect`, `delete`, `update`, `updateMany`, `deleteMany`,
+`set`, `upsert` — are available on an `update` and refused on a `create`, which has nothing linked
+to it yet; Prisma reports them as unknown arguments there too.
+
+Two rules hold across all of them. The **foreign key is the ORM's to set**, so a nested row naming
+it is describing a different parent than the call is, and it is overwritten. And the **parent
+restriction is conjoined, never merged** — a filter naming the foreign key column is narrowed by the
+restriction rather than replacing it, so `deleteMany: { userId: <someone else> }` deletes nothing
+rather than everything.
 
 `skipDuplicates` is not implemented on `createMany` at any level.
 

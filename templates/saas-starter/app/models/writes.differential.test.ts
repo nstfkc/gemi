@@ -1659,6 +1659,75 @@ function suite(label: string, url?: string) {
       );
     });
 
+    /**
+     * `upsert` — the lookup decides the branch, and it looks only among **this
+     * parent's** rows. The third case is the one that shows the difference:
+     * `acc-theirs` exists globally but not here, so Prisma takes the *create*
+     * branch and collides on the unique key rather than updating somebody
+     * else's row.
+     */
+    test("upsert updates the row when it is this parent's", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { id: 1 },
+          data: {
+            accounts: {
+              upsert: {
+                where: { publicId: "acc-mine-1" },
+                create: { publicId: "acc-mine-1", organizationRole: 5 },
+                update: { organizationRole: 9 },
+              },
+            },
+          },
+          include: { accounts: true },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    test("upsert creates when there is no such row", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { id: 1 },
+          data: {
+            accounts: {
+              upsert: {
+                where: { publicId: "brand-new" },
+                create: { publicId: "brand-new", organizationRole: 3 },
+                update: { organizationRole: 9 },
+              },
+            },
+          },
+          include: { accounts: true },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    test("upsert on another parent's row collides rather than updating it", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { id: 1 },
+          data: {
+            accounts: {
+              upsert: {
+                where: { publicId: "acc-theirs" },
+                create: { publicId: "acc-theirs", organizationRole: 4 },
+                update: { organizationRole: 7 },
+              },
+            },
+          },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
     test("nested connect on the foreign side repoints the child", async () => {
       await differential.reset();
       await differential.prisma.account.create({
