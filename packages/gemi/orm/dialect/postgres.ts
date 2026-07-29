@@ -7,7 +7,7 @@ import {
   sql,
 } from "../compile/fragment";
 import { DecodeError } from "../errors";
-import type { FieldSchema } from "../schema";
+import type { FieldSchema, ScalarType } from "../schema";
 import type { ConstraintViolation, SqlDialect } from "./index";
 
 // Postgres has real `timestamptz`, `boolean`, `numeric` and `jsonb` types, so
@@ -74,6 +74,77 @@ export class PostgresDialect implements SqlDialect {
       sql(`${lhs} ${operator} (`),
       param((args, context) => arrayLiteral(values(args, context) as unknown[])),
       sql(")"),
+    );
+  }
+
+  /**
+   * The SQL type each Prisma scalar takes inside an `unnest` cast.
+   *
+   * **Deliberately not the whole table.** Only the types a composite join key
+   * realistically uses are here, and anything else falls back to the portable
+   * `OR` rather than being guessed at — the cast has to round-trip the value
+   * exactly, and a wrong one is silently wrong rows rather than an error.
+   *
+   * `DateTime` is the instructive absence: Prisma maps it to `timestamp(3)`,
+   * and this driver's own note records that a zoneless timestamp decodes
+   * differently depending on which protocol the statement used. Putting that
+   * through a text array literal adds a second representation question to one
+   * that is already open, for a key type nobody joins on.
+   */
+  private static readonly COMPOSITE_IN_TYPES: Partial<
+    Record<ScalarType, string>
+  > = {
+    Int: "int",
+    BigInt: "bigint",
+    String: "text",
+    Boolean: "boolean",
+  };
+
+  canBindCompositeIn(types: readonly ScalarType[]): boolean {
+    return (
+      types.length > 0 &&
+      types.every((type) => PostgresDialect.COMPOSITE_IN_TYPES[type])
+    );
+  }
+
+  /**
+   * `(a, b) in (select * from unnest($1::int[], $2::text[]))`.
+   *
+   * **One parameter per column, not per parent**, which is the whole point:
+   * the text is fixed however many tuples arrive, so a batched composite
+   * `include` is one plan entry rather than one per parent count (#97). The
+   * `OR` it replaces costs a placeholder per field *per parent* and a plan key
+   * per length.
+   *
+   * The tuples arrive row-wise — one array per parent — and are transposed
+   * here, because that is the shape the loader has and the shape `unnest`
+   * needs. Serialized as Postgres array literals for the reason `inList`
+   * already documents: this driver rejects a JS array bound against an array
+   * parameter, and the literal is still one bound value that never touches the
+   * SQL text.
+   */
+  compositeIn(
+    columns: readonly string[],
+    types: readonly ScalarType[],
+    values: Binder,
+  ): Fragment {
+    const arrays = columns.map((_column, index) =>
+      concat(
+        param((args, context) =>
+          arrayLiteral(
+            (values(args, context) as unknown[][]).map((tuple) => tuple[index]),
+          ),
+        ),
+        sql(`::${PostgresDialect.COMPOSITE_IN_TYPES[types[index]]}[]`),
+      ),
+    );
+
+    return concat(
+      sql(`(${columns.join(", ")}) in (select * from unnest(`),
+      ...arrays.flatMap((array, index) =>
+        index === 0 ? [array] : [sql(", "), array],
+      ),
+      sql("))"),
     );
   }
 

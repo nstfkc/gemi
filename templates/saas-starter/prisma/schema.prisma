@@ -163,6 +163,39 @@ model PasswordResetToken {
   @@index([userId])
 }
 
+// An implicit many-to-many, which this schema had none of — so the differential
+// harness could not reach one, on the read side either. The existing coverage
+// (`relations.many-to-many.test.ts`) builds its own tables and asserts against
+// Prisma's *documented* shape rather than a real client; that is adequate for
+// reads and thin for writes, where the failure is a value landing in the wrong
+// column of a join table nobody looks at. See #66.
+model Post {
+  id    Int    @id @default(autoincrement())
+  title String
+
+  tags Tag[]
+}
+
+model Tag {
+  id    Int    @id @default(autoincrement())
+  label String @unique
+
+  posts Post[]
+}
+
+// A compound `@@id`, which nothing else in this schema has: the only other
+// composite key here is SocialAccount's `@@unique([username, provider])`, and
+// that is a different code path. A compound *primary* key was therefore never
+// compared against Prisma, and was unreachable by key at all — see #80.
+model Membership {
+  organizationId Int
+  userId         Int
+  role           Int      @default(2)
+  createdAt      DateTime @default(now())
+
+  @@id([organizationId, userId])
+}
+
 model MagicLinkToken {
   id    Int    @id @default(autoincrement())
   token String
@@ -173,4 +206,33 @@ model MagicLinkToken {
 
   @@unique([token, email])
   @@unique([pin, email])
+}
+
+/// A relation that joins on **two** fields (#67).
+///
+/// The shape is the tenant-scoped composite key: every table carries `tenantId`
+/// and every relation joins on `(tenantId, …)`. It is a deliberate schema style
+/// rather than an exotic one, and an application using it could not `include`
+/// at all until composite joins existed — so the differential harness needs a
+/// model with one to compare against Prisma.
+model Ledger {
+  tenantId Int
+  code     String
+  title    String
+
+  entries LedgerEntry[]
+
+  @@id([tenantId, code])
+}
+
+model LedgerEntry {
+  id         Int    @id @default(autoincrement())
+  tenantId   Int
+  ledgerCode String
+  amount     Int
+  memo       String?
+
+  ledger Ledger @relation(fields: [tenantId, ledgerCode], references: [tenantId, code])
+
+  @@index([tenantId, ledgerCode])
 }

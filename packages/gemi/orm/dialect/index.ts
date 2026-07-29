@@ -1,6 +1,6 @@
 import type { Dialect } from "../../database/dialect";
 import type { Binder, Fragment } from "../compile/fragment";
-import type { FieldSchema } from "../schema";
+import type { FieldSchema, ScalarType } from "../schema";
 import { PostgresDialect } from "./postgres";
 import { SqliteDialect } from "./sqlite";
 
@@ -151,6 +151,37 @@ export interface SqlDialect {
 
   /** `<lhs> like <pattern>`, case-insensitively when the dialect can. */
   like(lhs: string, insensitive: boolean, pattern: Binder): Fragment;
+
+  /**
+   * Whether this dialect can match a **tuple** of columns against a list of
+   * tuples in a statement whose text does not grow with the list.
+   *
+   * The single-column case is `inList`, and on Postgres `= any($1)` already
+   * gives one SQL text for every length — which is what lets `collapsedList`
+   * keep a batched relation query to one plan entry however many parents it
+   * has. A relation joining on *more than one* field cannot use it, so the
+   * loader falls back to an `OR` of `AND`s whose text does grow, and the plan
+   * cache churns with the parent count (#97).
+   *
+   * `unnest` closes that on Postgres — one array parameter per *column*, so the
+   * text is fixed — but it needs each column's SQL type for the cast, and the
+   * types are asked about here rather than assumed: a dialect that cannot spell
+   * one of them says so and the caller keeps the portable `OR`.
+   */
+  canBindCompositeIn(types: readonly ScalarType[]): boolean;
+
+  /**
+   * `(a, b) in (select * from unnest($1::t[], $2::u[]))`.
+   *
+   * `values` yields one tuple per parent at bind time; the dialect decides how
+   * they are transposed into per-column arrays. Only called when
+   * {@link canBindCompositeIn} returned true for these types.
+   */
+  compositeIn(
+    columns: readonly string[],
+    types: readonly ScalarType[],
+    values: Binder,
+  ): Fragment;
 
   /**
    * `limit`/`offset`. Both are values and therefore parameters — this is the

@@ -9,6 +9,8 @@ import {
 } from "./differential";
 import {
   AccountModel,
+  LedgerEntryModel,
+  LedgerModel,
   OrganizationModel,
   SocialAccountModel,
   UserModel,
@@ -20,6 +22,27 @@ import {
 const EPOCH = 1600000000000;
 
 async function seed(prisma: PrismaClient) {
+  // A relation joining on two fields (#67), in the tenant-scoped shape: the
+  // *same* ledger code appears in two tenants, so a join that used only the
+  // first field — or only the second — returns the wrong entries rather than
+  // failing. Two ledgers in tenant 1 whose codes differ only in length also
+  // pin the stitch key against concatenation: `(1, "a")` and `(1, "ab")`.
+  await prisma.ledger.createMany({
+    data: [
+      { tenantId: 1, code: "a", title: "one-a" },
+      { tenantId: 1, code: "ab", title: "one-ab" },
+      { tenantId: 2, code: "a", title: "two-a" },
+    ],
+  });
+  await prisma.ledgerEntry.createMany({
+    data: [
+      { tenantId: 1, ledgerCode: "a", amount: 10, memo: "first" },
+      { tenantId: 1, ledgerCode: "a", amount: 20, memo: null },
+      { tenantId: 1, ledgerCode: "ab", amount: 30, memo: "ab only" },
+      { tenantId: 2, ledgerCode: "a", amount: 40, memo: "other tenant" },
+    ],
+  });
+
   // Two organizations so a to-one include has something to discriminate, and
   // so `organization.users` is a to-many with more than one member.
   await prisma.organization.createMany({
@@ -604,6 +627,71 @@ const CASES: [string, string, unknown][] = [
     where: { publicId: "p4" }, include: { organization: true },
   }],
 
+  // --- omit ---------------------------------------------------------------
+  //
+  // The complement of `select`, and a real projection: the omitted column never
+  // enters the SELECT list, which Prisma's query log confirms. The cases that
+  // discriminate are the ones where `omit` and `select` would *differ* — a
+  // model gaining a column is included by an `omit` and dropped by a `select`.
+  ["omit one column", "findMany", { omit: { password: true } }],
+  ["omit several", "findMany", {
+    omit: { password: true, verificationToken: true, locale: true },
+  }],
+  // `false` means keep it, exactly as in a `select`.
+  ["omit false keeps the column", "findMany", { omit: { password: false } }],
+  ["omit mixed true and false", "findMany", {
+    omit: { password: true, locale: false },
+  }],
+  ["omit an empty object", "findMany", { omit: {} }],
+  ["omit a nullable column", "findMany", { omit: { deletedAt: true } }],
+  ["omit the primary key", "findMany", { omit: { id: true } }],
+  ["omit beside a where", "findMany", {
+    where: { globalRole: 2 }, omit: { password: true },
+  }],
+  ["omit beside an orderBy and take", "findMany", {
+    orderBy: { id: "asc" }, take: 2, omit: { password: true },
+  }],
+  ["omit on findFirst", "findFirst", {
+    orderBy: { id: "asc" }, omit: { password: true },
+  }],
+  ["omit on findUnique", "findUnique", {
+    where: { publicId: "p1" }, omit: { password: true },
+  }],
+  // With an `include`, the omission applies to the parent's own columns and
+  // leaves the relation alone.
+  ["omit beside an include", "findMany", {
+    omit: { password: true }, include: { accounts: { orderBy: { id: "asc" } } },
+  }],
+  // ...and the omitted column is the *stitch key*, which the planner has to
+  // fetch anyway and then hide again — the same path a `select` without the key
+  // takes.
+  ["omit the key an include stitches on", "findMany", {
+    omit: { id: true }, include: { accounts: { orderBy: { id: "asc" } } },
+  }],
+
+  // Nested, which is where the motivating shape actually bites: a column you
+  // never want to leave the process is as likely to be on an *included*
+  // relation as on the root. Both strategies have to agree — the lateral one
+  // resolves the node's selection directly, the batched one forwards the
+  // argument to the child's own query.
+  ["omit inside an include", "findMany", {
+    orderBy: { id: "asc" },
+    include: { accounts: { omit: { organizationRole: true }, orderBy: { id: "asc" } } },
+  }],
+  ["omit the column an include stitches on", "findMany", {
+    orderBy: { id: "asc" },
+    include: { accounts: { omit: { userId: true }, orderBy: { id: "asc" } } },
+  }],
+  ["omit on a to-one include", "findMany", {
+    orderBy: { id: "asc" },
+    include: { organization: { omit: { logoUrl: true } } },
+  }],
+  ["omit at both levels", "findMany", {
+    orderBy: { id: "asc" },
+    omit: { password: true },
+    include: { accounts: { omit: { organizationRole: true }, orderBy: { id: "asc" } } },
+  }],
+
   // --- count ------------------------------------------------------------
   ["count", "count", undefined],
   ["count with where", "count", { where: { deletedAt: null } }],
@@ -691,6 +779,91 @@ const CASES: [string, string, unknown][] = [
   }],
   ["aggregate paginating with no orderBy", "aggregate", {
     take: 2, _count: true,
+  }],
+
+  // --- groupBy (#64's second half) --------------------------------------
+  //
+  // The seed holds five users across three `globalRole` values, with one group
+  // of three — so a result that grouped by the wrong column, or aggregated over
+  // the whole table, is a different set of numbers rather than the same ones in
+  // a different order.
+  ["groupBy with a count", "groupBy", {
+    by: ["globalRole"], _count: true, orderBy: { globalRole: "asc" },
+  }],
+  // Prisma accepts the bare string, which the generated types read as
+  // array-only. Same statement, so a divergence here is a refusal, not a number.
+  ["groupBy with by as a bare string", "groupBy", {
+    by: "globalRole", _count: true, orderBy: { globalRole: "asc" },
+  }],
+  ["groupBy with no orderBy at all", "groupBy", {
+    by: ["locale"], _count: true,
+  }],
+  ["groupBy over two columns", "groupBy", {
+    by: ["globalRole", "locale"], _count: true,
+    orderBy: [{ globalRole: "asc" }, { locale: "asc" }],
+  }],
+  ["groupBy with every aggregate kind", "groupBy", {
+    by: ["globalRole"],
+    _count: true,
+    _sum: { globalRole: true },
+    _avg: { globalRole: true },
+    _min: { createdAt: true },
+    _max: { createdAt: true },
+    orderBy: { globalRole: "asc" },
+  }],
+  // `_count` per field counts non-nulls, `_all` counts rows — the seed has a
+  // user with a null name, so the two are different numbers in one group.
+  ["groupBy with a per-field count", "groupBy", {
+    by: ["globalRole"], _count: { _all: true, name: true, email: true },
+    orderBy: { globalRole: "asc" },
+  }],
+  ["groupBy with a where", "groupBy", {
+    by: ["globalRole"], where: { globalRole: { gte: 1 } }, _count: true,
+    orderBy: { globalRole: "asc" },
+  }],
+  ["groupBy matching no rows is an empty array", "groupBy", {
+    by: ["globalRole"], where: { globalRole: 99 }, _sum: { globalRole: true },
+  }],
+  ["groupBy with having on an aggregate", "groupBy", {
+    by: ["globalRole"], _count: true,
+    having: { globalRole: { _count: { gt: 1 } } },
+    orderBy: { globalRole: "asc" },
+  }],
+  ["groupBy with having on a grouped column", "groupBy", {
+    by: ["globalRole"], _count: true,
+    having: { globalRole: { gt: 0 } },
+    orderBy: { globalRole: "asc" },
+  }],
+  // The half of Prisma's rule that is easy to read backwards: an aggregate over
+  // a column that is *not* grouped is legal.
+  ["groupBy with having aggregating an ungrouped column", "groupBy", {
+    by: ["globalRole"], _count: true,
+    having: { email: { _count: { gt: 0 } } },
+    orderBy: { globalRole: "asc" },
+  }],
+  ["groupBy with having over OR", "groupBy", {
+    by: ["globalRole"], _count: true,
+    having: {
+      OR: [{ globalRole: { equals: 0 } }, { globalRole: { _count: { gt: 2 } } }],
+    },
+    orderBy: { globalRole: "asc" },
+  }],
+  ["groupBy ordered by an aggregate", "groupBy", {
+    by: ["globalRole"], _count: true,
+    orderBy: { _count: { globalRole: "desc" } },
+  }],
+  ["groupBy with take and skip over the groups", "groupBy", {
+    by: ["globalRole"], _count: true, orderBy: { globalRole: "asc" },
+    take: 2, skip: 1,
+  }],
+  // Legal in Prisma, and the shape that reads like `select distinct`.
+  ["groupBy with no aggregate at all", "groupBy", {
+    by: ["globalRole"], orderBy: { globalRole: "asc" },
+  }],
+  // Grouping by a nullable column: the null group is its own group, and it has
+  // to survive the round trip as `null` rather than being dropped.
+  ["groupBy over a nullable column", "groupBy", {
+    by: ["name"], _count: true, orderBy: { name: "asc" },
   }],
 ];
 
@@ -853,6 +1026,8 @@ function suite(label: string, url?: string) {
           SocialAccount: SocialAccountModel as never,
           Account: AccountModel as never,
           Organization: OrganizationModel as never,
+          Ledger: LedgerModel as never,
+          LedgerEntry: LedgerEntryModel as never,
         },
         seed,
         url,
@@ -861,6 +1036,62 @@ function suite(label: string, url?: string) {
 
     afterAll(async () => {
       await differential?.dispose();
+    });
+
+    /**
+     * A relation joining on **two** fields (#67).
+     *
+     * The seed is arranged so a partial join is *wrong* rather than empty: the
+     * code `"a"` exists in both tenants, so joining on the code alone pulls in
+     * the other tenant's entries, and joining on the tenant alone pulls in
+     * `"ab"`'s. Either mistake returns rows, which is why these compare against
+     * Prisma rather than asserting a count.
+     */
+    describe("composite relations", () => {
+      const COMPOSITE: [string, string, string, unknown][] = [
+        ["to-many include", "Ledger", "findMany", {
+          orderBy: [{ tenantId: "asc" }, { code: "asc" }],
+          include: { entries: { orderBy: { id: "asc" } } },
+        }],
+        ["to-one include", "LedgerEntry", "findMany", {
+          orderBy: { id: "asc" }, include: { ledger: true },
+        }],
+        ["to-many include with a select on the child", "Ledger", "findMany", {
+          orderBy: [{ tenantId: "asc" }, { code: "asc" }],
+          include: { entries: { select: { amount: true }, orderBy: { amount: "asc" } } },
+        }],
+        // The stitch key has to come back even when the select omits it, and
+        // then be removed again — for *both* fields.
+        ["to-one select that omits both key fields", "LedgerEntry", "findMany", {
+          orderBy: { id: "asc" }, select: { amount: true, ledger: true },
+        }],
+        ["relation filter through a composite join", "Ledger", "findMany", {
+          where: { entries: { some: { amount: { gte: 30 } } } },
+          orderBy: [{ tenantId: "asc" }, { code: "asc" }],
+        }],
+        ["relation filter, none", "Ledger", "findMany", {
+          where: { entries: { none: { amount: { gte: 30 } } } },
+          orderBy: [{ tenantId: "asc" }, { code: "asc" }],
+        }],
+        ["_count through a composite join", "Ledger", "findMany", {
+          orderBy: [{ tenantId: "asc" }, { code: "asc" }],
+          include: { _count: { select: { entries: true } } },
+        }],
+        ["orderBy through a composite join", "LedgerEntry", "findMany", {
+          orderBy: [{ ledger: { title: "desc" } }, { id: "asc" }],
+        }],
+        ["a where on the far side of a to-one", "LedgerEntry", "findMany", {
+          where: { ledger: { title: "one-a" } }, orderBy: { id: "asc" },
+        }],
+        ["nested include, two levels through the composite", "Ledger", "findMany", {
+          orderBy: [{ tenantId: "asc" }, { code: "asc" }],
+          include: { entries: { orderBy: { id: "asc" }, include: { ledger: true } } },
+        }],
+      ];
+
+      test.each(COMPOSITE)("%s", async (_name, model, operation, args) => {
+        await differential.expectSame(model, operation, args);
+      });
     });
 
     test.each(CASES)("%s", async (_name, operation, args) => {
