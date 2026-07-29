@@ -28,6 +28,17 @@ export function resolveSelection(
   const omit = args?.omit;
 
   // Prisma rejects using both, because the result shape would be ambiguous.
+  //
+  // **No current caller reaches this**, and that is deliberate rather than
+  // dead. All four check it first and say it better: `plan-relations.ts:506`
+  // reports `'accounts: select + include'` with the relation path, which this
+  // one has no way to know. So this is the floor under a fifth caller, not a
+  // duplicate to delete — the distinction #114 exists to record, and the
+  // reason the test for it calls `resolveSelection` directly.
+  //
+  //   read.ts:206          pre-empted by read.ts:341
+  //   write.ts:1277        pre-empted by write.ts:1411
+  //   plan-relations.ts:660 and lateral.ts:291   by plan-relations.ts:506
   if (select !== undefined && args?.include !== undefined) {
     throw new UnsupportedQueryError(
       "select + include",
