@@ -18,15 +18,21 @@ This work is a **third level in an open PR stack**. Branch from
 main
  └── refactor/laravel-container-architecture   PR #30, OPEN — container/providers
       └── feat/database-layer                  PR #33, OPEN — DatabaseManager, DB facade
-           └── feat/orm                        PR #45, OPEN — iterations 1-6
+           └── feat/orm                        PR #45, OPEN — iterations 1-9 and after
 ```
 
-### Where it actually is now
+### How the stack landed
 
 Nine levels, not three. Recorded because the diagram above described the state on
 the day this plan was written and a reader following it would branch under work
-that has since landed on top. **Every one of these is `MERGEABLE`/`CLEAN`** and
-each was verified at its own tip; they are listed in merge order.
+that has since landed on top.
+
+**All six merged on 2026-07-28**, in the order below. This is written as history
+rather than as status on purpose: the section it replaces said "**Every one of
+these is `MERGEABLE`/`CLEAN`**", which was true when measured and false a day
+later — the same way the diagram above it went stale, in the section written to
+correct that diagram. A date cannot rot; a merge state can, and this document
+has no way to notice.
 
 | PR | Branch | What it adds |
 | --- | --- | --- |
