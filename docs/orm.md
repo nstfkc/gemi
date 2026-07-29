@@ -31,8 +31,11 @@ and never ships in a bundle.
 
 ## Setup
 
-Add the gemi generator to `schema.prisma`, *after* the `client` block — the emitted bases
-type-import `@prisma/client`, and Prisma runs generators in declaration order.
+Add the gemi generator to `schema.prisma`. Conventionally after the `client` block, though the
+order does not matter: the generator reads its models from Prisma's generator protocol and never
+imports `@prisma/client` itself, so it emits the same three files either way. The emitted bases do
+`import type { Prisma }`, but that is erased at build and only has to resolve when you typecheck —
+by which point one `prisma generate` has produced both.
 
 ```prisma
 generator client {
