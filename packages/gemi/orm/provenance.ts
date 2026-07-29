@@ -84,6 +84,11 @@ export function track(row: object, schema: ModelSchema): void {
 }
 
 export function provenanceOf(row: unknown): Provenance | undefined {
+  // A fast path, not a correctness guard: `WeakMap.get` on a primitive returns
+  // `undefined` rather than throwing, so removing this line would change
+  // nothing an assertion could see. Recorded because a mutation of it survives
+  // the suite, and a survivor with no test is normally worth chasing — this one
+  // is not.
   if (row === null || typeof row !== "object") return undefined;
   return provenance.get(row);
 }
