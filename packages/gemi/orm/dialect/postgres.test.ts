@@ -3,8 +3,10 @@ import { describe, expect, test } from "vitest";
 import { user } from "../fixtures";
 import { compileRead } from "../compile/read";
 import { PostgresDialect } from "./postgres";
+import { SqliteDialect } from "./sqlite";
 
 const postgres = new PostgresDialect();
+const sqlite = new SqliteDialect();
 
 /**
  * The array parameter behind `= any($1)`.
@@ -24,6 +26,60 @@ function literal(values: unknown[]): unknown {
   const fragment = postgres.inList('"x"', false, values.length, () => values);
   return fragment.binders[0](undefined);
 }
+
+/**
+ * Identifier quoting and placeholder numbering — the block `sqlite.test.ts` has
+ * had and this file did not.
+ *
+ * The asymmetry mattered in a specific way. SQLite's version asserts the NUL
+ * refusal and says why: NUL is the parameter sentinel in `compile/fragment.ts`,
+ * so it is "the one character that could shift a placeholder's position rather
+ * than merely produce broken SQL", and it is asserted "so the invariant is
+ * unconditional rather than argued".
+ *
+ * It was conditional — on the dialect. And Postgres is the side where a shifted
+ * position is worse, because its placeholders are **numbered**: SQLite's `?` is
+ * positional, so a shift breaks the statement, while `$7` silently addresses a
+ * different value.
+ *
+ * Unreachable from a generated schema on either dialect. Asserted anyway, for
+ * the reason the SQLite file already gives.
+ */
+describe("identifiers and placeholders", () => {
+  test("quotes with double quotes", () => {
+    expect(postgres.quoteIdent("id")).toBe('"id"');
+  });
+
+  test("escapes an embedded quote", () => {
+    expect(postgres.quoteIdent('we"ird')).toBe('"we""ird"');
+  });
+
+  test.each([
+    ["at the end", `id\u0000`],
+    ["in the middle", `a\u0000b`],
+    ["on its own", `\u0000`],
+  ])("refuses an identifier containing the parameter sentinel — %s", (_label, name) => {
+    expect(() => postgres.quoteIdent(name)).toThrow(/NUL byte/);
+  });
+
+  /**
+   * The numbering itself, which is what the whole `Fragment` sentinel machinery
+   * exists to get right: placeholders cannot be rendered until a fragment's
+   * position in the finished statement is fixed.
+   *
+   * Asserted against SQLite's answer for the same index, because "they differ"
+   * is the property — a shared implementation would pass a test that only
+   * looked at one.
+   */
+  test.each([
+    [0, "$1"],
+    [1, "$2"],
+    [41, "$42"],
+  ])("index %i is %s, one-based", (index, expected) => {
+    expect(postgres.placeholder(index)).toBe(expected);
+    expect(sqlite.placeholder(index)).toBe("?");
+  });
+});
 
 describe("in-list array literals", () => {
   test("numbers are quoted, and Postgres casts them back", () => {
