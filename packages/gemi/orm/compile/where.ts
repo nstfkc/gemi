@@ -674,6 +674,29 @@ function compileFieldFilter(
   const { dialect } = context;
   const column = `${context.qualifier ?? ""}${dialect.quoteIdent(field.column)}`;
 
+  // A bare `Prisma.DbNull` is **not** shorthand for `equals`, and Prisma refuses
+  // it: `where: { settings: Prisma.DbNull }` is an invalid invocation there,
+  // spelled out under the offending key. Both sentinels are objects with no
+  // enumerable properties, so left alone they read as an operator map holding
+  // no operators — which compiles to `true`, and answered "every row" to a
+  // question about the null ones.
+  //
+  // Refused rather than interpreted, because guessing which of the two nulls a
+  // caller meant is the whole thing the sentinels exist to stop, and because
+  // matching Prisma means matching its refusals as well as its results.
+  const sentinel = jsonNullKind(value);
+  if (sentinel) {
+    throw new InvalidArgumentError(
+      `where.${field.name}`,
+      schema.name,
+      context.operation,
+      `Prisma.${sentinel === "db" ? "DbNull" : "JsonNull"} is not a filter on ` +
+        `its own — Prisma rejects it here too. Write it as an explicit ` +
+        `comparison: { ${field.name}: { equals: Prisma.` +
+        `${sentinel === "db" ? "DbNull" : "JsonNull"} } }.`,
+    );
+  }
+
   // A bare value is shorthand for `equals`. A `Date` is a value, not a filter
   // object, even though `typeof` cannot tell them apart.
   if (!isFilterObject(value)) {
@@ -795,7 +818,23 @@ function compileNot(
   locate: (args: any) => any,
   column: string,
 ): Fragment {
-  if (operand === null) return sql(`${column} is not null`);
+  // `DbNull` is the sentinel spelling of the same question, so it takes the
+  // same branch — see `equals`.
+  if (operand === null || jsonNullKind(operand) === "db") {
+    return sql(`${column} is not null`);
+  }
+
+  // `JsonNull` does not: it asks about a stored JSON *value*, so negating it is
+  // a value comparison. Handled here rather than by delegating, because the
+  // delegate refuses a bare sentinel — correctly, since Prisma does — and this
+  // one did not arrive bare. `{ not: Prisma.JsonNull }` is a valid Prisma
+  // filter and has to stay one.
+  if (jsonNullKind(operand) === "json") {
+    return concat(
+      sql("not "),
+      parenthesize(equals(column, field, operand, context.dialect, locate)),
+    );
+  }
 
   if (!isFilterObject(operand)) {
     return concat(

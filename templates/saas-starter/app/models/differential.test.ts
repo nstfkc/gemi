@@ -1270,6 +1270,14 @@ function suite(label: string, url?: string) {
     test.each([
       ["DbNull finds the SQL NULLs", { equals: PrismaNS.DbNull }],
       ["JsonNull finds the JSON nulls", { equals: PrismaNS.JsonNull }],
+      // The shorthand, which is what Prisma's own documentation writes. It read
+      // the sentinel as an operator map with no operators and compiled to
+      // `where true` — the whole table, when asked for the null rows.
+      ["DbNull as the bare shorthand", PrismaNS.DbNull],
+      ["JsonNull as the bare shorthand", PrismaNS.JsonNull],
+      // ...and negated, where the same misreading compiled to `not (true)`.
+      ["not DbNull", { not: PrismaNS.DbNull }],
+      ["not JsonNull", { not: PrismaNS.JsonNull }],
     ] as [string, unknown][])(
       "a Json null sentinel in a where: %s",
       async (_label, filter) => {
