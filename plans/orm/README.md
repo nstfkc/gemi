@@ -213,7 +213,7 @@ lets the entire compiler be unit-tested with no database at all.
 ### 3. `shape` is a static on the model class
 
 The result-shaping stage is `static $shape` on the model base, not a module-level
-function. Subclassing is the extension mechanism: a future `ActiveRecordModel`
+function. Subclassing is the extension mechanism: the `ActiveRecordModel`
 base overrides `$shape` to build instances, and every model extending it gets
 that with zero changes to the twelve operations. As a free function, every future
 tier becomes a rewrite.
@@ -279,15 +279,15 @@ dialect *and* strategy.
 
 ### 5. Row provenance is opt-in
 
-`$shape` is the place a `WeakMap<row, { model, pk, snapshot }>` would be
-populated, enabling a future `User.save(row)` that diffs against the snapshot and
+`$shape` is the place the `WeakMap<row, { model, pk, snapshot }>` is
+populated, enabling `User.save(row)`, which diffs against the snapshot and
 writes only changed columns — Eloquent-style writes with POJO return types, no
 proxies, no type changes.
 
 It costs a WeakMap insert and a snapshot clone **per row**, which contradicts the
 performance priority on large reads. So it is off by default and opted into per
-query or per model. Iterations 1–7 only need the seam to exist; iteration 8 fills
-it in.
+query or per model. Iterations 1–7 only needed the seam to exist; iteration 8
+filled it in.
 
 ### 6. Lazy, name-keyed model registry
 
