@@ -747,10 +747,21 @@ function planForeignSide(
         const operandAt = at(args) as Record<string, unknown>;
         const filter = updating ? operandAt?.where : operandAt;
 
-        const where = {
-          ...(filter as object),
-          [childField]: parent[parentField],
-        };
+        // **`AND`, not a spread.** A spread lets the parent key *overwrite* a
+        // caller filter naming the same column: `deleteMany: { userId: 9 }` on
+        // this parent's relation became `{ userId: <this parent> }`, so a query
+        // asking for children belonging to somebody else deleted every one of
+        // this parent's instead. Silent, and in the deleting direction.
+        //
+        // Prisma conjoins — measured, because the question is what it does
+        // rather than what is tidy:
+        //
+        //   deleteMany { userId: <other> }  ->  nothing deleted
+        //
+        // Conjoining keeps the parent restriction *unforgeable* while letting
+        // the caller's predicate narrow, which is what `withScope` does for a
+        // policy fragment and for the same reason.
+        const where = conjoin(filter, { [childField]: parent[parentField] });
 
         await executor.exec(
           relation.model,
@@ -828,10 +839,9 @@ function planForeignSide(
           // The caller's key *and* the link, so an `update` cannot reach a row
           // attached to a different parent — the same filter `delete` uses,
           // and it does the same two jobs.
-          const where = {
-            ...(entry.where as object),
+          const where = conjoin(entry.where, {
             [childField]: parent[parentField],
-          };
+          });
 
           const found = (await executor.exec(
             relation.model,
@@ -885,10 +895,9 @@ function planForeignSide(
         for (let index = 0; index < list.length; index++) {
           // The caller's key *and* the link, so neither operand can reach a row
           // attached to a different parent.
-          const where = {
-            ...(list[index] as object),
+          const where = conjoin(list[index], {
             [childField]: parent[parentField],
-          };
+          });
 
           if (!deleting) {
             await executor.exec(
@@ -1453,6 +1462,31 @@ async function runPairStatement(
   values: unknown[],
 ): Promise<void> {
   await executor.query(text, values);
+}
+
+/**
+ * The caller's filter and the parent restriction, as a conjunction.
+ *
+ * Never a spread. A spread merges by *key*, so a caller naming the foreign key
+ * column silently replaces the restriction that keeps the operand on this
+ * parent's rows — and the failure is a wider write, not an error. `AND` cannot
+ * be overwritten by any key the caller chooses, and it still lets their
+ * predicate narrow, which is the property `withScope` relies on.
+ */
+function conjoin(
+  filter: unknown,
+  restriction: Record<string, unknown>,
+): Record<string, unknown> {
+  if (
+    filter === undefined ||
+    filter === null ||
+    typeof filter !== "object" ||
+    Array.isArray(filter) ||
+    Object.keys(filter as object).length === 0
+  ) {
+    return restriction;
+  }
+  return { AND: [filter as object, restriction] };
 }
 
 /**
