@@ -150,6 +150,35 @@ async function main() {
   // not have run is a bug in the generator, not in the report.
   const measuredPostgres = anchors.postgres !== undefined;
 
+  /**
+   * Scenarios that came out *below* hand-written SQL, named from `results`
+   * rather than remembered.
+   *
+   * The sentence about them was the last written-rather-than-derived
+   * measurement in this file. #187 gated it on whether Postgres ran, which
+   * stopped it contradicting a SQLite-only run — but a run that *did* measure
+   * Postgres would still have been handed "the Postgres point read and depth-2
+   * include come out at 0.82× and 0.94×", whatever it actually measured. A
+   * gate fixes the contradiction; only deriving it fixes the number.
+   *
+   * Derived, it also stops being Postgres-only. A SQLite scenario that dips
+   * under 1.00× is the same observation and now gets named the same way,
+   * instead of leaving the reader to wonder why the caveat named one dialect.
+   */
+  const belowFloor = results
+    .filter((result) => (result.raw?.p50 ?? 0) > 0)
+    .map((result) => ({
+      result,
+      ratio: result.gemi.total.p50 / result.raw!.p50,
+    }))
+    .filter(({ ratio }) => ratio < 1)
+    .map(
+      ({ result, ratio }) =>
+        // The scenario's leading number belongs to the table, not to a sentence.
+        `${result.dialect} ${result.scenario.replace(/^\d+[a-z]?\.\s*/, "")} ` +
+        `at ${ratio.toFixed(2)}×`,
+    );
+
   const report = [
     "# ORM benchmarks",
     "",
@@ -339,21 +368,24 @@ async function main() {
     "",
     "- **Ratios below 1.00× are noise, not a win.** gemi cannot be faster than",
     "  hand-written SQL doing the same work; it *is* the same driver call plus",
-    ...(measuredPostgres
+    ...(belowFloor.length > 0
       ? [
-          "  overhead. The Postgres point read and depth-2 include come out at 0.82×",
-          "  and 0.94× because a ~150µs loopback round trip varies by more than the",
-          "  difference being measured, and because the `raw` baseline is a second",
-          "  `SQL` instance with its own prepared-statement state. Read them as \"at",
-          "  the floor\", not as better than it.",
-          "- Postgres was measured over loopback, so every Postgres round trip here is",
-          "  optimistic — see the note below.",
+          `  overhead. This run has ${belowFloor.join(", ")} — read those as \"at`,
+          "  the floor\", not as better than it. The `raw` baseline is a second",
+          "  `SQL` instance with its own prepared-statement state, and where a round",
+          "  trip dominates it varies by more than the difference being measured.",
         ]
       : [
           "  overhead. Where one appears, read it as \"at the floor\" rather than as a",
           "  win: the `raw` baseline is a second `SQL` instance with its own",
           "  prepared-statement state.",
         ]),
+    ...(measuredPostgres
+      ? [
+          "- Postgres was measured over loopback, so every Postgres round trip here is",
+          "  optimistic — see the note below.",
+        ]
+      : []),
     "",
     ...(notes.length > 0 ? ["## Notes", "", ...notes.map((n) => `- ${n}`)] : []),
     "",

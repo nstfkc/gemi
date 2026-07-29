@@ -103,4 +103,47 @@ describe("plans/orm/benchmarks.md reports only dialects it measured", () => {
       expect(claims, `${dialect} has no data, but the report states figures for it`).toEqual([]);
     },
   );
+
+  /**
+   * ...and a ratio the prose quotes has to be a ratio the run produced.
+   *
+   * The dialect check above is necessary and not sufficient. The report said
+   * "the Postgres point read and depth-2 include come out at **0.82× and
+   * 0.94×**"; gating that sentence on whether Postgres ran stops it appearing
+   * beside "Postgres was not measured", but a run that *did* measure Postgres
+   * would still have been handed those two numbers whatever it measured. The
+   * gate fixes the contradiction; only deriving the figure fixes the figure.
+   *
+   * Restricted to ratios **below 1.00×**, which is the precise claim worth
+   * pinning: "gemi came out faster than hand-written SQL here" is the one
+   * conclusion the report explicitly says is never real, so a sub-1 ratio in
+   * prose is either a live measurement worth reading or a leftover. Ratios
+   * above 1 are ordinary results and quoting them is not this failure mode.
+   *
+   * Table cells are skipped — they *are* the data, so checking them against
+   * the data they were rendered from proves nothing.
+   */
+  test("every sub-1.00× ratio in the prose is one the run measured", () => {
+    const ratios = new Set(
+      (
+        JSON.parse(
+          readFileSync(join(PLANS, "benchmarks.json"), "utf8"),
+        ) as Array<{ raw?: { p50: number }; gemi: { total: { p50: number } } }>
+      )
+        .filter((result) => (result.raw?.p50 ?? 0) > 0)
+        .map((result) => (result.gemi.total.p50 / result.raw!.p50).toFixed(2)),
+    );
+
+    const quoted = report
+      .split("\n")
+      .filter((line) => !line.trimStart().startsWith("|"))
+      .flatMap((line) => [...line.matchAll(/\b0\.\d{2}×/g)].map((m) => m[0]));
+
+    for (const ratio of quoted) {
+      expect(
+        [...ratios],
+        `the report quotes ${ratio}, which no result in benchmarks.json produces`,
+      ).toContain(ratio.replace("×", ""));
+    }
+  });
 });
