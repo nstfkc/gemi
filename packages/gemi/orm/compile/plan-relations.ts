@@ -832,6 +832,15 @@ function paired(
   operation: string,
 ): Link {
   if (parentFields.length === 0) {
+    // **No caller reaches this.** A relation with no fields on either side is
+    // refused earlier — `resolveLink` raises `MalformedRelationError` naming
+    // both sides — and a lopsided pairing is refused by the length check below
+    // it. Measured by feeding both shapes through an `include` and a relation
+    // filter: all four paths stop before here.
+    //
+    // Kept as the floor under a future caller that builds a `Link` some other
+    // way, not deleted — the same distinction `select.ts`'s `select + include`
+    // guard records, and for the same reason.
     throw new UnsupportedQueryError(
       relation.name,
       parent.name,

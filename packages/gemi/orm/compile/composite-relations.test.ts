@@ -342,6 +342,32 @@ describe("the composite-in key is the planner's alone", () => {
     ).toThrow(/the planner built/);
   });
 
+  /**
+   * ...and a planner operand naming a field the model does not have.
+   *
+   * The shape checks above pass it — `["nosuchfield"]` is a non-empty array of
+   * strings with matching tuples — so the only thing that catches it is the
+   * field lookup in `compileCompositeIn`, and that lookup was the one guard in
+   * this family with no test. Found by re-running the construction-site
+   * coverage from #114 against the merged composite work.
+   *
+   * `UnknownFieldError` rather than the "planner built" wording, and that is
+   * right: the shape is fine and the *name* is wrong, which is the same thing
+   * the caller-facing path reports for the same mistake.
+   */
+  test("a planner operand naming a field that is not there", () => {
+    const planners = plannerCompositeIn(["nosuchfield"], [[1]]);
+
+    expect(() =>
+      compileRead(ledgerEntry, "findMany", { where: { $compositeIn: planners } }, postgres),
+    ).toThrow(UnknownFieldError);
+
+    // The known fields are listed, which is what makes it actionable.
+    expect(() =>
+      compileRead(ledgerEntry, "findMany", { where: { $compositeIn: planners } }, postgres),
+    ).toThrow(/is not a field on model LedgerEntry/);
+  });
+
   /** ...and the planner's own still compiles, on the dialect that binds it. */
   test("the planner's own is accepted", () => {
     const plan = compileRead(ledgerEntry, "findMany", { include: { ledger: true } }, postgres);
