@@ -215,7 +215,7 @@ lets the entire compiler be unit-tested with no database at all.
 The result-shaping stage is `static $shape` on the model base, not a module-level
 function. Subclassing is the extension mechanism: a future `ActiveRecordModel`
 base overrides `$shape` to build instances, and every model extending it gets
-that with zero changes to the twelve operations. As a free function, every future
+that with zero changes to the fifteen operations. As a free function, every future
 tier becomes a rewrite.
 
 Shaping is per-row JavaScript and it is where ORMs quietly bleed. The plan
@@ -488,7 +488,7 @@ rather than work, and whatever the ORM's first real users find.
 ### Documentation
 
 `docs/orm.md` is the user-facing page — setup through the Prisma generator
-block, the thirteen operations, relations and the two strategies, ambient
+block, the fifteen operations, relations and the two strategies, ambient
 transactions, policies, soft deletes, the typed errors, and an explicit
 *not in scope* section. It sits beside `docs/orm-rows-and-entities.md`, which
 iteration 8 wrote and which nothing linked to: neither page was reachable from
