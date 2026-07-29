@@ -954,8 +954,22 @@ static $policies: UserPolicy[] = [softDeletes<User>(), new TenantPolicy()]
 the policy scopes on and something has to say that is intended. That permission is **per policy**:
 a tenant policy sitting beside it in the same list still has to answer for its own column.
 
-`field` is constrained to the model's own keys, so pointing it at a column that does not exist is a
-compile error rather than a `no such column` on the first read.
+`field` is constrained to the model's own keys **when the model type is given** —
+`softDeletes<User>({ field: … })`, as above — so a typo there is a compile error rather than a
+`no such column` on the first read.
+
+`softDelete(User)` and `softDeleteMany(User)` take the model as a *value*, and its row type is not
+recoverable from it, so their `field` is unchecked. Spell it once and share it if you override the
+default:
+
+```ts
+const archived = { field: "archivedAt" } as const
+
+export class User extends UserModel {
+  static $policies = [softDeletes<User>(archived)]   // checked here
+  static delete = softDelete(User, archived)          // and therefore correct here
+}
+```
 
 ## Errors
 
