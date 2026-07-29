@@ -3959,8 +3959,8 @@ describing exactly what the operation accepts.
 ### It is off by default, and that is a measurement
 
 Provenance costs a `WeakMap` insert and a snapshot clone per row. On a 1 000-row read that is
-**about +100% on SQLite and +40% on Postgres** — see `plans/orm/benchmarks.md`. So it is not a
-flag to set out of habit; on a large read it is a real decision.
+**about +100% on SQLite** — see `plans/orm/benchmarks.md`, which has no Postgres measurement to
+set beside it. So it is not a flag to set out of habit; on a large read it is a real decision.
 
 ### Provenance is tied to object identity
 
