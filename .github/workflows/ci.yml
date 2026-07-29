@@ -49,6 +49,31 @@ jobs:
         run: bun run build:bin
         working-directory: packages/gemi
 
+      # `bun install` does not leave a usable `gemi-orm-generator` behind, and
+      # `prisma generate` resolves the generator **by bin name**.
+      #
+      # Two behaviours combine. At install time the target does not exist yet —
+      # `dist/bin/` is produced by the step above — so the link is not created.
+      # And a second `bun install` does not fix it: with the lockfile satisfied
+      # it reports "no changes" and relinks nothing, which is measurable
+      # locally by deleting the link and re-running install.
+      #
+      # So the link is made here, after the file exists. Not a CI quirk: a fresh
+      # clone hits exactly this, which is what the first run of this workflow
+      # discovered.
+      # Both places, and each for its own reason. The root one is what
+      # `prisma generate` resolves through; the template one is what
+      # `generated.test.ts` asserts exists, because that is where a real
+      # installation would put it.
+      - name: Link the ORM generator
+        run: |
+          for dir in node_modules templates/saas-starter/node_modules; do
+            mkdir -p "$dir/.bin"
+            ln -sf "$PWD/packages/gemi/dist/bin/orm-generator.js" \
+                   "$dir/.bin/gemi-orm-generator"
+          done
+          echo "$PWD/node_modules/.bin" >> "$GITHUB_PATH"
+
       # The template's committed artifact is what its suite runs against, and
       # `generated.test.ts` asserts a second run produces a zero-line diff.
       - name: Generate the template's model artifact
