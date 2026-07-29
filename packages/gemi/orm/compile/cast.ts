@@ -1,4 +1,5 @@
 import type { SqlDialect } from "../dialect";
+import { jsonNullKind } from "../json-null";
 import type { FieldSchema } from "../schema";
 import { type Binder, type Fragment, param } from "./fragment";
 
@@ -42,6 +43,14 @@ export function fieldParam(
     // `JSON.stringify(null)` is `"null"`, and `'null'::jsonb` is a jsonb null,
     // which is a different thing from an absent value and would diverge from
     // Prisma on every nullable Json column.
-    return value === null || value === undefined ? null : JSON.stringify(value);
+    if (value === null || value === undefined) return null;
+
+    // Prisma's sentinels, which serialise to `{}` if left to `JSON.stringify`.
+    // `'null'::text::jsonb` is the JSON value; a bound `null` is SQL NULL.
+    const kind = jsonNullKind(value);
+    if (kind === "db") return null;
+    if (kind === "json") return "null";
+
+    return JSON.stringify(value);
   }, cast);
 }

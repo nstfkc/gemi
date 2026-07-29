@@ -1,4 +1,4 @@
-import type { PrismaClient } from "@prisma/client";
+import { Prisma as PrismaNamespace, type PrismaClient } from "@prisma/client";
 import { UniqueConstraintError } from "gemi/orm";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 
@@ -146,12 +146,31 @@ const CASES: Case[] = [
    * thing without the test needing to know which dialect it is on: whatever
    * Postgres does, gemi and Prisma have to do the same.
    */
-  // The two bare-scalar shapes are *not* here: on Postgres gemi raises where
-  // Prisma succeeds, which the harness would report as a divergence because it
-  // is one. It is pinned as such in `json-scalars.test.ts` instead, so it stays
-  // visible without weakening this table.
   ["create with a wrapped JSON number", "create", {
     data: { email: "json-wrapped@example.dev", metadata: { value: 42 } },
+  }],
+  // The bare scalars, which used to be excluded here because gemi raised on
+  // Postgres where Prisma stored. #216 lifted that, so they belong in the table
+  // like every other shape. (The note that replaced them pointed at a
+  // `json-scalars.test.ts` that has never existed; the boundary was pinned in
+  // `writes.coercion.test.ts`.)
+  ["create with a bare JSON number", "create", {
+    data: { email: "json-number@example.dev", metadata: 42 },
+  }],
+  ["create with a bare JSON boolean", "create", {
+    data: { email: "json-boolean@example.dev", metadata: true },
+  }],
+  // Prisma's two null sentinels, which are *different rows*: `DbNull` leaves
+  // the column SQL NULL, `JsonNull` stores the JSON value `null`. Both are
+  // ordinary objects with no enumerable properties, so anything that reaches
+  // `JSON.stringify` turns them into `{}` — which is what gemi stored, on both
+  // dialects, silently. The harness compares table contents, so conflating them
+  // again fails here.
+  ["create with Prisma.DbNull", "create", {
+    data: { email: "json-dbnull@example.dev", metadata: PrismaNamespace.DbNull },
+  }],
+  ["create with Prisma.JsonNull", "create", {
+    data: { email: "json-jsonnull@example.dev", metadata: PrismaNamespace.JsonNull },
   }],
   // A nullable column explicitly set to null must stay null, not fall back to
   // a default — the difference between `?? default` and a key-presence check.
