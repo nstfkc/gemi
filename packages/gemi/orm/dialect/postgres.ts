@@ -233,6 +233,16 @@ export class PostgresDialect implements SqlDialect {
   // reads `field` any more — the signature is the interface's, the disuse is
   // this dialect's. `Date`, `boolean`, `bigint` and arrays are Bun's to
   // serialize, and so, it turns out, is JSON.
+  // `$1::text::jsonb` for a `Json` column, and nothing for anything else.
+  //
+  // The value is serialised by `fieldParam`, not by `encode` below, so a
+  // binding site that does not ask for the cast still binds raw and keeps the
+  // loud failure rather than acquiring a silent mis-store. The comment on
+  // `encode` has the measurements.
+  castParameter(field: FieldSchema): string {
+    return field.type === "Json" ? "::text::jsonb" : "";
+  }
+
   encode(value: unknown, _field: FieldSchema): unknown {
     if (value === null || value === undefined) return null;
     // **`Json` is handed over raw**, because Bun serializes it for a `jsonb`
@@ -260,34 +270,22 @@ export class PostgresDialect implements SqlDialect {
     // time, and anything reading that column *other than this ORM* saw a
     // string. A loud failure replaces a silent mis-store.
     //
-    // **Fixing it is not "serialise and cast", which is what this comment used
-    // to say.** Measured through Bun 1.3.14 against Postgres 16, that stores
-    // the jsonb *string* `"42"` — the exact silent mis-store the refusal above
-    // exists to prevent, because Bun serialises a JS string bound to a `jsonb`
-    // parameter, so pre-serialising encodes it twice:
+    // **Fixed, in the compiler rather than here** — see `compile/cast.ts`. The
+    // placeholder carries `::text::jsonb` and `fieldParam` serialises the value
+    // to match, which is the only one of the four forms measured that carries
+    // all six shapes:
     //
-    //   values ($1)                 42        integer vs jsonb — the error above
-    //   values ($1::jsonb)          42        cannot cast integer to jsonb
-    //   values ($1::jsonb)          "42"      jsonb_typeof -> string   <- the old bug
-    //   values (to_jsonb($1))       42        jsonb_typeof -> number
+    //   values ($1)                 42        integer vs jsonb
+    //   values ($1::jsonb)          "42"      jsonb_typeof -> string
+    //   values (to_jsonb($1))       {a:1}     could not determine polymorphic type
     //   values ($1::text::jsonb)    "42"      jsonb_typeof -> number
     //
-    // **`to_jsonb($1)` is not the answer either**, though it looks like one from
-    // that row alone. It works for exactly the shapes Bun binds as a concrete
-    // type — a number and a boolean — and fails for the four that matter more,
-    // because an unannotated parameter leaves the polymorphic argument untyped:
+    // The serialisation deliberately does **not** live here. `encode` runs at
+    // every binding site, and a site that serialises without also emitting the
+    // cast is the second row above — the silent mis-store this whole comment is
+    // about. Keeping the two together in `fieldParam` means a site nobody
+    // converted still binds raw and still fails loudly.
     //
-    //   to_jsonb($1)   {a:1} / [1,2] / "42" / null
-    //                  could not determine polymorphic type
-    //
-    // So there is one form, not two: `JSON.stringify` the value and bind it
-    // through `$1::text::jsonb`, which round-trips all six shapes with the right
-    // `jsonb_typeof` — object, array, string, number, boolean and null.
-    //
-    // It needs the column's type at the *placeholder*, so it still has to reach
-    // the insert, the update's set clause and any `where` on a Json column. Not
-    // done here. `writes.coercion.test.ts` pins every row above, the failing
-    // forms included, so this stays a measurement rather than a memory.
     return value;
   }
 

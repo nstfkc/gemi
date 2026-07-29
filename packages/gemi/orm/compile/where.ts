@@ -19,6 +19,7 @@ import {
   param,
   sql,
 } from "./fragment";
+import { fieldParam } from "./cast";
 
 /**
  * `where` -> a boolean expression, recursively.
@@ -747,7 +748,7 @@ function compileFieldFilter(
         parts.push(
           concat(
             sql(`${column} ${COMPARISONS[key]} `),
-            param(encoded(field, dialect, at)),
+            fieldParam(field, dialect, encoded(field, dialect, at)),
           ),
         );
         break;
@@ -799,7 +800,7 @@ function compileNot(
   if (!isFilterObject(operand)) {
     return concat(
       sql(`${column} <> `),
-      param(encoded(field, context.dialect, locate)),
+      fieldParam(field, context.dialect, encoded(field, context.dialect, locate)),
     );
   }
 
@@ -821,7 +822,10 @@ function equals(
   // `= ?` with a null parameter matches nothing in SQL, where Prisma means
   // `is null`. This is the difference that would silently return wrong rows.
   if (operand === null) return sql(`${column} is null`);
-  return concat(sql(`${column} = `), param(encoded(field, dialect, locate)));
+  return concat(
+    sql(`${column} = `),
+    fieldParam(field, dialect, encoded(field, dialect, locate)),
+  );
 }
 
 function inList(

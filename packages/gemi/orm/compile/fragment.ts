@@ -80,9 +80,20 @@ export function sql(text: string): Fragment {
   return { text, binders: [] };
 }
 
-/** A single parameter position, bound from the argument tree at call time. */
-export function param(binder: Binder): Fragment {
-  return { text: PARAM_MARKER, binders: [binder] };
+/**
+ * A single parameter position, bound from the argument tree at call time.
+ *
+ * `cast` is SQL appended immediately after the placeholder — `$1::text::jsonb`.
+ * It rides as ordinary text rather than as a parallel array because the marker
+ * is replaced in place at render, so text following it needs no bookkeeping and
+ * cannot fall out of step with the binders.
+ *
+ * Only a dialect may supply one, and only from a constant: it is the one string
+ * here that reaches the statement without being a parameter. See
+ * `castParameter`.
+ */
+export function param(binder: Binder, cast = ""): Fragment {
+  return { text: PARAM_MARKER + cast, binders: [binder] };
 }
 
 export function concat(...parts: Fragment[]): Fragment {
