@@ -900,6 +900,69 @@ describe("applyNestedPolicies", () => {
     expect(out.orderBy).toBe(orderBy);
   });
 
+  /**
+   * **A malformed nested argument is left alone for the compiler to report.**
+   *
+   * The rule is stated in `scopeRelationOrderings` — "Malformed, and the
+   * compiler reports it with the message it has" — and repeated as a guard at
+   * six other places: the include walk, the `_count` walk, its `select`, the
+   * ordering walk, and two `undefined`/`false` skips.
+   *
+   * Nothing tested any of them. Every one of those guards could have its `||`
+   * turned into an `&&` with both suites still green (#137), and under that
+   * change the policy layer walks into an array where it expects a node — so
+   * the caller gets whatever that produces instead of the compiler's precise
+   * refusal. This repo has fixed that shape of failure repeatedly (#101, #107):
+   * an error that names the wrong thing sends the reader to a query they did
+   * not write.
+   *
+   * Asserted as passthrough rather than by catching an error, because the
+   * policy layer's job here is to do *nothing* — the refusal is the compiler's
+   * to make, and asserting on it here would move the contract.
+   */
+  describe("a malformed nested argument is passed through untouched", () => {
+    const scopes: ModelPolicy = { scope: () => ({ tenant: 1 }) };
+
+    const walk = (args: unknown) =>
+      applyNestedPolicies(
+        { relations: { accounts: { model: "Account", kind: "many" as const } } },
+        args as never,
+        USER,
+        false,
+        (model: string) =>
+          model === "Account"
+            ? { policies: [scopes], schema: { name: "Account", relations: {} } }
+            : undefined,
+      );
+
+    test.each([
+      ["an include node that is an array", { include: { accounts: [] } }],
+      ["an include node that is a number", { include: { accounts: 5 } }],
+      ["an include node that is a string", { include: { accounts: "yes" } }],
+      ["an orderBy node that is an array", { orderBy: { accounts: [] } }],
+      ["an orderBy node that is a number", { orderBy: { accounts: 5 } }],
+      ["a _count that is an array", { include: { _count: [] } }],
+      ["a counted relation that is an array", { include: { _count: { select: { accounts: [] } } } }],
+    ])("%s", (_label, args) => {
+      // Deep equality, not identity: the walk may copy the surrounding object
+      // on its way past. What must not change is the malformed node itself.
+      expect(walk(args)).toEqual(args);
+    });
+
+    /**
+     * `false` and `undefined` are not malformed — they are Prisma's way of
+     * saying "not this relation" — and they are skipped by a different guard
+     * that was equally untested. Same assertion, different reason, so they are
+     * named apart rather than folded into the table above.
+     */
+    test.each([
+      ["false", { include: { accounts: false } }],
+      ["undefined", { include: { accounts: undefined } }],
+    ])("an include node that is %s is skipped, not scoped", (_label, args) => {
+      expect(walk(args)).toEqual(args);
+    });
+  });
+
   test("an unregistered relation target is left for the planner to report", () => {
     const args = { include: { unknown: true } };
     const out = applyNestedPolicies(
