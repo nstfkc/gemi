@@ -10,7 +10,7 @@ import {
 } from "gemi/orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 
-import { POSTGRES_URL } from "./differential";
+import { POSTGRES_URL } from "./scratch";
 
 /**
  * Every scalar type, through a **relation**, under both strategies.

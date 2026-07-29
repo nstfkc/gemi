@@ -23,7 +23,7 @@ import {
   test,
 } from "vitest";
 
-import { POSTGRES_URL, applyMigrations } from "./differential";
+import { POSTGRES_URL, applyMigrations } from "./scratch";
 import { AccountModel } from "./generated";
 import { User } from "./User";
 

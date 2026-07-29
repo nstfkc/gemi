@@ -1,5 +1,4 @@
-import { SQL } from "bun";
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -8,6 +7,8 @@ import { DatabaseManager } from "gemi/database";
 import { Application } from "gemi/foundation";
 import { Model, clearPlanCache, type ExecOptions } from "gemi/orm";
 import { expect } from "vitest";
+
+import { applyMigrations } from "./scratch";
 
 /**
  * The safety net for every later iteration: run the same query through Prisma
@@ -22,6 +23,13 @@ import { expect } from "vitest";
  *
  * Postgres runs too when `TEST_POSTGRES_URL` is set. The skip is deliberately
  * loud: a silently skipped dialect reads as a passing one.
+ *
+ * **This module imports `@prisma/client`, so importing it is not free.** Only a
+ * suite that actually compares against Prisma should reach for it; `POSTGRES_URL`
+ * and `applyMigrations` moved to `./scratch`, which imports nothing but `bun`
+ * and two node builtins, precisely so the other eleven suites in this directory
+ * stop loading a query engine at collection time to read an environment
+ * variable. `packages/gemi/orm/template-import-graph.test.ts` holds that line.
  */
 
 /**
@@ -80,8 +88,6 @@ export interface Differential {
   resetQueries(): void;
   dispose(): Promise<void>;
 }
-
-export const POSTGRES_URL = process.env.TEST_POSTGRES_URL;
 
 /**
  * Redaction is the one policy capability that makes gemi's result *deliberately*
@@ -424,35 +430,6 @@ export async function createDifferential(options: {
       rmSync(workspace, { recursive: true, force: true });
     },
   };
-}
-
-/**
- * Replays the committed migrations into a fresh SQLite file, in name order —
- * which is Prisma's own ordering, since it prefixes every directory with a
- * timestamp. Statements are split on `;` at end of line, which is enough for
- * the DDL Prisma emits and involves no SQL parsing.
- */
-export async function applyMigrations(path: string): Promise<void> {
-  const root = join(import.meta.dirname, "../../prisma/migrations");
-  const sql = new SQL(`sqlite://${path}`);
-
-  try {
-    const directories = readdirSync(root, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => entry.name)
-      .sort();
-
-    for (const directory of directories) {
-      const file = join(root, directory, "migration.sql");
-      const source = readFileSync(file, "utf8");
-      for (const statement of source.split(/;\s*$/m)) {
-        if (statement.trim() === "") continue;
-        await sql.unsafe(statement);
-      }
-    }
-  } finally {
-    await sql.close();
-  }
 }
 
 /**

@@ -8,7 +8,7 @@ import { Application } from "gemi/foundation";
 import { Model, clearPlanCache, register, type ModelSchema } from "gemi/orm";
 import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 
-import { POSTGRES_URL } from "./differential";
+import { POSTGRES_URL } from "./scratch";
 
 /**
  * Prisma's *implicit* many-to-many, which the template's own schema cannot
@@ -310,6 +310,27 @@ async function teardown() {
 
 function suite(label: string, start: () => Promise<void>) {
   describe(label, () => {
+    /**
+     * **60s, and it is not #217.** This is the shortest hook timeout in the
+     * directory — its neighbours use 120s — so it is the first thing anyone
+     * reading #217 reaches for, and it is the wrong thing.
+     *
+     * The two failure shapes are distinguishable from the run's own counts,
+     * which is what settles it. Injecting each into this file and running the
+     * directory:
+     *
+     *   a hook that times out   FAIL <file> > <suite>      625 passed | 47 skipped (672)
+     *   a module that throws    FAIL <file> [ <file> ]     625 passed | 32 skipped (657)
+     *
+     * A failed hook still contributes its file's 15 tests to the run, as
+     * *skipped*; a module that throws before `describe` runs leaves them absent
+     * and the total 15 short. #217 reports `605 passed | 32 skipped (637)` —
+     * total short, skipped unchanged — so the failure is at import, and nothing
+     * this number does could have caused it or can prevent it.
+     *
+     * Raising it would only make a genuine hang slower to report. Left alone
+     * deliberately.
+     */
     beforeAll(start, 60_000);
     afterAll(teardown);
     cases();

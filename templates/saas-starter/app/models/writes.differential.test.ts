@@ -2,11 +2,7 @@ import { Prisma as PrismaNamespace, type PrismaClient } from "@prisma/client";
 import { UniqueConstraintError } from "gemi/orm";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 
-import {
-  POSTGRES_URL,
-  createDifferential,
-  type Differential,
-} from "./differential";
+import { createDifferential, type Differential } from "./differential";
 import {
   AccountModel,
   MembershipModel,
@@ -16,6 +12,7 @@ import {
   SocialAccountModel,
   UserModel,
 } from "./generated";
+import { POSTGRES_URL } from "./scratch";
 
 /**
  * The write surface, run through Prisma and through gemi against the same

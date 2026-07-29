@@ -8,7 +8,7 @@ import { Application } from "gemi/foundation";
 import { Model, clearPlanCache, register, type ModelSchema } from "gemi/orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 
-import { POSTGRES_URL } from "./differential";
+import { POSTGRES_URL } from "./scratch";
 
 /**
  * Round-tripping every scalar type: write a value, read it back, and get the

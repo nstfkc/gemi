@@ -5,11 +5,7 @@ import { Prisma as PrismaNS, type PrismaClient } from "@prisma/client";
 import { Model } from "gemi/orm";
 import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 
-import {
-  POSTGRES_URL,
-  createDifferential,
-  type Differential,
-} from "./differential";
+import { createDifferential, type Differential } from "./differential";
 import {
   AccountModel,
   LedgerEntryModel,
@@ -18,6 +14,7 @@ import {
   SocialAccountModel,
   UserModel,
 } from "./generated";
+import { POSTGRES_URL } from "./scratch";
 
 // Rows chosen so that every case below actually discriminates: nullable columns
 // that are null on some rows and not others, names that tie under `orderBy`,
