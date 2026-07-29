@@ -4014,7 +4014,7 @@ comes back too.
 
 ### Everything else still applies
 
-`save` compiles through the same path as any other write, so [policies](./authorization.md)
+`save` compiles through the same path as any other write, so [policies](./orm.md#policies)
 scope it, `@updatedAt` stamps it, an open transaction contains it, and two saves touching the
 same columns share one cached plan.
 
