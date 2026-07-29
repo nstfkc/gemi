@@ -1486,6 +1486,72 @@ function suite(label: string, url?: string) {
       );
     });
 
+    /**
+     * `set` — replace the whole set. The one supported operand that acts on
+     * rows the *call* did not name, which #83 showed how to scope: read the
+     * linked rows through the child's own `findMany` and clear only those.
+     *
+     * Four cases, and three of them are behaviours the name does not suggest —
+     * measured against Prisma before implementing.
+     */
+    test("set keeps the named row and detaches the rest", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { id: 1 },
+          data: { accounts: { set: [{ publicId: "acc-mine-1" }] } },
+          include: { accounts: true },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    test("set to empty detaches every linked row", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { id: 1 },
+          data: { accounts: { set: [] } },
+          include: { accounts: true },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    /** It repoints a row belonging to somebody else, exactly as `connect` does. */
+    test("set takes a row from another parent", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { id: 1 },
+          data: { accounts: { set: [{ publicId: "acc-theirs" }] } },
+          include: { accounts: true },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    /**
+     * And a named row that does not exist is **silently ignored** — no error,
+     * which is why the connect half is an `updateMany` rather than the `update`
+     * a nested `connect` uses.
+     */
+    test("set ignores a named row that does not exist", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { id: 1 },
+          data: { accounts: { set: [{ publicId: "no-such-account" }] } },
+          include: { accounts: true },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
     test("nested connect on the foreign side repoints the child", async () => {
       await differential.reset();
       await differential.prisma.account.create({

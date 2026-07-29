@@ -136,6 +136,11 @@ class Note extends Model {
   static $policies = [tenant()];
 }
 
+/** The same model with no policy at all, for the parity half of `set`. */
+class Unpolicied extends Model {
+  static $schema = noteSchema;
+}
+
 const OURS = { orgId: 7 };
 
 describe("policies on nested writes", () => {
@@ -622,6 +627,67 @@ describe("policies on nested writes", () => {
 
     const notes: any = await raw.unsafe(`SELECT "orgId" FROM "Note"`);
     expect(notes[0].orgId).toBe(7);
+  });
+
+  /**
+   * `set` means **"replace the set I can see"** — #83's answer, applied to an
+   * ordinary relation.
+   *
+   * It is the one supported operand that acts on rows the *call* did not name,
+   * so the disconnect half needs a lookup for the child's scope to narrow. A
+   * row this caller cannot see stays attached rather than being silently
+   * detached, which is the same choice `disconnect` makes one operand over —
+   * and the opposite of what an unscoped clear would do.
+   */
+  test("set replaces only the links the caller can see", async () => {
+    await raw.unsafe(
+      `INSERT INTO "Folder" ("id", "code", "orgId") VALUES (2, 'ours', 7)`,
+    );
+    // Both linked to our folder; one belongs to the other tenant.
+    await raw.unsafe(
+      `INSERT INTO "Note" ("id", "folderId", "label", "orgId") ` +
+        `VALUES (40, 2, 'ours', 7), (41, 2, 'theirs', 99)`,
+    );
+
+    await Model.asUser(OURS, () =>
+      Folder.$exec("update", {
+        where: { id: 2 },
+        data: { code: "ours", notes: { set: [] } },
+      }),
+    );
+
+    const notes: any = await raw.unsafe(
+      `SELECT "id", "folderId" FROM "Note" ORDER BY "id"`,
+    );
+    // Ours detached; theirs untouched, because the scoped read never saw it.
+    expect(notes[0].folderId).toBeNull();
+    expect(notes[1].folderId).toBe(2);
+  });
+
+  /** With no policy on the child, `set` is Prisma's `set` exactly. */
+  test("set clears everything when the child is unpolicied", async () => {
+    register("Note", Unpolicied);
+    try {
+      await raw.unsafe(
+        `INSERT INTO "Folder" ("id", "code", "orgId") VALUES (2, 'ours', 7)`,
+      );
+      await raw.unsafe(
+        `INSERT INTO "Note" ("id", "folderId", "label", "orgId") ` +
+          `VALUES (42, 2, 'a', 7), (43, 2, 'b', 99)`,
+      );
+
+      await Model.asUser(OURS, () =>
+        Folder.$exec("update", {
+          where: { id: 2 },
+          data: { code: "ours", notes: { set: [] } },
+        }),
+      );
+
+      const notes: any = await raw.unsafe(`SELECT "folderId" FROM "Note"`);
+      expect(notes.every((n: any) => n.folderId === null)).toBe(true);
+    } finally {
+      register("Note", Note);
+    }
   });
 
   /**
