@@ -300,6 +300,24 @@ const LIST_KEYS = new Set(["in", "notIn"]);
  *
  * An empty list keeps its own key: `in: []` compiles to a constant-false
  * predicate rather than to `= any($1)`, which is a different text.
+ *
+ * **It covers `in` / `notIn` and nothing else, which leaves one gap worth
+ * naming here rather than only where it happens.** A relation joining on more
+ * than one field cannot be filtered with a single `in`, so the batched loader
+ * builds an `OR` of `AND`s instead (see `childQuery`) — and an `OR`'s text
+ * genuinely varies with its branch count, so it cannot be collapsed the way a
+ * Postgres `= any($1)` can: a shared key would hand a plan the wrong number of
+ * placeholders, which is the trap described above for SQLite. Measured over
+ * parent counts 2, 3, 10, 50:
+ *
+ *     sqlite    composite: 4 keys    single: 4 keys
+ *     postgres  composite: 4 keys    single: 1 key
+ *
+ * So the churn this function prevents for a single-field relation still happens
+ * for a composite one on Postgres. SQLite was always in that position. Fixing
+ * it needs a form where the parent keys ride in one parameter — Postgres can,
+ * with `unnest` over one array per column — which is a dialect method rather
+ * than a key change, and is filed as #97 rather than sketched here.
  */
 function collapsedList(value: unknown[]): string {
   return value.length === 0 ? "[]" : "[*]";

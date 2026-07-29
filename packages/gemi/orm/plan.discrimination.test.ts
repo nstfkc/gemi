@@ -455,6 +455,56 @@ describe("plan cache discrimination", () => {
     );
   });
 
+  /**
+   * The gap `collapsedList` does not cover, pinned so it changes deliberately.
+   *
+   * A composite relation cannot be filtered with a single `in`, so the batched
+   * loader builds an `OR` of `AND`s — whose text varies with its branch count,
+   * so it cannot be collapsed the way `= any($1)` can. The result is that
+   * Postgres, otherwise immune to parent-count churn, is not immune for a
+   * composite relation.
+   *
+   * Asserted rather than left as a comment because the *asymmetry* is the
+   * surprising part: same include, same query shape, different relation arity.
+   * If a future change makes the composite path collapse too, this is what
+   * should say so.
+   */
+  test("a composite parent filter churns on both dialects, unlike a single-field one", () => {
+    const counts = [2, 3, 10, 50];
+
+    const composite = (dialect: SqliteDialect | PostgresDialect) =>
+      new Set(
+        counts.map((n) =>
+          planKey(dialect, "Ledger", "findMany", {
+            where: {
+              OR: Array.from({ length: n }, (_, i) => ({
+                tenantId: 1,
+                code: `c${i}`,
+              })),
+            },
+          }),
+        ),
+      ).size;
+
+    const single = (dialect: SqliteDialect | PostgresDialect) =>
+      new Set(
+        counts.map((n) =>
+          planKey(dialect, "User", "findMany", {
+            where: { id: { in: Array.from({ length: n }, (_, i) => i) } },
+          }),
+        ),
+      ).size;
+
+    // SQLite expands an `in` to one placeholder per element, so it churns
+    // either way and always has.
+    expect(single(sqlite)).toBe(counts.length);
+    expect(composite(sqlite)).toBe(counts.length);
+
+    // Postgres collapses an `in` to one key — and cannot collapse the `OR`.
+    expect(single(postgres)).toBe(1);
+    expect(composite(postgres)).toBe(counts.length);
+  });
+
   // Postgres is the exception that proves the point: there, every in-length
   // shares one SQL text on purpose — so it shares one cache entry too, and the
   // extra entries are the cost of SQLite's expansion rather than a fact about
