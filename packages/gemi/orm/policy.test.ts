@@ -1054,6 +1054,49 @@ describe("relation filters in where", () => {
     });
   });
 
+  /**
+   * **Inside a boolean combinator**, which nothing reached.
+   *
+   * `scopeRelationFilters` recurses into `AND` / `OR` / `NOT` arrays and shares
+   * structure on the way out — `changed ? out : where`, so an untouched tree
+   * comes back as the same object and the plan key does not move. Every test
+   * above puts the relation filter at the top level, where that array branch is
+   * never entered.
+   *
+   * Mutation found it: inverting `if (scoped !== entry)` survives the unit suite
+   * *and* the template suite. Under that mutant an entry that **was** scoped
+   * leaves `changed` false, so the function returns the original `where` and the
+   * child's scope is dropped — a policy bypass for any relation filter written
+   * inside an `AND`, which is how anyone composes two conditions.
+   *
+   * Both spellings, because `OR` reaches the same branch by a different key and
+   * a guard that only covers `AND` would leave half the combinator untested.
+   */
+  test("a relation filter inside AND is scoped like one at the top level", () => {
+    expect(
+      scoped({ AND: [{ accounts: { some: { organizationRole: 0 } } }] }, {
+        Account: [tenant],
+      }),
+    ).toEqual({
+      AND: [
+        { accounts: { some: { organizationRole: 0, AND: [{ organizationId: 7 }] } } },
+      ],
+    });
+  });
+
+  test("and inside OR, beside a plain condition it must not disturb", () => {
+    expect(
+      scoped({ OR: [{ email: "a@b.c" }, { accounts: { some: {} } }] }, {
+        Account: [tenant],
+      }),
+    ).toEqual({
+      OR: [
+        { email: "a@b.c" },
+        { accounts: { some: { AND: [{ organizationId: 7 }] } } },
+      ],
+    });
+  });
+
   test("none is narrowed the same way", () => {
     expect(scoped({ accounts: { none: {} } }, { Account: [tenant] })).toEqual({
       accounts: { none: { AND: [{ organizationId: 7 }] } },
