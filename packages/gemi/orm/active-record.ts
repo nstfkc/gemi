@@ -7,7 +7,7 @@ import type { QueryPlan } from "./plan";
  * This is iteration 8's deliverable 4, and its job is to prove invariant 3 was
  * worth holding: `$shape` is a static on the model base rather than a
  * module-level function, so a subclass can change what a query *returns* without
- * any of the twelve operations knowing. If that had required touching an
+ * any operation knowing. If that had required touching an
  * operation, it would have been a design defect to fix while the cost was still
  * small.
  *
@@ -34,7 +34,7 @@ import type { QueryPlan } from "./plan";
  * 2. The return *types* do not change. `findMany` is still typed as returning
  *    `Prisma.PostGetPayload<T>[]`, so the instance methods are invisible to
  *    TypeScript at the call site even though they are there at runtime. Fixing
- *    that means conditional return types across all twelve operations, which is
+ *    that means conditional return types across every operation, which is
  *    exactly the complexity the POJO baseline was chosen to avoid.
  *
  * So this file is evidence that the seam works, and a warning about what using
@@ -49,7 +49,7 @@ export abstract class ActiveRecordModel extends Model {
    * data is *carried in*.
    *
    * Note what is not here: no per-operation branching, no knowledge of which of
-   * the twelve operations is running, and no second code path for writes. A
+   * the operations is running, and no second code path for writes. A
    * `count` returns a number and an `updateMany` returns `{ count }`; both fall
    * through untouched because they are not rows.
    */

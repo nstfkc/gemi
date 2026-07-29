@@ -196,7 +196,7 @@ describe("the ORM's seams", () => {
    *
    * `$shape` is a static on the model base precisely so that
    * `ActiveRecordModel` can override it and every model extending it gets rows
-   * as instances "with zero changes to the twelve operations". That only holds
+   * as instances "with zero changes to the operations". That only holds
    * while `$exec` is the thing calling it.
    *
    * The failure is quiet and partial: one operation calling `plan.shape(rows)`

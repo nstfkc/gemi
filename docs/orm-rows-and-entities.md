@@ -150,7 +150,7 @@ There is an `ActiveRecordModel` base in the ORM that makes every query return in
 overriding one method. It ships as a **documented example rather than a supported tier**, for
 exactly the reason above plus one more: the return *types* do not change, so the methods are
 invisible to TypeScript at the call site even though they exist at runtime. Fixing that means
-conditional return types across all twelve operations, which is the complexity the plain-object
+conditional return types across every operation, which is the complexity the plain-object
 default was chosen to avoid.
 
 Use it if you want to see the seam work. Reach for `wrap` if you want the guarantee.

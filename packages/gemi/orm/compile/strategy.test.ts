@@ -15,7 +15,7 @@ const origin = { model: "User", operation: "findMany" };
 /**
  * `resolveStrategy` had no test, and its refusal reported `"Model"` as the
  * model and `"$exec"` as the operation — a base class, and something that is
- * not one of the thirteen operations (#112). Its one caller has both in scope.
+ * not one of the operations (#112). Its one caller has both in scope.
  */
 describe("resolveStrategy", () => {
   test("the default is per dialect: lateral on postgres, batched on sqlite", () => {

@@ -199,3 +199,46 @@ describe("docs/llms-full.txt carries the ORM pages", () => {
     expect(embedded(title.replace(/^#\s*/, ""))).toBe(expected);
   });
 });
+
+/**
+ * **The operations `docs/orm.md` lists are the operations that exist.**
+ *
+ * The page introduces them with a count and a code block. The count had been
+ * wrong, and had been wrong in three different ways at once across the
+ * repository — "twelve" in `active-record.ts`, "thirteen" in `strategy.ts` and
+ * `llms.txt`, "fourteen" in the page itself, against a union of **fifteen**.
+ * Each was right when written and none moved when `count`, `aggregate` and
+ * `groupBy` arrived.
+ *
+ * The list was complete throughout; only the prose around it drifted. That is
+ * the milder failure, but it is the one a reader meets first, and I contributed
+ * to it myself — #144 copied "thirteen" out of a comment without checking.
+ *
+ * So the guard is on the **list**, not the number: a count can only be wrong by
+ * one word, while a missing operation is a documented surface that does not
+ * exist, or an existing one nobody is told about.
+ */
+describe("docs/orm.md lists every operation", () => {
+  const source = readFileSync(DOC, "utf8");
+
+  /** The fenced block that follows the introduction. */
+  const listed = (() => {
+    const at = source.search(/^\w+ operations, with Prisma's argument types verbatim:$/m);
+    expect(at, "the operations block moved or was reworded").toBeGreaterThan(0);
+    const fence = source.indexOf("```", at);
+    const end = source.indexOf("```", fence + 3);
+    return source
+      .slice(fence + 3, end)
+      .split(/\s+/)
+      .map((word) => word.trim())
+      .filter(Boolean);
+  })();
+
+  test("the block was found and holds names", () => {
+    expect(listed.length).toBeGreaterThan(10);
+  });
+
+  test("it names exactly the operations the compiler implements", () => {
+    expect([...listed].sort()).toEqual([...IMPLEMENTED].sort());
+  });
+});
