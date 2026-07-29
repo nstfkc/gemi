@@ -1121,8 +1121,6 @@ Stated so you can plan around them rather than discover them:
   from. This one *is* pending rather than declined; it needs a composite key comparison on both
   sides (a tuple `in` for the batched strategy, a conjunction for the lateral one).
 - **No migrations, no schema DSL.** Prisma owns both, and gemi must not shadow the Prisma CLI.
-- **No `groupBy` or `aggregate`.** These land in [Raw SQL](#raw-sql), which exists so that "not
-  implemented" has an answer rather than a shrug.
 - **No `distinct`, and this one is deliberate rather than pending.** Prisma applies it **in
   memory** — its query log shows no `DISTINCT` at all, so `take` neither reduces the rows pulled
   nor paginates by group. Reproducing that faithfully would mean reading the whole result set and
