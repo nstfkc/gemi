@@ -507,6 +507,58 @@ function planOwningSide(
     return;
   }
 
+  /**
+   * `upsert` through a to-one, refused **by name**.
+   *
+   * The far row is identified by *this* row's foreign key, so an absent one
+   * means creating the far row and then writing back to a parent that has
+   * already been inserted — a shape no other operand here needs, and the
+   * reason this side is not implemented.
+   *
+   * Named rather than left to fall through, which is what it did: with no
+   * branch of its own it reached the `connect` handling below and reported
+   * `'where' yet (Organization.update.organization.connect)` — a different
+   * operand, a different model, and a claim that `{ id: 1 }` is not a unique
+   * field when it is. The real failure was that a `{ where, create, update }`
+   * operand was being read as a connect key.
+   *
+   * That is the shape #85 was filed for and #101 fixed on its own path: a
+   * refusal that misnames its origin sends the reader to a query they did not
+   * write.
+   */
+  /**
+   * The list operands, refused by name on a to-one.
+   *
+   * `set`, `updateMany` and `deleteMany` describe *many* rows, and this side
+   * has one by construction — Prisma does not offer them here either. They were
+   * in `SUPPORTED` with no branch on this side, so they fell through to the
+   * `connect` handling below and reported `connect` back to a caller who wrote
+   * something else. Same fall-through as `upsert`'s, found by the same test.
+   */
+  if (key === "set" || key === "updateMany" || key === "deleteMany") {
+    throw new UnsupportedQueryError(
+      `data.${relation.name}.${key}`,
+      schema.name,
+      operation,
+      `'${relation.name}' is a to-one: this row holds a single foreign key, so ` +
+        `there is no set of rows for '${key}' to act on. Prisma does not ` +
+        `accept it here either. Use 'connect', 'disconnect' or 'update'.`,
+    );
+  }
+
+  if (key === "upsert") {
+    throw new UnsupportedQueryError(
+      `data.${relation.name}.upsert`,
+      schema.name,
+      operation,
+      `'${relation.name}' is a to-one, and this row holds its foreign key — ` +
+        `so an absent far row would have to be created and then written back ` +
+        `to a ${schema.name} that has already been inserted. That is not ` +
+        `implemented. Upsert the ${relation.model} directly, then 'connect' ` +
+        `it.`,
+    );
+  }
+
   if (key === "connectOrCreate") {
     assertConnectOrCreateOperand(
       schema,

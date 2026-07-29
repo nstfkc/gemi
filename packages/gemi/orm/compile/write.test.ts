@@ -854,6 +854,76 @@ describe("nested writes", () => {
   });
 
   /**
+   * **Every supported operand is answered on both sides, or refused by name.**
+   *
+   * `SUPPORTED` says which operands the ordinary-relation path accepts, but the
+   * two sides are separate dispatches — `planOwningSide` when this row holds
+   * the key, `planForeignSide` when the child does. An operand can be in the
+   * set and unimplemented on one of them, and then it falls through to whatever
+   * handler comes last: `upsert` reached the `connect` path and reported
+   * `'where' yet (Organization.update.organization.connect)` — a different
+   * operand, a different model, and a claim that `{ id: 1 }` is not a unique
+   * key when it is.
+   *
+   * That is a gap `REFUSED` cannot cover, because the operand is not refused —
+   * it is supported, on one side. This walks the set and asserts that whatever
+   * comes back names the operand the caller actually wrote, which is the
+   * property #85 was filed about.
+   */
+  describe("every supported operand answers for itself on both sides", () => {
+    const OPERANDS = [
+      "connect",
+      "connectOrCreate",
+      "create",
+      "createMany",
+      "disconnect",
+      "delete",
+      "update",
+      "updateMany",
+      "deleteMany",
+      "set",
+      "upsert",
+    ];
+
+    // `organization` is the to-one — this row holds the key. `accounts` is the
+    // to-many — the child does.
+    test.each(OPERANDS)("%s on a to-one names itself", (operand) => {
+      let message = "";
+      try {
+        text("update", {
+          where: { id: 1 },
+          data: { organization: { [operand]: {} } },
+        });
+      } catch (error) {
+        message = (error as Error).message;
+      }
+
+      // Either it compiled, or the refusal names the operand the caller wrote.
+      //
+      // The *model* is deliberately not asserted: `matchUniqueKey` reports the
+      // child whose key is missing, which is a different question from whether
+      // the operand is named, and is the same on both sides.
+      if (message === "") return;
+      expect(message).toContain(`.${operand}`);
+    });
+
+    test.each(OPERANDS)("%s on a to-many names itself", (operand) => {
+      let message = "";
+      try {
+        text("update", {
+          where: { id: 1 },
+          data: { accounts: { [operand]: {} } },
+        });
+      } catch (error) {
+        message = (error as Error).message;
+      }
+
+      if (message === "") return;
+      expect(message).toContain(`.${operand}`);
+    });
+  });
+
+  /**
    * The two operand sets, reconciled — and asserted, because nothing else can
    * see the divergence.
    *
