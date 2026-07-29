@@ -18,6 +18,7 @@ import {
   joinFragments,
   sql,
 } from "./fragment";
+import { jsonNullKind } from "../json-null";
 import { fieldParam } from "./cast";
 
 /**
@@ -820,7 +821,15 @@ function equals(
 ): Fragment {
   // `= ?` with a null parameter matches nothing in SQL, where Prisma means
   // `is null`. This is the difference that would silently return wrong rows.
-  if (operand === null) return sql(`${column} is null`);
+  //
+  // `Prisma.DbNull` means the same thing on a `Json` column and arrives as a
+  // sentinel object rather than as `null`, so it reached the parameter path
+  // below and compiled to `= ?` — matching nothing, whatever the table held.
+  // Its sibling `JsonNull` is a genuine *value* comparison and belongs there:
+  // the column holds the JSON `null`, and `= 'null'` is how you find it.
+  if (operand === null || jsonNullKind(operand) === "db") {
+    return sql(`${column} is null`);
+  }
   return concat(
     sql(`${column} = `),
     fieldParam(field, dialect, encoded(field, dialect, locate)),
