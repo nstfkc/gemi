@@ -139,6 +139,17 @@ async function main() {
   // and the report says which is which.
   await carryForward(results);
 
+  // Whether this run has Postgres data at all. Every sentence below that cites
+  // a Postgres figure is gated on it.
+  //
+  // One of them already was — the deliverable-2 caveat — and the rest were
+  // written rather than derived, so a SQLite-only run emitted "Postgres was
+  // measured over loopback" and a pair of ratios three lines under its own
+  // "Postgres was not measured". The header of this file says to regenerate
+  // rather than edit, which means a static sentence about a dialect that may
+  // not have run is a bug in the generator, not in the report.
+  const measuredPostgres = anchors.postgres !== undefined;
+
   const report = [
     "# ORM benchmarks",
     "",
@@ -228,13 +239,17 @@ async function main() {
     "index is worth 1.0x\", which is a measurement answering a different question",
     "than its own heading.",
     "",
-    "**A ratio near 1 on Postgres here is a limit of this fixture, not a finding",
-    "about Postgres.** The child table is 200 rows and the connection is",
-    "loopback, so the round trip dominates and a scan of 200 rows is free either",
-    "way — the numbers below can go either side of 1.0x on noise alone. This",
-    "table says the index is decisive on SQLite and says *nothing* about how a",
-    "real child table behaves over a real socket.",
-    "",
+    ...(measuredPostgres
+      ? [
+          "**A ratio near 1 on Postgres here is a limit of this fixture, not a finding",
+          "about Postgres.** The child table is 200 rows and the connection is",
+          "loopback, so the round trip dominates and a scan of 200 rows is free either",
+          "way — the numbers below can go either side of 1.0x on noise alone. This",
+          "table says the index is decisive on SQLite and says *nothing* about how a",
+          "real child table behaves over a real socket.",
+          "",
+        ]
+      : []),
     "| Dialect | Parents | plain µs | `_count` µs | `_count` +index µs | include+`.length` µs | `exists` µs | `exists` +index µs |",
     "| --- | --: | --: | --: | --: | --: | --: | --: |",
     ...subqueries,
@@ -277,9 +292,17 @@ async function main() {
     "",
     "   **The positional-row half stays unjustified.** `.values()` exists — that",
     "   much is verified rather than assumed — but it measured 14% *slower* on",
-    "   SQLite and 17% faster on Postgres, and the sign flipped between runs at",
-    "   lower sample counts. With p95 near double p50 on Postgres, this workload",
-    "   cannot resolve it, so it was not taken.",
+    ...(measuredPostgres
+      ? [
+          "   SQLite and 17% faster on Postgres, and the sign flipped between runs at",
+          "   lower sample counts. With p95 near double p50 on Postgres, this workload",
+          "   cannot resolve it, so it was not taken.",
+        ]
+      : [
+          "   SQLite, and the sign flipped between runs at lower sample counts. The",
+          "   Postgres side of that comparison is not in this run's data, so nothing",
+          "   here resolves it and it was not taken.",
+        ]),
     ...(anchors.postgres === undefined
       ? [
           "3. **Deliverable 2 (lateral + `json_agg`) was not evaluated**: Postgres",
@@ -292,12 +315,22 @@ async function main() {
           statementCounts.postgres ?? {},
         )),
     "4. **A transaction costs one extra round trip pair, and that is the whole",
-    "   cost.** +12µs on SQLite, +350µs on Postgres — against a ~25ns ALS read.",
+    ...(measuredPostgres
+      ? ["   cost.** +12µs on SQLite, +350µs on Postgres — against a ~25ns ALS read."]
+      : ["   cost.** +12µs on SQLite — against a ~25ns ALS read."]),
     "   Iteration 5's second `AsyncLocalStorage` is nowhere in the number; the",
     "   `BEGIN`/`COMMIT` are. Worth knowing before anyone optimises the store.",
-    "5. **Policies are free at this resolution.** +1µs on a SQLite point read,",
-    "   and within run-to-run variance on Postgres. Iteration 6's deferred",
-    "   question is answered: dispatch is not worth memoising.",
+    ...(measuredPostgres
+      ? [
+          "5. **Policies are free at this resolution.** +1µs on a SQLite point read,",
+          "   and within run-to-run variance on Postgres. Iteration 6's deferred",
+          "   question is answered: dispatch is not worth memoising.",
+        ]
+      : [
+          "5. **Policies are free at this resolution.** +1µs on a SQLite point read.",
+          "   Iteration 6's deferred question is answered for the dialect that ran:",
+          "   dispatch is not worth memoising.",
+        ]),
     "6. **The plan cache earns ~10× on compile** — 5.7µs to compile a point read",
     "   against 0.9µs to look one up — and compile is a single-digit percentage",
     "   of any scenario's total, so it is not where the remaining time is.",
@@ -306,13 +339,21 @@ async function main() {
     "",
     "- **Ratios below 1.00× are noise, not a win.** gemi cannot be faster than",
     "  hand-written SQL doing the same work; it *is* the same driver call plus",
-    "  overhead. The Postgres point read and depth-2 include come out at 0.82×",
-    "  and 0.94× because a ~150µs loopback round trip varies by more than the",
-    "  difference being measured, and because the `raw` baseline is a second",
-    "  `SQL` instance with its own prepared-statement state. Read them as \"at",
-    "  the floor\", not as better than it.",
-    "- Postgres was measured over loopback, so every Postgres round trip here is",
-    "  optimistic — see the note below.",
+    ...(measuredPostgres
+      ? [
+          "  overhead. The Postgres point read and depth-2 include come out at 0.82×",
+          "  and 0.94× because a ~150µs loopback round trip varies by more than the",
+          "  difference being measured, and because the `raw` baseline is a second",
+          "  `SQL` instance with its own prepared-statement state. Read them as \"at",
+          "  the floor\", not as better than it.",
+          "- Postgres was measured over loopback, so every Postgres round trip here is",
+          "  optimistic — see the note below.",
+        ]
+      : [
+          "  overhead. Where one appears, read it as \"at the floor\" rather than as a",
+          "  win: the `raw` baseline is a second `SQL` instance with its own",
+          "  prepared-statement state.",
+        ]),
     "",
     ...(notes.length > 0 ? ["## Notes", "", ...notes.map((n) => `- ${n}`)] : []),
     "",
