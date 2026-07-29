@@ -671,7 +671,15 @@ function assertArgs(schema: ModelSchema, op: string, args: any): void {
   for (const key of Object.keys(args).sort()) {
     if (args[key] === undefined) continue;
     if (GROUP_BY_ARGS.has(key)) continue;
-    throw new UnsupportedQueryError(key, schema.name, op);
+    // The same wording `read.ts` uses for an argument an operation does not
+    // take, and for the reason #61's second half gives: this is the path a
+    // typo arrives on, so naming the set is the whole of the answer.
+    throw new UnsupportedQueryError(
+      key,
+      schema.name,
+      op,
+      `${op} takes ${[...GROUP_BY_ARGS].sort().join(", ")}.`,
+    );
   }
 
   if (args.by === undefined) {
