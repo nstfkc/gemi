@@ -87,17 +87,38 @@ jobs:
         run: bun run typecheck
         working-directory: packages/gemi
 
-      # `orm database`, not `orm`. The package has 47 test files and only 32
-      # have "orm" in their path — `database/DatabaseManager.test.ts` is the
-      # ORM's own SQLite foreign-key pragma test and would have been skipped by
-      # the narrower filter.
+      # Everything except a named red set, rather than a path filter.
       #
-      # Not the whole package: `app/`'s router tests fail on `feat/orm` today
-      # and are unrelated to this. Widening to everything would put CI red for a
-      # reason nobody here can act on, which is how a red board stops being
-      # read. Reported separately.
+      # This step used to run `vitest run orm database`, chosen so
+      # `database/DatabaseManager.test.ts` — the ORM's own SQLite foreign-key
+      # pragma test — was not skipped by the narrower `orm`. The reason given
+      # for not running the whole package was that `app/`'s router tests fail on
+      # `feat/orm` and are unrelated (#163), and a board that is red for a
+      # reason nobody here can act on stops being read.
+      #
+      # That reason covers six files. The filter excluded fourteen: `container`,
+      # `foundation`, `http`, `support`, `app/App` and three of the router
+      # tests all pass and were never run — 55 of the package's 61 files are
+      # green, and CI was running 47 of them.
+      #
+      # An inclusive filter also fails silently in one direction: a new test
+      # file outside those two words is skipped and nothing says so. That is how
+      # #201's type assertions went unnoticed. Naming what is broken instead
+      # means anything added is covered by default, and the exclusions have to
+      # be deleted for CI to stop being honest rather than merely left alone.
+      #
+      # These six are #163. They are excluded here rather than in a vitest
+      # config so a local `vitest run` still shows them: CI stays green without
+      # the failures becoming invisible to the person who could fix them.
       - name: Unit tests
-        run: bun --bun vitest run orm database
+        run: |
+          bun --bun vitest run \
+            --exclude '**/app/createComponentTree.test.ts' \
+            --exclude '**/app/createFlatViewRoutes.test.ts' \
+            --exclude '**/app/createRouteManifest.test.ts' \
+            --exclude '**/services/router/createFlatViewRoutes.test.ts' \
+            --exclude '**/services/router/createRouteManifest.test.ts' \
+            --exclude '**/utils/parseTranslation.test.tsx'
         working-directory: packages/gemi
 
       - name: Template tests
