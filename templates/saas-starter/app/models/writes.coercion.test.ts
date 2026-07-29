@@ -372,11 +372,15 @@ function suite(label: string, url?: string) {
      * a string. A loud failure replaces a silent mis-store, which is the trade
      * this project takes every time.
      *
-     * Fixing it means always serialising *and* emitting an explicit `::jsonb`
-     * cast on the parameter — which has to reach the insert, the update's set
-     * clause and any `where` comparing a Json column, so it is a compiler
-     * change with its own differential pass rather than a dialect tweak. Left
-     * out of the change that found it deliberately.
+     * **Fixing it is not "serialise and cast", which is what this said before.**
+     * That stores the jsonb *string* `"42"` — the very mis-store above — because
+     * Bun serialises a JS string bound to a `jsonb` parameter, so pre-serialising
+     * encodes it twice. The test below pins what actually works.
+     *
+     * Either working form still needs the column's type at the placeholder, so it
+     * reaches the insert, the update's set clause and any `where` comparing a Json
+     * column: a compiler change with its own differential pass rather than a
+     * dialect tweak. Left out of the change that found it deliberately.
      *
      * SQLite has no such limit: it stores JSON as text, so every shape works.
      */
@@ -395,6 +399,45 @@ function suite(label: string, url?: string) {
 
       const created: any = await write;
       expect(created.payload).toEqual(payload);
+    });
+
+    /**
+     * What a fix would have to be built on — postgres.
+     *
+     * The boundary above is recorded as temporary, and the note saying how to
+     * lift it was wrong: "serialise and emit `::jsonb`" reproduces the silent
+     * mis-store it warns about, because Bun serialises a JS string bound to a
+     * `jsonb` parameter and pre-serialising encodes it twice.
+     *
+     * That is a claim about the *driver*, not about this ORM, so nothing in the
+     * compiler would notice it changing. Pinned at the level it is true: if a
+     * later Bun binds these differently, this fails and the note above is stale
+     * rather than quietly wrong again.
+     */
+    test("the two bindings a jsonb fix could use — postgres", async () => {
+      if (!url) return;
+
+      await raw.unsafe(`DROP TABLE IF EXISTS "JsonProbe"`);
+      await raw.unsafe(`CREATE TABLE "JsonProbe" ("payload" jsonb)`);
+
+      const typeOf = async (text: string, value: unknown) => {
+        await raw.unsafe(`DELETE FROM "JsonProbe"`);
+        await raw.unsafe(`INSERT INTO "JsonProbe" ("payload") VALUES (${text})`, [value]);
+        const rows: any = await raw.unsafe(
+          `SELECT jsonb_typeof("payload") AS kind FROM "JsonProbe"`,
+        );
+        return [...rows][0].kind;
+      };
+
+      // The remedy that was written down, and does not work.
+      expect(await typeOf("$1::jsonb", JSON.stringify(42))).toBe("string");
+
+      // The two that do.
+      expect(await typeOf("to_jsonb($1)", 42)).toBe("number");
+      expect(await typeOf("to_jsonb($1)", true)).toBe("boolean");
+      expect(await typeOf("$1::text::jsonb", JSON.stringify(42))).toBe("number");
+
+      await raw.unsafe(`DROP TABLE IF EXISTS "JsonProbe"`);
     });
 
     test("createMany round-trips every row", async () => {

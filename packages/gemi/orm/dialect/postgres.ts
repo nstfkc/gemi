@@ -260,9 +260,23 @@ export class PostgresDialect implements SqlDialect {
     // time, and anything reading that column *other than this ORM* saw a
     // string. A loud failure replaces a silent mis-store.
     //
-    // Fixing it properly means serialising and emitting an explicit `::jsonb`
-    // cast, which has to reach the insert, the update's set clause and any
-    // `where` on a Json column. Not done here.
+    // **Fixing it is not "serialise and cast", which is what this comment used
+    // to say.** Measured through Bun 1.3.14 against Postgres 16, that stores
+    // the jsonb *string* `"42"` — the exact silent mis-store the refusal above
+    // exists to prevent, because Bun serialises a JS string bound to a `jsonb`
+    // parameter, so pre-serialising encodes it twice:
+    //
+    //   values ($1)                 42        integer vs jsonb — the error above
+    //   values ($1::jsonb)          42        cannot cast integer to jsonb
+    //   values ($1::jsonb)          "42"      jsonb_typeof -> string   <- the old bug
+    //   values (to_jsonb($1))       42        jsonb_typeof -> number   <- works
+    //   values ($1::text::jsonb)    "42"      jsonb_typeof -> number   <- works
+    //
+    // Either working form needs the column's type at the *placeholder*, so it
+    // still has to reach the insert, the update's set clause and any `where` on
+    // a Json column. Not done here — but whoever does it should start from one
+    // of the last two rows, not the second. `writes.coercion.test.ts` pins them
+    // so the table above stays a measurement rather than a memory.
     return value;
   }
 
