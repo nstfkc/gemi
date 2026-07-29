@@ -18,15 +18,29 @@ This work is a **third level in an open PR stack**. Branch from
 main
  └── refactor/laravel-container-architecture   PR #30, OPEN — container/providers
       └── feat/database-layer                  PR #33, OPEN — DatabaseManager, DB facade
-           └── feat/orm                        PR #45, OPEN — iterations 1-6
+           └── feat/orm                        PR #45, OPEN — iterations 1-9 and after
 ```
 
-### Where it actually is now
+### How the stack landed
 
 Nine levels, not three. Recorded because the diagram above described the state on
 the day this plan was written and a reader following it would branch under work
-that has since landed on top. **Every one of these is `MERGEABLE`/`CLEAN`** and
-each was verified at its own tip; they are listed in merge order.
+that has since landed on top.
+
+**All six merged on 2026-07-28**, listed below in **stack order** — each row's
+branch is the base of the row under it, except #58, which targeted `feat/orm`
+directly. That is not quite merge order: #55 (`docs/orm`) merged at `08:11:11`,
+seventeen seconds *before* its own base #56 (`fix/orm-bytes-container`) at
+`08:11:28`. It is the one place here a child landed before its parent went
+upward, and it is a concrete instance of the pooling described two sections
+down. Stack order is the more useful ordering for a reader deciding where to
+branch, so the table keeps it and names it.
+
+This is written as history rather than as status on purpose: the section it
+replaces said "**Every one of these is `MERGEABLE`/`CLEAN`**", which was true
+when measured and false a day later — the same way the diagram above it went
+stale, in the section written to correct that diagram. A date cannot rot; a
+merge state can, and this document has no way to notice.
 
 | PR | Branch | What it adds |
 | --- | --- | --- |
