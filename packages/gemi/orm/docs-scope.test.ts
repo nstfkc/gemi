@@ -153,3 +153,49 @@ describe("docs/orm.md lists every error an application can catch", () => {
     expect(errorsTable).toContain(`\`${name}\``);
   });
 });
+
+/**
+ * **`docs/llms-full.txt` carries the ORM pages verbatim**, and had stopped.
+ *
+ * That file is "every page concatenated for one-shot LLM context", served
+ * verbatim at a stable URL by the docs workflow. `plans/orm/README.md` records
+ * the intent — `orm.md` and `orm-rows-and-entities.md` were unreachable from
+ * the four index files "until the doc pass. Both are now in all four."
+ *
+ * The ORM page's embedded copy had drifted to **626 lines against the source's
+ * 1209** — roughly half. It predated the aggregate and `groupBy` sections, the
+ * `Json` page, the composite-relation paragraphs and every correction in this
+ * series, and it still said *"No `omit`"* under **Not in scope** while the
+ * source documents `omit` at length.
+ *
+ * Worse than the same drift in `orm.md` would be, for the reason #145 gives
+ * about "refused, but actually works": this file's audience is tools, which
+ * repeat what they are given confidently and without bumping into the runtime
+ * that would correct them.
+ *
+ * Compared exactly rather than loosely. A "close enough" check is what let it
+ * reach half a page.
+ */
+describe("docs/llms-full.txt carries the ORM pages", () => {
+  const full = readFileSync(join(import.meta.dirname, "../../../docs/llms-full.txt"), "utf8");
+
+  /** The page's own body, from its `## Title` to the next `---` separator. */
+  const embedded = (title: string) => {
+    const start = full.indexOf(`\n## ${title}\n`);
+    expect(start, `${title} is not in llms-full.txt`).toBeGreaterThan(0);
+    const body = full.slice(start + 1);
+    const end = body.indexOf("\n---");
+    return (end === -1 ? body : body.slice(0, end)).trimEnd();
+  };
+
+  test.each(["orm.md", "orm-rows-and-entities.md"])("%s is embedded verbatim", (name) => {
+    const source = readFileSync(join(import.meta.dirname, "../../../docs", name), "utf8").trimEnd();
+    const [title] = source.split("\n");
+
+    // The only difference the concatenation makes: the page's `#` title becomes
+    // a `##` heading, because every page sits under one document.
+    const expected = source.replace(title, `## ${title.replace(/^#\s*/, "")}`).trimEnd();
+
+    expect(embedded(title.replace(/^#\s*/, ""))).toBe(expected);
+  });
+});
