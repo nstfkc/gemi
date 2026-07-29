@@ -4,6 +4,7 @@ import { createBindContext } from "./fragment";
 import { PostgresDialect } from "../dialect/postgres";
 import { SqliteDialect } from "../dialect/sqlite";
 import {
+  InvalidArgumentError,
   MissingRequiredValueError,
   ParameterLimitError,
   UnknownFieldError,
@@ -12,6 +13,7 @@ import {
 import {
   account,
   bare,
+  mapped,
   organization,
   post,
   profile,
@@ -1841,5 +1843,112 @@ describe("no value reaches the SQL text", () => {
     // punctuation and placeholders — none of which may contain a digit.
     const withoutIdentifiers = statement.replace(/"[^"]*"/g, "");
     expect(withoutIdentifiers).not.toMatch(/\d/);
+  });
+});
+
+/**
+ * `Prisma.AnyNull` in a **write**, which Prisma refuses and gemi accepted.
+ *
+ * The sentinel has no enumerable properties, so `JSON.stringify` turned it into
+ * the jsonb object `{}` — a plausible-looking value written to a nullable Json
+ * column, on both dialects, with nothing raised. The same silent mis-store #222
+ * closed for `DbNull` and `JsonNull`, left open for the third because it was
+ * omitted from the map rather than refused: #259.
+ *
+ * Verified against Prisma 6.19.2 rather than inferred — `create` and `update`
+ * both raise *"Invalid value for argument `settings`. Expected
+ * NullableJsonNullValueInput"*.
+ *
+ * **These fail at bind, not at compile, and that is forced rather than chosen.**
+ * Compile is a pure function of the argument *shape* and never sees a value
+ * (invariant 2), so a value nobody may write cannot be detected there — the
+ * same reason the upsert key-agreement check above binds first. What the
+ * refusal keeps is the context: `valueBinder` closes over the schema and the
+ * operation, so the message still names the field, the model and the call.
+ */
+describe("a write refuses Prisma.AnyNull", () => {
+  class AnyNull {
+    toString() {
+      return "Prisma.AnyNull";
+    }
+  }
+
+  beforeEach(() => {
+    registry.clearRegistry();
+    registry.register("AuditLog", class { static $schema = mapped });
+  });
+
+  const row = (payload: unknown) => ({
+    id: 1,
+    isArchived: false,
+    occurredAt: new Date(0),
+    payload,
+  });
+
+  /**
+   * Every spelling that reaches a value, because they arrive through three
+   * different call sites — `insertColumns`, `createManyColumns` and
+   * `assignment` — and each one had to be routed through the binder that now
+   * refuses. Covering only `create` would have left `createMany` writing `{}`.
+   *
+   * `{ payload: { set: … } }` is deliberately **not** here. On a `Json` column
+   * `isOperatorObject` treats `set` as data rather than as an operator — its
+   * comment gives the reason, that `{ set: … }` is a legal Json *value* and
+   * nothing can tell the two apart structurally — so that spelling writes the
+   * object `{"set":…}` and is not a write of `AnyNull` at all. Listing it would
+   * assert a refusal that would contradict a decision made elsewhere on
+   * purpose.
+   */
+  test.each([
+    ["create", { data: row(new AnyNull()) }],
+    ["createMany", { data: [row(new AnyNull())] }],
+    ["update", { where: { id: 1 }, data: { payload: new AnyNull() } }],
+    ["updateMany", { where: { id: 1 }, data: { payload: new AnyNull() } }],
+  ] as [string, any][])("%s is refused", (op, args) => {
+    const compiled = compileWrite(mapped, op as any, args, sqlite);
+
+    expect(() => compiled.bind(args, createBindContext())).toThrow(
+      InvalidArgumentError,
+    );
+  });
+
+  /**
+   * The message says what to write instead. A refusal that only says no leaves
+   * the caller to guess between the two sentinels that *are* storable, and they
+   * store different rows — the same reason the bare-filter refusal names the
+   * one it got rather than the other.
+   */
+  test("the refusal names the field and both storable sentinels", () => {
+    const args = { data: row(new AnyNull()) };
+    const compiled = compileWrite(mapped, "create", args, sqlite);
+
+    let message = "";
+    try {
+      compiled.bind(args, createBindContext());
+    } catch (error) {
+      message = (error as Error).message;
+    }
+
+    expect(message).toContain("data.payload");
+    expect(message).toContain("AuditLog");
+    expect(message).toContain("Prisma.DbNull");
+    expect(message).toContain("Prisma.JsonNull");
+  });
+
+  // The other two still write, so the refusal is about `AnyNull` and not about
+  // sentinels in general.
+  test.each([
+    ["Prisma.DbNull", null],
+    ["Prisma.JsonNull", "null"],
+  ])("%s still binds", (tag, expected) => {
+    class Sentinel {
+      toString() {
+        return tag;
+      }
+    }
+    const args = { data: row(new Sentinel()) };
+    const compiled = compileWrite(mapped, "create", args, sqlite);
+
+    expect(compiled.bind(args, createBindContext())).toContain(expected);
   });
 });

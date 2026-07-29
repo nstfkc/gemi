@@ -3895,6 +3895,19 @@ Two things are worth knowing:
   A bare `where: { metadata: Prisma.DbNull }` raises `InvalidArgumentError` naming the explicit
   form. Prisma rejects that spelling too, so this is parity rather than a gemi restriction.
 
+  There is a **third** sentinel, and it belongs only in a filter:
+
+  ```ts
+  await User.findMany({ where: { metadata: { equals: Prisma.AnyNull } } })  // both kinds at once
+  await User.findMany({ where: { metadata: { not: Prisma.AnyNull } } })     // neither kind
+  ```
+
+  `Prisma.AnyNull` asks for *either* empty state, which is usually what you want when you do not
+  care how the row got that way — it compiles to `is null or = 'null'`, one predicate rather than
+  an `OR` you assemble yourself. It is a question about rows rather than a value, so writing it
+  raises `InvalidArgumentError`, and so does using it under any operator other than `equals` and
+  `not`. Prisma refuses all three of those too.
+
 On Postgres the parameter is cast — `$1::text::jsonb` — and the value serialised to match, which
 is what lets a bare number or boolean through. Binding it raw makes the driver send an `integer` to
 a `jsonb` column, and serialising *without* the cast stores the jsonb string `"42"` instead of the

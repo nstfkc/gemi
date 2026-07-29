@@ -2,6 +2,7 @@ import { compile } from "./compile";
 import type { BindContext } from "./compile/fragment";
 import type { NestedWriteStep, RelationPlan } from "./compile/plan-relations";
 import type { SqlDialect } from "./dialect";
+import { jsonNullKind } from "./json-null";
 import type { RelationStrategy } from "./compile/plan-relations";
 import type { ModelSchema } from "./schema";
 
@@ -260,6 +261,32 @@ export function canonicalShape(
   if (type !== "object") return literal ? JSON.stringify(value) : type;
 
   if (value instanceof Date) return "date";
+
+  /**
+   * Prisma's Json null sentinels, each its own key.
+   *
+   * They carry no enumerable properties, so the object branch below recorded
+   * all three — and a genuine empty Json object — as `{}`. They do not compile
+   * alike: `DbNull` is `is null`, `JsonNull` and `{}` are `= ?` with different
+   * bound values, and `AnyNull` is `is null or = ?`. So the first shape
+   * compiled won the entry and every later one was answered with its text —
+   * `JsonNull` served `is null` returns the SQL-NULL rows, and `DbNull` served
+   * `= ?` binds NULL and matches nothing. Both silent, both wrong, and both
+   * only reachable once two of them meet in one process (#266).
+   *
+   * This is invariant 2 read backwards. `binding.invariants.test.ts` asserts
+   * that one shape with different values gives byte-identical SQL; the same
+   * rule requires that different SQL means different shape, which is the half
+   * nothing was checking.
+   *
+   * Imported rather than duplicated. `plan.ts` spells `$compositeIn` literally
+   * to avoid depending on the compiler — `json-null.ts` is not the compiler but
+   * a leaf module with no imports of its own, so this respects that rule
+   * instead of making an exception to it.
+   */
+  const sentinel = jsonNullKind(value);
+  if (sentinel) return `jsonNull:${sentinel}`;
+
   if (Array.isArray(value)) {
     // Element-wise by default, so the length is part of the shape. Usually that
     // is not a choice: `AND: [a, b]` and `AND: [a]` are different predicates,

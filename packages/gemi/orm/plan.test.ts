@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, test } from "vitest";
 
 import { PostgresDialect } from "./dialect/postgres";
+import * as registry from "./registry";
 import { SqliteDialect } from "./dialect/sqlite";
-import { USER_COLUMNS, user } from "./fixtures";
+import { USER_COLUMNS, mapped, user } from "./fixtures";
 import {
   canonicalShape,
   clearPlanCache,
@@ -180,4 +181,105 @@ describe("the plan cache", () => {
     ).toThrow();
     expect(planCacheStats().size).toBe(0);
   });
+});
+
+/**
+ * **The Json null sentinels are three shapes, not one.**
+ *
+ * `canonicalShape` records an object by its enumerable entries, and the
+ * sentinels have none — so `DbNull`, `JsonNull`, `AnyNull` and a genuine empty
+ * Json object all produced `{where:{payload:{equals:{}}}}`. They do not compile
+ * alike:
+ *
+ *     DbNull     "payload" is null
+ *     JsonNull   "payload" = ?                          bound 'null'
+ *     {}         "payload" = ?                          bound '{}'
+ *     AnyNull    ("payload" is null or "payload" = ?)    bound 'null'
+ *
+ * So the first shape compiled won the entry and every later one was answered
+ * with its text: `JsonNull` served `is null` returns the SQL-NULL rows — the
+ * other of the two legal nulls, which is the confusion `json-null.ts` exists to
+ * prevent — and `DbNull` served `= ?` binds NULL and matches nothing, which is
+ * #224 arrived at through the cache rather than through the compiler. That is
+ * #266.
+ *
+ * **Order-dependent, and invisible to a suite that clears the cache between
+ * cases.** `differential.test.ts` covers `equals`, bare and `not` for every
+ * sentinel and each is correct in isolation; the fault needs two of them to
+ * meet in one process. So it is asserted here, in both orders, on the shared
+ * cache rather than on the key alone — a key test would pass on a
+ * `canonicalShape` that was right while `getOrCompile` reached a stale entry.
+ *
+ * This is invariant 2 read backwards. `binding.invariants.test.ts` asserts one
+ * shape with different values gives byte-identical SQL; the same rule requires
+ * different SQL to mean a different shape, and nothing was checking that half.
+ */
+describe("the Json null sentinels do not share a plan entry", () => {
+  const sentinel = (tag: string): object => {
+    // A class, for the same reason `json-null.test.ts` spells it out: a method
+    // in an object literal is enumerable and `for…in` would walk it, so the
+    // recogniser would reject the fake while accepting Prisma's real one.
+    class Sentinel {
+      toString() {
+        return tag;
+      }
+    }
+    return new Sentinel();
+  };
+
+  const dbNull = sentinel("Prisma.DbNull");
+  const jsonNull = sentinel("Prisma.JsonNull");
+  const anyNull = sentinel("Prisma.AnyNull");
+
+  beforeEach(() => {
+    registry.clearRegistry();
+    registry.register("Mapped", class { static $schema = mapped });
+  });
+
+  const textFor = (operand: unknown) =>
+    getOrCompile(
+      mapped,
+      "findMany",
+      { where: { payload: { equals: operand } } },
+      sqlite,
+      "batched",
+    ).text;
+
+  const IS_NULL = 'where "payload" is null';
+  const EQUALS = 'where "payload" = ?';
+  const EITHER = 'where ("payload" is null or "payload" = ?)';
+
+  test("each operand keeps its own key", () => {
+    const keys = [dbNull, jsonNull, anyNull, {}].map((operand) =>
+      planKey(sqlite, "Mapped", "findMany", {
+        where: { payload: { equals: operand } },
+      }),
+    );
+
+    // `JsonNull` and `{}` are allowed to share *text* — they differ in the
+    // bound value, which is what binding is for — but not a key, because the
+    // shape is what decides which sentinel the binder will encode.
+    expect(new Set(keys).size).toBe(4);
+  });
+
+  /**
+   * Every ordered pair, because the fault is asymmetric: which one is wrong
+   * depends on which compiled first, and a single ordering would have passed
+   * for two of the six.
+   */
+  test.each([
+    ["DbNull", dbNull, IS_NULL],
+    ["JsonNull", jsonNull, EQUALS],
+    ["AnyNull", anyNull, EITHER],
+    ["an empty object", {}, EQUALS],
+  ] as [string, unknown, string][])(
+    "%s compiles to its own text whatever was compiled before it",
+    (_label, operand, expected) => {
+      for (const first of [dbNull, jsonNull, anyNull, {}]) {
+        clearPlanCache();
+        textFor(first);
+        expect(textFor(operand)).toContain(expected);
+      }
+    },
+  );
 });

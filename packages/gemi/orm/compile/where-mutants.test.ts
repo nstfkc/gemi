@@ -40,6 +40,12 @@ class JsonNull {
   }
 }
 
+class AnyNull {
+  toString() {
+    return "Prisma.AnyNull";
+  }
+}
+
 describe("branches of where.ts that mutation found unguarded", () => {
   beforeEach(() => {
     registry.clearRegistry();
@@ -87,6 +93,7 @@ describe("branches of where.ts that mutation found unguarded", () => {
   test.each([
     ["DbNull", new DbNull(), "JsonNull"],
     ["JsonNull", new JsonNull(), "DbNull"],
+    ["AnyNull", new AnyNull(), "DbNull"],
   ])("a bare %s is refused naming %s, not the other one", (name, value, other) => {
     let message = "";
     try {
@@ -99,5 +106,64 @@ describe("branches of where.ts that mutation found unguarded", () => {
     expect(message).not.toContain(`Prisma.${other}`);
     // Both spellings in the sentence, so flipping either ternary is caught.
     expect(message.match(new RegExp(`Prisma\\.${name}`, "g"))).toHaveLength(2);
+  });
+
+  /**
+   * `AnyNull` is the union of the other two, and the only sentinel whose filter
+   * is not a single comparison.
+   *
+   * It was recognised by neither the map nor the refusal, so it fell through to
+   * the data path: `JSON.stringify(Prisma.AnyNull)` is `{}` and the filter
+   * compiled to `= '{}'` — the exact complement of the rows asked for, since no
+   * row holding either null holds an empty object. That is #259.
+   *
+   * Each half is asserted, because either alone is a wrong answer that looks
+   * like a right one: `is null` alone misses the JSON nulls and `= 'null'`
+   * alone misses the SQL NULLs, and both return a plausible non-empty set.
+   */
+  test("equals: AnyNull asks for both nulls, not one of them", () => {
+    const sql = json({ where: { payload: { equals: new AnyNull() } } });
+
+    expect(sql).toContain('where ("payload" is null or "payload" = ?)');
+  });
+
+  /**
+   * Negating it is only safe because the predicate above is *total*: `is null`
+   * is never NULL, and when the column is non-NULL the second half is a proper
+   * boolean. So no row falls through the way `not (col = value)` drops the
+   * NULLs — which is the trap `compileNot` already documents for ordinary
+   * values.
+   */
+  test("not: AnyNull negates the union rather than dropping the NULLs", () => {
+    const sql = json({ where: { payload: { not: new AnyNull() } } });
+
+    expect(sql).toContain('where not ("payload" is null or "payload" = ?)');
+  });
+
+  /**
+   * Under anything else it has no meaning — Prisma's `JsonNullableFilter`
+   * admits it beside `equals` and `not` and nowhere else, and `in` is not even
+   * an option there (verified against 6.19.2: *"Unknown argument `in`"*).
+   *
+   * Refused where the field and operation are in scope rather than left to the
+   * encoder's backstop, which reports it as an ORM bug — true of the backstop's
+   * own callers and wrong to say to someone who wrote the query.
+   */
+  test.each([
+    ["in", { in: [new AnyNull()] }],
+    ["notIn", { notIn: [new AnyNull()] }],
+    ["lt", { lt: new AnyNull() }],
+  ])("AnyNull under '%s' is refused, and says which operators take it", (_key, filter) => {
+    let message = "";
+    try {
+      json({ where: { payload: filter } });
+    } catch (error) {
+      expect(error).toBeInstanceOf(InvalidArgumentError);
+      message = (error as Error).message;
+    }
+
+    expect(message).toContain("Prisma.AnyNull");
+    expect(message).toContain("equals");
+    expect(message).toContain("not");
   });
 });

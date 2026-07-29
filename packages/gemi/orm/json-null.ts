@@ -27,23 +27,54 @@
  * `Prisma.JsonNull`; a constructor name would be the other candidate and is the
  * one a minifier is free to rewrite.
  */
-export type JsonNullKind = "db" | "json";
+export type JsonNullKind = "db" | "json" | "any";
 
 const SENTINELS: Record<string, JsonNullKind> = {
   "Prisma.DbNull": "db",
   "Prisma.JsonNull": "json",
+  "Prisma.AnyNull": "any",
 };
 
 /**
  * Which sentinel this is, or `null` for any ordinary value.
  *
- * `Prisma.AnyNull` is absent, and **absent is not the same as refused** — it
- * falls through to the data path, where a write stores it as the jsonb object
- * `{}` and a filter compiles to `= '{}'`, returning the complement of the rows
- * `AnyNull` asks for. Prisma raises on the write and answers both kinds of null
- * on the filter. That gap is #259; it is stated here rather than left to be
- * read off the omission as though the omission delivered a parity.
+ * **`"any"` is not a storable value, and the two others are.** `DbNull` and
+ * `JsonNull` each name one of the column's two legal empty states, so an
+ * encoder can turn either into something to write. `AnyNull` names *both at
+ * once* — it is a question, only ever meaningful in a filter, and Prisma raises
+ * if it reaches a write. Callers that encode must therefore handle it
+ * separately rather than treating the three alike; `cast.ts` and the SQLite
+ * encoder refuse it outright, since by the time a value reaches them the filter
+ * and write paths have each had their say.
+ *
+ * It was previously absent from this table, and **absent is not the same as
+ * refused** — it fell through to the data path, where a write stored it as the
+ * jsonb object `{}` and a filter compiled to `= '{}'`, returning the complement
+ * of the rows it asks for. That was #259.
  */
+/**
+ * The ORM's own spelling of `Prisma.JsonNull`, for a comparison the *compiler*
+ * authors rather than the caller.
+ *
+ * `AnyNull` compiles to `is null or = <JSON null>`, and the right-hand side has
+ * no argument to read it out of — the caller wrote `AnyNull`, not `JsonNull`.
+ * Rather than teach the encoders a second way to say the same thing, or splice
+ * a literal into the SQL text, the compiler binds this and every existing path
+ * treats it exactly as it treats the real sentinel.
+ *
+ * **A class, so the prototype's `toString` is non-enumerable.** A method in an
+ * object literal is enumerable, `for…in` walks it, and the shape check below
+ * would reject this — which is how the first version of the test helper in
+ * `json-null.test.ts` failed while Prisma's real sentinels passed. Prisma builds
+ * them as classes; this matches, and `json-null.test.ts` pins that it is
+ * recognised so the two cannot drift apart.
+ */
+export const JSON_NULL: object = new (class {
+  toString() {
+    return "Prisma.JsonNull";
+  }
+})();
+
 export function jsonNullKind(value: unknown): JsonNullKind | null {
   if (typeof value !== "object" || value === null) return null;
 

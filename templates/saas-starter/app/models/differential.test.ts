@@ -1301,6 +1301,25 @@ function suite(label: string, url?: string) {
       // ...and negated, where the same misreading compiled to `not (true)`.
       ["not DbNull", { not: PrismaNS.DbNull }],
       ["not JsonNull", { not: PrismaNS.JsonNull }],
+      /**
+       * The third sentinel, which asks for **both** of the above at once.
+       *
+       * It was in neither the map nor the refusal, so it fell through to the
+       * data path: `JSON.stringify(Prisma.AnyNull)` is `{}`, and the filter
+       * compiled to `= '{}'` — which is not merely wrong but the exact
+       * complement of the rows asked for, since no row holding either null
+       * holds an empty object. That is #259.
+       *
+       * These two cases are the reason the seed's shape matters twice over.
+       * `DbNull` and `JsonNull` each need one of the two states present to
+       * discriminate; `AnyNull` needs **both**, plus a row that is neither, or
+       * it agrees with a wrong implementation. `ac2` holds the JSON null, the
+       * other accounts leave the column SQL NULL, and the seeded `settings`
+       * object supplies the third — verified against Prisma 6.19.2 directly:
+       * `equals` returns the two null rows and `not` returns the object row.
+       */
+      ["AnyNull finds both kinds of null", { equals: PrismaNS.AnyNull }],
+      ["not AnyNull finds neither", { not: PrismaNS.AnyNull }],
     ] as [string, unknown][])(
       "a Json null sentinel in a where: %s",
       async (_label, filter) => {

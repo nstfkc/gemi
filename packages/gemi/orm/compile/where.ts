@@ -18,7 +18,7 @@ import {
   joinFragments,
   sql,
 } from "./fragment";
-import { jsonNullKind } from "../json-null";
+import { JSON_NULL, type JsonNullKind, jsonNullKind } from "../json-null";
 import { fieldParam } from "./cast";
 
 /**
@@ -690,10 +690,9 @@ function compileFieldFilter(
       `where.${field.name}`,
       schema.name,
       context.operation,
-      `Prisma.${sentinel === "db" ? "DbNull" : "JsonNull"} is not a filter on ` +
+      `${sentinelName(sentinel)} is not a filter on ` +
         `its own — Prisma rejects it here too. Write it as an explicit ` +
-        `comparison: { ${field.name}: { equals: Prisma.` +
-        `${sentinel === "db" ? "DbNull" : "JsonNull"} } }.`,
+        `comparison: { ${field.name}: { equals: ${sentinelName(sentinel)} } }.`,
     );
   }
 
@@ -741,6 +740,23 @@ function compileFieldFilter(
         schema.name,
         context.operation,
         `A scalar filter takes ${[...OPERATORS].sort().join(", ")}.`,
+      );
+    }
+
+    // `AnyNull` asks for both nulls at once, which only `equals` and `not` can
+    // express. Under any other operator it has no meaning — Prisma's own
+    // `JsonNullableFilter` admits it in exactly those two positions — and left
+    // alone it would reach the binder, where it is an ORM bug by construction.
+    // Refused here, where the field and operation are in scope to name it,
+    // rather than at the backstop that would report it as ours.
+    if (key !== "equals" && key !== "not" && carriesAnyNull(operand)) {
+      throw new InvalidArgumentError(
+        `where.${field.name}.${key}`,
+        schema.name,
+        context.operation,
+        `Prisma.AnyNull means 'either kind of null', which only 'equals' and ` +
+          `'not' can express. Write { ${field.name}: { equals: Prisma.AnyNull } }, ` +
+          `or name the one you mean with Prisma.DbNull or Prisma.JsonNull.`,
       );
     }
 
@@ -809,6 +825,23 @@ function compileFieldFilter(
   return group(parts, " and ");
 }
 
+/** How a sentinel is spelled in a message, so an error can be pasted back as code. */
+function sentinelName(kind: JsonNullKind): string {
+  return `Prisma.${kind === "db" ? "DbNull" : kind === "json" ? "JsonNull" : "AnyNull"}`;
+}
+
+/**
+ * Whether an operand is `AnyNull`, or a list holding one.
+ *
+ * The list case is the reachable one: `in: [Prisma.AnyNull]` type-checks
+ * nowhere in Prisma, but nothing stops it being written in JavaScript, and
+ * `inList` would bind it as an ordinary value.
+ */
+function carriesAnyNull(operand: unknown): boolean {
+  if (jsonNullKind(operand) === "any") return true;
+  return Array.isArray(operand) && operand.some((item) => jsonNullKind(item) === "any");
+}
+
 /** `not` is a whole nested filter, not just a value — `not: { in: [...] }`. */
 function compileNot(
   schema: ModelSchema,
@@ -830,6 +863,17 @@ function compileNot(
   // one did not arrive bare. `{ not: Prisma.JsonNull }` is a valid Prisma
   // filter and has to stay one.
   if (jsonNullKind(operand) === "json") {
+    return concat(
+      sql("not "),
+      parenthesize(equals(column, field, operand, context.dialect, locate)),
+    );
+  }
+
+  // `not: AnyNull` is "neither kind of null", so it negates the union `equals`
+  // builds. Safe to negate directly because that predicate is total — see the
+  // note there — so no row falls through on NULL the way `not (col = value)`
+  // would.
+  if (jsonNullKind(operand) === "any") {
     return concat(
       sql("not "),
       parenthesize(equals(column, field, operand, context.dialect, locate)),
@@ -869,9 +913,46 @@ function equals(
   if (operand === null || jsonNullKind(operand) === "db") {
     return sql(`${column} is null`);
   }
+
+  // `AnyNull` is the union of the other two, and the only operand here that is
+  // not a single comparison. Both halves are needed: the column being SQL NULL
+  // and the column holding the JSON value `null` are different rows, and this
+  // is the one filter that asks for both.
+  //
+  // No three-valued-logic trap in the `or`. `is null` is never NULL, and when
+  // the column is non-NULL the second half is a proper boolean — so the
+  // predicate is total, which is what makes negating it in `compileNot` safe.
+  if (jsonNullKind(operand) === "any") {
+    return group(
+      [sql(`${column} is null`), jsonNullComparison(column, field, dialect)],
+      " or ",
+    );
+  }
+
   return concat(
     sql(`${column} = `),
     fieldParam(field, dialect, encoded(field, dialect, locate)),
+  );
+}
+
+/**
+ * `<column> = <the JSON value null>`, as a bound parameter.
+ *
+ * The literal is the compiler's, not the caller's, so there is no argument to
+ * read it out of — but it stays a parameter rather than being written into the
+ * text, because invariant 2 admits no exception for a value the compiler
+ * happens to know. It is also what keeps the dialects' encoders as the single
+ * authority on how a JSON null is spelled: `'null'` on SQLite, `'null'::text::jsonb`
+ * on Postgres, decided by `fieldParam` and `castParameter` rather than here.
+ */
+function jsonNullComparison(
+  column: string,
+  field: FieldSchema,
+  dialect: SqlDialect,
+): Fragment {
+  return concat(
+    sql(`${column} = `),
+    fieldParam(field, dialect, () => dialect.encode(JSON_NULL, field)),
   );
 }
 

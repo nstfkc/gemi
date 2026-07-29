@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 
-import { jsonNullKind } from "./json-null";
+import { JSON_NULL, jsonNullKind } from "./json-null";
 
 /**
  * What may and may not be mistaken for one of Prisma's `Json` null sentinels.
@@ -66,24 +66,45 @@ describe("jsonNullKind recognises a sentinel and nothing else", () => {
   test.each([
     ["Prisma.DbNull", "db"],
     ["Prisma.JsonNull", "json"],
+    ["Prisma.AnyNull", "any"],
   ] as const)("%s is recognised", (tag, kind) => {
     expect(jsonNullKind(sentinelShaped(tag))).toBe(kind);
   });
 
   /**
-   * `AnyNull` is not mapped — and this pins only that, because **not mapped is
-   * not refused**. It falls through to the data path, where a write stores it
-   * as the jsonb object `{}` and `{ equals: AnyNull }` compiles to `= '{}'`,
-   * returning the exact complement of the rows it asks for; Prisma raises on
-   * the first and answers both kinds of null on the second.
+   * `AnyNull` is recognised, and the reason it needs saying is that the other
+   * two are *storable* and it is not.
    *
-   * So the assertion below says what the function does, not that the omission
-   * bought parity. Closing the gap means recognising `AnyNull` and refusing it
-   * in a write the way #225 refuses a bare sentinel in a filter, and deciding
-   * the filter half separately — #259.
+   * `DbNull` and `JsonNull` each name one of a nullable Json column's two legal
+   * empty states, so an encoder can turn either into something to write.
+   * `AnyNull` names both at once — a question about existing rows, which Prisma
+   * refuses in a write and answers as `is null or = 'null'` in a filter
+   * (verified against 6.19.2 directly, not inferred from the docs).
+   *
+   * It used to be absent from the table, and absent is not refused: it fell
+   * through to the data path, where a write stored it as the jsonb object `{}`
+   * and `{ equals: AnyNull }` compiled to `= '{}'` — the exact complement of
+   * the rows it asks for, since no row holding either null holds an empty
+   * object. That was #259. The kind is mapped here; the two call sites that
+   * cannot encode it refuse it, and `compile/where.ts` implements the filter.
    */
-  test("Prisma.AnyNull is not mapped to a kind (and is not refused either — #259)", () => {
-    expect(jsonNullKind(sentinelShaped("Prisma.AnyNull"))).toBeNull();
+  test("Prisma.AnyNull is recognised as its own kind, not as data", () => {
+    expect(jsonNullKind(sentinelShaped("Prisma.AnyNull"))).toBe("any");
+  });
+
+  /**
+   * The compiler's own `JsonNull`, which `compile/where.ts` binds as the
+   * right-hand side of `AnyNull`'s `or` — the caller wrote `AnyNull`, so there
+   * is no `JsonNull` in the argument tree to read it out of.
+   *
+   * Pinned here rather than where it is used because the failure is remote from
+   * the change that causes it: it is built as a class so its prototype's
+   * `toString` is non-enumerable, and rebuilding it as an object literal would
+   * make `for…in` walk the method and this recogniser reject it. The filter
+   * would then bind `{}` and match nothing — #259 restored, from the other end.
+   */
+  test("the compiler's own JsonNull is recognised as the real one", () => {
+    expect(jsonNullKind(JSON_NULL)).toBe("json");
   });
 
   test.each([

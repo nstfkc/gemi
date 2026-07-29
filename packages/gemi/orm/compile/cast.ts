@@ -50,6 +50,20 @@ export function fieldParam(
     const kind = jsonNullKind(value);
     if (kind === "db") return null;
     if (kind === "json") return "null";
+    // `AnyNull` is a question rather than a value — see `json-null.ts`. Every
+    // path that could carry one has already answered it: the filter compiles it
+    // to `is null or = 'null'`, and the write refuses it where the schema and
+    // operation are in scope to say so. Reaching here means one of those was
+    // missed, and the alternative to throwing is the `{}` mis-store of #259
+    // arrived at a second way. Not an `InvalidArgumentError`: this reports an
+    // ORM bug, not a caller's.
+    if (kind === "any") {
+      throw new Error(
+        "gemi ORM bug: Prisma.AnyNull reached the parameter binder. It is a " +
+          "filter operand only, and both the filter and write paths are " +
+          "supposed to have handled it before this point.",
+      );
+    }
 
     return JSON.stringify(value);
   }, cast);

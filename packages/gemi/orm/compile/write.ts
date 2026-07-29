@@ -7,6 +7,7 @@ import {
   UnknownFieldError,
   UnsupportedQueryError,
 } from "../errors";
+import { jsonNullKind } from "../json-null";
 import type { Operation, QueryPlan } from "../plan";
 import type { FieldSchema, ModelSchema } from "../schema";
 import { buildRowShaper } from "../shape";
@@ -396,7 +397,7 @@ function createManyColumns(
     union.map((field) => ({
       field,
       value: supplied[index].has(field.name)
-        ? valueBinder(field, dialect, (callArgs) =>
+        ? valueBinder(schema, op, field, dialect, (callArgs) =>
             listOf(callArgs?.data)[index]?.[field.name],
           )
         : defaultBinder(field, dialect),
@@ -990,7 +991,7 @@ function insertColumns(
     if (supplied.has(field.name)) {
       columns.push({
         field,
-        value: valueBinder(field, dialect, (args) =>
+        value: valueBinder(schema, op, field, dialect, (args) =>
           locateData(args)?.[field.name],
         ),
       });
@@ -1198,19 +1199,19 @@ function assignment(
     if (key === "set") {
       return concat(
         sql(`${column} = `),
-        fieldParam(field, dialect, valueBinder(field, dialect, at)),
+        fieldParam(field, dialect, valueBinder(schema, op, field, dialect, at)),
       );
     }
 
     return concat(
       sql(`${column} = ${source} ${ARITHMETIC[key]} `),
-      fieldParam(field, dialect, valueBinder(field, dialect, at)),
+      fieldParam(field, dialect, valueBinder(schema, op, field, dialect, at)),
     );
   }
 
   return concat(
     sql(`${column} = `),
-    fieldParam(field, dialect, valueBinder(field, dialect, locate)),
+    fieldParam(field, dialect, valueBinder(schema, op, field, dialect, locate)),
   );
 }
 
@@ -1240,12 +1241,47 @@ function isOperatorObject(value: unknown, field: FieldSchema): boolean {
   return keys.every((key) => key === "set" || key in ARITHMETIC);
 }
 
+/**
+ * Every write value passes through here — `create`, `createMany`, `update`'s
+ * `set` and its bare form, and `upsert` — which is what makes it the one place
+ * a value-dependent refusal has to live.
+ *
+ * It throws at **bind** time rather than compile time, and that is forced
+ * rather than chosen: compile is a pure function of the argument *shape* and
+ * never sees a value (invariant 2), so a value nobody may write cannot be
+ * detected there. The schema and operation are closed over instead, so the
+ * error still says which field of which model on which operation — the context
+ * `fieldParam` does not have, and the reason the refusal is not down there.
+ */
 function valueBinder(
+  schema: ModelSchema,
+  op: Operation,
   field: FieldSchema,
   dialect: SqlDialect,
   locate: (args: any) => any,
 ): Binder {
-  return (args) => dialect.encode(locate(args), field);
+  return (args) => {
+    const value = locate(args);
+
+    // `AnyNull` means "either kind of null", which is a question about existing
+    // rows and not something a column can hold. Prisma raises here too. Left
+    // alone it has no enumerable properties, so it serialised to the jsonb
+    // object `{}` — a plausible-looking value, silently wrong, with nothing
+    // raised: #259, and the same silent mis-store #222 closed for the other two
+    // sentinels.
+    if (jsonNullKind(value) === "any") {
+      throw new InvalidArgumentError(
+        `data.${field.name}`,
+        schema.name,
+        op,
+        `Prisma.AnyNull is a filter operand, not a value — Prisma rejects it ` +
+          `in a write here too. Write Prisma.DbNull for a SQL NULL column, or ` +
+          `Prisma.JsonNull for the JSON value null.`,
+      );
+    }
+
+    return dialect.encode(value, field);
+  };
 }
 
 function defaultBinder(field: FieldSchema, dialect: SqlDialect): Binder {

@@ -244,6 +244,16 @@ export class SqliteDialect implements SqlDialect {
           const kind = jsonNullKind(value);
           if (kind === "db") return null;
           if (kind === "json") return "null";
+          // `AnyNull` is not one of the two storable nulls — it asks for both.
+          // The same backstop as `compile/cast.ts`, and for the same reason:
+          // silently serialising it here is #259's `{}` by another route.
+          if (kind === "any") {
+            throw new Error(
+              "gemi ORM bug: Prisma.AnyNull reached the SQLite encoder. It is " +
+                "a filter operand only, and both the filter and write paths " +
+                "are supposed to have handled it before this point.",
+            );
+          }
         }
         return JSON.stringify(value);
       default:
