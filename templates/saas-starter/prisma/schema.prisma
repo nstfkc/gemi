@@ -26,6 +26,12 @@ model Organization {
   name        String
   logoUrl     String?
   description String?
+  // An enum exists here for the same reason Json and Bytes do: so the
+  // differential harness compares one against Prisma. Prisma enums travel as
+  // strings on the wire, and the generator maps them to `String` while
+  // recording the enum's name — that mapping had a unit test and no end-to-end
+  // check on either dialect.
+  plan        OrganizationPlan         @default(free)
   users       User[]
   accounts    Account[]
   invitations OrganizationInvitation[]
@@ -235,4 +241,10 @@ model LedgerEntry {
   ledger Ledger @relation(fields: [tenantId, ledgerCode], references: [tenantId, code])
 
   @@index([tenantId, ledgerCode])
+}
+
+enum OrganizationPlan {
+  free
+  pro
+  enterprise
 }
