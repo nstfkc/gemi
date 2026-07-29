@@ -464,12 +464,11 @@ as `connect` does, and it silently ignores a named row that does not exist.
 rows only. Their operands are shaped differently and it is easy to get backwards: `updateMany` wraps
 its filter in `where` and carries a `data` beside it, while `deleteMany` *is* the filter.
 
-**An implicit many-to-many accepts a narrower set**, and the split is by what an operand is *about*:
-`connect`, `create`, `disconnect` and `set` act on the **link** and work on both. `connectOrCreate`,
-`createMany`, `delete`, `update`, `updateMany` and `deleteMany` act on the far **row**, and a join
-table has two foreign keys and no row of its own — so each is refused there with which of those it
-is. `delete` is the clearest: through a join table it would mean deleting the far row rather than
-the link, which is what `disconnect` already does.
+**An implicit many-to-many accepts a narrower set** — `connect`, `connectOrCreate`, `create`,
+`disconnect` and `set`. The four that are missing (`update`, `updateMany`, `delete`, `deleteMany`)
+reach the far row *through* the pairs, which that path does not do yet; Prisma implements all four,
+so these are gaps rather than decisions and the refusals say so. `createMany` is the exception:
+Prisma does not offer it through a join table either.
 
 Only `upsert` in Prisma's nested grammar is refused, by name and with the reason. The line is **which rows an
 operand can name, and whose columns it writes**: everything supported names its rows (a new one, or

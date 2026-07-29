@@ -1623,12 +1623,13 @@ function suite(label: string, url?: string) {
     });
 
     /**
-     * The case the parent restriction has to survive: a caller filter naming
-     * the **foreign key column itself**, pointing at a different parent.
+     * The case the parent restriction has to survive: a caller filter that
+     * names the **foreign key column itself**, pointing at a different parent.
      *
      * Merging by key let the restriction overwrite it, so "this parent's
-     * children belonging to user 2" — nothing — became "all of this parent's
-     * children". Prisma conjoins and deletes nothing.
+     * children belonging to user 2" — which is nothing — became "all of this
+     * parent's children". Prisma conjoins and deletes nothing; measured before
+     * fixing, because the question is what it does rather than what is tidy.
      */
     test("deleteMany with a filter on the foreign key deletes nothing", async () => {
       await differential.expectSameWrite(
