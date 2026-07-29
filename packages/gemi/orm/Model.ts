@@ -304,7 +304,7 @@ export abstract class Model {
     Object.assign(instance, row);
     // Tracked on the instance, not the argument — `save()` on the instance has
     // to diff against the values it was constructed from.
-    track(instance, schema, []);
+    track(instance, schema);
 
     return instance;
   }
@@ -905,8 +905,7 @@ export abstract class Model {
       // override gets provenance for free — which is the same argument that put
       // everything else in `$exec`.
       if (options?.track === true) {
-        const relationKeys = (plan.relations ?? []).map((relation) => relation.as);
-        for (const row of rowsOf(result)) track(row, schema, relationKeys);
+        for (const row of rowsOf(result)) track(row, schema);
       }
 
       return result;

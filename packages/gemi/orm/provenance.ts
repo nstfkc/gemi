@@ -53,20 +53,25 @@ const provenance = new WeakMap<object, Provenance>();
  * means structural comparison per row per field, which is exactly the per-row
  * cost this feature is trying to keep off the default path.
  */
-export function track(
-  row: object,
-  schema: ModelSchema,
-  relationKeys: readonly string[],
-): void {
+export function track(row: object, schema: ModelSchema): void {
   const snapshot: Record<string, unknown> = {};
   const key: Record<string, unknown> = {};
   const source = row as Record<string, unknown>;
-  const skip = new Set(relationKeys);
 
   for (const name of Object.keys(source)) {
-    // Relations are not this row's columns to write, and an attached child array
-    // in a snapshot would make every `save` look dirty.
-    if (skip.has(name)) continue;
+    // The schema's own columns and nothing else. That covers the two things a
+    // shaped row carries besides them — an attached relation, and a `_count` —
+    // because neither is a field, and Prisma will not let a relation share a
+    // name with one.
+    //
+    // This used to take a `relationKeys` list and skip those first. It never
+    // changed the outcome: every name it excluded was excluded again on the
+    // next line. What it did do was make the two call sites look like they
+    // disagreed — `wrap` passed `[]`, `$exec` passed the plan's relations — and
+    // give the reason for the exclusion to a line that was not performing it.
+    // An attached child array in a snapshot would make every `save` look dirty,
+    // since the relation loader replaces it; this is the line that prevents
+    // that.
     if (!(name in schema.fields)) continue;
     snapshot[name] = source[name];
   }

@@ -22,14 +22,14 @@ describe("what gets snapshotted", () => {
   test("only the fields actually present on the row", () => {
     // A partial select: the row has two of the model's fields.
     const row = { id: 1, email: "a@b.c" };
-    track(row, user, []);
+    track(row, user);
 
     expect(provenanceOf(row)?.snapshot).toEqual({ id: 1, email: "a@b.c" });
   });
 
   test("the primary key is captured separately, at fetch time", () => {
     const row = { id: 7, email: "a@b.c" };
-    track(row, user, []);
+    track(row, user);
 
     // Captured rather than read at save time, so mutating `id` cannot move the
     // row a save targets — it would otherwise update a different record.
@@ -37,24 +37,52 @@ describe("what gets snapshotted", () => {
     expect(provenanceOf(row)?.key).toEqual({ id: 7 });
   });
 
-  test("relation keys are excluded", () => {
-    const row = { id: 1, email: "a@b.c", accounts: [] as unknown[] };
-    track(row, user, ["accounts"]);
+  /**
+   * An attached relation never enters the snapshot, because it is not one of
+   * the schema's fields — which is the *only* thing that excludes it.
+   *
+   * This test used to pass `["accounts"]` as a `relationKeys` argument and read
+   * as though that was what excluded it. It was not: the argument never changed
+   * the outcome, and the test passed identically with `[]`. The parameter is
+   * gone; the cases below are what the exclusion actually rests on, so they
+   * cover every shape a relation read attaches rather than one.
+   */
+  test.each([
+    ["a to-many array", { accounts: [] as unknown[] }],
+    ["a to-one object", { organization: { id: 3 } }],
+    ["a relation count", { _count: { accounts: 1 } }],
+    ["all three at once", { accounts: [{ id: 9 }], organization: { id: 3 }, _count: { accounts: 1 } }],
+  ])("%s is excluded from the snapshot", (_label, attached) => {
+    const row = { id: 1, email: "a@b.c", ...attached };
+    track(row, user);
 
-    // An attached child array in the snapshot would make every save look dirty,
-    // since the relation loader replaces it.
     expect(provenanceOf(row)?.snapshot).toEqual({ id: 1, email: "a@b.c" });
+  });
+
+  /**
+   * ...and the mechanism, stated directly: no relation can be a field, so the
+   * field check is sufficient on its own. Prisma enforces this — a model cannot
+   * declare a scalar and a relation under one name — and it is the assumption
+   * the removal rests on.
+   */
+  test("no relation name is also a field name", () => {
+    for (const schema of [user, organization]) {
+      const overlap = Object.keys(schema.relations ?? {}).filter(
+        (name) => name in schema.fields,
+      );
+      expect(overlap, `${schema.name} declares both`).toEqual([]);
+    }
   });
 
   test("keys that are not fields are ignored", () => {
     const row = { id: 1, notAField: true };
-    track(row, user, []);
+    track(row, user);
     expect(provenanceOf(row)?.snapshot).toEqual({ id: 1 });
   });
 
   test("the model name is recorded", () => {
     const row = { id: 1 };
-    track(row, organization, []);
+    track(row, organization);
     expect(provenanceOf(row)?.model).toBe("Organization");
   });
 });
@@ -62,13 +90,13 @@ describe("what gets snapshotted", () => {
 describe("what counts as changed", () => {
   test("an untouched row has no changes", () => {
     const row = { id: 1, email: "a@b.c", name: "A" };
-    track(row, user, []);
+    track(row, user);
     expect(changedFields(row, user)).toEqual({});
   });
 
   test("only the mutated field", () => {
     const row: any = { id: 1, email: "a@b.c", name: "A" };
-    track(row, user, []);
+    track(row, user);
     row.name = "B";
 
     expect(changedFields(row, user)).toEqual({ name: "B" });
@@ -76,7 +104,7 @@ describe("what counts as changed", () => {
 
   test("setting a field back to its fetched value is not a change", () => {
     const row: any = { id: 1, name: "A" };
-    track(row, user, []);
+    track(row, user);
     row.name = "B";
     row.name = "A";
 
@@ -85,7 +113,7 @@ describe("what counts as changed", () => {
 
   test("null and undefined are distinguished from a value", () => {
     const row: any = { id: 1, name: "A", deletedAt: null };
-    track(row, user, []);
+    track(row, user);
     row.name = null;
 
     expect(changedFields(row, user)).toEqual({ name: null });
@@ -99,7 +127,7 @@ describe("what counts as changed", () => {
    */
   test("a Date is compared by instant, not by reference", () => {
     const row: any = { id: 1, createdAt: new Date("2024-01-01T00:00:00Z") };
-    track(row, user, []);
+    track(row, user);
 
     row.createdAt = new Date("2024-01-01T00:00:00Z");
     expect(changedFields(row, user)).toEqual({});
@@ -119,7 +147,7 @@ describe("what counts as changed", () => {
    */
   test("assigning to a field the row never fetched is refused", () => {
     const row: any = { id: 1, email: "a@b.c" };
-    track(row, user, []);
+    track(row, user);
     row.password = "hunter2";
 
     expect(() => changedFields(row, user)).toThrow(/was not fetched/);
@@ -130,7 +158,7 @@ describe("what counts as changed", () => {
     // The legal half of the same situation: a partial row that only touches what
     // it read. `password` is simply absent, so there is nothing to refuse.
     const row: any = { id: 1, email: "a@b.c" };
-    track(row, user, []);
+    track(row, user);
     row.email = "changed@b.c";
 
     expect(changedFields(row, user)).toEqual({ email: "changed@b.c" });
@@ -152,7 +180,7 @@ describe("identity semantics", () => {
    */
   test("a spread copy carries no provenance", () => {
     const row = { id: 1, email: "a@b.c" };
-    track(row, user, []);
+    track(row, user);
 
     expect(isTracked(row)).toBe(true);
     expect(isTracked({ ...row })).toBe(false);
@@ -160,7 +188,7 @@ describe("identity semantics", () => {
 
   test("a JSON round trip carries no provenance", () => {
     const row = { id: 1, email: "a@b.c" };
-    track(row, user, []);
+    track(row, user);
     expect(isTracked(JSON.parse(JSON.stringify(row)))).toBe(false);
   });
 
@@ -174,8 +202,8 @@ describe("identity semantics", () => {
   test("two rows tracked separately do not share a snapshot", () => {
     const a: any = { id: 1, name: "A" };
     const b: any = { id: 2, name: "B" };
-    track(a, user, []);
-    track(b, user, []);
+    track(a, user);
+    track(b, user);
 
     a.name = "changed";
     expect(changedFields(a, user)).toEqual({ name: "changed" });
@@ -186,7 +214,7 @@ describe("identity semantics", () => {
 describe("resnapshot", () => {
   test("a second save of the same row is a no-op", () => {
     const row: any = { id: 1, name: "A" };
-    track(row, user, []);
+    track(row, user);
     row.name = "B";
 
     const changed = changedFields(row, user);
@@ -198,7 +226,7 @@ describe("resnapshot", () => {
 
   test("only the written fields are resnapshotted", () => {
     const row: any = { id: 1, name: "A", locale: "en-US" };
-    track(row, user, []);
+    track(row, user);
     row.name = "B";
     row.locale = "en-GB";
 
