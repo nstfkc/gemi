@@ -88,6 +88,23 @@ async function seed(prisma: PrismaClient) {
   // Safe for the delete cases either way: `Account_userId_fkey` is
   // `ON DELETE SET NULL`, so removing a user detaches its accounts on both
   // sides rather than failing a constraint.
+  // The implicit many-to-many fixtures, **in the seed for the same reason as
+  // the accounts above** — and this one was found the hard way. They used to be
+  // written by a `seedTags()` helper called from each test body, which
+  // `expectSameWrite`'s own reset then wiped: every m-n case was comparing two
+  // runs against an empty `Tag` table, agreeing that both clients failed, and
+  // passing whatever the code did.
+  //
+  // One post already linked to two of the three tags, so `disconnect`, `set`
+  // and a repeated `connect` all have something to act on and something to
+  // leave alone.
+  await prisma.tag.createMany({
+    data: [{ label: "red" }, { label: "blue" }, { label: "green" }],
+  });
+  await prisma.post.create({
+    data: { title: "existing", tags: { connect: [{ label: "red" }, { label: "blue" }] } },
+  });
+
   const users = await prisma.user.findMany({ orderBy: { id: "asc" } });
   await prisma.account.createMany({
     data: [
@@ -402,15 +419,7 @@ function suite(label: string, url?: string) {
      * Comparing the table contents afterwards is what catches that.
      */
     describe("an implicit many-to-many", () => {
-      const seedTags = async () => {
-        await differential.reset();
-        await differential.prisma.tag.createMany({
-          data: [{ label: "red" }, { label: "blue" }, { label: "green" }],
-        });
-      };
-
       test("connect attaches existing rows", async () => {
-        await seedTags();
         await differential.expectSameWrite(
           "Post",
           "create",
@@ -426,7 +435,6 @@ function suite(label: string, url?: string) {
       });
 
       test("create writes the child and the pair", async () => {
-        await seedTags();
         await differential.expectSameWrite(
           "Post",
           "create",
@@ -439,7 +447,6 @@ function suite(label: string, url?: string) {
       });
 
       test("connect and create together", async () => {
-        await seedTags();
         await differential.expectSameWrite(
           "Post",
           "create",
@@ -455,14 +462,6 @@ function suite(label: string, url?: string) {
       });
 
       test("disconnect removes one pair and leaves the row", async () => {
-        await seedTags();
-        await differential.prisma.post.create({
-          data: {
-            title: "existing",
-            tags: { connect: [{ label: "red" }, { label: "blue" }] },
-          },
-        });
-
         await differential.expectSameWrite(
           "Post",
           "update",
@@ -477,11 +476,6 @@ function suite(label: string, url?: string) {
 
       /** Two statements — delete then insert — inside the step's transaction. */
       test("set replaces the whole set", async () => {
-        await seedTags();
-        await differential.prisma.post.create({
-          data: { title: "existing", tags: { connect: [{ label: "red" }] } },
-        });
-
         await differential.expectSameWrite(
           "Post",
           "update",
@@ -495,11 +489,6 @@ function suite(label: string, url?: string) {
       });
 
       test("set to nothing clears them", async () => {
-        await seedTags();
-        await differential.prisma.post.create({
-          data: { title: "existing", tags: { connect: [{ label: "red" }] } },
-        });
-
         await differential.expectSameWrite(
           "Post",
           "update",
@@ -518,11 +507,6 @@ function suite(label: string, url?: string) {
        * unique violation — neither Prisma's behaviour nor a useful one.
        */
       test("connecting the same pair twice is a no-op", async () => {
-        await seedTags();
-        await differential.prisma.post.create({
-          data: { title: "existing", tags: { connect: [{ label: "red" }] } },
-        });
-
         await differential.expectSameWrite(
           "Post",
           "update",
@@ -535,17 +519,17 @@ function suite(label: string, url?: string) {
         );
       });
 
-      /** The far direction: the same relation written from `Tag`. */
+      /**
+       * The far direction: the same relation written from `Tag`. `green` is
+       * the seeded tag with no posts, so the connect has something to change.
+       */
       test("the relation writes from the other side too", async () => {
-        await seedTags();
-        await differential.prisma.post.create({ data: { title: "a" } });
-
         await differential.expectSameWrite(
           "Tag",
           "update",
           {
-            where: { label: "red" },
-            data: { posts: { connect: [{ id: 1 }] } },
+            where: { label: "green" },
+            data: { posts: { connect: [{ title: "existing" }] } },
             include: { posts: true },
           },
           { tables: ["Post", "Tag"] },
