@@ -954,22 +954,32 @@ static $policies: UserPolicy[] = [softDeletes<User>(), new TenantPolicy()]
 the policy scopes on and something has to say that is intended. That permission is **per policy**:
 a tenant policy sitting beside it in the same list still has to answer for its own column.
 
-`field` is constrained to the model's own keys **when the model type is given** —
-`softDeletes<User>({ field: … })`, as above — so a typo there is a compile error rather than a
-`no such column` on the first read.
+`field` is checked **only when the model type is given** — `softDeletes<User>({ field: … })`, as
+above. `softDeletes()`, `softDelete(User)` and `softDeleteMany(User)` take the model as a *value*,
+so there is nothing to check against and a typo compiles. And where it is checked, the constraint is
+`keyof` the model's **keys**, which includes its methods: `field: "save"` type-checks. It catches
+typos, not non-columns.
 
-`softDelete(User)` and `softDeleteMany(User)` take the model as a *value*, and its row type is not
-recoverable from it, so their `field` is unchecked. Spell it once and share it if you override the
-default:
+Either way a `field` that is not a column is `UnknownFieldError` on the first read — naming the
+model and listing every column it does have — and not a `no such column` from the database: the
+compiler refuses an unknown name before a statement is built, so the query never reaches a dialect.
+
+If you override the default, spell it once and share it, so the unchecked call is correct by
+construction:
 
 ```ts
-const archived = { field: "archivedAt" } as const
+const accepted = { field: "acceptedAt" } as const
 
-export class User extends UserModel {
-  static $policies = [softDeletes<User>(archived)]   // checked here
-  static delete = softDelete(User, archived)          // and therefore correct here
+export class Invitation extends OrganizationInvitationModel {
+  static $policies = [softDeletes<Invitation>(accepted)]  // checked here
+  static expire = softDelete(Invitation, accepted)        // and therefore correct here
 }
 ```
+
+The `as const` is load-bearing: without it `field` widens to `string` and the checked call fails for
+the wrong reason. The static is named `expire` rather than `delete` because against a generated
+model `static delete = softDelete(…)` is an illegal override — that is #263, and it applies to the
+recipe at the top of this section too.
 
 ## Errors
 

@@ -16,6 +16,7 @@ import {
   register,
   softDeletes,
   ScopeEscapeError,
+  UnknownFieldError,
   UnregisteredPolicyClassError,
   type ModelPolicy,
 } from "gemi/orm";
@@ -1427,6 +1428,45 @@ function softDeleteSuite(label: string, url?: string) {
         where: { id: bobId },
       });
       expect(await SoftUser.findMany({})).toHaveLength(1);
+    });
+
+    /**
+     * What a `field` naming something that is not a column actually does, on
+     * both halves — the consequence the docs described for two releases as a
+     * `no such column` from the database.
+     *
+     * It is not. The compiler refuses an unknown name in a `where` or a `data`
+     * before a statement is built, so the query never reaches a dialect and no
+     * dialect ever gets to say `no such column`. `UnknownFieldError` names the
+     * model and lists every column it does have.
+     *
+     * Only some of the spellings check `field` at compile time
+     * (`soft-delete.test-d.ts` pins which), so this is the failure the
+     * unchecked ones land on, and it is worth asserting rather than describing.
+     */
+    describe("a field that is not a column", () => {
+      test("the read half refuses, naming the model and its columns", async () => {
+        (SoftUser as any).$policies = [softDeletes({ field: "nope" })];
+
+        const error = await SoftUser.findMany({}).catch((e: unknown) => e);
+
+        expect(error).toBeInstanceOf(UnknownFieldError);
+        expect((error as UnknownFieldError).field).toBe("nope");
+        expect((error as UnknownFieldError).model).toBe("User");
+        expect((error as Error).message).toContain("deletedAt");
+      });
+
+      test("the write half refuses the same way", async () => {
+        (SoftUser as any).$policies = [softDeletes()];
+
+        const error = await softDelete(SoftUser, { field: "nope" })({
+          where: { id: bobId },
+        }).catch((e: unknown) => e);
+
+        expect(error).toBeInstanceOf(UnknownFieldError);
+        expect((error as UnknownFieldError).field).toBe("nope");
+        expect((error as UnknownFieldError).model).toBe("User");
+      });
     });
 
     // Composed through the prototype chain, which is the documented route and

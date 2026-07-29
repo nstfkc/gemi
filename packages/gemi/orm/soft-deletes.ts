@@ -39,9 +39,24 @@ export interface SoftDeleteOptions<M> {
   /**
    * The timestamp column. Defaults to `deletedAt`, which the template uses.
    *
-   * Constrained to the model's own keys, so a typo or a model that has no such
-   * column is a compile error instead of a `no such column` from the database on
-   * the first read.
+   * Constrained to `keyof M`, which is worth less than it looks and is stated
+   * here precisely because this is what shows on hover:
+   *
+   * - Only `softDeletes<User>()` supplies `M`. `softDeletes()`, `softDelete()`
+   *   and `softDeleteMany()` take the model as a *value*, `M` stays `any`, and
+   *   `keyof any & string` is `string` — a typo compiles.
+   * - Where it does bite it is `keyof` an *instance* type, so a method
+   *   satisfies it: `field: "save"` type-checks. It catches typos, not
+   *   non-columns.
+   *
+   * Either way a name that is not a column is `UnknownFieldError` on the first
+   * read, naming the model and listing its columns — the compiler refuses
+   * before a statement is built, so no dialect ever gets to say
+   * `no such column`. Both halves are pinned:
+   * `templates/saas-starter/app/models/soft-delete.test-d.ts` for what is
+   * checked, `policies.test.ts` for what the unchecked path does.
+   *
+   * Narrowing this to the schema's field names is #262.
    */
   field?: keyof M & string;
 }
@@ -112,6 +127,15 @@ type SoftDeletable<T, Op extends string> = {
  *       static delete = softDelete(User)
  *       static deleteMany = softDeleteMany(User)
  *     }
+ *
+ * Caveat, and it is not this function's: against a *generated* model that class
+ * does not type-check. The generated `delete` is generic in its arguments and
+ * returns a result narrowed by them, and `(args: any) => Promise<T>` is not
+ * assignable to it, so any `static delete =` is an illegal override regardless
+ * of what it is assigned. The repo's own soft-delete tests give the static a
+ * name of its own and so never hit it. Tracked as #263; the recipe is left as
+ * written here because the fix may well be to make the override legal rather
+ * than to rename it.
  *
  * Both return the row(s) the way the real operations do, and both are still
  * subject to the model's policies, because they go through `update` /
