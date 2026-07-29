@@ -152,6 +152,37 @@ describe("docs/orm.md lists every error an application can catch", () => {
   test.each(exported)("%s is in the table", (name) => {
     expect(errorsTable).toContain(`\`${name}\``);
   });
+
+  /**
+   * ...and the other direction, which nothing checked.
+   *
+   * The assertion above catches an error class the table forgot. It cannot
+   * catch a row naming a class that no longer exists — and that is the half a
+   * reader acts on, because the table is where you look to find out what there
+   * is to catch. A row for a deleted error sends them to write a `catch` for
+   * something no longer importable.
+   *
+   * The same asymmetry the operations list had until #226: a hand-written list
+   * verified in one direction reads as though it were verified in both. Both
+   * sets happen to agree today, at 21 — which is exactly when to pin it, rather
+   * than after they stop agreeing.
+   */
+  test("the table names no error the ORM does not export", () => {
+    const named = [...errorsTable.matchAll(/`([A-Z]\w*Error)`/g)].map(
+      (match) => match[1],
+    );
+
+    expect(named.length, "no error names found — the table format moved").toBeGreaterThan(10);
+
+    const unknown = [...new Set(named)].filter(
+      (name) => !exported.includes(name),
+    );
+
+    expect(
+      unknown,
+      `the Errors table names ${unknown.join(", ")}, which gemi/orm does not export`,
+    ).toEqual([]);
+  });
 });
 
 /**
