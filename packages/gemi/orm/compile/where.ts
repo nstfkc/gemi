@@ -198,8 +198,6 @@ function compileRelationFilter(
   context: WhereContext,
   locate: (args: any) => any,
 ): Fragment | null {
-  const path = `where.${relation.name}`;
-
   // Shape before environment: `readOperators` only reads the relation's own
   // `kind`, so a malformed filter is reported as one even when the registry is
   // empty. The other order let a missing `register` call mask a plain typo.

@@ -23,8 +23,8 @@
  */
 
 /** Prisma's operators, per relation kind. Sorted, because callers iterate them. */
-export const MANY_FILTER_OPERATORS = ["every", "none", "some"] as const;
-export const ONE_FILTER_OPERATORS = ["is", "isNot"] as const;
+const MANY_FILTER_OPERATORS = ["every", "none", "some"] as const;
+const ONE_FILTER_OPERATORS = ["is", "isNot"] as const;
 
 export function relationFilterOperators(
   kind: "one" | "many",

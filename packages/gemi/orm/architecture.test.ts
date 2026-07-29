@@ -224,6 +224,69 @@ describe("the ORM's seams", () => {
   });
 
   /**
+   * **Nothing is exported that only its own file uses.**
+   *
+   * `orm/index.ts` is the public surface and is curated — the `PRE_SCOPED`
+   * symbol is deliberately absent from it so an application cannot forge one.
+   * A module-level `export` is a smaller version of the same decision: it is
+   * how a helper becomes something another file may reach for, and exporting
+   * one that nothing imports widens the surface for nothing.
+   *
+   * Three had drifted that way — `relation-filters.ts`'s two operator tuples,
+   * used only by the function directly beneath them, and `corpus.ts`'s
+   * `LITERAL`, which I exported when extracting that corpus and never needed
+   * to. None was reachable from `index.ts`, so none was public; they were just
+   * wider than they had to be.
+   *
+   * Test files count as references, because an export existing *for* a test is
+   * a real reason — `isTracked` says so in as many words.
+   */
+  const MAY_BE_EXPORTED_UNUSED: string[] = [
+    // Nothing today. An entry here is a deliberate exception with a reason
+    // beside it, not a place to put whatever this test happens to flag.
+  ];
+
+  test("no export is referenced only inside its own file", () => {
+    const declared = new Map<string, string>();
+    const sources = new Map<string, string>();
+
+    for (const [name, path] of FILES) {
+      const content = read(path);
+      sources.set(name, content);
+      if (name === "index.ts") continue;
+
+      for (const match of content.matchAll(
+        /^export (?:async )?function (\w+)|^export const (\w+)|^export class (\w+)/gm,
+      )) {
+        const exported = match[1] ?? match[2] ?? match[3];
+        // A name declared in two files is ambiguous to a text scan; skip rather
+        // than guess, since a false positive here reads as a real finding.
+        declared.set(exported, declared.has(exported) ? "" : name);
+      }
+    }
+
+    // Tests are references: an export that exists for a test is justified.
+    for (const path of readdirSync(ROOT, { recursive: true, withFileTypes: true })) {
+      if (!path.name.endsWith(".test.ts")) continue;
+      const full = join((path as { parentPath?: string }).parentPath ?? ROOT, path.name);
+      sources.set(`test:${full}`, read(full));
+    }
+
+    const unreferenced: string[] = [];
+    for (const [name, home] of declared) {
+      if (home === "" || MAY_BE_EXPORTED_UNUSED.includes(name)) continue;
+
+      const used = [...sources.entries()].some(
+        ([file, content]) =>
+          file !== home && new RegExp(`\\b${name}\\b`).test(content),
+      );
+      if (!used) unreferenced.push(`${home} exports ${name}, and nothing else uses it`);
+    }
+
+    expect(unreferenced, unreferenced.join("\n")).toEqual([]);
+  });
+
+  /**
    * ...and the allow-list cannot go stale: each entry has to still contain the
    * thing it excuses. An exception that stops being needed should be removed,
    * not left standing as permission.
