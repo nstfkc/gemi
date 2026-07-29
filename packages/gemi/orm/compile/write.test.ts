@@ -840,17 +840,87 @@ describe("nested writes", () => {
   );
 
   /**
-   * The refusals now say *why*, which is the difference between "wait" and
-   * "rewrite this call site". Every one of them writes rows that already exist,
-   * which is the line: what is supported writes new rows or repoints a key.
+   * `REFUSED` is empty now: every entry it held described machinery that
+   * turned out to exist one layer down. What still refuses on a `create` is the
+   * *statement*, not the operand — a row that does not exist yet has nothing
+   * linked to it, and Prisma reports these as unknown arguments there too.
    */
-  test("a refusal explains what the operand would take", () => {
-    expect(() =>
-      text("create", { data: { email: "a@b.c", organization: { upsert: {} } } }),
-    ).toThrow(/deciding which branch ran/);
-    expect(() =>
-      text("create", { data: { email: "a@b.c", accounts: { deleteMany: {} } } }),
-    ).toThrow(/has none yet/);
+  test("an operand that needs an existing row says so on a create", () => {
+    for (const operand of ["upsert", "deleteMany", "disconnect", "update"]) {
+      expect(() =>
+        text("create", { data: { email: "a@b.c", accounts: { [operand]: {} } } }),
+      ).toThrow(/has none yet/);
+    }
+  });
+
+  /**
+   * **Every supported operand is answered on both sides, or refused by name.**
+   *
+   * `SUPPORTED` says which operands the ordinary-relation path accepts, but the
+   * two sides are separate dispatches — `planOwningSide` when this row holds
+   * the key, `planForeignSide` when the child does. An operand can be in the
+   * set and unimplemented on one of them, and then it falls through to whatever
+   * handler comes last: `upsert` reached the `connect` path and reported
+   * `'where' yet (Organization.update.organization.connect)` — a different
+   * operand, a different model, and a claim that `{ id: 1 }` is not a unique
+   * key when it is.
+   *
+   * That is a gap `REFUSED` cannot cover, because the operand is not refused —
+   * it is supported, on one side. This walks the set and asserts that whatever
+   * comes back names the operand the caller actually wrote, which is the
+   * property #85 was filed about.
+   */
+  describe("every supported operand answers for itself on both sides", () => {
+    const OPERANDS = [
+      "connect",
+      "connectOrCreate",
+      "create",
+      "createMany",
+      "disconnect",
+      "delete",
+      "update",
+      "updateMany",
+      "deleteMany",
+      "set",
+      "upsert",
+    ];
+
+    // `organization` is the to-one — this row holds the key. `accounts` is the
+    // to-many — the child does.
+    test.each(OPERANDS)("%s on a to-one names itself", (operand) => {
+      let message = "";
+      try {
+        text("update", {
+          where: { id: 1 },
+          data: { organization: { [operand]: {} } },
+        });
+      } catch (error) {
+        message = (error as Error).message;
+      }
+
+      // Either it compiled, or the refusal names the operand the caller wrote.
+      //
+      // The *model* is deliberately not asserted: `matchUniqueKey` reports the
+      // child whose key is missing, which is a different question from whether
+      // the operand is named, and is the same on both sides.
+      if (message === "") return;
+      expect(message).toContain(`.${operand}`);
+    });
+
+    test.each(OPERANDS)("%s on a to-many names itself", (operand) => {
+      let message = "";
+      try {
+        text("update", {
+          where: { id: 1 },
+          data: { accounts: { [operand]: {} } },
+        });
+      } catch (error) {
+        message = (error as Error).message;
+      }
+
+      if (message === "") return;
+      expect(message).toContain(`.${operand}`);
+    });
   });
 
   /**
