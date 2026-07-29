@@ -72,7 +72,22 @@ const SUPPORTED = new Set([
   "connectOrCreate",
   "create",
   "createMany",
+  "disconnect",
+  "delete",
 ]);
+
+/**
+ * Operands that only exist on a statement with a row to act on.
+ *
+ * Prisma refuses `disconnect` and `delete` under a `create` — *"Unknown
+ * argument `disconnect`"* — and it is right to: there is nothing linked to a
+ * row that does not exist yet. Refused here rather than accepted and made a
+ * no-op, so a caller who wrote one on the wrong operation hears about it.
+ */
+const EXISTING_ROW_ONLY = new Set(["disconnect", "delete"]);
+
+/** Statements that insert a new row, so nothing is linked to it yet. */
+const CREATE_ONLY_STATEMENTS = new Set(["create", "createMany"]);
 
 /**
  * The operands still refused, and what each would take.
@@ -85,8 +100,6 @@ const SUPPORTED = new Set([
  */
 const REFUSED: Record<string, string> = {
   set: `It replaces the whole set, so it has to disconnect what is there now.`,
-  disconnect: `It clears a foreign key on rows this call did not name.`,
-  delete: `It deletes rows this call did not name.`,
   deleteMany: `It deletes rows this call did not name.`,
   // Not "it writes a row that already exists" — `connectOrCreate` does that
   // too, on the foreign side, and is supported. The difference is *whose*
@@ -223,8 +236,20 @@ function planOne(
         `data.${relation.name}.${key}`,
         schema.name,
         operation,
-        `Only 'connect', 'create' and 'createMany' are implemented.` +
+        `Only ${[...SUPPORTED].sort().join(", ")} are implemented.` +
           (why ? ` '${key}' is not: ${why}` : ""),
+      );
+    }
+
+    // `create` has no row to disconnect from, and Prisma does not offer these
+    // there either — it reports them as an unknown argument.
+    if (EXISTING_ROW_ONLY.has(key) && CREATE_ONLY_STATEMENTS.has(operation)) {
+      throw new UnsupportedQueryError(
+        `data.${relation.name}.${key}`,
+        schema.name,
+        operation,
+        `'${key}' acts on rows already linked to this one, and a '${operation}' ` +
+          `has none yet — Prisma refuses it here too. Use it on an 'update'.`,
       );
     }
   }
@@ -333,6 +358,49 @@ function planOwningSide(
    * Object only on this side. The relation holds one foreign key, so there is
    * one row to point at, and Prisma refuses an array here too.
    */
+  /**
+   * `disconnect: true` on a to-one — clear the foreign key this row holds.
+   *
+   * No step at all: the key lives on this row, so it is one more bound column
+   * set to `null`, exactly as `connect`'s direct form is one bound column set
+   * to a value. Nothing on the child is read or written, which is why there is
+   * no scoping question on this side — the row being changed is the one the
+   * statement already names.
+   *
+   * `delete` has no meaning here for the same reason it has no `createMany`:
+   * this side is a to-one, and deleting the far row through a `data` key would
+   * be deleting a row the statement is not about. Prisma does offer it; it is
+   * refused rather than guessed, because a `delete` that fires as a side effect
+   * of an unrelated update is the kind of thing to implement deliberately.
+   */
+  if (key === "disconnect") {
+    assertDisconnectable(schema, relation, fkField, operation);
+
+    if (operand !== true) {
+      throw new UnsupportedQueryError(
+        `data.${relation.name}.disconnect`,
+        schema.name,
+        operation,
+        `'${relation.name}' is a to-one, so there is one row to clear and ` +
+          `nothing to name. Prisma takes 'true' here.`,
+      );
+    }
+
+    out.contributions.push({ field: fkField, value: () => null });
+    return;
+  }
+
+  if (key === "delete") {
+    throw new UnsupportedQueryError(
+      `data.${relation.name}.delete`,
+      schema.name,
+      operation,
+      `'${relation.name}' is a to-one whose foreign key lives on this row, so ` +
+        `deleting through it would remove a row this statement is not about. ` +
+        `Delete it directly, or 'disconnect' it first.`,
+    );
+  }
+
   if (key === "connectOrCreate") {
     assertConnectOrCreateOperand(
       schema,
@@ -464,6 +532,96 @@ function planForeignSide(
   const childField = link.childField;
 
   out.keyFields.push(parentField);
+
+  /**
+   * `disconnect` and `delete` on this side both act on rows the caller named by
+   * unique key — which is what makes them expressible at all, and what puts
+   * them on the supported side of this file's line.
+   *
+   * They differ on a row that is *not* linked to this parent, and the
+   * difference is Prisma's, measured rather than chosen:
+   *
+   *     disconnect a row linked elsewhere  ->  succeeds, changes nothing
+   *     delete     a row linked elsewhere  ->  raises "are not connected"
+   *
+   * So both filter by the parent key as well as the caller's key, and only
+   * `delete` treats a miss as an error. That filter is doing two jobs at once:
+   * it reproduces Prisma's semantics, and it is what stops either operand from
+   * reaching a row belonging to a different parent.
+   *
+   * **Scoping comes from the child's own operations**, as everywhere else here:
+   * `updateMany` and `delete` go through the child's `$exec` un-pre-scoped, so
+   * a row the child's policies hide is not reachable. For `delete` that means a
+   * hidden row reports "not connected" rather than "denied" — the same answer
+   * as a row that genuinely is not linked, which is the conservative one.
+   */
+  if (key === "disconnect" || key === "delete") {
+    const deleting = key === "delete";
+    if (!deleting) assertDisconnectable(child, relation, childField, operation);
+
+    assertNamedRows(schema, relation, child, operand, key, operation);
+
+    out.after.push({
+      relation: relation.name,
+      operation: key,
+      async run(args, _context, executor, rows) {
+        const parent = rows[0];
+        if (!parent) return;
+
+        const list = listOf(at(args));
+
+        for (let index = 0; index < list.length; index++) {
+          // The caller's key *and* the link, so neither operand can reach a row
+          // attached to a different parent.
+          const where = {
+            ...(list[index] as object),
+            [childField]: parent[parentField],
+          };
+
+          if (!deleting) {
+            await executor.exec(
+              relation.model,
+              "updateMany",
+              { where, data: { [childField]: null } },
+              // NOT pre-scoped: clearing a foreign key is a write to the child,
+              // so the child's scope decides which rows are reachable.
+              false,
+            );
+            continue;
+          }
+
+          const found = (await executor.exec(
+            relation.model,
+            "findFirst",
+            { where, select: { [childField]: true } },
+            false,
+          )) as Record<string, unknown> | null;
+
+          if (!found) {
+            throw new UnsupportedQueryError(
+              `data.${relation.name}.delete`,
+              schema.name,
+              operation,
+              `the row named by ${JSON.stringify(list[index])} is not ` +
+                `connected to this ${schema.name}. Prisma raises here too, ` +
+                `rather than deleting a row belonging to somebody else.`,
+            );
+          }
+
+          await executor.exec(
+            relation.model,
+            "deleteMany",
+            { where },
+            // NOT pre-scoped, for the reason above — and `deleteMany` rather
+            // than `delete` because the `where` carries the link as well as the
+            // unique key, which `delete` refuses as a non-unique target.
+            false,
+          );
+        }
+      },
+    });
+    return;
+  }
 
   if (key === "create") {
     out.after.push({
@@ -676,6 +834,68 @@ function planForeignSide(
       }
     },
   });
+}
+
+/**
+ * The rows a `disconnect` / `delete` names, each by a unique key.
+ *
+ * Validated at plan time for the reason every operand here is: a refusal that
+ * arrives mid-transaction has to unwind a parent row that should never have
+ * been written.
+ */
+function assertNamedRows(
+  schema: ModelSchema,
+  relation: RelationSchema,
+  child: ModelSchema,
+  operand: unknown,
+  key: string,
+  operation: string,
+): Record<string, unknown>[] {
+  const at = `data.${relation.name}.${key}`;
+  const entries = (Array.isArray(operand) ? operand : [operand]) as unknown[];
+  const out: Record<string, unknown>[] = [];
+
+  for (const entry of entries) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      throw new UnsupportedQueryError(
+        at,
+        schema.name,
+        operation,
+        `Expected an object naming a unique field, or an array of them.`,
+      );
+    }
+    matchUniqueKey(child, entry, `${operation}.${relation.name}.${key}`);
+    out.push(entry as Record<string, unknown>);
+  }
+
+  return out;
+}
+
+/**
+ * A `disconnect` clears a foreign key, so the column has to be nullable.
+ *
+ * Prisma refuses it on a required relation at the type level; here the schema
+ * is the only thing that knows, so the refusal says which column and why rather
+ * than letting the database report a not-null violation from inside a nested
+ * step.
+ */
+function assertDisconnectable(
+  owner: ModelSchema,
+  relation: RelationSchema,
+  fieldName: string,
+  operation: string,
+): void {
+  const field = owner.fields[fieldName];
+  if (field && field.nullable) return;
+
+  throw new UnsupportedQueryError(
+    `data.${relation.name}.disconnect`,
+    owner.name,
+    operation,
+    `'${fieldName}' is required, so there is no value to leave behind — a ` +
+      `disconnected row would have to be deleted or repointed instead. Prisma ` +
+      `does not offer 'disconnect' on a required relation either.`,
+  );
 }
 
 /**

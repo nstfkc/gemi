@@ -9,6 +9,7 @@ import { Application } from "gemi/foundation";
 import {
   Model,
   RecordNotFoundError,
+  ScopeEscapeError,
   clearPlanCache,
   register,
   type ModelPolicy,
@@ -392,6 +393,146 @@ describe("policies on nested writes", () => {
 
     const notes: any = await raw.unsafe(`SELECT * FROM "Note"`);
     expect(notes[0].folderId).toBe(2);
+  });
+
+  /**
+   * `disconnect` reaches a row by unique key, so the child's scope is the only
+   * thing standing between a caller and another tenant's row.
+   *
+   * The note below is linked to *our* folder — seeded that way deliberately —
+   * but carries the other tenant's `orgId`. So the link is right and the policy
+   * is what has to refuse: without the child's scope this clears a foreign key
+   * on a row we cannot see, and reports success.
+   */
+  test("disconnect cannot clear a row the child's policy hides", async () => {
+    await raw.unsafe(
+      `INSERT INTO "Folder" ("id", "code", "orgId") VALUES (2, 'ours', 7)`,
+    );
+    await raw.unsafe(
+      `INSERT INTO "Note" ("id", "folderId", "label", "orgId") ` +
+        `VALUES (10, 2, 'theirs', 99)`,
+    );
+
+    await Model.asUser(OURS, () =>
+      Folder.$exec("update", {
+        where: { id: 2 },
+        // `code` is here only to satisfy "at least one field must be
+        // updated": `Folder` has no `@updatedAt`, so a relation-only update has
+        // no scalar assignment and is refused on this branch. #83 makes that
+        // compile to a select of the same returning list; until it lands, a
+        // no-op assignment keeps the test about the disconnect.
+        data: { code: "ours", notes: { disconnect: { id: 10 } } },
+      }),
+    );
+
+    const notes: any = await raw.unsafe(`SELECT "folderId" FROM "Note"`);
+    expect(notes[0].folderId).toBe(2);
+  });
+
+  /** ...and a visible one is cleared. */
+  test("disconnect clears a row the caller can see", async () => {
+    await raw.unsafe(
+      `INSERT INTO "Folder" ("id", "code", "orgId") VALUES (2, 'ours', 7)`,
+    );
+    await raw.unsafe(
+      `INSERT INTO "Note" ("id", "folderId", "label", "orgId") ` +
+        `VALUES (11, 2, 'ours', 7)`,
+    );
+
+    await Model.asUser(OURS, () =>
+      Folder.$exec("update", {
+        where: { id: 2 },
+        // `code` is here only to satisfy "at least one field must be
+        // updated": `Folder` has no `@updatedAt`, so a relation-only update has
+        // no scalar assignment and is refused on this branch. #83 makes that
+        // compile to a select of the same returning list; until it lands, a
+        // no-op assignment keeps the test about the disconnect.
+        data: { code: "ours", notes: { disconnect: { id: 11 } } },
+      }),
+    );
+
+    const notes: any = await raw.unsafe(`SELECT "folderId" FROM "Note"`);
+    expect(notes[0].folderId).toBeNull();
+  });
+
+  /**
+   * `delete` reports a hidden row as **not connected** rather than as denied,
+   * which is the conservative answer: it is the same thing the caller would be
+   * told about a row that genuinely belongs to another parent, so the two are
+   * indistinguishable and neither confirms the row exists.
+   */
+  test("delete reports a hidden row as not connected, and leaves it", async () => {
+    await raw.unsafe(
+      `INSERT INTO "Folder" ("id", "code", "orgId") VALUES (2, 'ours', 7)`,
+    );
+    await raw.unsafe(
+      `INSERT INTO "Note" ("id", "folderId", "label", "orgId") ` +
+        `VALUES (12, 2, 'theirs', 99)`,
+    );
+
+    await expect(
+      Model.asUser(OURS, () =>
+        Folder.$exec("update", {
+          where: { id: 2 },
+          data: { code: "ours", notes: { delete: { id: 12 } } },
+        }),
+      ),
+    ).rejects.toThrow(/is not connected/);
+
+    expect(await raw.unsafe(`SELECT * FROM "Note"`)).toHaveLength(1);
+  });
+
+  /**
+   * **Pinned, not endorsed** — #98.
+   *
+   * A child scoped on its own foreign key loses every relation operand that
+   * writes that key, because `assertNoScopeEscape` reads `args.data` and cannot
+   * tell a column the caller supplied from one the nested step put there. The
+   * caller wrote `disconnect: { id }`; `folderId` is in `data` because the ORM
+   * chose it.
+   *
+   * This is **not** new to `disconnect`. `connect` has the same shape and the
+   * same failure on `feat/orm` today, which is why it is filed rather than
+   * fixed here: the decision affects an operand that already shipped.
+   *
+   * Asserted so the current behaviour is deliberate. When #98 lands this test
+   * should flip to expecting success, rather than being deleted.
+   */
+  test("a foreign-key scope refuses relation operands today", async () => {
+    class KeyScoped extends Model {
+      static $schema = noteSchema;
+      static $policies = [{ scope: () => ({ folderId: 2 }) } as ModelPolicy];
+    }
+    register("Note", KeyScoped);
+
+    try {
+      await raw.unsafe(
+        `INSERT INTO "Folder" ("id", "code", "orgId") VALUES (2, 'ours', 7)`,
+      );
+      await raw.unsafe(
+        `INSERT INTO "Note" ("id", "folderId", "label", "orgId") ` +
+          `VALUES (20, 2, 'ours', 7)`,
+      );
+
+      const attempt = (operand: unknown) =>
+        Model.asUser(OURS, () =>
+          Folder.$exec("update", {
+            where: { id: 2 },
+            data: { code: "ours", notes: operand },
+          }),
+        );
+
+      // Both operands, so the pin records that this is a property of the
+      // guard rather than of the one this PR added.
+      await expect(attempt({ disconnect: { id: 20 } })).rejects.toThrow(
+        ScopeEscapeError,
+      );
+      await expect(attempt({ connect: { id: 20 } })).rejects.toThrow(
+        ScopeEscapeError,
+      );
+    } finally {
+      register("Note", Note);
+    }
   });
 
   /**

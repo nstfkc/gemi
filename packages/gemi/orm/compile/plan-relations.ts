@@ -174,7 +174,13 @@ export interface NestedWriteStep {
    * itself does, so this is what makes a plan legible from the outside: to a
    * test, and to whatever logs queries later.
    */
-  operation: "connect" | "connectOrCreate" | "create" | "createMany";
+  operation:
+    | "connect"
+    | "connectOrCreate"
+    | "create"
+    | "createMany"
+    | "disconnect"
+    | "delete";
   run(
     args: any,
     context: BindContext,

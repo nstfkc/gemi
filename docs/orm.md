@@ -293,6 +293,8 @@ await List.create({
 | `createMany` | The same rows in **one** statement. To-many only, and the rows go inside `data`. |
 | `connect` | Points at an existing row — a bound column when it names the referenced key, a lookup otherwise. |
 | `connectOrCreate` | Looks the row up by a unique key and creates it only if it is not there. **A hit ignores `create` entirely** — it is connect-*or*-create, not upsert. |
+| `disconnect` | Clears the link. `true` on a to-one; a unique key, or a list of them, on a to-many. The column has to be nullable. |
+| `delete` | Deletes the named rows outright, not just the link. |
 
 Which direction a nested write runs in is decided by **who holds the foreign key**. When this model
 holds it, the far row is resolved or created *first* and collapses into one more column. When the
@@ -314,8 +316,21 @@ same answer you would get if it truly did not exist. That is deliberate. `connec
 `connectOrCreate` succeeded would together tell you a row with that key exists in someone else's
 tenant.
 
-Everything else in Prisma's nested grammar — `set`, `disconnect`, `update`, `updateMany`, `upsert`,
-`delete`, `deleteMany` — is refused, by name and with the reason. The line is **which rows an
+> **Known gap (#98).** A child whose policy *scopes on the foreign key itself* — `scope: () => ({
+> folderId: mine })` — cannot use any relation operand that writes that key, including `connect`,
+> unless it also declares an `onUpdate`. The scope-escape guard reads the payload and cannot tell a
+> column you supplied from one the nested step put there. Pre-existing rather than new to
+> `disconnect`, and tracked separately because the decision affects `connect` too.
+
+`disconnect` and `delete` only exist on an `update` — a `create` has nothing linked to it yet, and
+Prisma reports them as an unknown argument there too. They differ on a row that is **not** linked to
+this parent, and the difference is Prisma's: `disconnect` succeeds and changes nothing, `delete`
+raises. Both filter on the parent's key as well as yours, so neither can reach a row belonging to
+somebody else — and a row your policies hide is not reachable either, which `delete` reports as "not
+connected" rather than as denied, since that is the same answer a genuinely unlinked row gets.
+
+Everything else in Prisma's nested grammar — `set`, `update`, `updateMany`, `upsert`, `deleteMany` —
+is refused, by name and with the reason. The line is **which rows an
 operand can name, and whose columns it writes**: everything supported names its rows (a new one, or
 one you identified by unique key) and writes either a whole new row or one foreign key the ORM
 chose. `set`, `disconnect`, `delete`, `deleteMany` and `updateMany` act on rows the call did not
