@@ -3844,14 +3844,37 @@ everywhere, sort in the application or store an explicit rank column.
 ## `Json` columns
 
 A `Json` column round-trips whatever you give it: an object, an array, a string, a number, a
-boolean, `null`. The value is stored as JSON and comes back as the same JavaScript value, on both
+boolean. The value is stored as JSON and comes back as the same JavaScript value, on both
 dialects and whether it is read at the root or nested inside an `include`.
 
-One thing is worth knowing:
+Two things are worth knowing:
 
 - **A string is a string.** `metadata: "42"` stores the JSON string `"42"`, not the number, and
   `metadata: '{"a":1}'` stores that text as a string rather than as an object. If you want an
   object, pass an object.
+
+- **Empty is two values, and you have to say which.** `metadata: null` does not type-check —
+  Prisma's types do not allow it and gemi takes them verbatim — because a `Json` column has two
+  distinct empty states and guessing between them is what the sentinels exist to prevent:
+
+  ```ts
+  import { Prisma } from "@prisma/client"
+
+  await User.create({ data: { …, metadata: Prisma.DbNull } })    // the column is SQL NULL
+  await User.create({ data: { …, metadata: Prisma.JsonNull } })  // the column holds JSON null
+  ```
+
+  Both read back as `null`, so the difference is invisible from JavaScript and entirely visible to
+  anything else that reads the column — `psql`, a report, Prisma itself. Filtering takes the same
+  pair, and takes them as an explicit comparison:
+
+  ```ts
+  await User.findMany({ where: { metadata: { equals: Prisma.DbNull } } })   // the SQL NULLs
+  await User.findMany({ where: { metadata: { equals: Prisma.JsonNull } } }) // the JSON nulls
+  ```
+
+  A bare `where: { metadata: Prisma.DbNull }` raises `InvalidArgumentError` naming the explicit
+  form. Prisma rejects that spelling too, so this is parity rather than a gemi restriction.
 
 On Postgres the parameter is cast — `$1::text::jsonb` — and the value serialised to match, which
 is what lets a bare number or boolean through. Binding it raw makes the driver send an `integer` to

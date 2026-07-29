@@ -155,6 +155,51 @@ describe("docs/orm.md lists every error an application can catch", () => {
 });
 
 /**
+ * The two `Json` null sentinels are documented, because they are the only way
+ * to write an empty `Json` column and were shipped without a word.
+ *
+ * #223 taught the runtime to store `Prisma.DbNull` and `Prisma.JsonNull`
+ * correctly and #225 taught the filter path to read them; neither told anybody.
+ * The page went further than silence — it said a `Json` column round-trips
+ * "an object, an array, a string, a number, a boolean, `null`", and a bare
+ * `null` does not type-check on a `Json` field, on Prisma or here.
+ *
+ * So the documented way to write one was a type error and the real way was
+ * unmentioned. The distinction is not cosmetic: the two sentinels produce
+ * *different rows*, both read back as `null` from JavaScript, and the
+ * difference is entirely visible to anything else reading the column — which is
+ * the failure `differential.test.ts`'s seed comment describes as returning "the
+ * wrong one of two legal answers".
+ *
+ * Pinned by name rather than by prose, so the feature cannot go silent again.
+ */
+describe("docs/orm.md documents the Json null sentinels", () => {
+  const source = readFileSync(DOC, "utf8");
+
+  test.each(["Prisma.DbNull", "Prisma.JsonNull"])("%s is named", (sentinel) => {
+    expect(source).toContain(sentinel);
+  });
+
+  test("it says which one is SQL NULL and which is the JSON value", () => {
+    expect(source).toMatch(/DbNull[^\n]*\n?[^\n]*SQL NULL|SQL NULL[^\n]*DbNull/);
+    expect(source).toMatch(/JsonNull[^\n]*JSON null|JSON null[^\n]*JsonNull/);
+  });
+
+  /**
+   * And that a bare `null` is not the third option a reader would reach for
+   * first — the sentence that used to say it was is the reason this exists.
+   */
+  test("it does not offer a bare null as a way to write one", () => {
+    const section = source.slice(source.indexOf("## `Json` columns"));
+    const json = section.slice(0, section.indexOf("\n## ", 1));
+    // Across the line break, because that is where the sentence wrapped — the
+    // first version of this matched `a boolean, \`null\`` on one line and could
+    // never have failed, which is the same defect it is here to catch.
+    expect(json).not.toMatch(/boolean,\s+`null`/);
+  });
+});
+
+/**
  * **`docs/llms-full.txt` carries the ORM pages verbatim**, and had stopped.
  *
  * That file is "every page concatenated for one-shot LLM context", served
