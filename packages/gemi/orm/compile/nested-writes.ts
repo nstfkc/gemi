@@ -1152,29 +1152,44 @@ function planForeignSide(
  * What an implicit many-to-many accepts, and how it differs from
  * {@link SUPPORTED} — which is the ordinary-relation set.
  *
- * **The two are reconciled deliberately.** `planOne` checks `link.join` first
- * and returns, so this path never consults `SUPPORTED` at all: the sets can
+ * **The two must be reconciled deliberately.** `planOne` checks `link.join`
+ * first and returns, so this path never consults `SUPPORTED` at all: the sets
  * drift without anything failing to compile and without a test noticing, and
  * they did — #83 landed this one while four branches were adding to the other,
  * none of which could see it from inside itself.
  *
- * The asymmetries that remain are decisions rather than omissions, and are
- * named in {@link JOIN_TABLE_REFUSED} beside the reasons. In short: the
- * operands that are *about the link* work here, and the ones that are about the
- * far **row** do not, because a join table has two foreign keys and no row of
- * its own to act on.
+ * **The gaps are unimplemented, not by design, and that is measured rather than
+ * reasoned.** An earlier version of this comment claimed the split was "the
+ * link versus the far row" — operands about the pair work here, operands about
+ * the far row do not. It is a tidy rule and it is wrong. Prisma offers five of
+ * the six through an implicit m-n:
  *
- *     connect  create  disconnect  set        both paths
- *     connectOrCreate  createMany  delete  update  updateMany  deleteMany
- *                                                  ordinary relations only
+ *     update           OK   the far row is updated
+ *     delete           OK   the far row is deleted, not just the pair
+ *     deleteMany       OK
+ *     updateMany       OK
+ *     connectOrCreate  OK
+ *     createMany       Unknown argument — Prisma refuses it here too
+ *
+ * So `delete` through a join table really does mean deleting the far row, which
+ * is the opposite of what that rule predicted. Only `createMany` is a genuine
+ * refusal, and it is Prisma's rather than ours.
+ *
+ * `connectOrCreate` is implemented here because #83 already had both of its
+ * halves — `connect` inserts a pair for an existing row, `create` writes the
+ * row and its pair — so it is those two selected by a lookup. The remaining
+ * four reach the far row *through* the pairs, which is a second hop this path
+ * does not have yet; {@link JOIN_TABLE_REFUSED} says so in those terms rather
+ * than inventing a principle.
  *
  * `set` is the one operand with **two implementations** — this file's
  * join-table version from #83 and the ordinary-relation one — and they agree
- * because both were reasoned to "replace the set I can see" independently,
- * not because they share anything. Worth knowing when either is changed.
+ * because both were reasoned to "replace the set I can see" independently, not
+ * because they share anything. Worth knowing when either is changed.
  */
 const JOIN_TABLE_SUPPORTED = new Set([
   "connect",
+  "connectOrCreate",
   "disconnect",
   "set",
   "create",
@@ -1189,27 +1204,26 @@ const JOIN_TABLE_SUPPORTED = new Set([
  * wearing the same name.
  */
 const JOIN_TABLE_REFUSED: Record<string, string> = {
-  delete:
-    `Through a join table, 'delete' would mean deleting the far row rather ` +
-    `than the link — which is what 'disconnect' does here, and is the same ` +
-    `distinction those two draw on an ordinary relation. Delete the row ` +
-    `directly, or 'disconnect' it.`,
-  update:
-    `A join table holds two foreign keys and no columns of its own, so there ` +
-    `is nothing here to update. Write the far row through its own model.`,
-  updateMany:
-    `As 'update': the pairs have no columns to write. Filter the far model ` +
-    `directly.`,
-  deleteMany:
-    `As 'delete': this would remove far rows rather than links, and by a ` +
-    `predicate rather than a key. Use 'set' to replace the links.`,
-  connectOrCreate:
-    `It needs the far row's unique key to decide the branch, then a pair ` +
-    `written for either outcome — two statements whose failure modes differ, ` +
-    `which is why 'connect' and 'create' are offered separately here.`,
+  // Prisma's own refusal, not this ORM's — the one entry here that is a
+  // decision rather than a gap, and it is not gemi's decision.
   createMany:
-    `Each row needs a pair written for it as well, so it is not the single ` +
-    `statement 'createMany' exists to be. Use 'create'.`,
+    `Prisma does not offer 'createMany' through an implicit many-to-many ` +
+    `either — it reports it as an unknown argument. Use 'create', which writes ` +
+    `the row and its pair.`,
+  // The four that reach the far row through the pairs. Prisma implements all
+  // of them; this path does not have the second hop yet.
+  update:
+    `Reaching the far row means reading the pairs first, which this path does ` +
+    `not do yet. Update the related model directly, filtered by its own key.`,
+  updateMany:
+    `As 'update': it needs the pairs read before the far rows can be matched.`,
+  delete:
+    `It deletes the far row rather than the pair — Prisma does this through a ` +
+    `join table too — and reaching it means reading the pairs first, which ` +
+    `this path does not do yet. Use 'disconnect' to remove the link, or delete ` +
+    `the row through its own model.`,
+  deleteMany:
+    `As 'delete': the far rows have to be found through the pairs first.`,
 };
 
 /**
@@ -1250,6 +1264,17 @@ function planJoinTable(
   out: NestedWritePlanning,
   dialect: SqlDialect,
 ): void {
+  if (key === "connectOrCreate") {
+    assertConnectOrCreateOperand(
+      schema,
+      relation,
+      child,
+      operand,
+      operation,
+      relation.kind === "many",
+    );
+  }
+
   if (!JOIN_TABLE_SUPPORTED.has(key)) {
     const why = JOIN_TABLE_REFUSED[key];
     if (why) {
@@ -1391,6 +1416,48 @@ function planJoinTable(
             false,
           )) as Record<string, unknown> | null;
           if (created) childKeys.push(created[childField]);
+          continue;
+        }
+
+        /**
+         * `connectOrCreate` is the two branches above selected by a lookup, so
+         * it needed no new machinery here — which is why it is the one of the
+         * five missing operands this change adds.
+         *
+         * `findUnique`, not the `findUniqueOrThrow` the `connect` path below
+         * uses: a miss is the *other branch* here rather than an error. And a
+         * scoped-away hit therefore takes the create branch, which is the same
+         * answer the ordinary-relation `connectOrCreate` gives and closes the
+         * same probe — `connect` raising where this succeeds would together
+         * confirm a row the caller cannot see.
+         */
+        if (key === "connectOrCreate") {
+          const entry = item as Record<string, unknown>;
+          matchUniqueKey(
+            child,
+            entry.where,
+            `${operation}.${relation.name}.connectOrCreate`,
+          );
+
+          const hit = (await executor.exec(
+            relation.model,
+            "findUnique",
+            { where: entry.where, select: { [childField]: true } },
+            false,
+          )) as Record<string, unknown> | null;
+
+          if (hit) {
+            childKeys.push(hit[childField]);
+            continue;
+          }
+
+          const made = (await executor.exec(
+            relation.model,
+            "create",
+            { data: entry.create, select: { [childField]: true } },
+            false,
+          )) as Record<string, unknown> | null;
+          if (made) childKeys.push(made[childField]);
           continue;
         }
 

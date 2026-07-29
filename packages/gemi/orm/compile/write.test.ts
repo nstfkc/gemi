@@ -863,9 +863,8 @@ describe("nested writes", () => {
    * four other branches were in flight at once.
    */
   describe("ordinary relations and implicit many-to-many", () => {
-    const BOTH = ["connect", "create", "disconnect", "set"];
+    const BOTH = ["connect", "connectOrCreate", "create", "disconnect", "set"];
     const ORDINARY_ONLY = [
-      "connectOrCreate",
       "createMany",
       "delete",
       "update",
@@ -874,9 +873,11 @@ describe("nested writes", () => {
     ];
 
     /**
-     * The operands that are about the *link* work on both. The ones about the
-     * far **row** do not, because a join table has two foreign keys and no row
-     * of its own to act on — and each says which of those it is.
+     * The remaining gaps, each with a reason that says whether it is Prisma's
+     * refusal or this path's missing second hop — measured, not reasoned. An
+     * earlier version of this test asserted a "link versus far row" split that
+     * Prisma contradicts: it implements `delete` through a join table, and it
+     * deletes the far row.
      */
     test.each(ORDINARY_ONLY)("%s is refused through a join table, with a reason", (operand) => {
       expect(() =>
@@ -889,7 +890,7 @@ describe("nested writes", () => {
       ).toThrow(/means something different through a join table/);
     });
 
-    test("the shared operands are not refused there", () => {
+    test("the operands both paths implement are not refused there", () => {
       for (const operand of BOTH) {
         expect(() =>
           compileWrite(
