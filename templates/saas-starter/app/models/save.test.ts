@@ -15,7 +15,7 @@ import {
 } from "gemi/orm";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "vitest";
 
-import { POSTGRES_URL, applyMigrations } from "./differential";
+import { POSTGRES_URL, applyMigrations } from "./scratch";
 import { AccountModel, UserModel } from "./generated";
 
 /**
