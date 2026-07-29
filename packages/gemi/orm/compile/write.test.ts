@@ -1299,6 +1299,55 @@ describe("nested writes", () => {
       ).toThrow(/means something different through a join table/);
     });
 
+    /**
+     * **The step says which operand it is**, which is what the field is for.
+     *
+     * `NestedWriteStep.operation` is documented as the thing that "makes a plan
+     * legible from the outside: to a test, and to whatever logs queries later"
+     * — two steps on the same relation can produce byte-identical SQL and
+     * differ only in what the step does.
+     *
+     * Nothing on the join-table path asserted it. Mutation found the hole:
+     * flipping
+     *
+     *     operation: key === "create" ? "create" : "connect"
+     *
+     * survives the unit suite *and* the template suite, so a `create` step
+     * could report itself as a `connect` and the only reader would be a human
+     * debugging a plan.
+     *
+     * `plan.writes.discrimination.test.ts` does read the label, but folds it
+     * into a plan-identity string and asserts two plans *differ*. Swapping the
+     * two labels swaps both identities and they stay distinct, so that test
+     * passes either way — the difference between checking a value and checking
+     * that values are not equal.
+     */
+    test.each([
+      ["create", { create: { label: "new" } }],
+      ["connect", { connect: { id: 1 } }],
+      ["connectOrCreate", { connectOrCreate: { where: { id: 1 }, create: { label: "new" } } }],
+      ["disconnect", { disconnect: { id: 1 } }],
+      ["set", { set: [{ id: 1 }] }],
+    ] as [string, Record<string, unknown>][])(
+      "a %s through a join table is labelled as one",
+      (operand, payload) => {
+        const plan = compileWrite(
+          post,
+          "update",
+          { where: { id: 1 }, data: { tags: payload } } as never,
+          sqlite,
+        );
+
+        const steps = [...(plan.before ?? []), ...(plan.after ?? [])];
+        const labels = steps
+          .filter((step) => step.relation === "tags")
+          .map((step) => step.operation);
+
+        expect(labels, `no step was planned for ${operand}`).not.toHaveLength(0);
+        expect(labels).toContain(operand);
+      },
+    );
+
     test("the operands both paths implement are not refused there", () => {
       for (const operand of BOTH) {
         expect(() =>
