@@ -1,4 +1,4 @@
-import type { PrismaClient } from "@prisma/client";
+import { Prisma as PrismaNS, type PrismaClient } from "@prisma/client";
 import { Model } from "gemi/orm";
 import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 
@@ -1246,6 +1246,45 @@ function suite(label: string, url?: string) {
       "an enum column: %s",
       async (_label, operation, args) => {
         await differential.expectSame("Organization", operation, args);
+      },
+    );
+
+    /**
+     * The two `Json` null sentinels in a **filter**, which ask different
+     * questions: `DbNull` for the rows whose column is SQL NULL, `JsonNull` for
+     * the rows holding the JSON value `null`.
+     *
+     * `DbNull` compiled to `= ?` and therefore matched nothing, whatever the
+     * table held — the failure `equals`'s own comment describes for a bare
+     * `null` ("would silently return wrong rows"), reached by the sentinel that
+     * does not arrive as `null`.
+     *
+     * Run against `Account.settings` because the seed already carries **both**
+     * states there: `ac2` is seeded with a JSON null and the others leave the
+     * column SQL NULL. That matters more than it looks — with only one of the
+     * two present, `is null` and `= NULL` return the same empty set and the bug
+     * passes. Compared against Prisma rather than by row count, so a filter
+     * matching nothing fails here instead of agreeing with an equally empty
+     * expectation.
+     */
+    test.each([
+      ["DbNull finds the SQL NULLs", { equals: PrismaNS.DbNull }],
+      ["JsonNull finds the JSON nulls", { equals: PrismaNS.JsonNull }],
+      // The shorthand, which is what Prisma's own documentation writes. It read
+      // the sentinel as an operator map with no operators and compiled to
+      // `where true` — the whole table, when asked for the null rows.
+      ["DbNull as the bare shorthand", PrismaNS.DbNull],
+      ["JsonNull as the bare shorthand", PrismaNS.JsonNull],
+      // ...and negated, where the same misreading compiled to `not (true)`.
+      ["not DbNull", { not: PrismaNS.DbNull }],
+      ["not JsonNull", { not: PrismaNS.JsonNull }],
+    ] as [string, unknown][])(
+      "a Json null sentinel in a where: %s",
+      async (_label, filter) => {
+        await differential.expectSame("Account", "findMany", {
+          where: { settings: filter },
+          orderBy: { id: "asc" },
+        });
       },
     );
 
