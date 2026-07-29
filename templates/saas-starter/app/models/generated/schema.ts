@@ -432,6 +432,19 @@ export const Organization: ModelSchema = {
       "nullable": true,
       "isId": false,
       "isUpdatedAt": false
+    },
+    "plan": {
+      "name": "plan",
+      "column": "plan",
+      "type": "String",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false,
+      "enum": "OrganizationPlan",
+      "default": {
+        "kind": "value",
+        "value": "free"
+      }
     }
   },
   "primaryKey": [

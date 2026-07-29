@@ -3815,6 +3815,32 @@ The direction is the awkward one: a `DB.sql` write inside a transaction rolls ba
 development on SQLite and survives the rollback in production on Postgres. `DB.query` and
 `DB.execute` join the transaction on both.
 
+## Enums
+
+A Prisma `enum` is a **string** at runtime, on both dialects, exactly as it is through Prisma:
+
+```ts
+await Organization.findMany({ where: { plan: { in: ["pro", "enterprise"] } } })
+```
+
+The generated schema records the enum's name beside the field, but the value you write and the
+value you read back are the plain member name. Equality, `not`, `in`, `orderBy` and `groupBy` all
+work on it and are compared against Prisma by the differential suite.
+
+One consequence worth stating, because it is the one thing that surprises: **`orderBy` on an enum
+sorts differently on the two dialects.** Postgres creates a real enum type and sorts by
+*declaration* order; SQLite stores the member as `TEXT` and sorts *alphabetically*. For
+`enum OrganizationPlan { free pro enterprise }`, measured:
+
+```
+postgres   free, pro, enterprise      (declaration order)
+sqlite     enterprise, free, pro      (alphabetical)
+```
+
+gemi matches Prisma on each dialect rather than inventing a uniformity Prisma does not have — the
+same call as `contains` being case-sensitive on Postgres and not on SQLite. If you need one order
+everywhere, sort in the application or store an explicit rank column.
+
 ## `Json` columns
 
 A `Json` column round-trips whatever you give it: an object, an array, a string, `null` — and a

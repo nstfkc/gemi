@@ -45,10 +45,16 @@ async function seed(prisma: PrismaClient) {
 
   // Two organizations so a to-one include has something to discriminate, and
   // so `organization.users` is a to-many with more than one member.
+  //
+  // Their `plan` values differ, and neither is the column's default. An enum
+  // seeded to one value compares equal under every ordering and every grouping,
+  // so the cases that exercise it would pass without discriminating anything —
+  // and `free` on both would additionally never distinguish the stored value
+  // from the default the migration writes.
   await prisma.organization.createMany({
     data: [
-      { publicId: "o1", name: "Acme", description: "the first one" },
-      { publicId: "o2", name: "Globex" },
+      { publicId: "o1", name: "Acme", description: "the first one", plan: "pro" },
+      { publicId: "o2", name: "Globex", plan: "enterprise" },
     ],
   });
   const [acme, globex] = await prisma.organization.findMany({
@@ -1212,6 +1218,57 @@ function suite(label: string, url?: string) {
         await differential.expectSame(model, operation, args);
       },
     );
+
+    /**
+     * A Prisma **enum**, compared against Prisma on both dialects.
+     *
+     * The generator maps an enum field to `String` and records the enum's name
+     * separately, and that mapping had a unit test in `bin/orm/emit.test.ts`
+     * and nothing that ran it against a database. The template's schema carried
+     * no enum, so the harness had never seen one — the same reason its comment
+     * gives for `Json` and `Bytes` being there.
+     *
+     * Read, filtered, ordered and grouped, because "it is a string underneath"
+     * predicts all four and is worth checking rather than assuming: an enum
+     * arrives as a plain string from both drivers, but `orderBy` sorts by that
+     * string rather than by declaration order, and Prisma does the same.
+     */
+    test.each([
+      ["everything", "findMany", { orderBy: { id: "asc" } }],
+      ["selected alone", "findMany", { select: { plan: true }, orderBy: { id: "asc" } }],
+      ["equality", "findMany", { where: { plan: "free" }, orderBy: { id: "asc" } }],
+      ["not", "findMany", { where: { plan: { not: "free" } }, orderBy: { id: "asc" } }],
+      ["in a list", "findMany", { where: { plan: { in: ["free", "pro"] } }, orderBy: { id: "asc" } }],
+      ["no match", "findMany", { where: { plan: "enterprise" } }],
+      ["ordered by the enum", "findMany", { orderBy: [{ plan: "asc" }, { id: "asc" }] }],
+      ["counted by the enum", "groupBy", { by: ["plan"], _count: { _all: true }, orderBy: { plan: "asc" } }],
+    ] as [string, string, unknown][])(
+      "an enum column: %s",
+      async (_label, operation, args) => {
+        await differential.expectSame("Organization", operation, args);
+      },
+    );
+
+    /**
+     * ...and the data those cases run against discriminates.
+     *
+     * Every case above compares gemi to Prisma, so both agreeing on nothing is
+     * a pass. If the seed drifted to one plan — or to the column's default —
+     * the ordering, `in` and `groupBy` cases would still be green while
+     * distinguishing nothing, which is how #124's `having` corpus went vacuous.
+     * Asserted on the rows `expectSame` hands back, so it checks the values the
+     * comparison actually saw.
+     */
+    test("the seeded enum values are distinct and not the default", async () => {
+      const rows = (await differential.expectSame("Organization", "findMany", {
+        orderBy: { id: "asc" },
+      })) as { plan: string }[];
+
+      const plans = rows.map((row) => row.plan);
+      expect(plans.length).toBeGreaterThan(1);
+      expect(new Set(plans).size).toBe(plans.length);
+      expect(plans).not.toContain("free");
+    });
 
     // One query per *node* in the include tree, not per row. Depth 2 with two
     // branches over five users is 4 queries, not 20 — and the count is what
