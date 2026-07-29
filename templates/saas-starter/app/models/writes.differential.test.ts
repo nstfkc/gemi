@@ -1622,6 +1622,43 @@ function suite(label: string, url?: string) {
       );
     });
 
+    /**
+     * The case the parent restriction has to survive: a caller filter that
+     * names the **foreign key column itself**, pointing at a different parent.
+     *
+     * Merging by key let the restriction overwrite it, so "this parent's
+     * children belonging to user 2" — which is nothing — became "all of this
+     * parent's children". Prisma conjoins and deletes nothing; measured before
+     * fixing, because the question is what it does rather than what is tidy.
+     */
+    test("deleteMany with a filter on the foreign key deletes nothing", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { id: 1 },
+          data: { accounts: { deleteMany: { userId: 2 } } },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    test("updateMany with a filter on the foreign key writes nothing", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { id: 1 },
+          data: {
+            accounts: {
+              updateMany: { where: { userId: 2 }, data: { organizationRole: 7 } },
+            },
+          },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
     test("nested connect on the foreign side repoints the child", async () => {
       await differential.reset();
       await differential.prisma.account.create({
