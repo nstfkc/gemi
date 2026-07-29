@@ -652,6 +652,76 @@ describe("upsert", () => {
     expect(() => compiled.bind(args, createBindContext())).not.toThrow();
   });
 
+  /**
+   * The same for `Bytes`, which is the other type `encode` hands over as an
+   * object and the other half of why `sameEncoded` is not `===`.
+   *
+   * Its doc gives both: "Postgres passes a `DateTime` through as the `Date` it
+   * was given, and **both dialects** pass `Bytes` through as a `Uint8Array` —
+   * so the same instant and the same bytes arrive here as two distinct objects,
+   * and identity refuses a correct upsert".
+   *
+   * `DateTime` had a test in each direction. `Bytes` had only the refusal —
+   * that a *mismatched* pair is described distinguishably — so the branch that
+   * makes a *matching* pair work was never exercised. Mutation found it:
+   * inverting the length check inside that branch makes every equal pair
+   * compare unequal, and nothing failed.
+   *
+   * Both dialects, unlike the `Date` case which is Postgres-only: SQLite
+   * encodes a `DateTime` to a number and never reaches this, but it passes
+   * `Bytes` through as an object exactly as Postgres does.
+   */
+  test.each([
+    ["sqlite", sqlite],
+    ["postgres", postgres],
+  ])("a Bytes conflict key compares by value on %s", (_name, dialect) => {
+    const digest: any = {
+      name: "Digest",
+      table: "Digest",
+      fields: {
+        id: {
+          name: "id",
+          column: "id",
+          type: "Int",
+          nullable: false,
+          isId: true,
+          isUpdatedAt: false,
+          default: { kind: "autoincrement" },
+        },
+        key: {
+          name: "key",
+          column: "key",
+          type: "Bytes",
+          nullable: false,
+          isId: false,
+          isUpdatedAt: false,
+        },
+        note: {
+          name: "note",
+          column: "note",
+          type: "String",
+          nullable: true,
+          isId: false,
+          isUpdatedAt: false,
+        },
+      },
+      primaryKey: ["id"],
+      uniques: [["key"]],
+      relations: {},
+    };
+
+    // Equal bytes, two distinct objects — which is how they arrive from a
+    // caller who built the `where` and the `create` separately.
+    const args = {
+      where: { key: new Uint8Array([1, 2, 3]) },
+      create: { key: new Uint8Array([1, 2, 3]) },
+      update: { note: "n" },
+    };
+
+    const compiled = compileWrite(digest, "upsert", args, dialect);
+    expect(() => compiled.bind(args, createBindContext())).not.toThrow();
+  });
+
   test("a DateTime conflict key that genuinely differs is still refused", () => {
     const args = {
       where: { at: new Date("2024-01-01T00:00:00Z") },
