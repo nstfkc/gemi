@@ -356,18 +356,24 @@ describe("buildModelSchemas()", () => {
    * **A relation that joins on more than one field**, which every other case
    * here declares with exactly one.
    *
-   * The compiler handles this shape and is well tested for it — but against
-   * *hand-written* fixtures, and the starter template declares no composite
-   * relation, so nothing exercised the generator that produces the real
-   * artifact.
+   * **Correcting the reason this was added (#178, #179).** It was justified on
+   * two claims that are both false: that the starter template declares no
+   * composite relation, and that the artifact's zero-diff test would not catch
+   * a truncating generator. The template declares
+   * `LedgerEntry.ledger @relation(fields: [tenantId, ledgerCode], …)`, and
+   * truncating `emit.ts` to the first field **does** fail that test — the
+   * committed artifact holds the right value, so regenerating diverges from it.
    *
-   * The failure that leaves open is the quiet one. A generator that kept only
-   * the first field would emit `from: ["tenantId"]`, every compiler test would
-   * still pass because they build their own schemas, the template suite would
-   * still pass because it has no such relation — and an application with one
-   * would correlate on a single column and return plausible wrong rows. That is
-   * precisely what the compiler's own refusal was written to prevent, so it is
-   * worth checking that the input reaches it intact.
+   * The measurement behind "only this test notices" was `vitest run orm
+   * database`, which is the package suite and excludes the template. Reported
+   * as though it were general, it was not.
+   *
+   * What is still true, and is reason enough on its own: the compiler's
+   * composite tests build their own `ModelSchema` fixtures and never run the
+   * generator, so this is the only *direct* check of it. It also fails
+   * differently — naming the field that went missing, rather than reporting
+   * that `prisma generate` produced a diff, which is a slower thing to read and
+   * one that a stale committed artifact could mask.
    *
    * Both sides are asserted: `from` and `to` are positional pairs, and a
    * truncation or a reorder on either side is the same bug.
