@@ -240,14 +240,19 @@ jobs:
 
       # `-t postgres` selects the dialect-labelled suites, and it is required
       # rather than tidy. With `TEST_POSTGRES_URL` set, the harness makes the
-      # *SQLite* half **fail** rather than skip — deliberately, so a client
-      # generated for the wrong provider cannot look like a pass. Run unfiltered,
-      # this job reports "877 passed" and still exits 1, because three suites
-      # error at collection.
+      # *SQLite* half of each differential suite **fail** rather than skip —
+      # deliberately, so a client generated for the wrong provider cannot look
+      # like a pass. So an unfiltered run here exits 1 no matter how many tests
+      # pass, and the failures are the ones the setup above guarantees.
+      #
+      # Stated as the mechanism rather than as a count. It read "877 passed …
+      # three suites error at collection", measured once and true then; the same
+      # run is now 911 and two, and neither number was ever the reason.
       #
       # So this job runs the Postgres-labelled suites and the `sqlite` job runs
       # the rest. The dialect-agnostic tests are that job's business; nothing is
-      # left uncovered between them.
+      # left uncovered between them — which was false for three files until
+      # #206, and is guarded now by `postgres-suite-selection.test.ts`.
       #
       # Serially: the harness truncates shared tables between cases, so parallel
       # files clobber each other's fixtures. Measured — the parallel run fails
