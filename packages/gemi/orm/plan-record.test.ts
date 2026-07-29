@@ -10,8 +10,8 @@ import * as orm from "./index";
  *
  * `plans/orm/README.md` is the ORM's design record — the document the invariants
  * come from, cited by name from `strategy.ts`, `lateral.ts`, `nested-writes.ts`
- * and `order-relation.ts`. It is a living document: it has a "Where it actually
- * is now" section, and line 496 reads "Both are now in all four".
+ * and `order-relation.ts`. It is a living document: it has a "How the stack
+ * landed" section, and a later line reads "Both are now in all four".
  *
  * Two of its invariants still described shipped API as forthcoming:
  *
