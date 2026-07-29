@@ -37,18 +37,42 @@ const SENTINELS: Record<string, JsonNullKind> = {
 /**
  * Which sentinel this is, or `null` for any ordinary value.
  *
- * `Prisma.AnyNull` is deliberately absent: it means "either of the two" and is
- * only legal in a *filter*. Prisma rejects it in a write, and mapping it here
- * would quietly accept something Prisma does not.
+ * `Prisma.AnyNull` is absent, and **absent is not the same as refused** — it
+ * falls through to the data path, where a write stores it as the jsonb object
+ * `{}` and a filter compiles to `= '{}'`, returning the complement of the rows
+ * `AnyNull` asks for. Prisma raises on the write and answers both kinds of null
+ * on the filter. That gap is #259; it is stated here rather than left to be
+ * read off the omission as though the omission delivered a parity.
  */
 export function jsonNullKind(value: unknown): JsonNullKind | null {
   if (typeof value !== "object" || value === null) return null;
 
-  // Guarded because a plain object from `JSON.parse` has `Object.prototype`'s
-  // `toString`, and a caller's object may have thrown one of its own on.
-  const tag = Object.prototype.hasOwnProperty.call(value.constructor ?? {}, "name")
-    ? String(value)
-    : "";
+  // **A sentinel carries no data**, and checking that before anything else is
+  // what makes this safe rather than merely usually-right.
+  //
+  // Recognising by `toString` alone is forgeable: an object whose `toString`
+  // happens to return `Prisma.DbNull` was read as the sentinel and written as
+  // SQL NULL, losing the object. It also made the bind *throw* for a value
+  // whose `toString` throws — something Prisma stores without ever calling it,
+  // since `JSON.stringify` does not consult `toString`.
+  //
+  // Both reach `String` only for an object with nothing in it, which no
+  // application stores on purpose. The enumerable check runs first because it
+  // allocates nothing and exits on the first key, which is the common case; the
+  // own-property scan is for the handful of values that get past it, and is
+  // what keeps `[]` and `{}` out — an empty array is a legitimate Json value.
+  for (const _key in value) return null;
+  if (Object.getOwnPropertyNames(value).length > 0) return null;
+
+  // A null-prototype object has no `toString` at all and `String` throws on it.
+  // It is a legitimate Json value, so this answers "not a sentinel" rather than
+  // failing the write.
+  let tag: string;
+  try {
+    tag = String(value);
+  } catch {
+    return null;
+  }
 
   return SENTINELS[tag] ?? null;
 }
