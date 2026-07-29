@@ -4,11 +4,13 @@ import { afterEach, describe, expect, test } from "vitest";
 import { PostgresDialect } from "./dialect/postgres";
 import { SqliteDialect } from "./dialect/sqlite";
 import { mapped, reading, user } from "./fixtures";
+import type { FieldSchema } from "./schema";
 import {
   buildInterpretedShaper,
   buildRowShaper,
   setShaperCompilation,
   shaperCompilationAvailable,
+  type RowShaper,
   type ShapedRelation,
 } from "./shape";
 
@@ -159,6 +161,22 @@ describe("compiled and interpreted shapers agree", () => {
         },
       ],
     ],
+    // ...and the same shape on sqlite, where `Bytes` has no decode branch at
+    // all and falls through. The table covered it on postgres only, so a
+    // divergence confined to the passthrough side would not have shown.
+    [
+      "reading with bytes, sqlite",
+      reading,
+      sqlite,
+      [
+        {
+          id: 1,
+          at: 1_717_200_000_000,
+          digest: new Uint8Array([1, 2, 3]),
+          value: 1.5,
+        },
+      ],
+    ],
     ["a row missing every optional column", user, sqlite, [{ id: 1 }]],
     ["no rows at all", user, sqlite, []],
   ];
@@ -174,6 +192,55 @@ describe("compiled and interpreted shapers agree", () => {
     expect(JSON.stringify(compiled(rows), stable)).toBe(
       JSON.stringify(interpreted(rows), stable),
     );
+  });
+
+  /**
+   * **The two shapers have to fail alike, not only succeed alike.**
+   *
+   * The table above compares output, which says nothing about a row the
+   * decoders refuse. `DecodeError` is raised from inside `dialect.decode`, and
+   * the compiled shaper *inlines* what the interpreted one calls — so a
+   * divergence here would be one path throwing while the other returned
+   * something plausible, on exactly the malformed input that made it matter.
+   *
+   * That is the same lesson the differential harness already carries: it
+   * compares failure *kind* rather than only values, because two clients that
+   * agree when things work and disagree when they do not have not been shown
+   * to agree.
+   *
+   * All three decoders that can refuse are covered on both dialects — `BigInt`
+   * (`BigInt(3.5)` throws a RangeError), `Json` (unparseable), and `DateTime`.
+   */
+  describe("both shapers fail alike", () => {
+    const outcome = (shaper: RowShaper, rows: unknown[]) => {
+      try {
+        return {
+          threw: false,
+          value: JSON.stringify(shaper(rows), (_key, value) =>
+            typeof value === "bigint" ? `${value}n` : value,
+          ),
+        };
+      } catch (error) {
+        return { threw: true, value: (error as Error).constructor.name };
+      }
+    };
+
+    test.each([
+      ["a BigInt that is not an integer", "sqlite", sqlite, { size: 3.5 }],
+      ["a BigInt that is not an integer", "postgres", postgres, { size: 3.5 }],
+      ["a Json that will not parse", "sqlite", sqlite, { payload: "{not json" }],
+      ["a Json that will not parse", "postgres", postgres, { payload: "{not json" }],
+      ["a DateTime that is not one", "sqlite", sqlite, { occurred_at: "not a date" }],
+      ["a DateTime that is not one", "postgres", postgres, { occurred_at: "not a date" }],
+    ])("%s, %s", (_label, _dialectName, dialect, bad) => {
+      const fields = Object.values(mapped.fields) as FieldSchema[];
+      const rows = [{ id: 1, ...bad }];
+
+      const compiled = outcome(buildRowShaper(fields, dialect), rows);
+      const interpreted = outcome(buildInterpretedShaper(fields, dialect), rows);
+
+      expect(compiled).toEqual(interpreted);
+    });
   });
 
   const relations: ShapedRelation[] = [
