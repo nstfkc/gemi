@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { Prisma as PrismaNS, type PrismaClient } from "@prisma/client";
 import { Model } from "gemi/orm";
 import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
@@ -1128,6 +1131,29 @@ function suite(label: string, url?: string) {
         select !== undefined &&
         Object.keys(select).some((key) => key === "accounts" || key === "organization" || key === "session")
       );
+    });
+
+      /**
+     * `docs/orm.md` quotes this number — "across every relation shape in the
+     * differential corpus, **48** of them today" — and it had said "thirty"
+     * while the corpus grew to 48, understating its own coverage by a third.
+     *
+     * A count in prose drifts from its source the first time the source
+     * moves; #182 and #195 found the operation count wrong in six places for
+     * exactly that reason. This is the cheapest possible fix for the class:
+     * the corpus is the source, so the corpus asserts the sentence.
+     */
+    test("the shape count in docs/orm.md matches the corpus", () => {
+      const doc = readFileSync(
+        join(import.meta.dirname, "../../../../docs/orm.md"),
+        "utf8",
+      );
+      const stated = doc.match(
+        /differential corpus — \*\*(\d+)\*\* of them today/,
+      );
+
+      expect(stated, "the sentence in docs/orm.md moved or was reworded").not.toBeNull();
+      expect(Number(stated![1])).toBe(RELATION_CASES.length);
     });
 
     if (url) {
