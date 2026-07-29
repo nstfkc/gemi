@@ -1062,8 +1062,17 @@ same applies to identifiers and sort directions, which cannot be parameters in S
 is the same for those, and it is about where the value came from, not what it is.
 
 `DB.sql` is unchanged and still Bun's own tagged template, for a single self-contained statement
-that needs none of this. It does **not** join the ambient transaction — use `DB.query` when that
-matters.
+that needs none of this. **Whether it joins the ambient transaction depends on the dialect**, so use
+`DB.query` when that matters:
+
+- On **Postgres** it does not. The pool hands it a different connection, so a `Model.transaction`
+  that rolls back leaves a `DB.sql` write behind.
+- On **SQLite** it does, because `DatabaseManager` gives SQLite a single connection and the
+  statement is therefore inside the open transaction.
+
+The direction is the awkward one: a `DB.sql` write inside a transaction rolls back correctly in
+development on SQLite and survives the rollback in production on Postgres. `DB.query` and
+`DB.execute` join the transaction on both.
 
 ## `Json` columns
 

@@ -369,6 +369,87 @@ function suite(label: string, url?: string) {
       expect([...rows]).toHaveLength(1);
     });
 
+    /**
+     * **`DB.sql` does not join the ambient transaction**, which the docs state
+     * and nothing asserted — only that the template still works.
+     *
+     * It is the consequential half. A write issued through it inside a
+     * `Model.transaction` is on a different connection, so a rollback does not
+     * take it back: the transaction reports failure and the row is still there.
+     *
+     * Worth pinning in both directions rather than as a caveat, because the two
+     * calls look interchangeable at the call site and only one of them is safe
+     * to mix with a transaction.
+     */
+    /**
+     * **`DB.sql` and the ambient transaction — and the two dialects disagree.**
+     *
+     * `docs/orm.md` says it plainly and unconditionally: "It does **not** join
+     * the ambient transaction — use `DB.query` when that matters."
+     *
+     * Measured, that holds on Postgres and **not** on SQLite. `DatabaseManager`
+     * gives SQLite a single connection, so a `DB.sql` statement issued inside a
+     * `Model.transaction` is on the same connection and therefore inside the
+     * transaction — it rolls back with everything else. Postgres has a pool, so
+     * the statement takes a different connection and escapes.
+     *
+     * The direction matters. A developer who tests on SQLite watches a `DB.sql`
+     * write roll back correctly and ships it; on Postgres the rollback leaves
+     * that write behind. It is the same hazard the transactions section already
+     * warns about for a caught statement — "passes in development on SQLite and
+     * takes out the transaction in production on Postgres" — reached by a
+     * different door.
+     *
+     * Both halves are asserted per dialect rather than skipping the one that is
+     * inconvenient: the point is that they genuinely differ.
+     */
+    test("whether a DB.sql write survives a rollback depends on the dialect", async () => {
+      await expect(
+        Model.transaction(async () => {
+          await DB.sql`update "User" set "name" = ${"escaped"} where "email" = ${"ada@x.test"}`;
+          throw new Error("rolled back");
+        }),
+      ).rejects.toThrow("rolled back");
+
+      const after = await DB.query<{ name: string | null }>(
+        sql`select "name" from "User" where "email" = ${"ada@x.test"}`,
+      );
+
+      if (url) {
+        // Postgres: a different connection from the pool, so the transaction
+        // never contained it and the rollback did not reach it.
+        expect(after[0].name).toBe("escaped");
+        await DB.execute(
+          sql`update "User" set "name" = null where "email" = ${"ada@x.test"}`,
+        );
+      } else {
+        // SQLite: one connection, so it was inside the transaction after all.
+        expect(after[0].name).toBeNull();
+      }
+    });
+
+    /**
+     * ...and `DB.query` / `DB.execute`, which the docs point to instead, roll
+     * back on **both**. Without this the test above says only that something
+     * survived a failed transaction, which a transaction that never opened
+     * would satisfy too.
+     */
+    test("a DB.execute write in the same place rolls back on either dialect", async () => {
+      await expect(
+        Model.transaction(async () => {
+          await DB.execute(
+            sql`update "User" set "name" = ${"joined"} where "email" = ${"ada@x.test"}`,
+          );
+          throw new Error("rolled back");
+        }),
+      ).rejects.toThrow("rolled back");
+
+      const after = await DB.query<{ name: string | null }>(
+        sql`select "name" from "User" where "email" = ${"ada@x.test"}`,
+      );
+      expect(after[0].name).not.toBe("joined");
+    });
+
     test("a plain string is refused rather than run", async () => {
       await expect(
         DB.query(`select * from "User"` as never),
