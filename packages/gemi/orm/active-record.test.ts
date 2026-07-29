@@ -63,7 +63,7 @@ describe("ActiveRecordModel", () => {
    * The cases that must fall *through* untouched. Hydrating either would be the
    * kind of per-operation special case this override exists to show is
    * unnecessary — `$shape` sees rows or it sees something that is not a row, and
-   * it does not need to know which of the twelve operations produced it.
+   * it does not need to know which operation produced it.
    */
   test("a no-match single-row operation stays null", () => {
     expect(Entity.$shape(planFor([], true), [])).toBeNull();

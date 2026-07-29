@@ -48,7 +48,7 @@ generator gemi {
 Then `bunx prisma generate`. You get three files under `app/models/generated/`:
 
 - `schema.ts` — runtime metadata: tables, columns, types, defaults, relations.
-- `models.ts` — a typed base class per model, carrying the fourteen operations.
+- `models.ts` — a typed base class per model, carrying every operation.
 - `index.ts` — registers every model by name.
 
 **The output is committed on purpose.** Diffs stay reviewable and CI needs no codegen step.
@@ -97,7 +97,7 @@ read. It can only see modules you hand it, so it does not replace the `register`
 
 ## Querying
 
-Fourteen operations, with Prisma's argument types verbatim:
+Fifteen operations, with Prisma's argument types verbatim:
 
 ```
 findMany   findFirst   findFirstOrThrow   findUnique   findUniqueOrThrow   count   aggregate   groupBy
