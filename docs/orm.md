@@ -1143,6 +1143,34 @@ number, which is worse than refusing it. SQLite needs neither: it stores JSON as
 > it. Those rows now read back as strings. Re-seed development databases; there is no released
 > version affected.
 
+## Run Postgres deployments with `TZ=UTC`
+
+**A deployment requirement, not a preference.** Prisma maps `DateTime` to `timestamp(3)` — no time
+zone — and stores UTC in it. Bun's driver decodes that column differently depending on which wire
+protocol carried the statement, and *which protocol is used depends on whether the query binds a
+parameter*:
+
+```ts
+await User.findMany()                      // no parameters -> simple protocol
+await User.findMany({ where: { id } })     // one parameter -> extended protocol
+```
+
+The first comes back as zoneless text and is parsed as **local** time; the second comes back in
+binary and is correct. Same row, same column, two different instants — off by your machine's UTC
+offset. Measured against Postgres 16:
+
+```
+TZ=UTC                no parameters -> 2021-03-04T05:06:07.008Z    where id = $1 -> 05:06:07.008Z
+TZ=America/New_York   no parameters -> 2021-03-04T10:06:07.008Z    where id = $1 -> 05:06:07.008Z
+```
+
+Set `TZ=UTC` on any process that talks to Postgres and both paths agree. This is the setting the
+test suites and CI already run under.
+
+The ORM cannot correct it below the query: the decoded value alone does not say which protocol
+produced it. SQLite is unaffected — it stores `DateTime` as milliseconds and there is no text
+representation to reinterpret.
+
 ## Dialects
 
 **SQLite and Postgres** are built and tested, on every operation, against a differential harness
