@@ -436,7 +436,7 @@ function wrapOperation(model: string): string {
  *
  * The honest cost: `new UserModel()` now type-checks as having columns it does
  * not have. These classes are constructed by `wrap` and by nothing else — the
- * twelve operations return plain objects — so the lie is confined to a
+ * fifteen operations return plain objects — so the lie is confined to a
  * constructor call no application has a reason to make.
  */
 function instanceShape(model: string): string {
