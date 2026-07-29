@@ -8,12 +8,17 @@ import { assertSchemaArtifactVersion, register } from "gemi/orm";
 import { ARTIFACT_VERSION } from "./schema";
 import {
   AccountModel,
+  LedgerModel,
+  LedgerEntryModel,
   MagicLinkTokenModel,
+  MembershipModel,
   OrganizationModel,
   OrganizationInvitationModel,
   PasswordResetTokenModel,
+  PostModel,
   SessionModel,
   SocialAccountModel,
+  TagModel,
   UserModel,
 } from "./models";
 
@@ -23,12 +28,17 @@ assertSchemaArtifactVersion(ARTIFACT_VERSION);
 // lets two models reference each other without the generated files forming an
 // import cycle.
 register("Account", AccountModel);
+register("Ledger", LedgerModel);
+register("LedgerEntry", LedgerEntryModel);
 register("MagicLinkToken", MagicLinkTokenModel);
+register("Membership", MembershipModel);
 register("Organization", OrganizationModel);
 register("OrganizationInvitation", OrganizationInvitationModel);
 register("PasswordResetToken", PasswordResetTokenModel);
+register("Post", PostModel);
 register("Session", SessionModel);
 register("SocialAccount", SocialAccountModel);
+register("Tag", TagModel);
 register("User", UserModel);
 
 export * from "./models";

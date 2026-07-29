@@ -826,7 +826,6 @@ describe("nested writes", () => {
   });
 
   test.each([
-    "connectOrCreate",
     "set",
     "disconnect",
     "update",
@@ -849,13 +848,132 @@ describe("nested writes", () => {
    */
   test("a refusal explains what the operand would take", () => {
     expect(() =>
-      text("create", {
-        data: { email: "a@b.c", organization: { connectOrCreate: {} } },
-      }),
-    ).toThrow(/upsert against the child/);
+      text("create", { data: { email: "a@b.c", organization: { set: {} } } }),
+    ).toThrow(/replaces the whole set/);
     expect(() =>
       text("create", { data: { email: "a@b.c", accounts: { deleteMany: {} } } }),
     ).toThrow(/deletes rows this call did not name/);
+  });
+
+  /**
+   * `connectOrCreate` — find by a unique key, create only if it is not there.
+   *
+   * **A hit ignores `create` entirely**, which the name does not suggest: it is
+   * connect-*or*-create, not upsert. Measured against Prisma — an existing row
+   * kept its own values where the `create` payload named different ones — and
+   * the differential cases pin it.
+   */
+  describe("connectOrCreate", () => {
+    const entry = {
+      where: { publicId: "o1" },
+      create: { publicId: "o1", name: "Made" },
+    };
+
+    test("the owning side resolves before the parent insert", () => {
+      const plan = compileWrite(
+        user,
+        "create",
+        { data: { email: "a@b.c", organization: { connectOrCreate: entry } } },
+        sqlite,
+      );
+
+      expect(plan.before).toHaveLength(1);
+      expect(plan.before?.[0].operation).toBe("connectOrCreate");
+      // The foreign key is on this row, so it is a bound column rather than a
+      // second statement afterwards.
+      expect(plan.after).toBeUndefined();
+    });
+
+    test("the foreign side resolves after it, and returns the key", () => {
+      const plan = compileWrite(
+        user,
+        "create",
+        {
+          data: {
+            email: "a@b.c",
+            accounts: {
+              connectOrCreate: {
+                where: { publicId: "acc1" },
+                create: { organizationRole: 1 },
+              },
+            },
+          },
+        },
+        sqlite,
+      );
+
+      expect(plan.after).toHaveLength(1);
+      expect(plan.after?.[0].operation).toBe("connectOrCreate");
+      expect(plan.text).toContain(`"id"`);
+    });
+
+    test("a to-one refuses a list, as Prisma does", () => {
+      expect(() =>
+        text("create", {
+          data: { email: "a@b.c", organization: { connectOrCreate: [entry] } },
+        }),
+      ).toThrow(/a list has no meaning/);
+    });
+
+    test("a to-many takes one or a list", () => {
+      for (const operand of [entry, [entry, entry]]) {
+        expect(() =>
+          text("create", {
+            data: {
+              email: "a@b.c",
+              accounts: {
+                connectOrCreate: Array.isArray(operand)
+                  ? operand.map(() => ({
+                      where: { publicId: "acc1" },
+                      create: { organizationRole: 1 },
+                    }))
+                  : { where: { publicId: "acc1" }, create: { organizationRole: 1 } },
+              },
+            },
+          }),
+        ).not.toThrow();
+      }
+    });
+
+    test.each(["where", "create"])("a missing '%s' is refused by name", (key) => {
+      const partial: Record<string, unknown> = { ...entry };
+      delete partial[key];
+
+      expect(() =>
+        text("create", {
+          data: { email: "a@b.c", organization: { connectOrCreate: partial } },
+        }),
+      ).toThrow(new RegExp(`Expected a '${key}' key`));
+    });
+
+    test("an unexpected key is refused rather than ignored", () => {
+      expect(() =>
+        text("create", {
+          data: {
+            email: "a@b.c",
+            organization: { connectOrCreate: { ...entry, update: {} } },
+          },
+        }),
+      ).toThrow(/Unexpected update/);
+    });
+
+    /**
+     * Prisma's rule, and not merely ours: without a unique `where` the lookup
+     * matches an arbitrary row and "connect or create" quietly becomes
+     * "connect to whichever came back first".
+     */
+    test("a non-unique where is refused at compile time", () => {
+      expect(() =>
+        text("create", {
+          data: {
+            email: "a@b.c",
+            organization: {
+              connectOrCreate: { where: { name: "Acme" }, create: { name: "Acme" } },
+            },
+          },
+        }),
+      ).toThrow();
+    });
   });
 
   /**
@@ -1030,6 +1148,103 @@ describe("arguments", () => {
     expect(() =>
       text("createMany", { data: [{ email: "a" }], skipDuplicates: true }),
     ).toThrow(/skipDuplicates/);
+  });
+});
+
+/**
+ * `_count` in a write's `include` (#87).
+ *
+ * It used to be accepted and dropped — the row came back without the key and
+ * without an error — while an unknown relation name in the same `include`
+ * raised. The inconsistency is the sharper half of the complaint: the write
+ * path validated relation names and then discarded the one key that is not one.
+ */
+describe("_count on a write", () => {
+  const COUNT = { _count: { select: { accounts: true } } };
+
+  // The count correlates against the child's table, so its schema has to be
+  // resolvable — same requirement the relation planner has.
+  beforeEach(() => {
+    registry.clearRegistry();
+    registry.register("User", class { static $schema = user });
+    registry.register("Account", class { static $schema = account });
+    registry.register("Organization", class { static $schema = organization });
+  });
+
+  afterEach(() => registry.clearRegistry());
+
+  test("projects a correlated subquery into the returning list", () => {
+    const emitted = text("create", { data: { email: "a@b.c" }, include: COUNT });
+
+    expect(emitted).toContain(`select count(*)`);
+    expect(emitted).toContain(`from "Account"`);
+    // In `returning`, not as a second statement: both dialects evaluate a
+    // subquery there, so this costs no extra round trip.
+    expect(emitted.slice(emitted.indexOf(" returning "))).toContain(`count(*)`);
+  });
+
+  test("it reaches every row-returning write", () => {
+    for (const [op, args] of [
+      ["create", { data: { email: "a@b.c" } }],
+      ["update", { where: { id: 1 }, data: { name: "x" } }],
+      ["delete", { where: { id: 1 } }],
+      ["upsert", { where: { id: 1 }, create: { id: 1, email: "a@b.c" }, update: {} }],
+    ] as const) {
+      expect(text(op, { ...args, include: COUNT })).toContain(`count(*)`);
+    }
+  });
+
+  test("the filter inside a _count is bound, never inlined", () => {
+    const args = {
+      data: { email: "a@b.c" },
+      include: {
+        _count: { select: { accounts: { where: { organizationRole: 7 } } } },
+      },
+    };
+    const plan = compileWrite(user, "create", args, sqlite);
+
+    expect(plan.text).not.toContain("7");
+    expect(plan.bind(args, createBindContext())).toContain(7);
+  });
+
+  /**
+   * The flag `$exec` reads to decide that a `delete` has something to read
+   * *before* the row goes. A count is not a relation plan, so `relations` is
+   * empty for a `_count` on its own and cannot carry this.
+   *
+   * It matters because the two dialects disagree: under `on delete cascade`
+   * Postgres evaluates the subquery against the pre-statement snapshot and
+   * returns the old count, SQLite evaluates it after the cascade and returns 0.
+   * Prisma returns the old count on both.
+   */
+  test("a write carrying a _count says so, and one without does not", () => {
+    expect(
+      compileWrite(user, "delete", { where: { id: 1 }, include: COUNT }, sqlite)
+        .counts,
+    ).toBe(true);
+
+    expect(
+      compileWrite(user, "delete", { where: { id: 1 } }, sqlite).counts,
+    ).toBeUndefined();
+
+    // An `include` of a real relation is a relation plan, not a count.
+    expect(
+      compileWrite(
+        user,
+        "delete",
+        { where: { id: 1 }, include: { accounts: true } },
+        sqlite,
+      ).counts,
+    ).toBeUndefined();
+  });
+
+  test("an unknown relation inside a _count still raises", () => {
+    expect(() =>
+      text("create", {
+        data: { email: "a@b.c" },
+        include: { _count: { select: { nosuchrelation: true } } },
+      }),
+    ).toThrow(/nosuchrelation/);
   });
 });
 

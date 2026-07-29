@@ -40,7 +40,9 @@ import {
   applyRedaction,
   currentUser,
   isPreScoped,
+  markOrmAuthored,
   markPreScoped,
+  ormAuthoredFields,
   policiesFor,
   policyContext,
   type PolicyEntry,
@@ -582,7 +584,12 @@ export abstract class Model {
       // the same predicate twice; re-running `redact` on an already-redacted row
       // is a no-op.
       if (!preScoped) {
-        effective = applyPolicies(policies, policy, args);
+        effective = applyPolicies(
+          policies,
+          policy,
+          args,
+          ormAuthoredFields(options),
+        );
       }
     }
 
@@ -643,16 +650,20 @@ export abstract class Model {
       // grandchild folded anyway and the statement count was one lower than the
       // caller asked for. Found by the query-count test, which is the only thing
       // that could have found it: the results were identical either way.
-      exec: (model, operation, relationArgs, preScoped) =>
-        registry
+      exec: (model, operation, relationArgs, preScoped, ormAuthored) => {
+        const base = preScoped
+          ? markPreScoped({ strategy: options?.strategy })
+          : { strategy: options?.strategy };
+        return registry
           .get<typeof Model>(model)
           .$exec(
             operation as Operation,
             relationArgs,
-            (preScoped
-              ? markPreScoped({ strategy: options?.strategy })
-              : { strategy: options?.strategy }) as never,
-          ),
+            (ormAuthored && ormAuthored.length > 0
+              ? markOrmAuthored(base, ormAuthored)
+              : base) as never,
+          );
+      },
       // The one query with no model behind it — the implicit m-n join table —
       // resolves its connection here rather than reaching for the pool, so it
       // joins the transaction like everything else.
@@ -689,7 +700,24 @@ export abstract class Model {
     //
     // Only when there is something to read. A plain `delete` still compiles to
     // one statement and opens no transaction.
-    if (op === "delete" && plan.relations !== undefined) {
+    //
+    // `plan.counts` is here for the same hazard in its quietest form, and the
+    // two dialects disagree about it. A `_count` compiles to a correlated
+    // subquery inside the `RETURNING`, and where the schema cascades:
+    //
+    //   postgres  delete … returning (select count(*) from ch …)  ->  3
+    //   sqlite    delete … returning (select count(*) from ch …)  ->  0
+    //
+    // Measured through Bun against a real `on delete cascade` on both. Postgres
+    // evaluates the subquery against the pre-statement snapshot, which is what
+    // Prisma returns; SQLite evaluates it after the cascade has run, so the
+    // count is 0 — a *number*, so nothing looks missing and no error is raised.
+    //
+    // Reading first answers it the same way it already answers the `include`
+    // case, and on both dialects rather than one. A count is not a relation
+    // plan, so `relations` stays empty for an `include: { _count: … }` on its
+    // own — hence the separate flag rather than a wider check.
+    if (op === "delete" && (plan.relations !== undefined || plan.counts)) {
       const { where } = effective;
       const projection =
         effective.select !== undefined
@@ -776,6 +804,46 @@ export abstract class Model {
       // whose foreign key lives on the child. Run before relations are attached,
       // so an `include` on the same call sees what was just written.
       await runSteps(plan.after, effective, context, executor, rowsOf(result));
+
+      // ...and a `_count` on the same call has to be recomputed once they have,
+      // for the same reason `include` is attached after them rather than before.
+      //
+      // A count is a correlated subquery inside the write's own `RETURNING`, so
+      // it is evaluated at the instant the parent row is inserted — before any
+      // `after` step has written a child. That produced a single response
+      // contradicting itself:
+      //
+      //   User.create({ data: { …, accounts: { create: [a, b] } },
+      //                 include: { accounts: true, _count: { … } } })
+      //
+      //   accounts.length  2      attached after the steps
+      //   _count           0      projected before them
+      //
+      // Both keys describe the same relation on the same row. The row itself was
+      // never wrong — reading it back gives 2 — so this is the projection being
+      // frozen, which is the mirror of the `delete` case above: there the count
+      // is taken too late, here too early.
+      //
+      // **Only when there is something to be wrong about.** A write with no
+      // `after` steps keeps the projected value and costs nothing extra; one
+      // with both pays a single read. `plan.counts` is what makes that condition
+      // cheap enough to ask on every write.
+      //
+      // **Between `runSteps` and the `hidden` deletion, and that is
+      // load-bearing.** `select: { email, _count: … }` never asks for the
+      // primary key, so the key the recount reads the row by is on it only
+      // because the plan added it for the nested write and has not stripped it
+      // yet. Move this after the strip and the recount loses its identifier;
+      // move it before `runSteps` and there is nothing new to count.
+      if (plan.counts && plan.after !== undefined) {
+        await recountAfterSteps(
+          schema,
+          this as unknown as typeof Model,
+          effective,
+          rowsOf(result),
+          options,
+        );
+      }
 
       // Relations are loaded after the root rows are shaped, one query per node
       // in the include tree. Each of those queries is `$exec` on the *related
@@ -935,6 +1003,74 @@ function fieldsForColumns(
     }
     return column;
   });
+}
+
+/**
+ * Re-reads the `_count` for rows whose children were written by an `after` step.
+ *
+ * One read per row rather than one for all of them, and that is not a
+ * concession: every write that can carry both a `_count` and an `after` step is
+ * a single-row operation — `create`, `update`, `upsert`. `createMany` takes no
+ * `include` at all. So the loop runs once, and writing it as a loop keeps a
+ * compound primary key expressible without an `in` list over tuples.
+ *
+ * **Pre-scoped, deliberately.** `effective` has already been through this
+ * model's policies and `applyNestedPolicies` has already scoped the `_count`
+ * node, so re-applying them would `AND` the same predicate twice — the same
+ * rows, a different plan key. This is the same reasoning `delete`'s read-first
+ * path uses, a few hundred lines up.
+ */
+async function recountAfterSteps(
+  schema: ModelSchema,
+  model: typeof Model,
+  effective: any,
+  rows: Record<string, unknown>[],
+  options: unknown,
+): Promise<void> {
+  const node = effective?.include?._count ?? effective?.select?._count;
+  if (node === undefined || rows.length === 0) return;
+
+  for (const row of rows) {
+    // **Every component present, or nothing.** What the plan guarantees is on
+    // the row is the *link* field — `planForeignSide` pushes `link.parentField`
+    // into `keyFields`, which is the column the relation `references`, and that
+    // is the primary key only by convention. Declare a relation
+    // `references: [publicId]`, ask for `select: { email, _count }`, and `id` is
+    // simply not there.
+    //
+    // The failure that would produce is the bad kind. `compileWhere` drops
+    // `undefined` keys, so a `where` built entirely from missing components
+    // compiles to **no predicate at all**:
+    //
+    //   findFirst({ where: { id: undefined } })  ->  select … from "User" limit ?
+    //
+    // — an arbitrary row, whose count is a plausible number rather than an
+    // error. So an incomplete key means the projected value stands, which is
+    // the same answer this already gives for a missing row: stale, not
+    // invented. Nothing here can be salvaged by guessing.
+    const where: Record<string, unknown> = {};
+    let identified = schema.primaryKey.length > 0;
+    for (const field of schema.primaryKey) {
+      const value = row[field];
+      if (value === undefined) {
+        identified = false;
+        break;
+      }
+      where[field] = value;
+    }
+    if (!identified) continue;
+
+    const fresh = (await (model as any).$exec(
+      "findFirst",
+      { where, select: { _count: node } },
+      markPreScoped({ strategy: (options as any)?.strategy }),
+    )) as Record<string, unknown> | null;
+
+    // `null` only if the row vanished between the write and this read, which
+    // inside the write's own transaction it cannot. Leaving the projected value
+    // alone is still the right fallback: it is stale, not invented.
+    if (fresh && fresh._count !== undefined) row._count = fresh._count;
+  }
 }
 
 function rowsOf(result: unknown): Record<string, unknown>[] {

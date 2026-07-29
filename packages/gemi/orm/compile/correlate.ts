@@ -68,17 +68,44 @@ export function correlate(
 
   const quoted = dialect.quoteIdent(alias);
   const qualifier = `${quoted}.`;
-  const childKey = `${qualifier}${dialect.quoteIdent(column(child, relation, link.childField))}`;
-  const parentKey = `${parentQualifier}${dialect.quoteIdent(column(parent, relation, link.parentField))}`;
+
+  /**
+   * One equality per joined field, `and`ed.
+   *
+   * This is the whole of the composite-relation change for three of the four
+   * correlated surfaces — a relation filter, a `_count` and an `orderBy` all
+   * build their subquery here — which is the payoff for hoisting the
+   * correlation into one function rather than leaving three copies of it.
+   */
+  const correlation = link.parentFields
+    .map((parentField, index) => {
+      const childKey = `${qualifier}${dialect.quoteIdent(
+        column(child, relation, link.childFields[index]),
+      )}`;
+      const parentKey = `${parentQualifier}${dialect.quoteIdent(
+        column(parent, relation, parentField),
+      )}`;
+      return `${childKey} = ${parentKey}`;
+    })
+    .join(" and ");
 
   if (!link.join) {
     return {
       child,
       source: `${dialect.quoteIdent(child.table)} as ${quoted}`,
-      correlation: `${childKey} = ${parentKey}`,
+      correlation,
       qualifier,
     };
   }
+
+  // A join table always has exactly two columns, so the m-n branch below stays
+  // single-field by construction rather than by assumption.
+  const childKey = `${qualifier}${dialect.quoteIdent(
+    column(child, relation, link.childFields[0]),
+  )}`;
+  const parentKey = `${parentQualifier}${dialect.quoteIdent(
+    column(parent, relation, link.parentFields[0]),
+  )}`;
 
   // The join table gets the child's alias with a `j`, so two nested m-n filters
   // cannot collide any more than their children can.

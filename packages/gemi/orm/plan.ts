@@ -6,15 +6,17 @@ import type { RelationStrategy } from "./compile/plan-relations";
 import type { ModelSchema } from "./schema";
 
 /**
- * The public operations. `groupBy` and the raw operations are deliberately not
- * among them: they are excluded at the operation level rather than narrowed out
- * of the argument types, because narrowing Prisma's recursive where-inputs with
- * `Omit` is miserable.
+ * The public operations. The raw operations are deliberately not among them:
+ * they are excluded at the operation level rather than narrowed out of the
+ * argument types, because narrowing Prisma's recursive where-inputs with `Omit`
+ * is miserable.
  *
  * `aggregate` joined the list once there was a measured account of what Prisma
- * returns for one — see `compile/aggregate.ts`. `groupBy` did not follow it in
- * the same change: `having` is a second predicate compiler over aggregate
- * expressions rather than columns, which is its own piece of work.
+ * returns for one — see `compile/aggregate.ts`. `groupBy` followed in its own
+ * change, for the reason this note gave for separating them: `having` is a
+ * second predicate compiler over aggregate expressions rather than columns, and
+ * `orderBy` carries a restriction no other operation has. See
+ * `compile/group-by.ts`.
  */
 export type Operation =
   | "findUnique"
@@ -24,6 +26,7 @@ export type Operation =
   | "findMany"
   | "count"
   | "aggregate"
+  | "groupBy"
   | "create"
   | "createMany"
   | "update"
@@ -113,6 +116,17 @@ export interface QueryPlan {
    * `select` did not ask for. Dropped once the relations are attached.
    */
   hidden?: string[];
+  /**
+   * Whether this plan projects a `_count`. Undefined when it does not.
+   *
+   * A write needs this for the same reason it needs `relations`: a `delete`
+   * with either one is read *before* the row goes, so the choke point has to
+   * know there is something to read. A count is not a relation plan — it is a
+   * column in the statement, not a second query — so it cannot be discovered by
+   * looking at `relations`, and `include: { _count: … }` on its own leaves that
+   * list empty.
+   */
+  counts?: boolean;
 }
 
 /**
@@ -194,7 +208,27 @@ const LITERAL_KEYS = new Set([
   // not to, or worse, one that silently swallows a duplicate the caller wanted
   // to hear about.
   "skipDuplicates",
+  // `groupBy`'s grouped columns, which reach the SQL as *identifiers* — both
+  // the select list and the `group by`. `["role"]` and `["locale"]` have the
+  // same shape, `[string]`, so without this they would be one cache entry and
+  // the second caller would be grouped by the first caller's column. Silently:
+  // the result is well-formed, just grouped by something else.
+  "by",
 ]);
+
+/**
+ * The aggregate kinds, which mean **two different things by position**.
+ *
+ * As a *projection* — `_count: { email: true }` — their contents decide the
+ * select list, so they are in {@link LITERAL_KEYS} and recorded verbatim.
+ * Inside a `having` the same keys introduce a *comparison*, and its operand is
+ * a bound parameter like any other.
+ *
+ * Nothing else in the walk is ambiguous this way, which is why this is a set
+ * rather than a general rule: the position is what disambiguates, and only
+ * these five keys have two positions.
+ */
+const AGGREGATE_KINDS = new Set(["_count", "_avg", "_sum", "_min", "_max"]);
 
 export function canonicalShape(
   value: unknown,
@@ -204,6 +238,17 @@ export function canonicalShape(
    * list's *length* stops being part of the key. See `collapsedList`.
    */
   collapseLists = false,
+  /**
+   * Set inside a `having`, where an aggregate kind is an operator rather than a
+   * projection selector.
+   *
+   * A separate flag rather than clearing `literal`, because clearing it would
+   * be wrong: `mode` lives inside `where` — already a value subtree — and
+   * *must* stay literal, since `insensitive` and `default` compile to `ilike`
+   * and `like`. So "nothing below a value key is structural" is not the rule;
+   * "an aggregate kind below a `having` is not" is.
+   */
+  inHaving = false,
 ): string {
   if (value === null) return "null";
   if (value === undefined) return "undefined";
@@ -225,19 +270,30 @@ export function canonicalShape(
     // The exception is the `in` / `notIn` operand on a dialect that binds it as
     // one parameter, which `shapeOfMember` takes before this is reached.
     return `[${value
-      .map((item) => canonicalShape(item, literal, collapseLists))
+      .map((item) => canonicalShape(item, literal, collapseLists, inHaving))
       .join(",")}]`;
   }
 
   const entries = Object.entries(value as Record<string, unknown>)
     .filter(([, v]) => v !== undefined)
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-    .map(([key, v]) => `${key}:${shapeOfMember(key, v, literal, collapseLists)}`);
+    .map(
+      ([key, v]) =>
+        `${key}:${shapeOfMember(key, v, literal, collapseLists, inHaving)}`,
+    );
   return `{${entries.join(",")}}`;
 }
 
 /** The operators whose operand is a list of values rather than a structure. */
 const LIST_KEYS = new Set(["in", "notIn"]);
+
+/**
+ * The internal composite-`in` key — see `compile/where.ts`, which owns it.
+ *
+ * Spelled here rather than imported to keep `plan.ts` free of a dependency on
+ * the compiler, the way it already is for every other key it recognises.
+ */
+const COMPOSITE_IN = "$compositeIn";
 
 /**
  * `in: [1, 2]` and `in: [1, 2, 3]` on Postgres are the same SQL text — the
@@ -252,6 +308,24 @@ const LIST_KEYS = new Set(["in", "notIn"]);
  *
  * An empty list keeps its own key: `in: []` compiles to a constant-false
  * predicate rather than to `= any($1)`, which is a different text.
+ *
+ * **It covers `in` / `notIn` and nothing else, which leaves one gap worth
+ * naming here rather than only where it happens.** A relation joining on more
+ * than one field cannot be filtered with a single `in`, so the batched loader
+ * builds an `OR` of `AND`s instead (see `childQuery`) — and an `OR`'s text
+ * genuinely varies with its branch count, so it cannot be collapsed the way a
+ * Postgres `= any($1)` can: a shared key would hand a plan the wrong number of
+ * placeholders, which is the trap described above for SQLite. Measured over
+ * parent counts 2, 3, 10, 50:
+ *
+ *     sqlite    composite: 4 keys    single: 4 keys
+ *     postgres  composite: 4 keys    single: 1 key
+ *
+ * That gap is closed on Postgres by #97: a composite key binds one array per
+ * *column* through `unnest`, so its text is fixed too, and `shapeOfMember`
+ * collapses its tuple list on the same condition this function uses. SQLite has
+ * no such form, keeps the `OR`, and churns as it always has — which is the same
+ * sentence as above, and for the same reason.
  */
 function collapsedList(value: unknown[]): string {
   return value.length === 0 ? "[]" : "[*]";
@@ -275,6 +349,7 @@ function shapeOfMember(
   value: unknown,
   literal: boolean,
   collapseLists: boolean,
+  inHaving: boolean,
 ): string {
   // `take` is a parameter, but its *sign* is not: a negative take means "the
   // last N", which flips every ordering term and so changes the SQL text. The
@@ -292,11 +367,66 @@ function shapeOfMember(
   if (collapseLists && LIST_KEYS.has(key) && Array.isArray(value)) {
     return collapsedList(value);
   }
-  if (VALUE_KEYS.has(key)) return canonicalShape(value, false, collapseLists);
+  /**
+   * A composite `in`'s tuple list collapses on exactly the dialects where its
+   * SQL text does not grow with it — the same condition, and the same reason,
+   * as `collapsedList` for a single-column `in`.
+   *
+   * On Postgres the tuples become one array parameter per *column*, so every
+   * parent count is one statement and must be one entry: without this a batched
+   * composite `include` mints a plan per page size, which is #97 and the whole
+   * point of the `unnest` form. On SQLite the key is never emitted — the loader
+   * keeps the `OR`, whose text does grow — so the collapse cannot be reached
+   * there to be wrong.
+   *
+   * The `fields` stay verbatim: they are *identifiers* in the emitted SQL, so
+   * two relations joining on different columns must not share an entry. Only
+   * the tuple list is collapsed.
+   */
+  if (key === COMPOSITE_IN) {
+    const operand = value as { fields: unknown; values: unknown[] };
+    return canonicalShape(
+      collapseLists
+        ? { fields: operand.fields, values: collapsedList(operand.values) }
+        : value,
+      true,
+      collapseLists,
+    );
+  }
+
+  if (VALUE_KEYS.has(key)) {
+    return canonicalShape(value, false, collapseLists, inHaving);
+  }
+
+  /**
+   * `having` is a predicate, so its operands are parameters — and unlike every
+   * other value key it contains keys that {@link LITERAL_KEYS} would otherwise
+   * re-raise one level down.
+   *
+   * Without this, `having: { role: { _count: { gt: 5 } } }` records `gt:5`
+   * verbatim and mints one cache entry per threshold, each holding
+   * byte-identical SQL. The cap is 1000 and a threshold off a query string is
+   * ordinary, so it fills the cache and evicts every other query's plan — the
+   * same pathology `plan.ts` already describes for `in`-list lengths, and the
+   * thing `VALUE_KEYS`' own comment warns about: it would put user data into a
+   * long-lived global map.
+   *
+   * The equivalent `where` — `{ role: { gt: 5 } }` — has always been one entry,
+   * which is the behaviour this matches.
+   */
+  if (key === "having") return canonicalShape(value, false, collapseLists, true);
+
+  // In a `having`, an aggregate kind is a comparison rather than a projection,
+  // so it does not raise `literal` for its subtree.
+  if (inHaving && AGGREGATE_KINDS.has(key)) {
+    return canonicalShape(value, false, collapseLists, true);
+  }
+
   return canonicalShape(
     value,
     literal || LITERAL_KEYS.has(key),
     collapseLists,
+    inHaving,
   );
 }
 

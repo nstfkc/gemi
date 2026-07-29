@@ -122,7 +122,7 @@ export const lateralStrategy: RelationStrategy = {
       as: request.as,
       model: request.relation.model,
       kind: request.relation.kind,
-      parentField: link.parentField,
+      parentFields: link.parentFields,
       strategy: "lateral",
       root: {
         column: concat(
@@ -334,13 +334,19 @@ function foldNode(input: FoldInput): Fold {
   );
 
   // The correlation: the child's foreign key against the *parent's* column.
-  // This is the whole of "lateral" — the subquery references the outer row.
+  // This is the whole of "lateral" — the subquery references the outer row —
+  // and one equality per joined field is the whole of composite support here.
   const correlation = sql(
-    `${childQualifier}${dialect.quoteIdent(
-      fieldOf(child, input.link.childField).column,
-    )} = ${dialect.quoteIdent(input.parent.table)}.${dialect.quoteIdent(
-      fieldOf(input.parent, input.link.parentField).column,
-    )}`,
+    input.link.parentFields
+      .map(
+        (parentField, index) =>
+          `${childQualifier}${dialect.quoteIdent(
+            fieldOf(child, input.link.childFields[index]).column,
+          )} = ${dialect.quoteIdent(input.parent.table)}.${dialect.quoteIdent(
+            fieldOf(input.parent, parentField).column,
+          )}`,
+      )
+      .join(" and "),
   );
 
   const filter = compileWhere(
