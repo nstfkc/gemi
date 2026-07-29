@@ -407,6 +407,71 @@ describe("policies on nested writes", () => {
   });
 
   /**
+   * `connectOrCreate` against a row this caller cannot see.
+   *
+   * The interesting part is that it must not raise. A scoped-away hit reads as
+   * a **miss**, so the call takes the create branch and writes its own row —
+   * which is the same answer the caller would get if the row genuinely did not
+   * exist, and is what stops `connectOrCreate` from being a way to *probe* for
+   * another tenant's keys: `connect` raising and `connectOrCreate` succeeding
+   * would together tell you the row is there.
+   *
+   * The created row then carries our own tenant, because the child's `onCreate`
+   * scopes it.
+   */
+  test("connectOrCreate cannot see another tenant's row, and creates instead", async () => {
+    await Model.asUser(OURS, () =>
+      Note.$exec("create", {
+        data: {
+          label: "n",
+          folder: {
+            connectOrCreate: {
+              where: { code: "theirs" },
+              create: { code: "theirs-mine" },
+            },
+          },
+        },
+      }),
+    );
+
+    const folders: any = await raw.unsafe(
+      `SELECT "code", "orgId" FROM "Folder" ORDER BY "id"`,
+    );
+
+    // The other tenant's row is untouched, and ours was created beside it.
+    expect(folders).toHaveLength(2);
+    expect(folders[1].code).toBe("theirs-mine");
+    expect(folders[1].orgId).toBe(7);
+  });
+
+  /** ...and a visible row is connected, not duplicated. */
+  test("connectOrCreate connects a row this caller can see", async () => {
+    await raw.unsafe(
+      `INSERT INTO "Folder" ("id", "code", "orgId") VALUES (2, 'ours', 7)`,
+    );
+
+    await Model.asUser(OURS, () =>
+      Note.$exec("create", {
+        data: {
+          label: "n",
+          folder: {
+            connectOrCreate: {
+              where: { code: "ours" },
+              create: { code: "ours" },
+            },
+          },
+        },
+      }),
+    );
+
+    const folders: any = await raw.unsafe(`SELECT * FROM "Folder"`);
+    expect(folders).toHaveLength(2);
+
+    const notes: any = await raw.unsafe(`SELECT * FROM "Note"`);
+    expect(notes[0].folderId).toBe(2);
+  });
+
+  /**
    * A scoped model could not upsert at all: `assertScopable` refuses to put a
    * scope on one, because its where becomes an `on conflict` target and a
    * target cannot carry a predicate.

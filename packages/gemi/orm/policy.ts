@@ -300,6 +300,12 @@ const SCOPABLE = new Set<string>([
   // scope narrows it exactly as it narrows a `count` — which is the same
   // statement with one function in it.
   "aggregate",
+  // Same reasoning one step further: its `where` filters the rows *before* they
+  // are grouped, so a scope narrows which rows any group can contain. Leaving
+  // it out would not merely refuse the operation — `assertScopable` raises — so
+  // every policied model would lose `groupBy` entirely, which is how `aggregate`
+  // was found missing on #74.
+  "groupBy",
   "update",
   "updateMany",
   "delete",

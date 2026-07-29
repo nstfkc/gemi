@@ -555,9 +555,20 @@ function countOperation(model: string): string {
  * here: the types are Prisma's own, so narrowing stays exact and there is no
  * second definition of the shape to drift.
  *
- * `groupBy` is deliberately not beside it. `having` is a predicate compiler over
- * aggregate expressions rather than columns, and shipping half of it typed as
- * though it worked would be worse than not shipping it.
+ * `groupBy` is beside it now, and its typing is the awkward one.
+ *
+ * Prisma's `groupBy` signature is not a plain `Subset`: it carries a conditional
+ * that reports a *missing* `by` field in `orderBy` as a type error naming the
+ * field. Reproducing that machinery would mean copying a large conditional out
+ * of the generated client, where it would then be a second definition free to
+ * drift from the first — the thing every other operation here avoids.
+ *
+ * So the args type is Prisma's `${model}GroupByArgs` directly and the return is
+ * its `Get${model}GroupByPayload<T>`, which still narrows the payload exactly.
+ * The `orderBy`-must-be-in-`by` rule is enforced at runtime instead, with a
+ * message naming the field and saying why — see `compile/group-by.ts`. A
+ * compile-time error would be better; a *wrong* compile-time error, or a silent
+ * one, would be worse than a precise runtime refusal.
  */
 function aggregateOperation(model: string): string {
   return `
@@ -566,6 +577,14 @@ function aggregateOperation(model: string): string {
   ): Promise<Prisma.Get${model}AggregateType<T>> {
     return this.$exec("aggregate", args) as Promise<
       Prisma.Get${model}AggregateType<T>
+    >;
+  }
+
+  static groupBy<T extends Prisma.${model}GroupByArgs>(
+    args: Prisma.Subset<T, Prisma.${model}GroupByArgs>,
+  ): Promise<Prisma.Get${model}GroupByPayload<T>> {
+    return this.$exec("groupBy", args) as Promise<
+      Prisma.Get${model}GroupByPayload<T>
     >;
   }
 `;

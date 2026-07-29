@@ -100,7 +100,7 @@ read. It can only see modules you hand it, so it does not replace the `register`
 Fourteen operations, with Prisma's argument types verbatim:
 
 ```
-findMany   findFirst   findFirstOrThrow   findUnique   findUniqueOrThrow   count   aggregate
+findMany   findFirst   findFirstOrThrow   findUnique   findUniqueOrThrow   count   aggregate   groupBy
 create     createMany  update             updateMany   upsert              delete   deleteMany
 ```
 
@@ -116,6 +116,13 @@ const user = await User.findUniqueOrThrow({
   select: { id: true, email: true, accounts: { select: { provider: true } } },
 })
 ```
+
+A write's `include` takes `_count` as a read's does — `User.create({ data, include: { _count: {
+select: { accounts: true } } } })` comes back with `_count.accounts`. It compiles to a correlated
+subquery inside the `RETURNING`, so it costs no extra statement. Two orderings are handled so the
+number agrees with the row beside it: a `delete` carrying one reads the count *before* the row
+goes, and a write whose nested `create` writes children *after* the statement recomputes it once
+they have — otherwise `include` and `_count` would describe the same relation and disagree.
 
 **`take` and `skip` must be integers, and are refused rather than coerced.** They are the only
 arguments whose *sign* decides the SQL — a negative `take` means "the last N", which flips every
@@ -197,9 +204,75 @@ await User.count({ select: { _all: true, email: true } })  // { _all: 3, email: 
 Results are typed by Prisma's own mapped types, so `_max: { position: true }` narrows to
 `{ _max: { position: number | null } }` and nothing else.
 
-**`groupBy` is not implemented.** `having` is a predicate compiler over aggregate expressions rather
-than columns, which is its own piece of work; shipping half of it typed as though it worked would be
-worse than not shipping it.
+### `groupBy`
+
+```ts
+const perOperation = await Usage.groupBy({
+  by: ["operation"],                       // or "operation" — Prisma takes both
+  where: { occurredAt: { gte: since } },
+  _sum: { credits: true },
+  _count: true,
+  having: { credits: { _sum: { gt: 0 } } },
+  orderBy: { _count: { operation: "desc" } },
+})
+// [{ operation: "render", _count: 42, _sum: { credits: 1200 } }, …]
+```
+
+The grouped columns come back flat and the aggregates nested under their kind, which is Prisma's
+shape. Four rules are worth knowing because they are not what the arguments suggest:
+
+- **`orderBy` may only name grouped columns — or an aggregate.** A group has one value for a column
+  in `by` and many for everything else, so ordering by anything else is a question with no answer.
+  SQLite answers it anyway, by picking an arbitrary row's value, so this is refused rather than
+  passed through. `orderBy: { _count: { field: "desc" } }` is the top-N-by-count query and is fine.
+- **`orderBy` is optional.** `groupBy` with none is a legal query.
+- **`having` filters groups, `where` filters rows.** `having: { role: { gt: 0 } }` needs `role` to be
+  in `by`; `having: { email: { _count: { gt: 1 } } }` does not, because a count has one value per
+  group either way. That split is Prisma's, and it is easy to read as stricter than it is.
+- **`take` / `skip` page the groups**, not the rows — unlike `aggregate`, where they page the rows
+  being aggregated.
+
+One divergence, and it is a refusal rather than a difference: `having: { role: { gt: 0, _count: { gt: 1 } } }`
+mixes a column comparison and an aggregate filter under one key. Prisma's query engine panics on that
+shape rather than answering it, so there is no behaviour to match — spell it as an `AND` of the two.
+
+### Looking a row up by a composite key
+
+`findUnique`, `update`, `delete` and `upsert` need a key that is unique. A composite one — whether
+it is a compound `@@id([a, b])` or an `@@unique([a, b])` — is named in Prisma's compound form:
+
+```ts
+await Membership.findUnique({
+  where: { organizationId_userId: { organizationId, userId } },
+})
+```
+
+Every member is required. A composite key is only unique as a whole, so a partial one would quietly
+become a non-unique lookup — which is the failure `findUnique` exists to prevent, and it is refused
+by name.
+
+### Returning everything except one column
+
+```ts
+const user = await User.findUnique({ where: { id }, omit: { password: true } })
+```
+
+`omit` is the complement of `select`, and the reason to have both is what happens when the model
+gains a column. With `select` the exclusion list has to be rewritten every time, and the day
+somebody forgets is the day the new column silently stops being returned. `omit` says the thing that
+is actually stable about the query — *this column must never leave the process* — so a column added
+later is included by default.
+
+It is a real projection: the omitted column never enters the `SELECT` list, so it is not read, not
+shaped and not decoded. `select` and `omit` together are refused, because one names what to keep and
+the other what to drop; Prisma rejects that pair too. It works on every operation that returns a
+payload, reads and writes alike, and **inside an `include`** — which is where it usually matters,
+since a column you never want to leave the process is as likely to be on a related row as on the
+root one. Both relation strategies honour it.
+
+**It is not a substitute for a policy's `redact`.** `omit` is the caller choosing; `redact` is the
+model refusing, and a caller cannot opt out of it. Use `redact` for "nobody may read this", and
+`omit` for "I do not need this here".
 
 ### Importing a batch that may overlap
 
@@ -292,6 +365,7 @@ await List.create({
 | `create` | Writes new related rows. One statement each. |
 | `createMany` | The same rows in **one** statement. To-many only, and the rows go inside `data`. |
 | `connect` | Points at an existing row — a bound column when it names the referenced key, a lookup otherwise. |
+| `connectOrCreate` | Looks the row up by a unique key and creates it only if it is not there. **A hit ignores `create` entirely** — it is connect-*or*-create, not upsert. |
 
 Which direction a nested write runs in is decided by **who holds the foreign key**. When this model
 holds it, the far row is resolved or created *first* and collapses into one more column. When the
@@ -311,10 +385,21 @@ Three things follow from that, and all three are load-bearing:
   before.
 - **A failure anywhere rolls the whole thing back**, including the parent row.
 
-Everything else in Prisma's nested grammar — `connectOrCreate`, `set`, `disconnect`, `update`,
-`updateMany`, `upsert`, `delete`, `deleteMany` — is refused, by name and with the reason. They share
-one property: each writes rows that already exist, which needs a scoping pass of its own rather than
-the child's `onCreate`. `skipDuplicates` is not implemented on `createMany` at any level.
+`connectOrCreate` is worth one more line, because a scoped-away row makes it take the *create*
+branch rather than raise: a row your policies hide reads as absent, so the call writes its own — the
+same answer you would get if it truly did not exist. That is deliberate. `connect` raising where
+`connectOrCreate` succeeded would together tell you a row with that key exists in someone else's
+tenant.
+
+Everything else in Prisma's nested grammar — `set`, `disconnect`, `update`, `updateMany`, `upsert`,
+`delete`, `deleteMany` — is refused, by name and with the reason. The line is **which rows an
+operand can name, and whose columns it writes**: everything supported names its rows (a new one, or
+one you identified by unique key) and writes either a whole new row or one foreign key the ORM
+chose. `set`, `disconnect`, `delete`, `deleteMany` and `updateMany` act on rows the call did not
+name; `update` names its row but writes your columns to it, which needs the child's `onUpdate` and
+the scope-escape guard run over the payload.
+
+`skipDuplicates` is not implemented on `createMany` at any level.
 
 ### Paging a relation
 
@@ -444,6 +529,21 @@ Ordering by a relation is not a total order, so add a tiebreak if you need a sta
 Filtering, counting and ordering all work across an **implicit many-to-many** too — the join
 table is a second table inside the subquery and changes nothing else about how you write the
 query.
+
+**Writing one works too**, through the same relation key inside `data`: `connect`, `disconnect`,
+`set` and `create`. `set` replaces the whole set — a delete and then inserts, inside the same
+transaction — and connecting a pair that is already there is a no-op rather than an error, as it is
+in Prisma. An `update` whose `data` names only relations is fine: there is no column to set, so the
+row is read rather than written and the relation work still happens.
+
+Only the join table itself is written directly; it has no model and nothing an application could
+scope. The rows the pairs point at still go through the related model's own operations, so a
+`connect` cannot reach a row that model's policies hide, and a `create` gets its `onCreate`.
+
+That extends to `set`, which has to delete before it inserts: it clears **the links you can see**,
+not every link — in one `delete … in (…)`, not one statement per link. A pair pointing at a row the related model's policies hide survives — otherwise
+`set` would quietly do what `disconnect` refuses. With no policy on that model every link is
+visible and `set` clears all of them, exactly as Prisma does.
 
 Self-referential ones work too — `Thing.related Thing[]` — as long as the generated files are
 current. Prisma assigns that join table's two columns by *field name*, which the generator now
@@ -968,7 +1068,6 @@ Stated so you can plan around them rather than discover them:
   an identity map is worse than none.
 - **No lazy loading.** A relation you did not `include` is absent, not a proxy that queries when
   touched.
-- **No `omit`.** Use `select`, or a policy's `redact`.
 - **No multi-field relations.** `@relation(fields: [a, b], references: [c, d])` is refused wherever
   a relation is correlated — `include` under either strategy, a relation filter, `_count`, an
   `orderBy` through a relation, and nested writes — rather than joining on the first field and
@@ -976,8 +1075,20 @@ Stated so you can plan around them rather than discover them:
   from. This one *is* pending rather than declined; it needs a composite key comparison on both
   sides (a tuple `in` for the batched strategy, a conjunction for the lateral one).
 - **No migrations, no schema DSL.** Prisma owns both, and gemi must not shadow the Prisma CLI.
-- **No `groupBy`, `aggregate`, `distinct` or cursor pagination.** These land in
-  [Raw SQL](#raw-sql), which exists so that "not implemented" has an answer rather than a shrug.
+- **No `groupBy` or `aggregate`.** These land in [Raw SQL](#raw-sql), which exists so that "not
+  implemented" has an answer rather than a shrug.
+- **No `distinct`, and this one is deliberate rather than pending.** Prisma applies it **in
+  memory** — its query log shows no `DISTINCT` at all, so `take` neither reduces the rows pulled
+  nor paginates by group. Reproducing that faithfully would mean reading the whole result set and
+  deduplicating in JavaScript behind an argument that reads like a database operation; emitting a
+  real `DISTINCT ON` instead would silently diverge from Prisma. Write it as SQL.
+- **No `cursor`, also deliberate.** It is only correct under a *total* ordering, which Prisma does
+  not enforce — under a non-unique `orderBy` it skips or repeats rows at the page boundary. Use
+  `take` with a `where` on the last row's sort key, or compose the keyset comparison with `sql`.
+
+Both of the last two throw `UnsupportedByDesignError`, which says *"and this is a decision rather
+than a gap"* rather than *"yet"* — so a refusal you can plan around reads differently from one that
+might lift next release.
 
 ## See also
 
