@@ -362,8 +362,9 @@ back to batching for that node alone. It declines:
 
 A declined node still runs under this strategy one level down, so a decline costs one statement, not
 the subtree. A mixed include tree therefore uses both, which is fine — the results are the same
-either way, and there are tests asserting exactly that against Prisma across thirty relation
-shapes.
+either way, and there are tests asserting exactly that against Prisma across every relation shape
+in the differential corpus — **48** of them today, and the suite fails if this number stops
+matching the corpus.
 
 Override per call when you need to:
 
