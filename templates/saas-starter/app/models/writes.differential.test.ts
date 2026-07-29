@@ -198,6 +198,24 @@ const CASES: Case[] = [
   ["update with multiply", "update", {
     where: { id: 3 }, data: { globalRole: { multiply: 3 } },
   }],
+  // `divide` was the one arithmetic operator the differential never compared,
+  // sitting in the table beside three that it did. It is also the one with an
+  // edge that behaves differently per dialect, hence the two cases below it.
+  ["update with divide", "update", {
+    where: { id: 1 }, data: { globalRole: { divide: 2 } },
+  }],
+  // An Int divided into a non-integer: whether the result truncates, rounds or
+  // becomes a float is a database question, and both clients have to answer it
+  // the same way.
+  ["update with divide leaving a remainder", "update", {
+    where: { id: 2 }, data: { globalRole: { divide: 3 } },
+  }],
+  // Division by zero: Postgres raises, SQLite yields null — and `globalRole` is
+  // not nullable, so the two dialects fail differently. Both clients still have
+  // to fail the *same* way as each other on whichever dialect is running.
+  ["update with divide by zero", "update", {
+    where: { id: 1 }, data: { globalRole: { divide: 0 } },
+  }],
   ["update matching nothing", "update", {
     where: { id: 99999 }, data: { name: "x" },
   }],
