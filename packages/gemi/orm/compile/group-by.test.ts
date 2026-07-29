@@ -373,4 +373,32 @@ describe("shaping", () => {
   test("no groups is an empty array, not null", () => {
     expect(plan({ by: ["globalRole"], _count: true }).shape([])).toEqual([]);
   });
+
+  /**
+   * An argument `groupBy` does not take, refused **with the set it does**.
+   *
+   * This one call site was left with three arguments when #102 made `detail`
+   * required, so `feat/orm` stopped typechecking the moment that merged
+   * alongside `groupBy`. Neither PR could see it: #92 added the call, #102
+   * changed the signature, and each typechecked on its own branch.
+   *
+   * `tsc` is what catches the signature; this is what catches the *message*,
+   * which is the thing #61's second half was actually about — an argument the
+   * operation does not accept is the path a typo takes, and naming the set is
+   * the whole of the answer.
+   */
+  test("an unknown argument names the ones groupBy takes", () => {
+    let message = "";
+    try {
+      plan({ by: ["globalRole"], _count: true, nope: 1 } as never);
+    } catch (error) {
+      message = (error as Error).message;
+    }
+
+    expect(message).toContain("'nope'");
+    // The set, sorted, exactly as `read.ts` words the same refusal.
+    expect(message).toMatch(/groupBy takes .*\bby\b.*/);
+    expect(message).toContain("having");
+    expect(message).toContain("orderBy");
+  });
 });
