@@ -351,6 +351,79 @@ describe("buildModelSchemas()", () => {
     const [, user] = buildModelSchemas([USER, POST]);
     expect(user.relations.posts.joinTable).toBeUndefined();
   });
+
+  /**
+   * **A relation that joins on more than one field**, which every other case
+   * here declares with exactly one.
+   *
+   * The compiler handles this shape and is well tested for it — but against
+   * *hand-written* fixtures, and the starter template declares no composite
+   * relation, so nothing exercised the generator that produces the real
+   * artifact.
+   *
+   * The failure that leaves open is the quiet one. A generator that kept only
+   * the first field would emit `from: ["tenantId"]`, every compiler test would
+   * still pass because they build their own schemas, the template suite would
+   * still pass because it has no such relation — and an application with one
+   * would correlate on a single column and return plausible wrong rows. That is
+   * precisely what the compiler's own refusal was written to prevent, so it is
+   * worth checking that the input reaches it intact.
+   *
+   * Both sides are asserted: `from` and `to` are positional pairs, and a
+   * truncation or a reorder on either side is the same bug.
+   */
+  test("carries every field of a composite relation, on both sides", () => {
+    const LEDGER = model({
+      name: "Ledger",
+      fields: [
+        field({ name: "tenantId" }),
+        field({ name: "code", type: "String" }),
+        field({
+          kind: "object",
+          name: "entries",
+          type: "Entry",
+          isList: true,
+          relationName: "EntryToLedger",
+          relationFromFields: [],
+          relationToFields: [],
+        }),
+      ],
+      primaryKey: { name: null, fields: ["tenantId", "code"] } as never,
+    });
+
+    const ENTRY = model({
+      name: "Entry",
+      fields: [
+        field({ name: "id", isId: true }),
+        field({ name: "tenantId" }),
+        field({ name: "ledgerCode", type: "String" }),
+        field({
+          kind: "object",
+          name: "ledger",
+          type: "Ledger",
+          isRequired: true,
+          relationName: "EntryToLedger",
+          relationFromFields: ["tenantId", "ledgerCode"],
+          relationToFields: ["tenantId", "code"],
+        }),
+      ],
+    });
+
+    const [entry, ledger] = buildModelSchemas([ENTRY, LEDGER]);
+
+    // The owning side names both of its own columns and both of the target's,
+    // in declaration order — the pairing is positional.
+    expect(entry.relations.ledger.from).toEqual(["tenantId", "ledgerCode"]);
+    expect(entry.relations.ledger.to).toEqual(["tenantId", "code"]);
+
+    // The far side names neither, and is resolved through this one at plan
+    // time — which is why a truncation here would not show up as a missing key.
+    expect(ledger.relations.entries.from).toEqual([]);
+    expect(ledger.relations.entries.to).toEqual([]);
+
+    // ...and the composite primary key it references survives too.
+    expect(ledger.primaryKey).toEqual(["tenantId", "code"]);
+  });
 });
 
 describe("emitArtifacts()", () => {
