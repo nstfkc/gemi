@@ -1,6 +1,7 @@
 import { clientSideValue, hasClientSideValue } from "../defaults";
 import type { SqlDialect } from "../dialect";
 import {
+  InvalidArgumentError,
   MissingRequiredValueError,
   ReturningUnsupportedError,
   UnknownFieldError,
@@ -25,6 +26,7 @@ import {
   planNestedWrites,
 } from "./nested-writes";
 import { planRelations, strategiesOf } from "./plan-relations";
+import { type CountPlan, planRelationCounts } from "./relation-count";
 import { resolveSelection, withKeyFields } from "./select";
 import { matchUniqueKey } from "./unique";
 import { compileWhere } from "./where";
@@ -72,14 +74,18 @@ import { compileWhere } from "./where";
  * is refused with an error naming the column, rather than silently written wrong.
  */
 
-const WRITE_ARGS: Record<string, Set<string>> = {
-  create: new Set(["data", "select", "include"]),
+// `omit` rides along wherever a payload comes back, which is every write but
+// the three that return a count — Prisma types it the same way. It is resolved
+// by `resolveSelection`, so the `RETURNING` list narrows exactly as a read's
+// column list does and the omitted column is never read.
+export const WRITE_ARGS: Record<string, Set<string>> = {
+  create: new Set(["data", "select", "include", "omit"]),
   createMany: new Set(["data", "skipDuplicates"]),
-  update: new Set(["data", "where", "select", "include"]),
+  update: new Set(["data", "where", "select", "include", "omit"]),
   updateMany: new Set(["data", "where"]),
-  delete: new Set(["where", "select", "include"]),
+  delete: new Set(["where", "select", "include", "omit"]),
   deleteMany: new Set(["where"]),
-  upsert: new Set(["where", "create", "update", "select", "include"]),
+  upsert: new Set(["where", "create", "update", "select", "include", "omit"]),
 };
 
 /** The writes that return one row, and raise when they match none. */
@@ -120,7 +126,13 @@ export function compileWrite(
     case "upsert":
       return compileUpsert(schema, op, args, dialect);
     default:
-      throw new UnsupportedQueryError(op, schema.name, op);
+      throw new UnsupportedQueryError(
+        op,
+        schema.name,
+        op,
+        `'${op}' is not a write operation. The writes are ` +
+          `${Object.keys(WRITE_ARGS).sort().join(", ")}.`,
+      );
   }
 }
 
@@ -137,6 +149,7 @@ function compileCreate(
     args?.data,
     op,
     (callArgs) => callArgs?.data,
+    dialect,
   );
 
   const columns = insertColumns(
@@ -265,7 +278,7 @@ function skipDuplicatesClause(
   if (requested === undefined) return null;
 
   if (typeof requested !== "boolean") {
-    throw new UnsupportedQueryError(
+    throw new InvalidArgumentError(
       "skipDuplicates",
       schema.name,
       op,
@@ -312,7 +325,7 @@ function createManyColumns(
 ): WriteColumn[][] {
   const supplied = rows.map((row, index) => {
     if (typeof row !== "object" || row === null || Array.isArray(row)) {
-      throw new UnsupportedQueryError(
+      throw new InvalidArgumentError(
         `data[${index}]`,
         schema.name,
         op,
@@ -422,7 +435,7 @@ function compileUpdate(
 
   const nested = many
     ? undefined
-    : planNestedWrites(schema, args?.data, op, (callArgs) => callArgs?.data);
+    : planNestedWrites(schema, args?.data, op, (callArgs) => callArgs?.data, dialect);
 
   const assignments = updateAssignments(
     schema,
@@ -432,7 +445,24 @@ function compileUpdate(
     dialect,
   );
 
-  if (assignments.length === 0) {
+  // An `update` whose `data` is *only* nested relation writes has no column to
+  // set — `Post.update({ where, data: { tags: { connect: … } } })` changes the
+  // join table and nothing on `Post` itself. Prisma accepts it, and there is no
+  // `UPDATE … SET` that expresses it.
+  //
+  // So the row is *selected* instead. The nested steps need the parent's key
+  // and the caller's `select` / `include` still has to be honoured, and both
+  // come from the same `returning` list — which a select produces just as well
+  // as an `update … returning` does. Same plan shape, same steps, one statement
+  // that happens to read rather than write.
+  //
+  // Only reachable when there are steps to run: with neither an assignment nor
+  // a nested write there is genuinely nothing to do, and that stays an error.
+  const relationOnly =
+    assignments.length === 0 &&
+    ((nested?.before.length ?? 0) > 0 || (nested?.after.length ?? 0) > 0);
+
+  if (assignments.length === 0 && !relationOnly) {
     throw new UnsupportedQueryError(
       "data",
       schema.name,
@@ -450,12 +480,19 @@ function compileUpdate(
 
   const returning = returningClause(schema, args, dialect, op, nested);
 
-  const statement = concat(
-    sql(`update ${dialect.quoteIdent(schema.table)} set `),
-    joinFragments(assignments, ", "),
-    where ? concat(sql(" where "), where) : sql(""),
-    returning.clause,
-  );
+  const statement = relationOnly
+    ? concat(
+        sql(`select `),
+        returning.selected,
+        sql(` from ${dialect.quoteIdent(schema.table)}`),
+        where ? concat(sql(" where "), where) : sql(""),
+      )
+    : concat(
+        sql(`update ${dialect.quoteIdent(schema.table)} set `),
+        joinFragments(assignments, ", "),
+        where ? concat(sql(" where "), where) : sql(""),
+        returning.clause,
+      );
 
   return plan(schema, statement, dialect, op, returning, nested);
 }
@@ -891,7 +928,7 @@ function insertColumns(
 ): WriteColumn[] {
   if (data !== undefined && data !== null) {
     if (typeof data !== "object" || Array.isArray(data)) {
-      throw new UnsupportedQueryError(
+      throw new InvalidArgumentError(
         "data",
         schema.name,
         op,
@@ -1033,7 +1070,7 @@ function updateAssignments(
 ): Fragment[] {
   if (data !== undefined && data !== null) {
     if (typeof data !== "object" || Array.isArray(data)) {
-      throw new UnsupportedQueryError(
+      throw new InvalidArgumentError(
         "data",
         schema.name,
         op,
@@ -1192,9 +1229,12 @@ function defaultBinder(field: FieldSchema, dialect: SqlDialect): Binder {
 
 interface Returning {
   clause: Fragment;
+  /** The same columns without the `returning` keyword, for a select. */
+  selected: Fragment;
   fields: FieldSchema[];
   hidden?: string[];
   relations: ReturnType<typeof planRelations>["plans"];
+  counts: CountPlan[];
 }
 
 /**
@@ -1218,8 +1258,10 @@ function returningClause(
   if (COUNTING.has(op)) {
     return {
       clause: sql(` returning ${keyColumn(schema, dialect)}`),
+      selected: sql(keyColumn(schema, dialect)),
       fields: [],
       relations: [],
+      counts: [],
     };
   }
 
@@ -1229,18 +1271,29 @@ function returningClause(
     ...keyFields,
     ...(nested?.keyFields ?? []),
   ]);
+  const counts = planRelationCounts(schema, args, dialect, op);
+
+  const columns = joinFragments(
+    [
+      ...fields.map((field) => sql(dialect.quoteIdent(field.column))),
+      // Last, for the same reason they go last on a read: the shaper reads
+      // scalars by position and `_count` is attached afterwards from the raw
+      // row. The relation-only `select` below projects the same list, so a
+      // `_count` survives that path too.
+      ...counts.map((count) => count.column),
+    ],
+    ", ",
+  );
 
   return {
-    clause: concat(
-      sql(" returning "),
-      joinFragments(
-        fields.map((field) => sql(dialect.quoteIdent(field.column))),
-        ", ",
-      ),
-    ),
+    clause: concat(sql(" returning "), columns),
+    // The same list without the keyword, for the one statement that reads the
+    // row rather than writing it — a relation-only `update`. See `compileUpdate`.
+    selected: columns,
     fields,
     hidden,
     relations: plans,
+    counts,
   };
 }
 
@@ -1291,12 +1344,28 @@ function plan(
     hidden: returning.hidden,
     before: nested && nested.before.length > 0 ? nested.before : undefined,
     after: nested && nested.after.length > 0 ? nested.after : undefined,
+    counts: returning.counts.length > 0 ? true : undefined,
     shape(rows) {
       // The count *is* the number of returned rows — see the note at the top of
       // this file on why it does not come from driver metadata.
       if (counting) return { count: rows.length };
 
       const shaped = shaper(rows);
+
+      // `_count` came back as extra columns the shaper knows nothing about,
+      // under aliases carrying a dot. Assembled into one object per row,
+      // because that is the shape Prisma returns — and the same assembly
+      // `compileRead` does, deliberately spelled the same way.
+      if (returning.counts.length > 0) {
+        for (let i = 0; i < shaped.length; i++) {
+          const raw = (rows[i] as Record<string, unknown>) ?? {};
+          const totals: Record<string, number> = {};
+          for (const count of returning.counts) {
+            totals[count.as] = Number(raw[count.alias] ?? 0);
+          }
+          shaped[i]._count = totals;
+        }
+      }
       // `null` when nothing matched. `$exec` turns that into
       // `RecordNotFoundError` for the operations Prisma raises on, where the
       // model's name is in scope for the message.
@@ -1321,7 +1390,7 @@ function assertArgs(schema: ModelSchema, op: Operation, args: any): void {
   }
 
   if (typeof args !== "object" || Array.isArray(args)) {
-    throw new UnsupportedQueryError(
+    throw new InvalidArgumentError(
       String(args),
       schema.name,
       op,
@@ -1342,7 +1411,12 @@ function assertArgs(schema: ModelSchema, op: Operation, args: any): void {
   for (const key of Object.keys(args).sort()) {
     if (args[key] === undefined) continue;
     if (!allowed.has(key)) {
-      throw new UnsupportedQueryError(key, schema.name, op);
+      throw new UnsupportedQueryError(
+        key,
+        schema.name,
+        op,
+        `${op} takes ${[...allowed].sort().join(", ")}.`,
+      );
     }
   }
 

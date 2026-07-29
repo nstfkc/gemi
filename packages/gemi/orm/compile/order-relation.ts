@@ -1,5 +1,8 @@
 import type { SqlDialect } from "../dialect";
-import { UnsupportedQueryError } from "../errors";
+import {
+  InvalidArgumentError,
+  UnsupportedQueryError,
+} from "../errors";
 import { COUNT_KEY } from "../relation-filters";
 import type { ModelSchema, RelationSchema } from "../schema";
 import { type Fragment, concat, sql } from "./fragment";
@@ -58,7 +61,7 @@ export function relationOrderExpression(
   const path = `orderBy.${relation.name}`;
 
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new UnsupportedQueryError(
+    throw new InvalidArgumentError(
       path,
       schema.name,
       operation,
@@ -203,7 +206,7 @@ function readDirection(
   if (typeof value === "object" && value !== null) {
     const { sort, nulls } = value as Record<string, unknown>;
     if (sort !== "asc" && sort !== "desc") {
-      throw new UnsupportedQueryError(
+      throw new InvalidArgumentError(
         path,
         schema.name,
         operation,

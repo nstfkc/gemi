@@ -1,5 +1,8 @@
 import type { SqlDialect } from "./dialect";
-import { UnsupportedQueryError } from "./errors";
+import {
+  InvalidArgumentError,
+  UnsupportedQueryError,
+} from "./errors";
 import {
   type Fragment,
   bindValues,
@@ -190,7 +193,7 @@ export function join(
   separator: string | SqlFragment = ", ",
 ): SqlFragment {
   if (!Array.isArray(values)) {
-    throw new UnsupportedQueryError(
+    throw new InvalidArgumentError(
       "join",
       "DB",
       "sql",
@@ -227,7 +230,7 @@ const GLUE = /^[\s,]*$|^\s*(?:and|or)\s*$/i;
 function assertGlue(separator: unknown): void {
   if (typeof separator === "string" && GLUE.test(separator)) return;
 
-  throw new UnsupportedQueryError(
+  throw new InvalidArgumentError(
     "join",
     "DB",
     "sql",
@@ -297,7 +300,7 @@ export const empty: SqlFragment = brand(
  */
 export function unsafeSql(literal: string): SqlFragment {
   if (typeof literal !== "string") {
-    throw new UnsupportedQueryError(
+    throw new InvalidArgumentError(
       "unsafeSql",
       "DB",
       "sql",
@@ -331,7 +334,7 @@ export function renderFragment(
   operation = "query",
 ): { text: string; values: unknown[] } {
   if (!isFragment(fragment)) {
-    throw new UnsupportedQueryError(
+    throw new InvalidArgumentError(
       operation,
       "DB",
       operation,

@@ -1,5 +1,7 @@
 import type { SqlDialect } from "../dialect";
-import { UnsupportedQueryError } from "../errors";
+import {
+  InvalidArgumentError,
+} from "../errors";
 import type { ModelSchema } from "../schema";
 import type { Binder, Fragment } from "./fragment";
 import { reverse, type OrderTerm } from "./orderBy";
@@ -48,22 +50,16 @@ import { reverse, type OrderTerm } from "./orderBy";
  * `argument` is the name to report: `take` at the root, `accounts.take` on a
  * relation node.
  *
- * **The error type is wrong here, and deliberately left wrong until #78 lands.**
- * `UnsupportedQueryError` spells "does not support 'take' *yet*", and there is
- * no future in which `take: "-2"` becomes supported — the word promises
- * something nobody intends. For the fraction it contradicts this file's own
- * comment, which calls the refusal deliberate. That word is load-bearing in
- * this codebase: #78 adds `UnsupportedByDesignError` for "a decision rather
- * than a gap", and #82 removed "yet" from the dialect message for exactly this
- * reason.
+ * **`InvalidArgumentError`, and this note is what asked for it.** #88 left the
+ * error type deliberately wrong here — `UnsupportedQueryError` spells "does not
+ * support 'take' *yet*", and there is no future in which `take: "-2"` becomes
+ * supported — on the reasoning that validation is a *category* rather than a
+ * reworded string, and that inventing one while #78 was in flight would be the
+ * second copy this function exists to avoid.
  *
- * Validation is a fourth category again — not unimplemented, not a design
- * refusal of a feature, but invalid input — so the fix is a category, not a
- * reworded string, and inventing one here while #78 is in flight would be the
- * second copy this function exists to avoid. When #78 merges: the fraction
- * refusal moves to the by-design category it is already documented as, and the
- * type-mismatch messages lose the word. The two branches merge clean today, so
- * this is an order note rather than a conflict.
+ * #78 landed `UnsupportedByDesignError` for "a decision rather than a gap", and
+ * the third class followed it. A bad value now says `Invalid 'take'` and says
+ * what a good one looks like, which is the whole of what was owed.
  */
 export function assertPageArgument(
   model: string,
@@ -73,7 +69,7 @@ export function assertPageArgument(
   value: unknown,
 ): void {
   if (typeof value !== "number" || !Number.isInteger(value)) {
-    throw new UnsupportedQueryError(
+    throw new InvalidArgumentError(
       argument,
       model,
       operation,
@@ -81,7 +77,7 @@ export function assertPageArgument(
     );
   }
   if (key === "skip" && value < 0) {
-    throw new UnsupportedQueryError(
+    throw new InvalidArgumentError(
       argument,
       model,
       operation,

@@ -4,6 +4,7 @@ import type { Operation, QueryPlan } from "../plan";
 import type { RelationStrategy } from "./plan-relations";
 import type { ModelSchema } from "../schema";
 import { compileAggregate, isAggregateOperation } from "./aggregate";
+import { compileGroupBy, isGroupByOperation } from "./group-by";
 import { compileRead, isReadOperation } from "./read";
 import { compileWrite, isWriteOperation } from "./write";
 
@@ -30,16 +31,25 @@ export function compile(
   // Before the read check, because `aggregate` is a read whose result is
   // neither rows nor a number and so shares none of `compileRead`'s shaping.
   if (isAggregateOperation(op)) return compileAggregate(schema, op, args, dialect);
+  if (isGroupByOperation(op)) return compileGroupBy(schema, op, args, dialect);
 
   if (isReadOperation(op)) {
     return compileRead(schema, op, args, dialect, strategy);
   }
   if (isWriteOperation(op)) return compileWrite(schema, op, args, dialect);
-  throw new UnsupportedQueryError(op, schema.name, op);
+  throw new UnsupportedQueryError(
+    op,
+    schema.name,
+    op,
+    `'${op}' is not an operation this ORM compiles — the reads, the writes, ` +
+      `'aggregate' and 'groupBy' are, and a raw statement goes through ` +
+      `'DB.query' or 'DB.execute'.`,
+  );
 }
 
 export { compileRead, isReadOperation };
 export { compileAggregate, isAggregateOperation } from "./aggregate";
+export { compileGroupBy, isGroupByOperation } from "./group-by";
 export { compileWrite, isWriteOperation };
 export {
   planNestedWrites,

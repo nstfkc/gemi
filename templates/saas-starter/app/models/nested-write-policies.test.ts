@@ -336,6 +336,82 @@ describe("policies on nested writes", () => {
   });
 
   /**
+   * A child whose policy scopes on its **own foreign key** — `{ folderId: … }`,
+   * a plausible "my notes" scope — and which declares no `onUpdate` (#98).
+   *
+   * `connect` writes exactly that column, so `assertNoScopeEscape` used to
+   * refuse it: the guard reads `args.data` and could not tell a column the
+   * caller supplied from one the nested step put there. The caller wrote
+   * `connect: { id }`; `folderId` was in `data` because the ORM chose it.
+   *
+   * The row is still only reachable through the child's own scope — that is a
+   * different mechanism and it is untouched, which the second test pins.
+   */
+  test("a foreign-key scope no longer refuses a nested connect", async () => {
+    class KeyScoped extends Model {
+      static $schema = noteSchema;
+      static $policies = [{ scope: () => ({ folderId: 2 }) } as ModelPolicy];
+    }
+    register("Note", KeyScoped);
+
+    try {
+      await raw.unsafe(
+        `INSERT INTO "Folder" ("id", "code", "orgId") VALUES (2, 'ours', 7)`,
+      );
+      await raw.unsafe(
+        `INSERT INTO "Note" ("id", "folderId", "label", "orgId") ` +
+          `VALUES (20, 2, 'ours', 7)`,
+      );
+
+      await Model.asUser(OURS, () =>
+        Folder.$exec("update", {
+          where: { id: 2 },
+          data: { code: "ours", notes: { connect: { id: 20 } } },
+        }),
+      );
+
+      const notes: any = await raw.unsafe(`SELECT "folderId" FROM "Note"`);
+      expect(notes[0].folderId).toBe(2);
+    } finally {
+      register("Note", Note);
+    }
+  });
+
+  /**
+   * The half that must not move: a **caller** naming the scoped column in
+   * `data` is still refused. The marker lists the columns the ORM wrote, so
+   * anything else in the payload is judged exactly as before.
+   */
+  test("a caller naming the scoped column is still refused", async () => {
+    class KeyScoped extends Model {
+      static $schema = noteSchema;
+      static $policies = [{ scope: () => ({ folderId: 2 }) } as ModelPolicy];
+    }
+    register("Note", KeyScoped);
+
+    try {
+      await raw.unsafe(
+        `INSERT INTO "Folder" ("id", "code", "orgId") VALUES (2, 'ours', 7)`,
+      );
+      await raw.unsafe(
+        `INSERT INTO "Note" ("id", "folderId", "label", "orgId") ` +
+          `VALUES (21, 2, 'ours', 7)`,
+      );
+
+      await expect(
+        Model.asUser(OURS, () =>
+          KeyScoped.$exec("update", {
+            where: { id: 21 },
+            data: { folderId: 9 },
+          }),
+        ),
+      ).rejects.toThrow(ScopeEscapeError);
+    } finally {
+      register("Note", Note);
+    }
+  });
+
+  /**
    * `connectOrCreate` against a row this caller cannot see.
    *
    * The interesting part is that it must not raise. A scoped-away hit reads as
@@ -615,22 +691,21 @@ describe("policies on nested writes", () => {
   });
 
   /**
-   * **Pinned, not endorsed** — #98.
+   * **#98 has landed, so this flipped** — as the pin it replaces said it
+   * should, rather than being deleted.
    *
-   * A child scoped on its own foreign key loses every relation operand that
-   * writes that key, because `assertNoScopeEscape` reads `args.data` and cannot
+   * A child scoped on its own foreign key used to lose every relation operand
+   * that writes that key: `assertNoScopeEscape` read `args.data` and could not
    * tell a column the caller supplied from one the nested step put there. The
-   * caller wrote `disconnect: { id }`; `folderId` is in `data` because the ORM
+   * caller wrote `disconnect: { id }`; `folderId` was in `data` because the ORM
    * chose it.
    *
-   * This is **not** new to `disconnect`. `connect` has the same shape and the
-   * same failure on `feat/orm` today, which is why it is filed rather than
-   * fixed here: the decision affects an operand that already shipped.
-   *
-   * Asserted so the current behaviour is deliberate. When #98 lands this test
-   * should flip to expecting success, rather than being deleted.
+   * The guard now judges the caller's columns rather than the ORM's, so both
+   * operands go through. Kept on both — `disconnect` *and* `connect` — because
+   * the original pin's point was that this is a property of the guard rather
+   * than of one operand, and that is worth keeping now the answer is success.
    */
-  test("a foreign-key scope refuses relation operands today", async () => {
+  test("a foreign-key scope allows relation operands the ORM keyed", async () => {
     class KeyScoped extends Model {
       static $schema = noteSchema;
       static $policies = [{ scope: () => ({ folderId: 2 }) } as ModelPolicy];
@@ -654,14 +729,16 @@ describe("policies on nested writes", () => {
           }),
         );
 
-      // Both operands, so the pin records that this is a property of the
-      // guard rather than of the one this PR added.
-      await expect(attempt({ disconnect: { id: 20 } })).rejects.toThrow(
-        ScopeEscapeError,
-      );
-      await expect(attempt({ connect: { id: 20 } })).rejects.toThrow(
-        ScopeEscapeError,
-      );
+      // Both operands, so this records that it is a property of the guard
+      // rather than of the one operand this PR added.
+      //
+      // `connect` first, and the order is load-bearing now that both succeed:
+      // `disconnect` nulls `folderId`, which puts the row outside the very
+      // scope (`{ folderId: 2 }`) that has to select it, so a `connect` after
+      // it finds nothing. While both were refusals neither wrote anything and
+      // the order did not matter.
+      await expect(attempt({ connect: { id: 20 } })).resolves.toBeDefined();
+      await expect(attempt({ disconnect: { id: 20 } })).resolves.toBeDefined();
     } finally {
       register("Note", Note);
     }

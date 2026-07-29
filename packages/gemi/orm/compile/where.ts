@@ -1,6 +1,6 @@
 import type { SqlDialect } from "../dialect";
 import {
-  MalformedRelationError,
+  InvalidArgumentError,
   UnknownFieldError,
   UnsupportedQueryError,
 } from "../errors";
@@ -10,6 +10,7 @@ import {
 } from "../relation-filters";
 import type { FieldSchema, ModelSchema, RelationSchema } from "../schema";
 import { type Correlated, correlate } from "./correlate";
+import { uniqueKeys } from "./unique";
 import {
   type Binder,
   type Fragment,
@@ -61,7 +62,7 @@ export function compileWhere(
   if (where === undefined || where === null) return null;
 
   if (typeof where !== "object" || Array.isArray(where)) {
-    throw new UnsupportedQueryError(
+    throw new InvalidArgumentError(
       "where",
       schema.name,
       context.operation,
@@ -85,6 +86,11 @@ export function compileWhere(
     if (key === "AND" || key === "OR") {
       const combined = compileGroup(schema, value, context, at, key);
       if (combined) predicates.push(combined);
+      continue;
+    }
+
+    if (key === COMPOSITE_IN) {
+      predicates.push(compileCompositeIn(schema, value, context, at));
       continue;
     }
 
@@ -320,7 +326,7 @@ function readOperators(
   }
 
   if (typeof value !== "object" || Array.isArray(value)) {
-    throw new UnsupportedQueryError(
+    throw new InvalidArgumentError(
       path,
       schema.name,
       context.operation,
@@ -365,13 +371,25 @@ function compileCompoundKey(
   context: WhereContext,
   locate: (args: any) => any,
 ): Fragment | null {
-  const members = schema.uniques.find(
+  // `uniqueKeys`, not `schema.uniques` — the primary key is a unique key, and a
+  // compound `@@id` lives only in `schema.primaryKey`. Searching `uniques`
+  // alone made the two halves of this disagree: `matchUniqueKey` accepted
+  // `tenantId_code` (it asks `uniqueKeys`, which includes the primary key), so
+  // the operation compiled, and then this returned `null` and the caller
+  // reported an unknown field. Both spellings failed and each error pointed at
+  // the other.
+  //
+  // Invisible until now because the template's only compound key is
+  // `SocialAccount`'s `@@unique([username, provider])`. A compound `@@id` — a
+  // join table, or any tenant-scoped `@@id([tenantId, id])` — was unreachable
+  // by key at all.
+  const members = uniqueKeys(schema).find(
     (group) => group.length > 1 && group.join("_") === key,
   );
   if (!members) return null;
 
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new UnsupportedQueryError(
+    throw new InvalidArgumentError(
       `where.${key}`,
       schema.name,
       context.operation,
@@ -486,6 +504,167 @@ const COMPARISONS: Record<string, string> = {
   gte: ">=",
 };
 
+/**
+ * The internal key a batched relation loader uses to match a **tuple** of
+ * columns against a list of tuples — the composite-relation counterpart of
+ * `in`, and the reason #97 exists.
+ *
+ * **`$`-prefixed because a Prisma field cannot be.** Field names match
+ * `[A-Za-z][A-Za-z0-9_]*`, so this cannot collide with a column, which a
+ * `__`-prefixed name could not promise.
+ *
+ * It is not part of the public argument grammar, and that is **enforced rather
+ * than asserted**. This branch sits above the field lookup, so a caller writing
+ * the key by hand used to be honoured — not an injection, since the fields are
+ * resolved against the schema and the values are bound, but an undocumented
+ * input surface with none of the operand validation its neighbours have. The
+ * operand now has to carry {@link PLANNER}, a module-private `Symbol` an
+ * application cannot reach, exactly as `markPreScoped` and `markOrmAuthored`
+ * gate their own claims.
+ */
+export const COMPOSITE_IN = "$compositeIn";
+
+/**
+ * Marks a composite-`in` operand as the planner's own.
+ *
+ * A `Symbol`, so it is invisible to `Object.entries` — which means it does not
+ * reach the plan key, where it would be noise, and cannot be written in JSON by
+ * a caller who has seen the key name in a stack trace.
+ */
+const PLANNER = Symbol("gemi.orm.compositeInFromPlanner");
+
+/** `{ fields: ["a", "b"], values: [[1, "x"], [2, "y"]] }`. */
+interface CompositeInOperand {
+  fields: string[];
+  values: unknown[][];
+}
+
+export function plannerCompositeIn(
+  fields: string[],
+  values: unknown[][],
+): Record<string, unknown> {
+  return { [PLANNER]: true, fields, values };
+}
+
+/**
+ * `(a, b) in (…)`, in whichever form the dialect can bind.
+ *
+ * Only ever reached on a dialect whose `canBindCompositeIn` said yes for these
+ * column types — `plan-relations.ts` asks before it emits this key, and keeps
+ * the portable `OR` of `AND`s otherwise. So there is no fallback here: arriving
+ * with a dialect that cannot express it is a bug in that decision, not a shape
+ * to degrade.
+ */
+function compileCompositeIn(
+  schema: ModelSchema,
+  operand: unknown,
+  context: WhereContext,
+  locate: (args: any) => any,
+): Fragment {
+  const { dialect } = context;
+  const fields = assertCompositeInOperand(schema, operand, context);
+
+  const resolved = fields.map((name) => {
+    const field = schema.fields[name];
+    if (!field) {
+      throw new UnknownFieldError(name, schema.name, Object.keys(schema.fields));
+    }
+    return field;
+  });
+
+  const columns = resolved.map(
+    (field) =>
+      `${context.qualifier ?? ""}${dialect.quoteIdent(field.column)}`,
+  );
+
+  return dialect.compositeIn(
+    columns,
+    resolved.map((field) => field.type),
+    (args) => (locate(args) as CompositeInOperand).values,
+  );
+}
+
+/**
+ * The operand's shape, checked at **plan** time.
+ *
+ * Every other operand in this file is validated here rather than left to fail
+ * at bind time — `assertCreateManyOperand`'s note says why: a refusal that
+ * arrives later has to unwind work that should never have started. This one
+ * was the exception, and it showed: `{ $compositeIn: null }` raised a raw
+ * `TypeError` from a destructure, and `{ fields: ["id"] }` with no `values` at
+ * all compiled clean and deferred its failure to bind time.
+ */
+function assertCompositeInOperand(
+  schema: ModelSchema,
+  operand: unknown,
+  context: WhereContext,
+): string[] {
+  /**
+   * A caller's key gets the **unknown-key treatment**, which is what the
+   * original comment promised and what every other key it is not a field for
+   * already gets. `UnsupportedQueryError` would render "does not support
+   * '$compositeIn' *yet*" — a promise about a key that is deliberately not in
+   * the grammar and never will be. That word has now been corrected once each
+   * on #82 and #88; this is the third time it has been raised, which is enough
+   * to stop treating it as a wording nit and use the error that is simply
+   * accurate: `$compositeIn` is not a field on this model.
+   */
+  const notAField = (): never => {
+    throw new UnknownFieldError(
+      COMPOSITE_IN,
+      schema.name,
+      Object.keys(schema.fields),
+    );
+  };
+
+  if (typeof operand !== "object" || operand === null || Array.isArray(operand)) {
+    return notAField();
+  }
+
+  if ((operand as Record<symbol, unknown>)[PLANNER] !== true) {
+    return notAField();
+  }
+
+  /**
+   * Below here the operand *is* the planner's, so a bad shape is this ORM's bug
+   * rather than a caller's — and `UnsupportedQueryError` is the right class for
+   * it: an internal invariant that does not hold is genuinely something the
+   * ORM does not support, and "yet" is the honest word for a state it should
+   * not be in.
+   */
+  const refuse = (detail: string): never => {
+    throw new UnsupportedQueryError(
+      COMPOSITE_IN,
+      schema.name,
+      context.operation,
+      detail,
+    );
+  };
+
+  const { fields, values } = operand as CompositeInOperand;
+
+  // Below here the operand *is* the planner's, so these are its bugs rather
+  // than a caller's — worth catching at compile time for the same reason, and
+  // worth a different sentence because the audience is different.
+  if (!Array.isArray(fields) || fields.length === 0) {
+    return refuse(`the planner built a '${COMPOSITE_IN}' with no fields.`);
+  }
+  if (!fields.every((name) => typeof name === "string")) {
+    return refuse(`the planner built a '${COMPOSITE_IN}' with a non-string field.`);
+  }
+  if (!Array.isArray(values)) {
+    return refuse(`the planner built a '${COMPOSITE_IN}' with no values.`);
+  }
+  if (!values.every((tuple) => Array.isArray(tuple) && tuple.length === fields.length)) {
+    return refuse(
+      `the planner built a '${COMPOSITE_IN}' whose tuples do not all have ` +
+        `${fields.length} value(s).`,
+    );
+  }
+
+  return fields;
+}
+
 function compileFieldFilter(
   schema: ModelSchema,
   field: FieldSchema,
@@ -510,10 +689,11 @@ function compileFieldFilter(
   const insensitive = filter.mode === "insensitive";
   if (filter.mode !== undefined && filter.mode !== "default") {
     if (!insensitive) {
-      throw new UnsupportedQueryError(
+      throw new InvalidArgumentError(
         `mode: ${JSON.stringify(filter.mode)}`,
         schema.name,
         context.operation,
+        `Prisma takes 'default' or 'insensitive'.`,
       );
     }
     if (!dialect.supportsInsensitiveMode) {
@@ -534,10 +714,11 @@ function compileFieldFilter(
     if (operand === undefined || key === "mode") continue;
 
     if (!OPERATORS.has(key)) {
-      throw new UnsupportedQueryError(
+      throw new InvalidArgumentError(
         `where.${field.name}.${key}`,
         schema.name,
         context.operation,
+        `A scalar filter takes ${[...OPERATORS].sort().join(", ")}.`,
       );
     }
 
@@ -581,7 +762,7 @@ function compileFieldFilter(
         // query that runs and returns the wrong rows. The types catch the
         // static case but not a value that arrives dynamically.
         if (typeof operand !== "string") {
-          throw new UnsupportedQueryError(
+          throw new InvalidArgumentError(
             `where.${field.name}.${key}`,
             schema.name,
             context.operation,
@@ -657,7 +838,7 @@ function inList(
   const { dialect } = context;
 
   if (!Array.isArray(operand)) {
-    throw new UnsupportedQueryError(
+    throw new InvalidArgumentError(
       `where.${field.name}.${negated ? "notIn" : "in"}`,
       schema.name,
       context.operation,

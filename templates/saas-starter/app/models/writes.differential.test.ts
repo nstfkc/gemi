@@ -9,7 +9,10 @@ import {
 } from "./differential";
 import {
   AccountModel,
+  MembershipModel,
   OrganizationModel,
+  PostModel,
+  TagModel,
   SocialAccountModel,
   UserModel,
 } from "./generated";
@@ -73,12 +76,22 @@ async function seed(prisma: PrismaClient) {
   // on them would compare two runs against an empty table and pass whatever
   // the code did. Two of these belong to the *second* user, which is what makes
   // "not linked" mean something.
+  //
+  // The last two are Ada's, so a `_count` has a number to be wrong about:
+  // without children every count is 0 and a dropped `_count` is
+  // indistinguishable from a correct one, which is how #87 stayed invisible.
+  //
+  // Safe for the existing delete cases: `Account_userId_fkey` is
+  // `ON DELETE SET NULL`, so removing a user detaches its accounts on both
+  // sides rather than failing a constraint.
   const users = await prisma.user.findMany({ orderBy: { id: "asc" } });
   await prisma.account.createMany({
     data: [
       { publicId: "acc-mine-1", userId: users[0].id, organizationRole: 1 },
       { publicId: "acc-mine-2", userId: users[0].id, organizationRole: 2 },
       { publicId: "acc-theirs", userId: users[1].id, organizationRole: 1 },
+      { publicId: "a1", userId: users[0].id, organizationId: acme.id },
+      { publicId: "a2", userId: users[0].id, organizationId: acme.id },
     ],
   });
 }
@@ -246,6 +259,58 @@ const CASES: Case[] = [
     select: { email: true, name: true },
   }],
 
+  // --- _count on a write (#87) ------------------------------------------
+  //
+  // It used to be accepted and dropped: the row came back with no `_count` key
+  // and no error, while an unknown relation name in the same `include` raised.
+  // Every case below returns a number Prisma also returns, and the `update` /
+  // `upsert` / `delete` ones return a *non-zero* one, which is what separates
+  // "projected correctly" from "projected as zero".
+  ["create with _count", "create", {
+    data: { email: "c1@example.dev" },
+    include: { _count: { select: { accounts: true } } },
+  }],
+  ["update with _count", "update", {
+    where: { publicId: "p1" }, data: { name: "Counted" },
+    include: { _count: { select: { accounts: true } } },
+  }],
+  ["update with _count beside a relation", "update", {
+    where: { publicId: "p1" }, data: { name: "Counted" },
+    include: { accounts: true, _count: { select: { accounts: true } } },
+  }],
+  ["update with _count in a select", "update", {
+    where: { publicId: "p1" }, data: { name: "Counted" },
+    select: { email: true, _count: { select: { accounts: true } } },
+  }],
+  ["update with a filtered _count", "update", {
+    where: { publicId: "p1" }, data: { name: "Counted" },
+    include: {
+      _count: { select: { accounts: { where: { organizationRole: 2 } } } },
+    },
+  }],
+  ["upsert hitting, with _count", "upsert", {
+    where: { publicId: "p1" },
+    create: { email: "unused2@example.dev" },
+    update: { name: "Counted" },
+    include: { _count: { select: { accounts: true } } },
+  }],
+  // The one where the order of operations decides the answer. `Account`'s FK is
+  // `ON DELETE SET NULL`, so a count taken *after* the statement is 0 and one
+  // taken before it is 2 — which is why a `delete` carrying a `_count` is read
+  // first, the same way one carrying an `include` already was.
+  //
+  // **Discriminating on Postgres only, and the reason is its own bug.** Bun's
+  // SQLite driver leaves `pragma foreign_keys` at 0 and nothing in gemi turns it
+  // on, so no referential action ever fires there: the accounts keep pointing at
+  // the deleted user and a count taken after the delete would read 2 as well.
+  // Prisma enables the pragma, so the two disagree about the *table* — #89, and
+  // the reason this case compares `User` alone rather than asserting a
+  // difference that is really about foreign keys.
+  ["delete with _count", "delete", {
+    where: { publicId: "p1" },
+    include: { _count: { select: { accounts: true } } },
+  }],
+
   // --- foreign keys (#89) -----------------------------------------------
   //
   // Every one of these **succeeded on SQLite** before the pragma was turned on,
@@ -288,6 +353,9 @@ function suite(label: string, url?: string) {
       differential = await createDifferential({
         models: {
           User: UserModel as never,
+          Post: PostModel as never,
+          Tag: TagModel as never,
+          Membership: MembershipModel as never,
           SocialAccount: SocialAccountModel as never,
           Account: AccountModel as never,
           Organization: OrganizationModel as never,
@@ -318,6 +386,222 @@ function suite(label: string, url?: string) {
         },
         { tables: ["Organization"] },
       );
+    });
+
+    /**
+     * Implicit many-to-many writes (#66), against a **real Prisma client**.
+     *
+     * The existing m-n coverage builds its own tables and asserts Prisma's
+     * *documented* shape — adequate for reads and thin for writes, where the
+     * failure is a value landing in the wrong column of a join table nobody
+     * looks at, and a fixture asserting its own expectations agrees with it.
+     * Comparing the table contents afterwards is what catches that.
+     */
+    describe("an implicit many-to-many", () => {
+      const seedTags = async () => {
+        await differential.reset();
+        await differential.prisma.tag.createMany({
+          data: [{ label: "red" }, { label: "blue" }, { label: "green" }],
+        });
+      };
+
+      test("connect attaches existing rows", async () => {
+        await seedTags();
+        await differential.expectSameWrite(
+          "Post",
+          "create",
+          {
+            data: {
+              title: "first",
+              tags: { connect: [{ label: "red" }, { label: "blue" }] },
+            },
+            include: { tags: { orderBy: { id: "asc" } } },
+          },
+          { tables: ["Post", "Tag"] },
+        );
+      });
+
+      test("create writes the child and the pair", async () => {
+        await seedTags();
+        await differential.expectSameWrite(
+          "Post",
+          "create",
+          {
+            data: { title: "second", tags: { create: [{ label: "fresh" }] } },
+            include: { tags: { orderBy: { id: "asc" } } },
+          },
+          { tables: ["Post", "Tag"] },
+        );
+      });
+
+      test("connect and create together", async () => {
+        await seedTags();
+        await differential.expectSameWrite(
+          "Post",
+          "create",
+          {
+            data: {
+              title: "third",
+              tags: { connect: [{ label: "red" }], create: [{ label: "novel" }] },
+            },
+            include: { tags: { orderBy: { id: "asc" } } },
+          },
+          { tables: ["Post", "Tag"] },
+        );
+      });
+
+      test("disconnect removes one pair and leaves the row", async () => {
+        await seedTags();
+        await differential.prisma.post.create({
+          data: {
+            title: "existing",
+            tags: { connect: [{ label: "red" }, { label: "blue" }] },
+          },
+        });
+
+        await differential.expectSameWrite(
+          "Post",
+          "update",
+          {
+            where: { id: 1 },
+            data: { tags: { disconnect: [{ label: "red" }] } },
+            include: { tags: { orderBy: { id: "asc" } } },
+          },
+          { tables: ["Post", "Tag"] },
+        );
+      });
+
+      /** Two statements — delete then insert — inside the step's transaction. */
+      test("set replaces the whole set", async () => {
+        await seedTags();
+        await differential.prisma.post.create({
+          data: { title: "existing", tags: { connect: [{ label: "red" }] } },
+        });
+
+        await differential.expectSameWrite(
+          "Post",
+          "update",
+          {
+            where: { id: 1 },
+            data: { tags: { set: [{ label: "blue" }, { label: "green" }] } },
+            include: { tags: { orderBy: { id: "asc" } } },
+          },
+          { tables: ["Post", "Tag"] },
+        );
+      });
+
+      test("set to nothing clears them", async () => {
+        await seedTags();
+        await differential.prisma.post.create({
+          data: { title: "existing", tags: { connect: [{ label: "red" }] } },
+        });
+
+        await differential.expectSameWrite(
+          "Post",
+          "update",
+          {
+            where: { id: 1 },
+            data: { tags: { set: [] } },
+            include: { tags: true },
+          },
+          { tables: ["Post", "Tag"] },
+        );
+      });
+
+      /**
+       * Prisma treats a repeated `connect` as a no-op. Without
+       * `on conflict do nothing` the pair's primary key makes it a raw driver
+       * unique violation — neither Prisma's behaviour nor a useful one.
+       */
+      test("connecting the same pair twice is a no-op", async () => {
+        await seedTags();
+        await differential.prisma.post.create({
+          data: { title: "existing", tags: { connect: [{ label: "red" }] } },
+        });
+
+        await differential.expectSameWrite(
+          "Post",
+          "update",
+          {
+            where: { id: 1 },
+            data: { tags: { connect: [{ label: "red" }] } },
+            include: { tags: true },
+          },
+          { tables: ["Post", "Tag"] },
+        );
+      });
+
+      /** The far direction: the same relation written from `Tag`. */
+      test("the relation writes from the other side too", async () => {
+        await seedTags();
+        await differential.prisma.post.create({ data: { title: "a" } });
+
+        await differential.expectSameWrite(
+          "Tag",
+          "update",
+          {
+            where: { label: "red" },
+            data: { posts: { connect: [{ id: 1 }] } },
+            include: { posts: true },
+          },
+          { tables: ["Post", "Tag"] },
+        );
+      });
+    });
+
+    /**
+     * A compound `@@id`, which was unreachable by key at all (#80): the
+     * compound form was rejected as an unknown field and the field-by-field
+     * form for not naming a unique key, each error pointing at the other.
+     *
+     * Against Prisma, so the *shape* of the compound argument is its answer
+     * rather than mine — including `upsert`, which compiles the key into an
+     * `on conflict` target and would resolve against the wrong constraint if it
+     * named the wrong columns.
+     */
+    describe("a compound @@id", () => {
+      const key = { organizationId_userId: { organizationId: 1, userId: 7 } };
+
+      test("findUnique by the compound key", async () => {
+        await differential.reset();
+        await differential.prisma.membership.create({
+          data: { organizationId: 1, userId: 7, role: 0 },
+        });
+
+        await differential.expectSame("Membership", "findUnique", { where: key });
+        await differential.expectSame("Membership", "findUnique", {
+          where: { organizationId_userId: { organizationId: 9, userId: 9 } },
+        });
+      });
+
+      test.each([
+        ["update", { where: key, data: { role: 1 } }],
+        ["delete", { where: key }],
+        [
+          "upsert inserting",
+          {
+            where: { organizationId_userId: { organizationId: 2, userId: 8 } },
+            create: { organizationId: 2, userId: 8, role: 1 },
+            update: { role: 2 },
+          },
+        ],
+        [
+          "upsert updating",
+          { where: key, create: { organizationId: 1, userId: 7 }, update: { role: 2 } },
+        ],
+      ])("%s by the compound key", async (_label, args) => {
+        await differential.reset();
+        await differential.prisma.membership.create({
+          data: { organizationId: 1, userId: 7, role: 0 },
+        });
+
+        await differential.expectSameWrite(
+          "Membership",
+          _label.startsWith("upsert") ? "upsert" : (_label as string),
+          args,
+          { tables: ["Membership"] },
+        );
+      });
     });
 
     /**
@@ -590,6 +874,57 @@ function suite(label: string, url?: string) {
             accounts: { create: { organizationRole: 1 } },
           },
           include: { accounts: true },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    /**
+     * A `_count` beside the `include` that produced the children.
+     *
+     * The count is a correlated subquery inside the write's own `RETURNING`, so
+     * it is evaluated before any `after` step has run — while `include` is
+     * attached after them. Unfixed, the two keys describe the same relation on
+     * the same row and disagree:
+     *
+     *     accounts.length  2
+     *     _count           { accounts: 0 }
+     *
+     * Asserting both in one comparison is the point: a test that checked only
+     * `_count` would pass against a version that also lost the children, and one
+     * that checked only `accounts` never saw the bug at all.
+     */
+    test("a _count beside a nested create counts what the steps wrote", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "create",
+        {
+          data: {
+            email: "counted-nested@example.dev",
+            accounts: {
+              create: [{ organizationRole: 1 }, { organizationRole: 2 }],
+            },
+          },
+          include: {
+            accounts: true,
+            _count: { select: { accounts: true } },
+          },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    /** The same, through `select`, where `_count` is the only key asked for. */
+    test("a _count in a select sees the nested create too", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "create",
+        {
+          data: {
+            email: "counted-select@example.dev",
+            accounts: { create: { organizationRole: 1 } },
+          },
+          select: { email: true, _count: { select: { accounts: true } } },
         },
         { tables: ["User", "Account"] },
       );

@@ -162,7 +162,7 @@ describe("planning", () => {
     expect(plan.relations![0]).toMatchObject({
       as: "accounts",
       kind: "many",
-      parentField: "id",
+      parentFields: ["id"],
       strategy: "batched",
     });
   });
@@ -172,11 +172,11 @@ describe("planning", () => {
     expect(compile({ include: { organization: true } }).relations![0]).toMatchObject({
       as: "organization",
       kind: "one",
-      parentField: "organizationId",
+      parentFields: ["organizationId"],
     });
-    expect(compile({ include: { accounts: true } }).relations![0].parentField).toBe(
-      "id",
-    );
+    expect(
+      compile({ include: { accounts: true } }).relations![0].parentFields,
+    ).toEqual(["id"]);
   });
 
   test("a select that omits the join key still fetches it, hidden", () => {
@@ -602,7 +602,7 @@ describe("implicit many-to-many", () => {
       as: "tags",
       kind: "many",
       // Both sides join on their own primary key; the join table holds the pair.
-      parentField: "id",
+      parentFields: ["id"],
     });
     expect(plan.text).toBe('select "id", "title" from "Post"');
   });
@@ -702,7 +702,7 @@ describe("root contributions", () => {
       plan: {
         as: "accounts",
         kind: "many" as const,
-        parentField: "id",
+        parentFields: ["id"],
         strategy: "test",
         root,
         load: async () => {

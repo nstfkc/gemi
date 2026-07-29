@@ -146,6 +146,124 @@ export const Account: ModelSchema = {
   }
 };
 
+export const Ledger: ModelSchema = {
+  "name": "Ledger",
+  "table": "Ledger",
+  "fields": {
+    "tenantId": {
+      "name": "tenantId",
+      "column": "tenantId",
+      "type": "Int",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false
+    },
+    "code": {
+      "name": "code",
+      "column": "code",
+      "type": "String",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false
+    },
+    "title": {
+      "name": "title",
+      "column": "title",
+      "type": "String",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false
+    }
+  },
+  "primaryKey": [
+    "tenantId",
+    "code"
+  ],
+  "uniques": [],
+  "relations": {
+    "entries": {
+      "name": "entries",
+      "model": "LedgerEntry",
+      "kind": "many",
+      "relationName": "LedgerToLedgerEntry",
+      "from": [],
+      "to": [],
+      "nullable": false
+    }
+  }
+};
+
+export const LedgerEntry: ModelSchema = {
+  "name": "LedgerEntry",
+  "table": "LedgerEntry",
+  "fields": {
+    "id": {
+      "name": "id",
+      "column": "id",
+      "type": "Int",
+      "nullable": false,
+      "isId": true,
+      "isUpdatedAt": false,
+      "default": {
+        "kind": "autoincrement"
+      }
+    },
+    "tenantId": {
+      "name": "tenantId",
+      "column": "tenantId",
+      "type": "Int",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false
+    },
+    "ledgerCode": {
+      "name": "ledgerCode",
+      "column": "ledgerCode",
+      "type": "String",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false
+    },
+    "amount": {
+      "name": "amount",
+      "column": "amount",
+      "type": "Int",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false
+    },
+    "memo": {
+      "name": "memo",
+      "column": "memo",
+      "type": "String",
+      "nullable": true,
+      "isId": false,
+      "isUpdatedAt": false
+    }
+  },
+  "primaryKey": [
+    "id"
+  ],
+  "uniques": [],
+  "relations": {
+    "ledger": {
+      "name": "ledger",
+      "model": "Ledger",
+      "kind": "one",
+      "relationName": "LedgerToLedgerEntry",
+      "from": [
+        "tenantId",
+        "ledgerCode"
+      ],
+      "to": [
+        "tenantId",
+        "code"
+      ],
+      "nullable": false
+    }
+  }
+};
+
 export const MagicLinkToken: ModelSchema = {
   "name": "MagicLinkToken",
   "table": "MagicLinkToken",
@@ -210,6 +328,58 @@ export const MagicLinkToken: ModelSchema = {
       "email"
     ]
   ],
+  "relations": {}
+};
+
+export const Membership: ModelSchema = {
+  "name": "Membership",
+  "table": "Membership",
+  "fields": {
+    "organizationId": {
+      "name": "organizationId",
+      "column": "organizationId",
+      "type": "Int",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false
+    },
+    "userId": {
+      "name": "userId",
+      "column": "userId",
+      "type": "Int",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false
+    },
+    "role": {
+      "name": "role",
+      "column": "role",
+      "type": "Int",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false,
+      "default": {
+        "kind": "value",
+        "value": 2
+      }
+    },
+    "createdAt": {
+      "name": "createdAt",
+      "column": "createdAt",
+      "type": "DateTime",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false,
+      "default": {
+        "kind": "now"
+      }
+    }
+  },
+  "primaryKey": [
+    "organizationId",
+    "userId"
+  ],
+  "uniques": [],
   "relations": {}
 };
 
@@ -470,6 +640,52 @@ export const PasswordResetToken: ModelSchema = {
   }
 };
 
+export const Post: ModelSchema = {
+  "name": "Post",
+  "table": "Post",
+  "fields": {
+    "id": {
+      "name": "id",
+      "column": "id",
+      "type": "Int",
+      "nullable": false,
+      "isId": true,
+      "isUpdatedAt": false,
+      "default": {
+        "kind": "autoincrement"
+      }
+    },
+    "title": {
+      "name": "title",
+      "column": "title",
+      "type": "String",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false
+    }
+  },
+  "primaryKey": [
+    "id"
+  ],
+  "uniques": [],
+  "relations": {
+    "tags": {
+      "name": "tags",
+      "model": "Tag",
+      "kind": "many",
+      "relationName": "PostToTag",
+      "from": [],
+      "to": [],
+      "nullable": false,
+      "joinTable": {
+        "table": "_PostToTag",
+        "a": "Post",
+        "b": "Tag"
+      }
+    }
+  }
+};
+
 export const Session: ModelSchema = {
   "name": "Session",
   "table": "Session",
@@ -699,6 +915,56 @@ export const SocialAccount: ModelSchema = {
         "id"
       ],
       "nullable": false
+    }
+  }
+};
+
+export const Tag: ModelSchema = {
+  "name": "Tag",
+  "table": "Tag",
+  "fields": {
+    "id": {
+      "name": "id",
+      "column": "id",
+      "type": "Int",
+      "nullable": false,
+      "isId": true,
+      "isUpdatedAt": false,
+      "default": {
+        "kind": "autoincrement"
+      }
+    },
+    "label": {
+      "name": "label",
+      "column": "label",
+      "type": "String",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false
+    }
+  },
+  "primaryKey": [
+    "id"
+  ],
+  "uniques": [
+    [
+      "label"
+    ]
+  ],
+  "relations": {
+    "posts": {
+      "name": "posts",
+      "model": "Post",
+      "kind": "many",
+      "relationName": "PostToTag",
+      "from": [],
+      "to": [],
+      "nullable": false,
+      "joinTable": {
+        "table": "_PostToTag",
+        "a": "Post",
+        "b": "Tag"
+      }
     }
   }
 };

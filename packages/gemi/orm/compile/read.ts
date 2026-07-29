@@ -1,5 +1,9 @@
 import type { SqlDialect } from "../dialect";
-import { UnsupportedQueryError } from "../errors";
+import {
+  InvalidArgumentError,
+  UnsupportedByDesignError,
+  UnsupportedQueryError,
+} from "../errors";
 import type { Operation, QueryPlan } from "../plan";
 import type { ModelSchema } from "../schema";
 import { buildRowShaper } from "../shape";
@@ -25,9 +29,9 @@ import { pagination } from "./paginate";
 import { compileWhere } from "./where";
 
 /** Every read operation, and what each accepts. */
-const READ_ARGS: Record<string, Set<string>> = {
-  findMany: new Set(["where", "orderBy", "skip", "take", "select", "include"]),
-  findFirst: new Set(["where", "orderBy", "skip", "take", "select", "include"]),
+export const READ_ARGS: Record<string, Set<string>> = {
+  findMany: new Set(["where", "orderBy", "skip", "take", "select", "include", "omit"]),
+  findFirst: new Set(["where", "orderBy", "skip", "take", "select", "include", "omit"]),
   findFirstOrThrow: new Set([
     "where",
     "orderBy",
@@ -35,14 +39,44 @@ const READ_ARGS: Record<string, Set<string>> = {
     "take",
     "select",
     "include",
+    "omit",
   ]),
-  findUnique: new Set(["where", "select", "include"]),
-  findUniqueOrThrow: new Set(["where", "select", "include"]),
+  findUnique: new Set(["where", "select", "include", "omit"]),
+  findUniqueOrThrow: new Set(["where", "select", "include", "omit"]),
   // `select` on a count returns an object of per-field counts rather than a
   // number — `{ _all: 3, email: 2 }`. It was refused here while there was no
   // aggregate to put it beside; now there is, and `compileAggregate` owns it,
-  // so this only has to let it through.
+  // so this only has to let it through. No `omit`: it is `select`'s complement
+  // over a *row*, and a count returns counts rather than rows.
   count: new Set(["where", "orderBy", "skip", "take", "select"]),
+};
+
+/**
+ * The two read arguments that are **not coming**, and what to reach for.
+ *
+ * Both are decisions rather than gaps, and both were made against measurements
+ * of what Prisma actually does rather than against its documentation.
+ *
+ * `docs/orm.md` says the same. An argument that says "yet" while the docs say
+ * "not in scope" is the contradiction #68 exists to end — a caller cannot plan
+ * around a refusal that might lift next release.
+ */
+const PERMANENTLY_REFUSED: Record<string, string> = {
+  distinct:
+    `Prisma's 'distinct' is applied **in memory**, not in SQL — its query log ` +
+    `shows no DISTINCT at all, and 'take' therefore does not reduce the rows ` +
+    `pulled or paginate by group. Reproducing that faithfully would mean ` +
+    `reading the whole result set and deduplicating in JavaScript behind an ` +
+    `argument that reads like a database operation. Implementing it as a real ` +
+    `'DISTINCT ON' instead would be a silent divergence from Prisma. Write it ` +
+    `as SQL instead, with 'sql' and 'DB.query' — where what runs is what you ` +
+    `wrote, and 'distinct on' means what the database means by it.`,
+  cursor:
+    `'cursor' is only correct under a *total* ordering, which Prisma does not ` +
+    `enforce — under a non-unique 'orderBy' it silently skips or repeats rows ` +
+    `at the page boundary. For a stable page use 'take' with a 'where' on the ` +
+    `last row's sort key, or compose the keyset comparison with 'sql' and ` +
+    `'DB.query'.`,
 };
 
 export function isReadOperation(op: Operation): boolean {
@@ -297,7 +331,7 @@ function assertArgs(schema: ModelSchema, op: Operation, args: any): void {
   if (args === undefined || args === null) return;
 
   if (typeof args !== "object" || Array.isArray(args)) {
-    throw new UnsupportedQueryError(
+    throw new InvalidArgumentError(
       String(args),
       schema.name,
       op,
@@ -319,8 +353,18 @@ function assertArgs(schema: ModelSchema, op: Operation, args: any): void {
   const allowed = READ_ARGS[op];
   for (const key of Object.keys(args).sort()) {
     if (args[key] === undefined) continue;
-    if (!allowed.has(key)) {
-      throw new UnsupportedQueryError(key, schema.name, op);
+    if (allowed.has(key)) continue;
+
+    const permanent = PERMANENTLY_REFUSED[key];
+    if (permanent) {
+      throw new UnsupportedByDesignError(key, schema.name, op, permanent);
     }
+
+    throw new UnsupportedQueryError(
+      key,
+      schema.name,
+      op,
+      `${op} takes ${[...allowed].sort().join(", ")}.`,
+    );
   }
 }
