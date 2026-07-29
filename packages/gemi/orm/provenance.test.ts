@@ -7,6 +7,7 @@ import {
   provenanceOf,
   resnapshot,
   track,
+  untracked,
 } from "./provenance";
 
 /**
@@ -134,6 +135,115 @@ describe("what counts as changed", () => {
 
     row.createdAt = new Date("2024-06-01T00:00:00Z");
     expect(changedFields(row, user)).toHaveProperty("createdAt");
+  });
+
+  /**
+   * ...and against something that is *not* a Date.
+   *
+   * The guard is `a instanceof Date && b instanceof Date`, and the `&&` could
+   * be an `||` with every test still passing — found by mutation testing. Under
+   * that mutation a Date compared with a string calls `getTime` on the string
+   * and throws from inside a dirty check, which is a long way from where the
+   * caller made the mistake.
+   *
+   * Reachable for real: a `Json` column can hold a date-shaped string, and a
+   * caller assigning `"2024-01-01"` over a fetched `Date` is an ordinary slip.
+   */
+  test.each([
+    ["a string", "2024-01-01T00:00:00Z"],
+    ["a number", 1704067200000],
+    ["null", null],
+  ])("a Date replaced by %s is dirty, not an error", (_label, replacement) => {
+    const row: any = { id: 1, createdAt: new Date("2024-01-01T00:00:00Z") };
+    track(row, user);
+
+    row.createdAt = replacement;
+    expect(changedFields(row, user)).toEqual({ createdAt: replacement });
+  });
+
+  /** ...and the reverse: a non-Date snapshot replaced by a Date. */
+  test("a Date arriving where one was not is dirty", () => {
+    const row: any = { id: 1, createdAt: "2024-01-01T00:00:00Z" };
+    track(row, user);
+
+    const replacement = new Date("2024-01-01T00:00:00Z");
+    row.createdAt = replacement;
+    expect(changedFields(row, user)).toEqual({ createdAt: replacement });
+  });
+
+  /**
+   * **`Bytes` columns**, which the dirty check compares byte-wise for the same
+   * reason it compares Dates by instant — and which nothing exercised at all.
+   *
+   * Prisma maps `Bytes` to `Uint8Array`, so every value is a fresh view and
+   * `!==` is always true. Without the byte-wise branch, every `save` of a row
+   * carrying one would rewrite it. Three mutants in that branch survived the
+   * whole suite before this, because no test ever entered it.
+   */
+  describe("a Bytes column", () => {
+    const bytes = {
+      ...user,
+      fields: { ...user.fields, password: { ...user.fields.password, type: "Bytes" } },
+    };
+
+    const compare = (before: unknown, after: unknown) => {
+      const row: any = { id: 1, password: before };
+      track(row, bytes);
+      row.password = after;
+      return changedFields(row, bytes);
+    };
+
+    test("equal bytes in different views are not dirty", () => {
+      expect(compare(new Uint8Array([1, 2, 3]), new Uint8Array([1, 2, 3]))).toEqual({});
+    });
+
+    test("a differing byte is dirty", () => {
+      const after = new Uint8Array([1, 2, 4]);
+      expect(compare(new Uint8Array([1, 2, 3]), after)).toEqual({ password: after });
+    });
+
+    // The length check is its own branch, and a prefix is the case that would
+    // pass a naive element-wise loop.
+    test("a shorter value with the same prefix is dirty", () => {
+      const after = new Uint8Array([1, 2]);
+      expect(compare(new Uint8Array([1, 2, 3]), after)).toEqual({ password: after });
+    });
+
+    test("a longer value with the same prefix is dirty", () => {
+      const after = new Uint8Array([1, 2, 3, 4]);
+      expect(compare(new Uint8Array([1, 2, 3]), after)).toEqual({ password: after });
+    });
+
+    // A view over a larger buffer: `byteOffset` and `byteLength` have to be
+    // honoured or the comparison reads the wrong window.
+    test("a view into a larger buffer compares only its own window", () => {
+      const buffer = new Uint8Array([9, 9, 1, 2, 3, 9]).buffer;
+      const view = new Uint8Array(buffer, 2, 3);
+      expect(compare(new Uint8Array([1, 2, 3]), view)).toEqual({});
+    });
+
+    test("bytes replaced by null are dirty", () => {
+      expect(compare(new Uint8Array([1, 2, 3]), null)).toEqual({ password: null });
+    });
+  });
+
+  /**
+   * `untracked`'s message names **what the caller actually passed**, because
+   * the two causes it distinguishes have different fixes: a query that did not
+   * ask for tracking, versus a copy of a row that did.
+   *
+   * That naming was untested — mutation testing flipped the null/undefined
+   * branch with the suite still passing. A diagnostic nobody asserts is a
+   * diagnostic that can quietly start saying the wrong thing.
+   */
+  test.each([
+    ["null", null, "null"],
+    ["undefined", undefined, "undefined"],
+    ["an array", [1, 2], "an array"],
+    ["a string", "row", "string"],
+    ["a number", 7, "number"],
+  ])("save handed %s says so", (_label, value, expected) => {
+    expect(untracked(value, "User").message).toContain(expected);
   });
 
   /**

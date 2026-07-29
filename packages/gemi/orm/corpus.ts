@@ -26,6 +26,12 @@ export const READS: unknown[] = [
   { where: { id: { in: [1, 2] } } },
   { where: { id: { in: [1, 2, 3] } } },
   { where: { id: { notIn: [1] } } },
+  // An empty list keeps its own plan key: `in: []` compiles to a constant-false
+  // predicate rather than `= any($1)`, which is a different statement. Found by
+  // mutation testing — `collapsedList`'s `length === 0` could be inverted with
+  // nothing noticing, because the corpus had no empty list in it.
+  { where: { id: { in: [] } } },
+  { where: { id: { notIn: [] } } },
   { where: { name: { contains: "a", mode: "insensitive" } } },
   { where: { AND: [{ id: 1 }, { name: "a" }] } },
   { where: { OR: [{ id: 1 }, { name: "a" }] } },
