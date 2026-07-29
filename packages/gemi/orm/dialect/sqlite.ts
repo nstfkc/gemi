@@ -8,6 +8,7 @@ import {
   sql,
 } from "../compile/fragment";
 import { DecodeError } from "../errors";
+import { jsonNullKind } from "../json-null";
 import type { FieldSchema } from "../schema";
 import type { ConstraintViolation, SqlDialect } from "./index";
 
@@ -235,6 +236,15 @@ export class SqliteDialect implements SqlDialect {
         // `JSON.stringify` on every value is unambiguous: a string becomes
         // `"42"` with its quotes, which is what `JSON.parse` needs to hand back
         // a string. The mirror of `decode`, which parses unconditionally.
+        //
+        // Except Prisma's two null sentinels, which have no enumerable
+        // properties and would serialise to `{}` — see `json-null.ts`.
+        // `DbNull` is the column being NULL; `JsonNull` is the JSON value.
+        {
+          const kind = jsonNullKind(value);
+          if (kind === "db") return null;
+          if (kind === "json") return "null";
+        }
         return JSON.stringify(value);
       default:
         // BigInt passes through. Bun's driver truncates integers above 2^53 on
