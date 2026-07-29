@@ -186,9 +186,20 @@ jobs:
         run: bunx prisma db push --skip-generate
         working-directory: templates/saas-starter
 
+      # `-t postgres` selects the dialect-labelled suites, and it is required
+      # rather than tidy. With `TEST_POSTGRES_URL` set, the harness makes the
+      # *SQLite* half **fail** rather than skip — deliberately, so a client
+      # generated for the wrong provider cannot look like a pass. Run unfiltered,
+      # this job reports "877 passed" and still exits 1, because three suites
+      # error at collection.
+      #
+      # So this job runs the Postgres-labelled suites and the `sqlite` job runs
+      # the rest. The dialect-agnostic tests are that job's business; nothing is
+      # left uncovered between them.
+      #
       # Serially: the harness truncates shared tables between cases, so parallel
       # files clobber each other's fixtures. Measured — the parallel run fails
       # with row-count differences that have nothing to do with the code.
       - name: Differential and policy suites
-        run: bun --bun vitest run app/models --no-file-parallelism
+        run: bun --bun vitest run app/models --no-file-parallelism -t postgres
         working-directory: templates/saas-starter
