@@ -83,6 +83,8 @@ const SUPPORTED = new Set([
   "delete",
   "update",
   "set",
+  "updateMany",
+  "deleteMany",
 ]);
 
 /**
@@ -93,7 +95,14 @@ const SUPPORTED = new Set([
  * row that does not exist yet. Refused here rather than accepted and made a
  * no-op, so a caller who wrote one on the wrong operation hears about it.
  */
-const EXISTING_ROW_ONLY = new Set(["disconnect", "delete", "update", "set"]);
+const EXISTING_ROW_ONLY = new Set([
+  "disconnect",
+  "delete",
+  "update",
+  "set",
+  "updateMany",
+  "deleteMany",
+]);
 
 /** Statements that insert a new row, so nothing is linked to it yet. */
 const CREATE_ONLY_STATEMENTS = new Set(["create", "createMany"]);
@@ -108,11 +117,6 @@ const CREATE_ONLY_STATEMENTS = new Set(["create", "createMany"]);
  * key, and none of it has to reason about what was there before.
  */
 const REFUSED: Record<string, string> = {
-  deleteMany: `It deletes rows this call did not name.`,
-  updateMany:
-    `It writes caller-supplied columns to rows this call did not name — a ` +
-    `predicate, not a key — so there is no lookup for the child's scope to ` +
-    `narrow. 'update' names its row and is implemented.`,
   upsert:
     `It is 'update' and 'connectOrCreate' at once and needs a third thing ` +
     `neither has: deciding which branch ran, from inside a nested step.`,
@@ -725,6 +729,75 @@ function planForeignSide(
    * one the caller did. #99 fixes that for every relation operand at once, and
    * this needs no change when it lands.
    */
+  /**
+   * `updateMany` and `deleteMany` — a **filter**, applied to this parent's rows.
+   *
+   * These were the last two refused on the "names a predicate rather than a
+   * row" reading of #94's line, and that reading was too strong. What the line
+   * is really asking is whether there is a `where` the child's scope can be
+   * `AND`ed into — and a predicate is exactly that. Both operations are in
+   * `SCOPABLE`, so routing them through the child's own `$exec` gives the scope
+   * on which rows match, and `updateMany` gets `onUpdate` and the scope-escape
+   * guard over its payload, the same way #101's `update` does.
+   *
+   * The parent key goes into the filter for the same reason it does everywhere
+   * else here: Prisma applies these to *this* parent's children only, verified
+   * before implementing, and without it a `deleteMany: {}` would empty the
+   * table.
+   *
+   * **The two operands are shaped differently**, which is easy to get backwards:
+   *
+   *     updateMany: { where: { … }, data: { … } }
+   *     deleteMany: { … }                            the filter directly
+   *
+   * `upsert` stays refused, and its reason is the one that has not moved: it
+   * needs to know which branch ran from inside a nested step, which neither
+   * half of it provides.
+   */
+  if (key === "updateMany" || key === "deleteMany") {
+    const updating = key === "updateMany";
+    assertManyOperand(schema, relation, operand, key, operation);
+
+    out.after.push({
+      relation: relation.name,
+      operation: key,
+      async run(args, _context, executor, rows) {
+        const parent = rows[0];
+        if (!parent) return;
+
+        const operandAt = at(args) as Record<string, unknown>;
+        const filter = updating ? operandAt?.where : operandAt;
+
+        // **`AND`, not a spread.** A spread lets the parent key *overwrite* a
+        // caller filter naming the same column: `deleteMany: { userId: 9 }` on
+        // this parent's relation became `{ userId: <this parent> }`, so a query
+        // asking for children belonging to somebody else deleted every one of
+        // this parent's instead. Silent, and in the deleting direction.
+        //
+        // Prisma conjoins — measured, because the whole question is what it
+        // does rather than what is tidy:
+        //
+        //   deleteMany { userId: <other> }  ->  nothing deleted
+        //
+        // Conjoining also keeps the parent restriction *unforgeable* while
+        // letting the caller's predicate narrow, which is exactly what
+        // `withScope` does for a policy fragment and for the same reason.
+        const where = conjoin(filter, { [childField]: parent[parentField] });
+
+        await executor.exec(
+          relation.model,
+          key,
+          updating ? { where, data: operandAt?.data } : { where },
+          // NOT pre-scoped. The child's scope narrows which rows match, and for
+          // `updateMany` its `onUpdate` and scope-escape guard judge the
+          // payload — which is the whole reason these are expressible.
+          false,
+        );
+      },
+    });
+    return;
+  }
+
   if (key === "set") {
     assertNamedRows(schema, relation, child, operand, "set", operation);
     assertDisconnectable(child, relation, childField, operation);
@@ -786,11 +859,12 @@ function planForeignSide(
           const entry = list[index] as Record<string, unknown>;
           // The caller's key *and* the link, so an `update` cannot reach a row
           // attached to a different parent — the same filter `delete` uses,
-          // and it does the same two jobs.
-          const where = {
-            ...(entry.where as object),
+          // and it does the same two jobs. `AND` rather than a spread for the
+          // reason `updateMany` documents: a key naming the foreign column
+          // itself would otherwise be overwritten rather than honoured.
+          const where = conjoin(entry.where, {
             [childField]: parent[parentField],
-          };
+          });
 
           const found = (await executor.exec(
             relation.model,
@@ -843,11 +917,11 @@ function planForeignSide(
 
         for (let index = 0; index < list.length; index++) {
           // The caller's key *and* the link, so neither operand can reach a row
-          // attached to a different parent.
-          const where = {
-            ...(list[index] as object),
+          // attached to a different parent. `AND` rather than a spread — see
+          // `updateMany`.
+          const where = conjoin(list[index], {
             [childField]: parent[parentField],
-          };
+          });
 
           if (!deleting) {
             await executor.exec(
@@ -1116,13 +1190,83 @@ function planForeignSide(
   });
 }
 
-/** What an implicit many-to-many accepts, which is wider than an ordinary relation. */
+/**
+ * What an implicit many-to-many accepts, and how it differs from
+ * {@link SUPPORTED} — which is the ordinary-relation set.
+ *
+ * **The two must be reconciled deliberately.** `planOne` checks `link.join`
+ * first and returns, so this path never consults `SUPPORTED` at all: the sets
+ * drift without anything failing to compile and without a test noticing, and
+ * they did — #83 landed this one while four branches were adding to the other,
+ * none of which could see it from inside itself.
+ *
+ * **The gaps are unimplemented, not by design, and that is measured rather than
+ * reasoned.** An earlier version of this comment claimed the split was "the
+ * link versus the far row" — operands about the pair work here, operands about
+ * the far row do not. It is a tidy rule and it is wrong. Prisma offers five of
+ * the six through an implicit m-n:
+ *
+ *     update           OK   the far row is updated
+ *     delete           OK   the far row is deleted, not just the pair
+ *     deleteMany       OK
+ *     updateMany       OK
+ *     connectOrCreate  OK
+ *     createMany       Unknown argument — Prisma refuses it here too
+ *
+ * So `delete` through a join table really does mean deleting the far row, which
+ * is the opposite of what that rule predicted. Only `createMany` is a genuine
+ * refusal, and it is Prisma's rather than ours.
+ *
+ * `connectOrCreate` is implemented here because #83 already had both of its
+ * halves — `connect` inserts a pair for an existing row, `create` writes the
+ * row and its pair — so it is those two selected by a lookup. The remaining
+ * four reach the far row *through* the pairs, which is a second hop this path
+ * does not have yet; {@link JOIN_TABLE_REFUSED} says so in those terms rather
+ * than inventing a principle.
+ *
+ * `set` is the one operand with **two implementations** — this file's
+ * join-table version from #83 and the ordinary-relation one — and they agree
+ * because both were reasoned to "replace the set I can see" independently, not
+ * because they share anything. Worth knowing when either is changed.
+ */
 const JOIN_TABLE_SUPPORTED = new Set([
   "connect",
+  "connectOrCreate",
   "disconnect",
   "set",
   "create",
 ]);
+
+/**
+ * Why each ordinary-relation operand is not offered through a join table.
+ *
+ * Same shape as {@link REFUSED}, and for the same reason: "not implemented" is
+ * much less useful than knowing whether the thing you reached for is a rewrite
+ * or a wait — and here most of them are neither, they are a different operation
+ * wearing the same name.
+ */
+const JOIN_TABLE_REFUSED: Record<string, string> = {
+  // Prisma's own refusal, not this ORM's — the one entry here that is a
+  // decision rather than a gap, and it is not gemi's decision.
+  createMany:
+    `Prisma does not offer 'createMany' through an implicit many-to-many ` +
+    `either — it reports it as an unknown argument. Use 'create', which writes ` +
+    `the row and its pair.`,
+  // The four that reach the far row through the pairs. Prisma implements all
+  // of them; this path does not have the second hop yet.
+  update:
+    `Reaching the far row means reading the pairs first, which this path does ` +
+    `not do yet. Update the related model directly, filtered by its own key.`,
+  updateMany:
+    `As 'update': it needs the pairs read before the far rows can be matched.`,
+  delete:
+    `It deletes the far row rather than the pair — Prisma does this through a ` +
+    `join table too — and reaching it means reading the pairs first, which ` +
+    `this path does not do yet. Use 'disconnect' to remove the link, or delete ` +
+    `the row through its own model.`,
+  deleteMany:
+    `As 'delete': the far rows have to be found through the pairs first.`,
+};
 
 /**
  * Writes through Prisma's implicit many-to-many join table.
@@ -1162,7 +1306,29 @@ function planJoinTable(
   out: NestedWritePlanning,
   dialect: SqlDialect,
 ): void {
+  if (key === "connectOrCreate") {
+    assertConnectOrCreateOperand(
+      schema,
+      relation,
+      child,
+      operand,
+      operation,
+      relation.kind === "many",
+    );
+  }
+
   if (!JOIN_TABLE_SUPPORTED.has(key)) {
+    const why = JOIN_TABLE_REFUSED[key];
+    if (why) {
+      throw new UnsupportedQueryError(
+        `data.${relation.name}.${key}`,
+        schema.name,
+        operation,
+        `'${relation.name}' is an implicit many-to-many, and '${key}' means ` +
+          `something different through a join table. ${why}`,
+      );
+    }
+
     throw new UnsupportedQueryError(
       `data.${relation.name}.${key}`,
       schema.name,
@@ -1295,6 +1461,48 @@ function planJoinTable(
           continue;
         }
 
+        /**
+         * `connectOrCreate` is the two branches above selected by a lookup, so
+         * it needed no new machinery here — which is why it is the one of the
+         * five missing operands this change adds.
+         *
+         * `findUnique`, not the `findUniqueOrThrow` the `connect` path below
+         * uses: a miss is the *other branch* here rather than an error. And a
+         * scoped-away hit therefore takes the create branch, which is the same
+         * answer the ordinary-relation `connectOrCreate` gives and closes the
+         * same probe — `connect` raising where this succeeds would together
+         * confirm a row the caller cannot see.
+         */
+        if (key === "connectOrCreate") {
+          const entry = item as Record<string, unknown>;
+          matchUniqueKey(
+            child,
+            entry.where,
+            `${operation}.${relation.name}.connectOrCreate`,
+          );
+
+          const hit = (await executor.exec(
+            relation.model,
+            "findUnique",
+            { where: entry.where, select: { [childField]: true } },
+            false,
+          )) as Record<string, unknown> | null;
+
+          if (hit) {
+            childKeys.push(hit[childField]);
+            continue;
+          }
+
+          const made = (await executor.exec(
+            relation.model,
+            "create",
+            { data: entry.create, select: { [childField]: true } },
+            false,
+          )) as Record<string, unknown> | null;
+          if (made) childKeys.push(made[childField]);
+          continue;
+        }
+
         // `connect`, `disconnect` and `set` all name existing rows by a unique
         // key. Resolved through the child's own `$exec`, so its policies decide
         // which rows exist — otherwise a connect by any unique key reaches
@@ -1354,6 +1562,85 @@ async function runPairStatement(
   values: unknown[],
 ): Promise<void> {
   await executor.query(text, values);
+}
+
+/**
+ * The caller's filter and the parent restriction, as a conjunction.
+ *
+ * Never a spread. A spread merges by *key*, so a caller naming the foreign key
+ * column silently replaces the restriction that keeps the operand on this
+ * parent's rows — and the failure is a wider write, not an error. `AND` cannot
+ * be overwritten by any key the caller chooses, and it still lets their
+ * predicate narrow, which is the property `withScope` relies on for policy
+ * fragments.
+ *
+ * An empty or absent filter contributes nothing, so the common case is the
+ * restriction alone rather than `AND` of one thing.
+ */
+function conjoin(
+  filter: unknown,
+  restriction: Record<string, unknown>,
+): Record<string, unknown> {
+  if (
+    filter === undefined ||
+    filter === null ||
+    typeof filter !== "object" ||
+    Array.isArray(filter) ||
+    Object.keys(filter as object).length === 0
+  ) {
+    return restriction;
+  }
+  return { AND: [filter as object, restriction] };
+}
+
+/**
+ * The filter operands, which are shaped differently from each other.
+ *
+ * `updateMany` wraps its filter in `where` and carries a `data` beside it;
+ * `deleteMany` *is* the filter. Checked at plan time, so a caller who wrote one
+ * shape for the other hears about it before the parent row is written.
+ *
+ * `UnsupportedQueryError` here because that is what this branch has; both are
+ * argument *validation* and belong in #103's `InvalidArgumentError`. They need
+ * no edit when it lands — its conversion selects sites by whether their detail
+ * already says what a valid value looks like, and these say `Expected an
+ * object with 'where' and 'data'`.
+ */
+function assertManyOperand(
+  schema: ModelSchema,
+  relation: RelationSchema,
+  operand: unknown,
+  key: string,
+  operation: string,
+): void {
+  const at = `data.${relation.name}.${key}`;
+
+  if (typeof operand !== "object" || operand === null || Array.isArray(operand)) {
+    throw new UnsupportedQueryError(
+      at,
+      schema.name,
+      operation,
+      key === "updateMany"
+        ? `Expected an object with 'where' and 'data'.`
+        : `Expected an object of filters — 'deleteMany' takes the filter ` +
+          `directly, not wrapped in a 'where'.`,
+    );
+  }
+
+  if (key !== "updateMany") return;
+
+  const record = operand as Record<string, unknown>;
+  for (const required of ["where", "data"] as const) {
+    if (record[required] === undefined) {
+      throw new UnsupportedQueryError(
+        at,
+        schema.name,
+        operation,
+        `Expected a '${required}' key — 'updateMany' names which rows to ` +
+          `write and what to write to them.`,
+      );
+    }
+  }
 }
 
 /**

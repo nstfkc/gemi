@@ -9,7 +9,7 @@ import {
   UnknownFieldError,
   UnsupportedQueryError,
 } from "../errors";
-import { account, bare, organization, reading, user } from "../fixtures";
+import { account, bare, organization, post, reading, tag, user } from "../fixtures";
 import * as registry from "../registry";
 import { compileWrite } from "./write";
 
@@ -749,6 +749,9 @@ describe("nested writes", () => {
     registry.register("User", class { static $schema = user });
     registry.register("Account", class { static $schema = account });
     registry.register("Organization", class { static $schema = organization });
+    // The implicit many-to-many pair, for the two-operand-set reconciliation.
+    registry.register("Post", class { static $schema = post });
+    registry.register("Tag", class { static $schema = tag });
   });
 
   // The registry is process-global. Vitest isolates modules per file so this
@@ -825,20 +828,16 @@ describe("nested writes", () => {
     ).toThrow(/set both directly and through a nested relation write/);
   });
 
-  test.each([
-    "disconnect",
-    "update",
-    "upsert",
-    "delete",
-    "deleteMany",
-    "updateMany",
-  ])("%s is refused, naming itself", (operation) => {
-    expect(() =>
-      text("create", {
-        data: { email: "a@b.c", organization: { [operation]: {} } },
-      }),
-    ).toThrow(new RegExp(`data\\.organization\\.${operation}`));
-  });
+  test.each(["disconnect", "update", "upsert", "delete"])(
+    "%s is refused on a create, naming itself",
+    (operation) => {
+      expect(() =>
+        text("create", {
+          data: { email: "a@b.c", organization: { [operation]: {} } },
+        }),
+      ).toThrow(new RegExp(`data\\.organization\\.${operation}`));
+    },
+  );
 
   /**
    * The refusals now say *why*, which is the difference between "wait" and
@@ -847,11 +846,62 @@ describe("nested writes", () => {
    */
   test("a refusal explains what the operand would take", () => {
     expect(() =>
-      text("create", { data: { email: "a@b.c", accounts: { updateMany: {} } } }),
-    ).toThrow(/names a \*predicate\* rather than a row|predicate, not a key/);
+      text("create", { data: { email: "a@b.c", organization: { upsert: {} } } }),
+    ).toThrow(/deciding which branch ran/);
     expect(() =>
       text("create", { data: { email: "a@b.c", accounts: { deleteMany: {} } } }),
-    ).toThrow(/deletes rows this call did not name/);
+    ).toThrow(/has none yet/);
+  });
+
+  /**
+   * The two operand sets, reconciled — and asserted, because nothing else can
+   * see the divergence.
+   *
+   * `planOne` checks `link.join` first and returns, so the join-table path
+   * never consults `SUPPORTED`. The sets can drift with nothing failing to
+   * compile and no test noticing, which is exactly what happened while #83 and
+   * four other branches were in flight at once.
+   */
+  describe("ordinary relations and implicit many-to-many", () => {
+    const BOTH = ["connect", "connectOrCreate", "create", "disconnect", "set"];
+    const ORDINARY_ONLY = [
+      "createMany",
+      "delete",
+      "update",
+      "updateMany",
+      "deleteMany",
+    ];
+
+    /**
+     * The remaining gaps, each with a reason that says whether it is Prisma's
+     * refusal or this path's missing second hop — measured, not reasoned. An
+     * earlier version of this test asserted a "link versus far row" split that
+     * Prisma contradicts: it implements `delete` through a join table, and it
+     * deletes the far row.
+     */
+    test.each(ORDINARY_ONLY)("%s is refused through a join table, with a reason", (operand) => {
+      expect(() =>
+        compileWrite(
+          post,
+          "update",
+          { where: { id: 1 }, data: { tags: { [operand]: {} } } },
+          sqlite,
+        ),
+      ).toThrow(/means something different through a join table/);
+    });
+
+    test("the operands both paths implement are not refused there", () => {
+      for (const operand of BOTH) {
+        expect(() =>
+          compileWrite(
+            post,
+            "update",
+            { where: { id: 1 }, data: { tags: { [operand]: {} } } },
+            sqlite,
+          ),
+        ).not.toThrow(/means something different/);
+      }
+    });
   });
 
   /**
