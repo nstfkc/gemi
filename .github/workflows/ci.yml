@@ -14,10 +14,17 @@ name: CI
 # both are on the same branch — which is why this runs on pushes to the
 # integration branches as well as on pull requests.
 #
-# Postgres is deliberately not here yet. The differential harness runs against
-# it when `TEST_POSTGRES_URL` is set and skips loudly otherwise, so a run
-# without it is honest about covering SQLite only. Adding a service container is
-# a sensible next step and a separate decision.
+# **Two jobs, one per dialect**, and the split is forced rather than tidy.
+# `@prisma/client` is generated for one provider at a time and the differential
+# harness refuses the dialect it was not generated for, so the two cannot share
+# a checkout. `sqlite` runs the package and the dialect-agnostic suites;
+# `postgres` brings up a `postgres:16` service container and runs the
+# dialect-labelled ones. The reasoning is written out at the `postgres:` job
+# below, next to the `-t postgres` filter it justifies.
+#
+# On a developer's machine there is no service container, and the harness skips
+# its Postgres half loudly when `TEST_POSTGRES_URL` is unset — so a local run is
+# honest about covering SQLite only.
 on:
   pull_request:
   push:

@@ -90,3 +90,56 @@ describe("Postgres-only suites are selected by the Postgres job", () => {
     },
   );
 });
+
+/**
+ * The header does not tell its reader Postgres is absent while the job is there.
+ *
+ * `ci.yml` opened with "Postgres is deliberately not here yet … adding a
+ * service container is a sensible next step and a separate decision". The step
+ * was taken in #173. The paragraph describing it as not-taken stayed, 160 lines
+ * above the `postgres:` job that contradicts it (#261).
+ *
+ * A different failure from the drift #246 fixed — that was numbers moving after
+ * they were measured. This was a claim about the *shape* of the workflow that
+ * was simply false, and false in the expensive direction: a reader who believes
+ * the header concludes the repository has no Postgres coverage at all, and
+ * stops before reaching the sentence that would correct them.
+ *
+ * Checked as a contradiction inside the file rather than by asserting today's
+ * wording, so rephrasing the header is free and un-taking the claim is not.
+ */
+describe("the workflow header agrees with the workflow", () => {
+  const header = workflow.slice(0, workflow.indexOf("\non:"));
+
+  test("the Postgres job is what the header is checked against", () => {
+    // The premise. Without this the two tests below pass on a file that has no
+    // Postgres job at all, which is the one state where the old header was true.
+    expect(workflow).toMatch(/^\s{2}postgres:$/m);
+    expect(workflow).toContain("postgres:16");
+  });
+
+  test("it does not say Postgres is absent", () => {
+    expect(
+      header,
+      "the header still describes Postgres as not-yet-in-CI, and the postgres: job is below it",
+    ).not.toMatch(/deliberately not here/i);
+    expect(header).not.toMatch(/adding a service container is a sensible next step/i);
+  });
+
+  test("it says why there are two jobs", () => {
+    // The reason is the part a reader needs and the part that cannot be guessed:
+    // one generated client per provider is what makes this two checkouts rather
+    // than two steps.
+    expect(header).toMatch(/two jobs/i);
+    expect(header).toMatch(/@prisma\/client/);
+  });
+
+  /**
+   * The half of the old paragraph that was true, and is worth keeping: it
+   * describes a developer's machine, where there is no service container.
+   */
+  test("it keeps what a local run covers", () => {
+    expect(header).toContain("TEST_POSTGRES_URL");
+    expect(header).toMatch(/SQLite only/i);
+  });
+});
