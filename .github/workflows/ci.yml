@@ -106,8 +106,23 @@ jobs:
         env:
           TZ: UTC
 
+      # Two lints, because the package and the ORM are in different states.
+      #
+      # `bun run lint` is `oxlint` over the whole package: 88 warnings, 0
+      # errors, so it passes — and a new warning in `orm/` would be one of 89.
+      # Kept, because the errors it would catch are worth catching.
+      #
+      # `orm/` is at zero after #165, so it can be held there. `--deny-warnings`
+      # makes that a build failure rather than a line nobody reads. Scoped to
+      # `orm/` deliberately: the rest of the package is not this series' to
+      # clean up, and a check that is red for someone else's reasons stops
+      # being read — the argument #163 makes about the suite.
       - name: Lint
         run: bun run lint
+        working-directory: packages/gemi
+
+      - name: Lint the ORM at zero warnings
+        run: bunx oxlint orm --deny-warnings
         working-directory: packages/gemi
 
   # The other half of the differential harness, which is the repository's actual
