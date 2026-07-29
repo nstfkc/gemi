@@ -69,18 +69,29 @@ async function seed(prisma: PrismaClient) {
     ],
   });
 
-  // Two accounts on Ada, so a `_count` has a number to be wrong about. Without
-  // children every count is 0 and a dropped `_count` is indistinguishable from
-  // a correct one — which is how #87 stayed invisible.
+  // Accounts for the `disconnect` / `delete` cases, **in the seed rather than
+  // in each test**. `expectSameWrite` resets to the seeded state before each
+  // client runs — that is the whole point of it — so rows written in a test
+  // body are gone by the time the comparison happens, and a case that depended
+  // on them would compare two runs against an empty table and pass whatever
+  // the code did. Two of these belong to the *second* user, which is what makes
+  // "not linked" mean something.
+  //
+  // The last two are Ada's, so a `_count` has a number to be wrong about:
+  // without children every count is 0 and a dropped `_count` is
+  // indistinguishable from a correct one, which is how #87 stayed invisible.
   //
   // Safe for the existing delete cases: `Account_userId_fkey` is
   // `ON DELETE SET NULL`, so removing a user detaches its accounts on both
   // sides rather than failing a constraint.
-  const [ada] = await prisma.user.findMany({ orderBy: { id: "asc" } });
+  const users = await prisma.user.findMany({ orderBy: { id: "asc" } });
   await prisma.account.createMany({
     data: [
-      { publicId: "a1", userId: ada.id, organizationId: acme.id },
-      { publicId: "a2", userId: ada.id, organizationId: acme.id },
+      { publicId: "acc-mine-1", userId: users[0].id, organizationRole: 1 },
+      { publicId: "acc-mine-2", userId: users[0].id, organizationRole: 2 },
+      { publicId: "acc-theirs", userId: users[1].id, organizationRole: 1 },
+      { publicId: "a1", userId: users[0].id, organizationId: acme.id },
+      { publicId: "a2", userId: users[0].id, organizationId: acme.id },
     ],
   });
 }
@@ -1248,6 +1259,231 @@ function suite(label: string, url?: string) {
         where: { publicId: "keep-1" },
       });
       expect(children).toHaveLength(0);
+    });
+
+    /**
+     * `disconnect` and `delete` — the operands that act on rows already linked
+     * to this one, and the pair that shows why the boundary is "which rows can
+     * be named": both take a unique key, so the child's own operations decide
+     * reachability.
+     *
+     * They differ on a row that is *not* linked, and the difference is Prisma's
+     * rather than a choice — measured before implementing:
+     *
+     *     disconnect a row linked elsewhere  ->  succeeds, changes nothing
+     *     delete     a row linked elsewhere  ->  raises "are not connected"
+     *
+     * The rows come from the seed, not from the test body: `expectSameWrite`
+     * resets to the seeded state before each client runs, so a case that set
+     * itself up would compare two runs against an empty table and pass whatever
+     * the code did.
+     */
+    test("disconnect clears the link and leaves the row", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { id: 1 },
+          data: { accounts: { disconnect: { publicId: "acc-mine-1" } } },
+          include: { accounts: true },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    test("disconnect takes a list", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { id: 1 },
+          data: {
+            accounts: {
+              disconnect: [
+                { publicId: "acc-mine-1" },
+                { publicId: "acc-mine-2" },
+              ],
+            },
+          },
+          include: { accounts: true },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    /**
+     * A row linked to a *different* user. Prisma succeeds and changes nothing —
+     * and without the parent key in the `where`, this would clear somebody
+     * else's foreign key and still return a plausible payload.
+     */
+    test("disconnecting a row that is not linked is a no-op", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { id: 1 },
+          data: { accounts: { disconnect: { publicId: "acc-theirs" } } },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    test("delete removes the row, not just the link", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { id: 1 },
+          data: { accounts: { delete: { publicId: "acc-mine-1" } } },
+          include: { accounts: true },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    /**
+     * The asymmetry, and the case that decides whether this is implemented or
+     * merely spelled: `delete` on a row belonging to a different parent
+     * **raises** where `disconnect` shrugs. Without the parent key in the
+     * `where` this deletes somebody else's row and reports success.
+     */
+    test("deleting a row that is not linked raises, as Prisma does", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { id: 1 },
+          data: { accounts: { delete: { publicId: "acc-theirs" } } },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    test("disconnect on a to-one clears the foreign key", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { id: 1 },
+          data: { organization: { disconnect: true } },
+          include: { organization: true },
+        },
+        { tables: ["User", "Organization"] },
+      );
+    });
+
+    /**
+     * `update` — caller columns, written to a row they named by unique key.
+     *
+     * The seeded accounts make the "not linked" case mean something: two
+     * belong to user 1 and one to user 2, so an `update` naming the third has
+     * to raise rather than reach across.
+     */
+    test("update writes the named child", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { id: 1 },
+          data: {
+            accounts: {
+              update: {
+                where: { publicId: "acc-mine-1" },
+                data: { organizationRole: 9 },
+              },
+            },
+          },
+          include: { accounts: true },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    test("update takes a list", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { id: 1 },
+          data: {
+            accounts: {
+              update: [
+                { where: { publicId: "acc-mine-1" }, data: { organizationRole: 8 } },
+                { where: { publicId: "acc-mine-2" }, data: { organizationRole: 7 } },
+              ],
+            },
+          },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    test("updating a row that is not linked raises, as Prisma does", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { id: 1 },
+          data: {
+            accounts: {
+              update: {
+                where: { publicId: "acc-theirs" },
+                data: { organizationRole: 9 },
+              },
+            },
+          },
+        },
+        { tables: ["User", "Account"] },
+      );
+    });
+
+    /** Prisma accepts both spellings on a to-one; so does this. */
+    test("update through a to-one, bare data", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { id: 1 },
+          data: { organization: { update: { name: "Renamed" } } },
+          include: { organization: true },
+        },
+        { tables: ["User", "Organization"] },
+      );
+    });
+
+    test("update through a to-one, wrapped in data", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { id: 1 },
+          data: { organization: { update: { data: { name: "Wrapped" } } } },
+          include: { organization: true },
+        },
+        { tables: ["User", "Organization"] },
+      );
+    });
+
+    /**
+     * The owning-side miss — the case that was missing, and the reason its
+     * twin's fix did not carry over.
+     *
+     * The third seeded user has no organisation, so the foreign key is null and
+     * there is nothing to update. Prisma answers P2025 (`notFound`); the
+     * harness compares the failure *kind*, so an `UnsupportedQueryError` here
+     * reads as `other` and disagrees. The connected to-one cases above never
+     * touch this branch.
+     */
+    test("updating a to-one that is not there raises, as Prisma does", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { publicId: "p3" },
+          data: { organization: { update: { name: "Nowhere" } } },
+        },
+        { tables: ["User", "Organization"] },
+      );
     });
 
     test("nested connect on the foreign side repoints the child", async () => {
