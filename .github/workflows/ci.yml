@@ -239,15 +239,14 @@ jobs:
         working-directory: templates/saas-starter
 
       # `-t postgres` selects the dialect-labelled suites, and it is required
-      # rather than tidy. With `TEST_POSTGRES_URL` set, the harness makes the
-      # *SQLite* half of each differential suite **fail** rather than skip —
-      # deliberately, so a client generated for the wrong provider cannot look
-      # like a pass. So an unfiltered run here exits 1 no matter how many tests
-      # pass, and the failures are the ones the setup above guarantees.
-      #
-      # Stated as the mechanism rather than as a count. It read "877 passed …
-      # three suites error at collection", measured once and true then; the same
-      # run is now 911 and two, and neither number was ever the reason.
+      # rather than tidy. `@prisma/client` speaks one provider at a time, and
+      # `Generate for Postgres` above makes it Postgres — so the *SQLite* half
+      # of each differential suite **fails** rather than skips, deliberately,
+      # so a client generated for the wrong provider cannot look like a pass.
+      # `TEST_POSTGRES_URL` decides only whether the Postgres half runs at all;
+      # the generate step is what decides which half dies. So an unfiltered run
+      # here exits 1 no matter how many tests pass, and the failures are the
+      # ones the setup above guarantees.
       #
       # So this job runs the Postgres-labelled suites and the `sqlite` job runs
       # the rest. The dialect-agnostic tests are that job's business; nothing is
