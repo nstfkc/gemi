@@ -269,14 +269,25 @@ export class PostgresDialect implements SqlDialect {
     //   values ($1)                 42        integer vs jsonb — the error above
     //   values ($1::jsonb)          42        cannot cast integer to jsonb
     //   values ($1::jsonb)          "42"      jsonb_typeof -> string   <- the old bug
-    //   values (to_jsonb($1))       42        jsonb_typeof -> number   <- works
-    //   values ($1::text::jsonb)    "42"      jsonb_typeof -> number   <- works
+    //   values (to_jsonb($1))       42        jsonb_typeof -> number
+    //   values ($1::text::jsonb)    "42"      jsonb_typeof -> number
     //
-    // Either working form needs the column's type at the *placeholder*, so it
-    // still has to reach the insert, the update's set clause and any `where` on
-    // a Json column. Not done here — but whoever does it should start from one
-    // of the last two rows, not the second. `writes.coercion.test.ts` pins them
-    // so the table above stays a measurement rather than a memory.
+    // **`to_jsonb($1)` is not the answer either**, though it looks like one from
+    // that row alone. It works for exactly the shapes Bun binds as a concrete
+    // type — a number and a boolean — and fails for the four that matter more,
+    // because an unannotated parameter leaves the polymorphic argument untyped:
+    //
+    //   to_jsonb($1)   {a:1} / [1,2] / "42" / null
+    //                  could not determine polymorphic type
+    //
+    // So there is one form, not two: `JSON.stringify` the value and bind it
+    // through `$1::text::jsonb`, which round-trips all six shapes with the right
+    // `jsonb_typeof` — object, array, string, number, boolean and null.
+    //
+    // It needs the column's type at the *placeholder*, so it still has to reach
+    // the insert, the update's set clause and any `where` on a Json column. Not
+    // done here. `writes.coercion.test.ts` pins every row above, the failing
+    // forms included, so this stays a measurement rather than a memory.
     return value;
   }
 
