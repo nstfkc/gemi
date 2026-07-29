@@ -1,5 +1,5 @@
-import { readFileSync, readdirSync } from "node:fs";
-import { join, relative } from "node:path";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { dirname, join, normalize, relative } from "node:path";
 import { describe, expect, test } from "vitest";
 
 /**
@@ -8,8 +8,15 @@ import { describe, expect, test } from "vitest";
  * and for the same reason: a single line added while implementing an operation
  * is how either of them would go, and no unit test would notice.
  *
- *   **1. `Model.$exec` is the single door to the database.**
- *   **4. The dialect seam — the compiler asks the dialect, it does not test it.**
+ *   **1. One choke point** — `Model.$exec` is the only thing that touches the
+ *       database.
+ *   **2. Compile is pure** — and in particular, "lets the entire compiler be
+ *       unit-tested with no database at all". `relation-filters.ts` states the
+ *       operative half: `compile/` may not import `policy.ts`.
+ *   **3. `shape` is a static on the model class** — subclassing is the
+ *       extension mechanism, so shaping has to route through it.
+ *   **4. The dialect seam** — the compiler asks the dialect, it does not test
+ *       it.
  *
  * Both are enforced here by allow-list rather than by prohibition, because both
  * have real exceptions. A list makes an exception a decision someone wrote
@@ -113,6 +120,107 @@ describe("the ORM's seams", () => {
     }).map(([name]) => name);
 
     expect(testers.sort()).toEqual(MAY_COMPARE_DIALECT);
+  });
+
+  /**
+   * **Invariant 2, structurally: the compiler cannot reach the database.**
+   *
+   * The value half is `binding.invariants.test.ts`. This is the other one, and
+   * it is what the invariant means by "lets the entire compiler be unit-tested
+   * with no database at all" — every `compile/**` test in this repo constructs
+   * a schema and a dialect and nothing else, which only stays true while the
+   * import graph allows it.
+   *
+   * Computed **transitively**, because a one-hop check is the version that
+   * passes while being wrong: `compile/x.ts` importing a helper that imports
+   * `Model.ts` reads as clean and drags the whole runtime in behind it.
+   *
+   * `policy.ts` is called out by name in `relation-filters.ts` for a specific
+   * reason — policies rewrite the *arg tree* before the compiler sees it, which
+   * is what makes a scope a two-line `AND` rather than SQL surgery. A compiler
+   * that could consult a policy would invite the surgery back.
+   */
+  const FORBIDDEN_TO_COMPILER = [
+    "Model.ts",
+    "context.ts",
+    "policy.ts",
+    "provenance.ts",
+    "sql.ts",
+    "soft-deletes.ts",
+    "active-record.ts",
+    "database/DatabaseManager",
+  ];
+
+  test("nothing the compiler imports can reach the database", () => {
+    const resolve = (from: string, spec: string) => {
+      if (!spec.startsWith(".")) return null;
+      const base = normalize(join(dirname(from), spec));
+      for (const candidate of [`${base}.ts`, join(base, "index.ts")]) {
+        if (existsSync(candidate)) return candidate;
+      }
+      return null;
+    };
+
+    const seeds = FILES.filter(([name]) => name.startsWith("compile/")).map(
+      ([, path]) => path,
+    );
+    expect(seeds.length).toBeGreaterThan(10);
+
+    const seen = new Set(seeds);
+    const stack = [...seeds];
+    while (stack.length > 0) {
+      const current = stack.pop()!;
+      const source = read(current);
+      for (const match of source.matchAll(
+        /^\s*import\s+(?:type\s+)?[^;]*?from\s+"([^"]+)"/gm,
+      )) {
+        const resolved = resolve(current, match[1]);
+        if (resolved && !seen.has(resolved)) {
+          seen.add(resolved);
+          stack.push(resolved);
+        }
+      }
+    }
+
+    const reached = [...seen]
+      .map((path) => relative(ROOT, path))
+      .filter((name) => FORBIDDEN_TO_COMPILER.some((bad) => name.includes(bad)))
+      .sort();
+
+    expect(reached, `the compiler reaches ${reached.join(", ")}`).toEqual([]);
+  });
+
+  /**
+   * **Invariant 3: shaping goes through the static, or subclassing stops
+   * working.**
+   *
+   * `$shape` is a static on the model base precisely so that
+   * `ActiveRecordModel` can override it and every model extending it gets rows
+   * as instances "with zero changes to the twelve operations". That only holds
+   * while `$exec` is the thing calling it.
+   *
+   * The failure is quiet and partial: one operation calling `plan.shape(rows)`
+   * directly still returns correct data, so nothing fails — except that this
+   * one operation hands back plain objects on a model whose every other
+   * operation returns instances.
+   */
+  test("only a $shape implementation calls the plan's shaper", () => {
+    const callers = FILES.filter(([, path]) => /plan\.shape\(/.test(read(path)))
+      .map(([name]) => name)
+      .sort();
+
+    // The base's own implementation, and the one override that exists to prove
+    // the static was worth holding.
+    expect(callers).toEqual(["Model.ts", "active-record.ts"]);
+  });
+
+  test("...and $exec reaches it through the static rather than directly", () => {
+    const model = read(join(ROOT, "Model.ts"));
+
+    expect(model).toMatch(/this\.\$shape\(plan,/);
+    // Exactly one shaping call in the whole execution path — a second would be
+    // an operation that had grown its own.
+    expect(model.match(/this\.\$shape\(/g) ?? []).toHaveLength(1);
   });
 
   /**
