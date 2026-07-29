@@ -56,6 +56,11 @@ export function defaultStrategy(dialect: SqlDialect): RelationStrategy {
 export function resolveStrategy(
   named: string | undefined,
   dialect: SqlDialect,
+  // Required, so the caller cannot fall back to a placeholder without saying
+  // so. This used to report `"Model"` and `"$exec"` — a base class and
+  // something that is not one of the thirteen operations — while `$exec`, its
+  // only caller, had both in scope (#112).
+  origin: { model: string; operation: string },
 ): RelationStrategy {
   if (named === undefined) return defaultStrategy(dialect);
   if (named === "batched") return batchedStrategy;
@@ -63,8 +68,8 @@ export function resolveStrategy(
 
   throw new UnsupportedQueryError(
     `strategy: ${JSON.stringify(named)}`,
-    "Model",
-    "$exec",
+    origin.model,
+    origin.operation,
     `Unknown relation strategy. Expected "batched" or "lateral".`,
   );
 }

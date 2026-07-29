@@ -590,7 +590,10 @@ export abstract class Model {
     // `defaultStrategy`, and either way it reaches the plan key — two strategies
     // emit different SQL for the same arguments, so sharing a plan between them
     // would run one request's statement for the other's.
-    const strategy = resolveStrategy(options?.strategy, dialect);
+    const strategy = resolveStrategy(options?.strategy, dialect, {
+      model: schema.name,
+      operation: op,
+    });
 
     // `createMany` past the driver's parameter ceiling, which used to raise.
     //
