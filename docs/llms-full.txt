@@ -3817,27 +3817,20 @@ development on SQLite and survives the rollback in production on Postgres. `DB.q
 
 ## `Json` columns
 
-A `Json` column round-trips whatever you give it: an object, an array, a string, `null` — and a
-number or boolean on SQLite, with the one exception below. The value is stored as JSON and comes
-back as the same JavaScript value, on both dialects and whether it is read at the root or nested
-inside an `include`.
+A `Json` column round-trips whatever you give it: an object, an array, a string, a number, a
+boolean, `null`. The value is stored as JSON and comes back as the same JavaScript value, on both
+dialects and whether it is read at the root or nested inside an `include`.
 
-Two things are worth knowing:
+One thing is worth knowing:
 
-- **A bare JSON number or boolean is refused on Postgres.** `metadata: 42` raises rather than being
-  stored, because the driver binds it as an integer and the column is `jsonb`. Wrap it — `{ value:
-  42 }` — or store it as a string. SQLite has no such limit.
-
-  **This is the one *write* shape where gemi diverges from Prisma**, which stores it on both
-  dialects, so it is worth knowing if you are porting code rather than writing it fresh. (The other
-  divergence is on reads, and is a deployment requirement rather than an API difference — see
-  [Run Postgres deployments with `TZ=UTC`](#run-postgres-deployments-with-tzutc).) It is a trade rather than
-  an oversight: the encoder that accepted it serialised first, which stored `42` as the jsonb
-  *string* `"42"` — and only looked correct because the decoder re-parsed it on the way out, so the
-  value was wrong in the database the whole time. Failing loudly beats storing the wrong thing.
 - **A string is a string.** `metadata: "42"` stores the JSON string `"42"`, not the number, and
   `metadata: '{"a":1}'` stores that text as a string rather than as an object. If you want an
   object, pass an object.
+
+On Postgres the parameter is cast — `$1::text::jsonb` — and the value serialised to match, which
+is what lets a bare number or boolean through. Binding it raw makes the driver send an `integer` to
+a `jsonb` column, and serialising *without* the cast stores the jsonb string `"42"` instead of the
+number, which is worse than refusing it. SQLite needs neither: it stores JSON as text.
 
 > **Upgrading:** `Json` values written by a *pre-release* build of this ORM on Postgres were stored
 > as JSON **strings** rather than as objects — `{ a: 1 }` landed as `"{\"a\":1}"`. Reads undid it,
