@@ -1,0 +1,76 @@
+name: CI
+
+# Typecheck, tests and lint for the ORM and the template that exercises it.
+#
+# **Why this exists.** `feat/orm` stopped typechecking at #102 and stayed broken
+# across six merges (#101–#109) with every test green the whole time. The break
+# was a *semantic* merge conflict: #92 added a three-argument
+# `UnsupportedQueryError` while `detail` was optional, #102 made `detail`
+# required and fixed the call sites on its own branch. Neither touched the
+# other's file, so there was no textual conflict, no diff for a reviewer to look
+# at, and nothing that runs on the result of merging them.
+#
+# That is a class a per-PR check cannot cover on its own — it only appears once
+# both are on the same branch — which is why this runs on pushes to the
+# integration branches as well as on pull requests.
+#
+# Postgres is deliberately not here yet. The differential harness runs against
+# it when `TEST_POSTGRES_URL` is set and skips loudly otherwise, so a run
+# without it is honest about covering SQLite only. Adding a service container is
+# a sensible next step and a separate decision.
+on:
+  pull_request:
+  push:
+    branches: [main, feat/orm]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          # Not pinned to `packageManager` (bun@1.1.3), which is behind what the
+          # repo is actually developed against.
+          bun-version: latest
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      # The ORM generator is resolved by bin name, and in this repo that symlink
+      # points at built output — so `prisma generate` below needs it to exist.
+      - name: Build the binaries
+        run: bun run build:bin
+        working-directory: packages/gemi
+
+      # The template's committed artifact is what its suite runs against, and
+      # `generated.test.ts` asserts a second run produces a zero-line diff.
+      - name: Generate the template's model artifact
+        run: bunx prisma generate
+        working-directory: templates/saas-starter
+
+      # The step that would have caught #159. Kept before the tests, because a
+      # type error is cheaper to read than a suite that still passes around it.
+      - name: Typecheck
+        run: bun run typecheck
+        working-directory: packages/gemi
+
+      - name: Unit tests
+        run: bun --bun vitest run orm
+        working-directory: packages/gemi
+
+      - name: Template tests
+        run: bun --bun vitest run app/models
+        working-directory: templates/saas-starter
+        env:
+          TZ: UTC
+
+      - name: Lint
+        run: bun run lint
+        working-directory: packages/gemi
