@@ -61,8 +61,17 @@ jobs:
         run: bun run typecheck
         working-directory: packages/gemi
 
+      # `orm database`, not `orm`. The package has 47 test files and only 32
+      # have "orm" in their path — `database/DatabaseManager.test.ts` is the
+      # ORM's own SQLite foreign-key pragma test and would have been skipped by
+      # the narrower filter.
+      #
+      # Not the whole package: `app/`'s router tests fail on `feat/orm` today
+      # and are unrelated to this. Widening to everything would put CI red for a
+      # reason nobody here can act on, which is how a red board stops being
+      # read. Reported separately.
       - name: Unit tests
-        run: bun --bun vitest run orm
+        run: bun --bun vitest run orm database
         working-directory: packages/gemi
 
       - name: Template tests
