@@ -766,6 +766,90 @@ export const bare: ModelSchema = {
   relations: {},
 };
 
+/**
+ * A one-to-one whose foreign key lives on the **child**, which nothing else
+ * here has:
+ *
+ *     model User    { profile Profile? }
+ *     model Profile { userId Int @unique
+ *                     user   User @relation(fields: [userId], references: [id]) }
+ *
+ * Every other to-one in these fixtures holds its own key, so `planForeignSide`
+ * was only ever reached with `kind: "many"` — and it has exactly one `kind`
+ * check, which is why every other operand treated the child as a list (#116).
+ *
+ * `userWithProfile` rather than adding the relation to `user`: the emitted
+ * column list is asserted verbatim in several tests, and a relation adds no
+ * column but the fixture is compared as a whole in others.
+ */
+export const profile: ModelSchema = {
+  name: "Profile",
+  table: "Profile",
+  fields: {
+    id: {
+      name: "id",
+      column: "id",
+      type: "Int",
+      nullable: false,
+      isId: true,
+      isUpdatedAt: false,
+      default: { kind: "autoincrement" },
+    },
+    bio: {
+      name: "bio",
+      column: "bio",
+      type: "String",
+      nullable: true,
+      isId: false,
+      isUpdatedAt: false,
+    },
+    // Required and unique — that pairing is what makes the relation a to-one
+    // rather than a to-many, and `@unique` is what Prisma requires for it.
+    userId: {
+      name: "userId",
+      column: "userId",
+      type: "Int",
+      nullable: false,
+      isId: false,
+      isUpdatedAt: false,
+    },
+  },
+  primaryKey: ["id"],
+  uniques: [["userId"]],
+  relations: {
+    user: {
+      name: "user",
+      model: "User",
+      kind: "one",
+      relationName: "ProfileToUser",
+      from: ["userId"],
+      to: ["id"],
+      nullable: false,
+    },
+  },
+};
+
+/**
+ * `user`, plus the far side of {@link profile} — `kind: "one"` with empty
+ * `from`/`to`, which is how the foreign side of any relation is spelled: the
+ * link is resolved through the child's opposing relation, not stated here.
+ */
+export const userWithProfile: ModelSchema = {
+  ...user,
+  relations: {
+    ...user.relations,
+    profile: {
+      name: "profile",
+      model: "Profile",
+      kind: "one",
+      relationName: "ProfileToUser",
+      from: [],
+      to: [],
+      nullable: true,
+    },
+  },
+};
+
 /** The full explicit column list `findMany` emits for `user`, unparameterised. */
 export const USER_COLUMNS =
   '"id", "publicId", "name", "email", "emailVerifiedAt", "verificationToken", ' +
