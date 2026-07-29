@@ -11,11 +11,32 @@ export class UnsupportedQueryError extends Error {
     public readonly argument: string,
     public readonly model: string,
     public readonly operation: string,
-    detail?: string,
+    /**
+     * What cannot work, and what to do instead.
+     *
+     * **Required**, which is the second half of #61 — the first being the
+     * `UnsupportedByDesignError` split beside this. It was optional, and the
+     * refusals that omitted it were the highest-traffic ones: an argument the
+     * operation does not accept, on the path a typo takes. Those said only
+     * *that* something was refused, to the reader least likely to know why.
+     *
+     * Required rather than conventionally-supplied for the reason five other
+     * parameters here are — `render`'s `origin`, `changedFields`' `schema`,
+     * `RelationExecutor.exec`'s `preScoped`, `resolveLink`'s `operation`,
+     * `assertPageArgument`'s reported name: where omitting an argument produces
+     * a *worse* result rather than an error, `tsc` is the only thing that keeps
+     * a convention. Ninety-five of a hundred call sites already passed one; the
+     * five that did not are exactly the ones nobody revisited.
+     *
+     * `UnknownFieldError` and `UnknownRelationError` set the standard this
+     * meets: both enumerate the valid names rather than only rejecting the
+     * invalid one.
+     */
+    detail: string,
   ) {
     super(
-      `gemi ORM does not support '${argument}' yet (${model}.${operation}).` +
-        (detail ? ` ${detail}` : ""),
+      `gemi ORM does not support '${argument}' yet (${model}.${operation}). ` +
+        detail,
     );
     this.name = "UnsupportedQueryError";
   }
@@ -43,7 +64,7 @@ export class UnsupportedByDesignError extends UnsupportedQueryError {
     /** What to use instead. Required — see #61: a refusal owes the caller a next step. */
     reason: string,
   ) {
-    super(argument, model, operation);
+    super(argument, model, operation, reason);
     this.name = "UnsupportedByDesignError";
     this.message =
       `gemi ORM does not implement '${argument}' (${model}.${operation}), ` +

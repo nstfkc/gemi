@@ -588,6 +588,9 @@ function assertNodeArgs(
       `${node.as}.${key}`,
       schema.name,
       operation,
+      `A relation node takes ${[...(many ? RELATION_ARGS : TO_ONE_ARGS)]
+        .sort()
+        .join(", ")}.`,
     );
   }
 }

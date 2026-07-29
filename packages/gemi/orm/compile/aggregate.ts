@@ -523,6 +523,11 @@ function assertArgs(
       );
     }
 
-    throw new UnsupportedQueryError(key, schema.name, op);
+    throw new UnsupportedQueryError(
+      key,
+      schema.name,
+      op,
+      `${op} takes ${[...AGGREGATE_ARGS].sort().join(", ")}.`,
+    );
   }
 }
