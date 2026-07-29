@@ -331,6 +331,58 @@ export const MagicLinkToken: ModelSchema = {
   "relations": {}
 };
 
+export const Membership: ModelSchema = {
+  "name": "Membership",
+  "table": "Membership",
+  "fields": {
+    "organizationId": {
+      "name": "organizationId",
+      "column": "organizationId",
+      "type": "Int",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false
+    },
+    "userId": {
+      "name": "userId",
+      "column": "userId",
+      "type": "Int",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false
+    },
+    "role": {
+      "name": "role",
+      "column": "role",
+      "type": "Int",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false,
+      "default": {
+        "kind": "value",
+        "value": 2
+      }
+    },
+    "createdAt": {
+      "name": "createdAt",
+      "column": "createdAt",
+      "type": "DateTime",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false,
+      "default": {
+        "kind": "now"
+      }
+    }
+  },
+  "primaryKey": [
+    "organizationId",
+    "userId"
+  ],
+  "uniques": [],
+  "relations": {}
+};
+
 export const Organization: ModelSchema = {
   "name": "Organization",
   "table": "Organization",
@@ -588,6 +640,52 @@ export const PasswordResetToken: ModelSchema = {
   }
 };
 
+export const Post: ModelSchema = {
+  "name": "Post",
+  "table": "Post",
+  "fields": {
+    "id": {
+      "name": "id",
+      "column": "id",
+      "type": "Int",
+      "nullable": false,
+      "isId": true,
+      "isUpdatedAt": false,
+      "default": {
+        "kind": "autoincrement"
+      }
+    },
+    "title": {
+      "name": "title",
+      "column": "title",
+      "type": "String",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false
+    }
+  },
+  "primaryKey": [
+    "id"
+  ],
+  "uniques": [],
+  "relations": {
+    "tags": {
+      "name": "tags",
+      "model": "Tag",
+      "kind": "many",
+      "relationName": "PostToTag",
+      "from": [],
+      "to": [],
+      "nullable": false,
+      "joinTable": {
+        "table": "_PostToTag",
+        "a": "Post",
+        "b": "Tag"
+      }
+    }
+  }
+};
+
 export const Session: ModelSchema = {
   "name": "Session",
   "table": "Session",
@@ -817,6 +915,56 @@ export const SocialAccount: ModelSchema = {
         "id"
       ],
       "nullable": false
+    }
+  }
+};
+
+export const Tag: ModelSchema = {
+  "name": "Tag",
+  "table": "Tag",
+  "fields": {
+    "id": {
+      "name": "id",
+      "column": "id",
+      "type": "Int",
+      "nullable": false,
+      "isId": true,
+      "isUpdatedAt": false,
+      "default": {
+        "kind": "autoincrement"
+      }
+    },
+    "label": {
+      "name": "label",
+      "column": "label",
+      "type": "String",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false
+    }
+  },
+  "primaryKey": [
+    "id"
+  ],
+  "uniques": [
+    [
+      "label"
+    ]
+  ],
+  "relations": {
+    "posts": {
+      "name": "posts",
+      "model": "Post",
+      "kind": "many",
+      "relationName": "PostToTag",
+      "from": [],
+      "to": [],
+      "nullable": false,
+      "joinTable": {
+        "table": "_PostToTag",
+        "a": "Post",
+        "b": "Tag"
+      }
     }
   }
 };

@@ -523,6 +523,69 @@ describe("plan cache discrimination", () => {
 });
 
 /**
+ * **The converse of every discrimination test above**, and nothing asserted it
+ * until a review found the class by measuring rather than by reading.
+ *
+ * Those tests check one direction: arguments that compile to *different* SQL
+ * must not share a key, because a collision silently runs the wrong statement.
+ * This checks the other: arguments that compile to the *same* SQL must not mint
+ * separate keys, because the cache is a bounded LRU — 1000 entries — and one
+ * argument recording its values verbatim fills it from a query string and
+ * evicts every other query's plan. `plan.ts` already describes that pathology
+ * for `in`-list lengths; `VALUE_KEYS`' comment names the other half, that it
+ * would put user data into a long-lived global map.
+ *
+ * Three instances of the first direction were caught by `plan.coverage`'s rule;
+ * the `having` one below was caught by nothing, because nothing looked this
+ * way.
+ */
+describe("arguments that compile to one statement share one entry", () => {
+  const SAME_STATEMENT: [string, unknown[]][] = [
+    ["where threshold", [
+      { where: { globalRole: { gt: 1 } } },
+      { where: { globalRole: { gt: 9999 } } },
+    ]],
+    ["take magnitude", [{ take: 1 }, { take: 500 }]],
+    ["skip magnitude", [{ skip: 1 }, { skip: 500 }]],
+    ["a value inside a relation filter", [
+      { where: { accounts: { some: { organizationRole: 1 } } } },
+      { where: { accounts: { some: { organizationRole: 9 } } } },
+    ]],
+    ["a value inside a nested include's where", [
+      { include: { accounts: { where: { organizationRole: 1 } } } },
+      { include: { accounts: { where: { organizationRole: 9 } } } },
+    ]],
+    // The one this test was written for. `_count` is in `LITERAL_KEYS` so a
+    // *projection* keeps its booleans — but inside a `having` the same key
+    // introduces a comparison, and its operand is a parameter like any other.
+    ["a having threshold", [
+      { by: ["globalRole"], _count: true, having: { globalRole: { _count: { gt: 1 } } } },
+      { by: ["globalRole"], _count: true, having: { globalRole: { _count: { gt: 9999 } } } },
+    ]],
+    ["a having threshold on a grouped column", [
+      { by: ["globalRole"], _count: true, having: { globalRole: { gt: 1 } } },
+      { by: ["globalRole"], _count: true, having: { globalRole: { gt: 9999 } } },
+    ]],
+  ];
+
+  test.each(SAME_STATEMENT)("%s", (_label, argsList) => {
+    clearPlanCache();
+
+    const operation = (argsList[0] as any).by ? "groupBy" : "findMany";
+    const texts = new Set(
+      argsList.map(
+        (args) => getOrCompile(user, operation as any, args, sqlite).text,
+      ),
+    );
+
+    // The premise: these really are one statement. If they are not, the test
+    // is asserting the wrong thing and should say so loudly.
+    expect(texts.size).toBe(1);
+    expect(planCacheStats()).toMatchObject({ compiles: 1, size: 1 });
+  });
+});
+
+/**
  * Acceptance criterion: not one value is inlined into the SQL text anywhere.
  *
  * The check is that no digit survives outside an identifier — identifiers are
