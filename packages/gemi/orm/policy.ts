@@ -459,6 +459,11 @@ export function applyPolicies(
   policies: readonly ModelPolicy[],
   context: PolicyContext,
   args: any,
+  /**
+   * Columns of `args.data` the ORM wrote rather than the caller — see
+   * {@link ormAuthoredFields}. Only the scope-escape guard reads it.
+   */
+  ormAuthored: readonly string[] = [],
 ): any {
   if (policies.length === 0) return args;
 
@@ -540,7 +545,7 @@ export function applyPolicies(
   // whoever put it there — which is the only version of the question worth
   // asking.
   if (unguarded !== undefined) {
-    assertNoScopeEscape(unguarded, context, out);
+    assertNoScopeEscape(unguarded, context, out, ormAuthored);
   }
 
   return out;
@@ -658,11 +663,29 @@ function assertNoScopeEscape(
   unguarded: readonly string[],
   context: PolicyContext,
   args: any,
+  /**
+   * Columns the ORM itself wrote — a relation operand's own foreign key.
+   *
+   * The guard exists to stop a **caller** moving a row out of the scope that
+   * selected it by naming a scoped column in `data`. A relation key is not
+   * that: its value is the ORM's, the parent was reached through the parent
+   * model's own scoping, and a child row this caller cannot see was already
+   * refused before this runs. What is left is the operand doing what it means.
+   *
+   * Empty by default, and that direction matters: forgetting to pass it makes
+   * the guard *stricter*, not looser, so an omission is a refused query rather
+   * than a silent escape. That is the opposite of #79's defaulted `operation`,
+   * where the default was the wrong answer — which is why this one is allowed
+   * to have a default at all.
+   */
+  ormAuthored: readonly string[] = [],
 ): void {
   const data = args?.data;
   if (typeof data !== "object" || data === null) return;
 
-  const escaping = unguarded.filter((field) => field in data);
+  const escaping = unguarded.filter(
+    (field) => field in data && !ormAuthored.includes(field),
+  );
   if (escaping.length === 0) return;
 
   throw new ScopeEscapeError(context.model, context.operation, [
@@ -897,6 +920,44 @@ export function isPreScoped(options: unknown): boolean {
     (options as Record<symbol, unknown>)[PRE_SCOPED] === true
   );
 }
+
+/**
+ * Columns in this call's `data` that the **ORM** put there, not the caller.
+ *
+ * A nested relation operand writes exactly one column: the relation's own
+ * foreign key, with a value this statement chose — the parent it is about, or
+ * `null` for a `disconnect`. `assertNoScopeEscape` reads `args.data` and cannot
+ * tell that apart from a caller naming the same column, so a child whose policy
+ * scopes on its foreign key lost every relation operand that writes it (#98):
+ *
+ *     connect     ScopeEscapeError: Note.update writes 'folderId', which
+ *                 Note's policy also scopes on…
+ *     disconnect  ScopeEscapeError: Note.updateMany writes 'folderId', …
+ *
+ * The caller wrote `connect: { id: 1 }`. The error described a write they had
+ * not made and sent them to their own `data`, where there was nothing to find.
+ *
+ * **A module-private `Symbol`, for the same reason `PRE_SCOPED` is one**: it is
+ * not exported from `orm/index.ts`, so an application cannot forge it and it
+ * cannot become a way to write a scoped column past the guard. An
+ * `ExecOptions` field would have been exactly that door.
+ */
+const ORM_AUTHORED = Symbol("gemi.orm.columnsWrittenByTheOrm");
+
+export function markOrmAuthored(
+  options: object | undefined,
+  fields: readonly string[],
+): object {
+  return { ...options, [ORM_AUTHORED]: fields };
+}
+
+export function ormAuthoredFields(options: unknown): readonly string[] {
+  if (typeof options !== "object" || options === null) return EMPTY_FIELDS;
+  const fields = (options as Record<symbol, unknown>)[ORM_AUTHORED];
+  return Array.isArray(fields) ? (fields as string[]) : EMPTY_FIELDS;
+}
+
+const EMPTY_FIELDS: readonly string[] = [];
 
 /** Resolves a model name to its policies, so this file need not import the registry. */
 export type PolicyLookup = (model: string) => {
