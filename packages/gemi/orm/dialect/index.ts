@@ -106,6 +106,17 @@ export interface SqlDialect {
   encode(value: unknown, field: FieldSchema): unknown;
 
   /**
+   * SQL appended to this field's placeholder, or `""` for none.
+   *
+   * The one string a dialect contributes to the statement that is not a
+   * parameter, so it must be a constant — never derived from a value, and never
+   * from anything an application supplies. `fieldParam` is the only caller, and
+   * a non-empty cast also means it serialises the value; the two travel
+   * together and neither is correct alone (#209).
+   */
+  castParameter(field: FieldSchema): string;
+
+  /**
    * The same, for a value with **no declared column type** — a parameter
    * interpolated into a composed raw fragment, where there is no schema to ask.
    *

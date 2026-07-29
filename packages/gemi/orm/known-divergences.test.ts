@@ -54,9 +54,24 @@ describe("divergences the source knows about are documented", () => {
    * The claim that started this. It is true of *writes*, and was written as
    * though it were true of everything.
    */
-  test("the Json refusal is not called the only divergence", () => {
-    expect(DOC).not.toMatch(/the one shape where gemi diverges from Prisma\*\*,/);
-    expect(DOC).toMatch(/one \*write\* shape where gemi diverges/);
+  /**
+   * There is now one divergence, not two.
+   *
+   * This assertion has moved twice, and the sequence is the point. It began as
+   * "the Json refusal is not called *the* only divergence", because the page
+   * said the bare-scalar refusal was the one shape gemi differs on while the
+   * `TZ` fault went unmentioned. It then required the narrowed wording, "the
+   * one *write* shape". Lifting the boundary removed the write divergence
+   * outright, so what is left to assert is that the page claims no divergence
+   * it no longer has.
+   *
+   * Kept rather than deleted with the sentence it guarded: the failure it
+   * exists to catch is a page describing a divergence that is not there, and
+   * that is as wrong in this direction as it was in the other.
+   */
+  test("the page does not claim a Json divergence it no longer has", () => {
+    expect(DOC).not.toMatch(/shape where gemi diverges from Prisma/);
+    expect(DOC).not.toMatch(/bare JSON number or boolean is refused/);
   });
 
   /**

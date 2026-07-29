@@ -353,54 +353,50 @@ function suite(label: string, url?: string) {
     });
 
     /**
-     * The one `Json` shape that does **not** work on Postgres, pinned so it is
-     * a known boundary rather than a surprise.
+     * Every `Json` shape round-trips, including the two that used to be refused.
      *
-     * A bare JSON number or boolean is bound as its own type — Bun has no way
-     * to know the parameter is destined for a `jsonb` column — and Postgres
-     * answers `column "payload" is of type jsonb but expression is of type
-     * integer`.
+     * A bare JSON number or boolean was the one shape Bun binds as its own type
+     * — it has no way to know the parameter is destined for a `jsonb` column —
+     * so Postgres answered `column "payload" is of type jsonb but expression is
+     * of type integer`, and the ORM let that through as a loud failure rather
+     * than storing something wrong.
      *
-     * **This reads like a regression and is not one**, which is worth stating
-     * here because a bisect will land on this commit and conclude otherwise.
-     * Under the previous encoder the same call *appeared* to work — but the
-     * stored value was the jsonb **string** `"42"`, not the number.
-     * `jsonb_typeof` answered `string` for a bare number, a bare boolean and an
-     * object alike; it only looked correct because the old decoder re-parsed on
-     * the way out. So the column was wrong in the database the whole time, and
-     * anything reading it other than this ORM — Prisma, `psql`, a report — saw
-     * a string. A loud failure replaces a silent mis-store, which is the trade
-     * this project takes every time.
+     * The compiler now asks the dialect for a cast and serialises the value to
+     * match: `$1::text::jsonb`. That is the only form of the four measured in
+     * #209 that carries all six shapes — the raw bind refuses scalars, a bare
+     * `::jsonb` stores the jsonb *string* `"42"`, and `to_jsonb($1)` cannot type
+     * an object, an array, a string or null.
      *
-     * **Fixing it is not "serialise and cast", which is what this said before.**
-     * That stores the jsonb *string* `"42"` — the very mis-store above — because
-     * Bun serialises a JS string bound to a `jsonb` parameter, so pre-serialising
-     * encodes it twice. Nor is it `to_jsonb($1)`, which carries a number and a
-     * boolean and fails on an object, an array, a string and null. The test below
-     * pins all three, so the one that works is a measurement rather than a pick.
-     *
-     * The working form still needs the column's type at the placeholder, so it
-     * reaches the insert, the update's set clause and any `where` comparing a Json
-     * column: a compiler change with its own differential pass rather than a
-     * dialect tweak. Left out of the change that found it deliberately.
-     *
-     * SQLite has no such limit: it stores JSON as text, so every shape works.
+     * `jsonb_typeof` is asserted as well as the value, because the mis-store
+     * this replaces was a *right-looking value under the wrong type*: `"42"`
+     * reads back as `42` through this ORM and as a string through anything else.
+     * Equality alone could not tell the two apart, which is how it survived.
      */
     test.each([
-      ["a JSON number", 7],
-      ["a JSON boolean", true],
-    ])("%s is a known boundary on postgres", async (_label, payload) => {
-      const write = EverythingModel.$exec("create", {
+      ["a JSON number", 7, "number"],
+      ["a JSON boolean", true, "boolean"],
+      ["a JSON string", "42", "string"],
+      ["an object", { a: 1 }, "object"],
+      ["an array", [1, 2, 3], "array"],
+    ])("%s round-trips", async (_label, payload, kind) => {
+      const created: any = await EverythingModel.$exec("create", {
         data: { ...values, payload },
       });
-
-      if (url) {
-        await expect(write).rejects.toThrow(/jsonb/);
-        return;
-      }
-
-      const created: any = await write;
       expect(created.payload).toEqual(payload);
+
+      const read: any = await EverythingModel.$exec("findFirst", {
+        where: { id: created.id },
+      });
+      expect(read.payload).toEqual(payload);
+
+      if (!url) return;
+
+      // The half the ORM cannot see: what the column actually holds.
+      const rows: any = await raw.unsafe(
+        `SELECT jsonb_typeof("payload") AS kind FROM "Everything" WHERE "id" = $1`,
+        [created.id],
+      );
+      expect([...rows][0].kind).toBe(kind);
     });
 
     /**

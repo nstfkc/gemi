@@ -203,6 +203,13 @@ export class SqliteDialect implements SqlDialect {
     return { kind: "unique", columns };
   }
 
+  // Nothing to cast. SQLite stores JSON as text and has no typed jsonb column
+  // to disagree with the parameter, which is why the boundary #209 describes is
+  // a Postgres one.
+  castParameter(_field: FieldSchema): string {
+    return "";
+  }
+
   encode(value: unknown, field: FieldSchema): unknown {
     if (value === null || value === undefined) return null;
 

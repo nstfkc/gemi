@@ -20,6 +20,7 @@ import {
   render,
   sql,
 } from "./fragment";
+import { fieldParam } from "./cast";
 import {
   type ForeignKeyContribution,
   type NestedWritePlanning,
@@ -912,7 +913,10 @@ function valuesClause(grid: WriteColumn[][], dialect: SqlDialect): Fragment {
   const tuples = grid.map((row) =>
     concat(
       sql("("),
-      joinFragments(row.map((column) => param(column.value)), ", "),
+      joinFragments(
+        row.map((column) => fieldParam(column.field, dialect, column.value)),
+        ", ",
+      ),
       sql(")"),
     ),
   );
@@ -1137,7 +1141,10 @@ function updateAssignments(
     // Every write stamps `@updatedAt` — that is the whole of the attribute.
     if (field.isUpdatedAt) {
       out.push(
-        concat(sql(`${column} = `), param(defaultBinder(field, dialect))),
+        concat(
+          sql(`${column} = `),
+          fieldParam(field, dialect, defaultBinder(field, dialect)),
+        ),
       );
     }
   }
@@ -1189,16 +1196,22 @@ function assignment(
     const at = (args: any) => locate(args)?.[key];
 
     if (key === "set") {
-      return concat(sql(`${column} = `), param(valueBinder(field, dialect, at)));
+      return concat(
+        sql(`${column} = `),
+        fieldParam(field, dialect, valueBinder(field, dialect, at)),
+      );
     }
 
     return concat(
       sql(`${column} = ${source} ${ARITHMETIC[key]} `),
-      param(valueBinder(field, dialect, at)),
+      fieldParam(field, dialect, valueBinder(field, dialect, at)),
     );
   }
 
-  return concat(sql(`${column} = `), param(valueBinder(field, dialect, locate)));
+  return concat(
+    sql(`${column} = `),
+    fieldParam(field, dialect, valueBinder(field, dialect, locate)),
+  );
 }
 
 /**
