@@ -20,7 +20,7 @@ import { resolveStrategy } from "./compile/strategy";
 import { matchUniqueKey } from "./compile/unique";
 import { upsertAbsentConflictKey } from "./compile/write";
 import { dialectFor, type SqlDialect } from "./dialect";
-import { protocolSkewWarning } from "./protocol-skew";
+import { clockCouldSkew, createProtocolSkewWarner } from "./protocol-skew";
 import {
   MissingModelSchemaError,
   RecordNotFoundError,
@@ -957,8 +957,24 @@ async function runSteps(
   }
 }
 
-/** Set the first time `protocolSkewWarning` fires; see the call site below. */
-let warnedProtocolSkew = false;
+/**
+ * The skew warning, gated on this process's **zone** — resolved once, here.
+ *
+ * Reading the clock per call cost a `Date` allocation on the one path every
+ * query takes — ~60ns, against under a nanosecond for the closed-over boolean
+ * that replaces it — and the latch inside only ever closes on a *firing*, so
+ * the deployment that is configured correctly and never warns paid it forever.
+ *
+ * `clockCouldSkew()` asks the question whose answer cannot change under a
+ * running process: not "is the offset zero today", which is also true of
+ * `Europe/London` every winter, but "is this zone ever off UTC at all". A UTC
+ * process never enters the check; anything else stops entering once it has said
+ * its piece, and reads the clock only until then — see `protocol-skew.ts`,
+ * which owns both halves so that both can be tested from a UTC machine.
+ */
+const warnProtocolSkewOnce = createProtocolSkewWarner(clockCouldSkew(), () =>
+  new Date().getTimezoneOffset(),
+);
 
 /**
  * Runs the statement and translates the failures that have a typed home.
@@ -979,22 +995,12 @@ async function execute(
   values: unknown[],
 ): Promise<unknown> {
   // Said once per process, and only for the configuration that silently returns
-  // the wrong instant — see `protocol-skew.ts`. Behind `warnedProtocolSkew` so
-  // the check disappears after it fires, and ordered so a correctly configured
-  // process pays one boolean.
-  if (!warnedProtocolSkew) {
-    const warning = protocolSkewWarning(
-      dialect.name,
-      schema,
-      text,
-      values,
-      new Date().getTimezoneOffset(),
-    );
-    if (warning) {
-      warnedProtocolSkew = true;
-      console.warn(warning);
-    }
-  }
+  // the wrong instant — see `protocol-skew.ts`. Printing is left here because
+  // this is the layer allowed to talk to the operator; deciding is not, because
+  // nothing that needs a database can be tested in the one configuration CI
+  // runs.
+  const warning = warnProtocolSkewOnce(dialect.name, schema, text, values);
+  if (warning) console.warn(warning);
 
   try {
     return await conn.unsafe(text, values);
