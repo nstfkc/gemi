@@ -413,7 +413,13 @@ function compileUpdate(
 ): QueryPlan {
   const many = op === "updateMany";
 
-  if (!many) matchUniqueKey(schema, args?.where, op);
+  if (!many) {
+    matchUniqueKey(schema, args?.where, {
+      model: schema.name,
+      operation: op,
+      argument: "where",
+    });
+  }
 
   // Prisma's `updateMany` takes unchecked input — scalars and foreign keys, no
   // relation keys — and rejects one with `Unknown argument 'organization'`.
@@ -522,7 +528,13 @@ function compileDelete(
   args: any,
   dialect: SqlDialect,
 ): QueryPlan {
-  if (op === "delete") matchUniqueKey(schema, args?.where, op);
+  if (op === "delete") {
+    matchUniqueKey(schema, args?.where, {
+      model: schema.name,
+      operation: op,
+      argument: "where",
+    });
+  }
 
   const where = compileWhere(
     schema,
@@ -565,7 +577,11 @@ function compileUpsert(
   args: any,
   dialect: SqlDialect,
 ): QueryPlan {
-  const key = matchUniqueKey(schema, args?.where, op);
+  const key = matchUniqueKey(schema, args?.where, {
+    model: schema.name,
+    operation: op,
+    argument: "where",
+  });
 
   // Since Prisma 5 a `WhereUniqueInput` may carry extra non-unique filters
   // beside the key, and they narrow the match further. `update` and `delete`

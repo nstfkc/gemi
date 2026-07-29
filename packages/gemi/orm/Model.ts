@@ -1143,7 +1143,11 @@ function chunkedCreateMany(
  */
 function findThenWrite(schema: ModelSchema, args: any, op: Operation): boolean {
   try {
-    const key = matchUniqueKey(schema, args?.where, op);
+    const key = matchUniqueKey(schema, args?.where, {
+      model: schema.name,
+      operation: op,
+      argument: "where",
+    });
     return upsertAbsentConflictKey(schema, args, key).length > 0;
   } catch {
     return false;

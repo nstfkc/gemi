@@ -670,7 +670,11 @@ function planOwningSide(
   // Prisma resolves it with a lookup, and so do we. Validated now so a
   // non-unique connect target fails at compile time rather than matching an
   // arbitrary row.
-  matchUniqueKey(child, operand, `${operation}.${relation.name}.connect`);
+  matchUniqueKey(child, operand, {
+    model: schema.name,
+    operation,
+    argument: `data.${relation.name}.connect`,
+  });
 
   out.before.push({
     relation: relation.name,
@@ -1298,6 +1302,15 @@ function planForeignSide(
 
   // `connect` on this side means "point that existing row at me", which is an
   // update of the child's foreign key — not something this row's insert can do.
+  //
+  // Checked here rather than in the step below, for the reason `assertNamedRows`
+  // gives: the step runs after the parent row is written, so a key the child
+  // does not declare unwinds an insert that should never have happened. The
+  // owning side has always checked its `connect` at plan time; this side had
+  // not, which made the same operand answer differently depending on which
+  // table the foreign key is on (#110).
+  assertNamedRows(schema, relation, child, operand, key, operation);
+
   out.after.push({
     relation: relation.name,
     operation: "connect",
@@ -1306,7 +1319,6 @@ function planForeignSide(
       if (!parent) return;
 
       for (const item of listOf(at(args))) {
-        matchUniqueKey(child, item, `${operation}.${relation.name}.connect`);
         await executor.exec(
           relation.model,
           "update",
@@ -1478,6 +1490,16 @@ function planJoinTable(
     );
   }
 
+  // `connect`, `disconnect` and `set` name existing rows by a unique key, and
+  // the step below resolves them one at a time — after the parent row exists,
+  // since a pair needs both ends. That made a key the child does not declare
+  // refuse from mid-transaction, while the *same* operand on an ordinary
+  // relation refuses from the compiler (#110). `create` names no existing row
+  // and `connectOrCreate` is checked above, so those two are not this.
+  if (key === "connect" || key === "disconnect" || key === "set") {
+    assertNamedRows(schema, relation, child, operand, key, operation);
+  }
+
   const join = link.join!;
   const parentField = link.parentField;
   const childField = link.childField;
@@ -1613,12 +1635,10 @@ function planJoinTable(
          * confirm a row the caller cannot see.
          */
         if (key === "connectOrCreate") {
+          // The `where` was validated at plan time by
+          // `assertConnectOrCreateOperand`, which the branch at the top of this
+          // function runs for both relation kinds.
           const entry = item as Record<string, unknown>;
-          matchUniqueKey(
-            child,
-            entry.where,
-            `${operation}.${relation.name}.connectOrCreate`,
-          );
 
           const hit = (await executor.exec(
             relation.model,
@@ -1643,10 +1663,9 @@ function planJoinTable(
         }
 
         // `connect`, `disconnect` and `set` all name existing rows by a unique
-        // key. Resolved through the child's own `$exec`, so its policies decide
-        // which rows exist — otherwise a connect by any unique key reaches
-        // every tenant's.
-        matchUniqueKey(child, item, `${operation}.${relation.name}.${key}`);
+        // key — checked at plan time above. Resolved through the child's own
+        // `$exec`, so its policies decide which rows exist — otherwise a
+        // connect by any unique key reaches every tenant's.
         const found = (await executor.exec(
           relation.model,
           "findUniqueOrThrow",
@@ -1743,7 +1762,11 @@ function assertUpsertOperand(
       }
     }
 
-    matchUniqueKey(child, record.where, `${operation}.${relation.name}.upsert`);
+    matchUniqueKey(child, record.where, {
+      model: schema.name,
+      operation,
+      argument: `data.${relation.name}.upsert.where`,
+    });
   }
 }
 
@@ -1868,7 +1891,11 @@ function assertNamedUpdates(
       }
     }
 
-    matchUniqueKey(child, record.where, `${operation}.${relation.name}.update`);
+    matchUniqueKey(child, record.where, {
+      model: schema.name,
+      operation,
+      argument: `data.${relation.name}.update.where`,
+    });
     out.push(record);
   }
 
@@ -1903,7 +1930,11 @@ function assertNamedRows(
         `Expected an object naming a unique field, or an array of them.`,
       );
     }
-    matchUniqueKey(child, entry, `${operation}.${relation.name}.${key}`);
+    matchUniqueKey(child, entry, {
+      model: schema.name,
+      operation,
+      argument: `data.${relation.name}.${key}`,
+    });
     out.push(entry as Record<string, unknown>);
   }
 
@@ -2013,7 +2044,11 @@ function assertConnectOrCreateOperand(
       );
     }
 
-    matchUniqueKey(child, record.where, `${operation}.${relation.name}.connectOrCreate`);
+    matchUniqueKey(child, record.where, {
+    model: schema.name,
+    operation,
+    argument: `data.${relation.name}.connectOrCreate.where`,
+  });
     out.push(record);
   }
 
