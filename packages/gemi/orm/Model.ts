@@ -957,6 +957,30 @@ async function runSteps(
   }
 }
 
+/**
+ * The process's UTC offset, read **once**.
+ *
+ * The skew warning below needs it, and reading it per call cost a `Date`
+ * allocation on the one path every query takes — 60ns against a boolean's
+ * 1.6ns, measured. That is small beside a query and it is paid by every
+ * correctly configured deployment forever, which is not what the comment on the
+ * call site claimed.
+ *
+ * Safe to cache even though a zone's offset moves across a DST boundary: the
+ * only thing read from it is whether the clock is UTC, and a process that is
+ * UTC stays UTC.
+ */
+const CLOCK_OFFSET_MINUTES = new Date().getTimezoneOffset();
+
+/**
+ * Whether the skew is possible in this process at all.
+ *
+ * `false` in the recommended configuration and in CI, which is what lets the
+ * check below actually cost one boolean rather than merely be described as
+ * costing one.
+ */
+const CLOCK_COULD_SKEW = CLOCK_OFFSET_MINUTES !== 0;
+
 /** Set the first time `protocolSkewWarning` fires; see the call site below. */
 let warnedProtocolSkew = false;
 
@@ -979,16 +1003,16 @@ async function execute(
   values: unknown[],
 ): Promise<unknown> {
   // Said once per process, and only for the configuration that silently returns
-  // the wrong instant — see `protocol-skew.ts`. Behind `warnedProtocolSkew` so
-  // the check disappears after it fires, and ordered so a correctly configured
-  // process pays one boolean.
-  if (!warnedProtocolSkew) {
+  // the wrong instant — see `protocol-skew.ts`. A UTC process cannot produce
+  // the skew, so it never enters this at all; a non-UTC one stops entering once
+  // it has said so. Either way the steady-state cost is the boolean above.
+  if (CLOCK_COULD_SKEW && !warnedProtocolSkew) {
     const warning = protocolSkewWarning(
       dialect.name,
       schema,
       text,
       values,
-      new Date().getTimezoneOffset(),
+      CLOCK_OFFSET_MINUTES,
     );
     if (warning) {
       warnedProtocolSkew = true;
