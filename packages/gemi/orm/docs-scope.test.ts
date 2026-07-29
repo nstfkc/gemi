@@ -4,8 +4,8 @@ import { describe, expect, test } from "vitest";
 
 import { isAggregateOperation } from "./compile/aggregate";
 import { isGroupByOperation } from "./compile/group-by";
-import { isReadOperation } from "./compile/read";
-import { isWriteOperation } from "./compile/write";
+import { READ_ARGS, isReadOperation } from "./compile/read";
+import { WRITE_ARGS, isWriteOperation } from "./compile/write";
 import * as orm from "./index";
 import type { Operation } from "./plan";
 
@@ -32,27 +32,24 @@ import type { Operation } from "./plan";
 const DOC = join(import.meta.dirname, "../../../docs/orm.md");
 
 /**
- * The operations the ORM implements. Listed here because `Operation` is a type
- * and erased — but every entry is then **verified** against the compiler's own
- * predicates, so this cannot quietly name something that does not exist.
+ * The operations the ORM implements, derived from the compiler's own tables.
+ *
+ * This was a hand-written list, verified entry by entry against the predicates.
+ * That direction is the weaker one: it catches a name that does not exist, and
+ * cannot catch an operation that exists and was never added — which is the
+ * failure a scope guard is for, and the one #182 and #195 kept finding in
+ * hand-written copies elsewhere.
+ *
+ * `op in READ_ARGS` is the whole of `isReadOperation`, so those keys are the
+ * compiler's record of itself. `aggregate` and `groupBy` are named because
+ * their predicates are literal comparisons with no table behind them.
  */
-const IMPLEMENTED: Operation[] = [
-  "findUnique",
-  "findUniqueOrThrow",
-  "findFirst",
-  "findFirstOrThrow",
-  "findMany",
-  "count",
+const IMPLEMENTED = [
+  ...Object.keys(READ_ARGS),
+  ...Object.keys(WRITE_ARGS),
   "aggregate",
   "groupBy",
-  "create",
-  "createMany",
-  "update",
-  "updateMany",
-  "upsert",
-  "delete",
-  "deleteMany",
-];
+] as Operation[];
 
 describe("docs/orm.md and the runtime agree", () => {
   const source = readFileSync(DOC, "utf8");

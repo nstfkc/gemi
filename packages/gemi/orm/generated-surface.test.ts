@@ -3,6 +3,8 @@ import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 
 import { isAggregateOperation } from "./compile/aggregate";
+import { READ_ARGS } from "./compile/read";
+import { WRITE_ARGS } from "./compile/write";
 import { isGroupByOperation } from "./compile/group-by";
 import { isReadOperation } from "./compile/read";
 import { isWriteOperation } from "./compile/write";
@@ -42,31 +44,42 @@ const MODELS = join(
 );
 
 /**
- * The operations the compiler implements, each verified against its own
- * predicate below so this list cannot quietly name something that does not
- * exist. The same list, and the same reasoning, as `docs-scope.test.ts`.
+ * The operations the compiler implements, **derived from the compiler** rather
+ * than listed here.
+ *
+ * `docs-scope.test.ts` writes this set out by hand and verifies each entry
+ * against the predicates. That catches an entry that does not exist — but not
+ * an operation that exists and was never added to the list, which is the
+ * direction that matters for a guard whose whole job is finding a list nobody
+ * updated. A hand-written list is exactly the thing #226 is about, and writing
+ * a second copy of it here would have been that bug, in the test for that bug.
+ *
+ * `READ_ARGS` and `WRITE_ARGS` are the tables the predicates answer from — `op
+ * in READ_ARGS` is the whole of `isReadOperation` — so their keys are the
+ * compiler's own record of what it implements. `aggregate` and `groupBy` are
+ * named because their predicates are literal comparisons with no table behind
+ * them; the count assertion below is what keeps that pair honest if a fifth
+ * kind is ever added.
  */
-const IMPLEMENTED: Operation[] = [
-  "findUnique",
-  "findUniqueOrThrow",
-  "findFirst",
-  "findFirstOrThrow",
-  "findMany",
-  "count",
+const IMPLEMENTED = [
+  ...Object.keys(READ_ARGS),
+  ...Object.keys(WRITE_ARGS),
   "aggregate",
   "groupBy",
-  "create",
-  "createMany",
-  "update",
-  "updateMany",
-  "upsert",
-  "delete",
-  "deleteMany",
-];
+] as Operation[];
 
 const source = readFileSync(MODELS, "utf8");
 
 describe("the generated base exposes every implemented operation", () => {
+  test("the derived set is the whole surface", () => {
+    // Fifteen today. A mismatch means either a new operation — in which case
+    // the assertions below now cover it, which is the point — or a fifth
+    // predicate kind whose operations no table lists, which the two literals
+    // above would silently miss.
+    expect(IMPLEMENTED.length).toBe(15);
+    expect(new Set(IMPLEMENTED).size).toBe(IMPLEMENTED.length);
+  });
+
   test("the artifact was found", () => {
     expect(source).toContain("export class");
     expect(source.length).toBeGreaterThan(1000);
