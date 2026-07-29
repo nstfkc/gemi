@@ -157,7 +157,7 @@ const VALUES = {
 
 const RUN = POSTGRES_URL ? describe : describe.skip;
 
-RUN("every scalar through a relation, lateral vs batched", () => {
+RUN("every scalar through a relation, lateral vs batched — postgres", () => {
   let database: DatabaseManager;
   let raw: SQL;
   let previous: Application | undefined;
