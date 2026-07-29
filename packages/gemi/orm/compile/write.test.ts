@@ -9,7 +9,17 @@ import {
   UnknownFieldError,
   UnsupportedQueryError,
 } from "../errors";
-import { account, bare, organization, post, reading, tag, user } from "../fixtures";
+import {
+  account,
+  bare,
+  organization,
+  post,
+  profile,
+  reading,
+  tag,
+  user,
+  userWithProfile,
+} from "../fixtures";
 import * as registry from "../registry";
 import { compileWrite } from "./write";
 
@@ -911,6 +921,96 @@ describe("nested writes", () => {
         expect(refusal.operation).toBe("delete");
         expect(refusal.argument).toBe("where");
       }
+    });
+  });
+
+  /**
+   * **Both sides of a to-one answer the same way**, which they did not.
+   *
+   * `planForeignSide` had exactly one `relation.kind` check — `createMany`'s —
+   * because no fixture had a to-one whose foreign key is on the child, so
+   * nothing ever reached it with `kind: "one"` (#116). Everything else planned
+   * the child as a list: `updateMany` and `deleteMany` **compiled**, and
+   * `update` / `delete` / `upsert` were refused for not looking like the
+   * to-many spelling rather than for being unimplemented on this shape.
+   *
+   * Prisma's to-one nested input, read off the generated client:
+   *
+   *     { create, connectOrCreate, upsert, disconnect, delete, connect, update }
+   *
+   * — no `createMany`, `set`, `updateMany` or `deleteMany` key at all.
+   *
+   * Walked as a table over both sides, because the two disagreeing *is* the
+   * defect and a one-sided test cannot see it.
+   */
+  describe("a to-one answers the same on both sides", () => {
+    beforeEach(() => {
+      registry.register("Profile", class { static $schema = profile });
+      registry.register("User", class { static $schema = userWithProfile });
+    });
+
+    const refuse = (relation: string, operand: Record<string, unknown>) => {
+      try {
+        compileWrite(
+          userWithProfile,
+          "update",
+          { where: { id: 1 }, data: { [relation]: operand } } as never,
+          sqlite,
+        );
+        return null;
+      } catch (error) {
+        return error as UnsupportedQueryError;
+      }
+    };
+
+    /**
+     * The four keys Prisma's to-one input does not have. Refused by name on
+     * both sides, with the same reason — `createMany` already was, the other
+     * three were the gap.
+     */
+    test.each([
+      ["set", { set: [{ id: 1 }] }],
+      ["updateMany", { updateMany: { where: {}, data: {} } }],
+      ["deleteMany", { deleteMany: {} }],
+      ["createMany", { createMany: { data: [{}] } }],
+    ])("%s is refused on both sides", (operand, value) => {
+      // `organization` — this row holds the key. `profile` — the child does.
+      for (const relation of ["organization", "profile"]) {
+        const error = refuse(relation, value);
+        expect(error, `${relation}.${operand} compiled`).not.toBeNull();
+        expect(error!.argument).toBe(`data.${relation}.${operand}`);
+        expect(error!.model).toBe("User");
+        expect(error!.message).toMatch(/is a to-one/);
+      }
+    });
+
+    /**
+     * The three that *are* on Prisma's to-one input. Not implemented on the
+     * foreign side — the point is that the refusal now says so, instead of
+     * blaming the operand's shape.
+     */
+    test.each([
+      ["update", { update: { bio: "y" } }],
+      ["delete", { delete: true }],
+      ["upsert", { upsert: { create: {}, update: {} } }],
+    ])("%s on the foreign side names the shape, not the spelling", (operand, value) => {
+      const error = refuse("profile", value);
+
+      expect(error).not.toBeNull();
+      expect(error!.argument).toBe(`data.profile.${operand}`);
+      expect(error!.message).toMatch(/foreign key lives on Profile/);
+      // The old refusals complained about the operand's spelling instead.
+      expect(error!.message).not.toMatch(/Expected an object/);
+    });
+
+    // The operands that work on this shape, so the refusals above are not
+    // simply "everything fails".
+    test.each([
+      ["create", { create: { bio: "x" } }],
+      ["connect", { connect: { userId: 1 } }],
+      ["connectOrCreate", { connectOrCreate: { where: { userId: 1 }, create: { bio: "x" } } }],
+    ])("%s still compiles on the foreign side", (_operand, value) => {
+      expect(refuse("profile", value)).toBeNull();
     });
   });
 

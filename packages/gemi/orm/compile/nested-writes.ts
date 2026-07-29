@@ -704,6 +704,54 @@ function planForeignSide(
   out.keyFields.push(parentField);
 
   /**
+   * **A to-one whose key is on the child**, which this function otherwise plans
+   * as though the child were a list.
+   *
+   * It had exactly one `kind` check — `createMany`'s, further down — because no
+   * fixture had the shape, so nothing ever reached this side with `kind: "one"`
+   * (#116). Everything else took the to-many spelling: `updateMany` and
+   * `deleteMany` *compiled*, and `update` / `delete` / `upsert` were refused
+   * for looking wrong rather than for being unimplemented here.
+   *
+   * Measured against the generated client rather than reasoned about. Prisma's
+   * to-one nested input is
+   *
+   *     { create, connectOrCreate, upsert, disconnect, delete, connect, update }
+   *
+   * with no `createMany`, `set`, `updateMany` or `deleteMany` key at all — so
+   * the first group below is refused for the same reason `planOwningSide`
+   * refuses it, and says so in the same words. The second group exists on that
+   * input but not here yet, and the refusal now says *that* instead of
+   * complaining about the operand's shape.
+   */
+  if (relation.kind !== "many") {
+    if (key === "set" || key === "updateMany" || key === "deleteMany") {
+      throw new UnsupportedQueryError(
+        `data.${relation.name}.${key}`,
+        schema.name,
+        operation,
+        `'${relation.name}' is a to-one: there is a single ${child.name} row, ` +
+          `so there is no set of rows for '${key}' to act on. Prisma does not ` +
+          `offer it on a to-one either. Use 'connect', 'disconnect' or ` +
+          `'update'.`,
+      );
+    }
+
+    if (key === "update" || key === "delete" || key === "upsert") {
+      throw new UnsupportedQueryError(
+        `data.${relation.name}.${key}`,
+        schema.name,
+        operation,
+        `'${relation.name}' is a to-one whose foreign key lives on ` +
+          `${child.name}, and '${key}' is not implemented for that shape yet. ` +
+          `On a to-one Prisma takes the data directly rather than the ` +
+          `{ where, data } form this side expects. Reach the row through the ` +
+          `${child.name} model directly, or use 'connect' and 'disconnect'.`,
+      );
+    }
+  }
+
+  /**
    * `disconnect` and `delete` on this side both act on rows the caller named by
    * unique key — which is what makes them expressible at all, and what puts
    * them on the supported side of this file's line.
