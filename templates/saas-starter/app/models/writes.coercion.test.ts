@@ -372,11 +372,17 @@ function suite(label: string, url?: string) {
      * a string. A loud failure replaces a silent mis-store, which is the trade
      * this project takes every time.
      *
-     * Fixing it means always serialising *and* emitting an explicit `::jsonb`
-     * cast on the parameter — which has to reach the insert, the update's set
-     * clause and any `where` comparing a Json column, so it is a compiler
-     * change with its own differential pass rather than a dialect tweak. Left
-     * out of the change that found it deliberately.
+     * **Fixing it is not "serialise and cast", which is what this said before.**
+     * That stores the jsonb *string* `"42"` — the very mis-store above — because
+     * Bun serialises a JS string bound to a `jsonb` parameter, so pre-serialising
+     * encodes it twice. Nor is it `to_jsonb($1)`, which carries a number and a
+     * boolean and fails on an object, an array, a string and null. The test below
+     * pins all three, so the one that works is a measurement rather than a pick.
+     *
+     * The working form still needs the column's type at the placeholder, so it
+     * reaches the insert, the update's set clause and any `where` comparing a Json
+     * column: a compiler change with its own differential pass rather than a
+     * dialect tweak. Left out of the change that found it deliberately.
      *
      * SQLite has no such limit: it stores JSON as text, so every shape works.
      */
@@ -395,6 +401,70 @@ function suite(label: string, url?: string) {
 
       const created: any = await write;
       expect(created.payload).toEqual(payload);
+    });
+
+    /**
+     * What a fix would have to be built on — postgres.
+     *
+     * The boundary above is recorded as temporary, and the note saying how to
+     * lift it was wrong: "serialise and emit `::jsonb`" reproduces the silent
+     * mis-store it warns about, because Bun serialises a JS string bound to a
+     * `jsonb` parameter and pre-serialising encodes it twice.
+     *
+     * That is a claim about the *driver*, not about this ORM, so nothing in the
+     * compiler would notice it changing. Pinned at the level it is true: if a
+     * later Bun binds these differently, this fails and the note above is stale
+     * rather than quietly wrong again.
+     */
+    test("the one binding a jsonb fix can use — postgres", async () => {
+      if (!url) return;
+
+      await raw.unsafe(`DROP TABLE IF EXISTS "JsonProbe"`);
+      await raw.unsafe(`CREATE TABLE "JsonProbe" ("payload" jsonb)`);
+
+      const insert = async (text: string, value: unknown) => {
+        await raw.unsafe(`DELETE FROM "JsonProbe"`);
+        await raw.unsafe(`INSERT INTO "JsonProbe" ("payload") VALUES (${text})`, [value]);
+        const rows: any = await raw.unsafe(
+          `SELECT "payload", jsonb_typeof("payload") AS kind FROM "JsonProbe"`,
+        );
+        return [...rows][0];
+      };
+
+      const shapes: [string, unknown, string][] = [
+        ["an object", { a: 1 }, "object"],
+        ["an array", [1, 2], "array"],
+        ["a string", "42", "string"],
+        ["a number", 42, "number"],
+        ["a boolean", true, "boolean"],
+        ["null", null, "null"],
+      ];
+
+      // The only form that carries every shape: serialise, then cast through
+      // text. Value *and* `jsonb_typeof`, because the mis-store this replaces
+      // was a right-looking value under the wrong type.
+      for (const [, value, kind] of shapes) {
+        const row = await insert("$1::text::jsonb", JSON.stringify(value));
+        expect(row.kind).toBe(kind);
+        expect(row.payload).toEqual(value);
+      }
+
+      // The remedy that was written down, and reproduces the old mis-store.
+      expect((await insert("$1::jsonb", JSON.stringify(42))).kind).toBe("string");
+
+      // `to_jsonb($1)` looks like a second answer and is not: it carries the two
+      // shapes Bun binds as a concrete type, and fails on the rest because an
+      // unannotated parameter leaves the polymorphic argument untyped. Pinned so
+      // nobody adopts it from the two rows that work.
+      expect((await insert("to_jsonb($1)", 42)).kind).toBe("number");
+      expect((await insert("to_jsonb($1)", true)).kind).toBe("boolean");
+      for (const value of [{ a: 1 }, [1, 2], "42", null]) {
+        await expect(insert("to_jsonb($1)", value)).rejects.toThrow(
+          /polymorphic type/,
+        );
+      }
+
+      await raw.unsafe(`DROP TABLE IF EXISTS "JsonProbe"`);
     });
 
     test("createMany round-trips every row", async () => {
