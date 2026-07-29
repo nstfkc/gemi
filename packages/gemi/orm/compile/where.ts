@@ -89,6 +89,11 @@ export function compileWhere(
       continue;
     }
 
+    if (key === COMPOSITE_IN) {
+      predicates.push(compileCompositeIn(schema, value, context, at));
+      continue;
+    }
+
     if (key === "NOT") {
       const negated = compileGroup(schema, value, context, at, "AND");
       // `NOT` of nothing is vacuously true, so it contributes no predicate.
@@ -498,6 +503,167 @@ const COMPARISONS: Record<string, string> = {
   gt: ">",
   gte: ">=",
 };
+
+/**
+ * The internal key a batched relation loader uses to match a **tuple** of
+ * columns against a list of tuples — the composite-relation counterpart of
+ * `in`, and the reason #97 exists.
+ *
+ * **`$`-prefixed because a Prisma field cannot be.** Field names match
+ * `[A-Za-z][A-Za-z0-9_]*`, so this cannot collide with a column, which a
+ * `__`-prefixed name could not promise.
+ *
+ * It is not part of the public argument grammar, and that is **enforced rather
+ * than asserted**. This branch sits above the field lookup, so a caller writing
+ * the key by hand used to be honoured — not an injection, since the fields are
+ * resolved against the schema and the values are bound, but an undocumented
+ * input surface with none of the operand validation its neighbours have. The
+ * operand now has to carry {@link PLANNER}, a module-private `Symbol` an
+ * application cannot reach, exactly as `markPreScoped` and `markOrmAuthored`
+ * gate their own claims.
+ */
+export const COMPOSITE_IN = "$compositeIn";
+
+/**
+ * Marks a composite-`in` operand as the planner's own.
+ *
+ * A `Symbol`, so it is invisible to `Object.entries` — which means it does not
+ * reach the plan key, where it would be noise, and cannot be written in JSON by
+ * a caller who has seen the key name in a stack trace.
+ */
+const PLANNER = Symbol("gemi.orm.compositeInFromPlanner");
+
+/** `{ fields: ["a", "b"], values: [[1, "x"], [2, "y"]] }`. */
+interface CompositeInOperand {
+  fields: string[];
+  values: unknown[][];
+}
+
+export function plannerCompositeIn(
+  fields: string[],
+  values: unknown[][],
+): Record<string, unknown> {
+  return { [PLANNER]: true, fields, values };
+}
+
+/**
+ * `(a, b) in (…)`, in whichever form the dialect can bind.
+ *
+ * Only ever reached on a dialect whose `canBindCompositeIn` said yes for these
+ * column types — `plan-relations.ts` asks before it emits this key, and keeps
+ * the portable `OR` of `AND`s otherwise. So there is no fallback here: arriving
+ * with a dialect that cannot express it is a bug in that decision, not a shape
+ * to degrade.
+ */
+function compileCompositeIn(
+  schema: ModelSchema,
+  operand: unknown,
+  context: WhereContext,
+  locate: (args: any) => any,
+): Fragment {
+  const { dialect } = context;
+  const fields = assertCompositeInOperand(schema, operand, context);
+
+  const resolved = fields.map((name) => {
+    const field = schema.fields[name];
+    if (!field) {
+      throw new UnknownFieldError(name, schema.name, Object.keys(schema.fields));
+    }
+    return field;
+  });
+
+  const columns = resolved.map(
+    (field) =>
+      `${context.qualifier ?? ""}${dialect.quoteIdent(field.column)}`,
+  );
+
+  return dialect.compositeIn(
+    columns,
+    resolved.map((field) => field.type),
+    (args) => (locate(args) as CompositeInOperand).values,
+  );
+}
+
+/**
+ * The operand's shape, checked at **plan** time.
+ *
+ * Every other operand in this file is validated here rather than left to fail
+ * at bind time — `assertCreateManyOperand`'s note says why: a refusal that
+ * arrives later has to unwind work that should never have started. This one
+ * was the exception, and it showed: `{ $compositeIn: null }` raised a raw
+ * `TypeError` from a destructure, and `{ fields: ["id"] }` with no `values` at
+ * all compiled clean and deferred its failure to bind time.
+ */
+function assertCompositeInOperand(
+  schema: ModelSchema,
+  operand: unknown,
+  context: WhereContext,
+): string[] {
+  /**
+   * A caller's key gets the **unknown-key treatment**, which is what the
+   * original comment promised and what every other key it is not a field for
+   * already gets. `UnsupportedQueryError` would render "does not support
+   * '$compositeIn' *yet*" — a promise about a key that is deliberately not in
+   * the grammar and never will be. That word has now been corrected once each
+   * on #82 and #88; this is the third time it has been raised, which is enough
+   * to stop treating it as a wording nit and use the error that is simply
+   * accurate: `$compositeIn` is not a field on this model.
+   */
+  const notAField = (): never => {
+    throw new UnknownFieldError(
+      COMPOSITE_IN,
+      schema.name,
+      Object.keys(schema.fields),
+    );
+  };
+
+  if (typeof operand !== "object" || operand === null || Array.isArray(operand)) {
+    return notAField();
+  }
+
+  if ((operand as Record<symbol, unknown>)[PLANNER] !== true) {
+    return notAField();
+  }
+
+  /**
+   * Below here the operand *is* the planner's, so a bad shape is this ORM's bug
+   * rather than a caller's — and `UnsupportedQueryError` is the right class for
+   * it: an internal invariant that does not hold is genuinely something the
+   * ORM does not support, and "yet" is the honest word for a state it should
+   * not be in.
+   */
+  const refuse = (detail: string): never => {
+    throw new UnsupportedQueryError(
+      COMPOSITE_IN,
+      schema.name,
+      context.operation,
+      detail,
+    );
+  };
+
+  const { fields, values } = operand as CompositeInOperand;
+
+  // Below here the operand *is* the planner's, so these are its bugs rather
+  // than a caller's — worth catching at compile time for the same reason, and
+  // worth a different sentence because the audience is different.
+  if (!Array.isArray(fields) || fields.length === 0) {
+    return refuse(`the planner built a '${COMPOSITE_IN}' with no fields.`);
+  }
+  if (!fields.every((name) => typeof name === "string")) {
+    return refuse(`the planner built a '${COMPOSITE_IN}' with a non-string field.`);
+  }
+  if (!Array.isArray(values)) {
+    return refuse(`the planner built a '${COMPOSITE_IN}' with no values.`);
+  }
+  if (!values.every((tuple) => Array.isArray(tuple) && tuple.length === fields.length)) {
+    return refuse(
+      `the planner built a '${COMPOSITE_IN}' whose tuples do not all have ` +
+        `${fields.length} value(s).`,
+    );
+  }
+
+  return fields;
+}
 
 function compileFieldFilter(
   schema: ModelSchema,

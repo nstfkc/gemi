@@ -288,6 +288,14 @@ export function canonicalShape(
 const LIST_KEYS = new Set(["in", "notIn"]);
 
 /**
+ * The internal composite-`in` key — see `compile/where.ts`, which owns it.
+ *
+ * Spelled here rather than imported to keep `plan.ts` free of a dependency on
+ * the compiler, the way it already is for every other key it recognises.
+ */
+const COMPOSITE_IN = "$compositeIn";
+
+/**
  * `in: [1, 2]` and `in: [1, 2, 3]` on Postgres are the same SQL text — the
  * whole array binds to `= any($1)` — so they must be the same cache entry.
  *
@@ -313,11 +321,11 @@ const LIST_KEYS = new Set(["in", "notIn"]);
  *     sqlite    composite: 4 keys    single: 4 keys
  *     postgres  composite: 4 keys    single: 1 key
  *
- * So the churn this function prevents for a single-field relation still happens
- * for a composite one on Postgres. SQLite was always in that position. Fixing
- * it needs a form where the parent keys ride in one parameter — Postgres can,
- * with `unnest` over one array per column — which is a dialect method rather
- * than a key change, and is filed as #97 rather than sketched here.
+ * That gap is closed on Postgres by #97: a composite key binds one array per
+ * *column* through `unnest`, so its text is fixed too, and `shapeOfMember`
+ * collapses its tuple list on the same condition this function uses. SQLite has
+ * no such form, keeps the `OR`, and churns as it always has — which is the same
+ * sentence as above, and for the same reason.
  */
 function collapsedList(value: unknown[]): string {
   return value.length === 0 ? "[]" : "[*]";
@@ -359,6 +367,33 @@ function shapeOfMember(
   if (collapseLists && LIST_KEYS.has(key) && Array.isArray(value)) {
     return collapsedList(value);
   }
+  /**
+   * A composite `in`'s tuple list collapses on exactly the dialects where its
+   * SQL text does not grow with it — the same condition, and the same reason,
+   * as `collapsedList` for a single-column `in`.
+   *
+   * On Postgres the tuples become one array parameter per *column*, so every
+   * parent count is one statement and must be one entry: without this a batched
+   * composite `include` mints a plan per page size, which is #97 and the whole
+   * point of the `unnest` form. On SQLite the key is never emitted — the loader
+   * keeps the `OR`, whose text does grow — so the collapse cannot be reached
+   * there to be wrong.
+   *
+   * The `fields` stay verbatim: they are *identifiers* in the emitted SQL, so
+   * two relations joining on different columns must not share an entry. Only
+   * the tuple list is collapsed.
+   */
+  if (key === COMPOSITE_IN) {
+    const operand = value as { fields: unknown; values: unknown[] };
+    return canonicalShape(
+      collapseLists
+        ? { fields: operand.fields, values: collapsedList(operand.values) }
+        : value,
+      true,
+      collapseLists,
+    );
+  }
+
   if (VALUE_KEYS.has(key)) {
     return canonicalShape(value, false, collapseLists, inHaving);
   }
