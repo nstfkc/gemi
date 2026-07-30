@@ -5,6 +5,7 @@ import type { NestedPrettify } from "../utils/type";
 import type { ApiRouterHandler } from "../http/ApiRouter";
 import type { UnwrapPromise } from "../utils/type";
 import { QueryManagerContext } from "./QueryManagerContext";
+import { DEFAULT_STALE_TIME } from "./QueryResource";
 import { applyParams } from "../utils/applyParams";
 import type { UrlParser } from "./types";
 import { omitNullishValues } from "../utils/omitNullishValues";
@@ -17,6 +18,8 @@ interface Config<T> {
   keepPreviousData?: boolean;
   retryIntervalOnError?: number;
   refreshInterval?: number;
+  /** How long cached data stays fresh before a read revalidates it, in ms. */
+  staleTime?: number;
   debug?: boolean;
   lazy?: boolean;
   refetchUntil?: (data: T, duration: number) => number;
@@ -31,6 +34,7 @@ const defaultConfig: Config<any> = {
   keepPreviousData: true,
   retryIntervalOnError: 10000,
   refreshInterval: 999999,
+  staleTime: DEFAULT_STALE_TIME,
   debug: false,
   lazy: false,
 };
@@ -101,7 +105,7 @@ export function useQuery<T extends keyof GetRPC>(
     if (lazy) {
       return { loading: false, data: null, error: null, version: 0 };
     }
-    return resource.getVariant(variantKey);
+    return resource.getVariant(variantKey, config.staleTime);
   });
 
   const retry = useCallback(
@@ -110,7 +114,7 @@ export function useQuery<T extends keyof GetRPC>(
         if (configRef.current.debug) console.log("retrying", vk);
         retryingMap.current.set(vk, true);
         retryIntervalRef.current = setTimeout(() => {
-          resource.getVariant(vk);
+          resource.getVariant(vk, configRef.current.staleTime);
           retryingMap.current.set(vk, false);
         }, configRef.current.retryIntervalOnError);
       }
@@ -120,19 +124,29 @@ export function useQuery<T extends keyof GetRPC>(
 
   useEffect(() => {
     if (paramsKey !== paramsRef.current) {
-      setResource(getResource(normalPath));
+      // Pass `fallbackData` so a params change into a route the server already
+      // prefetched is served from the payload instead of a fresh request, and
+      // read the variant off the *next* resource — `resource` still points at
+      // the previous params' resource until React applies `setResource`.
+      const nextResource = getResource(normalPath, fallbackData);
+      setResource(nextResource);
       if (fetchedRef.current) {
-        setState(resource.getVariant(variantKey));
+        setState(
+          nextResource.getVariant(variantKey, configRef.current.staleTime),
+        );
       }
       paramsRef.current = paramsKey;
     }
-  }, [paramsKey, normalPath, variantKey, getResource, resource]);
+  }, [paramsKey, normalPath, variantKey, getResource, fallbackData]);
 
   const handleReload = useCallback(() => {
     if (configRef.current.debug) {
       console.log("Reloading query for", variantKey);
     }
-    const data = resource.getVariant(variantKey).data;
+    const data = resource.getVariant(
+      variantKey,
+      configRef.current.staleTime,
+    ).data;
     resource.mutate(variantKey, () => data);
   }, [variantKey, resource]);
 
@@ -201,7 +215,9 @@ export function useQuery<T extends keyof GetRPC>(
 
   useEffect(() => {
     if (fetchedRef.current) {
-      handleStateUpdate(resource.getVariant(variantKey));
+      handleStateUpdate(
+        resource.getVariant(variantKey, configRef.current.staleTime),
+      );
     }
     const unsub = resource.store.subscribe((store) => {
       const variant = store.get(variantKey);
