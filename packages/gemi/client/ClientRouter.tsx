@@ -41,6 +41,7 @@ import {
   type PartialRenderInfo,
 } from "../utils/partialRender";
 import { mergeCarriedSegments } from "./helpers/mergeCarriedSegments";
+import { routeDataUrl } from "./helpers/routeDataUrl";
 
 declare global {
   interface Window {
@@ -153,7 +154,8 @@ const Routes = (props: { componentTree: ComponentTree }) => {
   const { componentTree } = props;
   const [isPending, startTransition] = useTransition();
   const [isFetching, setIsFetching] = useState(false);
-  const { routerSubject, fetchRouteCSS } = useContext(ClientRouterContext);
+  const { routerSubject, fetchRouteCSS, takePrefetched } =
+    useContext(ClientRouterContext);
   const { hydrate } = useContext(QueryManagerContext);
 
   const [transitionPath, setTransitionPath] = useState<[string, string]>([
@@ -226,18 +228,12 @@ const Routes = (props: { componentTree: ComponentTree }) => {
 
       const localeSegment = routerState.locale ? `/${routerState.locale}` : "";
 
-      const _pathname =
-        localeSegment.length > 0 && pathname === "/" ? "" : pathname;
-
-      const pathnameWithLocaleSegment = `${localeSegment}${_pathname}`;
-
-      const url = `${pathnameWithLocaleSegment}.json${search}`;
+      const url = routeDataUrl({ pathname, search, localeSegment });
       const from = renderedRouteRef.current;
       setIsFetching(true);
-      let res = { ok: false, json: async () => ({}) } as Response;
-      try {
-        const result = await Promise.all([
-          fetch(url, { headers: { [PARTIAL_RENDER_HEADER]: from } }),
+
+      const warmRouteAssets = () =>
+        Promise.all([
           fetchRouteCSS(pathname),
           ...views.map((component) => {
             if (!window?.loaders) return Promise.resolve();
@@ -245,30 +241,54 @@ const Routes = (props: { componentTree: ComponentTree }) => {
             loader();
           }),
         ]);
-        res = result[0];
-      } catch (e) {
-        console.error(e);
+
+      // A prefetched payload is always a full render, so there is nothing to
+      // merge onto and the request can be skipped entirely. `takePrefetched`
+      // resolves to null when the prefetch failed — fall through and fetch.
+      let payload: any = null;
+      const prefetched = takePrefetched?.(url);
+      if (prefetched) {
+        const [prefetchedPayload] = await Promise.all([
+          prefetched,
+          warmRouteAssets(),
+        ]);
+        payload = prefetchedPayload ?? null;
       }
 
-      if (res.ok) {
-        let payload = await res.json();
-
-        // Another navigation committed while this one was in flight, so the
-        // segments the server carried forward were computed against a route
-        // that is no longer on screen. Nothing sound to merge onto — ask for
-        // the whole tree instead.
-        const claimed: PartialRenderInfo | null = payload.partial ?? null;
-        if (claimed && claimed.from !== renderedRouteRef.current) {
-          try {
-            const full = await fetch(url);
-            if (full.ok) {
-              payload = await full.json();
-            }
-          } catch (e) {
-            console.error(e);
-          }
+      if (!payload) {
+        let res = { ok: false, json: async () => ({}) } as Response;
+        try {
+          const result = await Promise.all([
+            fetch(url, { headers: { [PARTIAL_RENDER_HEADER]: from } }),
+            warmRouteAssets(),
+          ]);
+          res = result[0];
+        } catch (e) {
+          console.error(e);
         }
 
+        if (res.ok) {
+          payload = await res.json();
+
+          // Another navigation committed while this one was in flight, so the
+          // segments the server carried forward were computed against a route
+          // that is no longer on screen. Nothing sound to merge onto — ask for
+          // the whole tree instead.
+          const claimed: PartialRenderInfo | null = payload.partial ?? null;
+          if (claimed && claimed.from !== renderedRouteRef.current) {
+            try {
+              const full = await fetch(url);
+              if (full.ok) {
+                payload = await full.json();
+              }
+            } catch (e) {
+              console.error(e);
+            }
+          }
+        }
+      }
+
+      if (payload) {
         const {
           data,
           i18n,
@@ -322,7 +342,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
       }
       setIsFetching(false);
     });
-  }, [routerSubject, fetchRouteCSS, replace, hydrate]);
+  }, [routerSubject, fetchRouteCSS, takePrefetched, replace, hydrate]);
 
   return (
     <RouteTransitionProvider
