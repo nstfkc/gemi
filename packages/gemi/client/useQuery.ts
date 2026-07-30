@@ -105,7 +105,20 @@ export function useQuery<T extends keyof GetRPC>(
     if (lazy) {
       return { loading: false, data: null, error: null, version: 0 };
     }
-    return resource.getVariant(variantKey, config.staleTime);
+    // Seed from the cache without touching the network — the mount effect below
+    // calls `getVariant`, which is what fetches and revalidates. Fetching here
+    // instead would fire a request for renders React discards: a layout renders
+    // once per suspending descendant, and each attempt gets fresh hook state,
+    // including a fresh `QueryResource`, so the in-flight guard cannot dedupe
+    // them.
+    return (
+      resource.peek(variantKey) ?? {
+        loading: true,
+        data: null,
+        error: null,
+        version: 0,
+      }
+    );
   });
 
   const retry = useCallback(
