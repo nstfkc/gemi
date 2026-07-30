@@ -1,6 +1,7 @@
 import {
   useContext,
   useEffect,
+  useRef,
   useState,
   StrictMode,
   memo,
@@ -34,6 +35,12 @@ import { useRouteData } from "./useRouteData";
 import { updateMeta } from "./Head";
 import { RouteTransitionProvider } from "./RouteTransitionProvider";
 import { ThemeProvider } from "./ThemeProvider";
+import {
+  PARTIAL_RENDER_HEADER,
+  initialRenderedRoute,
+  type PartialRenderInfo,
+} from "../utils/partialRender";
+import { mergeCarriedSegments } from "./helpers/mergeCarriedSegments";
 
 declare global {
   interface Window {
@@ -181,6 +188,19 @@ const Routes = (props: { componentTree: ComponentTree }) => {
 
   const { replace } = useNavigate();
 
+  // Adopt what the document was rendered with. Without this the initial payload
+  // only ever reaches a component that mounts on the first render, and one that
+  // mounts on a later navigation — into a route whose layout has since been
+  // carried forward rather than re-run — would fetch it over `/api` instead.
+  useEffect(() => {
+    hydrate(prefetchedData);
+  }, [hydrate, prefetchedData]);
+
+  // The route currently on screen, in `x-gemi-from` form. Updated when a
+  // response is committed, never when one is merely requested — a navigation
+  // that fails must leave the base the server carries segments from intact.
+  const renderedRouteRef = useRef(initialRenderedRoute(routeState));
+
   useEffect(() => {
     return routerSubject?.subscribe(async (routerState) => {
       const { pathname, search, state, views } = routerState;
@@ -212,11 +232,12 @@ const Routes = (props: { componentTree: ComponentTree }) => {
       const pathnameWithLocaleSegment = `${localeSegment}${_pathname}`;
 
       const url = `${pathnameWithLocaleSegment}.json${search}`;
+      const from = renderedRouteRef.current;
       setIsFetching(true);
       let res = { ok: false, json: async () => ({}) } as Response;
       try {
         const result = await Promise.all([
-          fetch(url),
+          fetch(url, { headers: { [PARTIAL_RENDER_HEADER]: from } }),
           fetchRouteCSS(pathname),
           ...views.map((component) => {
             if (!window?.loaders) return Promise.resolve();
@@ -230,6 +251,24 @@ const Routes = (props: { componentTree: ComponentTree }) => {
       }
 
       if (res.ok) {
+        let payload = await res.json();
+
+        // Another navigation committed while this one was in flight, so the
+        // segments the server carried forward were computed against a route
+        // that is no longer on screen. Nothing sound to merge onto — ask for
+        // the whole tree instead.
+        const claimed: PartialRenderInfo | null = payload.partial ?? null;
+        if (claimed && claimed.from !== renderedRouteRef.current) {
+          try {
+            const full = await fetch(url);
+            if (full.ok) {
+              payload = await full.json();
+            }
+          } catch (e) {
+            console.error(e);
+          }
+        }
+
         const {
           data,
           i18n,
@@ -239,7 +278,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
           directive = {},
           is404 = false,
           appId,
-        } = await res.json();
+        } = payload;
         updateMeta(meta);
         if (directive?.kind === "Redirect") {
           if (directive?.path) {
@@ -259,20 +298,26 @@ const Routes = (props: { componentTree: ComponentTree }) => {
           });
         }
 
+        const carriedViews: string[] = payload.partial?.carriedViews ?? [];
+        renderedRouteRef.current = `${pathname}${search}`;
+
         // Adopt what the server just prefetched before the new surface mounts
         // and its queries read the cache, otherwise they refetch it over /api.
         // Safe here: this callback is async, so we are past the render phase.
         hydrate(prefetchedData);
 
         startTransition(() => {
-          setRouteState({
+          setRouteState((state) => ({
             ...routerState,
             appId,
-            data,
             i18n,
             prefetchedData,
-            breadcrumbs,
-          });
+            ...mergeCarriedSegments(
+              state,
+              { pathname, routePath: routerState.routePath, data, breadcrumbs },
+              carriedViews,
+            ),
+          }));
         });
       }
       setIsFetching(false);

@@ -3,6 +3,7 @@ import { I18n } from "gemi/facades";
 import { ApiRouter, ResourceController, ValidationError, type HttpRequest } from "gemi/http";
 import { Dictionary } from "gemi/i18n";
 import { HomeController } from "../controllers/HomeController";
+import { PartialRenderController } from "../controllers/PartialRenderController";
 
 class ProductsController extends ResourceController {
   async list() {}
@@ -26,6 +27,11 @@ export default class extends ApiRouter {
   routes = {
     "/org": OrgRouter,
     "/test": this.get(HomeController, "index"),
+    // Read by the `/partial` demo — see PartialRenderController for which of
+    // these are prefetched on the server and which the browser has to fetch.
+    "/partial-render/org/:orgId": this.get(PartialRenderController, "org"),
+    "/partial-render/reports": this.get(PartialRenderController, "reportsData"),
+    "/partial-render/notifications": this.get(PartialRenderController, "notifications"),
     "/home": this.post(HomeController, "post"),
     "/upload": this.post(async (req: HttpRequest<{ file: File | File[] }>) => {
       const input = await req.input();

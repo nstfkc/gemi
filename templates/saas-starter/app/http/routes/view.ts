@@ -1,5 +1,6 @@
 import { Cookie, I18n, Meta, Query, Auth } from "gemi/facades";
 import { type HttpRequest, ViewRouter } from "gemi/http";
+import { PartialRenderController } from "../controllers/PartialRenderController";
 
 class AuthViewRouter extends ViewRouter {
   routes = {
@@ -7,6 +8,43 @@ class AuthViewRouter extends ViewRouter {
     "/sign-up": this.view("auth/SignUp"),
     "/reset-password": this.view("auth/ResetPassword"),
     "/forgot-password": this.view("auth/ForgotPassword"),
+  };
+}
+
+/**
+ * Hand-testable surface for partial rendering: navigating between two routes
+ * under the same layout re-runs only the segments that changed. Each segment
+ * renders the run number its handler stamped, so you can see which ones ran.
+ */
+class PartialRenderRouter extends ViewRouter {
+  routes = {
+    "/:orgId": this.layout("partial/Layout", [PartialRenderController, "layout"], {
+      "/": this.view("partial/Overview", [PartialRenderController, "overview"]),
+      "/reports": this.view("partial/Reports", [PartialRenderController, "reports"]),
+      "/settings": this.layout(
+        "partial/SettingsLayout",
+        [PartialRenderController, "settingsLayout"],
+        {
+          "/general": this.view("partial/SettingsGeneral", [
+            PartialRenderController,
+            "settingsGeneral",
+          ]),
+          "/billing": this.view("partial/SettingsBilling", [
+            PartialRenderController,
+            "settingsBilling",
+          ]),
+        },
+      ),
+    }),
+    // The same shape, opted out of being skipped.
+    "/always/:orgId": this.layout(
+      "partial/AlwaysLayout",
+      [PartialRenderController, "alwaysLayout"],
+      {
+        "/one": this.view("partial/AlwaysOne", [PartialRenderController, "alwaysOne"]),
+        "/two": this.view("partial/AlwaysTwo", [PartialRenderController, "alwaysTwo"]),
+      },
+    ).alwaysRun(),
   };
 }
 
@@ -65,6 +103,7 @@ export default class extends ViewRouter {
       },
     ),
     "/auth": AuthViewRouter,
+    "/partial": PartialRenderRouter,
     "(app)/": AppRouter,
   };
 }

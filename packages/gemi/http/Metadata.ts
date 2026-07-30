@@ -19,6 +19,13 @@ export class Metadata {
     openGraph: null,
   };
 
+  /**
+   * Whether a handler set anything, as opposed to `content` still being the
+   * defaults. A partially rendered response that touched no metadata sends
+   * none, so the client keeps what the skipped segments put there.
+   */
+  touched = false;
+
   render() {
     return {
       title: this.content.title,
@@ -28,10 +35,12 @@ export class Metadata {
   }
 
   title(title: string) {
+    this.touched = true;
     this.content.title = title;
   }
 
   description(description: string) {
+    this.touched = true;
     this.content.description = description;
   }
 
@@ -49,6 +58,7 @@ export class Metadata {
     twitterImageWidth = imageWidth,
     twitterImageHeight = imageHeight,
   }: OpenGraphParams) {
+    this.touched = true;
     let _image = image;
     let _twitterImage = twitterImage;
     if (image && !image.startsWith("http")) {
