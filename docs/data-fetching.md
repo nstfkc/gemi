@@ -164,6 +164,13 @@ refetch behind an optimistic `mutate()` — is left alone rather than overwritte
 > **Gotcha:** The `Query` facade can only be used from a **view/page request**, not
 > from an API request — calling it during an API request throws.
 
+A prefetch belongs to the handler that queues it, so a prefetch in a layout handler
+runs when the client enters that layout and not on every navigation inside it — see
+[layout handlers do not re-run on every
+navigation](./views-and-layouts.md#layout-handlers-do-not-re-run-on-every-navigation).
+Prefetch from the view handler when a route needs the data fetched every time it is
+navigated to.
+
 ## Writing data: mutations
 
 For `POST`/`PUT`/`PATCH`/`DELETE`, the [`Form`](./forms.md) component is the

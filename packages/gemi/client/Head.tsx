@@ -2,6 +2,11 @@ import { type ReactNode, useContext } from "react";
 import { ServerDataContext } from "./ServerDataProvider";
 
 export function updateMeta(meta: any) {
+  // A partially rendered response whose segments set no metadata sends none —
+  // what is on the page belongs to the segments that were skipped.
+  if (!meta) {
+    return;
+  }
   const { title, description } = meta;
   if (title) {
     document.title = title;

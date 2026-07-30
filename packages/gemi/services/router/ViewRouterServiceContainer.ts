@@ -11,13 +11,14 @@ import {
   type FlatViewRoutes,
   type ViewRouteExec,
 } from "./createFlatViewRoutes";
+import { resolvePartialRender } from "./planPartialRender";
+import { matchViewRoute } from "./matchViewRoute";
+import { PARTIAL_RENDER_HEADER, type PartialRenderInfo } from "../../utils/partialRender";
 import type { ViewRouterServiceProvider } from "./ViewRouterServiceProvider";
 // @ts-ignore
 import { renderToReadableStream } from "react-dom/server.browser";
 import { createElement, Fragment } from "react";
 
-// @ts-ignore
-import { URLPattern } from "urlpattern-polyfill/urlpattern";
 import { ServiceContainer } from "../ServiceContainer";
 import { createFileResponse, type FileOutput, type ViewRoutes } from "../../http/ViewRouter";
 import { createRouteManifest } from "./createRouteManifest";
@@ -345,16 +346,32 @@ export class ViewRouterServiceContainer extends ServiceContainer {
     let middlewares: (RouterMiddleware | string)[] = [];
     let currentPathName: null | string = null;
     let params: Record<string, any> = {};
+    let partial: PartialRenderInfo | null = null;
 
     try {
-      for (const [pathname, handler] of Object.entries(this.flatViewRoutes)) {
-        const pattern = new URLPattern({ pathname });
-        if (pattern.test({ pathname: urlPathname })) {
-          currentPathName = pathname;
-          params = pattern.exec({ pathname: urlPathname })?.pathname.groups;
-          handlers = handler.exec;
-          middlewares = handler.middleware;
-          break;
+      const match = matchViewRoute(this.flatViewRoutes, urlPathname);
+      if (match) {
+        currentPathName = match.routePath;
+        params = match.params;
+        handlers = match.route.exec;
+        middlewares = match.route.middleware;
+
+        // Only navigations skip work. A document request renders the whole
+        // tree, and the client has nothing to carry forward yet.
+        if (isViewDataRequest && this.service.partialRendering) {
+          const from = req.headers.get(PARTIAL_RENDER_HEADER);
+          const plan = resolvePartialRender({
+            flatViewRoutes: this.flatViewRoutes,
+            supportedLocales: i18nServiceContainer.service.supportedLocales,
+            from,
+            origin: url.origin,
+            to: { segments: match.route.segments, params, search: url.search },
+          });
+
+          if (plan.startIndex > 0) {
+            handlers = handlers.slice(plan.startIndex);
+            partial = { from, carriedViews: plan.carriedViews };
+          }
         }
       }
     } catch (err) {
@@ -420,9 +437,13 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           };
         }
 
-        const data = await Promise.all([
-          ...handlers.map((fn) => fn(httpRequest as any)),
-          ...Array.from(ctx.prefetchPromiseQueue).map((fn) => fn()),
+        // Started together, collected apart: `data` is one entry per rendered
+        // segment, and must stay that way — prefetch results are not view data.
+        const handlerPromises = handlers.map((fn) => fn(httpRequest as any));
+        const prefetchPromises = Array.from(ctx.prefetchPromiseQueue).map((fn) => fn());
+        const [data] = await Promise.all([
+          Promise.all(handlerPromises),
+          Promise.all(prefetchPromises),
         ]);
 
         const cookies = ctx.cookies;
@@ -474,6 +495,9 @@ export class ViewRouterServiceContainer extends ServiceContainer {
 
         if (isViewDataRequest) {
           headers.set("Content-Type", "application/json; charset=utf-8");
+          // The body depends on the route the client came from, so no shared
+          // cache may serve one client's partial response to another.
+          headers.append("Vary", PARTIAL_RENDER_HEADER);
 
           cookies.forEach((cookie) => headers.append("Set-Cookie", cookie.toString()));
 
@@ -481,7 +505,9 @@ export class ViewRouterServiceContainer extends ServiceContainer {
 
           return new Response(
             JSON.stringify({
-              meta: pageData.meta,
+              // Nothing that rendered touched the metadata, so the segments
+              // that were skipped are still the ones that own it.
+              meta: partial && !ctx.metadata.touched ? null : pageData.meta,
               data: {
                 [urlPathname]: viewData,
               },
@@ -490,6 +516,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
               i18n,
               is404: !currentPathName,
               appId: pageData.appId,
+              partial,
             }),
             {
               headers,

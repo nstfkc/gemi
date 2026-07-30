@@ -242,6 +242,8 @@ export class ViewRoute<Input, Output, Params> {
 export class LayoutRoute<T extends ViewRoutes, Input, Output, Params> {
   children: new () => ViewRouter;
   middlewares: string[] = [];
+  /** @internal Set by `alwaysRun()`. */
+  alwaysRuns = false;
   private handler: (req: HttpRequest<Input, Params>) => Output = (() => ({})) as any;
   constructor(
     public viewPath: string,
@@ -286,6 +288,20 @@ export class LayoutRoute<T extends ViewRoutes, Input, Output, Params> {
         },
       },
     };
+  }
+
+  /**
+   * Runs this layout's handler on every navigation underneath it, instead of
+   * only when the client enters the layout.
+   *
+   * Costs a handler run per navigation, so reach for it when the layout's data
+   * genuinely changes as the routes below it change. It is not a way to make a
+   * handler-level access check reliable — use middleware for that, which runs
+   * on every request regardless.
+   */
+  alwaysRun() {
+    this.alwaysRuns = true;
+    return this;
   }
 
   middleware(middlewares: string[]) {
