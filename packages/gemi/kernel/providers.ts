@@ -1,5 +1,6 @@
 import type { ServiceProviderConstructor } from "../foundation/Application";
 import { AuthServiceProvider } from "../auth/AuthServiceProvider";
+import { DatabaseServiceProvider } from "../database/DatabaseServiceProvider";
 import { TranslationServiceProvider } from "../i18n/TranslationServiceProvider";
 import { ScheduleServiceProvider } from "../services/cron/ScheduleServiceProvider";
 import { MailServiceProvider } from "../services/email/MailServiceProvider";
@@ -15,8 +16,8 @@ import { RedisServiceProvider } from "../services/redis/RedisServiceProvider";
 import { RouteServiceProvider } from "../services/router/RouteServiceProvider";
 
 /**
- * The providers every gemi app boots with, in registration order. Fourteen
- * providers for fifteen services — `RouteServiceProvider` owns both the api and
+ * The providers every gemi app boots with, in registration order. Fifteen
+ * providers for sixteen services — `RouteServiceProvider` owns both the api and
  * the view dispatcher, the way Laravel's does.
  *
  * Order only matters for `boot()`; `register()` binds factories and resolves
@@ -25,6 +26,7 @@ import { RouteServiceProvider } from "../services/router/RouteServiceProvider";
 export const frameworkProviders: ServiceProviderConstructor[] = [
   KernelIdServiceProvider,
   MiddlewareServiceProvider,
+  DatabaseServiceProvider,
   RouteServiceProvider,
   AuthServiceProvider,
   MailServiceProvider,

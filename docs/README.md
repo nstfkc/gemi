@@ -1,6 +1,6 @@
 # gemi Documentation
 
-**gemi** is a batteries-included, full-stack TypeScript web framework built on **Bun**, **Vite**, and **React 19** with server-side rendering. It ships everything a typical web application needs — class-based routing, a type-safe network layer, authentication and authorization, middleware, form validation, transactional email, background jobs, cron, object storage, real-time broadcasting, and i18n — so you spend time on product code instead of wiring libraries together.
+**gemi** is a batteries-included, full-stack TypeScript web framework built on **Bun**, **Vite**, and **React 19** with server-side rendering. It ships everything a typical web application needs — class-based routing, a type-safe network layer, a Prisma-typed ORM, authentication and authorization, middleware, form validation, transactional email, background jobs, cron, object storage, real-time broadcasting, and i18n — so you spend time on product code instead of wiring libraries together.
 
 gemi is Laravel-inspired: an application is a **Kernel** owning a **container**, **service providers** register bindings into that container, runtime settings live in **`app/config/*.ts`**, routes are declared in **router classes**, request logic lives in **controllers**, and framework services are reached through **facades**. It is **not** Next.js — there is no file-based routing; every URL is mapped explicitly in a router.
 
@@ -41,6 +41,10 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 - **[Data Fetching](./data-fetching.md)** — `useQuery`, the mutation hooks, the `Query` prefetch facade, and the type-safe `gemi.d.ts` layer.
 - **[Forms](./forms.md)** — the `Form` component, surfacing validation errors, form status hooks.
 - **[Navigation](./navigation.md)** — `Link`, `useNavigate`, `useParams`, `useSearchParams`, and the `Redirect` component vs. facade.
+
+### Data
+- **[ORM](./orm.md)** — the Prisma-typed, gemi-executed query layer: models, relations, ambient transactions, policies, soft deletes.
+- **[Rows & Entities](./orm-rows-and-entities.md)** — plain objects by default, `track` + `save`, and `wrap`.
 
 ### Auth
 - **[Authentication](./authentication.md)** — `app/config/auth.ts`, adapters, sessions, magic links, OAuth, the `Auth` facade, and client auth hooks.

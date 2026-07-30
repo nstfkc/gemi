@@ -1,0 +1,352 @@
+import { describe, expect, test } from "vitest";
+
+import { organization, user } from "./fixtures";
+import {
+  changedFields,
+  isTracked,
+  provenanceOf,
+  resnapshot,
+  track,
+  untracked,
+} from "./provenance";
+
+/**
+ * Provenance, tested as the pure functions it is — no database, no query.
+ *
+ * The end-to-end behaviour (`save` writing only changed columns, policies and
+ * `@updatedAt` applying) is in the template suite where there is a real `$exec`.
+ * What belongs here is the bookkeeping: what gets snapshotted, what counts as
+ * changed, and the identity semantics that make a spread row unsaveable.
+ */
+
+describe("what gets snapshotted", () => {
+  test("only the fields actually present on the row", () => {
+    // A partial select: the row has two of the model's fields.
+    const row = { id: 1, email: "a@b.c" };
+    track(row, user);
+
+    expect(provenanceOf(row)?.snapshot).toEqual({ id: 1, email: "a@b.c" });
+  });
+
+  test("the primary key is captured separately, at fetch time", () => {
+    const row = { id: 7, email: "a@b.c" };
+    track(row, user);
+
+    // Captured rather than read at save time, so mutating `id` cannot move the
+    // row a save targets — it would otherwise update a different record.
+    row.id = 9;
+    expect(provenanceOf(row)?.key).toEqual({ id: 7 });
+  });
+
+  /**
+   * An attached relation never enters the snapshot, because it is not one of
+   * the schema's fields — which is the *only* thing that excludes it.
+   *
+   * This test used to pass `["accounts"]` as a `relationKeys` argument and read
+   * as though that was what excluded it. It was not: the argument never changed
+   * the outcome, and the test passed identically with `[]`. The parameter is
+   * gone; the cases below are what the exclusion actually rests on, so they
+   * cover every shape a relation read attaches rather than one.
+   */
+  test.each([
+    ["a to-many array", { accounts: [] as unknown[] }],
+    ["a to-one object", { organization: { id: 3 } }],
+    ["a relation count", { _count: { accounts: 1 } }],
+    ["all three at once", { accounts: [{ id: 9 }], organization: { id: 3 }, _count: { accounts: 1 } }],
+  ])("%s is excluded from the snapshot", (_label, attached) => {
+    const row = { id: 1, email: "a@b.c", ...attached };
+    track(row, user);
+
+    expect(provenanceOf(row)?.snapshot).toEqual({ id: 1, email: "a@b.c" });
+  });
+
+  /**
+   * ...and the mechanism, stated directly: no relation can be a field, so the
+   * field check is sufficient on its own. Prisma enforces this — a model cannot
+   * declare a scalar and a relation under one name — and it is the assumption
+   * the removal rests on.
+   */
+  test("no relation name is also a field name", () => {
+    for (const schema of [user, organization]) {
+      const overlap = Object.keys(schema.relations ?? {}).filter(
+        (name) => name in schema.fields,
+      );
+      expect(overlap, `${schema.name} declares both`).toEqual([]);
+    }
+  });
+
+  test("keys that are not fields are ignored", () => {
+    const row = { id: 1, notAField: true };
+    track(row, user);
+    expect(provenanceOf(row)?.snapshot).toEqual({ id: 1 });
+  });
+
+  test("the model name is recorded", () => {
+    const row = { id: 1 };
+    track(row, organization);
+    expect(provenanceOf(row)?.model).toBe("Organization");
+  });
+});
+
+describe("what counts as changed", () => {
+  test("an untouched row has no changes", () => {
+    const row = { id: 1, email: "a@b.c", name: "A" };
+    track(row, user);
+    expect(changedFields(row, user)).toEqual({});
+  });
+
+  test("only the mutated field", () => {
+    const row: any = { id: 1, email: "a@b.c", name: "A" };
+    track(row, user);
+    row.name = "B";
+
+    expect(changedFields(row, user)).toEqual({ name: "B" });
+  });
+
+  test("setting a field back to its fetched value is not a change", () => {
+    const row: any = { id: 1, name: "A" };
+    track(row, user);
+    row.name = "B";
+    row.name = "A";
+
+    expect(changedFields(row, user)).toEqual({});
+  });
+
+  test("null and undefined are distinguished from a value", () => {
+    const row: any = { id: 1, name: "A", deletedAt: null };
+    track(row, user);
+    row.name = null;
+
+    expect(changedFields(row, user)).toEqual({ name: null });
+  });
+
+  /**
+   * `!==` is wrong for a `Date`: two objects for the same instant are different
+   * references. Without this every save of a row carrying a timestamp would
+   * rewrite that timestamp — and on a model with `@updatedAt` that means every
+   * save of an otherwise-unchanged row issues a statement.
+   */
+  test("a Date is compared by instant, not by reference", () => {
+    const row: any = { id: 1, createdAt: new Date("2024-01-01T00:00:00Z") };
+    track(row, user);
+
+    row.createdAt = new Date("2024-01-01T00:00:00Z");
+    expect(changedFields(row, user)).toEqual({});
+
+    row.createdAt = new Date("2024-06-01T00:00:00Z");
+    expect(changedFields(row, user)).toHaveProperty("createdAt");
+  });
+
+  /**
+   * ...and against something that is *not* a Date.
+   *
+   * The guard is `a instanceof Date && b instanceof Date`, and the `&&` could
+   * be an `||` with every test still passing — found by mutation testing. Under
+   * that mutation a Date compared with a string calls `getTime` on the string
+   * and throws from inside a dirty check, which is a long way from where the
+   * caller made the mistake.
+   *
+   * Reachable for real: a `Json` column can hold a date-shaped string, and a
+   * caller assigning `"2024-01-01"` over a fetched `Date` is an ordinary slip.
+   */
+  test.each([
+    ["a string", "2024-01-01T00:00:00Z"],
+    ["a number", 1704067200000],
+    ["null", null],
+  ])("a Date replaced by %s is dirty, not an error", (_label, replacement) => {
+    const row: any = { id: 1, createdAt: new Date("2024-01-01T00:00:00Z") };
+    track(row, user);
+
+    row.createdAt = replacement;
+    expect(changedFields(row, user)).toEqual({ createdAt: replacement });
+  });
+
+  /** ...and the reverse: a non-Date snapshot replaced by a Date. */
+  test("a Date arriving where one was not is dirty", () => {
+    const row: any = { id: 1, createdAt: "2024-01-01T00:00:00Z" };
+    track(row, user);
+
+    const replacement = new Date("2024-01-01T00:00:00Z");
+    row.createdAt = replacement;
+    expect(changedFields(row, user)).toEqual({ createdAt: replacement });
+  });
+
+  /**
+   * **`Bytes` columns**, which the dirty check compares byte-wise for the same
+   * reason it compares Dates by instant — and which nothing exercised at all.
+   *
+   * Prisma maps `Bytes` to `Uint8Array`, so every value is a fresh view and
+   * `!==` is always true. Without the byte-wise branch, every `save` of a row
+   * carrying one would rewrite it. Three mutants in that branch survived the
+   * whole suite before this, because no test ever entered it.
+   */
+  describe("a Bytes column", () => {
+    const bytes = {
+      ...user,
+      fields: { ...user.fields, password: { ...user.fields.password, type: "Bytes" } },
+    };
+
+    const compare = (before: unknown, after: unknown) => {
+      const row: any = { id: 1, password: before };
+      track(row, bytes);
+      row.password = after;
+      return changedFields(row, bytes);
+    };
+
+    test("equal bytes in different views are not dirty", () => {
+      expect(compare(new Uint8Array([1, 2, 3]), new Uint8Array([1, 2, 3]))).toEqual({});
+    });
+
+    test("a differing byte is dirty", () => {
+      const after = new Uint8Array([1, 2, 4]);
+      expect(compare(new Uint8Array([1, 2, 3]), after)).toEqual({ password: after });
+    });
+
+    // The length check is its own branch, and a prefix is the case that would
+    // pass a naive element-wise loop.
+    test("a shorter value with the same prefix is dirty", () => {
+      const after = new Uint8Array([1, 2]);
+      expect(compare(new Uint8Array([1, 2, 3]), after)).toEqual({ password: after });
+    });
+
+    test("a longer value with the same prefix is dirty", () => {
+      const after = new Uint8Array([1, 2, 3, 4]);
+      expect(compare(new Uint8Array([1, 2, 3]), after)).toEqual({ password: after });
+    });
+
+    // A view over a larger buffer: `byteOffset` and `byteLength` have to be
+    // honoured or the comparison reads the wrong window.
+    test("a view into a larger buffer compares only its own window", () => {
+      const buffer = new Uint8Array([9, 9, 1, 2, 3, 9]).buffer;
+      const view = new Uint8Array(buffer, 2, 3);
+      expect(compare(new Uint8Array([1, 2, 3]), view)).toEqual({});
+    });
+
+    test("bytes replaced by null are dirty", () => {
+      expect(compare(new Uint8Array([1, 2, 3]), null)).toEqual({ password: null });
+    });
+  });
+
+  /**
+   * `untracked`'s message names **what the caller actually passed**, because
+   * the two causes it distinguishes have different fixes: a query that did not
+   * ask for tracking, versus a copy of a row that did.
+   *
+   * That naming was untested — mutation testing flipped the null/undefined
+   * branch with the suite still passing. A diagnostic nobody asserts is a
+   * diagnostic that can quietly start saying the wrong thing.
+   */
+  test.each([
+    ["null", null, "null"],
+    ["undefined", undefined, "undefined"],
+    ["an array", [1, 2], "an array"],
+    ["a string", "row", "string"],
+    ["a number", 7, "number"],
+  ])("save handed %s says so", (_label, value, expected) => {
+    expect(untracked(value, "User").message).toContain(expected);
+  });
+
+  /**
+   * Assigning to a column the query never fetched is **refused**, not dropped.
+   *
+   * This test previously asserted the drop as correct behaviour — it was encoding
+   * the bug. The diff walks the snapshot's keys, so a field outside it cannot be
+   * seen as changed, and `save` reported success having written nothing. Writing
+   * it blind is not the alternative either: that overwrites whatever the column
+   * actually holds. Refusing is the only honest answer.
+   */
+  test("assigning to a field the row never fetched is refused", () => {
+    const row: any = { id: 1, email: "a@b.c" };
+    track(row, user);
+    row.password = "hunter2";
+
+    expect(() => changedFields(row, user)).toThrow(/was not fetched/);
+    expect(() => changedFields(row, user)).toThrow(/'password'/);
+  });
+
+  test("a field the row never fetched and never touched is fine", () => {
+    // The legal half of the same situation: a partial row that only touches what
+    // it read. `password` is simply absent, so there is nothing to refuse.
+    const row: any = { id: 1, email: "a@b.c" };
+    track(row, user);
+    row.email = "changed@b.c";
+
+    expect(changedFields(row, user)).toEqual({ email: "changed@b.c" });
+  });
+
+  test("an untracked object reports no changes rather than throwing", () => {
+    // `save` is the layer that raises; the diff itself is a query, and a query
+    // about an unknown object has an answer.
+    expect(changedFields({ id: 1 })).toEqual({});
+  });
+});
+
+describe("identity semantics", () => {
+  /**
+   * The first thing anyone will hit, so it is pinned rather than only
+   * documented. Provenance is keyed on the object, so any copy is a new object
+   * with none — and `save` must fail loudly there rather than guessing, because
+   * the guess would be "write every column".
+   */
+  test("a spread copy carries no provenance", () => {
+    const row = { id: 1, email: "a@b.c" };
+    track(row, user);
+
+    expect(isTracked(row)).toBe(true);
+    expect(isTracked({ ...row })).toBe(false);
+  });
+
+  test("a JSON round trip carries no provenance", () => {
+    const row = { id: 1, email: "a@b.c" };
+    track(row, user);
+    expect(isTracked(JSON.parse(JSON.stringify(row)))).toBe(false);
+  });
+
+  test("a primitive or null is not tracked and does not throw", () => {
+    expect(isTracked(null)).toBe(false);
+    expect(isTracked(undefined)).toBe(false);
+    expect(isTracked(42)).toBe(false);
+    expect(isTracked("row")).toBe(false);
+  });
+
+  test("two rows tracked separately do not share a snapshot", () => {
+    const a: any = { id: 1, name: "A" };
+    const b: any = { id: 2, name: "B" };
+    track(a, user);
+    track(b, user);
+
+    a.name = "changed";
+    expect(changedFields(a, user)).toEqual({ name: "changed" });
+    expect(changedFields(b, user)).toEqual({});
+  });
+});
+
+describe("resnapshot", () => {
+  test("a second save of the same row is a no-op", () => {
+    const row: any = { id: 1, name: "A" };
+    track(row, user);
+    row.name = "B";
+
+    const changed = changedFields(row, user);
+    expect(changed).toEqual({ name: "B" });
+
+    resnapshot(row, changed);
+    expect(changedFields(row, user)).toEqual({});
+  });
+
+  test("only the written fields are resnapshotted", () => {
+    const row: any = { id: 1, name: "A", locale: "en-US" };
+    track(row, user);
+    row.name = "B";
+    row.locale = "en-GB";
+
+    // Pretend only `name` was written.
+    resnapshot(row, { name: "B" });
+
+    expect(changedFields(row, user)).toEqual({ locale: "en-GB" });
+  });
+
+  test("resnapshotting an untracked object is a no-op, not a throw", () => {
+    expect(() => resnapshot({ id: 1 }, { name: "B" })).not.toThrow();
+  });
+});

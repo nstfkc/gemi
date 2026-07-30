@@ -1,0 +1,18 @@
+-- An enum column, so the differential harness can compare one against Prisma.
+--
+-- The generator maps a Prisma enum to `String` and records the enum's name
+-- alongside it. That mapping had a unit test in `bin/orm/emit.test.ts` and
+-- nothing that ran it against a database, because the schema carried no enum —
+-- the same gap `20260728120000_json_and_bytes_columns` closed for Json and
+-- Bytes, and for the same reason.
+--
+-- `NOT NULL DEFAULT 'free'` rather than nullable: an enum's interesting cases
+-- are equality, `in` and ordering across several values, and a column that is
+-- null half the time tests the null path again instead. The default is what
+-- lets existing rows and every insert that predates this column keep working
+-- without a backfill.
+--
+-- TEXT, since `migration_lock.toml` pins this directory to the sqlite provider
+-- and Prisma stores an enum as TEXT there. On Postgres the schema is applied
+-- with `prisma db push`, which creates the real enum type instead.
+ALTER TABLE "Organization" ADD COLUMN "plan" TEXT NOT NULL DEFAULT 'free';

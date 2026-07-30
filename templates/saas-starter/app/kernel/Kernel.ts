@@ -1,6 +1,7 @@
 import { Kernel } from "gemi/kernel";
 
 import auth from "../config/auth";
+import database from "../config/database";
 import filesystem from "../config/filesystem";
 import log from "../config/log";
 import mail from "../config/mail";
@@ -16,6 +17,7 @@ import AppServiceProvider from "../providers/AppServiceProvider";
 export default class extends Kernel {
   config = {
     auth,
+    database,
     filesystem,
     log,
     mail,
