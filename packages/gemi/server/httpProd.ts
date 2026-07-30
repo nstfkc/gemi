@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { compressResponse } from "./compression";
 import { generateETag } from "./generateEtag";
 import { URLPattern } from "urlpattern-polyfill";
 import { exists } from "node:fs/promises";
@@ -190,6 +191,11 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
     }
   }
 
+  // Compression is on unless the deployment opts out — set `GEMI_COMPRESSION=off`
+  // when a layer in front of the origin already compresses HTML and you would
+  // rather not spend origin CPU on it.
+  const compressionEnabled = (process.env.GEMI_COMPRESSION ?? "auto").toLowerCase() !== "off";
+
   const server = Bun.serve({
     maxRequestBodySize: 10 * 1024 * 1024 * 1024, // 10 GB
     fetch: async (req, server) => {
@@ -199,7 +205,12 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
         const ip = server.requestIP(req);
         if (ip) req.headers.set("x-forwarded-for", ip.address);
       }
-      return await instrumentation(req, requestHandler);
+      const res = await instrumentation(req, requestHandler);
+      // Applied at the very edge, after instrumentation, so every HTML response
+      // goes through the same negotiation — including the ones an app's
+      // instrumentation produced itself. Anything that isn't HTML comes back
+      // untouched.
+      return compressionEnabled ? compressResponse(req, res) : res;
     },
     idleTimeout: Number(process.env.SERVER_IDLE_TIMEOUT ?? 10),
     port: process.env.PORT || 5173,
