@@ -60,6 +60,21 @@ export class QueryResource {
     }
   }
 
+  /**
+   * The cached state for a variant, or `undefined` — a plain read that never
+   * fetches and never revalidates.
+   *
+   * `getVariant` is the read that keeps the cache honest, and it starts a
+   * request when it has to. That makes it the wrong thing to call while
+   * rendering: React throws away a render whose subtree suspends and retries
+   * it, so every discarded attempt would leak a request. Renders read with
+   * this; effects, which only run for a render that committed, use
+   * `getVariant`.
+   */
+  peek(variantKey: string) {
+    return this.store.getValue().get(variantKey);
+  }
+
   getVariant(variantKey: string, staleTime: number = DEFAULT_STALE_TIME) {
     const store = this.store.getValue();
     if (!store.has(variantKey)) {

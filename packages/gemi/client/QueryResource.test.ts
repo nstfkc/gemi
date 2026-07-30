@@ -267,3 +267,60 @@ describe("hydrate", () => {
     ]);
   });
 });
+
+describe("peek", () => {
+  test("returns the cached state", () => {
+    const resource = seeded("/todos", { "": [{ id: 1 }] });
+
+    expect(resource.peek("")).toEqual(resource.store.getValue().get(""));
+  });
+
+  test("returns undefined for a variant that was never fetched", () => {
+    const resource = seeded("/todos", { "": [{ id: 1 }] });
+
+    expect(resource.peek("page=2")).toBeUndefined();
+    expect(net.fetchMock).not.toHaveBeenCalled();
+  });
+
+  test("does not fetch for a cold variant, where getVariant would", () => {
+    const resource = seeded("/todos", {});
+
+    resource.peek("");
+    expect(net.fetchMock).not.toHaveBeenCalled();
+
+    resource.getVariant("");
+    expect(net.fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test("does not revalidate data past its stale window, where getVariant would", () => {
+    const resource = seeded("/todos", { "": [{ id: 1 }] });
+    vi.setSystemTime(START + DEFAULT_STALE_TIME + 1);
+
+    expect(resource.peek("")!.data).toEqual([{ id: 1 }]);
+    expect(net.fetchMock).not.toHaveBeenCalled();
+
+    resource.getVariant("");
+    expect(net.fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test("does not revalidate a variant flagged stale, where getVariant would", () => {
+    const resource = seeded("/todos", { "": [{ id: 1 }] });
+    resource.staleVariants.add("");
+
+    resource.peek("");
+    expect(net.fetchMock).not.toHaveBeenCalled();
+    expect(resource.staleVariants.has("")).toBe(true);
+  });
+
+  test("never writes to the store", () => {
+    const resource = seeded("/todos", {});
+    const subscriber = vi.fn();
+    resource.store.subscribe(subscriber);
+
+    resource.peek("");
+    resource.peek("page=2");
+
+    expect(resource.store.getValue().size).toBe(0);
+    expect(subscriber).not.toHaveBeenCalled();
+  });
+});
