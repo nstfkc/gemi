@@ -111,14 +111,13 @@ export function useQuery<T extends keyof GetRPC>(
     // once per suspending descendant, and each attempt gets fresh hook state,
     // including a fresh `QueryResource`, so the in-flight guard cannot dedupe
     // them.
-    return (
-      resource.peek(variantKey) ?? {
-        loading: true,
-        data: null,
-        error: null,
-        version: 0,
-      }
-    );
+    //
+    // An uncached variant seeds `undefined`, not a `{ data: null }` sentinel:
+    // the returned `data` has to stay `undefined` so destructuring defaults
+    // (`const { data: items = [] } = useQuery(...)`) still fire. The return
+    // block below already reads through with `state?.` and defaults `loading`
+    // to `true`.
+    return resource.peek(variantKey);
   });
 
   const retry = useCallback(
