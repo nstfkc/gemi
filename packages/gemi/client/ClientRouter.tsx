@@ -37,6 +37,7 @@ import { RouteTransitionProvider } from "./RouteTransitionProvider";
 import { ThemeProvider } from "./ThemeProvider";
 import {
   PARTIAL_RENDER_HEADER,
+  initialRenderedRoute,
   type PartialRenderInfo,
 } from "../utils/partialRender";
 import { mergeCarriedSegments } from "./helpers/mergeCarriedSegments";
@@ -198,9 +199,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
   // The route currently on screen, in `x-gemi-from` form. Updated when a
   // response is committed, never when one is merely requested — a navigation
   // that fails must leave the base the server carries segments from intact.
-  const renderedRouteRef = useRef(
-    `${routeState.pathname ?? "/"}${routeState.search ?? ""}`,
-  );
+  const renderedRouteRef = useRef(initialRenderedRoute(routeState));
 
   useEffect(() => {
     return routerSubject?.subscribe(async (routerState) => {
