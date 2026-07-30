@@ -48,6 +48,43 @@ export function Panel(props: { stamp?: Stamp; kind: "layout" | "view"; children?
   );
 }
 
+/** What every endpoint in the demo returns, via `PartialRenderController`. */
+export type Call = {
+  endpoint: string;
+  call: number;
+  at: string;
+};
+
+/**
+ * One `useQuery` read. `call #N` is the endpoint's own counter, so the number
+ * only moves when the endpoint was actually hit — by a server-side prefetch or
+ * by the browser going to `/api`.
+ */
+export function QueryRow(props: {
+  prefetchedBy: string | null;
+  state: { data?: Call; loading: boolean };
+}) {
+  const { prefetchedBy, state } = props;
+
+  return (
+    <p className="font-mono text-sm text-slate-700">
+      <span className={prefetchedBy ? "text-emerald-700" : "text-amber-700"}>
+        {prefetchedBy ? `prefetched by ${prefetchedBy}` : "not prefetched"}
+      </span>
+      {" · "}
+      {state.loading && !state.data ? (
+        "loading…"
+      ) : state.data ? (
+        <>
+          {state.data.endpoint} → call #{state.data.call} · {state.data.at}
+        </>
+      ) : (
+        "—"
+      )}
+    </p>
+  );
+}
+
 export function DemoNav() {
   const { orgId = "acme" } = useParams() as { orgId?: string };
   const other = orgId === "acme" ? "globex" : "acme";
