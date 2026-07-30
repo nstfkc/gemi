@@ -16,6 +16,7 @@ import {
 } from "./ClientRouterContext";
 import type { ComponentTree } from "./types";
 import { ComponentsContext, ComponentsProvider } from "./ComponentContext";
+import { RouteRegistry, useRouteBundle } from "./RouteRegistry";
 import { QueryManagerProvider } from "./QueryManagerContext";
 import { I18nProvider } from "./I18nContext";
 import { WebSocketContextProvider } from "./WebsocketContext";
@@ -139,8 +140,8 @@ const Tree = memo(
   },
 );
 
-const Routes = (props: { componentTree: ComponentTree }) => {
-  const { componentTree } = props;
+const Routes = (props: { routeRegistry: RouteRegistry }) => {
+  const { componentTree } = useRouteBundle(props.routeRegistry);
   const [isPending, startTransition] = useTransition();
   const [isFetching, setIsFetching] = useState(false);
   const { routerSubject, fetchRouteCSS } = useContext(ClientRouterContext);
@@ -303,12 +304,21 @@ export const ClientRouter = (props: {
     i18n,
   } = useContext(ServerDataContext);
 
+  // The server ships only the routes this visitor may see. The registry seeds
+  // from that and refreshes itself when the visitor's access changes.
+  const [routeRegistry] = useState(
+    () => new RouteRegistry({ routeManifest, componentTree, loaders: {} }),
+  );
+
   return (
     <ThemeProvider>
       <I18nProvider>
         <WebSocketContextProvider>
           <QueryManagerProvider>
-            <ComponentsProvider viewImportMap={props.viewImportMap}>
+            <ComponentsProvider
+              viewImportMap={props.viewImportMap}
+              routeRegistry={routeRegistry}
+            >
               <ClientRouterProvider
                 cssManifest={cssManifest}
                 searchParams={router.searchParams}
@@ -318,13 +328,13 @@ export const ClientRouter = (props: {
                 is500={false}
                 pathname={router.pathname}
                 currentPath={router.currentPath}
-                routeManifest={routeManifest}
+                routeRegistry={routeRegistry}
                 breadcrumbs={breadcrumbs}
                 urlLocaleSegment={router.urlLocaleSegment}
               >
                 <StrictMode>
                   <RootLayout locale={i18n.currentLocale}>
-                    <Routes componentTree={componentTree} />
+                    <Routes routeRegistry={routeRegistry} />
                   </RootLayout>
                 </StrictMode>
               </ClientRouterProvider>

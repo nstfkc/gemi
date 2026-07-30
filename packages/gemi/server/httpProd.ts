@@ -29,8 +29,7 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
   const viewImportMap = {};
   const ogMap = {};
   const cssManifest = {};
-  const template = (viewName: string, path: string) => `"${viewName}": () => import("${path}")`;
-  const templates = [];
+  const viewLoaders: Record<string, string> = {};
 
   for (const fileName of ["404", ...app.getFlatComponentTree.call(app)]) {
     const serverFile = serverManifest[`app/views/${fileName}.tsx`];
@@ -51,11 +50,13 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
       cssManifest[fileName] = clientFile?.css;
     }
     if (clientFile) {
-      templates.push(template(fileName, `/${clientFile?.file}`));
+      viewLoaders[fileName] = `/${clientFile?.file}`;
     }
   }
 
-  const loaders = `{${templates.join(",")}}`;
+  // The container owns the loader map from here: it filters it per audience for
+  // both the rendered page and the route manifest endpoint.
+  app.setViewLoaders(viewLoaders);
 
   // Vite's manifest `css` field is a `string[]` — a client entry can emit more
   // than one CSS chunk. Read and concatenate them all instead of interpolating
@@ -171,7 +172,6 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
         return await result({
           getStyles,
           bootstrapModules: [`/${manifest["app/client.tsx"].file}`],
-          loaders,
           viewImportMap,
           ogMap,
           cssManifest,

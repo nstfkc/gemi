@@ -12,6 +12,7 @@ import { Subject } from "../utils/Subject";
 // @ts-ignore
 import { URLPattern } from "urlpattern-polyfill";
 import { ProgressManager } from "./ProgressManager";
+import type { RouteRegistry } from "./RouteRegistry";
 import { HttpReload } from "./HttpReload";
 import type { Breadcrumb } from "./useBreadcrumbs";
 import type { RouteState } from "./RouteStateContext";
@@ -41,6 +42,7 @@ interface ClientRouterContextValue {
   breadcrumbsCache: Map<string, Breadcrumb>;
   routerSubject: Subject<RouteState>;
   urlLocaleSegment: string | null;
+  routeRegistry: RouteRegistry;
 }
 
 export const ClientRouterContext = createContext(
@@ -49,7 +51,7 @@ export const ClientRouterContext = createContext(
 
 interface ClientRouterProviderProps {
   pathname: string;
-  routeManifest: Record<string, string[]>;
+  routeRegistry: RouteRegistry;
   cssManifest: Record<string, string[]>;
   pageData: Record<string, unknown>;
   currentPath: string;
@@ -70,7 +72,7 @@ export const ClientRouterProvider = (
     currentPath,
     is404,
     is500,
-    routeManifest,
+    routeRegistry,
     cssManifest,
     pageData,
     params,
@@ -79,6 +81,8 @@ export const ClientRouterProvider = (
     urlLocaleSegment,
   } = props;
   const navigationAbortControllerRef = useRef(new AbortController());
+  /** Discriminates a stale manifest refresh from the navigation in flight. */
+  const navigationIdRef = useRef(0);
   const [isNavigatingSubject] = useState(() => {
     return new Subject<boolean>(false);
   });
@@ -96,7 +100,7 @@ export const ClientRouterProvider = (
     ? ["404"]
     : is500
       ? ["500"]
-      : (routeManifest[pathname] ?? ["404"]);
+      : (routeRegistry.routeManifest[pathname] ?? ["404"]);
   const viewEntriesSubject = useRef(new Subject<string[]>(initalViewEntries));
 
   const [routerSubject] = useState(() => {
@@ -122,34 +126,23 @@ export const ClientRouterProvider = (
     return history;
   });
 
+  // These read the registry live rather than closing over a manifest snapshot,
+  // so they stay referentially stable when the set of known routes changes —
+  // in particular the `history.listen` effect below never re-subscribes.
   const findMatchingRouteFromParams = useMemo(
     () => (pathname: string) => {
-      let routePath = pathname.replace("/en-US", "").replace("/tr-TR", "");
-      routePath = routePath === "" ? "/" : routePath;
-      const candidates: string[] = [];
-      for (const route of Object.keys(routeManifest)) {
-        const urlPattern = new URLPattern({ pathname: route });
-        if (urlPattern.test({ pathname: routePath })) {
-          candidates.push(route);
-        }
-      }
-      const sortedCandidates = candidates.sort((a, b) => {
-        const x = a.split("/").length + a.split(":").length;
-        const y = b.split("/").length + b.split(":").length;
-        return x - y;
-      });
-
-      return (sortedCandidates ?? [])[0];
+      const routePath = pathname.replace("/en-US", "").replace("/tr-TR", "");
+      return routeRegistry.match(routePath);
     },
-    [routeManifest],
+    [routeRegistry],
   );
 
   const getViewPathsFromPathname = useMemo(
     () => (pathname: string) => {
       const route = findMatchingRouteFromParams(pathname);
-      return routeManifest[route] ?? [];
+      return routeRegistry.routeManifest[route] ?? [];
     },
-    [findMatchingRouteFromParams, routeManifest],
+    [findMatchingRouteFromParams, routeRegistry],
   );
 
   const getRoutePathnameFromHref = useMemo(
@@ -163,6 +156,9 @@ export const ClientRouterProvider = (
   const getParams = useMemo(
     () => (pathname: string) => {
       const route = findMatchingRouteFromParams(pathname);
+      if (!route) {
+        return {};
+      }
       const urlPattern = new URLPattern({ pathname: route });
       return urlPattern.exec({ pathname })?.pathname.groups ?? {};
     },
@@ -170,7 +166,7 @@ export const ClientRouterProvider = (
   );
 
   useEffect(() => {
-    history?.listen(({ location, action }) => {
+    return history?.listen(({ location, action }) => {
       if (!window.scrollHistory) {
         window.scrollHistory = new Map();
       }
@@ -187,26 +183,46 @@ export const ClientRouterProvider = (
         }
       }
       _pathname = _pathname === "" ? "/" : _pathname;
-      const routePath = getRoutePathnameFromHref(_pathname);
-      routerSubject.next({
-        views: getViewPathsFromPathname(_pathname),
-        params: getParams(_pathname),
-        search: location.search,
-        state: location.state as Record<string, unknown>,
-        pathname: _pathname,
-        action,
-        routePath,
-        hash: location.hash,
-        locale: _locale,
+
+      const navigationId = ++navigationIdRef.current;
+      const commit = () =>
+        routerSubject.next({
+          views: getViewPathsFromPathname(_pathname),
+          params: getParams(_pathname),
+          search: location.search,
+          state: location.state as Record<string, unknown>,
+          pathname: _pathname,
+          action,
+          routePath: getRoutePathnameFromHref(_pathname),
+          hash: location.hash,
+          locale: _locale,
+        });
+
+      if (findMatchingRouteFromParams(_pathname)) {
+        commit();
+        return;
+      }
+
+      // The target may be a route this page was never told about — the
+      // manifest only carries what the visitor was allowed to see when the
+      // document was rendered. Signing in is the common case: let the registry
+      // pick up the newly reachable routes before calling this a 404.
+      void routeRegistry.ensureRoute(_pathname).then(() => {
+        // A newer navigation started while we were waiting — that one wins.
+        if (navigationId === navigationIdRef.current) {
+          commit();
+        }
       });
     });
   }, [
     supportedLocales,
     history,
     routerSubject,
+    routeRegistry,
     getParams,
     getRoutePathnameFromHref,
     getViewPathsFromPathname,
+    findMatchingRouteFromParams,
   ]);
 
   const updatePageData = (
@@ -234,7 +250,7 @@ export const ClientRouterProvider = (
   };
 
   const fetchRouteCSS = async (routePath: string) => {
-    const views = routeManifest[routePath];
+    const views = routeRegistry.routeManifest[routePath];
     if (!views) {
       return;
     }
@@ -285,6 +301,7 @@ export const ClientRouterProvider = (
         breadcrumbsCache: breadcrumbsCache.current,
         routerSubject,
         urlLocaleSegment,
+        routeRegistry,
       }}
     >
       {children}

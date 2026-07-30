@@ -5,6 +5,8 @@ import { AuthenticationError } from "./errors";
 import { AuthenticationServiceContainer } from "../auth/AuthenticationServiceContainer";
 
 export class AuthenticationMiddleware extends Middleware {
+  static isPrivate = true;
+
   async run(_req: HttpRequest) {
     const requestContextStore = RequestContext.getStore();
     const accessTokenCookie =

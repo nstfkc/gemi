@@ -12,6 +12,29 @@ import { createFlatApiRoutes, type FlatApiRoutes } from "./createFlatApiRoutes";
 import { ViewRouterServiceContainer } from "./ViewRouterServiceContainer";
 import { I18nServiceContainer } from "../../i18n/I18nServiceContainer";
 
+/**
+ * Serves the route manifest, component tree and view loader map the *current
+ * session* is allowed to see.
+ *
+ * Anonymous visitors get a manifest with the auth-gated routes stripped out, so
+ * the client can't resolve a private path on its own. When that changes — after
+ * signing in — the client hits this endpoint to pick up the routes it can now
+ * reach, instead of having to reload the page.
+ */
+class RouterManifestRouter extends ApiRouter {
+  routes = {
+    "/manifest": this.get(async () => {
+      const viewRouter = ViewRouterServiceContainer.use();
+      const viewer = await viewRouter.resolveViewer();
+
+      // Per-session content — never let a shared cache hold on to it.
+      RequestContext.getStore()?.setHeaders("Cache-Control", "private, no-store");
+
+      return viewRouter.getClientBundle(!!viewer);
+    }),
+  };
+}
+
 class DebugRouter extends ApiRouter {
   routes = {
     "/api-routes": this.get(() => {
@@ -49,7 +72,11 @@ export class ApiRouterServiceContainer extends ServiceContainer {
       "/__gemi__/services/i18n": I18nRouter,
       "/__gemi__/services/logs": LoggingRouter,
       "/__gemi__/services/image": ImageOptimizationRouter,
-      "/__gemi__/debug": DebugRouter,
+      "/__gemi__/router": RouterManifestRouter,
+      // `DebugRouter` dumps every route path, view and middleware with no auth
+      // of its own — that's the whole route table, including the private routes
+      // deliberately kept out of the client manifest. Dev-only.
+      ...(process.env.NODE_ENV === "production" ? {} : { "/__gemi__/debug": DebugRouter }),
     });
   }
 

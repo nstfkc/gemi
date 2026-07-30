@@ -21,7 +21,13 @@ import { URLPattern } from "urlpattern-polyfill/urlpattern";
 import { ServiceContainer } from "../ServiceContainer";
 import { createFileResponse, type FileOutput, type ViewRoutes } from "../../http/ViewRouter";
 import { createRouteManifest } from "./createRouteManifest";
+import {
+  type ClientBundle,
+  createClientBundle,
+  serializeViewLoaders,
+} from "./createClientBundle";
 import { createComponentTree } from "./createComponentTree";
+import { downgradePublicCacheControl } from "./downgradePublicCacheControl";
 import { flattenComponentTree } from "../../client/helpers/flattenComponentTree";
 import type { ComponentTree } from "../../client/types";
 import { I18nServiceContainer } from "../../i18n/I18nServiceContainer";
@@ -29,6 +35,7 @@ import { MiddlewareServiceContainer } from "../middleware/MiddlewareServiceConta
 import { Log } from "../../facades/Log";
 import { I18n } from "../../facades/I18n";
 import { AuthViewRouter } from "../../auth/AuthenticationServiceProvider";
+import { AuthenticationServiceContainer } from "../../auth/AuthenticationServiceContainer";
 import { KernelIdServiceContainer } from "../kernel-id/KernelIdServiceContainer";
 
 const themeScript = `
@@ -99,7 +106,12 @@ export class ViewRouterServiceContainer extends ServiceContainer {
   clientRouteManifest: Record<string, string[]> = {};
   componentTree: ComponentTree = [];
   flatComponentTree: string[] = [];
+  /** View name -> module URL the browser imports it from. Set by the http layer at boot. */
+  viewLoaders: Record<string, string> = {};
   root: any = null;
+
+  private privateRoutePaths: Set<string> | null = null;
+  private clientBundles = new Map<boolean, ClientBundle>();
 
   constructor(public service: ViewRouterServiceProvider) {
     super();
@@ -119,6 +131,99 @@ export class ViewRouterServiceContainer extends ServiceContainer {
   }
 
   boot() {}
+
+  /**
+   * The http layer owns the view -> module URL mapping (Vite's manifest in
+   * production, a fixed `/app/views/*` URL in dev). Handing it to the container
+   * lets both the render path and the manifest endpoint serve the same,
+   * audience-filtered map.
+   */
+  setViewLoaders(viewLoaders: Record<string, string>) {
+    this.viewLoaders = viewLoaders;
+    this.clientBundles.clear();
+  }
+
+  /**
+   * Route paths sitting behind an auth-gating middleware.
+   *
+   * Computed lazily, not in the constructor: `Kernel.boot()` builds every
+   * container inside a single object literal, outside `kernelContext.run`, so
+   * `MiddlewareServiceContainer.use()` isn't reachable yet at construction time.
+   */
+  getPrivateRoutePaths() {
+    if (this.privateRoutePaths === null) {
+      const middlewareServiceContainer = MiddlewareServiceContainer.use();
+      this.privateRoutePaths = new Set(
+        Object.entries(this.flatViewRoutes)
+          .filter(([, { middleware }]) => middlewareServiceContainer.isPrivateChain(middleware))
+          .map(([routePath]) => routePath),
+      );
+    }
+    return this.privateRoutePaths;
+  }
+
+  /**
+   * What this request's visitor is allowed to know about the app's routes.
+   * Both variants are built once and cached — there is no per-request work.
+   */
+  getClientBundle(isAuthenticated: boolean): ClientBundle {
+    const cached = this.clientBundles.get(isAuthenticated);
+    if (cached) {
+      return cached;
+    }
+
+    const full: ClientBundle = {
+      routeManifest: this.clientRouteManifest,
+      componentTree: [["404", []], ...this.componentTree],
+      loaders: this.viewLoaders,
+    };
+
+    const bundle = isAuthenticated
+      ? full
+      : createClientBundle(full, this.getPrivateRoutePaths());
+
+    this.clientBundles.set(isAuthenticated, bundle);
+    return bundle;
+  }
+
+  /**
+   * Resolve the visitor's session for the sole purpose of deciding which
+   * bundle to ship. Deliberately does not call `ctx.setUser()` — `auth.user` in
+   * the page payload stays exactly as populated (or not) by the route's own
+   * middleware and handlers.
+   */
+  async resolveViewer() {
+    if (this.getPrivateRoutePaths().size === 0) {
+      return null;
+    }
+
+    const ctx = RequestContext.getStore();
+
+    // Private routes run the auth middleware, which already resolved the
+    // session — no second lookup for them.
+    if (ctx?.user) {
+      return ctx.user;
+    }
+
+    const accessToken =
+      ctx?.req?.cookies.get("access_token") || ctx?.req?.headers.get("access_token");
+
+    if (!accessToken) {
+      return null;
+    }
+
+    try {
+      const session = await AuthenticationServiceContainer.use().getSession(
+        accessToken,
+        ctx.req.headers.get("User-Agent"),
+      );
+      return session?.user ?? null;
+    } catch {
+      // A bad or expired token just means "anonymous" here — the route's own
+      // middleware is what actually enforces access.
+      return null;
+    }
+  }
 
   async onRequestEnd(req: HttpRequest) {
     if (!req.cookies.has("session_id")) {
@@ -149,6 +254,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
     meta: any;
     isOgRequest?: boolean;
     appId: string;
+    isAuthenticated: boolean;
   }) {
     const {
       csrfTokenHMAC,
@@ -166,9 +272,11 @@ export class ViewRouterServiceContainer extends ServiceContainer {
       meta,
       isOgRequest,
       appId,
+      isAuthenticated,
     } = props;
 
     const pageDataKey = pathname.replace(`/${urlLocaleSegment}`, "");
+    const clientBundle = this.getClientBundle(isAuthenticated);
 
     const result = {
       kind: "view",
@@ -181,7 +289,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
         prefetchedData,
         i18n,
         auth: { user },
-        routeManifest: this.clientRouteManifest,
+        routeManifest: clientBundle.routeManifest,
         breadcrumbs,
         router: {
           urlLocaleSegment,
@@ -192,7 +300,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           is404: !currentPathName ? true : false,
         },
         appId,
-        componentTree: [["404", []], ...this.componentTree],
+        componentTree: clientBundle.componentTree,
       },
       head: {},
     };
@@ -203,11 +311,11 @@ export class ViewRouterServiceContainer extends ServiceContainer {
       getStyles: (p: string[]) => Promise<any[]>;
       viewImportMap: any;
       bootstrapModules: string[];
-      loaders: string;
       cssManifest: Record<string, string[]>;
       ogMap: Record<string, any>;
     }) => {
-      const { bootstrapModules, loaders, getStyles, viewImportMap, cssManifest, ogMap } = params;
+      const { bootstrapModules, getStyles, viewImportMap, cssManifest, ogMap } = params;
+      const loaders = serializeViewLoaders(clientBundle.loaders);
 
       if (isOgRequest) {
         let ogHandler = null;
@@ -499,6 +607,14 @@ export class ViewRouterServiceContainer extends ServiceContainer {
 
         headers.set("Content-Type", "text/html; charset=utf-8");
 
+        // The HTML now embeds an audience-specific route manifest, so a
+        // response built for a signed-in visitor must never be reused from a
+        // shared cache for an anonymous one.
+        const viewer = await this.resolveViewer();
+        if (viewer) {
+          downgradePublicCacheControl(headers);
+        }
+
         for (const cookie of cookies) {
           headers.append("Set-Cookie", cookie.toString());
         }
@@ -535,6 +651,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           meta: pageData.meta,
           appId: pageData.appId,
           isOgRequest,
+          isAuthenticated: !!viewer,
         });
       } catch (err) {
         if (err.kind === GEMI_REQUEST_BREAKER_ERROR) {

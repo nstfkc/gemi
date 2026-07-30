@@ -56,6 +56,14 @@ export class App {
     return this.useViewRouter().routeManifest;
   }
 
+  /**
+   * Hand the view -> module URL map (built by the http layer from Vite's
+   * manifests) to the router container, which filters it per audience.
+   */
+  public setViewLoaders(viewLoaders: Record<string, string>) {
+    this.useViewRouter().setViewLoaders(viewLoaders);
+  }
+
   public async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url);
     return this.kernel.run.call(this.kernel, async () => {

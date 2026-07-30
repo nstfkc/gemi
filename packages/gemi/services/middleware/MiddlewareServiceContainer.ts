@@ -29,6 +29,32 @@ export class MiddlewareServiceContainer extends ServiceContainer {
     super();
   }
 
+  /**
+   * Does this middleware chain gate access behind authentication?
+   *
+   * Runs the same `transformMiddleware` normalisation as `runMiddleware`, so a
+   * `-auth` further down the chain cancels an earlier `auth` exactly the way it
+   * does at request time. Aliases that aren't registered resolve to nothing and
+   * are ignored, matching `runMiddleware`'s behaviour.
+   */
+  public isPrivateChain(
+    middleware: (
+      | string
+      | RouterMiddleware
+      | (new (req: HttpRequest) => Middleware)
+    )[],
+  ) {
+    for (const key of transformMiddleware(middleware).keys()) {
+      const Middleware =
+        typeof key === "string" ? this.service.aliases[key] : key;
+
+      if (isConstructor(Middleware) && (Middleware as any).isPrivate === true) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   public runMiddleware(
     middleware: (
       | string

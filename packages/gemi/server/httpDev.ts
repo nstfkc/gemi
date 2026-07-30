@@ -200,6 +200,18 @@ export async function httpDev(app: App, instrumentation: Instrumentation) {
   process.env.ROOT_DIR = rootDir;
   process.env.APP_DIR = appDir;
 
+  // Dev view URLs are fixed (`/app/views/<name>.tsx`), so the loader map can be
+  // built once here rather than per request. It must stay root-relative — see
+  // the note on the SSR loop below.
+  app.setViewLoaders(
+    Object.fromEntries(
+      ["404", ...app.getFlatComponentTree.call(app)].map((fileName) => [
+        fileName,
+        `/app/views/${fileName}.tsx`,
+      ]),
+    ),
+  );
+
   const server = Bun.serve({
     port: 5173,
     fetch: async (req) => {
@@ -237,10 +249,13 @@ export async function httpDev(app: App, instrumentation: Instrumentation) {
 
           const viewImportMap = {};
           const ogMap = {};
-          const template = (viewName: string, path: string) =>
-            `"${viewName}": () => import("${path}")`;
-          const templates = [];
 
+          // The browser's `window.loaders` map is built from the URLs registered
+          // via `setViewLoaders` above; this loop only resolves the *server*
+          // modules for SSR, per request so HMR picks up edits. The two must
+          // agree on the root-relative URL (`/app/views/Foo.tsx`), NOT the
+          // absolute filesystem path used here — otherwise Vite serves the
+          // module under two URLs and instantiates the view twice.
           for (const fileName of ["404", ...app.getFlatComponentTree.call(app)]) {
             if (process.env.NODE_ENV === "test") {
               break;
@@ -252,16 +267,7 @@ export async function httpDev(app: App, instrumentation: Instrumentation) {
 
             viewImportMap[fileName] = mod.default;
             ogMap[fileName] = mod?.OpenGraph;
-            // Emit a root-relative URL (`/app/views/Foo.tsx`), NOT the absolute
-            // filesystem path used for `ssrLoadModule` above. The browser's
-            // `window.loaders` preload and `client.tsx`'s `import.meta.glob` map
-            // must import the exact same URL — otherwise Vite serves the module
-            // under two URLs (`/app/views/Foo.tsx` vs `/Users/.../app/views/Foo.tsx`)
-            // and loads/instantiates the view twice.
-            templates.push(template(fileName, `/app/views/${fileName}.tsx`));
           }
-
-          const loaders = `{${templates.join(",")}}`;
 
           return await result({
             getStyles: async (currentViews: string[]) =>
@@ -269,7 +275,6 @@ export async function httpDev(app: App, instrumentation: Instrumentation) {
             bootstrapModules: ["/refresh.js", "/app/client.tsx", "/@vite/client"],
             viewImportMap,
             ogMap,
-            loaders,
             cssManifest: {},
           });
         } catch (err: any) {
