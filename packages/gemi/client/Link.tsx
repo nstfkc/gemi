@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useContext,
   useEffect,
   useRef,
@@ -58,7 +59,7 @@ type LinkBaseProps<T extends keyof Views> = Omit<
   href: T;
   hash?: string;
   /** Off unless set. `false` is accepted so it can be driven by a variable. */
-  prefetch?: PrefetchStrategy | PrefetchStrategy[] | false;
+  prefetch?: PrefetchStrategy | readonly PrefetchStrategy[] | false;
   params: UrlParser<T>;
   search?: T extends keyof Views
     ? Views[T]["input"] extends Record<string, never>
@@ -168,14 +169,21 @@ export const Link = memo(<T extends keyof Views>(props: LinkProps<T>) => {
   // A caller's own `ref` still has to reach them — under React 19 it arrives as
   // a plain prop, and the spread below would otherwise hand the element to one
   // of us and null to the other.
-  const setAnchorRef = (node: HTMLAnchorElement | null) => {
-    anchorRef.current = node;
-    if (typeof ref === "function") {
-      ref(node);
-    } else if (ref) {
-      ref.current = node;
-    }
-  };
+  //
+  // Memoised because `Link` re-renders on every navigation in the app: a fresh
+  // callback identity would have React detach and reattach the element each
+  // time, handing a caller's ref callback a null it never asked for.
+  const setAnchorRef = useCallback(
+    (node: HTMLAnchorElement | null) => {
+      anchorRef.current = node;
+      if (typeof ref === "function") {
+        ref(node);
+      } else if (ref) {
+        ref.current = node;
+      }
+    },
+    [ref],
+  );
 
   useEffect(() => {
     if (!uses("viewport")) {
@@ -257,7 +265,6 @@ export const Link = memo(<T extends keyof Views>(props: LinkProps<T>) => {
         if (hash === "") {
           e.preventDefault();
         }
-        onClick?.(e);
         push(href, {
           hash,
           search,

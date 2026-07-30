@@ -35,13 +35,10 @@ import { useRouteData } from "./useRouteData";
 import { updateMeta } from "./Head";
 import { RouteTransitionProvider } from "./RouteTransitionProvider";
 import { ThemeProvider } from "./ThemeProvider";
-import {
-  PARTIAL_RENDER_HEADER,
-  initialRenderedRoute,
-  type PartialRenderInfo,
-} from "../utils/partialRender";
+import { initialRenderedRoute } from "../utils/partialRender";
 import { mergeCarriedSegments } from "./helpers/mergeCarriedSegments";
 import { routeDataUrl } from "./helpers/routeDataUrl";
+import { loadRoutePayload } from "./helpers/loadRoutePayload";
 
 declare global {
   interface Window {
@@ -232,61 +229,19 @@ const Routes = (props: { componentTree: ComponentTree }) => {
       const from = renderedRouteRef.current;
       setIsFetching(true);
 
-      const warmRouteAssets = () =>
-        Promise.all([
-          fetchRouteCSS(pathname),
-          ...views.map((component) => {
-            if (!window?.loaders) return Promise.resolve();
-            const loader = window?.loaders?.[component] ?? (() => ({}));
-            loader();
-          }),
-        ]);
-
-      // A prefetched payload is always a full render, so there is nothing to
-      // merge onto and the request can be skipped entirely. `takePrefetched`
-      // resolves to null when the prefetch failed — fall through and fetch.
-      let payload: any = null;
-      const prefetched = takePrefetched?.(url);
-      if (prefetched) {
-        const [prefetchedPayload] = await Promise.all([
-          prefetched,
-          warmRouteAssets(),
-        ]);
-        payload = prefetchedPayload ?? null;
+      // `fetchRouteCSS` keys off the route manifest, so it needs the pattern
+      // rather than the concrete path — `/posts/:id`, not `/posts/123`.
+      fetchRouteCSS(routerState.routePath).catch((e) => console.error(e));
+      for (const component of views) {
+        window?.loaders?.[component]?.();
       }
 
-      if (!payload) {
-        let res = { ok: false, json: async () => ({}) } as Response;
-        try {
-          const result = await Promise.all([
-            fetch(url, { headers: { [PARTIAL_RENDER_HEADER]: from } }),
-            warmRouteAssets(),
-          ]);
-          res = result[0];
-        } catch (e) {
-          console.error(e);
-        }
-
-        if (res.ok) {
-          payload = await res.json();
-
-          // Another navigation committed while this one was in flight, so the
-          // segments the server carried forward were computed against a route
-          // that is no longer on screen. Nothing sound to merge onto — ask for
-          // the whole tree instead.
-          const claimed: PartialRenderInfo | null = payload.partial ?? null;
-          if (claimed && claimed.from !== renderedRouteRef.current) {
-            try {
-              const full = await fetch(url);
-              if (full.ok) {
-                payload = await full.json();
-              }
-            } catch (e) {
-              console.error(e);
-            }
-          }
-        }
-      }
+      const payload = await loadRoutePayload({
+        url,
+        from,
+        takePrefetched,
+        renderedRoute: () => renderedRouteRef.current,
+      });
 
       if (payload) {
         const {

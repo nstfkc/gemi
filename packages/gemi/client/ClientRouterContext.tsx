@@ -51,6 +51,7 @@ interface ClientRouterContextValue {
   fetchRouteCSS: (routePath: string) => Promise<void>;
   prefetchRoute: (target: PrefetchTarget) => Promise<void>;
   takePrefetched: (url: string) => Promise<unknown> | null;
+  clearPrefetchCache: () => void;
   breadcrumbsCache: Map<string, Breadcrumb>;
   routerSubject: Subject<RouteState>;
   urlLocaleSegment: string | null;
@@ -288,6 +289,10 @@ export const ClientRouterProvider = (
    * route on screen when the link is prefetched is not necessarily the one it
    * will be clicked from — a partial response computed against the wrong base
    * has nothing sound to merge onto. A full payload is always safe to commit.
+   *
+   * It carries `Purpose: prefetch` so applications can tell speculative traffic
+   * from a real visit — a route's handlers run either way, and a `viewport`
+   * page multiplies that by the number of links on it.
    */
   const prefetchRoute = async (target: PrefetchTarget) => {
     if (typeof window === "undefined") {
@@ -301,14 +306,17 @@ export const ClientRouterProvider = (
 
     const url = routeDataUrl({ pathname, search, localeSegment });
 
+    // Alongside the payload rather than joined to it: a stylesheet that 404s
+    // must not throw away page data that arrived perfectly well.
+    fetchRouteCSS(routePath).catch(() => {});
+    for (const view of routeManifest[routePath] ?? []) {
+      window?.loaders?.[view]?.();
+    }
+
     await prefetchCache.prime(url, async () => {
-      const [response] = await Promise.all([
-        fetch(url),
-        fetchRouteCSS(routePath),
-        ...(routeManifest[routePath] ?? []).map((view) => {
-          window?.loaders?.[view]?.();
-        }),
-      ]);
+      const response = await fetch(url, {
+        headers: { Purpose: "prefetch" },
+      });
       if (!response.ok) {
         return null;
       }
@@ -322,6 +330,7 @@ export const ClientRouterProvider = (
         isNavigatingSubject,
         prefetchRoute,
         takePrefetched: (url: string) => prefetchCache.take(url),
+        clearPrefetchCache: () => prefetchCache.clear(),
         getViewPathsFromPathname,
         history,
         getScrollPosition: (path: string) => {
