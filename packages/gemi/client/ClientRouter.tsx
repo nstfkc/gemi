@@ -35,12 +35,10 @@ import { useRouteData } from "./useRouteData";
 import { updateMeta } from "./Head";
 import { RouteTransitionProvider } from "./RouteTransitionProvider";
 import { ThemeProvider } from "./ThemeProvider";
-import {
-  PARTIAL_RENDER_HEADER,
-  initialRenderedRoute,
-  type PartialRenderInfo,
-} from "../utils/partialRender";
+import { initialRenderedRoute } from "../utils/partialRender";
 import { mergeCarriedSegments } from "./helpers/mergeCarriedSegments";
+import { routeDataUrl } from "./helpers/routeDataUrl";
+import { loadRoutePayload } from "./helpers/loadRoutePayload";
 
 declare global {
   interface Window {
@@ -153,7 +151,8 @@ const Routes = (props: { componentTree: ComponentTree }) => {
   const { componentTree } = props;
   const [isPending, startTransition] = useTransition();
   const [isFetching, setIsFetching] = useState(false);
-  const { routerSubject, fetchRouteCSS } = useContext(ClientRouterContext);
+  const { routerSubject, fetchRouteCSS, takePrefetched } =
+    useContext(ClientRouterContext);
   const { hydrate } = useContext(QueryManagerContext);
 
   const [transitionPath, setTransitionPath] = useState<[string, string]>([
@@ -226,49 +225,25 @@ const Routes = (props: { componentTree: ComponentTree }) => {
 
       const localeSegment = routerState.locale ? `/${routerState.locale}` : "";
 
-      const _pathname =
-        localeSegment.length > 0 && pathname === "/" ? "" : pathname;
-
-      const pathnameWithLocaleSegment = `${localeSegment}${_pathname}`;
-
-      const url = `${pathnameWithLocaleSegment}.json${search}`;
+      const url = routeDataUrl({ pathname, search, localeSegment });
       const from = renderedRouteRef.current;
       setIsFetching(true);
-      let res = { ok: false, json: async () => ({}) } as Response;
-      try {
-        const result = await Promise.all([
-          fetch(url, { headers: { [PARTIAL_RENDER_HEADER]: from } }),
-          fetchRouteCSS(pathname),
-          ...views.map((component) => {
-            if (!window?.loaders) return Promise.resolve();
-            const loader = window?.loaders?.[component] ?? (() => ({}));
-            loader();
-          }),
-        ]);
-        res = result[0];
-      } catch (e) {
-        console.error(e);
+
+      // `fetchRouteCSS` keys off the route manifest, so it needs the pattern
+      // rather than the concrete path — `/posts/:id`, not `/posts/123`.
+      fetchRouteCSS(routerState.routePath).catch((e) => console.error(e));
+      for (const component of views) {
+        window?.loaders?.[component]?.();
       }
 
-      if (res.ok) {
-        let payload = await res.json();
+      const payload = await loadRoutePayload({
+        url,
+        from,
+        takePrefetched,
+        renderedRoute: () => renderedRouteRef.current,
+      });
 
-        // Another navigation committed while this one was in flight, so the
-        // segments the server carried forward were computed against a route
-        // that is no longer on screen. Nothing sound to merge onto — ask for
-        // the whole tree instead.
-        const claimed: PartialRenderInfo | null = payload.partial ?? null;
-        if (claimed && claimed.from !== renderedRouteRef.current) {
-          try {
-            const full = await fetch(url);
-            if (full.ok) {
-              payload = await full.json();
-            }
-          } catch (e) {
-            console.error(e);
-          }
-        }
-
+      if (payload) {
         const {
           data,
           i18n,
@@ -322,7 +297,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
       }
       setIsFetching(false);
     });
-  }, [routerSubject, fetchRouteCSS, replace, hydrate]);
+  }, [routerSubject, fetchRouteCSS, takePrefetched, replace, hydrate]);
 
   return (
     <RouteTransitionProvider

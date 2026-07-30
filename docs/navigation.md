@@ -31,13 +31,111 @@ import { Link } from "gemi/client";
   available.
 - `hash` — appends a `#fragment`.
 - `active` — force the active state.
+- `prefetch` — warm the target route before it is clicked; see below.
 
 `Link` sets `data-active` when its target matches the current URL, and
 `data-pending` while a navigation to it is in flight — style against these:
 
 ```tsx
-<Link className="data-[pending=true]:opacity-50" href="/about">About</Link>
+<Link className="data-[pending=true]:opacity-50" href="/about">
+  About
+</Link>
 ```
+
+## Prefetching
+
+A navigation fetches the target route's page data, stylesheets and component
+chunks, and the visitor waits for it. `prefetch` does that work earlier, so the
+click commits from cache instead of a request. It is **off unless you ask for
+it**:
+
+```tsx
+<Link href="/about" prefetch="hover">
+  About
+</Link>
+```
+
+Pick when it happens:
+
+| strategy   | fires                                                                                        |
+| ---------- | -------------------------------------------------------------------------------------------- |
+| `hover`    | the pointer arrives, or on touch or keyboard focus                                           |
+| `intent`   | the pointer is held ~100ms, so a cursor crossing a nav bar doesn't warm every link it passes |
+| `viewport` | the link scrolls into view (200px ahead of it)                                               |
+| `render`   | the link renders                                                                             |
+
+Strategies combine. The pairing that earns its keep is a bulk strategy plus an
+interactive one — `viewport` warms the link on the way past, and `intent` warms
+it again on approach if the payload has since gone stale:
+
+```tsx
+// Hoisted: an inline array literal is a new value on every render, which
+// defeats the memo on Link.
+const PREFETCH = ["viewport", "intent"] as const;
+
+<Link href="/pricing" prefetch={PREFETCH}>
+  Pricing
+</Link>;
+```
+
+`prefetch` also accepts `false`, so it can be driven by a variable:
+
+```tsx
+<Link href="/pricing" prefetch={isMetered ? false : "hover"}>
+  Pricing
+</Link>
+```
+
+### What it costs
+
+A prefetch **runs the route's handlers on the server** — it is a real request
+for real data, just early. With `viewport` or `render` on a list page that
+multiplies backend work by the number of links on screen. Prefetch requests
+carry a `Purpose: prefetch` header so you can tell them apart in logs and rate
+limiters, and skip side effects that should only happen on a genuine visit:
+
+```typescript
+"/posts/:id": this.view("Post", async () => {
+  if (Request.header("purpose") !== "prefetch") {
+    await recordView(params.id); // don't count a page nobody opened
+  }
+  return { /* … */ };
+}),
+```
+
+gemi keeps the cost bounded on its side: prefetching stands down on metered
+connections (`Save-Data`) and very slow ones (`2g`), links pointing at the
+current path are skipped, at most 12 payloads are retained at a time, and each
+one expires after 10 seconds.
+
+### Staleness
+
+A prefetched payload can be committed up to 10 seconds after it was fetched, and
+it is committed wholesale — including into the `useQuery` cache. Writes through
+`useMutation` (and `Form`, `usePost`, `usePut`, `usePatch`, `useDelete`,
+`useUpload`) drop every warmed payload on success, so your own mutations can't
+be undone by a stale prefetch. Data changed elsewhere is only bounded by the
+10-second window; on a page where that matters, leave `prefetch` off.
+
+### `usePrefetch`
+
+For warming a route outside of a link — the next step of a wizard, the page a
+form submit will land on — `usePrefetch` returns the same machinery as a
+function. It takes a typed path with `params` / `search` / `locale`:
+
+```tsx
+import { usePrefetch } from "gemi/client";
+
+function Wizard({ step }) {
+  const prefetch = usePrefetch();
+
+  useEffect(() => {
+    prefetch("/checkout/:step", { params: { step: String(step + 1) } });
+  }, [step]);
+}
+```
+
+It honours the same guards as the `prefetch` prop, and is a no-op during SSR.
 
 ## `useNavigate`
 

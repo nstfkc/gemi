@@ -16,6 +16,17 @@ import { HttpReload } from "./HttpReload";
 import type { Breadcrumb } from "./useBreadcrumbs";
 import type { RouteState } from "./RouteStateContext";
 import { I18nContext } from "./I18nContext";
+import { PrefetchCache } from "./PrefetchCache";
+import { routeDataUrl } from "./helpers/routeDataUrl";
+
+export interface PrefetchTarget {
+  /** Concrete pathname, without the locale segment. */
+  pathname: string;
+  /** Query string including the leading `?`, or empty. */
+  search?: string;
+  /** `/tr-TR` style prefix, or empty for the default locale. */
+  localeSegment?: string;
+}
 
 declare global {
   interface Window {
@@ -38,6 +49,9 @@ interface ClientRouterContextValue {
   setNavigationAbortController: (controller: AbortController) => void;
   progressManager: ProgressManager;
   fetchRouteCSS: (routePath: string) => Promise<void>;
+  prefetchRoute: (target: PrefetchTarget) => Promise<void>;
+  takePrefetched: (url: string) => Promise<unknown> | null;
+  clearPrefetchCache: () => void;
   breadcrumbsCache: Map<string, Breadcrumb>;
   routerSubject: Subject<RouteState>;
   urlLocaleSegment: string | null;
@@ -86,6 +100,7 @@ export const ClientRouterProvider = (
   const { supportedLocales = [], locale } = useContext(I18nContext);
 
   const [progressManager] = useState(new ProgressManager(isNavigatingSubject));
+  const [prefetchCache] = useState(() => new PrefetchCache());
   const pageDataRef = useRef(structuredClone(pageData));
   const scrollHistoryRef = useRef<Map<string, number>>(new Map());
   const breadcrumbsCache = useRef<Map<string, Breadcrumb>>(
@@ -266,10 +281,56 @@ export const ClientRouterProvider = (
     }
   };
 
+  /**
+   * Warms everything a navigation to `target` would need: the route's page
+   * data, its stylesheets and its component chunks.
+   *
+   * The payload is requested *without* the partial-render header, because the
+   * route on screen when the link is prefetched is not necessarily the one it
+   * will be clicked from — a partial response computed against the wrong base
+   * has nothing sound to merge onto. A full payload is always safe to commit.
+   *
+   * It carries `Purpose: prefetch` so applications can tell speculative traffic
+   * from a real visit — a route's handlers run either way, and a `viewport`
+   * page multiplies that by the number of links on it.
+   */
+  const prefetchRoute = async (target: PrefetchTarget) => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const { pathname, search = "", localeSegment = "" } = target;
+    const routePath = getRoutePathnameFromHref(pathname);
+    if (!routePath) {
+      return;
+    }
+
+    const url = routeDataUrl({ pathname, search, localeSegment });
+
+    // Alongside the payload rather than joined to it: a stylesheet that 404s
+    // must not throw away page data that arrived perfectly well.
+    fetchRouteCSS(routePath).catch(() => {});
+    for (const view of routeManifest[routePath] ?? []) {
+      window?.loaders?.[view]?.();
+    }
+
+    await prefetchCache.prime(url, async () => {
+      const response = await fetch(url, {
+        headers: { Purpose: "prefetch" },
+      });
+      if (!response.ok) {
+        return null;
+      }
+      return await response.json();
+    });
+  };
+
   return (
     <ClientRouterContext.Provider
       value={{
         isNavigatingSubject,
+        prefetchRoute,
+        takePrefetched: (url: string) => prefetchCache.take(url),
+        clearPrefetchCache: () => prefetchCache.clear(),
         getViewPathsFromPathname,
         history,
         getScrollPosition: (path: string) => {
