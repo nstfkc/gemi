@@ -94,6 +94,42 @@ Bun reads `.env` only once at startup and does not reload it — even under `--h
 
 > **Gotcha:** The reload updates `process.env`, so config read **per request** picks up the new value immediately. But a value a service reads **once at boot** (e.g. a client constructed from an env var) is already cached and won't change until that code re-runs — a hot reload in dev, or a full restart in production. Also, a key you delete from the file keeps its last value until the next full restart; the watcher only adds and updates keys, never clears them.
 
+## HTML compression
+
+In **production only** (`gemi start`), gemi compresses SSR HTML responses at the edge of the server, after your instrumentation runs. Nothing to configure — a client that sends `Accept-Encoding: br` or `gzip` gets an encoded document, and one that doesn't gets the same bytes it always did.
+
+An SSR document is mostly critical CSS, markup, and the `window.__GEMI_DATA__` hydration payload, so it compresses extremely well. On a representative page (177 kB of HTML):
+
+| Encoding | Transferred | Reduction | Cost |
+| --- | ---: | ---: | ---: |
+| identity | 177,072 B | — | — |
+| `gzip` (level 6) | 31,514 B | 82.2% | ~2 ms |
+| `br` (quality 5) | 27,911 B | 84.2% | ~2 ms |
+
+Brotli is preferred when the client accepts both. gemi runs it at quality 5 rather than the default 11: on a streamed document, quality 11 costs ~175 ms for ~12% more savings, which is the wrong trade for content compressed once per request instead of once per build.
+
+### What is and isn't compressed
+
+- **`text/html` responses only.** JSON view-data responses (`.json`), API routes, static assets from `dist/`, and OG images are untouched — same response object, same headers.
+- **Streaming is preserved.** The compressor flushes on every write, so React's shell still reaches the browser before the rest of the document is rendered. Compression does not cost you time to first byte.
+- **The transport layer only.** What the browser decodes is byte-for-byte the HTML React rendered, so hydration sees exactly what it would have without compression.
+- Responses are left alone when they are already encoded, carry `Cache-Control: no-transform`, are a `206` byte range, or answer a `HEAD`.
+- `Content-Length` is dropped from an encoded response (it described the identity body), and `Vary: Accept-Encoding` is added to **every** HTML response — including the identity ones — so a shared cache can never hand an encoded variant to a client that didn't ask for one.
+
+### Why the framework and not the CDN
+
+Compression could live at the edge, in the runtime, or in the app. gemi puts it in the runtime because it is the only layer where the behaviour is portable: every gemi app serves the same shape of response, so the win doesn't depend on each deployment configuring a CDN to compress on the origin's behalf. It also cuts **origin→edge** bandwidth, which edge compression cannot do. Edge compression still composes on top of it — the `Vary` header is what makes that safe.
+
+### Opting out
+
+If a layer in front of the origin already compresses HTML and you'd rather not spend origin CPU on it:
+
+```bash
+GEMI_COMPRESSION=off
+```
+
+Any other value (or none) leaves compression on.
+
 ## `app/preload.ts`
 
 `app/preload.ts` is an optional [Bun `--preload`](https://bun.sh/docs/runtime/bunfig#preload) script that runs **once, before the server starts**, for both `gemi dev` and `gemi start`. Use it for process-wide setup that must happen before any request is handled:

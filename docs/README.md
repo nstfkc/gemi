@@ -28,7 +28,7 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 ### Foundations
 - **[Getting Started](./getting-started.md)** — install, scaffold, dev/build/start, your first route + view.
 - **[Project Structure & the Kernel](./project-structure.md)** — the `app/` layout, the Kernel, service providers, and app bootstrap.
-- **[Configuration](./configuration.md)** — `gemi.config.ts`, `.env` handling, `app/preload.ts`, Vite config.
+- **[Configuration](./configuration.md)** — `gemi.config.ts`, `.env` handling, HTML compression, `app/preload.ts`, Vite config.
 - **[CLI](./cli.md)** — `gemi dev`, `build`, `start`, and the codegen/inspection commands.
 
 ### HTTP layer
