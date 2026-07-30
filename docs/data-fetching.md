@@ -75,7 +75,7 @@ so a typo in a param or a wrong field type is a compile error.
 | `mutate(fn?)` | Optimistically update the cached data (see below), or refetch when called with no argument. |
 | `trigger()` | Kick off the fetch for a `lazy` query. |
 | `prefetch()` | Fetch once, eagerly, without subscribing to loading state (e.g. on hover). |
-| `version` | Monotonic counter that increments on each successful update. |
+| `version` | Timestamp that changes every time the cache receives data from the server, including a refetch that returns an identical payload and prefetched data adopted on navigation. |
 
 > The exported `QueryResult<T>` type is the inferred **data** type for endpoint
 > `T` (i.e. the type of `data`), not the whole hook return.
@@ -88,9 +88,17 @@ const { data } = useQuery("/feed", {}, {
   keepPreviousData: true,  // keep old data visible while refetching (default true)
   refreshInterval: 5000,   // poll every 5s
   retryIntervalOnError: 10000,
+  staleTime: 5000,         // how long cached data stays fresh (default 5000ms)
   lazy: false,             // when true, no fetch until trigger()/refetch()
 });
 ```
+
+`staleTime` controls when reading the cache triggers a background revalidation.
+Once cached data is older than `staleTime`, the next component that mounts and
+reads it kicks off a silent refetch. Raise it for data that rarely changes
+(`staleTime: 60_000`) to stop it being re-requested on every navigation, or set
+`staleTime: 0` to always revalidate. `Infinity` disables age-based revalidation
+entirely — `mutate()` and `refetch()` still fetch, since those are explicit.
 
 ### Optimistic updates with `mutate`
 
@@ -147,7 +155,11 @@ import { Query } from "gemi/facades";
   to resolve alongside the rest of the page, without returning the data for use here.
 
 Both take the same `{ params, search }` options as `useQuery`, and the stored data
-is matched to the client query by path + search key.
+is matched to the client query by path + search key. The stored data is adopted on
+every client-side navigation, not just the initial server render, so a layout that
+prefetches its endpoints keeps serving them from the payload without the browser
+re-requesting them over `/api`. Data currently being fetched — including the
+refetch behind an optimistic `mutate()` — is left alone rather than overwritten.
 
 > **Gotcha:** The `Query` facade can only be used from a **view/page request**, not
 > from an API request — calling it during an API request throws.

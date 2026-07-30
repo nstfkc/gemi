@@ -7,6 +7,8 @@ type State = {
   version: number;
 };
 
+export const DEFAULT_STALE_TIME = 5000;
+
 export class QueryResource {
   store: Subject<Map<string, State>>;
   staleVariants = new Set<string>();
@@ -15,23 +17,50 @@ export class QueryResource {
 
   constructor(key: string, initialState: Record<string, any>) {
     this.key = key;
-    const store = new Map();
-    const now = Date.now();
-    for (const [variantKey, data] of Object.entries(initialState ?? {})) {
-      if (data) {
-        store.set(variantKey, {
-          loading: false,
-          data,
-          error: null,
-        });
-        this.lastFetchRecord.set(variantKey, now);
-      }
-    }
-
-    this.store = new Subject(store);
+    this.store = new Subject(new Map());
+    this.hydrate(initialState);
   }
 
-  getVariant(variantKey: string) {
+  /**
+   * Adopt server-prefetched data into the cache.
+   *
+   * Called once from the constructor for the SSR payload, and again on every
+   * client-side navigation with the `prefetchedData` the server just produced —
+   * otherwise the resource cache (which is keyed by path for the lifetime of
+   * the app) would keep serving the first payload and revalidate it over `/api`.
+   */
+  hydrate(initialState: Record<string, any> | null | undefined) {
+    const store = this.store.getValue();
+    const now = Date.now();
+    let changed = false;
+
+    for (const [variantKey, data] of Object.entries(initialState ?? {})) {
+      if (!data) continue;
+      const current = store.get(variantKey);
+      // Never clobber an in-flight fetch — `resolveVariant` flips `loading`
+      // before its first await, so this also covers an optimistic `mutate`
+      // whose refetch hasn't landed yet.
+      if (current?.loading) continue;
+      // Idempotent re-hydration (e.g. StrictMode's double invoke).
+      if (current && current.data === data) continue;
+
+      store.set(variantKey, {
+        loading: false,
+        data,
+        error: null,
+        version: now,
+      });
+      this.staleVariants.delete(variantKey);
+      this.lastFetchRecord.set(variantKey, now);
+      changed = true;
+    }
+
+    if (changed) {
+      this.store.next(store);
+    }
+  }
+
+  getVariant(variantKey: string, staleTime: number = DEFAULT_STALE_TIME) {
     const store = this.store.getValue();
     if (!store.has(variantKey)) {
       this.resolveVariant(variantKey);
@@ -47,9 +76,10 @@ export class QueryResource {
         if (variant.data) {
           const stale = this.staleVariants.has(variantKey);
           const now = Date.now();
-          // TODO: age must be dynamic
+          // `>=` so `staleTime: 0` means "always revalidate" and
+          // `staleTime: Infinity` means "never".
           const old =
-            now - (this.lastFetchRecord.get(variantKey) ?? now) > 5000;
+            now - (this.lastFetchRecord.get(variantKey) ?? now) >= staleTime;
           if (stale || old) {
             this.lastFetchRecord.set(variantKey, now);
             this.resolveVariant(variantKey, true);

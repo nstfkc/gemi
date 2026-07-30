@@ -16,7 +16,10 @@ import {
 } from "./ClientRouterContext";
 import type { ComponentTree } from "./types";
 import { ComponentsContext, ComponentsProvider } from "./ComponentContext";
-import { QueryManagerProvider } from "./QueryManagerContext";
+import {
+  QueryManagerContext,
+  QueryManagerProvider,
+} from "./QueryManagerContext";
 import { I18nProvider } from "./I18nContext";
 import { WebSocketContextProvider } from "./WebsocketContext";
 import { useNavigate } from "./useNavigate";
@@ -144,6 +147,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
   const [isPending, startTransition] = useTransition();
   const [isFetching, setIsFetching] = useState(false);
   const { routerSubject, fetchRouteCSS } = useContext(ClientRouterContext);
+  const { hydrate } = useContext(QueryManagerContext);
 
   const [transitionPath, setTransitionPath] = useState<[string, string]>([
     null,
@@ -255,6 +259,11 @@ const Routes = (props: { componentTree: ComponentTree }) => {
           });
         }
 
+        // Adopt what the server just prefetched before the new surface mounts
+        // and its queries read the cache, otherwise they refetch it over /api.
+        // Safe here: this callback is async, so we are past the render phase.
+        hydrate(prefetchedData);
+
         startTransition(() => {
           setRouteState({
             ...routerState,
@@ -268,7 +277,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
       }
       setIsFetching(false);
     });
-  }, [routerSubject, fetchRouteCSS, replace]);
+  }, [routerSubject, fetchRouteCSS, replace, hydrate]);
 
   return (
     <RouteTransitionProvider
