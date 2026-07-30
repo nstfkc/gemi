@@ -28,7 +28,7 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main, feat/orm]
+    branches: [main, next, feat/orm]
   workflow_dispatch:
 
 concurrency:
