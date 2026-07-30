@@ -3,6 +3,7 @@ import { I18n } from "gemi/facades";
 import { ApiRouter, ResourceController, ValidationError, type HttpRequest } from "gemi/http";
 import { Dictionary } from "gemi/i18n";
 import { HomeController } from "../controllers/HomeController";
+import { PartialRenderController } from "../controllers/PartialRenderController";
 
 class ProductsController extends ResourceController {
   async list() {}
@@ -26,6 +27,8 @@ export default class extends ApiRouter {
   routes = {
     "/org": OrgRouter,
     "/test": this.get(HomeController, "index"),
+    // Prefetched by the `/partial` demo's layout — see PartialRenderController.
+    "/partial-render/clock": this.get(PartialRenderController, "clock"),
     "/home": this.post(HomeController, "post"),
     "/upload": this.post(async (req: HttpRequest<{ file: File | File[] }>) => {
       const input = await req.input();
