@@ -21,15 +21,30 @@ declare const window: {
  * `loadViewModule` repeatedly is free.
  */
 const viewModules = new Map<string, Record<string, any>>();
+const viewModuleListeners = new Set<() => void>();
 
 export function loadViewModule(name: string): Promise<any> {
   const loader =
     typeof window !== "undefined" ? window.loaders?.[name] : undefined;
   if (!loader) return Promise.resolve(null);
   return Promise.resolve(loader()).then((mod) => {
+    const isNew = !viewModules.has(name);
     viewModules.set(name, mod);
+    // Notify on first registration so a `Route` that rendered before its
+    // module arrived re-reads it — otherwise a hard load could suspend into
+    // a `null` fallback while the view's `Loading` export sits in the module.
+    if (isNew) {
+      for (const listener of viewModuleListeners) listener();
+    }
     return mod;
   });
+}
+
+export function subscribeViewModules(listener: () => void) {
+  viewModuleListeners.add(listener);
+  return () => {
+    viewModuleListeners.delete(listener);
+  };
 }
 
 export function getViewModule(name: string) {

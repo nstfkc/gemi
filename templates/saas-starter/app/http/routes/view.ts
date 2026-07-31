@@ -1,6 +1,7 @@
 import { Cookie, I18n, Meta, Query, Auth } from "gemi/facades";
 import { type HttpRequest, ViewRouter } from "gemi/http";
 import { PartialRenderController } from "../controllers/PartialRenderController";
+import { SuspenseDemoController } from "../controllers/SuspenseDemoController";
 
 class AuthViewRouter extends ViewRouter {
   routes = {
@@ -45,6 +46,22 @@ class PartialRenderRouter extends ViewRouter {
         "/two": this.view("partial/AlwaysTwo", [PartialRenderController, "alwaysTwo"]),
       },
     ).alwaysRun(),
+  };
+}
+
+/**
+ * Hand-testable surface for suspense-ready `useQuery`: a prefetched page that
+ * never shows a spinner, a non-prefetched page that suspends, and a failing
+ * endpoint that lands in the segment's `Error` export. See
+ * SuspenseDemoController for which endpoint backs which page.
+ */
+class SuspenseDemoRouter extends ViewRouter {
+  routes = {
+    "/": this.layout("suspense/Layout", [SuspenseDemoController, "layout"], {
+      "/": this.view("suspense/Instant", [SuspenseDemoController, "instant"]),
+      "/slow": this.view("suspense/Slow", [SuspenseDemoController, "slow"]),
+      "/broken": this.view("suspense/Broken", [SuspenseDemoController, "broken"]),
+    }),
   };
 }
 
@@ -106,6 +123,7 @@ export default class extends ViewRouter {
     ),
     "/auth": AuthViewRouter,
     "/partial": PartialRenderRouter,
+    "/suspense": SuspenseDemoRouter,
     "(app)/": AppRouter,
   };
 }

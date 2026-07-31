@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useContext,
   useEffect,
   useRef,
@@ -7,6 +8,7 @@ import {
   memo,
   useTransition,
   Suspense,
+  useSyncExternalStore,
 } from "react";
 
 import type { PropsWithChildren, ReactNode, ComponentType, lazy } from "react";
@@ -22,6 +24,7 @@ import {
   ComponentsContext,
   ComponentsProvider,
   loadViewModule,
+  subscribeViewModules,
 } from "./ComponentContext";
 import {
   QueryManagerContext,
@@ -103,6 +106,19 @@ const Route = memo((props: PropsWithChildren<RouteProps>) => {
   const { clearErrors } = useContext(QueryManagerContext);
   const { data } = useRouteData();
 
+  // `Loading` / `Error` are optional named exports of the view module,
+  // subscribed so a Route that rendered before its chunk arrived re-reads
+  // the registry once it lands. On the server the registry is empty — which
+  // is fine, because the server never suspends (queries don't fetch there and
+  // views are eager), so the fallback is never rendered into the HTML. The
+  // `Suspense` element itself is rendered on both sides, so hydration sees
+  // the same tree.
+  const getModule = useCallback(
+    () => getViewModule?.(componentPath),
+    [getViewModule, componentPath],
+  );
+  const mod = useSyncExternalStore(subscribeViewModules, getModule, getModule);
+
   const componentData = data?.[pathname]?.[componentPath] ?? {};
   const Component = viewImportMap[componentPath];
 
@@ -116,13 +132,6 @@ const Route = memo((props: PropsWithChildren<RouteProps>) => {
     const NotFound = viewImportMap["404"];
     return <NotFound />;
   }
-
-  // `Loading` / `Error` are optional named exports of the view module. On
-  // the server the registry is empty — which is fine, because the server
-  // never suspends (queries don't fetch there and views are eager), so the
-  // fallback is never rendered into the HTML. The `Suspense` element itself is
-  // rendered on both sides, so hydration sees the same tree.
-  const mod = getViewModule?.(componentPath);
   const Loading = mod?.Loading;
   const ErrorFallback = mod?.Error ?? DefaultQueryErrorFallback;
 
