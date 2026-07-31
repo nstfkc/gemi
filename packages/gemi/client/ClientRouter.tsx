@@ -142,13 +142,18 @@ const Route = memo((props: PropsWithChildren<RouteProps>) => {
       onReset={clearErrors}
     >
       <Suspense fallback={Loading ? <Loading /> : null}>
-        <Component {...componentData}>{props.children}</Component>
+        {/* Keyed by view path so swapping views remounts the view (fresh
+            state), while the boundary above — keyed by tree slot in `Tree` —
+            stays revealed across the swap. */}
+        <Component key={componentPath} {...componentData}>
+          {props.children}
+        </Component>
       </Suspense>
     </ErrorBoundary>
   );
 });
 
-const Tree = memo(
+export const Tree = memo(
   (props: {
     action: Action;
     tree: ComponentTree;
@@ -159,35 +164,45 @@ const Tree = memo(
 
     return (
       <>
-        {tree.map((node) => {
-          const [path, subtree] = node;
-          if (!entries.includes(path)) return null;
-          if (subtree.length > 0) {
+        {tree
+          .filter(([path]) => entries.includes(path))
+          .map((node, slot) => {
+            const [path, subtree] = node;
+            // Keyed by tree SLOT, not by view path: the Suspense/error
+            // boundary inside `Route` must survive a sibling swap (Home →
+            // Pricing under the same layout), so React treats it as already
+            // revealed and a suspending navigation keeps the previous page on
+            // screen. A path key would remount the boundary every navigation,
+            // and a brand-new boundary commits its fallback the moment any
+            // sibling content (the layout's re-rendered chrome) commits —
+            // blanking the outgoing page. The view itself still remounts when
+            // the path changes: `Route` keys its Component render.
+            if (subtree.length > 0) {
+              return (
+                <Route
+                  action={action}
+                  key={`slot-${slot}`}
+                  componentPath={path}
+                  pathname={pathname}
+                >
+                  <Tree
+                    action={action}
+                    tree={subtree}
+                    entries={entries}
+                    pathname={pathname}
+                  />
+                </Route>
+              );
+            }
             return (
               <Route
                 action={action}
-                key={path}
+                key={`slot-${slot}`}
                 componentPath={path}
                 pathname={pathname}
-              >
-                <Tree
-                  action={action}
-                  tree={subtree}
-                  entries={entries}
-                  pathname={pathname}
-                />
-              </Route>
+              />
             );
-          }
-          return (
-            <Route
-              action={action}
-              key={path}
-              componentPath={path}
-              pathname={pathname}
-            />
-          );
-        })}
+          })}
       </>
     );
   },
