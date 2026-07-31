@@ -109,6 +109,9 @@ export const Link = memo(<T extends keyof Views>(props: LinkProps<T>) => {
   const searchParams = new URLSearchParams(normalizeSearch(search));
 
   const path = applyParams(href, params);
+  // `applyParams` drops the trailing slash, so the root route comes back empty
+  // where every pathname the router reports says `/`.
+  const resolvedPath = path || "/";
   let urlLocaleSegment = location.locale;
   if (urlLocaleSegment === defaultLocale) {
     urlLocaleSegment = "";
@@ -137,7 +140,7 @@ export const Link = memo(<T extends keyof Views>(props: LinkProps<T>) => {
 
   // Clicking through to the path we are already on is a shallow navigation —
   // it moves the URL without fetching, so there is nothing to warm.
-  const isShallowTarget = (path || "/") === location.pathname;
+  const isShallowTarget = resolvedPath === location.pathname;
 
   const strategies = !prefetch
     ? []
@@ -249,7 +252,9 @@ export const Link = memo(<T extends keyof Views>(props: LinkProps<T>) => {
     <a
       ref={setAnchorRef}
       data-active={active || currentHref === targetHref}
-      data-pending={href === targetPath && isTransitioning}
+      // The resolved path, not the template: one template can back a whole list
+      // of rows, and only the row that was clicked is heading anywhere.
+      data-pending={isTransitioning && resolvedPath === targetPath}
       href={targetHref === '' ? '/' : targetHref}
       onClick={(e) => {
         if (typeof window !== "undefined") {
