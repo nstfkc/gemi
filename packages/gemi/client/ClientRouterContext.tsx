@@ -310,7 +310,7 @@ export const ClientRouterProvider = (
     // Alongside the payload rather than joined to it: a stylesheet that 404s
     // must not throw away page data that arrived perfectly well.
     fetchRouteCSS(routePath).catch(() => {});
-    // Through `loadViewModule` so each view's `Loading`/`ErrorFallback`
+    // Through `loadViewModule` so each view's `Loading`/`Error`
     // exports are registered by the time the route commits.
     for (const view of routeManifest[routePath] ?? []) {
       loadViewModule(view);

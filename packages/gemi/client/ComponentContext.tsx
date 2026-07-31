@@ -15,7 +15,7 @@ declare const window: {
 /**
  * Resolved view modules, not just their default exports. A route segment's
  * `Suspense` fallback and error UI come from optional named exports
- * (`Loading`, `ErrorFallback`), and those have to be readable synchronously
+ * (`Loading`, `Error`), and those have to be readable synchronously
  * while rendering — so every path that loads a view chunk records the module
  * here. Browsers dedupe the underlying dynamic import, so calling
  * `loadViewModule` repeatedly is free.

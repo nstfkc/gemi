@@ -117,14 +117,14 @@ const Route = memo((props: PropsWithChildren<RouteProps>) => {
     return <NotFound />;
   }
 
-  // `Loading` / `ErrorFallback` are optional named exports of the view module.
-  // On the server the registry is empty — which is fine, because the server
+  // `Loading` / `Error` are optional named exports of the view module. On
+  // the server the registry is empty — which is fine, because the server
   // never suspends (queries don't fetch there and views are eager), so the
   // fallback is never rendered into the HTML. The `Suspense` element itself is
   // rendered on both sides, so hydration sees the same tree.
   const mod = getViewModule?.(componentPath);
   const Loading = mod?.Loading;
-  const ErrorFallback = mod?.ErrorFallback ?? DefaultQueryErrorFallback;
+  const ErrorFallback = mod?.Error ?? DefaultQueryErrorFallback;
 
   return (
     <ErrorBoundary
@@ -270,7 +270,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
       // rather than the concrete path — `/posts/:id`, not `/posts/123`.
       fetchRouteCSS(routerState.routePath).catch((e) => console.error(e));
       // Through `loadViewModule` so the module registry — and with it each
-      // view's `Loading`/`ErrorFallback` exports — is populated before the
+      // view's `Loading`/`Error` exports — is populated before the
       // transition commits the new surface.
       for (const component of views) {
         loadViewModule(component);

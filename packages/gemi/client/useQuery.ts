@@ -171,6 +171,13 @@ export function useQuery<T extends keyof GetRPC>(
   // changes on a real write, so the snapshot is stable across render
   // attempts. Also the server snapshot: SSR renders whatever the prefetch
   // payload seeded, and never fetches.
+  //
+  // uSES and transitions: store updates are always urgent, so a write landing
+  // mid-transition restarts the pending transition — wasted work, never wrong
+  // UI. Exposure is kept small by design: render-phase reads never write the
+  // store synchronously (fetches are silent), and a suspended component has no
+  // subscription — it is woken by its thrown promise, not the store. The
+  // navigation-shaped consequences are pinned in `useQuery.transition.test.tsx`.
   const getSnapshot = useCallback(
     () => resource.peek(variantKey),
     [resource, variantKey],

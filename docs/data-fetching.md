@@ -58,7 +58,7 @@ export function Loading() {
 }
 
 // Shown when a query throws — receives { error, resetErrorBoundary }.
-export function ErrorFallback({ error, resetErrorBoundary }) {
+export function Error({ error, resetErrorBoundary }) {
   return <button onClick={resetErrorBoundary}>Retry</button>;
 }
 ```
