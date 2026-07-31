@@ -25,10 +25,7 @@ against your `GET:` routes); the optional second argument carries `params` and
 import { useQuery } from "gemi/client";
 
 export default function Todos() {
-  const { data, loading, error, refetch } = useQuery("/todos");
-
-  if (loading) return <p>Loading…</p>;
-  if (error) return <p>Something went wrong.</p>;
+  const { data } = useQuery("/todos");
 
   return (
     <ul>
@@ -39,6 +36,68 @@ export default function Todos() {
   );
 }
 ```
+
+### Suspense (the default)
+
+By default a query with no cached data **suspends** the route segment it renders
+in: the component doesn't render until the data is there, so `data` is
+non-nullable and there is no loading branch to write. Every route segment is
+wrapped in a `Suspense` + error boundary by the router, and a view module can
+export its own UI for both:
+
+```tsx
+// app/views/Todos.tsx
+export default function Todos() {
+  const { data } = useQuery("/todos"); // suspends until resolved
+  return <ul>…</ul>;
+}
+
+// Shown while the segment's queries (or its chunk) load.
+export function Loading() {
+  return <TodosSkeleton />;
+}
+
+// Shown when a query throws — receives { error, resetErrorBoundary }.
+export function ErrorFallback({ error, resetErrorBoundary }) {
+  return <button onClick={resetErrorBoundary}>Retry</button>;
+}
+```
+
+How it composes with the rest of the framework:
+
+- **Initial page load** — the server never fetches during render. A query on an
+  SSR'd page must be primed with `Query.prefetch()` in the route's view handler
+  (see below); the page then ships with the data in the HTML and nothing
+  suspends. A suspense query without prefetched data logs a server warning
+  naming the exact `Query.prefetch` call to add, ships without the data, and
+  suspends on the client after hydration.
+- **Navigation** — the router commits navigations inside a transition, so when
+  the next page's queries suspend, the previous page stays on screen
+  (`Link[data-pending]` / `useRouteTransition()` report it) until they resolve.
+  Entering a freshly mounted layout commits the layout and shows the suspended
+  leaf's `Loading` export instead.
+- **Prefetching** — data that arrives any other way — `Query.prefetch` on the
+  server, a `<Link prefetch>` route payload — lands in the same cache and wakes
+  a suspended query immediately, without waiting on its own request.
+- **Stale data never suspends.** A query with cached data always renders it and
+  revalidates in the background (`staleTime` semantics are unchanged).
+- **Errors throw.** With suspense on, an HTTP failure throws a `QueryError`
+  (with `status`, `body`, `path`) into the segment's error boundary instead of
+  being returned. Resetting the boundary clears the stored errors and retries.
+
+Opting out restores the `loading`/`error` flags — per query, with
+`{ suspense: false }` (and `lazy: true` implies it):
+
+```tsx
+const { data, loading, error } = useQuery("/todos", {}, { suspense: false });
+
+if (loading) return <p>Loading…</p>;
+if (error) return <p>Something went wrong.</p>;
+```
+
+Use the opt-out when the loading state itself is UI you want to control inline
+(e.g. paging inside a mounted view), or when the data legitimately may never
+exist (an anonymous visitor's `/auth/me`).
 
 ### Params and search
 
@@ -68,13 +127,13 @@ so a typo in a param or a wrong field type is a compile error.
 
 | field | description |
 | --- | --- |
-| `data` | The response body, typed from the endpoint. `null`/undefined until first load. |
-| `loading` | `true` while a request is in flight (defaults to `true` before the first fetch). |
-| `error` | Error record if the request failed, otherwise `null`. |
+| `data` | The response body, typed from the endpoint. Non-nullable under suspense (the default); `undefined` until first load with `suspense: false` / `lazy: true`. |
+| `loading` | `true` while a request is in flight. Only meaningful with `suspense: false` — a suspense query doesn't render until data exists. |
+| `error` | Error record if the request failed, otherwise `null`. Only populated with `suspense: false` — under suspense a failure throws a `QueryError` into the segment's error boundary. |
 | `refetch()` | Force a fresh fetch of the current variant. |
 | `mutate(fn?)` | Optimistically update the cached data (see below), or refetch when called with no argument. |
 | `trigger()` | Kick off the fetch for a `lazy` query. |
-| `prefetch()` | Fetch once, eagerly, without subscribing to loading state (e.g. on hover). |
+| `prefetch()` | Fetch once, eagerly, without subscribing to loading state (e.g. on hover). Joins the in-flight request a suspending read would otherwise start. |
 | `version` | Timestamp that changes every time the cache receives data from the server, including a refetch that returns an identical payload and prefetched data adopted on navigation. |
 
 > The exported `QueryResult<T>` type is the inferred **data** type for endpoint
@@ -84,12 +143,13 @@ so a typo in a param or a wrong field type is a compile error.
 
 ```tsx
 const { data } = useQuery("/feed", {}, {
+  suspense: true,          // default; false restores the loading/error flags
   fallbackData: [],        // initial data before the first fetch
   keepPreviousData: true,  // keep old data visible while refetching (default true)
   refreshInterval: 5000,   // poll every 5s
-  retryIntervalOnError: 10000,
+  retryIntervalOnError: 10000, // background retry — suspense: false only
   staleTime: 5000,         // how long cached data stays fresh (default 5000ms)
-  lazy: false,             // when true, no fetch until trigger()/refetch()
+  lazy: false,             // when true, no fetch until trigger()/refetch(); implies suspense: false
 });
 ```
 
@@ -153,6 +213,11 @@ import { Query } from "gemi/facades";
   data** — use its return value in the handler. It also stores the result for the client.
 - `Query.prefetch(path, options?)` only primes the client cache: it queues the endpoint
   to resolve alongside the rest of the page, without returning the data for use here.
+
+Because the server never fetches during render, `Query.prefetch` is how a
+suspense query (the default) gets its data into the initial HTML — a route that
+renders a query without prefetching it ships without the data, warns in the
+server log, and suspends on the client after hydration.
 
 Both take the same `{ params, search }` options as `useQuery`, and the stored data
 is matched to the client query by path + search key. The stored data is adopted on

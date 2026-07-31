@@ -201,7 +201,8 @@ export async function httpDev(app: App, instrumentation: Instrumentation) {
   process.env.APP_DIR = appDir;
 
   const server = Bun.serve({
-    port: 5173,
+    // Same override the prod server honors (`httpProd.ts`).
+    port: process.env.PORT || 5173,
     fetch: async (req) => {
       const { pathname, host, protocol } = new URL(req.url);
       if (pathname.startsWith("/render-error.js")) {

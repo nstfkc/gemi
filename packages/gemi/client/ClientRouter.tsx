@@ -6,9 +6,11 @@ import {
   StrictMode,
   memo,
   useTransition,
+  Suspense,
 } from "react";
 
 import type { PropsWithChildren, ReactNode, ComponentType, lazy } from "react";
+import { ErrorBoundary, type FallbackProps } from "react-error-boundary";
 
 import { ServerDataContext } from "./ServerDataProvider";
 import {
@@ -16,7 +18,11 @@ import {
   ClientRouterProvider,
 } from "./ClientRouterContext";
 import type { ComponentTree } from "./types";
-import { ComponentsContext, ComponentsProvider } from "./ComponentContext";
+import {
+  ComponentsContext,
+  ComponentsProvider,
+  loadViewModule,
+} from "./ComponentContext";
 import {
   QueryManagerContext,
   QueryManagerProvider,
@@ -80,9 +86,21 @@ interface RouteProps {
   action: Action | null;
 }
 
+const DefaultQueryErrorFallback = (props: FallbackProps) => {
+  return (
+    <div role="alert">
+      <p>Something went wrong.</p>
+      <button type="button" onClick={() => props.resetErrorBoundary()}>
+        Try again
+      </button>
+    </div>
+  );
+};
+
 const Route = memo((props: PropsWithChildren<RouteProps>) => {
   const { componentPath, pathname, action, children } = props;
-  const { viewImportMap } = useContext(ComponentsContext);
+  const { viewImportMap, getViewModule } = useContext(ComponentsContext);
+  const { clearErrors } = useContext(QueryManagerContext);
   const { data } = useRouteData();
 
   const componentData = data?.[pathname]?.[componentPath] ?? {};
@@ -94,12 +112,31 @@ const Route = memo((props: PropsWithChildren<RouteProps>) => {
     }
   }, [action, children, componentPath]);
 
-  if (Component) {
-    return <Component {...componentData}>{props.children}</Component>;
+  if (!Component) {
+    const NotFound = viewImportMap["404"];
+    return <NotFound />;
   }
 
-  const NotFound = viewImportMap["404"];
-  return <NotFound />;
+  // `Loading` / `ErrorFallback` are optional named exports of the view module.
+  // On the server the registry is empty — which is fine, because the server
+  // never suspends (queries don't fetch there and views are eager), so the
+  // fallback is never rendered into the HTML. The `Suspense` element itself is
+  // rendered on both sides, so hydration sees the same tree.
+  const mod = getViewModule?.(componentPath);
+  const Loading = mod?.Loading;
+  const ErrorFallback = mod?.ErrorFallback ?? DefaultQueryErrorFallback;
+
+  return (
+    <ErrorBoundary
+      FallbackComponent={ErrorFallback}
+      resetKeys={[pathname]}
+      onReset={clearErrors}
+    >
+      <Suspense fallback={Loading ? <Loading /> : null}>
+        <Component {...componentData}>{props.children}</Component>
+      </Suspense>
+    </ErrorBoundary>
+  );
 });
 
 const Tree = memo(
@@ -232,8 +269,11 @@ const Routes = (props: { componentTree: ComponentTree }) => {
       // `fetchRouteCSS` keys off the route manifest, so it needs the pattern
       // rather than the concrete path — `/posts/:id`, not `/posts/123`.
       fetchRouteCSS(routerState.routePath).catch((e) => console.error(e));
+      // Through `loadViewModule` so the module registry — and with it each
+      // view's `Loading`/`ErrorFallback` exports — is populated before the
+      // transition commits the new surface.
       for (const component of views) {
-        window?.loaders?.[component]?.();
+        loadViewModule(component);
       }
 
       const payload = await loadRoutePayload({

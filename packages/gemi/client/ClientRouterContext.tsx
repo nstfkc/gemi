@@ -18,6 +18,7 @@ import type { RouteState } from "./RouteStateContext";
 import { I18nContext } from "./I18nContext";
 import { PrefetchCache } from "./PrefetchCache";
 import { routeDataUrl } from "./helpers/routeDataUrl";
+import { loadViewModule } from "./ComponentContext";
 
 export interface PrefetchTarget {
   /** Concrete pathname, without the locale segment. */
@@ -309,8 +310,10 @@ export const ClientRouterProvider = (
     // Alongside the payload rather than joined to it: a stylesheet that 404s
     // must not throw away page data that arrived perfectly well.
     fetchRouteCSS(routePath).catch(() => {});
+    // Through `loadViewModule` so each view's `Loading`/`ErrorFallback`
+    // exports are registered by the time the route commits.
     for (const view of routeManifest[routePath] ?? []) {
-      window?.loaders?.[view]?.();
+      loadViewModule(view);
     }
 
     await prefetchCache.prime(url, async () => {

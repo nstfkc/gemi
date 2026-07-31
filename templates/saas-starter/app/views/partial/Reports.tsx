@@ -9,10 +9,13 @@ export default function PartialDemoReports(props: { stamp?: Stamp; page?: string
   const prefetchedPage = props.page ?? "1";
   const [page, setPage] = useState(prefetchedPage);
 
+  // `suspense: false` keeps the loading state visible in the row below when a
+  // non-prefetched page is picked; the default would blank the segment into
+  // its Suspense fallback while the variant loads.
   const reports = useQuery(
     "/partial-render/reports",
     { search: { page } },
-    { staleTime: Number.POSITIVE_INFINITY },
+    { staleTime: Number.POSITIVE_INFINITY, suspense: false },
   );
 
   return (

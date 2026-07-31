@@ -15,6 +15,7 @@ export interface QueryManagerContextValue {
     initialState?: Record<string, any>,
   ) => QueryResource;
   hydrate: (prefetchedData?: PrefetchedData | null) => void;
+  clearErrors: () => void;
 }
 
 export const QueryManagerContext = createContext<QueryManagerContextValue>({
@@ -22,6 +23,7 @@ export const QueryManagerContext = createContext<QueryManagerContextValue>({
     return new QueryResource(key, initialState);
   },
   hydrate: () => {},
+  clearErrors: () => {},
 });
 
 export const QueryManagerProvider = ({ children }: PropsWithChildren<{}>) => {
@@ -56,9 +58,17 @@ export const QueryManagerProvider = ({ children }: PropsWithChildren<{}>) => {
     }
   }, []);
 
+  // Used by the route-level error boundary's reset: without this, the retried
+  // render would read the stored failure back out of the cache and re-throw.
+  const clearErrors = useCallback(() => {
+    for (const resource of resourcesRef.current.values()) {
+      resource.clearError();
+    }
+  }, []);
+
   const value = useMemo(
-    () => ({ getResource, hydrate }),
-    [getResource, hydrate],
+    () => ({ getResource, hydrate, clearErrors }),
+    [getResource, hydrate, clearErrors],
   );
 
   return (

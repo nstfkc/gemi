@@ -10,7 +10,9 @@ const defaultArgs: UseSignInArgs = {
 };
 
 export function useSignIn(args: UseSignInArgs = defaultArgs) {
-  const { mutate } = useQuery("/auth/me");
+  // Only here for `mutate` — `lazy` so the sign-in form neither fetches nor
+  // suspends on a user it does not have yet.
+  const { mutate } = useQuery("/auth/me", {}, { lazy: true });
   return usePost(
     "/auth/sign-in",
     {},

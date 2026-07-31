@@ -86,8 +86,10 @@ export default class extends ViewRouter {
         "/": this.view("Home", () => {
           Meta.title("GEMI here home page");
         }),
-        "/about": this.view("About", () => {
-          // Query.prefetch("/test");
+        "/about": this.view("About", (req: HttpRequest) => {
+          // The search here must mirror what `About.tsx` queries with —
+          // prefetched data is matched by variant (sorted search params).
+          Query.prefetch("/test", { search: { locale: req.locale() } });
           return { title: "About" };
         }),
         "/pricing": this.view("Pricing", (req: HttpRequest) => {
