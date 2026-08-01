@@ -236,10 +236,26 @@ sequential waterfall back into a parallel fetch:
 2. **Conditionally rendered on fetched data.** `{data.hasReports && <Reports />}`
    can't be seen until `data` arrives.
 
-You don't have to spot these yourself: in dev, a query that starts late logs a
-warning with the delay it paid and the exact `Query.prefetch` call that removes
-it. (A query whose *params* depend on another query's *result* is inherently
-sequential — compose the two in one api handler instead.)
+You don't have to spot these yourself: in dev, a query that started late logs a
+hint once it resolves, with the delay it paid and the payload size. But
+"discovered late" does not automatically mean "should be prefetched" — weigh
+the hint against two things:
+
+- **Priming is not free on client navigation.** The `.json` navigation payload
+  is one body, so every prefetched query is awaited by — and serialized into —
+  every client-side navigation to the route, including ones where the client
+  already holds the data. Prime small reads; leave a heavy collection to
+  `useQuery`'s cache-then-revalidate. The hint reports the resolved size so
+  you can judge the trade directly.
+- **The query may not belong on the route at all.** A query behind a closed
+  popover or hidden tab that mounts unconditionally runs on every page load —
+  the fix is `{ lazy: true }` + `trigger()` when it opens, not an earlier
+  fetch of data nobody sees.
+
+A handler that deliberately primes nothing can declare it with
+`Query.noPrefetch()`, which silences the hints for that route. (A query whose
+*params* depend on another query's *result* is inherently sequential — compose
+the two in one api handler instead.)
 
 Both take the same `{ params, search }` options as `useQuery`, and the stored data
 is matched to the client query by path + search key. The stored data is adopted on

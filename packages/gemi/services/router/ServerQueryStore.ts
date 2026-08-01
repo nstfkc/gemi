@@ -11,8 +11,17 @@ export type ServerQuerySource = "prefetch" | "render";
 export interface ServerQueryEntry {
   /** Concrete path, params applied — `/posts/123`, not `/posts/:id`. */
   path: string;
+  /** The route pattern the query was declared with — `/posts/:id`. */
+  patternPath: string;
   /** Sorted search params — the same variant key `useQuery` derives. */
   variantKey: string;
+  /**
+   * How many ms into the render this entry was discovered, when that was late
+   * enough to mean it sat under a suspended segment. Set at `ensure`, acted
+   * on at settle — the hint reports the resolved payload size, which only
+   * exists once the fetch lands.
+   */
+  lateBy?: number;
   status: "pending" | "resolved" | "rejected";
   data?: any;
   error?: any;
@@ -64,6 +73,8 @@ export class ServerQueryStore {
   private shipped = new Set<string>();
   private requestStartedAt = performance.now();
   private renderStartedAt: number | null = null;
+  /** Set by `Query.noPrefetch()` — the route declared its lack of priming intentional. */
+  private discoveryHintsMuted = false;
 
   constructor(private fetcher: ServerQueryFetcher) {}
 
@@ -80,6 +91,55 @@ export class ServerQueryStore {
     if (this.renderStartedAt === null) {
       this.renderStartedAt = performance.now();
     }
+  }
+
+  /**
+   * `Query.noPrefetch()` — the route's handler primes nothing on purpose
+   * (heavy payloads it would rather cache-then-revalidate, for instance), so
+   * late-discovery hints are noise for this request.
+   */
+  muteDiscoveryHints() {
+    this.discoveryHintsMuted = true;
+  }
+
+  /**
+   * The late-discovery hint (#287): reported at settle time, not discovery
+   * time, so it can state the resolved payload size — the single number that
+   * decides whether priming is a win (it is serialized into, and awaited by,
+   * every client-navigation payload for the route) or a regression. The
+   * observation is asserted; the remedies are offered, because "discovered
+   * late" does not imply "should be prefetched" — the query may not belong on
+   * the route at all.
+   */
+  private maybeLogLateDiscovery(entry: ServerQueryEntry) {
+    if (!entry.lateBy || this.discoveryHintsMuted) return;
+    if (entry.status !== "resolved") return; // failures have their own visibility
+    if (process.env.NODE_ENV === "production") return;
+
+    let size = "";
+    try {
+      const bytes = JSON.stringify(entry.data)?.length ?? 0;
+      size = bytes >= 1024 ? `${(bytes / 1024).toFixed(1)} kB` : `${bytes} B`;
+    } catch {
+      size = "an unserializable payload";
+    }
+    const duration = (entry.settledAt ?? 0) - entry.startedAt;
+    const searchHint = entry.variantKey
+      ? `, { search: ${JSON.stringify(Object.fromEntries(new URLSearchParams(entry.variantKey)))} }`
+      : "";
+
+    console.warn(
+      `[gemi] useQuery("${entry.patternPath}") was discovered ${entry.lateBy}ms into the ` +
+        `server render — under a suspended segment, so its fetch (${duration}ms, resolved ` +
+        `${size}) could not overlap the others. It still streamed. If the query belongs on ` +
+        `this route, \`Query.prefetch("${entry.patternPath}"${searchHint})\` in the view ` +
+        `handler starts it at request time — but note prefetched data is also awaited by and ` +
+        `serialized into every client-side navigation payload for the route, so weigh that ` +
+        `against the ${size}. If the data is only needed conditionally (a closed popover, a ` +
+        `hidden tab), \`{ lazy: true }\` + \`trigger()\` avoids running it here at all. ` +
+        `\`Query.noPrefetch()\` in the handler marks the omission intentional and silences ` +
+        `this hint for the route.`,
+    );
   }
 
   read(path: string, variantKey: string): ServerQueryEntry | undefined {
@@ -111,22 +171,11 @@ export class ServerQueryStore {
     const existing = this.entries.get(key);
     if (existing) return existing;
 
-    if (
-      source === "render" &&
-      this.renderStartedAt !== null &&
-      process.env.NODE_ENV !== "production"
-    ) {
+    let lateBy: number | undefined;
+    if (source === "render" && this.renderStartedAt !== null) {
       const delay = Math.round(performance.now() - this.renderStartedAt);
       if (delay > LATE_DISCOVERY_THRESHOLD_MS) {
-        const searchHint = variantKey
-          ? `, { search: ${JSON.stringify(Object.fromEntries(searchParams))} }`
-          : "";
-        console.warn(
-          `[gemi] useQuery("${patternPath}") started ${delay}ms into the server render — ` +
-            `it was discovered under a suspended segment, so its fetch could not overlap ` +
-            `the others. It still streams, but \`Query.prefetch("${patternPath}"${searchHint})\` ` +
-            `in the route's view handler would start it at request time.`,
-        );
+        lateBy = delay;
       }
     }
 
@@ -137,7 +186,9 @@ export class ServerQueryStore {
 
     const entry: ServerQueryEntry = {
       path,
+      patternPath,
       variantKey,
+      lateBy,
       status: "pending",
       promise,
       source,
@@ -158,6 +209,7 @@ export class ServerQueryStore {
       )
       .then(() => {
         entry.settledAt = this.elapsed();
+        this.maybeLogLateDiscovery(entry);
         // Listener first, wake second: the payload script must be queued for
         // injection before React resumes the suspended segment, so the data
         // always precedes the segment's reveal in the stream.

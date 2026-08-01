@@ -185,29 +185,69 @@ describe("ServerQueryStore", () => {
     expect(seen).toEqual(["/late"]);
   });
 
-  test("late render discovery warns in dev; prefetch and first-pass discovery stay silent", () => {
-    const { fetcher } = createDeferredFetcher();
+  test("late render discovery hints at settle with the resolved size; prefetch and first-pass stay silent", async () => {
+    const { fetcher, calls } = createDeferredFetcher();
     const store = new ServerQueryStore(fetcher);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
     let clock = 0;
     vi.spyOn(performance, "now").mockImplementation(() => clock);
 
-    store.ensure("/before-render", {}, "prefetch");
+    const beforeRender = store.ensure("/before-render", {}, "prefetch");
     store.markRenderStart();
-    store.ensure("/first-pass", {}, "render");
-    expect(warn).not.toHaveBeenCalled();
+    const firstPass = store.ensure("/first-pass", {}, "render");
 
     clock = 640;
-    store.ensure("/late-one", { search: { locale: "en-US" } }, "render");
+    const late = store.ensure("/late-one", { search: { locale: "en-US" } }, "render");
+    const latePrefetch = store.ensure("/late-prefetch", {}, "prefetch");
+
+    // Nothing is logged at discovery — the hint waits for the payload.
+    expect(warn).not.toHaveBeenCalled();
+
+    calls[0].resolve({ a: 1 });
+    calls[1].resolve({ b: 2 });
+    calls[2].resolve({ rows: "x".repeat(2048) });
+    calls[3].resolve({ c: 3 });
+    await Promise.all([
+      beforeRender.promise,
+      firstPass.promise,
+      late.promise,
+      latePrefetch.promise,
+    ]);
+
+    // Only the late render-discovered entry hints, with size and both remedies.
     expect(warn).toHaveBeenCalledTimes(1);
-    expect(warn.mock.calls[0][0]).toContain('useQuery("/late-one") started 640ms');
-    expect(warn.mock.calls[0][0]).toContain(
+    const message = warn.mock.calls[0][0];
+    expect(message).toContain('useQuery("/late-one") was discovered 640ms');
+    expect(message).toContain("resolved 2.0 kB");
+    expect(message).toContain(
       'Query.prefetch("/late-one", { search: {"locale":"en-US"} })',
     );
+    expect(message).toContain("every client-side navigation payload");
+    expect(message).toContain("lazy: true");
+    expect(message).toContain("Query.noPrefetch()");
+  });
 
-    store.ensure("/late-prefetch", {}, "prefetch");
-    expect(warn).toHaveBeenCalledTimes(1);
+  test("a rejected late discovery logs no hint, and muteDiscoveryHints silences resolved ones", async () => {
+    const { fetcher, calls } = createDeferredFetcher();
+    const store = new ServerQueryStore(fetcher);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    let clock = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => clock);
+    store.markRenderStart();
+    clock = 500;
+
+    const failing = store.ensure("/late-broken", {}, "render");
+    calls[0].reject(new Error("boom"));
+    await failing.promise;
+    expect(warn).not.toHaveBeenCalled();
+
+    store.muteDiscoveryHints();
+    const muted = store.ensure("/late-muted", {}, "render");
+    calls[1].resolve({ big: "payload" });
+    await muted.promise;
+    expect(warn).not.toHaveBeenCalled();
   });
 });
 
@@ -223,6 +263,7 @@ describe("stream injection", () => {
   test("payload scripts self-shim the buffer", () => {
     const script = queryPayloadScript({
       path: "/products",
+      patternPath: "/products",
       variantKey: "page=1",
       status: "resolved",
       data: { ok: true },

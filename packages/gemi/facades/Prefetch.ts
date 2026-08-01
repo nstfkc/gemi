@@ -71,4 +71,24 @@ export class Query {
   ) {
     Query.ensure(path, args[0]);
   }
+
+  /**
+   * Declare that this route primes nothing on purpose, silencing the dev-mode
+   * late-discovery hints for the request. Priming is not free — prefetched
+   * data is awaited by and serialized into every client-navigation payload
+   * for the route — so a handler that deliberately leaves a heavy query to
+   * `useQuery`'s cache-then-revalidate can say so instead of being nagged.
+   */
+  static noPrefetch() {
+    const ctx = RequestContext.getStore();
+
+    if (ctx.req.kind === "api") {
+      throw new Error("Query.noPrefetch() cannot be called from an API request");
+    }
+
+    ctx.serverQueries ??= new ServerQueryStore(
+      createServerQueryFetcher(ctx.req.rawRequest),
+    );
+    ctx.serverQueries.muteDiscoveryHints();
+  }
 }
