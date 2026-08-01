@@ -75,9 +75,10 @@ export class Query {
   /**
    * Declare that this route primes nothing on purpose, silencing the dev-mode
    * late-discovery hints for the request. Priming is not free — prefetched
-   * data is awaited by and serialized into every client-navigation payload
-   * for the route — so a handler that deliberately leaves a heavy query to
-   * `useQuery`'s cache-then-revalidate can say so instead of being nagged.
+   * data is re-fetched and streamed into every client-navigation payload for
+   * the route, even when the client already holds it — so a handler that
+   * deliberately leaves a heavy query to `useQuery`'s cache-then-revalidate
+   * can say so instead of being nagged.
    */
   static noPrefetch() {
     const ctx = RequestContext.getStore();

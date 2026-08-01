@@ -133,12 +133,12 @@ export class ServerQueryStore {
         `server render — under a suspended segment, so its fetch (${duration}ms, resolved ` +
         `${size}) could not overlap the others. It still streamed. If the query belongs on ` +
         `this route, \`Query.prefetch("${entry.patternPath}"${searchHint})\` in the view ` +
-        `handler starts it at request time — but note prefetched data is also awaited by and ` +
-        `serialized into every client-side navigation payload for the route, so weigh that ` +
-        `against the ${size}. If the data is only needed conditionally (a closed popover, a ` +
-        `hidden tab), \`{ lazy: true }\` + \`trigger()\` avoids running it here at all. ` +
-        `\`Query.noPrefetch()\` in the handler marks the omission intentional and silences ` +
-        `this hint for the route.`,
+        `handler starts it at request time — but note prefetched data is also re-fetched and ` +
+        `streamed into every client-side navigation payload for the route, even when the ` +
+        `client already holds it, so weigh that bandwidth against the ${size}. If the data ` +
+        `is only needed conditionally (a closed popover, a hidden tab), \`{ lazy: true }\` + ` +
+        `\`trigger()\` avoids running it here at all. \`Query.noPrefetch()\` in the handler ` +
+        `marks the omission intentional and silences this hint for the route.`,
     );
   }
 

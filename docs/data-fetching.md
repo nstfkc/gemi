@@ -247,12 +247,14 @@ hint once it resolves, with the delay it paid and the payload size. But
 "discovered late" does not automatically mean "should be prefetched" — weigh
 the hint against two things:
 
-- **Priming is not free on client navigation.** The `.json` navigation payload
-  is one body, so every prefetched query is awaited by — and serialized into —
-  every client-side navigation to the route, including ones where the client
-  already holds the data. Prime small reads; leave a heavy collection to
-  `useQuery`'s cache-then-revalidate. The hint reports the resolved size so
-  you can judge the trade directly.
+- **Priming still costs bandwidth on client navigation.** The navigation
+  payload streams (the envelope commits at handler speed, so priming no longer
+  *delays* anything), but every prefetched query is still re-run and streamed
+  into every navigation payload for the route — including navigations where
+  the client already holds the data and would have served it from cache.
+  Prime small reads; leave a heavy collection to `useQuery`'s
+  cache-then-revalidate. The hint reports the resolved size so you can judge
+  the trade directly.
 - **The query may not belong on the route at all.** A query behind a closed
   popover or hidden tab that mounts unconditionally runs on every page load —
   the fix is `{ lazy: true }` + `trigger()` when it opens, not an earlier
