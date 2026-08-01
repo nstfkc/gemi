@@ -7,6 +7,9 @@ import {
 } from "react";
 import { QueryResource } from "./QueryResource";
 
+/** One streamed query payload: `[path, variantKey, data]`. */
+type StreamedQueryPayload = [string, string, any];
+
 export type PrefetchedData = Record<string, Record<string, any>>;
 
 export interface QueryManagerContextValue {
@@ -15,6 +18,7 @@ export interface QueryManagerContextValue {
     initialState?: Record<string, any>,
   ) => QueryResource;
   hydrate: (prefetchedData?: PrefetchedData | null) => void;
+  clearErrors: () => void;
 }
 
 export const QueryManagerContext = createContext<QueryManagerContextValue>({
@@ -22,6 +26,7 @@ export const QueryManagerContext = createContext<QueryManagerContextValue>({
     return new QueryResource(key, initialState);
   },
   hydrate: () => {},
+  clearErrors: () => {},
 });
 
 export const QueryManagerProvider = ({ children }: PropsWithChildren<{}>) => {
@@ -56,9 +61,48 @@ export const QueryManagerProvider = ({ children }: PropsWithChildren<{}>) => {
     }
   }, []);
 
+  // Used by the route-level error boundary's reset: without this, the retried
+  // render would read the stored failure back out of the cache and re-throw.
+  const clearErrors = useCallback(() => {
+    for (const resource of resourcesRef.current.values()) {
+      resource.clearError();
+    }
+  }, []);
+
+  // Streaming SSR delivers late-resolving queries as inline
+  // `__GEMI_STREAM__.push([path, variant, data])` scripts interleaved with
+  // React's chunks. Payloads that ran before this rendered sit buffered in a
+  // plain array; from here on, `push` hydrates directly — and `hydrate`
+  // settles any reader suspended on that variant.
+  //
+  // Drained synchronously during the FIRST render, not in an effect:
+  // suspension happens during the render phase, so a segment hydrating in
+  // this very pass must already find its streamed data in the cache — an
+  // effect-timed drain would let it suspend and start a duplicate `/api`
+  // fetch for data the document already carries. Safe here: it runs once
+  // (idempotent under StrictMode's double-invoke), and nothing is subscribed
+  // to the store yet, so no render is invalidated mid-pass.
+  const drainedStreamRef = useRef(false);
+  if (typeof window !== "undefined" && !drainedStreamRef.current) {
+    drainedStreamRef.current = true;
+    const w = window as unknown as {
+      __GEMI_STREAM__?:
+        | StreamedQueryPayload[]
+        | { push: (p: StreamedQueryPayload) => void };
+    };
+    const adopt = ([path, variantKey, data]: StreamedQueryPayload) => {
+      hydrate({ [path]: { [variantKey]: data } });
+    };
+    const buffered = Array.isArray(w.__GEMI_STREAM__) ? w.__GEMI_STREAM__ : [];
+    w.__GEMI_STREAM__ = { push: adopt };
+    for (const payload of buffered) {
+      adopt(payload);
+    }
+  }
+
   const value = useMemo(
-    () => ({ getResource, hydrate }),
-    [getResource, hydrate],
+    () => ({ getResource, hydrate, clearErrors }),
+    [getResource, hydrate, clearErrors],
   );
 
   return (

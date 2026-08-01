@@ -201,7 +201,8 @@ export async function httpDev(app: App, instrumentation: Instrumentation) {
   process.env.APP_DIR = appDir;
 
   const server = Bun.serve({
-    port: 5173,
+    // Same override the prod server honors (`httpProd.ts`).
+    port: process.env.PORT || 5173,
     fetch: async (req) => {
       const { pathname, host, protocol } = new URL(req.url);
       if (pathname.startsWith("/render-error.js")) {
@@ -237,6 +238,7 @@ export async function httpDev(app: App, instrumentation: Instrumentation) {
 
           const viewImportMap = {};
           const ogMap = {};
+          const viewModules = {};
           const template = (viewName: string, path: string) =>
             `"${viewName}": () => import("${path}")`;
           const templates = [];
@@ -252,6 +254,9 @@ export async function httpDev(app: App, instrumentation: Instrumentation) {
 
             viewImportMap[fileName] = mod.default;
             ogMap[fileName] = mod?.OpenGraph;
+            // The whole module, so a streaming render can put the view's
+            // `Loading`/`Error` exports into the shell it sends.
+            viewModules[fileName] = mod;
             // Emit a root-relative URL (`/app/views/Foo.tsx`), NOT the absolute
             // filesystem path used for `ssrLoadModule` above. The browser's
             // `window.loaders` preload and `client.tsx`'s `import.meta.glob` map
@@ -268,6 +273,7 @@ export async function httpDev(app: App, instrumentation: Instrumentation) {
               await createDevStyles(appDir, vite, currentViews),
             bootstrapModules: ["/refresh.js", "/app/client.tsx", "/@vite/client"],
             viewImportMap,
+            viewModules,
             ogMap,
             loaders,
             cssManifest: {},

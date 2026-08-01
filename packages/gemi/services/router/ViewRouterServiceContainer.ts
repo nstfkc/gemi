@@ -31,6 +31,17 @@ import { Log } from "../../facades/Log";
 import { I18n } from "../../facades/I18n";
 import { AuthViewRouter } from "../../auth/AuthenticationServiceProvider";
 import { KernelIdServiceContainer } from "../kernel-id/KernelIdServiceContainer";
+import { ServerQueryStore } from "./ServerQueryStore";
+import { createServerQueryFetcher } from "./serverQueryFetcher";
+import { injectQueryPayloads, isBotUserAgent } from "./streamQueryInjection";
+import { createRoutePayloadStream } from "./routePayloadStream";
+
+/**
+ * How long a document response may keep streaming before pending segments are
+ * cut over to client rendering. One hung query must not hold the connection
+ * open forever; the browser resolves whatever was aborted over `/api`.
+ */
+const STREAM_DEADLINE_MS = 10_000;
 
 const themeScript = `
 !function(){try{var d=document.documentElement,c=d.classList;
@@ -143,7 +154,9 @@ export class ViewRouterServiceContainer extends ServiceContainer {
     url: URL;
     i18n: any;
     user: any;
-    prefetchedData: any;
+    serverQueries: ServerQueryStore;
+    userAgent: string | null;
+    noStream: boolean;
     params: any;
     breadcrumbs: any;
     urlLocaleSegment?: string;
@@ -158,7 +171,9 @@ export class ViewRouterServiceContainer extends ServiceContainer {
       i18n,
       params,
       pathname,
-      prefetchedData,
+      serverQueries,
+      userAgent,
+      noStream,
       url,
       user,
       viewData,
@@ -179,7 +194,10 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           [pageDataKey]: viewData,
         },
         __csrf: csrfTokenHMAC.toString("base64"),
-        prefetchedData,
+        // Placeholder — re-snapshotted at render time (below) so everything
+        // that resolved while styles and modules loaded still makes the
+        // document payload instead of streaming.
+        prefetchedData: {} as Record<string, Record<string, any>>,
         i18n,
         auth: { user },
         routeManifest: this.clientRouteManifest,
@@ -207,8 +225,22 @@ export class ViewRouterServiceContainer extends ServiceContainer {
       loaders: string;
       cssManifest: Record<string, string[]>;
       ogMap: Record<string, any>;
+      /**
+       * Full view modules (not just default exports) so `Route` can render a
+       * view's `Loading`/`Error` exports on the server — a streamed shell
+       * carries real fallbacks, and they must match what the client hydrates.
+       */
+      viewModules?: Record<string, any>;
     }) => {
-      const { bootstrapModules, loaders, getStyles, viewImportMap, cssManifest, ogMap } = params;
+      const {
+        bootstrapModules,
+        loaders,
+        getStyles,
+        viewImportMap,
+        cssManifest,
+        ogMap,
+        viewModules,
+      } = params;
 
       if (isOgRequest) {
         let ogHandler = null;
@@ -257,6 +289,29 @@ export class ViewRouterServiceContainer extends ServiceContainer {
 
       result.data["cssManifest"] = cssManifest;
       const styles = await getStyles(currentViews);
+
+      // Everything resolved by now ships in the document payload; everything
+      // still in flight streams in behind it. The snapshot marks its entries
+      // as shipped so the injector doesn't send them twice.
+      result.data.prefetchedData = serverQueries.snapshotResolved();
+      serverQueries.markRenderStart();
+
+      const deadline = new AbortController();
+      const deadlineTimer = setTimeout(() => deadline.abort(), STREAM_DEADLINE_MS);
+
+      // Decided before the render call because it changes *render-time*
+      // behavior: React splits any boundary bigger than
+      // `progressiveChunkSize` (~12.8KB) out of the shell as it renders, and
+      // awaiting `allReady` afterwards settles the data but cannot undo the
+      // split — a non-JS reader would see a body whose content is parked in
+      // `<div hidden>` + `$RC()` reveal scripts (#286, #289). Two audiences
+      // need the settled document: crawlers (detected by UA — progressive
+      // chunking only exists to reach a browser sooner, which is worthless to
+      // a client that buffers the whole response) and routes that declared
+      // `"no-stream"` (marketing/content pages that must render for
+      // JS-disabled humans, text browsers, and failed-script loads too).
+      const settled = isBotUserAgent(userAgent) || noStream;
+
       try {
         const stream = await renderToReadableStream(
           createElement(Fragment, {
@@ -271,6 +326,8 @@ export class ViewRouterServiceContainer extends ServiceContainer {
               createElement(Root, {
                 data: result.data,
                 viewImportMap,
+                viewModules,
+                serverQueries,
                 key: "root",
               }),
             ],
@@ -278,14 +335,37 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           {
             bootstrapScriptContent: `window.__GEMI_DATA__ = ${JSON.stringify(result.data)}; window.loaders=${loaders}`,
             bootstrapModules,
+            signal: deadline.signal,
+            ...(settled ? { progressiveChunkSize: Number.MAX_SAFE_INTEGER } : {}),
+            // A query rejecting inside a streamed segment is expected: React
+            // client-renders that boundary and the browser surfaces the error
+            // through its own fetch. Log it and move on.
+            onError(error: unknown) {
+              if (process.env.NODE_ENV !== "production") {
+                console.error(error);
+              }
+            },
           },
         );
 
-        return new Response(stream, {
+        stream.allReady
+          .catch(() => {})
+          .finally(() => clearTimeout(deadlineTimer));
+
+        // A settled response waits for everything before the first byte.
+        // Works only together with the `progressiveChunkSize` override
+        // above: this waits for the data, that keeps the content inline
+        // instead of script-revealed.
+        if (settled) {
+          await stream.allReady.catch(() => {});
+        }
+
+        return new Response(injectQueryPayloads(stream, serverQueries), {
           status: !currentPathName ? 404 : 200,
           headers,
         });
       } catch (err) {
+        clearTimeout(deadlineTimer);
         const stream = await renderToReadableStream(createElement("div"), {
           bootstrapScriptContent: `window.error= ${JSON.stringify(err.message)}; window.stack_trace=${JSON.stringify(err.stack)};window.__GEMI_DATA__ = ${JSON.stringify(result.data)}; window.loaders=${loaders}`,
           bootstrapModules:
@@ -347,6 +427,11 @@ export class ViewRouterServiceContainer extends ServiceContainer {
     let currentPathName: null | string = null;
     let params: Record<string, any> = {};
     let partial: PartialRenderInfo | null = null;
+    // `"no-stream"` in a route's (or its router's) middleware list opts the
+    // route out of progressive streaming: everyone gets the fully settled
+    // document a bot UA would (#289). It is a directive read here, not real
+    // middleware — the middleware runner ignores unknown aliases.
+    let noStream = false;
 
     try {
       const match = matchViewRoute(this.flatViewRoutes, urlPathname);
@@ -355,6 +440,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
         params = match.params;
         handlers = match.route.exec;
         middlewares = match.route.middleware;
+        noStream = middlewares.includes("no-stream");
 
         // Only navigations skip work. A document request renders the whole
         // tree, and the client has nothing to carry forward yet.
@@ -394,6 +480,9 @@ export class ViewRouterServiceContainer extends ServiceContainer {
         appId: string;
       } | null = null;
       const ctx = RequestContext.getStore();
+      // Before middleware and handlers, so every `Query.prefetch` along the
+      // way lands in one live, request-scoped store.
+      ctx.serverQueries = new ServerQueryStore(createServerQueryFetcher(req));
 
       if (urlLocale) {
         const locale = urlLocale.replaceAll("/", "");
@@ -437,25 +526,24 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           };
         }
 
-        // Started together, collected apart: `data` is one entry per rendered
-        // segment, and must stay that way — prefetch results are not view data.
-        const handlerPromises = handlers.map((fn) => fn(httpRequest as any));
-        const prefetchPromises = Array.from(ctx.prefetchPromiseQueue).map((fn) => fn());
-        const [data] = await Promise.all([
-          Promise.all(handlerPromises),
-          Promise.all(prefetchPromises),
-        ]);
+        // Handlers gate the response — they decide redirects, status codes,
+        // cookies — so they are awaited. Queries do not: `Query.prefetch`
+        // starts its request the moment it is called (a live store, so a
+        // prefetch after a handler's first `await` is no longer silently
+        // dropped), and both response shapes stream whatever is still in
+        // flight — the document as interleaved payload scripts, the `.json`
+        // navigation payload as NDJSON lines (#290).
+        const data = await Promise.all(handlers.map((fn) => fn(httpRequest as any)));
 
         const cookies = ctx.cookies;
         const headers = ctx.headers;
-        const prefetchedResources = ctx.prefetchedResources;
 
         pageData = {
           data,
           cookies,
           headers,
           user: ctx.user,
-          prefetchedData: Object.fromEntries(prefetchedResources.entries()),
+          prefetchedData: ctx.serverQueries.snapshotResolved(),
           currentPathName: httpRequest.routePath,
           params: httpRequest.params,
           urlLocaleSegment,
@@ -494,7 +582,10 @@ export class ViewRouterServiceContainer extends ServiceContainer {
         }
 
         if (isViewDataRequest) {
-          headers.set("Content-Type", "application/json; charset=utf-8");
+          // NDJSON: envelope first — sent at handler speed — then one line
+          // per query as it settles (#290). The client commits the
+          // navigation off the envelope and hydrates the rest as it lands.
+          headers.set("Content-Type", "application/x-ndjson; charset=utf-8");
           // The body depends on the route the client came from, so no shared
           // cache may serve one client's partial response to another.
           headers.append("Vary", PARTIAL_RENDER_HEADER);
@@ -503,21 +594,25 @@ export class ViewRouterServiceContainer extends ServiceContainer {
 
           await this.service.onRequestEnd(httpRequest);
 
+          const envelope = {
+            // Nothing that rendered touched the metadata, so the segments
+            // that were skipped are still the ones that own it.
+            meta: partial && !ctx.metadata.touched ? null : pageData.meta,
+            data: {
+              [urlPathname]: viewData,
+            },
+            breadcrumbs,
+            // Resolved-so-far; the rest streams behind the envelope. The
+            // snapshot marks its entries shipped so they aren't sent twice.
+            prefetchedData: ctx.serverQueries.snapshotResolved(),
+            i18n,
+            is404: !currentPathName,
+            appId: pageData.appId,
+            partial,
+          };
+
           return new Response(
-            JSON.stringify({
-              // Nothing that rendered touched the metadata, so the segments
-              // that were skipped are still the ones that own it.
-              meta: partial && !ctx.metadata.touched ? null : pageData.meta,
-              data: {
-                [urlPathname]: viewData,
-              },
-              breadcrumbs,
-              prefetchedData: pageData.prefetchedData,
-              i18n,
-              is404: !currentPathName,
-              appId: pageData.appId,
-              partial,
-            }),
+            createRoutePayloadStream(envelope, ctx.serverQueries),
             {
               headers,
             },
@@ -525,6 +620,16 @@ export class ViewRouterServiceContainer extends ServiceContainer {
         }
 
         headers.set("Content-Type", "text/html; charset=utf-8");
+
+        // The streamed/settled decision is UA-derived (crawlers get inline
+        // settled documents), so the body varies by User-Agent and a shared
+        // cache must key on it — otherwise a cached browser shell full of
+        // fallbacks and reveal scripts gets served to a bot. `no-stream`
+        // routes serve one settled body to everyone, so they stay cacheable
+        // without the (CDN-hostile) Vary.
+        if (!noStream) {
+          headers.append("Vary", "User-Agent");
+        }
 
         for (const cookie of cookies) {
           headers.append("Set-Cookie", cookie.toString());
@@ -553,7 +658,9 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           i18n,
           params,
           pathname: url.pathname,
-          prefetchedData: pageData.prefetchedData,
+          serverQueries: ctx.serverQueries,
+          userAgent: req.headers.get("user-agent"),
+          noStream,
           url,
           user,
           viewData,

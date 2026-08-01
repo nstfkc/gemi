@@ -10,10 +10,13 @@ export default function PartialDemoLayout(props: { children: ReactNode; stamp?: 
   // Nobody prefetches this one, so the browser fetches it over `/api` the first
   // time this layout mounts. It then stays in the cache — and because a carried
   // layout does not re-mount, navigating around inside it does not refetch it.
+  // `suspense: false` so the row can *show* that fetch happening; the default
+  // would suspend this segment until the response lands (and, with no server
+  // prefetch, would warn during SSR).
   const notifications = useQuery(
     "/partial-render/notifications",
     {},
-    { staleTime: Number.POSITIVE_INFINITY },
+    { staleTime: Number.POSITIVE_INFINITY, suspense: false },
   );
 
   return (

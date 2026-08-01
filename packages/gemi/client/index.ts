@@ -1,5 +1,6 @@
 export { useQuery } from "./useQuery";
 export type { QueryResult } from "./useQuery";
+export { QueryError } from "./QueryError";
 export {
   useMutation,
   useDelete,

@@ -4,6 +4,7 @@ import { ApiRouter, ResourceController, ValidationError, type HttpRequest } from
 import { Dictionary } from "gemi/i18n";
 import { HomeController } from "../controllers/HomeController";
 import { PartialRenderController } from "../controllers/PartialRenderController";
+import { SuspenseDemoController } from "../controllers/SuspenseDemoController";
 
 class ProductsController extends ResourceController {
   async list() {}
@@ -32,6 +33,11 @@ export default class extends ApiRouter {
     "/partial-render/org/:orgId": this.get(PartialRenderController, "org"),
     "/partial-render/reports": this.get(PartialRenderController, "reportsData"),
     "/partial-render/notifications": this.get(PartialRenderController, "notifications"),
+    // Read by the `/suspense` demo — all artificially slow so suspension is
+    // visible; `flaky` fails twice and succeeds on the third call.
+    "/suspense-demo/products": this.get(SuspenseDemoController, "products"),
+    "/suspense-demo/metrics": this.get(SuspenseDemoController, "metrics"),
+    "/suspense-demo/flaky": this.get(SuspenseDemoController, "flaky"),
     "/home": this.post(HomeController, "post"),
     "/upload": this.post(async (req: HttpRequest<{ file: File | File[] }>) => {
       const input = await req.input();

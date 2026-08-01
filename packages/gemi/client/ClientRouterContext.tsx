@@ -18,6 +18,8 @@ import type { RouteState } from "./RouteStateContext";
 import { I18nContext } from "./I18nContext";
 import { PrefetchCache } from "./PrefetchCache";
 import { routeDataUrl } from "./helpers/routeDataUrl";
+import { readSettledRoutePayload } from "./helpers/readRoutePayload";
+import { loadViewModule } from "./ComponentContext";
 
 export interface PrefetchTarget {
   /** Concrete pathname, without the locale segment. */
@@ -309,8 +311,10 @@ export const ClientRouterProvider = (
     // Alongside the payload rather than joined to it: a stylesheet that 404s
     // must not throw away page data that arrived perfectly well.
     fetchRouteCSS(routePath).catch(() => {});
+    // Through `loadViewModule` so each view's `Loading`/`Error`
+    // exports are registered by the time the route commits.
     for (const view of routeManifest[routePath] ?? []) {
-      window?.loaders?.[view]?.();
+      loadViewModule(view);
     }
 
     await prefetchCache.prime(url, async () => {
@@ -320,7 +324,10 @@ export const ClientRouterProvider = (
       if (!response.ok) {
         return null;
       }
-      return await response.json();
+      // The settled aggregate: every streamed query result merged back into
+      // the envelope's `prefetchedData` — a warmed payload is stored whole,
+      // exactly as the blocking response used to arrive (#290).
+      return await readSettledRoutePayload(response);
     });
   };
 

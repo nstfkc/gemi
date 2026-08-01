@@ -97,4 +97,48 @@ describe("useQuery during SSR", () => {
     renderWithRouteState(<View />);
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  test("a suspense query without prefetched data warns, naming the missing prefetch", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    function View() {
+      const { data: items = [] } = useQuery("/uncached" as any);
+      return <div>{items.length}</div>;
+    }
+
+    renderWithRouteState(<View />);
+
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('Query.prefetch("/uncached")'),
+    );
+  });
+
+  test("a prefetched suspense query does not warn", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    function View() {
+      const { data: items = [] } = useQuery("/lists" as any);
+      return <div>{items.length}</div>;
+    }
+
+    renderWithRouteState(<View />, {
+      prefetchedData: { "/lists": { "": [{ id: 1 }] } },
+    });
+
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  test("opted-out and lazy queries do not warn", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    function View() {
+      useQuery("/uncached" as any, {}, { suspense: false });
+      useQuery("/uncached" as any, {}, { lazy: true });
+      return <div />;
+    }
+
+    renderWithRouteState(<View />);
+
+    expect(warn).not.toHaveBeenCalled();
+  });
 });

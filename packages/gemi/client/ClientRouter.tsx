@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useContext,
   useEffect,
   useRef,
@@ -6,9 +7,12 @@ import {
   StrictMode,
   memo,
   useTransition,
+  Suspense,
+  useSyncExternalStore,
 } from "react";
 
 import type { PropsWithChildren, ReactNode, ComponentType, lazy } from "react";
+import { ErrorBoundary, type FallbackProps } from "react-error-boundary";
 
 import { ServerDataContext } from "./ServerDataProvider";
 import {
@@ -16,7 +20,12 @@ import {
   ClientRouterProvider,
 } from "./ClientRouterContext";
 import type { ComponentTree } from "./types";
-import { ComponentsContext, ComponentsProvider } from "./ComponentContext";
+import {
+  ComponentsContext,
+  ComponentsProvider,
+  loadViewModule,
+  subscribeViewModules,
+} from "./ComponentContext";
 import {
   QueryManagerContext,
   QueryManagerProvider,
@@ -80,10 +89,34 @@ interface RouteProps {
   action: Action | null;
 }
 
+const DefaultQueryErrorFallback = (props: FallbackProps) => {
+  return (
+    <div role="alert">
+      <p>Something went wrong.</p>
+      <button type="button" onClick={() => props.resetErrorBoundary()}>
+        Try again
+      </button>
+    </div>
+  );
+};
+
 const Route = memo((props: PropsWithChildren<RouteProps>) => {
   const { componentPath, pathname, action, children } = props;
-  const { viewImportMap } = useContext(ComponentsContext);
+  const { viewImportMap, getViewModule } = useContext(ComponentsContext);
+  const { clearErrors } = useContext(QueryManagerContext);
   const { data } = useRouteData();
+
+  // `Loading` / `Error` are optional named exports of the view module,
+  // subscribed so a Route that rendered before its chunk arrived re-reads
+  // the registry once it lands. On the server `getViewModule` reads the
+  // eagerly-loaded modules the http server passed in — a streaming render
+  // suspends for real, so the `Loading` fallback it puts in the shell must be
+  // the same one the client hydrates.
+  const getModule = useCallback(
+    () => getViewModule?.(componentPath),
+    [getViewModule, componentPath],
+  );
+  const mod = useSyncExternalStore(subscribeViewModules, getModule, getModule);
 
   const componentData = data?.[pathname]?.[componentPath] ?? {};
   const Component = viewImportMap[componentPath];
@@ -94,15 +127,32 @@ const Route = memo((props: PropsWithChildren<RouteProps>) => {
     }
   }, [action, children, componentPath]);
 
-  if (Component) {
-    return <Component {...componentData}>{props.children}</Component>;
+  if (!Component) {
+    const NotFound = viewImportMap["404"];
+    return <NotFound />;
   }
+  const Loading = mod?.Loading;
+  const ErrorFallback = mod?.Error ?? DefaultQueryErrorFallback;
 
-  const NotFound = viewImportMap["404"];
-  return <NotFound />;
+  return (
+    <ErrorBoundary
+      FallbackComponent={ErrorFallback}
+      resetKeys={[pathname]}
+      onReset={clearErrors}
+    >
+      <Suspense fallback={Loading ? <Loading /> : null}>
+        {/* Keyed by view path so swapping views remounts the view (fresh
+            state), while the boundary above — keyed by tree slot in `Tree` —
+            stays revealed across the swap. */}
+        <Component key={componentPath} {...componentData}>
+          {props.children}
+        </Component>
+      </Suspense>
+    </ErrorBoundary>
+  );
 });
 
-const Tree = memo(
+export const Tree = memo(
   (props: {
     action: Action;
     tree: ComponentTree;
@@ -113,35 +163,45 @@ const Tree = memo(
 
     return (
       <>
-        {tree.map((node) => {
-          const [path, subtree] = node;
-          if (!entries.includes(path)) return null;
-          if (subtree.length > 0) {
+        {tree
+          .filter(([path]) => entries.includes(path))
+          .map((node, slot) => {
+            const [path, subtree] = node;
+            // Keyed by tree SLOT, not by view path: the Suspense/error
+            // boundary inside `Route` must survive a sibling swap (Home →
+            // Pricing under the same layout), so React treats it as already
+            // revealed and a suspending navigation keeps the previous page on
+            // screen. A path key would remount the boundary every navigation,
+            // and a brand-new boundary commits its fallback the moment any
+            // sibling content (the layout's re-rendered chrome) commits —
+            // blanking the outgoing page. The view itself still remounts when
+            // the path changes: `Route` keys its Component render.
+            if (subtree.length > 0) {
+              return (
+                <Route
+                  action={action}
+                  key={`slot-${slot}`}
+                  componentPath={path}
+                  pathname={pathname}
+                >
+                  <Tree
+                    action={action}
+                    tree={subtree}
+                    entries={entries}
+                    pathname={pathname}
+                  />
+                </Route>
+              );
+            }
             return (
               <Route
                 action={action}
-                key={path}
+                key={`slot-${slot}`}
                 componentPath={path}
                 pathname={pathname}
-              >
-                <Tree
-                  action={action}
-                  tree={subtree}
-                  entries={entries}
-                  pathname={pathname}
-                />
-              </Route>
+              />
             );
-          }
-          return (
-            <Route
-              action={action}
-              key={path}
-              componentPath={path}
-              pathname={pathname}
-            />
-          );
-        })}
+          })}
       </>
     );
   },
@@ -232,8 +292,11 @@ const Routes = (props: { componentTree: ComponentTree }) => {
       // `fetchRouteCSS` keys off the route manifest, so it needs the pattern
       // rather than the concrete path — `/posts/:id`, not `/posts/123`.
       fetchRouteCSS(routerState.routePath).catch((e) => console.error(e));
+      // Through `loadViewModule` so the module registry — and with it each
+      // view's `Loading`/`Error` exports — is populated before the
+      // transition commits the new surface.
       for (const component of views) {
-        window?.loaders?.[component]?.();
+        loadViewModule(component);
       }
 
       const payload = await loadRoutePayload({
@@ -241,6 +304,12 @@ const Routes = (props: { componentTree: ComponentTree }) => {
         from,
         takePrefetched,
         renderedRoute: () => renderedRouteRef.current,
+        // Query results streaming behind the envelope (#290): hydrating each
+        // settles the segment suspended on it — the same wake path streamed
+        // documents use.
+        onQueryPayload: ([path, variantKey, data]) => {
+          hydrate({ [path]: { [variantKey]: data } });
+        },
       });
 
       if (payload) {
@@ -319,6 +388,8 @@ const Routes = (props: { componentTree: ComponentTree }) => {
 
 export const ClientRouter = (props: {
   viewImportMap?: Record<string, ReturnType<typeof lazy>>;
+  /** Server only: full view modules for `Loading`/`Error` fallbacks. */
+  viewModules?: Record<string, Record<string, any>>;
   RootLayout: ComponentType<{ children: ReactNode; locale: string }>;
 }) => {
   const { RootLayout } = props;
@@ -337,7 +408,10 @@ export const ClientRouter = (props: {
       <I18nProvider>
         <WebSocketContextProvider>
           <QueryManagerProvider>
-            <ComponentsProvider viewImportMap={props.viewImportMap}>
+            <ComponentsProvider
+              viewImportMap={props.viewImportMap}
+              modules={props.viewModules}
+            >
               <ClientRouterProvider
                 cssManifest={cssManifest}
                 searchParams={router.searchParams}

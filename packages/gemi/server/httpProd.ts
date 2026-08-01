@@ -29,6 +29,7 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
 
   const viewImportMap = {};
   const ogMap = {};
+  const viewModules = {};
   const cssManifest = {};
   const template = (viewName: string, path: string) => `"${viewName}": () => import("${path}")`;
   const templates = [];
@@ -46,6 +47,9 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
     const mod = await import(`${process.env.DIST_DIR}/server/${serverFile?.file}`);
     viewImportMap[fileName] = mod.default;
     ogMap[fileName] = mod.OpenGraph;
+    // The whole module, so a streaming render can put the view's
+    // `Loading`/`Error` exports into the shell it sends.
+    viewModules[fileName] = mod;
     const clientFile = manifest[`app/views/${fileName}.tsx`];
 
     if (clientFile?.css && clientFile?.css.length > 0) {
@@ -174,6 +178,7 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
           bootstrapModules: [`/${manifest["app/client.tsx"].file}`],
           loaders,
           viewImportMap,
+          viewModules,
           ogMap,
           cssManifest,
         });

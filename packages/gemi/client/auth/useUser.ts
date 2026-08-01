@@ -13,6 +13,9 @@ export function useUser() {
     {},
     {
       fallbackData: auth?.user ? auth.user : null,
+      // An anonymous visitor has no `/auth/me` data and never will — this
+      // must resolve to `user: null`, not suspend the page behind a 401.
+      suspense: false,
     },
   );
 
