@@ -174,8 +174,21 @@ export function useQuery<T extends keyof GetRPC>(
   const [options, config] = args;
   // Resolution order: per-call config → provider `queryConfig` → framework
   // defaults. The first two merge here; `useFrameworkQuery` applies the last.
+  // Only *defined* per-call keys participate: a key explicitly set to
+  // `undefined` (`{ suspense: cond ? true : undefined }`, forwarding an
+  // optional prop) must fall through to the provider default, not clobber it
+  // — a plain spread would copy the `undefined` over it. The provider value
+  // is already sanitized at the provider (see `QueryManagerProvider`).
   const queryConfig = useContext(QueryConfigContext);
-  return useFrameworkQuery(url, options, { ...queryConfig, ...config });
+  const merged: Config<Data<T>> = { ...queryConfig };
+  if (config) {
+    for (const key of Object.keys(config) as Array<keyof Config<Data<T>>>) {
+      if (config[key] !== undefined) {
+        (merged as Record<string, unknown>)[key] = config[key];
+      }
+    }
+  }
+  return useFrameworkQuery(url, options, merged);
 }
 
 /**
