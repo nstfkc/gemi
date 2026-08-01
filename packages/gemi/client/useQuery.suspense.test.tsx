@@ -1,6 +1,13 @@
 /** @vitest-environment jsdom */
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { Component, Suspense, act, useContext } from "react";
+import {
+  Component,
+  Suspense,
+  act,
+  useContext,
+  useEffect,
+  useState,
+} from "react";
 import type { PropsWithChildren, ReactNode } from "react";
 import { cleanup, render } from "@testing-library/react";
 
@@ -28,7 +35,11 @@ function createFetch() {
   const fetchMock = vi.fn((_url: string, _init?: RequestInit) => {
     return new Promise((resolve) => {
       pending.push(({ ok, body }) =>
-        resolve({ ok, status: ok ? 200 : 500, json: async () => body } as Response),
+        resolve({
+          ok,
+          status: ok ? 200 : 500,
+          json: async () => body,
+        } as Response),
       );
     });
   });
@@ -265,6 +276,84 @@ describe("useQuery with suspense (the default)", () => {
   });
 });
 
+describe("keepPreviousData under suspense", () => {
+  let mounts = 0;
+  beforeEach(() => {
+    mounts = 0;
+  });
+
+  function PagedList(props: { keepPreviousData?: boolean }) {
+    const [page, setPage] = useState(1);
+    const { data, loading } = useQuery(
+      "/todos" as any,
+      { search: { page } },
+      props.keepPreviousData === false ? { keepPreviousData: false } : {},
+    );
+    useEffect(() => {
+      mounts += 1;
+    }, []);
+    return (
+      <button type="button" onClick={() => setPage((p) => p + 1)}>
+        {`ids:${(data as any[]).map((t: any) => t.id).join(",")} loading:${loading}`}
+      </button>
+    );
+  }
+
+  test("a variant change keeps the previous rows and flags pending — no startTransition in app code", async () => {
+    const screen = render(
+      <Providers>
+        <PagedList />
+      </Providers>,
+    );
+
+    // First mount is unchanged: nothing cached yet, suspend into the fallback.
+    expect(screen.queryByText("suspense-fallback")).not.toBeNull();
+    await net.resolve([{ id: 1 }]);
+    expect(screen.queryByText("ids:1 loading:false")).not.toBeNull();
+
+    // Next page — a plain urgent state update, no transition at the call site.
+    await act(async () => {
+      screen.getByRole("button").click();
+    });
+
+    // The previous page's rows stay committed — the fallback never flashes in
+    // — and the pending window is exposed as `loading: true` for pager UI.
+    expect(screen.queryByText("suspense-fallback")).toBeNull();
+    expect(screen.queryByText("ids:1 loading:true")).not.toBeNull();
+    // The new variant's request went on the wire immediately.
+    expect(net.fetchMock).toHaveBeenLastCalledWith("/api/todos?page=2", {
+      cache: "default",
+    });
+
+    await net.resolve([{ id: 2 }]);
+
+    // The deferred render committed the new rows, and the component was never
+    // unmounted along the way.
+    expect(screen.queryByText("ids:2 loading:false")).not.toBeNull();
+    expect(mounts).toBe(1);
+  });
+
+  test("keepPreviousData: false restores suspend-on-variant-change", async () => {
+    const screen = render(
+      <Providers>
+        <PagedList keepPreviousData={false} />
+      </Providers>,
+    );
+    await net.resolve([{ id: 1 }]);
+    expect(screen.queryByText("ids:1 loading:false")).not.toBeNull();
+
+    await act(async () => {
+      screen.getByRole("button").click();
+    });
+
+    // The caller opted back into the fallback: the segment suspends in place.
+    expect(screen.queryByText("suspense-fallback")).not.toBeNull();
+
+    await net.resolve([{ id: 2 }]);
+    expect(screen.queryByText("ids:2 loading:false")).not.toBeNull();
+  });
+});
+
 describe("useQuery with suspense: false", () => {
   test("reproduces the loading-flag sequence", async () => {
     const states: Array<{ data: any; loading: boolean }> = [];
@@ -302,7 +391,9 @@ describe("useQuery with suspense: false", () => {
         {},
         { suspense: false },
       );
-      return <div>{`error:${(error as any)?.name ?? "none"} loading:${loading}`}</div>;
+      return (
+        <div>{`error:${(error as any)?.name ?? "none"} loading:${loading}`}</div>
+      );
     }
 
     const screen = render(
