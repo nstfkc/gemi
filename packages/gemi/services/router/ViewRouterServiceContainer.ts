@@ -34,11 +34,7 @@ import { KernelIdServiceContainer } from "../kernel-id/KernelIdServiceContainer"
 import { ServerQueryStore, type StreamSummary } from "./ServerQueryStore";
 import { createServerQueryFetcher } from "./serverQueryFetcher";
 import { injectQueryPayloads, isBotUserAgent } from "./streamQueryInjection";
-import {
-  createShellContentObserver,
-  shellContentHint,
-  type ShellContentMeasurement,
-} from "./shellContentReport";
+import { createShellContentObserver, createShellContentReporter } from "./shellContentReport";
 import { createRoutePayloadStream } from "./routePayloadStream";
 
 /**
@@ -118,10 +114,14 @@ export class ViewRouterServiceContainer extends ServiceContainer {
   flatComponentTree: string[] = [];
   root: any = null;
   /**
-   * Routes already hinted for near-blank shell text — the hint fires once per
-   * route per boot (#294) so a hot route doesn't spam the dev console.
+   * The shell-content hint (#294): React defers any boundary over
+   * `progressiveChunkSize` on size alone, so a page that reads fine without
+   * JS can go blank the day one more section pushes it over the budget — and
+   * nothing else notices the transition (#289 was found by hand-measuring).
+   * The reporter owns the once-per-route-per-boot dedup so a hot route
+   * doesn't spam the dev console.
    */
-  private shellHintedRoutes = new Set<string>();
+  private shellReporter = createShellContentReporter();
 
   constructor(public service: ViewRouterServiceProvider) {
     super();
@@ -171,22 +171,6 @@ export class ViewRouterServiceContainer extends ServiceContainer {
     } catch (err) {
       logError(err);
     }
-  }
-
-  /**
-   * The shell-content hint (#294): React defers any boundary over
-   * `progressiveChunkSize` on size alone, so a page that reads fine without
-   * JS can go blank the day one more section pushes it over the budget — and
-   * nothing else notices the transition (#289 was found by hand-measuring).
-   * The injector's `onChunk` collected the exact bytes the visitor got;
-   * measured here once the body closed, hinted once per route per boot.
-   */
-  private maybeReportShellContent(routePath: string, measurement: ShellContentMeasurement) {
-    if (this.shellHintedRoutes.has(routePath)) return;
-    const hint = shellContentHint(routePath, measurement);
-    if (!hint) return;
-    this.shellHintedRoutes.add(routePath);
-    console.warn(hint);
   }
 
   private async render(props: {
@@ -366,7 +350,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
         process.env.NODE_ENV !== "production" &&
         !settled &&
         currentPathName &&
-        !this.shellHintedRoutes.has(currentPathName)
+        this.shellReporter.shouldObserve(currentPathName)
           ? createShellContentObserver()
           : null;
 
@@ -431,7 +415,9 @@ export class ViewRouterServiceContainer extends ServiceContainer {
             onClose: () => {
               this.completeStream(req, serverQueries.summarize(deadline.signal.aborted));
               if (shellObserver) {
-                this.maybeReportShellContent(currentPathName, shellObserver.measure());
+                // The injector's `onChunk` collected the exact bytes the
+                // visitor got; measured once the body closed (#294).
+                this.shellReporter.report(currentPathName, shellObserver.measure());
               }
             },
           }),

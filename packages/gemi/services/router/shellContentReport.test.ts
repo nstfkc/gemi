@@ -6,6 +6,7 @@ import { renderToReadableStream } from "react-dom/server.browser";
 
 import {
   createShellContentObserver,
+  createShellContentReporter,
   DEFERRED_TEXT_FLOOR,
   measureShellContent,
   SHELL_TEXT_NEAR_ZERO,
@@ -44,6 +45,39 @@ describe("measureShellContent", () => {
     );
     expect(shellChars).toBe("stillreadable".length);
     expect(deferredChars).toBe(0);
+  });
+
+  test("the word `hidden` inside a quoted attribute value does not open a deferred segment", () => {
+    // Space-delimited mid-value occurrences — prose and Tailwind lists — are
+    // where a bare `\shidden\b` test false-positives.
+    const cases = [
+      `<div title="show hidden files">readable</div>`,
+      `<div title="the hidden cost">readable</div>`,
+      `<div class="a hidden b">readable</div>`,
+      `<div class="mt-2 hidden md:block">readable</div>`,
+      `<div title='show hidden files'>readable</div>`,
+    ];
+    for (const html of cases) {
+      expect(measureShellContent(html)).toEqual({
+        shellChars: "readable".length,
+        deferredChars: 0,
+      });
+    }
+  });
+
+  test("the standalone `hidden` attribute still opens a deferred segment in every spelling", () => {
+    const cases = [
+      `<div hidden id="S:0">deferred</div>`,
+      `<div hidden>deferred</div>`,
+      `<div hidden="">deferred</div>`,
+      `<div id="S:0" hidden>deferred</div>`,
+    ];
+    for (const html of cases) {
+      expect(measureShellContent(html)).toEqual({
+        shellChars: 0,
+        deferredChars: "deferred".length,
+      });
+    }
   });
 
   test("whitespace never counts", () => {
@@ -90,6 +124,42 @@ describe("shellContentHint", () => {
     expect(
       shellContentHint("/", { shellChars: SHELL_TEXT_NEAR_ZERO - 1, deferredChars: 50_000 }),
     ).not.toBeNull();
+  });
+});
+
+describe("createShellContentReporter", () => {
+  const failing = { shellChars: 0, deferredChars: 5000 };
+  const healthy = { shellChars: 5000, deferredChars: 0 };
+
+  test("logs the hint once per route (#294 acceptance)", () => {
+    const warnings: string[] = [];
+    const reporter = createShellContentReporter((hint) => warnings.push(hint));
+
+    reporter.report("/", failing);
+    reporter.report("/", failing);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("[gemi] GET /");
+
+    // Hinted routes need no further observation this boot.
+    expect(reporter.shouldObserve("/")).toBe(false);
+
+    // The dedup keys on the route: another route still gets its own hint.
+    reporter.report("/terms-and-conditions", failing);
+    expect(warnings).toHaveLength(2);
+    expect(warnings[1]).toContain("[gemi] GET /terms-and-conditions");
+  });
+
+  test("a healthy measurement does not consume the route's one hint", () => {
+    const warnings: string[] = [];
+    const reporter = createShellContentReporter((hint) => warnings.push(hint));
+
+    reporter.report("/docs", healthy);
+    expect(warnings).toHaveLength(0);
+    // Still observed, still eligible: the route crossing the threshold later
+    // in the boot must get its hint.
+    expect(reporter.shouldObserve("/docs")).toBe(true);
+    reporter.report("/docs", failing);
+    expect(warnings).toHaveLength(1);
   });
 });
 

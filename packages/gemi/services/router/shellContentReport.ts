@@ -32,10 +32,20 @@ export interface ShellContentMeasurement {
 const RAW_TEXT_TAGS = new Set(["script", "style", "template", "title"]);
 
 /**
- * `hidden` as a standalone attribute (`<div hidden id="S:0">`, `hidden=""`),
- * not a substring of an attribute value like `class="hidden-md"`.
+ * `hidden` as a standalone attribute (`<div hidden id="S:0">`, `hidden=""`).
+ * Tested against the tag with its quoted attribute values blanked out
+ * (`QUOTED_VALUE` below), so the word `hidden` inside a value — a Tailwind
+ * list like `class="mt-2 hidden md:block"` or prose like
+ * `title="show hidden files"` — never opens a deferred segment.
  */
 const HIDDEN_ATTR = /\shidden([\s=/]|$)/i;
+
+/**
+ * Quoted attribute values, to be blanked before the `HIDDEN_ATTR` test. Safe
+ * as a regex because React escapes `"` and `'` inside attribute values, so a
+ * quoted span never contains its own delimiter.
+ */
+const QUOTED_VALUE = /"[^"]*"|'[^']*'/g;
 
 /**
  * Splits a streamed HTML document into shell-readable versus deferred text.
@@ -87,12 +97,15 @@ export function measureShellContent(html: string): ShellContentMeasurement {
       continue;
     }
 
+    // Only `div` is tracked because that is the container React streams
+    // deferred segments in. A hand-written `<section hidden>` still counts as
+    // shell text — a false negative (stays silent), never a false hint.
     if (name !== "div") continue;
     if (isClosing) {
       if (hiddenDepth > 0) hiddenDepth -= 1;
     } else if (hiddenDepth > 0) {
       hiddenDepth += 1;
-    } else if (HIDDEN_ATTR.test(tag)) {
+    } else if (HIDDEN_ATTR.test(tag.replace(QUOTED_VALUE, '""'))) {
       hiddenDepth = 1;
     }
   }
@@ -131,6 +144,38 @@ export function shellContentHint(
     `If this is a public/content route, add "no-stream" to its middleware.`
   );
 }
+
+/**
+ * Owns the once-per-route-per-boot dedup (#294's "logs the hint once"): a hot
+ * route must not spam the dev console, but a route whose measurement is
+ * healthy today must stay eligible for the hint the day it crosses the
+ * threshold — only an actually-emitted hint marks the route as done.
+ *
+ * `warn` is injectable for tests; production callers use the default.
+ */
+export function createShellContentReporter(warn: (hint: string) => void = console.warn) {
+  /** Routes already hinted this boot. */
+  const hintedRoutes = new Set<string>();
+  return {
+    /**
+     * Whether collecting bytes for this route can still lead to a hint —
+     * false once the route has been hinted, so the caller can skip the
+     * observer entirely.
+     */
+    shouldObserve(routePath: string): boolean {
+      return !hintedRoutes.has(routePath);
+    },
+    report(routePath: string, measurement: ShellContentMeasurement): void {
+      if (hintedRoutes.has(routePath)) return;
+      const hint = shellContentHint(routePath, measurement);
+      if (!hint) return;
+      hintedRoutes.add(routePath);
+      warn(hint);
+    },
+  };
+}
+
+export type ShellContentReporter = ReturnType<typeof createShellContentReporter>;
 
 /**
  * Accumulates the response body for a post-close measurement. Wire `onChunk`
