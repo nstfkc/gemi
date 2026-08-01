@@ -200,6 +200,52 @@ describe("per-call config wins over provider defaults", () => {
     expect(screen.queryByText("loading:false")).not.toBeNull();
   });
 
+  test("a per-call key explicitly set to undefined falls through to the provider default", async () => {
+    // The common conditional / prop-forwarding shape: the key is *present*
+    // but `undefined`. It must not clobber the provider's `suspense: false`
+    // (which would fall through to the framework default and suspend).
+    function View() {
+      const { loading } = useQuery(
+        "/todos" as any,
+        {},
+        { suspense: undefined as any },
+      );
+      return <div>{`loading:${loading}`}</div>;
+    }
+
+    const screen = render(
+      <Providers queryConfig={{ suspense: false }}>
+        <View />
+      </Providers>,
+    );
+
+    expect(screen.queryByText("suspense-fallback")).toBeNull();
+    expect(screen.queryByText("loading:true")).not.toBeNull();
+
+    await net.resolve([{ id: 1 }]);
+    expect(screen.queryByText("loading:false")).not.toBeNull();
+  });
+
+  test("a provider key explicitly set to undefined falls through to the framework default", async () => {
+    // `queryConfig: { suspense: env.SUSPENSE }` with the env value absent:
+    // the framework default (suspense: true) must apply.
+    function View() {
+      const { data } = useQuery("/todos" as any);
+      return <div>{`items:${(data as any[]).length}`}</div>;
+    }
+
+    const screen = render(
+      <Providers queryConfig={{ suspense: undefined }}>
+        <View />
+      </Providers>,
+    );
+
+    expect(screen.queryByText("suspense-fallback")).not.toBeNull();
+
+    await net.resolve([{ id: 1 }]);
+    expect(screen.queryByText("items:1")).not.toBeNull();
+  });
+
   test("keepPreviousData: true at the call site overrides an app-wide false", async () => {
     function PagedList(props: { config?: Record<string, any> }) {
       const [page, setPage] = useState(1);
@@ -278,6 +324,43 @@ describe("numeric provider defaults flow through", () => {
     });
 
     expect(net.fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("only app-wide keys pass the provider at runtime", () => {
+  test("call-site-only keys smuggled through a non-literal config are dropped", async () => {
+    // TS excess-property checking doesn't fire on non-literal values, so this
+    // typechecks in user land. `lazy: true` leaking app-wide would stop every
+    // unconfigured query from fetching; `fallbackData` would seed every query
+    // with the same value.
+    const smuggled = {
+      suspense: false,
+      lazy: true,
+      fallbackData: [{ id: 99 }],
+    };
+
+    const states: Array<{ data: any; loading: boolean }> = [];
+    function View() {
+      const { data, loading } = useQuery("/todos" as any);
+      states.push({ data, loading });
+      return <div>{`loading:${loading}`}</div>;
+    }
+
+    const screen = render(
+      <Providers queryConfig={smuggled as QueryConfig}>
+        <View />
+      </Providers>,
+    );
+
+    // `suspense: false` (an app-wide key) applies; `lazy` does not — the
+    // query fetches on mount — and `fallbackData` does not seed the cache.
+    expect(screen.queryByText("suspense-fallback")).toBeNull();
+    expect(net.fetchMock).toHaveBeenCalledTimes(1);
+    expect(states[0]).toEqual({ data: undefined, loading: true });
+
+    await net.resolve([{ id: 1 }]);
+    expect(screen.queryByText("loading:false")).not.toBeNull();
+    expect(states.at(-1)!.data).toEqual([{ id: 1 }]);
   });
 });
 
