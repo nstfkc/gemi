@@ -90,6 +90,15 @@ How it composes with the rest of the framework:
   a suspended query immediately, without waiting on its own request.
 - **Stale data never suspends.** A query with cached data always renders it and
   revalidates in the background (`staleTime` semantics are unchanged).
+- **Variant changes don't re-suspend.** With `keepPreviousData` (the default),
+  changing a query's `search` or `params` keeps the previous variant's rows
+  rendered while the new one loads in the background — no fallback flash, no
+  `startTransition` at the call site — and the pending window is reported as
+  `loading: true` for pager UI. Set `keepPreviousData: false` to restore
+  suspend-into-the-fallback on variant change (e.g. tab-like switches where
+  stale rows would mislead). If the new variant's fetch *fails* during the
+  window, the failure throws into the segment's error boundary as usual — the
+  previous rows don't mask it.
 - **Errors throw.** With suspense on, an HTTP failure throws a `QueryError`
   (with `status`, `body`, `path`) into the segment's error boundary instead of
   being returned. Resetting the boundary clears the stored errors and retries.
@@ -104,9 +113,11 @@ if (loading) return <p>Loading…</p>;
 if (error) return <p>Something went wrong.</p>;
 ```
 
-Use the opt-out when the loading state itself is UI you want to control inline
-(e.g. paging inside a mounted view), or when the data legitimately may never
-exist (an anonymous visitor's `/auth/me`).
+Use the opt-out when the loading state itself is UI you want to control inline,
+or when the data legitimately may never exist (an anonymous visitor's
+`/auth/me`). Pagination, search, and filters do **not** need it: a variant
+change under suspense keeps the previous rows on screen and reports
+`loading: true` (see "Variant changes don't re-suspend" above).
 
 ### Params and search
 
@@ -137,8 +148,8 @@ so a typo in a param or a wrong field type is a compile error.
 | field | description |
 | --- | --- |
 | `data` | The response body, typed from the endpoint. Non-nullable under suspense (the default); `undefined` until first load with `suspense: false` / `lazy: true`. |
-| `loading` | `true` while a request is in flight. Only meaningful with `suspense: false` — a suspense query doesn't render until data exists. |
-| `error` | Error record if the request failed, otherwise `null`. Under suspense a failure only *throws* (a `QueryError`, into the segment's error boundary) when there is no data to show — a background revalidation that fails while cached data is on screen keeps rendering the data and returns the `error` here instead. With `suspense: false` it is always returned, never thrown. |
+| `loading` | `true` while a request is in flight. Under suspense (the default) a query never renders without data, so this is `false` in steady state — it flips to `true` during a variant change's pending window: with `keepPreviousData` on, changing `search`/`params` keeps the previous variant's rows rendered and reports the new variant's in-flight fetch here. This is the flag pager UI consumes. With `suspense: false` it is the plain in-flight flag, `true` from the first render until the first load settles. |
+| `error` | Error record if the request failed, otherwise `null`. Under suspense a failure only *throws* (a `QueryError`, into the segment's error boundary) when there is no data to show for the requested variant — a background revalidation that fails while that variant's data is on screen keeps rendering the data and returns the `error` here instead. A variant change whose fetch fails still throws, even though the *previous* variant's rows are on screen during the pending window. With `suspense: false` it is always returned, never thrown. |
 | `refetch()` | Force a fresh fetch of the current variant. |
 | `mutate(fn?)` | Optimistically update the cached data (see below), or refetch when called with no argument. |
 | `trigger()` | Kick off the fetch for a `lazy` query. |
@@ -154,13 +165,22 @@ so a typo in a param or a wrong field type is a compile error.
 const { data } = useQuery("/feed", {}, {
   suspense: true,          // default; false restores the loading/error flags
   fallbackData: [],        // initial data before the first fetch
-  keepPreviousData: true,  // keep old data visible while refetching (default true)
+  keepPreviousData: true,  // keep the previous variant's data on screen while a new one loads (default true)
   refreshInterval: 5000,   // poll every 5s
   retryIntervalOnError: 10000, // background retry — suspense: false only
   staleTime: 5000,         // how long cached data stays fresh (default 5000ms)
   lazy: false,             // when true, no fetch until trigger()/refetch(); implies suspense: false
 });
 ```
+
+`keepPreviousData` governs what a variant change (a new `search`/`params`
+combination) renders while the new variant loads. Under suspense it keeps the
+previous variant's rows on screen and reports the window as `loading: true` —
+no `startTransition` needed at the call site (see "Variant changes don't
+re-suspend"). With `suspense: false` it substitutes the previous variant's
+`data` while `loading` is `true` instead of handing you `undefined`. Either
+way, set it to `false` to drop the previous data the moment the variant
+changes.
 
 `staleTime` controls when reading the cache triggers a background revalidation.
 Once cached data is older than `staleTime`, the next component that mounts and
