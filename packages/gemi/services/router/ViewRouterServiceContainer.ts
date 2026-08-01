@@ -155,6 +155,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
     user: any;
     serverQueries: ServerQueryStore;
     userAgent: string | null;
+    noStream: boolean;
     params: any;
     breadcrumbs: any;
     urlLocaleSegment?: string;
@@ -171,6 +172,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
       pathname,
       serverQueries,
       userAgent,
+      noStream,
       url,
       user,
       viewData,
@@ -300,11 +302,14 @@ export class ViewRouterServiceContainer extends ServiceContainer {
       // behavior: React splits any boundary bigger than
       // `progressiveChunkSize` (~12.8KB) out of the shell as it renders, and
       // awaiting `allReady` afterwards settles the data but cannot undo the
-      // split — a non-JS crawler would see a body whose content is parked in
-      // `<div hidden>` + `$RC()` reveal scripts (#286). Progressive chunking
-      // only exists to reach a browser sooner, which is worthless to a
-      // crawler that buffers the whole response, so the bot path disables it.
-      const isBot = isBotUserAgent(userAgent);
+      // split — a non-JS reader would see a body whose content is parked in
+      // `<div hidden>` + `$RC()` reveal scripts (#286, #289). Two audiences
+      // need the settled document: crawlers (detected by UA — progressive
+      // chunking only exists to reach a browser sooner, which is worthless to
+      // a client that buffers the whole response) and routes that declared
+      // `"no-stream"` (marketing/content pages that must render for
+      // JS-disabled humans, text browsers, and failed-script loads too).
+      const settled = isBotUserAgent(userAgent) || noStream;
 
       try {
         const stream = await renderToReadableStream(
@@ -330,7 +335,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
             bootstrapScriptContent: `window.__GEMI_DATA__ = ${JSON.stringify(result.data)}; window.loaders=${loaders}`,
             bootstrapModules,
             signal: deadline.signal,
-            ...(isBot ? { progressiveChunkSize: Number.MAX_SAFE_INTEGER } : {}),
+            ...(settled ? { progressiveChunkSize: Number.MAX_SAFE_INTEGER } : {}),
             // A query rejecting inside a streamed segment is expected: React
             // client-renders that boundary and the browser surfaces the error
             // through its own fetch. Log it and move on.
@@ -346,11 +351,11 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           .catch(() => {})
           .finally(() => clearTimeout(deadlineTimer));
 
-        // Crawlers don't execute scripts or wait for streams — they get the
-        // fully settled document. Works only together with the
-        // `progressiveChunkSize` override above: this waits for the data,
-        // that keeps the settled content inline instead of script-revealed.
-        if (isBot) {
+        // A settled response waits for everything before the first byte.
+        // Works only together with the `progressiveChunkSize` override
+        // above: this waits for the data, that keeps the content inline
+        // instead of script-revealed.
+        if (settled) {
           await stream.allReady.catch(() => {});
         }
 
@@ -421,6 +426,11 @@ export class ViewRouterServiceContainer extends ServiceContainer {
     let currentPathName: null | string = null;
     let params: Record<string, any> = {};
     let partial: PartialRenderInfo | null = null;
+    // `"no-stream"` in a route's (or its router's) middleware list opts the
+    // route out of progressive streaming: everyone gets the fully settled
+    // document a bot UA would (#289). It is a directive read here, not real
+    // middleware — the middleware runner ignores unknown aliases.
+    let noStream = false;
 
     try {
       const match = matchViewRoute(this.flatViewRoutes, urlPathname);
@@ -429,6 +439,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
         params = match.params;
         handlers = match.route.exec;
         middlewares = match.route.middleware;
+        noStream = middlewares.includes("no-stream");
 
         // Only navigations skip work. A document request renders the whole
         // tree, and the client has nothing to carry forward yet.
@@ -635,6 +646,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           pathname: url.pathname,
           serverQueries: ctx.serverQueries,
           userAgent: req.headers.get("user-agent"),
+          noStream,
           url,
           user,
           viewData,

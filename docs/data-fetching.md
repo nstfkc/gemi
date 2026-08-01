@@ -71,9 +71,11 @@ How it composes with the rest of the framework:
   finished segments (data included) into the document as they land. The page
   completes at the speed of the *slowest* query, not the sum: every query the
   first render pass reaches starts immediately and in parallel, wherever it
-  sits in the tree. Crawlers are served the fully settled document instead.
-  `Query.prefetch` is **not required** for this — see "Avoiding server
-  waterfalls" below for when it still earns its keep.
+  sits in the tree. Crawlers are served the fully settled document instead,
+  and a route can request that treatment for *everyone* — JS-disabled
+  visitors included — with the `"no-stream"` middleware directive (see the
+  middleware docs). `Query.prefetch` is **not required** for streaming — see
+  "Avoiding server waterfalls" below for when it still earns its keep.
 - **Navigation** — the router commits navigations inside a transition, so when
   the next page's queries suspend, the previous page stays on screen
   (`Link[data-pending]` / `useRouteTransition()` report it) until they resolve.
