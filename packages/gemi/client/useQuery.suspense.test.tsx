@@ -333,6 +333,95 @@ describe("keepPreviousData under suspense", () => {
     expect(mounts).toBe(1);
   });
 
+  test("a params change swaps the resource but keeps the same contract — previous rows, pending flag, no remount", async () => {
+    // Unlike a `search` change (one resource, new variant key), a `params`
+    // change swaps the entire `QueryResource`: new store, new subscription,
+    // new read promise. The committed tree stays subscribed to the *old*
+    // resource for the whole pending window and the background render is
+    // woken by the new resource's thrown promise — the invariants must hold
+    // across that swap too.
+    function ListTodos() {
+      const [listId, setListId] = useState(1);
+      const { data, loading } = useQuery("/lists/:listId/todos" as any, {
+        params: { listId } as any,
+      });
+      useEffect(() => {
+        mounts += 1;
+      }, []);
+      return (
+        <button type="button" onClick={() => setListId((id) => id + 1)}>
+          {`ids:${(data as any[]).map((t: any) => t.id).join(",")} loading:${loading}`}
+        </button>
+      );
+    }
+
+    const screen = render(
+      <Providers>
+        <ListTodos />
+      </Providers>,
+    );
+
+    // First mount is unchanged: suspend into the fallback.
+    expect(screen.queryByText("suspense-fallback")).not.toBeNull();
+    expect(net.fetchMock).toHaveBeenLastCalledWith("/api/lists/1/todos", {
+      cache: "default",
+    });
+    await net.resolve([{ id: 1 }]);
+    expect(screen.queryByText("ids:1 loading:false")).not.toBeNull();
+
+    // Switch lists — a plain urgent state update.
+    await act(async () => {
+      screen.getByRole("button").click();
+    });
+
+    // The old list's rows stay committed, the pending window is flagged, and
+    // the new resource's request went on the wire immediately.
+    expect(screen.queryByText("suspense-fallback")).toBeNull();
+    expect(screen.queryByText("ids:1 loading:true")).not.toBeNull();
+    expect(net.fetchMock).toHaveBeenLastCalledWith("/api/lists/2/todos", {
+      cache: "default",
+    });
+
+    await net.resolve([{ id: 2 }]);
+
+    expect(screen.queryByText("ids:2 loading:false")).not.toBeNull();
+    expect(mounts).toBe(1);
+  });
+
+  test("a fetch failure during the pending window throws into the error boundary", async () => {
+    // Pins the error path of the deferral: the background render suspends on
+    // the new variant, the fetch fails, and the retry render throws the
+    // stored error — the boundary replaces the previous rows. The previous
+    // variant's data does NOT mask the failure: under suspense the caller
+    // writes no error branch, so silently returning `error` while keeping
+    // the old page on screen would leave a failed page change with no
+    // visible signal at all. The boundary is the suspense contract's error
+    // channel, exactly as it was for a suspended variant change before the
+    // deferral existed.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const screen = render(
+      <Providers>
+        <Boundary>
+          <PagedList />
+        </Boundary>
+      </Providers>,
+    );
+
+    await net.resolve([{ id: 1 }]);
+    expect(screen.queryByText("ids:1 loading:false")).not.toBeNull();
+
+    await act(async () => {
+      screen.getByRole("button").click();
+    });
+    // Pending window: previous rows visible, page 2 in flight.
+    expect(screen.queryByText("ids:1 loading:true")).not.toBeNull();
+
+    await net.resolve({ message: "boom" }, false);
+
+    expect(screen.queryByText("caught:QueryError")).not.toBeNull();
+    expect(screen.queryByText("ids:1 loading:true")).toBeNull();
+  });
+
   test("keepPreviousData: false restores suspend-on-variant-change", async () => {
     const screen = render(
       <Providers>

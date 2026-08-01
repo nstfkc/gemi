@@ -155,6 +155,13 @@ export function useQuery<T extends keyof GetRPC>(
   // an uncached query suspends into the segment fallback as today. Both hooks
   // run unconditionally (hook order); the values are only *used* when
   // deferring applies.
+  //
+  // Deliberate: during the pending window the imperative callbacks
+  // (`mutate`/`refetch`/`trigger`/`prefetch`) and the revalidation effects
+  // close over the deferred — i.e. *visible* — variant and resource, so they
+  // act on the data the user is looking at, not the variant still loading in
+  // the background. The window ends when the deferred render commits, at
+  // which point they re-bind to the new keys.
   const deferredPath = useDeferredValue(currentPath);
   const deferredVariantKey = useDeferredValue(currentVariantKey);
   const deferVariant = suspense && config.keepPreviousData;
