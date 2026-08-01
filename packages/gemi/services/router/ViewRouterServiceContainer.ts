@@ -617,6 +617,16 @@ export class ViewRouterServiceContainer extends ServiceContainer {
 
         headers.set("Content-Type", "text/html; charset=utf-8");
 
+        // The streamed/settled decision is UA-derived (crawlers get inline
+        // settled documents), so the body varies by User-Agent and a shared
+        // cache must key on it — otherwise a cached browser shell full of
+        // fallbacks and reveal scripts gets served to a bot. `no-stream`
+        // routes serve one settled body to everyone, so they stay cacheable
+        // without the (CDN-hostile) Vary.
+        if (!noStream) {
+          headers.append("Vary", "User-Agent");
+        }
+
         for (const cookie of cookies) {
           headers.append("Set-Cookie", cookie.toString());
         }

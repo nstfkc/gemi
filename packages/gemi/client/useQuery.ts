@@ -188,10 +188,11 @@ export function useQuery<T extends keyof GetRPC>(
 
   // `keepPreviousData`: remember the last snapshot that had data, and show it
   // whenever the current one is loading without data (e.g. a variant change
-  // with `suspense: false`).
-  const lastDataRef = useRef(snapshot?.data ? snapshot : null);
+  // with `suspense: false`). Presence is `hasData`, never `data`'s truthiness
+  // — `null`/`0`/`false`/`""` are legitimate response bodies.
+  const lastDataRef = useRef(snapshot?.hasData ? snapshot : null);
   useEffect(() => {
-    if (snapshot?.data) {
+    if (snapshot?.hasData) {
       lastDataRef.current = snapshot;
     }
   }, [snapshot]);
@@ -199,7 +200,7 @@ export function useQuery<T extends keyof GetRPC>(
   let state = snapshot;
   if (
     config.keepPreviousData &&
-    !snapshot?.data &&
+    !snapshot?.hasData &&
     snapshot?.loading &&
     lastDataRef.current
   ) {
@@ -217,12 +218,18 @@ export function useQuery<T extends keyof GetRPC>(
   // (the store logs the late-discovery hint when that cost something).
   let readPromise: Promise<void> | undefined;
   let serverError: unknown;
-  if (suspense && !state?.data && !state?.error) {
+  if (suspense && !state?.hasData && !state?.error) {
     if (typeof window === "undefined") {
       if (serverQueries) {
         const entry = serverQueries.ensure(url, { params, search });
         if (entry.status === "resolved") {
-          state = { loading: false, data: entry.data, error: null, version: 0 };
+          state = {
+            loading: false,
+            data: entry.data,
+            hasData: true,
+            error: null,
+            version: 0,
+          };
         } else if (entry.status === "rejected") {
           serverError = entry.error;
         } else {
@@ -238,7 +245,7 @@ export function useQuery<T extends keyof GetRPC>(
     suspense &&
     typeof window === "undefined" &&
     !serverQueries &&
-    !state?.data &&
+    !state?.hasData &&
     process.env.NODE_ENV !== "production"
   ) {
     const searchHint = variantKey
@@ -289,7 +296,7 @@ export function useQuery<T extends keyof GetRPC>(
   useEffect(() => {
     const cfg = configRef.current;
     if (!cfg.refetchUntil) return;
-    if (snapshot && !snapshot.loading && snapshot.data && !snapshot.error) {
+    if (snapshot && !snapshot.loading && snapshot.hasData && !snapshot.error) {
       const nextDuration = cfg.refetchUntil(
         snapshot.data,
         refetchUntilDurationRef.current,
@@ -355,7 +362,7 @@ export function useQuery<T extends keyof GetRPC>(
     fetchedRef.current = true;
     const store = resource.store.getValue();
     const variant = store.get(variantKey);
-    if (!variant || (!variant.loading && !variant.data)) {
+    if (!variant || (!variant.loading && !variant.hasData)) {
       resource.refetch(variantKey);
     }
   }, [resource, variantKey]);
@@ -385,7 +392,10 @@ export function useQuery<T extends keyof GetRPC>(
       return;
     }
     return resource.mutate(variantKey, (data: any) => {
-      if (data === undefined || data === null) {
+      // `null` is a legitimate cached body; only `undefined` means the query
+      // hasn't produced anything (and `mutate` refetches instead of calling
+      // this in that case).
+      if (data === undefined) {
         console.warn("Mutate function called before the query.");
         return data;
       }
@@ -437,10 +447,10 @@ export function useQuery<T extends keyof GetRPC>(
     if (serverError) {
       throw serverError;
     }
-    if (state?.error && !state?.data) {
+    if (state?.error && !state?.hasData) {
       throw state.error;
     }
-    if (!state?.data && readPromise) {
+    if (!state?.hasData && readPromise) {
       throw readPromise;
     }
   }

@@ -63,6 +63,10 @@ export function Error({ error, resetErrorBoundary }) {
 }
 ```
 
+Treat `Loading` as effectively required for any view whose queries can
+suspend: without it the fallback is `null`, which on a streamed hard load
+means a blank region until the segment's data arrives.
+
 How it composes with the rest of the framework:
 
 - **Initial page load streams.** The server sends the shell — layout chrome,
@@ -134,7 +138,7 @@ so a typo in a param or a wrong field type is a compile error.
 | --- | --- |
 | `data` | The response body, typed from the endpoint. Non-nullable under suspense (the default); `undefined` until first load with `suspense: false` / `lazy: true`. |
 | `loading` | `true` while a request is in flight. Only meaningful with `suspense: false` — a suspense query doesn't render until data exists. |
-| `error` | Error record if the request failed, otherwise `null`. Only populated with `suspense: false` — under suspense a failure throws a `QueryError` into the segment's error boundary. |
+| `error` | Error record if the request failed, otherwise `null`. Under suspense a failure only *throws* (a `QueryError`, into the segment's error boundary) when there is no data to show — a background revalidation that fails while cached data is on screen keeps rendering the data and returns the `error` here instead. With `suspense: false` it is always returned, never thrown. |
 | `refetch()` | Force a fresh fetch of the current variant. |
 | `mutate(fn?)` | Optimistically update the cached data (see below), or refetch when called with no argument. |
 | `trigger()` | Kick off the fetch for a `lazy` query. |

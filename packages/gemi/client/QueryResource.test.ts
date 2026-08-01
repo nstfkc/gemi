@@ -228,18 +228,81 @@ describe("hydrate", () => {
     );
   });
 
-  test("ignores empty, nullish and falsy payloads without notifying", () => {
+  test("ignores absent payloads, but adopts falsy response bodies", () => {
     const resource = seeded("/todos", { "": [{ id: 1 }] });
     const subscriber = vi.fn();
     resource.store.subscribe(subscriber);
 
+    // No payload at all: nothing to adopt, nothing to notify.
     resource.hydrate(undefined);
     resource.hydrate(null);
     resource.hydrate({});
-    resource.hydrate({ "": null });
-
     expect(subscriber).not.toHaveBeenCalled();
     expect(resource.store.getValue().get("")!.data).toEqual([{ id: 1 }]);
+
+    // `null` is a real response body — the server produced it, so it replaces
+    // the cache and marks the variant present. Treating it as "no data" made
+    // a falsy body look permanently unfetched, which under suspense meant an
+    // unbounded fetch loop.
+    resource.hydrate({ "": null });
+    expect(subscriber).toHaveBeenCalledTimes(1);
+    const state = resource.store.getValue().get("")!;
+    expect(state.data).toBeNull();
+    expect(state.hasData).toBe(true);
+  });
+
+  test("hydrating a falsy body settles a suspended reader", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => new Promise(() => {})),
+    );
+    const resource = new QueryResource("/flag", {});
+
+    const { promise } = resource.read("");
+    let settled = false;
+    promise!.then(() => {
+      settled = true;
+    });
+
+    resource.hydrate({ "": false });
+    await Promise.resolve();
+
+    expect(settled).toBe(true);
+    expect(resource.peek("")!.data).toBe(false);
+    expect(resource.peek("")!.hasData).toBe(true);
+    vi.unstubAllGlobals();
+  });
+
+  test("a resolved falsy body never suspends or refetches on subsequent reads", async () => {
+    const fetchMock = vi.fn(() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => null,
+      } as Response),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const resource = new QueryResource("/nullable", {});
+
+    // First read starts the fetch and suspends.
+    const first = resource.read("", Infinity);
+    expect(first.promise).toBeDefined();
+    await first.promise;
+
+    // The retry loop React performs: every subsequent read must see the null
+    // body as present — no new promise, no new fetch.
+    for (let i = 0; i < 6; i++) {
+      const attempt = resource.read("", Infinity);
+      expect(attempt.promise).toBeUndefined();
+      expect(attempt.state!.hasData).toBe(true);
+      expect(attempt.state!.data).toBeNull();
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // The mount-effect read joins the same conclusion.
+    resource.getVariant("", Infinity);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    vi.unstubAllGlobals();
   });
 
   test("re-hydrating the identical data reference is a no-op", () => {

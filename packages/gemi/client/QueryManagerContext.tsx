@@ -2,7 +2,6 @@ import {
   createContext,
   type PropsWithChildren,
   useCallback,
-  useEffect,
   useMemo,
   useRef,
 } from "react";
@@ -72,12 +71,20 @@ export const QueryManagerProvider = ({ children }: PropsWithChildren<{}>) => {
 
   // Streaming SSR delivers late-resolving queries as inline
   // `__GEMI_STREAM__.push([path, variant, data])` scripts interleaved with
-  // React's chunks. Payloads that ran before this mounted sit buffered in a
+  // React's chunks. Payloads that ran before this rendered sit buffered in a
   // plain array; from here on, `push` hydrates directly — and `hydrate`
-  // settles any reader suspended on that variant. Payload-before-reveal
-  // ordering in the stream guarantees a segment never hydrates ahead of its
-  // data.
-  useEffect(() => {
+  // settles any reader suspended on that variant.
+  //
+  // Drained synchronously during the FIRST render, not in an effect:
+  // suspension happens during the render phase, so a segment hydrating in
+  // this very pass must already find its streamed data in the cache — an
+  // effect-timed drain would let it suspend and start a duplicate `/api`
+  // fetch for data the document already carries. Safe here: it runs once
+  // (idempotent under StrictMode's double-invoke), and nothing is subscribed
+  // to the store yet, so no render is invalidated mid-pass.
+  const drainedStreamRef = useRef(false);
+  if (typeof window !== "undefined" && !drainedStreamRef.current) {
+    drainedStreamRef.current = true;
     const w = window as unknown as {
       __GEMI_STREAM__?:
         | StreamedQueryPayload[]
@@ -91,7 +98,7 @@ export const QueryManagerProvider = ({ children }: PropsWithChildren<{}>) => {
     for (const payload of buffered) {
       adopt(payload);
     }
-  }, [hydrate]);
+  }
 
   const value = useMemo(
     () => ({ getResource, hydrate, clearErrors }),

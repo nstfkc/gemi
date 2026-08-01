@@ -4,6 +4,14 @@ import { QueryError } from "./QueryError";
 type State = {
   loading: boolean;
   data: any;
+  /**
+   * Whether `data` is a value the server actually produced — `null`, `0`,
+   * `false` and `""` are all legitimate response bodies. Every presence check
+   * in the cache goes through this flag, never through `data`'s truthiness:
+   * inferring presence from the value made a falsy body look permanently
+   * unfetched, which under suspense meant an unbounded fetch/suspend loop.
+   */
+  hasData: boolean;
   error: any;
   version: number;
 };
@@ -52,18 +60,22 @@ export class QueryResource {
     let changed = false;
 
     for (const [variantKey, data] of Object.entries(initialState ?? {})) {
-      if (!data) continue;
+      // `undefined` means "no value" (JSON can't produce it); everything else
+      // — including `null`, `0`, `false`, `""` — is a real response body, and
+      // a suspended reader may be waiting on exactly this write to settle.
+      if (data === undefined) continue;
       const current = store.get(variantKey);
       // Never clobber an in-flight fetch — `resolveVariant` flips `loading`
       // before its first await, so this also covers an optimistic `mutate`
       // whose refetch hasn't landed yet.
       if (current?.loading) continue;
       // Idempotent re-hydration (e.g. StrictMode's double invoke).
-      if (current && current.data === data) continue;
+      if (current?.hasData && current.data === data) continue;
 
       store.set(variantKey, {
         loading: false,
         data,
+        hasData: true,
         error: null,
         version: now,
       });
@@ -140,7 +152,7 @@ export class QueryResource {
     const state = this.peek(variantKey);
 
     // Data in hand: stale-while-revalidate, never suspend.
-    if (state?.data) {
+    if (state?.hasData) {
       if (
         !this.inflight.has(variantKey) &&
         this.isStale(variantKey, staleTime)
@@ -180,16 +192,14 @@ export class QueryResource {
 
       if (!variant.loading && !this.inflight.has(variantKey)) {
         // Don't have data
-        if (!variant.data) {
+        if (!variant.hasData) {
           this.resolveVariant(variantKey);
           return store.get(variantKey);
         }
-        if (variant.data) {
-          if (this.isStale(variantKey, staleTime)) {
-            this.lastFetchRecord.set(variantKey, Date.now());
-            this.resolveVariant(variantKey, true);
-            return store.get(variantKey);
-          }
+        if (this.isStale(variantKey, staleTime)) {
+          this.lastFetchRecord.set(variantKey, Date.now());
+          this.resolveVariant(variantKey, true);
+          return store.get(variantKey);
         }
       }
     }
@@ -234,7 +244,7 @@ export class QueryResource {
 
     const store = this.store.getValue();
     const state = store.get(variantKey);
-    if (!state || !state.data) {
+    if (!state || !state.hasData) {
       // Nothing is cached yet to update optimistically — e.g. a lazy query, or
       // one that hasn't resolved. Fall through to a refetch so `mutate(fn)` is
       // not a silent no-op (it still means "go get the latest data").
@@ -248,6 +258,7 @@ export class QueryResource {
       store.set(variantKey, {
         loading: false,
         data,
+        hasData: true,
         error: null,
         version: state.version,
       }),
@@ -278,6 +289,7 @@ export class QueryResource {
         store.set(variantKey, {
           loading: true,
           data: previousState?.data,
+          hasData: previousState?.hasData ?? false,
           error: previousState?.error,
           version: previousState?.version,
         });
@@ -297,6 +309,7 @@ export class QueryResource {
           store.set(variantKey, {
             loading: false,
             data: previousState?.data,
+            hasData: previousState?.hasData ?? false,
             error,
             version: previousState?.version,
           }),
@@ -309,6 +322,7 @@ export class QueryResource {
           store.set(variantKey, {
             loading: false,
             data,
+            hasData: true,
             error: null,
             version: Date.now(),
           }),
@@ -321,6 +335,7 @@ export class QueryResource {
           store.set(variantKey, {
             loading: false,
             data: previousState?.data,
+            hasData: previousState?.hasData ?? false,
             error: new QueryError(this.key, variantKey, response!.status, data),
             version: previousState?.version,
           }),
