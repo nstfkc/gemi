@@ -35,6 +35,10 @@ export class ViewRouterServiceProvider extends ServiceProvider {
    * deadline aborted rendering, and per-query timings. Non-streamed
    * responses (`.json` payloads, `no-stream` routes, bot requests) report
    * `shellAt === settledAt`.
+   *
+   * Although the body closes long after the handler returned, the router
+   * re-enters the request's scopes around this hook — facades and
+   * `req.ctx()` work here exactly as they do in the other lifecycle hooks.
    */
   onStreamComplete(
     _req: HttpRequest,

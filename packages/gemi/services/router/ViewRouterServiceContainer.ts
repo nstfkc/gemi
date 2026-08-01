@@ -31,6 +31,7 @@ import { Log } from "../../facades/Log";
 import { I18n } from "../../facades/I18n";
 import { AuthViewRouter } from "../../auth/AuthenticationServiceProvider";
 import { KernelIdServiceContainer } from "../kernel-id/KernelIdServiceContainer";
+import { kernelContext } from "../../kernel/context";
 import { ServerQueryStore, type StreamSummary } from "./ServerQueryStore";
 import { createServerQueryFetcher } from "./serverQueryFetcher";
 import { injectQueryPayloads, isBotUserAgent } from "./streamQueryInjection";
@@ -159,6 +160,12 @@ export class ViewRouterServiceContainer extends ServiceContainer {
    * Fires the provider's `onStreamComplete` from a stream callback — an
    * observability hook must never break the response body it observes, so
    * sync throws and rejections are logged and swallowed.
+   *
+   * Call sites must invoke this inside the request scope (see
+   * `runInRequestScope` in `handleViewRequest`): stream callbacks are driven
+   * by the HTTP server after the handler returned, outside the kernel
+   * AsyncLocalStorage — where both the user's hook and this very `Log.error`
+   * guard would break.
    */
   private completeStream(req: HttpRequest, summary: StreamSummary) {
     const logError = (err: any) => {
@@ -175,6 +182,13 @@ export class ViewRouterServiceContainer extends ServiceContainer {
 
   private async render(props: {
     req: HttpRequest;
+    /**
+     * Re-enters the kernel + request AsyncLocalStorage scopes captured while
+     * the request was live. Every stream lifecycle callback below runs after
+     * the handler returned — driven by the HTTP server, outside both scopes —
+     * so user hooks are always invoked through this.
+     */
+    runInRequestScope: <T>(fn: () => T) => T;
     viewData: any;
     pathname: string;
     currentPathName: string;
@@ -195,6 +209,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
   }) {
     const {
       req,
+      runInRequestScope,
       csrfTokenHMAC,
       currentPathName,
       headers,
@@ -412,14 +427,15 @@ export class ViewRouterServiceContainer extends ServiceContainer {
             onChunk: shellObserver?.onChunk,
             // The APM-visible end of the request: the body closed, not the
             // handler returned (that was at time-to-shell).
-            onClose: () => {
-              this.completeStream(req, serverQueries.summarize(deadline.signal.aborted));
-              if (shellObserver) {
-                // The injector's `onChunk` collected the exact bytes the
-                // visitor got; measured once the body closed (#294).
-                this.shellReporter.report(currentPathName, shellObserver.measure());
-              }
-            },
+            onClose: () =>
+              runInRequestScope(() => {
+                this.completeStream(req, serverQueries.summarize(deadline.signal.aborted));
+                if (shellObserver) {
+                  // The injector's `onChunk` collected the exact bytes the
+                  // visitor got; measured once the body closed (#294).
+                  this.shellReporter.report(currentPathName, shellObserver.measure());
+                }
+              }),
           }),
           {
             status: !currentPathName ? 404 : 200,
@@ -435,10 +451,22 @@ export class ViewRouterServiceContainer extends ServiceContainer {
               ? ["/render-error.js", ...bootstrapModules]
               : bootstrapModules,
         });
-        return new Response(stream, {
-          status: !currentPathName ? 404 : 200,
-          headers,
-        });
+        // The failed-render body still closes, and the span-ending hook is
+        // pinned to the body closing, not the render succeeding — a span that
+        // only ends on happy paths leaks for exactly the requests worth
+        // seeing. No shell mark: this body is one settled error document.
+        return new Response(
+          injectQueryPayloads(stream, serverQueries, {
+            onClose: () =>
+              runInRequestScope(() =>
+                this.completeStream(req, serverQueries.summarize(deadline.signal.aborted)),
+              ),
+          }),
+          {
+            status: !currentPathName ? 404 : 200,
+            headers,
+          },
+        );
       }
     };
   }
@@ -542,6 +570,16 @@ export class ViewRouterServiceContainer extends ServiceContainer {
         appId: string;
       } | null = null;
       const ctx = RequestContext.getStore();
+      // The HTTP server drives the response body — and therefore every stream
+      // lifecycle callback — after `app.fetch` returned, outside the kernel
+      // AsyncLocalStorage scope and outside this request's context (the same
+      // phenomenon `createServerQueryFetcher` documents for render-discovered
+      // fetches). Facades and `req.ctx()` inside `onStreamComplete` /
+      // `onRequestFail` would break there, so capture both scopes while they
+      // are live and re-enter them around every hook invocation below.
+      const kernelStore = kernelContext.getStore();
+      const runInRequestScope = <T>(fn: () => T): T =>
+        kernelContext.run(kernelStore, () => RequestContext.runWith(ctx, fn));
       // Before middleware and handlers, so every `Query.prefetch` along the
       // way lands in one live, request-scoped store.
       ctx.serverQueries = new ServerQueryStore(createServerQueryFetcher(req));
@@ -555,8 +593,13 @@ export class ViewRouterServiceContainer extends ServiceContainer {
       ctx.serverQueries.onQueryFail((entry) => {
         reportedQueryErrors.add(entry.error);
         try {
-          Promise.resolve(this.service.onRequestFail(httpRequest, entry.error)).catch(
-            () => {},
+          // In scope, and with the rejection handler attached *inside* the
+          // scope, so a facade-using hook works for render-phase failures
+          // exactly as it does for handler-phase ones.
+          runInRequestScope(() =>
+            Promise.resolve(this.service.onRequestFail(httpRequest, entry.error)).catch(
+              () => {},
+            ),
           );
         } catch {
           // An error-reporting hook must not break the settle chain it
@@ -696,7 +739,9 @@ export class ViewRouterServiceContainer extends ServiceContainer {
               // No shell was marked, so the summary reports
               // `shellAt === settledAt` — the NDJSON body is one payload, not
               // a shell followed by streamed content.
-              this.completeStream(httpRequest, ctx.serverQueries.summarize(aborted)),
+              runInRequestScope(() =>
+                this.completeStream(httpRequest, ctx.serverQueries.summarize(aborted)),
+              ),
             ),
             {
               headers,
@@ -738,6 +783,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
 
         return await this.render({
           req: httpRequest,
+          runInRequestScope,
           csrfTokenHMAC: Buffer.from(""),
           currentPathName,
           headers,

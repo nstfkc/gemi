@@ -449,6 +449,31 @@ describe("stream injection", () => {
     expect(chunks.join("")).toContain('"/slow"');
   });
 
+  test("an erroring source stream fires onClose exactly once", async () => {
+    const { fetcher } = createDeferredFetcher();
+    const store = new ServerQueryStore(fetcher);
+    let errorSource!: (reason: unknown) => void;
+    const source = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("<!doctype html>"));
+        errorSource = (reason) => controller.error(reason);
+      },
+    });
+
+    let closes = 0;
+    const stream = injectQueryPayloads(source, store, {
+      onClose: () => {
+        closes += 1;
+      },
+    });
+
+    const reader = stream.getReader();
+    await reader.read();
+    errorSource(new Error("render crashed mid-stream"));
+    await expect(reader.read()).rejects.toThrow("render crashed mid-stream");
+    expect(closes).toBe(1);
+  });
+
   test("a cancelled response body fires onClose exactly once", async () => {
     const { fetcher } = createDeferredFetcher();
     const store = new ServerQueryStore(fetcher);
