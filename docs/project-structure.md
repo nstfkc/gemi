@@ -242,7 +242,9 @@ The view router provider's `onStreamComplete(req, summary)` fires when the respo
 - **`aborted`** — whether the stream deadline cut rendering short.
 - **`queries`** — per-query `path`, `variantKey`, `startedAt`, `settledAt`, `status`, and `source` (`"prefetch"` or `"render"`).
 
-Non-streamed responses (`.json` navigation payloads, `"no-stream"` routes, bot requests) report `shellAt === settledAt`.
+Non-streamed responses (`.json` navigation payloads, `"no-stream"` routes, bot requests) report `shellAt === settledAt`. The hook also fires when a shell render crashes (or the deadline aborts it before the shell resolved) — the fallback error document's body still closes, so the span still ends.
+
+> **Scope:** `onStreamComplete` fires for document and `.json` navigation bodies — the responses that stream. Responses without a query lifecycle (OG images, `FILE` routes, redirects and error responses produced by `RequestBreakerError`) do not fire it, so a span opened unconditionally in instrumentation needs a fallback end (e.g. also ending it in `onRequestEnd` / `onRequestFail` when no stream ever started).
 
 Start the span where you already do, and end it here instead:
 
@@ -263,7 +265,9 @@ export default class extends ViewRouterServiceProvider {
 }
 ```
 
-Query failures during the streamed render are routed through `onRequestFail(req, error)` exactly once per rejected query, with a `QueryError` carrying the query's path, variant, and status — so error tracking wired to `onRequestFail` keeps seeing server-side failures that React quietly hands over to client rendering. (`Query.instant` rethrows into the handler; that rejection is still reported only once.)
+Query failures during the streamed render are routed through `onRequestFail(req, error)` exactly once per rejected query, with a `QueryError` carrying the query's path, variant, and status — so error tracking wired to `onRequestFail` keeps seeing server-side failures that React quietly hands over to client rendering. (`Query.instant` rethrows into the handler; that rejection is still reported only once.) An api handler that fails with a `RequestBreakerError` (or an error `Response`) yields a `QueryError` with that response's status; a raw `throw` inside the handler yields a status-500 `QueryError` with the original error on `cause`.
+
+> **Gotcha:** a raw `throw` inside an api handler also fires the **api** provider's `onRequestFail` — the query runs the api handler in-process, and the api router reports its own failures. If both providers report to the same error tracker, dedupe there (the view provider's error is the `QueryError` wrapper, the api provider's is the original error on its `cause`).
 
 ## App bootstrap
 
