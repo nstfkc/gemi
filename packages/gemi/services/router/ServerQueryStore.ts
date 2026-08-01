@@ -45,6 +45,34 @@ export type ServerQueryFetcher = (
   searchParams: URLSearchParams,
 ) => Promise<any>;
 
+/** One query's timings in a `StreamSummary` — a serialization of its entry. */
+export interface StreamQuerySummary {
+  path: string;
+  variantKey: string;
+  /** ms since the request started. */
+  startedAt: number;
+  /** Absent when the stream closed (deadline) with the query still pending. */
+  settledAt?: number;
+  status: "pending" | "resolved" | "rejected";
+  source: ServerQuerySource;
+}
+
+/**
+ * What `onStreamComplete` receives when the response body actually closes —
+ * the numbers an APM span wrapped around the *handler* gets wrong under
+ * streaming, where the handler returns at time-to-shell while the body keeps
+ * streaming.
+ */
+export interface StreamSummary {
+  /** ms from request start to the response's first byte. */
+  shellAt: number;
+  /** ms from request start to the last chunk — when the body closed. */
+  settledAt: number;
+  /** The stream deadline cut rendering short. */
+  aborted: boolean;
+  queries: StreamQuerySummary[];
+}
+
 /**
  * When a render-discovered query starts this long after the render began, it
  * was blocked behind another suspended segment (or conditional data) — the
@@ -67,6 +95,9 @@ const LATE_DISCOVERY_THRESHOLD_MS = 50;
 export class ServerQueryStore {
   private entries = new Map<string, ServerQueryEntry>();
   private settleListener: ((entry: ServerQueryEntry) => void) | null = null;
+  private failListener: ((entry: ServerQueryEntry) => void) | null = null;
+  /** ms to the response's first byte — set only for progressive responses. */
+  private shellAt: number | null = null;
   /** Entries settled before the stream injector subscribed. */
   private settledBacklog: ServerQueryEntry[] = [];
   /** Variants already serialized into `__GEMI_DATA__` — not streamed again. */
@@ -91,6 +122,52 @@ export class ServerQueryStore {
     if (this.renderStartedAt === null) {
       this.renderStartedAt = performance.now();
     }
+  }
+
+  /**
+   * Marks the response's first byte — time-to-shell. Only progressive
+   * responses mark it; a response that never does (settled documents for bots
+   * and `no-stream` routes, `.json` navigation payloads) reports
+   * `shellAt === settledAt` in its summary, because its body has no
+   * shell-then-stream phase to distinguish.
+   */
+  markShell() {
+    if (this.shellAt === null) {
+      this.shellAt = this.elapsed();
+    }
+  }
+
+  /**
+   * The stream lifecycle summary for `onStreamComplete`. `settledAt` is "now",
+   * so call it at the moment the response body actually closes.
+   */
+  summarize(aborted: boolean): StreamSummary {
+    const settledAt = this.elapsed();
+    return {
+      shellAt: this.shellAt ?? settledAt,
+      settledAt,
+      aborted,
+      queries: Array.from(this.entries.values(), (entry) => ({
+        path: entry.path,
+        variantKey: entry.variantKey,
+        startedAt: entry.startedAt,
+        settledAt: entry.settledAt,
+        status: entry.status,
+        source: entry.source,
+      })),
+    };
+  }
+
+  /**
+   * Single-subscriber rejection feed. A query that rejects during the
+   * streamed render never throws the handler — React client-renders the
+   * segment and moves on — so without this the failure is invisible to
+   * `onRequestFail`-style error reporting. Fires once per rejected entry
+   * (`ensure` dedupes, so a query rejects at most once per request), before
+   * the entry's promise wakes any awaiter.
+   */
+  onQueryFail(listener: (entry: ServerQueryEntry) => void) {
+    this.failListener = listener;
   }
 
   /**
@@ -210,6 +287,9 @@ export class ServerQueryStore {
       .then(() => {
         entry.settledAt = this.elapsed();
         this.maybeLogLateDiscovery(entry);
+        if (entry.status === "rejected" && this.failListener) {
+          this.failListener(entry);
+        }
         // Listener first, wake second: the payload script must be queued for
         // injection before React resumes the suspended segment, so the data
         // always precedes the segment's reveal in the stream.

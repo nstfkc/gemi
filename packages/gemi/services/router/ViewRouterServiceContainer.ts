@@ -31,7 +31,7 @@ import { Log } from "../../facades/Log";
 import { I18n } from "../../facades/I18n";
 import { AuthViewRouter } from "../../auth/AuthenticationServiceProvider";
 import { KernelIdServiceContainer } from "../kernel-id/KernelIdServiceContainer";
-import { ServerQueryStore } from "./ServerQueryStore";
+import { ServerQueryStore, type StreamSummary } from "./ServerQueryStore";
 import { createServerQueryFetcher } from "./serverQueryFetcher";
 import { injectQueryPayloads, isBotUserAgent } from "./streamQueryInjection";
 import { createRoutePayloadStream } from "./routePayloadStream";
@@ -145,7 +145,26 @@ export class ViewRouterServiceContainer extends ServiceContainer {
     return await this.service.onRequestEnd(req);
   }
 
+  /**
+   * Fires the provider's `onStreamComplete` from a stream callback — an
+   * observability hook must never break the response body it observes, so
+   * sync throws and rejections are logged and swallowed.
+   */
+  private completeStream(req: HttpRequest, summary: StreamSummary) {
+    const logError = (err: any) => {
+      Log.error(err?.message ?? 'Error in "onStreamComplete" event handler', {
+        err: JSON.stringify(err),
+      });
+    };
+    try {
+      Promise.resolve(this.service.onStreamComplete(req, summary)).catch(logError);
+    } catch (err) {
+      logError(err);
+    }
+  }
+
   private async render(props: {
+    req: HttpRequest;
     viewData: any;
     pathname: string;
     currentPathName: string;
@@ -165,6 +184,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
     appId: string;
   }) {
     const {
+      req,
       csrfTokenHMAC,
       currentPathName,
       headers,
@@ -360,10 +380,24 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           await stream.allReady.catch(() => {});
         }
 
-        return new Response(injectQueryPayloads(stream, serverQueries), {
-          status: !currentPathName ? 404 : 200,
-          headers,
-        });
+        return new Response(
+          injectQueryPayloads(stream, serverQueries, {
+            // A settled body has no shell-then-stream phase — its first byte
+            // already carries everything — so only progressive responses mark
+            // one; the summary then reports `shellAt === settledAt` for the
+            // settled ones.
+            onShell: settled ? undefined : () => serverQueries.markShell(),
+            // The APM-visible end of the request: the body closed, not the
+            // handler returned (that was at time-to-shell).
+            onClose: () => {
+              this.completeStream(req, serverQueries.summarize(deadline.signal.aborted));
+            },
+          }),
+          {
+            status: !currentPathName ? 404 : 200,
+            headers,
+          },
+        );
       } catch (err) {
         clearTimeout(deadlineTimer);
         const stream = await renderToReadableStream(createElement("div"), {
@@ -483,6 +517,24 @@ export class ViewRouterServiceContainer extends ServiceContainer {
       // Before middleware and handlers, so every `Query.prefetch` along the
       // way lands in one live, request-scoped store.
       ctx.serverQueries = new ServerQueryStore(createServerQueryFetcher(req));
+      // A query rejecting during the streamed render (or a fire-and-forget
+      // prefetch) never throws the handler, so the catch below can't see it —
+      // error tracking wired to `onRequestFail` would miss server-side work
+      // that failed. Route rejections through the hook here. The identity set
+      // keeps `Query.instant` rethrows — which DO reach the catch — from
+      // reporting the same error twice.
+      const reportedQueryErrors = new Set<any>();
+      ctx.serverQueries.onQueryFail((entry) => {
+        reportedQueryErrors.add(entry.error);
+        try {
+          Promise.resolve(this.service.onRequestFail(httpRequest, entry.error)).catch(
+            () => {},
+          );
+        } catch {
+          // An error-reporting hook must not break the settle chain it
+          // observes — a suspended segment is waiting on it.
+        }
+      });
 
       if (urlLocale) {
         const locale = urlLocale.replaceAll("/", "");
@@ -612,7 +664,12 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           };
 
           return new Response(
-            createRoutePayloadStream(envelope, ctx.serverQueries),
+            createRoutePayloadStream(envelope, ctx.serverQueries, undefined, ({ aborted }) =>
+              // No shell was marked, so the summary reports
+              // `shellAt === settledAt` — the NDJSON body is one payload, not
+              // a shell followed by streamed content.
+              this.completeStream(httpRequest, ctx.serverQueries.summarize(aborted)),
+            ),
             {
               headers,
             },
@@ -652,6 +709,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
         }
 
         return await this.render({
+          req: httpRequest,
           csrfTokenHMAC: Buffer.from(""),
           currentPathName,
           headers,
@@ -686,7 +744,11 @@ export class ViewRouterServiceContainer extends ServiceContainer {
             });
           }
         }
-        this.service.onRequestFail(httpRequest, err);
+        // `Query.instant` rethrows the entry's error object into this catch —
+        // already reported when the rejection settled, so skip the duplicate.
+        if (!reportedQueryErrors.has(err)) {
+          this.service.onRequestFail(httpRequest, err);
+        }
         throw err;
       }
     });

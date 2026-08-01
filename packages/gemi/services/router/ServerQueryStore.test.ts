@@ -1,11 +1,16 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { ServerQueryStore, type ServerQueryFetcher } from "./ServerQueryStore";
+import {
+  ServerQueryStore,
+  type ServerQueryFetcher,
+  type StreamSummary,
+} from "./ServerQueryStore";
 import {
   htmlSafeJson,
   injectQueryPayloads,
   isBotUserAgent,
   queryPayloadScript,
 } from "./streamQueryInjection";
+import { QueryError } from "../../client/QueryError";
 
 /** A hand-cranked source standing in for React's SSR stream. */
 function createSource() {
@@ -249,6 +254,55 @@ describe("ServerQueryStore", () => {
     await muted.promise;
     expect(warn).not.toHaveBeenCalled();
   });
+
+  test("a rejected query fires the fail listener exactly once, with the error", async () => {
+    const { fetcher, calls } = createDeferredFetcher();
+    const store = new ServerQueryStore(fetcher);
+    const failures: any[] = [];
+    store.onQueryFail((entry) => failures.push(entry.error));
+
+    const entry = store.ensure("/broken", { search: { page: 3 } });
+    // React discards and retries suspended renders — repeated discovery must
+    // not multiply the report.
+    store.ensure("/broken", { search: { page: 3 } });
+    const ok = store.ensure("/fine");
+
+    const error = new QueryError("/broken", "page=3", 500, { message: "boom" });
+    calls[0].reject(error);
+    calls[1].resolve({ ok: true });
+    await Promise.all([entry.promise, ok.promise]);
+
+    expect(failures).toEqual([error]);
+    expect(failures[0]).toBeInstanceOf(QueryError);
+  });
+
+  test("a summary without a shell mark reports shellAt === settledAt", async () => {
+    const { fetcher, calls } = createDeferredFetcher();
+    let clock = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => clock);
+    const store = new ServerQueryStore(fetcher);
+
+    const entry = store.ensure("/data", {}, "prefetch");
+    clock = 120;
+    calls[0].resolve({ d: 1 });
+    await entry.promise;
+
+    clock = 130;
+    const summary = store.summarize(false);
+    expect(summary.shellAt).toBe(130);
+    expect(summary.settledAt).toBe(130);
+    expect(summary.aborted).toBe(false);
+    expect(summary.queries).toEqual([
+      {
+        path: "/data",
+        variantKey: "",
+        startedAt: 0,
+        settledAt: 120,
+        status: "resolved",
+        source: "prefetch",
+      },
+    ]);
+  });
 });
 
 describe("stream injection", () => {
@@ -341,6 +395,74 @@ describe("stream injection", () => {
     await finished;
 
     expect(chunks.join("")).toBe("<!doctype html>");
+  });
+
+  test("onClose fires after the last injected chunk; shellAt ≪ settledAt for a suspending page", async () => {
+    const { fetcher, calls } = createDeferredFetcher();
+    let clock = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => clock);
+    const store = new ServerQueryStore(fetcher);
+    const source = createSource();
+
+    let summary: StreamSummary | null = null;
+    let closes = 0;
+    const { chunks, finished } = collect(
+      injectQueryPayloads(source.stream, store, {
+        onShell: () => store.markShell(),
+        onClose: () => {
+          closes += 1;
+          summary = store.summarize(false);
+        },
+      }),
+    );
+
+    const slow = store.ensure("/slow", {}, "prefetch");
+    clock = 15;
+    source.write("<!doctype html><div>shell</div>");
+    // Let the pump forward the shell before the clock moves on.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(closes).toBe(0);
+
+    // The slowest query settles long after the shell went out.
+    clock = 900;
+    calls[0].resolve({ rows: [1] });
+    await slow.promise;
+    source.write("<div hidden>revealed segment</div>");
+    source.close();
+    await finished;
+
+    expect(closes).toBe(1);
+    expect(summary!.shellAt).toBe(15);
+    expect(summary!.settledAt).toBe(900);
+    expect(summary!.aborted).toBe(false);
+    expect(summary!.queries).toEqual([
+      {
+        path: "/slow",
+        variantKey: "",
+        startedAt: 0,
+        settledAt: 900,
+        status: "resolved",
+        source: "prefetch",
+      },
+    ]);
+    // The payload chunk was injected before the body closed.
+    expect(chunks.join("")).toContain('"/slow"');
+  });
+
+  test("a cancelled response body fires onClose exactly once", async () => {
+    const { fetcher } = createDeferredFetcher();
+    const store = new ServerQueryStore(fetcher);
+    const source = createSource();
+
+    let closes = 0;
+    const stream = injectQueryPayloads(source.stream, store, {
+      onClose: () => {
+        closes += 1;
+      },
+    });
+
+    await stream.getReader().cancel(new Error("client went away"));
+    expect(closes).toBe(1);
   });
 });
 

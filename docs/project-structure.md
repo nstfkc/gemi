@@ -205,6 +205,7 @@ The router providers expose request lifecycle hooks you can override for cross-c
 - **`onRequestStart(req)`** — before a matched request is handled (API path).
 - **`onRequestEnd(req)`** — after a request is handled successfully.
 - **`onRequestFail(req, error)`** — when handling throws.
+- **`onStreamComplete(req, summary)`** — view provider only; when a response body actually closes, after the last streamed chunk (see [Instrumenting streamed responses](#instrumenting-streamed-responses)).
 
 A real-world example from a production app reports failures to Sentry:
 
@@ -229,6 +230,40 @@ export default class extends ApiRouterServiceProvider {
 Other providers expose their own hooks — for example the logging provider has `onLogCreated(logEntry)` and `onLogFileClosed(file)`, the i18n provider has `onLocaleChange(locale)`, and the authentication provider has `onSignUp`, `onForgotPassword`, and `onMagicLinkCreated`.
 
 > **Gotcha:** On the view path, gemi does not call `onRequestStart`. If you need per-request setup for views, use `onRequestEnd` / `onRequestFail`, which both fire on the view path.
+
+### Instrumenting streamed responses
+
+View responses stream: the handler returns at time-to-shell while query payloads keep streaming for as long as the slowest query takes. A span that ends when the handler returns (or in a `finally` around `app.fetch`) therefore records ~milliseconds for a request whose body stayed open for a second — the duration of the shell, not the response.
+
+The view router provider's `onStreamComplete(req, summary)` fires when the response body actually closes — after the last streamed chunk, or when the stream deadline aborts rendering. The `summary` reports:
+
+- **`shellAt`** — ms from request start to the response's first byte.
+- **`settledAt`** — ms to the last chunk, when the body closed.
+- **`aborted`** — whether the stream deadline cut rendering short.
+- **`queries`** — per-query `path`, `variantKey`, `startedAt`, `settledAt`, `status`, and `source` (`"prefetch"` or `"render"`).
+
+Non-streamed responses (`.json` navigation payloads, `"no-stream"` routes, bot requests) report `shellAt === settledAt`.
+
+Start the span where you already do, and end it here instead:
+
+```typescript
+import { ViewRouterServiceProvider } from "gemi/services";
+import type { StreamSummary } from "gemi/services";
+import type { HttpRequest } from "gemi/http";
+
+export default class extends ViewRouterServiceProvider {
+  // ...
+
+  onStreamComplete(req: HttpRequest, summary: StreamSummary) {
+    // e.g. end the Sentry span opened for this request:
+    // span.setAttribute("gemi.shell_ms", summary.shellAt);
+    // span.setAttribute("gemi.aborted", summary.aborted);
+    // span.end(); // now measures the full streamed response
+  }
+}
+```
+
+Query failures during the streamed render are routed through `onRequestFail(req, error)` exactly once per rejected query, with a `QueryError` carrying the query's path, variant, and status — so error tracking wired to `onRequestFail` keeps seeing server-side failures that React quietly hands over to client rendering. (`Query.instant` rethrows into the handler; that rejection is still reported only once.)
 
 ## App bootstrap
 

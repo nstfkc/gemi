@@ -20,6 +20,21 @@ export function queryPayloadScript(entry: ServerQueryEntry): string {
 }
 
 /**
+ * The injector sits at the end of the response pipe, so it is the one place
+ * that knows when the body's first byte goes out and when the body actually
+ * closes — the two marks a handler-scoped span gets wrong under streaming.
+ */
+export interface StreamLifecycleHooks {
+  /** The response's first chunk was enqueued — time-to-shell. */
+  onShell?: () => void;
+  /**
+   * The body closed: the last chunk (and any leftover payload scripts)
+   * flushed, or the client went away. Fires exactly once.
+   */
+  onClose?: () => void;
+}
+
+/**
  * Interleaves resolved query payloads with React's streamed HTML.
  *
  * A manual pull-pump around the source, not a `pipeThrough` — React's SSR
@@ -47,10 +62,17 @@ export function queryPayloadScript(entry: ServerQueryEntry): string {
 export function injectQueryPayloads(
   source: ReadableStream<Uint8Array>,
   store: ServerQueryStore,
+  hooks: StreamLifecycleHooks = {},
 ): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
   const queue: string[] = [];
   let sentFirstChunk = false;
+  let closed = false;
+  const closeOnce = () => {
+    if (closed) return;
+    closed = true;
+    hooks.onClose?.();
+  };
 
   store.onSettle((entry) => {
     // Rejected entries stream nothing: React client-renders that segment and
@@ -74,11 +96,13 @@ export function injectQueryPayloads(
         // last chunk — they still belong in the client cache.
         flush(controller);
         controller.close();
+        closeOnce();
         return;
       }
       if (!sentFirstChunk) {
         sentFirstChunk = true;
         controller.enqueue(value);
+        hooks.onShell?.();
         flush(controller);
         return;
       }
@@ -86,6 +110,7 @@ export function injectQueryPayloads(
       controller.enqueue(value);
     },
     cancel(reason) {
+      closeOnce();
       return reader.cancel(reason);
     },
   });
