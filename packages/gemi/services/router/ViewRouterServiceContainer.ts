@@ -296,6 +296,16 @@ export class ViewRouterServiceContainer extends ServiceContainer {
       const deadline = new AbortController();
       const deadlineTimer = setTimeout(() => deadline.abort(), STREAM_DEADLINE_MS);
 
+      // Decided before the render call because it changes *render-time*
+      // behavior: React splits any boundary bigger than
+      // `progressiveChunkSize` (~12.8KB) out of the shell as it renders, and
+      // awaiting `allReady` afterwards settles the data but cannot undo the
+      // split — a non-JS crawler would see a body whose content is parked in
+      // `<div hidden>` + `$RC()` reveal scripts (#286). Progressive chunking
+      // only exists to reach a browser sooner, which is worthless to a
+      // crawler that buffers the whole response, so the bot path disables it.
+      const isBot = isBotUserAgent(userAgent);
+
       try {
         const stream = await renderToReadableStream(
           createElement(Fragment, {
@@ -320,6 +330,7 @@ export class ViewRouterServiceContainer extends ServiceContainer {
             bootstrapScriptContent: `window.__GEMI_DATA__ = ${JSON.stringify(result.data)}; window.loaders=${loaders}`,
             bootstrapModules,
             signal: deadline.signal,
+            ...(isBot ? { progressiveChunkSize: Number.MAX_SAFE_INTEGER } : {}),
             // A query rejecting inside a streamed segment is expected: React
             // client-renders that boundary and the browser surfaces the error
             // through its own fetch. Log it and move on.
@@ -336,8 +347,10 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           .finally(() => clearTimeout(deadlineTimer));
 
         // Crawlers don't execute scripts or wait for streams — they get the
-        // fully settled document.
-        if (isBotUserAgent(userAgent)) {
+        // fully settled document. Works only together with the
+        // `progressiveChunkSize` override above: this waits for the data,
+        // that keeps the settled content inline instead of script-revealed.
+        if (isBot) {
           await stream.allReady.catch(() => {});
         }
 

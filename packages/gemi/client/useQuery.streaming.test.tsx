@@ -181,6 +181,56 @@ describe("streaming SSR", () => {
     expect(html).not.toContain("__GEMI_STREAM__");
   });
 
+  test("bot render options settle over-budget boundaries inline; default options defer them (#286)", async () => {
+    // React splits any boundary bigger than `progressiveChunkSize` (~12.8KB)
+    // out of the shell *during* render — awaiting `allReady` afterwards
+    // settles the data but the content still ships as `<div hidden>` + a
+    // `$RC()` reveal script, which a non-JS crawler never executes. The bot
+    // path must therefore disable progressive chunking up front AND await
+    // `allReady`; this pins both halves, and pins that the default options
+    // really do defer (i.e. the override is load-bearing).
+    const rows = Array.from({ length: 1000 }, (_, i) => `row-${i}-${"x".repeat(40)}`);
+
+    async function renderSettled(options: Record<string, unknown>) {
+      const { fetcher, calls } = createDeferredFetcher();
+      const store = new ServerQueryStore(fetcher);
+      function Big() {
+        const { data } = useQuery("/big" as any);
+        return (
+          <ul>
+            {(data as any).rows.map((row: string) => (
+              <li key={row}>{row}</li>
+            ))}
+          </ul>
+        );
+      }
+      const stream: ReadableStream<Uint8Array> & { allReady: Promise<void> } =
+        await renderToReadableStream(
+          <App store={store}>
+            <Big />
+          </App>,
+          { onError: () => {}, ...options },
+        );
+      calls[0].resolve({ rows });
+      // Production order on the bot path: settle everything, then respond.
+      await stream.allReady;
+      return await new Response(injectQueryPayloads(stream, store)).text();
+    }
+
+    const botHtml = await renderSettled({
+      progressiveChunkSize: Number.MAX_SAFE_INTEGER,
+    });
+    expect(botHtml).toContain("row-999");
+    expect(botHtml).not.toContain("<!--$?-->");
+    expect(botHtml).not.toContain("$RC(");
+    // The content must be plain body text, not parked in a hidden reveal div.
+    expect(botHtml).not.toContain("<div hidden");
+
+    const defaultHtml = await renderSettled({});
+    expect(defaultHtml).toContain("$RC(");
+    expect(defaultHtml).toContain("<div hidden");
+  });
+
   test("a query nested under a suspended parent is discovered late but still streams both segments", async () => {
     const { fetcher, calls } = createDeferredFetcher();
     const store = new ServerQueryStore(fetcher);
