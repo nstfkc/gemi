@@ -29,7 +29,8 @@ export interface StreamLifecycleHooks {
   onShell?: () => void;
   /**
    * The body closed: the last chunk (and any leftover payload scripts)
-   * flushed, or the client went away. Fires exactly once.
+   * flushed, the client went away, or the source stream errored. Fires
+   * exactly once.
    */
   onClose?: () => void;
 }
@@ -90,7 +91,17 @@ export function injectQueryPayloads(
 
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
-      const { done, value } = await reader.read();
+      let result: Awaited<ReturnType<typeof reader.read>>;
+      try {
+        result = await reader.read();
+      } catch (err) {
+        // A source error (React's stream failing post-shell) still ends the
+        // body — without this, "fires exactly once" would be zero times on
+        // the error exit, leaking whatever span `onClose` was meant to end.
+        closeOnce();
+        throw err;
+      }
+      const { done, value } = result;
       if (done) {
         // Queries nothing rendered (an unused prefetch) settle after React's
         // last chunk — they still belong in the client cache.
