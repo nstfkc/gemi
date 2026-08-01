@@ -18,6 +18,7 @@ import type { RouteState } from "./RouteStateContext";
 import { I18nContext } from "./I18nContext";
 import { PrefetchCache } from "./PrefetchCache";
 import { routeDataUrl } from "./helpers/routeDataUrl";
+import { readSettledRoutePayload } from "./helpers/readRoutePayload";
 import { loadViewModule } from "./ComponentContext";
 
 export interface PrefetchTarget {
@@ -323,7 +324,10 @@ export const ClientRouterProvider = (
       if (!response.ok) {
         return null;
       }
-      return await response.json();
+      // The settled aggregate: every streamed query result merged back into
+      // the envelope's `prefetchedData` — a warmed payload is stored whole,
+      // exactly as the blocking response used to arrive (#290).
+      return await readSettledRoutePayload(response);
     });
   };
 

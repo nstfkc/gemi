@@ -2,6 +2,7 @@ import {
   PARTIAL_RENDER_HEADER,
   type PartialRenderInfo,
 } from "../../utils/partialRender";
+import { readRoutePayload, type RouteQueryPayload } from "./readRoutePayload";
 
 interface LoadRoutePayloadOptions {
   /** The `.json` URL for the route being navigated to. */
@@ -16,6 +17,12 @@ interface LoadRoutePayloadOptions {
    * partial-render plan the server computed.
    */
   renderedRoute: () => string;
+  /**
+   * Receives each query result the server streams behind the envelope
+   * (#290) — the caller hydrates it into the cache, which settles any
+   * segment suspended on that variant.
+   */
+  onQueryPayload?: (payload: RouteQueryPayload) => void;
 }
 
 /**
@@ -32,7 +39,7 @@ interface LoadRoutePayloadOptions {
 export async function loadRoutePayload(
   options: LoadRoutePayloadOptions,
 ): Promise<any> {
-  const { url, from, takePrefetched, renderedRoute } = options;
+  const { url, from, takePrefetched, renderedRoute, onQueryPayload } = options;
 
   const prefetched = takePrefetched?.(url);
   if (prefetched) {
@@ -54,7 +61,9 @@ export async function loadRoutePayload(
     return null;
   }
 
-  const payload = await response.json();
+  // Resolves with the envelope as soon as its line arrives; query results
+  // streaming behind it keep draining into `onQueryPayload`.
+  const payload = await readRoutePayload(response, onQueryPayload);
 
   // The segments the server carried forward were computed against a route that
   // is no longer on screen. Nothing sound to merge onto — ask for the whole
@@ -64,7 +73,7 @@ export async function loadRoutePayload(
     try {
       const full = await fetch(url);
       if (full.ok) {
-        return await full.json();
+        return await readRoutePayload(full, onQueryPayload);
       }
     } catch (e) {
       console.error(e);

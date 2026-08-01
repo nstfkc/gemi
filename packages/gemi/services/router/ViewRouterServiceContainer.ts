@@ -34,6 +34,7 @@ import { KernelIdServiceContainer } from "../kernel-id/KernelIdServiceContainer"
 import { ServerQueryStore } from "./ServerQueryStore";
 import { createServerQueryFetcher } from "./serverQueryFetcher";
 import { injectQueryPayloads, isBotUserAgent } from "./streamQueryInjection";
+import { createRoutePayloadStream } from "./routePayloadStream";
 
 /**
  * How long a document response may keep streaming before pending segments are
@@ -529,14 +530,10 @@ export class ViewRouterServiceContainer extends ServiceContainer {
         // cookies — so they are awaited. Queries do not: `Query.prefetch`
         // starts its request the moment it is called (a live store, so a
         // prefetch after a handler's first `await` is no longer silently
-        // dropped), and the render below streams whatever is still in flight.
+        // dropped), and both response shapes stream whatever is still in
+        // flight — the document as interleaved payload scripts, the `.json`
+        // navigation payload as NDJSON lines (#290).
         const data = await Promise.all(handlers.map((fn) => fn(httpRequest as any)));
-
-        // The `.json` navigation payload is one JSON body — it has no stream
-        // to carry late data, so it keeps the settle-everything contract.
-        if (isViewDataRequest) {
-          await ctx.serverQueries.allSettled();
-        }
 
         const cookies = ctx.cookies;
         const headers = ctx.headers;
@@ -585,7 +582,10 @@ export class ViewRouterServiceContainer extends ServiceContainer {
         }
 
         if (isViewDataRequest) {
-          headers.set("Content-Type", "application/json; charset=utf-8");
+          // NDJSON: envelope first — sent at handler speed — then one line
+          // per query as it settles (#290). The client commits the
+          // navigation off the envelope and hydrates the rest as it lands.
+          headers.set("Content-Type", "application/x-ndjson; charset=utf-8");
           // The body depends on the route the client came from, so no shared
           // cache may serve one client's partial response to another.
           headers.append("Vary", PARTIAL_RENDER_HEADER);
@@ -594,21 +594,25 @@ export class ViewRouterServiceContainer extends ServiceContainer {
 
           await this.service.onRequestEnd(httpRequest);
 
+          const envelope = {
+            // Nothing that rendered touched the metadata, so the segments
+            // that were skipped are still the ones that own it.
+            meta: partial && !ctx.metadata.touched ? null : pageData.meta,
+            data: {
+              [urlPathname]: viewData,
+            },
+            breadcrumbs,
+            // Resolved-so-far; the rest streams behind the envelope. The
+            // snapshot marks its entries shipped so they aren't sent twice.
+            prefetchedData: ctx.serverQueries.snapshotResolved(),
+            i18n,
+            is404: !currentPathName,
+            appId: pageData.appId,
+            partial,
+          };
+
           return new Response(
-            JSON.stringify({
-              // Nothing that rendered touched the metadata, so the segments
-              // that were skipped are still the ones that own it.
-              meta: partial && !ctx.metadata.touched ? null : pageData.meta,
-              data: {
-                [urlPathname]: viewData,
-              },
-              breadcrumbs,
-              prefetchedData: pageData.prefetchedData,
-              i18n,
-              is404: !currentPathName,
-              appId: pageData.appId,
-              partial,
-            }),
+            createRoutePayloadStream(envelope, ctx.serverQueries),
             {
               headers,
             },

@@ -304,6 +304,12 @@ const Routes = (props: { componentTree: ComponentTree }) => {
         from,
         takePrefetched,
         renderedRoute: () => renderedRouteRef.current,
+        // Query results streaming behind the envelope (#290): hydrating each
+        // settles the segment suspended on it — the same wake path streamed
+        // documents use.
+        onQueryPayload: ([path, variantKey, data]) => {
+          hydrate({ [path]: { [variantKey]: data } });
+        },
       });
 
       if (payload) {
