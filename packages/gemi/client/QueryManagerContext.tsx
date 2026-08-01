@@ -10,6 +10,31 @@ import { QueryResource } from "./QueryResource";
 /** One streamed query payload: `[path, variantKey, data]`. */
 type StreamedQueryPayload = [string, string, any];
 
+/**
+ * App-wide `useQuery` defaults, threaded from `createRoot(RootLayout, {
+ * queryConfig })` (and `init` on the client). Resolution order is per-call
+ * config → these defaults → framework defaults, so a call site always wins.
+ * Only keys with app-wide meaning are accepted — `lazy`, `fallbackData` and
+ * `refetchUntil` stay call-site-only. Framework-internal hooks (`useUser`,
+ * `useSignIn`) never see these.
+ */
+export interface QueryConfig {
+  /**
+   * App-wide suspense switch. `suspense: false` makes every unconfigured
+   * `useQuery` behave like pre-0.49: `loading` flags instead of suspension,
+   * errors returned instead of thrown. Pair it with the `GemiQueryDefaults`
+   * module augmentation so `data`'s nullability matches.
+   */
+  suspense?: boolean;
+  /** How long cached data stays fresh before a read revalidates it, in ms. */
+  staleTime?: number;
+  keepPreviousData?: boolean;
+  retryIntervalOnError?: number;
+  refreshInterval?: number;
+}
+
+export const QueryConfigContext = createContext<QueryConfig | null>(null);
+
 export type PrefetchedData = Record<string, Record<string, any>>;
 
 export interface QueryManagerContextValue {
@@ -29,7 +54,10 @@ export const QueryManagerContext = createContext<QueryManagerContextValue>({
   clearErrors: () => {},
 });
 
-export const QueryManagerProvider = ({ children }: PropsWithChildren<{}>) => {
+export const QueryManagerProvider = ({
+  children,
+  queryConfig = null,
+}: PropsWithChildren<{ queryConfig?: QueryConfig | null }>) => {
   const resourcesRef = useRef<Map<string, QueryResource>>(new Map());
 
   const getResource = useCallback(
@@ -107,7 +135,9 @@ export const QueryManagerProvider = ({ children }: PropsWithChildren<{}>) => {
 
   return (
     <QueryManagerContext.Provider value={value}>
-      {children}
+      <QueryConfigContext.Provider value={queryConfig}>
+        {children}
+      </QueryConfigContext.Provider>
     </QueryManagerContext.Provider>
   );
 };

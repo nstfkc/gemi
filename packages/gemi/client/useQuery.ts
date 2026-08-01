@@ -11,7 +11,7 @@ import type { NestedPrettify } from "../utils/type";
 
 import type { ApiRouterHandler } from "../http/ApiRouter";
 import type { UnwrapPromise } from "../utils/type";
-import { QueryManagerContext } from "./QueryManagerContext";
+import { QueryConfigContext, QueryManagerContext } from "./QueryManagerContext";
 import { ServerQueryContext } from "./ServerQueryContext";
 import { DEFAULT_STALE_TIME } from "./QueryResource";
 import { applyParams } from "../utils/applyParams";
@@ -118,11 +118,50 @@ interface SuspenseConfig<T> extends Omit<Config<T>, "suspense" | "lazy"> {
   lazy?: false;
 }
 
+/** A per-call `suspense: true` opt-in — wins over an app-wide `suspense: false`. */
+interface ExplicitSuspenseConfig<T> extends Omit<
+  Config<T>,
+  "suspense" | "lazy"
+> {
+  suspense: true;
+  lazy?: false;
+}
+
+/**
+ * The type-level mirror of a provider-level `queryConfig: { suspense: false }`.
+ * The `useQuery` overloads reflect the call site only — they cannot see the
+ * value threaded through `createRoot` — so an app that turns suspense off
+ * app-wide flips the default `data` nullability with the same
+ * module-augmentation switch RPC types use:
+ *
+ * ```ts
+ * declare module "gemi/client" {
+ *   interface GemiQueryDefaults {
+ *     suspense: false;
+ *   }
+ * }
+ * ```
+ *
+ * A per-call `suspense: true` still narrows `data` back to non-nullable.
+ */
+export interface GemiQueryDefaults {}
+
+type DefaultData<T extends keyof GetRPC> = GemiQueryDefaults extends {
+  suspense: false;
+}
+  ? NestedPrettify<Data<T>> | undefined
+  : NestedPrettify<Data<T>>;
+
+export function useQuery<T extends keyof GetRPC>(
+  url: T,
+  options: Options<T> | undefined,
+  config: ExplicitSuspenseConfig<Data<T>>,
+): QueryReturn<T, NestedPrettify<Data<T>>>;
 export function useQuery<T extends keyof GetRPC>(
   url: T,
   options?: Options<T>,
   config?: SuspenseConfig<Data<T>>,
-): QueryReturn<T, NestedPrettify<Data<T>>>;
+): QueryReturn<T, DefaultData<T>>;
 export function useQuery<T extends keyof GetRPC>(
   url: T,
   options?: Options<T>,
@@ -132,6 +171,24 @@ export function useQuery<T extends keyof GetRPC>(
   url: T,
   ...args: [options?: Options<T>, config?: Config<Data<T>>]
 ) {
+  const [options, config] = args;
+  // Resolution order: per-call config → provider `queryConfig` → framework
+  // defaults. The first two merge here; `useFrameworkQuery` applies the last.
+  const queryConfig = useContext(QueryConfigContext);
+  return useFrameworkQuery(url, options, { ...queryConfig, ...config });
+}
+
+/**
+ * `useQuery` minus the app's provider-level `queryConfig`: per-call config
+ * resolves straight against the framework defaults. Framework-internal hooks
+ * (`useUser`'s `suspense: false`, `useSignIn`'s `lazy`) build on this so an
+ * app-wide `queryConfig` can never change their semantics. Deliberately not
+ * exported from the package root.
+ */
+export function useFrameworkQuery<T extends keyof GetRPC>(
+  url: T,
+  ...args: [options?: Options<T>, config?: Config<Data<T>>]
+): QueryReturn<T, NestedPrettify<Data<T>> | undefined> {
   const _params = useParams();
   const [_options = defaultOptions, _config = defaultConfig] = args;
   const options = { ...defaultOptions, ..._options };

@@ -1,6 +1,6 @@
 import { useContext } from "react";
 import { ServerDataContext } from "../ServerDataProvider";
-import { useQuery } from "../useQuery";
+import { useFrameworkQuery } from "../useQuery";
 
 export function useUser() {
   const { auth } = useContext(ServerDataContext);
@@ -8,7 +8,9 @@ export function useUser() {
     data: user,
     loading,
     error,
-  } = useQuery(
+    // `useFrameworkQuery`: the semantics below are pinned, so an app-wide
+    // `queryConfig` must not leak in.
+  } = useFrameworkQuery(
     "/auth/me",
     {},
     {
