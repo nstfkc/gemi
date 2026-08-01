@@ -46,10 +46,12 @@ export class SuspenseDemoController extends Controller {
   }
 
   instant() {
-    // Prefetched on the server: the page ships with the data already in the
-    // HTML and in the client cache — the two `useQuery("/suspense-demo/products")`
-    // below it never suspend and never hit `/api`, despite the endpoint's
-    // 600ms delay. The cost lives here: SSR waits for the prefetch queue.
+    // Prefetched: the request goes on the wire the moment this handler runs,
+    // in parallel with everything else, and the shell doesn't wait for it.
+    // If it resolves before the render needs it the data ships in the
+    // document payload; otherwise it streams in right behind the shell. The
+    // two `useQuery("/suspense-demo/products")` on the page never hit `/api`
+    // either way, despite the endpoint's 600ms delay.
     Query.prefetch("/suspense-demo/products");
     return { title: "Instant" };
   }
@@ -58,9 +60,10 @@ export class SuspenseDemoController extends Controller {
     // Deliberately NOT prefetched — this is the page that demonstrates
     // suspension. Navigating here keeps the previous page on screen (watch
     // the nav link dim via `data-pending`) until `/suspense-demo/metrics`
-    // resolves. Hard-loading it logs the server warning naming the missing
-    // `Query.prefetch`, ships the HTML without the data, and the client
-    // suspends into the view's `Loading` export after hydration.
+    // resolves. Hard-loading it streams: the shell arrives instantly with the
+    // view's `Loading` export in place, and the metrics segment (data
+    // included) streams into the document ~1.2s later. No prefetch is needed
+    // because the query sits in the render's first pass.
     return { title: "Slow" };
   }
 

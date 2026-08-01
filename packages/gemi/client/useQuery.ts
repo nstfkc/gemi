@@ -11,6 +11,7 @@ import type { NestedPrettify } from "../utils/type";
 import type { ApiRouterHandler } from "../http/ApiRouter";
 import type { UnwrapPromise } from "../utils/type";
 import { QueryManagerContext } from "./QueryManagerContext";
+import { ServerQueryContext } from "./ServerQueryContext";
 import { DEFAULT_STALE_TIME } from "./QueryResource";
 import { applyParams } from "../utils/applyParams";
 import type { UrlParser } from "./types";
@@ -130,6 +131,7 @@ export function useQuery<T extends keyof GetRPC>(
     "params" in options ? { ..._params, ...options.params } : _params;
   const search = "search" in options ? (options.search ?? {}) : {};
   const { getResource } = useContext(QueryManagerContext);
+  const serverQueries = useContext(ServerQueryContext);
   const normalPath = applyParams(url, params);
   const searchParams = new URLSearchParams(omitNullishValues(search));
   searchParams.sort();
@@ -206,16 +208,36 @@ export function useQuery<T extends keyof GetRPC>(
 
   // The render-phase read for the suspense path. Only when there is nothing
   // to show — data in hand always renders, and revalidation stays where it
-  // was (the mount effect below). `read` dedupes across the render attempts
-  // React discards, so this is safe to hit on every attempt.
+  // was (the mount effect below). Both reads dedupe across the render
+  // attempts React discards, so this is safe to hit on every attempt.
+  //
+  // On a streaming server render the read goes to the request's
+  // `ServerQueryStore` instead of the client resource: a prefetched query is
+  // already in flight there and is joined, an undiscovered one starts now
+  // (the store logs the late-discovery hint when that cost something).
   let readPromise: Promise<void> | undefined;
+  let serverError: unknown;
   if (suspense && !state?.data && !state?.error) {
-    readPromise = resource.read(variantKey, config.staleTime).promise;
+    if (typeof window === "undefined") {
+      if (serverQueries) {
+        const entry = serverQueries.ensure(url, { params, search });
+        if (entry.status === "resolved") {
+          state = { loading: false, data: entry.data, error: null, version: 0 };
+        } else if (entry.status === "rejected") {
+          serverError = entry.error;
+        } else {
+          readPromise = entry.promise;
+        }
+      }
+    } else {
+      readPromise = resource.read(variantKey, config.staleTime).promise;
+    }
   }
 
   if (
     suspense &&
     typeof window === "undefined" &&
+    !serverQueries &&
     !state?.data &&
     process.env.NODE_ENV !== "production"
   ) {
@@ -407,9 +429,14 @@ export function useQuery<T extends keyof GetRPC>(
   // React's ping-and-retry machinery is built around (React.lazy, SWR, React
   // Query), whereas `use()` on a client-created promise is documented as
   // unsupported outside a Suspense-compatible framework and React never
-  // retries it. On the server neither branch fires — `read` never returns a
-  // promise there, and errors don't exist because the server doesn't fetch.
+  // retries it. A streaming server render takes the same paths: a pending
+  // entry suspends (React streams the fallback and resumes on settle), and a
+  // rejected one throws so the segment falls back to client rendering, where
+  // the browser's own fetch surfaces the error into the boundary.
   if (suspense) {
+    if (serverError) {
+      throw serverError;
+    }
     if (state?.error && !state?.data) {
       throw state.error;
     }

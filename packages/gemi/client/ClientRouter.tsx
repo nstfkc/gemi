@@ -108,11 +108,10 @@ const Route = memo((props: PropsWithChildren<RouteProps>) => {
 
   // `Loading` / `Error` are optional named exports of the view module,
   // subscribed so a Route that rendered before its chunk arrived re-reads
-  // the registry once it lands. On the server the registry is empty — which
-  // is fine, because the server never suspends (queries don't fetch there and
-  // views are eager), so the fallback is never rendered into the HTML. The
-  // `Suspense` element itself is rendered on both sides, so hydration sees
-  // the same tree.
+  // the registry once it lands. On the server `getViewModule` reads the
+  // eagerly-loaded modules the http server passed in — a streaming render
+  // suspends for real, so the `Loading` fallback it puts in the shell must be
+  // the same one the client hydrates.
   const getModule = useCallback(
     () => getViewModule?.(componentPath),
     [getViewModule, componentPath],
@@ -383,6 +382,8 @@ const Routes = (props: { componentTree: ComponentTree }) => {
 
 export const ClientRouter = (props: {
   viewImportMap?: Record<string, ReturnType<typeof lazy>>;
+  /** Server only: full view modules for `Loading`/`Error` fallbacks. */
+  viewModules?: Record<string, Record<string, any>>;
   RootLayout: ComponentType<{ children: ReactNode; locale: string }>;
 }) => {
   const { RootLayout } = props;
@@ -401,7 +402,10 @@ export const ClientRouter = (props: {
       <I18nProvider>
         <WebSocketContextProvider>
           <QueryManagerProvider>
-            <ComponentsProvider viewImportMap={props.viewImportMap}>
+            <ComponentsProvider
+              viewImportMap={props.viewImportMap}
+              modules={props.viewModules}
+            >
               <ClientRouterProvider
                 cssManifest={cssManifest}
                 searchParams={router.searchParams}

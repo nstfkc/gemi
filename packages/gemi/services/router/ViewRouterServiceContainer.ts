@@ -31,6 +31,16 @@ import { Log } from "../../facades/Log";
 import { I18n } from "../../facades/I18n";
 import { AuthViewRouter } from "../../auth/AuthenticationServiceProvider";
 import { KernelIdServiceContainer } from "../kernel-id/KernelIdServiceContainer";
+import { ServerQueryStore } from "./ServerQueryStore";
+import { createServerQueryFetcher } from "./serverQueryFetcher";
+import { injectQueryPayloads, isBotUserAgent } from "./streamQueryInjection";
+
+/**
+ * How long a document response may keep streaming before pending segments are
+ * cut over to client rendering. One hung query must not hold the connection
+ * open forever; the browser resolves whatever was aborted over `/api`.
+ */
+const STREAM_DEADLINE_MS = 10_000;
 
 const themeScript = `
 !function(){try{var d=document.documentElement,c=d.classList;
@@ -143,7 +153,8 @@ export class ViewRouterServiceContainer extends ServiceContainer {
     url: URL;
     i18n: any;
     user: any;
-    prefetchedData: any;
+    serverQueries: ServerQueryStore;
+    userAgent: string | null;
     params: any;
     breadcrumbs: any;
     urlLocaleSegment?: string;
@@ -158,7 +169,8 @@ export class ViewRouterServiceContainer extends ServiceContainer {
       i18n,
       params,
       pathname,
-      prefetchedData,
+      serverQueries,
+      userAgent,
       url,
       user,
       viewData,
@@ -179,7 +191,10 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           [pageDataKey]: viewData,
         },
         __csrf: csrfTokenHMAC.toString("base64"),
-        prefetchedData,
+        // Placeholder — re-snapshotted at render time (below) so everything
+        // that resolved while styles and modules loaded still makes the
+        // document payload instead of streaming.
+        prefetchedData: {} as Record<string, Record<string, any>>,
         i18n,
         auth: { user },
         routeManifest: this.clientRouteManifest,
@@ -207,8 +222,22 @@ export class ViewRouterServiceContainer extends ServiceContainer {
       loaders: string;
       cssManifest: Record<string, string[]>;
       ogMap: Record<string, any>;
+      /**
+       * Full view modules (not just default exports) so `Route` can render a
+       * view's `Loading`/`Error` exports on the server — a streamed shell
+       * carries real fallbacks, and they must match what the client hydrates.
+       */
+      viewModules?: Record<string, any>;
     }) => {
-      const { bootstrapModules, loaders, getStyles, viewImportMap, cssManifest, ogMap } = params;
+      const {
+        bootstrapModules,
+        loaders,
+        getStyles,
+        viewImportMap,
+        cssManifest,
+        ogMap,
+        viewModules,
+      } = params;
 
       if (isOgRequest) {
         let ogHandler = null;
@@ -257,6 +286,16 @@ export class ViewRouterServiceContainer extends ServiceContainer {
 
       result.data["cssManifest"] = cssManifest;
       const styles = await getStyles(currentViews);
+
+      // Everything resolved by now ships in the document payload; everything
+      // still in flight streams in behind it. The snapshot marks its entries
+      // as shipped so the injector doesn't send them twice.
+      result.data.prefetchedData = serverQueries.snapshotResolved();
+      serverQueries.markRenderStart();
+
+      const deadline = new AbortController();
+      const deadlineTimer = setTimeout(() => deadline.abort(), STREAM_DEADLINE_MS);
+
       try {
         const stream = await renderToReadableStream(
           createElement(Fragment, {
@@ -271,6 +310,8 @@ export class ViewRouterServiceContainer extends ServiceContainer {
               createElement(Root, {
                 data: result.data,
                 viewImportMap,
+                viewModules,
+                serverQueries,
                 key: "root",
               }),
             ],
@@ -278,14 +319,34 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           {
             bootstrapScriptContent: `window.__GEMI_DATA__ = ${JSON.stringify(result.data)}; window.loaders=${loaders}`,
             bootstrapModules,
+            signal: deadline.signal,
+            // A query rejecting inside a streamed segment is expected: React
+            // client-renders that boundary and the browser surfaces the error
+            // through its own fetch. Log it and move on.
+            onError(error: unknown) {
+              if (process.env.NODE_ENV !== "production") {
+                console.error(error);
+              }
+            },
           },
         );
 
-        return new Response(stream, {
+        stream.allReady
+          .catch(() => {})
+          .finally(() => clearTimeout(deadlineTimer));
+
+        // Crawlers don't execute scripts or wait for streams — they get the
+        // fully settled document.
+        if (isBotUserAgent(userAgent)) {
+          await stream.allReady.catch(() => {});
+        }
+
+        return new Response(injectQueryPayloads(stream, serverQueries), {
           status: !currentPathName ? 404 : 200,
           headers,
         });
       } catch (err) {
+        clearTimeout(deadlineTimer);
         const stream = await renderToReadableStream(createElement("div"), {
           bootstrapScriptContent: `window.error= ${JSON.stringify(err.message)}; window.stack_trace=${JSON.stringify(err.stack)};window.__GEMI_DATA__ = ${JSON.stringify(result.data)}; window.loaders=${loaders}`,
           bootstrapModules:
@@ -394,6 +455,9 @@ export class ViewRouterServiceContainer extends ServiceContainer {
         appId: string;
       } | null = null;
       const ctx = RequestContext.getStore();
+      // Before middleware and handlers, so every `Query.prefetch` along the
+      // way lands in one live, request-scoped store.
+      ctx.serverQueries = new ServerQueryStore(createServerQueryFetcher(req));
 
       if (urlLocale) {
         const locale = urlLocale.replaceAll("/", "");
@@ -437,25 +501,28 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           };
         }
 
-        // Started together, collected apart: `data` is one entry per rendered
-        // segment, and must stay that way — prefetch results are not view data.
-        const handlerPromises = handlers.map((fn) => fn(httpRequest as any));
-        const prefetchPromises = Array.from(ctx.prefetchPromiseQueue).map((fn) => fn());
-        const [data] = await Promise.all([
-          Promise.all(handlerPromises),
-          Promise.all(prefetchPromises),
-        ]);
+        // Handlers gate the response — they decide redirects, status codes,
+        // cookies — so they are awaited. Queries do not: `Query.prefetch`
+        // starts its request the moment it is called (a live store, so a
+        // prefetch after a handler's first `await` is no longer silently
+        // dropped), and the render below streams whatever is still in flight.
+        const data = await Promise.all(handlers.map((fn) => fn(httpRequest as any)));
+
+        // The `.json` navigation payload is one JSON body — it has no stream
+        // to carry late data, so it keeps the settle-everything contract.
+        if (isViewDataRequest) {
+          await ctx.serverQueries.allSettled();
+        }
 
         const cookies = ctx.cookies;
         const headers = ctx.headers;
-        const prefetchedResources = ctx.prefetchedResources;
 
         pageData = {
           data,
           cookies,
           headers,
           user: ctx.user,
-          prefetchedData: Object.fromEntries(prefetchedResources.entries()),
+          prefetchedData: ctx.serverQueries.snapshotResolved(),
           currentPathName: httpRequest.routePath,
           params: httpRequest.params,
           urlLocaleSegment,
@@ -553,7 +620,8 @@ export class ViewRouterServiceContainer extends ServiceContainer {
           i18n,
           params,
           pathname: url.pathname,
-          prefetchedData: pageData.prefetchedData,
+          serverQueries: ctx.serverQueries,
+          userAgent: req.headers.get("user-agent"),
           url,
           user,
           viewData,

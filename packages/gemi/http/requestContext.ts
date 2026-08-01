@@ -2,6 +2,9 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { HttpRequest } from "./HttpRequest";
 import { Metadata } from "./Metadata";
 import type { ByteRange } from "./range";
+// Type-only: `services/router` imports from `http`, so a runtime import here
+// would be circular.
+import type { ServerQueryStore } from "../services/router/ServerQueryStore";
 
 export interface CreateCookieOptions {
   maxAge?: number;
@@ -39,8 +42,12 @@ const requestContext = new AsyncLocalStorage<Store>();
 class Store {
   cookies: Set<string> = new Set();
   headers: Headers = new Headers();
-  prefetchedResources = new Map<string, Record<string, any>>();
-  prefetchPromiseQueue = new Set<() => Promise<any>>();
+  /**
+   * Every server-side query of this request — prefetched or discovered during
+   * the streaming render. Assigned by the view router (or lazily by the
+   * `Query` facade); `null` for api requests, which must not query themselves.
+   */
+  serverQueries: ServerQueryStore | null = null;
   user: any = null;
   csrfHmac: string | null = null;
   locale: string | null = null;
@@ -93,8 +100,7 @@ class Store {
   destroy() {
     delete this.cookies;
     delete this.headers;
-    delete this.prefetchedResources;
-    delete this.prefetchPromiseQueue;
+    this.serverQueries = null;
     delete this.user;
   }
 }

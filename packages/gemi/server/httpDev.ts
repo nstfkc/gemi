@@ -238,6 +238,7 @@ export async function httpDev(app: App, instrumentation: Instrumentation) {
 
           const viewImportMap = {};
           const ogMap = {};
+          const viewModules = {};
           const template = (viewName: string, path: string) =>
             `"${viewName}": () => import("${path}")`;
           const templates = [];
@@ -253,6 +254,9 @@ export async function httpDev(app: App, instrumentation: Instrumentation) {
 
             viewImportMap[fileName] = mod.default;
             ogMap[fileName] = mod?.OpenGraph;
+            // The whole module, so a streaming render can put the view's
+            // `Loading`/`Error` exports into the shell it sends.
+            viewModules[fileName] = mod;
             // Emit a root-relative URL (`/app/views/Foo.tsx`), NOT the absolute
             // filesystem path used for `ssrLoadModule` above. The browser's
             // `window.loaders` preload and `client.tsx`'s `import.meta.glob` map
@@ -269,6 +273,7 @@ export async function httpDev(app: App, instrumentation: Instrumentation) {
               await createDevStyles(appDir, vite, currentViews),
             bootstrapModules: ["/refresh.js", "/app/client.tsx", "/@vite/client"],
             viewImportMap,
+            viewModules,
             ogMap,
             loaders,
             cssManifest: {},

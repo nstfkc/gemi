@@ -2,10 +2,14 @@ import {
   createContext,
   type PropsWithChildren,
   useCallback,
+  useEffect,
   useMemo,
   useRef,
 } from "react";
 import { QueryResource } from "./QueryResource";
+
+/** One streamed query payload: `[path, variantKey, data]`. */
+type StreamedQueryPayload = [string, string, any];
 
 export type PrefetchedData = Record<string, Record<string, any>>;
 
@@ -65,6 +69,29 @@ export const QueryManagerProvider = ({ children }: PropsWithChildren<{}>) => {
       resource.clearError();
     }
   }, []);
+
+  // Streaming SSR delivers late-resolving queries as inline
+  // `__GEMI_STREAM__.push([path, variant, data])` scripts interleaved with
+  // React's chunks. Payloads that ran before this mounted sit buffered in a
+  // plain array; from here on, `push` hydrates directly — and `hydrate`
+  // settles any reader suspended on that variant. Payload-before-reveal
+  // ordering in the stream guarantees a segment never hydrates ahead of its
+  // data.
+  useEffect(() => {
+    const w = window as unknown as {
+      __GEMI_STREAM__?:
+        | StreamedQueryPayload[]
+        | { push: (p: StreamedQueryPayload) => void };
+    };
+    const adopt = ([path, variantKey, data]: StreamedQueryPayload) => {
+      hydrate({ [path]: { [variantKey]: data } });
+    };
+    const buffered = Array.isArray(w.__GEMI_STREAM__) ? w.__GEMI_STREAM__ : [];
+    w.__GEMI_STREAM__ = { push: adopt };
+    for (const payload of buffered) {
+      adopt(payload);
+    }
+  }, [hydrate]);
 
   const value = useMemo(
     () => ({ getResource, hydrate, clearErrors }),

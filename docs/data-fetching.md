@@ -65,12 +65,15 @@ export function Error({ error, resetErrorBoundary }) {
 
 How it composes with the rest of the framework:
 
-- **Initial page load** — the server never fetches during render. A query on an
-  SSR'd page must be primed with `Query.prefetch()` in the route's view handler
-  (see below); the page then ships with the data in the HTML and nothing
-  suspends. A suspense query without prefetched data logs a server warning
-  naming the exact `Query.prefetch` call to add, ships without the data, and
-  suspends on the client after hydration.
+- **Initial page load streams.** The server sends the shell — layout chrome,
+  every segment's `Loading` export in place — as soon as the route handlers
+  finish, then resolves each query's api handler in-process and streams the
+  finished segments (data included) into the document as they land. The page
+  completes at the speed of the *slowest* query, not the sum: every query the
+  first render pass reaches starts immediately and in parallel, wherever it
+  sits in the tree. Crawlers are served the fully settled document instead.
+  `Query.prefetch` is **not required** for this — see "Avoiding server
+  waterfalls" below for when it still earns its keep.
 - **Navigation** — the router commits navigations inside a transition, so when
   the next page's queries suspend, the previous page stays on screen
   (`Link[data-pending]` / `useRouteTransition()` report it) until they resolve.
@@ -209,15 +212,34 @@ import { Query } from "gemi/facades";
 }),
 ```
 
-- `Query.instant(path, options?)` runs the endpoint immediately and **returns the
-  data** — use its return value in the handler. It also stores the result for the client.
-- `Query.prefetch(path, options?)` only primes the client cache: it queues the endpoint
-  to resolve alongside the rest of the page, without returning the data for use here.
+- `Query.instant(path, options?)` runs the endpoint, **waits for it**, and returns
+  the data — use its return value in the handler. The response cannot start until
+  it resolves, so its data is always part of the first paint. It also stores the
+  result for the client.
+- `Query.prefetch(path, options?)` starts the endpoint immediately — in parallel
+  with the handlers and every other prefetch — without blocking the response on
+  it. If it resolves before the render needs it, the data ships in the document
+  payload; otherwise it streams in behind the shell.
 
-Because the server never fetches during render, `Query.prefetch` is how a
-suspense query (the default) gets its data into the initial HTML — a route that
-renders a query without prefetching it ships without the data, warns in the
-server log, and suspends on the client after hydration.
+#### Avoiding server waterfalls
+
+`Query.prefetch` is a performance tool, not a requirement. The streaming render
+starts every query it can *reach* in its first pass — a `useQuery` in the page
+component, or ten components deep, all start immediately and in parallel. The
+render can't reach a query in two cases, and those are where a prefetch turns a
+sequential waterfall back into a parallel fetch:
+
+1. **Nested under another suspending query.** A layout's query suspends its
+   children, so a child's query is only discovered — and only *started* — once
+   the layout resolves. Prefetching the child's query starts it at request time
+   instead.
+2. **Conditionally rendered on fetched data.** `{data.hasReports && <Reports />}`
+   can't be seen until `data` arrives.
+
+You don't have to spot these yourself: in dev, a query that starts late logs a
+warning with the delay it paid and the exact `Query.prefetch` call that removes
+it. (A query whose *params* depend on another query's *result* is inherently
+sequential — compose the two in one api handler instead.)
 
 Both take the same `{ params, search }` options as `useQuery`, and the stored data
 is matched to the client query by path + search key. The stored data is adopted on

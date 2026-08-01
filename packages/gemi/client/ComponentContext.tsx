@@ -1,4 +1,4 @@
-import { createContext, lazy, type PropsWithChildren } from "react";
+import { createContext, lazy, useMemo, type PropsWithChildren } from "react";
 import { flattenComponentTree } from "./helpers/flattenComponentTree";
 import type { ServerDataContextValue } from "./ServerDataProvider";
 
@@ -67,15 +67,28 @@ export const ComponentsContext = createContext({
 });
 
 export const ComponentsProvider = (
-  props: PropsWithChildren<{ viewImportMap: typeof viewImportMap }>,
+  props: PropsWithChildren<{
+    viewImportMap: typeof viewImportMap;
+    /**
+     * Server only: the fully-loaded view modules, so `Loading`/`Error`
+     * exports resolve during a streaming render. The browser leaves this
+     * unset and reads the registry `loadViewModule` fills instead.
+     */
+    modules?: Record<string, Record<string, any>>;
+  }>,
 ) => {
+  const { modules } = props;
+  const value = useMemo(
+    () => ({
+      viewImportMap: props.viewImportMap ?? viewImportMap,
+      getViewModule: modules
+        ? (name: string) => modules[name] ?? getViewModule(name)
+        : getViewModule,
+    }),
+    [props.viewImportMap, modules],
+  );
   return (
-    <ComponentsContext.Provider
-      value={{
-        viewImportMap: props.viewImportMap ?? viewImportMap,
-        getViewModule,
-      }}
-    >
+    <ComponentsContext.Provider value={value}>
       {props.children}
     </ComponentsContext.Provider>
   );

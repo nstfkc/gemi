@@ -2,17 +2,18 @@ import { useQuery } from "gemi/client";
 
 /**
  * `Query.prefetch("/suspense-demo/products")` runs in this view's handler, so
- * despite the endpoint's 600ms delay this page never shows a spinner: the
- * data is in the initial HTML on a hard load, and in the route payload on a
- * client-side navigation. Neither card ever hits `/api`.
+ * despite the endpoint's 600ms delay neither card ever hits `/api`: on a hard
+ * load the shell streams immediately and the products section (data included)
+ * streams in when the query lands ~600ms later; on a client-side navigation
+ * the data arrives in the route payload.
  */
 export default function SuspenseDemoInstant() {
   return (
     <div>
       <p className="text-sm text-slate-600">
         This page's handler prefetches the query on the server. The endpoint
-        takes 600ms — and you never see it load, because the page does not
-        commit without it.
+        takes 600ms — the request starts the moment the route is handled, and
+        the browser never makes it.
       </p>
       <div className="mt-4 grid gap-4 sm:grid-cols-2">
         <ProductsCard label="first reader" />

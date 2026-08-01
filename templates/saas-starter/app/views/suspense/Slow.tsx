@@ -5,10 +5,11 @@ import { useQuery } from "gemi/client";
  *
  * - Navigate here from another demo page: the page you were on stays visible
  *   (the nav link dims) until the 1.2s endpoint resolves, then this commits.
- * - Hard-load it: the server logs a warning naming the missing
- *   `Query.prefetch("/suspense-demo/metrics")`, ships the HTML without the
- *   data, and the client suspends into the `Loading` export below after
- *   hydration.
+ * - Hard-load it: the shell streams instantly with the `Loading` export below
+ *   in place, the server resolves the query in-process, and the finished
+ *   section (data included) streams into the document ~1.2s later. No
+ *   prefetch needed — the query is in the render's first pass, so it starts
+ *   at request time anyway.
  */
 export default function SuspenseDemoSlow() {
   const { data, refetch } = useQuery("/suspense-demo/metrics");
