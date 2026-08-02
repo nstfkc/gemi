@@ -1,13 +1,28 @@
-import { test, expect, describe } from "bun:test";
+// Imported from vitest, not `bun:test`. This file was written against the bun
+// runner while the suite runs under vitest, so vitest failed to *collect* it —
+// "Cannot use describe outside of the test runner" — and it counted as one
+// failing file with zero tests run. CI excluded it on that basis (#163),
+// alongside genuinely dead code, which hid the more useful fact: none of these
+// 28 assertions had ever executed here, and `parseTranslation` is live —
+// `i18n/Dictionary.ts` and `client/useTranslator.ts` both call it.
+import { test, expect, describe } from "vitest";
 import type { ReactElement } from "react";
-import { parseTranslation } from "./parseTranslation"; // Adjust path as needed
+import { parseTranslation } from "./parseTranslation";
 import { renderToString } from "react-dom/server";
 
 // Helper function to compare JSX output
 function jsxToString(jsx: ReactElement): string {
-  return renderToString(jsx)
-    .replace(/data-reactroot=""/g, "")
-    .trim();
+  return (
+    renderToString(jsx)
+      .replace(/data-reactroot=""/g, "")
+      // React emits `<!-- -->` between *adjacent text nodes* so hydration can
+      // tell where one ends and the next begins. `parseTranslation` produces
+      // exactly that shape — a Fragment of alternating strings and elements —
+      // so the separators appear around every interpolated variable. They are
+      // not part of the rendered text and no assertion here is about them.
+      .replace(/<!-- -->/g, "")
+      .trim()
+  );
 }
 
 describe("parseTranslation function", () => {
@@ -183,11 +198,35 @@ describe("parseTranslation function", () => {
   });
 
   describe("Error handling", () => {
-    test("JSX in string context should throw error", () => {
+    /**
+     * A function that always returns JSX does **not** throw — it is the whole
+     * feature. `parseTranslation` probes every function param with `""` up
+     * front, so this one is detected and the JSX branch handles it.
+     *
+     * This assertion previously expected a throw here and could never have
+     * passed. It never ran: the file imported `bun:test` while the suite runs
+     * under vitest, so it failed to collect and CI excluded it (#163).
+     */
+    test("a JSX-returning param takes the JSX branch rather than throwing", () => {
+      const result = parseTranslation("{{link:[click]}}", {
+        link: (text: string) => <a href="/test">{text}</a>,
+      });
+
+      expect(jsxToString(result)).toBe('<a href="/test">click</a>');
+    });
+
+    /**
+     * The guard *is* reachable, by a function whose return type depends on its
+     * argument: the `""` probe sees a string, so the string branch is chosen,
+     * and then the real call returns an element into a context that can only
+     * concatenate strings. Throwing beats `String(element)` — which is
+     * `"[object Object]"` in the middle of a sentence.
+     */
+    test("JSX returned in string context throws", () => {
       expect(() => {
-        // @ts-ignore - Deliberately testing runtime behavior with incorrect types
         parseTranslation("{{link:[click]}}", {
-          link: (text: string) => <a href="/test">{text}</a>,
+          link: (text: string) =>
+            text ? <a href="/test">{text}</a> : "",
         });
       }).toThrow("JSX returned in string context");
     });

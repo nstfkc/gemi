@@ -78,7 +78,21 @@ describe("createRouteManifest()", () => {
     });
   });
 
-  test("DeeplyNestedRouter", () => {
+  /**
+   * `/foo` and `/foo/bar` are **not** in the manifest, and that is the correct
+   * answer rather than a missing one.
+   *
+   * Both are layouts with no index route — `/foo` holds only `/bar`, and `/bar`
+   * holds only `/baz` and `/cux` — so neither path resolves to a page, and an
+   * entry for one would render layouts around a blank content area.
+   *
+   * This assertion used to list them, and the file was excluded from CI rather
+   * than reconciled (#163). `createFlatViewRoutes` settles it: its own test
+   * passes on this exact fixture, and there `/foo` and `/foo/bar` appear only as
+   * *segments* of `/foo/bar/baz`, never as matchable routes. A manifest entry
+   * for a path the router will not match is a route to nowhere.
+   */
+  test("DeeplyNestedRouter omits layouts that have no index route", () => {
     const result = createRouteManifest({ "/": DeeplyNestedRouter });
 
     expect(result).toEqual({
@@ -92,12 +106,22 @@ describe("createRouteManifest()", () => {
         "ProductsLayout",
         "ProductProviders",
       ],
-      "/foo": ["Layout", "Foo"],
-      "/foo/bar": ["Layout", "Foo", "Bar"],
       "/foo/bar/baz": ["Layout", "Foo", "Bar", "Baz"],
       "/foo/bar/cux": ["Layout", "Foo", "Bar", "Cux"],
       "/app": ["Layout", "PrivateLayout", "Dashboard"],
       "/app/settings": ["Layout", "PrivateLayout", "Settings"],
     });
+  });
+
+  /**
+   * The pair the assertion above turns on, stated on its own so a future change
+   * that reintroduces them fails with a sentence rather than a large diff.
+   */
+  test("a layout with no index route is absent, while its leaves are present", () => {
+    const result = createRouteManifest({ "/": DeeplyNestedRouter });
+
+    expect(result).not.toHaveProperty("/foo");
+    expect(result).not.toHaveProperty("/foo/bar");
+    expect(result["/foo/bar/baz"]).toEqual(["Layout", "Foo", "Bar", "Baz"]);
   });
 });
