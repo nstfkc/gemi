@@ -578,7 +578,13 @@ function jsonObject(
     // exact. Found by the all-scalars-through-a-relation fixture, which exists
     // because the template's schema has no BigInt behind a relation and the
     // differential matrix therefore cannot reach this.
-    const expression = field.type === "BigInt" ? `${column}::text` : column;
+    //
+    // `::text[]` for a `BigInt[]`, and the measurement is the same one: a
+    // `bigint[]` rendered into JSON is an array of JSON numbers, and
+    // 9007199254740993 came back as ...992 element-wise. The array form of the
+    // same trap, and it needs the array form of the same cast.
+    const expression =
+      field.type === "BigInt" ? `${column}::text${field.isList ? "[]" : ""}` : column;
     return `'${field.name}', ${expression}`;
   });
 
@@ -653,8 +659,35 @@ function buildDecoder(
 /**
  * How one field's JSON form becomes its JavaScript form, or `undefined` when JSON
  * already carries it faithfully (`Int`, `String`, `Boolean`, `Float`, `Json`).
+ *
+ * A **scalar list** is the element's own converter mapped over a JSON array,
+ * which is exactly right and is worth saying because the alternative is
+ * tempting: `PostgresDialect.decode` is *not* reusable here. Its whole job is
+ * normalising the containers Bun's driver produces — an `Int32Array`, an
+ * unparsed `{a,b}` literal — and none of them exist on this path. `json_agg`
+ * hands over a JSON array whatever the element type, including for the enum
+ * lists the driver refuses to parse. Two decoding sites, two container
+ * problems, one shared per-element rule.
  */
 function jsonConverter(
+  field: FieldSchema,
+): ((value: unknown) => unknown) | undefined {
+  if (field.isList) {
+    const element = elementConverter(field);
+    if (!element) return undefined;
+    return (value) => {
+      if (value === null || value === undefined) return null;
+      if (!Array.isArray(value)) return value;
+      return value.map((item) =>
+        item === null || item === undefined ? null : element(item),
+      );
+    };
+  }
+
+  return elementConverter(field);
+}
+
+function elementConverter(
   field: FieldSchema,
 ): ((value: unknown) => unknown) | undefined {
   switch (field.type) {

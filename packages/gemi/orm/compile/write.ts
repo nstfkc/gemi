@@ -31,7 +31,7 @@ import { planRelations, strategiesOf } from "./plan-relations";
 import { type CountPlan, planRelationCounts } from "./relation-count";
 import { resolveSelection, withKeyFields } from "./select";
 import { matchUniqueKey } from "./unique";
-import { compileWhere } from "./where";
+import { assertListDialect, compileWhere } from "./where";
 
 /**
  * The write surface: `create`, `createMany`, `update`, `updateMany`, `delete`,
@@ -361,7 +361,9 @@ function createManyColumns(
   const union: FieldSchema[] = [];
   for (const field of Object.values(schema.fields)) {
     const inSome = supplied.some((keys) => keys.has(field.name));
-    if (inSome || hasClientSideValue(field)) union.push(field);
+    if (inSome || hasClientSideValue(field) || suppliesEmptyList(field)) {
+      union.push(field);
+    }
   }
 
   for (const field of union) {
@@ -370,6 +372,19 @@ function createManyColumns(
 
     if (hasClientSideValue(field)) continue;
     if (field.nullable) continue;
+    // The empty list stands in for an absent one — see `insertColumns`. It also
+    // resolves the "some rows set it and others do not" refusal below, which
+    // exists because a single `VALUES` list cannot ask for a database default
+    // per row. A list needs no default asked for: `{}` is a value, so the rows
+    // that omitted it get one written rather than needing the statement split.
+    //
+    // `suppliesEmptyList` rather than `field.isList`, which is the whole of the
+    // distinction: this stands in for a list that has **nothing else** to fall
+    // back on. A list with a *database-side* default still cannot be expressed
+    // per row, so it falls through to the refusal below rather than silently
+    // acquiring `{}` — and one with a client-side default never reaches here,
+    // because `hasClientSideValue` answered above.
+    if (suppliesEmptyList(field)) continue;
 
     // A database-side default that only some rows override. `NULL` would
     // *overwrite* the default rather than request it, and SQLite has no
@@ -393,15 +408,60 @@ function createManyColumns(
     );
   }
 
-  return rows.map((_row, index) =>
-    union.map((field) => ({
-      field,
-      value: supplied[index].has(field.name)
-        ? valueBinder(schema, op, field, dialect, (callArgs) =>
-            listOf(callArgs?.data)[index]?.[field.name],
-          )
-        : defaultBinder(field, dialect),
-    })),
+  for (const field of union) {
+    if (field.isList) {
+      assertListDialect(schema, field, `data.${field.name}`, op, dialect);
+    }
+  }
+
+  return rows.map((row, index) =>
+    union.map((field) => {
+      if (!supplied[index].has(field.name)) {
+        // **`suppliesEmptyList`, not `field.isList`**, and the difference is a
+        // row that comes out wrong rather than a statement that fails.
+        //
+        // `@default([])` and `@default(["seed"])` are *client-side* defaults —
+        // `kind: "value"`, which `isClientSideDefault` admits — so `create`
+        // binds the declared value through `defaultBinder`. Asking `isList`
+        // here put `{}` ahead of that, so one `createMany` row omitting a
+        // defaulted list wrote the empty array where `create` wrote the
+        // default, and where Prisma writes the default — so `create` and
+        // `createMany` disagreed about one schema, silently, in the row.
+        //
+        // Invisible to the differential until the fixture changed: the template
+        // declared `@default([])`, where the correct value and the wrong one are
+        // the same array. It now declares a non-empty default, and the
+        // `createMany` case supplies it on one row and omits it on the other.
+        return {
+          field,
+          value: suppliesEmptyList(field)
+            ? emptyList(field, dialect)
+            : defaultBinder(field, dialect),
+        };
+      }
+
+      if (field.isList) {
+        // Compile-time, like `insertColumns` and `assignment` — this was the
+        // one write path that let a bad operand reach the binder. `["set"]`
+        // because an insert takes no `push`, and a refusal naming `push` on the
+        // operation where it is never legal is a puzzle rather than a next step.
+        assertListOperand(schema, field, (row as any)?.[field.name], op, ["set"]);
+      }
+
+      // Per row, because two rows of one `createMany` may legitimately spell
+      // the same list differently — `["a"]` and `{ set: ["a"] }`. The plan key
+      // records the whole `data` array's shape, so the two are already
+      // different entries and this stays a compile-time decision.
+      const setForm = isListSetOperand(field, (row as any)?.[field.name]);
+
+      return {
+        field,
+        value: valueBinder(schema, op, field, dialect, (callArgs) => {
+          const value = listOf(callArgs?.data)[index]?.[field.name];
+          return setForm ? value?.set : value;
+        }),
+      };
+    }),
   );
 }
 
@@ -989,11 +1049,25 @@ function insertColumns(
     }
 
     if (supplied.has(field.name)) {
+      if (field.isList) {
+        assertListDialect(schema, field, `data.${field.name}`, op, dialect);
+        assertListOperand(schema, field, (data as any)?.[field.name], op, ["set"]);
+      }
+
+      // `{ tags: { set: [...] } }` is what Prisma documents for a list, and it
+      // is accepted in `create` as well as in `update` — where a bare array is
+      // also accepted, and means the same thing. Unwrapped at *compile* time
+      // rather than in the binder because the two spellings are two argument
+      // shapes and so already two plan-cache entries; deciding it here keeps
+      // the binder a pure function of the value it is handed.
+      const setForm = isListSetOperand(field, (data as any)?.[field.name]);
+
       columns.push({
         field,
-        value: valueBinder(schema, op, field, dialect, (args) =>
-          locateData(args)?.[field.name],
-        ),
+        value: valueBinder(schema, op, field, dialect, (args) => {
+          const value = locateData(args)?.[field.name];
+          return setForm ? value?.set : value;
+        }),
       });
       continue;
     }
@@ -1007,10 +1081,112 @@ function insertColumns(
     // its own default or as NULL.
     if (field.default || field.nullable) continue;
 
+    // **A scalar list is never missing**, whatever the schema says about
+    // required-ness. Measured against a generated 6.19 client: `create({ data:
+    // { id: 900 } })` on a model whose every list is `NOT NULL` with no
+    // `@default` succeeds, and every one of them reads back as `[]`. So Prisma
+    // treats "no value" as the empty list rather than as an omission, and a
+    // column with no database default gives it no choice — leaving the column
+    // out would violate the NOT NULL constraint.
+    //
+    // This was a `MissingRequiredValueError` until the differential harness ran:
+    // four `create` cases refused a call Prisma answers. It is exactly the kind
+    // of divergence no amount of reading the docs produces, because the docs
+    // describe the *input type* — where the field is optional — and say nothing
+    // about what is written when it is absent.
+    if (field.isList) {
+      // Asked *here* as well as on the supplied path above, because this branch
+      // invents a value the caller never wrote — and an unasked dialect is how
+      // `create({ data: { id: 1 } })` on SQLite compiled a statement binding
+      // raw JS arrays for the driver to reject with a type error, where naming
+      // the column would have said "sqlite has no array type … It works on
+      // postgres". The check belongs to the *column*, not to the caller
+      // mentioning it.
+      assertListDialect(schema, field, `data.${field.name}`, op, dialect);
+      columns.push({ field, value: emptyList(field, dialect) });
+      continue;
+    }
+
     throw new MissingRequiredValueError(schema.name, op, field.name);
   }
 
   return columns;
+}
+
+/**
+ * Refuses an operator map a scalar list does not take — `{ increment: 1 }` —
+ * at **compile** time.
+ *
+ * The value-shaped refusal in `valueBinder` would eventually catch it, and too
+ * late: `isOperatorObject` answers false for an operator a list does not have,
+ * so `{ counts: { increment: 1 } }` was read as a *value* and travelled all the
+ * way to the binder before anything objected. Compile is a pure function of the
+ * argument shape and this is a shape question, so it belongs here — the same
+ * call `assertCompositeInOperand` records making for the same reason.
+ *
+ * Note this is unambiguous even for a `Json[]`, where an object is a plausible
+ * element: the column's value is an *array*, so a bare object in this position
+ * is never data. `isOperatorObject` relies on the same fact.
+ */
+function assertListOperand(
+  schema: ModelSchema,
+  field: FieldSchema,
+  value: unknown,
+  op: Operation,
+  /**
+   * The operators legal in *this* position. An insert takes `set` only —
+   * Prisma's create input for a list is `T[] | { set: T[] }`, with no `push`,
+   * and there is nothing for a `push` to append to on a row that does not exist
+   * yet.
+   */
+  allowed: readonly string[],
+): void {
+  if (!field.isList) return;
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    Array.isArray(value) ||
+    value instanceof Date ||
+    ArrayBuffer.isView(value)
+  ) {
+    return;
+  }
+
+  const given = Object.keys(value as Record<string, unknown>).filter(
+    (key) => (value as Record<string, unknown>)[key] !== undefined,
+  );
+  if (given.length === 1 && allowed.includes(given[0])) return;
+
+  throw new UnsupportedQueryError(
+    `data.${field.name}`,
+    schema.name,
+    op,
+    `'${field.name}' is a scalar list, so it takes ${allowed.join(" or ")} — ` +
+      `or a bare array. Received ${
+        given.length === 0 ? "an empty object" : `{ ${given.join(", ")} }`
+      }. The arithmetic operators apply to a number, not to a list of them.`,
+  );
+}
+
+/**
+ * `{ set: [...] }` on a scalar list, which is the spelling Prisma documents and
+ * which an insert accepts as readily as an update.
+ *
+ * Unambiguous in a way the scalar `Json` case is not — see `isOperatorObject` —
+ * because a list column's data form is always an array, so an object here can
+ * only be the operator.
+ */
+function isListSetOperand(field: FieldSchema, value: unknown): boolean {
+  return (
+    field.isList === true &&
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    !(value instanceof Date) &&
+    !ArrayBuffer.isView(value) &&
+    Object.keys(value).length === 1 &&
+    "set" in value
+  );
 }
 
 /** The scalar fields a `data` object actually sets, validated against the schema. */
@@ -1157,6 +1333,11 @@ function updateAssignments(
  * Prisma's update operators. `set` is the explicit spelling of a plain
  * assignment; the arithmetic four read the column and write it back, so they
  * are the one place a column name appears on the right of an `=`.
+ *
+ * `push` is the sixth and belongs to scalar lists only, so it lives beside them
+ * rather than here — see {@link listOperators}. Keeping it out of this table is
+ * what makes `{ tags: { increment: 1 } }` and `{ count: { push: 1 } }` both
+ * errors that name the field's kind, rather than one of them compiling.
  */
 const ARITHMETIC: Record<string, string> = {
   increment: "+",
@@ -1164,6 +1345,13 @@ const ARITHMETIC: Record<string, string> = {
   multiply: "*",
   divide: "/",
 };
+
+/** The update operators a scalar list takes: `set` and `push`, and nothing else. */
+const LIST_OPERATORS = ["set", "push"] as const;
+
+function listOperators(field: FieldSchema): readonly string[] {
+  return field.isList ? LIST_OPERATORS : ["set", ...Object.keys(ARITHMETIC)];
+}
 
 function assignment(
   schema: ModelSchema,
@@ -1179,6 +1367,11 @@ function assignment(
 ): Fragment {
   const value = (data as Record<string, unknown>)[field.name];
 
+  if (field.isList) {
+    assertListDialect(schema, field, `data.${field.name}`, op, dialect);
+    assertListOperand(schema, field, value, op, LIST_OPERATORS);
+  }
+
   if (isOperatorObject(value, field)) {
     const keys = Object.keys(value as Record<string, unknown>).filter(
       (key) => (value as Record<string, unknown>)[key] !== undefined,
@@ -1189,7 +1382,7 @@ function assignment(
         `data.${field.name}`,
         schema.name,
         op,
-        `Expected exactly one of ${["set", ...Object.keys(ARITHMETIC)].join(", ")}.`,
+        `Expected exactly one of ${listOperators(field).join(", ")}.`,
       );
     }
 
@@ -1200,6 +1393,32 @@ function assignment(
       return concat(
         sql(`${column} = `),
         fieldParam(field, dialect, valueBinder(schema, op, field, dialect, at)),
+      );
+    }
+
+    if (key === "push") {
+      // `array_cat(<column>, $1)` — the column on the right of an `=`, like the
+      // arithmetic four below, and for the same reason: the new value is a
+      // function of the old one.
+      //
+      // The operand is normalised to a list **at bind time**, because Prisma
+      // accepts both `push: "a"` and `push: ["a", "b"]` and the two are the
+      // same statement. That normalisation is also what lets the dialect use a
+      // single-signature function: `||` would read the two spellings as
+      // different operators — see `PostgresDialect.listPush`.
+      return concat(
+        sql(`${column} = `),
+        dialect.listPush(
+          source,
+          fieldParam(
+            field,
+            dialect,
+            valueBinder(schema, op, field, dialect, (args) => {
+              const supplied = at(args);
+              return Array.isArray(supplied) ? supplied : [supplied];
+            }),
+          ),
+        ),
       );
     }
 
@@ -1223,6 +1442,14 @@ function assignment(
  * Prisma resolves the ambiguity through its types; we resolve it by treating a
  * Json column's object as data, which is the reading that never loses the
  * caller's value.
+ *
+ * **A `Json[]` is not excluded**, and the exclusion above is why: the ambiguity
+ * it exists for cannot arise on a list. A `Json` column can legitimately hold
+ * the object `{ set: 1 }`; a `Json[]` column holds an *array*, so an object
+ * operand is never data there and reading it as an operator loses nothing.
+ * Without this the one spelling Prisma documents for writing a list —
+ * `{ tags: { set: [...] } }` — would have been stored as a single JSON object
+ * on exactly the element type where that is a plausible-looking value.
  */
 function isOperatorObject(value: unknown, field: FieldSchema): boolean {
   if (
@@ -1231,14 +1458,15 @@ function isOperatorObject(value: unknown, field: FieldSchema): boolean {
     Array.isArray(value) ||
     value instanceof Date ||
     ArrayBuffer.isView(value) ||
-    field.type === "Json"
+    (field.type === "Json" && !field.isList)
   ) {
     return false;
   }
 
+  const operators = listOperators(field);
   const keys = Object.keys(value as Record<string, unknown>);
   if (keys.length === 0) return false;
-  return keys.every((key) => key === "set" || key in ARITHMETIC);
+  return keys.every((key) => operators.includes(key));
 }
 
 /**
@@ -1280,8 +1508,52 @@ function valueBinder(
       );
     }
 
+    // A list operand is checked here rather than left to `encode`, for the
+    // reason this whole function exists: the dialect has the value and nothing
+    // else, so its refusal can only report an ORM bug. The schema and operation
+    // are closed over here, so this one says which field of which model.
+    if (field.isList && value !== null && value !== undefined) {
+      if (!Array.isArray(value)) {
+        throw new InvalidArgumentError(
+          `data.${field.name}`,
+          schema.name,
+          op,
+          `'${field.name}' is a scalar list, so it takes an array — or ` +
+            `{ set: [...] } / { push: … }. Received ${typeof value}.`,
+        );
+      }
+      if (value.some((element) => jsonNullKind(element) === "any")) {
+        throw new InvalidArgumentError(
+          `data.${field.name}`,
+          schema.name,
+          op,
+          `Prisma.AnyNull is a filter operand, not a value, and that does not ` +
+            `change for being inside a list.`,
+        );
+      }
+    }
+
     return dialect.encode(value, field);
   };
+}
+
+/**
+ * `{}` for a scalar list nobody supplied — what Prisma writes, measured rather
+ * than assumed. See the note in `insertColumns`.
+ */
+function emptyList(field: FieldSchema, dialect: SqlDialect): Binder {
+  return () => dialect.encode([], field);
+}
+
+/**
+ * Whether an absent value for this field means "write the empty list" — a
+ * scalar list with no database default of its own to fall back to.
+ *
+ * A list *with* a default stays out of the statement so the default fires,
+ * which is the same rule every other field follows and produces the same rows.
+ */
+function suppliesEmptyList(field: FieldSchema): boolean {
+  return field.isList === true && !field.default && !field.nullable;
 }
 
 function defaultBinder(field: FieldSchema, dialect: SqlDialect): Binder {

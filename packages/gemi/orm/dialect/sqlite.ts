@@ -141,6 +141,46 @@ export class SqliteDialect implements SqlDialect {
   }
 
   /**
+   * **None**, because SQLite has no array type — and this is Prisma's answer
+   * before it is gemi's. The generated client never sees such a column here:
+   * `prisma generate` refuses the *schema* with *"Field `tags` in model `User`
+   * can't be a list. The current connector does not support lists of primitive
+   * types."*
+   *
+   * So the only way to reach a scalar list on this dialect is an artifact
+   * generated against a Postgres schema and a `DATABASE_URL` pointed at SQLite
+   * — a real configuration, since the artifact is deliberately dialect-agnostic
+   * (#300), and one where the underlying table has no such column either. An
+   * empty set is what turns that into a refusal naming the dialect, in place of
+   * `no such column: tags` from the driver.
+   */
+  readonly listFilters: ReadonlySet<string> = new Set();
+
+  // All five are unreachable: `listFilters` is empty, so `where.ts` and
+  // `write.ts` refuse first with a message naming the dialect. Throwing rather
+  // than emitting something plausible keeps the two from disagreeing silently —
+  // the same call `compositeIn` and `jsonArrayContains` above already make.
+  listHas(): Fragment {
+    throw new Error(unsupportedList("has"));
+  }
+
+  listHasEvery(): Fragment {
+    throw new Error(unsupportedList("hasEvery"));
+  }
+
+  listHasSome(): Fragment {
+    throw new Error(unsupportedList("hasSome"));
+  }
+
+  listIsEmpty(): Fragment {
+    throw new Error(unsupportedList("isEmpty"));
+  }
+
+  listPush(): Fragment {
+    throw new Error(unsupportedList("push"));
+  }
+
+  /**
    * `path: "$.a.b"` — a JSONPath *string*, where Postgres takes an array.
    *
    * Prisma's own split, measured on both: the generated client refuses
@@ -390,4 +430,11 @@ export class SqliteDialect implements SqlDialect {
         return value;
     }
   }
+}
+
+function unsupportedList(operator: string): string {
+  return (
+    `SQLite has no array type, so it cannot express '${operator}' on a scalar ` +
+    `list; \`listFilters\` is the guard.`
+  );
 }

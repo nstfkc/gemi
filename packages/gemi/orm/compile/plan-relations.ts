@@ -1587,6 +1587,18 @@ function assertKeyable(
   relation: RelationSchema,
   key: FieldSchema,
 ): void {
+  // A scalar list is refused for the identical reason, and the element type is
+  // a red herring: a `String[]` decodes to a fresh *array* per row, so `keyOf`
+  // compares two references that are never equal — as unusable a key as a
+  // `Json`, even though `String` is the most keyable scalar there is.
+  if (key.isList) {
+    throw new MalformedRelationError(
+      schema.name,
+      relation.name,
+      `it joins on '${key.name}', a ${key.type} list — which decodes to a new ` +
+        `array per row and so cannot be compared between the two sides.`,
+    );
+  }
   if (key.type !== "Json") return;
   throw new MalformedRelationError(
     schema.name,

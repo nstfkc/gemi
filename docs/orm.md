@@ -58,12 +58,11 @@ Then `bunx prisma generate`. You get three files under `app/models/generated/`:
 
 ### Columns the generator refuses
 
-Two kinds of column stop generation with an `UnsupportedSchemaError` naming the model and field,
+One kind of column stops generation with an `UnsupportedSchemaError` naming the model and field,
 rather than being skipped:
 
 | Column | Why |
 | --- | --- |
-| A scalar list — `tags String[]` | Postgres-only, and needs array decoding this ORM does not have. |
 | `Decimal` | Prisma types it as `Prisma.Decimal`; SQLite stores a REAL and the driver returns a JS number, so the value would be a float pretending to be an arbitrary-precision decimal. |
 
 **Refused rather than omitted, and the whole generation fails rather than the one field.** Skipping
@@ -75,7 +74,25 @@ visible at the moment you introduce it.
 A `Unsupported(...)` column is different and is *not* refused: Prisma's own client omits those from
 its result types, so omitting them is what keeps the shapes identical.
 
-Scalar lists are tracked in [#300](https://github.com/nstfkc/gemi/issues/300).
+```
+UnsupportedSchemaError: User.price is a Decimal, which the gemi ORM does not support yet:
+Prisma types a Decimal field as `Prisma.Decimal`, but SQLite stores it as a REAL and the
+driver returns a JS number — so the value would be a float pretending to be an
+arbitrary-precision decimal, losing exactly the precision the type exists to keep.
+Keep using the Prisma client for this model, or change the field's type.
+```
+
+A scalar type the generator cannot map at all — a future Prisma addition — raises the same error.
+Both are *generator* errors rather than runtime ones, so neither is in the
+[errors table](#errors) below, which is about queries. If you see one, the fix is in
+`schema.prisma`.
+
+**A scalar list used to be in this table and no longer is.** `tags String[]` is implemented on
+Postgres — see [Scalar lists](#scalar-lists-postgres-only). The refusal did not disappear so much as
+move: this artifact is dialect-agnostic on purpose, because `DATABASE_URL` can name a different
+database than `prisma generate` saw, so refusing here refused the column for Postgres too. SQLite
+now declines it at query time instead, with a message naming the dialect. `Decimal[]` is still
+refused, by the row above rather than by a rule about lists.
 
 ### Your model class
 
@@ -365,6 +382,60 @@ merely unsupported:
 
 An empty path — `[]` or `""` — is refused on both dialects. On Postgres it would extract the whole
 document, which is a filter on the column rather than on a path.
+
+### Scalar lists (Postgres only)
+
+```ts
+// model Post { tags String[] }
+await Post.findMany({ where: { tags: { has: "urgent" } } })
+await Post.findMany({ where: { tags: { hasEvery: ["urgent", "draft"] } } })
+await Post.update({ where: { id }, data: { tags: { push: "urgent" } } })
+```
+
+**Postgres only, and that is Prisma's line rather than this ORM's.** SQLite has no array type, and
+`prisma generate` refuses the column outright there — *"Field `tags` in model `Post` can't be a
+list. The current connector does not support lists of primitive types."* So there is no SQLite
+behaviour to match.
+
+The filters, which are a **different set from the scalar operators** on a different kind of column:
+
+| | |
+| --- | --- |
+| `has` | the list contains this element |
+| `hasEvery` | the list contains all of these |
+| `hasSome` | the list and this one share an element |
+| `isEmpty` | `true` or `false` |
+| `equals` | the whole list, in order |
+
+`contains`, `startsWith`, `in` and the comparisons are **not** among them: `contains` on a `String`
+asks about a substring, and on a `String[]` there is no such question — the one Prisma spells is
+`has`. Writing one gets an error naming both sets.
+
+One asymmetry worth knowing before it surprises you, because it is Prisma's and gemi reproduces it:
+
+```ts
+await Post.findMany({ where: { tags: ["a", "b"] } })      // ✗ refused
+await Post.findMany({ where: { tags: { equals: ["a", "b"] } } })  // ✓
+await Post.update({ where: { id }, data: { tags: ["a", "b"] } })  // ✓ a bare array is a value
+```
+
+A bare array is a **value** but not a **filter**. Prisma rejects the first line with *"Expected
+StringNullableListFilter"*, so gemi does too rather than guessing that `equals` was meant.
+
+Writes take `set` and `push`; `push` accepts one element or a list. `increment` and its siblings
+apply to a number, not to a list of them, and are refused by name.
+
+**An omitted list is written as the empty list, not refused.** A `String[]` with no `@default` is
+still not "missing" on `create` — Prisma writes `[]`, and so does gemi. That was measured against a
+generated client rather than read off the input type, which says only that the field is optional.
+
+Every element type Prisma allows is supported — `String`, `Int`, `Float`, `Boolean`, `BigInt`,
+`DateTime`, `Bytes`, `Json` and enums. `Decimal[]` is refused, because `Decimal` itself is (see
+below); a list of a scalar no dialect can round-trip is not more supportable for being a list.
+
+An enum list is worth one note: the driver hands those back as an unparsed Postgres array literal
+rather than as an array, so gemi parses them. You will not see the difference — that is the point —
+but it is why a list column costs a decode where a `String` does not.
 
 ### What a refusal tells you
 
@@ -1368,10 +1439,6 @@ if (!ormSupports(DB.dialect)) throw new Error("this deployment needs Postgres")
 
 Stated so you can plan around them rather than discover them:
 
-- **No scalar lists.** `tags String[]` is refused at *generation* time, so this one stops your build
-  rather than a query — see [Columns the generator refuses](#columns-the-generator-refuses). Prisma
-  itself refuses them on SQLite, so half the supported matrix could never have had them.
-  Pending rather than declined ([#300](https://github.com/nstfkc/gemi/issues/300)).
 - **No identity map and no unit of work.** Two queries for the same row give you two objects. Half
   an identity map is worse than none.
 - **No lazy loading.** A relation you did not `include` is absent, not a proxy that queries when
@@ -1391,6 +1458,13 @@ Stated so you can plan around them rather than discover them:
 - **No `cursor`, also deliberate.** It is only correct under a *total* ordering, which Prisma does
   not enforce — under a non-unique `orderBy` it skips or repeats rows at the page boundary. Use
   `take` with a `where` on the last row's sort key, or compose the keyset comparison with `sql`.
+- **No `Decimal`, on either dialect.** Refused at `prisma generate` rather than at query time — see
+  [Columns the generator refuses](#columns-the-generator-refuses). SQLite stores it as a REAL and
+  hands back a JS number, so the value would be a float typed as `Prisma.Decimal`. `Decimal[]` is
+  refused for the same reason.
+- **Scalar lists are Postgres-only**, which is not a gemi limit but Prisma's: SQLite rejects the
+  column at schema validation. They are otherwise fully supported — see
+  [Scalar lists](#scalar-lists-postgres-only).
 
 Both of the last two throw `UnsupportedByDesignError`, which says *"and this is a decision rather
 than a gap"* rather than *"yet"* — so a refusal you can plan around reads differently from one that

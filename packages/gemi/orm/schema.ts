@@ -17,6 +17,16 @@
  * `assertSchemaArtifactVersion` compares the two at registration time so a stale
  * `app/models/generated` fails with "run prisma generate" rather than with a
  * `TypeError` five stack frames into the compiler.
+ *
+ * **`FieldSchema.isList` did not bump it**, and the reason is worth stating
+ * because the obvious reading says it should have. The hazard a bump guards
+ * against is a *new* artifact read by an *old* runtime, which would see a list
+ * column, not know the flag, and treat it as a scalar. That pairing cannot
+ * occur: the generator is `bin/orm` and the runtime is `orm/`, both shipped by
+ * the same `gemi` package and the same version — a runtime old enough to miss
+ * the flag came with a generator that refused to emit the column at all. The
+ * reverse pairing, an old artifact on a new runtime, is what `isList` being
+ * optional already covers.
  */
 export const SCHEMA_ARTIFACT_VERSION = 1;
 
@@ -59,6 +69,24 @@ export interface FieldSchema {
   nullable: boolean;
   isId: boolean;
   isUpdatedAt: boolean;
+  /**
+   * A Prisma **scalar list** — `tags String[]`. Postgres only; SQLite has no
+   * array type and Prisma refuses the declaration there outright.
+   *
+   * **A flag beside `type` rather than a `ScalarType` constructor**, and the
+   * choice reaches further than it looks. `type` keeps meaning the *element*
+   * type, so every `switch (field.type)` already written — `encode`, `decode`,
+   * `castParameter`, the lateral strategy's `jsonConverter`, `COMPOSITE_IN_TYPES`
+   * — keeps reading correctly and only has to ask this one extra question where
+   * a list genuinely differs. A `"String[]"` member of the union would have made
+   * every one of those switches silently non-exhaustive instead: no compile
+   * error, just a `default:` branch answering for a shape it had never seen.
+   *
+   * Absent rather than `false` on a non-list field, so an artifact generated
+   * before this existed is byte-identical to one generated after it — see the
+   * note on `SCHEMA_ARTIFACT_VERSION`, which is deliberately *not* bumped here.
+   */
+  isList?: boolean;
   /**
    * Set when the field is a Prisma enum. The enum's members are strings on the
    * wire, so `type` is `"String"` and this carries the name for later.

@@ -206,6 +206,10 @@ jobs:
       # parameter, which reads as a connection failure rather than a bad URL.
       TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/gemi_test
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/gemi_test
+      # The scalar-list schema's own database — see the two steps that create
+      # and push it. A second database rather than a second set of tables,
+      # because `prisma db push` reconciles a whole database to one schema.
+      TEST_POSTGRES_LISTS_URL: postgres://postgres:postgres@localhost:5432/gemi_lists
       TZ: UTC
 
     steps:
@@ -245,6 +249,36 @@ jobs:
       - name: Create the schema
         run: bunx prisma db push --skip-generate
         working-directory: templates/saas-starter
+
+      # `prisma/postgres-only.prisma` — the scalar lists (#300), which cannot
+      # live in the schema above because a `String[]` is a *validation error* on
+      # SQLite, and that schema has its provider flipped between dialects. So
+      # they get their own schema, their own client and their own database.
+      #
+      # A separate database because `prisma db push` reconciles a whole database
+      # to one schema: pushed at `gemi_test`, it would drop every table the main
+      # schema owns and the rest of this job would fail with missing relations.
+      #
+      # Skipping this step does not fail anything — `scalar-list.test.ts` gates
+      # on `TEST_POSTGRES_LISTS_URL` — so it would read as a pass. That is
+      # exactly the silence `postgres-suite-selection.test.ts` exists to catch,
+      # and the suite prints a loud warning when it does not run.
+      # `|| true` for the same reason `app/models/postgres.sh` has one: a
+      # re-created database is an error rather than a no-op, so a rerun against
+      # a persisted service container would fail a step that is not the point of
+      # the job. A fresh container makes it succeed the first time either way.
+      - name: Create the scalar-list database
+        run: >-
+          PGPASSWORD=postgres psql -h localhost -U postgres -d gemi_test
+          -c 'CREATE DATABASE gemi_lists' || true
+
+      - name: Generate and push the scalar-list schema
+        run: |
+          bunx prisma generate --schema prisma/postgres-only.prisma
+          bunx prisma db push --schema prisma/postgres-only.prisma --skip-generate
+        working-directory: templates/saas-starter
+        env:
+          LISTS_DATABASE_URL: postgres://postgres:postgres@localhost:5432/gemi_lists
 
       # `-t postgres` selects the dialect-labelled suites, and it is required
       # rather than tidy. `@prisma/client` speaks one provider at a time, and

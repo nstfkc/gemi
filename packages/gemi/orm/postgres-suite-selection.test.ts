@@ -52,11 +52,22 @@ const filter = (() => {
   return match![1];
 })();
 
-/** Files that gate a suite behind `POSTGRES_URL`, and the suite names they use. */
+/**
+ * Files that gate a suite behind a Postgres URL, and the suite names they use.
+ *
+ * The pattern admits any `POSTGRES…_URL`, not just `POSTGRES_URL` itself. There
+ * is a second one now — `POSTGRES_LISTS_URL`, for the scalar-list schema that
+ * needs its own database (#300) — and a check written against the one name
+ * would have silently stopped covering the file that introduced it. That is the
+ * precise shape of the failure this test exists for: three suites were selected
+ * by neither job, and nothing said so.
+ */
 const gated = readdirSync(MODELS)
   .filter((file) => file.endsWith(".test.ts"))
   .map((file) => ({ file, source: readFileSync(join(MODELS, file), "utf8") }))
-  .filter(({ source }) => /POSTGRES_URL \? describe : describe\.skip/.test(source))
+  .filter(({ source }) =>
+    /POSTGRES(?:_[A-Z]+)*_URL \? describe : describe\.skip/.test(source),
+  )
   .map(({ file, source }) => ({
     file,
     suites: [...source.matchAll(/^RUN\(\s*"([^"]+)"/gm)].map((match) => match[1]),
