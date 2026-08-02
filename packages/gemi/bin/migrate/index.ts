@@ -20,6 +20,7 @@ import {
   FACADE_RENAMES,
   MODULE_MOVES,
   PROVIDER_MIGRATIONS,
+  RETIRED_CONFIG_FIELDS,
   SECTION_ORDER,
   SERVICE_RENAMES,
   TODO,
@@ -70,7 +71,25 @@ export async function runMigrate(options: MigrateOptions) {
   // referencing them, just through the new `providers` array.
   const carriedProviders: string[] = [];
 
-  if (existsSync(providersDir)) {
+  /**
+   * Whether the app is still on the 0.42 layout, and so whether steps 2 and 3
+   * have anything to do.
+   *
+   * Both used to run unconditionally, which made this command destructive on an
+   * app that had already migrated. `buildKernel` writes the `config` member from
+   * the slices it just generated, so it treats a Kernel's existing `config` as
+   * an unrecognised leftover and carries it over commented out — and `config` is
+   * part of the current Kernel shape, not a 0.42 relic. On an already-migrated
+   * app that silently unwires every config slice: the file still compiles, the
+   * app still boots, and nothing an app declares in `app/config` is merged.
+   *
+   * The directory's presence is the right signal rather than the slice count,
+   * because a providers directory whose every file is unrecognised is still a
+   * 0.42 app that wants its Kernel rewritten.
+   */
+  const onOldLayout = existsSync(providersDir);
+
+  if (onOldLayout) {
     for (const entry of readdirSync(providersDir).sort()) {
       if (!/\.tsx?$/.test(entry)) continue;
       const file = path.join(providersDir, entry);
@@ -119,42 +138,48 @@ export async function runMigrate(options: MigrateOptions) {
     }
   }
 
-  // 2. Kernel.
+  // 2. Kernel — only when there was a provider layout to move off, per
+  //    `onOldLayout`. Nothing is reported when the whole step is skipped: the
+  //    no-providers-directory note above already says why, and repeating it per
+  //    skipped step buries the retired-API findings under its own bookkeeping.
   const kernelFile = path.join(appDir, "kernel", "Kernel.ts");
-  if (existsSync(kernelFile)) {
-    changes.push({
-      file: kernelFile,
-      contents: buildKernel(
-        kernelFile,
-        [...slices.keys()],
-        carriedProviders,
-        rootDir,
-        notes,
-      ),
-    });
-  } else {
-    notes.push({
-      file: "app/kernel/Kernel.ts",
-      message: "not found — the Kernel rewrite was skipped",
-    });
+  if (onOldLayout) {
+    if (existsSync(kernelFile)) {
+      changes.push({
+        file: kernelFile,
+        contents: buildKernel(
+          kernelFile,
+          [...slices.keys()],
+          carriedProviders,
+          rootDir,
+          notes,
+        ),
+      });
+    } else {
+      notes.push({
+        file: "app/kernel/Kernel.ts",
+        message: "not found — the Kernel rewrite was skipped",
+      });
+    }
   }
 
   // 3. The app's own provider, which is where anything that used to live in a
   //    provider's `boot()` now belongs.
   const appProviderFile = path.join(appDir, "providers", "AppServiceProvider.ts");
-  if (!existsSync(appProviderFile)) {
+  if (onOldLayout && !existsSync(appProviderFile)) {
     changes.push({ file: appProviderFile, contents: APP_SERVICE_PROVIDER });
   }
 
   // 4. Provider files whose contents now live in app/config are superseded.
   for (const file of migratedFiles) changes.push({ file, contents: null });
 
-  // 5. Renames across the rest of the app.
+  // 5. Renames across the rest of the app, plus retired fields in app/config.
   const touched = new Set(changes.map((change) => change.file));
   for (const file of walk(appDir)) {
     if (touched.has(file)) continue;
     const source = readFileSync(file, "utf8");
-    const rewritten = rewriteReferences(source, rel(rootDir, file), notes);
+    let rewritten = rewriteReferences(source, rel(rootDir, file), notes);
+    rewritten = annotateRetiredFields(rewritten, file, appDir, rel(rootDir, file), notes);
     if (rewritten !== source) changes.push({ file, contents: rewritten });
   }
 
@@ -424,14 +449,28 @@ function renderMembers(
     if (member.blankBefore) lines.push("");
     if (member.leading.trim()) lines.push(reindent(member.leading, width, shift));
 
-    if (member.kind === "unsupported") {
+    // Two ways a member fails to become a config field: the parser could not
+    // classify it, or the field it would have become no longer exists. Both
+    // render the same — TODO, then the original commented out — and differ only
+    // in the sentence, so they share the branch.
+    const removal = member.name
+      ? migration.memberRemovals?.[member.name]
+      : undefined;
+
+    if (member.kind === "unsupported" || removal) {
+      const reason = removal ?? member.reason!;
       notes.push({
         file: label,
-        message: `\`${member.name ?? member.text.split(/\s/)[0]}\` — ${member.reason}; left commented out in the config file`,
+        message: removal
+          ? `\`${member.name}\` — ${removal}`
+          : `\`${member.name ?? member.text.split(/\s/)[0]}\` — ${reason}; left commented out in the config file`,
       });
+      // The parser's reasons are clause fragments; a removal's is prose that
+      // already punctuates itself.
+      const sentence = /[.!?]$/.test(reason) ? reason : `${reason}.`;
       lines.push(
         reindent(
-          `${TODO} ${member.reason}. The 0.42 source is kept below.`,
+          `${TODO} ${sentence} The 0.42 source is kept below.`,
           width,
           shift,
         ),
@@ -620,6 +659,54 @@ export default class AppServiceProvider extends ServiceProvider {
 // ---------------------------------------------------------------------------
 // Reference renames across the rest of app/
 // ---------------------------------------------------------------------------
+
+/**
+ * Marks retired fields in `app/config/*.ts` with a TODO, in place.
+ *
+ * Annotates rather than deletes, which is the whole design. A field's value is
+ * an expression the app wrote — `new OrgProvisioningAuthAdapter(prisma)` — and
+ * removing the property can strand an import, an instantiation with side
+ * effects, or the only reference to a class the app still wants. The type error
+ * is already a perfectly good forcing function; what it lacks is a sentence
+ * saying where the replacement lives, and that is what this adds.
+ *
+ * Matched by line rather than by parsing the object, because the target is a
+ * top-level key in a `define*Config({ … })` call and a nested `userProvider`
+ * inside some unrelated option would be a false positive the author can see and
+ * ignore — where a rewrite of the wrong node would not be.
+ */
+function annotateRetiredFields(
+  source: string,
+  file: string,
+  appDir: string,
+  label: string,
+  notes: Note[],
+): string {
+  const configDir = path.join(appDir, "config");
+  if (path.dirname(file) !== configDir) return source;
+
+  const slice = path.basename(file).replace(/\.tsx?$/, "");
+  const retired = RETIRED_CONFIG_FIELDS[slice];
+  if (!retired) return source;
+
+  let out = source;
+
+  for (const [field, message] of Object.entries(retired)) {
+    const property = new RegExp(`^([ \\t]*)${field}\\s*:`, "m");
+    const match = property.exec(out);
+    if (!match) continue;
+    // Idempotent: a second run must not stack TODOs on the same field.
+    if (out.slice(0, match.index).trimEnd().endsWith(message)) continue;
+
+    out =
+      out.slice(0, match.index) +
+      `${match[1]}${TODO} ${message}\n` +
+      out.slice(match.index);
+    notes.push({ file: label, message: `\`${field}\` — ${message}` });
+  }
+
+  return out;
+}
 
 function rewriteReferences(
   source: string,

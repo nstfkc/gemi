@@ -1,6 +1,24 @@
-// The 0.42 -> 0.43 rename tables the codemod drives off. Keeping them as data
-// (rather than scattered string literals) means `UPGRADE.md` and the codemod
-// cannot drift apart.
+// The rename tables the codemod drives off — the 0.42 -> 0.43 provider/config
+// move, plus the APIs retired since. Keeping them as data (rather than scattered
+// string literals) means `UPGRADE.md` and the codemod cannot drift apart.
+
+/**
+ * What the retired authentication-adapter seam leaves an app to do. One sentence
+ * reused by every name that seam exported, because they all have the same
+ * replacement: there is one `UserProvider`, it is a class rather than an
+ * interface, and an app that needs different queries subclasses it.
+ *
+ * A codemod cannot write that subclass — an adapter's method bodies are the
+ * app's own queries, against whatever client it was using — so this stops at
+ * naming the destination. That is still the difference between a compile error
+ * with no target and one that says where to go.
+ */
+const ADAPTER_RETIRED =
+  "The authentication adapter seam was removed; auth persistence is now the " +
+  "ORM-backed `UserProvider`. Subclass `UserProvider` from `gemi/kernel`, " +
+  "override the methods the adapter implemented, and install it by rebinding " +
+  "`AuthManager` (from `gemi/services`) in a ServiceProvider — it takes the " +
+  "provider as its second constructor argument. See docs/authentication.md.";
 
 export interface ProviderMigration {
   /** Base class the app's provider extended in 0.42. */
@@ -14,6 +32,13 @@ export interface ProviderMigration {
   defineModule: string;
   /** Provider members renamed on the way to config. */
   memberRenames?: Record<string, string>;
+  /**
+   * Provider members with no config field to land in, mapped to the sentence
+   * the TODO should carry. Rendered commented-out, like a member the parser
+   * could not classify — the app's source is preserved either way, and the
+   * difference is only whether we can say *why*.
+   */
+  memberRemovals?: Record<string, string>;
 }
 
 export const PROVIDER_MIGRATIONS: ProviderMigration[] = [
@@ -22,7 +47,15 @@ export const PROVIDER_MIGRATIONS: ProviderMigration[] = [
     configKey: "auth",
     defineFn: "defineAuthConfig",
     defineModule: "gemi/services",
-    memberRenames: { adapter: "userProvider" },
+    // `adapter` used to become the `userProvider` config field. That field is
+    // gone too — the seam it selected between no longer exists — so renaming it
+    // would emit a key `AuthConfig` does not have, turning a migration into a
+    // type error in the file the codemod just wrote. It is dropped with the
+    // instruction instead.
+    memberRemovals: {
+      adapter: ADAPTER_RETIRED,
+      userProvider: ADAPTER_RETIRED,
+    },
   },
   {
     provider: "EmailServiceProvider",
@@ -137,6 +170,22 @@ export const SERVICE_RENAMES: Record<string, string> = {
   KernelIdServiceContainer: "KernelId",
 };
 
+/**
+ * Config fields retired *after* 0.43, keyed by slice — the `app/config/<slice>.ts`
+ * basename — then by field.
+ *
+ * Distinct from `memberRenames`/`memberRemovals`, which only reach an app still
+ * carrying 0.42 provider classes. An app that migrated to 0.43 when it was
+ * current has no providers directory left, so the provider-to-config step finds
+ * nothing and every table above sits idle — while its config files keep naming
+ * fields that have since gone. That app is the one most likely to run this
+ * command, and until this table existed it was the one the command did least
+ * for.
+ */
+export const RETIRED_CONFIG_FIELDS: Record<string, Record<string, string>> = {
+  auth: { userProvider: ADAPTER_RETIRED },
+};
+
 /** Exports that are simply gone, with the sentence the TODO should carry. */
 export const DELETED_EXPORTS: Record<string, string> = {
   Singleton:
@@ -152,6 +201,10 @@ export const DELETED_EXPORTS: Record<string, string> = {
   KernelIdServiceProvider:
     "`KernelIdServiceProvider` is internal to the framework now and has no " +
     "app-facing config slice.",
+  IAuthenticationAdapter: ADAPTER_RETIRED,
+  PrismaAuthenticationAdapter: ADAPTER_RETIRED,
+  OrmAuthenticationAdapter: ADAPTER_RETIRED,
+  ormAuthenticationAdapter: ADAPTER_RETIRED,
 };
 
 /** Exports that moved module without changing name. */

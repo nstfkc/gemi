@@ -82,6 +82,12 @@ export { Sharp } from "./image-optimization/drivers/SharpDriver";
 
 // Auth
 export { AuthServiceProvider } from "../auth/AuthServiceProvider";
+// Exported for the same reason every other manager here is: an application that
+// needs a different `UserProvider` rebinds this token in its own service
+// provider, passing the subclass as the second constructor argument. That is
+// the only supported way to install one — `AuthConfig` has no field for it —
+// and `docs/authentication.md` documents it against this entrypoint.
+export { AuthManager } from "../auth/AuthManager";
 export { GoogleOAuthProvider } from "../auth/oauth/GoogleOAuthProvider";
 export { XOAuthProvider } from "../auth/oauth/XOAuthProvider";
 export { OAuthProvider } from "../auth/oauth/OAuthProvider";

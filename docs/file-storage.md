@@ -214,16 +214,16 @@ bun add @azure/storage-blob
 ```
 
 ```typescript
-// app/kernel/providers/FileStorageServiceProvider.ts
-import { FileStorageServiceProvider, AzureBlobDriver } from "gemi/services";
+// app/config/filesystem.ts
+import { defineFilesystemConfig, AzureBlobDriver } from "gemi/services";
 
-export default class extends FileStorageServiceProvider {
-  driver = new AzureBlobDriver({
+export default defineFilesystemConfig({
+  driver: new AzureBlobDriver({
     // defaults to process.env.AZURE_STORAGE_CONNECTION_STRING
     connectionString: process.env.AZURE_STORAGE_CONNECTION_STRING,
     container: process.env.BUCKET_NAME,
-  });
-}
+  }),
+});
 ```
 
 The SDK is loaded lazily on first use, so importing `gemi/services` costs nothing when the driver is unused. Using it without the package installed throws an error telling you to install it.

@@ -61,7 +61,7 @@ It launches `dist/server/server.mjs` in a fresh Bun process with `NODE_ENV=produ
 
 ## `gemi migrate`
 
-Upgrades an app from the 0.42 service-provider layout to the 0.43 config + container layout.
+Upgrades an app from the 0.42 service-provider layout to the config + container layout introduced in 0.43, and flags the APIs retired since.
 
 ```bash
 gemi migrate --dry-run   # print the plan, write nothing
@@ -72,7 +72,9 @@ It reads `app/kernel/providers/`, turns each recognised provider into an `app/co
 
 Anything it cannot translate is left on disk and reported rather than guessed at — unrecognised providers are carried into the new `providers` array with a TODO, and `.use()` call sites are renamed but not rewritten. Run `--dry-run` first, and see [UPGRADE.md](https://github.com/nstfkc/gemi/blob/main/UPGRADE.md) for the full list of what it does and does not handle.
 
-> This command only makes sense once, when moving from 0.42 to 0.43. It is a no-op on an app that has no `app/kernel/providers/` directory.
+It also annotates APIs retired after 0.43 rather than rewriting them, which is the half that applies to an app already on the config + container layout. Imports of the retired authentication adapters (`IAuthenticationAdapter`, `PrismaAuthenticationAdapter`, `OrmAuthenticationAdapter`) and the `userProvider` field in `app/config/auth.ts` get a TODO naming their replacement — subclass `UserProvider` and rebind `AuthManager` — because the substitute is an app-specific class no codemod can write. Retired fields are marked in place, never deleted: the value is an expression your app wrote, and removing it can strand an import or an instantiation you still need. See [Authentication](./authentication.md#changing-a-query).
+
+> The provider-to-config half only runs when `app/kernel/providers/` exists. Without it that step is skipped and your `Kernel.ts` is left alone — so re-running the command on an already-migrated app is safe, and the retired-API pass above is all it does.
 
 ## `gemi ide:generate-api-manifest`
 
