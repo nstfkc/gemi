@@ -16,6 +16,7 @@ import {
   type Fragment,
   concat,
   joinFragments,
+  param,
   sql,
 } from "./fragment";
 import { JSON_NULL, type JsonNullKind, jsonNullKind } from "../json-null";
@@ -664,6 +665,216 @@ function assertCompositeInOperand(
   return fields;
 }
 
+/** The filters Prisma applies to a value extracted from a JSON path. */
+const JSON_FILTERS = new Set([
+  "equals",
+  "not",
+  "string_contains",
+  "string_starts_with",
+  "string_ends_with",
+  "array_contains",
+  "lt",
+  "lte",
+  "gt",
+  "gte",
+]);
+
+/**
+ * `where: { metadata: { path: …, equals: … } }`.
+ *
+ * **Two dialects, two path grammars, and that is Prisma's split rather than
+ * this ORM's.** Measured on both through a generated client: Postgres takes
+ * `path: ["a", "b"]` and refuses a string; SQLite takes `path: "$.a.b"` and
+ * refuses an array. So the argument is dialect-specific before it arrives here,
+ * and `jsonPathSyntax` is what lets the check say which form *this* database
+ * wants instead of failing inside the driver.
+ *
+ * **The path is bound, never interpolated.** This is the one place a caller's
+ * value decides part of an expression's meaning, which makes it the obvious
+ * place to break invariant 2 by accident. Neither dialect needs it in the text:
+ * Postgres's `#>` takes a `text[]` parameter and SQLite's `json_extract` takes
+ * a string, so the whole feature fits inside the existing rule.
+ *
+ * The operator set is the dialect's too. Prisma refuses `array_contains` and
+ * the numeric comparisons on SQLite — *"Unknown argument"* — so refusing them
+ * here is matching it, not falling short: implementing them would make gemi
+ * answer a query the oracle cannot, which is precisely where a differential
+ * test stops being able to check anything.
+ */
+function compileJsonFilter(
+  schema: ModelSchema,
+  field: FieldSchema,
+  column: string,
+  filter: Record<string, unknown>,
+  context: WhereContext,
+  locate: (args: any) => any,
+): Fragment {
+  const { dialect } = context;
+
+  if (field.type !== "Json") {
+    throw new UnsupportedQueryError(
+      `${field.name}.path`,
+      schema.name,
+      context.operation,
+      `A 'path' filter reads inside a JSON document, and '${field.name}' is ` +
+        `a ${field.type} column.`,
+    );
+  }
+
+  assertPathShape(schema, field, filter.path, context);
+
+  const path: Binder = (args) => locate(args)?.path;
+  const applied = Object.keys(filter)
+    .filter((key) => key !== "path")
+    .sort();
+
+  if (applied.length === 0) {
+    // Prisma: "A JSON path cannot be set without a scalar filter." Reproduced
+    // because the alternative is an extraction with nothing to compare it to,
+    // which compiles to a value in a predicate position on one dialect and to
+    // an error on the other.
+    throw new UnsupportedQueryError(
+      `${field.name}.path`,
+      schema.name,
+      context.operation,
+      `A 'path' needs a filter beside it — ${[...JSON_FILTERS].sort().join(", ")}. ` +
+        `Prisma refuses a bare path too.`,
+    );
+  }
+
+  const parts: Fragment[] = [];
+
+  for (const key of applied) {
+    if (!JSON_FILTERS.has(key)) {
+      throw new UnsupportedQueryError(
+        `${field.name}.${key}`,
+        schema.name,
+        context.operation,
+        `A JSON path filter takes ${[...JSON_FILTERS].sort().join(", ")}.`,
+      );
+    }
+
+    if (!dialect.jsonFilters.has(key)) {
+      throw new UnsupportedQueryError(
+        `${field.name}.${key}`,
+        schema.name,
+        context.operation,
+        `'${key}' on a JSON path is not available on ${dialect.name}. Prisma ` +
+          `refuses it here too, so this is a difference between the databases ` +
+          `rather than a gap in the ORM. It works on postgres.`,
+      );
+    }
+
+    parts.push(
+      jsonComparison(key, column, path, field, dialect, (args) =>
+        locate(args)?.[key],
+      ),
+    );
+  }
+
+  return parts.length === 1
+    ? parts[0]
+    : group(parts, " and ");
+}
+
+/** The comparison for one JSON filter key. */
+function jsonComparison(
+  key: string,
+  column: string,
+  path: Binder,
+  field: FieldSchema,
+  dialect: SqlDialect,
+  value: Binder,
+): Fragment {
+  if (key === "array_contains") {
+    return dialect.jsonArrayContains(column, path, value);
+  }
+
+  // The string filters compare *text*, so they need the text-returning
+  // extraction; everything else compares the value.
+  const stringly =
+    key === "string_contains" ||
+    key === "string_starts_with" ||
+    key === "string_ends_with";
+
+  const extracted = dialect.jsonExtract(column, path, true);
+
+  if (stringly) {
+    const wrap =
+      key === "string_contains"
+        ? (text: string) => `%${text}%`
+        : key === "string_starts_with"
+          ? (text: string) => `${text}%`
+          : (text: string) => `%${text}`;
+
+    return concat(
+      sql("("),
+      extracted,
+      sql(") like "),
+      param((args, context) => {
+        const raw = value(args, context);
+        return raw === null || raw === undefined ? null : wrap(String(raw));
+      }),
+    );
+  }
+
+  const operator =
+    key === "equals" ? "=" : key === "not" ? "<>" : COMPARISONS[key];
+
+  // `#>>` and `json_extract` both yield text, so a numeric comparison has to
+  // compare numbers rather than their spellings — otherwise "10" < "9". The
+  // cast is structural, never a value.
+  const numeric = key !== "equals" && key !== "not";
+  const lhs = numeric
+    ? concat(sql("cast(("), extracted, sql(") as real)"))
+    : concat(sql("("), extracted, sql(")"));
+
+  return concat(
+    lhs,
+    sql(` ${operator} `),
+    param((args, context) => {
+      const raw = value(args, context);
+      if (raw === null || raw === undefined) return null;
+      if (numeric) return Number(raw);
+      // Text on Postgres, native on SQLite — see `jsonComparesAsText`. The
+      // wrong one returns no rows on one dialect and raises on the other.
+      return dialect.jsonComparesAsText ? String(raw) : raw;
+    }),
+  );
+}
+
+/** The path is a string on SQLite and an array of keys on Postgres. */
+function assertPathShape(
+  schema: ModelSchema,
+  field: FieldSchema,
+  path: unknown,
+  context: WhereContext,
+): void {
+  const { dialect } = context;
+  const wanted = dialect.jsonPathSyntax === "array" ? "array" : "jsonpath";
+  const got = Array.isArray(path) ? "array" : typeof path === "string" ? "jsonpath" : "other";
+
+  if (got === wanted) {
+    if (wanted !== "array") return;
+    if ((path as unknown[]).every((part) => typeof part === "string" || typeof part === "number")) {
+      return;
+    }
+  }
+
+  throw new UnsupportedQueryError(
+    `${field.name}.path`,
+    schema.name,
+    context.operation,
+    dialect.jsonPathSyntax === "array"
+      ? `On ${dialect.name} a JSON path is an array of keys — ["a", "b"] — ` +
+        `not a JSONPath string. Prisma splits them the same way, and refuses ` +
+        `the other form on each database.`
+      : `On ${dialect.name} a JSON path is a JSONPath string — "$.a.b" — not ` +
+        `an array of keys. Prisma splits them the same way, and refuses the ` +
+        `other form on each database.`,
+  );
+}
+
 function compileFieldFilter(
   schema: ModelSchema,
   field: FieldSchema,
@@ -704,6 +915,13 @@ function compileFieldFilter(
 
   const filter = value as Record<string, unknown>;
   const keys = Object.keys(filter).sort();
+
+  // A `path` turns the whole operand into a JSON filter, whose operators are a
+  // different set from the scalar ones and whose left-hand side is an
+  // extraction rather than a column.
+  if (filter.path !== undefined) {
+    return compileJsonFilter(schema, field, column, filter, context, locate);
+  }
 
   // Prisma-only, and only meaningful next to a string operator. Read here so it
   // does not get treated as an operator in its own right.

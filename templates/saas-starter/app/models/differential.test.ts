@@ -885,6 +885,41 @@ const SQLITE_ONLY: [string, string, unknown][] = [
     "findMany",
     { where: { email: { contains: "ADA", mode: "insensitive" } } },
   ],
+
+  // --- JSON path filters, SQLite spelling (#70) -------------------------
+  //
+  // The path is a **JSONPath string** here and an array of keys on Postgres.
+  // That is Prisma's own split — its client refuses the other form on each
+  // database — so these cannot be one shared list, and the pair of lists is
+  // itself the assertion.
+  ["json path equals", "findMany", {
+    where: { metadata: { path: "$.plan", equals: "pro" } },
+    orderBy: { id: "asc" },
+  }],
+  ["json path not", "findMany", {
+    where: { metadata: { path: "$.plan", not: "pro" } },
+    orderBy: { id: "asc" },
+  }],
+  ["json path string_contains", "findMany", {
+    where: { metadata: { path: "$.plan", string_contains: "r" } },
+    orderBy: { id: "asc" },
+  }],
+  ["json path string_starts_with", "findMany", {
+    where: { metadata: { path: "$.plan", string_starts_with: "p" } },
+    orderBy: { id: "asc" },
+  }],
+  ["json path string_ends_with", "findMany", {
+    where: { metadata: { path: "$.plan", string_ends_with: "o" } },
+    orderBy: { id: "asc" },
+  }],
+  ["json path into a nested object", "findMany", {
+    where: { metadata: { path: "$.limits.seats", equals: 3 } },
+    orderBy: { id: "asc" },
+  }],
+  ["json path that matches nothing", "findMany", {
+    where: { metadata: { path: "$.nope", equals: "x" } },
+    orderBy: { id: "asc" },
+  }],
 ];
 
 /**
@@ -1009,6 +1044,60 @@ const PER_PARENT_NESTED: [string, string, unknown][] = [
 ];
 
 const POSTGRES_ONLY: [string, string, unknown][] = [
+  // --- JSON path filters, Postgres spelling (#70) -----------------------
+  //
+  // The same seven as the SQLite list, spelled with an array path, plus the
+  // three Prisma only offers here. `array_contains` and the numeric
+  // comparisons are refused on SQLite by the generated client itself, so
+  // implementing them there would put gemi ahead of an oracle that cannot
+  // check it.
+  ["json path equals", "findMany", {
+    where: { metadata: { path: ["plan"], equals: "pro" } },
+    orderBy: { id: "asc" },
+  }],
+  ["json path not", "findMany", {
+    where: { metadata: { path: ["plan"], not: "pro" } },
+    orderBy: { id: "asc" },
+  }],
+  ["json path string_contains", "findMany", {
+    where: { metadata: { path: ["plan"], string_contains: "r" } },
+    orderBy: { id: "asc" },
+  }],
+  ["json path string_starts_with", "findMany", {
+    where: { metadata: { path: ["plan"], string_starts_with: "p" } },
+    orderBy: { id: "asc" },
+  }],
+  ["json path string_ends_with", "findMany", {
+    where: { metadata: { path: ["plan"], string_ends_with: "o" } },
+    orderBy: { id: "asc" },
+  }],
+  ["json path into a nested object", "findMany", {
+    where: { metadata: { path: ["limits", "seats"], equals: 3 } },
+    orderBy: { id: "asc" },
+  }],
+  ["json path that matches nothing", "findMany", {
+    where: { metadata: { path: ["nope"], equals: "x" } },
+    orderBy: { id: "asc" },
+  }],
+  ["json array_contains a scalar", "findMany", {
+    where: { metadata: { path: ["tags"], array_contains: "a" } },
+    orderBy: { id: "asc" },
+  }],
+  ["json array_contains a list", "findMany", {
+    where: { metadata: { path: ["tags"], array_contains: ["a"] } },
+    orderBy: { id: "asc" },
+  }],
+  // A number inside a document, compared as a number. Both extractions yield
+  // text, so without a cast "10" would sort before "9".
+  ["json path gt on a number", "findMany", {
+    where: { metadata: { path: ["limits", "seats"], gt: 2 } },
+    orderBy: { id: "asc" },
+  }],
+  ["json path lte on a number", "findMany", {
+    where: { metadata: { path: ["limits", "seats"], lte: 3 } },
+    orderBy: { id: "asc" },
+  }],
+
   [
     "mode insensitive matches case-blind on postgres",
     "findMany",
