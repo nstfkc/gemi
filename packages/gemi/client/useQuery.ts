@@ -1,6 +1,7 @@
 import {
   useCallback,
   useContext,
+  useDeferredValue,
   useEffect,
   useRef,
   useSyncExternalStore,
@@ -22,6 +23,15 @@ import { isPlainObject } from "./isPlainObject";
 
 interface Config<T> {
   fallbackData?: T;
+  /**
+   * When true (the default), a variant change keeps rendering the previous
+   * variant's data while the new one loads. Under suspense this reads through
+   * a deferred variant key, so changing `search`/`params` never flashes the
+   * segment fallback and needs no `startTransition` at the call site — the
+   * pending window is exposed as `loading: true`. Set to `false` to get the
+   * suspend-on-variant-change semantics back (e.g. tab-like switches where
+   * stale rows would mislead). First mount always suspends either way.
+   */
   keepPreviousData?: boolean;
   retryIntervalOnError?: number;
   refreshInterval?: number;
@@ -132,10 +142,35 @@ export function useQuery<T extends keyof GetRPC>(
   const search = "search" in options ? (options.search ?? {}) : {};
   const { getResource } = useContext(QueryManagerContext);
   const serverQueries = useContext(ServerQueryContext);
-  const normalPath = applyParams(url, params);
+  const currentPath = applyParams(url, params);
   const searchParams = new URLSearchParams(omitNullishValues(search));
   searchParams.sort();
-  const variantKey = searchParams.toString();
+  const currentVariantKey = searchParams.toString();
+  // `keepPreviousData` under suspense: read through deferred keys so a
+  // variant change never suspends the committed tree. The urgent render keeps
+  // showing the previous variant's data; React re-renders in the background
+  // with the new keys, suspends *that* attempt only (no fallback flash), and
+  // commits when the data lands — no `startTransition` needed at the call
+  // site. First mount is unchanged: deferred and current keys are equal, so
+  // an uncached query suspends into the segment fallback as today. Both hooks
+  // run unconditionally (hook order); the values are only *used* when
+  // deferring applies.
+  //
+  // Deliberate: during the pending window the imperative callbacks
+  // (`mutate`/`refetch`/`trigger`/`prefetch`) and the revalidation effects
+  // close over the deferred — i.e. *visible* — variant and resource, so they
+  // act on the data the user is looking at, not the variant still loading in
+  // the background. The window ends when the deferred render commits, at
+  // which point they re-bind to the new keys.
+  const deferredPath = useDeferredValue(currentPath);
+  const deferredVariantKey = useDeferredValue(currentVariantKey);
+  const deferVariant = suspense && config.keepPreviousData;
+  const normalPath = deferVariant ? deferredPath : currentPath;
+  const variantKey = deferVariant ? deferredVariantKey : currentVariantKey;
+  // The pending signal for pager UI: true while the visible data belongs to
+  // the previous variant and the new one is still loading in the background.
+  const isDeferred =
+    normalPath !== currentPath || variantKey !== currentVariantKey;
   const { prefetchedData } = useRouteData();
   // `fallbackData` is a single variant's value, so it seeds under this
   // query's variant key; `prefetchedData[normalPath]` is already the full
@@ -457,7 +492,7 @@ export function useQuery<T extends keyof GetRPC>(
 
   return {
     data: state?.data as NestedPrettify<Data<T>>,
-    loading: state?.loading ?? !lazy,
+    loading: isDeferred || (state?.loading ?? !lazy),
     error: state?.error as Error,
     mutate,
     trigger,
