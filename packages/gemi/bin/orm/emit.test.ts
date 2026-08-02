@@ -163,7 +163,6 @@ describe("buildModelSchemas()", () => {
   // A Decimal generates cleanly and then returns the driver's raw JS number
   // typed as `Prisma.Decimal` — a wrong answer rather than an error, which is
   // the same class as the Date -> NULL binding this iteration is built around.
-  // The generator refuses it for the same reason it refuses a scalar list.
   test("refuses a Decimal field, which no dialect can round-trip yet", () => {
     expect(() =>
       buildModelSchemas([
@@ -195,13 +194,57 @@ describe("buildModelSchemas()", () => {
     ).toThrow(UnsupportedSchemaError);
   });
 
-  // Skipping it would silently change the result shape versus Prisma.
-  test("refuses a scalar list", () => {
+  // #300. This used to assert the opposite — "refuses a scalar list" — and the
+  // refusal was correct for as long as no dialect could decode an array. What
+  // moved is where the refusal lives, not whether there is one: the artifact is
+  // dialect-agnostic, so a column that is legal on Postgres and a validation
+  // error on SQLite cannot be adjudicated here. SQLite says no at compile time
+  // instead, naming itself; see `SqliteDialect.listFilters`.
+  test("describes a scalar list rather than refusing it", () => {
+    const [only] = buildModelSchemas([
+      model({ fields: [field({ name: "tags", type: "String", isList: true })] }),
+    ]);
+    expect(only.fields.tags).toMatchObject({ type: "String", isList: true });
+  });
+
+  // The flag is absent, not `false`, on everything else — which is what keeps a
+  // schema with no list generating the artifact it generated before #300, byte
+  // for byte, and is why `SCHEMA_ARTIFACT_VERSION` did not have to move.
+  test("omits isList on a scalar field", () => {
+    const [only] = buildModelSchemas([
+      model({ fields: [field({ name: "email", type: "String" })] }),
+    ]);
+    expect("isList" in only.fields.email).toBe(false);
+  });
+
+  // A list of a scalar no dialect can round-trip is not more supportable for
+  // being a list, and the error a reader gets should be the *Decimal* one —
+  // with the precision reasoning — rather than a generic list refusal.
+  test("refuses a Decimal list as a Decimal", () => {
     expect(() =>
       buildModelSchemas([
-        model({ fields: [field({ name: "tags", type: "String", isList: true })] }),
+        model({
+          fields: [field({ name: "prices", type: "Decimal", isList: true })],
+        }),
       ]),
-    ).toThrow(/scalar list/);
+    ).toThrow(/User\.prices is a Decimal/);
+  });
+
+  // An enum list keeps both facts: the element travels as a string, and the
+  // column holds many of them.
+  test("describes an enum list", () => {
+    const [only] = buildModelSchemas([
+      model({
+        fields: [
+          field({ kind: "enum", name: "roles", type: "Role", isList: true }),
+        ],
+      }),
+    ]);
+    expect(only.fields.roles).toMatchObject({
+      type: "String",
+      enum: "Role",
+      isList: true,
+    });
   });
 
   // Prisma's own client omits `Unsupported(...)` columns from its result types,

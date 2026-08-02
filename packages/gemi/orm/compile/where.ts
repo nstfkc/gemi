@@ -665,6 +665,256 @@ function assertCompositeInOperand(
   return fields;
 }
 
+/**
+ * The filters Prisma applies to a **scalar list** — `tags String[]`.
+ *
+ * A different set on a different left-hand side, which is why it is a branch
+ * rather than four more entries in `OPERATORS`: `contains` on a `String` asks
+ * about a substring, and on a `String[]` there is no such question — the one
+ * Prisma spells is `has`. Sharing the table would have made every scalar
+ * operator compile against an array column and answer something.
+ */
+const LIST_FILTERS = new Set([
+  "equals",
+  "has",
+  "hasEvery",
+  "hasSome",
+  "isEmpty",
+]);
+
+/**
+ * `where: { tags: { has: "urgent" } }`.
+ *
+ * **The dialect answers first**, before any operand is looked at, because on
+ * SQLite the answer is "not this column, on this database, ever" rather than
+ * "not this filter". That refusal used to live in the generator (#300) and
+ * could not stay there: the generated artifact is dialect-agnostic on purpose,
+ * so refusing a scalar list at generation refused it for Postgres too — and
+ * refused the *whole artifact*, since one `String[]` anywhere threw before any
+ * model was emitted.
+ */
+function compileListFilter(
+  schema: ModelSchema,
+  field: FieldSchema,
+  column: string,
+  value: unknown,
+  context: WhereContext,
+  locate: (args: any) => any,
+): Fragment {
+  const { dialect } = context;
+  assertListDialect(schema, field, `where.${field.name}`, context.operation, dialect);
+
+  // **A bare array is not shorthand for `equals` here**, and that is the one
+  // place a list deliberately reads differently from a scalar — where
+  // `{ email: "a@b" }` means `equals`, `{ tags: ["a"] }` means nothing.
+  //
+  // Not a judgement call: Prisma refuses it, measured against a generated 6.19
+  // client — *"Argument `strings`: Invalid value provided. Expected
+  // StringNullableListFilter, provided (String)."* Accepting it would make gemi
+  // a silent superset of Prisma on the one dialect where a differential test
+  // could otherwise check every other answer, which is the trade this project
+  // has declined every time it has come up.
+  //
+  // The asymmetry that surprises: the same bare array *is* accepted as a
+  // **write** value — `data: { tags: ["a"] }` is valid Prisma and valid here.
+  // Filter and value are different positions and Prisma treats them
+  // differently; so does this.
+  if (Array.isArray(value)) {
+    throw new InvalidArgumentError(
+      `where.${field.name}`,
+      schema.name,
+      context.operation,
+      `'${field.name}' is a scalar list, and a bare array is not a filter on ` +
+        `one — Prisma rejects it here too. Say which comparison you mean: ` +
+        `{ ${field.name}: { equals: [...] } } for the whole list, or ` +
+        `{ ${field.name}: { hasEvery: [...] } } for "contains all of these". ` +
+        `A bare array *is* accepted as a value in \`data\`.`,
+    );
+  }
+
+  if (!isFilterObject(value)) {
+    throw new InvalidArgumentError(
+      `where.${field.name}`,
+      schema.name,
+      context.operation,
+      `'${field.name}' is a scalar list. Expected an object holding ` +
+        `${[...LIST_FILTERS].sort().join(", ")}; received ` +
+        `${value === null ? "null" : typeof value}.`,
+    );
+  }
+
+  const filter = value as Record<string, unknown>;
+  const parts: Fragment[] = [];
+
+  // Sorted, for the reason `compileWhere` sorts: the plan cache canonicalises
+  // key order, so two objects differing only in it must compile alike.
+  for (const key of Object.keys(filter).sort()) {
+    const operand = filter[key];
+    if (operand === undefined) continue;
+
+    if (!LIST_FILTERS.has(key)) {
+      throw new InvalidArgumentError(
+        `where.${field.name}.${key}`,
+        schema.name,
+        context.operation,
+        `'${field.name}' is a scalar list, and a list filter takes ` +
+          `${[...LIST_FILTERS].sort().join(", ")}. The scalar operators — ` +
+          `${[...OPERATORS].sort().join(", ")} — apply to a single value and ` +
+          `Prisma does not offer them here.`,
+      );
+    }
+
+    const at = (args: any) => locate(args)?.[key];
+    parts.push(listComparison(schema, field, column, key, operand, context, at));
+  }
+
+  // An empty filter object constrains nothing, which is what the scalar path
+  // does with `{}` too.
+  if (parts.length === 0) return sql("true");
+  if (parts.length === 1) return parts[0];
+  return group(parts, " and ");
+}
+
+/** One list filter key. */
+function listComparison(
+  schema: ModelSchema,
+  field: FieldSchema,
+  column: string,
+  key: string,
+  operand: unknown,
+  context: WhereContext,
+  locate: (args: any) => any,
+): Fragment {
+  const { dialect } = context;
+
+  if (key === "equals") {
+    return listEquals(schema, field, column, operand, context, locate);
+  }
+
+  if (key === "isEmpty") {
+    if (typeof operand !== "boolean") {
+      throw new InvalidArgumentError(
+        `where.${field.name}.isEmpty`,
+        schema.name,
+        context.operation,
+        `Expected true or false, received ${operand === null ? "null" : typeof operand}.`,
+      );
+    }
+    return dialect.listIsEmpty(column, operand);
+  }
+
+  if (key === "has") {
+    // One **element**, so it binds as one — through the element's own field, so
+    // a `Json[]` gets #209's `::text::jsonb` on the placeholder and the
+    // serialisation that has to travel with it. Binding it as a list instead
+    // would produce an array literal on the left of `= any(...)`, and binding
+    // it with no cast answers *false* on a `Json[]` rather than raising.
+    const element = elementOf(field);
+    return dialect.listHas(
+      column,
+      fieldParam(element, dialect, encoded(element, dialect, locate)),
+    );
+  }
+
+  // `hasEvery` / `hasSome` — both take a list, and both have a defined answer
+  // for an empty one: `@> '{}'` is true of every row and `&& '{}'` of none,
+  // which is what Prisma means by "contains all of nothing" and "shares one
+  // element with nothing".
+  if (!Array.isArray(operand)) {
+    throw new InvalidArgumentError(
+      `where.${field.name}.${key}`,
+      schema.name,
+      context.operation,
+      `Expected an array, received ${operand === null ? "null" : typeof operand}.`,
+    );
+  }
+
+  const values = fieldParam(field, dialect, encoded(field, dialect, locate));
+  return key === "hasEvery"
+    ? dialect.listHasEvery(column, values)
+    : dialect.listHasSome(column, values);
+}
+
+/** `"tags" = $1` — whole-list equality, which is order-sensitive in SQL. */
+function listEquals(
+  schema: ModelSchema,
+  field: FieldSchema,
+  column: string,
+  operand: unknown,
+  context: WhereContext,
+  locate: (args: any) => any,
+): Fragment {
+  const { dialect } = context;
+
+  // A list column cannot be null in Prisma — `String[]?` is refused at schema
+  // validation — but `equals: null` is still in the generated filter type, and
+  // a column written by something other than Prisma can hold NULL. Same
+  // reading as everywhere else: `= NULL` matches nothing, `is null` is meant.
+  if (operand === null) return sql(`${column} is null`);
+
+  if (!Array.isArray(operand)) {
+    throw new InvalidArgumentError(
+      `where.${field.name}.equals`,
+      schema.name,
+      context.operation,
+      `'${field.name}' is a scalar list, so it compares against an array. ` +
+        `Received ${typeof operand}. For "is this element present", use ` +
+        `{ ${field.name}: { has: … } }.`,
+    );
+  }
+
+  return concat(
+    sql(`${column} = `),
+    fieldParam(field, dialect, encoded(field, dialect, locate)),
+  );
+}
+
+/**
+ * The same field, seen as **one element of itself**.
+ *
+ * `type` already carries the element type — that is the whole reason `isList`
+ * is a flag beside it rather than a `ScalarType` constructor — so dropping the
+ * flag is the entire conversion, and `encode`, `decode` and `castParameter` all
+ * read it as the scalar they were written for.
+ */
+function elementOf(field: FieldSchema): FieldSchema {
+  return { ...field, isList: false };
+}
+
+/**
+ * Refuses a scalar list on a dialect that has no array type, naming it.
+ *
+ * Shared by the read and write paths, and it says more than "unsupported"
+ * because the reader's likeliest next question is whether they did something
+ * wrong. They did not: Prisma refuses the *column* on SQLite, so a schema that
+ * declares one was generated against Postgres and this process is pointed at a
+ * database that could not hold it either.
+ */
+export function assertListDialect(
+  schema: ModelSchema,
+  field: FieldSchema,
+  argument: string,
+  operation: string,
+  dialect: SqlDialect,
+): void {
+  if (dialect.listFilters.size > 0) return;
+
+  throw new UnsupportedQueryError(
+    argument,
+    schema.name,
+    operation,
+    `'${field.name}' is a scalar list, and ${dialect.name} has no array type ` +
+      `to hold one. Prisma refuses the column itself on ${dialect.name} — ` +
+      `"the current connector does not support lists of primitive types" — so ` +
+      `this is a difference between the databases rather than a gap in the ` +
+      `ORM. The generated artifact is dialect-agnostic, which is why this ` +
+      `surfaces here rather than at \`prisma generate\`: the schema was ` +
+      `generated against Postgres and DATABASE_URL names a ${dialect.name} ` +
+      `database, which has no '${field.column}' column either. It works on ` +
+      `postgres.`,
+  );
+}
+
 /** The filters Prisma applies to a value extracted from a JSON path. */
 const JSON_FILTERS = new Set([
   "equals",
@@ -1045,6 +1295,16 @@ function compileFieldFilter(
         `its own — Prisma rejects it here too. Write it as an explicit ` +
         `comparison: { ${field.name}: { equals: ${sentinelName(sentinel)} } }.`,
     );
+  }
+
+  // A scalar list takes a different operator set on a different left-hand side,
+  // so the whole operand belongs to that branch — the same shape the `path`
+  // check below has for a JSON document. Placed *above* the bare-value
+  // shorthand because on a list the bare form is an **array**, which
+  // `isFilterObject` reports as a value and would send to the scalar `equals`
+  // with no dialect check and no operand validation.
+  if (field.isList) {
+    return compileListFilter(schema, field, column, value, context, locate);
   }
 
   // A bare value is shorthand for `equals`. A `Date` is a value, not a filter

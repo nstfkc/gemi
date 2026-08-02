@@ -42,6 +42,17 @@ import { join } from "node:path";
 export const POSTGRES_URL = process.env.TEST_POSTGRES_URL;
 
 /**
+ * The scratch database for `prisma/postgres-only.prisma` — the scalar-list
+ * schema (#300), which needs a database of its own because `prisma db push`
+ * reconciles a whole database to one schema and would drop the main tables.
+ *
+ * Separate from {@link POSTGRES_URL} rather than derived from it, so the one
+ * suite that needs it skips when only the main schema was pushed instead of
+ * connecting to a database with no tables in it and failing per case.
+ */
+export const POSTGRES_LISTS_URL = process.env.TEST_POSTGRES_LISTS_URL;
+
+/**
  * Replays the committed migrations into a fresh SQLite file, in name order —
  * which is Prisma's own ordering, since it prefixes every directory with a
  * timestamp. Statements are split on `;` at end of line, which is enough for

@@ -195,6 +195,68 @@ export interface SqlDialect {
   ): Fragment;
 
   /**
+   * The filters this dialect can apply to a **scalar list** — `tags String[]`.
+   *
+   * **Empty is the whole of SQLite's answer**, and it is a capability rather
+   * than a gap in this ORM: SQLite has no array type, and Prisma refuses the
+   * declaration there at validation time — *"Field `tags` in model `User` can't
+   * be a list. The current connector does not support lists of primitive
+   * types."* So a SQLite database cannot hold such a column to begin with.
+   *
+   * The refusal lives here rather than in the generator, which is where it used
+   * to live (#300). The generated artifact is dialect-agnostic on purpose —
+   * `DATABASE_URL` can name a different database than `prisma generate` saw —
+   * so a generator that refused a scalar list refused it for Postgres too, and
+   * one `String[]` anywhere meant no artifact for *any* model. Asking the
+   * dialect at compile time refuses exactly the combination that cannot work,
+   * and names it, which is the shape {@link UnsupportedDialectError} already
+   * has for the dialects with no compiler at all.
+   */
+  readonly listFilters: ReadonlySet<string>;
+
+  /**
+   * `<value> = any(<column>)` — is this element in the list?
+   *
+   * The mirror of {@link inList} rather than a variant of it, and the two are
+   * easy to confuse: there, one column is matched against a caller's list;
+   * here, one caller value is matched against a column that *is* a list.
+   *
+   * **These four take a `Fragment` where every other member here takes a
+   * `Binder`**, which is a deliberate exception. A list operand may need a cast
+   * on its placeholder — a single element of a `Json[]` needs #209's
+   * `::text::jsonb`, and the serialisation that must travel with it — so the
+   * parameter is built by `fieldParam` before it arrives and the dialect
+   * chooses only the operator. Handing over a `Binder` instead would oblige
+   * each dialect to restate `fieldParam`'s rule, and restating it slightly
+   * wrong is silent: `$1::jsonb = any(col)` answers *false* where
+   * `$1::text::jsonb = any(col)` answers true, with no error on either.
+   */
+  listHas(column: string, value: Fragment): Fragment;
+
+  /** `hasEvery` — every element of the operand is present in the column. */
+  listHasEvery(column: string, values: Fragment): Fragment;
+
+  /** `hasSome` — the column and the operand share at least one element. */
+  listHasSome(column: string, values: Fragment): Fragment;
+
+  /**
+   * `isEmpty: true`, or its negation when `empty` is false.
+   *
+   * The odd one out with no operand at all: the value being compared against is
+   * the empty list, which is the compiler's own constant rather than the
+   * caller's. It stays a bound parameter regardless — see `jsonNullComparison`,
+   * which declines the same exception for the same reason.
+   */
+  listIsEmpty(column: string, empty: boolean): Fragment;
+
+  /**
+   * The right-hand side of a `push`: the column's current value with the
+   * operand appended. An expression rather than a statement, because it is
+   * assigned by the write compiler like any other `set` value.
+   */
+  listPush(column: string, values: Fragment): Fragment;
+
+  /**
    * How this dialect spells a JSON path, and which filters it can apply to one.
    *
    * The **path grammar itself differs**, which is unusual enough to be worth

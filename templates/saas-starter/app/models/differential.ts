@@ -155,6 +155,27 @@ function normalize(value: unknown, volatile?: Set<string>): unknown {
 }
 
 /**
+ * `User.findMany({"where":…})` — the label every assertion below is reported
+ * under, so a failure in a `test.each` says which case failed.
+ *
+ * `JSON.stringify` on its own is not enough and fails *loudly*: it throws
+ * `TypeError: JSON.stringify cannot serialize BigInt`. That turned four
+ * scalar-list cases into an error raised while building the message rather than
+ * a comparison — the harness failing to describe the test instead of running
+ * it, which reads at a glance like the case itself failing.
+ *
+ * Reachable before now only in principle: the template's one `BigInt` column is
+ * never an *argument*, and `BigInt[]` is the first thing that put one inside a
+ * `where` and a `data`.
+ */
+function describeCall(model: string, operation: string, args: unknown): string {
+  const text = JSON.stringify(args ?? {}, (_key, value) =>
+    typeof value === "bigint" ? `${value}n` : value,
+  );
+  return `${model}.${operation}(${text})`;
+}
+
+/**
  * What a generated value looks like, without what it is. Keeps the comparison
  * meaningful for `@default(cuid())` and `@default(now())` — a string of the
  * wrong length or with the wrong first character still fails.
@@ -173,10 +194,53 @@ export async function createDifferential(options: {
   /** Applied to both clients before any comparison runs. */
   seed: (prisma: PrismaClient) => Promise<void>;
   url?: string;
+  /**
+   * A Prisma client to compare against, instead of the one this module imports.
+   *
+   * **For a schema that is not `prisma/schema.prisma`**, which today means
+   * `prisma/postgres-only.prisma` and its scalar lists (#300). That schema has
+   * to be separate — a `String[]` is a validation error on SQLite, so it cannot
+   * share a file whose provider is flipped between dialects — and a separate
+   * schema generates a separate client, which `@prisma/client` does not name.
+   *
+   * Injecting it rather than importing a second client here is what keeps this
+   * module loadable during a SQLite run: the scalar-list client only exists
+   * after `prisma generate --schema prisma/postgres-only.prisma`, and eleven
+   * other suites import this file.
+   *
+   * Postgres only, and required to come with `url` and `tables` — there is no
+   * SQLite fallback for a schema SQLite cannot express.
+   */
+  client?: PrismaClient;
+  /** Tables to truncate between cases, children before parents. */
+  tables?: string[];
 }): Promise<Differential> {
   const workspace = mkdtempSync(join(tmpdir(), "gemi-orm-diff-"));
   const sqlitePath = join(workspace, "diff.db");
   const url = options.url ?? `file:${sqlitePath}`;
+
+  // Both, not just `url`. Omitting `tables` was the worse of the two and the
+  // one that failed *quietly*: the default list below names the main schema's
+  // tables, so a second-schema harness without its own would issue a `TRUNCATE`
+  // for tables that do not exist in the database it is pointed at — clearing
+  // nothing it meant to clear, and reporting it as a truncation error rather
+  // than as the missing argument it is.
+  if (options.client) {
+    const missing = [
+      !options.url && "url",
+      !options.tables && "tables",
+    ].filter(Boolean);
+
+    if (missing.length > 0) {
+      throw new Error(
+        `createDifferential({ client }) is for a second Postgres schema, so it ` +
+          `needs ${missing.join(" and ")}: the \`url\` of the database that ` +
+          `schema was pushed to, and the \`tables\` to clear between cases — ` +
+          `the defaults name the main schema's, which are not in that ` +
+          `database. There is no SQLite path for it.`,
+      );
+    }
+  }
 
   // SQLite gets a brand-new file with the committed migrations replayed into
   // it. Deliberately not `prisma db push --force-reset`: that command is
@@ -186,7 +250,11 @@ export async function createDifferential(options: {
     await applyMigrations(sqlitePath);
   }
 
-  const prisma = new PrismaClient({ datasources: { db: { url } } });
+  // An injected client is already constructed and already pointed at its own
+  // database; re-constructing it here would need its class, which is the thing
+  // this module deliberately does not import.
+  const prisma =
+    options.client ?? new PrismaClient({ datasources: { db: { url } } });
 
   // Postgres runs against whatever `TEST_POSTGRES_URL` names, so the harness
   // clears only the table it seeds and nothing else. The env var's contract is
@@ -195,7 +263,7 @@ export async function createDifferential(options: {
 
   // Children before parents: the schema's foreign keys are enforced on both
   // dialects, and a scratch database is only scratch for this suite.
-  const TABLES = [
+  const TABLES = options.tables ?? [
     "_PostToTag",
     "Post",
     "Tag",
@@ -337,7 +405,7 @@ export async function createDifferential(options: {
       const gemiModel = options.models[model];
       if (!gemiModel) throw new Error(`No gemi model registered for ${model}.`);
 
-      const label = `${model}.${operation}(${JSON.stringify(args ?? {})})`;
+      const label = describeCall(model, operation, args);
 
       const [fromPrisma, fromGemi] = await Promise.all([
         settle(() => prismaDelegate(prisma, model)[operation](args)),
@@ -373,7 +441,7 @@ export async function createDifferential(options: {
     async expectSameWrite(model, operation, args, comparison = {}) {
       const volatile = new Set(comparison.volatile ?? VOLATILE);
       const tables = comparison.tables ?? [model];
-      const label = `${model}.${operation}(${JSON.stringify(args ?? {})})`;
+      const label = describeCall(model, operation, args);
 
       // Sequential, not concurrent: a write run through both clients against
       // one database would have the second see the first one's effects. Each
