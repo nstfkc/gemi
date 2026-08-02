@@ -12,12 +12,13 @@ import {
   type ViewRouteExec,
 } from "./createFlatViewRoutes";
 import { viewRouteConfigDefaults, type ViewRouteConfig } from "./config";
+import { resolvePartialRender } from "./planPartialRender";
+import { matchViewRoute } from "./matchViewRoute";
+import { PARTIAL_RENDER_HEADER, type PartialRenderInfo } from "../../utils/partialRender";
 // @ts-ignore
 import { renderToReadableStream } from "react-dom/server.browser";
 import { createElement, Fragment } from "react";
 
-// @ts-ignore
-import { URLPattern } from "urlpattern-polyfill/urlpattern";
 import { createFileResponse, type FileOutput, type ViewRoutes } from "../../http/ViewRouter";
 import { createRouteManifest } from "./createRouteManifest";
 import { createComponentTree } from "./createComponentTree";
@@ -30,6 +31,17 @@ import { Lang } from "../../facades/Lang";
 import { AuthViewRouter } from "../../auth/routes";
 import { KernelId } from "../kernel-id/KernelId";
 import { app } from "../../foundation/app";
+import { ServerQueryStore } from "./ServerQueryStore";
+import { createServerQueryFetcher } from "./serverQueryFetcher";
+import { injectQueryPayloads, isBotUserAgent } from "./streamQueryInjection";
+import { createRoutePayloadStream } from "./routePayloadStream";
+
+/**
+ * How long a document response may keep streaming before pending segments are
+ * cut over to client rendering. One hung query must not hold the connection
+ * open forever; the browser resolves whatever was aborted over `/api`.
+ */
+const STREAM_DEADLINE_MS = 10_000;
 
 const themeScript = `
 !function(){try{var d=document.documentElement,c=d.classList;
@@ -105,8 +117,13 @@ export class ViewRouteDispatcher {
     Pick<ViewRouteConfig, "onRequestStart" | "onRequestEnd" | "onRequestFail">
   >;
 
+  /** See `ViewRouteConfig.partialRendering`. */
+  readonly partialRendering: boolean;
+
   constructor(config: ViewRouteConfig) {
     const defaults = viewRouteConfigDefaults();
+
+    this.partialRendering = config.partialRendering ?? defaults.partialRendering;
 
     this.hooks = {
       onRequestStart: config.onRequestStart ?? defaults.onRequestStart,
@@ -151,7 +168,9 @@ export class ViewRouteDispatcher {
     url: URL;
     i18n: any;
     user: any;
-    prefetchedData: any;
+    serverQueries: ServerQueryStore;
+    userAgent: string | null;
+    noStream: boolean;
     params: any;
     breadcrumbs: any;
     urlLocaleSegment?: string;
@@ -166,7 +185,9 @@ export class ViewRouteDispatcher {
       i18n,
       params,
       pathname,
-      prefetchedData,
+      serverQueries,
+      userAgent,
+      noStream,
       url,
       user,
       viewData,
@@ -187,7 +208,10 @@ export class ViewRouteDispatcher {
           [pageDataKey]: viewData,
         },
         __csrf: csrfTokenHMAC.toString("base64"),
-        prefetchedData,
+        // Placeholder — re-snapshotted at render time (below) so everything
+        // that resolved while styles and modules loaded still makes the
+        // document payload instead of streaming.
+        prefetchedData: {} as Record<string, Record<string, any>>,
         i18n,
         auth: { user },
         routeManifest: this.clientRouteManifest,
@@ -215,8 +239,22 @@ export class ViewRouteDispatcher {
       loaders: string;
       cssManifest: Record<string, string[]>;
       ogMap: Record<string, any>;
+      /**
+       * Full view modules (not just default exports) so `Route` can render a
+       * view's `Loading`/`Error` exports on the server — a streamed shell
+       * carries real fallbacks, and they must match what the client hydrates.
+       */
+      viewModules?: Record<string, any>;
     }) => {
-      const { bootstrapModules, loaders, getStyles, viewImportMap, cssManifest, ogMap } = params;
+      const {
+        bootstrapModules,
+        loaders,
+        getStyles,
+        viewImportMap,
+        cssManifest,
+        ogMap,
+        viewModules,
+      } = params;
 
       if (isOgRequest) {
         let ogHandler = null;
@@ -265,6 +303,29 @@ export class ViewRouteDispatcher {
 
       result.data["cssManifest"] = cssManifest;
       const styles = await getStyles(currentViews);
+
+      // Everything resolved by now ships in the document payload; everything
+      // still in flight streams in behind it. The snapshot marks its entries
+      // as shipped so the injector doesn't send them twice.
+      result.data.prefetchedData = serverQueries.snapshotResolved();
+      serverQueries.markRenderStart();
+
+      const deadline = new AbortController();
+      const deadlineTimer = setTimeout(() => deadline.abort(), STREAM_DEADLINE_MS);
+
+      // Decided before the render call because it changes *render-time*
+      // behavior: React splits any boundary bigger than
+      // `progressiveChunkSize` (~12.8KB) out of the shell as it renders, and
+      // awaiting `allReady` afterwards settles the data but cannot undo the
+      // split — a non-JS reader would see a body whose content is parked in
+      // `<div hidden>` + `$RC()` reveal scripts (#286, #289). Two audiences
+      // need the settled document: crawlers (detected by UA — progressive
+      // chunking only exists to reach a browser sooner, which is worthless to
+      // a client that buffers the whole response) and routes that declared
+      // `"no-stream"` (marketing/content pages that must render for
+      // JS-disabled humans, text browsers, and failed-script loads too).
+      const settled = isBotUserAgent(userAgent) || noStream;
+
       try {
         const stream = await renderToReadableStream(
           createElement(Fragment, {
@@ -279,6 +340,8 @@ export class ViewRouteDispatcher {
               createElement(Root, {
                 data: result.data,
                 viewImportMap,
+                viewModules,
+                serverQueries,
                 key: "root",
               }),
             ],
@@ -286,14 +349,37 @@ export class ViewRouteDispatcher {
           {
             bootstrapScriptContent: `window.__GEMI_DATA__ = ${JSON.stringify(result.data)}; window.loaders=${loaders}`,
             bootstrapModules,
+            signal: deadline.signal,
+            ...(settled ? { progressiveChunkSize: Number.MAX_SAFE_INTEGER } : {}),
+            // A query rejecting inside a streamed segment is expected: React
+            // client-renders that boundary and the browser surfaces the error
+            // through its own fetch. Log it and move on.
+            onError(error: unknown) {
+              if (process.env.NODE_ENV !== "production") {
+                console.error(error);
+              }
+            },
           },
         );
 
-        return new Response(stream, {
+        stream.allReady
+          .catch(() => {})
+          .finally(() => clearTimeout(deadlineTimer));
+
+        // A settled response waits for everything before the first byte.
+        // Works only together with the `progressiveChunkSize` override
+        // above: this waits for the data, that keeps the content inline
+        // instead of script-revealed.
+        if (settled) {
+          await stream.allReady.catch(() => {});
+        }
+
+        return new Response(injectQueryPayloads(stream, serverQueries), {
           status: !currentPathName ? 404 : 200,
           headers,
         });
       } catch (err) {
+        clearTimeout(deadlineTimer);
         const stream = await renderToReadableStream(createElement("div"), {
           bootstrapScriptContent: `window.error= ${JSON.stringify(err.message)}; window.stack_trace=${JSON.stringify(err.stack)};window.__GEMI_DATA__ = ${JSON.stringify(result.data)}; window.loaders=${loaders}`,
           bootstrapModules:
@@ -354,16 +440,38 @@ export class ViewRouteDispatcher {
     let middlewares: (RouterMiddleware | string)[] = [];
     let currentPathName: null | string = null;
     let params: Record<string, any> = {};
+    let partial: PartialRenderInfo | null = null;
+    // `"no-stream"` in a route's (or its router's) middleware list opts the
+    // route out of progressive streaming: everyone gets the fully settled
+    // document a bot UA would (#289). It is a directive read here, not real
+    // middleware — the middleware runner ignores unknown aliases.
+    let noStream = false;
 
     try {
-      for (const [pathname, handler] of Object.entries(this.flatViewRoutes)) {
-        const pattern = new URLPattern({ pathname });
-        if (pattern.test({ pathname: urlPathname })) {
-          currentPathName = pathname;
-          params = pattern.exec({ pathname: urlPathname })?.pathname.groups;
-          handlers = handler.exec;
-          middlewares = handler.middleware;
-          break;
+      const match = matchViewRoute(this.flatViewRoutes, urlPathname);
+      if (match) {
+        currentPathName = match.routePath;
+        params = match.params;
+        handlers = match.route.exec;
+        middlewares = match.route.middleware;
+        noStream = middlewares.includes("no-stream");
+
+        // Only navigations skip work. A document request renders the whole
+        // tree, and the client has nothing to carry forward yet.
+        if (isViewDataRequest && this.partialRendering) {
+          const from = req.headers.get(PARTIAL_RENDER_HEADER);
+          const plan = resolvePartialRender({
+            flatViewRoutes: this.flatViewRoutes,
+            supportedLocales: app(Translator).supportedLocales,
+            from,
+            origin: url.origin,
+            to: { segments: match.route.segments, params, search: url.search },
+          });
+
+          if (plan.startIndex > 0) {
+            handlers = handlers.slice(plan.startIndex);
+            partial = { from, carriedViews: plan.carriedViews };
+          }
         }
       }
     } catch (err) {
@@ -387,6 +495,9 @@ export class ViewRouteDispatcher {
         appId: string;
       } | null = null;
       const ctx = RequestContext.getStore();
+      // Before middleware and handlers, so every `Query.prefetch` along the
+      // way lands in one live, request-scoped store.
+      ctx.serverQueries = new ServerQueryStore(createServerQueryFetcher(req));
 
       if (urlLocale) {
         const locale = urlLocale.replaceAll("/", "");
@@ -430,21 +541,24 @@ export class ViewRouteDispatcher {
           };
         }
 
-        const data = await Promise.all([
-          ...handlers.map((fn) => fn(httpRequest as any)),
-          ...Array.from(ctx.prefetchPromiseQueue).map((fn) => fn()),
-        ]);
+        // Handlers gate the response — they decide redirects, status codes,
+        // cookies — so they are awaited. Queries do not: `Query.prefetch`
+        // starts its request the moment it is called (a live store, so a
+        // prefetch after a handler's first `await` is no longer silently
+        // dropped), and both response shapes stream whatever is still in
+        // flight — the document as interleaved payload scripts, the `.json`
+        // navigation payload as NDJSON lines (#290).
+        const data = await Promise.all(handlers.map((fn) => fn(httpRequest as any)));
 
         const cookies = ctx.cookies;
         const headers = ctx.headers;
-        const prefetchedResources = ctx.prefetchedResources;
 
         pageData = {
           data,
           cookies,
           headers,
           user: ctx.user,
-          prefetchedData: Object.fromEntries(prefetchedResources.entries()),
+          prefetchedData: ctx.serverQueries.snapshotResolved(),
           currentPathName: httpRequest.routePath,
           params: httpRequest.params,
           urlLocaleSegment,
@@ -483,24 +597,37 @@ export class ViewRouteDispatcher {
         }
 
         if (isViewDataRequest) {
-          headers.set("Content-Type", "application/json; charset=utf-8");
+          // NDJSON: envelope first — sent at handler speed — then one line
+          // per query as it settles (#290). The client commits the
+          // navigation off the envelope and hydrates the rest as it lands.
+          headers.set("Content-Type", "application/x-ndjson; charset=utf-8");
+          // The body depends on the route the client came from, so no shared
+          // cache may serve one client's partial response to another.
+          headers.append("Vary", PARTIAL_RENDER_HEADER);
 
           cookies.forEach((cookie) => headers.append("Set-Cookie", cookie.toString()));
 
           await this.hooks.onRequestEnd(httpRequest);
 
+          const envelope = {
+            // Nothing that rendered touched the metadata, so the segments
+            // that were skipped are still the ones that own it.
+            meta: partial && !ctx.metadata.touched ? null : pageData.meta,
+            data: {
+              [urlPathname]: viewData,
+            },
+            breadcrumbs,
+            // Resolved-so-far; the rest streams behind the envelope. The
+            // snapshot marks its entries shipped so they aren't sent twice.
+            prefetchedData: ctx.serverQueries.snapshotResolved(),
+            i18n,
+            is404: !currentPathName,
+            appId: pageData.appId,
+            partial,
+          };
+
           return new Response(
-            JSON.stringify({
-              meta: pageData.meta,
-              data: {
-                [urlPathname]: viewData,
-              },
-              breadcrumbs,
-              prefetchedData: pageData.prefetchedData,
-              i18n,
-              is404: !currentPathName,
-              appId: pageData.appId,
-            }),
+            createRoutePayloadStream(envelope, ctx.serverQueries),
             {
               headers,
             },
@@ -508,6 +635,16 @@ export class ViewRouteDispatcher {
         }
 
         headers.set("Content-Type", "text/html; charset=utf-8");
+
+        // The streamed/settled decision is UA-derived (crawlers get inline
+        // settled documents), so the body varies by User-Agent and a shared
+        // cache must key on it — otherwise a cached browser shell full of
+        // fallbacks and reveal scripts gets served to a bot. `no-stream`
+        // routes serve one settled body to everyone, so they stay cacheable
+        // without the (CDN-hostile) Vary.
+        if (!noStream) {
+          headers.append("Vary", "User-Agent");
+        }
 
         for (const cookie of cookies) {
           headers.append("Set-Cookie", cookie.toString());
@@ -536,7 +673,9 @@ export class ViewRouteDispatcher {
           i18n,
           params,
           pathname: url.pathname,
-          prefetchedData: pageData.prefetchedData,
+          serverQueries: ctx.serverQueries,
+          userAgent: req.headers.get("user-agent"),
+          noStream,
           url,
           user,
           viewData,

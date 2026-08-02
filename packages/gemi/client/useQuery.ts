@@ -1,10 +1,18 @@
-import { useCallback, useContext, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useSyncExternalStore,
+} from "react";
 import type { RPC } from "./rpc";
 import type { NestedPrettify } from "../utils/type";
 
 import type { ApiRouterHandler } from "../http/ApiRouter";
 import type { UnwrapPromise } from "../utils/type";
 import { QueryManagerContext } from "./QueryManagerContext";
+import { ServerQueryContext } from "./ServerQueryContext";
+import { DEFAULT_STALE_TIME } from "./QueryResource";
 import { applyParams } from "../utils/applyParams";
 import type { UrlParser } from "./types";
 import { omitNullishValues } from "../utils/omitNullishValues";
@@ -17,8 +25,17 @@ interface Config<T> {
   keepPreviousData?: boolean;
   retryIntervalOnError?: number;
   refreshInterval?: number;
+  /** How long cached data stays fresh before a read revalidates it, in ms. */
+  staleTime?: number;
   debug?: boolean;
   lazy?: boolean;
+  /**
+   * When true (the default), a query with no cached data suspends the nearest
+   * `Suspense` boundary instead of returning `loading: true`, and an HTTP
+   * failure throws into the nearest error boundary. `lazy: true` implies
+   * `suspense: false`.
+   */
+  suspense?: boolean;
   refetchUntil?: (data: T, duration: number) => number;
 }
 
@@ -31,8 +48,10 @@ const defaultConfig: Config<any> = {
   keepPreviousData: true,
   retryIntervalOnError: 10000,
   refreshInterval: 999999,
+  staleTime: DEFAULT_STALE_TIME,
   debug: false,
   lazy: false,
+  suspense: true,
 };
 
 type GetRPC = {
@@ -40,7 +59,9 @@ type GetRPC = {
 };
 
 type Data<T extends keyof GetRPC> =
-  GetRPC[T] extends ApiRouterHandler<any, infer Data, any> ? UnwrapPromise<Data> : never;
+  GetRPC[T] extends ApiRouterHandler<any, infer Data, any>
+    ? UnwrapPromise<Data>
+    : never;
 
 type Input<T extends keyof GetRPC> =
   GetRPC[T] extends ApiRouterHandler<infer I, any, any> ? I : never;
@@ -58,51 +79,185 @@ const defaultOptions: QueryOptions<any> & { params?: Record<string, any> } = {
 
 export type QueryResult<T extends keyof GetRPC> = NestedPrettify<Data<T> & {}>;
 
+type Options<T extends keyof GetRPC> = {
+  search?: Record<string, string | number | boolean | null>;
+  params?: Partial<UrlParser<`${T & string}`>>;
+};
+
+interface QueryReturn<T extends keyof GetRPC, D> {
+  data: D;
+  loading: boolean;
+  error: Error;
+  mutate: {
+    (fn?: NestedPrettify<Data<T>>): void;
+    (fn?: (data: NestedPrettify<Data<T>>) => NestedPrettify<Data<T>>): void;
+  };
+  trigger: () => void;
+  prefetch: () => void;
+  refetch: () => void;
+  version: number;
+}
+
+/**
+ * A suspense-enabled query never renders without data, so `data` is
+ * non-nullable. Opting out — `suspense: false` or `lazy: true` — brings back
+ * the `loading` flag and with it a `data` that can be `undefined`.
+ */
+interface SuspenseConfig<T> extends Omit<Config<T>, "suspense" | "lazy"> {
+  suspense?: true;
+  lazy?: false;
+}
+
 export function useQuery<T extends keyof GetRPC>(
   url: T,
-  ...args: [
-    options?: {
-      search?: Record<string, string | number | boolean | null>;
-      params?: Partial<UrlParser<`${T & string}`>>;
-    },
-    config?: Config<Data<T>>,
-  ]
+  options?: Options<T>,
+  config?: SuspenseConfig<Data<T>>,
+): QueryReturn<T, NestedPrettify<Data<T>>>;
+export function useQuery<T extends keyof GetRPC>(
+  url: T,
+  options?: Options<T>,
+  config?: Config<Data<T>>,
+): QueryReturn<T, NestedPrettify<Data<T>> | undefined>;
+export function useQuery<T extends keyof GetRPC>(
+  url: T,
+  ...args: [options?: Options<T>, config?: Config<Data<T>>]
 ) {
   const _params = useParams();
   const [_options = defaultOptions, _config = defaultConfig] = args;
   const options = { ...defaultOptions, ..._options };
   const config = { ...defaultConfig, ..._config };
-  const params = "params" in options ? { ..._params, ...options.params } : _params;
-  const paramsKey = JSON.stringify(params);
-  const paramsRef = useRef(paramsKey);
+  const suspense = config.suspense !== false && !config.lazy;
+  const params =
+    "params" in options ? { ..._params, ...options.params } : _params;
   const search = "search" in options ? (options.search ?? {}) : {};
   const { getResource } = useContext(QueryManagerContext);
+  const serverQueries = useContext(ServerQueryContext);
   const normalPath = applyParams(url, params);
   const searchParams = new URLSearchParams(omitNullishValues(search));
   searchParams.sort();
   const variantKey = searchParams.toString();
   const { prefetchedData } = useRouteData();
-  const fallbackData = config.fallbackData ?? prefetchedData?.[normalPath] ?? null;
-  const refreshInterval = config.refreshInterval;
+  // `fallbackData` is a single variant's value, so it seeds under this
+  // query's variant key; `prefetchedData[normalPath]` is already the full
+  // `{ [variantKey]: data }` map the server produced.
+  const seed =
+    config.fallbackData != null
+      ? { [variantKey]: config.fallbackData }
+      : prefetchedData?.[normalPath];
+  // A memoized map lookup on the provider's ref: stable and cheap, so the
+  // resource is derived every render — a params change swaps it in the same
+  // render pass instead of flashing through an effect.
+  const resource = getResource(normalPath, seed ?? undefined);
   const lazy = config.lazy;
-  const [resource, setResource] = useState(() => getResource(normalPath, fallbackData));
 
   const configRef = useRef(config);
   configRef.current = config;
 
-  const refreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const refreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(
+    null,
+  );
   const retryIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const retryingMap = useRef<Map<string, boolean>>(new Map());
   const fetchedRef = useRef(!lazy);
-  const refetchUntilTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const refetchUntilTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
   const refetchUntilDurationRef = useRef(0);
   const prefetchedRef = useRef(false);
-  const [state, setState] = useState(() => {
-    if (lazy) {
-      return { loading: false, data: null, error: null, version: 0 };
+
+  const subscribe = useCallback(
+    (onStoreChange: () => void) => resource.store.subscribe(onStoreChange),
+    [resource],
+  );
+  // `peek` hands back the object stored in the map — its identity only
+  // changes on a real write, so the snapshot is stable across render
+  // attempts. Also the server snapshot: SSR renders whatever the prefetch
+  // payload seeded, and never fetches.
+  //
+  // uSES and transitions: store updates are always urgent, so a write landing
+  // mid-transition restarts the pending transition — wasted work, never wrong
+  // UI. Exposure is kept small by design: render-phase reads never write the
+  // store synchronously (fetches are silent), and a suspended component has no
+  // subscription — it is woken by its thrown promise, not the store. The
+  // navigation-shaped consequences are pinned in `useQuery.transition.test.tsx`.
+  const getSnapshot = useCallback(
+    () => resource.peek(variantKey),
+    [resource, variantKey],
+  );
+  const snapshot = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+
+  // `keepPreviousData`: remember the last snapshot that had data, and show it
+  // whenever the current one is loading without data (e.g. a variant change
+  // with `suspense: false`). Presence is `hasData`, never `data`'s truthiness
+  // — `null`/`0`/`false`/`""` are legitimate response bodies.
+  const lastDataRef = useRef(snapshot?.hasData ? snapshot : null);
+  useEffect(() => {
+    if (snapshot?.hasData) {
+      lastDataRef.current = snapshot;
     }
-    return resource.getVariant(variantKey);
-  });
+  }, [snapshot]);
+
+  let state = snapshot;
+  if (
+    config.keepPreviousData &&
+    !snapshot?.hasData &&
+    snapshot?.loading &&
+    lastDataRef.current
+  ) {
+    state = { ...lastDataRef.current, loading: true };
+  }
+
+  // The render-phase read for the suspense path. Only when there is nothing
+  // to show — data in hand always renders, and revalidation stays where it
+  // was (the mount effect below). Both reads dedupe across the render
+  // attempts React discards, so this is safe to hit on every attempt.
+  //
+  // On a streaming server render the read goes to the request's
+  // `ServerQueryStore` instead of the client resource: a prefetched query is
+  // already in flight there and is joined, an undiscovered one starts now
+  // (the store logs the late-discovery hint when that cost something).
+  let readPromise: Promise<void> | undefined;
+  let serverError: unknown;
+  if (suspense && !state?.hasData && !state?.error) {
+    if (typeof window === "undefined") {
+      if (serverQueries) {
+        const entry = serverQueries.ensure(url, { params, search });
+        if (entry.status === "resolved") {
+          state = {
+            loading: false,
+            data: entry.data,
+            hasData: true,
+            error: null,
+            version: 0,
+          };
+        } else if (entry.status === "rejected") {
+          serverError = entry.error;
+        } else {
+          readPromise = entry.promise;
+        }
+      }
+    } else {
+      readPromise = resource.read(variantKey, config.staleTime).promise;
+    }
+  }
+
+  if (
+    suspense &&
+    typeof window === "undefined" &&
+    !serverQueries &&
+    !state?.hasData &&
+    process.env.NODE_ENV !== "production"
+  ) {
+    const searchHint = variantKey
+      ? `, { search: ${JSON.stringify(Object.fromEntries(searchParams))} }`
+      : "";
+    console.warn(
+      `[gemi] useQuery("${url}") rendered on the server without data. ` +
+        `The server never fetches, so this page ships without it and the ` +
+        `client suspends after hydration. Add ` +
+        `\`Query.prefetch("${url}"${searchHint})\` to the route's view handler.`,
+    );
+  }
 
   const retry = useCallback(
     (vk: string) => {
@@ -110,7 +265,7 @@ export function useQuery<T extends keyof GetRPC>(
         if (configRef.current.debug) console.log("retrying", vk);
         retryingMap.current.set(vk, true);
         retryIntervalRef.current = setTimeout(() => {
-          resource.getVariant(vk);
+          resource.getVariant(vk, configRef.current.staleTime);
           retryingMap.current.set(vk, false);
         }, configRef.current.retryIntervalOnError);
       }
@@ -118,21 +273,58 @@ export function useQuery<T extends keyof GetRPC>(
     [resource],
   );
 
+  // Mount / variant-change revalidation — unchanged semantics: `getVariant`
+  // fetches when the variant is missing or stale, and now joins an in-flight
+  // render-initiated read instead of racing it.
   useEffect(() => {
-    if (paramsKey !== paramsRef.current) {
-      setResource(getResource(normalPath));
-      if (fetchedRef.current) {
-        setState(resource.getVariant(variantKey));
-      }
-      paramsRef.current = paramsKey;
+    if (fetchedRef.current) {
+      resource.getVariant(variantKey, configRef.current.staleTime);
     }
-  }, [paramsKey, normalPath, variantKey, getResource, resource]);
+    return () => {
+      clearTimeout(retryIntervalRef.current);
+    };
+  }, [variantKey, resource]);
+
+  // With `suspense: false` an error is returned and retried in the
+  // background; under suspense it throws below instead.
+  useEffect(() => {
+    if (!suspense && snapshot?.error) {
+      retry(variantKey);
+    }
+  }, [snapshot, suspense, retry, variantKey]);
+
+  useEffect(() => {
+    const cfg = configRef.current;
+    if (!cfg.refetchUntil) return;
+    if (snapshot && !snapshot.loading && snapshot.hasData && !snapshot.error) {
+      const nextDuration = cfg.refetchUntil(
+        snapshot.data,
+        refetchUntilDurationRef.current,
+      );
+      if (nextDuration > 0) {
+        refetchUntilDurationRef.current = nextDuration;
+        refetchUntilTimerRef.current = setTimeout(() => {
+          resource.refetch(variantKey);
+        }, nextDuration);
+      } else {
+        refetchUntilDurationRef.current = 0;
+      }
+    }
+    return () => {
+      if (refetchUntilTimerRef.current) {
+        clearTimeout(refetchUntilTimerRef.current);
+      }
+    };
+  }, [snapshot, resource, variantKey]);
 
   const handleReload = useCallback(() => {
     if (configRef.current.debug) {
       console.log("Reloading query for", variantKey);
     }
-    const data = resource.getVariant(variantKey).data;
+    const data = resource.getVariant(
+      variantKey,
+      configRef.current.staleTime,
+    ).data;
     resource.mutate(variantKey, () => data);
   }, [variantKey, resource]);
 
@@ -140,89 +332,37 @@ export function useQuery<T extends keyof GetRPC>(
     if (!fetchedRef.current) return;
     refreshIntervalRef.current = setInterval(() => {
       handleReload();
-    }, refreshInterval);
+    }, config.refreshInterval);
 
     return () => {
       if (refreshIntervalRef.current) {
         clearInterval(refreshIntervalRef.current);
       }
     };
-  }, [refreshInterval, handleReload]);
+  }, [config.refreshInterval, handleReload]);
 
   useEffect(() => {
+    // Feature-checked per method: vitest's `import.meta.hot` shim has `on`
+    // but not `off`.
     // @ts-ignore
-    if (import.meta.hot) {
+    if (typeof import.meta.hot?.on === "function") {
       // @ts-ignore
       import.meta.hot.on("http-reload", handleReload);
     }
     return () => {
       // @ts-ignore
-      if (import.meta.hot) {
+      if (typeof import.meta.hot?.off === "function") {
         // @ts-ignore
         import.meta.hot.off("http-reload", handleReload);
       }
     };
   }, [handleReload]);
 
-  const handleStateUpdate = useCallback(
-    (nextState: ReturnType<typeof resource.getVariant>) => {
-      const cfg = configRef.current;
-      if (cfg.debug) {
-        console.log("state updating due to url update", variantKey);
-        console.log(nextState);
-      }
-      if (nextState.error) {
-        retry(variantKey);
-      }
-      if (cfg.keepPreviousData) {
-        if (nextState.loading) {
-          setState((s) => ({ ...s, loading: true }));
-        } else {
-          setState(nextState);
-        }
-      } else {
-        setState(nextState);
-      }
-
-      if (cfg.refetchUntil && !nextState.loading && nextState.data && !nextState.error) {
-        const nextDuration = cfg.refetchUntil(nextState.data, refetchUntilDurationRef.current);
-        if (nextDuration > 0) {
-          refetchUntilDurationRef.current = nextDuration;
-          refetchUntilTimerRef.current = setTimeout(() => {
-            resource.refetch(variantKey);
-          }, nextDuration);
-        } else {
-          refetchUntilDurationRef.current = 0;
-        }
-      }
-    },
-    [variantKey, retry, resource],
-  );
-
-  useEffect(() => {
-    if (fetchedRef.current) {
-      handleStateUpdate(resource.getVariant(variantKey));
-    }
-    const unsub = resource.store.subscribe((store) => {
-      const variant = store.get(variantKey);
-      if (variant) {
-        handleStateUpdate(variant);
-      }
-    });
-    return () => {
-      unsub();
-      clearTimeout(retryIntervalRef.current);
-      if (refetchUntilTimerRef.current) {
-        clearTimeout(refetchUntilTimerRef.current);
-      }
-    };
-  }, [variantKey, resource, handleStateUpdate]);
-
   const trigger = useCallback(() => {
     fetchedRef.current = true;
     const store = resource.store.getValue();
     const variant = store.get(variantKey);
-    if (!variant || (!variant.loading && !variant.data)) {
+    if (!variant || (!variant.loading && !variant.hasData)) {
       resource.refetch(variantKey);
     }
   }, [resource, variantKey]);
@@ -231,7 +371,9 @@ export function useQuery<T extends keyof GetRPC>(
     if (prefetchedRef.current) return;
     prefetchedRef.current = true;
     fetchedRef.current = true;
-    resource.refetch(variantKey);
+    // `read`, not `refetch`: a suspending read that follows joins this
+    // request instead of racing it, and fresh data is a no-op.
+    resource.read(variantKey, configRef.current.staleTime);
   }, [resource, variantKey]);
 
   const refetch = useCallback(() => {
@@ -240,7 +382,9 @@ export function useQuery<T extends keyof GetRPC>(
   }, [resource, variantKey]);
 
   function mutate(fn?: NestedPrettify<Data<T>>): void;
-  function mutate(fn?: (data: NestedPrettify<Data<T>>) => NestedPrettify<Data<T>>): void;
+  function mutate(
+    fn?: (data: NestedPrettify<Data<T>>) => NestedPrettify<Data<T>>,
+  ): void;
   function mutate(fn?: any) {
     if (!fn) {
       fetchedRef.current = true;
@@ -248,7 +392,10 @@ export function useQuery<T extends keyof GetRPC>(
       return;
     }
     return resource.mutate(variantKey, (data: any) => {
-      if (data === undefined || data === null) {
+      // `null` is a legitimate cached body; only `undefined` means the query
+      // hasn't produced anything (and `mutate` refetches instead of calling
+      // this in that case).
+      if (data === undefined) {
         console.warn("Mutate function called before the query.");
         return data;
       }
@@ -271,24 +418,51 @@ export function useQuery<T extends keyof GetRPC>(
         if (Array.isArray(updatedData)) {
           return updatedData;
         }
-        throw new Error("Mutate function must return an array when the current data is an array.");
+        throw new Error(
+          "Mutate function must return an array when the current data is an array.",
+        );
       }
 
       if (typeof data !== typeof updatedData) {
-        throw new Error("Mutate function must return the same type as the current data.");
+        throw new Error(
+          "Mutate function must return the same type as the current data.",
+        );
       }
 
       return updatedData;
     });
   }
 
+  // Suspend last, after every hook has run: the attempt React discards ran
+  // them all, and the retry re-runs them identically. The promise is *thrown*
+  // rather than passed to `use()` — the thenable-throw protocol is what
+  // React's ping-and-retry machinery is built around (React.lazy, SWR, React
+  // Query), whereas `use()` on a client-created promise is documented as
+  // unsupported outside a Suspense-compatible framework and React never
+  // retries it. A streaming server render takes the same paths: a pending
+  // entry suspends (React streams the fallback and resumes on settle), and a
+  // rejected one throws so the segment falls back to client rendering, where
+  // the browser's own fetch surfaces the error into the boundary.
+  if (suspense) {
+    if (serverError) {
+      throw serverError;
+    }
+    if (state?.error && !state?.hasData) {
+      throw state.error;
+    }
+    if (!state?.hasData && readPromise) {
+      throw readPromise;
+    }
+  }
+
   return {
     data: state?.data as NestedPrettify<Data<T>>,
-    loading: state?.loading ?? true,
+    loading: state?.loading ?? !lazy,
     error: state?.error as Error,
     mutate,
     trigger,
     prefetch,
+    refetch,
     version: state?.version as number,
   };
 }

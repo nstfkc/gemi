@@ -1,12 +1,9 @@
 import type { RPC } from "../client/rpc";
 import type { UrlParser } from "../client/types";
 import type { ApiRouterHandler } from "../http/ApiRouter";
-import { HttpRequest } from "../http/HttpRequest";
 import { RequestContext } from "../http/requestContext";
-import { applyParams } from "../utils/applyParams";
-import { omitNullishValues } from "../utils/omitNullishValues";
-import { ApiRouteDispatcher } from "../services/router/ApiRouteDispatcher";
-import { Facade } from "./Facade";
+import { ServerQueryStore, type ServerQueryEntry } from "../services/router/ServerQueryStore";
+import { createServerQueryFetcher } from "../services/router/serverQueryFetcher";
 
 type GetRPC = {
   [K in keyof RPC as K extends `GET:${infer P}` ? P : never]: RPC[K];
@@ -20,89 +17,79 @@ type Data<T extends keyof GetRPC> = GetRPC[T] extends ApiRouterHandler<
   ? Awaited<Data>
   : never;
 
-export class Query extends Facade {
-  static getFacadeAccessor() {
-    return ApiRouteDispatcher;
-  }
+type QueryFacadeOptions<T extends keyof GetRPC> = {
+  search?: Record<string, string | number | boolean | null>;
+  params?: Partial<UrlParser<T>>;
+};
 
-  private static prepare<T extends keyof GetRPC>(
+export class Query {
+  private static ensure<T extends keyof GetRPC>(
     path: T,
-    ...args: [
-      options?: {
-        search?: Record<string, string | number | boolean | null>;
-        params?: Partial<UrlParser<T>>;
-      },
-    ]
-  ) {
-    const defaultOptions = { params: {}, search: {} };
-    const [options = {}] = args;
-    const { search, params } = { ...defaultOptions, ...options };
+    options: QueryFacadeOptions<T> = {},
+  ): ServerQueryEntry {
     const ctx = RequestContext.getStore();
 
     if (ctx.req.kind === "api") {
       throw new Error("Query.prefetch() cannot be called from an API request");
     }
 
-    const req = ctx.req.rawRequest;
-    const url = new URL(req.url);
-    const searchParams = new URLSearchParams(
-      omitNullishValues(search as Record<string, string>),
+    // The view router creates the store up front; this lazy fallback keeps the
+    // facade usable anywhere else a view-kind request context exists.
+    ctx.serverQueries ??= new ServerQueryStore(
+      createServerQueryFetcher(ctx.req.rawRequest),
     );
-    searchParams.delete("json");
-    searchParams.sort();
-    const pathnameWithSearchParams = [
-      `${applyParams(path, params)}`,
-      searchParams.toString(),
-    ]
-      .filter((s) => s.length > 0)
-      .join("?");
 
-    const urlStr = `${url.origin}/${pathnameWithSearchParams}`;
-    const newReq = new Request(urlStr, { headers: req.headers });
-    const httpRequest = new HttpRequest(newReq, params);
-    const store = (data: any) => {
-      ctx.prefetchedResources.set(applyParams(path, params), {
-        [searchParams.toString()]: data,
-      });
-    };
-
-    const trigger = () => {
-      return RequestContext.run(httpRequest, async () => {
-        const data: Data<T> = await Query.getFacadeRoot().getRouteData(path);
-        store(data);
-        return data;
-      });
-    };
-
-    return {
-      instant: trigger,
-      prefetch: () => {
-        ctx.prefetchPromiseQueue.add(trigger);
-      },
-    };
+    return ctx.serverQueries.ensure(path, options, "prefetch");
   }
 
-  static instant<T extends keyof GetRPC>(
+  /**
+   * Start the query AND wait for it — the response cannot begin until it
+   * resolves, so its data is part of the first paint. Use for data the shell
+   * itself needs; `prefetch` for everything that may stream.
+   */
+  static async instant<T extends keyof GetRPC>(
     path: T,
-    ...args: [
-      options?: {
-        search?: Record<string, string | number | boolean | null>;
-        params?: Partial<UrlParser<T>>;
-      },
-    ]
-  ) {
-    return Query.prepare(path, ...args).instant();
+    ...args: [options?: QueryFacadeOptions<T>]
+  ): Promise<Data<T>> {
+    const entry = Query.ensure(path, args[0]);
+    await entry.promise;
+    if (entry.status === "rejected") {
+      throw entry.error;
+    }
+    return entry.data as Data<T>;
   }
 
+  /**
+   * Start the query now, in parallel with everything else this request does,
+   * without blocking the response on it. A `useQuery` for the same path and
+   * search renders with this data the moment it lands — in the document
+   * payload when it wins the render, streamed into the page when it doesn't.
+   */
   static prefetch<T extends keyof GetRPC>(
     path: T,
-    ...args: [
-      options?: {
-        search?: Record<string, string | number | boolean | null>;
-        params?: Partial<UrlParser<T>>;
-      },
-    ]
+    ...args: [options?: QueryFacadeOptions<T>]
   ) {
-    return Query.prepare(path, ...args).prefetch();
+    Query.ensure(path, args[0]);
+  }
+
+  /**
+   * Declare that this route primes nothing on purpose, silencing the dev-mode
+   * late-discovery hints for the request. Priming is not free — prefetched
+   * data is re-fetched and streamed into every client-navigation payload for
+   * the route, even when the client already holds it — so a handler that
+   * deliberately leaves a heavy query to `useQuery`'s cache-then-revalidate
+   * can say so instead of being nagged.
+   */
+  static noPrefetch() {
+    const ctx = RequestContext.getStore();
+
+    if (ctx.req.kind === "api") {
+      throw new Error("Query.noPrefetch() cannot be called from an API request");
+    }
+
+    ctx.serverQueries ??= new ServerQueryStore(
+      createServerQueryFetcher(ctx.req.rawRequest),
+    );
+    ctx.serverQueries.muteDiscoveryHints();
   }
 }

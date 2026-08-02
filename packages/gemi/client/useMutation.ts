@@ -4,6 +4,7 @@ import type { ApiRouterHandler } from "../http/ApiRouter";
 import type { UnwrapPromise } from "../utils/type";
 import type { UrlParser } from "./types";
 import { useParams } from "./useParams";
+import { ClientRouterContext } from "./ClientRouterContext";
 
 type Methods = {
   POST: {
@@ -99,6 +100,9 @@ export function useMutation<
   ]
 ) {
   const _params = useParams();
+  // A write may have moved the data behind any page warmed ahead of a click,
+  // and a prefetched payload is committed wholesale — into the query cache too.
+  const { clearPrefetchCache } = useContext(ClientRouterContext);
   const [state, setState] = useState<State<T>>({
     data: null,
     error: null,
@@ -164,6 +168,7 @@ export function useMutation<
         return;
       }
 
+      clearPrefetchCache?.();
       options.onSuccess(data);
 
       setState({
@@ -268,6 +273,7 @@ export function useUpload<K extends keyof Methods["POST"], T = Data<"POST", K>>(
   );
   const [progress, setProgress] = useState(0);
   const _params = useParams();
+  const { clearPrefetchCache } = useContext(ClientRouterContext);
   const abortRef = useRef<VoidFunction | null>(null);
 
   const [inputs = {}, options = defaultOptions] = args ?? [];
@@ -356,6 +362,7 @@ export function useUpload<K extends keyof Methods["POST"], T = Data<"POST", K>>(
         return;
       }
       const json = await result.json();
+      clearPrefetchCache?.();
       options?.onSuccess?.(json);
       return json;
     } catch (error) {

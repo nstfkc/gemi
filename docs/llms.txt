@@ -10,7 +10,7 @@ Each link below points to a self-contained Markdown page. For a single file cont
 
 - [Getting Started](https://nstfkc.github.io/gemi/getting-started.md): install, scaffold with create-gemi-app, dev/build/start, a first route + view.
 - [Project Structure & the Kernel](https://nstfkc.github.io/gemi/project-structure.md): the app/ layout, the Kernel, the container, app/config/*.ts, service providers, and app bootstrap.
-- [Configuration](https://nstfkc.github.io/gemi/configuration.md): gemi.config.ts (BUILD config, distinct from app/config/), .env handling, app/preload.ts, Vite config.
+- [Configuration](https://nstfkc.github.io/gemi/configuration.md): gemi.config.ts (BUILD config, distinct from app/config/), .env handling, HTML compression, app/preload.ts, Vite config.
 - [CLI](https://nstfkc.github.io/gemi/cli.md): gemi dev/build/start, gemi migrate (0.42 -> 0.43 codemod), plus codegen and inspection commands.
 
 ## HTTP layer

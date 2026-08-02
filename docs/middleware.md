@@ -88,6 +88,26 @@ Sets CORS headers for requests whose `Origin` is in the configured `origins` map
 
 Verifies the `csrf_token` cookie against Bun's CSRF verifier for `POST`/`PUT`/`PATCH`/`DELETE`. Missing or invalid tokens throw a **403**.
 
+### `no-stream` (view routes only)
+
+Opts the route out of streaming SSR: the document response waits for every
+query and renders fully settled, inline HTML — the same treatment crawler
+user-agents get automatically. Use it on public marketing/content routes that
+must render for JS-disabled visitors, text browsers, and failed script loads:
+React parks any HTML chunk over ~12.8&nbsp;kB behind a reveal script when
+streaming, so without this a large static page renders blank until JS runs.
+
+```ts
+class MarketingRouter extends ViewRouter {
+  middlewares = ["cache:public", "no-stream"];
+  // ...
+}
+```
+
+Streaming stays the right default for the authenticated app, where JS is a
+given and time-to-shell matters. `no-stream` is a routing directive rather
+than a middleware class — it has no alias to register.
+
 ## Registering middleware
 
 The `middleware` config slice holds a single field, `aliases` — `Record<string, MiddlewareClass>`. This is where DSL names become classes:

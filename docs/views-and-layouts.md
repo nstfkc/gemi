@@ -84,7 +84,9 @@ reaches the component.
 3. The HTML — plus the serialized server data and any prefetched query data — is
    sent to the browser.
 4. The client hydrates the same tree. Subsequent in-app navigations fetch just the
-   new view's data as JSON instead of a full page load.
+   new view's data as JSON instead of a full page load — and only for the segments
+   that changed, see [layout handlers do not re-run on every
+   navigation](#layout-handlers-do-not-re-run-on-every-navigation).
 
 ## Layouts
 
@@ -150,6 +152,61 @@ export default function PublicLayout(props: LayoutProps<"/">) {
   return <div data-plan={props.plan}>{props.children}</div>;
 }
 ```
+
+### Layout handlers do not re-run on every navigation
+
+A layout handler runs when the client *enters* the layout, not on every navigation
+underneath it. Moving between two routes inside the same layout sends only the
+segments that actually changed, and the layout keeps the props it already has:
+
+| Navigation | `PublicLayout` handler |
+| --- | --- |
+| `/about` → `/pricing` | skipped — same layout, same path |
+| `/app/A/chat` → `/app/A/lists` | skipped |
+| `/app/A/chat` → `/app/B/chat` | re-runs — `:orgId` changed |
+| `/pricing` → `/auth/sign-in` → back | re-runs — the layout was left |
+| any navigation that changes the query string | re-runs |
+
+A full page load always runs every handler, so a refresh re-runs the layout too.
+
+A layout whose data really does change as the routes below it change can opt out
+with `alwaysRun()`, at the cost of a handler run per navigation:
+
+```typescript
+"/app/:orgId": this.layout("AppLayout", [AppController, "layout"], {
+  "/chat": this.view("Chat"),
+}).alwaysRun(),
+```
+
+Segments are skipped as a prefix, so `alwaysRun()` on a layout also re-runs every
+layout and view nested inside it. To turn the whole mechanism off for an app, set
+`view.partialRendering` to `false` in `app/config/route.ts`:
+
+```typescript
+export default defineRouteConfig({
+  view: {
+    rootRouter: RootViewRouter,
+    root: createRoot(RootLayout),
+    partialRendering: false,
+  },
+});
+```
+
+This makes layout handlers the wrong place for an access check. A handler that
+redirects when there is no session stops running once the client is inside the
+layout, and the header the client sends to say where it is is client-controlled.
+**Guard with middleware** — middleware runs on every request, whole chain, before
+any handler:
+
+```typescript
+"/app": this.layout("AppLayout", [AppController, "layout"], {
+  "/chat": this.view("Chat"),
+}).middleware(["auth"]),
+```
+
+Metadata follows the same rule. If a partially rendered navigation sets no
+metadata at all, the response carries none and the page keeps the title and
+description the skipped layout set.
 
 ### RootLayout
 

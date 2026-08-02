@@ -1,5 +1,6 @@
 export { useQuery } from "./useQuery";
 export type { QueryResult } from "./useQuery";
+export { QueryError } from "./QueryError";
 export {
   useMutation,
   useDelete,
@@ -26,9 +27,11 @@ export { useRoute } from "./useRoute";
 export { useIsNavigationPending } from "./useIsNavigationPending";
 export { useNavigationProgress } from "./useNavigationProgress";
 export { useNavigate } from "./useNavigate";
+export { usePrefetch } from "./usePrefetch";
 export { useBreadcrumbs } from "./useBreadcrumbs";
 export { useRouteTransition } from "./RouteTransitionProvider";
 export { Link } from "./Link";
+export type { PrefetchStrategy } from "./Link";
 export { Redirect } from "./Redirect";
 export { init, create } from "./init";
 export { createRoot } from "./createRoot";
