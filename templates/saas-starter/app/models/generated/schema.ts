@@ -10,7 +10,7 @@ import type { ModelSchema } from "gemi/orm";
 // rather than with a TypeError inside the compiler.
 export const ARTIFACT_VERSION = 1;
 
-export const Account: ModelSchema = {
+export const Account = {
   "name": "Account",
   "table": "Account",
   "fields": {
@@ -144,9 +144,9 @@ export const Account: ModelSchema = {
       "nullable": true
     }
   }
-};
+} satisfies ModelSchema;
 
-export const Ledger: ModelSchema = {
+export const Ledger = {
   "name": "Ledger",
   "table": "Ledger",
   "fields": {
@@ -191,9 +191,9 @@ export const Ledger: ModelSchema = {
       "nullable": false
     }
   }
-};
+} satisfies ModelSchema;
 
-export const LedgerEntry: ModelSchema = {
+export const LedgerEntry = {
   "name": "LedgerEntry",
   "table": "LedgerEntry",
   "fields": {
@@ -262,9 +262,9 @@ export const LedgerEntry: ModelSchema = {
       "nullable": false
     }
   }
-};
+} satisfies ModelSchema;
 
-export const MagicLinkToken: ModelSchema = {
+export const MagicLinkToken = {
   "name": "MagicLinkToken",
   "table": "MagicLinkToken",
   "fields": {
@@ -329,9 +329,9 @@ export const MagicLinkToken: ModelSchema = {
     ]
   ],
   "relations": {}
-};
+} satisfies ModelSchema;
 
-export const Membership: ModelSchema = {
+export const Membership = {
   "name": "Membership",
   "table": "Membership",
   "fields": {
@@ -381,9 +381,9 @@ export const Membership: ModelSchema = {
   ],
   "uniques": [],
   "relations": {}
-};
+} satisfies ModelSchema;
 
-export const Organization: ModelSchema = {
+export const Organization = {
   "name": "Organization",
   "table": "Organization",
   "fields": {
@@ -484,9 +484,9 @@ export const Organization: ModelSchema = {
       "nullable": false
     }
   }
-};
+} satisfies ModelSchema;
 
-export const OrganizationInvitation: ModelSchema = {
+export const OrganizationInvitation = {
   "name": "OrganizationInvitation",
   "table": "OrganizationInvitation",
   "fields": {
@@ -583,9 +583,9 @@ export const OrganizationInvitation: ModelSchema = {
       "nullable": false
     }
   }
-};
+} satisfies ModelSchema;
 
-export const PasswordResetToken: ModelSchema = {
+export const PasswordResetToken = {
   "name": "PasswordResetToken",
   "table": "PasswordResetToken",
   "fields": {
@@ -651,9 +651,9 @@ export const PasswordResetToken: ModelSchema = {
       "nullable": false
     }
   }
-};
+} satisfies ModelSchema;
 
-export const Post: ModelSchema = {
+export const Post = {
   "name": "Post",
   "table": "Post",
   "fields": {
@@ -697,9 +697,9 @@ export const Post: ModelSchema = {
       }
     }
   }
-};
+} satisfies ModelSchema;
 
-export const Session: ModelSchema = {
+export const Session = {
   "name": "Session",
   "table": "Session",
   "fields": {
@@ -805,9 +805,9 @@ export const Session: ModelSchema = {
       "nullable": true
     }
   }
-};
+} satisfies ModelSchema;
 
-export const SocialAccount: ModelSchema = {
+export const SocialAccount = {
   "name": "SocialAccount",
   "table": "SocialAccount",
   "fields": {
@@ -930,9 +930,9 @@ export const SocialAccount: ModelSchema = {
       "nullable": false
     }
   }
-};
+} satisfies ModelSchema;
 
-export const Tag: ModelSchema = {
+export const Tag = {
   "name": "Tag",
   "table": "Tag",
   "fields": {
@@ -980,9 +980,9 @@ export const Tag: ModelSchema = {
       }
     }
   }
-};
+} satisfies ModelSchema;
 
-export const User: ModelSchema = {
+export const User = {
   "name": "User",
   "table": "User",
   "fields": {
@@ -1186,4 +1186,4 @@ export const User: ModelSchema = {
       "nullable": false
     }
   }
-};
+} satisfies ModelSchema;

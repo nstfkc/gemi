@@ -56,6 +56,27 @@ Then `bunx prisma generate`. You get three files under `app/models/generated/`:
 
 **The output is committed on purpose.** Diffs stay reviewable and CI needs no codegen step.
 
+### Columns the generator refuses
+
+Two kinds of column stop generation with an `UnsupportedSchemaError` naming the model and field,
+rather than being skipped:
+
+| Column | Why |
+| --- | --- |
+| A scalar list — `tags String[]` | Postgres-only, and needs array decoding this ORM does not have. |
+| `Decimal` | Prisma types it as `Prisma.Decimal`; SQLite stores a REAL and the driver returns a JS number, so the value would be a float pretending to be an arbitrary-precision decimal. |
+
+**Refused rather than omitted, and the whole generation fails rather than the one field.** Skipping
+the column would generate cleanly and then hand back a row shape that silently disagrees with the
+type Prisma gave you — which is the failure this ORM is built to make impossible. One unsupported
+column means no `schema.ts`, no `models.ts` and no `index.ts` for any model, so the problem is
+visible at the moment you introduce it.
+
+A `Unsupported(...)` column is different and is *not* refused: Prisma's own client omits those from
+its result types, so omitting them is what keeps the shapes identical.
+
+Scalar lists are tracked in [#300](https://github.com/nstfkc/gemi/issues/300).
+
 ### Your model class
 
 The generated base is not the class you write code on. Subclass it, and **re-register it**:
@@ -297,6 +318,53 @@ becoming a silent superset on the one dialect the differential harness could the
 On SQLite the error names the dialect and says so. If a batch is too large for one statement it is
 split inside a transaction, and `skipDuplicates` survives the split: the counts sum, and a conflict
 in a later chunk does not roll back an earlier one, because `do nothing` is not an error.
+
+### JSON path filters
+
+```ts
+// postgres
+await User.findMany({ where: { metadata: { path: ["plan"], equals: "pro" } } })
+// sqlite
+await User.findMany({ where: { metadata: { path: "$.plan", equals: "pro" } } })
+```
+
+**The path grammar differs by dialect, and that is Prisma's split rather than this ORM's.** Its
+generated client takes an array of keys on Postgres and a JSONPath string on SQLite, and refuses the
+other form on each — so the argument is dialect-specific before it reaches gemi. The refusal here
+says which form the database you are on wants.
+
+Which filters apply also differs, again following Prisma:
+
+| | SQLite | Postgres |
+| --- | --- | --- |
+| `equals`, `not` | yes | yes |
+| `string_contains`, `string_starts_with`, `string_ends_with` | yes | yes |
+| `array_contains` | no | yes |
+| `lt`, `lte`, `gt`, `gte` | no | yes |
+
+Prisma refuses the bottom two rows on SQLite with *"Unknown argument"*, so gemi refuses them too:
+implementing them there would answer a query the differential harness has no oracle for.
+
+**The path is always a bound parameter.** It is the one place a caller's value decides part of an
+expression's meaning, and both dialects take it natively — Postgres's `#>` accepts a `text[]`,
+SQLite's `json_extract` a string — so the feature fits inside invariant 2 rather than bending it.
+
+Three things a path filter refuses, each because answering would be silently wrong rather than
+merely unsupported:
+
+- **The null sentinels.** `{ path: […], equals: Prisma.DbNull }` is refused. An extracted value
+  cannot tell an absent key from a JSON `null` — `#>>` yields SQL NULL for both — so the
+  distinction the sentinels exist to make is already gone by the time the comparison happens.
+  Filter the column itself: `{ metadata: { equals: Prisma.DbNull } }`.
+- **A non-string operand to `string_contains` / `string_starts_with` / `string_ends_with`**, for
+  the same reason the scalar `contains` refuses one: the pattern would become `%null%`, which runs
+  and returns the wrong rows.
+- **An object or array under `equals` / `not` / the numeric comparisons.** Prisma accepts one;
+  gemi does not yet. It would bind as `"[object Object]"` on Postgres and match nothing. Use
+  `array_contains` for containment, or narrow the path until it names a scalar.
+
+An empty path — `[]` or `""` — is refused on both dialects. On Postgres it would extract the whole
+document, which is a filter on the column rather than on a path.
 
 ### What a refusal tells you
 
@@ -780,7 +848,7 @@ initializer from an inherited static declaration, so without it `ctx` and `data`
 Policies compose by listing them, in the order they apply:
 
 ```ts
-static $policies: AccountPolicy[] = [softDeletes<Account>(), new TenantPolicy()]
+static $policies: AccountPolicy[] = [softDeletes<typeof Account>(), new TenantPolicy()]
 ```
 
 Entries may be objects or classes. A class is instantiated once, and extending the generated
@@ -933,11 +1001,23 @@ Ships as a policy, which is the proof the hook is expressive enough to be worth 
 import { softDelete, softDeleteMany, softDeletes } from "gemi/orm"
 
 export class User extends UserModel {
-  static $policies = [softDeletes<User>()]  // reads skip rows with a deletedAt
-  static delete = softDelete(User)          // delete becomes an update
-  static deleteMany = softDeleteMany(User)
+  static $policies = [softDeletes<typeof User>()]  // reads skip rows with a deletedAt
+  static expire = softDelete(User)                 // an update that sets deletedAt
+  static expireMany = softDeleteMany(User)
 }
 ```
+
+> **`expire`, not `delete`, and that is a limitation rather than a style.** Naming the wrapper
+> `delete` would be the better recipe — `User.delete()` would transparently become an update — and
+> it cannot be written: the member's type would have to be read off the class the member is being
+> defined on, which TypeScript refuses with *"'delete' implicitly has type 'any' because it does
+> not have a type annotation and is referenced directly or indirectly in its own initializer"*.
+> Annotating it does not help, and passing the generated base instead of your subclass breaks the
+> feature, because policies are resolved per registered class and the base carries none.
+>
+> **So `User.delete()` remains a hard delete.** On a model that soft-deletes, that is a real edge:
+> reads are scoped by the policy, but a `delete` still removes the row. Call `User.expire()`, and
+> if a hard delete should be unreachable, keep the model's `delete` behind a policy of your own.
 
 `deletedAt` must be a nullable `DateTime` on the model (`field` overrides the column name). The
 read half applies to nested reads for the same reason every policy does — a deleted `Account` does
@@ -947,27 +1027,34 @@ the include site, which is the half ORM-level soft deletes usually get wrong.
 Composing it with your own is one list:
 
 ```ts
-static $policies: UserPolicy[] = [softDeletes<User>(), new TenantPolicy()]
+static $policies: UserPolicy[] = [softDeletes<typeof User>(), new TenantPolicy()]
 ```
 
 `softDeletes()` carries an `onUpdate` pass-through, because `softDelete()` writes the very column
 the policy scopes on and something has to say that is intended. That permission is **per policy**:
 a tenant policy sitting beside it in the same list still has to answer for its own column.
 
-`field` is constrained to the model's own keys **when the model type is given** —
-`softDeletes<User>({ field: … })`, as above — so a typo there is a compile error rather than a
-`no such column` on the first read.
-
-`softDelete(User)` and `softDeleteMany(User)` take the model as a *value*, and its row type is not
-recoverable from it, so their `field` is unchecked. Spell it once and share it if you override the
-default:
+`field` is constrained to the model's **schema columns** — the same list `UnknownFieldError` prints
+— on every spelling that names a model:
 
 ```ts
-const archived = { field: "archivedAt" } as const
+softDeletes<typeof User>({ field: "archivedAt" })   // checked
+softDelete(User, { field: "archivedAt" })           // checked
+softDeleteMany(User, { field: "archivedAt" })       // checked
 
+softDeletes({ field: "archivedAt" })                // unchecked — no model named
+```
+
+Columns rather than keys is the part that matters: the constraint used to be `keyof` the *instance*
+type, so `field: "save"` — a method — compiled clean and failed at runtime. Pass the model as
+`typeof User` and it is a compile error.
+
+Nothing needs spelling twice. If you override the default, each call checks its own argument:
+
+```ts
 export class User extends UserModel {
-  static $policies = [softDeletes<User>(archived)]   // checked here
-  static delete = softDelete(User, archived)          // and therefore correct here
+  static $policies = [softDeletes<typeof User>({ field: "archivedAt" })]
+  static expire = softDelete(User, { field: "archivedAt" })
 }
 ```
 
@@ -1281,6 +1368,10 @@ if (!ormSupports(DB.dialect)) throw new Error("this deployment needs Postgres")
 
 Stated so you can plan around them rather than discover them:
 
+- **No scalar lists.** `tags String[]` is refused at *generation* time, so this one stops your build
+  rather than a query — see [Columns the generator refuses](#columns-the-generator-refuses). Prisma
+  itself refuses them on SQLite, so half the supported matrix could never have had them.
+  Pending rather than declined ([#300](https://github.com/nstfkc/gemi/issues/300)).
 - **No identity map and no unit of work.** Two queries for the same row give you two objects. Half
   an identity map is worse than none.
 - **No lazy loading.** A relation you did not `include` is absent, not a proxy that queries when

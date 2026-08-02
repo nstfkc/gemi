@@ -11,15 +11,33 @@ nested reads**. Performance is the top priority throughout.
 
 ## Stack position
 
-This work is a **third level in an open PR stack**. Branch from
-`feat/database-layer` and target it, not `main` and not the release branch:
+**There is no stack. The ORM has landed.** `feat/orm` is an ancestor of
+`origin/next`, which carries `0.51.0-rc.0` and proposes to `main` as PR #273.
+Branch from `next`.
 
 ```
 main
- └── refactor/laravel-container-architecture   PR #30, OPEN — container/providers
-      └── feat/database-layer                  PR #33, OPEN — DatabaseManager, DB facade
-           └── feat/orm                        PR #45, OPEN — iterations 1-9 and after
+ └── next                    0.51.0-rc.0, PR #273 — contains the ORM
 ```
+
+The stack this section described is history, and reading it as instructions is
+the mistake it now exists to prevent:
+
+```
+main
+ └── refactor/laravel-container-architecture   PR #30, CLOSED — shipped in rc.2
+      └── feat/database-layer                  PR #33, CLOSED — shipped in rc.2
+           └── feat/orm                        PR #45, CLOSED — landed on next
+```
+
+#30 and #33 were closed as already-shipped: their content reached
+`release/v0.50.0-rc.2` on 2026-07-28 and their PRs were simply never closed, so
+for three days two open PRs described history. #45 is closed because the work
+went into `next` directly rather than into a base with nothing above it.
+
+**This section has now gone stale three times** — the original diagram, the
+correction below it, and this. Each rewrite has been to replace a *status* with
+a *date*, because a status rots silently and this document has no way to notice.
 
 ### How the stack landed
 
@@ -535,8 +553,8 @@ makes the *SQLite* suites fail for an unrelated reason afterwards.
 
 ## Picking up an iteration
 
-0. Confirm you are on a branch descended from `feat/database-layer` (see
-   [Stack position](#stack-position)), not from `main` or a release branch.
+0. Confirm you are on a branch descended from `next` (see
+   [Stack position](#stack-position)), not from `main`.
 1. Read this file, then the iteration's doc.
 2. Read the "Read first" list in that doc before writing anything.
 3. Respect the six invariants. If one is in the way, raise it — do not work around it.
@@ -555,9 +573,22 @@ makes the *SQLite* suites fail for an unrelated reason afterwards.
   of it — `app()` above all — handle two shapes forever, and hanging the handle
   off the Application shares it across concurrent requests, which is data
   corruption rather than a style question.
-- **MySQL / MariaDB.** Deferred. `DatabaseManager` already infers all four
-  dialects, and the strategy seam keeps the door open, but only SQLite and
-  Postgres are built and tested. Confirm this is acceptable.
+- ~~**MySQL / MariaDB.**~~ **Settled for 0.51.0: refused, not supported** (#269).
+  `DatabaseManager` still infers all four dialects and the strategy seam still
+  keeps the door open, but only SQLite and Postgres have compilers, and the
+  other two raise `UnsupportedDialectError` — which is careful to say the
+  *connection* is fine and the ORM is what does not speak that dialect.
+  `ReturningUnsupportedError` is the same gap seen from the write path.
+
+  This closes #71 (*"support it, or refuse it explicitly"*) by refusing, and
+  `docs/orm.md`'s **Dialects** section and errors table already say so. What
+  made it a decision rather than a build: the constraint is the differential
+  harness, not the compiler. Every correctness claim here is *the same query
+  through Prisma and through gemi against one database, compared on rows and
+  table contents* — so MySQL needs a MySQL Prisma client, a service container in
+  CI, and an answer to `RETURNING`, which MySQL does not have and which the
+  write path's row counts come from deliberately. That is a second answer to how
+  writes report what they did, not a dialect file.
 - ~~**Implicit many-to-many.**~~ **Covered.** Iteration 3 built the dedicated
   fixture this asked for —
   `templates/saas-starter/app/models/relations.many-to-many.test.ts` — a
@@ -568,18 +599,22 @@ makes the *SQLite* suites fail for an unrelated reason afterwards.
   Still true, and worth keeping in view: the template's own schema has no m-n, so
   the differential harness cannot reach one and this fixture asserts against
   Prisma's documented shape rather than a second generated client.
-- ~~**Coexistence.**~~ **Built.** `OrmAuthenticationAdapter` ships alongside the
-  Prisma one — both satisfy `IAuthenticationAdapter`, so an application selects
-  one and nothing else in `auth/` knows which. All twenty-two methods translated
-  with no changes to the ORM, which is the first evidence the query surface is
-  *sufficient* rather than merely tested: they were written against a real
-  application's needs rather than against the compiler's known capabilities.
-  `packages/gemi/auth/adapters/prisma.ts` and the template's
-  `app/database/prisma.ts` are untouched.
+- ~~**Coexistence.**~~ ~~**Built.**~~ **Overtaken — the seam is gone** (`922c45d`,
+  closing #270). All twenty-two methods translated with no changes to the ORM,
+  which was the first evidence the query surface is *sufficient* rather than
+  merely tested. Then the adapter interface itself was retired: there is one
+  `auth/UserProvider.ts`, `AuthManager` constructs it, and `app/config/auth.ts`
+  says nothing about persistence at all.
 
-  **Still open, and a decision rather than work:** the template's
-  `app/config/auth.ts` is not pointed at it. That is a behaviour change to a
-  working application and wants its own call.
-- **Where this stack merges.** PRs #30 and #33 are both open. If they land before
-  the ORM is ready, rebase onto whatever they merge into rather than carrying a
-  three-deep stack longer than necessary.
+  So the decision this entry was holding open — *should the template point at
+  the ORM adapter?* — was not answered either way. It stopped being a question:
+  there is no adapter to select and no `userProvider` line in the template. An
+  application that must change a query subclasses `UserProvider` and passes it
+  as `AuthManager`'s second constructor argument.
+- ~~**Where this stack merges.**~~ **Settled: it merged to `next`.** PRs #30 and
+  #33 were closed as already-shipped — their content had been on
+  `release/v0.50.0-rc.2` since 2026-07-28 — and `feat/orm` is now an ancestor of
+  `origin/next`, which carries `0.51.0-rc.0` and proposes to `main` as PR #273.
+  PR #45 is closed. **This section has gone stale three times; it is now a
+  statement about history rather than a plan, which is the only form that
+  cannot.** See #268 for the branch hygiene that outlived it.

@@ -16,6 +16,7 @@ import {
   register,
   softDeletes,
   ScopeEscapeError,
+  UnknownFieldError,
   UnregisteredPolicyClassError,
   type ModelPolicy,
 } from "gemi/orm";
@@ -1427,6 +1428,53 @@ function softDeleteSuite(label: string, url?: string) {
         where: { id: bobId },
       });
       expect(await SoftUser.findMany({})).toHaveLength(1);
+    });
+
+    /**
+     * What a `field` naming something that is not a column actually does — the
+     * consequence the docs described for two releases as a `no such column`
+     * from the database.
+     *
+     * It is not, and never was. The compiler refuses an unknown name in a
+     * `where` or a `data` before a statement is built, so the query never
+     * reaches a dialect and no dialect ever gets to say `no such column`.
+     * `UnknownFieldError` names the model and lists every column it does have.
+     *
+     * #262 made this unreachable from most spellings — `field` is constrained
+     * to `$schema.fields` wherever a model is named, and
+     * `soft-delete.test-d.ts` pins exactly which. This is the backstop for the
+     * one spelling that cannot be checked statically, `softDeletes({ field })`,
+     * which names no model. Asserted rather than described, because the prose
+     * got it wrong twice.
+     */
+    describe("a field that is not a column", () => {
+      test("the read half refuses, naming the model and its columns", async () => {
+        (SoftUser as any).$policies = [softDeletes({ field: "nope" })];
+
+        const error = await SoftUser.findMany({}).catch((e: unknown) => e);
+
+        expect(error).toBeInstanceOf(UnknownFieldError);
+        expect((error as UnknownFieldError).field).toBe("nope");
+        expect((error as UnknownFieldError).model).toBe("User");
+        expect((error as Error).message).toContain("deletedAt");
+      });
+
+      test("the write half refuses the same way", async () => {
+        (SoftUser as any).$policies = [softDeletes()];
+
+        // Cast on purpose: since #262 this argument is a *compile* error, which
+        // is the improvement. The runtime guard still has to hold for callers
+        // reaching it from untyped code, so the check is bypassed rather than
+        // the case dropped.
+        const options = { field: "nope" } as any;
+        const error = await softDelete(SoftUser, options)({
+          where: { id: bobId },
+        }).catch((e: unknown) => e);
+
+        expect(error).toBeInstanceOf(UnknownFieldError);
+        expect((error as UnknownFieldError).field).toBe("nope");
+        expect((error as UnknownFieldError).model).toBe("User");
+      });
     });
 
     // Composed through the prototype chain, which is the documented route and
