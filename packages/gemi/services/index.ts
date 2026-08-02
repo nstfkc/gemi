@@ -50,6 +50,11 @@ export { BroadcastingServiceProvider } from "./pubsub/BroadcastingServiceProvide
 // Router
 export { ViewRouterServiceProvider } from "./router/ViewRouterServiceProvider";
 export { ApiRouterServiceProvider } from "./router/ApiRouterServiceProvider";
+// What `onStreamComplete` receives when a response body closes.
+export type {
+  StreamSummary,
+  StreamQuerySummary,
+} from "./router/ServerQueryStore";
 
 // Logging
 

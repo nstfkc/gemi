@@ -33,24 +33,44 @@ export function createServerQueryFetcher(req: Request): ServerQueryFetcher {
     const httpRequest = new HttpRequest(newReq, params);
     return kernelContext.run(kernelStore, () =>
       RequestContext.run(httpRequest, async () => {
-        const data = await ApiRouterServiceContainer.use().getRouteData(patternPath);
-        // A handler that broke (`RequestBreakerError`) comes back as an error
-        // `Response`, not a throw. Surface it as the same `QueryError` the
-        // browser's fetch would produce — otherwise the entry "resolves" and
-        // the view renders with a Response object for data.
-        if (data instanceof Response) {
-          const body = await data.json().catch(() => null);
-          if (!data.ok) {
-            throw new QueryError(
-              applyParams(patternPath, params),
-              searchParams.toString(),
-              data.status,
-              body,
-            );
+        try {
+          const data = await ApiRouterServiceContainer.use().getRouteData(patternPath);
+          // A handler that broke (`RequestBreakerError`) comes back as an
+          // error `Response`, not a throw. Surface it as the same
+          // `QueryError` the browser's fetch would produce — otherwise the
+          // entry "resolves" and the view renders with a Response object for
+          // data.
+          if (data instanceof Response) {
+            const body = await data.json().catch(() => null);
+            if (!data.ok) {
+              throw new QueryError(
+                applyParams(patternPath, params),
+                searchParams.toString(),
+                data.status,
+                body,
+              );
+            }
+            return body;
           }
-          return body;
+          return data;
+        } catch (err) {
+          if (err instanceof QueryError) throw err;
+          // A raw throw inside the api handler (not a `RequestBreakerError`)
+          // would otherwise leave this boundary unwrapped, so `onRequestFail`
+          // would see an error with no path/variant/status attached — the
+          // browser's fetch for the same failure produces a 500 `QueryError`.
+          // Wrapping here keeps the two paths interchangeable and keeps the
+          // error identity stable for the router's rethrow dedupe
+          // (`Query.instant` rethrows the entry's — now wrapped — error).
+          const wrapped = new QueryError(
+            applyParams(patternPath, params),
+            searchParams.toString(),
+            500,
+            { message: err instanceof Error ? err.message : String(err) },
+          );
+          wrapped.cause = err;
+          throw wrapped;
         }
-        return data;
       }),
     );
   };

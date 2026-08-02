@@ -117,4 +117,15 @@ export class RequestContext {
   static run<T>(httpRequest: HttpRequest, fn: () => T): T {
     return requestContext.run(new Store(httpRequest), fn);
   }
+
+  /**
+   * Re-enters an *existing* request scope. Stream lifecycle callbacks fire
+   * after the HTTP server has taken over the response body — outside the
+   * AsyncLocalStorage scope the request ran in — so the view router captures
+   * the live store and re-enters it around user-facing hooks, keeping
+   * `req.ctx()` (and everything context-backed) working inside them.
+   */
+  static runWith<T>(store: Store, fn: () => T): T {
+    return requestContext.run(store, fn);
+  }
 }
