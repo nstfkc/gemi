@@ -1,16 +1,25 @@
 name: Deploy docs to GitHub Pages
 
-# Publishes the `docs/` directory to GitHub Pages as-is (raw Markdown + llms.txt +
+# Publishes documentation to GitHub Pages as-is (raw Markdown + llms.txt +
 # a static index.html). No site generator runs, so every `.md` file and both
 # `llms.txt`/`llms-full.txt` are served verbatim at stable URLs and all relative
 # links between docs keep working.
+#
+# The site carries two copies:
+#   - `main`'s docs at the root  — the released framework;
+#   - `next`'s docs under /next/ — the prerelease line published to npm's `rc`
+#     dist-tag, which documents subsystems (the ORM, say) that no release covers
+#     yet.
+#
+# Both copies are assembled from explicit refs, so a run deploys the same site
+# no matter which branch triggered it.
 #
 # Before this runs, enable Pages once: repo Settings → Pages → Build and deployment
 # → Source: "GitHub Actions".
 
 on:
   push:
-    branches: [main, server2-migration]
+    branches: [main, next]
     paths: ["docs/**", ".github/workflows/docs.yml"]
   workflow_dispatch:
 
@@ -24,6 +33,9 @@ concurrency:
   group: pages
   cancel-in-progress: false
 
+env:
+  PAGES_BASE: https://nstfkc.github.io/gemi/
+
 jobs:
   deploy:
     environment:
@@ -31,22 +43,61 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout released docs (main)
         uses: actions/checkout@v4
+        with:
+          ref: main
+          path: released
+
+      - name: Checkout prerelease docs (next)
+        uses: actions/checkout@v4
+        with:
+          ref: next
+          path: prerelease
+
+      - name: Assemble the site
+        run: |
+          set -euo pipefail
+          rm -rf site
+          cp -r released/docs site
+          cp -r prerelease/docs site/next
+          # `.nojekyll` disables Jekyll so files are served verbatim (raw
+          # Markdown, files/paths with leading underscores, etc.). One at the
+          # root covers /next/ too.
+          touch site/.nojekyll
+
+          # next/llms.txt indexes its sibling pages by absolute Pages URL. Under
+          # the /next/ prefix those have to address the prerelease copies, or an
+          # agent following the index silently reads the released docs instead —
+          # the one failure this rewrite exists to prevent, so both halves of it
+          # are fatal rather than best-effort.
+          if ! grep -q "$PAGES_BASE" site/next/llms.txt; then
+            echo "::error::next/llms.txt has no $PAGES_BASE links to rewrite — its link style changed; update this step."
+            exit 1
+          fi
+          sed -i "s#$PAGES_BASE#${PAGES_BASE}next/#g" site/next/llms.txt
+          if grep -o "$PAGES_BASE[^ )\"]*" site/next/llms.txt | grep -qv "^${PAGES_BASE}next/"; then
+            echo "::error::next/llms.txt still links outside /next/ after the rewrite."
+            exit 1
+          fi
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
 
-      # `.nojekyll` disables Jekyll so files are served verbatim (raw Markdown,
-      # files/paths with leading underscores, etc.).
-      - name: Disable Jekyll processing
-        run: touch docs/.nojekyll
-
       - name: Upload docs artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: docs
+          path: site
 
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+
+      - name: Summary
+        run: |
+          {
+            echo "Deployed \`main\`'s docs at the root and \`next\`'s under /next/."
+            echo
+            echo "- ${PAGES_BASE}llms.txt · ${PAGES_BASE}llms-full.txt"
+            echo "- ${PAGES_BASE}next/llms.txt · ${PAGES_BASE}next/llms-full.txt"
+          } >> "$GITHUB_STEP_SUMMARY"
