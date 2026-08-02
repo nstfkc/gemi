@@ -232,9 +232,15 @@ export interface SqlDialect {
    * Postgres's `#>` accepts a `text[]`, SQLite's `json_extract` a string — so
    * nothing has to be bent to keep it out of the SQL text.
    *
-   * `asText` picks the extraction that yields SQL text rather than JSON, which
-   * is what the string filters compare against; the JSON form is what `equals`
-   * and `array_contains` need.
+   * `asText` picks the extraction that yields SQL text rather than JSON. Every
+   * comparison in `jsonComparison` passes `true` — the string filters compare
+   * against text, and `equals` / `not` / the numeric operators compare an
+   * extracted *scalar*, which is what the text form gives them. The JSON form
+   * has exactly one caller, `jsonArrayContains`, because containment is the one
+   * operator whose right-hand side is a document.
+   *
+   * SQLite ignores the flag: `json_extract` already yields a SQL value rather
+   * than a JSON document for a scalar at the path.
    */
   jsonExtract(column: string, path: Binder, asText: boolean): Fragment;
 

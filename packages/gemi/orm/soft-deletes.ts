@@ -22,7 +22,11 @@ import type { ModelPolicy } from "./policy";
  * compiles and simply checks nothing.
  *
  *     await User.findMany({})        // deleted rows are not there
- *     await User.delete({ where })   // sets deletedAt, does not remove the row
+ *     await User.expire({ where })   // sets deletedAt, does not remove the row
+ *
+ * **`User.delete()` is still a hard delete**, and cannot be made otherwise —
+ * see the note on #263 above `softDelete` below. The policy scopes reads; it is
+ * the wrapper that rewrites a write, and the wrapper cannot be named `delete`.
  *
  * Composing it with a policy of your own is now just a longer list, in the order
  * they should apply:
@@ -58,7 +62,7 @@ import type { ModelPolicy } from "./policy";
  * — and those carry no literal schema. Degrading to unchecked keeps them
  * working; degrading to `never` would reject every `field` they pass.
  */
-type SchemaFields<M> = M extends { $schema: { fields: infer F } }
+export type SchemaFields<M> = M extends { $schema: { fields: infer F } }
   ? Extract<keyof F, string> extends never
     ? string
     : Extract<keyof F, string>
@@ -79,7 +83,19 @@ type SchemaFields<M> = M extends { $schema: { fields: infer F } }
  */
 type RowOf<M> = M extends { prototype: infer Row } ? Row : M;
 
-export interface SoftDeleteOptions<F extends string = string> {
+/**
+ * **The parameter is still the model type, not the field union.**
+ *
+ * `SoftDeleteOptions` is exported, so an application can annotate with it —
+ * `const opts: SoftDeleteOptions<User> = …`. Constraining the parameter to
+ * `extends string` and taking the union directly read more honestly from inside
+ * this file and broke every such annotation from outside it, with *"Type 'User'
+ * does not satisfy the constraint 'string'"*. Keeping the model type and
+ * resolving the union here costs nothing and keeps those compiling: a row type
+ * has no `$schema`, so it degrades to `string` exactly as it did before, and
+ * `SoftDeleteOptions<typeof User>` is the spelling that gains the check.
+ */
+export interface SoftDeleteOptions<M = any> {
   /**
    * The timestamp column. Defaults to `deletedAt`, which the template uses.
    *
@@ -92,7 +108,7 @@ export interface SoftDeleteOptions<F extends string = string> {
    * one spelling that cannot be constrained: there is nothing to constrain it
    * against.
    */
-  field?: F;
+  field?: SchemaFields<M>;
 }
 
 /**
@@ -105,7 +121,7 @@ export interface SoftDeleteOptions<F extends string = string> {
  * written at the include site.
  */
 export function softDeletes<M = any>(
-  options: SoftDeleteOptions<SchemaFields<M>> = {},
+  options: SoftDeleteOptions<M> = {},
 ): ModelPolicy<any, any, RowOf<M>> {
   const field = options.field ?? "deletedAt";
 
@@ -147,6 +163,30 @@ type SoftDeletable<T, Op extends string> = {
 } & { $schema?: { name: string } };
 
 /**
+ * The write half: rewrites a `delete` into an `update` that sets the timestamp.
+ *
+ * Kept separate from `softDeletes()` and applied at the call site rather than
+ * folded into the policy, because a policy rewrites *arguments* and this
+ * changes the *operation* — and `$exec` dispatches on the operation before a
+ * policy is consulted. Widening `ModelPolicy` to let a policy swap the
+ * operation would make every `$exec` call's meaning depend on a hook, which is
+ * a much larger claim than scoping a `where`.
+ *
+ *     export class User extends UserModel {
+ *       static $policies = [softDeletes<typeof User>()]
+ *       static expire = softDelete(User)
+ *       static expireMany = softDeleteMany(User)
+ *     }
+ *
+ * **The name is not `delete`, and cannot be** — the reason is below.
+ * `User.delete()` stays a hard delete.
+ *
+ * Both return the row(s) the way the real operations do, and both are still
+ * subject to the model's policies, because they go through `update` /
+ * `updateMany` — which means the soft-delete scope applies and a
+ * `expire({ where })` naming an already-deleted row finds nothing, exactly as
+ * a hard delete of a missing row would.
+ *
  * Why this does not return the generated `delete`'s own signature — #263.
  *
  * `static delete = softDelete(User)` is the recipe the docs used to teach, and
@@ -173,36 +213,11 @@ type SoftDeletable<T, Op extends string> = {
  * `docs/orm.md` says so in the words a reader needs, and
  * `soft-delete.test-d.ts` holds the documented snippet verbatim so it cannot
  * drift back.
+ 
  */
-
-/**
- * The write half: rewrites a `delete` into an `update` that sets the timestamp.
- *
- * Kept separate from `softDeletes()` and applied at the call site rather than
- * folded into the policy, because a policy rewrites *arguments* and this
- * changes the *operation* — and `$exec` dispatches on the operation before a
- * policy is consulted. Widening `ModelPolicy` to let a policy swap the
- * operation would make every `$exec` call's meaning depend on a hook, which is
- * a much larger claim than scoping a `where`.
- *
- *     export class User extends UserModel {
- *       static $policies = [softDeletes<typeof User>()]
- *       static expire = softDelete(User)
- *       static expireMany = softDeleteMany(User)
- *     }
- *
- * **The name is not `delete`, and cannot be** — see the note below on #263.
- * `User.delete()` stays a hard delete.
- *
- * Both return the row(s) the way the real operations do, and both are still
- * subject to the model's policies, because they go through `update` /
- * `updateMany` — which means the soft-delete scope applies and a
- * `delete({ where })` naming an already-deleted row finds nothing, exactly as
- * a hard delete of a missing row would.
- */
-export function softDelete<T, M>(
+export function softDelete<T, M = any>(
   model: SoftDeletable<T, "update"> & M,
-  options: SoftDeleteOptions<SchemaFields<M>> = {},
+  options: SoftDeleteOptions<M> = {},
 ): (args: any) => Promise<T> {
   const field = options.field ?? "deletedAt";
 
@@ -215,9 +230,9 @@ export function softDelete<T, M>(
   };
 }
 
-export function softDeleteMany<T, M>(
+export function softDeleteMany<T, M = any>(
   model: SoftDeletable<T, "updateMany"> & M,
-  options: SoftDeleteOptions<SchemaFields<M>> = {},
+  options: SoftDeleteOptions<M> = {},
 ): (args: any) => Promise<T> {
   const field = options.field ?? "deletedAt";
 

@@ -3059,6 +3059,23 @@ implementing them there would answer a query the differential harness has no ora
 expression's meaning, and both dialects take it natively — Postgres's `#>` accepts a `text[]`,
 SQLite's `json_extract` a string — so the feature fits inside invariant 2 rather than bending it.
 
+Three things a path filter refuses, each because answering would be silently wrong rather than
+merely unsupported:
+
+- **The null sentinels.** `{ path: […], equals: Prisma.DbNull }` is refused. An extracted value
+  cannot tell an absent key from a JSON `null` — `#>>` yields SQL NULL for both — so the
+  distinction the sentinels exist to make is already gone by the time the comparison happens.
+  Filter the column itself: `{ metadata: { equals: Prisma.DbNull } }`.
+- **A non-string operand to `string_contains` / `string_starts_with` / `string_ends_with`**, for
+  the same reason the scalar `contains` refuses one: the pattern would become `%null%`, which runs
+  and returns the wrong rows.
+- **An object or array under `equals` / `not` / the numeric comparisons.** Prisma accepts one;
+  gemi does not yet. It would bind as `"[object Object]"` on Postgres and match nothing. Use
+  `array_contains` for containment, or narrow the path until it names a scalar.
+
+An empty path — `[]` or `""` — is refused on both dialects. On Postgres it would extract the whole
+document, which is a filter on the column rather than on a path.
+
 ### What a refusal tells you
 
 Three classes, and which one you get says what to do next:
@@ -3541,7 +3558,7 @@ initializer from an inherited static declaration, so without it `ctx` and `data`
 Policies compose by listing them, in the order they apply:
 
 ```ts
-static $policies: AccountPolicy[] = [softDeletes<Account>(), new TenantPolicy()]
+static $policies: AccountPolicy[] = [softDeletes<typeof Account>(), new TenantPolicy()]
 ```
 
 Entries may be objects or classes. A class is instantiated once, and extending the generated

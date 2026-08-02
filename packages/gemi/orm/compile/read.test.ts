@@ -1253,6 +1253,119 @@ describe("json path filters", () => {
   });
 
   /**
+   * The gap review found: `compileFieldFilter` refuses a bare sentinel *above*
+   * the `path` branch and refuses `AnyNull` under a non-`equals`/`not` operator
+   * *below* it, so a sentinel inside a JSON filter reached neither and went
+   * straight to the binder. Postgres compared against the literal text
+   * `Prisma.DbNull`; SQLite bound the sentinel object. Zero rows, no error —
+   * the class #259 and #266 exist to close.
+   *
+   * Refused rather than mapped, because an extracted value cannot tell an
+   * absent key from a JSON null: `#>>` yields NULL for both, so there is no
+   * answer to give that is not silently wrong half the time.
+   */
+  describe("a Json null sentinel inside a path filter is refused", () => {
+    // A class, for the reason `json-null.test.ts` spells out: a method in an
+    // object literal is enumerable, `for…in` walks it, and the recogniser would
+    // reject the fake while accepting Prisma's real one.
+    const sentinel = (tag: string): object => {
+      class Sentinel {
+        toString() {
+          return tag;
+        }
+      }
+      return new Sentinel();
+    };
+
+    const sentinels = [
+      ["DbNull", sentinel("Prisma.DbNull")],
+      ["JsonNull", sentinel("Prisma.JsonNull")],
+      ["AnyNull", sentinel("Prisma.AnyNull")],
+    ] as const;
+
+    test.each(sentinels)("%s on sqlite", (_name, sentinel) => {
+      expect(() =>
+        sqliteText({ where: { metadata: { path: "$.a", equals: sentinel } } }),
+      ).toThrow(InvalidArgumentError);
+    });
+
+    test.each(sentinels)("%s on postgres", (_name, sentinel) => {
+      expect(() =>
+        pgText({ where: { metadata: { path: ["a"], equals: sentinel } } }),
+      ).toThrow(InvalidArgumentError);
+    });
+
+    /** Nothing of the sentinel reaches the SQL, which is the actual defect. */
+    test("it never becomes a bound literal", () => {
+      let text = "";
+      try {
+        text = pgText({
+          where: { metadata: { path: ["a"], equals: sentinel("Prisma.DbNull") } },
+        });
+      } catch {
+        // expected
+      }
+      expect(text).not.toContain("Prisma.DbNull");
+    });
+  });
+
+  /**
+   * The scalar `contains` refuses a non-string operand, with a comment saying
+   * why: `String(null)` makes the pattern `%null%`, "a query that runs and
+   * returns the wrong rows". The JSON string filters reintroduced that shape.
+   * `like NULL` matches nothing and raises nothing.
+   */
+  test.each([
+    ["string_contains", null],
+    ["string_contains", 5],
+    ["string_starts_with", null],
+    ["string_ends_with", { a: 1 }],
+  ])("%s refuses a non-string operand", (key, operand) => {
+    expect(() =>
+      sqliteText({ where: { metadata: { path: "$.a", [key]: operand } } }),
+    ).toThrow(InvalidArgumentError);
+  });
+
+  /**
+   * On Postgres the comparison binds `String(raw)` because `#>>` yields text,
+   * so an object operand became the string `"[object Object]"` and matched
+   * nothing. Refused rather than implemented: answering it properly needs the
+   * `#>` + `::jsonb` form, which is Postgres-only, and a filter that works on
+   * one dialect and silently misses on the other is the thing this file refuses
+   * everywhere else.
+   */
+  test("equals with a non-scalar operand is refused, not bound as a string", () => {
+    for (const operand of [{ b: 1 }, ["a"]]) {
+      expect(() =>
+        pgText({ where: { metadata: { path: ["a"], equals: operand } } }),
+      ).toThrow(UnsupportedQueryError);
+      expect(() =>
+        sqliteText({ where: { metadata: { path: "$.a", not: operand } } }),
+      ).toThrow(UnsupportedQueryError);
+    }
+
+    // `array_contains` is the exception, because containment is precisely the
+    // operator whose right-hand side is a document.
+    expect(() =>
+      pgText({ where: { metadata: { path: ["a"], array_contains: ["x"] } } }),
+    ).not.toThrow();
+  });
+
+  /**
+   * `[]` on Postgres extracts the whole document — `[].every` is vacuously
+   * true, so it passed the grammar check — and `""` on SQLite raises inside
+   * `json_extract` at execution time. Neither is a path.
+   */
+  test("an empty path is refused on both dialects", () => {
+    expect(() =>
+      pgText({ where: { metadata: { path: [], equals: "x" } } }),
+    ).toThrow(/cannot be empty/);
+    expect(() =>
+      sqliteText({ where: { metadata: { path: "", equals: "x" } } }),
+    ).toThrow(/cannot be empty/);
+  });
+
+  /**
    * Both extractions yield text on Postgres, so a numeric comparison has to
    * compare numbers rather than their spellings — otherwise "10" sorts before
    * "9". The cast is structural; the value is still bound.
