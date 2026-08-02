@@ -20,6 +20,28 @@ export function queryPayloadScript(entry: ServerQueryEntry): string {
 }
 
 /**
+ * The injector sits at the end of the response pipe, so it is the one place
+ * that knows when the body's first byte goes out and when the body actually
+ * closes — the two marks a handler-scoped span gets wrong under streaming.
+ */
+export interface StreamLifecycleHooks {
+  /** The response's first chunk was enqueued — time-to-shell. */
+  onShell?: () => void;
+  /**
+   * Every chunk enqueued into the response body, in order — the byte stream
+   * exactly as the client receives it, injected payload scripts included.
+   * The dev-mode shell-content measurement (#294) hangs here.
+   */
+  onChunk?: (chunk: Uint8Array) => void;
+  /**
+   * The body closed: the last chunk (and any leftover payload scripts)
+   * flushed, the client went away, or the source stream errored. Fires
+   * exactly once.
+   */
+  onClose?: () => void;
+}
+
+/**
  * Interleaves resolved query payloads with React's streamed HTML.
  *
  * A manual pull-pump around the source, not a `pipeThrough` — React's SSR
@@ -47,10 +69,17 @@ export function queryPayloadScript(entry: ServerQueryEntry): string {
 export function injectQueryPayloads(
   source: ReadableStream<Uint8Array>,
   store: ServerQueryStore,
+  hooks: StreamLifecycleHooks = {},
 ): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
   const queue: string[] = [];
   let sentFirstChunk = false;
+  let closed = false;
+  const closeOnce = () => {
+    if (closed) return;
+    closed = true;
+    hooks.onClose?.();
+  };
 
   store.onSettle((entry) => {
     // Rejected entries stream nothing: React client-renders that segment and
@@ -60,32 +89,52 @@ export function injectQueryPayloads(
   });
 
   const reader = source.getReader();
+  const forward = (
+    controller: ReadableStreamDefaultController<Uint8Array>,
+    chunk: Uint8Array,
+  ) => {
+    controller.enqueue(chunk);
+    hooks.onChunk?.(chunk);
+  };
   const flush = (controller: ReadableStreamDefaultController<Uint8Array>) => {
     while (queue.length > 0) {
-      controller.enqueue(encoder.encode(queue.shift()!));
+      forward(controller, encoder.encode(queue.shift()!));
     }
   };
 
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
-      const { done, value } = await reader.read();
+      let result: Awaited<ReturnType<typeof reader.read>>;
+      try {
+        result = await reader.read();
+      } catch (err) {
+        // A source error (React's stream failing post-shell) still ends the
+        // body — without this, "fires exactly once" would be zero times on
+        // the error exit, leaking whatever span `onClose` was meant to end.
+        closeOnce();
+        throw err;
+      }
+      const { done, value } = result;
       if (done) {
         // Queries nothing rendered (an unused prefetch) settle after React's
         // last chunk — they still belong in the client cache.
         flush(controller);
         controller.close();
+        closeOnce();
         return;
       }
       if (!sentFirstChunk) {
         sentFirstChunk = true;
-        controller.enqueue(value);
+        forward(controller, value);
+        hooks.onShell?.();
         flush(controller);
         return;
       }
       flush(controller);
-      controller.enqueue(value);
+      forward(controller, value);
     },
     cancel(reason) {
+      closeOnce();
       return reader.cancel(reason);
     },
   });

@@ -2,7 +2,17 @@ import { useEffect, type ComponentType } from "react";
 import { hydrateRoot, createRoot } from "react-dom/client";
 import { ServerDataProvider } from "./ServerDataProvider";
 import { ClientRouter } from "./ClientRouter";
+import type { QueryConfig } from "./QueryManagerContext";
 import { ErrorBoundary } from "react-error-boundary";
+
+export interface InitOptions {
+  /**
+   * App-wide `useQuery` defaults (per-call config always wins). Mirror the
+   * value passed to `createRoot` in the view router's service provider so the
+   * server render and hydration agree.
+   */
+  queryConfig?: QueryConfig;
+}
 
 const StackTrace = () => {
   useEffect(() => {
@@ -22,7 +32,10 @@ const StackTrace = () => {
   return <div id="overlay" />;
 };
 
-export function init(RootLayout: ComponentType<any>) {
+export function init(
+  RootLayout: ComponentType<any>,
+  options: InitOptions = {},
+) {
   if (typeof window !== "undefined" && (window as any).render_error) {
     createRoot(document.body).render(<StackTrace />);
   } else {
@@ -33,7 +46,10 @@ export function init(RootLayout: ComponentType<any>) {
         <></>
         <ErrorBoundary fallback={<div />}>
           <ServerDataProvider>
-            <ClientRouter RootLayout={RootLayout} />
+            <ClientRouter
+              RootLayout={RootLayout}
+              queryConfig={options.queryConfig}
+            />
           </ServerDataProvider>
         </ErrorBoundary>
       </>,
@@ -59,7 +75,16 @@ export function init(RootLayout: ComponentType<any>) {
 
 export function create(
   RootLayout: ComponentType<any>,
-  { componentTree, loaders, routeManifest, router, i18n, auth, prefetchedData, viewImportMap }: any,
+  {
+    componentTree,
+    loaders,
+    routeManifest,
+    router,
+    i18n,
+    auth,
+    prefetchedData,
+    viewImportMap,
+  }: any,
 ) {
   (window as any).__GEMI_DATA__ = {
     componentTree,

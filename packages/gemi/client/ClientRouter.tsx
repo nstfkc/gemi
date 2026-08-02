@@ -29,6 +29,7 @@ import {
 import {
   QueryManagerContext,
   QueryManagerProvider,
+  type QueryConfig,
 } from "./QueryManagerContext";
 import { I18nProvider } from "./I18nContext";
 import { WebSocketContextProvider } from "./WebsocketContext";
@@ -391,6 +392,8 @@ export const ClientRouter = (props: {
   /** Server only: full view modules for `Loading`/`Error` fallbacks. */
   viewModules?: Record<string, Record<string, any>>;
   RootLayout: ComponentType<{ children: ReactNode; locale: string }>;
+  /** App-wide `useQuery` defaults; per-call config always wins. */
+  queryConfig?: QueryConfig;
 }) => {
   const { RootLayout } = props;
   const {
@@ -407,7 +410,7 @@ export const ClientRouter = (props: {
     <ThemeProvider>
       <I18nProvider>
         <WebSocketContextProvider>
-          <QueryManagerProvider>
+          <QueryManagerProvider queryConfig={props.queryConfig}>
             <ComponentsProvider
               viewImportMap={props.viewImportMap}
               modules={props.viewModules}
