@@ -148,6 +148,101 @@ export class PostgresDialect implements SqlDialect {
     );
   }
 
+  /**
+   * Everything Prisma exposes on a scalar list, because `text[]` can express
+   * all of it (#300).
+   *
+   * `equals` is in the set even though it is compiled by the generic `equals`
+   * path rather than by a method here: the set is what the compiler consults to
+   * decide whether a list filter is *available at all*, and leaving it out
+   * would make `{ tags: ["a"] }` — the bare-array shorthand — refuse itself on
+   * the one dialect that can serve it.
+   */
+  readonly listFilters: ReadonlySet<string> = new Set([
+    "equals",
+    "has",
+    "hasEvery",
+    "hasSome",
+    "isEmpty",
+  ]);
+
+  /**
+   * `$1 = any("tags")` — the element on the left, which is the mirror of
+   * {@link inList} and worth not confusing with it. There, one column is
+   * matched against a caller's list; here, one caller value is matched against
+   * a column that *is* a list.
+   *
+   * No cast is added *here*, in this method or the three below. An untyped
+   * array literal resolves against the column's own element type in every one
+   * of these positions — measured through Bun 1.3.14 against Postgres 16 on
+   * `text[]`, `jsonb[]`, `bytea[]`, `timestamp(3)[]` and an `enum[]`. That is
+   * not merely convenient: an explicit cast would have to *name* the element
+   * type, and for an enum that name is the database's own enum type, which the
+   * generated artifact does not carry. Leaning on inference is what lets enum
+   * lists work without widening the artifact.
+   *
+   * **The operand is a `Fragment`, not a `Binder`**, and `Json` is why. A
+   * single element of a `Json[]` still needs #209's `::text::jsonb`, and it
+   * needs the serialisation that travels with it — so the parameter is built by
+   * `fieldParam` before it gets here, and this method only picks the operator.
+   * Measured, because every wrong form fails *silently*:
+   *
+   *   $1 = any(docs)                {"a":1}   ->  false
+   *   $1::jsonb = any(docs)         {"a":1}   ->  false
+   *   $1::text::jsonb = any(docs)   {"a":1}   ->  true
+   *
+   * No error on either of the first two. A dialect that built its own parameter
+   * here would have to restate `fieldParam`'s rule, and the version that
+   * restated it slightly wrong would return "no rows" rather than raising.
+   */
+  listHas(column: string, value: Fragment): Fragment {
+    return concat(value, sql(` = any(${column})`));
+  }
+
+  /** `"tags" @> $1` — containment: every element of the operand is present. */
+  listHasEvery(column: string, values: Fragment): Fragment {
+    return concat(sql(`${column} @> `), values);
+  }
+
+  /** `"tags" && $1` — overlap: at least one element is shared. */
+  listHasSome(column: string, values: Fragment): Fragment {
+    return concat(sql(`${column} && `), values);
+  }
+
+  /**
+   * `"tags" = $1` against the empty array, rather than `cardinality(…) = 0`.
+   *
+   * The two are equivalent on a non-null column — and a scalar list cannot be
+   * null, since Prisma refuses `String[]?` — including on the NULL case, where
+   * both yield NULL and so exclude the row.
+   *
+   * The comparison is the one that keeps the invariant `FALSE` is spelled
+   * `false` for: **no digit reaches the SQL text outside an identifier**. A
+   * literal `0` would be the first, for a constant the compiler already knows —
+   * which is exactly the exception `jsonNullComparison` declines to make.
+   */
+  listIsEmpty(column: string, empty: boolean): Fragment {
+    return concat(
+      sql(`${column} ${empty ? "=" : "<>"} `),
+      param(() => arrayLiteral([])),
+    );
+  }
+
+  /**
+   * `array_cat("tags", $1)` — the right-hand side of a `push`.
+   *
+   * **`array_cat` rather than `||`**, and the difference is not stylistic.
+   * `||` is overloaded `anyarray || anyarray` *and* `anyarray || anyelement`,
+   * so an untyped parameter beside it is genuinely ambiguous — and Prisma's
+   * `push` accepts both a single element and a list, which is precisely the
+   * pair that would resolve differently. `array_cat` has one signature, so the
+   * compiler can normalise `push` to an array once and the operator cannot be
+   * read the other way.
+   */
+  listPush(column: string, values: Fragment): Fragment {
+    return concat(sql(`array_cat(${column}, `), values, sql(")"));
+  }
+
   /** `path: ["a", "b"]`, where SQLite takes `"$.a.b"`. Prisma's own split. */
   readonly jsonPathSyntax = "array" as const;
 
@@ -302,22 +397,62 @@ export class PostgresDialect implements SqlDialect {
     return { kind: "unique", columns, constraint };
   }
 
-  // Every type binds natively here, including `Json`, so nothing in the body
-  // reads `field` any more — the signature is the interface's, the disuse is
-  // this dialect's. `Date`, `boolean`, `bigint` and arrays are Bun's to
-  // serialize, and so, it turns out, is JSON.
-  // `$1::text::jsonb` for a `Json` column, and nothing for anything else.
+  // `$1::text::jsonb` for a `Json` column, nothing for a scalar list, and
+  // nothing for anything else. A scalar `Date`, `boolean` or `bigint` binds
+  // natively and needs neither a cast nor an encoder — which is why `encode`
+  // below reads `field` for exactly two questions and passes everything else
+  // through.
   //
   // The value is serialised by `fieldParam`, not by `encode` below, so a
   // binding site that does not ask for the cast still binds raw and keeps the
   // loud failure rather than acquiring a silent mis-store. The comment on
   // `encode` has the measurements.
   castParameter(field: FieldSchema): string {
+    // A list is bound as an array literal and needs no cast in any position it
+    // can occupy — see `listHas` for the measurements. Checked *before* the
+    // `Json` branch rather than after, because a `Json[]` would otherwise take
+    // it and bind `$1::text::jsonb` against a `jsonb[]` column, which is a type
+    // error rather than a wrong answer. The order is the whole check.
+    if (field.isList) return "";
     return field.type === "Json" ? "::text::jsonb" : "";
   }
 
-  encode(value: unknown, _field: FieldSchema): unknown {
+  encode(value: unknown, field: FieldSchema): unknown {
     if (value === null || value === undefined) return null;
+
+    // A scalar list crosses as one Postgres array literal, which is the same
+    // trick `inList` and `compositeIn` already use for a bound array: still one
+    // parameter, still nothing in the SQL text.
+    //
+    // `Json` is the element type that needs work here rather than in
+    // `fieldParam`, and it is not the exception it looks like. `fieldParam`'s
+    // rule is that the cast and the serialisation travel together; a list emits
+    // *no* cast, because the array literal already carries the element's text
+    // form and Postgres casts each element to the column's element type. So
+    // serialising a `Json` element here is what makes the literal well-formed,
+    // not a second place doing `fieldParam`'s job.
+    if (field.isList) {
+      // Not an `InvalidArgumentError`: the compiler validates every list
+      // operand where the model and operation are in scope to name them, so a
+      // non-array arriving here reports an ORM bug rather than a caller's —
+      // the same call `fieldParam` makes about a stray `AnyNull`.
+      if (!Array.isArray(value)) {
+        throw new Error(
+          `gemi ORM bug: a non-array reached the parameter binder for the ` +
+            `scalar list '${field.column}' (received ${typeof value}). Every ` +
+            `path that binds a list is supposed to have checked its operand.`,
+        );
+      }
+      return arrayLiteral(
+        field.type === "Json"
+          ? value.map((element) =>
+              element === null || element === undefined
+                ? null
+                : JSON.stringify(element),
+            )
+          : value,
+      );
+    }
     // **`Json` is handed over raw**, because Bun serializes it for a `jsonb`
     // parameter and doing it here first is the mirror of the decode bug beside
     // it: `JSON.stringify({a:1})` produces the *string* `{"a":1}`, and Bun then
@@ -401,12 +536,71 @@ export class PostgresDialect implements SqlDialect {
     // "false when the driver already returns exactly what Prisma would" — which
     // is now exactly true. Leaving it in cost a function call per Json value on
     // every read for nothing.
-    return field.type === "BigInt" || field.type === "Bytes";
+    //
+    // **Every list is decoded**, including a `String[]` whose elements the
+    // driver already hands back correctly. Three separate reasons, and the
+    // first alone settles it: the *container* is wrong for two element types
+    // regardless of the elements — `int[]` arrives as an `Int32Array`, and an
+    // `enum[]` arrives as an unparsed `{…}` literal — so a predicate that
+    // answered per element type would have to encode which container Bun picks
+    // for which Postgres type, which is a table nothing keeps in step. Second,
+    // `int[]`'s container differs *by protocol*: `Int32Array` when the
+    // statement binds a parameter, a plain `Array` when it does not. Third, the
+    // cost is one call per list value, not per element.
+    return field.isList === true || field.type === "BigInt" || field.type === "Bytes";
   }
 
   decode(value: unknown, field: FieldSchema): unknown {
     if (value === null || value === undefined) return null;
+    if (field.isList) return this.decodeList(value, field);
+    return this.decodeScalar(value, field);
+  }
 
+  /**
+   * One array column, element by element.
+   *
+   * **Three container shapes arrive here**, all measured through Bun 1.3.14
+   * against Postgres 16 rather than read off a driver's documentation:
+   *
+   *   text[] float8[] bool[] timestamp[] bytea[] jsonb[] bigint[]  -> Array
+   *   int[]                                                        -> Int32Array
+   *   enum[]  domain[]                                             -> "{a,b}"
+   *
+   * The third is the surprise and the reason this is not four lines: Bun has no
+   * decoder for an array whose element type it does not recognise, so it hands
+   * the **Postgres array output literal back as a string** — and every enum
+   * list is in that case. `real[]` is the same story as `int[]` with a
+   * `Float32Array`, which is why the typed-array branch is written against
+   * `ArrayBuffer.isView` rather than against `Int32Array` by name.
+   *
+   * `int[]`'s container also depends on the *protocol*: a statement that binds
+   * at least one parameter goes over the extended protocol and yields an
+   * `Int32Array`, one that binds none yields a plain `Array`. Same column, same
+   * row, two shapes — so this cannot be decided once and cached.
+   *
+   * Elements then go through {@link decodeScalar}, which is the same function
+   * the scalar path uses. That is what makes `BigInt[]` exact and `Bytes[]` a
+   * `Uint8Array[]` rather than a `Buffer[]` without restating either rule.
+   */
+  private decodeList(value: unknown, field: FieldSchema): unknown {
+    const elements = Array.isArray(value)
+      ? value
+      : typeof value === "string"
+        ? parseArrayLiteral(value, field)
+        : ArrayBuffer.isView(value)
+          ? Array.from(value as unknown as ArrayLike<unknown>)
+          : null;
+
+    if (elements === null) throw new DecodeError(field, value);
+
+    return elements.map((element) =>
+      element === null || element === undefined
+        ? null
+        : this.decodeScalar(element, field),
+    );
+  }
+
+  private decodeScalar(value: unknown, field: FieldSchema): unknown {
     switch (field.type) {
       case "BigInt":
         if (typeof value === "bigint") return value;
@@ -527,4 +721,85 @@ function arrayElement(value: unknown): string {
 
   const text = typeof value === "string" ? value : String(value);
   return `"${text.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+/**
+ * `{a,"b,c",NULL}` -> `["a", "b,c", null]`: the same form, read back.
+ *
+ * **Only reached for an array type Bun has no decoder for**, which today means
+ * an `enum[]` or a `domain[]` — everything else arrives as a JS array and never
+ * comes near this. That is why it exists at all: an enum list is the one scalar
+ * list a Prisma schema is *likely* to declare, and it is precisely the one the
+ * driver hands back as text.
+ *
+ * Splitting on commas is wrong and looks right, which is the whole reason this
+ * is a state machine. Postgres quotes an element only when it has to, and then
+ * escapes `"` and `\` inside the quotes — so a label containing a comma, a
+ * brace, a quote or a backslash all survive the output format and none of them
+ * survive a `split(",")`. Verified against a live server with an enum declaring
+ * exactly those labels, plus one spelled `NULL`: unquoted `NULL` is the null
+ * element, and quoted `"NULL"` is the four-character string.
+ *
+ * A nested `{` is a multi-dimensional array, which Prisma's scalar lists cannot
+ * be. It is refused rather than flattened — flattening would return a row shape
+ * that disagrees with the type Prisma handed the caller, which is the failure
+ * this whole feature was refused for eight iterations to avoid.
+ */
+function parseArrayLiteral(text: string, field: FieldSchema): unknown[] {
+  if (!text.startsWith("{") || !text.endsWith("}")) {
+    throw new DecodeError(field, text);
+  }
+  if (text === "{}") return [];
+
+  const out: unknown[] = [];
+  let index = 1;
+  const end = text.length - 1;
+
+  while (index <= end) {
+    let raw = "";
+    let quoted = false;
+
+    if (text[index] === '"') {
+      quoted = true;
+      index++;
+      while (index < end && text[index] !== '"') {
+        // One level of backslash escaping, which is what the writer above emits
+        // and what `bytea`'s own `\x` prefix is doubled to survive.
+        raw += text[index] === "\\" ? text[++index] : text[index];
+        index++;
+      }
+      // The closing quote.
+      index++;
+    } else {
+      while (index < end && text[index] !== ",") {
+        if (text[index] === "{") throw new DecodeError(field, text);
+        raw += text[index];
+        index++;
+      }
+    }
+
+    // Unquoted `NULL` is the null element; quoted, it is the string.
+    out.push(!quoted && raw.toUpperCase() === "NULL" ? null : raw);
+
+    // Either a separator or the closing brace, and nothing else is well-formed.
+    if (index < end && text[index] !== ",") throw new DecodeError(field, text);
+    index++;
+  }
+
+  if (field.type !== "Json") return out;
+
+  // **The one place a JS string is not ambiguous**, which is worth saying next
+  // to `decodeScalar`'s `Json` case insisting that it usually is. There, a
+  // string could be raw JSON text the driver skipped *or* a JSON string value
+  // it parsed, and nothing distinguishes them. Here the element was read out of
+  // Postgres' own array output a moment ago, so it is raw text by construction
+  // and there is no second reading to guess between.
+  return out.map((element) => {
+    if (element === null) return null;
+    try {
+      return JSON.parse(element as string);
+    } catch {
+      throw new DecodeError(field, element);
+    }
+  });
 }

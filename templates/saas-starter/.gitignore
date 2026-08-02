@@ -12,3 +12,10 @@ node_modules/
 .gemi
 .env
 .debug
+
+# The artifacts of `prisma/postgres-only.prisma`, which only exist during a
+# Postgres run — see `app/models/postgres.sh`. Uncommitted on purpose, unlike
+# `app/models/generated/`: they carry a whole generated Prisma client, and the
+# models they describe cannot be generated at all on SQLite, so a committed copy
+# would be a directory that half the CI matrix could neither produce nor check.
+app/models/generated-lists/

@@ -39,10 +39,26 @@ const SCALAR_TYPES: Record<string, ScalarType> = {
 };
 
 // Scalars the artifact can describe but no dialect can round-trip yet, mapped
-// to the reason. Refusing at generation time is the same call the `isList`
-// check below makes, and for the same reason: the alternative is a model that
-// generates cleanly and then returns a value that silently disagrees with the
-// type Prisma gave it. That is the failure mode this iteration is built around.
+// to the reason. Refusing at generation time rather than emitting the column:
+// the alternative is a model that generates cleanly and then returns a value
+// that silently disagrees with the type Prisma gave it. That is the failure
+// mode this iteration is built around.
+//
+// **A scalar list used to be refused here too, and is not any more** (#300).
+// The refusal was right for as long as no dialect could decode an array, and
+// its comment pointed at "iteration 2", which shipped without doing it. What
+// changed the answer is not that lists became decodable — it is *where* the
+// refusal belongs. A list is legal on Postgres and a validation error on
+// SQLite, but this artifact is generated once and is dialect-agnostic by
+// design: `DATABASE_URL` can name a different database than `prisma generate`
+// saw. So refusing here would refuse a column the running dialect can serve
+// perfectly well, and the honest place to say no is the dialect, at compile
+// time, naming which one — the shape `UnsupportedDialectError` already has.
+// `SqliteDialect.listFilters` is that refusal.
+//
+// `Decimal[]` is still refused, and by this table rather than by a list rule:
+// a list of a scalar no dialect can round-trip is not more supportable for
+// being a list.
 const UNSUPPORTED_SCALARS: Partial<Record<ScalarType, string>> = {
   Decimal:
     "Prisma types a Decimal field as `Prisma.Decimal`, but SQLite stores it " +
@@ -145,6 +161,18 @@ function fieldSchema(model: string, field: DMMF.Field): FieldSchema {
   // Prisma enums travel as strings on the wire, so `type` stays `"String"` and
   // the enum's identity is recorded separately for a later iteration.
   if (field.kind === "enum") schema.enum = field.type;
+
+  // A scalar list — `tags String[]`. `type` above is already the *element*
+  // type, which is the whole reason this is a flag: the generator says what the
+  // column holds and how many of them, and the dialect decides what that is in
+  // SQL. Set rather than always-emitted so a schema with no list generates the
+  // artifact it generated before this existed, byte for byte.
+  //
+  // Deliberately after the `scalarType` call above rather than before it, so a
+  // `Decimal[]` is refused as a **Decimal** — with the precision reasoning in
+  // `UNSUPPORTED_SCALARS`, which is the part a reader needs — rather than being
+  // admitted as a list of something no dialect can round-trip one of.
+  if (field.isList) schema.isList = true;
 
   const def = defaultSpec(field);
   if (def) schema.default = def;
@@ -253,14 +281,6 @@ export function buildModelSchema(
       // Prisma's own client omits `Unsupported(...)` columns from its result
       // types, so omitting them keeps our result shape identical to Prisma's.
       continue;
-    }
-    // A list of scalars is Postgres-only and needs array decoding; iteration 2
-    // handles it. Skipping silently would change the result shape, so refuse.
-    if (field.isList) {
-      throw new UnsupportedSchemaError(
-        `${model.name}.${field.name} is a scalar list, which the gemi ORM ` +
-          `does not support yet.`,
-      );
     }
     fields[field.name] = fieldSchema(model.name, field);
   }
@@ -663,10 +683,30 @@ function batchOperation(
 `;
 }
 
-export function emitModelsFile(schemas: ModelSchema[]): string {
+/**
+ * Where `models.ts` type-imports `Prisma` from.
+ *
+ * `@prisma/client` for every ordinary app, and the default is what keeps the
+ * emitted file byte-identical to what it was before this parameter existed.
+ *
+ * It is a parameter at all because a schema can generate its client somewhere
+ * else — `generator client { output = … }` — and then `@prisma/client` is not
+ * where its types live. That is not a hypothetical: it is how a repository
+ * covers a column one dialect has and the other cannot, which is exactly the
+ * position `String[]` is in (#300). One `schema.prisma` cannot carry a scalar
+ * list, because Prisma refuses the declaration outright on SQLite, so the
+ * second schema needs a second client and the artifacts generated from it have
+ * to import that one.
+ */
+const DEFAULT_CLIENT = "@prisma/client";
+
+export function emitModelsFile(
+  schemas: ModelSchema[],
+  client: string = DEFAULT_CLIENT,
+): string {
   const parts = [
     HEADER,
-    `\nimport type { Prisma } from "@prisma/client";\n`,
+    `\nimport type { Prisma } from ${JSON.stringify(client)};\n`,
     `import {
   Model,
   ScopedPolicy,
@@ -740,13 +780,19 @@ export * as schema from "./schema";
 `;
 }
 
+export interface EmitOptions {
+  /** See {@link emitModelsFile}. Defaults to `@prisma/client`. */
+  client?: string;
+}
+
 export function emitArtifacts(
   models: readonly DMMF.Model[],
+  options: EmitOptions = {},
 ): Record<GeneratedFile, string> {
   const schemas = buildModelSchemas(models);
   return {
     "schema.ts": emitSchemaFile(schemas),
-    "models.ts": emitModelsFile(schemas),
+    "models.ts": emitModelsFile(schemas, options.client),
     "index.ts": emitIndexFile(schemas),
   };
 }

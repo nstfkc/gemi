@@ -102,9 +102,32 @@ generatorHandler({
     warnOnPrismaVersion(options);
     warnOnDatasource(options);
 
+    // Where the emitted `models.ts` type-imports `Prisma` from. Absent for
+    // every ordinary app, and then it is `@prisma/client`; supplied by a schema
+    // whose `generator client` writes somewhere else, where that name resolves
+    // to a different schema's types or to nothing at all.
+    //
+    //   generator gemi {
+    //     provider = "gemi-orm-generator"
+    //     output   = "../app/models/generated-lists"
+    //     client   = "./client"
+    //   }
+    //
+    // A module specifier, not a path: it is written into an `import` in the
+    // generated file, so it is resolved relative to `output` by whatever
+    // resolves that file — the same rule as any other import.
+    const client = options.generator.config?.client;
+    if (client !== undefined && typeof client !== "string") {
+      throw new Error(
+        "The gemi ORM generator's `client` option is the module specifier its " +
+          "generated models type-import `Prisma` from, so it must be a single " +
+          'string — `client = "./client"`.',
+      );
+    }
+
     // Prisma hands the DMMF over directly, so nothing here parses
     // `schema.prisma`.
-    const files = emitArtifacts(options.dmmf.datamodel.models);
+    const files = emitArtifacts(options.dmmf.datamodel.models, { client });
 
     await mkdir(output, { recursive: true });
     for (const [name, content] of Object.entries(files)) {

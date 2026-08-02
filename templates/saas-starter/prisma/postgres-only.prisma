@@ -1,0 +1,119 @@
+// The columns Postgres has and SQLite cannot have, in a schema of their own.
+//
+// **Why this is a second file rather than four more fields in `schema.prisma`.**
+// A scalar list is legal on Postgres and a *validation error* on SQLite —
+// `prisma generate` refuses the schema with "the current connector does not
+// support lists of primitive types" — and `app/models/postgres.sh` covers both
+// dialects by `sed`-flipping the provider in one file. So a `String[]` added
+// there does not merely go untested on SQLite: it stops the SQLite suites from
+// generating at all, and one such column means no artifacts for any model.
+//
+// That is the constraint #300 had to solve before any compiler work, because it
+// decides what "done" can be evidenced by. The three candidates were: assert
+// against Prisma's documented shape (cheap, and checks gemi against a reading of
+// the docs rather than against Prisma); a Postgres-only suite that builds its
+// own table with raw SQL (a real round trip, still no Prisma oracle); or this —
+// a second schema with its own client, which keeps the property every other
+// correctness claim in this ORM rests on: **the same query through Prisma and
+// through gemi, against one database, compared on rows and table contents.**
+//
+// The cost is honest and contained: this schema is never generated during a
+// SQLite run, so `app/models/generated-lists/` is gitignored and the suite that
+// reads it is gated on `TEST_POSTGRES_URL`. `app/models/postgres.sh` pushes and
+// generates it alongside the main one.
+//
+// It lives in its own database — `LISTS_DATABASE_URL`, `gemi_lists` — rather
+// than beside the main tables. `prisma db push` reconciles a whole database to
+// one schema, so pushing this one at `gemi` would drop every table the other
+// schema owns.
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["driverAdapters"]
+  output          = "../app/models/generated-lists/client"
+}
+
+generator gemi {
+  provider = "gemi-orm-generator"
+  output   = "../app/models/generated-lists"
+  // Not `@prisma/client`: that name resolves to the *main* schema's client,
+  // which has never heard of these models. See the generator's `client` option.
+  client   = "./client"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("LISTS_DATABASE_URL")
+}
+
+/// An enum array is the one scalar list Bun's driver hands back **unparsed** —
+/// as the Postgres array literal `{urgent,blocked}` — so this is what makes the
+/// decoder's literal parser reachable end to end at all.
+///
+/// It cannot reach the *quoting* half of that parser, and that is a property of
+/// Prisma rather than an omission here: an enum member is a Prisma identifier,
+/// `[A-Za-z][A-Za-z0-9_]*`, and Postgres quotes an array element only when it
+/// contains a delimiter, a quote or a backslash. So no schema Prisma will accept
+/// can produce a quoted element in this position. The escaping cases are unit
+/// tested against the parser directly, in `packages/gemi/orm/dialect`, and that
+/// split is deliberate rather than a gap papered over.
+///
+/// `@@map` renames the *type*, which is the case that would break a design
+/// naming the element type in a cast. This one infers it from the column
+/// instead, and this line is what keeps that honest.
+enum Label {
+  urgent
+  blocked
+  needs_review
+
+  @@map("label_kind")
+}
+
+/// Every element type Prisma allows in a scalar list on Postgres, in one model,
+/// so the differential matrix reaches all of them rather than the two a
+/// realistic schema would have used.
+///
+/// `Decimal[]` is the one absence, and it is not a gap here: `Decimal` itself is
+/// refused at generation time — a SQLite REAL cannot carry it — and a list of a
+/// scalar no dialect can round-trip is not more supportable for being a list.
+model Tagged {
+  id Int @id @default(autoincrement())
+
+  strings   String[]
+  ints      Int[]
+  floats    Float[]
+  booleans  Boolean[]
+  bigints   BigInt[]
+  stamps    DateTime[]
+  blobs     Bytes[]
+  documents Json[]
+  labels    Label[]
+
+  /// A list with a database-side default, which is the ordinary way one is
+  /// declared and the case where the insert must *omit* the column rather than
+  /// bind an empty array.
+  defaulted String[] @default([])
+
+  /// `@map`, so the compiler is exercised on a list whose column name is not
+  /// its field name — the one thing a hand-written `has` filter would get right
+  /// by accident.
+  renamed String[] @map("renamed_column")
+
+  notes Note[]
+}
+
+/// A second model behind a relation, so the lateral strategy's decoder — which
+/// is a *separate* decoding site from the driver's, reached only when a list
+/// arrives inside `json_agg` — is covered too. That path is where `BigInt[]`
+/// silently loses its low bit without a `::text[]` cast.
+model Note {
+  id       Int      @id @default(autoincrement())
+  taggedId Int
+  tagged   Tagged   @relation(fields: [taggedId], references: [id], onDelete: Cascade)
+  keywords String[]
+  counts   Int[]
+  amounts  BigInt[]
+  when     DateTime[]
+
+  @@index([taggedId])
+}
