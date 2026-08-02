@@ -35,6 +35,7 @@ import { kernelContext } from "../../kernel/context";
 import { ServerQueryStore, type StreamSummary } from "./ServerQueryStore";
 import { createServerQueryFetcher } from "./serverQueryFetcher";
 import { injectQueryPayloads, isBotUserAgent } from "./streamQueryInjection";
+import { createShellContentObserver, createShellContentReporter } from "./shellContentReport";
 import { createRoutePayloadStream } from "./routePayloadStream";
 
 /**
@@ -113,6 +114,15 @@ export class ViewRouterServiceContainer extends ServiceContainer {
   componentTree: ComponentTree = [];
   flatComponentTree: string[] = [];
   root: any = null;
+  /**
+   * The shell-content hint (#294): React defers any boundary over
+   * `progressiveChunkSize` on size alone, so a page that reads fine without
+   * JS can go blank the day one more section pushes it over the budget — and
+   * nothing else notices the transition (#289 was found by hand-measuring).
+   * The reporter owns the once-per-route-per-boot dedup so a hot route
+   * doesn't spam the dev console.
+   */
+  private shellReporter = createShellContentReporter();
 
   constructor(public service: ViewRouterServiceProvider) {
     super();
@@ -347,6 +357,18 @@ export class ViewRouterServiceContainer extends ServiceContainer {
       // JS-disabled humans, text browsers, and failed-script loads too).
       const settled = isBotUserAgent(userAgent) || noStream;
 
+      // Dev-only: collect the streamed bytes so the close hook can measure
+      // what a no-JS reader gets (#294). A settled document carries its
+      // content inline by construction — nothing to measure — and a route
+      // already hinted this boot skips the collection entirely.
+      const shellObserver =
+        process.env.NODE_ENV !== "production" &&
+        !settled &&
+        currentPathName &&
+        this.shellReporter.shouldObserve(currentPathName)
+          ? createShellContentObserver()
+          : null;
+
       try {
         const stream = await renderToReadableStream(
           createElement(Fragment, {
@@ -402,12 +424,18 @@ export class ViewRouterServiceContainer extends ServiceContainer {
             // one; the summary then reports `shellAt === settledAt` for the
             // settled ones.
             onShell: settled ? undefined : () => serverQueries.markShell(),
+            onChunk: shellObserver?.onChunk,
             // The APM-visible end of the request: the body closed, not the
             // handler returned (that was at time-to-shell).
             onClose: () =>
-              runInRequestScope(() =>
-                this.completeStream(req, serverQueries.summarize(deadline.signal.aborted)),
-              ),
+              runInRequestScope(() => {
+                this.completeStream(req, serverQueries.summarize(deadline.signal.aborted));
+                if (shellObserver) {
+                  // The injector's `onChunk` collected the exact bytes the
+                  // visitor got; measured once the body closed (#294).
+                  this.shellReporter.report(currentPathName, shellObserver.measure());
+                }
+              }),
           }),
           {
             status: !currentPathName ? 404 : 200,

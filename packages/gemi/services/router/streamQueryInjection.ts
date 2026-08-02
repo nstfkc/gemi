@@ -28,6 +28,12 @@ export interface StreamLifecycleHooks {
   /** The response's first chunk was enqueued — time-to-shell. */
   onShell?: () => void;
   /**
+   * Every chunk enqueued into the response body, in order — the byte stream
+   * exactly as the client receives it, injected payload scripts included.
+   * The dev-mode shell-content measurement (#294) hangs here.
+   */
+  onChunk?: (chunk: Uint8Array) => void;
+  /**
    * The body closed: the last chunk (and any leftover payload scripts)
    * flushed, the client went away, or the source stream errored. Fires
    * exactly once.
@@ -83,9 +89,16 @@ export function injectQueryPayloads(
   });
 
   const reader = source.getReader();
+  const forward = (
+    controller: ReadableStreamDefaultController<Uint8Array>,
+    chunk: Uint8Array,
+  ) => {
+    controller.enqueue(chunk);
+    hooks.onChunk?.(chunk);
+  };
   const flush = (controller: ReadableStreamDefaultController<Uint8Array>) => {
     while (queue.length > 0) {
-      controller.enqueue(encoder.encode(queue.shift()!));
+      forward(controller, encoder.encode(queue.shift()!));
     }
   };
 
@@ -112,13 +125,13 @@ export function injectQueryPayloads(
       }
       if (!sentFirstChunk) {
         sentFirstChunk = true;
-        controller.enqueue(value);
+        forward(controller, value);
         hooks.onShell?.();
         flush(controller);
         return;
       }
       flush(controller);
-      controller.enqueue(value);
+      forward(controller, value);
     },
     cancel(reason) {
       closeOnce();
