@@ -11,6 +11,7 @@ export function createComponentTree(routes: ViewRoutes): ComponentTree {
         continue;
       }
 
+      // File and redirect routes never resolve to a component.
       if (viewPath === "REDIRECT") {
         continue;
       }

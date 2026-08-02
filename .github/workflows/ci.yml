@@ -114,18 +114,19 @@ jobs:
       # means anything added is covered by default, and the exclusions have to
       # be deleted for CI to stop being honest rather than merely left alone.
       #
-      # These six are #163. They are excluded here rather than in a vitest
-      # config so a local `vitest run` still shows them: CI stays green without
-      # the failures becoming invisible to the person who could fix them.
+      # The six exclusions #163 carried here are gone, and so is #163. They were
+      # three different problems wearing one label: three superseded copies in
+      # `app/` that nothing imported (deleted), a stale assertion about the live
+      # router (corrected), and a test file written against `bun:test` that this
+      # runner could not even collect (ported, and it found two real things).
+      # `services/router/createFlatViewRoutes.test.ts` was excluded while
+      # passing.
+      #
+      # The whole package runs now. Keep it that way: an exclusion added here is
+      # a failure nobody will look at again, which is the state this comment
+      # replaced.
       - name: Unit tests
-        run: |
-          bun --bun vitest run \
-            --exclude '**/app/createComponentTree.test.ts' \
-            --exclude '**/app/createFlatViewRoutes.test.ts' \
-            --exclude '**/app/createRouteManifest.test.ts' \
-            --exclude '**/services/router/createFlatViewRoutes.test.ts' \
-            --exclude '**/services/router/createRouteManifest.test.ts' \
-            --exclude '**/utils/parseTranslation.test.tsx'
+        run: bun --bun vitest run
         working-directory: packages/gemi
 
       - name: Template tests

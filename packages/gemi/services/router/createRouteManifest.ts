@@ -12,6 +12,8 @@ export function createRouteManifest(routes: ViewRoutes) {
   const routeManifest: Record<string, string[]> = {};
   for (const [routePath, routeHandler] of Object.entries(routes)) {
     if ("run" in routeHandler) {
+      // `viewPath` is "FILE" for file routes and "REDIRECT" for redirect routes,
+      // neither of which resolves to a component — consumers filter them out.
       const viewPath = routeHandler.viewPath;
 
       if ("children" in routeHandler) {
@@ -24,8 +26,19 @@ export function createRouteManifest(routes: ViewRoutes) {
           const _key = path === "/" && routePath !== "/" ? routePath : key;
           routeManifest[_key] = [viewPath, ...viewPaths];
         }
+        // **A layout with no index route is not a navigable path.**
+        //
+        // Still length 1 means nothing merged into this key — the layout has no
+        // `"/"` child — so the path would resolve to layouts and no page, and
+        // rendering it would produce a blank content area. `createFlatViewRoutes`
+        // agrees: `/foo` and `/foo/bar` appear there only as *segments* of
+        // `/foo/bar/baz`, never as matchable routes of their own.
+        //
+        // The condition is "no index route", which is broader than the "no
+        // children at all" this comment used to claim — a layout whose only
+        // children are deeper layouts is removed too, and that is the case the
+        // stale test in this directory expected to survive.
         if (routeManifest[routePath].length === 1) {
-          // If the layout doesn't have any children, remove it from the manifest
           delete routeManifest[routePath];
         }
       } else {
