@@ -30,7 +30,7 @@
     },
     "packages/gemi": {
       "name": "gemi",
-      "version": "0.51.0-rc.0",
+      "version": "0.51.0-rc.1",
       "bin": {
         "gemi": "./dist/bin/gemi.js",
       },
