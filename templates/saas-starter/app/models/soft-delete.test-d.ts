@@ -1,65 +1,106 @@
-import { test, describe } from "vitest";
+import { describe, test } from "vitest";
 
 import { softDelete, softDeleteMany, softDeletes } from "gemi/orm";
 
 import { UserModel } from "./generated";
 
 /**
- * Where the `field` option is checked, and where it is not.
+ * Where the `field` option is checked, and what the documented recipe is.
  *
- * `docs/orm.md` claimed it flatly — "`field` is constrained to the model's own
- * keys, so pointing it at a column that does not exist is a compile error
- * rather than a `no such column` on the first read" — and that is true of one of
- * the three functions it appears to describe.
+ * This file used to pin the *absence* of a guarantee. `SoftDeleteOptions<M>`
+ * constrained `field` to `keyof M & string` with `M` defaulting to `any`, so
+ * only `softDeletes<User>()` checked anything — and what it checked were the
+ * keys of an **instance**, which is not a column list: `field: "save"` compiled
+ * clean and then raised `UnknownFieldError` at runtime. Three cases here were
+ * written without `@ts-expect-error` on purpose, so that tightening the
+ * inference would break the file and force this note to be rewritten.
  *
- * `SoftDeleteOptions<M>` constrains `field` to `keyof M & string`, and `M`
- * defaults to `any`. `softDeletes<User>()` supplies it, so the constraint bites.
- * `softDelete(User)` and `softDeleteMany(User)` take the model as a *value*;
- * `M` stays `any`, `keyof any & string` is `string`, and any typo is accepted —
- * arriving as `no such column` on the first read, which is the failure the
- * sentence promised was impossible.
+ * It did. Both halves of #262 are closed:
  *
- * Defaulting `M = T` does not fix it. The row type is only recoverable from the
- * model's `update` signature, which is generic, so `T` infers too loosely to
- * constrain anything — tried, and it changed nothing. Recording that here so the
- * next person does not spend the same half hour on it.
+ *   - **Columns, not keys.** The generator emits `satisfies ModelSchema` rather
+ *     than a `: ModelSchema` annotation (`bin/orm/emit.ts`), which keeps the
+ *     literal field names instead of widening them to `string`. `field` is now
+ *     constrained to `$schema.fields` — the same list `UnknownFieldError`
+ *     prints — so `"save"` is rejected at compile time.
+ *   - **All four spellings.** The constraint is reachable from the model
+ *     *value* for `softDelete` / `softDeleteMany`, and from the model *class*
+ *     for `softDeletes<typeof User>()`. `ModelPolicy` still needs the row type,
+ *     which is recovered from the class through `prototype` — the mechanism
+ *     #243 recorded and left unused.
  *
- * So this pins the boundary rather than asserting a guarantee that does not
- * hold. The unchecked calls are written without `@ts-expect-error` on purpose:
- * if the inference is ever tightened, they become errors, this file stops
- * type-checking, and the note above needs revisiting — which is the outcome
- * worth having.
+ * The one spelling that stays unchecked is `softDeletes({ field })` with no
+ * type argument, and it is unchecked because there is nothing to check against.
  */
-type User = { id: number; email: string | null; deletedAt: Date | null };
+type LegacyRow = { id: number; email: string | null; deletedAt: Date | null };
 
-describe("softDeletes checks `field` when the model type is given", () => {
-  test("a real column is accepted", () => {
-    softDeletes<User>({ field: "deletedAt" });
-  });
+describe("the documented recipe compiles", () => {
+  /**
+   * #263, verbatim from `docs/orm.md`. It is a **non-overriding name**, and
+   * that is the finding rather than a workaround: `static delete =
+   * softDelete(User)` cannot be made to type-check, because the member's type
+   * would be read off the class whose member it is (`TS7022`). `soft-deletes.ts`
+   * carries the full reasoning.
+   *
+   * Held here so the snippet in the docs is one that has been compiled.
+   */
+  test("a soft-deleting model", () => {
+    class User extends UserModel {
+      static $policies = [softDeletes<typeof User>()];
+      static expire = softDelete(User);
+      static expireMany = softDeleteMany(User);
+    }
 
-  test("a column the model does not have is a compile error", () => {
-    // @ts-expect-error `nope` is not a key of User
-    softDeletes<User>({ field: "nope" });
+    void User;
   });
 
   /**
-   * Without the type parameter there is nothing to check against: `M` is `any`,
-   * so `keyof M & string` is `string`. Pinned because the documented sentence
-   * reads as though it applied here too.
+   * The spelling the docs taught before #262. It still compiles — an instance
+   * type has no `prototype`, so `RowOf` resolves to it unchanged — and it
+   * simply gets no field checking. Pinned so the migration is known to be
+   * additive rather than breaking.
    */
-  test("without the type parameter it is unchecked", () => {
-    softDeletes({ field: "nope" });
+  test("the pre-#262 instance-type spelling still compiles", () => {
+    class User extends UserModel {
+      static $policies = [softDeletes<LegacyRow>()];
+    }
+
+    void User;
   });
 });
 
-describe("softDelete and softDeleteMany do not check it", () => {
-  test("the model arrives as a value, so `field` is unconstrained", () => {
+describe("`field` is checked against the schema's columns", () => {
+  test("a real column is accepted, on every spelling", () => {
+    softDeletes<typeof UserModel>({ field: "deletedAt" });
+    softDelete(UserModel, { field: "deletedAt" });
+    softDeleteMany(UserModel, { field: "deletedAt" });
+  });
+
+  test("a column the model does not have is a compile error", () => {
+    // @ts-expect-error `nope` is not a field on User
+    softDeletes<typeof UserModel>({ field: "nope" });
+    // @ts-expect-error `nope` is not a field on User
     softDelete(UserModel, { field: "nope" });
+    // @ts-expect-error `nope` is not a field on User
     softDeleteMany(UserModel, { field: "nope" });
   });
 
-  test("the correct spelling compiles, which is all that is asserted", () => {
-    softDelete(UserModel, { field: "deletedAt" });
-    softDeleteMany(UserModel, { field: "deletedAt" });
+  /**
+   * The case that decides this was worth doing rather than being a typo check.
+   * `save` is a real key of the *instance* and not a column, so the old
+   * `keyof M` constraint accepted it and the database answered at runtime.
+   */
+  test("a method name is not a column", () => {
+    // @ts-expect-error `save` is a method, not a field
+    softDeletes<typeof UserModel>({ field: "save" });
+  });
+
+  /**
+   * Unchecked, and the one spelling that cannot be otherwise: no model is named,
+   * so `SchemaFields` falls back to `string`. Without `@ts-expect-error` on
+   * purpose — if a way is found to constrain this too, this line becomes an
+   * error and the note above needs revisiting. Same tripwire, one level up.
+   */
+  test("without a model there is nothing to check against", () => {
+    softDeletes({ field: "nope" });
   });
 });

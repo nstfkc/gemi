@@ -320,9 +320,19 @@ export function emitSchemaFile(schemas: ModelSchema[]): string {
     `export const ARTIFACT_VERSION = ${SCHEMA_ARTIFACT_VERSION};\n`,
   ];
 
+  // `satisfies` rather than a `: ModelSchema` annotation, which is the whole of
+  // #262's compile-time half. An annotation *widens*: `fields` becomes
+  // `Record<string, FieldSchema>`, so `keyof` it is `string` and nothing built
+  // on top of it can tell a column from a typo. `satisfies` checks the literal
+  // against the same interface and keeps its keys, so `$schema.fields` carries
+  // the model's real column names into the type system — which is what lets
+  // `softDeletes` constrain `field` to columns rather than to an instance's
+  // keys, where `"save"` is as valid a spelling as `"deletedAt"`.
+  //
+  // Type-level only: the emitted value is byte-identical.
   for (const schema of schemas) {
     parts.push(
-      `\nexport const ${schema.name}: ModelSchema = ${literal(schema)};\n`,
+      `\nexport const ${schema.name} = ${literal(schema)} satisfies ModelSchema;\n`,
     );
   }
 

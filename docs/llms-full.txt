@@ -3694,11 +3694,23 @@ Ships as a policy, which is the proof the hook is expressive enough to be worth 
 import { softDelete, softDeleteMany, softDeletes } from "gemi/orm"
 
 export class User extends UserModel {
-  static $policies = [softDeletes<User>()]  // reads skip rows with a deletedAt
-  static delete = softDelete(User)          // delete becomes an update
-  static deleteMany = softDeleteMany(User)
+  static $policies = [softDeletes<typeof User>()]  // reads skip rows with a deletedAt
+  static expire = softDelete(User)                 // an update that sets deletedAt
+  static expireMany = softDeleteMany(User)
 }
 ```
+
+> **`expire`, not `delete`, and that is a limitation rather than a style.** Naming the wrapper
+> `delete` would be the better recipe — `User.delete()` would transparently become an update — and
+> it cannot be written: the member's type would have to be read off the class the member is being
+> defined on, which TypeScript refuses with *"'delete' implicitly has type 'any' because it does
+> not have a type annotation and is referenced directly or indirectly in its own initializer"*.
+> Annotating it does not help, and passing the generated base instead of your subclass breaks the
+> feature, because policies are resolved per registered class and the base carries none.
+>
+> **So `User.delete()` remains a hard delete.** On a model that soft-deletes, that is a real edge:
+> reads are scoped by the policy, but a `delete` still removes the row. Call `User.expire()`, and
+> if a hard delete should be unreachable, keep the model's `delete` behind a policy of your own.
 
 `deletedAt` must be a nullable `DateTime` on the model (`field` overrides the column name). The
 read half applies to nested reads for the same reason every policy does — a deleted `Account` does
@@ -3708,27 +3720,34 @@ the include site, which is the half ORM-level soft deletes usually get wrong.
 Composing it with your own is one list:
 
 ```ts
-static $policies: UserPolicy[] = [softDeletes<User>(), new TenantPolicy()]
+static $policies: UserPolicy[] = [softDeletes<typeof User>(), new TenantPolicy()]
 ```
 
 `softDeletes()` carries an `onUpdate` pass-through, because `softDelete()` writes the very column
 the policy scopes on and something has to say that is intended. That permission is **per policy**:
 a tenant policy sitting beside it in the same list still has to answer for its own column.
 
-`field` is constrained to the model's own keys **when the model type is given** —
-`softDeletes<User>({ field: … })`, as above — so a typo there is a compile error rather than a
-`no such column` on the first read.
-
-`softDelete(User)` and `softDeleteMany(User)` take the model as a *value*, and its row type is not
-recoverable from it, so their `field` is unchecked. Spell it once and share it if you override the
-default:
+`field` is constrained to the model's **schema columns** — the same list `UnknownFieldError` prints
+— on every spelling that names a model:
 
 ```ts
-const archived = { field: "archivedAt" } as const
+softDeletes<typeof User>({ field: "archivedAt" })   // checked
+softDelete(User, { field: "archivedAt" })           // checked
+softDeleteMany(User, { field: "archivedAt" })       // checked
 
+softDeletes({ field: "archivedAt" })                // unchecked — no model named
+```
+
+Columns rather than keys is the part that matters: the constraint used to be `keyof` the *instance*
+type, so `field: "save"` — a method — compiled clean and failed at runtime. Pass the model as
+`typeof User` and it is a compile error.
+
+Nothing needs spelling twice. If you override the default, each call checks its own argument:
+
+```ts
 export class User extends UserModel {
-  static $policies = [softDeletes<User>(archived)]   // checked here
-  static delete = softDelete(User, archived)          // and therefore correct here
+  static $policies = [softDeletes<typeof User>({ field: "archivedAt" })]
+  static expire = softDelete(User, { field: "archivedAt" })
 }
 ```
 
