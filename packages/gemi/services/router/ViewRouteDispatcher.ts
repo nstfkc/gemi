@@ -31,9 +31,11 @@ import { Lang } from "../../facades/Lang";
 import { AuthViewRouter } from "../../auth/routes";
 import { KernelId } from "../kernel-id/KernelId";
 import { app } from "../../foundation/app";
-import { ServerQueryStore } from "./ServerQueryStore";
+import { kernelContext } from "../../kernel/context";
+import { ServerQueryStore, type StreamSummary } from "./ServerQueryStore";
 import { createServerQueryFetcher } from "./serverQueryFetcher";
 import { injectQueryPayloads, isBotUserAgent } from "./streamQueryInjection";
+import { createShellContentObserver, createShellContentReporter } from "./shellContentReport";
 import { createRoutePayloadStream } from "./routePayloadStream";
 
 /**
@@ -112,9 +114,21 @@ export class ViewRouteDispatcher {
   componentTree: ComponentTree = [];
   flatComponentTree: string[] = [];
   root: any = null;
+  /**
+   * The shell-content hint (#294): React defers any boundary over
+   * `progressiveChunkSize` on size alone, so a page that reads fine without
+   * JS can go blank the day one more section pushes it over the budget — and
+   * nothing else notices the transition (#289 was found by hand-measuring).
+   * The reporter owns the once-per-route-per-boot dedup so a hot route
+   * doesn't spam the dev console.
+   */
+  private shellReporter = createShellContentReporter();
 
   private readonly hooks: Required<
-    Pick<ViewRouteConfig, "onRequestStart" | "onRequestEnd" | "onRequestFail">
+    Pick<
+      ViewRouteConfig,
+      "onRequestStart" | "onRequestEnd" | "onRequestFail" | "onStreamComplete"
+    >
   >;
 
   /** See `ViewRouteConfig.partialRendering`. */
@@ -129,6 +143,7 @@ export class ViewRouteDispatcher {
       onRequestStart: config.onRequestStart ?? defaults.onRequestStart,
       onRequestEnd: config.onRequestEnd ?? defaults.onRequestEnd,
       onRequestFail: config.onRequestFail ?? defaults.onRequestFail,
+      onStreamComplete: config.onStreamComplete ?? defaults.onStreamComplete,
     };
 
     const routes: ViewRoutes = {
@@ -159,7 +174,39 @@ export class ViewRouteDispatcher {
     return await this.hooks.onRequestEnd(req);
   }
 
+  /**
+   * Fires the provider's `onStreamComplete` from a stream callback — an
+   * observability hook must never break the response body it observes, so
+   * sync throws and rejections are logged and swallowed.
+   *
+   * Call sites must invoke this inside the request scope (see
+   * `runInRequestScope` in `handleViewRequest`): stream callbacks are driven
+   * by the HTTP server after the handler returned, outside the kernel
+   * AsyncLocalStorage — where both the user's hook and this very `Log.error`
+   * guard would break.
+   */
+  private completeStream(req: HttpRequest, summary: StreamSummary) {
+    const logError = (err: any) => {
+      Log.error(err?.message ?? 'Error in "onStreamComplete" event handler', {
+        err: JSON.stringify(err),
+      });
+    };
+    try {
+      Promise.resolve(this.hooks.onStreamComplete(req, summary)).catch(logError);
+    } catch (err) {
+      logError(err);
+    }
+  }
+
   private async render(props: {
+    req: HttpRequest;
+    /**
+     * Re-enters the kernel + request AsyncLocalStorage scopes captured while
+     * the request was live. Every stream lifecycle callback below runs after
+     * the handler returned — driven by the HTTP server, outside both scopes —
+     * so user hooks are always invoked through this.
+     */
+    runInRequestScope: <T>(fn: () => T) => T;
     viewData: any;
     pathname: string;
     currentPathName: string;
@@ -179,6 +226,8 @@ export class ViewRouteDispatcher {
     appId: string;
   }) {
     const {
+      req,
+      runInRequestScope,
       csrfTokenHMAC,
       currentPathName,
       headers,
@@ -326,6 +375,18 @@ export class ViewRouteDispatcher {
       // JS-disabled humans, text browsers, and failed-script loads too).
       const settled = isBotUserAgent(userAgent) || noStream;
 
+      // Dev-only: collect the streamed bytes so the close hook can measure
+      // what a no-JS reader gets (#294). A settled document carries its
+      // content inline by construction — nothing to measure — and a route
+      // already hinted this boot skips the collection entirely.
+      const shellObserver =
+        process.env.NODE_ENV !== "production" &&
+        !settled &&
+        currentPathName &&
+        this.shellReporter.shouldObserve(currentPathName)
+          ? createShellContentObserver()
+          : null;
+
       try {
         const stream = await renderToReadableStream(
           createElement(Fragment, {
@@ -374,10 +435,31 @@ export class ViewRouteDispatcher {
           await stream.allReady.catch(() => {});
         }
 
-        return new Response(injectQueryPayloads(stream, serverQueries), {
-          status: !currentPathName ? 404 : 200,
-          headers,
-        });
+        return new Response(
+          injectQueryPayloads(stream, serverQueries, {
+            // A settled body has no shell-then-stream phase — its first byte
+            // already carries everything — so only progressive responses mark
+            // one; the summary then reports `shellAt === settledAt` for the
+            // settled ones.
+            onShell: settled ? undefined : () => serverQueries.markShell(),
+            onChunk: shellObserver?.onChunk,
+            // The APM-visible end of the request: the body closed, not the
+            // handler returned (that was at time-to-shell).
+            onClose: () =>
+              runInRequestScope(() => {
+                this.completeStream(req, serverQueries.summarize(deadline.signal.aborted));
+                if (shellObserver) {
+                  // The injector's `onChunk` collected the exact bytes the
+                  // visitor got; measured once the body closed (#294).
+                  this.shellReporter.report(currentPathName, shellObserver.measure());
+                }
+              }),
+          }),
+          {
+            status: !currentPathName ? 404 : 200,
+            headers,
+          },
+        );
       } catch (err) {
         clearTimeout(deadlineTimer);
         const stream = await renderToReadableStream(createElement("div"), {
@@ -387,10 +469,22 @@ export class ViewRouteDispatcher {
               ? ["/render-error.js", ...bootstrapModules]
               : bootstrapModules,
         });
-        return new Response(stream, {
-          status: !currentPathName ? 404 : 200,
-          headers,
-        });
+        // The failed-render body still closes, and the span-ending hook is
+        // pinned to the body closing, not the render succeeding — a span that
+        // only ends on happy paths leaks for exactly the requests worth
+        // seeing. No shell mark: this body is one settled error document.
+        return new Response(
+          injectQueryPayloads(stream, serverQueries, {
+            onClose: () =>
+              runInRequestScope(() =>
+                this.completeStream(req, serverQueries.summarize(deadline.signal.aborted)),
+              ),
+          }),
+          {
+            status: !currentPathName ? 404 : 200,
+            headers,
+          },
+        );
       }
     };
   }
@@ -495,9 +589,42 @@ export class ViewRouteDispatcher {
         appId: string;
       } | null = null;
       const ctx = RequestContext.getStore();
+      // The HTTP server drives the response body — and therefore every stream
+      // lifecycle callback — after `app.fetch` returned, outside the kernel
+      // AsyncLocalStorage scope and outside this request's context (the same
+      // phenomenon `createServerQueryFetcher` documents for render-discovered
+      // fetches). Facades and `req.ctx()` inside `onStreamComplete` /
+      // `onRequestFail` would break there, so capture both scopes while they
+      // are live and re-enter them around every hook invocation below.
+      const kernelStore = kernelContext.getStore();
+      const runInRequestScope = <T>(fn: () => T): T =>
+        kernelContext.run(kernelStore, () => RequestContext.runWith(ctx, fn));
       // Before middleware and handlers, so every `Query.prefetch` along the
       // way lands in one live, request-scoped store.
       ctx.serverQueries = new ServerQueryStore(createServerQueryFetcher(req));
+      // A query rejecting during the streamed render (or a fire-and-forget
+      // prefetch) never throws the handler, so the catch below can't see it —
+      // error tracking wired to `onRequestFail` would miss server-side work
+      // that failed. Route rejections through the hook here. The identity set
+      // keeps `Query.instant` rethrows — which DO reach the catch — from
+      // reporting the same error twice.
+      const reportedQueryErrors = new Set<any>();
+      ctx.serverQueries.onQueryFail((entry) => {
+        reportedQueryErrors.add(entry.error);
+        try {
+          // In scope, and with the rejection handler attached *inside* the
+          // scope, so a facade-using hook works for render-phase failures
+          // exactly as it does for handler-phase ones.
+          runInRequestScope(() =>
+            Promise.resolve(this.hooks.onRequestFail(httpRequest, entry.error)).catch(
+              () => {},
+            ),
+          );
+        } catch {
+          // An error-reporting hook must not break the settle chain it
+          // observes — a suspended segment is waiting on it.
+        }
+      });
 
       if (urlLocale) {
         const locale = urlLocale.replaceAll("/", "");
@@ -627,7 +754,14 @@ export class ViewRouteDispatcher {
           };
 
           return new Response(
-            createRoutePayloadStream(envelope, ctx.serverQueries),
+            createRoutePayloadStream(envelope, ctx.serverQueries, undefined, ({ aborted }) =>
+              // No shell was marked, so the summary reports
+              // `shellAt === settledAt` — the NDJSON body is one payload, not
+              // a shell followed by streamed content.
+              runInRequestScope(() =>
+                this.completeStream(httpRequest, ctx.serverQueries.summarize(aborted)),
+              ),
+            ),
             {
               headers,
             },
@@ -667,6 +801,8 @@ export class ViewRouteDispatcher {
         }
 
         return await this.render({
+          req: httpRequest,
+          runInRequestScope,
           csrfTokenHMAC: Buffer.from(""),
           currentPathName,
           headers,
@@ -701,7 +837,11 @@ export class ViewRouteDispatcher {
             });
           }
         }
-        this.hooks.onRequestFail(httpRequest, err);
+        // `Query.instant` rethrows the entry's error object into this catch —
+        // already reported when the rejection settled, so skip the duplicate.
+        if (!reportedQueryErrors.has(err)) {
+          this.hooks.onRequestFail(httpRequest, err);
+        }
         throw err;
       }
     });

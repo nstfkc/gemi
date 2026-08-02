@@ -313,7 +313,7 @@ The hooks are ordinary config values, so a service reads them the same way it re
 | `log` | `onLogCreated`, `onLogFileClosed` |
 | `translation` | `detectLocale`, `onLocaleChange` |
 | `route.api` | `onRequestStart`, `onRequestEnd`, `onRequestFail` |
-| `route.view` | `onRequestStart`, `onRequestEnd`, `onRequestFail` |
+| `route.view` | `onRequestStart`, `onRequestEnd`, `onRequestFail`, `onStreamComplete` |
 
 Request lifecycle hooks are the usual place for tracing and error reporting:
 
@@ -410,6 +410,49 @@ The boot is split in two because `new App({ kernel })` is a synchronous construc
 2. **`kernel.waitForBoot()` — asynchronous.** Runs every provider's `boot()` in registration order. Idempotent.
 
 `new App({ kernel })` performs phase one for you; `Server.start()` awaits phase two before binding the port. If you drive `App` yourself, `await app.waitForBoot()` before serving.
+
+### Instrumenting streamed responses
+
+View responses stream: the handler returns at time-to-shell while query payloads keep streaming for as long as the slowest query takes. A span that ends when the handler returns (or in a `finally` around `app.fetch`) therefore records ~milliseconds for a request whose body stayed open for a second — the duration of the shell, not the response.
+
+The `route.view` slice's `onStreamComplete(req, summary)` hook fires when the response body actually closes — after the last streamed chunk, or when the stream deadline aborts rendering. The `summary` reports:
+
+- **`shellAt`** — ms from request start to the response's first byte.
+- **`settledAt`** — ms to the last chunk, when the body closed.
+- **`aborted`** — whether the stream deadline cut rendering short.
+- **`queries`** — per-query `path`, `variantKey`, `startedAt`, `settledAt`, `status`, and `source` (`"prefetch"` or `"render"`).
+
+Non-streamed responses (`.json` navigation payloads, `"no-stream"` routes, bot requests) report `shellAt === settledAt`. The hook also fires when a shell render crashes (or the deadline aborts it before the shell resolved) — the fallback error document's body still closes, so the span still ends.
+
+> **Scope:** `onStreamComplete` fires for document and `.json` navigation bodies — the responses that stream. Responses without a query lifecycle (OG images, `FILE` routes, redirects and error responses produced by `RequestBreakerError`) do not fire it, so a span opened unconditionally in instrumentation needs a fallback end (e.g. also ending it in `onRequestEnd` / `onRequestFail` when no stream ever started).
+
+Start the span where you already do, and end it here instead:
+
+```typescript
+// app/config/route.ts
+import { defineRouteConfig } from "gemi/services";
+import type { StreamSummary } from "gemi/services";
+import type { HttpRequest } from "gemi/http";
+
+export default defineRouteConfig({
+  api: { rootRouter: RootApiRouter },
+  view: {
+    rootRouter: RootViewRouter,
+    root: createRoot(RootLayout),
+
+    onStreamComplete(req: HttpRequest, summary: StreamSummary) {
+      // e.g. end the Sentry span opened for this request:
+      // span.setAttribute("gemi.shell_ms", summary.shellAt);
+      // span.setAttribute("gemi.aborted", summary.aborted);
+      // span.end(); // now measures the full streamed response
+    },
+  },
+});
+```
+
+Query failures during the streamed render are routed through `onRequestFail(req, error)` exactly once per rejected query, with a `QueryError` carrying the query's path, variant, and status — so error tracking wired to `onRequestFail` keeps seeing server-side failures that React quietly hands over to client rendering. (`Query.instant` rethrows into the handler; that rejection is still reported only once.) An api handler that fails with a `RequestBreakerError` (or an error `Response`) yields a `QueryError` with that response's status; a raw `throw` inside the handler yields a status-500 `QueryError` with the original error on `cause`.
+
+> **Gotcha:** a raw `throw` inside an api handler also fires the **api** slice's `onRequestFail` — the query runs the api handler in-process, and the api router reports its own failures. If both slices report to the same error tracker, dedupe there (the view hook's error is the `QueryError` wrapper, the api hook's is the original error on its `cause`).
 
 ## App bootstrap
 

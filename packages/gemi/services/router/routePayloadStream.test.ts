@@ -118,4 +118,61 @@ describe("createRoutePayloadStream", () => {
     await slow.promise;
     expect(slow.status).toBe("resolved");
   });
+
+  test("onClose fires once when the last query has streamed; the summary has shellAt === settledAt", async () => {
+    const { fetcher, calls } = createDeferredFetcher();
+    const store = new ServerQueryStore(fetcher);
+    store.ensure("/pending", {}, "prefetch");
+
+    const closes: Array<{ aborted: boolean }> = [];
+    const { lines, finished } = collectLines(
+      createRoutePayloadStream({ ok: true }, store, undefined, (info) => {
+        closes.push(info);
+      }),
+    );
+
+    // The envelope alone does not complete the stream.
+    await new Promise((r) => setTimeout(r, 10));
+    expect(closes).toHaveLength(0);
+
+    calls[0].resolve({ p: 1 });
+    await finished;
+
+    expect(lines).toHaveLength(2);
+    expect(closes).toEqual([{ aborted: false }]);
+    // The NDJSON body is one payload, never a shell followed by streamed
+    // content — no shell mark, so the summary collapses the two times.
+    const summary = store.summarize(closes[0].aborted);
+    expect(summary.shellAt).toBe(summary.settledAt);
+    expect(summary.aborted).toBe(false);
+  });
+
+  test("onClose reports aborted when the deadline cut a hung query loose", async () => {
+    const { fetcher } = createDeferredFetcher();
+    const store = new ServerQueryStore(fetcher);
+    store.ensure("/hung", {}, "prefetch");
+
+    const closes: Array<{ aborted: boolean }> = [];
+    const { finished } = collectLines(
+      createRoutePayloadStream({ ok: true }, store, 20, (info) => {
+        closes.push(info);
+      }),
+    );
+
+    await finished;
+    expect(closes).toEqual([{ aborted: true }]);
+
+    const summary = store.summarize(true);
+    expect(summary.aborted).toBe(true);
+    expect(summary.queries).toEqual([
+      {
+        path: "/hung",
+        variantKey: "",
+        startedAt: expect.any(Number),
+        settledAt: undefined,
+        status: "pending",
+        source: "prefetch",
+      },
+    ]);
+  });
 });

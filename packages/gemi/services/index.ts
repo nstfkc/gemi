@@ -54,6 +54,11 @@ export { BroadcastManager } from "./pubsub/BroadcastManager";
 export { RouteServiceProvider } from "./router/RouteServiceProvider";
 export { ApiRouteDispatcher } from "./router/ApiRouteDispatcher";
 export { ViewRouteDispatcher } from "./router/ViewRouteDispatcher";
+// What `onStreamComplete` receives when a response body closes.
+export type {
+  StreamSummary,
+  StreamQuerySummary,
+} from "./router/ServerQueryStore";
 
 // Logging
 export { LogServiceProvider } from "./logging/LogServiceProvider";

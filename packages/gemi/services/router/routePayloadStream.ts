@@ -30,20 +30,29 @@ export function createRoutePayloadStream(
   envelope: unknown,
   store: ServerQueryStore,
   deadlineMs: number = PAYLOAD_STREAM_DEADLINE_MS,
+  /**
+   * The body actually closed — every settled query streamed, the deadline
+   * fired (`aborted: true`), or the client went away. Fires exactly once;
+   * the stream-lifecycle mirror of the document injector's `onClose`.
+   */
+  onClose?: (info: { aborted: boolean }) => void,
 ): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
+  let closeStream: (aborted: boolean) => void = () => {};
 
   return new ReadableStream<Uint8Array>({
     start(controller) {
       let closed = false;
-      const close = () => {
+      const close = (aborted: boolean) => {
         if (closed) return;
         closed = true;
         clearTimeout(deadline);
         try {
           controller.close();
         } catch {}
+        onClose?.({ aborted });
       };
+      closeStream = close;
 
       controller.enqueue(encoder.encode(`${JSON.stringify(envelope)}\n`));
 
@@ -58,8 +67,14 @@ export function createRoutePayloadStream(
         );
       });
 
-      const deadline = setTimeout(close, deadlineMs);
-      store.allSettled().then(close, close);
+      const deadline = setTimeout(() => close(true), deadlineMs);
+      store.allSettled().then(
+        () => close(false),
+        () => close(false),
+      );
+    },
+    cancel() {
+      closeStream(false);
     },
   });
 }
