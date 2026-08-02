@@ -56,6 +56,27 @@ Then `bunx prisma generate`. You get three files under `app/models/generated/`:
 
 **The output is committed on purpose.** Diffs stay reviewable and CI needs no codegen step.
 
+### Columns the generator refuses
+
+Two kinds of column stop generation with an `UnsupportedSchemaError` naming the model and field,
+rather than being skipped:
+
+| Column | Why |
+| --- | --- |
+| A scalar list — `tags String[]` | Postgres-only, and needs array decoding this ORM does not have. |
+| `Decimal` | Prisma types it as `Prisma.Decimal`; SQLite stores a REAL and the driver returns a JS number, so the value would be a float pretending to be an arbitrary-precision decimal. |
+
+**Refused rather than omitted, and the whole generation fails rather than the one field.** Skipping
+the column would generate cleanly and then hand back a row shape that silently disagrees with the
+type Prisma gave you — which is the failure this ORM is built to make impossible. One unsupported
+column means no `schema.ts`, no `models.ts` and no `index.ts` for any model, so the problem is
+visible at the moment you introduce it.
+
+A `Unsupported(...)` column is different and is *not* refused: Prisma's own client omits those from
+its result types, so omitting them is what keeps the shapes identical.
+
+Scalar lists are tracked in [#300](https://github.com/nstfkc/gemi/issues/300).
+
 ### Your model class
 
 The generated base is not the class you write code on. Subclass it, and **re-register it**:
@@ -1347,6 +1368,10 @@ if (!ormSupports(DB.dialect)) throw new Error("this deployment needs Postgres")
 
 Stated so you can plan around them rather than discover them:
 
+- **No scalar lists.** `tags String[]` is refused at *generation* time, so this one stops your build
+  rather than a query — see [Columns the generator refuses](#columns-the-generator-refuses). Prisma
+  itself refuses them on SQLite, so half the supported matrix could never have had them.
+  Pending rather than declined ([#300](https://github.com/nstfkc/gemi/issues/300)).
 - **No identity map and no unit of work.** Two queries for the same row give you two objects. Half
   an identity map is worse than none.
 - **No lazy loading.** A relation you did not `include` is absent, not a proxy that queries when
