@@ -47,7 +47,7 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 - **[Rows & Entities](./orm-rows-and-entities.md)** — plain objects by default, `track` + `save`, and `wrap`.
 
 ### Auth
-- **[Authentication](./authentication.md)** — `app/config/auth.ts`, adapters, sessions, magic links, OAuth, the `Auth` facade, and client auth hooks.
+- **[Authentication](./authentication.md)** — `app/config/auth.ts`, the user provider, sessions, magic links, OAuth, the `Auth` facade, and client auth hooks.
 - **[Authorization](./authorization.md)** — role-based middleware and authorization errors.
 
 ### Services & facades

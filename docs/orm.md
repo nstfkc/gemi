@@ -1308,9 +1308,10 @@ might lift next release.
 ## See also
 
 - **[Rows and entities](./orm-rows-and-entities.md)** — POJOs, `track` + `save`, and `wrap`.
-- **[Authentication](./authentication.md)** — `app/config/auth.ts` and the user provider seam.
-  `OrmAuthenticationAdapter` (exported from `gemi/kernel`, beside the Prisma one) implements all
-  twenty-two methods of `IAuthenticationAdapter` on this ORM and can be selected in its place. The
-  starter template still points at the Prisma adapter; switching it is a per-application call.
+- **[Authentication](./authentication.md)** — `app/config/auth.ts` and the user provider.
+  `UserProvider` (exported from `gemi/kernel`) implements all twenty-two methods of the auth
+  persistence on this ORM, and is the only implementation: the adapter seam and the Prisma
+  adapter are gone, and `AuthManager` constructs it directly. It resolves your models from the
+  registry by name, so registering them at boot is what makes sign-in work.
 - **[Authorization](./authorization.md)** — route-level authorization, which policies complement
   rather than replace.

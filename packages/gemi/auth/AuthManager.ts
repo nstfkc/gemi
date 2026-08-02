@@ -1,8 +1,8 @@
 import { randomBytes } from "crypto";
 import { Temporal } from "temporal-polyfill";
 import { HttpRequest } from "../http";
-import type { IAuthenticationAdapter } from "./adapters/types";
 import { authConfigDefaults, type AuthConfig } from "./config";
+import { UserProvider } from "./UserProvider";
 import { withDefaults } from "../support/withDefaults";
 
 export class AuthManager {
@@ -10,16 +10,37 @@ export class AuthManager {
 
   readonly config: Required<AuthConfig>;
 
-  constructor(config: AuthConfig = {}) {
+  private readonly provider: UserProvider;
+
+  /**
+   * The provider is a constructor argument rather than a config field, and the
+   * distinction is the point: it defaults to the ORM-backed `UserProvider`, so
+   * an application configures nothing to get working authentication, while an
+   * application that must change a query subclasses it and binds the result in
+   * the container.
+   *
+   * Not a config field because `app/config/auth.ts` is data an app edits, and a
+   * persistence implementation is not: routing it through config is what made
+   * the old adapter seam a decision every new app had to make before it could
+   * log anybody in.
+   *
+   * Defaulting eagerly is safe — `UserProvider` resolves its models lazily from
+   * the registry, so this touches no application module at boot.
+   */
+  constructor(
+    config: AuthConfig = {},
+    provider: UserProvider = new UserProvider(),
+  ) {
     this.config = withDefaults(authConfigDefaults(config), config);
+    this.provider = provider;
   }
 
   /**
-   * The user provider, i.e. everything that reads and writes users, sessions
-   * and tokens. Mirrors `Illuminate\Contracts\Auth\UserProvider`.
+   * Everything that reads and writes users, sessions and tokens. Mirrors
+   * `Illuminate\Contracts\Auth\UserProvider`.
    */
-  get userProvider(): IAuthenticationAdapter {
-    return this.config.userProvider;
+  get userProvider(): UserProvider {
+    return this.provider;
   }
 
   async getSession(token: string, userAgent: string) {

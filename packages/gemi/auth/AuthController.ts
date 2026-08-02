@@ -7,7 +7,7 @@ import { AuthorizationError } from "../http/errors";
 import { Auth } from "../facades";
 import { app } from "../foundation/app";
 import { Translator } from "../i18n/Translator";
-import type { Invitation, User } from "./adapters/types";
+import type { Invitation, User } from "./types";
 import { AuthManager } from "./AuthManager";
 
 class SignInRequest extends HttpRequest<

@@ -1,7 +1,7 @@
 import { createContext, type PropsWithChildren } from "react";
 import type { Translations } from "./I18nContext";
 import type { ComponentTree } from "./types";
-import type { User } from "../auth/adapters/types";
+import type { User } from "../auth/types";
 
 type Data = Record<string, any>;
 

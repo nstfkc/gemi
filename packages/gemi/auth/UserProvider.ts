@@ -1,6 +1,7 @@
-import type * as registry from "../../orm/registry";
+import * as registry from "../orm/registry";
 import type {
   Account,
+  AuthModels,
   CreateAccountArgs,
   CreateMagicLinkTokenArgs,
   CreatePasswordResetTokenArgs,
@@ -11,7 +12,6 @@ import type {
   DeleteSessionArgs,
   FindPasswordResetTokenArgs,
   FindSessionArgs,
-  IAuthenticationAdapter,
   Invitation,
   PasswordResetToken,
   SessionWithUser,
@@ -21,42 +21,56 @@ import type {
 } from "./types";
 
 /**
- * The authentication adapter, on the gemi ORM.
+ * Everything `auth/` reads and writes — users, sessions, tokens — on the gemi
+ * ORM. Named after `Illuminate\Contracts\Auth\UserProvider`, which is also where
+ * the `AuthManager.userProvider` accessor gets its name.
  *
- * This is the piece `plans/orm/README.md` schedules for "once iteration 4 lands
- * writes", and it is the thing that lets `auth/adapters/prisma.ts` eventually be
- * deprecated — which was PR #33's stated goal, and the reason its proposed
- * hand-written `SqlUserProvider` was dropped in favour of building the ORM first.
- * Twenty-two methods of per-dialect SQL is exactly what a compiler is for.
+ * ## Why this is a class and not an interface
  *
- * **It ships alongside the Prisma adapter, not instead of it.** An application
- * selects one; both satisfy `IAuthenticationAdapter`, so nothing else in `auth/`
- * knows which is in use. That is what lets an app migrate when it chooses rather
- * than when the framework chooses.
+ * It used to be one of three interchangeable `IAuthenticationAdapter`
+ * implementations — blank, Prisma, and this. That seam is gone. The framework
+ * ships an ORM, and auth persistence on it is not a choice an application should
+ * have to make before it can log anybody in; the pluggable version meant a
+ * default that threw `AdapterNotFound` and a starter template that reached for
+ * Prisma to get past it.
+ *
+ * What the seam actually bought was reachable more cheaply. An application that
+ * needs different behaviour subclasses this and overrides the methods it cares
+ * about — the queries are twenty-two small independent methods, all funnelled
+ * through `run`, precisely the shape that subclasses well. What it no longer
+ * buys is a *different database*, and that is deliberate: an app on the ORM has
+ * one.
+ *
+ * Note what was **not** done here. Writing these methods against `DB`/raw SQL
+ * would mean twenty-two methods of per-dialect SQL across SQLite and Postgres —
+ * the hand-written `SqlUserProvider` PR #33 proposed, dropped in favour of
+ * building the ORM first. That reasoning did not stop applying when the adapter
+ * seam went away. Twenty-two methods of per-dialect SQL is exactly what a
+ * compiler is for.
  *
  * ## Why the models are injected rather than imported
  *
  * The ORM resolves models by *name* through a registry, and the generated classes
  * live in the application (`app/models/generated`), not in the framework. So this
- * adapter cannot import `User` — there is no such module here. It takes the model
- * classes it needs, which also makes it testable against fixtures and lets an
- * application point it at its own subclasses (the ones carrying policies, which
- * matters: see the note on `asSystem` below).
+ * cannot import `User` — there is no such module here. It takes the model
+ * classes it needs, defaulting to the registry, which also makes it testable
+ * against fixtures and lets an application point it at its own subclasses (the
+ * ones carrying policies, which matters: see the note on `asSystem` below).
  *
- * ## Two behaviours worth knowing before switching
+ * ## Two behaviours worth knowing
  *
  * **Policies are suspended.** Every query here runs inside `Model.asSystem`.
  * Authentication happens *before* there is an authenticated user, so a policy
  * that scopes by `ctx.user` cannot be satisfied — and under deny-by-default it
- * would raise rather than return null, turning "wrong password" into a 500. The
- * adapter is the one place in an application where acting without a user is
- * correct rather than a mistake, so it says so explicitly at the call site,
- * which is what `asSystem` is for.
+ * would raise rather than return null, turning "wrong password" into a 500. This
+ * is the one place in an application where acting without a user is correct
+ * rather than a mistake, so it says so explicitly at the call site, which is what
+ * `asSystem` is for.
  *
- * **`password` is stripped from returned users**, matching Prisma's adapter. The
- * ORM does not implement `omit`, so it is deleted from the returned object rather
- * than excluded by the query — see `createUser` for why that is the right shape
- * and why it matters: `POST /sign-up` returns this object as its response body.
+ * **`password` is stripped from returned users.** The ORM does not implement
+ * `omit`, so it is deleted from the returned object rather than excluded by the
+ * query — see `createUser` for why that is the right shape and why it matters:
+ * `POST /sign-up` returns this object as its response body.
  */
 
 /**
@@ -74,24 +88,32 @@ function withoutPassword<T>(user: T): T {
   return user;
 }
 
-/** The generated model classes this adapter needs, by their Prisma names. */
-export interface AuthModels {
-  User: any;
-  Session: any;
-  Account: any;
-  PasswordResetToken: any;
-  MagicLinkToken: any;
-  OrganizationInvitation: any;
-  SocialAccount: any;
+/**
+ * The models, resolved from the ORM registry by name.
+ *
+ * Lazily, through a Proxy, so the order of module evaluation does not matter —
+ * the same property `registry.get` provides everywhere else. Constructing a
+ * `UserProvider` therefore does not require the application's models to have
+ * been imported yet; only *calling* one of its methods does.
+ *
+ * When they never are, `registry.get` throws `ModelNotRegisteredError`, which
+ * names the model and lists what is registered. That is the replacement for the
+ * old `BlankAdapter`, and a better one: it says which model is missing instead
+ * of `AdapterNotFound`.
+ */
+function registryModels(): AuthModels {
+  return new Proxy({} as AuthModels, {
+    get: (_target, name: string) => registry.get(name),
+  });
 }
 
 /**
  * The user shape the rest of `auth/` expects on a session.
  *
- * Spelled out rather than `include: { user: true }` because the interface's `User`
- * carries `accounts[].organization`, which is a relation two levels down — and
- * because naming the columns is what keeps the *session* queries from selecting
- * `password` into something that is handed to a client.
+ * Spelled out rather than `include: { user: true }` because `User` in
+ * `./types.ts` carries `accounts[].organization`, which is a relation two levels
+ * down — and because naming the columns is what keeps the *session* queries from
+ * selecting `password` into something that is handed to a client.
  */
 const SESSION_USER = {
   select: {
@@ -113,11 +135,16 @@ const SESSION_USER = {
   },
 } as const;
 
-export class OrmAuthenticationAdapter implements IAuthenticationAdapter {
-  constructor(protected models: AuthModels) {}
+export class UserProvider {
+  /**
+   * Defaults to the ORM registry, so an application needs no configuration to
+   * get working authentication. Pass models explicitly to test against fixtures
+   * or to point at subclasses carrying policies.
+   */
+  constructor(protected models: AuthModels = registryModels()) {}
 
   /**
-   * Every query in this adapter goes through here.
+   * Every query in this class goes through here.
    *
    * `asSystem` rather than a user scope, for the reason in the class comment:
    * authentication runs before there is a user, so a policy that scopes by one
@@ -381,21 +408,3 @@ export class OrmAuthenticationAdapter implements IAuthenticationAdapter {
   }
 }
 
-/**
- * Builds the adapter from the ORM's registry, for an application that has
- * imported `app/models/generated`.
- *
- * By name rather than by import, for the reason the registry exists at all: the
- * generated classes live in the application and the framework cannot import
- * them. Resolved lazily, at first use, so the order of module evaluation does
- * not matter — the same property `registry.get` provides everywhere else.
- */
-export function ormAuthenticationAdapter(
-  models: typeof registry,
-): OrmAuthenticationAdapter {
-  return new OrmAuthenticationAdapter(
-    new Proxy({} as AuthModels, {
-      get: (_target, name: string) => models.get(name),
-    }),
-  );
-}

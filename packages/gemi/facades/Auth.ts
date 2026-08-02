@@ -1,4 +1,4 @@
-import type { User } from "../auth/adapters/types";
+import type { User } from "../auth/types";
 import { AuthManager } from "../auth/AuthManager";
 import {
   AuthenticationError,

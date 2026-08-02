@@ -33,7 +33,7 @@ Each link below points to a self-contained Markdown page. For a single file cont
 
 ## Auth
 
-- [Authentication](https://nstfkc.github.io/gemi/authentication.md): app/config/auth.ts, adapters, sessions, magic links, OAuth, the Auth facade, and client auth hooks.
+- [Authentication](https://nstfkc.github.io/gemi/authentication.md): app/config/auth.ts, the user provider, sessions, magic links, OAuth, the Auth facade, and client auth hooks.
 - [Authorization](https://nstfkc.github.io/gemi/authorization.md): role-based middleware and authorization errors.
 
 ## Services & facades

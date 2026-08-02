@@ -2,9 +2,13 @@
 
 gemi ships a full authentication system — email/password, passwordless magic-link (PIN),
 OAuth, sessions, email verification and password reset — configured through a single
-config file in your app. You write `app/config/auth.ts`, plug in a *user provider* that talks
-to your database, and (optionally) supply lifecycle callbacks to send emails, provision
-resources, or extend the session payload.
+config file in your app. You write `app/config/auth.ts` and (optionally) supply lifecycle
+callbacks to send emails, provision resources, or extend the session payload.
+
+Persistence needs no configuration. Users, sessions and tokens are read and written by
+`UserProvider`, which runs on the [gemi ORM](./orm.md) and resolves your models from the
+registry by name — so an app whose schema has the auth models has working authentication
+out of the box. See [User provider](#user-provider) to change a query.
 
 The framework's own `AuthServiceProvider` reads that config slice and binds an `AuthManager`
 singleton into the [container](./project-structure.md); the `Auth` [facade](#the-auth-facade)
@@ -19,12 +23,8 @@ Auth configuration is a plain object built with the `defineAuthConfig` helper fr
 
 ```typescript
 import { defineAuthConfig, GoogleOAuthProvider } from "gemi/services";
-import { PrismaAuthenticationAdapter } from "gemi/kernel";
-import { prisma } from "@/app/database/prisma";
 
 export default defineAuthConfig({
-  userProvider: new PrismaAuthenticationAdapter(prisma),
-
   oauthProviders: {
     google: new GoogleOAuthProvider(),
   },
@@ -71,7 +71,6 @@ a binding into the container, and a facade resolves it.**
 
 | Field | Type | Default | Purpose |
 | --- | --- | --- | --- |
-| `userProvider` | `IAuthenticationAdapter` | `BlankAdapter` | Persistence layer (users, sessions, tokens). See [User providers](#user-providers). |
 | `oauthProviders` | `Record<string, OAuthProvider>` | `{}` | OAuth providers keyed by name (the `:provider` in the callback route). See [OAuth](#oauth). |
 | `verifyEmail` | `boolean` | `true` | When `true`, sign-in only succeeds for users whose `emailVerifiedAt` is set. |
 | `sessionExpiresInHours` | `number` | `24` | Rolling expiry — refreshed to `now + N` hours every time the session is used. |
@@ -82,36 +81,45 @@ a binding into the container, and a facade resolves it.**
 | `hashPassword` / `verifyPassword` | `(password) => Promise<string>` / `(password, hash) => Promise<boolean>` | `Bun.password.*` | Swap the hashing scheme. |
 | `generateEmailVerificationToken` / `generateForgotPasswordToken` / `generateMagicLinkToken` | `(...) => string \| Promise<string>` | sha256 of value + timestamp | Token minting. |
 
-> **Note:** the field is `userProvider`, not `adapter`. It is named after Laravel's
-> `Illuminate\Contracts\Auth\UserProvider`. `AuthManager.userProvider` exposes the same
-> instance to framework internals.
+> **Note:** there is no `userProvider` field. Persistence is not configurable — `AuthManager`
+> constructs a [`UserProvider`](#user-provider) on the ORM and exposes it as
+> `AuthManager.userProvider`, named after Laravel's
+> `Illuminate\Contracts\Auth\UserProvider`. Earlier versions took an `IAuthenticationAdapter`
+> here (and a `adapter` field before that); see [Upgrading](#upgrading-from-the-adapter-config).
 
 > **Note:** Session lifetime is enforced two ways. `sessionExpiresInHours` is a *rolling*
 > window pushed forward on each request; `sessionAbsoluteExpiresInHours` is a fixed cap
 > stamped at creation. Setting both very high effectively creates long-lived sessions.
 
-## User providers
+## User provider
 
-The user provider is the bridge between the auth system and your database. It implements
-`IAuthenticationAdapter` — a set of methods for creating users, managing sessions, and
-handling verification / reset / magic-link tokens.
+`UserProvider` is the bridge between the auth system and your database: creating users,
+managing sessions, and handling verification / reset / magic-link tokens. It runs on the
+[gemi ORM](./orm.md) and there is one of it — `AuthManager` constructs it, and
+`app/config/auth.ts` says nothing about it.
 
-### PrismaAuthenticationAdapter
-
-`PrismaAuthenticationAdapter` (from `gemi/kernel`) is a ready-made implementation backed by a
-Prisma client. Construct it with your client:
+It resolves models from the ORM registry **by name, at call time**, so the framework never
+imports your generated classes. Anything that registers them before the first request is
+enough; the starter template does it from `app/preload.ts`:
 
 ```typescript
-import { defineAuthConfig } from "gemi/services";
-import { PrismaAuthenticationAdapter } from "gemi/kernel";
-import { prisma } from "@/app/database/prisma";
-
-export default defineAuthConfig({
-  userProvider: new PrismaAuthenticationAdapter(prisma),
-});
+// app/preload.ts — pulls in generated/index.ts (registering every model) and
+// then re-registers "User" against your subclass.
+import "@/app/models/User";
 ```
 
-It expects the following Prisma models (field names matter, they are queried directly):
+Without that, the first sign-in raises `ModelNotRegisteredError`, which names the missing
+model and lists what is registered.
+
+> **Note:** every query runs inside `Model.asSystem`, so [policies](./orm.md) are suspended.
+> Authentication happens before there is an authenticated user, so a policy scoping by
+> `ctx.user` cannot be satisfied — under deny-by-default it would turn "wrong password" into
+> a 500. `password` is also stripped from returned users, because `POST /sign-up` returns
+> that object as its response body.
+
+### Required models
+
+It expects the following models (field names matter, they are queried directly):
 
 - **`User`** — `id`, `publicId`, `email` (unique), `name`, `password`, `emailVerifiedAt`,
   `verificationToken`, `globalRole`, `locale`, `organizationId`, and an `accounts` relation.
@@ -127,9 +135,9 @@ It expects the following Prisma models (field names matter, they are queried dir
 - **`OrganizationInvitation`** — `publicId`, `email`, `organizationId`, `role` (used by the
   optional invitation sign-up flow).
 
-### Provider interface
+### Methods
 
-A custom user provider must implement `IAuthenticationAdapter`. The methods:
+The twenty-two methods, all overridable:
 
 | Method | Purpose |
 | --- | --- |
@@ -147,39 +155,74 @@ A custom user provider must implement `IAuthenticationAdapter`. The methods:
 | `createSocialAccount(args)` | Persist an OAuth-linked social account. |
 | `findInvitation(id, email)` / `deleteInvitationById(id)` / `createAccount(args)` | Invitation-based sign-up. |
 
-### Writing a custom provider
+### Changing a query
 
-The easiest path is to extend `PrismaAuthenticationAdapter` and override just the method(s)
-you need — for example to make sign-up atomic by provisioning an organization in the same
-transaction that creates the user:
+Subclass `UserProvider` and override the method(s) you need — for example to make sign-up
+atomic by provisioning an organization in the same transaction that creates the user:
 
 ```typescript
-import { PrismaAuthenticationAdapter } from "gemi/kernel";
-import type { Prisma, PrismaClient } from "@folio/db";
+import { UserProvider } from "gemi/kernel";
+import type { CreateUserArgs, User } from "gemi/kernel";
 
-type CreateUserArgs = Parameters<PrismaAuthenticationAdapter["createUser"]>[0];
-type AdapterUser = Awaited<ReturnType<PrismaAuthenticationAdapter["createUser"]>>;
+import { Organization } from "@/app/models/Organization";
+import { User as UserModel } from "@/app/models/User";
 
-export class OrgProvisioningAuthAdapter extends PrismaAuthenticationAdapter {
-  async createUser(args: CreateUserArgs): Promise<AdapterUser> {
-    return (this.prisma as PrismaClient).$transaction(async (tx) => {
-      const user = await tx.user.create({
-        data: args as Prisma.UserCreateInput,
-        omit: { password: true },
-      });
-      await provisionOrganization(tx, user, user.publicId, 10);
-      return user as unknown as AdapterUser;
+export class OrgProvisioningUserProvider extends UserProvider {
+  async createUser(args: CreateUserArgs): Promise<User> {
+    return UserModel.transaction(async () => {
+      const user = await super.createUser(args);
+      await Organization.create({ data: { name: `${user.name}'s org`, ownerId: user.id } });
+      return user;
     });
   }
 }
 ```
 
-Then point the config at it: `userProvider: new OrgProvisioningAuthAdapter(prisma)`.
+`this.models` holds the resolved model classes if an override needs one the base does not
+reach for. `protected run(fn)` is the `asSystem` wrapper every built-in method goes through —
+call it in an override that queries directly, or it will run under policies.
+
+Because there is no config field, bind the subclass by rebinding `AuthManager` in the
+container from a service provider — it takes the provider as its second constructor
+argument:
+
+```typescript
+// app/providers/AppServiceProvider.ts
+import { AuthManager } from "gemi/services";
+import { ServiceProvider } from "gemi/services";
+
+export class AppServiceProvider extends ServiceProvider {
+  register() {
+    this.app.singleton(
+      AuthManager,
+      () =>
+        new AuthManager(
+          this.app.config.get("auth", {}),
+          new OrgProvisioningUserProvider(),
+        ),
+    );
+  }
+}
+```
 
 > **Note:** gemi runs `createUser` and then fires `onSignUp` *separately*. Provisioning
 > inside the `onSignUp` callback is therefore **not** atomic with user creation — a failure
 > there leaves an orphaned user. Do transactional provisioning inside a `createUser`
-> override, as above. The base class stores the client as `protected prisma`.
+> override, as above.
+
+### Upgrading from the adapter config
+
+`IAuthenticationAdapter`, `PrismaAuthenticationAdapter`, `OrmAuthenticationAdapter`,
+`ormAuthenticationAdapter` and the `userProvider` config field are gone.
+
+- **On `PrismaAuthenticationAdapter`** (the old template default): delete the `userProvider`
+  line and its imports, and make sure your models are registered at boot (see above). The
+  models and column names are unchanged, so no migration is needed. Prisma itself stays if
+  you use it elsewhere — it is still the schema and migration tool.
+- **On `OrmAuthenticationAdapter`**: delete the `userProvider` line and its import. Same
+  queries; the class is now `UserProvider` and is constructed for you.
+- **On a custom adapter**: subclass `UserProvider` as above rather than implementing an
+  interface, and bind it in the container.
 
 ## Lifecycle hooks
 

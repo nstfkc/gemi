@@ -1,40 +1,22 @@
-export interface IAuthenticationAdapter {
-  createUser: (args: CreateUserArgs) => Promise<User>;
-  updateUserPassword: (args: UpdateUserPasswordArgs) => Promise<User>;
-  createSession: (args: CreateSessionArgs) => Promise<SessionWithUser>;
-  createSessionV2: (args: CreateSessionArgs) => Promise<SessionWithUser>;
-  updateSession: (args: UpdateSessionArgs) => Promise<SessionWithUser | null>;
-  findSession: (args: FindSessionArgs) => Promise<SessionWithUser | null>;
-  deleteSession: (args: DeleteSessionArgs) => Promise<void>;
-  findUserByEmailAddress: (
-    email: string,
-    verifyEmail: boolean,
-  ) => Promise<User>;
-  createPasswordResetToken: (
-    args: CreatePasswordResetTokenArgs,
-  ) => Promise<string>;
-  deletePasswordResetToken: (
-    args: DeletePasswordResetTokenArgs,
-  ) => Promise<string>;
-  findPasswordResetToken: (
-    args: FindPasswordResetTokenArgs,
-  ) => Promise<PasswordResetToken | null>;
-  deleteAllUserSessions: (userId: number) => Promise<void>;
-  findUserByVerificationToken: (token: string) => Promise<User | null>;
-  verifyUser: (email: string) => Promise<User>;
-  findInvitation: (invitationId: string, email: string) => Promise<Invitation>;
-  deleteInvitationById: (invitationId: string) => Promise<void>;
-  createAccount: (args: CreateAccountArgs) => Promise<Account | null>;
-  createMagicLinkToken: (
-    args: CreateMagicLinkTokenArgs,
-  ) => Promise<{ token: string; pin: string }>;
-  findUserMagicLinkToken: (args: {
-    token?: string;
-    pin?: string;
-    email: string;
-  }) => Promise<User | null>;
-  deleteMagicLinkToken: (email: string) => Promise<void>;
-  createSocialAccount: (args: CreateSocialAccountArgs) => Promise<any>;
+/**
+ * The data `auth/` reads and writes. Types only — the queries live in
+ * `UserProvider`.
+ *
+ * These sit here rather than beside it because `User` in particular travels well
+ * past authentication: `facades/Auth.ts` returns it and
+ * `client/ServerDataProvider.tsx` puts it on the page. A module that owns both
+ * the shape and the SQL would make those importers depend on the ORM.
+ */
+
+/** The generated model classes `UserProvider` needs, by their Prisma names. */
+export interface AuthModels {
+  User: any;
+  Session: any;
+  Account: any;
+  PasswordResetToken: any;
+  MagicLinkToken: any;
+  OrganizationInvitation: any;
+  SocialAccount: any;
 }
 
 export type CreateSocialAccountArgs = {

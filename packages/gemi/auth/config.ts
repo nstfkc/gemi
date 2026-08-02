@@ -1,6 +1,5 @@
 import type { HttpRequest } from "../http/HttpRequest";
-import type { IAuthenticationAdapter, User } from "./adapters/types";
-import { BlankAdapter } from "./adapters/blank";
+import type { User } from "./types";
 import type { OAuthProvider } from "./oauth/OAuthProvider";
 import { SignUpRequest } from "./requests";
 
@@ -14,9 +13,6 @@ export interface AuthConfig {
   sessionAbsoluteExpiresInHours?: number;
 
   signUpRequest?: new () => HttpRequest<any, any>;
-  // The user provider: everything that reads and writes users, sessions and
-  // tokens. Named after `Illuminate\Contracts\Auth\UserProvider`.
-  userProvider?: IAuthenticationAdapter;
   oauthProviders?: Record<string, OAuthProvider>;
 
   verifyPassword?: (password: string, hash: string) => Promise<boolean>;
@@ -69,8 +65,6 @@ export function authConfigDefaults(
     sessionAbsoluteExpiresInHours: 24 * 7 * 4,
 
     signUpRequest: SignUpRequest as any,
-    // @ts-ignore
-    userProvider: new BlankAdapter(),
     oauthProviders: {},
 
     verifyPassword: async (password, hash) =>

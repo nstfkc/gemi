@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { OrmAuthenticationAdapter } from "gemi/kernel";
+import { UserProvider } from "gemi/kernel";
 import { DatabaseManager } from "gemi/database";
 import { Application } from "gemi/foundation";
 import { clearPlanCache } from "gemi/orm";
@@ -22,12 +22,20 @@ import {
 } from "./generated";
 
 /**
- * The ORM-backed authentication adapter, all twenty-two methods.
+ * `UserProvider` — the framework's authentication persistence, all twenty-two
+ * methods.
  *
  * `plans/orm/README.md` schedules this for "once iteration 4 lands writes", and
- * it is the thing that lets `auth/adapters/prisma.ts` be deprecated — PR #33's
- * stated goal, and the reason its proposed hand-written `SqlUserProvider` was
- * dropped in favour of building the ORM first.
+ * it is what let the Prisma adapter be retired — PR #33's stated goal, and the
+ * reason its proposed hand-written `SqlUserProvider` was dropped in favour of
+ * building the ORM first. It is now the only implementation: the
+ * `IAuthenticationAdapter` seam is gone and `AuthManager` constructs this
+ * directly, so these twenty-two methods are the auth path rather than one
+ * selectable option for it.
+ *
+ * Models are injected here rather than left to default to the registry, which is
+ * the constructor's other purpose: the suite points them at a scratch database
+ * per dialect.
  *
  * It is also the ORM's most demanding end-to-end exercise so far, and that is
  * half the point of the test: twenty-two methods written against a real
@@ -44,7 +52,7 @@ function suite(label: string, url?: string) {
     let database: DatabaseManager;
     let raw: SQL;
     let previous: Application | undefined;
-    let auth: OrmAuthenticationAdapter;
+    let auth: UserProvider;
 
     const TABLES = [
       "SocialAccount",
@@ -74,7 +82,7 @@ function suite(label: string, url?: string) {
       application.instance(DatabaseManager, database as never);
       Application.setInstance(application);
 
-      auth = new OrmAuthenticationAdapter({
+      auth = new UserProvider({
         User: UserModel,
         Session: SessionModel,
         Account: AccountModel,

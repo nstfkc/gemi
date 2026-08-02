@@ -1,14 +1,10 @@
 import { defineAuthConfig, GoogleOAuthProvider } from "gemi/services";
-import { PrismaAuthenticationAdapter } from "gemi/kernel";
 import { Auth } from "gemi/facades";
 
-import { prisma } from "@/app/database/prisma";
 import { WelcomeEmail } from "@/app/email/WelcomeEmail";
 import { SignUpRequest } from "@/app/http/requests/SignUpRequest";
 
 export default defineAuthConfig({
-  userProvider: new PrismaAuthenticationAdapter(prisma),
-
   oauthProviders: {
     google: new GoogleOAuthProvider(),
   },
