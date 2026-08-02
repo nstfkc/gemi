@@ -10,6 +10,61 @@ import { QueryResource } from "./QueryResource";
 /** One streamed query payload: `[path, variantKey, data]`. */
 type StreamedQueryPayload = [string, string, any];
 
+/**
+ * App-wide `useQuery` defaults, threaded from `createRoot(RootLayout, {
+ * queryConfig })` (and `init` on the client). Resolution order is per-call
+ * config → these defaults → framework defaults, so a call site always wins.
+ * Only keys with app-wide meaning are accepted — `lazy`, `fallbackData` and
+ * `refetchUntil` stay call-site-only. Framework-internal hooks (`useUser`,
+ * `useSignIn`) never see these.
+ */
+export interface QueryConfig {
+  /**
+   * App-wide suspense switch. `suspense: false` makes every unconfigured
+   * `useQuery` behave like pre-0.49: `loading` flags instead of suspension,
+   * errors returned instead of thrown. Pair it with the `GemiQueryDefaults`
+   * module augmentation so `data`'s nullability matches.
+   */
+  suspense?: boolean;
+  /** How long cached data stays fresh before a read revalidates it, in ms. */
+  staleTime?: number;
+  keepPreviousData?: boolean;
+  retryIntervalOnError?: number;
+  refreshInterval?: number;
+}
+
+export const QueryConfigContext = createContext<QueryConfig | null>(null);
+
+/**
+ * The runtime mirror of the `QueryConfig` type: TS excess-property checking
+ * only fires on fresh object literals, so a dynamically built (or plain-JS)
+ * config could smuggle call-site-only keys (`lazy`, `fallbackData`,
+ * `refetchUntil`) into every query. The provider picks these keys — and only
+ * these — before the value enters the context. Keys whose value is
+ * `undefined` are dropped too, so an absent value (e.g. an unset env-derived
+ * `staleTime`) falls through to the framework default instead of shadowing it.
+ */
+const APP_WIDE_QUERY_CONFIG_KEYS = [
+  "suspense",
+  "staleTime",
+  "keepPreviousData",
+  "retryIntervalOnError",
+  "refreshInterval",
+] as const satisfies ReadonlyArray<keyof QueryConfig>;
+
+export function pickAppWideQueryConfig(
+  queryConfig: QueryConfig | null | undefined,
+): QueryConfig | null {
+  if (!queryConfig) return null;
+  const picked: QueryConfig = {};
+  for (const key of APP_WIDE_QUERY_CONFIG_KEYS) {
+    if (queryConfig[key] !== undefined) {
+      (picked as Record<string, unknown>)[key] = queryConfig[key];
+    }
+  }
+  return picked;
+}
+
 export type PrefetchedData = Record<string, Record<string, any>>;
 
 export interface QueryManagerContextValue {
@@ -29,8 +84,18 @@ export const QueryManagerContext = createContext<QueryManagerContextValue>({
   clearErrors: () => {},
 });
 
-export const QueryManagerProvider = ({ children }: PropsWithChildren<{}>) => {
+export const QueryManagerProvider = ({
+  children,
+  queryConfig = null,
+}: PropsWithChildren<{ queryConfig?: QueryConfig | null }>) => {
   const resourcesRef = useRef<Map<string, QueryResource>>(new Map());
+
+  // Sanitized once at the choke point every query reads through, so the
+  // "only app-wide keys" contract holds at runtime, not just in the types.
+  const appQueryConfig = useMemo(
+    () => pickAppWideQueryConfig(queryConfig),
+    [queryConfig],
+  );
 
   const getResource = useCallback(
     (key: string, initialState?: Record<string, any>) => {
@@ -107,7 +172,9 @@ export const QueryManagerProvider = ({ children }: PropsWithChildren<{}>) => {
 
   return (
     <QueryManagerContext.Provider value={value}>
-      {children}
+      <QueryConfigContext.Provider value={appQueryConfig}>
+        {children}
+      </QueryConfigContext.Provider>
     </QueryManagerContext.Provider>
   );
 };

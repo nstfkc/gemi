@@ -1,5 +1,5 @@
 import { usePost } from "../useMutation";
-import { useQuery } from "../useQuery";
+import { useFrameworkQuery } from "../useQuery";
 
 interface UseSignInArgs {
   onSuccess?: (data: any) => void;
@@ -11,8 +11,9 @@ const defaultArgs: UseSignInArgs = {
 
 export function useSignIn(args: UseSignInArgs = defaultArgs) {
   // Only here for `mutate` — `lazy` so the sign-in form neither fetches nor
-  // suspends on a user it does not have yet.
-  const { mutate } = useQuery("/auth/me", {}, { lazy: true });
+  // suspends on a user it does not have yet. `useFrameworkQuery` keeps that
+  // pinned regardless of the app's `queryConfig`.
+  const { mutate } = useFrameworkQuery("/auth/me", {}, { lazy: true });
   return usePost(
     "/auth/sign-in",
     {},

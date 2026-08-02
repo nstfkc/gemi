@@ -1,5 +1,5 @@
 export { useQuery } from "./useQuery";
-export type { QueryResult } from "./useQuery";
+export type { QueryResult, GemiQueryDefaults } from "./useQuery";
 export { QueryError } from "./QueryError";
 export {
   useMutation,
@@ -20,6 +20,7 @@ export {
   ValidationErrors,
 } from "./Mutation";
 export { QueryManagerProvider } from "./QueryManagerContext";
+export type { QueryConfig } from "./QueryManagerContext";
 export { useParams } from "./useParams";
 export { useLocation } from "./useLocation";
 export { useSearchParams } from "./useSearchParams";
