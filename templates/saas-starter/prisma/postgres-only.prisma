@@ -19,7 +19,10 @@
 //
 // The cost is honest and contained: this schema is never generated during a
 // SQLite run, so `app/models/generated-lists/` is gitignored and the suite that
-// reads it is gated on `TEST_POSTGRES_URL`. `app/models/postgres.sh` pushes and
+// reads it is gated on `TEST_POSTGRES_LISTS_URL` — a *second* variable, not the
+// main suite's, so the suite skips when only the main schema was pushed rather
+// than connecting to a database with no tables in it.
+// `app/models/postgres.sh` pushes and
 // generates it alongside the main one.
 //
 // It lives in its own database — `LISTS_DATABASE_URL`, `gemi_lists` — rather
@@ -89,10 +92,18 @@ model Tagged {
   documents Json[]
   labels    Label[]
 
-  /// A list with a database-side default, which is the ordinary way one is
-  /// declared and the case where the insert must *omit* the column rather than
-  /// bind an empty array.
-  defaulted String[] @default([])
+  /// A list with a default, and a **non-empty** one on purpose.
+  ///
+  /// `@default([])` is what this was, and it could not fail: the correct value
+  /// and the wrong one are both the empty array, so a write that ignored the
+  /// default and wrote `{}` compared equal to one that honoured it. A seeded
+  /// default is what makes the two distinguishable — and it caught `createMany`
+  /// overwriting the declared default where `create` honoured it.
+  ///
+  /// Note `@default([...])` is a *client-side* default, like `@default(cuid())`:
+  /// the value is in the DMMF, so gemi binds it rather than leaving the column
+  /// out for the database to fill.
+  defaulted String[] @default(["seed"])
 
   /// `@map`, so the compiler is exercised on a list whose column name is not
   /// its field name — the one thing a hand-written `has` filter would get right

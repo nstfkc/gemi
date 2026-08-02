@@ -219,12 +219,27 @@ export async function createDifferential(options: {
   const sqlitePath = join(workspace, "diff.db");
   const url = options.url ?? `file:${sqlitePath}`;
 
-  if (options.client && !options.url) {
-    throw new Error(
-      "createDifferential({ client }) is for a second Postgres schema, so it " +
-        "needs the `url` of the database that schema was pushed to. There is " +
-        "no SQLite path for it.",
-    );
+  // Both, not just `url`. Omitting `tables` was the worse of the two and the
+  // one that failed *quietly*: the default list below names the main schema's
+  // tables, so a second-schema harness without its own would issue a `TRUNCATE`
+  // for tables that do not exist in the database it is pointed at — clearing
+  // nothing it meant to clear, and reporting it as a truncation error rather
+  // than as the missing argument it is.
+  if (options.client) {
+    const missing = [
+      !options.url && "url",
+      !options.tables && "tables",
+    ].filter(Boolean);
+
+    if (missing.length > 0) {
+      throw new Error(
+        `createDifferential({ client }) is for a second Postgres schema, so it ` +
+          `needs ${missing.join(" and ")}: the \`url\` of the database that ` +
+          `schema was pushed to, and the \`tables\` to clear between cases — ` +
+          `the defaults name the main schema's, which are not in that ` +
+          `database. There is no SQLite path for it.`,
+      );
+    }
   }
 
   // SQLite gets a brand-new file with the committed migrations replayed into

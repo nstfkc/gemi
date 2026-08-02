@@ -5,6 +5,7 @@ import { compileWrite } from "./compile/write";
 import { PostgresDialect } from "./dialect/postgres";
 import { SqliteDialect } from "./dialect/sqlite";
 import { DecodeError, UnsupportedQueryError } from "./errors";
+import { canonicalShape } from "./plan";
 import type { FieldSchema, ModelSchema } from "./schema";
 
 const postgres = new PostgresDialect();
@@ -63,6 +64,14 @@ const TAGGED: ModelSchema = {
     counts: field({ name: "counts", column: "counts", type: "Int" }),
     docs: field({ name: "docs", column: "docs", type: "Json" }),
     renamed: field({ name: "renamed", column: "renamed_column" }),
+    // A **non-empty** default on purpose: with `@default([])` a write that
+    // ignored the default and a write that honoured it produce the same array,
+    // so the bug below could not be seen.
+    defaulted: field({
+      name: "defaulted",
+      column: "defaulted",
+      default: { kind: "value", value: ["seed"] },
+    }),
   },
   primaryKey: ["id"],
   uniques: [["id"]],
@@ -327,6 +336,167 @@ describe("the SQL a list write compiles to", () => {
 });
 
 /**
+ * The plan key, which has to follow the SQL text rather than the argument.
+ *
+ * The suite above asserts a list operand's *length* does not reach the
+ * statement. That is only half the property: if the key still varies with it,
+ * every distinct length mints an LRU entry holding SQL identical to its
+ * neighbours' — which is the churn `collapsedList` was written for.
+ */
+describe("the plan key for a list operand", () => {
+  const key = (where: unknown) =>
+    canonicalShape({ where }, false, true);
+
+  test.each(["hasEvery", "hasSome"])(
+    "%s does not vary with the operand's length",
+    (operator) => {
+      expect(key({ tags: { [operator]: ["a"] } })).toBe(
+        key({ tags: { [operator]: ["a", "b", "c"] } }),
+      );
+    },
+  );
+
+  test("push does not vary with the operand's length", () => {
+    expect(canonicalShape({ data: { tags: { push: ["a"] } } }, false, true)).toBe(
+      canonicalShape({ data: { tags: { push: ["a", "b"] } } }, false, true),
+    );
+  });
+
+  /**
+   * An empty operand keeps its own key, as `in: []` does: it is a different
+   * predicate often enough that sharing would be the riskier default.
+   */
+  test("an empty operand keeps its own key", () => {
+    expect(key({ tags: { hasEvery: [] } })).not.toBe(
+      key({ tags: { hasEvery: ["a"] } }),
+    );
+  });
+
+  /** Different operators must not share an entry — their SQL differs. */
+  test("hasEvery and hasSome are different keys", () => {
+    expect(key({ tags: { hasEvery: ["a"] } })).not.toBe(
+      key({ tags: { hasSome: ["a"] } }),
+    );
+  });
+
+  /**
+   * **`set` is deliberately not collapsed**, and this is the test that says so
+   * rather than leaving the omission to look like an oversight.
+   *
+   * It is also a *relation* operator — `{ tags: { set: [{ id: 1 }] } }` rewrites
+   * a join table — and that statement's text grows with the list. Collapsing by
+   * the name alone would hand such a plan the wrong number of placeholders.
+   */
+  test("set keeps its length, because it is also a relation operator", () => {
+    expect(
+      canonicalShape({ data: { tags: { set: [{ id: 1 }] } } }, false, true),
+    ).not.toBe(
+      canonicalShape(
+        { data: { tags: { set: [{ id: 1 }, { id: 2 }] } } },
+        false,
+        true,
+      ),
+    );
+  });
+
+  /**
+   * SQLite refuses scalar lists outright, so the collapse must not fire there —
+   * the flag is what carries "this dialect binds a list as one parameter", and
+   * borrowing it for a dialect that cannot bind one at all would be a claim
+   * about the wrong thing.
+   */
+  test("nothing collapses when the dialect does not bind a list as one parameter", () => {
+    expect(canonicalShape({ where: { tags: { hasEvery: ["a"] } } }, false, false)).not.toBe(
+      canonicalShape({ where: { tags: { hasEvery: ["a", "b"] } } }, false, false),
+    );
+  });
+});
+
+/**
+ * What an insert *invents* for a list nobody supplied — the seam between
+ * `create` and `createMany`, and where all three write-path defects lived.
+ */
+describe("an absent list on an insert", () => {
+  const binds = (op: "create" | "createMany", args: unknown) => {
+    const compiled = compileWrite(TAGGED, op as never, args as never, postgres);
+    return compiled.bind(args as never, { now: new Date(0) } as never);
+  };
+
+  /**
+   * Prisma writes `[]` for a list with no default rather than refusing the
+   * call — measured against a generated client, since the input type says only
+   * that the field is optional.
+   */
+  test("create writes [] for a list with no default", () => {
+    expect(binds("create", { data: { id: 1 } })).toContain("{}");
+  });
+
+  /**
+   * The defect the review caught. `@default(["seed"])` is a *client-side*
+   * default, so `create` binds the declared value — and `createMany` bound `{}`
+   * over it, because it asked `isList` where it had to ask "does this list have
+   * anything else to fall back on".
+   */
+  test("create binds a list's declared default, not []", () => {
+    expect(binds("create", { data: { id: 1 } })).toContain('{"seed"}');
+  });
+
+  test("createMany binds the same default on a row that omits it", () => {
+    const values = binds("createMany", {
+      data: [{ id: 1 }, { id: 2, defaulted: ["explicit"] }],
+    });
+    expect(values).toContain('{"seed"}');
+    expect(values).toContain('{"explicit"}');
+  });
+
+  /** The two operations must not disagree about one schema. */
+  test("create and createMany agree on what an omitted list is worth", () => {
+    const one = binds("create", { data: { id: 1 } });
+    const many = binds("createMany", { data: [{ id: 1 }] });
+    expect(many.filter((value) => typeof value === "string")).toEqual(
+      one.filter((value) => typeof value === "string"),
+    );
+  });
+
+  /**
+   * A list with a *database-side* default still cannot be expressed per row, so
+   * it keeps the existing refusal rather than quietly acquiring `{}`.
+   */
+  test("a database-side default that only some rows set is still refused", () => {
+    const schema: ModelSchema = {
+      ...TAGGED,
+      fields: {
+        ...TAGGED.fields,
+        generated: field({
+          name: "generated",
+          column: "generated",
+          default: { kind: "dbgenerated" },
+        }),
+      },
+    };
+    expect(() =>
+      compileWrite(
+        schema,
+        "createMany" as never,
+        { data: [{ id: 1 }, { id: 2, generated: ["x"] }] } as never,
+        postgres,
+      ),
+    ).toThrow(/leave it to the database default/);
+  });
+
+  /**
+   * The dialect owes an answer for a column it cannot hold whether or not the
+   * caller mentioned it. Without the check on this branch, SQLite compiled a
+   * statement and left the driver to reject raw JS arrays with a type error.
+   */
+  test("SQLite refuses a list the caller never mentioned", () => {
+    expect(() =>
+      compileWrite(TAGGED, "create" as never, { data: { id: 1 } } as never, sqlite),
+    ).toThrow(/sqlite has no array type/);
+  });
+});
+
+/**
  * Refusals. Each one names the field's *kind*, because "unsupported" sends a
  * reader looking for a release note when the fix is in their own call.
  */
@@ -438,5 +608,34 @@ describe("refusals", () => {
       );
     expect(bad).toThrow(/scalar list, so it takes set —/);
     expect(bad).toThrow(/Received \{ push \}/);
+  });
+
+  /**
+   * `createMany` was the one write path with no compile-time operand check, so
+   * a bad operand reached the *binder* — and the binder's message offers
+   * `{ push: … }` as the remedy, on the one operation where `push` is never
+   * legal. A late refusal that also points the wrong way.
+   */
+  test("createMany refuses a bad operand at compile time, like create", () => {
+    const bad = () =>
+      compileWrite(
+        TAGGED,
+        "createMany" as never,
+        { data: [{ id: 1, tags: { push: ["a"] } }] } as never,
+        postgres,
+      );
+    expect(bad).toThrow(/scalar list, so it takes set —/);
+    expect(bad).not.toThrow(/\{ push: … \}/);
+  });
+
+  test("createMany refuses an arithmetic operator on a list too", () => {
+    expect(() =>
+      compileWrite(
+        TAGGED,
+        "createMany" as never,
+        { data: [{ id: 1, counts: { increment: 1 } }] } as never,
+        postgres,
+      ),
+    ).toThrow(/scalar list, so it takes set —/);
   });
 });

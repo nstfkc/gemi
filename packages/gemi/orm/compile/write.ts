@@ -377,7 +377,14 @@ function createManyColumns(
     // exists because a single `VALUES` list cannot ask for a database default
     // per row. A list needs no default asked for: `{}` is a value, so the rows
     // that omitted it get one written rather than needing the statement split.
-    if (field.isList) continue;
+    //
+    // `suppliesEmptyList` rather than `field.isList`, which is the whole of the
+    // distinction: this stands in for a list that has **nothing else** to fall
+    // back on. A list with a *database-side* default still cannot be expressed
+    // per row, so it falls through to the refusal below rather than silently
+    // acquiring `{}` — and one with a client-side default never reaches here,
+    // because `hasClientSideValue` answered above.
+    if (suppliesEmptyList(field)) continue;
 
     // A database-side default that only some rows override. `NULL` would
     // *overwrite* the default rather than request it, and SQLite has no
@@ -410,12 +417,35 @@ function createManyColumns(
   return rows.map((row, index) =>
     union.map((field) => {
       if (!supplied[index].has(field.name)) {
+        // **`suppliesEmptyList`, not `field.isList`**, and the difference is a
+        // row that comes out wrong rather than a statement that fails.
+        //
+        // `@default([])` and `@default(["seed"])` are *client-side* defaults —
+        // `kind: "value"`, which `isClientSideDefault` admits — so `create`
+        // binds the declared value through `defaultBinder`. Asking `isList`
+        // here put `{}` ahead of that, so one `createMany` row omitting a
+        // defaulted list wrote the empty array where `create` wrote the
+        // default, and where Prisma writes the default — so `create` and
+        // `createMany` disagreed about one schema, silently, in the row.
+        //
+        // Invisible to the differential until the fixture changed: the template
+        // declared `@default([])`, where the correct value and the wrong one are
+        // the same array. It now declares a non-empty default, and the
+        // `createMany` case supplies it on one row and omits it on the other.
         return {
           field,
-          value: field.isList
+          value: suppliesEmptyList(field)
             ? emptyList(field, dialect)
             : defaultBinder(field, dialect),
         };
+      }
+
+      if (field.isList) {
+        // Compile-time, like `insertColumns` and `assignment` — this was the
+        // one write path that let a bad operand reach the binder. `["set"]`
+        // because an insert takes no `push`, and a refusal naming `push` on the
+        // operation where it is never legal is a puzzle rather than a next step.
+        assertListOperand(schema, field, (row as any)?.[field.name], op, ["set"]);
       }
 
       // Per row, because two rows of one `createMany` may legitimately spell
@@ -1065,6 +1095,14 @@ function insertColumns(
     // describe the *input type* — where the field is optional — and say nothing
     // about what is written when it is absent.
     if (field.isList) {
+      // Asked *here* as well as on the supplied path above, because this branch
+      // invents a value the caller never wrote — and an unasked dialect is how
+      // `create({ data: { id: 1 } })` on SQLite compiled a statement binding
+      // raw JS arrays for the driver to reject with a type error, where naming
+      // the column would have said "sqlite has no array type … It works on
+      // postgres". The check belongs to the *column*, not to the caller
+      // mentioning it.
+      assertListDialect(schema, field, `data.${field.name}`, op, dialect);
       columns.push({ field, value: emptyList(field, dialect) });
       continue;
     }

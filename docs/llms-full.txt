@@ -3113,6 +3113,7 @@ merely unsupported:
 
 An empty path — `[]` or `""` — is refused on both dialects. On Postgres it would extract the whole
 document, which is a filter on the column rather than on a path.
+
 ### Scalar lists (Postgres only)
 
 ```ts

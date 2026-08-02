@@ -262,10 +262,14 @@ jobs:
       # on `TEST_POSTGRES_LISTS_URL` — so it would read as a pass. That is
       # exactly the silence `postgres-suite-selection.test.ts` exists to catch,
       # and the suite prints a loud warning when it does not run.
+      # `|| true` for the same reason `app/models/postgres.sh` has one: a
+      # re-created database is an error rather than a no-op, so a rerun against
+      # a persisted service container would fail a step that is not the point of
+      # the job. A fresh container makes it succeed the first time either way.
       - name: Create the scalar-list database
         run: >-
           PGPASSWORD=postgres psql -h localhost -U postgres -d gemi_test
-          -c 'CREATE DATABASE gemi_lists'
+          -c 'CREATE DATABASE gemi_lists' || true
 
       - name: Generate and push the scalar-list schema
         run: |

@@ -311,8 +311,39 @@ export function canonicalShape(
   return `{${entries.join(",")}}`;
 }
 
-/** The operators whose operand is a list of values rather than a structure. */
-const LIST_KEYS = new Set(["in", "notIn"]);
+/**
+ * The operators whose operand is a list of values rather than a structure.
+ *
+ * `in` / `notIn` bind as one `= any($1)` on Postgres. So do a scalar list's
+ * `hasEvery`, `hasSome` and `push` (#300) — `col @> $1`, `col && $1` and
+ * `array_cat(col, $1)` are each one parameter however long the operand is, so
+ * recording it element-wise mints one entry per distinct length, every one of
+ * them holding SQL identical to its neighbours'. A `hasEvery` built from user
+ * input is exactly the churn `collapsedList` exists to prevent.
+ *
+ * **Three names, and the two obvious omissions are deliberate.**
+ *
+ * `equals` and `set` are *overloaded*, and `set` is the one that would have
+ * been a real bug rather than a missed optimisation: it is also a **relation**
+ * operator — `data: { tags: { set: [{ id: 1 }, { id: 2 }] } }` rewrites a join
+ * table, and that statement's text grows with the list. Collapsing it would
+ * hand a plan the wrong number of placeholders, which is precisely the failure
+ * the note above warns about for `OR`. Checked in `compile/nested-writes.ts`
+ * rather than assumed from the name.
+ *
+ * The three below carry no such second meaning: `grep` finds them only in the
+ * scalar-list filter set and the list write operators.
+ *
+ * **One case is still uncollapsed and needs a schema to fix.** A bare array as
+ * a *write* value — `data: { tags: ["a", "b"] }` — is keyed by the **field
+ * name**, so no fixed set can recognise it; telling it from `data: { AND: … }`
+ * needs to know that `tags` is a list on this model, and `canonicalShape` is
+ * deliberately schema-free. Left as churn rather than guessed at: the cost is
+ * bounded by the LRU and the SQL is identical either way, where a wrong
+ * collapse is a wrong statement. The filter side — which is where a
+ * user-sized list actually arrives — is covered.
+ */
+const LIST_KEYS = new Set(["in", "notIn", "hasEvery", "hasSome", "push"]);
 
 /**
  * The internal composite-`in` key — see `compile/where.ts`, which owns it.

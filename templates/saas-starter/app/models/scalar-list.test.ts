@@ -306,7 +306,15 @@ RUN("scalar lists vs prisma — postgres", () => {
     );
   });
 
-  test("a list with @default([]) is left to the database", async () => {
+  /**
+   * A defaulted list is written with its **declared** value, not with `[]`.
+   *
+   * `@default([...])` is a client-side default — the value is in the DMMF — so
+   * gemi binds it rather than leaving the column out. The distinction only
+   * became testable when the fixture's default stopped being `[]`, where the
+   * right answer and the wrong one are the same array.
+   */
+  test("an omitted list with a default is written with that default", async () => {
     await differential.expectSameWrite(
       "Tagged",
       "create",
@@ -347,6 +355,43 @@ RUN("scalar lists vs prisma — postgres", () => {
           { id: 15, strings: { set: ["q", "r"] } },
         ],
       },
+      { tables: ["Tagged"] },
+    );
+  });
+
+  /**
+   * **The case that catches `createMany` disagreeing with `create`.**
+   *
+   * One row supplies `defaulted` and the other omits it, so the column enters
+   * the union with a row that has no value of its own — the exact seam where
+   * `createMany` picked the empty-list binder ahead of the default binder and
+   * wrote `{}` over `["seed"]`. `create` honoured the default the whole time,
+   * so the two operations disagreed about one schema, in the row rather than in
+   * an error.
+   *
+   * Two properties are needed for it to be visible at all, and the suite had
+   * neither: a **non-empty** default, and a `createMany` where one row supplies
+   * the defaulted column and another does not.
+   */
+  test("createMany honours a list default on the rows that omit it", async () => {
+    await differential.expectSameWrite(
+      "Tagged",
+      "createMany",
+      {
+        data: [
+          { id: 17, strings: ["p"] },
+          { id: 18, strings: ["q"], defaulted: ["explicit"] },
+        ],
+      },
+      { tables: ["Tagged"] },
+    );
+  });
+
+  test("createMany with every list omitted on every row", async () => {
+    await differential.expectSameWrite(
+      "Tagged",
+      "createMany",
+      { data: [{ id: 19 }, { id: 21 }] },
       { tables: ["Tagged"] },
     );
   });

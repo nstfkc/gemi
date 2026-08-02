@@ -116,12 +116,21 @@ generatorHandler({
     // A module specifier, not a path: it is written into an `import` in the
     // generated file, so it is resolved relative to `output` by whatever
     // resolves that file — the same rule as any other import.
+    // Checked for emptiness as well as for type. A Prisma generator block
+    // cannot express `undefined`, so `client = ""` is how the option gets
+    // written by someone clearing it — and it would emit
+    // `import type { Prisma } from ""`, which fails at the *importing* file
+    // rather than here, naming a generated artifact nobody edited.
     const client = options.generator.config?.client;
-    if (client !== undefined && typeof client !== "string") {
+    if (
+      client !== undefined &&
+      (typeof client !== "string" || client.trim() === "")
+    ) {
       throw new Error(
         "The gemi ORM generator's `client` option is the module specifier its " +
           "generated models type-import `Prisma` from, so it must be a single " +
-          'string — `client = "./client"`.',
+          'non-empty string — `client = "./client"`. Remove the line entirely ' +
+          "to get the default, `@prisma/client`.",
       );
     }
 
