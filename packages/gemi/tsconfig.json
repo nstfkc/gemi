@@ -6,10 +6,11 @@
     "downlevelIteration": true
   },
   // Every directory of server source belongs here. That was not true until
-  // iteration 5 of the ORM: `orm`, `auth`, `config`, `internal`, `runtime` and
-  // `bin/orm` were all outside it, so `tsc --noEmit` passed without looking at
-  // them — and `orm` and `config` are public exports. Six directories, two of
-  // them shipped, none of them checked.
+  // iteration 5 of the ORM: `orm`, `auth`, `config`, `internal` and `bin/orm`
+  // were all outside it, so `tsc --noEmit` passed without looking at them — and
+  // `orm` and `config` are public exports. Five directories, two of them
+  // shipped, none of them checked. (A sixth, `runtime`, was in that list until
+  // it was deleted as dead.)
   //
   // `client` is covered by tsconfig.browser.json instead.
   //
@@ -48,8 +49,7 @@
     "bin/orm",
     "auth",
     "config",
-    "internal",
-    "runtime"
+    "internal"
   ],
   "exclude": [
     "node_modules",

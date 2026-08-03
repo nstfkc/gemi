@@ -14,29 +14,23 @@ import { join } from "node:path";
 // a throwaway staging directory that npm publishes from.
 const STAGING = ".publish";
 
-// `exports` entries whose published target isn't a mechanical `./x.ts` ->
-// `./dist/x.js` rewrite. Keep this table as the single place that documents the
-// exceptions.
-//   - `./runtime` is a legacy export: its source (`client/runtime.ts`) and this
-//     built target don't currently exist and nothing imports `gemi/runtime`, but
-//     the mapping is preserved as-is to avoid changing the published surface.
-const PUBLISH_EXPORT_OVERRIDES: Record<string, string> = {
-  "./runtime": "./dist/runtime/index.js",
-};
-
 // Map the source `exports` to their built `dist/` equivalents:
-//   - an explicit override wins;
 //   - a value already under `./dist/` (e.g. `./vite`) is kept verbatim;
 //   - anything else is `./<path>.ts` -> `./dist/<path>.js`.
 // Non-string values (future conditional exports) pass through untouched.
+//
+// There is deliberately no override table. The one entry it ever held existed
+// to keep `./runtime` publishable after its source was deleted, by pointing at
+// a built file the JS build does not emit either — so the override did not
+// rescue the export, it hid the fact that it was already broken. The export is
+// gone; if a genuine exception turns up, a table is easy to reintroduce, and it
+// should carry a test rather than a comment.
 function toPublishExports(
   devExports: Record<string, unknown>,
 ): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(devExports)) {
-    if (key in PUBLISH_EXPORT_OVERRIDES) {
-      out[key] = PUBLISH_EXPORT_OVERRIDES[key];
-    } else if (typeof value !== "string") {
+    if (typeof value !== "string") {
       out[key] = value;
     } else if (value.startsWith("./dist/")) {
       out[key] = value;
@@ -71,6 +65,44 @@ for (const extra of ["README.md", "LICENSE", "LICENSE.md"]) {
   if (await Bun.file(extra).exists()) await cp(extra, join(STAGING, extra));
 }
 
+// Every published subpath must name a file that is actually in the staged
+// tarball. This is the check that catches the bug class `./runtime` belonged to
+// — an `exports` entry whose *published* target was never built — and it has to
+// live here rather than in a test, because only this script has a built `dist/`
+// to look at.
+//
+// A unit test over `package.json` cannot do this job. The published targets are
+// `./dist/…` paths that do not exist until `bun run build` runs, and three
+// separate builds produce them: `scripts/build.ts` for most entrypoints, then
+// `vite.client.config.mts` for `./client` and `vite.plugin.config.mts` for
+// `./vite`'s `.mjs`. Neither vite input is listed in the first, so dropping an
+// entry from either config would dangle an export with nothing to notice —
+// exactly this bug, recurring.
+//
+// Failing beats warning: the failure mode is a package that installs cleanly
+// and fails on import, which is the worst time to find out.
+const dangling: string[] = [];
+for (const [subpath, target] of Object.entries(publishPkg.exports)) {
+  if (typeof target !== "string") continue;
+  if (!(await Bun.file(join(STAGING, target)).exists())) {
+    dangling.push(`  ${subpath} -> ${target}`);
+  }
+}
+
+if (dangling.length > 0) {
+  console.error(
+    `Refusing to stage gemi@${pkg.version}: ${dangling.length} of ` +
+      `${Object.keys(publishPkg.exports).length} published exports name a file ` +
+      `that was not built.\n${dangling.join("\n")}\n\n` +
+      `Either the entry is stale and should be deleted from \`exports\`, or the ` +
+      `build that produces it (scripts/build.ts, vite.client.config.mts, ` +
+      `vite.plugin.config.mts) no longer emits it.`,
+  );
+  process.exit(1);
+}
+
 console.log(
-  `Staged gemi@${pkg.version} in ${STAGING}/ — publish with: (cd ${STAGING} && npm publish)`,
+  `Staged gemi@${pkg.version} in ${STAGING}/ — ` +
+    `${Object.keys(publishPkg.exports).length} exports, all resolved. ` +
+    `Publish with: (cd ${STAGING} && npm publish)`,
 );
