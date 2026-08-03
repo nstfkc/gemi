@@ -2764,6 +2764,16 @@ and never ships in a bundle.
 
 ## Setup
 
+Prisma is your app's dependency, not gemi's. gemi never imports `@prisma/client` and never runs a
+Prisma query, so it does not carry a copy on your behalf:
+
+```sh
+bun add -d prisma @prisma/client
+```
+
+Install both, and keep their versions matched. `prisma generate` writes the client that
+`@prisma/client` resolves to, and Prisma requires the CLI and the client to agree.
+
 Add the gemi generator to `schema.prisma`. Conventionally after the `client` block, though the
 order does not matter: the generator reads its models from Prisma's generator protocol and never
 imports `@prisma/client` itself, so it emits the same three files either way. The emitted bases do
