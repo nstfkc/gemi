@@ -21,12 +21,17 @@ import { describe, expect, test } from "vitest";
  * it made a broken one look deliberate. A comment asserting the mapping was
  * fine is exactly what a check would have contradicted.
  *
- * Two assertions, because the two maps fail differently: the dev map is what
- * breaks `bun run dev` in this repo, and the published map is what breaks
- * `npm install gemi`. The published one is only checkable after a build, so it
- * is verified structurally here and by `npm pack` at release time.
+ * **This file checks the source half only, and cannot check the other.** The
+ * published targets are `./dist/…` paths that do not exist until `bun run build`
+ * runs, so the assertion that every *published* export names a built file lives
+ * at the end of `scripts/build-publish.ts`, where a real `dist/` exists. That is
+ * the check that would have caught `./runtime`; this one catches the source
+ * entry that produced it, one step earlier. Neither subsumes the other:
+ * `./client` and `./vite` are emitted by two separate vite configs that
+ * `scripts/build.ts` does not cover, so a published target can go missing with
+ * every source path in this file still valid.
  */
-const ROOT = join(import.meta.dirname);
+const ROOT = import.meta.dirname;
 
 const PKG: { exports: Record<string, unknown> } = JSON.parse(
   readFileSync(join(ROOT, "package.json"), "utf8"),
@@ -39,8 +44,9 @@ const entries = Object.entries(PKG.exports).filter(
 describe("the package's exports map", () => {
   test("names at least the entrypoints the docs and templates import", () => {
     // Guards against an `exports` that parsed to something empty, which would
-    // make every assertion below vacuously true.
-    expect(entries.length).toBeGreaterThan(15);
+    // make every assertion below vacuously true. Pinned just under the 19 the
+    // map currently holds, so losing a couple is noticed rather than absorbed.
+    expect(entries.length).toBeGreaterThanOrEqual(18);
   });
 
   test("every source target exists", () => {
@@ -54,10 +60,15 @@ describe("the package's exports map", () => {
     expect(dangling).toEqual([]);
   });
 
-  test("every published target is a built path", () => {
-    // The publish map is derived by rewriting `./x.ts` to `./dist/x.js`, so a
-    // source entry that is not a `.ts`/`.tsx` file silently publishes a target
-    // that was never compiled — the shape of the bug this file exists for.
+  test("every source target is a file the publish rewrite can compile", () => {
+    // `toPublishExports` turns `./x.ts` into `./dist/x.js` by string rewrite. A
+    // source entry that is neither already-built nor a `.ts`/`.tsx` file comes
+    // out of that rewrite unchanged and publishes a path nothing emits.
+    //
+    // Note what this does *not* cover: an entry that is already `./dist/…` is
+    // skipped here by construction, and that is the shape `./runtime`'s
+    // published target had. Only `build-publish.ts` can check those, against a
+    // real build.
     const unbuildable = entries
       .filter(([, target]) => !target.startsWith("./dist/"))
       .filter(([, target]) => !/\.tsx?$/.test(target))
