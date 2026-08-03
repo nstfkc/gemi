@@ -48,8 +48,7 @@
     "bin/orm",
     "auth",
     "config",
-    "internal",
-    "runtime"
+    "internal"
   ],
   "exclude": [
     "node_modules",

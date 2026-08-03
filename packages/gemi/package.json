@@ -24,7 +24,6 @@
     "./facades": "./facades/index.ts",
     "./email": "./email/index.ts",
     "./vite": "./dist/vite/index.mjs",
-    "./runtime": "./client/runtime.ts",
     "./kernel": "./kernel/index.ts",
     "./services": "./services/index.ts",
     "./broadcasting": "./broadcasting/index.ts",

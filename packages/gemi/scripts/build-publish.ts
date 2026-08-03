@@ -14,29 +14,23 @@ import { join } from "node:path";
 // a throwaway staging directory that npm publishes from.
 const STAGING = ".publish";
 
-// `exports` entries whose published target isn't a mechanical `./x.ts` ->
-// `./dist/x.js` rewrite. Keep this table as the single place that documents the
-// exceptions.
-//   - `./runtime` is a legacy export: its source (`client/runtime.ts`) and this
-//     built target don't currently exist and nothing imports `gemi/runtime`, but
-//     the mapping is preserved as-is to avoid changing the published surface.
-const PUBLISH_EXPORT_OVERRIDES: Record<string, string> = {
-  "./runtime": "./dist/runtime/index.js",
-};
-
 // Map the source `exports` to their built `dist/` equivalents:
-//   - an explicit override wins;
 //   - a value already under `./dist/` (e.g. `./vite`) is kept verbatim;
 //   - anything else is `./<path>.ts` -> `./dist/<path>.js`.
 // Non-string values (future conditional exports) pass through untouched.
+//
+// There is deliberately no override table. The one entry it ever held existed
+// to keep `./runtime` publishable after its source was deleted, by pointing at
+// a built file the JS build does not emit either — so the override did not
+// rescue the export, it hid the fact that it was already broken. The export is
+// gone; if a genuine exception turns up, a table is easy to reintroduce, and it
+// should carry a test rather than a comment.
 function toPublishExports(
   devExports: Record<string, unknown>,
 ): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(devExports)) {
-    if (key in PUBLISH_EXPORT_OVERRIDES) {
-      out[key] = PUBLISH_EXPORT_OVERRIDES[key];
-    } else if (typeof value !== "string") {
+    if (typeof value !== "string") {
       out[key] = value;
     } else if (value.startsWith("./dist/")) {
       out[key] = value;
