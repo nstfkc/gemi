@@ -87,13 +87,13 @@ export default function SignIn() {
 
 ### Type-safe network layer
 
-Consuming api endpoints using `useGet` hook.
+Consuming api endpoints using the `useQuery` hook.
 
 ``` tsx
-import { useGet } from 'gemi/client'
+import { useQuery } from 'gemi/client'
 
 export default function OrderDetail() {
-  const { data: orders } = useGet('/orders/:orderId')
+  const { data: orders } = useQuery('/orders/:orderId')
 
   return (
     <div>...</div>

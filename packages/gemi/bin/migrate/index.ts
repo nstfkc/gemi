@@ -20,6 +20,7 @@ import {
   FACADE_RENAMES,
   MODULE_MOVES,
   PROVIDER_MIGRATIONS,
+  RETIRED_CONFIG_FIELDS,
   SECTION_ORDER,
   SERVICE_RENAMES,
   TODO,
@@ -70,7 +71,25 @@ export async function runMigrate(options: MigrateOptions) {
   // referencing them, just through the new `providers` array.
   const carriedProviders: string[] = [];
 
-  if (existsSync(providersDir)) {
+  /**
+   * Whether the app is still on the 0.42 layout, and so whether steps 2 and 3
+   * have anything to do.
+   *
+   * Both used to run unconditionally, which made this command destructive on an
+   * app that had already migrated. `buildKernel` writes the `config` member from
+   * the slices it just generated, so it treats a Kernel's existing `config` as
+   * an unrecognised leftover and carries it over commented out — and `config` is
+   * part of the current Kernel shape, not a 0.42 relic. On an already-migrated
+   * app that silently unwires every config slice: the file still compiles, the
+   * app still boots, and nothing an app declares in `app/config` is merged.
+   *
+   * The directory's presence is the right signal rather than the slice count,
+   * because a providers directory whose every file is unrecognised is still a
+   * 0.42 app that wants its Kernel rewritten.
+   */
+  const onOldLayout = existsSync(providersDir);
+
+  if (onOldLayout) {
     for (const entry of readdirSync(providersDir).sort()) {
       if (!/\.tsx?$/.test(entry)) continue;
       const file = path.join(providersDir, entry);
@@ -103,10 +122,32 @@ export async function runMigrate(options: MigrateOptions) {
       { rootDir, appDir, aliasPrefix },
       notes,
     );
-    changes.push({
-      file: path.join(appDir, "config", `${configKey}.ts`),
-      contents: emitted.contents,
-    });
+    // Same refusal the extracted files get below, for the same reason and one
+    // step earlier. A half-migrated app — a providers directory *and* a
+    // hand-written `app/config/<slice>.ts` — used to have that config silently
+    // replaced by the provider-derived one, under an `update` line and a
+    // "Nothing needs manual attention" summary. The two files are both the
+    // app's, neither is derivable from the other, and merging them is a
+    // judgement call this command should not make on its own.
+    const configFile = path.join(appDir, "config", `${configKey}.ts`);
+    if (existsSync(configFile)) {
+      notes.push({
+        file: rel(rootDir, configFile),
+        message:
+          `already exists — left untouched. The ${inputs.length === 1 ? "provider" : "providers"} it would ` +
+          `have been generated from ${inputs.length === 1 ? "is" : "are"} left in place too, so nothing is ` +
+          `lost; fold them together by hand and delete the provider.`,
+      });
+      // The provider files stay on disk: deleting them would strand the only
+      // copy of the settings this file was not allowed to receive.
+      for (const input of inputs) {
+        const index = migratedFiles.indexOf(input.file);
+        if (index !== -1) migratedFiles.splice(index, 1);
+      }
+      continue;
+    }
+
+    changes.push({ file: configFile, contents: emitted.contents });
     for (const extracted of emitted.extractedFiles) {
       if (existsSync(extracted.file)) {
         notes.push({
@@ -119,42 +160,48 @@ export async function runMigrate(options: MigrateOptions) {
     }
   }
 
-  // 2. Kernel.
+  // 2. Kernel — only when there was a provider layout to move off, per
+  //    `onOldLayout`. Nothing is reported when the whole step is skipped: the
+  //    no-providers-directory note above already says why, and repeating it per
+  //    skipped step buries the retired-API findings under its own bookkeeping.
   const kernelFile = path.join(appDir, "kernel", "Kernel.ts");
-  if (existsSync(kernelFile)) {
-    changes.push({
-      file: kernelFile,
-      contents: buildKernel(
-        kernelFile,
-        [...slices.keys()],
-        carriedProviders,
-        rootDir,
-        notes,
-      ),
-    });
-  } else {
-    notes.push({
-      file: "app/kernel/Kernel.ts",
-      message: "not found — the Kernel rewrite was skipped",
-    });
+  if (onOldLayout) {
+    if (existsSync(kernelFile)) {
+      changes.push({
+        file: kernelFile,
+        contents: buildKernel(
+          kernelFile,
+          [...slices.keys()],
+          carriedProviders,
+          rootDir,
+          notes,
+        ),
+      });
+    } else {
+      notes.push({
+        file: "app/kernel/Kernel.ts",
+        message: "not found — the Kernel rewrite was skipped",
+      });
+    }
   }
 
   // 3. The app's own provider, which is where anything that used to live in a
   //    provider's `boot()` now belongs.
   const appProviderFile = path.join(appDir, "providers", "AppServiceProvider.ts");
-  if (!existsSync(appProviderFile)) {
+  if (onOldLayout && !existsSync(appProviderFile)) {
     changes.push({ file: appProviderFile, contents: APP_SERVICE_PROVIDER });
   }
 
   // 4. Provider files whose contents now live in app/config are superseded.
   for (const file of migratedFiles) changes.push({ file, contents: null });
 
-  // 5. Renames across the rest of the app.
+  // 5. Renames across the rest of the app, plus retired fields in app/config.
   const touched = new Set(changes.map((change) => change.file));
   for (const file of walk(appDir)) {
     if (touched.has(file)) continue;
     const source = readFileSync(file, "utf8");
-    const rewritten = rewriteReferences(source, rel(rootDir, file), notes);
+    let rewritten = rewriteReferences(source, rel(rootDir, file), notes);
+    rewritten = annotateRetiredFields(rewritten, file, rootDir, notes);
     if (rewritten !== source) changes.push({ file, contents: rewritten });
   }
 
@@ -424,14 +471,28 @@ function renderMembers(
     if (member.blankBefore) lines.push("");
     if (member.leading.trim()) lines.push(reindent(member.leading, width, shift));
 
-    if (member.kind === "unsupported") {
+    // Two ways a member fails to become a config field: the parser could not
+    // classify it, or the field it would have become no longer exists. Both
+    // render the same — TODO, then the original commented out — and differ only
+    // in the sentence, so they share the branch.
+    const removal = member.name
+      ? migration.memberRemovals?.[member.name]
+      : undefined;
+
+    if (member.kind === "unsupported" || removal) {
+      const reason = removal ?? member.reason!;
       notes.push({
         file: label,
-        message: `\`${member.name ?? member.text.split(/\s/)[0]}\` — ${member.reason}; left commented out in the config file`,
+        message: removal
+          ? `\`${member.name}\` — ${removal}`
+          : `\`${member.name ?? member.text.split(/\s/)[0]}\` — ${reason}; left commented out in the config file`,
       });
+      // The parser's reasons are clause fragments; a removal's is prose that
+      // already punctuates itself.
+      const sentence = /[.!?]$/.test(reason) ? reason : `${reason}.`;
       lines.push(
         reindent(
-          `${TODO} ${member.reason}. The 0.42 source is kept below.`,
+          `${TODO} ${sentence} The 0.42 source is kept below.`,
           width,
           shift,
         ),
@@ -620,6 +681,79 @@ export default class AppServiceProvider extends ServiceProvider {
 // ---------------------------------------------------------------------------
 // Reference renames across the rest of app/
 // ---------------------------------------------------------------------------
+
+/**
+ * Marks retired fields in `app/config/*.ts` with a TODO, in place.
+ *
+ * Annotates rather than deletes, which is the whole design. A field's value is
+ * an expression the app wrote — `new OrgProvisioningAuthAdapter(prisma)` — and
+ * removing the property can strand an import, an instantiation with side
+ * effects, or the only reference to a class the app still wants. The type error
+ * is already a perfectly good forcing function; what it lacks is a sentence
+ * saying where the replacement lives, and that is what this adds.
+ *
+ * Matched by line rather than by parsing the object, because the target is a
+ * top-level key in a `define*Config({ … })` call and a nested `userProvider`
+ * inside some unrelated option is a false positive the author can see and
+ * ignore — where a rewrite of the wrong node would not be.
+ *
+ * *Every* match is annotated, not just the first. Marking one and stopping
+ * traded the tolerable false positive for an intolerable false negative: a
+ * nested key of the same name occurring earlier in the file would absorb the
+ * annotation and leave the real retired field unmarked, which is the one
+ * outcome this pass exists to prevent. Each match carries its own idempotency
+ * check, so annotating all of them stays safe across re-runs.
+ *
+ * Line-by-line rather than by advancing a `/g` regex over a string that grows
+ * as annotations are inserted. That version worked but was a trap: its
+ * termination depended on the `g` flag, so dropping the flag turned a wrong
+ * answer into an infinite loop — a test suite that hangs instead of failing.
+ * Iterating lines cannot outlive the array.
+ */
+function annotateRetiredFields(
+  source: string,
+  file: string,
+  rootDir: string,
+  notes: Note[],
+): string {
+  const configDir = path.join(rootDir, "app", "config");
+  if (path.dirname(file) !== configDir) return source;
+
+  const slice = path.basename(file).replace(/\.tsx?$/, "");
+  const retired = RETIRED_CONFIG_FIELDS[slice];
+  if (!retired) return source;
+
+  const entries = Object.entries(retired);
+  const out: string[] = [];
+  const marked = new Set<string>();
+
+  for (const line of source.split("\n")) {
+    for (const [field, message] of entries) {
+      const match = new RegExp(`^([ \\t]*)${field}\\s*:`).exec(line);
+      if (!match) continue;
+
+      // Idempotent: a second run must not stack TODOs on the same field. The
+      // annotation is a single line, so the one just emitted is the only place
+      // a previous run's could be.
+      const previous = out[out.length - 1] ?? "";
+      if (!previous.includes(message)) {
+        out.push(`${match[1]}${TODO} ${message}`);
+        marked.add(field);
+      }
+      break;
+    }
+    out.push(line);
+  }
+
+  for (const field of marked) {
+    notes.push({
+      file: rel(rootDir, file),
+      message: `\`${field}\` — ${retired[field]}`,
+    });
+  }
+
+  return out.join("\n");
+}
 
 function rewriteReferences(
   source: string,
@@ -824,6 +958,33 @@ function rel(rootDir: string, file: string) {
   return path.relative(rootDir, file).split(path.sep).join("/");
 }
 
+/** The `` `member` — `` a note prepends to say which member it is about. */
+const QUALIFIER = /^`[^`]+` — /;
+
+/**
+ * Collapses notes that say the same thing about one file.
+ *
+ * An exact-string check is not enough, because a single retired API reaches the
+ * report through two tables: `DELETED_EXPORTS` fires on the import and
+ * `memberRemovals` on the member, and both carry `ADAPTER_RETIRED` — one bare,
+ * one prefixed with the member's name. That printed a ~330-character paragraph
+ * twice under the same filename, and the report is this command's entire output
+ * surface.
+ *
+ * The qualified form wins: "`adapter` — …" says which member to look at, and the
+ * bare one is the same sentence with that information removed.
+ */
+function dedupeBySentence(messages: string[]): string[] {
+  const bySentence = new Map<string, string>();
+  for (const message of messages) {
+    const sentence = message.replace(QUALIFIER, "");
+    if (!bySentence.has(sentence) || QUALIFIER.test(message)) {
+      bySentence.set(sentence, message);
+    }
+  }
+  return [...bySentence.values()];
+}
+
 function report(notes: Note[], dryRun: boolean) {
   console.log("");
   if (!notes.length) {
@@ -838,8 +999,11 @@ function report(notes: Note[], dryRun: boolean) {
   const grouped = new Map<string, string[]>();
   for (const note of notes) {
     const list = grouped.get(note.file) ?? [];
-    if (!list.includes(note.message)) list.push(note.message);
+    list.push(note.message);
     grouped.set(note.file, list);
+  }
+  for (const [file, messages] of grouped) {
+    grouped.set(file, dedupeBySentence(messages));
   }
 
   console.log(dryRun ? "Would report:" : "Summary:");

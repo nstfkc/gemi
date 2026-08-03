@@ -189,9 +189,11 @@ argument:
 ```typescript
 // app/providers/AppServiceProvider.ts
 import { AuthManager } from "gemi/services";
-import { ServiceProvider } from "gemi/services";
+import { ServiceProvider } from "gemi/support";
 
-export class AppServiceProvider extends ServiceProvider {
+import { OrgProvisioningUserProvider } from "@/app/auth/OrgProvisioningUserProvider";
+
+export default class AppServiceProvider extends ServiceProvider {
   register() {
     this.app.singleton(
       AuthManager,
@@ -204,6 +206,10 @@ export class AppServiceProvider extends ServiceProvider {
   }
 }
 ```
+
+The provider has to be listed in your `Kernel`'s `providers` array to run — see
+[Project Structure](./project-structure.md#service-providers). App providers register *after*
+the framework's, so this binding replaces the default `AuthManager` rather than racing it.
 
 > **Note:** gemi runs `createUser` and then fires `onSignUp` *separately*. Provisioning
 > inside the `onSignUp` callback is therefore **not** atomic with user creation — a failure

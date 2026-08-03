@@ -81,10 +81,19 @@ export default defineRouteConfig({
 and `route.view.rootRouter` have no defaults. Everything else can be omitted
 entirely.
 
-### One property was renamed
+### One property was retired
 
-`AuthenticationServiceProvider.adapter` is now `auth.userProvider`. The codemod
-renames it for you and says so in the summary.
+`AuthenticationServiceProvider.adapter` briefly became `auth.userProvider`, and
+then the seam it selected between was removed altogether: auth persistence is
+now the ORM-backed `UserProvider`, and `AuthConfig` has no field for it.
+
+The codemod comments the member out and leaves a TODO carrying the replacement —
+subclass `UserProvider` from `gemi/kernel`, override the methods the adapter
+implemented, and install it by rebinding `AuthManager` (from `gemi/services`) in
+a ServiceProvider, which takes the provider as its second constructor argument.
+The same TODO is written over a `userProvider` field left in an
+`app/config/auth.ts` by an earlier migration. See
+[docs/authentication.md](docs/authentication.md) for the worked example.
 
 ---
 
