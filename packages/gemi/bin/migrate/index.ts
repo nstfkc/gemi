@@ -122,10 +122,32 @@ export async function runMigrate(options: MigrateOptions) {
       { rootDir, appDir, aliasPrefix },
       notes,
     );
-    changes.push({
-      file: path.join(appDir, "config", `${configKey}.ts`),
-      contents: emitted.contents,
-    });
+    // Same refusal the extracted files get below, for the same reason and one
+    // step earlier. A half-migrated app — a providers directory *and* a
+    // hand-written `app/config/<slice>.ts` — used to have that config silently
+    // replaced by the provider-derived one, under an `update` line and a
+    // "Nothing needs manual attention" summary. The two files are both the
+    // app's, neither is derivable from the other, and merging them is a
+    // judgement call this command should not make on its own.
+    const configFile = path.join(appDir, "config", `${configKey}.ts`);
+    if (existsSync(configFile)) {
+      notes.push({
+        file: rel(rootDir, configFile),
+        message:
+          `already exists — left untouched. The ${inputs.length === 1 ? "provider" : "providers"} it would ` +
+          `have been generated from ${inputs.length === 1 ? "is" : "are"} left in place too, so nothing is ` +
+          `lost; fold them together by hand and delete the provider.`,
+      });
+      // The provider files stay on disk: deleting them would strand the only
+      // copy of the settings this file was not allowed to receive.
+      for (const input of inputs) {
+        const index = migratedFiles.indexOf(input.file);
+        if (index !== -1) migratedFiles.splice(index, 1);
+      }
+      continue;
+    }
+
+    changes.push({ file: configFile, contents: emitted.contents });
     for (const extracted of emitted.extractedFiles) {
       if (existsSync(extracted.file)) {
         notes.push({
@@ -179,7 +201,7 @@ export async function runMigrate(options: MigrateOptions) {
     if (touched.has(file)) continue;
     const source = readFileSync(file, "utf8");
     let rewritten = rewriteReferences(source, rel(rootDir, file), notes);
-    rewritten = annotateRetiredFields(rewritten, file, appDir, rel(rootDir, file), notes);
+    rewritten = annotateRetiredFields(rewritten, file, rootDir, notes);
     if (rewritten !== source) changes.push({ file, contents: rewritten });
   }
 
@@ -672,40 +694,65 @@ export default class AppServiceProvider extends ServiceProvider {
  *
  * Matched by line rather than by parsing the object, because the target is a
  * top-level key in a `define*Config({ … })` call and a nested `userProvider`
- * inside some unrelated option would be a false positive the author can see and
+ * inside some unrelated option is a false positive the author can see and
  * ignore — where a rewrite of the wrong node would not be.
+ *
+ * *Every* match is annotated, not just the first. Marking one and stopping
+ * traded the tolerable false positive for an intolerable false negative: a
+ * nested key of the same name occurring earlier in the file would absorb the
+ * annotation and leave the real retired field unmarked, which is the one
+ * outcome this pass exists to prevent. Each match carries its own idempotency
+ * check, so annotating all of them stays safe across re-runs.
+ *
+ * Line-by-line rather than by advancing a `/g` regex over a string that grows
+ * as annotations are inserted. That version worked but was a trap: its
+ * termination depended on the `g` flag, so dropping the flag turned a wrong
+ * answer into an infinite loop — a test suite that hangs instead of failing.
+ * Iterating lines cannot outlive the array.
  */
 function annotateRetiredFields(
   source: string,
   file: string,
-  appDir: string,
-  label: string,
+  rootDir: string,
   notes: Note[],
 ): string {
-  const configDir = path.join(appDir, "config");
+  const configDir = path.join(rootDir, "app", "config");
   if (path.dirname(file) !== configDir) return source;
 
   const slice = path.basename(file).replace(/\.tsx?$/, "");
   const retired = RETIRED_CONFIG_FIELDS[slice];
   if (!retired) return source;
 
-  let out = source;
+  const entries = Object.entries(retired);
+  const out: string[] = [];
+  const marked = new Set<string>();
 
-  for (const [field, message] of Object.entries(retired)) {
-    const property = new RegExp(`^([ \\t]*)${field}\\s*:`, "m");
-    const match = property.exec(out);
-    if (!match) continue;
-    // Idempotent: a second run must not stack TODOs on the same field.
-    if (out.slice(0, match.index).trimEnd().endsWith(message)) continue;
+  for (const line of source.split("\n")) {
+    for (const [field, message] of entries) {
+      const match = new RegExp(`^([ \\t]*)${field}\\s*:`).exec(line);
+      if (!match) continue;
 
-    out =
-      out.slice(0, match.index) +
-      `${match[1]}${TODO} ${message}\n` +
-      out.slice(match.index);
-    notes.push({ file: label, message: `\`${field}\` — ${message}` });
+      // Idempotent: a second run must not stack TODOs on the same field. The
+      // annotation is a single line, so the one just emitted is the only place
+      // a previous run's could be.
+      const previous = out[out.length - 1] ?? "";
+      if (!previous.includes(message)) {
+        out.push(`${match[1]}${TODO} ${message}`);
+        marked.add(field);
+      }
+      break;
+    }
+    out.push(line);
   }
 
-  return out;
+  for (const field of marked) {
+    notes.push({
+      file: rel(rootDir, file),
+      message: `\`${field}\` — ${retired[field]}`,
+    });
+  }
+
+  return out.join("\n");
 }
 
 function rewriteReferences(
@@ -911,6 +958,33 @@ function rel(rootDir: string, file: string) {
   return path.relative(rootDir, file).split(path.sep).join("/");
 }
 
+/** The `` `member` — `` a note prepends to say which member it is about. */
+const QUALIFIER = /^`[^`]+` — /;
+
+/**
+ * Collapses notes that say the same thing about one file.
+ *
+ * An exact-string check is not enough, because a single retired API reaches the
+ * report through two tables: `DELETED_EXPORTS` fires on the import and
+ * `memberRemovals` on the member, and both carry `ADAPTER_RETIRED` — one bare,
+ * one prefixed with the member's name. That printed a ~330-character paragraph
+ * twice under the same filename, and the report is this command's entire output
+ * surface.
+ *
+ * The qualified form wins: "`adapter` — …" says which member to look at, and the
+ * bare one is the same sentence with that information removed.
+ */
+function dedupeBySentence(messages: string[]): string[] {
+  const bySentence = new Map<string, string>();
+  for (const message of messages) {
+    const sentence = message.replace(QUALIFIER, "");
+    if (!bySentence.has(sentence) || QUALIFIER.test(message)) {
+      bySentence.set(sentence, message);
+    }
+  }
+  return [...bySentence.values()];
+}
+
 function report(notes: Note[], dryRun: boolean) {
   console.log("");
   if (!notes.length) {
@@ -925,8 +999,11 @@ function report(notes: Note[], dryRun: boolean) {
   const grouped = new Map<string, string[]>();
   for (const note of notes) {
     const list = grouped.get(note.file) ?? [];
-    if (!list.includes(note.message)) list.push(note.message);
+    list.push(note.message);
     grouped.set(note.file, list);
+  }
+  for (const [file, messages] of grouped) {
+    grouped.set(file, dedupeBySentence(messages));
   }
 
   console.log(dryRun ? "Would report:" : "Summary:");

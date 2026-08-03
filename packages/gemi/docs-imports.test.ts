@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 
@@ -55,8 +55,16 @@ const EXPORTS: Record<string, string> = JSON.parse(
  * docs were wrong. A static read covers every form these index files use —
  * re-exports, type re-exports, and the one `export * as registry`.
  */
-function exportsOf(entry: string): Set<string> {
-  const source = readFileSync(join(ROOT, EXPORTS[entry]), "utf8");
+function exportsOf(entry: string): Set<string> | undefined {
+  const target = join(ROOT, EXPORTS[entry]);
+  // `./runtime` is a legacy entry in the `exports` map whose source does not
+  // exist — `scripts/build-publish.ts` documents it as preserved only to avoid
+  // changing the published surface. Reading it unguarded turns the first
+  // snippet that imports `gemi/runtime` into a stack trace instead of an
+  // assertion, so a missing target is reported by the caller as unresolvable.
+  if (!existsSync(target)) return undefined;
+
+  const source = readFileSync(target, "utf8");
   const names = new Set<string>();
 
   // `export { a, b as c }` / `export type { A }`, in one- and multi-line form.
@@ -86,10 +94,19 @@ function exportsOf(entry: string): Set<string> {
 /**
  * `llms-full.txt` is the pages concatenated, so it carries every snippet a
  * second time. Checking it too is what keeps a fix to one copy from passing.
+ *
+ * The repository README is checked alongside them — it is the first gemi code
+ * most people read, and its snippets are ordinary current-version code. The
+ * root `UPGRADE.md` is deliberately excluded: it shows *pre*-0.43 source on
+ * purpose (`import { Singleton } from "gemi/services"`), so checking it needs a
+ * before/after fence convention that does not exist yet.
  */
-const PAGES = readdirSync(DOCS).filter(
-  (file) => file.endsWith(".md") || file === "llms-full.txt",
-);
+const PAGES: { label: string; path: string }[] = [
+  ...readdirSync(DOCS)
+    .filter((file) => file.endsWith(".md") || file === "llms-full.txt")
+    .map((file) => ({ label: file, path: join(DOCS, file) })),
+  { label: "README.md", path: join(ROOT, "../../README.md") },
+];
 
 /** `gemi/orm` -> `./orm`, the key `exports` is written with. */
 const subpathOf = (module: string) => `.${module.slice("gemi".length)}`;
@@ -100,8 +117,8 @@ interface DocImport {
   name: string;
 }
 
-const imports: DocImport[] = PAGES.flatMap((page) => {
-  const text = readFileSync(join(DOCS, page), "utf8");
+const imports: DocImport[] = PAGES.flatMap(({ label, path }) => {
+  const text = readFileSync(path, "utf8");
   const found: DocImport[] = [];
 
   for (const statement of text.matchAll(
@@ -109,7 +126,7 @@ const imports: DocImport[] = PAGES.flatMap((page) => {
   )) {
     for (const clause of statement[1].split(",")) {
       const name = clause.trim().replace(/^type\s+/, "").split(/\s+as\s+/)[0];
-      if (name) found.push({ page, module: statement[2], name: name.trim() });
+      if (name) found.push({ page: label, module: statement[2], name: name.trim() });
     }
   }
 
@@ -117,9 +134,36 @@ const imports: DocImport[] = PAGES.flatMap((page) => {
 });
 
 describe("documented gemi imports resolve", () => {
-  test("the docs import something", () => {
-    // A regex that silently stops matching would make every test below vacuous.
-    expect(imports.length).toBeGreaterThan(50);
+  /**
+   * The canary. Every assertion below is over `imports`, so a regex that
+   * quietly stopped matching most statements would leave them all vacuously
+   * true — and a floor low enough to be safe is also low enough to miss that.
+   *
+   * Both halves are pinned: the count, near the ~500 the docs currently
+   * produce, and the *set* of entrypoints seen. The set is the stronger of the
+   * two — losing `gemi/orm` entirely still leaves hundreds of imports, so only
+   * naming the modules catches a page dropping out of the sweep.
+   */
+  test("the sweep still sees the whole documentation surface", () => {
+    expect(imports.length).toBeGreaterThan(400);
+
+    const modules = [...new Set(imports.map((entry) => entry.module))].sort();
+    expect(modules).toEqual([
+      "gemi/app",
+      "gemi/broadcasting",
+      "gemi/client",
+      "gemi/config",
+      "gemi/email",
+      "gemi/facades",
+      "gemi/foundation",
+      "gemi/http",
+      "gemi/i18n",
+      "gemi/kernel",
+      "gemi/orm",
+      "gemi/server",
+      "gemi/services",
+      "gemi/support",
+    ]);
   });
 
   test("every subpath is in the package's exports map", () => {
@@ -135,7 +179,7 @@ describe("documented gemi imports resolve", () => {
 
   test("every named import exists on the entrypoint it comes from", () => {
     // `./dist/…` entrypoints are build output, absent until `bun run build`.
-    const readable = new Map<string, Set<string>>();
+    const readable = new Map<string, Set<string> | undefined>();
     const missing: string[] = [];
 
     for (const entry of imports) {
@@ -144,7 +188,15 @@ describe("documented gemi imports resolve", () => {
       if (!target || target.includes("/dist/")) continue;
 
       if (!readable.has(subpath)) readable.set(subpath, exportsOf(subpath));
-      if (!readable.get(subpath)!.has(entry.name)) {
+      const names = readable.get(subpath);
+
+      if (names === undefined) {
+        missing.push(
+          `${entry.page}: ${entry.module} maps to ${target}, which does not exist`,
+        );
+        continue;
+      }
+      if (!names.has(entry.name)) {
         missing.push(`${entry.page}: ${entry.name} from ${entry.module}`);
       }
     }

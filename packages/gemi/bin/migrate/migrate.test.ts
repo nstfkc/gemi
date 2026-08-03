@@ -53,11 +53,19 @@ export default class AuthServiceProvider extends AuthenticationServiceProvider {
 `;
 
 let root: string;
+let logged: string[];
 
-/** `runMigrate` reports through `console.log`; the assertions read the tree. */
+/**
+ * `runMigrate` reports through `console.log`. Most assertions read the tree
+ * instead, but the summary is this command's entire output surface, so it is
+ * captured rather than discarded.
+ */
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "gemi-migrate-"));
-  vi.spyOn(console, "log").mockImplementation(() => {});
+  logged = [];
+  vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+    logged.push(args.join(" "));
+  });
 });
 
 afterEach(() => {
@@ -114,6 +122,65 @@ describe("an app already on the config + container layout", () => {
   });
 });
 
+describe("a config file whose retired field is not the first match", () => {
+  test("the real top-level field is annotated, not just the first name-alike", async () => {
+    // The nested key is the false positive the line-matching approach accepts.
+    // Annotating only the first match turned that into a false *negative*: the
+    // nested one absorbed the TODO and the real retired field went unmarked,
+    // which is the single outcome this pass exists to prevent.
+    write(
+      "app/config/auth.ts",
+      `import { defineAuthConfig } from "gemi/services";
+
+export default defineAuthConfig({
+  social: {
+    userProvider: "unrelated",
+  },
+  userProvider: new OrgAdapter(prisma),
+});
+`,
+    );
+    await runMigrate({ rootDir: root });
+
+    const lines = read("app/config/auth.ts").split("\n");
+    const real = lines.findIndex((line) => line.startsWith("  userProvider:"));
+    expect(real).toBeGreaterThan(-1);
+    expect(lines[real - 1]).toContain("TODO(gemi-migrate)");
+  });
+});
+
+describe("a half-migrated app: providers AND a hand-written config", () => {
+  const HANDWRITTEN = `import { defineAuthConfig } from "gemi/services";
+
+export default defineAuthConfig({
+  handcrafted: true,
+  redirectPath: "/somewhere-important",
+});
+`;
+
+  beforeEach(async () => {
+    write("app/kernel/Kernel.ts", `import { Kernel } from "gemi/kernel";
+export default class extends Kernel {}
+`);
+    write("app/kernel/providers/AuthenticationServiceProvider.ts", PROVIDER_42);
+    write("app/config/auth.ts", HANDWRITTEN);
+    await runMigrate({ rootDir: root });
+  });
+
+  test("the hand-written config survives untouched", () => {
+    // It used to be replaced wholesale by the provider-derived file, under an
+    // `update` line and a "Nothing needs manual attention" summary. Both files
+    // are the app's, and neither is derivable from the other.
+    expect(read("app/config/auth.ts")).toBe(HANDWRITTEN);
+  });
+
+  test("the provider it would have come from is left on disk", () => {
+    // Deleting it would strand the only copy of the settings the config file
+    // was not allowed to receive.
+    expect(exists("app/kernel/providers/AuthenticationServiceProvider.ts")).toBe(true);
+  });
+});
+
 describe("an app still on the 0.42 provider layout", () => {
   beforeEach(async () => {
     write("app/kernel/Kernel.ts", `import { Kernel } from "gemi/kernel";
@@ -129,6 +196,20 @@ export default class extends Kernel {}
     expect(kernel).toContain("auth,");
     expect(exists("app/providers/AppServiceProvider.ts")).toBe(true);
     expect(exists("app/kernel/providers/AuthenticationServiceProvider.ts")).toBe(false);
+  });
+
+  test("the retired-adapter sentence is reported once, not once per table", () => {
+    // The same sentence reaches the report twice for this file — once from
+    // `DELETED_EXPORTS` on the import, once from `memberRemovals` on the
+    // member — and they differ only by the `` `adapter` — `` qualifier, so an
+    // exact-string dedup did not see them. A ~330-character paragraph printed
+    // twice under one filename is most of the report.
+    const summary = logged.join("\n");
+    const occurrences = summary.match(/The authentication adapter seam was removed/g);
+    expect(occurrences).toHaveLength(1);
+
+    // And the surviving copy is the one that says which member to look at.
+    expect(summary).toContain("`adapter` — The authentication adapter seam was removed");
   });
 
   test("the retired adapter member is commented out rather than renamed", () => {
