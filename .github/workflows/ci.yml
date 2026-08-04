@@ -84,8 +84,23 @@ jobs:
 
       # The template's committed artifact is what its suite runs against, and
       # `generated.test.ts` asserts a second run produces a zero-line diff.
+      #
+      # This runs against `prisma/schema.prisma`, which has **no**
+      # `generator client` block — so it is also the check that the client-free
+      # path an application uses actually works. If the emitted bases ever went
+      # back to needing Prisma's types, this step would still pass and the
+      # typecheck below would fail; if `prisma generate` itself came to need a
+      # client, this step fails here.
       - name: Generate the template's model artifact
         run: bunx prisma generate
+        working-directory: templates/saas-starter
+
+      # The differential harness compares gemi against Prisma, so it needs a
+      # Prisma client — generated from `differential.prisma`, which is
+      # `schema.prisma` plus a client block and nothing else. Uncommitted, like
+      # every generated client in this repo.
+      - name: Generate the differential harness's Prisma client
+        run: bunx prisma generate --schema prisma/differential.prisma
         working-directory: templates/saas-starter
 
       # The step that would have caught #159. Kept before the tests, because a
@@ -242,8 +257,23 @@ jobs:
         run: sed -i 's/^  provider = "sqlite"/  provider = "postgresql"/' prisma/schema.prisma
         working-directory: templates/saas-starter
 
+      # `differential.prisma` is derived from the schema edited above, so it has
+      # to be re-derived rather than left holding a sqlite datasource. Deriving
+      # it here also keeps it consistent with `schema.prisma` for
+      # `app-dependencies.test.ts`, which compares the two.
+      - name: Re-derive the differential schema
+        run: bun prisma/differential-schema.ts
+        working-directory: templates/saas-starter
+
       - name: Generate for Postgres
         run: bunx prisma generate
+        working-directory: templates/saas-starter
+
+      # The harness's client, which is what the differential suites compare
+      # against — and it speaks one provider at a time, which is why it is
+      # generated after the schema was pointed at Postgres.
+      - name: Generate the differential harness's Prisma client
+        run: bunx prisma generate --schema prisma/differential.prisma
         working-directory: templates/saas-starter
 
       - name: Create the schema

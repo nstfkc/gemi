@@ -21,42 +21,60 @@ queries against it.
 | --- | --- |
 | Schema definition (`schema.prisma`) | Prisma |
 | Migrations (`prisma migrate`) | Prisma |
-| Query argument and result **types** | Prisma (`prisma generate`, imported type-only) |
+| Query argument and result **types** | gemi (`prisma generate`, from the gemi generator) |
 | Runtime model metadata | gemi (a Prisma generator block, run by `prisma generate`) |
 | SQL compilation, execution, result shaping | gemi |
 | Transactions, policies, hooks | gemi |
 
-`@prisma/client` is generated and imported **type-only**. It never appears in a runtime import
-and never ships in a bundle.
+**You do not install `@prisma/client`.** Nothing in gemi imports it, nothing it generates imports
+it, and no Prisma command needs it: the `prisma` CLI depends on `@prisma/config` and
+`@prisma/engines`, so `migrate dev`, `migrate deploy`, `db push` and `migrate diff` all run without
+a client anywhere in the project.
 
 ## Setup
 
-Prisma is your app's dependency, not gemi's. gemi never imports `@prisma/client` and never runs a
-Prisma query, so it does not carry a copy on your behalf:
-
 ```sh
-bun add -d prisma @prisma/client
+bun add -d prisma
 ```
 
-Install both, and keep their versions matched. `prisma generate` writes the client that
-`@prisma/client` resolves to, and Prisma requires the CLI and the client to agree.
+That is the whole dependency. Prisma still owns your schema and your migrations, and you still run
+`prisma migrate dev` — you just never generate or install a Prisma client.
 
-Add the gemi generator to `schema.prisma`. Conventionally after the `client` block, though the
-order does not matter: the generator reads its models from Prisma's generator protocol and never
-imports `@prisma/client` itself, so it emits the same three files either way. The emitted bases do
-`import type { Prisma }`, but that is erased at build and only has to resolve when you typecheck —
-by which point one `prisma generate` has produced both.
+Add the gemi generator to `schema.prisma`. It is the only generator block you need:
 
 ```prisma
-generator client {
-  provider = "prisma-client-js"
-}
-
 generator gemi {
   provider = "gemi-orm-generator"
   output   = "../app/models/generated"
 }
 ```
+
+<details>
+<summary>Upgrading from a version that required <code>generator client</code></summary>
+
+Earlier releases emitted model bases that did `import type { Prisma } from "@prisma/client"`, so
+the generator refused to run without a `generator client` block. The import was type-only and never
+reached a bundle — but it still had to *resolve*, which put a 95MB package and an 18MB query engine
+into the dependency graph of every gemi app, for types that are erased at build.
+
+To upgrade: delete the `generator client` block from `schema.prisma`, run `bun remove @prisma/client`,
+and re-run `bunx prisma generate`. The regenerated `models.ts` imports its types from `gemi/orm`
+instead. Your queries do not change.
+
+Two things get *better* rather than staying equal, because the types now describe gemi rather than
+Prisma's query engine:
+
+- `cursor` and `distinct` are compile errors. gemi refuses both
+  permanently and by design, and Prisma's argument types admitted
+  them — so code that type-checked used to throw at runtime.
+- `_sum` and `_avg` are restricted to numeric columns, and `_min` / `_max` to orderable ones,
+  matching what the aggregate compiler actually accepts.
+
+If you passed `Prisma.DbNull` or `Prisma.JsonNull` to a `Json` column, import them from `gemi/orm`
+instead — see [Json columns](#json-columns). Prisma's own sentinels keep working; gemi recognises them
+structurally rather than by identity.
+
+</details>
 
 Then `bunx prisma generate`. You get three files under `app/models/generated/`:
 
@@ -379,10 +397,10 @@ SQLite's `json_extract` a string — so the feature fits inside invariant 2 rath
 Three things a path filter refuses, each because answering would be silently wrong rather than
 merely unsupported:
 
-- **The null sentinels.** `{ path: […], equals: Prisma.DbNull }` is refused. An extracted value
+- **The null sentinels.** `{ path: […], equals: DbNull }` is refused. An extracted value
   cannot tell an absent key from a JSON `null` — `#>>` yields SQL NULL for both — so the
   distinction the sentinels exist to make is already gone by the time the comparison happens.
-  Filter the column itself: `{ metadata: { equals: Prisma.DbNull } }`.
+  Filter the column itself: `{ metadata: { equals: DbNull } }`.
 - **A non-string operand to `string_contains` / `string_starts_with` / `string_ends_with`**, for
   the same reason the scalar `contains` refuses one: the pattern would become `%null%`, which runs
   and returns the wrong rows.
@@ -1345,27 +1363,32 @@ Two things are worth knowing:
   `metadata: '{"a":1}'` stores that text as a string rather than as an object. If you want an
   object, pass an object.
 
-- **Empty is two values, and you have to say which.** `metadata: null` does not type-check —
-  Prisma's types do not allow it and gemi takes them verbatim — because a `Json` column has two
-  distinct empty states and guessing between them is what the sentinels exist to prevent:
+- **Empty is two values, and you have to say which.** `metadata: null` does not type-check,
+  because a `Json` column has two distinct empty states and guessing between them is what the
+  sentinels exist to prevent:
 
   ```ts
-  import { Prisma } from "@prisma/client"
+  import { DbNull, JsonNull } from "gemi/orm"
 
-  await User.create({ data: { …, metadata: Prisma.DbNull } })    // the column is SQL NULL
-  await User.create({ data: { …, metadata: Prisma.JsonNull } })  // the column holds JSON null
+  await User.create({ data: { …, metadata: DbNull } })    // the column is SQL NULL
+  await User.create({ data: { …, metadata: JsonNull } })  // the column holds JSON null
   ```
+
+  These used to be spelled `Prisma.DbNull` and `Prisma.JsonNull`, which made this the one piece of
+  ordinary application code that could not be written without `@prisma/client`. gemi has always
+  recognised the sentinels structurally rather than by identity — that is why the ORM runtime could
+  stay free of Prisma at all — so Prisma's own still work if you have them.
 
   Both read back as `null`, so the difference is invisible from JavaScript and entirely visible to
   anything else that reads the column — `psql`, a report, Prisma itself. Filtering takes the same
   pair, and takes them as an explicit comparison:
 
   ```ts
-  await User.findMany({ where: { metadata: { equals: Prisma.DbNull } } })   // the SQL NULLs
-  await User.findMany({ where: { metadata: { equals: Prisma.JsonNull } } }) // the JSON nulls
+  await User.findMany({ where: { metadata: { equals: DbNull } } })   // the SQL NULLs
+  await User.findMany({ where: { metadata: { equals: JsonNull } } }) // the JSON nulls
   ```
 
-  A bare `where: { metadata: Prisma.DbNull }` raises `InvalidArgumentError` naming the explicit
+  A bare `where: { metadata: DbNull }` raises `InvalidArgumentError` naming the explicit
   form. Prisma rejects that spelling too, so this is parity rather than a gemi restriction.
 
   There is a **third** sentinel, and it belongs only in a filter:

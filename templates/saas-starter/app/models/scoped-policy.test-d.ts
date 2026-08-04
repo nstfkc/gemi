@@ -1,9 +1,13 @@
 import { expectTypeOf, test, describe } from "vitest";
 
-import type { Prisma } from "@prisma/client";
-import type { PolicyContext } from "gemi/orm";
+import type { CreateInput, PolicyContext, WhereInput } from "gemi/orm";
 
-import { AccountScopedPolicy, UserScopedPolicy } from "./generated";
+import {
+  AccountScopedPolicy,
+  UserScopedPolicy,
+  type AccountTypes,
+  type UserTypes,
+} from "./generated";
 
 /**
  * **A policy that scopes reads but forgets the write halves is a compile
@@ -39,10 +43,10 @@ describe("a generated ScopedPolicy demands all three members", () => {
       scope() {
         return { organizationId: 1 };
       }
-      onCreate(_ctx: PolicyContext, data: Prisma.AccountCreateInput) {
+      onCreate(_ctx: PolicyContext, data: CreateInput<AccountTypes>) {
         return data;
       }
-      onUpdate(_ctx: PolicyContext, data: Partial<Prisma.AccountCreateInput>) {
+      onUpdate(_ctx: PolicyContext, data: Partial<CreateInput<AccountTypes>>) {
         return data;
       }
     }
@@ -60,14 +64,14 @@ describe("a generated ScopedPolicy demands all three members", () => {
     // a hand-written `ScopedPolicy<any, any, any>` would get wrong — the
     // abstract-ness above would survive it intact.
     expectTypeOf<AccountScopedPolicy["scope"]>().returns.toEqualTypeOf<
-      Prisma.AccountWhereInput | undefined
+      WhereInput<AccountTypes> | undefined
     >();
     expectTypeOf<AccountScopedPolicy["onCreate"]>()
       .parameter(1)
-      .toEqualTypeOf<Prisma.AccountCreateInput>();
+      .toEqualTypeOf<CreateInput<AccountTypes>>();
     expectTypeOf<AccountScopedPolicy["onUpdate"]>()
       .parameter(1)
-      .toEqualTypeOf<Partial<Prisma.AccountCreateInput>>();
+      .toEqualTypeOf<Partial<CreateInput<AccountTypes>>>();
   });
 
   /**
@@ -88,7 +92,7 @@ describe("a generated ScopedPolicy demands all three members", () => {
       scope() {
         return { organizationId: 1 };
       }
-      onUpdate(_ctx: PolicyContext, data: Partial<Prisma.AccountCreateInput>) {
+      onUpdate(_ctx: PolicyContext, data: Partial<CreateInput<AccountTypes>>) {
         return data;
       }
     }
@@ -101,7 +105,7 @@ describe("a generated ScopedPolicy demands all three members", () => {
       scope() {
         return { organizationId: 1 };
       }
-      onCreate(_ctx: PolicyContext, data: Prisma.AccountCreateInput) {
+      onCreate(_ctx: PolicyContext, data: CreateInput<AccountTypes>) {
         return data;
       }
     }
@@ -111,10 +115,10 @@ describe("a generated ScopedPolicy demands all three members", () => {
   test("omitting scope is a compile error too", () => {
     // @ts-expect-error `scope` is abstract and unimplemented
     class NoScope extends AccountScopedPolicy {
-      onCreate(_ctx: PolicyContext, data: Prisma.AccountCreateInput) {
+      onCreate(_ctx: PolicyContext, data: CreateInput<AccountTypes>) {
         return data;
       }
-      onUpdate(_ctx: PolicyContext, data: Partial<Prisma.AccountCreateInput>) {
+      onUpdate(_ctx: PolicyContext, data: Partial<CreateInput<AccountTypes>>) {
         return data;
       }
     }
@@ -131,9 +135,9 @@ describe("a generated ScopedPolicy demands all three members", () => {
    * - `ScopedPolicy<any, …>` on `UserScopedPolicy` — binding widened, model
    *   forgotten. The **inferred** test fails (`Unused '@ts-expect-error'`); the
    *   annotated test passes, because its excess-property error comes from the
-   *   author's own `: Prisma.UserWhereInput` annotation and would still be
+   *   author's own `: WhereInput<UserTypes>` annotation and would still be
    *   there if the class extended nothing at all.
-   * - `ScopedPolicy<Prisma.AccountWhereInput, …>` on `UserScopedPolicy` — the
+   * - `ScopedPolicy<WhereInput<AccountTypes>, …>` on `UserScopedPolicy` — the
    *   plausible `emit.ts` bug, right shape, wrong model. The **annotated** test
    *   fails, on `Property 'scope' … is not assignable to the same property in
    *   base type 'UserScopedPolicy'` at the method declaration; the inferred
@@ -161,14 +165,14 @@ describe("a generated ScopedPolicy demands all three members", () => {
    */
   test("an annotated scope rejects a column the model does not have", () => {
     class Annotated extends UserScopedPolicy {
-      scope(): Prisma.UserWhereInput {
+      scope(): WhereInput<UserTypes> {
         // @ts-expect-error `nonexistentColumn` is not on UserWhereInput
         return { nonexistentColumn: 1 };
       }
-      onCreate(_ctx: PolicyContext, data: Prisma.UserCreateInput) {
+      onCreate(_ctx: PolicyContext, data: CreateInput<UserTypes>) {
         return data;
       }
-      onUpdate(_ctx: PolicyContext, data: Partial<Prisma.UserCreateInput>) {
+      onUpdate(_ctx: PolicyContext, data: Partial<CreateInput<UserTypes>>) {
         return data;
       }
     }
@@ -181,10 +185,10 @@ describe("a generated ScopedPolicy demands all three members", () => {
       scope() {
         return { nonexistentColumn: 1 };
       }
-      onCreate(_ctx: PolicyContext, data: Prisma.UserCreateInput) {
+      onCreate(_ctx: PolicyContext, data: CreateInput<UserTypes>) {
         return data;
       }
-      onUpdate(_ctx: PolicyContext, data: Partial<Prisma.UserCreateInput>) {
+      onUpdate(_ctx: PolicyContext, data: Partial<CreateInput<UserTypes>>) {
         return data;
       }
     }

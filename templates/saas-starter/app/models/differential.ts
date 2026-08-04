@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient } from "./prisma-client";
 import { DatabaseManager } from "gemi/database";
 import { Application } from "gemi/foundation";
 import { Model, clearPlanCache, type ExecOptions } from "gemi/orm";

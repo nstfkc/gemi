@@ -3,14 +3,29 @@ import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 
 // The ORM runtime executes every query itself: no Prisma query engine, no
-// serialization boundary, no Prisma client at runtime. Prisma's *types* are
-// wired in through the generated model bases in an app, imported type-only, and
-// its runtime never ships in a bundle.
+// serialization boundary, no Prisma client. Since the generated model bases
+// stopped type-importing `@prisma/client`, nothing in an app's ORM path reaches
+// Prisma either — the argument and result types come from `orm/types.ts`.
 //
 // That is a property of the whole directory, not of any one file, so it is
 // asserted as one — a single stray `import { PrismaClient } from ...` while
 // adding an operation would quietly re-introduce the boundary the project
 // exists to remove.
+//
+// **This used to grep the file's *text*, comments included, and no longer can.**
+// The strict form was right while the ORM had nothing whatever to say about
+// Prisma. It does now, and the things it says are the reasons this invariant
+// holds: `json-null.ts` explains that it recognises Prisma's two `Json` null
+// sentinels by `toString` rather than `instanceof` *because* the runtime may
+// not import the package, and `types.ts` explains which Prisma types each of
+// its own replaced and why the originals were wrong about gemi. A guard that
+// fails when the code documents its own reasoning teaches authors to delete the
+// reasoning, so what is asserted is the property itself: no module specifier
+// under `orm/` names `@prisma/` anything.
+//
+// That is strictly stronger than the package-wide check below, and deliberately
+// so. `bin/` legitimately imports `@prisma/generator-helper` — it is the
+// generator protocol — and the runtime may not import even that.
 
 /** Directories with no first-party source in them. */
 const SKIP_DIRS = new Set(["node_modules", "dist", ".publish"]);
@@ -43,10 +58,16 @@ describe("the ORM runtime", () => {
   });
 
   test.each(files.map((file) => [file.slice(import.meta.dirname.length + 1)]))(
-    "%s does not reference @prisma/*",
+    "%s imports no @prisma/* module",
     (relative) => {
-      const content = readFileSync(join(import.meta.dirname, relative), "utf8");
-      expect(content).not.toMatch(/@prisma\//);
+      const source = readFileSync(join(import.meta.dirname, relative), "utf8");
+
+      expect(
+        importedModules(source).filter((name) => name.startsWith("@prisma/")),
+        `${relative} imports a Prisma package. The ORM runtime executes every ` +
+          `query itself and its types are its own — not the generator ` +
+          `protocol either, which belongs to bin/.`,
+      ).toEqual([]);
     },
   );
 });

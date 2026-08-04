@@ -1,3 +1,18 @@
+// Generated from schema.prisma by prisma/differential-schema.ts. Do not edit.
+//
+// schema.prisma plus the `generator client` block that gemi's differential test
+// harness needs. The application's schema has no client block, so that an app
+// installs `prisma` alone; this file exists so that gemi can still compare
+// itself against Prisma. Re-run:
+//
+//     bun prisma/differential-schema.ts
+
+generator client {
+  provider        = "prisma-client-js"
+  output          = "../app/models/prisma-client"
+  previewFeatures = ["driverAdapters"]
+}
+
 // This is your Prisma schema file,
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 

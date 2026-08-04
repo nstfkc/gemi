@@ -5,6 +5,7 @@
     "": {
       "name": "gemi",
       "devDependencies": {
+        "@prisma/client": "^6.5.0",
         "@repo/typescript-config": "*",
         "oxfmt": "^0.53.0",
         "oxlint": "^1.39.0",
@@ -105,7 +106,6 @@
         "tailwindcss-animate": "^1.0.7",
       },
       "devDependencies": {
-        "@prisma/client": "^6.5.0",
         "@types/bun": "^1.1.6",
         "@types/react": "19.0.2",
         "@types/react-dom": "19.0.2",

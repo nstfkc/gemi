@@ -30,6 +30,10 @@
 // one schema, so pushing this one at `gemi` would drop every table the other
 // schema owns.
 
+// A Prisma client, for the same reason `differential.prisma` has one: the
+// scalar-list suite compares gemi against Prisma, so it needs a Prisma to
+// compare against. Not something an application's schema carries — see the note
+// on `schema.prisma`.
 generator client {
   provider        = "prisma-client-js"
   previewFeatures = ["driverAdapters"]
@@ -39,9 +43,6 @@ generator client {
 generator gemi {
   provider = "gemi-orm-generator"
   output   = "../app/models/generated-lists"
-  // Not `@prisma/client`: that name resolves to the *main* schema's client,
-  // which has never heard of these models. See the generator's `client` option.
-  client   = "./client"
 }
 
 datasource db {

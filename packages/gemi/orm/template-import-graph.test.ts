@@ -46,9 +46,21 @@ const MODELS = join(
   "../../../templates/saas-starter/app/models",
 );
 
-/** The module whose import pulls in `@prisma/client`, and what earns importing it. */
+/** The module whose import pulls in a Prisma client, and what earns importing it. */
 const HARNESS = "./differential";
 const HARNESS_API = "createDifferential";
+
+/**
+ * Where that client now comes from.
+ *
+ * `@prisma/client` until the generated bases stopped type-importing Prisma:
+ * `prisma/schema.prisma` has no `generator client` block any more, so an app
+ * installs `prisma` alone, and the harness generates its own client from
+ * `prisma/differential.prisma` into this path instead. The cost this file exists
+ * to keep off the collection phase is unchanged — it is still a whole query
+ * engine loaded at import.
+ */
+const CLIENT = "./prisma-client";
 
 const suites = readdirSync(MODELS)
   .filter((file) => file.endsWith(".test.ts"))
@@ -68,9 +80,11 @@ describe("the template's model suites", () => {
     ).toBeGreaterThan(0);
   });
 
-  test(`${HARNESS} still imports @prisma/client, which is why this test exists`, () => {
+  test(`${HARNESS} still imports a Prisma client, which is why this test exists`, () => {
     const source = readFileSync(join(MODELS, "differential.ts"), "utf8");
-    expect(source).toMatch(/^import .*from "@prisma\/client";$/m);
+    expect(source).toMatch(
+      new RegExp(`^import .*from "${CLIENT.replace(".", "\\.")}";$`, "m"),
+    );
   });
 
   test.each(suites.map(({ file, source }) => [file, source] as const))(
@@ -81,7 +95,7 @@ describe("the template's model suites", () => {
       expect(
         source.includes(HARNESS_API),
         `${file} imports ${HARNESS} but never calls ${HARNESS_API}, so it pays ` +
-          `for @prisma/client at collection time and gets nothing for it. ` +
+          `for a Prisma client at collection time and gets nothing for it. ` +
           `POSTGRES_URL and applyMigrations live in ./scratch.`,
       ).toBe(true);
     },

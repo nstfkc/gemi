@@ -156,19 +156,32 @@ describe("User.findMany()", () => {
     expect(planCacheStats()).toMatchObject({ compiles: 1, hits: 1 });
   });
 
-  // Signatures accept the full Prisma argument type from iteration 1, so an
-  // argument the ORM does not run has to say so rather than silently returning
-  // the wrong rows — and has to say *which kind* of refusal it is, since "wait
-  // for a release" and "change the code" are different answers.
+  // `cursor` is refused twice over, and both refusals are worth keeping.
+  //
+  // It is now a **compile error**, which it was not while the signatures took
+  // Prisma's argument types verbatim: `Prisma.UserFindManyArgs` admits `cursor`
+  // and `distinct`, because Prisma's engine implements them, and gemi refuses
+  // both permanently and by design. So the old types type-checked code that
+  // threw — the `@ts-expect-error` directives below are the improvement, and
+  // they fail loudly if the argument is ever quietly re-admitted.
+  //
+  // The **runtime** refusal still has to exist and still has to be exact. Types
+  // are erased, so a plain-JavaScript caller, a `JSON.parse`d filter or an `any`
+  // reaches the compiler with the argument intact; it must say so rather than
+  // silently return the wrong rows, and say *which kind* of refusal it is, since
+  // "wait for a release" and "change the code" are different answers.
   test("throws on an argument refused by design, and says it is a decision", async () => {
+    // @ts-expect-error `cursor` is not in gemi's argument grammar — by design.
     await expect(User.findMany({ cursor: { id: 1 } })).rejects.toThrow(
       UnsupportedQueryError,
     );
+    // @ts-expect-error as above; the runtime message is what is under test.
     await expect(User.findMany({ cursor: { id: 1 } })).rejects.toThrow(
       "gemi ORM does not implement 'cursor' (User.findMany), and this is a " +
         "decision rather than a gap.",
     );
     // ...and it names what to reach for instead.
+    // @ts-expect-error as above.
     await expect(User.findMany({ cursor: { id: 1 } })).rejects.toThrow(
       /DB\.query/,
     );
