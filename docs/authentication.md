@@ -100,16 +100,34 @@ managing sessions, and handling verification / reset / magic-link tokens. It run
 
 It resolves models from the ORM registry **by name, at call time**, so the framework never
 imports your generated classes. Anything that registers them before the first request is
-enough; the starter template does it from `app/preload.ts`:
+enough; the starter template lists them on its Kernel and also pulls them in from
+`app/preload.ts`:
 
 ```typescript
-// app/preload.ts — pulls in generated/index.ts (registering every model) and
-// then re-registers "User" against your subclass.
-import "@/app/models/User";
+// app/kernel/Kernel.ts — boot() registers everything these export.
+import * as generated from "../models/generated";
+import * as models from "../models";
+
+export default class extends Kernel {
+  models = [generated, models];
+}
+```
+
+```typescript
+// app/preload.ts — the same modules, before the server starts.
+import "@/app/models";
 ```
 
 Without that, the first sign-in raises `ModelNotRegisteredError`, which names the missing
 model and lists what is registered.
+
+> **The ORM comes with the provider, not optionally alongside it.** There is no adapter seam
+> any more: every `UserProvider` method resolves its model through the registry, so an app
+> with no other ORM adoption still has to run the generator, commit
+> `app/models/generated/` and register it at boot before authentication works *at all*. On a
+> large schema that is a real artifact — a 79-model schema generates around 750 KB across
+> three files. Budget for it when you plan the port; the error that tells you otherwise
+> arrives at runtime, after the code is already written.
 
 > **Note:** every query runs inside `Model.asSystem`, so [policies](./orm.md) are suspended.
 > Authentication happens before there is an authenticated user, so a policy scoping by

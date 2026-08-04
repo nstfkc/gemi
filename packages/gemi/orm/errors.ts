@@ -363,18 +363,41 @@ export class ScopeEscapeError extends Error {
 export class UnregisteredPolicyClassError extends Error {
   constructor(
     public readonly model: string,
+    /**
+     * Under `carries: "narrowing"` this is the *ancestor* — the class the model
+     * belongs to — rather than whatever the registry currently holds. The two
+     * classes are on one prototype chain there, and which of them is registered
+     * is the thing in question, so naming them by their relationship is what
+     * makes the message readable.
+     */
     public readonly registered: string,
+    /** Under `carries: "narrowing"`, the descendant: the view that narrows. */
     public readonly queried: string,
     /**
-     * Which side carries the policies that would be skipped. The two directions
-     * need different advice: one is a missing registration, the other is a
-     * query through the wrong class.
+     * Which side carries the policies that would be skipped, and therefore what
+     * the author should do about it. Three, because they need three different
+     * answers: a missing registration, a query through the wrong class, and a
+     * view that should not be competing for the name at all.
      */
-    public readonly carries: "queried" | "registered" = "queried",
+    public readonly carries: "queried" | "registered" | "narrowing" = "queried",
   ) {
     super(
-      carries === "queried"
-        ? `${queried} carries policies but the registry resolves '${model}' to ` +
+      carries === "narrowing"
+        ? `${queried} extends ${registered}, which owns the model '${model}', ` +
+            `and carries policies of its own on top of it. A class that ` +
+            `narrows an existing model is a view, and the registry holds one ` +
+            `class per name — so registering ${queried} would apply its ` +
+            `narrowing to every nested read of ${model}, and leaving ` +
+            `${registered} registered would skip ${queried}'s policies ` +
+            `entirely. Neither is a thing to choose for you.\n\n` +
+            `Keep the view out of the modules you hand to Kernel.models, and ` +
+            `query it directly where you want it:\n\n` +
+            `    ${queried}.findMany(…)   // narrowed, at the call site\n\n` +
+            `If it is not a view but the model itself, move the policies onto ` +
+            `${registered} — the class the model's name resolves to — and ` +
+            `${queried} inherits them everywhere.\n`
+        : carries === "queried"
+          ? `${queried} carries policies but the registry resolves '${model}' to ` +
             `${registered}. Nested relation reads go through the registry, so ` +
             `they would run on ${registered} and skip every policy on ` +
             `${queried} — scoped at the root, unscoped inside an include. ` +
@@ -382,7 +405,7 @@ export class UnregisteredPolicyClassError extends Error {
             `    import { register } from "gemi/orm"\n` +
             `    export class ${queried} extends ${registered} { … }\n` +
             `    register("${model}", ${queried})\n`
-        : `This query goes through ${queried}, but the registry resolves ` +
+          : `This query goes through ${queried}, but the registry resolves ` +
             `'${model}' to ${registered}, which carries policies ${queried} ` +
             `does not. Nested relation reads would be scoped and this query is ` +
             `not — the same policy applying to some queries and not others. ` +
@@ -393,6 +416,50 @@ export class UnregisteredPolicyClassError extends Error {
             `that a reader can see.\n`,
     );
     this.name = "UnregisteredPolicyClassError";
+  }
+}
+
+/**
+ * Thrown when `registerModels` finds two unrelated classes in one module both
+ * claiming the same model name.
+ *
+ * Deriving registration from a module namespace works because the candidates
+ * are normally a chain — a generated base, the application's subclass, perhaps
+ * a typed view over it — and a chain has a least element to elect. Two classes
+ * that extend the same base without extending each other do not: both were
+ * written for this model, and only the author knows which one nested reads
+ * should run.
+ *
+ * Refused rather than guessed at, because both guesses are silent. Picking
+ * either would scope every `include` of the model by one class's policies while
+ * the other's code keeps reading as though its own applied.
+ *
+ * **"In one module" is the exact scope, and the asymmetry is deliberate.**
+ * Election happens per module, so two unrelated claims split across *different*
+ * modules never meet inside one — the later import simply wins. What catches
+ * that is the audit at the end of `registerModels` rather than this error, and
+ * only when the two diverge in policies. Two unrelated *unpolicied* claims on
+ * one name resolve by import order and nothing reports it, which is tolerable
+ * for the same reason it is invisible: with no policies on either, the choice
+ * changes no query's scope.
+ */
+export class AmbiguousModelRegistrationError extends Error {
+  constructor(
+    public readonly model: string,
+    public readonly candidates: readonly string[],
+  ) {
+    const named = candidates.map((candidate) => `'${candidate}'`).join(", ");
+    super(
+      `Two classes in one module claim the model '${model}' — ${named} — and ` +
+        `neither extends the other, so there is no way to tell which one ` +
+        `nested relation reads should run.\n\n` +
+        `Say which, and registerModels will leave it alone:\n\n` +
+        `    import { register } from "gemi/orm"\n` +
+        `    register("${model}", ${candidates[0]})\n\n` +
+        `A class that is only a typed view over the same rows belongs in a ` +
+        `module you do not hand to registerModels.`,
+    );
+    this.name = "AmbiguousModelRegistrationError";
   }
 }
 

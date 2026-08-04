@@ -15,8 +15,6 @@ import { viewRouteConfigDefaults, type ViewRouteConfig } from "./config";
 import { resolvePartialRender } from "./planPartialRender";
 import { matchViewRoute } from "./matchViewRoute";
 import { PARTIAL_RENDER_HEADER, type PartialRenderInfo } from "../../utils/partialRender";
-// @ts-ignore
-import { renderToReadableStream } from "react-dom/server.browser";
 import { createElement, Fragment } from "react";
 
 import { createFileResponse, type FileOutput, type ViewRoutes } from "../../http/ViewRouter";
@@ -37,6 +35,53 @@ import { createServerQueryFetcher } from "./serverQueryFetcher";
 import { injectQueryPayloads, isBotUserAgent } from "./streamQueryInjection";
 import { createShellContentObserver, createShellContentReporter } from "./shellContentReport";
 import { createRoutePayloadStream } from "./routePayloadStream";
+
+/**
+ * React's server renderer, loaded on the first render rather than on import.
+ *
+ * **Importing `react-dom/server.browser` keeps the process alive forever.** On
+ * React 19.2.3 under Bun, that one import — nothing else, no render, no server
+ * — is enough that the process never exits: `getActiveResourcesInfo()` comes
+ * back empty, there are no timers, no sockets and an empty kqueue, and it hangs
+ * anyway. `react-dom/server.node` does not do it. Reduced from #316's third
+ * item, which reports the same hang from `await import("gemi/kernel")` and
+ * predates the 0.51 line.
+ *
+ * That import sat at module scope here, and this module is reachable from
+ * `gemi/kernel` through `RouteServiceProvider` — so *any* script that touched
+ * the kernel inherited the hang and needed an explicit `process.exit()`. A
+ * one-off migration, a seeder, a cron entry point, a CI check: all of them
+ * loaded the SSR renderer to get a `Kernel` they were going to use for
+ * something else entirely.
+ *
+ * Deferring it costs one already-resolved dynamic import on the first document
+ * render and nothing after — `react-dom` is external in the framework build, so
+ * this stays a runtime resolve out of the app's own `node_modules` exactly as
+ * the static import was. A server renders, so it pays this once at first
+ * request; a script that never renders no longer pays it at all, which is the
+ * whole point.
+ *
+ * Wrapped rather than awaited at each call site so the three of them read
+ * unchanged.
+ *
+ * The slot is cleared on failure so a rejection is not what gets memoised. A
+ * missing `react-dom` is fatal either way — this is about the diagnostic, not
+ * about recovery: caching the rejected promise would make every later render
+ * report whatever the loader threw the first time, with no stack from the call
+ * that actually failed.
+ */
+let serverRenderer:
+  | Promise<{ renderToReadableStream: (...args: any[]) => Promise<any> }>
+  | undefined;
+
+const renderToReadableStream = async (...args: any[]): Promise<any> => {
+  // @ts-ignore
+  serverRenderer ??= import("react-dom/server.browser").catch((error) => {
+    serverRenderer = undefined;
+    throw error;
+  });
+  return (await serverRenderer).renderToReadableStream(...args);
+};
 
 /**
  * How long a document response may keep streaming before pending segments are

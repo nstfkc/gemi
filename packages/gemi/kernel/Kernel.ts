@@ -2,6 +2,8 @@ import { Application } from "../foundation/Application";
 import type { ServiceProviderConstructor } from "../foundation/Application";
 import type { ServiceToken } from "../container/Container";
 import type { ConfigItems } from "../support/Repository";
+import { registerModels } from "../orm/registration";
+import { registeredNames } from "../orm/registry";
 import { Scheduler } from "../services/cron/Scheduler";
 import { BroadcastManager } from "../services/pubsub/BroadcastManager";
 import { QueueManager } from "../services/queue/QueueManager";
@@ -29,6 +31,36 @@ export class Kernel {
    */
   protected providers: ServiceProviderConstructor[] = [];
 
+  /**
+   * The modules holding the app's model classes — normally
+   * `[generated, models]`, the generated namespace and the barrel of subclasses
+   * written over it. Every model class they export is registered under the name
+   * its schema carries, later modules winning, and the whole set is audited
+   * before anything else boots.
+   *
+   * ### Why this is a Kernel field and not a line in a file somewhere
+   *
+   * Registration used to be `register("User", User)` next to each subclass, and
+   * the failure mode of forgetting it is an authorization hole that nothing
+   * reports: a relation read resolves its target by name, so an unregistered
+   * policied subclass leaves the generated base owning the name and every
+   * nested `include` of that model comes back unscoped. No error at the root
+   * either, because `$exec`'s divergence guard begins `registered !== this` and
+   * the base it is running on *is* the registered one. A model only ever read
+   * through an include — a membership, a pivot, the kind that carries a tenant
+   * scope — never trips anything.
+   *
+   * Listing the modules here says it once, in the same place the app already
+   * declares its config slices and providers, and turns the mistake into a
+   * failure to boot rather than a quiet cross-tenant read.
+   *
+   * It sees the modules it is given, so a model class in a file that no barrel
+   * re-exports is still invisible. That is the residual, and it is a smaller
+   * one: a barrel is a place to notice an omission, and thirteen `register`
+   * lines scattered across thirteen files is not.
+   */
+  protected models: Array<Record<string, unknown>> = [];
+
   readonly app = new Application();
 
   /**
@@ -38,6 +70,12 @@ export class Kernel {
    * Phase two is `waitForBoot()`.
    */
   boot() {
+    // Before the container, deliberately. This throws on a model whose policies
+    // would be skipped, and the useful moment for that is the one where nothing
+    // has been constructed and no request can be in flight.
+    if (this.models.length > 0) registerModels(...this.models);
+    else warnIfModelsAreRegisteredButUndeclared();
+
     this.app.config.merge(this.config);
     Application.setInstance(this.app);
     this.app.registerMany([...frameworkProviders, ...this.providers]);
@@ -98,4 +136,52 @@ export class Kernel {
 
     kernelContext.disable();
   }
+}
+
+/**
+ * Says something to an application that has models and has not declared them.
+ *
+ * Without this the fix for #316 defaults to off. `models` is `[]`, `boot()`
+ * no-ops, and an app upgrading from 0.48 is in exactly the state the issue
+ * describes until somebody edits their Kernel by hand — while the only place
+ * that says to is the **Setup** section of `docs/orm.md`, which an existing app
+ * read once and will not read again. #316 was filed by an app mid-migration
+ * with a 79-model schema, which is precisely the reader who never sees it.
+ *
+ * The condition is what makes this worth printing. A populated registry with an
+ * empty `models` means the generated `index.ts` was imported and its bases are
+ * what every nested read resolves to — so if any policy lives on a subclass, it
+ * is being skipped inside includes right now. A Kernel with no ORM at all has
+ * an empty registry and hears nothing.
+ *
+ * Development only, and a warning rather than a throw: an app in this state is
+ * running today, and turning a working deploy into a failure to start over an
+ * arrangement that *might* be fine is not a patch-level thing to do. The
+ * failure it points at is silent, so the fix for it has to be noisy somewhere,
+ * and the terminal an author is already looking at is the cheapest somewhere
+ * there is.
+ */
+function warnIfModelsAreRegisteredButUndeclared(): void {
+  if (process.env.NODE_ENV === "production") return;
+
+  const registered = registeredNames();
+  if (registered.length === 0) return;
+
+  console.warn(
+    `[gemi] ${registered.length} model${registered.length === 1 ? " is" : "s are"} ` +
+      `registered, but Kernel.models is empty.\n` +
+      `        Nested relation reads resolve a model by name, so a policy on a ` +
+      `subclass that does not own its\n` +
+      `        name is skipped inside every include — scoped at the root, ` +
+      `unscoped in an include, with nothing\n` +
+      `        to notice it. Declaring the modules registers each class under ` +
+      `its own name and audits the set:\n\n` +
+      `            import * as generated from "../models/generated"\n` +
+      `            import * as models from "../models"\n\n` +
+      `            export default class extends Kernel {\n` +
+      `              models = [generated, models]\n` +
+      `            }\n\n` +
+      `        See docs/orm.md#your-model-class. Development only; this never ` +
+      `prints in production.`,
+  );
 }

@@ -78,6 +78,39 @@ structurally rather than by identity.
 
 </details>
 
+<details>
+<summary>Migrating model by model, with a Prisma client still in the app</summary>
+
+Nothing requires the switch to happen all at once. A `PrismaClient` and the gemi ORM coexist
+fine — but they are **two connection pools against the same database**, and by default nobody
+chooses their sizes.
+
+`DatabaseConfig.url` defaults to `DATABASE_URL`, which is normally the same URL the Prisma client
+already has. So the moment you register your first gemi model, the process holds Prisma's pool and
+gemi's Bun `SQL` pool at once, and their two defaults were each picked as though they were the only
+one. Against a managed Postgres with a connection cap — or a PgBouncer with a fixed pool — the
+symptom is connection exhaustion under a load that used to be fine, and it names neither library.
+
+Decide the split before you start rather than after the first incident:
+
+```typescript
+export default defineDatabaseConfig({
+  url: process.env.DATABASE_URL,
+
+  // Passed straight through to Bun's `SQL` client.
+  options: { max: 5 },   // gemi's share of the budget
+});
+```
+
+and lower Prisma's `connection_limit` by the same amount, so the two together stay inside the
+budget one of them used to have. Rebalance as models move across; when the last one has, drop the
+Prisma client and give gemi the whole budget.
+
+Pointing gemi at a *different* `url` is the other honest answer — a separate pool with its own cap,
+at the cost of two things to configure per environment.
+
+</details>
+
 Then `bunx prisma generate`. You get three files under `app/models/generated/`:
 
 - `schema.ts` — runtime metadata: tables, columns, types, defaults, relations.
@@ -126,45 +159,107 @@ refused, by the row above rather than by a rule about lists.
 
 ### Your model class
 
-The generated base is not the class you write code on. Subclass it, and **re-register it**:
+The generated base is not the class you write code on. Subclass it, put the subclass in a barrel,
+and list that barrel on your Kernel:
 
 ```ts
 // app/models/User.ts
-import { register } from "gemi/orm"
 import { UserModel } from "./generated"
 
 export class User extends UserModel {}
-
-register("User", User)
 ```
 
-That `register` line is not bookkeeping. A relation read resolves its target through the registry
-by name, so whatever is registered under `"User"` is the class that runs inside every nested
-`include`. If that is the generated base while your policy lives on your subclass, the policy
-applies to root queries and is skipped inside includes — scoped one way, unscoped the other, with
-nothing to notice it. `Model.$exec` raises `UnregisteredPolicyClassError` when a class carrying
-policies is queried while a *different* class owns its name — but that guard is narrower than it
-sounds, and the gap runs the wrong way. **A model you only ever read through an `include` never
-trips it:** the include resolves the name to the unpolicied generated base, nothing diverges from
-nothing, and the rows come back unscoped with no error. That is the shape a membership or pivot
-model usually has, and it is exactly the kind that carries a tenant scope. Write the line next to
-every subclass regardless — the guard is a backstop for the cases it can see, not a substitute.
+```ts
+// app/models/index.ts
+export { User } from "./User"
+```
 
-For the case it cannot see, there is an audit you can run once instead of trusting thirteen
-subclasses:
+```ts
+// app/kernel/Kernel.ts
+import { Kernel } from "gemi/kernel"
+import * as generated from "../models/generated"
+import * as models from "../models"
+
+export default class extends Kernel {
+  models = [generated, models]
+}
+```
+
+`boot()` registers every model class those modules export under the name its schema carries, later
+modules winning — so each subclass takes the name its generated base was holding — and then checks
+that no policied class lost its name to something else.
+
+**Upgrading an app that already has models?** `models` defaults to `[]`, so until you write that
+line your app behaves exactly as it did before — which is the arrangement the rest of this section
+is about. A Kernel with an empty `models` and a populated registry warns at boot in development.
+[UPGRADE.md](https://github.com/nstfkc/gemi/blob/main/UPGRADE.md) has the short version.
+
+**Why the framework does this rather than you.** A relation read resolves its target through the
+registry by name, so whatever is registered under `"User"` is the class that runs inside every
+nested `include`. If that is the generated base while your policy lives on your subclass, the
+policy applies to root queries and is skipped inside includes — scoped one way, unscoped the other.
+The registration used to be a `register("User", User)` line next to each subclass, and forgetting
+it is invisible: `Model.$exec` raises `UnregisteredPolicyClassError` when a class carrying policies
+is *queried* while a different class owns its name, but that guard is narrower than it sounds and
+the gap runs the wrong way. **A model you only ever read through an `include` never trips it** — the
+include resolves the name to the unpolicied base, nothing diverges from nothing, and the rows come
+back unscoped with no error. That is the shape a membership or pivot model usually has, and exactly
+the kind that carries a tenant scope.
+
+Deriving the registration from the module removes the mistake instead of reporting it. The name is
+not a string you retype; it is `$schema.name`, which the generator wrote and your subclass inherits.
+
+`register` still exists and still works, for a class you want registered from a module you are not
+handing to the Kernel. And you can call the same thing directly — `registerModels(generated,
+models)` from `gemi/orm` — in a script or a test that boots no Kernel.
+
+Two classes in **one** module claiming the same model raise `AmbiguousModelRegistrationError`,
+unless one extends the other. A generated base and the subclass over it are not ambiguous — the
+subclass wins. Nor are a class and a typed view over it, *as long as the view adds no policies of
+its own*: the class wins and the view inherits its policies, so which one the registry holds changes
+nothing. Two siblings both written for the same model are ambiguous, and `register` is how you say
+which.
+
+Across **different** modules there is no election at all — the later one simply wins. What catches a
+bad outcome there is the audit that runs at the end, so a conflict between two policied classes is
+still refused; two unpolicied ones resolve by import order, which changes no query's scope.
+
+**A view that carries its own policies is refused rather than chosen between.** The registry holds
+one class per name, so registering `AdminUser` would apply its narrowing to every nested read of
+`User`, and leaving `User` registered would skip `AdminUser`'s policies entirely — both silent. Keep
+such a class out of the modules you hand to `Kernel.models` and query it directly where you want the
+narrowing:
+
+```ts
+// app/models/views/AdminUser.ts — not exported from app/models/index.ts
+export class AdminUser extends User {
+  static $policies: UserPolicy[] = [{ scope: () => ({ archived: false }) }]
+}
+
+const rows = await AdminUser.findMany({ … })   // narrowed, at the call site
+```
+
+If it is not a view but the model itself, move the policies onto the class the name resolves to and
+every subclass inherits them everywhere.
+
+#### What this still cannot see
+
+Modules you hand it. A policied class in a file that no barrel re-exports is invisible to the
+Kernel exactly as it was to a forgotten `register` line — which is the reason for the barrel: one
+file to add a model to, and a missing line in it is a thing you can notice.
+
+`assertPoliciesRegistered` is the same audit without the registration, for running over modules the
+Kernel does not own:
 
 ```ts
 import { assertPoliciesRegistered } from "gemi/orm"
 import * as generated from "@/app/models/generated"
-import * as models from "@/app/models/User"
+import * as models from "@/app/models"
 
 assertPoliciesRegistered(generated, models)
 ```
 
-Same rule, triggered differently: it reads the classes out of the module namespace, so a policied
-class that nothing queries is still visible. In a test it closes the hole for CI at no runtime cost;
-at boot it turns a deploy of the mistake into a failure to start rather than a quiet cross-tenant
-read. It can only see modules you hand it, so it does not replace the `register` line either.
+In a test it closes the hole for CI at no runtime cost.
 
 ## Querying
 
@@ -921,6 +1016,34 @@ migration whose transactions are legitimately long.
 The warning is development-only and never fires in production, whatever the config says. It is a
 diagnostic, not a limit: nothing cancels a long transaction.
 
+### Unit-testing code that opens one
+
+`Model.transaction` resolves its connection ambiently, out of the `AsyncLocalStorage` scope — which
+is exactly what lets `audit(user)` above join the transaction without being handed anything. The
+same property means there is no client to inject: a unit test of a function that crosses a
+transaction has to either boot a Kernel or replace the model module.
+
+Replacing the module is usually what you want, because the point of the test is the branching
+around the write rather than the SQL:
+
+```ts
+import { vi } from "vitest"
+
+vi.mock("@/app/models", () => ({
+  User: { create: vi.fn(), findFirst: vi.fn() },
+  transaction: (cb: () => unknown) => cb(),   // run the callback, open nothing
+}))
+```
+
+`transaction: (cb) => cb()` is the whole trick: the callback runs inline, the assertions are about
+what it called, and no connection is involved. `vi.spyOn` on the model statics does the same job
+when you want the real module for everything else.
+
+What this does not cover is the behaviour that only a real transaction has — the rollback, the
+savepoint, the Postgres abort described above. Those need a database, and they belong in an
+integration test rather than in a mock. Keep the seam for the control flow and test the transaction
+itself against Postgres.
+
 ## Policies
 
 A model carries a **list** of policies. Every member of a policy is optional; a model with none
@@ -1172,6 +1295,7 @@ Every failure is a typed error from `gemi/orm`, not a driver string.
 | `UnknownFieldError` / `UnknownRelationError` | A name that is not on the model. |
 | `UnsupportedQueryError` | A query shape the compiler does not implement — with what and why. |
 | `ModelNotRegisteredError` / `UnregisteredPolicyClassError` | Registry problems (see [Setup](#your-model-class)). |
+| `AmbiguousModelRegistrationError` | `registerModels` found two unrelated classes in one module claiming the same model, and refused to pick (see [Setup](#your-model-class)). |
 | `RelationDepthExceededError` | An include tree past `MAX_RELATION_DEPTH`. |
 | `ParameterLimitError` | A statement exceeding the dialect's parameter ceiling. |
 | `MissingRequiredValueError` | A write leaving a required column with no value and no default. |
@@ -1396,11 +1520,13 @@ Two things are worth knowing:
   There is a **third** sentinel, and it belongs only in a filter:
 
   ```ts
-  await User.findMany({ where: { metadata: { equals: Prisma.AnyNull } } })  // both kinds at once
-  await User.findMany({ where: { metadata: { not: Prisma.AnyNull } } })     // neither kind
+  import { AnyNull } from "gemi/orm"
+
+  await User.findMany({ where: { metadata: { equals: AnyNull } } })  // both kinds at once
+  await User.findMany({ where: { metadata: { not: AnyNull } } })     // neither kind
   ```
 
-  `Prisma.AnyNull` asks for *either* empty state, which is usually what you want when you do not
+  `AnyNull` asks for *either* empty state, which is usually what you want when you do not
   care how the row got that way — it compiles to `is null or = 'null'`, one predicate rather than
   an `OR` you assemble yourself. It is a question about rows rather than a value, so writing it
   raises `InvalidArgumentError`, and so does using it under any operator other than `equals` and
