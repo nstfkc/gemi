@@ -82,9 +82,12 @@ describe("the template's model suites", () => {
 
   test(`${HARNESS} still imports a Prisma client, which is why this test exists`, () => {
     const source = readFileSync(join(MODELS, "differential.ts"), "utf8");
-    expect(source).toMatch(
-      new RegExp(`^import .*from "${CLIENT.replace(".", "\\.")}";$`, "m"),
-    );
+    // Every regex metacharacter, not just the first `.`: a string pattern
+    // replaces one occurrence, so `./prisma-client/index` would have kept an
+    // unescaped `.` — which matches any character and leaves the test passing
+    // for the wrong reason.
+    const literal = CLIENT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    expect(source).toMatch(new RegExp(`^import .*from "${literal}";$`, "m"));
   });
 
   test.each(suites.map(({ file, source }) => [file, source] as const))(

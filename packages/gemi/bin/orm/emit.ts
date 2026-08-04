@@ -460,15 +460,55 @@ function fieldTs(
 }
 
 /**
+ * The columns that hold a relation's foreign key, on this side of it.
+ *
+ * `RelationSchema.from` is empty on the side that does not own the key, so this
+ * is exactly the local columns some relation writes.
+ */
+function relationBackedColumns(schema: ModelSchema): Set<string> {
+  const columns = new Set<string>();
+  for (const relation of Object.values(schema.relations)) {
+    for (const field of relation.from) columns.add(field);
+  }
+  return columns;
+}
+
+/**
  * Whether `create` may omit this column.
  *
- * Three reasons, none of them visible in the column's *type*, which is why the
+ * Four reasons, none of them visible in the column's *type*, which is why the
  * descriptor carries the split rather than leaving `orm/types.ts` to guess: the
- * column is nullable, the database supplies a default, or it is an `@updatedAt`
- * that the ORM stamps.
+ * column is nullable, the database supplies a default, it is an `@updatedAt`
+ * that the ORM stamps, or **a relation can supply it**.
+ *
+ * That fourth one is the difference between offering `connect` and offering it
+ * usefully. `CreateInput` is the scalar half intersected with the relation half,
+ * so a required foreign key stayed required no matter which spelling the caller
+ * chose — and Prisma's canonical form,
+ *
+ *     SocialAccount.create({ data: { …, user: { connect: { id: 1 } } } })
+ *
+ * did not compile, because `userId` was missing from an intersection that
+ * demanded it. Prisma avoids this by having two types, `CreateInput` with
+ * `connect` and `UncheckedCreateInput` with the raw column, and accepting either
+ * at the operation. Here both are offered on one type, so the column has to be
+ * optional for the pair to be a real choice.
+ *
+ * The genuinely-missing case is still refused, just later: `compile/write.ts`
+ * raises `MissingRequiredValueError` naming the column when neither spelling
+ * supplies it. It has to do that regardless — types are erased, and an untyped
+ * caller reaches the compiler with the column absent either way.
  */
-function optionalOnCreate(field: FieldSchema): boolean {
-  return field.nullable || field.default !== undefined || field.isUpdatedAt;
+function optionalOnCreate(
+  field: FieldSchema,
+  relationBacked: Set<string>,
+): boolean {
+  return (
+    field.nullable ||
+    field.default !== undefined ||
+    field.isUpdatedAt ||
+    relationBacked.has(field.name)
+  );
 }
 
 /** Prisma field names are `[A-Za-z][A-Za-z0-9_]*`, but emit defensively. */
@@ -510,9 +550,11 @@ ${fields.join("\n")}
  * runtime does.
  */
 function createType(schema: ModelSchema, enums: EnumMap): string {
+  const relationBacked = relationBackedColumns(schema);
   const fields = Object.values(schema.fields).map(
     (field) =>
-      `  ${propertyName(field.name)}${optionalOnCreate(field) ? "?" : ""}: ` +
+      `  ${propertyName(field.name)}` +
+      `${optionalOnCreate(field, relationBacked) ? "?" : ""}: ` +
       `${fieldTs(field, enums, "write")};`,
   );
 
@@ -531,9 +573,16 @@ function relationsType(schema: ModelSchema): string {
       `nullable: ${relation.nullable}; target: ${relation.model}Types };`,
   );
 
+  // `Record<never, never>` — no keys — and emphatically not
+  // `Record<string, never>`, which is `{ [k: string]: never }`. That gave a
+  // relation-less model's `WhereInput` an index signature of
+  // `RelationFilter<never>`, which every *scalar* key then had to satisfy too:
+  // the template's `Membership` could not be filtered, `findUnique`d, updated or
+  // deleted by its own primary key. `select` and `orderBy` happened to survive,
+  // so it read as partly working rather than broken. See `orm/types.ts`.
   if (relations.length === 0) {
     return `
-export type ${schema.name}Relations = Record<string, never>;
+export type ${schema.name}Relations = Record<never, never>;
 `;
   }
 
@@ -981,6 +1030,11 @@ export function emitModelsFile(
   schemas: ModelSchema[],
   enums: EnumMap = {},
 ): string {
+  // A schema with no models needs none of them, and importing twenty-eight
+  // unused names would be reported by the *app's* linter, in a generated file it
+  // is told not to edit.
+  if (schemas.length === 0) return HEADER;
+
   const imports = [...RUNTIME_IMPORTS];
   if (usesJson(schemas)) {
     imports.push("type JsonInput", "type JsonValue");
@@ -1076,6 +1130,18 @@ export * as schema from "./schema";
  * `buildModelSchemas` deliberately drops them: `FieldSchema.enum` keeps the
  * enum's *name* for the runtime, whose only interest is that the value travels
  * as a string. The members matter to the compiler and to nothing else.
+ *
+ * **`dbName` wins over `name`, and that is a deliberate divergence from
+ * Prisma.** A value-level `@map` — `free @map("FREE")` — gives a member two
+ * spellings: `free` in the schema, `FREE` in the column. Prisma's client
+ * translates between them, so its types say `free`. gemi does not translate: its
+ * decoders hand back the string the database returned, and its encoders bind the
+ * string they were given, so the value an application sees and writes is `FREE`.
+ * Typing these as `name` would describe Prisma's behaviour and mistype gemi's.
+ *
+ * No schema in this repository has a value-level `@map`, so the differential
+ * harness never compares the two — which is exactly why this is written down and
+ * asserted in `emit.test.ts` rather than left to be rediscovered.
  */
 function enumMap(enums: readonly DMMF.DatamodelEnum[]): EnumMap {
   const out: EnumMap = {};

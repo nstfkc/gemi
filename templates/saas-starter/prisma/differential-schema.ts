@@ -16,7 +16,9 @@
  *
  * The output is committed, like the ORM artifacts and for the same reason: CI
  * needs no codegen step before it can read the schema, and the diff stays
- * reviewable. `differential-schema.test.ts` fails if it falls out of date.
+ * reviewable. `packages/gemi/orm/app-dependencies.test.ts` fails if it falls out
+ * of date — it lives in the other package, because the invariant it guards is
+ * the ORM's, and it imports `SCHEMAS` and `derive` from this file.
  *
  *     bun prisma/differential-schema.ts
  */
@@ -88,8 +90,15 @@ generator client {
  * It would also be redundant: `bunx prisma generate` in the template already
  * emits those artifacts from `schema.prisma`, which is the run that proves the
  * client-free path works.
+ *
+ * **The comment lines immediately above it go too.** They explain why the
+ * source has no `generator client` — "There is no `generator client` block, and
+ * that is the point" — and carrying that into a file whose first declaration
+ * *is* a client block leaves a committed artifact asserting the opposite of its
+ * own contents, twelve lines apart. These files are marked `Do not edit.`, so
+ * `derive` is the only place the contradiction can be fixed.
  */
-const GEMI_BLOCK = /^generator\s+gemi\s*\{[^}]*\}\n?/m;
+const GEMI_BLOCK = /(?:^\/\/[^\n]*\n)*^generator\s+gemi\s*\{[^}]*\}\n?/m;
 
 export function derive(
   contents: string,

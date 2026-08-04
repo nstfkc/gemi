@@ -427,8 +427,8 @@ export type LedgerEntryScalars = {
 
 export type LedgerEntryCreateScalars = {
   id?: number;
-  tenantId: number;
-  ledgerCode: string;
+  tenantId?: number;
+  ledgerCode?: string;
   amount: number;
   memo?: string | null;
 };
@@ -616,7 +616,7 @@ export type MagicLinkTokenCreateScalars = {
   createdAt?: Date;
 };
 
-export type MagicLinkTokenRelations = Record<string, never>;
+export type MagicLinkTokenRelations = Record<never, never>;
 
 export type MagicLinkTokenUnique = { id: number } | { token_email: { token: string; email: string } } | { pin_email: { pin: string; email: string } };
 
@@ -795,7 +795,7 @@ export type MembershipCreateScalars = {
   createdAt?: Date;
 };
 
-export type MembershipRelations = Record<string, never>;
+export type MembershipRelations = Record<never, never>;
 
 export type MembershipUnique = { organizationId_userId: { organizationId: number; userId: number } };
 
@@ -1160,7 +1160,7 @@ export type OrganizationInvitationScalars = {
 export type OrganizationInvitationCreateScalars = {
   id?: number;
   publicId?: string;
-  organizationId: number;
+  organizationId?: number;
   email: string;
   role?: number;
   acceptedAt?: Date | null;
@@ -1344,7 +1344,7 @@ export type PasswordResetTokenScalars = {
 export type PasswordResetTokenCreateScalars = {
   id?: number;
   token: string;
-  userId: number;
+  userId?: number;
   createdAt?: Date;
 };
 
@@ -1899,7 +1899,7 @@ export type SocialAccountScalars = {
 
 export type SocialAccountCreateScalars = {
   id?: number;
-  userId: number;
+  userId?: number;
   provider: string;
   providerId: string;
   username?: string | null;

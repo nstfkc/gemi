@@ -36,14 +36,27 @@
 //
 // and every signature on `UserModel` is a combinator applied to it.
 //
-// ## Recursion is bounded by the caller's literal
+// ## What bounds the recursion, and what does not
 //
-// `Payload` recurses through `select` and `include`, which reads like an
-// unbounded recursion over a cyclic relation graph and is not: a relation is
-// only descended into when the caller's own argument object names it, so the
-// depth of the instantiation is the depth of the literal that was written. A
-// self-referential `include: { manager: true }` bottoms out immediately, because
-// `true` means "that model's scalars" and asks for nothing further.
+// **`Payload` is bounded by the caller's literal.** It recurses through `select`
+// and `include`, which reads like an unbounded walk over a cyclic relation graph
+// and is not: a relation is descended into only when the caller's own argument
+// object names it, so the depth of the instantiation is the depth of the literal
+// that was written. A self-referential `include: { manager: true }` bottoms out
+// immediately, because `true` means "that model's scalars" and asks for nothing
+// further.
+//
+// **The input types are not, and it is worth being exact about why they are
+// still finite.** `WhereInput`, `OrderByInput`, `SelectInput` and `IncludeInput`
+// name each other and themselves through the relation graph unconditionally —
+// `WhereInput<User>` mentions `WhereInput<Account>`, which mentions
+// `WhereInput<User>` again, whatever the caller passes. They typecheck because
+// TypeScript defers resolution of an object type's properties until something
+// asks for one, not because anything bounds them. That is a real property and a
+// stable one, but it is a different property, and a change that made any of them
+// eagerly evaluated — mapping over `keyof` at the top level, say, or wrapping one
+// in a conditional that has to resolve the whole shape — would turn a cyclic
+// schema into an instantiation-depth error rather than a slow compile.
 
 import type {
   AnyNullValue,
@@ -72,8 +85,19 @@ export type JsonValue =
  * value `null` — and a bare `null` is not among them: the choice is the whole
  * reason they exist, and guessing between them is what silently stores the
  * wrong one of two legal answers.
+ *
+ * **`null` is excluded explicitly**, because `JsonValue` contains it. That is
+ * correct of `JsonValue` — a `Json` column really can hold the JSON value
+ * `null`, and a nested one is untouched by this: `{ a: [1, null] }` still
+ * type-checks. It is only the *top-level* `null` that has to go, which is the
+ * distinction Prisma draws too with `InputJsonValue`. Without the `Exclude`,
+ * `metadata: null` compiled while `docs/orm.md` said in this same change that
+ * it does not.
  */
-export type JsonInput = JsonValue | DbNullValue | JsonNullValue;
+export type JsonInput =
+  | Exclude<JsonValue, null>
+  | DbNullValue
+  | JsonNullValue;
 
 /**
  * Is this column a `Json` one?
@@ -257,6 +281,27 @@ type BaseFilter<V> = {
   notIn?: NonNullable<V>[];
 };
 
+/**
+ * The identity for intersection: an object type with no keys.
+ *
+ * **Not `Record<string, never>`**, which is not an empty object — it is
+ * `{ [k: string]: never }`, an index signature whose every value is `never`. It
+ * poisons every sibling property of an intersection, because each of them then
+ * has to satisfy the index signature too. `NestedFilter` is
+ * `BaseFilter & OrderingFilter & StringFilter`, and on any non-`String` column
+ * at least one of the latter two takes its false branch — so `equals`, `not`,
+ * `in`, `notIn`, `gt`, `gte` and the rest all had to be assignable to `never`,
+ * and the operator-object form was gone from every `Int`, `Float`, `BigInt`,
+ * `DateTime`, `Boolean` and `Bytes` column. Only the bare-value shorthand and
+ * `String`'s own operators survived.
+ *
+ * `Record<never, never>` says what was meant: no keys at all. `keyof` it is
+ * `never`, so it contributes nothing to the intersection and costs none of the
+ * precision the split exists for — `{ id: { contains: "x" } }` on an `Int` is
+ * still an error, as `filters.test-d.ts` asserts.
+ */
+type NoKeys = Record<never, never>;
+
 type OrderingFilter<V> = NonNullable<V> extends Comparable
   ? {
       lt?: NonNullable<V>;
@@ -264,7 +309,7 @@ type OrderingFilter<V> = NonNullable<V> extends Comparable
       gt?: NonNullable<V>;
       gte?: NonNullable<V>;
     }
-  : Record<string, never>;
+  : NoKeys;
 
 type StringFilter<V> = NonNullable<V> extends string
   ? {
@@ -274,7 +319,7 @@ type StringFilter<V> = NonNullable<V> extends string
       /** Postgres only; `SqliteDialect` refuses it, naming the dialect. */
       mode?: "default" | "insensitive";
     }
-  : Record<string, never>;
+  : NoKeys;
 
 type NestedFilter<V> = BaseFilter<V> & OrderingFilter<V> & StringFilter<V>;
 
@@ -299,8 +344,14 @@ type ListFilter<E> = {
  *
  * `AnyNull` is accepted here and nowhere else: it asks "either kind of empty",
  * which is a question rather than a value, and the write paths refuse it.
- * A bare `equals: null` is not accepted, matching the compiler — a `Json`
- * column has two empty states and the filter has to say which.
+ *
+ * **`equals: null` is refused at runtime and cannot be refused here.** A `Json`
+ * column has two empty states and the filter has to say which, so the compiler
+ * raises `InvalidArgumentError` naming the explicit form — but the type cannot
+ * express it, because `JsonValue` minus `null` still contains
+ * `{ [key: string]: JsonValue }`, and `{ equals: null }` is itself a valid JSON
+ * object. Prisma has the same gap. Stated rather than papered over: a comment
+ * claiming the type rejects it would be read as a guarantee.
  */
 type JsonFilter = {
   equals?: JsonValue | DbNullValue | JsonNullValue | AnyNullValue;

@@ -46,11 +46,6 @@ generator client {
 // one schema, so pushing this one at `gemi` would drop every table the other
 // schema owns.
 
-// No `generator client` here, for the same reason `schema.prisma` has none: a
-// schema an application could start from must not require `@prisma/client`.
-// The scalar-list suite does compare against Prisma, and gets its client from
-// `postgres-only-differential.prisma` — this file with the block below swapped
-// for a client one, derived by `prisma/differential-schema.ts`.
 
 datasource db {
   provider = "postgresql"
