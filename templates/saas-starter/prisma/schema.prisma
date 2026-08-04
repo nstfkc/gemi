@@ -6,6 +6,15 @@ generator client {
   previewFeatures = ["driverAdapters"]
 }
 
+// Runtime model metadata and the typed model bases the gemi ORM executes
+// queries through. Declared after `client` on purpose: the emitted bases
+// type-import `@prisma/client`, and Prisma runs generators in declaration
+// order. The output is committed.
+generator gemi {
+  provider = "gemi-orm-generator"
+  output   = "../app/models/generated"
+}
+
 datasource db {
   provider = "sqlite"
   url      = env("DATABASE_URL")
@@ -13,10 +22,16 @@ datasource db {
 
 model Organization {
   id          Int                      @id @default(autoincrement())
-  publicId     String                   @unique @default(cuid())
+  publicId    String                   @unique @default(cuid())
   name        String
   logoUrl     String?
   description String?
+  // An enum exists here for the same reason Json and Bytes do: so the
+  // differential harness compares one against Prisma. Prisma enums travel as
+  // strings on the wire, and the generator maps them to `String` while
+  // recording the enum's name — that mapping had a unit test and no end-to-end
+  // check on either dialect.
+  plan        OrganizationPlan         @default(free)
   users       User[]
   accounts    Account[]
   invitations OrganizationInvitation[]
@@ -32,6 +47,20 @@ model OrganizationInvitation {
   acceptedAt     DateTime?
 
   createdAt DateTime @default(now())
+
+  // Every foreign key is indexed, because every relation read goes through one.
+  //
+  // Prisma declares no index for a relation's foreign key on either dialect, and
+  // the ORM's relation work leans on it twice over: a batched include filters
+  // the child by `in (<parent keys>)`, and `_count`, relation filters and
+  // relation orderings each run a correlated subquery **once per parent row**.
+  // Without an index that subquery is a scan of the child table per row.
+  //
+  // Measured on 100 parents in `plans/orm/benchmarks.md`: one index line is
+  // worth 6.3x on `_count` and 4.0x on an `exists` filter on SQLite, and it
+  // reverses the advice — unindexed, `_count` is 2.4x slower than loading the
+  // children and counting them in JavaScript; indexed, 2.6x faster.
+  @@index([organizationId])
 }
 
 model Account {
@@ -47,6 +76,15 @@ model Account {
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
   deletedAt DateTime?
+
+  // The same two, one relation away: a Json column *nested inside an include*
+  // is the case the lateral strategy flattens through `json_agg`, so it has to
+  // survive `JSON.parse` twice and still match the batched path.
+  settings Json?
+  token    Bytes?
+
+  @@index([organizationId])
+  @@index([userId])
 }
 
 model User {
@@ -66,10 +104,19 @@ model User {
   updatedAt DateTime  @updatedAt
   deletedAt DateTime?
 
+  // Json and Bytes exist here so the differential harness sees them. Every
+  // other scalar the ORM implements was already reachable from this schema;
+  // these two were not, so their encode/decode paths were only ever checked
+  // against fixtures that the same code wrote the expectations for.
+  metadata Json?
+  avatar   Bytes?
+
   accounts           Account[]
   session            Session[]
   passwordResetToken PasswordResetToken[]
   socialAccount      SocialAccount[]
+
+  @@index([organizationId])
 }
 
 model SocialAccount {
@@ -82,7 +129,7 @@ model SocialAccount {
   providerId String
 
   username String?
-  email   String?
+  email    String?
 
   accessToken  String
   refreshToken String
@@ -92,6 +139,7 @@ model SocialAccount {
   updatedAt DateTime @updatedAt
 
   @@unique([username, provider])
+  @@index([userId])
 }
 
 model Session {
@@ -106,6 +154,8 @@ model Session {
   updatedAt         DateTime? @updatedAt
   expiresAt         DateTime
   absoluteExpiresAt DateTime
+
+  @@index([userId])
 }
 
 model PasswordResetToken {
@@ -115,6 +165,41 @@ model PasswordResetToken {
   user   User   @relation(fields: [userId], references: [id])
 
   createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+// An implicit many-to-many, which this schema had none of — so the differential
+// harness could not reach one, on the read side either. The existing coverage
+// (`relations.many-to-many.test.ts`) builds its own tables and asserts against
+// Prisma's *documented* shape rather than a real client; that is adequate for
+// reads and thin for writes, where the failure is a value landing in the wrong
+// column of a join table nobody looks at. See #66.
+model Post {
+  id    Int    @id @default(autoincrement())
+  title String
+
+  tags Tag[]
+}
+
+model Tag {
+  id    Int    @id @default(autoincrement())
+  label String @unique
+
+  posts Post[]
+}
+
+// A compound `@@id`, which nothing else in this schema has: the only other
+// composite key here is SocialAccount's `@@unique([username, provider])`, and
+// that is a different code path. A compound *primary* key was therefore never
+// compared against Prisma, and was unreachable by key at all — see #80.
+model Membership {
+  organizationId Int
+  userId         Int
+  role           Int      @default(2)
+  createdAt      DateTime @default(now())
+
+  @@id([organizationId, userId])
 }
 
 model MagicLinkToken {
@@ -127,4 +212,39 @@ model MagicLinkToken {
 
   @@unique([token, email])
   @@unique([pin, email])
+}
+
+/// A relation that joins on **two** fields (#67).
+///
+/// The shape is the tenant-scoped composite key: every table carries `tenantId`
+/// and every relation joins on `(tenantId, …)`. It is a deliberate schema style
+/// rather than an exotic one, and an application using it could not `include`
+/// at all until composite joins existed — so the differential harness needs a
+/// model with one to compare against Prisma.
+model Ledger {
+  tenantId Int
+  code     String
+  title    String
+
+  entries LedgerEntry[]
+
+  @@id([tenantId, code])
+}
+
+model LedgerEntry {
+  id         Int    @id @default(autoincrement())
+  tenantId   Int
+  ledgerCode String
+  amount     Int
+  memo       String?
+
+  ledger Ledger @relation(fields: [tenantId, ledgerCode], references: [tenantId, code])
+
+  @@index([tenantId, ledgerCode])
+}
+
+enum OrganizationPlan {
+  free
+  pro
+  enterprise
 }

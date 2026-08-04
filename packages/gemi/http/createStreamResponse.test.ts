@@ -33,7 +33,17 @@ describe("createStreamResponse() without a Range", () => {
 
     expect(res.status).toBe(200);
     expect(res.headers.get("Accept-Ranges")).toBe("bytes");
-    expect(res.headers.get("Content-Type")).toBe("text/plain");
+    // The media type, not the whole header. `createStreamResponse` passes
+    // `blob.type` through untouched, so this assertion was really about what
+    // the *runtime's* Blob constructor stores — and Bun changed it: as of
+    // 1.3.14 `new Blob([…], { type: "text/plain" })` reports
+    // `text/plain;charset=utf-8`, where it used to report `text/plain`.
+    //
+    // Passing the charset through is right, so the expectation moved rather
+    // than the code. Matched on the media type so a future parameter change
+    // does not break it a third time; the fallback case below still asserts an
+    // exact string, because there the value is ours rather than the runtime's.
+    expect(res.headers.get("Content-Type")).toMatch(/^text\/plain\b/);
     expect(res.headers.get("Content-Length")).toBe("10");
     expect(res.headers.get("Content-Range")).toBeNull();
     expect(await res.text()).toBe(TEN);

@@ -9,8 +9,6 @@ import { kernelContext } from "../../kernel/context";
 import { RequestContext } from "../../http/requestContext";
 import { Query } from "../../facades/Prefetch";
 import { QueryError } from "../../client/QueryError";
-import { ApiRouterServiceProvider } from "./ApiRouterServiceProvider";
-import { ViewRouterServiceProvider } from "./ViewRouterServiceProvider";
 import type { ServerQueryStore, StreamSummary } from "./ServerQueryStore";
 
 /**
@@ -96,34 +94,34 @@ function TestRoot(props: any) {
   );
 }
 
-class TestApiProvider extends ApiRouterServiceProvider {
-  rootRouter = TestApiRouter;
-}
-
-class TestViewProvider extends ViewRouterServiceProvider {
-  root = TestRoot;
-  rootRouter = TestViewRouter;
-
-  onStreamComplete(_req: any, summary: StreamSummary) {
-    streamCompletions.push({
-      summary,
-      hasKernelScope: Boolean(kernelContext.getStore()),
-      hasRequestCtx: Boolean(RequestContext.getStore()?.req),
-    });
-  }
-
-  onRequestFail(_req: any, error: any) {
-    requestFailures.push({
-      error,
-      hasKernelScope: Boolean(kernelContext.getStore()),
-      hasRequestCtx: Boolean(RequestContext.getStore()?.req),
-    });
-  }
-}
-
 class TestKernel extends Kernel {
-  protected apiRouterServiceProvider = TestApiProvider;
-  protected viewRouterServiceProvider = TestViewProvider;
+  config = {
+    route: {
+      api: {
+        rootRouter: TestApiRouter,
+      },
+      view: {
+        root: TestRoot,
+        rootRouter: TestViewRouter,
+
+        onStreamComplete(_req: any, summary: StreamSummary) {
+          streamCompletions.push({
+            summary,
+            hasKernelScope: Boolean(kernelContext.getStore()),
+            hasRequestCtx: Boolean(RequestContext.getStore()?.req),
+          });
+        },
+
+        onRequestFail(_req: any, error: any) {
+          requestFailures.push({
+            error,
+            hasKernelScope: Boolean(kernelContext.getStore()),
+            hasRequestCtx: Boolean(RequestContext.getStore()?.req),
+          });
+        },
+      },
+    },
+  };
 }
 
 const app = new App({ kernel: TestKernel });

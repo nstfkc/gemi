@@ -1,6 +1,8 @@
 # Configuration
 
-gemi keeps build- and runtime-level configuration in a handful of root files: `gemi.config.ts` for Vite and Bun plugins, `.env` files for secrets and environment variables, an optional `app/preload.ts` for process setup, and `vite.config.mjs` for the front-end build.
+This page is about **build** configuration: `gemi.config.ts` for Vite and Bun plugins, `.env` files for secrets and environment variables, an optional `app/preload.ts` for process setup, and `vite.config.mjs` for the front-end build.
+
+> **`gemi.config.ts` and `app/config/` are unrelated despite the similar names.** `gemi.config.ts` (typed by `defineConfig` from `gemi/config`) configures how your app is *built*. `app/config/*.ts` — `mail.ts`, `auth.ts`, `route.ts`, … — configures the framework *services* your app runs on, and is documented in [Project Structure](./project-structure.md#configuration-appconfig). Runtime config is read through the `Repository` from `gemi/support`; build config is never in the container.
 
 ## `gemi.config.ts`
 

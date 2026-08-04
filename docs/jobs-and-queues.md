@@ -2,14 +2,14 @@
 
 Jobs move slow or non-essential work off the request path. Instead of making a user wait while you call an external API, generate an image, or send a batch of emails, you dispatch a **Job** — it runs in the background through gemi's in-process queue, and the request returns immediately.
 
-You define jobs as classes extending `Job` (from `gemi/services`), register them on your `QueueServiceProvider`, and fire them with `Job.dispatch(...)`.
+You define jobs as classes extending `Job` (from `gemi/services`), list them in `app/config/queue.ts`, and fire them with `Job.dispatch(...)`.
 
 ## Defining a job
 
 A job is a class extending `Job` with a **static `name`** and a `run` method that does the work. The parameters of `run` are your job's payload.
 
 ```typescript
-// app/kernel/providers/jobs/ProcessVideoJob.ts
+// app/jobs/ProcessVideoJob.ts
 import { Job } from "gemi/services";
 
 type Params = {
@@ -61,7 +61,7 @@ Retry behavior: when `run` throws, `onFail` fires and the job is re-queued until
 Call the static `dispatch` method with exactly the arguments your `run` method takes — the call is fully typed against `run`'s signature.
 
 ```typescript
-import { ProcessVideoJob } from "@/app/kernel/providers/jobs/ProcessVideoJob";
+import { ProcessVideoJob } from "@/app/jobs/ProcessVideoJob";
 
 // Inside a controller — returns immediately; the job runs in the background.
 ProcessVideoJob.dispatch({ videoId: video.id });
@@ -69,28 +69,56 @@ ProcessVideoJob.dispatch({ videoId: video.id });
 
 `dispatch` enqueues the job and returns `void` (fire-and-forget) — it does not wait for the job to finish, and the payload is serialized as JSON, so pass plain, serializable data (not class instances or functions). See [Controllers](./controllers.md) for dispatching from request handlers.
 
-## Registering jobs — `QueueServiceProvider`
+## Registering jobs — `app/config/queue.ts`
 
-Every job class must be listed on your app's `QueueServiceProvider` so the queue knows how to construct it by name. You also set the worker `concurrency` here.
+Every job class must be listed in the `queue` config slice so the queue knows how to construct it by name. You also set the worker `concurrency` here.
 
 ```typescript
-// app/kernel/providers/QueueServiceProvider.ts
-import { QueueServiceProvider } from "gemi/services";
-import { ProcessVideoJob } from "./jobs/ProcessVideoJob";
+// app/config/queue.ts
+import { defineQueueConfig } from "gemi/services";
+import { ProcessVideoJob } from "@/app/jobs/ProcessVideoJob";
 
-export default class extends QueueServiceProvider {
-  concurrency = 20; // max jobs running at once (default 1)
-
-  jobs = [ProcessVideoJob];
-}
+export default defineQueueConfig({
+  concurrency: 20, // max jobs running at once (default 1)
+  jobs: [ProcessVideoJob],
+});
 ```
+
+`defineQueueConfig` is an identity helper — it exists only to type the object.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `jobs` | `(new () => Job)[]` | `[]` | All dispatchable job classes. A job not listed here cannot be dispatched. |
 | `concurrency` | `number` | `1` | Maximum number of jobs processed simultaneously. |
 
-See [Kernel & Service Providers](./project-structure.md) for how providers are wired into the kernel.
+The slice is wired into the kernel by name:
+
+```typescript
+// app/kernel/Kernel.ts
+import { Kernel } from "gemi/kernel";
+import queue from "../config/queue";
+
+export default class extends Kernel {
+  config = { queue /* , ...other slices */ };
+}
+```
+
+Behind the scenes the framework's `QueueServiceProvider` reads that slice in its `register()` and binds a `QueueManager` singleton into the container under the token `"queue"`. You never construct or reference the provider yourself — providers register bindings, config configures them.
+
+### Resolving the queue
+
+`QueueManager` is a normal container binding, so you can resolve it directly when you need the manager rather than a job:
+
+```typescript
+import { app } from "gemi/foundation";
+import { QueueManager } from "gemi/services";
+
+app(QueueManager); // typed QueueManager, no cast
+```
+
+See [Project Structure](./project-structure.md) for the full kernel layout.
+
+> **Coming from Laravel:** the vocabulary is the same — a `ServiceProvider` registers bindings into the `Container`, config lives in `app/config`, and facades are static proxies to container-resolved services. Two things are deliberately different: job retry/failure behavior lives on the job class (`maxAttempts`, `onFail`, `onDeadletter`) rather than in a queue driver's config, and per-subsystem hooks across the framework (`filterRecipients`, `onLogCreated`, `detectLocale`, ...) are **config callbacks** in `app/config/*.ts` rather than macros you register from a provider's `boot()`. Use `boot()` only for wiring you cannot express as data — see `app/providers/AppServiceProvider.ts`.
 
 > **Note:** The queue is **in-process and in-memory** — jobs live in the running server's memory and are processed by that same process (or, for `worker` jobs, a Worker thread it spawns). Enqueued jobs do not survive a restart, and there is no cross-machine/distributed queue. Use jobs for best-effort background work (translations, image processing, notifications), not for work that must be durably guaranteed across restarts.
 
@@ -108,5 +136,5 @@ For work that must happen on a **schedule** (nightly reports, hourly cleanups) r
 
 - [Cron](./cron.md) — scheduled, recurring background work.
 - [Controllers](./controllers.md) — dispatching jobs from request handlers.
-- [Kernel & Service Providers](./project-structure.md) — registering `QueueServiceProvider`.
+- [Project Structure](./project-structure.md) — the kernel, `app/config/*.ts`, and service providers.
 - [Configuration](./configuration.md) — environment setup.

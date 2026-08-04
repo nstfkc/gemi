@@ -1,0 +1,237 @@
+import { UnsupportedQueryError } from "./errors";
+import type { ModelSchema } from "./schema";
+
+/**
+ * Row provenance: where a returned object came from, and what it looked like
+ * when it arrived.
+ *
+ * This is the whole of invariant 5, and the reason it is opt-in. Queries return
+ * plain objects — no proxies, no conditional return types, no signature that
+ * changes depending on a flag — so `save(row)` needs somewhere *outside* the row
+ * to remember which model and which primary key it belongs to. A `WeakMap` keyed
+ * on the object is that somewhere, and it is the only shape that does not leak:
+ * the entry goes when the row does.
+ *
+ * **The cost of that choice, stated up front because it is the first thing
+ * anyone will hit.** Provenance is attached to an object *identity*. A row that
+ * is spread (`{ ...user }`), cloned, or round-tripped through JSON is a
+ * different object and has none. `save` raises in that case rather than
+ * guessing, because the guess would be "write every column", and writing a
+ * column the caller never fetched is how a partial select silently reverts data.
+ *
+ * Off by default. Iteration 7 measured shaping at ~55µs per 1000 rows, and a
+ * WeakMap insert plus a snapshot clone per row is a real fraction of that — so
+ * the default path must not pay for a feature most queries do not use.
+ */
+
+export interface Provenance {
+  /** The model name, so `save` compiles against the right schema. */
+  model: string;
+  /** The primary key values, captured at fetch time so a mutation cannot move the row. */
+  key: Record<string, unknown>;
+  /**
+   * The values as fetched, for the columns that were fetched.
+   *
+   * Only those columns: a partially selected row can still be saved, it just
+   * cannot write what it never read. That is the correct behaviour rather than a
+   * limitation — the alternative is writing a default over a column that holds
+   * something else.
+   */
+  snapshot: Record<string, unknown>;
+}
+
+const provenance = new WeakMap<object, Provenance>();
+
+/**
+ * Records provenance for a shaped row.
+ *
+ * Called only when the caller asked for it. The snapshot is a shallow copy of
+ * the row's own scalar keys — shallow because a deep clone would have to decide
+ * what to do with a `Json` column's nested object, and the dirty check compares
+ * with `!==`, so a caller who mutates a nested object *in place* has changed
+ * something this cannot see. That is documented rather than solved: solving it
+ * means structural comparison per row per field, which is exactly the per-row
+ * cost this feature is trying to keep off the default path.
+ */
+export function track(row: object, schema: ModelSchema): void {
+  const snapshot: Record<string, unknown> = {};
+  const key: Record<string, unknown> = {};
+  const source = row as Record<string, unknown>;
+
+  for (const name of Object.keys(source)) {
+    // The schema's own columns and nothing else. That covers the two things a
+    // shaped row carries besides them — an attached relation, and a `_count` —
+    // because neither is a field, and Prisma will not let a relation share a
+    // name with one.
+    //
+    // This used to take a `relationKeys` list and skip those first. It never
+    // changed the outcome: every name it excluded was excluded again on the
+    // next line. What it did do was make the two call sites look like they
+    // disagreed — `wrap` passed `[]`, `$exec` passed the plan's relations — and
+    // give the reason for the exclusion to a line that was not performing it.
+    // An attached child array in a snapshot would make every `save` look dirty,
+    // since the relation loader replaces it; this is the line that prevents
+    // that.
+    if (!(name in schema.fields)) continue;
+    snapshot[name] = source[name];
+  }
+
+  for (const name of schema.primaryKey) {
+    key[name] = source[name];
+  }
+
+  provenance.set(row, { model: schema.name, key, snapshot });
+}
+
+export function provenanceOf(row: unknown): Provenance | undefined {
+  // A fast path, not a correctness guard: `WeakMap.get` on a primitive returns
+  // `undefined` rather than throwing, so removing this line would change
+  // nothing an assertion could see. Recorded because a mutation of it survives
+  // the suite, and a survivor with no test is normally worth chasing — this one
+  // is not.
+  if (row === null || typeof row !== "object") return undefined;
+  return provenance.get(row);
+}
+
+/**
+ * The columns whose value differs from the snapshot.
+ *
+ * Compared with `!==`, which is right for the scalars an encoder produces and
+ * wrong for a `Date` — two Dates for the same instant are different objects. So
+ * `Date` is compared by instant and typed arrays byte-wise, the same three cases
+ * `sameEncoded` in the write compiler handles, and for the same reason: without
+ * it, every save of a row carrying a timestamp would rewrite that timestamp.
+ */
+export function changedFields(
+  row: object,
+  /**
+   * Required, not optional.
+   *
+   * The unfetched-column check below is `save`'s central safety guarantee, and an
+   * optional schema would mean every caller that omitted it silently got the
+   * permissive behaviour — the exact silent drop this function exists to refuse.
+   * That is the same conclusion `render`'s `origin` reached on #49: optional
+   * "reintroduces in miniature the hole this check exists to close".
+   *
+   * The argument is stronger here, because `changedFields` is exported from
+   * `orm/index.ts`. An application computing its own diff would have got the old
+   * semantics from a signature that read as though the schema were an extra, when
+   * what it actually selected was whether the check ran at all.
+   */
+  schema: ModelSchema,
+): Record<string, unknown> {
+  const record = provenanceOf(row);
+  if (!record) return {};
+
+  const source = row as Record<string, unknown>;
+  const changed: Record<string, unknown> = {};
+
+  for (const name of Object.keys(record.snapshot)) {
+    if (!same(source[name], record.snapshot[name])) {
+      changed[name] = source[name];
+    }
+  }
+
+  // A value assigned to a column the query never fetched cannot be seen as
+  // changed, because the diff walks the *snapshot's* keys — so it would be
+  // silently dropped. That is the divergence class this codebase refuses
+  // everywhere else: `save` returning happily having done less than it was told.
+  //
+  // The detection is exact rather than heuristic. A key on the row that the schema
+  // declares as a field, is not a relation, and is *absent from the snapshot* can
+  // only be an assignment to something unfetched — a fetched column is in the
+  // snapshot by construction.
+  assertNothingUnfetched(row, record, schema);
+
+  return changed;
+}
+
+function assertNothingUnfetched(
+  row: object,
+  record: Provenance,
+  schema: ModelSchema,
+): void {
+  for (const name of Object.keys(row as Record<string, unknown>)) {
+    if (name in record.snapshot) continue;
+    if (!(name in schema.fields)) continue;
+    if (name in schema.relations) continue;
+
+    throw new UnsupportedQueryError(
+      `save.${name}`,
+      schema.name,
+      "save",
+      `'${name}' was not fetched by the query this row came from, so save ` +
+        `cannot write it — the diff has nothing to compare it against, and ` +
+        `writing it blind would overwrite whatever the column actually holds. ` +
+        `Select '${name}' in the query, or update it explicitly with ` +
+        `${schema.name}.update({ where, data: { ${name} } }).`,
+    );
+  }
+}
+
+/** Replaces the snapshot after a successful save, so a second save is a no-op. */
+export function resnapshot(row: object, written: Record<string, unknown>): void {
+  const record = provenanceOf(row);
+  if (!record) return;
+
+  for (const name of Object.keys(written)) {
+    record.snapshot[name] = written[name];
+  }
+}
+
+/**
+ * Raised when `save` is handed something it cannot place.
+ *
+ * Separate from a generic error because the two causes have different fixes and
+ * both are easy to hit: the query did not ask for tracking, or the object is a
+ * copy of one that did.
+ */
+export function untracked(row: unknown, model: string): UnsupportedQueryError {
+  const shape =
+    row === null || row === undefined
+      ? String(row)
+      : Array.isArray(row)
+        ? "an array"
+        : typeof row;
+
+  return new UnsupportedQueryError(
+    "save",
+    model,
+    "save",
+    `This object carries no provenance, so there is no row to update. Either ` +
+      `the query did not ask for it — pass { track: true } as the second ` +
+      `argument, e.g. ${model}.findUnique({ where }, { track: true }) — or this ` +
+      `is a copy of a row that did. Provenance is keyed on object identity, so ` +
+      `spreading, cloning or JSON round-tripping a row loses it. ` +
+      `(Received ${shape}.)`,
+  );
+}
+
+/** Test-only: provenance is a module-level WeakMap, and a test may need it empty. */
+export function isTracked(row: unknown): boolean {
+  return provenanceOf(row) !== undefined;
+}
+
+/**
+ * Value equality for the dirty check. See `changedFields` for why it is not
+ * `!==`.
+ */
+function same(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+
+  if (a instanceof Date && b instanceof Date) {
+    return a.getTime() === b.getTime();
+  }
+
+  if (ArrayBuffer.isView(a) && ArrayBuffer.isView(b)) {
+    const left = new Uint8Array(a.buffer, a.byteOffset, a.byteLength);
+    const right = new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
+    if (left.length !== right.length) return false;
+    for (let i = 0; i < left.length; i++) {
+      if (left[i] !== right[i]) return false;
+    }
+    return true;
+  }
+
+  return false;
+}

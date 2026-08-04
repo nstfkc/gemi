@@ -1,5 +1,5 @@
 import { WelcomeEmail } from "@/app/email/WelcomeEmail";
-import { I18n } from "gemi/facades";
+import { Lang } from "gemi/facades";
 import { ApiRouter, ResourceController, ValidationError, type HttpRequest } from "gemi/http";
 import { Dictionary } from "gemi/i18n";
 import { HomeController } from "../controllers/HomeController";

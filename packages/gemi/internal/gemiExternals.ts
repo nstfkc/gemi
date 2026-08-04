@@ -26,7 +26,6 @@ export const GEMI_EXTERNAL_SPECIFIERS = [
   "gemi/app",
   "gemi/facades",
   "gemi/email",
-  "gemi/runtime",
   "gemi/kernel",
   "gemi/services",
   "gemi/broadcasting",

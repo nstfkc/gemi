@@ -12,7 +12,7 @@ bun run build
 bun run start
 ```
 
-> **Note:** None of the current commands take flags or options — each is a bare subcommand. gemi discovers your project from the current working directory (it expects `app/` and, for tooling commands, `app/kernel/Kernel.ts`).
+> **Note:** Apart from `gemi migrate --dry-run`, the commands take no flags or options — each is a bare subcommand. gemi discovers your project from the current working directory (it expects `app/` and, for tooling commands, `app/kernel/Kernel.ts`).
 
 ## `gemi dev`
 
@@ -58,6 +58,23 @@ gemi start
 It launches `dist/server/server.mjs` in a fresh Bun process with `NODE_ENV=production`, registering the same runtime preloads as `dev` (`gemi/bun/preload`, then `app/preload.ts` if present). The fresh process is required so Bun starts with the production JSX runtime and production React DOM export conditions.
 
 > **Gotcha:** `start` requires a completed [`gemi build`](#gemi-build) — it does not build for you. In deployments you'll typically run migrations first, e.g. `bunx prisma migrate deploy && gemi start`.
+
+## `gemi migrate`
+
+Upgrades an app from the 0.42 service-provider layout to the config + container layout introduced in 0.43, and flags the APIs retired since.
+
+```bash
+gemi migrate --dry-run   # print the plan, write nothing
+gemi migrate             # apply it
+```
+
+It reads `app/kernel/providers/`, turns each recognised provider into an `app/config/<slice>.ts` module, rewrites `app/kernel/Kernel.ts` to declare `config` and `providers`, moves the `ServiceProvider` import from `gemi/services` to `gemi/support`, and applies the facade and service renames (`I18n` → `Lang`, `FileStorage` → `Storage`, `EmailServiceContainer` → `MailManager`, …) across your app.
+
+Anything it cannot translate is left on disk and reported rather than guessed at — unrecognised providers are carried into the new `providers` array with a TODO, and `.use()` call sites are renamed but not rewritten. Run `--dry-run` first, and see [UPGRADE.md](https://github.com/nstfkc/gemi/blob/main/UPGRADE.md) for the full list of what it does and does not handle.
+
+It also annotates APIs retired after 0.43 rather than rewriting them, which is the half that applies to an app already on the config + container layout. Imports of the retired authentication adapters (`IAuthenticationAdapter`, `PrismaAuthenticationAdapter`, `OrmAuthenticationAdapter`) and the `userProvider` field in `app/config/auth.ts` get a TODO naming their replacement — subclass `UserProvider` and rebind `AuthManager` — because the substitute is an app-specific class no codemod can write. Retired fields are marked in place, never deleted: the value is an expression your app wrote, and removing it can strand an import or an instantiation you still need. See [Authentication](./authentication.md#changing-a-query).
+
+> The provider-to-config half only runs when `app/kernel/providers/` exists. Without it that step is skipped and your `Kernel.ts` is left alone — so re-running the command on an already-migrated app is safe, and the retired-API pass above is all it does.
 
 ## `gemi ide:generate-api-manifest`
 

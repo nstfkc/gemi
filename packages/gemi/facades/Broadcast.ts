@@ -1,11 +1,15 @@
-import { KernelContext } from "../kernel/KernelContext";
-import { BroadcastingServiceContainer } from "../services/pubsub/BroadcastingServiceContainer";
+import { BroadcastManager } from "../services/pubsub/BroadcastManager";
 import { applyParams } from "../utils/applyParams";
+import { Facade } from "./Facade";
 
-export class Broadcast {
+export class Broadcast extends Facade {
+  static getFacadeAccessor() {
+    return BroadcastManager;
+  }
+
   static channel<T>(route: T, params: any) {
-    const channel =
-      BroadcastingServiceContainer.use().service.channels[route as any];
+    const broadcast = this.getFacadeRoot();
+    const channel = broadcast.channels[route as any];
     if (!channel) {
       console.error(`Channel ${route} not found`);
       return {
@@ -19,7 +23,7 @@ export class Broadcast {
         compress: boolean = false,
       ) => {
         const topic = applyParams(route as any, params);
-        BroadcastingServiceContainer.use().publish(
+        broadcast.publish(
           topic,
           JSON.stringify({ topic, data: instance.publish(data) }),
           compress,

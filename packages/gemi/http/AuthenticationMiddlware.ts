@@ -2,7 +2,8 @@ import type { HttpRequest } from "./HttpRequest";
 import { Middleware } from "./Middleware";
 import { RequestContext } from "./requestContext";
 import { AuthenticationError } from "./errors";
-import { AuthenticationServiceContainer } from "../auth/AuthenticationServiceContainer";
+import { AuthManager } from "../auth/AuthManager";
+import { app } from "../foundation/app";
 
 export class AuthenticationMiddleware extends Middleware {
   async run(_req: HttpRequest) {
@@ -21,7 +22,7 @@ export class AuthenticationMiddleware extends Middleware {
     let user = requestContextStore.user;
 
     if (!user) {
-      const session = await AuthenticationServiceContainer.use().getSession(
+      const session = await app(AuthManager).getSession(
         accessToken,
         requestContextStore.req.headers.get("User-Agent"),
       );

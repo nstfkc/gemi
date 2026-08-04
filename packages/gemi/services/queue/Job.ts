@@ -1,4 +1,5 @@
-import { QueueServiceContainer } from "./QueueServiceContainer";
+import { app } from "../../foundation/app";
+import { QueueManager } from "./QueueManager";
 
 export class Job {
   static name = "unset";
@@ -19,6 +20,6 @@ export class Job {
       throw new Error("Cannot dispatch a job with no name");
     }
 
-    QueueServiceContainer.use().push(this, JSON.stringify(args));
+    app(QueueManager).push(this, JSON.stringify(args));
   }
 }

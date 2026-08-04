@@ -180,7 +180,17 @@ with `alwaysRun()`, at the cost of a handler run per navigation:
 
 Segments are skipped as a prefix, so `alwaysRun()` on a layout also re-runs every
 layout and view nested inside it. To turn the whole mechanism off for an app, set
-`partialRendering = false` on its `ViewRouterServiceProvider`.
+`view.partialRendering` to `false` in `app/config/route.ts`:
+
+```typescript
+export default defineRouteConfig({
+  view: {
+    rootRouter: RootViewRouter,
+    root: createRoot(RootLayout),
+    partialRendering: false,
+  },
+});
+```
 
 This makes layout handlers the wrong place for an access check. A handler that
 redirects when there is no session stops running once the client is inside the

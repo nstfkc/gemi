@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { assertNoReservedRoutePaths } from "./ViewRouterServiceContainer";
+import { assertNoReservedRoutePaths } from "./ViewRouteDispatcher";
 import { createFlatViewRoutes } from "./createFlatViewRoutes";
 import { ViewRouter } from "../../http/ViewRouter";
 

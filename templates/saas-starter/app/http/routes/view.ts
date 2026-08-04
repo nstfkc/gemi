@@ -1,4 +1,4 @@
-import { Cookie, I18n, Meta, Query, Auth } from "gemi/facades";
+import { Cookie, Lang, Meta, Query, Auth } from "gemi/facades";
 import { type HttpRequest, ViewRouter } from "gemi/http";
 import { PartialRenderController } from "../controllers/PartialRenderController";
 import { SuspenseDemoController } from "../controllers/SuspenseDemoController";

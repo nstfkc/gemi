@@ -1,8 +1,9 @@
 import {
   type ConsumeOptions,
-  RateLimiterServiceContainer,
-} from "../services/rate-limiter/RateLimiterServiceContainer";
+  RateLimiter as RateLimiterManager,
+} from "../services/rate-limiter/RateLimiter";
 import type { RateLimitResult } from "../services/rate-limiter/types";
+import { Facade } from "./Facade";
 
 /**
  * The rate limiter, outside of middleware — for the things a route-level limit
@@ -20,12 +21,16 @@ import type { RateLimitResult } from "../services/rate-limiter/types";
  * }
  * ```
  */
-export class RateLimiter {
+export class RateLimiter extends Facade {
+  static getFacadeAccessor() {
+    return RateLimiterManager;
+  }
+
   /** Records one hit against `key` and reports whether it fits the budget. */
   static consume(
     key: string,
     options: ConsumeOptions = {},
   ): Promise<RateLimitResult> {
-    return RateLimiterServiceContainer.use().consume(key, options);
+    return this.getFacadeRoot().consume(key, options);
   }
 }

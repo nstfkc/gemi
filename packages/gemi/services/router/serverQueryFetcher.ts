@@ -3,7 +3,8 @@ import { HttpRequest } from "../../http/HttpRequest";
 import { RequestContext } from "../../http/requestContext";
 import { kernelContext } from "../../kernel/context";
 import { applyParams } from "../../utils/applyParams";
-import { ApiRouterServiceContainer } from "./ApiRouterServiceContainer";
+import { app } from "../../foundation/app";
+import { ApiRouteDispatcher } from "./ApiRouteDispatcher";
 import type { ServerQueryFetcher } from "./ServerQueryStore";
 
 /**
@@ -16,11 +17,11 @@ import type { ServerQueryFetcher } from "./ServerQueryStore";
  * unit-testable, while this pulls in the whole service-container graph.
  */
 export function createServerQueryFetcher(req: Request): ServerQueryFetcher {
-  // `ServiceContainer.use()` resolves through the kernel's AsyncLocalStorage.
-  // The factory runs inside it (request handling always does), but a
-  // render-discovered query fires from React's streaming render, which the
-  // http server drives *outside* the kernel scope — so capture the store now
-  // and re-enter it around every fetch.
+  // `app()` resolves through the kernel's AsyncLocalStorage. The factory runs
+  // inside it (request handling always does), but a render-discovered query
+  // fires from React's streaming render, which the http server drives
+  // *outside* the kernel scope — so capture the store now and re-enter it
+  // around every fetch.
   const kernelStore = kernelContext.getStore();
   return (patternPath, params, searchParams) => {
     const origin = new URL(req.url).origin;
@@ -34,7 +35,7 @@ export function createServerQueryFetcher(req: Request): ServerQueryFetcher {
     return kernelContext.run(kernelStore, () =>
       RequestContext.run(httpRequest, async () => {
         try {
-          const data = await ApiRouterServiceContainer.use().getRouteData(patternPath);
+          const data = await app(ApiRouteDispatcher).getRouteData(patternPath);
           // A handler that broke (`RequestBreakerError`) comes back as an
           // error `Response`, not a throw. Surface it as the same
           // `QueryError` the browser's fetch would produce — otherwise the

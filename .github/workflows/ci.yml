@@ -1,0 +1,303 @@
+name: CI
+
+# Typecheck, tests and lint for the ORM and the template that exercises it.
+#
+# **Why this exists.** `feat/orm` stopped typechecking at #102 and stayed broken
+# across six merges (#101–#109) with every test green the whole time. The break
+# was a *semantic* merge conflict: #92 added a three-argument
+# `UnsupportedQueryError` while `detail` was optional, #102 made `detail`
+# required and fixed the call sites on its own branch. Neither touched the
+# other's file, so there was no textual conflict, no diff for a reviewer to look
+# at, and nothing that runs on the result of merging them.
+#
+# That is a class a per-PR check cannot cover on its own — it only appears once
+# both are on the same branch — which is why this runs on pushes to the
+# integration branches as well as on pull requests.
+#
+# **Two jobs, one per dialect**, and the split is forced rather than tidy.
+# `@prisma/client` is generated for one provider at a time and the differential
+# harness refuses the dialect it was not generated for, so the two cannot share
+# a checkout. `sqlite` runs the package and the dialect-agnostic suites;
+# `postgres` brings up a `postgres:16` service container and runs the
+# dialect-labelled ones. The reasoning is written out at the `postgres:` job
+# below, next to the `-t postgres` filter it justifies.
+#
+# On a developer's machine there is no service container, and the harness skips
+# its Postgres half loudly when `TEST_POSTGRES_URL` is unset — so a local run is
+# honest about covering SQLite only.
+on:
+  pull_request:
+  push:
+    branches: [main, next, feat/orm]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: sqlite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          # Not pinned to `packageManager` (bun@1.1.3), which is behind what the
+          # repo is actually developed against.
+          bun-version: latest
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      # The ORM generator is resolved by bin name, and in this repo that symlink
+      # points at built output — so `prisma generate` below needs it to exist.
+      - name: Build the binaries
+        run: bun run build:bin
+        working-directory: packages/gemi
+
+      # `bun install` does not leave a usable `gemi-orm-generator` behind, and
+      # `prisma generate` resolves the generator **by bin name**.
+      #
+      # Two behaviours combine. At install time the target does not exist yet —
+      # `dist/bin/` is produced by the step above — so the link is not created.
+      # And a second `bun install` does not fix it: with the lockfile satisfied
+      # it reports "no changes" and relinks nothing, which is measurable
+      # locally by deleting the link and re-running install.
+      #
+      # So the link is made here, after the file exists. Not a CI quirk: a fresh
+      # clone hits exactly this, which is what the first run of this workflow
+      # discovered.
+      # Both places, and each for its own reason. The root one is what
+      # `prisma generate` resolves through; the template one is what
+      # `generated.test.ts` asserts exists, because that is where a real
+      # installation would put it.
+      - name: Link the ORM generator
+        run: |
+          for dir in node_modules templates/saas-starter/node_modules; do
+            mkdir -p "$dir/.bin"
+            ln -sf "$PWD/packages/gemi/dist/bin/orm-generator.js" \
+                   "$dir/.bin/gemi-orm-generator"
+          done
+          echo "$PWD/node_modules/.bin" >> "$GITHUB_PATH"
+
+      # The template's committed artifact is what its suite runs against, and
+      # `generated.test.ts` asserts a second run produces a zero-line diff.
+      - name: Generate the template's model artifact
+        run: bunx prisma generate
+        working-directory: templates/saas-starter
+
+      # The step that would have caught #159. Kept before the tests, because a
+      # type error is cheaper to read than a suite that still passes around it.
+      - name: Typecheck
+        run: bun run typecheck
+        working-directory: packages/gemi
+
+      # Everything except a named red set, rather than a path filter.
+      #
+      # This step used to run `vitest run orm database`, chosen so
+      # `database/DatabaseManager.test.ts` — the ORM's own SQLite foreign-key
+      # pragma test — was not skipped by the narrower `orm`. The reason given
+      # for not running the whole package was that `app/`'s router tests fail on
+      # `feat/orm` and are unrelated (#163), and a board that is red for a
+      # reason nobody here can act on stops being read.
+      #
+      # That reason covers six files. The filter excluded fourteen: `container`,
+      # `foundation`, `http`, `support`, `app/App` and three of the router
+      # tests all pass and were never run — 55 of the package's 61 files are
+      # green, and CI was running 47 of them.
+      #
+      # An inclusive filter also fails silently in one direction: a new test
+      # file outside those two words is skipped and nothing says so. That is how
+      # #201's type assertions went unnoticed. Naming what is broken instead
+      # means anything added is covered by default, and the exclusions have to
+      # be deleted for CI to stop being honest rather than merely left alone.
+      #
+      # The six exclusions #163 carried here are gone, and so is #163. They were
+      # three different problems wearing one label: three superseded copies in
+      # `app/` that nothing imported (deleted), a stale assertion about the live
+      # router (corrected), and a test file written against `bun:test` that this
+      # runner could not even collect (ported, and it found two real things).
+      # `services/router/createFlatViewRoutes.test.ts` was excluded while
+      # passing.
+      #
+      # The whole package runs now. Keep it that way: an exclusion added here is
+      # a failure nobody will look at again, which is the state this comment
+      # replaced.
+      - name: Unit tests
+        run: bun --bun vitest run
+        working-directory: packages/gemi
+
+      - name: Template tests
+        run: bun --bun vitest run app/models
+        working-directory: templates/saas-starter
+        env:
+          TZ: UTC
+
+      # `.test-d.ts` files do not match vitest's default `include`, so the step
+      # above collects none of them: 15 type assertions in `wrap.test-d.ts` and
+      # `aggregate.test-d.ts` ran nowhere, locally or here. They are the only
+      # check on the compile-time half of the ORM's pitch — that `wrap` refuses
+      # a partial row, and that a narrowed `select` narrows the result type.
+      #
+      # `ignoreSourceErrors` because the template's own app code has 276 type
+      # errors unrelated to the ORM. Without it this step reports them and
+      # fails, which is why it could not simply be switched on; with it, the
+      # scope is exactly the assertions in the `.test-d.ts` files.
+      - name: Template type tests
+        run: bun run test:types
+        working-directory: templates/saas-starter
+        env:
+          TZ: UTC
+
+      # Two lints, because the package and the ORM are in different states.
+      #
+      # `bun run lint` is `oxlint` over the whole package: 88 warnings, 0
+      # errors, so it passes — and a new warning in `orm/` would be one of 89.
+      # Kept, because the errors it would catch are worth catching.
+      #
+      # `orm/` is at zero after #165, so it can be held there. `--deny-warnings`
+      # makes that a build failure rather than a line nobody reads. Scoped to
+      # `orm/` deliberately: the rest of the package is not this series' to
+      # clean up, and a check that is red for someone else's reasons stops
+      # being read — the argument #163 makes about the suite.
+      - name: Lint
+        run: bun run lint
+        working-directory: packages/gemi
+
+      - name: Lint the ORM at zero warnings
+        run: bunx oxlint orm --deny-warnings
+        working-directory: packages/gemi
+
+  # The other half of the differential harness, which is the repository's actual
+  # correctness claim: every query run through Prisma *and* through gemi against
+  # one database, compared on rows and on table contents.
+  #
+  # It only runs when `TEST_POSTGRES_URL` is set, and it is loud rather than
+  # silent when it does not — but "loud" only helps someone who is watching, and
+  # until now nothing was. The lateral relation strategy is the Postgres
+  # default, so an entire strategy was exercised only when a person remembered
+  # to export the variable.
+  #
+  # A separate job rather than a step, because the two cannot share a checkout:
+  # `@prisma/client` is generated for one provider at a time, and the harness
+  # refuses to run the dialect it was not generated for rather than skipping.
+  postgres:
+    name: postgres
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: gemi_test
+        ports: ["5432:5432"]
+        # Without this the first query races the server's own startup.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      # No `?schema=public`: Bun's SQL client rejects it as an unrecognised
+      # parameter, which reads as a connection failure rather than a bad URL.
+      TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/gemi_test
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/gemi_test
+      # The scalar-list schema's own database — see the two steps that create
+      # and push it. A second database rather than a second set of tables,
+      # because `prisma db push` reconciles a whole database to one schema.
+      TEST_POSTGRES_LISTS_URL: postgres://postgres:postgres@localhost:5432/gemi_lists
+      TZ: UTC
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - name: Build the binaries
+        run: bun run build:bin
+        working-directory: packages/gemi
+
+      - name: Link the ORM generator
+        run: |
+          for dir in node_modules templates/saas-starter/node_modules; do
+            mkdir -p "$dir/.bin"
+            ln -sf "$PWD/packages/gemi/dist/bin/orm-generator.js" \
+                   "$dir/.bin/gemi-orm-generator"
+          done
+          echo "$PWD/node_modules/.bin" >> "$GITHUB_PATH"
+
+      # The provider decides which client Prisma emits, and the harness compares
+      # against that client. Switched here rather than committed, so the
+      # repository stays on sqlite for everyone else.
+      - name: Point the schema at Postgres
+        run: sed -i 's/^  provider = "sqlite"/  provider = "postgresql"/' prisma/schema.prisma
+        working-directory: templates/saas-starter
+
+      - name: Generate for Postgres
+        run: bunx prisma generate
+        working-directory: templates/saas-starter
+
+      - name: Create the schema
+        run: bunx prisma db push --skip-generate
+        working-directory: templates/saas-starter
+
+      # `prisma/postgres-only.prisma` — the scalar lists (#300), which cannot
+      # live in the schema above because a `String[]` is a *validation error* on
+      # SQLite, and that schema has its provider flipped between dialects. So
+      # they get their own schema, their own client and their own database.
+      #
+      # A separate database because `prisma db push` reconciles a whole database
+      # to one schema: pushed at `gemi_test`, it would drop every table the main
+      # schema owns and the rest of this job would fail with missing relations.
+      #
+      # Skipping this step does not fail anything — `scalar-list.test.ts` gates
+      # on `TEST_POSTGRES_LISTS_URL` — so it would read as a pass. That is
+      # exactly the silence `postgres-suite-selection.test.ts` exists to catch,
+      # and the suite prints a loud warning when it does not run.
+      # `|| true` for the same reason `app/models/postgres.sh` has one: a
+      # re-created database is an error rather than a no-op, so a rerun against
+      # a persisted service container would fail a step that is not the point of
+      # the job. A fresh container makes it succeed the first time either way.
+      - name: Create the scalar-list database
+        run: >-
+          PGPASSWORD=postgres psql -h localhost -U postgres -d gemi_test
+          -c 'CREATE DATABASE gemi_lists' || true
+
+      - name: Generate and push the scalar-list schema
+        run: |
+          bunx prisma generate --schema prisma/postgres-only.prisma
+          bunx prisma db push --schema prisma/postgres-only.prisma --skip-generate
+        working-directory: templates/saas-starter
+        env:
+          LISTS_DATABASE_URL: postgres://postgres:postgres@localhost:5432/gemi_lists
+
+      # `-t postgres` selects the dialect-labelled suites, and it is required
+      # rather than tidy. `@prisma/client` speaks one provider at a time, and
+      # `Generate for Postgres` above makes it Postgres — so the *SQLite* half
+      # of each differential suite **fails** rather than skips, deliberately,
+      # so a client generated for the wrong provider cannot look like a pass.
+      # `TEST_POSTGRES_URL` decides only whether the Postgres half runs at all;
+      # the generate step is what decides which half dies. So an unfiltered run
+      # here exits 1 no matter how many tests pass, and the failures are the
+      # ones the setup above guarantees.
+      #
+      # So this job runs the Postgres-labelled suites and the `sqlite` job runs
+      # the rest. The dialect-agnostic tests are that job's business; nothing is
+      # left uncovered between them — which was false for three files until
+      # #206, and is guarded now by `postgres-suite-selection.test.ts`.
+      #
+      # Serially: the harness truncates shared tables between cases, so parallel
+      # files clobber each other's fixtures. Measured — the parallel run fails
+      # with row-count differences that have nothing to do with the code.
+      - name: Differential and policy suites
+        run: bun --bun vitest run app/models --no-file-parallelism -t postgres
+        working-directory: templates/saas-starter
