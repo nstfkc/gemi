@@ -44,8 +44,8 @@ restore() {
   sed -i '' 's/provider = "postgresql"/provider = "sqlite"/' prisma/schema.prisma || true
   bun prisma/differential-schema.ts >/dev/null 2>&1 || true
   DATABASE_URL="file:./dev.db" npx prisma generate >/dev/null 2>&1 || true
-  DATABASE_URL="file:./dev.db" npx prisma generate \
-    --schema prisma/differential.prisma >/dev/null 2>&1 || true
+  (cd ../.. && DATABASE_URL="file:./dev.db" npx prisma generate \
+    --schema templates/saas-starter/prisma/differential.prisma >/dev/null 2>&1) || true
   if [ -n "$STARTED" ]; then docker rm -f "$CONTAINER" >/dev/null 2>&1 || true; fi
 }
 trap restore EXIT
@@ -74,7 +74,12 @@ DATABASE_URL="$URL" npx prisma db push --skip-generate --accept-data-loss >/dev/
 DATABASE_URL="$URL" npx prisma generate >/dev/null
 # The harness's client. `schema.prisma` has no `generator client` block — an app
 # installs `prisma` alone — so this is the step that produces one.
-DATABASE_URL="$URL" npx prisma generate --schema prisma/differential.prisma >/dev/null
+#
+# From the repository root, because `prisma generate` decides whether
+# `@prisma/client` is installed by reading the *nearest package.json* rather than
+# by resolving the module — and the template's deliberately does not name it.
+(cd ../.. && DATABASE_URL="$URL" npx prisma generate \
+  --schema templates/saas-starter/prisma/differential.prisma >/dev/null)
 
 # The scalar-list schema (#300), in its own database and with its own client.
 # `createdb` is idempotent here only because the failure is swallowed: it exists

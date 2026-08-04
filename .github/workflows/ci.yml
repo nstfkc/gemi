@@ -99,9 +99,20 @@ jobs:
       # Prisma client — generated from `differential.prisma`, which is
       # `schema.prisma` plus a client block and nothing else. Uncommitted, like
       # every generated client in this repo.
+      #
+      # **Run from the repository root, not from the template**, and the reason
+      # is not obvious. `prisma generate` decides whether `@prisma/client` is
+      # installed by reading the *nearest package.json* rather than by resolving
+      # the module: from `templates/saas-starter`, whose manifest deliberately no
+      # longer names it, Prisma concludes it is missing and runs
+      # `npm i @prisma/client`, which fails. The root manifest declares it — it
+      # is a dependency of gemi's test suite — so from here Prisma is satisfied
+      # and resolution finds the hoisted copy.
+      #
+      # The template not declaring it is the point of this whole arrangement, so
+      # the fix is to generate from the package that does.
       - name: Generate the differential harness's Prisma client
-        run: bunx prisma generate --schema prisma/differential.prisma
-        working-directory: templates/saas-starter
+        run: bunx prisma generate --schema templates/saas-starter/prisma/differential.prisma
 
       # The step that would have caught #159. Kept before the tests, because a
       # type error is cheaper to read than a suite that still passes around it.
@@ -271,10 +282,12 @@ jobs:
 
       # The harness's client, which is what the differential suites compare
       # against — and it speaks one provider at a time, which is why it is
-      # generated after the schema was pointed at Postgres.
+      # generated after the schema was pointed at Postgres. Run from the root
+      # for the reason the sqlite job gives at length: Prisma reads the nearest
+      # package.json to decide whether the client is installed, and the
+      # template's deliberately does not name it.
       - name: Generate the differential harness's Prisma client
-        run: bunx prisma generate --schema prisma/differential.prisma
-        working-directory: templates/saas-starter
+        run: bunx prisma generate --schema templates/saas-starter/prisma/differential.prisma
 
       - name: Create the schema
         run: bunx prisma db push --skip-generate
