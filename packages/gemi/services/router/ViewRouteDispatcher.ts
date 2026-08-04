@@ -63,6 +63,12 @@ import { createRoutePayloadStream } from "./routePayloadStream";
  *
  * Wrapped rather than awaited at each call site so the three of them read
  * unchanged.
+ *
+ * The slot is cleared on failure so a rejection is not what gets memoised. A
+ * missing `react-dom` is fatal either way — this is about the diagnostic, not
+ * about recovery: caching the rejected promise would make every later render
+ * report whatever the loader threw the first time, with no stack from the call
+ * that actually failed.
  */
 let serverRenderer:
   | Promise<{ renderToReadableStream: (...args: any[]) => Promise<any> }>
@@ -70,7 +76,10 @@ let serverRenderer:
 
 const renderToReadableStream = async (...args: any[]): Promise<any> => {
   // @ts-ignore
-  serverRenderer ??= import("react-dom/server.browser");
+  serverRenderer ??= import("react-dom/server.browser").catch((error) => {
+    serverRenderer = undefined;
+    throw error;
+  });
   return (await serverRenderer).renderToReadableStream(...args);
 };
 

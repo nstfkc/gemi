@@ -425,4 +425,169 @@ describe("registerModels", () => {
   test("no modules at all is a no-op rather than an error", () => {
     expect(() => registerModels()).not.toThrow();
   });
+
+  /**
+   * A refusal must not leave behind the thing it refused.
+   *
+   * The registry is process-wide and outlives the throw, so registering as we
+   * went meant `registerModels({Ours}, {Theirs})` threw *and* left `"User"`
+   * resolving to `Theirs` — the leaking mapping the audit had just rejected. A
+   * server whose boot dies never notices; a dev server that catches and keeps
+   * serving runs the rest of the process on it.
+   */
+  test("a refused call leaves the registry as it found it", () => {
+    class Established extends UserBase {
+      static $policies = [scope];
+    }
+    class Ours extends UserBase {
+      static $policies = [scope];
+    }
+    class Theirs extends UserBase {
+      static $policies = [other];
+    }
+
+    register("User", Established);
+
+    expect(() => registerModels({ Ours }, { Theirs })).toThrow(
+      UnregisteredPolicyClassError,
+    );
+    expect(registry.get("User")).toBe(Established);
+  });
+
+  test("a successful call commits", () => {
+    class User extends UserBase {
+      static $policies = [scope];
+    }
+
+    registerModels({ UserBase }, { User });
+
+    expect(registry.get("User")).toBe(User);
+  });
+});
+
+/**
+ * A typed view that carries policies of its own.
+ *
+ * `elect` reasons about this shape explicitly — it prefers the least-derived
+ * application class so a view's narrowing does not silently reach every nested
+ * read — and then the audit has to finish the thought, because electing the
+ * base is only half an answer. The registry holds one class per name: register
+ * the view and its narrowing applies to every include of the model; leave the
+ * base registered and the view's policies never run inside one. Both are
+ * silent, so neither is chosen.
+ */
+describe("a view that narrows a model it does not own", () => {
+  const narrow: ModelPolicy = { scope: () => ({ archived: false }) };
+
+  test("is refused when it shares a module with the class it extends", () => {
+    class User extends UserBase {
+      static $policies = [scope];
+    }
+    class AdminUser extends User {
+      static $policies = [narrow];
+    }
+
+    expect(() => registerModels({ UserBase, User, AdminUser })).toThrow(
+      UnregisteredPolicyClassError,
+    );
+  });
+
+  /**
+   * The spelling that used to pass. Election is per module, so a view in a
+   * *later* module met no competition and simply won the name — and the
+   * ancestor skip then read `User` as a base its subclass had replaced and
+   * waved it through. Every nested read of the model quietly acquired the
+   * view's narrowing.
+   */
+  test("is refused when it arrives in a later module", () => {
+    class User extends UserBase {
+      static $policies = [scope];
+    }
+    class AdminUser extends User {
+      static $policies = [narrow];
+    }
+
+    expect(() => registerModels({ UserBase }, { User }, { AdminUser })).toThrow(
+      UnregisteredPolicyClassError,
+    );
+  });
+
+  test("the message names the view and does not ask for a register line", () => {
+    class User extends UserBase {
+      static $policies = [scope];
+    }
+    class AdminUser extends User {
+      static $policies = [narrow];
+    }
+
+    try {
+      registerModels({ UserBase, User, AdminUser });
+      expect.unreachable("expected a throw");
+    } catch (error) {
+      expect((error as UnregisteredPolicyClassError).carries).toBe("narrowing");
+
+      const message = (error as Error).message;
+      expect(message).toContain("AdminUser");
+      expect(message).toContain("Kernel.models");
+      // The old advice produced exactly the every-include narrowing the
+      // election had just refused to produce.
+      expect(message).not.toContain('register("User", AdminUser)');
+    }
+  });
+
+  /**
+   * The line between this and #316's leak. Both are a policied descendant of
+   * the registered class; what separates them is whether the registered class
+   * is the generated base — in which case the subclass is not a view, it is the
+   * model, and giving it the name is the fix.
+   */
+  test("a policied subclass of a generated base still gets the register advice", () => {
+    class Membership extends UserBase {
+      static $policies = [scope];
+    }
+
+    register("User", UserBase);
+
+    try {
+      assertPoliciesRegistered({ Membership });
+      expect.unreachable("expected a throw");
+    } catch (error) {
+      expect((error as UnregisteredPolicyClassError).carries).toBe("queried");
+      expect((error as Error).message).toContain('register("User", Membership)');
+    }
+  });
+
+  test("a view that adds no policies of its own is still fine", () => {
+    class User extends UserBase {
+      static $policies = [scope];
+    }
+    class AdminUser extends User {}
+
+    expect(() =>
+      registerModels({ UserBase, User, AdminUser }),
+    ).not.toThrow();
+    expect(registry.get("User")).toBe(User);
+  });
+});
+
+/**
+ * `elect` turns on `Object.hasOwn(candidate, "$schema")`, and the reader's
+ * question at that line is what happens when it is wrong. A subclass that
+ * redeclares `$schema` reads as a base, every candidate looks generated, and
+ * the least derived wins — the base takes the name over the policied subclass.
+ *
+ * That is #316's arrangement, so what matters is that it does not pass
+ * quietly.
+ */
+describe("when the generated-base test guesses wrong", () => {
+  test("a subclass that redeclares $schema fails loudly rather than leaking", () => {
+    class User extends UserBase {
+      static $schema = user;
+      static $policies = [scope];
+    }
+
+    expect(() => registerModels({ UserBase, User })).toThrow(
+      UnregisteredPolicyClassError,
+    );
+  });
 });

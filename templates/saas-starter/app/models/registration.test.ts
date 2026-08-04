@@ -3,12 +3,13 @@ import {
   assertPoliciesRegistered,
   policiesFor,
   register,
+  registerModels,
   registry,
 } from "gemi/orm";
 import { afterEach, describe, expect, test } from "vitest";
 
 import * as generated from "./generated";
-import * as models from "./User";
+import * as models from "./index";
 
 /**
  * The registration audit, against the template's **real** generated classes.
@@ -38,6 +39,77 @@ describe("the template's own models", () => {
   test("User.ts has replaced the generated base in the registry", () => {
     expect(models.User).not.toBe(generated.UserModel);
     expect(Object.getPrototypeOf(models.User)).toBe(generated.UserModel);
+  });
+
+  /**
+   * **The contract `elect` is built on, checked against the generator rather
+   * than against a stand-in.**
+   *
+   * `registerModels` decides which of several candidates owns a name by asking
+   * whether a class declares `$schema` itself or inherits it: an own property
+   * means the generator emitted it, and an inherited one means an application
+   * wrote it. Every unit test of that rule uses a hand-written
+   * `class UserBase { static $schema = user }`, which is exactly the thing that
+   * cannot tell you whether real generator output still looks like this.
+   *
+   * If `models.ts` ever moved `$schema` — onto the prototype, into a getter, up
+   * into `Model` — `elect` would read every candidate as a base and hand the
+   * name to the generated class over the application's subclass. That fails
+   * loudly rather than leaking, because the audit refuses it a moment later,
+   * but "loudly" is a worse day than this assertion.
+   */
+  test("the generator declares $schema and subclasses inherit it", () => {
+    expect(Object.hasOwn(generated.UserModel, "$schema")).toBe(true);
+    expect(Object.hasOwn(models.User, "$schema")).toBe(false);
+  });
+});
+
+/**
+ * `registerModels` — the mechanism `Kernel.models` runs — against the real
+ * generated namespace and the real barrel.
+ *
+ * The audit above checks a registry somebody else populated. This checks the
+ * thing that populates it, on thirteen generated classes and the application
+ * subclass written over one of them, which is the arrangement every gemi app
+ * has and the one the unit tests can only approximate.
+ */
+describe("registering the template's models the way the Kernel does", () => {
+  const before = new Map(
+    registry.registeredNames().map((name) => [name, registry.get(name)]),
+  );
+
+  afterEach(() => {
+    for (const [name, model] of before) register(name, model);
+  });
+
+  test("every generated model ends up registered under its own name", () => {
+    registerModels(generated, models);
+
+    for (const name of before.keys()) {
+      expect(registry.has(name), name).toBe(true);
+    }
+  });
+
+  /**
+   * The point of the whole mechanism: `User.ts` needs no `register` line for
+   * its class to own the name, because the name comes from `$schema` and the
+   * subclass inherits it.
+   */
+  test("the application subclass takes the name from its generated base", () => {
+    register("User", generated.UserModel);
+
+    registerModels(generated, models);
+
+    expect(registry.get("User")).toBe(models.User);
+  });
+
+  /**
+   * The barrel is what the Kernel is handed, so a model missing from it is
+   * a model the Kernel cannot see. Asserted here so `index.ts` is load-bearing
+   * in a test rather than only in the template's Kernel.
+   */
+  test("the barrel is what carries the application's classes", () => {
+    expect(Object.values(models)).toContain(models.User);
   });
 });
 

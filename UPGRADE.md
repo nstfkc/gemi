@@ -1,3 +1,72 @@
+# Upgrading from 0.50 to 0.51
+
+Two changes need a hand. There is no codemod for either — `bunx gemi migrate` is
+the 0.42→0.43 tool and does not touch any of this.
+
+## Declare your model modules on the Kernel
+
+**Do this even if nothing else in your app changes.** Until you do, a policy on
+a model subclass is skipped inside every nested `include`.
+
+A relation read resolves its target through the ORM registry *by name*. The
+generated `index.ts` registers each base under its model's name, so unless your
+own subclass replaces it there, `User.findMany({ include: { memberships: true } })`
+runs the generated `MembershipModel` — which carries none of the policies you
+wrote on `Membership`. Scoped at the root, unscoped inside the include, with
+nothing to notice it. A model you only ever read *through* an include never
+raises, because the query-time guard compares the class being run against the
+registered one and they are the same class.
+
+Put your model classes in a barrel and list it:
+
+```ts
+// app/models/index.ts
+export { User } from "./User"
+export { Membership } from "./Membership"
+```
+
+```ts
+// app/kernel/Kernel.ts
+import * as generated from "../models/generated"
+import * as models from "../models"
+
+export default class extends Kernel {
+  models = [generated, models]
+}
+```
+
+`boot()` registers every class those modules export under the name its schema
+carries — later modules winning, so each subclass takes the name its generated
+base was holding — and then refuses to start if any policied class lost its name
+to something else. The `register("User", User)` lines become unnecessary; they
+still work, and are still what you write for a class in a module the Kernel is
+not handed.
+
+In development, a Kernel with an empty `models` and a populated registry now
+warns at boot, so an app that skips this hears about it once per start rather
+than never.
+
+See [docs/orm.md](./docs/orm.md#your-model-class) for the full rules, including
+what happens with a typed view that carries its own policies.
+
+## `@prisma/client` is gone
+
+0.51 removed the type-only `@prisma/client` import from the generated model
+bases, so an app installs `prisma` alone. Delete the `generator client` block
+from every `.prisma` file, `bun remove @prisma/client`, and re-run
+`bunx prisma generate`.
+
+Your queries do not change. Two things start failing to compile that used to
+type-check and throw at runtime — `cursor` and `distinct`, which gemi refuses by
+design — and `_sum` / `_avg` are now restricted to numeric columns. If you
+passed `Prisma.DbNull`, `Prisma.JsonNull` or `Prisma.AnyNull`, import them from
+`gemi/orm` instead.
+
+The full detail, including the `Prisma.*` type mapping, is under
+**Setup** in [docs/orm.md](./docs/orm.md#setup).
+
+---
+
 # Upgrading from 0.42 to 0.43
 
 0.43 replaces the 16 hand-written `*ServiceContainer` singletons and the

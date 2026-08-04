@@ -77,45 +77,84 @@ export function assertPoliciesRegistered(
       // `ModelNotRegisteredError`. Not this function's business.
       if (registered === undefined || registered === model) continue;
 
-      // The exported class is an *ancestor* of the registered one — which is
-      // what a generated base is, and why this has to be skipped rather than
-      // reported.
-      //
-      // `generated/index.ts` exports `UserModel` and the application subclasses
-      // it. So the moment a policy lands on `User`, the documented call
-      //
-      //     assertPoliciesRegistered(generated, models)
-      //
-      // walked the generated namespace, found `UserModel` diverging from the
-      // registered `User`, and threw — on the correct arrangement, in exactly
-      // the case the audit exists to protect. The recipe in the docs was
-      // unusable by anything it could have helped, and passed only while every
-      // subclass stayed unpolicied.
-      //
-      // Being *reachable* through a base is not the bug. Querying through one
-      // is, and that is a property of a call site rather than of a module's
-      // export list, so `Model.$exec` keeps it: a real
-      // `UserModel.findMany()` still raises with `carries: "registered"`. What
-      // this audit can see is which class owns a name, and a base its own
-      // subclass replaced has not lost anything.
-      //
-      // Siblings are untouched by this. Two classes extending the same base
-      // where only one is registered are not in each other's prototype chains,
-      // so they still diverge and are still refused.
-      if (descendsFrom(registered, model)) continue;
-
       const ours = policiesFor(model);
       const theirs = policiesFor(registered);
       const diverges =
         ours.length !== theirs.length ||
         ours.some((policy, index) => policy !== theirs[index]);
 
+      // The two classes are on one prototype chain — a base and something
+      // extending it — which is the arrangement almost every application has,
+      // and the one this audit used to get wrong in both directions.
+      //
+      // `policiesFor` accumulates upwards, so a descendant's chain always
+      // contains its ancestor's. What separates the two shapes is therefore
+      // whether the **ancestor** carries anything of its own.
+      if (descendsFrom(registered, model) || descendsFrom(model, registered)) {
+        const ancestor = descendsFrom(model, registered) ? registered : model;
+        const descendant = ancestor === registered ? model : registered;
+
+        if (policiesFor(ancestor).length === 0) {
+          // The ancestor contributes nothing, so the descendant is the first
+          // class to carry a policy: it is not a view over the model, it *is*
+          // the model. A generated base is the usual ancestor here, and a
+          // hand-written intermediate behaves the same way.
+          //
+          // Registered already? Then this is the correct arrangement, and it
+          // has to be skipped rather than reported — it used not to be, and
+          // that is why the documented
+          //
+          //     assertPoliciesRegistered(generated, models)
+          //
+          // threw the moment an application wrote its first policy: it walked
+          // the generated namespace, found `UserModel` diverging from the
+          // registered `User`, and refused the thing it exists to protect.
+          // Being reachable through a base is not the bug; querying through one
+          // is, and that is a property of a call site rather than of a module's
+          // export list, so `Model.$exec` keeps that direction.
+          if (registered === descendant) continue;
+
+          // Neither class carries anything, so which one owns the name changes
+          // no query's scope. An unregistered plain subclass is not a mistake.
+          if (!diverges) continue;
+
+          // Not registered, and it has policies: #316 itself. The policied
+          // class is not the one the name resolves to, so every nested read
+          // runs the ancestor and skips it.
+          throw new UnregisteredPolicyClassError(
+            name,
+            nameOf(registered),
+            nameOf(model),
+            ours.length > 0 ? "queried" : "registered",
+          );
+        }
+
+        // The ancestor carries policies of its own, so it is a registered model
+        // in good standing and the descendant is narrowing it. The registry
+        // holds one class per name: registering the view applies its narrowing
+        // to every nested read, and leaving the ancestor registered skips the
+        // view's policies entirely. Both are silent, so neither is chosen.
+        if (diverges) {
+          throw new UnregisteredPolicyClassError(
+            name,
+            nameOf(ancestor),
+            nameOf(descendant),
+            "narrowing",
+          );
+        }
+
+        // Same chain, same policies — a plain typed view. Nothing to report.
+        continue;
+      }
+
       if (!diverges) continue;
 
+      // Unrelated classes claiming one name. Whichever is registered, the
+      // other's policies are simply not in effect.
       throw new UnregisteredPolicyClassError(
         name,
-        (registered as { name?: string }).name ?? String(registered),
-        (model as { name?: string }).name ?? String(model),
+        nameOf(registered),
+        nameOf(model),
         ours.length > 0 ? "queried" : "registered",
       );
     }
@@ -163,6 +202,17 @@ export function assertPoliciesRegistered(
 export function registerModels(
   ...modules: Array<Record<string, unknown>>
 ): void {
+  // Elected into a local map first, and only committed once the audit passes.
+  //
+  // The registry is process-wide and outlives the throw. Registering as we went
+  // meant a refused call left the arrangement it had just refused installed —
+  // `registerModels({Ours}, {Theirs})` threw, and `"User"` resolved to `Theirs`
+  // afterwards, which is the leaking mapping the audit exists to reject. A
+  // server whose boot dies never notices; a dev server that catches and keeps
+  // serving, or a test harness that continues past the error, serves the rest
+  // of the process from it.
+  const staged = new Map<string, ModelClass>();
+
   for (const module of modules) {
     const candidates = new Map<string, ModelClass[]>();
 
@@ -178,12 +228,31 @@ export function registerModels(
       else existing.push(model);
     }
 
+    // Later modules win, which is what lets an application's classes replace
+    // the generated bases they extend.
     for (const [name, classes] of candidates) {
-      registry.register(name, elect(name, classes));
+      staged.set(name, elect(name, classes));
     }
   }
 
-  assertPoliciesRegistered(...modules);
+  // What the registry said before, so a failed audit can put it back. `register`
+  // has no inverse, so a name that was previously *absent* cannot be made
+  // absent again — it is left pointing at what this call elected. That is the
+  // one residue, and it is the harmless direction: the alternative to a wrong
+  // registration under a name nothing claimed is `ModelNotRegisteredError`, and
+  // the class elected here is the one this module set would have used anyway.
+  const previous = [...staged.keys()]
+    .filter((name) => registry.has(name))
+    .map((name) => [name, registry.get<unknown>(name)] as const);
+
+  for (const [name, model] of staged) registry.register(name, model);
+
+  try {
+    assertPoliciesRegistered(...modules);
+  } catch (error) {
+    for (const [name, model] of previous) registry.register(name, model);
+    throw error;
+  }
 }
 
 /**
@@ -249,7 +318,18 @@ function elect(name: string, classes: ModelClass[]): ModelClass {
  * it, so owning the property is the difference. Nothing has to be added to the
  * generated output for this to hold — it is already how `models.ts` is written,
  * and `Model.$exec` already reads `$schema` off the prototype chain for exactly
- * that reason.
+ * that reason. `registration.test.ts` in the template asserts the contract
+ * against real generator output, because this is the one place a generator
+ * change could quietly invalidate an assumption made here.
+ *
+ * **When it is wrong, it is wrong safely.** A subclass that redeclares
+ * `static $schema` — pointing at a modified schema object, or by copy-paste —
+ * reads as a base here. Every candidate then looks generated, `elect` falls
+ * through to the whole set, and the least derived wins: the base takes the name
+ * over the policied subclass. That is the arrangement #316 is about, so it does
+ * not pass quietly — `assertPoliciesRegistered` runs immediately after and
+ * refuses it, naming both classes. Loud and wrong beats silent and wrong, and
+ * the reader's question at `Object.hasOwn` is exactly this one.
  */
 function isGeneratedBase(candidate: ModelClass): boolean {
   return Object.hasOwn(candidate, "$schema");

@@ -40,6 +40,13 @@ describe("a script that imports the kernel", () => {
       { encoding: "utf8", timeout: 10_000 },
     );
 
+    // Checked first because it is the outcome that looks like the others. A
+    // `bun` that is not on PATH gives `status: null` and `signal: null` and
+    // sets `error` — so without this the assertions below pass, and the
+    // environment problem surfaces as `expected undefined to contain "loaded"`,
+    // which names neither the cause nor the fix.
+    expect(result.error, "could not spawn bun").toBeUndefined();
+
     // `signal` is what a timeout kill shows up as, and it is the failure this
     // test is for — distinguished from an ordinary non-zero exit, which would
     // mean the import itself broke and is a different bug.

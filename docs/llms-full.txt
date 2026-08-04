@@ -2922,6 +2922,11 @@ export default class extends Kernel {
 modules winning — so each subclass takes the name its generated base was holding — and then checks
 that no policied class lost its name to something else.
 
+**Upgrading an app that already has models?** `models` defaults to `[]`, so until you write that
+line your app behaves exactly as it did before — which is the arrangement the rest of this section
+is about. A Kernel with an empty `models` and a populated registry warns at boot in development.
+[UPGRADE.md](https://github.com/nstfkc/gemi/blob/main/UPGRADE.md) has the short version.
+
 **Why the framework does this rather than you.** A relation read resolves its target through the
 registry by name, so whatever is registered under `"User"` is the class that runs inside every
 nested `include`. If that is the generated base while your policy lives on your subclass, the
@@ -2942,10 +2947,33 @@ handing to the Kernel. And you can call the same thing directly — `registerMod
 models)` from `gemi/orm` — in a script or a test that boots no Kernel.
 
 Two classes in **one** module claiming the same model raise `AmbiguousModelRegistrationError`,
-unless one extends the other. A generated base and the subclass over it are not ambiguous (the
-subclass wins), nor are a class and a typed view over it (the class wins, and the view inherits its
-policies either way). Two siblings both written for the same model are, and `register` is how you
-say which.
+unless one extends the other. A generated base and the subclass over it are not ambiguous — the
+subclass wins. Nor are a class and a typed view over it, *as long as the view adds no policies of
+its own*: the class wins and the view inherits its policies, so which one the registry holds changes
+nothing. Two siblings both written for the same model are ambiguous, and `register` is how you say
+which.
+
+Across **different** modules there is no election at all — the later one simply wins. What catches a
+bad outcome there is the audit that runs at the end, so a conflict between two policied classes is
+still refused; two unpolicied ones resolve by import order, which changes no query's scope.
+
+**A view that carries its own policies is refused rather than chosen between.** The registry holds
+one class per name, so registering `AdminUser` would apply its narrowing to every nested read of
+`User`, and leaving `User` registered would skip `AdminUser`'s policies entirely — both silent. Keep
+such a class out of the modules you hand to `Kernel.models` and query it directly where you want the
+narrowing:
+
+```ts
+// app/models/views/AdminUser.ts — not exported from app/models/index.ts
+export class AdminUser extends User {
+  static $policies: UserPolicy[] = [{ scope: () => ({ archived: false }) }]
+}
+
+const rows = await AdminUser.findMany({ … })   // narrowed, at the call site
+```
+
+If it is not a view but the model itself, move the policies onto the class the name resolves to and
+every subclass inherits them everywhere.
 
 #### What this still cannot see
 

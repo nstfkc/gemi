@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { Application } from "../foundation/Application";
 import { Kernel } from "./Kernel";
@@ -66,6 +66,70 @@ describe("boot registers the declared model modules", () => {
     new Kernel().boot();
 
     expect(registry.registeredNames()).toEqual([]);
+  });
+});
+
+/**
+ * The warning that keeps the fix from defaulting to off.
+ *
+ * `models` is `[]` on the base class, so an application upgrading from 0.48 is
+ * in exactly #316's state until somebody edits their Kernel — and the only
+ * place that says to is the Setup section of a page an existing app has already
+ * read. A populated registry with an empty `models` is the signature of that
+ * app precisely: the generated `index.ts` was imported, its bases own every
+ * name, and any policy on a subclass is being skipped inside includes right
+ * now.
+ */
+describe("an app that has models and has not declared them", () => {
+  const warn = () => vi.spyOn(console, "warn").mockImplementation(() => {});
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    delete process.env.NODE_ENV;
+  });
+
+  test("is warned, with the fix in the message", () => {
+    const spy = warn();
+    registry.register("User", UserModel);
+
+    new Kernel().boot();
+
+    expect(spy).toHaveBeenCalledOnce();
+    const message = spy.mock.calls[0]![0] as string;
+    expect(message).toContain("Kernel.models is empty");
+    expect(message).toContain("models = [generated, models]");
+  });
+
+  /** A Kernel with no ORM at all has nothing to be wrong about. */
+  test("an empty registry says nothing", () => {
+    const spy = warn();
+
+    new Kernel().boot();
+
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  test("declaring the modules says nothing", () => {
+    const spy = warn();
+
+    new KernelWith([{ UserModel }]).boot();
+
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  /**
+   * A diagnostic for the author's terminal, not a line in a production log. The
+   * app in this state is running today; the warning is how it learns there is
+   * something to change, and production is not where that conversation happens.
+   */
+  test("production is silent", () => {
+    const spy = warn();
+    process.env.NODE_ENV = "production";
+    registry.register("User", UserModel);
+
+    new Kernel().boot();
+
+    expect(spy).not.toHaveBeenCalled();
   });
 });
 
