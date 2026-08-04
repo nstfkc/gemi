@@ -84,8 +84,10 @@ describe("the ORM runtime", () => {
 // this walked only `orm/`, so it never had a chance to fire.
 //
 // It also cost every consumer a dependency: `@prisma/client` sat in gemi's
-// `dependencies` for that one import, pulling ~95MB and an 18MB query engine
-// into the install graph of a framework that never executes a Prisma query.
+// `dependencies` for that one import, pulling 74MB into the install graph of a
+// framework that never executes a Prisma query. (The often-quoted "18MB query
+// engine" is not in that package — it ships with the `prisma` CLI, which an app
+// keeps, and is copied into whatever client `prisma generate` writes.)
 // Prisma's types belong to the *app* — its generated model bases import them,
 // its `prisma generate` produces them, and its `prisma` CLI must match their
 // version — so gemi declaring the package at all is what put a matched pair

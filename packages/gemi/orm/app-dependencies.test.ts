@@ -18,8 +18,8 @@ import {
  * models.ts` did `import type { Prisma } from "@prisma/client"` and built every
  * signature out of `Prisma.<M>FindManyArgs` and `Prisma.<M>GetPayload<T>`. Being
  * type-only, it was erased at build and never reached a bundle — and it still
- * had to *resolve* when the app typechecked, so every gemi app carried a 95MB
- * package and an 18MB query engine for types it never ran.
+ * had to *resolve* when the app typechecked, so every gemi app carried a 74MB
+ * package, and generated a further 23MB of client, for types it never ran.
  *
  * Nothing outside gemi ever required it. The `prisma` CLI depends on
  * `@prisma/config` and `@prisma/engines`; `migrate dev`, `migrate deploy`,

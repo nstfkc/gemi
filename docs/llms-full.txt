@@ -2787,8 +2787,10 @@ generator gemi {
 
 Earlier releases emitted model bases that did `import type { Prisma } from "@prisma/client"`, so
 the generator refused to run without a `generator client` block. The import was type-only and never
-reached a bundle — but it still had to *resolve*, which put a 95MB package and an 18MB query engine
-into the dependency graph of every gemi app, for types that are erased at build.
+reached a bundle — but it still had to *resolve*, which put a 74MB package into the dependency
+graph of every gemi app, and made it generate a further 23MB of client it never called, for types
+that are erased at build. The `prisma` CLI keeps its own copy of the query engine either way — that
+is what runs your migrations — so what goes away is the client and the duplicate, not the engine.
 
 To upgrade: delete the `generator client` block from `schema.prisma`, run `bun remove @prisma/client`,
 and re-run `bunx prisma generate`. The regenerated `models.ts` imports its types from `gemi/orm`

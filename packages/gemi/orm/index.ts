@@ -14,7 +14,7 @@ export {
 } from "./schema";
 
 // The argument and result types the generated model bases are built from.
-// Previously `@prisma/client`'s, which is what made an app install a 95MB
+// Previously `@prisma/client`'s, which is what made an app install a 74MB
 // package for types that are erased at build — and which described Prisma's
 // query engine rather than gemi's compiler. See `types.ts`.
 export type {

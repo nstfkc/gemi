@@ -27,7 +27,8 @@ import { emitArtifacts } from "./orm/emit";
 // bases it emitted did `import type { Prisma } from "@prisma/client"`, so the
 // client had to exist for the app to typecheck. That single type-only import —
 // erased at build, never present in a bundle — was what made every gemi app
-// install a 95MB package and an 18MB query engine it never called.
+// install a 74MB package, and generate a further 23MB of client, that it never
+// called.
 //
 // Nothing outside gemi ever wanted it. The `prisma` CLI depends on
 // `@prisma/config` and `@prisma/engines` and not on the client; `migrate dev`,

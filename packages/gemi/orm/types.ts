@@ -5,9 +5,10 @@
 // used to `import type { Prisma } from "@prisma/client"` and build every
 // signature out of `Prisma.<M>FindManyArgs`, `Prisma.<M>GetPayload<T>` and
 // friends. That single type-only import is what forced an app to install
-// `@prisma/client` — 95MB and a query engine — for types that are erased at
-// build. Nothing in Prisma's schema, migration or generator machinery needs the
-// package; the import was the whole of the coupling.
+// `@prisma/client` — 74MB, plus the 23MB client `prisma generate` then wrote —
+// for types that are erased at build. Nothing in Prisma's schema, migration or
+// generator machinery needs the package; the import was the whole of the
+// coupling.
 //
 // It was also describing the wrong library. Prisma's argument types describe
 // what *Prisma's* query engine accepts, and gemi executes its own SQL. The two

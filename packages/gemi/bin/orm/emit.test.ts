@@ -507,8 +507,9 @@ describe("buildModelSchemas()", () => {
  * `import type { Prisma } from "@prisma/client"` and built every signature out
  * of `Prisma.<M>FindManyArgs` and `Prisma.<M>GetPayload<T>`. A type-only import
  * is erased at build and never appears in a bundle — but it still has to
- * *resolve* when the app typechecks, so it put a 95MB package and an 18MB query
- * engine into the dependency graph of every gemi app, for types.
+ * *resolve* when the app typechecks, so it put a 74MB package into the
+ * dependency graph of every gemi app, and 23MB of generated client into its
+ * working tree, for types.
  *
  * It also described the wrong library. `Prisma.<M>FindManyArgs` admits `cursor`
  * and `distinct`; gemi refuses both permanently and by design, so the emitted
