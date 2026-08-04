@@ -74,6 +74,7 @@ export {
 } from "./json-null";
 
 export {
+  AmbiguousModelRegistrationError,
   DecodeError,
   MalformedRelationError,
   MissingModelSchemaError,
@@ -139,7 +140,7 @@ export {
   type SqlFragment,
 } from "./sql";
 
-export { assertPoliciesRegistered } from "./registration";
+export { assertPoliciesRegistered, registerModels } from "./registration";
 
 export {
   softDelete,

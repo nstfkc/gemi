@@ -29,17 +29,19 @@ import { UserModel } from "./generated";
 // literal and the parameters are implicitly `any`.
 export class User extends UserModel {}
 
-// Re-registers the name against *this* class, replacing the generated base that
+// Registers the name against *this* class, replacing the generated base that
 // `generated/index.ts` registered.
 //
-// This is not optional bookkeeping. A relation read resolves its target through
-// the registry by name, so whatever is registered under "User" is the class that
-// runs for every nested `include` — and if that is the generated base while your
-// policy lives here, the policy applies to root queries and is skipped inside
-// includes. Scoped one way, unscoped the other, with nothing to notice it.
+// `app/kernel/Kernel.ts` already does this for everything `app/models/index.ts`
+// exports, so the line is no longer what makes the app correct — which is the
+// point of listing the modules there. It is kept because this module is also
+// imported on its own, by tests and by `app/preload.ts`, and in those the
+// registry is whatever the imports made it.
 //
-// `Model.$exec` raises `UnregisteredPolicyClassError` if a class carrying
-// policies is not the registered one, so forgetting this line fails loudly
-// rather than leaking — but the line belongs next to every subclass regardless,
-// because the same reasoning will apply to observers and hooks.
+// What it is protecting against, either way: a relation read resolves its target
+// through the registry by name, so whatever is registered under "User" is the
+// class that runs inside every nested `include`. If that is the generated base
+// while a policy lives here, the policy applies to root queries and is skipped
+// inside includes — scoped one way, unscoped the other, with nothing to notice
+// it.
 register("User", User);

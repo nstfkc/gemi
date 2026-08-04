@@ -2,6 +2,7 @@ import { Application } from "../foundation/Application";
 import type { ServiceProviderConstructor } from "../foundation/Application";
 import type { ServiceToken } from "../container/Container";
 import type { ConfigItems } from "../support/Repository";
+import { registerModels } from "../orm/registration";
 import { Scheduler } from "../services/cron/Scheduler";
 import { BroadcastManager } from "../services/pubsub/BroadcastManager";
 import { QueueManager } from "../services/queue/QueueManager";
@@ -29,6 +30,36 @@ export class Kernel {
    */
   protected providers: ServiceProviderConstructor[] = [];
 
+  /**
+   * The modules holding the app's model classes — normally
+   * `[generated, models]`, the generated namespace and the barrel of subclasses
+   * written over it. Every model class they export is registered under the name
+   * its schema carries, later modules winning, and the whole set is audited
+   * before anything else boots.
+   *
+   * ### Why this is a Kernel field and not a line in a file somewhere
+   *
+   * Registration used to be `register("User", User)` next to each subclass, and
+   * the failure mode of forgetting it is an authorization hole that nothing
+   * reports: a relation read resolves its target by name, so an unregistered
+   * policied subclass leaves the generated base owning the name and every
+   * nested `include` of that model comes back unscoped. No error at the root
+   * either, because `$exec`'s divergence guard begins `registered !== this` and
+   * the base it is running on *is* the registered one. A model only ever read
+   * through an include — a membership, a pivot, the kind that carries a tenant
+   * scope — never trips anything.
+   *
+   * Listing the modules here says it once, in the same place the app already
+   * declares its config slices and providers, and turns the mistake into a
+   * failure to boot rather than a quiet cross-tenant read.
+   *
+   * It sees the modules it is given, so a model class in a file that no barrel
+   * re-exports is still invisible. That is the residual, and it is a smaller
+   * one: a barrel is a place to notice an omission, and thirteen `register`
+   * lines scattered across thirteen files is not.
+   */
+  protected models: Array<Record<string, unknown>> = [];
+
   readonly app = new Application();
 
   /**
@@ -38,6 +69,11 @@ export class Kernel {
    * Phase two is `waitForBoot()`.
    */
   boot() {
+    // Before the container, deliberately. This throws on a model whose policies
+    // would be skipped, and the useful moment for that is the one where nothing
+    // has been constructed and no request can be in flight.
+    if (this.models.length > 0) registerModels(...this.models);
+
     this.app.config.merge(this.config);
     Application.setInstance(this.app);
     this.app.registerMany([...frameworkProviders, ...this.providers]);

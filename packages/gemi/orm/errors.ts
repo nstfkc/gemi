@@ -397,6 +397,41 @@ export class UnregisteredPolicyClassError extends Error {
 }
 
 /**
+ * Thrown when `registerModels` finds two unrelated classes in one module both
+ * claiming the same model name.
+ *
+ * Deriving registration from a module namespace works because the candidates
+ * are normally a chain — a generated base, the application's subclass, perhaps
+ * a typed view over it — and a chain has a least element to elect. Two classes
+ * that extend the same base without extending each other do not: both were
+ * written for this model, and only the author knows which one nested reads
+ * should run.
+ *
+ * Refused rather than guessed at, because both guesses are silent. Picking
+ * either would scope every `include` of the model by one class's policies while
+ * the other's code keeps reading as though its own applied.
+ */
+export class AmbiguousModelRegistrationError extends Error {
+  constructor(
+    public readonly model: string,
+    public readonly candidates: readonly string[],
+  ) {
+    const named = candidates.map((candidate) => `'${candidate}'`).join(", ");
+    super(
+      `Two classes in one module claim the model '${model}' — ${named} — and ` +
+        `neither extends the other, so there is no way to tell which one ` +
+        `nested relation reads should run.\n\n` +
+        `Say which, and registerModels will leave it alone:\n\n` +
+        `    import { register } from "gemi/orm"\n` +
+        `    register("${model}", ${candidates[0]})\n\n` +
+        `A class that is only a typed view over the same rows belongs in a ` +
+        `module you do not hand to registerModels.`,
+    );
+    this.name = "AmbiguousModelRegistrationError";
+  }
+}
+
+/**
  * Thrown when a statement would bind more parameters than the driver's wire
  * protocol can carry.
  *

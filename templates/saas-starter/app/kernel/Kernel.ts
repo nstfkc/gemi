@@ -12,9 +12,19 @@ import route from "../config/route";
 import schedule from "../config/schedule";
 import translation from "../config/translation";
 
+import * as generated from "../models/generated";
+import * as models from "../models";
+
 import AppServiceProvider from "../providers/AppServiceProvider";
 
 export default class extends Kernel {
+  // The generated bases, then the classes written over them — later wins, so
+  // each subclass takes the name its base was holding. `boot()` registers them
+  // and then checks that no policied class lost its name to something else,
+  // which is the mistake that would otherwise show up as an `include` quietly
+  // returning rows nobody was allowed to see.
+  models = [generated, models];
+
   config = {
     auth,
     database,
