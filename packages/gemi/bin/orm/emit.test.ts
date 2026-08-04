@@ -11,6 +11,21 @@ import {
   emitArtifacts,
 } from "./emit";
 
+/**
+ * Every module an emitted file imports, in source order.
+ *
+ * The emitted files are the whole of an app's contact with this generator, so
+ * "what do they resolve" is the property worth asserting — and it has to be read
+ * from the imports rather than from the text, because those files carry comments
+ * that *name* `@prisma/client` in the course of explaining that they no longer
+ * need it.
+ */
+function importsOf(source: string): string[] {
+  return [...source.matchAll(/^\s*(?:import|export)\s[^;]*?from\s+"([^"]+)"/gm)].map(
+    (match) => match[1],
+  );
+}
+
 // A hand-built DMMF rather than a real `prisma generate` run: the emitters are
 // pure functions of it, so the whole generator is testable with no Prisma CLI,
 // no engines and no database.
@@ -479,22 +494,32 @@ describe("buildModelSchemas()", () => {
 });
 
 /**
- * **The generator never imports `@prisma/client`**, which is what makes the
- * generator block's position in `schema.prisma` a matter of convention.
+ * **Neither the generator nor what it emits reaches `@prisma/client`.**
  *
- * `docs/orm.md` used to say the gemi block had to come *after* the `client`
- * one, because "the emitted bases type-import `@prisma/client`, and Prisma runs
- * generators in declaration order". The premise is true and the conclusion does
- * not follow: the emitted import is a **type** import, erased at build, and it
- * only has to resolve when someone typechecks — by which point a single
- * `prisma generate` has produced both outputs whatever order it ran them in.
+ * This is the invariant that lets an app install `prisma` alone, and it has two
+ * halves that used to have different answers.
  *
- * Measured before rewording: swapping the two blocks produces byte-identical
- * `schema.ts`, `models.ts` and `index.ts`.
+ * The generator half was always true: it talks to Prisma over
+ * `@prisma/generator-helper`, the JSON-RPC protocol, and reads the DMMF it is
+ * handed. It never loaded a client.
  *
- * This is the fact the corrected sentence rests on, so it is asserted rather
- * than trusted. If the generator ever does need the client at generation time,
- * the ordering advice comes back — and this fails first.
+ * The *emitted* half was not. `models.ts` carried
+ * `import type { Prisma } from "@prisma/client"` and built every signature out
+ * of `Prisma.<M>FindManyArgs` and `Prisma.<M>GetPayload<T>`. A type-only import
+ * is erased at build and never appears in a bundle — but it still has to
+ * *resolve* when the app typechecks, so it put a 74MB package into the
+ * dependency graph of every gemi app, and 23MB of generated client into its
+ * working tree, for types.
+ *
+ * It also described the wrong library. `Prisma.<M>FindManyArgs` admits `cursor`
+ * and `distinct`; gemi refuses both permanently and by design, so the emitted
+ * types type-checked code that threw. The types now come from `gemi/orm`, where
+ * the argument grammar matches `READ_ARGS` in the compiler.
+ *
+ * Asserted on the emitted text rather than trusted, because the failure is
+ * silent from the app's side: an emitted import would simply resolve, in a
+ * repository that has `@prisma/client` installed for its differential harness,
+ * and nothing would fail until someone scaffolded a new app.
  */
 describe("the generator's own dependencies", () => {
   const sources = ["bin/orm/emit.ts", "bin/orm-generator.ts"];
@@ -512,13 +537,14 @@ describe("the generator's own dependencies", () => {
     expect(imports.some((name) => name.startsWith("@prisma/"))).toBe(true);
   });
 
-  /** ...while the *emitted* base does import it, as a type. */
-  test("the emitted models file imports Prisma as a type only", () => {
+  test("the emitted models file imports no Prisma module at all", () => {
     const models = emitArtifacts([USER, POST])["models.ts"];
 
-    expect(models).toContain('import type { Prisma } from "@prisma/client"');
-    // ...and never as a value import, which would make it a runtime dependency.
-    expect(models).not.toMatch(/^import \{[^}]*\} from "@prisma\/client"/m);
+    expect(importsOf(models)).toEqual(["gemi/orm", "./schema"]);
+
+    // Not merely "no *value* import": a type import resolves too, and resolving
+    // is the whole of the cost this removes. So no Prisma type is named either.
+    expect(models).not.toContain("Prisma.");
   });
 });
 
@@ -556,25 +582,149 @@ describe("emitArtifacts()", () => {
     }
   });
 
-  test("emits one concrete base class per model, typed from Prisma", () => {
+  test("emits one concrete base class per model, typed from its descriptor", () => {
     expect(files["models.ts"]).toContain("export class UserModel extends Model");
     expect(files["models.ts"]).toContain(
-      "static findMany<T extends Prisma.UserFindManyArgs>",
+      "static findMany<T extends FindManyArgs<UserTypes>>",
     );
-    expect(files["models.ts"]).toContain("Promise<Prisma.UserGetPayload<T>[]>");
+    expect(files["models.ts"]).toContain("Promise<Payload<UserTypes, T>[]>");
   });
 
-  // The generated app code may reference Prisma's types, but must never pull
-  // its runtime in.
-  test("imports @prisma/client type-only", () => {
-    expect(files["models.ts"]).toContain(
-      'import type { Prisma } from "@prisma/client";',
+  /**
+   * The descriptor is the *facts* about a model — concrete column types,
+   * relation targets, unique selectors — and `gemi/orm` supplies the rules over
+   * them. Asserted because the split is what keeps the emitted file free of
+   * Prisma: a generator that emitted the rules too would have had to name
+   * Prisma's mapped types to get `select` narrowing.
+   */
+  test("emits a type descriptor per model", () => {
+    const models = files["models.ts"];
+
+    expect(models).toContain("export interface UserTypes extends ModelTypeInfo");
+    expect(models).toContain("export type UserScalars = {");
+    expect(models).toContain("export type UserCreateScalars = {");
+    expect(models).toContain("export type UserRelations = {");
+    expect(models).toContain("export type UserUnique =");
+  });
+
+  /**
+   * **A model with no relations gets `Record<never, never>`, not
+   * `Record<string, never>`.**
+   *
+   * The two read alike and are opposites. `Record<string, never>` is an index
+   * signature valued `never`, so `keyof` it is `string` — and `WhereInput`
+   * spreads `{ [K in keyof Relations<M>]?: RelationFilter<…> }`, which then gave
+   * the model an index signature that every *scalar* key had to satisfy too. The
+   * template's `Membership` could not be filtered, `findUnique`d, updated or
+   * deleted, by its own primary key included, while `select` and `orderBy`
+   * happened to keep working — so it looked partly broken rather than broken.
+   *
+   * Nothing reached this branch before: `USER` and `POST` both have relations,
+   * and the descriptor test above asserts only that `UserRelations` exists.
+   */
+  test("a relation-less model gets a keyless relations type", () => {
+    const alone: DMMF.Model = {
+      name: "Alone",
+      dbName: null,
+      schema: null,
+      fields: [
+        field({ name: "id", type: "Int", isId: true, isRequired: true }),
+        field({ name: "label", type: "String", isRequired: true }),
+      ],
+      primaryKey: null,
+      uniqueFields: [],
+      uniqueIndexes: [],
+    };
+
+    const models = emitArtifacts([alone])["models.ts"];
+
+    expect(models).toContain("export type AloneRelations = Record<never, never>;");
+    expect(models).not.toContain("Record<string, never>");
+  });
+
+  /**
+   * A foreign key is optional on `create`, because the relation can supply it.
+   *
+   * `CreateInput` intersects the scalar half with the relation half, so a
+   * required FK made Prisma's canonical `user: { connect: … }` uncompilable —
+   * `connect` was offered and simultaneously not sufficient. `compile/write.ts`
+   * still raises `MissingRequiredValueError` when neither spelling arrives.
+   */
+  test("a relation-backed column is optional on create", () => {
+    const models = files["models.ts"];
+    const create = models.slice(
+      models.indexOf("export type PostCreateScalars = {"),
     );
-    expect(files["models.ts"]).not.toMatch(
-      /^import \{[^}]*\} from "@prisma\/client"/m,
-    );
-    expect(files["schema.ts"]).not.toContain("@prisma/client");
-    expect(files["index.ts"]).not.toContain("@prisma/client");
+
+    // `Post.authorId` is required and not defaulted, and backs `Post.author`.
+    expect(create).toMatch(/^\s*authorId\?: number;$/m);
+    // A column no relation backs keeps its requirement.
+    expect(create).toMatch(/^\s*title: string;$/m);
+  });
+
+  /**
+   * An empty schema emits a header and nothing else — no import block naming
+   * twenty-eight types it has no models to use, which the *app's* linter would
+   * report in a file it is told not to edit.
+   */
+  test("a schema with no models emits no imports", () => {
+    const models = emitArtifacts([])["models.ts"];
+
+    expect(models).not.toContain("from \"gemi/orm\"");
+    expect(models).toContain("Generated by the gemi ORM generator");
+  });
+
+  /**
+   * A value-level `@map` types as the **database** spelling.
+   *
+   * Deliberately unlike Prisma, whose client translates the two and whose types
+   * therefore say `free`. gemi does not translate — the decoder returns what the
+   * column held — so `FREE` is what an application sees and writes. No schema in
+   * this repository has one, so the differential harness never compares it, and
+   * this is the only thing pinning the decision.
+   */
+  test("an enum member's @map name is the type", () => {
+    const model: DMMF.Model = {
+      name: "Tenant",
+      dbName: null,
+      schema: null,
+      fields: [
+        field({ name: "id", type: "Int", isId: true, isRequired: true }),
+        field({ name: "plan", kind: "enum", type: "Plan", isRequired: true }),
+      ],
+      primaryKey: null,
+      uniqueFields: [],
+      uniqueIndexes: [],
+    };
+
+    const models = emitArtifacts([model], [
+      {
+        name: "Plan",
+        values: [
+          { name: "free", dbName: "FREE" },
+          { name: "pro", dbName: null },
+        ],
+        dbName: null,
+      },
+    ])["models.ts"];
+
+    expect(models).toContain('plan: "FREE" | "pro";');
+  });
+
+  // None of the three generated files imports Prisma, which is the property
+  // that lets an app's manifest carry `prisma` and not `@prisma/client`.
+  //
+  // Asserted on module specifiers rather than on the file's text, for the same
+  // reason `runtime-isolation.test.ts` gives: the emitted header *explains* that
+  // nothing here resolves to `@prisma/client`, and a text grep cannot tell that
+  // sentence from an import.
+  test("no generated file imports a Prisma package", () => {
+    for (const name of ["models.ts", "schema.ts", "index.ts"] as const) {
+      expect(
+        importsOf(files[name]).filter((from) => from.startsWith("@prisma/")),
+        `${name} imports a Prisma package`,
+      ).toEqual([]);
+    }
   });
 
   test("registers every model by name", () => {
@@ -593,23 +743,24 @@ describe("emitArtifacts()", () => {
   /**
    * `options` is a second parameter, not a key inside `args`.
    *
-   * That is what keeps `Prisma.UserFindManyArgs` describing exactly what the
-   * operation accepts — intersecting every args type with a gemi-specific key
-   * would make Prisma's own types wrong about our surface. It also keeps the
-   * flag away from the compiler, so it cannot reach the plan key, which it must
-   * not since it does not change the SQL.
+   * That is what keeps `FindManyArgs<UserTypes>` describing exactly what the
+   * *query* accepts — one shape, matching `READ_ARGS` in the compiler, with
+   * nothing in it the compiler would reject. Intersecting every args type with a
+   * gemi-specific key would put a key in the grammar that never reaches SQL. It
+   * also keeps the flag away from the plan key, which it must not reach since it
+   * does not change the SQL.
    */
-  test("per-call options are a second parameter, leaving Prisma's arg types intact", () => {
+  test("per-call options are a second parameter, leaving the arg types intact", () => {
     const models = files["models.ts"];
 
     expect(models).toContain("options?: ExecOptions,");
     expect(models).toContain("type ExecOptions,");
     expect(models).toMatch(/^} from "gemi\/orm";$/m);
 
-    // The args type is Prisma's, unintersected.
+    // The args type is the descriptor's, unintersected.
     expect(models).toMatch(
-      /static findMany<T extends Prisma\.UserFindManyArgs>\(/,
+      /static findMany<T extends FindManyArgs<UserTypes>>\(/,
     );
-    expect(models).not.toContain("FindManyArgs & {");
+    expect(models).not.toContain("FindManyArgs<UserTypes> & {");
   });
 });

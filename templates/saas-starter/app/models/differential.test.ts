@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { Prisma as PrismaNS, type PrismaClient } from "@prisma/client";
+import { Prisma as PrismaNS, type PrismaClient } from "./prisma-client";
 import { Model } from "gemi/orm";
 import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 

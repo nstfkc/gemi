@@ -3,24 +3,86 @@
 // Re-run `prisma generate` (or `prisma migrate dev`) to refresh this file.
 // It is committed on purpose: diffs stay reviewable and CI needs no codegen step.
 
-import type { Prisma } from "@prisma/client";
+// Every argument and result type here comes from `gemi/orm`, which is what lets
+// an app install `prisma` alone: nothing in this file resolves to
+// `@prisma/client`, so nothing forces it into the dependency graph for types
+// that are erased at build. Each model's `…Types` interface below is the
+// descriptor those generic types read.
 import {
   Model,
   ScopedPolicy,
+  type AggregateArgs,
+  type AggregatePayload,
+  type CountArgs,
+  type CountPayload,
+  type CreateArgs,
+  type CreateInput,
+  type CreateManyArgs,
+  type DeleteArgs,
+  type DeleteManyArgs,
   type ExecOptions,
+  type FindFirstArgs,
+  type FindFirstOrThrowArgs,
+  type FindManyArgs,
+  type FindUniqueArgs,
+  type FindUniqueOrThrowArgs,
+  type GroupByArgs,
+  type GroupByPayload,
+  type JsonInput,
+  type JsonValue,
   type ModelPolicy,
+  type ModelTypeInfo,
+  type Payload,
   type PolicyEntry,
+  type SelectSubset,
+  type Subset,
+  type UpdateArgs,
+  type UpdateManyArgs,
+  type UpsertArgs,
+  type WhereInput,
 } from "gemi/orm";
 
 import * as schema from "./schema";
 
-// Copied from Prisma's own generated client. It is what makes `select` and
-// `include` narrow the return type: `T` is inferred from the literal the
-// caller passes, and any key outside the operation's argument type collapses to
-// `never` rather than being quietly accepted.
-type Subset<T, U> = {
-  [key in keyof T]: key extends keyof U ? T[key] : never;
+export type AccountScalars = {
+  id: number;
+  publicId: string;
+  organizationId: number | null;
+  organizationRole: number;
+  userId: number | null;
+  createdAt: Date;
+  updatedAt: Date;
+  deletedAt: Date | null;
+  settings: JsonValue | null;
+  token: Uint8Array | null;
 };
+
+export type AccountCreateScalars = {
+  id?: number;
+  publicId?: string;
+  organizationId?: number | null;
+  organizationRole?: number;
+  userId?: number | null;
+  createdAt?: Date;
+  updatedAt?: Date;
+  deletedAt?: Date | null;
+  settings?: JsonInput;
+  token?: Uint8Array | null;
+};
+
+export type AccountRelations = {
+  organization: { kind: "one"; nullable: true; target: OrganizationTypes };
+  user: { kind: "one"; nullable: true; target: UserTypes };
+};
+
+export type AccountUnique = { id: number } | { publicId: string };
+
+export interface AccountTypes extends ModelTypeInfo {
+  scalars: AccountScalars;
+  relations: AccountRelations;
+  unique: AccountUnique;
+  create: AccountCreateScalars;
+}
 
 // Merges the row's columns into the instance type, so a method on a subclass can
 // read `this.email`. No runtime output.
@@ -31,12 +93,12 @@ type Subset<T, U> = {
 // accepted: `Model`'s constructor is `protected`, so the only way to get an
 // instance is `wrap`, which assigns a complete row. See bin/orm/emit.ts.
 // oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
-export interface AccountModel extends Prisma.AccountGetPayload<{}> {}
+export interface AccountModel extends AccountScalars {}
 
 export type AccountPolicy = ModelPolicy<
-  Prisma.AccountWhereInput,
-  Prisma.AccountCreateInput,
-  Prisma.AccountGetPayload<{}>
+  WhereInput<AccountTypes>,
+  CreateInput<AccountTypes>,
+  AccountScalars
 >;
 
 // The same shape with `scope`, `onCreate` and `onUpdate` abstract, so a policy
@@ -44,9 +106,9 @@ export type AccountPolicy = ModelPolicy<
 // combinations too — this makes it `TS2515` at the class declaration instead of
 // an error on the first write that reaches production.
 export abstract class AccountScopedPolicy extends ScopedPolicy<
-  Prisma.AccountWhereInput,
-  Prisma.AccountCreateInput,
-  Prisma.AccountGetPayload<{}>
+  WhereInput<AccountTypes>,
+  CreateInput<AccountTypes>,
+  AccountScalars
 > {}
 
 export class AccountModel extends Model {
@@ -56,124 +118,149 @@ export class AccountModel extends Model {
   // written for another model is a type error here rather than a scope compiled
   // against columns that do not exist.
   static $policies?: readonly PolicyEntry<
-    Prisma.AccountWhereInput,
-    Prisma.AccountCreateInput,
-    Prisma.AccountGetPayload<{}>
+    WhereInput<AccountTypes>,
+    CreateInput<AccountTypes>,
+    AccountScalars
   >[];
 
-  static findMany<T extends Prisma.AccountFindManyArgs>(
-    args?: Subset<T, Prisma.AccountFindManyArgs>,
+  static findMany<T extends FindManyArgs<AccountTypes>>(
+    args?: Subset<T, FindManyArgs<AccountTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.AccountGetPayload<T>[]> {
-    return this.$exec("findMany", args, options) as Promise<Prisma.AccountGetPayload<T>[]>;
+  ): Promise<Payload<AccountTypes, T>[]> {
+    return this.$exec("findMany", args, options) as Promise<Payload<AccountTypes, T>[]>;
   }
 
-  static findFirst<T extends Prisma.AccountFindFirstArgs>(
-    args?: Subset<T, Prisma.AccountFindFirstArgs>,
+  static findFirst<T extends FindFirstArgs<AccountTypes>>(
+    args?: Subset<T, FindFirstArgs<AccountTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.AccountGetPayload<T> | null> {
-    return this.$exec("findFirst", args, options) as Promise<Prisma.AccountGetPayload<T> | null>;
+  ): Promise<Payload<AccountTypes, T> | null> {
+    return this.$exec("findFirst", args, options) as Promise<Payload<AccountTypes, T> | null>;
   }
 
-  static findFirstOrThrow<T extends Prisma.AccountFindFirstOrThrowArgs>(
-    args?: Subset<T, Prisma.AccountFindFirstOrThrowArgs>,
+  static findFirstOrThrow<T extends FindFirstOrThrowArgs<AccountTypes>>(
+    args?: Subset<T, FindFirstOrThrowArgs<AccountTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.AccountGetPayload<T>> {
-    return this.$exec("findFirstOrThrow", args, options) as Promise<Prisma.AccountGetPayload<T>>;
+  ): Promise<Payload<AccountTypes, T>> {
+    return this.$exec("findFirstOrThrow", args, options) as Promise<Payload<AccountTypes, T>>;
   }
 
-  static findUnique<T extends Prisma.AccountFindUniqueArgs>(
-    args: Subset<T, Prisma.AccountFindUniqueArgs>,
+  static findUnique<T extends FindUniqueArgs<AccountTypes>>(
+    args: Subset<T, FindUniqueArgs<AccountTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.AccountGetPayload<T> | null> {
-    return this.$exec("findUnique", args, options) as Promise<Prisma.AccountGetPayload<T> | null>;
+  ): Promise<Payload<AccountTypes, T> | null> {
+    return this.$exec("findUnique", args, options) as Promise<Payload<AccountTypes, T> | null>;
   }
 
-  static findUniqueOrThrow<T extends Prisma.AccountFindUniqueOrThrowArgs>(
-    args: Subset<T, Prisma.AccountFindUniqueOrThrowArgs>,
+  static findUniqueOrThrow<T extends FindUniqueOrThrowArgs<AccountTypes>>(
+    args: Subset<T, FindUniqueOrThrowArgs<AccountTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.AccountGetPayload<T>> {
-    return this.$exec("findUniqueOrThrow", args, options) as Promise<Prisma.AccountGetPayload<T>>;
+  ): Promise<Payload<AccountTypes, T>> {
+    return this.$exec("findUniqueOrThrow", args, options) as Promise<Payload<AccountTypes, T>>;
   }
 
-  static count(args?: Omit<Prisma.AccountCountArgs, "select">): Promise<number>;
-  static count<T extends Prisma.AccountCountArgs>(
-    args: Prisma.SelectSubset<T, Prisma.AccountCountArgs> & {
+  static count(args?: Omit<CountArgs<AccountTypes>, "select">): Promise<number>;
+  static count<T extends CountArgs<AccountTypes>>(
+    args: SelectSubset<T, CountArgs<AccountTypes>> & {
       select: NonNullable<T["select"]>;
     },
-  ): Promise<Prisma.GetScalarType<T["select"], Prisma.AccountCountAggregateOutputType>>;
+  ): Promise<CountPayload<T["select"]>>;
   static count(args?: unknown): Promise<unknown> {
     return this.$exec("count", args as never);
   }
 
-  static aggregate<T extends Prisma.AccountAggregateArgs>(
-    args: Prisma.Subset<T, Prisma.AccountAggregateArgs>,
-  ): Promise<Prisma.GetAccountAggregateType<T>> {
+  static aggregate<T extends AggregateArgs<AccountTypes>>(
+    args: Subset<T, AggregateArgs<AccountTypes>>,
+  ): Promise<AggregatePayload<AccountTypes, T>> {
     return this.$exec("aggregate", args) as Promise<
-      Prisma.GetAccountAggregateType<T>
+      AggregatePayload<AccountTypes, T>
     >;
   }
 
-  static groupBy<T extends Prisma.AccountGroupByArgs>(
-    args: Prisma.Subset<T, Prisma.AccountGroupByArgs>,
-  ): Promise<Prisma.GetAccountGroupByPayload<T>> {
+  static groupBy<T extends GroupByArgs<AccountTypes>>(
+    args: Subset<T, GroupByArgs<AccountTypes>>,
+  ): Promise<GroupByPayload<AccountTypes, T>> {
     return this.$exec("groupBy", args) as Promise<
-      Prisma.GetAccountGroupByPayload<T>
+      GroupByPayload<AccountTypes, T>
     >;
   }
 
-  static create<T extends Prisma.AccountCreateArgs>(
-    args: Subset<T, Prisma.AccountCreateArgs>,
+  static create<T extends CreateArgs<AccountTypes>>(
+    args: Subset<T, CreateArgs<AccountTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.AccountGetPayload<T>> {
-    return this.$exec("create", args, options) as Promise<Prisma.AccountGetPayload<T>>;
+  ): Promise<Payload<AccountTypes, T>> {
+    return this.$exec("create", args, options) as Promise<Payload<AccountTypes, T>>;
   }
 
-  static update<T extends Prisma.AccountUpdateArgs>(
-    args: Subset<T, Prisma.AccountUpdateArgs>,
+  static update<T extends UpdateArgs<AccountTypes>>(
+    args: Subset<T, UpdateArgs<AccountTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.AccountGetPayload<T>> {
-    return this.$exec("update", args, options) as Promise<Prisma.AccountGetPayload<T>>;
+  ): Promise<Payload<AccountTypes, T>> {
+    return this.$exec("update", args, options) as Promise<Payload<AccountTypes, T>>;
   }
 
-  static delete<T extends Prisma.AccountDeleteArgs>(
-    args: Subset<T, Prisma.AccountDeleteArgs>,
+  static delete<T extends DeleteArgs<AccountTypes>>(
+    args: Subset<T, DeleteArgs<AccountTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.AccountGetPayload<T>> {
-    return this.$exec("delete", args, options) as Promise<Prisma.AccountGetPayload<T>>;
+  ): Promise<Payload<AccountTypes, T>> {
+    return this.$exec("delete", args, options) as Promise<Payload<AccountTypes, T>>;
   }
 
-  static upsert<T extends Prisma.AccountUpsertArgs>(
-    args: Subset<T, Prisma.AccountUpsertArgs>,
+  static upsert<T extends UpsertArgs<AccountTypes>>(
+    args: Subset<T, UpsertArgs<AccountTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.AccountGetPayload<T>> {
-    return this.$exec("upsert", args, options) as Promise<Prisma.AccountGetPayload<T>>;
+  ): Promise<Payload<AccountTypes, T>> {
+    return this.$exec("upsert", args, options) as Promise<Payload<AccountTypes, T>>;
   }
 
   static createMany(
-    args?: Prisma.AccountCreateManyArgs,
+    args?: CreateManyArgs<AccountTypes>,
   ): Promise<{ count: number }> {
     return this.$exec("createMany", args) as Promise<{ count: number }>;
   }
 
   static updateMany(
-    args?: Prisma.AccountUpdateManyArgs,
+    args?: UpdateManyArgs<AccountTypes>,
   ): Promise<{ count: number }> {
     return this.$exec("updateMany", args) as Promise<{ count: number }>;
   }
 
   static deleteMany(
-    args?: Prisma.AccountDeleteManyArgs,
+    args?: DeleteManyArgs<AccountTypes>,
   ): Promise<{ count: number }> {
     return this.$exec("deleteMany", args) as Promise<{ count: number }>;
   }
 
-  static wrap<C extends { prototype: unknown }, R extends Prisma.AccountGetPayload<{}>>(
+  static wrap<C extends { prototype: unknown }, R extends AccountScalars>(
     this: C,
     row: R,
   ): C["prototype"] & R {
     return (Model.wrap as (row: object) => any).call(this, row);
   }
+}
+
+export type LedgerScalars = {
+  tenantId: number;
+  code: string;
+  title: string;
+};
+
+export type LedgerCreateScalars = {
+  tenantId: number;
+  code: string;
+  title: string;
+};
+
+export type LedgerRelations = {
+  entries: { kind: "many"; nullable: false; target: LedgerEntryTypes };
+};
+
+export type LedgerUnique = { tenantId_code: { tenantId: number; code: string } };
+
+export interface LedgerTypes extends ModelTypeInfo {
+  scalars: LedgerScalars;
+  relations: LedgerRelations;
+  unique: LedgerUnique;
+  create: LedgerCreateScalars;
 }
 
 // Merges the row's columns into the instance type, so a method on a subclass can
@@ -185,12 +272,12 @@ export class AccountModel extends Model {
 // accepted: `Model`'s constructor is `protected`, so the only way to get an
 // instance is `wrap`, which assigns a complete row. See bin/orm/emit.ts.
 // oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
-export interface LedgerModel extends Prisma.LedgerGetPayload<{}> {}
+export interface LedgerModel extends LedgerScalars {}
 
 export type LedgerPolicy = ModelPolicy<
-  Prisma.LedgerWhereInput,
-  Prisma.LedgerCreateInput,
-  Prisma.LedgerGetPayload<{}>
+  WhereInput<LedgerTypes>,
+  CreateInput<LedgerTypes>,
+  LedgerScalars
 >;
 
 // The same shape with `scope`, `onCreate` and `onUpdate` abstract, so a policy
@@ -198,9 +285,9 @@ export type LedgerPolicy = ModelPolicy<
 // combinations too — this makes it `TS2515` at the class declaration instead of
 // an error on the first write that reaches production.
 export abstract class LedgerScopedPolicy extends ScopedPolicy<
-  Prisma.LedgerWhereInput,
-  Prisma.LedgerCreateInput,
-  Prisma.LedgerGetPayload<{}>
+  WhereInput<LedgerTypes>,
+  CreateInput<LedgerTypes>,
+  LedgerScalars
 > {}
 
 export class LedgerModel extends Model {
@@ -210,124 +297,153 @@ export class LedgerModel extends Model {
   // written for another model is a type error here rather than a scope compiled
   // against columns that do not exist.
   static $policies?: readonly PolicyEntry<
-    Prisma.LedgerWhereInput,
-    Prisma.LedgerCreateInput,
-    Prisma.LedgerGetPayload<{}>
+    WhereInput<LedgerTypes>,
+    CreateInput<LedgerTypes>,
+    LedgerScalars
   >[];
 
-  static findMany<T extends Prisma.LedgerFindManyArgs>(
-    args?: Subset<T, Prisma.LedgerFindManyArgs>,
+  static findMany<T extends FindManyArgs<LedgerTypes>>(
+    args?: Subset<T, FindManyArgs<LedgerTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.LedgerGetPayload<T>[]> {
-    return this.$exec("findMany", args, options) as Promise<Prisma.LedgerGetPayload<T>[]>;
+  ): Promise<Payload<LedgerTypes, T>[]> {
+    return this.$exec("findMany", args, options) as Promise<Payload<LedgerTypes, T>[]>;
   }
 
-  static findFirst<T extends Prisma.LedgerFindFirstArgs>(
-    args?: Subset<T, Prisma.LedgerFindFirstArgs>,
+  static findFirst<T extends FindFirstArgs<LedgerTypes>>(
+    args?: Subset<T, FindFirstArgs<LedgerTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.LedgerGetPayload<T> | null> {
-    return this.$exec("findFirst", args, options) as Promise<Prisma.LedgerGetPayload<T> | null>;
+  ): Promise<Payload<LedgerTypes, T> | null> {
+    return this.$exec("findFirst", args, options) as Promise<Payload<LedgerTypes, T> | null>;
   }
 
-  static findFirstOrThrow<T extends Prisma.LedgerFindFirstOrThrowArgs>(
-    args?: Subset<T, Prisma.LedgerFindFirstOrThrowArgs>,
+  static findFirstOrThrow<T extends FindFirstOrThrowArgs<LedgerTypes>>(
+    args?: Subset<T, FindFirstOrThrowArgs<LedgerTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.LedgerGetPayload<T>> {
-    return this.$exec("findFirstOrThrow", args, options) as Promise<Prisma.LedgerGetPayload<T>>;
+  ): Promise<Payload<LedgerTypes, T>> {
+    return this.$exec("findFirstOrThrow", args, options) as Promise<Payload<LedgerTypes, T>>;
   }
 
-  static findUnique<T extends Prisma.LedgerFindUniqueArgs>(
-    args: Subset<T, Prisma.LedgerFindUniqueArgs>,
+  static findUnique<T extends FindUniqueArgs<LedgerTypes>>(
+    args: Subset<T, FindUniqueArgs<LedgerTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.LedgerGetPayload<T> | null> {
-    return this.$exec("findUnique", args, options) as Promise<Prisma.LedgerGetPayload<T> | null>;
+  ): Promise<Payload<LedgerTypes, T> | null> {
+    return this.$exec("findUnique", args, options) as Promise<Payload<LedgerTypes, T> | null>;
   }
 
-  static findUniqueOrThrow<T extends Prisma.LedgerFindUniqueOrThrowArgs>(
-    args: Subset<T, Prisma.LedgerFindUniqueOrThrowArgs>,
+  static findUniqueOrThrow<T extends FindUniqueOrThrowArgs<LedgerTypes>>(
+    args: Subset<T, FindUniqueOrThrowArgs<LedgerTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.LedgerGetPayload<T>> {
-    return this.$exec("findUniqueOrThrow", args, options) as Promise<Prisma.LedgerGetPayload<T>>;
+  ): Promise<Payload<LedgerTypes, T>> {
+    return this.$exec("findUniqueOrThrow", args, options) as Promise<Payload<LedgerTypes, T>>;
   }
 
-  static count(args?: Omit<Prisma.LedgerCountArgs, "select">): Promise<number>;
-  static count<T extends Prisma.LedgerCountArgs>(
-    args: Prisma.SelectSubset<T, Prisma.LedgerCountArgs> & {
+  static count(args?: Omit<CountArgs<LedgerTypes>, "select">): Promise<number>;
+  static count<T extends CountArgs<LedgerTypes>>(
+    args: SelectSubset<T, CountArgs<LedgerTypes>> & {
       select: NonNullable<T["select"]>;
     },
-  ): Promise<Prisma.GetScalarType<T["select"], Prisma.LedgerCountAggregateOutputType>>;
+  ): Promise<CountPayload<T["select"]>>;
   static count(args?: unknown): Promise<unknown> {
     return this.$exec("count", args as never);
   }
 
-  static aggregate<T extends Prisma.LedgerAggregateArgs>(
-    args: Prisma.Subset<T, Prisma.LedgerAggregateArgs>,
-  ): Promise<Prisma.GetLedgerAggregateType<T>> {
+  static aggregate<T extends AggregateArgs<LedgerTypes>>(
+    args: Subset<T, AggregateArgs<LedgerTypes>>,
+  ): Promise<AggregatePayload<LedgerTypes, T>> {
     return this.$exec("aggregate", args) as Promise<
-      Prisma.GetLedgerAggregateType<T>
+      AggregatePayload<LedgerTypes, T>
     >;
   }
 
-  static groupBy<T extends Prisma.LedgerGroupByArgs>(
-    args: Prisma.Subset<T, Prisma.LedgerGroupByArgs>,
-  ): Promise<Prisma.GetLedgerGroupByPayload<T>> {
+  static groupBy<T extends GroupByArgs<LedgerTypes>>(
+    args: Subset<T, GroupByArgs<LedgerTypes>>,
+  ): Promise<GroupByPayload<LedgerTypes, T>> {
     return this.$exec("groupBy", args) as Promise<
-      Prisma.GetLedgerGroupByPayload<T>
+      GroupByPayload<LedgerTypes, T>
     >;
   }
 
-  static create<T extends Prisma.LedgerCreateArgs>(
-    args: Subset<T, Prisma.LedgerCreateArgs>,
+  static create<T extends CreateArgs<LedgerTypes>>(
+    args: Subset<T, CreateArgs<LedgerTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.LedgerGetPayload<T>> {
-    return this.$exec("create", args, options) as Promise<Prisma.LedgerGetPayload<T>>;
+  ): Promise<Payload<LedgerTypes, T>> {
+    return this.$exec("create", args, options) as Promise<Payload<LedgerTypes, T>>;
   }
 
-  static update<T extends Prisma.LedgerUpdateArgs>(
-    args: Subset<T, Prisma.LedgerUpdateArgs>,
+  static update<T extends UpdateArgs<LedgerTypes>>(
+    args: Subset<T, UpdateArgs<LedgerTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.LedgerGetPayload<T>> {
-    return this.$exec("update", args, options) as Promise<Prisma.LedgerGetPayload<T>>;
+  ): Promise<Payload<LedgerTypes, T>> {
+    return this.$exec("update", args, options) as Promise<Payload<LedgerTypes, T>>;
   }
 
-  static delete<T extends Prisma.LedgerDeleteArgs>(
-    args: Subset<T, Prisma.LedgerDeleteArgs>,
+  static delete<T extends DeleteArgs<LedgerTypes>>(
+    args: Subset<T, DeleteArgs<LedgerTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.LedgerGetPayload<T>> {
-    return this.$exec("delete", args, options) as Promise<Prisma.LedgerGetPayload<T>>;
+  ): Promise<Payload<LedgerTypes, T>> {
+    return this.$exec("delete", args, options) as Promise<Payload<LedgerTypes, T>>;
   }
 
-  static upsert<T extends Prisma.LedgerUpsertArgs>(
-    args: Subset<T, Prisma.LedgerUpsertArgs>,
+  static upsert<T extends UpsertArgs<LedgerTypes>>(
+    args: Subset<T, UpsertArgs<LedgerTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.LedgerGetPayload<T>> {
-    return this.$exec("upsert", args, options) as Promise<Prisma.LedgerGetPayload<T>>;
+  ): Promise<Payload<LedgerTypes, T>> {
+    return this.$exec("upsert", args, options) as Promise<Payload<LedgerTypes, T>>;
   }
 
   static createMany(
-    args?: Prisma.LedgerCreateManyArgs,
+    args?: CreateManyArgs<LedgerTypes>,
   ): Promise<{ count: number }> {
     return this.$exec("createMany", args) as Promise<{ count: number }>;
   }
 
   static updateMany(
-    args?: Prisma.LedgerUpdateManyArgs,
+    args?: UpdateManyArgs<LedgerTypes>,
   ): Promise<{ count: number }> {
     return this.$exec("updateMany", args) as Promise<{ count: number }>;
   }
 
   static deleteMany(
-    args?: Prisma.LedgerDeleteManyArgs,
+    args?: DeleteManyArgs<LedgerTypes>,
   ): Promise<{ count: number }> {
     return this.$exec("deleteMany", args) as Promise<{ count: number }>;
   }
 
-  static wrap<C extends { prototype: unknown }, R extends Prisma.LedgerGetPayload<{}>>(
+  static wrap<C extends { prototype: unknown }, R extends LedgerScalars>(
     this: C,
     row: R,
   ): C["prototype"] & R {
     return (Model.wrap as (row: object) => any).call(this, row);
   }
+}
+
+export type LedgerEntryScalars = {
+  id: number;
+  tenantId: number;
+  ledgerCode: string;
+  amount: number;
+  memo: string | null;
+};
+
+export type LedgerEntryCreateScalars = {
+  id?: number;
+  tenantId?: number;
+  ledgerCode?: string;
+  amount: number;
+  memo?: string | null;
+};
+
+export type LedgerEntryRelations = {
+  ledger: { kind: "one"; nullable: false; target: LedgerTypes };
+};
+
+export type LedgerEntryUnique = { id: number };
+
+export interface LedgerEntryTypes extends ModelTypeInfo {
+  scalars: LedgerEntryScalars;
+  relations: LedgerEntryRelations;
+  unique: LedgerEntryUnique;
+  create: LedgerEntryCreateScalars;
 }
 
 // Merges the row's columns into the instance type, so a method on a subclass can
@@ -339,12 +455,12 @@ export class LedgerModel extends Model {
 // accepted: `Model`'s constructor is `protected`, so the only way to get an
 // instance is `wrap`, which assigns a complete row. See bin/orm/emit.ts.
 // oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
-export interface LedgerEntryModel extends Prisma.LedgerEntryGetPayload<{}> {}
+export interface LedgerEntryModel extends LedgerEntryScalars {}
 
 export type LedgerEntryPolicy = ModelPolicy<
-  Prisma.LedgerEntryWhereInput,
-  Prisma.LedgerEntryCreateInput,
-  Prisma.LedgerEntryGetPayload<{}>
+  WhereInput<LedgerEntryTypes>,
+  CreateInput<LedgerEntryTypes>,
+  LedgerEntryScalars
 >;
 
 // The same shape with `scope`, `onCreate` and `onUpdate` abstract, so a policy
@@ -352,9 +468,9 @@ export type LedgerEntryPolicy = ModelPolicy<
 // combinations too — this makes it `TS2515` at the class declaration instead of
 // an error on the first write that reaches production.
 export abstract class LedgerEntryScopedPolicy extends ScopedPolicy<
-  Prisma.LedgerEntryWhereInput,
-  Prisma.LedgerEntryCreateInput,
-  Prisma.LedgerEntryGetPayload<{}>
+  WhereInput<LedgerEntryTypes>,
+  CreateInput<LedgerEntryTypes>,
+  LedgerEntryScalars
 > {}
 
 export class LedgerEntryModel extends Model {
@@ -364,124 +480,151 @@ export class LedgerEntryModel extends Model {
   // written for another model is a type error here rather than a scope compiled
   // against columns that do not exist.
   static $policies?: readonly PolicyEntry<
-    Prisma.LedgerEntryWhereInput,
-    Prisma.LedgerEntryCreateInput,
-    Prisma.LedgerEntryGetPayload<{}>
+    WhereInput<LedgerEntryTypes>,
+    CreateInput<LedgerEntryTypes>,
+    LedgerEntryScalars
   >[];
 
-  static findMany<T extends Prisma.LedgerEntryFindManyArgs>(
-    args?: Subset<T, Prisma.LedgerEntryFindManyArgs>,
+  static findMany<T extends FindManyArgs<LedgerEntryTypes>>(
+    args?: Subset<T, FindManyArgs<LedgerEntryTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.LedgerEntryGetPayload<T>[]> {
-    return this.$exec("findMany", args, options) as Promise<Prisma.LedgerEntryGetPayload<T>[]>;
+  ): Promise<Payload<LedgerEntryTypes, T>[]> {
+    return this.$exec("findMany", args, options) as Promise<Payload<LedgerEntryTypes, T>[]>;
   }
 
-  static findFirst<T extends Prisma.LedgerEntryFindFirstArgs>(
-    args?: Subset<T, Prisma.LedgerEntryFindFirstArgs>,
+  static findFirst<T extends FindFirstArgs<LedgerEntryTypes>>(
+    args?: Subset<T, FindFirstArgs<LedgerEntryTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.LedgerEntryGetPayload<T> | null> {
-    return this.$exec("findFirst", args, options) as Promise<Prisma.LedgerEntryGetPayload<T> | null>;
+  ): Promise<Payload<LedgerEntryTypes, T> | null> {
+    return this.$exec("findFirst", args, options) as Promise<Payload<LedgerEntryTypes, T> | null>;
   }
 
-  static findFirstOrThrow<T extends Prisma.LedgerEntryFindFirstOrThrowArgs>(
-    args?: Subset<T, Prisma.LedgerEntryFindFirstOrThrowArgs>,
+  static findFirstOrThrow<T extends FindFirstOrThrowArgs<LedgerEntryTypes>>(
+    args?: Subset<T, FindFirstOrThrowArgs<LedgerEntryTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.LedgerEntryGetPayload<T>> {
-    return this.$exec("findFirstOrThrow", args, options) as Promise<Prisma.LedgerEntryGetPayload<T>>;
+  ): Promise<Payload<LedgerEntryTypes, T>> {
+    return this.$exec("findFirstOrThrow", args, options) as Promise<Payload<LedgerEntryTypes, T>>;
   }
 
-  static findUnique<T extends Prisma.LedgerEntryFindUniqueArgs>(
-    args: Subset<T, Prisma.LedgerEntryFindUniqueArgs>,
+  static findUnique<T extends FindUniqueArgs<LedgerEntryTypes>>(
+    args: Subset<T, FindUniqueArgs<LedgerEntryTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.LedgerEntryGetPayload<T> | null> {
-    return this.$exec("findUnique", args, options) as Promise<Prisma.LedgerEntryGetPayload<T> | null>;
+  ): Promise<Payload<LedgerEntryTypes, T> | null> {
+    return this.$exec("findUnique", args, options) as Promise<Payload<LedgerEntryTypes, T> | null>;
   }
 
-  static findUniqueOrThrow<T extends Prisma.LedgerEntryFindUniqueOrThrowArgs>(
-    args: Subset<T, Prisma.LedgerEntryFindUniqueOrThrowArgs>,
+  static findUniqueOrThrow<T extends FindUniqueOrThrowArgs<LedgerEntryTypes>>(
+    args: Subset<T, FindUniqueOrThrowArgs<LedgerEntryTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.LedgerEntryGetPayload<T>> {
-    return this.$exec("findUniqueOrThrow", args, options) as Promise<Prisma.LedgerEntryGetPayload<T>>;
+  ): Promise<Payload<LedgerEntryTypes, T>> {
+    return this.$exec("findUniqueOrThrow", args, options) as Promise<Payload<LedgerEntryTypes, T>>;
   }
 
-  static count(args?: Omit<Prisma.LedgerEntryCountArgs, "select">): Promise<number>;
-  static count<T extends Prisma.LedgerEntryCountArgs>(
-    args: Prisma.SelectSubset<T, Prisma.LedgerEntryCountArgs> & {
+  static count(args?: Omit<CountArgs<LedgerEntryTypes>, "select">): Promise<number>;
+  static count<T extends CountArgs<LedgerEntryTypes>>(
+    args: SelectSubset<T, CountArgs<LedgerEntryTypes>> & {
       select: NonNullable<T["select"]>;
     },
-  ): Promise<Prisma.GetScalarType<T["select"], Prisma.LedgerEntryCountAggregateOutputType>>;
+  ): Promise<CountPayload<T["select"]>>;
   static count(args?: unknown): Promise<unknown> {
     return this.$exec("count", args as never);
   }
 
-  static aggregate<T extends Prisma.LedgerEntryAggregateArgs>(
-    args: Prisma.Subset<T, Prisma.LedgerEntryAggregateArgs>,
-  ): Promise<Prisma.GetLedgerEntryAggregateType<T>> {
+  static aggregate<T extends AggregateArgs<LedgerEntryTypes>>(
+    args: Subset<T, AggregateArgs<LedgerEntryTypes>>,
+  ): Promise<AggregatePayload<LedgerEntryTypes, T>> {
     return this.$exec("aggregate", args) as Promise<
-      Prisma.GetLedgerEntryAggregateType<T>
+      AggregatePayload<LedgerEntryTypes, T>
     >;
   }
 
-  static groupBy<T extends Prisma.LedgerEntryGroupByArgs>(
-    args: Prisma.Subset<T, Prisma.LedgerEntryGroupByArgs>,
-  ): Promise<Prisma.GetLedgerEntryGroupByPayload<T>> {
+  static groupBy<T extends GroupByArgs<LedgerEntryTypes>>(
+    args: Subset<T, GroupByArgs<LedgerEntryTypes>>,
+  ): Promise<GroupByPayload<LedgerEntryTypes, T>> {
     return this.$exec("groupBy", args) as Promise<
-      Prisma.GetLedgerEntryGroupByPayload<T>
+      GroupByPayload<LedgerEntryTypes, T>
     >;
   }
 
-  static create<T extends Prisma.LedgerEntryCreateArgs>(
-    args: Subset<T, Prisma.LedgerEntryCreateArgs>,
+  static create<T extends CreateArgs<LedgerEntryTypes>>(
+    args: Subset<T, CreateArgs<LedgerEntryTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.LedgerEntryGetPayload<T>> {
-    return this.$exec("create", args, options) as Promise<Prisma.LedgerEntryGetPayload<T>>;
+  ): Promise<Payload<LedgerEntryTypes, T>> {
+    return this.$exec("create", args, options) as Promise<Payload<LedgerEntryTypes, T>>;
   }
 
-  static update<T extends Prisma.LedgerEntryUpdateArgs>(
-    args: Subset<T, Prisma.LedgerEntryUpdateArgs>,
+  static update<T extends UpdateArgs<LedgerEntryTypes>>(
+    args: Subset<T, UpdateArgs<LedgerEntryTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.LedgerEntryGetPayload<T>> {
-    return this.$exec("update", args, options) as Promise<Prisma.LedgerEntryGetPayload<T>>;
+  ): Promise<Payload<LedgerEntryTypes, T>> {
+    return this.$exec("update", args, options) as Promise<Payload<LedgerEntryTypes, T>>;
   }
 
-  static delete<T extends Prisma.LedgerEntryDeleteArgs>(
-    args: Subset<T, Prisma.LedgerEntryDeleteArgs>,
+  static delete<T extends DeleteArgs<LedgerEntryTypes>>(
+    args: Subset<T, DeleteArgs<LedgerEntryTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.LedgerEntryGetPayload<T>> {
-    return this.$exec("delete", args, options) as Promise<Prisma.LedgerEntryGetPayload<T>>;
+  ): Promise<Payload<LedgerEntryTypes, T>> {
+    return this.$exec("delete", args, options) as Promise<Payload<LedgerEntryTypes, T>>;
   }
 
-  static upsert<T extends Prisma.LedgerEntryUpsertArgs>(
-    args: Subset<T, Prisma.LedgerEntryUpsertArgs>,
+  static upsert<T extends UpsertArgs<LedgerEntryTypes>>(
+    args: Subset<T, UpsertArgs<LedgerEntryTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.LedgerEntryGetPayload<T>> {
-    return this.$exec("upsert", args, options) as Promise<Prisma.LedgerEntryGetPayload<T>>;
+  ): Promise<Payload<LedgerEntryTypes, T>> {
+    return this.$exec("upsert", args, options) as Promise<Payload<LedgerEntryTypes, T>>;
   }
 
   static createMany(
-    args?: Prisma.LedgerEntryCreateManyArgs,
+    args?: CreateManyArgs<LedgerEntryTypes>,
   ): Promise<{ count: number }> {
     return this.$exec("createMany", args) as Promise<{ count: number }>;
   }
 
   static updateMany(
-    args?: Prisma.LedgerEntryUpdateManyArgs,
+    args?: UpdateManyArgs<LedgerEntryTypes>,
   ): Promise<{ count: number }> {
     return this.$exec("updateMany", args) as Promise<{ count: number }>;
   }
 
   static deleteMany(
-    args?: Prisma.LedgerEntryDeleteManyArgs,
+    args?: DeleteManyArgs<LedgerEntryTypes>,
   ): Promise<{ count: number }> {
     return this.$exec("deleteMany", args) as Promise<{ count: number }>;
   }
 
-  static wrap<C extends { prototype: unknown }, R extends Prisma.LedgerEntryGetPayload<{}>>(
+  static wrap<C extends { prototype: unknown }, R extends LedgerEntryScalars>(
     this: C,
     row: R,
   ): C["prototype"] & R {
     return (Model.wrap as (row: object) => any).call(this, row);
   }
+}
+
+export type MagicLinkTokenScalars = {
+  id: number;
+  token: string;
+  email: string;
+  pin: string;
+  createdAt: Date;
+};
+
+export type MagicLinkTokenCreateScalars = {
+  id?: number;
+  token: string;
+  email: string;
+  pin: string;
+  createdAt?: Date;
+};
+
+export type MagicLinkTokenRelations = Record<never, never>;
+
+export type MagicLinkTokenUnique = { id: number } | { token_email: { token: string; email: string } } | { pin_email: { pin: string; email: string } };
+
+export interface MagicLinkTokenTypes extends ModelTypeInfo {
+  scalars: MagicLinkTokenScalars;
+  relations: MagicLinkTokenRelations;
+  unique: MagicLinkTokenUnique;
+  create: MagicLinkTokenCreateScalars;
 }
 
 // Merges the row's columns into the instance type, so a method on a subclass can
@@ -493,12 +636,12 @@ export class LedgerEntryModel extends Model {
 // accepted: `Model`'s constructor is `protected`, so the only way to get an
 // instance is `wrap`, which assigns a complete row. See bin/orm/emit.ts.
 // oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
-export interface MagicLinkTokenModel extends Prisma.MagicLinkTokenGetPayload<{}> {}
+export interface MagicLinkTokenModel extends MagicLinkTokenScalars {}
 
 export type MagicLinkTokenPolicy = ModelPolicy<
-  Prisma.MagicLinkTokenWhereInput,
-  Prisma.MagicLinkTokenCreateInput,
-  Prisma.MagicLinkTokenGetPayload<{}>
+  WhereInput<MagicLinkTokenTypes>,
+  CreateInput<MagicLinkTokenTypes>,
+  MagicLinkTokenScalars
 >;
 
 // The same shape with `scope`, `onCreate` and `onUpdate` abstract, so a policy
@@ -506,9 +649,9 @@ export type MagicLinkTokenPolicy = ModelPolicy<
 // combinations too — this makes it `TS2515` at the class declaration instead of
 // an error on the first write that reaches production.
 export abstract class MagicLinkTokenScopedPolicy extends ScopedPolicy<
-  Prisma.MagicLinkTokenWhereInput,
-  Prisma.MagicLinkTokenCreateInput,
-  Prisma.MagicLinkTokenGetPayload<{}>
+  WhereInput<MagicLinkTokenTypes>,
+  CreateInput<MagicLinkTokenTypes>,
+  MagicLinkTokenScalars
 > {}
 
 export class MagicLinkTokenModel extends Model {
@@ -518,124 +661,149 @@ export class MagicLinkTokenModel extends Model {
   // written for another model is a type error here rather than a scope compiled
   // against columns that do not exist.
   static $policies?: readonly PolicyEntry<
-    Prisma.MagicLinkTokenWhereInput,
-    Prisma.MagicLinkTokenCreateInput,
-    Prisma.MagicLinkTokenGetPayload<{}>
+    WhereInput<MagicLinkTokenTypes>,
+    CreateInput<MagicLinkTokenTypes>,
+    MagicLinkTokenScalars
   >[];
 
-  static findMany<T extends Prisma.MagicLinkTokenFindManyArgs>(
-    args?: Subset<T, Prisma.MagicLinkTokenFindManyArgs>,
+  static findMany<T extends FindManyArgs<MagicLinkTokenTypes>>(
+    args?: Subset<T, FindManyArgs<MagicLinkTokenTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.MagicLinkTokenGetPayload<T>[]> {
-    return this.$exec("findMany", args, options) as Promise<Prisma.MagicLinkTokenGetPayload<T>[]>;
+  ): Promise<Payload<MagicLinkTokenTypes, T>[]> {
+    return this.$exec("findMany", args, options) as Promise<Payload<MagicLinkTokenTypes, T>[]>;
   }
 
-  static findFirst<T extends Prisma.MagicLinkTokenFindFirstArgs>(
-    args?: Subset<T, Prisma.MagicLinkTokenFindFirstArgs>,
+  static findFirst<T extends FindFirstArgs<MagicLinkTokenTypes>>(
+    args?: Subset<T, FindFirstArgs<MagicLinkTokenTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.MagicLinkTokenGetPayload<T> | null> {
-    return this.$exec("findFirst", args, options) as Promise<Prisma.MagicLinkTokenGetPayload<T> | null>;
+  ): Promise<Payload<MagicLinkTokenTypes, T> | null> {
+    return this.$exec("findFirst", args, options) as Promise<Payload<MagicLinkTokenTypes, T> | null>;
   }
 
-  static findFirstOrThrow<T extends Prisma.MagicLinkTokenFindFirstOrThrowArgs>(
-    args?: Subset<T, Prisma.MagicLinkTokenFindFirstOrThrowArgs>,
+  static findFirstOrThrow<T extends FindFirstOrThrowArgs<MagicLinkTokenTypes>>(
+    args?: Subset<T, FindFirstOrThrowArgs<MagicLinkTokenTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.MagicLinkTokenGetPayload<T>> {
-    return this.$exec("findFirstOrThrow", args, options) as Promise<Prisma.MagicLinkTokenGetPayload<T>>;
+  ): Promise<Payload<MagicLinkTokenTypes, T>> {
+    return this.$exec("findFirstOrThrow", args, options) as Promise<Payload<MagicLinkTokenTypes, T>>;
   }
 
-  static findUnique<T extends Prisma.MagicLinkTokenFindUniqueArgs>(
-    args: Subset<T, Prisma.MagicLinkTokenFindUniqueArgs>,
+  static findUnique<T extends FindUniqueArgs<MagicLinkTokenTypes>>(
+    args: Subset<T, FindUniqueArgs<MagicLinkTokenTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.MagicLinkTokenGetPayload<T> | null> {
-    return this.$exec("findUnique", args, options) as Promise<Prisma.MagicLinkTokenGetPayload<T> | null>;
+  ): Promise<Payload<MagicLinkTokenTypes, T> | null> {
+    return this.$exec("findUnique", args, options) as Promise<Payload<MagicLinkTokenTypes, T> | null>;
   }
 
-  static findUniqueOrThrow<T extends Prisma.MagicLinkTokenFindUniqueOrThrowArgs>(
-    args: Subset<T, Prisma.MagicLinkTokenFindUniqueOrThrowArgs>,
+  static findUniqueOrThrow<T extends FindUniqueOrThrowArgs<MagicLinkTokenTypes>>(
+    args: Subset<T, FindUniqueOrThrowArgs<MagicLinkTokenTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.MagicLinkTokenGetPayload<T>> {
-    return this.$exec("findUniqueOrThrow", args, options) as Promise<Prisma.MagicLinkTokenGetPayload<T>>;
+  ): Promise<Payload<MagicLinkTokenTypes, T>> {
+    return this.$exec("findUniqueOrThrow", args, options) as Promise<Payload<MagicLinkTokenTypes, T>>;
   }
 
-  static count(args?: Omit<Prisma.MagicLinkTokenCountArgs, "select">): Promise<number>;
-  static count<T extends Prisma.MagicLinkTokenCountArgs>(
-    args: Prisma.SelectSubset<T, Prisma.MagicLinkTokenCountArgs> & {
+  static count(args?: Omit<CountArgs<MagicLinkTokenTypes>, "select">): Promise<number>;
+  static count<T extends CountArgs<MagicLinkTokenTypes>>(
+    args: SelectSubset<T, CountArgs<MagicLinkTokenTypes>> & {
       select: NonNullable<T["select"]>;
     },
-  ): Promise<Prisma.GetScalarType<T["select"], Prisma.MagicLinkTokenCountAggregateOutputType>>;
+  ): Promise<CountPayload<T["select"]>>;
   static count(args?: unknown): Promise<unknown> {
     return this.$exec("count", args as never);
   }
 
-  static aggregate<T extends Prisma.MagicLinkTokenAggregateArgs>(
-    args: Prisma.Subset<T, Prisma.MagicLinkTokenAggregateArgs>,
-  ): Promise<Prisma.GetMagicLinkTokenAggregateType<T>> {
+  static aggregate<T extends AggregateArgs<MagicLinkTokenTypes>>(
+    args: Subset<T, AggregateArgs<MagicLinkTokenTypes>>,
+  ): Promise<AggregatePayload<MagicLinkTokenTypes, T>> {
     return this.$exec("aggregate", args) as Promise<
-      Prisma.GetMagicLinkTokenAggregateType<T>
+      AggregatePayload<MagicLinkTokenTypes, T>
     >;
   }
 
-  static groupBy<T extends Prisma.MagicLinkTokenGroupByArgs>(
-    args: Prisma.Subset<T, Prisma.MagicLinkTokenGroupByArgs>,
-  ): Promise<Prisma.GetMagicLinkTokenGroupByPayload<T>> {
+  static groupBy<T extends GroupByArgs<MagicLinkTokenTypes>>(
+    args: Subset<T, GroupByArgs<MagicLinkTokenTypes>>,
+  ): Promise<GroupByPayload<MagicLinkTokenTypes, T>> {
     return this.$exec("groupBy", args) as Promise<
-      Prisma.GetMagicLinkTokenGroupByPayload<T>
+      GroupByPayload<MagicLinkTokenTypes, T>
     >;
   }
 
-  static create<T extends Prisma.MagicLinkTokenCreateArgs>(
-    args: Subset<T, Prisma.MagicLinkTokenCreateArgs>,
+  static create<T extends CreateArgs<MagicLinkTokenTypes>>(
+    args: Subset<T, CreateArgs<MagicLinkTokenTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.MagicLinkTokenGetPayload<T>> {
-    return this.$exec("create", args, options) as Promise<Prisma.MagicLinkTokenGetPayload<T>>;
+  ): Promise<Payload<MagicLinkTokenTypes, T>> {
+    return this.$exec("create", args, options) as Promise<Payload<MagicLinkTokenTypes, T>>;
   }
 
-  static update<T extends Prisma.MagicLinkTokenUpdateArgs>(
-    args: Subset<T, Prisma.MagicLinkTokenUpdateArgs>,
+  static update<T extends UpdateArgs<MagicLinkTokenTypes>>(
+    args: Subset<T, UpdateArgs<MagicLinkTokenTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.MagicLinkTokenGetPayload<T>> {
-    return this.$exec("update", args, options) as Promise<Prisma.MagicLinkTokenGetPayload<T>>;
+  ): Promise<Payload<MagicLinkTokenTypes, T>> {
+    return this.$exec("update", args, options) as Promise<Payload<MagicLinkTokenTypes, T>>;
   }
 
-  static delete<T extends Prisma.MagicLinkTokenDeleteArgs>(
-    args: Subset<T, Prisma.MagicLinkTokenDeleteArgs>,
+  static delete<T extends DeleteArgs<MagicLinkTokenTypes>>(
+    args: Subset<T, DeleteArgs<MagicLinkTokenTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.MagicLinkTokenGetPayload<T>> {
-    return this.$exec("delete", args, options) as Promise<Prisma.MagicLinkTokenGetPayload<T>>;
+  ): Promise<Payload<MagicLinkTokenTypes, T>> {
+    return this.$exec("delete", args, options) as Promise<Payload<MagicLinkTokenTypes, T>>;
   }
 
-  static upsert<T extends Prisma.MagicLinkTokenUpsertArgs>(
-    args: Subset<T, Prisma.MagicLinkTokenUpsertArgs>,
+  static upsert<T extends UpsertArgs<MagicLinkTokenTypes>>(
+    args: Subset<T, UpsertArgs<MagicLinkTokenTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.MagicLinkTokenGetPayload<T>> {
-    return this.$exec("upsert", args, options) as Promise<Prisma.MagicLinkTokenGetPayload<T>>;
+  ): Promise<Payload<MagicLinkTokenTypes, T>> {
+    return this.$exec("upsert", args, options) as Promise<Payload<MagicLinkTokenTypes, T>>;
   }
 
   static createMany(
-    args?: Prisma.MagicLinkTokenCreateManyArgs,
+    args?: CreateManyArgs<MagicLinkTokenTypes>,
   ): Promise<{ count: number }> {
     return this.$exec("createMany", args) as Promise<{ count: number }>;
   }
 
   static updateMany(
-    args?: Prisma.MagicLinkTokenUpdateManyArgs,
+    args?: UpdateManyArgs<MagicLinkTokenTypes>,
   ): Promise<{ count: number }> {
     return this.$exec("updateMany", args) as Promise<{ count: number }>;
   }
 
   static deleteMany(
-    args?: Prisma.MagicLinkTokenDeleteManyArgs,
+    args?: DeleteManyArgs<MagicLinkTokenTypes>,
   ): Promise<{ count: number }> {
     return this.$exec("deleteMany", args) as Promise<{ count: number }>;
   }
 
-  static wrap<C extends { prototype: unknown }, R extends Prisma.MagicLinkTokenGetPayload<{}>>(
+  static wrap<C extends { prototype: unknown }, R extends MagicLinkTokenScalars>(
     this: C,
     row: R,
   ): C["prototype"] & R {
     return (Model.wrap as (row: object) => any).call(this, row);
   }
+}
+
+export type MembershipScalars = {
+  organizationId: number;
+  userId: number;
+  role: number;
+  createdAt: Date;
+};
+
+export type MembershipCreateScalars = {
+  organizationId: number;
+  userId: number;
+  role?: number;
+  createdAt?: Date;
+};
+
+export type MembershipRelations = Record<never, never>;
+
+export type MembershipUnique = { organizationId_userId: { organizationId: number; userId: number } };
+
+export interface MembershipTypes extends ModelTypeInfo {
+  scalars: MembershipScalars;
+  relations: MembershipRelations;
+  unique: MembershipUnique;
+  create: MembershipCreateScalars;
 }
 
 // Merges the row's columns into the instance type, so a method on a subclass can
@@ -647,12 +815,12 @@ export class MagicLinkTokenModel extends Model {
 // accepted: `Model`'s constructor is `protected`, so the only way to get an
 // instance is `wrap`, which assigns a complete row. See bin/orm/emit.ts.
 // oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
-export interface MembershipModel extends Prisma.MembershipGetPayload<{}> {}
+export interface MembershipModel extends MembershipScalars {}
 
 export type MembershipPolicy = ModelPolicy<
-  Prisma.MembershipWhereInput,
-  Prisma.MembershipCreateInput,
-  Prisma.MembershipGetPayload<{}>
+  WhereInput<MembershipTypes>,
+  CreateInput<MembershipTypes>,
+  MembershipScalars
 >;
 
 // The same shape with `scope`, `onCreate` and `onUpdate` abstract, so a policy
@@ -660,9 +828,9 @@ export type MembershipPolicy = ModelPolicy<
 // combinations too — this makes it `TS2515` at the class declaration instead of
 // an error on the first write that reaches production.
 export abstract class MembershipScopedPolicy extends ScopedPolicy<
-  Prisma.MembershipWhereInput,
-  Prisma.MembershipCreateInput,
-  Prisma.MembershipGetPayload<{}>
+  WhereInput<MembershipTypes>,
+  CreateInput<MembershipTypes>,
+  MembershipScalars
 > {}
 
 export class MembershipModel extends Model {
@@ -672,124 +840,157 @@ export class MembershipModel extends Model {
   // written for another model is a type error here rather than a scope compiled
   // against columns that do not exist.
   static $policies?: readonly PolicyEntry<
-    Prisma.MembershipWhereInput,
-    Prisma.MembershipCreateInput,
-    Prisma.MembershipGetPayload<{}>
+    WhereInput<MembershipTypes>,
+    CreateInput<MembershipTypes>,
+    MembershipScalars
   >[];
 
-  static findMany<T extends Prisma.MembershipFindManyArgs>(
-    args?: Subset<T, Prisma.MembershipFindManyArgs>,
+  static findMany<T extends FindManyArgs<MembershipTypes>>(
+    args?: Subset<T, FindManyArgs<MembershipTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.MembershipGetPayload<T>[]> {
-    return this.$exec("findMany", args, options) as Promise<Prisma.MembershipGetPayload<T>[]>;
+  ): Promise<Payload<MembershipTypes, T>[]> {
+    return this.$exec("findMany", args, options) as Promise<Payload<MembershipTypes, T>[]>;
   }
 
-  static findFirst<T extends Prisma.MembershipFindFirstArgs>(
-    args?: Subset<T, Prisma.MembershipFindFirstArgs>,
+  static findFirst<T extends FindFirstArgs<MembershipTypes>>(
+    args?: Subset<T, FindFirstArgs<MembershipTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.MembershipGetPayload<T> | null> {
-    return this.$exec("findFirst", args, options) as Promise<Prisma.MembershipGetPayload<T> | null>;
+  ): Promise<Payload<MembershipTypes, T> | null> {
+    return this.$exec("findFirst", args, options) as Promise<Payload<MembershipTypes, T> | null>;
   }
 
-  static findFirstOrThrow<T extends Prisma.MembershipFindFirstOrThrowArgs>(
-    args?: Subset<T, Prisma.MembershipFindFirstOrThrowArgs>,
+  static findFirstOrThrow<T extends FindFirstOrThrowArgs<MembershipTypes>>(
+    args?: Subset<T, FindFirstOrThrowArgs<MembershipTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.MembershipGetPayload<T>> {
-    return this.$exec("findFirstOrThrow", args, options) as Promise<Prisma.MembershipGetPayload<T>>;
+  ): Promise<Payload<MembershipTypes, T>> {
+    return this.$exec("findFirstOrThrow", args, options) as Promise<Payload<MembershipTypes, T>>;
   }
 
-  static findUnique<T extends Prisma.MembershipFindUniqueArgs>(
-    args: Subset<T, Prisma.MembershipFindUniqueArgs>,
+  static findUnique<T extends FindUniqueArgs<MembershipTypes>>(
+    args: Subset<T, FindUniqueArgs<MembershipTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.MembershipGetPayload<T> | null> {
-    return this.$exec("findUnique", args, options) as Promise<Prisma.MembershipGetPayload<T> | null>;
+  ): Promise<Payload<MembershipTypes, T> | null> {
+    return this.$exec("findUnique", args, options) as Promise<Payload<MembershipTypes, T> | null>;
   }
 
-  static findUniqueOrThrow<T extends Prisma.MembershipFindUniqueOrThrowArgs>(
-    args: Subset<T, Prisma.MembershipFindUniqueOrThrowArgs>,
+  static findUniqueOrThrow<T extends FindUniqueOrThrowArgs<MembershipTypes>>(
+    args: Subset<T, FindUniqueOrThrowArgs<MembershipTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.MembershipGetPayload<T>> {
-    return this.$exec("findUniqueOrThrow", args, options) as Promise<Prisma.MembershipGetPayload<T>>;
+  ): Promise<Payload<MembershipTypes, T>> {
+    return this.$exec("findUniqueOrThrow", args, options) as Promise<Payload<MembershipTypes, T>>;
   }
 
-  static count(args?: Omit<Prisma.MembershipCountArgs, "select">): Promise<number>;
-  static count<T extends Prisma.MembershipCountArgs>(
-    args: Prisma.SelectSubset<T, Prisma.MembershipCountArgs> & {
+  static count(args?: Omit<CountArgs<MembershipTypes>, "select">): Promise<number>;
+  static count<T extends CountArgs<MembershipTypes>>(
+    args: SelectSubset<T, CountArgs<MembershipTypes>> & {
       select: NonNullable<T["select"]>;
     },
-  ): Promise<Prisma.GetScalarType<T["select"], Prisma.MembershipCountAggregateOutputType>>;
+  ): Promise<CountPayload<T["select"]>>;
   static count(args?: unknown): Promise<unknown> {
     return this.$exec("count", args as never);
   }
 
-  static aggregate<T extends Prisma.MembershipAggregateArgs>(
-    args: Prisma.Subset<T, Prisma.MembershipAggregateArgs>,
-  ): Promise<Prisma.GetMembershipAggregateType<T>> {
+  static aggregate<T extends AggregateArgs<MembershipTypes>>(
+    args: Subset<T, AggregateArgs<MembershipTypes>>,
+  ): Promise<AggregatePayload<MembershipTypes, T>> {
     return this.$exec("aggregate", args) as Promise<
-      Prisma.GetMembershipAggregateType<T>
+      AggregatePayload<MembershipTypes, T>
     >;
   }
 
-  static groupBy<T extends Prisma.MembershipGroupByArgs>(
-    args: Prisma.Subset<T, Prisma.MembershipGroupByArgs>,
-  ): Promise<Prisma.GetMembershipGroupByPayload<T>> {
+  static groupBy<T extends GroupByArgs<MembershipTypes>>(
+    args: Subset<T, GroupByArgs<MembershipTypes>>,
+  ): Promise<GroupByPayload<MembershipTypes, T>> {
     return this.$exec("groupBy", args) as Promise<
-      Prisma.GetMembershipGroupByPayload<T>
+      GroupByPayload<MembershipTypes, T>
     >;
   }
 
-  static create<T extends Prisma.MembershipCreateArgs>(
-    args: Subset<T, Prisma.MembershipCreateArgs>,
+  static create<T extends CreateArgs<MembershipTypes>>(
+    args: Subset<T, CreateArgs<MembershipTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.MembershipGetPayload<T>> {
-    return this.$exec("create", args, options) as Promise<Prisma.MembershipGetPayload<T>>;
+  ): Promise<Payload<MembershipTypes, T>> {
+    return this.$exec("create", args, options) as Promise<Payload<MembershipTypes, T>>;
   }
 
-  static update<T extends Prisma.MembershipUpdateArgs>(
-    args: Subset<T, Prisma.MembershipUpdateArgs>,
+  static update<T extends UpdateArgs<MembershipTypes>>(
+    args: Subset<T, UpdateArgs<MembershipTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.MembershipGetPayload<T>> {
-    return this.$exec("update", args, options) as Promise<Prisma.MembershipGetPayload<T>>;
+  ): Promise<Payload<MembershipTypes, T>> {
+    return this.$exec("update", args, options) as Promise<Payload<MembershipTypes, T>>;
   }
 
-  static delete<T extends Prisma.MembershipDeleteArgs>(
-    args: Subset<T, Prisma.MembershipDeleteArgs>,
+  static delete<T extends DeleteArgs<MembershipTypes>>(
+    args: Subset<T, DeleteArgs<MembershipTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.MembershipGetPayload<T>> {
-    return this.$exec("delete", args, options) as Promise<Prisma.MembershipGetPayload<T>>;
+  ): Promise<Payload<MembershipTypes, T>> {
+    return this.$exec("delete", args, options) as Promise<Payload<MembershipTypes, T>>;
   }
 
-  static upsert<T extends Prisma.MembershipUpsertArgs>(
-    args: Subset<T, Prisma.MembershipUpsertArgs>,
+  static upsert<T extends UpsertArgs<MembershipTypes>>(
+    args: Subset<T, UpsertArgs<MembershipTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.MembershipGetPayload<T>> {
-    return this.$exec("upsert", args, options) as Promise<Prisma.MembershipGetPayload<T>>;
+  ): Promise<Payload<MembershipTypes, T>> {
+    return this.$exec("upsert", args, options) as Promise<Payload<MembershipTypes, T>>;
   }
 
   static createMany(
-    args?: Prisma.MembershipCreateManyArgs,
+    args?: CreateManyArgs<MembershipTypes>,
   ): Promise<{ count: number }> {
     return this.$exec("createMany", args) as Promise<{ count: number }>;
   }
 
   static updateMany(
-    args?: Prisma.MembershipUpdateManyArgs,
+    args?: UpdateManyArgs<MembershipTypes>,
   ): Promise<{ count: number }> {
     return this.$exec("updateMany", args) as Promise<{ count: number }>;
   }
 
   static deleteMany(
-    args?: Prisma.MembershipDeleteManyArgs,
+    args?: DeleteManyArgs<MembershipTypes>,
   ): Promise<{ count: number }> {
     return this.$exec("deleteMany", args) as Promise<{ count: number }>;
   }
 
-  static wrap<C extends { prototype: unknown }, R extends Prisma.MembershipGetPayload<{}>>(
+  static wrap<C extends { prototype: unknown }, R extends MembershipScalars>(
     this: C,
     row: R,
   ): C["prototype"] & R {
     return (Model.wrap as (row: object) => any).call(this, row);
   }
+}
+
+export type OrganizationScalars = {
+  id: number;
+  publicId: string;
+  name: string;
+  logoUrl: string | null;
+  description: string | null;
+  plan: "free" | "pro" | "enterprise";
+};
+
+export type OrganizationCreateScalars = {
+  id?: number;
+  publicId?: string;
+  name: string;
+  logoUrl?: string | null;
+  description?: string | null;
+  plan?: "free" | "pro" | "enterprise";
+};
+
+export type OrganizationRelations = {
+  users: { kind: "many"; nullable: false; target: UserTypes };
+  accounts: { kind: "many"; nullable: false; target: AccountTypes };
+  invitations: { kind: "many"; nullable: false; target: OrganizationInvitationTypes };
+};
+
+export type OrganizationUnique = { id: number } | { publicId: string };
+
+export interface OrganizationTypes extends ModelTypeInfo {
+  scalars: OrganizationScalars;
+  relations: OrganizationRelations;
+  unique: OrganizationUnique;
+  create: OrganizationCreateScalars;
 }
 
 // Merges the row's columns into the instance type, so a method on a subclass can
@@ -801,12 +1002,12 @@ export class MembershipModel extends Model {
 // accepted: `Model`'s constructor is `protected`, so the only way to get an
 // instance is `wrap`, which assigns a complete row. See bin/orm/emit.ts.
 // oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
-export interface OrganizationModel extends Prisma.OrganizationGetPayload<{}> {}
+export interface OrganizationModel extends OrganizationScalars {}
 
 export type OrganizationPolicy = ModelPolicy<
-  Prisma.OrganizationWhereInput,
-  Prisma.OrganizationCreateInput,
-  Prisma.OrganizationGetPayload<{}>
+  WhereInput<OrganizationTypes>,
+  CreateInput<OrganizationTypes>,
+  OrganizationScalars
 >;
 
 // The same shape with `scope`, `onCreate` and `onUpdate` abstract, so a policy
@@ -814,9 +1015,9 @@ export type OrganizationPolicy = ModelPolicy<
 // combinations too — this makes it `TS2515` at the class declaration instead of
 // an error on the first write that reaches production.
 export abstract class OrganizationScopedPolicy extends ScopedPolicy<
-  Prisma.OrganizationWhereInput,
-  Prisma.OrganizationCreateInput,
-  Prisma.OrganizationGetPayload<{}>
+  WhereInput<OrganizationTypes>,
+  CreateInput<OrganizationTypes>,
+  OrganizationScalars
 > {}
 
 export class OrganizationModel extends Model {
@@ -826,124 +1027,157 @@ export class OrganizationModel extends Model {
   // written for another model is a type error here rather than a scope compiled
   // against columns that do not exist.
   static $policies?: readonly PolicyEntry<
-    Prisma.OrganizationWhereInput,
-    Prisma.OrganizationCreateInput,
-    Prisma.OrganizationGetPayload<{}>
+    WhereInput<OrganizationTypes>,
+    CreateInput<OrganizationTypes>,
+    OrganizationScalars
   >[];
 
-  static findMany<T extends Prisma.OrganizationFindManyArgs>(
-    args?: Subset<T, Prisma.OrganizationFindManyArgs>,
+  static findMany<T extends FindManyArgs<OrganizationTypes>>(
+    args?: Subset<T, FindManyArgs<OrganizationTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.OrganizationGetPayload<T>[]> {
-    return this.$exec("findMany", args, options) as Promise<Prisma.OrganizationGetPayload<T>[]>;
+  ): Promise<Payload<OrganizationTypes, T>[]> {
+    return this.$exec("findMany", args, options) as Promise<Payload<OrganizationTypes, T>[]>;
   }
 
-  static findFirst<T extends Prisma.OrganizationFindFirstArgs>(
-    args?: Subset<T, Prisma.OrganizationFindFirstArgs>,
+  static findFirst<T extends FindFirstArgs<OrganizationTypes>>(
+    args?: Subset<T, FindFirstArgs<OrganizationTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.OrganizationGetPayload<T> | null> {
-    return this.$exec("findFirst", args, options) as Promise<Prisma.OrganizationGetPayload<T> | null>;
+  ): Promise<Payload<OrganizationTypes, T> | null> {
+    return this.$exec("findFirst", args, options) as Promise<Payload<OrganizationTypes, T> | null>;
   }
 
-  static findFirstOrThrow<T extends Prisma.OrganizationFindFirstOrThrowArgs>(
-    args?: Subset<T, Prisma.OrganizationFindFirstOrThrowArgs>,
+  static findFirstOrThrow<T extends FindFirstOrThrowArgs<OrganizationTypes>>(
+    args?: Subset<T, FindFirstOrThrowArgs<OrganizationTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.OrganizationGetPayload<T>> {
-    return this.$exec("findFirstOrThrow", args, options) as Promise<Prisma.OrganizationGetPayload<T>>;
+  ): Promise<Payload<OrganizationTypes, T>> {
+    return this.$exec("findFirstOrThrow", args, options) as Promise<Payload<OrganizationTypes, T>>;
   }
 
-  static findUnique<T extends Prisma.OrganizationFindUniqueArgs>(
-    args: Subset<T, Prisma.OrganizationFindUniqueArgs>,
+  static findUnique<T extends FindUniqueArgs<OrganizationTypes>>(
+    args: Subset<T, FindUniqueArgs<OrganizationTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.OrganizationGetPayload<T> | null> {
-    return this.$exec("findUnique", args, options) as Promise<Prisma.OrganizationGetPayload<T> | null>;
+  ): Promise<Payload<OrganizationTypes, T> | null> {
+    return this.$exec("findUnique", args, options) as Promise<Payload<OrganizationTypes, T> | null>;
   }
 
-  static findUniqueOrThrow<T extends Prisma.OrganizationFindUniqueOrThrowArgs>(
-    args: Subset<T, Prisma.OrganizationFindUniqueOrThrowArgs>,
+  static findUniqueOrThrow<T extends FindUniqueOrThrowArgs<OrganizationTypes>>(
+    args: Subset<T, FindUniqueOrThrowArgs<OrganizationTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.OrganizationGetPayload<T>> {
-    return this.$exec("findUniqueOrThrow", args, options) as Promise<Prisma.OrganizationGetPayload<T>>;
+  ): Promise<Payload<OrganizationTypes, T>> {
+    return this.$exec("findUniqueOrThrow", args, options) as Promise<Payload<OrganizationTypes, T>>;
   }
 
-  static count(args?: Omit<Prisma.OrganizationCountArgs, "select">): Promise<number>;
-  static count<T extends Prisma.OrganizationCountArgs>(
-    args: Prisma.SelectSubset<T, Prisma.OrganizationCountArgs> & {
+  static count(args?: Omit<CountArgs<OrganizationTypes>, "select">): Promise<number>;
+  static count<T extends CountArgs<OrganizationTypes>>(
+    args: SelectSubset<T, CountArgs<OrganizationTypes>> & {
       select: NonNullable<T["select"]>;
     },
-  ): Promise<Prisma.GetScalarType<T["select"], Prisma.OrganizationCountAggregateOutputType>>;
+  ): Promise<CountPayload<T["select"]>>;
   static count(args?: unknown): Promise<unknown> {
     return this.$exec("count", args as never);
   }
 
-  static aggregate<T extends Prisma.OrganizationAggregateArgs>(
-    args: Prisma.Subset<T, Prisma.OrganizationAggregateArgs>,
-  ): Promise<Prisma.GetOrganizationAggregateType<T>> {
+  static aggregate<T extends AggregateArgs<OrganizationTypes>>(
+    args: Subset<T, AggregateArgs<OrganizationTypes>>,
+  ): Promise<AggregatePayload<OrganizationTypes, T>> {
     return this.$exec("aggregate", args) as Promise<
-      Prisma.GetOrganizationAggregateType<T>
+      AggregatePayload<OrganizationTypes, T>
     >;
   }
 
-  static groupBy<T extends Prisma.OrganizationGroupByArgs>(
-    args: Prisma.Subset<T, Prisma.OrganizationGroupByArgs>,
-  ): Promise<Prisma.GetOrganizationGroupByPayload<T>> {
+  static groupBy<T extends GroupByArgs<OrganizationTypes>>(
+    args: Subset<T, GroupByArgs<OrganizationTypes>>,
+  ): Promise<GroupByPayload<OrganizationTypes, T>> {
     return this.$exec("groupBy", args) as Promise<
-      Prisma.GetOrganizationGroupByPayload<T>
+      GroupByPayload<OrganizationTypes, T>
     >;
   }
 
-  static create<T extends Prisma.OrganizationCreateArgs>(
-    args: Subset<T, Prisma.OrganizationCreateArgs>,
+  static create<T extends CreateArgs<OrganizationTypes>>(
+    args: Subset<T, CreateArgs<OrganizationTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.OrganizationGetPayload<T>> {
-    return this.$exec("create", args, options) as Promise<Prisma.OrganizationGetPayload<T>>;
+  ): Promise<Payload<OrganizationTypes, T>> {
+    return this.$exec("create", args, options) as Promise<Payload<OrganizationTypes, T>>;
   }
 
-  static update<T extends Prisma.OrganizationUpdateArgs>(
-    args: Subset<T, Prisma.OrganizationUpdateArgs>,
+  static update<T extends UpdateArgs<OrganizationTypes>>(
+    args: Subset<T, UpdateArgs<OrganizationTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.OrganizationGetPayload<T>> {
-    return this.$exec("update", args, options) as Promise<Prisma.OrganizationGetPayload<T>>;
+  ): Promise<Payload<OrganizationTypes, T>> {
+    return this.$exec("update", args, options) as Promise<Payload<OrganizationTypes, T>>;
   }
 
-  static delete<T extends Prisma.OrganizationDeleteArgs>(
-    args: Subset<T, Prisma.OrganizationDeleteArgs>,
+  static delete<T extends DeleteArgs<OrganizationTypes>>(
+    args: Subset<T, DeleteArgs<OrganizationTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.OrganizationGetPayload<T>> {
-    return this.$exec("delete", args, options) as Promise<Prisma.OrganizationGetPayload<T>>;
+  ): Promise<Payload<OrganizationTypes, T>> {
+    return this.$exec("delete", args, options) as Promise<Payload<OrganizationTypes, T>>;
   }
 
-  static upsert<T extends Prisma.OrganizationUpsertArgs>(
-    args: Subset<T, Prisma.OrganizationUpsertArgs>,
+  static upsert<T extends UpsertArgs<OrganizationTypes>>(
+    args: Subset<T, UpsertArgs<OrganizationTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.OrganizationGetPayload<T>> {
-    return this.$exec("upsert", args, options) as Promise<Prisma.OrganizationGetPayload<T>>;
+  ): Promise<Payload<OrganizationTypes, T>> {
+    return this.$exec("upsert", args, options) as Promise<Payload<OrganizationTypes, T>>;
   }
 
   static createMany(
-    args?: Prisma.OrganizationCreateManyArgs,
+    args?: CreateManyArgs<OrganizationTypes>,
   ): Promise<{ count: number }> {
     return this.$exec("createMany", args) as Promise<{ count: number }>;
   }
 
   static updateMany(
-    args?: Prisma.OrganizationUpdateManyArgs,
+    args?: UpdateManyArgs<OrganizationTypes>,
   ): Promise<{ count: number }> {
     return this.$exec("updateMany", args) as Promise<{ count: number }>;
   }
 
   static deleteMany(
-    args?: Prisma.OrganizationDeleteManyArgs,
+    args?: DeleteManyArgs<OrganizationTypes>,
   ): Promise<{ count: number }> {
     return this.$exec("deleteMany", args) as Promise<{ count: number }>;
   }
 
-  static wrap<C extends { prototype: unknown }, R extends Prisma.OrganizationGetPayload<{}>>(
+  static wrap<C extends { prototype: unknown }, R extends OrganizationScalars>(
     this: C,
     row: R,
   ): C["prototype"] & R {
     return (Model.wrap as (row: object) => any).call(this, row);
   }
+}
+
+export type OrganizationInvitationScalars = {
+  id: number;
+  publicId: string;
+  organizationId: number;
+  email: string;
+  role: number;
+  acceptedAt: Date | null;
+  createdAt: Date;
+};
+
+export type OrganizationInvitationCreateScalars = {
+  id?: number;
+  publicId?: string;
+  organizationId?: number;
+  email: string;
+  role?: number;
+  acceptedAt?: Date | null;
+  createdAt?: Date;
+};
+
+export type OrganizationInvitationRelations = {
+  organization: { kind: "one"; nullable: false; target: OrganizationTypes };
+};
+
+export type OrganizationInvitationUnique = { id: number } | { publicId: string };
+
+export interface OrganizationInvitationTypes extends ModelTypeInfo {
+  scalars: OrganizationInvitationScalars;
+  relations: OrganizationInvitationRelations;
+  unique: OrganizationInvitationUnique;
+  create: OrganizationInvitationCreateScalars;
 }
 
 // Merges the row's columns into the instance type, so a method on a subclass can
@@ -955,12 +1189,12 @@ export class OrganizationModel extends Model {
 // accepted: `Model`'s constructor is `protected`, so the only way to get an
 // instance is `wrap`, which assigns a complete row. See bin/orm/emit.ts.
 // oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
-export interface OrganizationInvitationModel extends Prisma.OrganizationInvitationGetPayload<{}> {}
+export interface OrganizationInvitationModel extends OrganizationInvitationScalars {}
 
 export type OrganizationInvitationPolicy = ModelPolicy<
-  Prisma.OrganizationInvitationWhereInput,
-  Prisma.OrganizationInvitationCreateInput,
-  Prisma.OrganizationInvitationGetPayload<{}>
+  WhereInput<OrganizationInvitationTypes>,
+  CreateInput<OrganizationInvitationTypes>,
+  OrganizationInvitationScalars
 >;
 
 // The same shape with `scope`, `onCreate` and `onUpdate` abstract, so a policy
@@ -968,9 +1202,9 @@ export type OrganizationInvitationPolicy = ModelPolicy<
 // combinations too — this makes it `TS2515` at the class declaration instead of
 // an error on the first write that reaches production.
 export abstract class OrganizationInvitationScopedPolicy extends ScopedPolicy<
-  Prisma.OrganizationInvitationWhereInput,
-  Prisma.OrganizationInvitationCreateInput,
-  Prisma.OrganizationInvitationGetPayload<{}>
+  WhereInput<OrganizationInvitationTypes>,
+  CreateInput<OrganizationInvitationTypes>,
+  OrganizationInvitationScalars
 > {}
 
 export class OrganizationInvitationModel extends Model {
@@ -980,124 +1214,151 @@ export class OrganizationInvitationModel extends Model {
   // written for another model is a type error here rather than a scope compiled
   // against columns that do not exist.
   static $policies?: readonly PolicyEntry<
-    Prisma.OrganizationInvitationWhereInput,
-    Prisma.OrganizationInvitationCreateInput,
-    Prisma.OrganizationInvitationGetPayload<{}>
+    WhereInput<OrganizationInvitationTypes>,
+    CreateInput<OrganizationInvitationTypes>,
+    OrganizationInvitationScalars
   >[];
 
-  static findMany<T extends Prisma.OrganizationInvitationFindManyArgs>(
-    args?: Subset<T, Prisma.OrganizationInvitationFindManyArgs>,
+  static findMany<T extends FindManyArgs<OrganizationInvitationTypes>>(
+    args?: Subset<T, FindManyArgs<OrganizationInvitationTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.OrganizationInvitationGetPayload<T>[]> {
-    return this.$exec("findMany", args, options) as Promise<Prisma.OrganizationInvitationGetPayload<T>[]>;
+  ): Promise<Payload<OrganizationInvitationTypes, T>[]> {
+    return this.$exec("findMany", args, options) as Promise<Payload<OrganizationInvitationTypes, T>[]>;
   }
 
-  static findFirst<T extends Prisma.OrganizationInvitationFindFirstArgs>(
-    args?: Subset<T, Prisma.OrganizationInvitationFindFirstArgs>,
+  static findFirst<T extends FindFirstArgs<OrganizationInvitationTypes>>(
+    args?: Subset<T, FindFirstArgs<OrganizationInvitationTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.OrganizationInvitationGetPayload<T> | null> {
-    return this.$exec("findFirst", args, options) as Promise<Prisma.OrganizationInvitationGetPayload<T> | null>;
+  ): Promise<Payload<OrganizationInvitationTypes, T> | null> {
+    return this.$exec("findFirst", args, options) as Promise<Payload<OrganizationInvitationTypes, T> | null>;
   }
 
-  static findFirstOrThrow<T extends Prisma.OrganizationInvitationFindFirstOrThrowArgs>(
-    args?: Subset<T, Prisma.OrganizationInvitationFindFirstOrThrowArgs>,
+  static findFirstOrThrow<T extends FindFirstOrThrowArgs<OrganizationInvitationTypes>>(
+    args?: Subset<T, FindFirstOrThrowArgs<OrganizationInvitationTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.OrganizationInvitationGetPayload<T>> {
-    return this.$exec("findFirstOrThrow", args, options) as Promise<Prisma.OrganizationInvitationGetPayload<T>>;
+  ): Promise<Payload<OrganizationInvitationTypes, T>> {
+    return this.$exec("findFirstOrThrow", args, options) as Promise<Payload<OrganizationInvitationTypes, T>>;
   }
 
-  static findUnique<T extends Prisma.OrganizationInvitationFindUniqueArgs>(
-    args: Subset<T, Prisma.OrganizationInvitationFindUniqueArgs>,
+  static findUnique<T extends FindUniqueArgs<OrganizationInvitationTypes>>(
+    args: Subset<T, FindUniqueArgs<OrganizationInvitationTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.OrganizationInvitationGetPayload<T> | null> {
-    return this.$exec("findUnique", args, options) as Promise<Prisma.OrganizationInvitationGetPayload<T> | null>;
+  ): Promise<Payload<OrganizationInvitationTypes, T> | null> {
+    return this.$exec("findUnique", args, options) as Promise<Payload<OrganizationInvitationTypes, T> | null>;
   }
 
-  static findUniqueOrThrow<T extends Prisma.OrganizationInvitationFindUniqueOrThrowArgs>(
-    args: Subset<T, Prisma.OrganizationInvitationFindUniqueOrThrowArgs>,
+  static findUniqueOrThrow<T extends FindUniqueOrThrowArgs<OrganizationInvitationTypes>>(
+    args: Subset<T, FindUniqueOrThrowArgs<OrganizationInvitationTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.OrganizationInvitationGetPayload<T>> {
-    return this.$exec("findUniqueOrThrow", args, options) as Promise<Prisma.OrganizationInvitationGetPayload<T>>;
+  ): Promise<Payload<OrganizationInvitationTypes, T>> {
+    return this.$exec("findUniqueOrThrow", args, options) as Promise<Payload<OrganizationInvitationTypes, T>>;
   }
 
-  static count(args?: Omit<Prisma.OrganizationInvitationCountArgs, "select">): Promise<number>;
-  static count<T extends Prisma.OrganizationInvitationCountArgs>(
-    args: Prisma.SelectSubset<T, Prisma.OrganizationInvitationCountArgs> & {
+  static count(args?: Omit<CountArgs<OrganizationInvitationTypes>, "select">): Promise<number>;
+  static count<T extends CountArgs<OrganizationInvitationTypes>>(
+    args: SelectSubset<T, CountArgs<OrganizationInvitationTypes>> & {
       select: NonNullable<T["select"]>;
     },
-  ): Promise<Prisma.GetScalarType<T["select"], Prisma.OrganizationInvitationCountAggregateOutputType>>;
+  ): Promise<CountPayload<T["select"]>>;
   static count(args?: unknown): Promise<unknown> {
     return this.$exec("count", args as never);
   }
 
-  static aggregate<T extends Prisma.OrganizationInvitationAggregateArgs>(
-    args: Prisma.Subset<T, Prisma.OrganizationInvitationAggregateArgs>,
-  ): Promise<Prisma.GetOrganizationInvitationAggregateType<T>> {
+  static aggregate<T extends AggregateArgs<OrganizationInvitationTypes>>(
+    args: Subset<T, AggregateArgs<OrganizationInvitationTypes>>,
+  ): Promise<AggregatePayload<OrganizationInvitationTypes, T>> {
     return this.$exec("aggregate", args) as Promise<
-      Prisma.GetOrganizationInvitationAggregateType<T>
+      AggregatePayload<OrganizationInvitationTypes, T>
     >;
   }
 
-  static groupBy<T extends Prisma.OrganizationInvitationGroupByArgs>(
-    args: Prisma.Subset<T, Prisma.OrganizationInvitationGroupByArgs>,
-  ): Promise<Prisma.GetOrganizationInvitationGroupByPayload<T>> {
+  static groupBy<T extends GroupByArgs<OrganizationInvitationTypes>>(
+    args: Subset<T, GroupByArgs<OrganizationInvitationTypes>>,
+  ): Promise<GroupByPayload<OrganizationInvitationTypes, T>> {
     return this.$exec("groupBy", args) as Promise<
-      Prisma.GetOrganizationInvitationGroupByPayload<T>
+      GroupByPayload<OrganizationInvitationTypes, T>
     >;
   }
 
-  static create<T extends Prisma.OrganizationInvitationCreateArgs>(
-    args: Subset<T, Prisma.OrganizationInvitationCreateArgs>,
+  static create<T extends CreateArgs<OrganizationInvitationTypes>>(
+    args: Subset<T, CreateArgs<OrganizationInvitationTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.OrganizationInvitationGetPayload<T>> {
-    return this.$exec("create", args, options) as Promise<Prisma.OrganizationInvitationGetPayload<T>>;
+  ): Promise<Payload<OrganizationInvitationTypes, T>> {
+    return this.$exec("create", args, options) as Promise<Payload<OrganizationInvitationTypes, T>>;
   }
 
-  static update<T extends Prisma.OrganizationInvitationUpdateArgs>(
-    args: Subset<T, Prisma.OrganizationInvitationUpdateArgs>,
+  static update<T extends UpdateArgs<OrganizationInvitationTypes>>(
+    args: Subset<T, UpdateArgs<OrganizationInvitationTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.OrganizationInvitationGetPayload<T>> {
-    return this.$exec("update", args, options) as Promise<Prisma.OrganizationInvitationGetPayload<T>>;
+  ): Promise<Payload<OrganizationInvitationTypes, T>> {
+    return this.$exec("update", args, options) as Promise<Payload<OrganizationInvitationTypes, T>>;
   }
 
-  static delete<T extends Prisma.OrganizationInvitationDeleteArgs>(
-    args: Subset<T, Prisma.OrganizationInvitationDeleteArgs>,
+  static delete<T extends DeleteArgs<OrganizationInvitationTypes>>(
+    args: Subset<T, DeleteArgs<OrganizationInvitationTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.OrganizationInvitationGetPayload<T>> {
-    return this.$exec("delete", args, options) as Promise<Prisma.OrganizationInvitationGetPayload<T>>;
+  ): Promise<Payload<OrganizationInvitationTypes, T>> {
+    return this.$exec("delete", args, options) as Promise<Payload<OrganizationInvitationTypes, T>>;
   }
 
-  static upsert<T extends Prisma.OrganizationInvitationUpsertArgs>(
-    args: Subset<T, Prisma.OrganizationInvitationUpsertArgs>,
+  static upsert<T extends UpsertArgs<OrganizationInvitationTypes>>(
+    args: Subset<T, UpsertArgs<OrganizationInvitationTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.OrganizationInvitationGetPayload<T>> {
-    return this.$exec("upsert", args, options) as Promise<Prisma.OrganizationInvitationGetPayload<T>>;
+  ): Promise<Payload<OrganizationInvitationTypes, T>> {
+    return this.$exec("upsert", args, options) as Promise<Payload<OrganizationInvitationTypes, T>>;
   }
 
   static createMany(
-    args?: Prisma.OrganizationInvitationCreateManyArgs,
+    args?: CreateManyArgs<OrganizationInvitationTypes>,
   ): Promise<{ count: number }> {
     return this.$exec("createMany", args) as Promise<{ count: number }>;
   }
 
   static updateMany(
-    args?: Prisma.OrganizationInvitationUpdateManyArgs,
+    args?: UpdateManyArgs<OrganizationInvitationTypes>,
   ): Promise<{ count: number }> {
     return this.$exec("updateMany", args) as Promise<{ count: number }>;
   }
 
   static deleteMany(
-    args?: Prisma.OrganizationInvitationDeleteManyArgs,
+    args?: DeleteManyArgs<OrganizationInvitationTypes>,
   ): Promise<{ count: number }> {
     return this.$exec("deleteMany", args) as Promise<{ count: number }>;
   }
 
-  static wrap<C extends { prototype: unknown }, R extends Prisma.OrganizationInvitationGetPayload<{}>>(
+  static wrap<C extends { prototype: unknown }, R extends OrganizationInvitationScalars>(
     this: C,
     row: R,
   ): C["prototype"] & R {
     return (Model.wrap as (row: object) => any).call(this, row);
   }
+}
+
+export type PasswordResetTokenScalars = {
+  id: number;
+  token: string;
+  userId: number;
+  createdAt: Date;
+};
+
+export type PasswordResetTokenCreateScalars = {
+  id?: number;
+  token: string;
+  userId?: number;
+  createdAt?: Date;
+};
+
+export type PasswordResetTokenRelations = {
+  user: { kind: "one"; nullable: false; target: UserTypes };
+};
+
+export type PasswordResetTokenUnique = { id: number } | { token: string };
+
+export interface PasswordResetTokenTypes extends ModelTypeInfo {
+  scalars: PasswordResetTokenScalars;
+  relations: PasswordResetTokenRelations;
+  unique: PasswordResetTokenUnique;
+  create: PasswordResetTokenCreateScalars;
 }
 
 // Merges the row's columns into the instance type, so a method on a subclass can
@@ -1109,12 +1370,12 @@ export class OrganizationInvitationModel extends Model {
 // accepted: `Model`'s constructor is `protected`, so the only way to get an
 // instance is `wrap`, which assigns a complete row. See bin/orm/emit.ts.
 // oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
-export interface PasswordResetTokenModel extends Prisma.PasswordResetTokenGetPayload<{}> {}
+export interface PasswordResetTokenModel extends PasswordResetTokenScalars {}
 
 export type PasswordResetTokenPolicy = ModelPolicy<
-  Prisma.PasswordResetTokenWhereInput,
-  Prisma.PasswordResetTokenCreateInput,
-  Prisma.PasswordResetTokenGetPayload<{}>
+  WhereInput<PasswordResetTokenTypes>,
+  CreateInput<PasswordResetTokenTypes>,
+  PasswordResetTokenScalars
 >;
 
 // The same shape with `scope`, `onCreate` and `onUpdate` abstract, so a policy
@@ -1122,9 +1383,9 @@ export type PasswordResetTokenPolicy = ModelPolicy<
 // combinations too — this makes it `TS2515` at the class declaration instead of
 // an error on the first write that reaches production.
 export abstract class PasswordResetTokenScopedPolicy extends ScopedPolicy<
-  Prisma.PasswordResetTokenWhereInput,
-  Prisma.PasswordResetTokenCreateInput,
-  Prisma.PasswordResetTokenGetPayload<{}>
+  WhereInput<PasswordResetTokenTypes>,
+  CreateInput<PasswordResetTokenTypes>,
+  PasswordResetTokenScalars
 > {}
 
 export class PasswordResetTokenModel extends Model {
@@ -1134,124 +1395,147 @@ export class PasswordResetTokenModel extends Model {
   // written for another model is a type error here rather than a scope compiled
   // against columns that do not exist.
   static $policies?: readonly PolicyEntry<
-    Prisma.PasswordResetTokenWhereInput,
-    Prisma.PasswordResetTokenCreateInput,
-    Prisma.PasswordResetTokenGetPayload<{}>
+    WhereInput<PasswordResetTokenTypes>,
+    CreateInput<PasswordResetTokenTypes>,
+    PasswordResetTokenScalars
   >[];
 
-  static findMany<T extends Prisma.PasswordResetTokenFindManyArgs>(
-    args?: Subset<T, Prisma.PasswordResetTokenFindManyArgs>,
+  static findMany<T extends FindManyArgs<PasswordResetTokenTypes>>(
+    args?: Subset<T, FindManyArgs<PasswordResetTokenTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.PasswordResetTokenGetPayload<T>[]> {
-    return this.$exec("findMany", args, options) as Promise<Prisma.PasswordResetTokenGetPayload<T>[]>;
+  ): Promise<Payload<PasswordResetTokenTypes, T>[]> {
+    return this.$exec("findMany", args, options) as Promise<Payload<PasswordResetTokenTypes, T>[]>;
   }
 
-  static findFirst<T extends Prisma.PasswordResetTokenFindFirstArgs>(
-    args?: Subset<T, Prisma.PasswordResetTokenFindFirstArgs>,
+  static findFirst<T extends FindFirstArgs<PasswordResetTokenTypes>>(
+    args?: Subset<T, FindFirstArgs<PasswordResetTokenTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.PasswordResetTokenGetPayload<T> | null> {
-    return this.$exec("findFirst", args, options) as Promise<Prisma.PasswordResetTokenGetPayload<T> | null>;
+  ): Promise<Payload<PasswordResetTokenTypes, T> | null> {
+    return this.$exec("findFirst", args, options) as Promise<Payload<PasswordResetTokenTypes, T> | null>;
   }
 
-  static findFirstOrThrow<T extends Prisma.PasswordResetTokenFindFirstOrThrowArgs>(
-    args?: Subset<T, Prisma.PasswordResetTokenFindFirstOrThrowArgs>,
+  static findFirstOrThrow<T extends FindFirstOrThrowArgs<PasswordResetTokenTypes>>(
+    args?: Subset<T, FindFirstOrThrowArgs<PasswordResetTokenTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.PasswordResetTokenGetPayload<T>> {
-    return this.$exec("findFirstOrThrow", args, options) as Promise<Prisma.PasswordResetTokenGetPayload<T>>;
+  ): Promise<Payload<PasswordResetTokenTypes, T>> {
+    return this.$exec("findFirstOrThrow", args, options) as Promise<Payload<PasswordResetTokenTypes, T>>;
   }
 
-  static findUnique<T extends Prisma.PasswordResetTokenFindUniqueArgs>(
-    args: Subset<T, Prisma.PasswordResetTokenFindUniqueArgs>,
+  static findUnique<T extends FindUniqueArgs<PasswordResetTokenTypes>>(
+    args: Subset<T, FindUniqueArgs<PasswordResetTokenTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.PasswordResetTokenGetPayload<T> | null> {
-    return this.$exec("findUnique", args, options) as Promise<Prisma.PasswordResetTokenGetPayload<T> | null>;
+  ): Promise<Payload<PasswordResetTokenTypes, T> | null> {
+    return this.$exec("findUnique", args, options) as Promise<Payload<PasswordResetTokenTypes, T> | null>;
   }
 
-  static findUniqueOrThrow<T extends Prisma.PasswordResetTokenFindUniqueOrThrowArgs>(
-    args: Subset<T, Prisma.PasswordResetTokenFindUniqueOrThrowArgs>,
+  static findUniqueOrThrow<T extends FindUniqueOrThrowArgs<PasswordResetTokenTypes>>(
+    args: Subset<T, FindUniqueOrThrowArgs<PasswordResetTokenTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.PasswordResetTokenGetPayload<T>> {
-    return this.$exec("findUniqueOrThrow", args, options) as Promise<Prisma.PasswordResetTokenGetPayload<T>>;
+  ): Promise<Payload<PasswordResetTokenTypes, T>> {
+    return this.$exec("findUniqueOrThrow", args, options) as Promise<Payload<PasswordResetTokenTypes, T>>;
   }
 
-  static count(args?: Omit<Prisma.PasswordResetTokenCountArgs, "select">): Promise<number>;
-  static count<T extends Prisma.PasswordResetTokenCountArgs>(
-    args: Prisma.SelectSubset<T, Prisma.PasswordResetTokenCountArgs> & {
+  static count(args?: Omit<CountArgs<PasswordResetTokenTypes>, "select">): Promise<number>;
+  static count<T extends CountArgs<PasswordResetTokenTypes>>(
+    args: SelectSubset<T, CountArgs<PasswordResetTokenTypes>> & {
       select: NonNullable<T["select"]>;
     },
-  ): Promise<Prisma.GetScalarType<T["select"], Prisma.PasswordResetTokenCountAggregateOutputType>>;
+  ): Promise<CountPayload<T["select"]>>;
   static count(args?: unknown): Promise<unknown> {
     return this.$exec("count", args as never);
   }
 
-  static aggregate<T extends Prisma.PasswordResetTokenAggregateArgs>(
-    args: Prisma.Subset<T, Prisma.PasswordResetTokenAggregateArgs>,
-  ): Promise<Prisma.GetPasswordResetTokenAggregateType<T>> {
+  static aggregate<T extends AggregateArgs<PasswordResetTokenTypes>>(
+    args: Subset<T, AggregateArgs<PasswordResetTokenTypes>>,
+  ): Promise<AggregatePayload<PasswordResetTokenTypes, T>> {
     return this.$exec("aggregate", args) as Promise<
-      Prisma.GetPasswordResetTokenAggregateType<T>
+      AggregatePayload<PasswordResetTokenTypes, T>
     >;
   }
 
-  static groupBy<T extends Prisma.PasswordResetTokenGroupByArgs>(
-    args: Prisma.Subset<T, Prisma.PasswordResetTokenGroupByArgs>,
-  ): Promise<Prisma.GetPasswordResetTokenGroupByPayload<T>> {
+  static groupBy<T extends GroupByArgs<PasswordResetTokenTypes>>(
+    args: Subset<T, GroupByArgs<PasswordResetTokenTypes>>,
+  ): Promise<GroupByPayload<PasswordResetTokenTypes, T>> {
     return this.$exec("groupBy", args) as Promise<
-      Prisma.GetPasswordResetTokenGroupByPayload<T>
+      GroupByPayload<PasswordResetTokenTypes, T>
     >;
   }
 
-  static create<T extends Prisma.PasswordResetTokenCreateArgs>(
-    args: Subset<T, Prisma.PasswordResetTokenCreateArgs>,
+  static create<T extends CreateArgs<PasswordResetTokenTypes>>(
+    args: Subset<T, CreateArgs<PasswordResetTokenTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.PasswordResetTokenGetPayload<T>> {
-    return this.$exec("create", args, options) as Promise<Prisma.PasswordResetTokenGetPayload<T>>;
+  ): Promise<Payload<PasswordResetTokenTypes, T>> {
+    return this.$exec("create", args, options) as Promise<Payload<PasswordResetTokenTypes, T>>;
   }
 
-  static update<T extends Prisma.PasswordResetTokenUpdateArgs>(
-    args: Subset<T, Prisma.PasswordResetTokenUpdateArgs>,
+  static update<T extends UpdateArgs<PasswordResetTokenTypes>>(
+    args: Subset<T, UpdateArgs<PasswordResetTokenTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.PasswordResetTokenGetPayload<T>> {
-    return this.$exec("update", args, options) as Promise<Prisma.PasswordResetTokenGetPayload<T>>;
+  ): Promise<Payload<PasswordResetTokenTypes, T>> {
+    return this.$exec("update", args, options) as Promise<Payload<PasswordResetTokenTypes, T>>;
   }
 
-  static delete<T extends Prisma.PasswordResetTokenDeleteArgs>(
-    args: Subset<T, Prisma.PasswordResetTokenDeleteArgs>,
+  static delete<T extends DeleteArgs<PasswordResetTokenTypes>>(
+    args: Subset<T, DeleteArgs<PasswordResetTokenTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.PasswordResetTokenGetPayload<T>> {
-    return this.$exec("delete", args, options) as Promise<Prisma.PasswordResetTokenGetPayload<T>>;
+  ): Promise<Payload<PasswordResetTokenTypes, T>> {
+    return this.$exec("delete", args, options) as Promise<Payload<PasswordResetTokenTypes, T>>;
   }
 
-  static upsert<T extends Prisma.PasswordResetTokenUpsertArgs>(
-    args: Subset<T, Prisma.PasswordResetTokenUpsertArgs>,
+  static upsert<T extends UpsertArgs<PasswordResetTokenTypes>>(
+    args: Subset<T, UpsertArgs<PasswordResetTokenTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.PasswordResetTokenGetPayload<T>> {
-    return this.$exec("upsert", args, options) as Promise<Prisma.PasswordResetTokenGetPayload<T>>;
+  ): Promise<Payload<PasswordResetTokenTypes, T>> {
+    return this.$exec("upsert", args, options) as Promise<Payload<PasswordResetTokenTypes, T>>;
   }
 
   static createMany(
-    args?: Prisma.PasswordResetTokenCreateManyArgs,
+    args?: CreateManyArgs<PasswordResetTokenTypes>,
   ): Promise<{ count: number }> {
     return this.$exec("createMany", args) as Promise<{ count: number }>;
   }
 
   static updateMany(
-    args?: Prisma.PasswordResetTokenUpdateManyArgs,
+    args?: UpdateManyArgs<PasswordResetTokenTypes>,
   ): Promise<{ count: number }> {
     return this.$exec("updateMany", args) as Promise<{ count: number }>;
   }
 
   static deleteMany(
-    args?: Prisma.PasswordResetTokenDeleteManyArgs,
+    args?: DeleteManyArgs<PasswordResetTokenTypes>,
   ): Promise<{ count: number }> {
     return this.$exec("deleteMany", args) as Promise<{ count: number }>;
   }
 
-  static wrap<C extends { prototype: unknown }, R extends Prisma.PasswordResetTokenGetPayload<{}>>(
+  static wrap<C extends { prototype: unknown }, R extends PasswordResetTokenScalars>(
     this: C,
     row: R,
   ): C["prototype"] & R {
     return (Model.wrap as (row: object) => any).call(this, row);
   }
+}
+
+export type PostScalars = {
+  id: number;
+  title: string;
+};
+
+export type PostCreateScalars = {
+  id?: number;
+  title: string;
+};
+
+export type PostRelations = {
+  tags: { kind: "many"; nullable: false; target: TagTypes };
+};
+
+export type PostUnique = { id: number };
+
+export interface PostTypes extends ModelTypeInfo {
+  scalars: PostScalars;
+  relations: PostRelations;
+  unique: PostUnique;
+  create: PostCreateScalars;
 }
 
 // Merges the row's columns into the instance type, so a method on a subclass can
@@ -1263,12 +1547,12 @@ export class PasswordResetTokenModel extends Model {
 // accepted: `Model`'s constructor is `protected`, so the only way to get an
 // instance is `wrap`, which assigns a complete row. See bin/orm/emit.ts.
 // oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
-export interface PostModel extends Prisma.PostGetPayload<{}> {}
+export interface PostModel extends PostScalars {}
 
 export type PostPolicy = ModelPolicy<
-  Prisma.PostWhereInput,
-  Prisma.PostCreateInput,
-  Prisma.PostGetPayload<{}>
+  WhereInput<PostTypes>,
+  CreateInput<PostTypes>,
+  PostScalars
 >;
 
 // The same shape with `scope`, `onCreate` and `onUpdate` abstract, so a policy
@@ -1276,9 +1560,9 @@ export type PostPolicy = ModelPolicy<
 // combinations too — this makes it `TS2515` at the class declaration instead of
 // an error on the first write that reaches production.
 export abstract class PostScopedPolicy extends ScopedPolicy<
-  Prisma.PostWhereInput,
-  Prisma.PostCreateInput,
-  Prisma.PostGetPayload<{}>
+  WhereInput<PostTypes>,
+  CreateInput<PostTypes>,
+  PostScalars
 > {}
 
 export class PostModel extends Model {
@@ -1288,124 +1572,161 @@ export class PostModel extends Model {
   // written for another model is a type error here rather than a scope compiled
   // against columns that do not exist.
   static $policies?: readonly PolicyEntry<
-    Prisma.PostWhereInput,
-    Prisma.PostCreateInput,
-    Prisma.PostGetPayload<{}>
+    WhereInput<PostTypes>,
+    CreateInput<PostTypes>,
+    PostScalars
   >[];
 
-  static findMany<T extends Prisma.PostFindManyArgs>(
-    args?: Subset<T, Prisma.PostFindManyArgs>,
+  static findMany<T extends FindManyArgs<PostTypes>>(
+    args?: Subset<T, FindManyArgs<PostTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.PostGetPayload<T>[]> {
-    return this.$exec("findMany", args, options) as Promise<Prisma.PostGetPayload<T>[]>;
+  ): Promise<Payload<PostTypes, T>[]> {
+    return this.$exec("findMany", args, options) as Promise<Payload<PostTypes, T>[]>;
   }
 
-  static findFirst<T extends Prisma.PostFindFirstArgs>(
-    args?: Subset<T, Prisma.PostFindFirstArgs>,
+  static findFirst<T extends FindFirstArgs<PostTypes>>(
+    args?: Subset<T, FindFirstArgs<PostTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.PostGetPayload<T> | null> {
-    return this.$exec("findFirst", args, options) as Promise<Prisma.PostGetPayload<T> | null>;
+  ): Promise<Payload<PostTypes, T> | null> {
+    return this.$exec("findFirst", args, options) as Promise<Payload<PostTypes, T> | null>;
   }
 
-  static findFirstOrThrow<T extends Prisma.PostFindFirstOrThrowArgs>(
-    args?: Subset<T, Prisma.PostFindFirstOrThrowArgs>,
+  static findFirstOrThrow<T extends FindFirstOrThrowArgs<PostTypes>>(
+    args?: Subset<T, FindFirstOrThrowArgs<PostTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.PostGetPayload<T>> {
-    return this.$exec("findFirstOrThrow", args, options) as Promise<Prisma.PostGetPayload<T>>;
+  ): Promise<Payload<PostTypes, T>> {
+    return this.$exec("findFirstOrThrow", args, options) as Promise<Payload<PostTypes, T>>;
   }
 
-  static findUnique<T extends Prisma.PostFindUniqueArgs>(
-    args: Subset<T, Prisma.PostFindUniqueArgs>,
+  static findUnique<T extends FindUniqueArgs<PostTypes>>(
+    args: Subset<T, FindUniqueArgs<PostTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.PostGetPayload<T> | null> {
-    return this.$exec("findUnique", args, options) as Promise<Prisma.PostGetPayload<T> | null>;
+  ): Promise<Payload<PostTypes, T> | null> {
+    return this.$exec("findUnique", args, options) as Promise<Payload<PostTypes, T> | null>;
   }
 
-  static findUniqueOrThrow<T extends Prisma.PostFindUniqueOrThrowArgs>(
-    args: Subset<T, Prisma.PostFindUniqueOrThrowArgs>,
+  static findUniqueOrThrow<T extends FindUniqueOrThrowArgs<PostTypes>>(
+    args: Subset<T, FindUniqueOrThrowArgs<PostTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.PostGetPayload<T>> {
-    return this.$exec("findUniqueOrThrow", args, options) as Promise<Prisma.PostGetPayload<T>>;
+  ): Promise<Payload<PostTypes, T>> {
+    return this.$exec("findUniqueOrThrow", args, options) as Promise<Payload<PostTypes, T>>;
   }
 
-  static count(args?: Omit<Prisma.PostCountArgs, "select">): Promise<number>;
-  static count<T extends Prisma.PostCountArgs>(
-    args: Prisma.SelectSubset<T, Prisma.PostCountArgs> & {
+  static count(args?: Omit<CountArgs<PostTypes>, "select">): Promise<number>;
+  static count<T extends CountArgs<PostTypes>>(
+    args: SelectSubset<T, CountArgs<PostTypes>> & {
       select: NonNullable<T["select"]>;
     },
-  ): Promise<Prisma.GetScalarType<T["select"], Prisma.PostCountAggregateOutputType>>;
+  ): Promise<CountPayload<T["select"]>>;
   static count(args?: unknown): Promise<unknown> {
     return this.$exec("count", args as never);
   }
 
-  static aggregate<T extends Prisma.PostAggregateArgs>(
-    args: Prisma.Subset<T, Prisma.PostAggregateArgs>,
-  ): Promise<Prisma.GetPostAggregateType<T>> {
+  static aggregate<T extends AggregateArgs<PostTypes>>(
+    args: Subset<T, AggregateArgs<PostTypes>>,
+  ): Promise<AggregatePayload<PostTypes, T>> {
     return this.$exec("aggregate", args) as Promise<
-      Prisma.GetPostAggregateType<T>
+      AggregatePayload<PostTypes, T>
     >;
   }
 
-  static groupBy<T extends Prisma.PostGroupByArgs>(
-    args: Prisma.Subset<T, Prisma.PostGroupByArgs>,
-  ): Promise<Prisma.GetPostGroupByPayload<T>> {
+  static groupBy<T extends GroupByArgs<PostTypes>>(
+    args: Subset<T, GroupByArgs<PostTypes>>,
+  ): Promise<GroupByPayload<PostTypes, T>> {
     return this.$exec("groupBy", args) as Promise<
-      Prisma.GetPostGroupByPayload<T>
+      GroupByPayload<PostTypes, T>
     >;
   }
 
-  static create<T extends Prisma.PostCreateArgs>(
-    args: Subset<T, Prisma.PostCreateArgs>,
+  static create<T extends CreateArgs<PostTypes>>(
+    args: Subset<T, CreateArgs<PostTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.PostGetPayload<T>> {
-    return this.$exec("create", args, options) as Promise<Prisma.PostGetPayload<T>>;
+  ): Promise<Payload<PostTypes, T>> {
+    return this.$exec("create", args, options) as Promise<Payload<PostTypes, T>>;
   }
 
-  static update<T extends Prisma.PostUpdateArgs>(
-    args: Subset<T, Prisma.PostUpdateArgs>,
+  static update<T extends UpdateArgs<PostTypes>>(
+    args: Subset<T, UpdateArgs<PostTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.PostGetPayload<T>> {
-    return this.$exec("update", args, options) as Promise<Prisma.PostGetPayload<T>>;
+  ): Promise<Payload<PostTypes, T>> {
+    return this.$exec("update", args, options) as Promise<Payload<PostTypes, T>>;
   }
 
-  static delete<T extends Prisma.PostDeleteArgs>(
-    args: Subset<T, Prisma.PostDeleteArgs>,
+  static delete<T extends DeleteArgs<PostTypes>>(
+    args: Subset<T, DeleteArgs<PostTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.PostGetPayload<T>> {
-    return this.$exec("delete", args, options) as Promise<Prisma.PostGetPayload<T>>;
+  ): Promise<Payload<PostTypes, T>> {
+    return this.$exec("delete", args, options) as Promise<Payload<PostTypes, T>>;
   }
 
-  static upsert<T extends Prisma.PostUpsertArgs>(
-    args: Subset<T, Prisma.PostUpsertArgs>,
+  static upsert<T extends UpsertArgs<PostTypes>>(
+    args: Subset<T, UpsertArgs<PostTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.PostGetPayload<T>> {
-    return this.$exec("upsert", args, options) as Promise<Prisma.PostGetPayload<T>>;
+  ): Promise<Payload<PostTypes, T>> {
+    return this.$exec("upsert", args, options) as Promise<Payload<PostTypes, T>>;
   }
 
   static createMany(
-    args?: Prisma.PostCreateManyArgs,
+    args?: CreateManyArgs<PostTypes>,
   ): Promise<{ count: number }> {
     return this.$exec("createMany", args) as Promise<{ count: number }>;
   }
 
   static updateMany(
-    args?: Prisma.PostUpdateManyArgs,
+    args?: UpdateManyArgs<PostTypes>,
   ): Promise<{ count: number }> {
     return this.$exec("updateMany", args) as Promise<{ count: number }>;
   }
 
   static deleteMany(
-    args?: Prisma.PostDeleteManyArgs,
+    args?: DeleteManyArgs<PostTypes>,
   ): Promise<{ count: number }> {
     return this.$exec("deleteMany", args) as Promise<{ count: number }>;
   }
 
-  static wrap<C extends { prototype: unknown }, R extends Prisma.PostGetPayload<{}>>(
+  static wrap<C extends { prototype: unknown }, R extends PostScalars>(
     this: C,
     row: R,
   ): C["prototype"] & R {
     return (Model.wrap as (row: object) => any).call(this, row);
   }
+}
+
+export type SessionScalars = {
+  id: number;
+  token: string;
+  userId: number | null;
+  location: string | null;
+  userAgent: string | null;
+  createdAt: Date;
+  updatedAt: Date | null;
+  expiresAt: Date;
+  absoluteExpiresAt: Date;
+};
+
+export type SessionCreateScalars = {
+  id?: number;
+  token: string;
+  userId?: number | null;
+  location?: string | null;
+  userAgent?: string | null;
+  createdAt?: Date;
+  updatedAt?: Date | null;
+  expiresAt: Date;
+  absoluteExpiresAt: Date;
+};
+
+export type SessionRelations = {
+  user: { kind: "one"; nullable: true; target: UserTypes };
+};
+
+export type SessionUnique = { id: number } | { token: string };
+
+export interface SessionTypes extends ModelTypeInfo {
+  scalars: SessionScalars;
+  relations: SessionRelations;
+  unique: SessionUnique;
+  create: SessionCreateScalars;
 }
 
 // Merges the row's columns into the instance type, so a method on a subclass can
@@ -1417,12 +1738,12 @@ export class PostModel extends Model {
 // accepted: `Model`'s constructor is `protected`, so the only way to get an
 // instance is `wrap`, which assigns a complete row. See bin/orm/emit.ts.
 // oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
-export interface SessionModel extends Prisma.SessionGetPayload<{}> {}
+export interface SessionModel extends SessionScalars {}
 
 export type SessionPolicy = ModelPolicy<
-  Prisma.SessionWhereInput,
-  Prisma.SessionCreateInput,
-  Prisma.SessionGetPayload<{}>
+  WhereInput<SessionTypes>,
+  CreateInput<SessionTypes>,
+  SessionScalars
 >;
 
 // The same shape with `scope`, `onCreate` and `onUpdate` abstract, so a policy
@@ -1430,9 +1751,9 @@ export type SessionPolicy = ModelPolicy<
 // combinations too — this makes it `TS2515` at the class declaration instead of
 // an error on the first write that reaches production.
 export abstract class SessionScopedPolicy extends ScopedPolicy<
-  Prisma.SessionWhereInput,
-  Prisma.SessionCreateInput,
-  Prisma.SessionGetPayload<{}>
+  WhereInput<SessionTypes>,
+  CreateInput<SessionTypes>,
+  SessionScalars
 > {}
 
 export class SessionModel extends Model {
@@ -1442,124 +1763,165 @@ export class SessionModel extends Model {
   // written for another model is a type error here rather than a scope compiled
   // against columns that do not exist.
   static $policies?: readonly PolicyEntry<
-    Prisma.SessionWhereInput,
-    Prisma.SessionCreateInput,
-    Prisma.SessionGetPayload<{}>
+    WhereInput<SessionTypes>,
+    CreateInput<SessionTypes>,
+    SessionScalars
   >[];
 
-  static findMany<T extends Prisma.SessionFindManyArgs>(
-    args?: Subset<T, Prisma.SessionFindManyArgs>,
+  static findMany<T extends FindManyArgs<SessionTypes>>(
+    args?: Subset<T, FindManyArgs<SessionTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.SessionGetPayload<T>[]> {
-    return this.$exec("findMany", args, options) as Promise<Prisma.SessionGetPayload<T>[]>;
+  ): Promise<Payload<SessionTypes, T>[]> {
+    return this.$exec("findMany", args, options) as Promise<Payload<SessionTypes, T>[]>;
   }
 
-  static findFirst<T extends Prisma.SessionFindFirstArgs>(
-    args?: Subset<T, Prisma.SessionFindFirstArgs>,
+  static findFirst<T extends FindFirstArgs<SessionTypes>>(
+    args?: Subset<T, FindFirstArgs<SessionTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.SessionGetPayload<T> | null> {
-    return this.$exec("findFirst", args, options) as Promise<Prisma.SessionGetPayload<T> | null>;
+  ): Promise<Payload<SessionTypes, T> | null> {
+    return this.$exec("findFirst", args, options) as Promise<Payload<SessionTypes, T> | null>;
   }
 
-  static findFirstOrThrow<T extends Prisma.SessionFindFirstOrThrowArgs>(
-    args?: Subset<T, Prisma.SessionFindFirstOrThrowArgs>,
+  static findFirstOrThrow<T extends FindFirstOrThrowArgs<SessionTypes>>(
+    args?: Subset<T, FindFirstOrThrowArgs<SessionTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.SessionGetPayload<T>> {
-    return this.$exec("findFirstOrThrow", args, options) as Promise<Prisma.SessionGetPayload<T>>;
+  ): Promise<Payload<SessionTypes, T>> {
+    return this.$exec("findFirstOrThrow", args, options) as Promise<Payload<SessionTypes, T>>;
   }
 
-  static findUnique<T extends Prisma.SessionFindUniqueArgs>(
-    args: Subset<T, Prisma.SessionFindUniqueArgs>,
+  static findUnique<T extends FindUniqueArgs<SessionTypes>>(
+    args: Subset<T, FindUniqueArgs<SessionTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.SessionGetPayload<T> | null> {
-    return this.$exec("findUnique", args, options) as Promise<Prisma.SessionGetPayload<T> | null>;
+  ): Promise<Payload<SessionTypes, T> | null> {
+    return this.$exec("findUnique", args, options) as Promise<Payload<SessionTypes, T> | null>;
   }
 
-  static findUniqueOrThrow<T extends Prisma.SessionFindUniqueOrThrowArgs>(
-    args: Subset<T, Prisma.SessionFindUniqueOrThrowArgs>,
+  static findUniqueOrThrow<T extends FindUniqueOrThrowArgs<SessionTypes>>(
+    args: Subset<T, FindUniqueOrThrowArgs<SessionTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.SessionGetPayload<T>> {
-    return this.$exec("findUniqueOrThrow", args, options) as Promise<Prisma.SessionGetPayload<T>>;
+  ): Promise<Payload<SessionTypes, T>> {
+    return this.$exec("findUniqueOrThrow", args, options) as Promise<Payload<SessionTypes, T>>;
   }
 
-  static count(args?: Omit<Prisma.SessionCountArgs, "select">): Promise<number>;
-  static count<T extends Prisma.SessionCountArgs>(
-    args: Prisma.SelectSubset<T, Prisma.SessionCountArgs> & {
+  static count(args?: Omit<CountArgs<SessionTypes>, "select">): Promise<number>;
+  static count<T extends CountArgs<SessionTypes>>(
+    args: SelectSubset<T, CountArgs<SessionTypes>> & {
       select: NonNullable<T["select"]>;
     },
-  ): Promise<Prisma.GetScalarType<T["select"], Prisma.SessionCountAggregateOutputType>>;
+  ): Promise<CountPayload<T["select"]>>;
   static count(args?: unknown): Promise<unknown> {
     return this.$exec("count", args as never);
   }
 
-  static aggregate<T extends Prisma.SessionAggregateArgs>(
-    args: Prisma.Subset<T, Prisma.SessionAggregateArgs>,
-  ): Promise<Prisma.GetSessionAggregateType<T>> {
+  static aggregate<T extends AggregateArgs<SessionTypes>>(
+    args: Subset<T, AggregateArgs<SessionTypes>>,
+  ): Promise<AggregatePayload<SessionTypes, T>> {
     return this.$exec("aggregate", args) as Promise<
-      Prisma.GetSessionAggregateType<T>
+      AggregatePayload<SessionTypes, T>
     >;
   }
 
-  static groupBy<T extends Prisma.SessionGroupByArgs>(
-    args: Prisma.Subset<T, Prisma.SessionGroupByArgs>,
-  ): Promise<Prisma.GetSessionGroupByPayload<T>> {
+  static groupBy<T extends GroupByArgs<SessionTypes>>(
+    args: Subset<T, GroupByArgs<SessionTypes>>,
+  ): Promise<GroupByPayload<SessionTypes, T>> {
     return this.$exec("groupBy", args) as Promise<
-      Prisma.GetSessionGroupByPayload<T>
+      GroupByPayload<SessionTypes, T>
     >;
   }
 
-  static create<T extends Prisma.SessionCreateArgs>(
-    args: Subset<T, Prisma.SessionCreateArgs>,
+  static create<T extends CreateArgs<SessionTypes>>(
+    args: Subset<T, CreateArgs<SessionTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.SessionGetPayload<T>> {
-    return this.$exec("create", args, options) as Promise<Prisma.SessionGetPayload<T>>;
+  ): Promise<Payload<SessionTypes, T>> {
+    return this.$exec("create", args, options) as Promise<Payload<SessionTypes, T>>;
   }
 
-  static update<T extends Prisma.SessionUpdateArgs>(
-    args: Subset<T, Prisma.SessionUpdateArgs>,
+  static update<T extends UpdateArgs<SessionTypes>>(
+    args: Subset<T, UpdateArgs<SessionTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.SessionGetPayload<T>> {
-    return this.$exec("update", args, options) as Promise<Prisma.SessionGetPayload<T>>;
+  ): Promise<Payload<SessionTypes, T>> {
+    return this.$exec("update", args, options) as Promise<Payload<SessionTypes, T>>;
   }
 
-  static delete<T extends Prisma.SessionDeleteArgs>(
-    args: Subset<T, Prisma.SessionDeleteArgs>,
+  static delete<T extends DeleteArgs<SessionTypes>>(
+    args: Subset<T, DeleteArgs<SessionTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.SessionGetPayload<T>> {
-    return this.$exec("delete", args, options) as Promise<Prisma.SessionGetPayload<T>>;
+  ): Promise<Payload<SessionTypes, T>> {
+    return this.$exec("delete", args, options) as Promise<Payload<SessionTypes, T>>;
   }
 
-  static upsert<T extends Prisma.SessionUpsertArgs>(
-    args: Subset<T, Prisma.SessionUpsertArgs>,
+  static upsert<T extends UpsertArgs<SessionTypes>>(
+    args: Subset<T, UpsertArgs<SessionTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.SessionGetPayload<T>> {
-    return this.$exec("upsert", args, options) as Promise<Prisma.SessionGetPayload<T>>;
+  ): Promise<Payload<SessionTypes, T>> {
+    return this.$exec("upsert", args, options) as Promise<Payload<SessionTypes, T>>;
   }
 
   static createMany(
-    args?: Prisma.SessionCreateManyArgs,
+    args?: CreateManyArgs<SessionTypes>,
   ): Promise<{ count: number }> {
     return this.$exec("createMany", args) as Promise<{ count: number }>;
   }
 
   static updateMany(
-    args?: Prisma.SessionUpdateManyArgs,
+    args?: UpdateManyArgs<SessionTypes>,
   ): Promise<{ count: number }> {
     return this.$exec("updateMany", args) as Promise<{ count: number }>;
   }
 
   static deleteMany(
-    args?: Prisma.SessionDeleteManyArgs,
+    args?: DeleteManyArgs<SessionTypes>,
   ): Promise<{ count: number }> {
     return this.$exec("deleteMany", args) as Promise<{ count: number }>;
   }
 
-  static wrap<C extends { prototype: unknown }, R extends Prisma.SessionGetPayload<{}>>(
+  static wrap<C extends { prototype: unknown }, R extends SessionScalars>(
     this: C,
     row: R,
   ): C["prototype"] & R {
     return (Model.wrap as (row: object) => any).call(this, row);
   }
+}
+
+export type SocialAccountScalars = {
+  id: number;
+  userId: number;
+  provider: string;
+  providerId: string;
+  username: string | null;
+  email: string | null;
+  accessToken: string;
+  refreshToken: string;
+  expiresAt: Date;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+export type SocialAccountCreateScalars = {
+  id?: number;
+  userId?: number;
+  provider: string;
+  providerId: string;
+  username?: string | null;
+  email?: string | null;
+  accessToken: string;
+  refreshToken: string;
+  expiresAt: Date;
+  createdAt?: Date;
+  updatedAt?: Date;
+};
+
+export type SocialAccountRelations = {
+  user: { kind: "one"; nullable: false; target: UserTypes };
+};
+
+export type SocialAccountUnique = { id: number } | { username_provider: { username: string; provider: string } };
+
+export interface SocialAccountTypes extends ModelTypeInfo {
+  scalars: SocialAccountScalars;
+  relations: SocialAccountRelations;
+  unique: SocialAccountUnique;
+  create: SocialAccountCreateScalars;
 }
 
 // Merges the row's columns into the instance type, so a method on a subclass can
@@ -1571,12 +1933,12 @@ export class SessionModel extends Model {
 // accepted: `Model`'s constructor is `protected`, so the only way to get an
 // instance is `wrap`, which assigns a complete row. See bin/orm/emit.ts.
 // oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
-export interface SocialAccountModel extends Prisma.SocialAccountGetPayload<{}> {}
+export interface SocialAccountModel extends SocialAccountScalars {}
 
 export type SocialAccountPolicy = ModelPolicy<
-  Prisma.SocialAccountWhereInput,
-  Prisma.SocialAccountCreateInput,
-  Prisma.SocialAccountGetPayload<{}>
+  WhereInput<SocialAccountTypes>,
+  CreateInput<SocialAccountTypes>,
+  SocialAccountScalars
 >;
 
 // The same shape with `scope`, `onCreate` and `onUpdate` abstract, so a policy
@@ -1584,9 +1946,9 @@ export type SocialAccountPolicy = ModelPolicy<
 // combinations too — this makes it `TS2515` at the class declaration instead of
 // an error on the first write that reaches production.
 export abstract class SocialAccountScopedPolicy extends ScopedPolicy<
-  Prisma.SocialAccountWhereInput,
-  Prisma.SocialAccountCreateInput,
-  Prisma.SocialAccountGetPayload<{}>
+  WhereInput<SocialAccountTypes>,
+  CreateInput<SocialAccountTypes>,
+  SocialAccountScalars
 > {}
 
 export class SocialAccountModel extends Model {
@@ -1596,124 +1958,147 @@ export class SocialAccountModel extends Model {
   // written for another model is a type error here rather than a scope compiled
   // against columns that do not exist.
   static $policies?: readonly PolicyEntry<
-    Prisma.SocialAccountWhereInput,
-    Prisma.SocialAccountCreateInput,
-    Prisma.SocialAccountGetPayload<{}>
+    WhereInput<SocialAccountTypes>,
+    CreateInput<SocialAccountTypes>,
+    SocialAccountScalars
   >[];
 
-  static findMany<T extends Prisma.SocialAccountFindManyArgs>(
-    args?: Subset<T, Prisma.SocialAccountFindManyArgs>,
+  static findMany<T extends FindManyArgs<SocialAccountTypes>>(
+    args?: Subset<T, FindManyArgs<SocialAccountTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.SocialAccountGetPayload<T>[]> {
-    return this.$exec("findMany", args, options) as Promise<Prisma.SocialAccountGetPayload<T>[]>;
+  ): Promise<Payload<SocialAccountTypes, T>[]> {
+    return this.$exec("findMany", args, options) as Promise<Payload<SocialAccountTypes, T>[]>;
   }
 
-  static findFirst<T extends Prisma.SocialAccountFindFirstArgs>(
-    args?: Subset<T, Prisma.SocialAccountFindFirstArgs>,
+  static findFirst<T extends FindFirstArgs<SocialAccountTypes>>(
+    args?: Subset<T, FindFirstArgs<SocialAccountTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.SocialAccountGetPayload<T> | null> {
-    return this.$exec("findFirst", args, options) as Promise<Prisma.SocialAccountGetPayload<T> | null>;
+  ): Promise<Payload<SocialAccountTypes, T> | null> {
+    return this.$exec("findFirst", args, options) as Promise<Payload<SocialAccountTypes, T> | null>;
   }
 
-  static findFirstOrThrow<T extends Prisma.SocialAccountFindFirstOrThrowArgs>(
-    args?: Subset<T, Prisma.SocialAccountFindFirstOrThrowArgs>,
+  static findFirstOrThrow<T extends FindFirstOrThrowArgs<SocialAccountTypes>>(
+    args?: Subset<T, FindFirstOrThrowArgs<SocialAccountTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.SocialAccountGetPayload<T>> {
-    return this.$exec("findFirstOrThrow", args, options) as Promise<Prisma.SocialAccountGetPayload<T>>;
+  ): Promise<Payload<SocialAccountTypes, T>> {
+    return this.$exec("findFirstOrThrow", args, options) as Promise<Payload<SocialAccountTypes, T>>;
   }
 
-  static findUnique<T extends Prisma.SocialAccountFindUniqueArgs>(
-    args: Subset<T, Prisma.SocialAccountFindUniqueArgs>,
+  static findUnique<T extends FindUniqueArgs<SocialAccountTypes>>(
+    args: Subset<T, FindUniqueArgs<SocialAccountTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.SocialAccountGetPayload<T> | null> {
-    return this.$exec("findUnique", args, options) as Promise<Prisma.SocialAccountGetPayload<T> | null>;
+  ): Promise<Payload<SocialAccountTypes, T> | null> {
+    return this.$exec("findUnique", args, options) as Promise<Payload<SocialAccountTypes, T> | null>;
   }
 
-  static findUniqueOrThrow<T extends Prisma.SocialAccountFindUniqueOrThrowArgs>(
-    args: Subset<T, Prisma.SocialAccountFindUniqueOrThrowArgs>,
+  static findUniqueOrThrow<T extends FindUniqueOrThrowArgs<SocialAccountTypes>>(
+    args: Subset<T, FindUniqueOrThrowArgs<SocialAccountTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.SocialAccountGetPayload<T>> {
-    return this.$exec("findUniqueOrThrow", args, options) as Promise<Prisma.SocialAccountGetPayload<T>>;
+  ): Promise<Payload<SocialAccountTypes, T>> {
+    return this.$exec("findUniqueOrThrow", args, options) as Promise<Payload<SocialAccountTypes, T>>;
   }
 
-  static count(args?: Omit<Prisma.SocialAccountCountArgs, "select">): Promise<number>;
-  static count<T extends Prisma.SocialAccountCountArgs>(
-    args: Prisma.SelectSubset<T, Prisma.SocialAccountCountArgs> & {
+  static count(args?: Omit<CountArgs<SocialAccountTypes>, "select">): Promise<number>;
+  static count<T extends CountArgs<SocialAccountTypes>>(
+    args: SelectSubset<T, CountArgs<SocialAccountTypes>> & {
       select: NonNullable<T["select"]>;
     },
-  ): Promise<Prisma.GetScalarType<T["select"], Prisma.SocialAccountCountAggregateOutputType>>;
+  ): Promise<CountPayload<T["select"]>>;
   static count(args?: unknown): Promise<unknown> {
     return this.$exec("count", args as never);
   }
 
-  static aggregate<T extends Prisma.SocialAccountAggregateArgs>(
-    args: Prisma.Subset<T, Prisma.SocialAccountAggregateArgs>,
-  ): Promise<Prisma.GetSocialAccountAggregateType<T>> {
+  static aggregate<T extends AggregateArgs<SocialAccountTypes>>(
+    args: Subset<T, AggregateArgs<SocialAccountTypes>>,
+  ): Promise<AggregatePayload<SocialAccountTypes, T>> {
     return this.$exec("aggregate", args) as Promise<
-      Prisma.GetSocialAccountAggregateType<T>
+      AggregatePayload<SocialAccountTypes, T>
     >;
   }
 
-  static groupBy<T extends Prisma.SocialAccountGroupByArgs>(
-    args: Prisma.Subset<T, Prisma.SocialAccountGroupByArgs>,
-  ): Promise<Prisma.GetSocialAccountGroupByPayload<T>> {
+  static groupBy<T extends GroupByArgs<SocialAccountTypes>>(
+    args: Subset<T, GroupByArgs<SocialAccountTypes>>,
+  ): Promise<GroupByPayload<SocialAccountTypes, T>> {
     return this.$exec("groupBy", args) as Promise<
-      Prisma.GetSocialAccountGroupByPayload<T>
+      GroupByPayload<SocialAccountTypes, T>
     >;
   }
 
-  static create<T extends Prisma.SocialAccountCreateArgs>(
-    args: Subset<T, Prisma.SocialAccountCreateArgs>,
+  static create<T extends CreateArgs<SocialAccountTypes>>(
+    args: Subset<T, CreateArgs<SocialAccountTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.SocialAccountGetPayload<T>> {
-    return this.$exec("create", args, options) as Promise<Prisma.SocialAccountGetPayload<T>>;
+  ): Promise<Payload<SocialAccountTypes, T>> {
+    return this.$exec("create", args, options) as Promise<Payload<SocialAccountTypes, T>>;
   }
 
-  static update<T extends Prisma.SocialAccountUpdateArgs>(
-    args: Subset<T, Prisma.SocialAccountUpdateArgs>,
+  static update<T extends UpdateArgs<SocialAccountTypes>>(
+    args: Subset<T, UpdateArgs<SocialAccountTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.SocialAccountGetPayload<T>> {
-    return this.$exec("update", args, options) as Promise<Prisma.SocialAccountGetPayload<T>>;
+  ): Promise<Payload<SocialAccountTypes, T>> {
+    return this.$exec("update", args, options) as Promise<Payload<SocialAccountTypes, T>>;
   }
 
-  static delete<T extends Prisma.SocialAccountDeleteArgs>(
-    args: Subset<T, Prisma.SocialAccountDeleteArgs>,
+  static delete<T extends DeleteArgs<SocialAccountTypes>>(
+    args: Subset<T, DeleteArgs<SocialAccountTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.SocialAccountGetPayload<T>> {
-    return this.$exec("delete", args, options) as Promise<Prisma.SocialAccountGetPayload<T>>;
+  ): Promise<Payload<SocialAccountTypes, T>> {
+    return this.$exec("delete", args, options) as Promise<Payload<SocialAccountTypes, T>>;
   }
 
-  static upsert<T extends Prisma.SocialAccountUpsertArgs>(
-    args: Subset<T, Prisma.SocialAccountUpsertArgs>,
+  static upsert<T extends UpsertArgs<SocialAccountTypes>>(
+    args: Subset<T, UpsertArgs<SocialAccountTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.SocialAccountGetPayload<T>> {
-    return this.$exec("upsert", args, options) as Promise<Prisma.SocialAccountGetPayload<T>>;
+  ): Promise<Payload<SocialAccountTypes, T>> {
+    return this.$exec("upsert", args, options) as Promise<Payload<SocialAccountTypes, T>>;
   }
 
   static createMany(
-    args?: Prisma.SocialAccountCreateManyArgs,
+    args?: CreateManyArgs<SocialAccountTypes>,
   ): Promise<{ count: number }> {
     return this.$exec("createMany", args) as Promise<{ count: number }>;
   }
 
   static updateMany(
-    args?: Prisma.SocialAccountUpdateManyArgs,
+    args?: UpdateManyArgs<SocialAccountTypes>,
   ): Promise<{ count: number }> {
     return this.$exec("updateMany", args) as Promise<{ count: number }>;
   }
 
   static deleteMany(
-    args?: Prisma.SocialAccountDeleteManyArgs,
+    args?: DeleteManyArgs<SocialAccountTypes>,
   ): Promise<{ count: number }> {
     return this.$exec("deleteMany", args) as Promise<{ count: number }>;
   }
 
-  static wrap<C extends { prototype: unknown }, R extends Prisma.SocialAccountGetPayload<{}>>(
+  static wrap<C extends { prototype: unknown }, R extends SocialAccountScalars>(
     this: C,
     row: R,
   ): C["prototype"] & R {
     return (Model.wrap as (row: object) => any).call(this, row);
   }
+}
+
+export type TagScalars = {
+  id: number;
+  label: string;
+};
+
+export type TagCreateScalars = {
+  id?: number;
+  label: string;
+};
+
+export type TagRelations = {
+  posts: { kind: "many"; nullable: false; target: PostTypes };
+};
+
+export type TagUnique = { id: number } | { label: string };
+
+export interface TagTypes extends ModelTypeInfo {
+  scalars: TagScalars;
+  relations: TagRelations;
+  unique: TagUnique;
+  create: TagCreateScalars;
 }
 
 // Merges the row's columns into the instance type, so a method on a subclass can
@@ -1725,12 +2110,12 @@ export class SocialAccountModel extends Model {
 // accepted: `Model`'s constructor is `protected`, so the only way to get an
 // instance is `wrap`, which assigns a complete row. See bin/orm/emit.ts.
 // oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
-export interface TagModel extends Prisma.TagGetPayload<{}> {}
+export interface TagModel extends TagScalars {}
 
 export type TagPolicy = ModelPolicy<
-  Prisma.TagWhereInput,
-  Prisma.TagCreateInput,
-  Prisma.TagGetPayload<{}>
+  WhereInput<TagTypes>,
+  CreateInput<TagTypes>,
+  TagScalars
 >;
 
 // The same shape with `scope`, `onCreate` and `onUpdate` abstract, so a policy
@@ -1738,9 +2123,9 @@ export type TagPolicy = ModelPolicy<
 // combinations too — this makes it `TS2515` at the class declaration instead of
 // an error on the first write that reaches production.
 export abstract class TagScopedPolicy extends ScopedPolicy<
-  Prisma.TagWhereInput,
-  Prisma.TagCreateInput,
-  Prisma.TagGetPayload<{}>
+  WhereInput<TagTypes>,
+  CreateInput<TagTypes>,
+  TagScalars
 > {}
 
 export class TagModel extends Model {
@@ -1750,124 +2135,177 @@ export class TagModel extends Model {
   // written for another model is a type error here rather than a scope compiled
   // against columns that do not exist.
   static $policies?: readonly PolicyEntry<
-    Prisma.TagWhereInput,
-    Prisma.TagCreateInput,
-    Prisma.TagGetPayload<{}>
+    WhereInput<TagTypes>,
+    CreateInput<TagTypes>,
+    TagScalars
   >[];
 
-  static findMany<T extends Prisma.TagFindManyArgs>(
-    args?: Subset<T, Prisma.TagFindManyArgs>,
+  static findMany<T extends FindManyArgs<TagTypes>>(
+    args?: Subset<T, FindManyArgs<TagTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.TagGetPayload<T>[]> {
-    return this.$exec("findMany", args, options) as Promise<Prisma.TagGetPayload<T>[]>;
+  ): Promise<Payload<TagTypes, T>[]> {
+    return this.$exec("findMany", args, options) as Promise<Payload<TagTypes, T>[]>;
   }
 
-  static findFirst<T extends Prisma.TagFindFirstArgs>(
-    args?: Subset<T, Prisma.TagFindFirstArgs>,
+  static findFirst<T extends FindFirstArgs<TagTypes>>(
+    args?: Subset<T, FindFirstArgs<TagTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.TagGetPayload<T> | null> {
-    return this.$exec("findFirst", args, options) as Promise<Prisma.TagGetPayload<T> | null>;
+  ): Promise<Payload<TagTypes, T> | null> {
+    return this.$exec("findFirst", args, options) as Promise<Payload<TagTypes, T> | null>;
   }
 
-  static findFirstOrThrow<T extends Prisma.TagFindFirstOrThrowArgs>(
-    args?: Subset<T, Prisma.TagFindFirstOrThrowArgs>,
+  static findFirstOrThrow<T extends FindFirstOrThrowArgs<TagTypes>>(
+    args?: Subset<T, FindFirstOrThrowArgs<TagTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.TagGetPayload<T>> {
-    return this.$exec("findFirstOrThrow", args, options) as Promise<Prisma.TagGetPayload<T>>;
+  ): Promise<Payload<TagTypes, T>> {
+    return this.$exec("findFirstOrThrow", args, options) as Promise<Payload<TagTypes, T>>;
   }
 
-  static findUnique<T extends Prisma.TagFindUniqueArgs>(
-    args: Subset<T, Prisma.TagFindUniqueArgs>,
+  static findUnique<T extends FindUniqueArgs<TagTypes>>(
+    args: Subset<T, FindUniqueArgs<TagTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.TagGetPayload<T> | null> {
-    return this.$exec("findUnique", args, options) as Promise<Prisma.TagGetPayload<T> | null>;
+  ): Promise<Payload<TagTypes, T> | null> {
+    return this.$exec("findUnique", args, options) as Promise<Payload<TagTypes, T> | null>;
   }
 
-  static findUniqueOrThrow<T extends Prisma.TagFindUniqueOrThrowArgs>(
-    args: Subset<T, Prisma.TagFindUniqueOrThrowArgs>,
+  static findUniqueOrThrow<T extends FindUniqueOrThrowArgs<TagTypes>>(
+    args: Subset<T, FindUniqueOrThrowArgs<TagTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.TagGetPayload<T>> {
-    return this.$exec("findUniqueOrThrow", args, options) as Promise<Prisma.TagGetPayload<T>>;
+  ): Promise<Payload<TagTypes, T>> {
+    return this.$exec("findUniqueOrThrow", args, options) as Promise<Payload<TagTypes, T>>;
   }
 
-  static count(args?: Omit<Prisma.TagCountArgs, "select">): Promise<number>;
-  static count<T extends Prisma.TagCountArgs>(
-    args: Prisma.SelectSubset<T, Prisma.TagCountArgs> & {
+  static count(args?: Omit<CountArgs<TagTypes>, "select">): Promise<number>;
+  static count<T extends CountArgs<TagTypes>>(
+    args: SelectSubset<T, CountArgs<TagTypes>> & {
       select: NonNullable<T["select"]>;
     },
-  ): Promise<Prisma.GetScalarType<T["select"], Prisma.TagCountAggregateOutputType>>;
+  ): Promise<CountPayload<T["select"]>>;
   static count(args?: unknown): Promise<unknown> {
     return this.$exec("count", args as never);
   }
 
-  static aggregate<T extends Prisma.TagAggregateArgs>(
-    args: Prisma.Subset<T, Prisma.TagAggregateArgs>,
-  ): Promise<Prisma.GetTagAggregateType<T>> {
+  static aggregate<T extends AggregateArgs<TagTypes>>(
+    args: Subset<T, AggregateArgs<TagTypes>>,
+  ): Promise<AggregatePayload<TagTypes, T>> {
     return this.$exec("aggregate", args) as Promise<
-      Prisma.GetTagAggregateType<T>
+      AggregatePayload<TagTypes, T>
     >;
   }
 
-  static groupBy<T extends Prisma.TagGroupByArgs>(
-    args: Prisma.Subset<T, Prisma.TagGroupByArgs>,
-  ): Promise<Prisma.GetTagGroupByPayload<T>> {
+  static groupBy<T extends GroupByArgs<TagTypes>>(
+    args: Subset<T, GroupByArgs<TagTypes>>,
+  ): Promise<GroupByPayload<TagTypes, T>> {
     return this.$exec("groupBy", args) as Promise<
-      Prisma.GetTagGroupByPayload<T>
+      GroupByPayload<TagTypes, T>
     >;
   }
 
-  static create<T extends Prisma.TagCreateArgs>(
-    args: Subset<T, Prisma.TagCreateArgs>,
+  static create<T extends CreateArgs<TagTypes>>(
+    args: Subset<T, CreateArgs<TagTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.TagGetPayload<T>> {
-    return this.$exec("create", args, options) as Promise<Prisma.TagGetPayload<T>>;
+  ): Promise<Payload<TagTypes, T>> {
+    return this.$exec("create", args, options) as Promise<Payload<TagTypes, T>>;
   }
 
-  static update<T extends Prisma.TagUpdateArgs>(
-    args: Subset<T, Prisma.TagUpdateArgs>,
+  static update<T extends UpdateArgs<TagTypes>>(
+    args: Subset<T, UpdateArgs<TagTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.TagGetPayload<T>> {
-    return this.$exec("update", args, options) as Promise<Prisma.TagGetPayload<T>>;
+  ): Promise<Payload<TagTypes, T>> {
+    return this.$exec("update", args, options) as Promise<Payload<TagTypes, T>>;
   }
 
-  static delete<T extends Prisma.TagDeleteArgs>(
-    args: Subset<T, Prisma.TagDeleteArgs>,
+  static delete<T extends DeleteArgs<TagTypes>>(
+    args: Subset<T, DeleteArgs<TagTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.TagGetPayload<T>> {
-    return this.$exec("delete", args, options) as Promise<Prisma.TagGetPayload<T>>;
+  ): Promise<Payload<TagTypes, T>> {
+    return this.$exec("delete", args, options) as Promise<Payload<TagTypes, T>>;
   }
 
-  static upsert<T extends Prisma.TagUpsertArgs>(
-    args: Subset<T, Prisma.TagUpsertArgs>,
+  static upsert<T extends UpsertArgs<TagTypes>>(
+    args: Subset<T, UpsertArgs<TagTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.TagGetPayload<T>> {
-    return this.$exec("upsert", args, options) as Promise<Prisma.TagGetPayload<T>>;
+  ): Promise<Payload<TagTypes, T>> {
+    return this.$exec("upsert", args, options) as Promise<Payload<TagTypes, T>>;
   }
 
   static createMany(
-    args?: Prisma.TagCreateManyArgs,
+    args?: CreateManyArgs<TagTypes>,
   ): Promise<{ count: number }> {
     return this.$exec("createMany", args) as Promise<{ count: number }>;
   }
 
   static updateMany(
-    args?: Prisma.TagUpdateManyArgs,
+    args?: UpdateManyArgs<TagTypes>,
   ): Promise<{ count: number }> {
     return this.$exec("updateMany", args) as Promise<{ count: number }>;
   }
 
   static deleteMany(
-    args?: Prisma.TagDeleteManyArgs,
+    args?: DeleteManyArgs<TagTypes>,
   ): Promise<{ count: number }> {
     return this.$exec("deleteMany", args) as Promise<{ count: number }>;
   }
 
-  static wrap<C extends { prototype: unknown }, R extends Prisma.TagGetPayload<{}>>(
+  static wrap<C extends { prototype: unknown }, R extends TagScalars>(
     this: C,
     row: R,
   ): C["prototype"] & R {
     return (Model.wrap as (row: object) => any).call(this, row);
   }
+}
+
+export type UserScalars = {
+  id: number;
+  publicId: string;
+  name: string | null;
+  email: string | null;
+  emailVerifiedAt: Date | null;
+  verificationToken: string | null;
+  locale: string | null;
+  globalRole: number;
+  password: string | null;
+  organizationId: number | null;
+  createdAt: Date;
+  updatedAt: Date;
+  deletedAt: Date | null;
+  metadata: JsonValue | null;
+  avatar: Uint8Array | null;
+};
+
+export type UserCreateScalars = {
+  id?: number;
+  publicId?: string;
+  name?: string | null;
+  email?: string | null;
+  emailVerifiedAt?: Date | null;
+  verificationToken?: string | null;
+  locale?: string | null;
+  globalRole?: number;
+  password?: string | null;
+  organizationId?: number | null;
+  createdAt?: Date;
+  updatedAt?: Date;
+  deletedAt?: Date | null;
+  metadata?: JsonInput;
+  avatar?: Uint8Array | null;
+};
+
+export type UserRelations = {
+  organization: { kind: "one"; nullable: true; target: OrganizationTypes };
+  accounts: { kind: "many"; nullable: false; target: AccountTypes };
+  session: { kind: "many"; nullable: false; target: SessionTypes };
+  passwordResetToken: { kind: "many"; nullable: false; target: PasswordResetTokenTypes };
+  socialAccount: { kind: "many"; nullable: false; target: SocialAccountTypes };
+};
+
+export type UserUnique = { id: number } | { publicId: string } | { email: string };
+
+export interface UserTypes extends ModelTypeInfo {
+  scalars: UserScalars;
+  relations: UserRelations;
+  unique: UserUnique;
+  create: UserCreateScalars;
 }
 
 // Merges the row's columns into the instance type, so a method on a subclass can
@@ -1879,12 +2317,12 @@ export class TagModel extends Model {
 // accepted: `Model`'s constructor is `protected`, so the only way to get an
 // instance is `wrap`, which assigns a complete row. See bin/orm/emit.ts.
 // oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
-export interface UserModel extends Prisma.UserGetPayload<{}> {}
+export interface UserModel extends UserScalars {}
 
 export type UserPolicy = ModelPolicy<
-  Prisma.UserWhereInput,
-  Prisma.UserCreateInput,
-  Prisma.UserGetPayload<{}>
+  WhereInput<UserTypes>,
+  CreateInput<UserTypes>,
+  UserScalars
 >;
 
 // The same shape with `scope`, `onCreate` and `onUpdate` abstract, so a policy
@@ -1892,9 +2330,9 @@ export type UserPolicy = ModelPolicy<
 // combinations too — this makes it `TS2515` at the class declaration instead of
 // an error on the first write that reaches production.
 export abstract class UserScopedPolicy extends ScopedPolicy<
-  Prisma.UserWhereInput,
-  Prisma.UserCreateInput,
-  Prisma.UserGetPayload<{}>
+  WhereInput<UserTypes>,
+  CreateInput<UserTypes>,
+  UserScalars
 > {}
 
 export class UserModel extends Model {
@@ -1904,119 +2342,119 @@ export class UserModel extends Model {
   // written for another model is a type error here rather than a scope compiled
   // against columns that do not exist.
   static $policies?: readonly PolicyEntry<
-    Prisma.UserWhereInput,
-    Prisma.UserCreateInput,
-    Prisma.UserGetPayload<{}>
+    WhereInput<UserTypes>,
+    CreateInput<UserTypes>,
+    UserScalars
   >[];
 
-  static findMany<T extends Prisma.UserFindManyArgs>(
-    args?: Subset<T, Prisma.UserFindManyArgs>,
+  static findMany<T extends FindManyArgs<UserTypes>>(
+    args?: Subset<T, FindManyArgs<UserTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.UserGetPayload<T>[]> {
-    return this.$exec("findMany", args, options) as Promise<Prisma.UserGetPayload<T>[]>;
+  ): Promise<Payload<UserTypes, T>[]> {
+    return this.$exec("findMany", args, options) as Promise<Payload<UserTypes, T>[]>;
   }
 
-  static findFirst<T extends Prisma.UserFindFirstArgs>(
-    args?: Subset<T, Prisma.UserFindFirstArgs>,
+  static findFirst<T extends FindFirstArgs<UserTypes>>(
+    args?: Subset<T, FindFirstArgs<UserTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.UserGetPayload<T> | null> {
-    return this.$exec("findFirst", args, options) as Promise<Prisma.UserGetPayload<T> | null>;
+  ): Promise<Payload<UserTypes, T> | null> {
+    return this.$exec("findFirst", args, options) as Promise<Payload<UserTypes, T> | null>;
   }
 
-  static findFirstOrThrow<T extends Prisma.UserFindFirstOrThrowArgs>(
-    args?: Subset<T, Prisma.UserFindFirstOrThrowArgs>,
+  static findFirstOrThrow<T extends FindFirstOrThrowArgs<UserTypes>>(
+    args?: Subset<T, FindFirstOrThrowArgs<UserTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.UserGetPayload<T>> {
-    return this.$exec("findFirstOrThrow", args, options) as Promise<Prisma.UserGetPayload<T>>;
+  ): Promise<Payload<UserTypes, T>> {
+    return this.$exec("findFirstOrThrow", args, options) as Promise<Payload<UserTypes, T>>;
   }
 
-  static findUnique<T extends Prisma.UserFindUniqueArgs>(
-    args: Subset<T, Prisma.UserFindUniqueArgs>,
+  static findUnique<T extends FindUniqueArgs<UserTypes>>(
+    args: Subset<T, FindUniqueArgs<UserTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.UserGetPayload<T> | null> {
-    return this.$exec("findUnique", args, options) as Promise<Prisma.UserGetPayload<T> | null>;
+  ): Promise<Payload<UserTypes, T> | null> {
+    return this.$exec("findUnique", args, options) as Promise<Payload<UserTypes, T> | null>;
   }
 
-  static findUniqueOrThrow<T extends Prisma.UserFindUniqueOrThrowArgs>(
-    args: Subset<T, Prisma.UserFindUniqueOrThrowArgs>,
+  static findUniqueOrThrow<T extends FindUniqueOrThrowArgs<UserTypes>>(
+    args: Subset<T, FindUniqueOrThrowArgs<UserTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.UserGetPayload<T>> {
-    return this.$exec("findUniqueOrThrow", args, options) as Promise<Prisma.UserGetPayload<T>>;
+  ): Promise<Payload<UserTypes, T>> {
+    return this.$exec("findUniqueOrThrow", args, options) as Promise<Payload<UserTypes, T>>;
   }
 
-  static count(args?: Omit<Prisma.UserCountArgs, "select">): Promise<number>;
-  static count<T extends Prisma.UserCountArgs>(
-    args: Prisma.SelectSubset<T, Prisma.UserCountArgs> & {
+  static count(args?: Omit<CountArgs<UserTypes>, "select">): Promise<number>;
+  static count<T extends CountArgs<UserTypes>>(
+    args: SelectSubset<T, CountArgs<UserTypes>> & {
       select: NonNullable<T["select"]>;
     },
-  ): Promise<Prisma.GetScalarType<T["select"], Prisma.UserCountAggregateOutputType>>;
+  ): Promise<CountPayload<T["select"]>>;
   static count(args?: unknown): Promise<unknown> {
     return this.$exec("count", args as never);
   }
 
-  static aggregate<T extends Prisma.UserAggregateArgs>(
-    args: Prisma.Subset<T, Prisma.UserAggregateArgs>,
-  ): Promise<Prisma.GetUserAggregateType<T>> {
+  static aggregate<T extends AggregateArgs<UserTypes>>(
+    args: Subset<T, AggregateArgs<UserTypes>>,
+  ): Promise<AggregatePayload<UserTypes, T>> {
     return this.$exec("aggregate", args) as Promise<
-      Prisma.GetUserAggregateType<T>
+      AggregatePayload<UserTypes, T>
     >;
   }
 
-  static groupBy<T extends Prisma.UserGroupByArgs>(
-    args: Prisma.Subset<T, Prisma.UserGroupByArgs>,
-  ): Promise<Prisma.GetUserGroupByPayload<T>> {
+  static groupBy<T extends GroupByArgs<UserTypes>>(
+    args: Subset<T, GroupByArgs<UserTypes>>,
+  ): Promise<GroupByPayload<UserTypes, T>> {
     return this.$exec("groupBy", args) as Promise<
-      Prisma.GetUserGroupByPayload<T>
+      GroupByPayload<UserTypes, T>
     >;
   }
 
-  static create<T extends Prisma.UserCreateArgs>(
-    args: Subset<T, Prisma.UserCreateArgs>,
+  static create<T extends CreateArgs<UserTypes>>(
+    args: Subset<T, CreateArgs<UserTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.UserGetPayload<T>> {
-    return this.$exec("create", args, options) as Promise<Prisma.UserGetPayload<T>>;
+  ): Promise<Payload<UserTypes, T>> {
+    return this.$exec("create", args, options) as Promise<Payload<UserTypes, T>>;
   }
 
-  static update<T extends Prisma.UserUpdateArgs>(
-    args: Subset<T, Prisma.UserUpdateArgs>,
+  static update<T extends UpdateArgs<UserTypes>>(
+    args: Subset<T, UpdateArgs<UserTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.UserGetPayload<T>> {
-    return this.$exec("update", args, options) as Promise<Prisma.UserGetPayload<T>>;
+  ): Promise<Payload<UserTypes, T>> {
+    return this.$exec("update", args, options) as Promise<Payload<UserTypes, T>>;
   }
 
-  static delete<T extends Prisma.UserDeleteArgs>(
-    args: Subset<T, Prisma.UserDeleteArgs>,
+  static delete<T extends DeleteArgs<UserTypes>>(
+    args: Subset<T, DeleteArgs<UserTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.UserGetPayload<T>> {
-    return this.$exec("delete", args, options) as Promise<Prisma.UserGetPayload<T>>;
+  ): Promise<Payload<UserTypes, T>> {
+    return this.$exec("delete", args, options) as Promise<Payload<UserTypes, T>>;
   }
 
-  static upsert<T extends Prisma.UserUpsertArgs>(
-    args: Subset<T, Prisma.UserUpsertArgs>,
+  static upsert<T extends UpsertArgs<UserTypes>>(
+    args: Subset<T, UpsertArgs<UserTypes>>,
     options?: ExecOptions,
-  ): Promise<Prisma.UserGetPayload<T>> {
-    return this.$exec("upsert", args, options) as Promise<Prisma.UserGetPayload<T>>;
+  ): Promise<Payload<UserTypes, T>> {
+    return this.$exec("upsert", args, options) as Promise<Payload<UserTypes, T>>;
   }
 
   static createMany(
-    args?: Prisma.UserCreateManyArgs,
+    args?: CreateManyArgs<UserTypes>,
   ): Promise<{ count: number }> {
     return this.$exec("createMany", args) as Promise<{ count: number }>;
   }
 
   static updateMany(
-    args?: Prisma.UserUpdateManyArgs,
+    args?: UpdateManyArgs<UserTypes>,
   ): Promise<{ count: number }> {
     return this.$exec("updateMany", args) as Promise<{ count: number }>;
   }
 
   static deleteMany(
-    args?: Prisma.UserDeleteManyArgs,
+    args?: DeleteManyArgs<UserTypes>,
   ): Promise<{ count: number }> {
     return this.$exec("deleteMany", args) as Promise<{ count: number }>;
   }
 
-  static wrap<C extends { prototype: unknown }, R extends Prisma.UserGetPayload<{}>>(
+  static wrap<C extends { prototype: unknown }, R extends UserScalars>(
     this: C,
     row: R,
   ): C["prototype"] & R {

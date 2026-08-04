@@ -19,3 +19,13 @@ node_modules/
 # models they describe cannot be generated at all on SQLite, so a committed copy
 # would be a directory that half the CI matrix could neither produce nor check.
 app/models/generated-lists/
+
+# The Prisma client gemi's differential harness compares against, generated from
+# `prisma/differential.prisma`. Uncommitted for the same reason as above — it is
+# a whole generated client — and produced by:
+#
+#     bunx prisma generate --schema prisma/differential.prisma
+#
+# An application never has one of these: `prisma/schema.prisma` has no
+# `generator client` block, which is what lets an app install `prisma` alone.
+app/models/prisma-client/

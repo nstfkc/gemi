@@ -1,8 +1,8 @@
 import { expectTypeOf, test, describe } from "vitest";
 
-import type { Prisma } from "@prisma/client";
+import type { Payload } from "gemi/orm";
 
-import { UserModel } from "./generated";
+import { UserModel, type UserScalars, type UserTypes } from "./generated";
 
 /**
  * Iteration 8, acceptance criterion 6: **`wrap` rejects a partial row at compile
@@ -19,7 +19,15 @@ import { UserModel } from "./generated";
  * `wrap` cannot be handed a row that did not fetch `email`.
  */
 
-type FullUser = Prisma.UserGetPayload<{}>;
+/**
+ * The model's full scalar payload.
+ *
+ * `UserScalars` rather than `Prisma.UserGetPayload<{}>`: the generated bases no
+ * longer type-import `@prisma/client`, so an app installs `prisma` alone and
+ * this file has nothing to import it for. The type it names is the same set of
+ * columns, emitted by the gemi generator from the same DMMF.
+ */
+type FullUser = UserScalars;
 
 describe("wrap requires a complete row", () => {
   test("a full payload is accepted, and carries both columns and the class", () => {
@@ -76,9 +84,10 @@ describe("wrap requires a complete row", () => {
    * is understood as "at least complete" rather than "exactly the scalars".
    */
   test("a row with relations attached is accepted", () => {
-    const withRelations = {} as Prisma.UserGetPayload<{
-      include: { accounts: true };
-    }>;
+    const withRelations = {} as Payload<
+      UserTypes,
+      { include: { accounts: true } }
+    >;
 
     expectTypeOf(UserModel.wrap(withRelations).accounts).toBeArray();
   });

@@ -1,4 +1,4 @@
-import { Prisma as PrismaNamespace, type PrismaClient } from "@prisma/client";
+import { Prisma as PrismaNamespace, type PrismaClient } from "./prisma-client";
 import { UniqueConstraintError } from "gemi/orm";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 

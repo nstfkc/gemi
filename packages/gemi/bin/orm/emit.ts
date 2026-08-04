@@ -359,18 +359,316 @@ export function emitSchemaFile(schemas: ModelSchema[]): string {
   return parts.join("");
 }
 
+// ---------------------------------------------------------------------------
+// The type descriptor
+//
+// Everything below emits the *facts* about a model that only the generator
+// knows, and leaves the rules to `orm/types.ts`. The split is the whole reason
+// an app no longer installs `@prisma/client`: the emitted file names concrete
+// column types and relation targets, and `gemi/orm` supplies `select`
+// narrowing, the filter grammars and the argument shapes over them.
+//
+// The facts have to be emitted rather than derived from the runtime metadata in
+// `schema.ts`, because the metadata does not record them. A `Json` column's
+// value type, an enum's members and a `String[]`'s element type are all things
+// the DMMF says and `FieldSchema` deliberately does not — `type` there is the
+// *storage* classification the SQL compiler switches on, not a TypeScript type.
+// ---------------------------------------------------------------------------
+
 /**
- * The read surface, and how each operation's return type is built from Prisma's
- * own generated types.
+ * How each storage type surfaces in TypeScript, which is a statement about what
+ * this ORM's decoders return rather than about what Prisma's client returns.
  *
- * `returns` is a template over the model name. The three shapes are: many rows,
- * one row or `null`, and one row (the `*OrThrow` variants, which never resolve
- * to `null` because `$exec` raises instead).
+ * The two agree today and are not required to: `Bytes` is a `Uint8Array` on
+ * both dialects because `dialect/postgres.ts` deliberately views the driver's
+ * `Buffer` as one — a divergence it had to *fix* to match, and the kind of thing
+ * that used to be asserted only by a type imported from the other library.
+ *
+ * `Decimal` is unreachable: `UNSUPPORTED_SCALARS` refuses the column before any
+ * of this runs. It is listed so the record stays total and a future entry
+ * cannot be forgotten here.
+ */
+const TS_SCALARS: Record<ScalarType, string> = {
+  Int: "number",
+  Float: "number",
+  String: "string",
+  Boolean: "boolean",
+  DateTime: "Date",
+  BigInt: "bigint",
+  Bytes: "Uint8Array",
+  Json: "JsonValue",
+  Decimal: "never",
+};
+
+/** A Prisma enum's members, by enum name. */
+export type EnumMap = Record<string, readonly string[]>;
+
+/**
+ * Whether a value needs parentheses before `[]` or `| null` is appended.
+ *
+ * An enum is the only base that is itself a union, and `"a" | "b"[]` parses as
+ * `"a" | ("b"[])` — a silently wrong type rather than a syntax error.
+ */
+function parenthesized(ts: string): string {
+  return ts.includes(" | ") ? `(${ts})` : ts;
+}
+
+/**
+ * The element type of a column.
+ *
+ * `position` distinguishes reading from writing, and today only `Json` cares:
+ * a read produces a `JsonValue`, while a write also accepts the two null
+ * sentinels, which are the column's two empty states and are not values.
+ */
+function scalarTs(
+  field: FieldSchema,
+  enums: EnumMap,
+  position: "read" | "write",
+): string {
+  if (field.enum) {
+    const members = enums[field.enum];
+    // An enum the map does not carry falls back to `string`, which is what the
+    // column holds on the wire anyway. Generating a broken union, or throwing
+    // over a name the DMMF simply did not repeat, would both be worse than
+    // being less specific.
+    if (members && members.length > 0) {
+      return members.map((member) => JSON.stringify(member)).join(" | ");
+    }
+    return "string";
+  }
+
+  if (field.type === "Json") {
+    return position === "write" ? "JsonInput" : "JsonValue";
+  }
+
+  return TS_SCALARS[field.type];
+}
+
+function fieldTs(
+  field: FieldSchema,
+  enums: EnumMap,
+  position: "read" | "write",
+): string {
+  let ts = scalarTs(field, enums, position);
+  if (field.isList) ts = `${parenthesized(ts)}[]`;
+  // A `Json` write already spells its own empty states, and `| null` beside them
+  // would reintroduce the bare `null` the sentinels exist to refuse.
+  if (field.nullable && !(field.type === "Json" && position === "write")) {
+    ts = `${ts} | null`;
+  }
+  return ts;
+}
+
+/**
+ * The columns that hold a relation's foreign key, on this side of it.
+ *
+ * `RelationSchema.from` is empty on the side that does not own the key, so this
+ * is exactly the local columns some relation writes.
+ */
+function relationBackedColumns(schema: ModelSchema): Set<string> {
+  const columns = new Set<string>();
+  for (const relation of Object.values(schema.relations)) {
+    for (const field of relation.from) columns.add(field);
+  }
+  return columns;
+}
+
+/**
+ * Whether `create` may omit this column.
+ *
+ * Four reasons, none of them visible in the column's *type*, which is why the
+ * descriptor carries the split rather than leaving `orm/types.ts` to guess: the
+ * column is nullable, the database supplies a default, it is an `@updatedAt`
+ * that the ORM stamps, or **a relation can supply it**.
+ *
+ * That fourth one is the difference between offering `connect` and offering it
+ * usefully. `CreateInput` is the scalar half intersected with the relation half,
+ * so a required foreign key stayed required no matter which spelling the caller
+ * chose — and Prisma's canonical form,
+ *
+ *     SocialAccount.create({ data: { …, user: { connect: { id: 1 } } } })
+ *
+ * did not compile, because `userId` was missing from an intersection that
+ * demanded it. Prisma avoids this by having two types, `CreateInput` with
+ * `connect` and `UncheckedCreateInput` with the raw column, and accepting either
+ * at the operation. Here both are offered on one type, so the column has to be
+ * optional for the pair to be a real choice.
+ *
+ * The genuinely-missing case is still refused, just later: `compile/write.ts`
+ * raises `MissingRequiredValueError` naming the column when neither spelling
+ * supplies it. It has to do that regardless — types are erased, and an untyped
+ * caller reaches the compiler with the column absent either way.
+ */
+function optionalOnCreate(
+  field: FieldSchema,
+  relationBacked: Set<string>,
+): boolean {
+  return (
+    field.nullable ||
+    field.default !== undefined ||
+    field.isUpdatedAt ||
+    relationBacked.has(field.name)
+  );
+}
+
+/** Prisma field names are `[A-Za-z][A-Za-z0-9_]*`, but emit defensively. */
+function propertyName(name: string): string {
+  return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name) ? name : JSON.stringify(name);
+}
+
+/**
+ * The model's columns as TypeScript sees them.
+ *
+ * A `type` alias rather than an `interface`, and the distinction is load-bearing
+ * twice over. TypeScript gives an implicit index signature to an object *type
+ * alias* and not to an interface, which is what lets this satisfy
+ * `ModelTypeInfo`'s `scalars: Record<string, unknown>`. And the emitted
+ * `interface ${model}Model extends ${model}Scalars` needs a statically known
+ * base, which a named alias is and an indexed access into a generic is not.
+ */
+function scalarsType(schema: ModelSchema, enums: EnumMap): string {
+  const fields = Object.values(schema.fields).map(
+    (field) =>
+      `  ${propertyName(field.name)}: ${fieldTs(field, enums, "read")};`,
+  );
+
+  return `
+export type ${schema.name}Scalars = {
+${fields.join("\n")}
+};
+`;
+}
+
+/**
+ * The scalar half of `create`'s `data`.
+ *
+ * Foreign key columns are present, which is a deliberate difference from
+ * Prisma's `<M>CreateInput` — that type hides them and demands the nested
+ * `connect` spelling, offering the raw columns only through a second
+ * `UncheckedCreateInput`. gemi's write compiler takes the column directly, so
+ * describing it as unavailable would have been the types refusing something the
+ * runtime does.
+ */
+function createType(schema: ModelSchema, enums: EnumMap): string {
+  const relationBacked = relationBackedColumns(schema);
+  const fields = Object.values(schema.fields).map(
+    (field) =>
+      `  ${propertyName(field.name)}` +
+      `${optionalOnCreate(field, relationBacked) ? "?" : ""}: ` +
+      `${fieldTs(field, enums, "write")};`,
+  );
+
+  return `
+export type ${schema.name}CreateScalars = {
+${fields.join("\n")}
+};
+`;
+}
+
+/** Where each relation points, and what shape it resolves to. */
+function relationsType(schema: ModelSchema): string {
+  const relations = Object.values(schema.relations).map(
+    (relation) =>
+      `  ${propertyName(relation.name)}: { kind: "${relation.kind}"; ` +
+      `nullable: ${relation.nullable}; target: ${relation.model}Types };`,
+  );
+
+  // `Record<never, never>` — no keys — and emphatically not
+  // `Record<string, never>`, which is `{ [k: string]: never }`. That gave a
+  // relation-less model's `WhereInput` an index signature of
+  // `RelationFilter<never>`, which every *scalar* key then had to satisfy too:
+  // the template's `Membership` could not be filtered, `findUnique`d, updated or
+  // deleted by its own primary key. `select` and `orderBy` happened to survive,
+  // so it read as partly working rather than broken. See `orm/types.ts`.
+  if (relations.length === 0) {
+    return `
+export type ${schema.name}Relations = Record<never, never>;
+`;
+  }
+
+  return `
+export type ${schema.name}Relations = {
+${relations.join("\n")}
+};
+`;
+}
+
+/**
+ * The selectors `findUnique` accepts: `@id`, every `@unique`, every `@@unique`.
+ *
+ * A composite group is one key holding an object, joined by underscores — the
+ * spelling Prisma exposes and `compile/unique.ts` resolves, so a model like the
+ * template's `SocialAccount` can be fetched by `provider_providerId` at all.
+ *
+ * `never` when a model has none, which makes `findUnique` uncallable on it
+ * rather than callable with nothing that identifies a row.
+ */
+function uniqueType(schema: ModelSchema, enums: EnumMap): string {
+  const groups: string[][] = [];
+  const seen = new Set<string>();
+
+  const push = (fields: string[]) => {
+    if (fields.length === 0) return;
+    const key = fields.join(" ");
+    if (seen.has(key)) return;
+    seen.add(key);
+    groups.push(fields);
+  };
+
+  push(schema.primaryKey);
+  for (const group of schema.uniques) push(group);
+
+  const members = groups.map((group) => {
+    // The column type without its nullability: a selector identifies a row, and
+    // `null` never does.
+    const member = (name: string) => {
+      const field = schema.fields[name];
+      if (!field) return `${propertyName(name)}: never`;
+      const ts = field.isList
+        ? `${parenthesized(scalarTs(field, enums, "read"))}[]`
+        : scalarTs(field, enums, "read");
+      return `${propertyName(name)}: ${ts}`;
+    };
+
+    if (group.length === 1) return `{ ${member(group[0])} }`;
+
+    const inner = group.map(member).join("; ");
+    return `{ ${propertyName(group.join("_"))}: { ${inner} } }`;
+  });
+
+  const union = members.length > 0 ? members.join(" | ") : "never";
+
+  return `
+export type ${schema.name}Unique = ${union};
+`;
+}
+
+/**
+ * The descriptor itself: the one type every signature on the model is built
+ * from, and the only thing `orm/types.ts` reads.
+ */
+function typesInterface(schema: ModelSchema): string {
+  return `
+export interface ${schema.name}Types extends ModelTypeInfo {
+  scalars: ${schema.name}Scalars;
+  relations: ${schema.name}Relations;
+  unique: ${schema.name}Unique;
+  create: ${schema.name}CreateScalars;
+}
+`;
+}
+
+/**
+ * The read surface, and how each operation's return type is built.
+ *
+ * `returns` is a template over the model's descriptor. The three shapes are:
+ * many rows, one row or `null`, and one row (the `*OrThrow` variants, which
+ * never resolve to `null` because `$exec` raises instead).
  */
 interface ReadOperation {
   name: string;
   args: string;
-  returns: (model: string) => string;
+  returns: (types: string) => string;
   /** `findUnique` cannot be called without a `where`, so its args are required. */
   required?: boolean;
 }
@@ -379,28 +677,28 @@ const READ_OPERATIONS: ReadOperation[] = [
   {
     name: "findMany",
     args: "FindManyArgs",
-    returns: (m) => `Prisma.${m}GetPayload<T>[]`,
+    returns: (t) => `Payload<${t}, T>[]`,
   },
   {
     name: "findFirst",
     args: "FindFirstArgs",
-    returns: (m) => `Prisma.${m}GetPayload<T> | null`,
+    returns: (t) => `Payload<${t}, T> | null`,
   },
   {
     name: "findFirstOrThrow",
     args: "FindFirstOrThrowArgs",
-    returns: (m) => `Prisma.${m}GetPayload<T>`,
+    returns: (t) => `Payload<${t}, T>`,
   },
   {
     name: "findUnique",
     args: "FindUniqueArgs",
-    returns: (m) => `Prisma.${m}GetPayload<T> | null`,
+    returns: (t) => `Payload<${t}, T> | null`,
     required: true,
   },
   {
     name: "findUniqueOrThrow",
     args: "FindUniqueOrThrowArgs",
-    returns: (m) => `Prisma.${m}GetPayload<T>`,
+    returns: (t) => `Payload<${t}, T>`,
     required: true,
   },
 ];
@@ -432,7 +730,7 @@ const READ_OPERATIONS: ReadOperation[] = [
  * least* the full scalar set, which is the property that matters.
  */
 function wrapOperation(model: string): string {
-  const payload = `Prisma.${model}GetPayload<{}>`;
+  const payload = `${model}Scalars`;
   return `
   static wrap<C extends { prototype: unknown }, R extends ${payload}>(
     this: C,
@@ -460,9 +758,9 @@ function wrapOperation(model: string): string {
  * call site correctly and left the class body blind.
  *
  * Emitted as an interface rather than as `declare` fields for two reasons: it
- * reuses Prisma's own payload type instead of re-deriving TypeScript types from
- * the DMMF, so the two cannot drift; and it is zero runtime output, which
- * `declare` also is but less obviously.
+ * reuses the descriptor's own scalar type rather than restating the columns, so
+ * the two cannot drift; and it is zero runtime output, which `declare` also is
+ * but less obviously.
  *
  * The honest cost: `new UserModel()` now type-checks as having columns it does
  * not have. These classes are constructed by `wrap` and by nothing else — the
@@ -480,7 +778,7 @@ function instanceShape(model: string): string {
 // accepted: \`Model\`'s constructor is \`protected\`, so the only way to get an
 // instance is \`wrap\`, which assigns a complete row. See bin/orm/emit.ts.
 // oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
-export interface ${model}Model extends Prisma.${model}GetPayload<{}> {}
+export interface ${model}Model extends ${model}Scalars {}
 `;
 }
 
@@ -513,9 +811,9 @@ export interface ${model}Model extends Prisma.${model}GetPayload<{}> {}
 function policyTypes(model: string): string {
   return `
 export type ${model}Policy = ModelPolicy<
-  Prisma.${model}WhereInput,
-  Prisma.${model}CreateInput,
-  Prisma.${model}GetPayload<{}>
+  WhereInput<${model}Types>,
+  CreateInput<${model}Types>,
+  ${model}Scalars
 >;
 
 // The same shape with \`scope\`, \`onCreate\` and \`onUpdate\` abstract, so a policy
@@ -523,22 +821,22 @@ export type ${model}Policy = ModelPolicy<
 // combinations too — this makes it \`TS2515\` at the class declaration instead of
 // an error on the first write that reaches production.
 export abstract class ${model}ScopedPolicy extends ScopedPolicy<
-  Prisma.${model}WhereInput,
-  Prisma.${model}CreateInput,
-  Prisma.${model}GetPayload<{}>
+  WhereInput<${model}Types>,
+  CreateInput<${model}Types>,
+  ${model}Scalars
 > {}
 `;
 }
 
 function operation(model: string, op: ReadOperation): string {
-  const argsType = `Prisma.${model}${op.args}`;
-  const returns = op.returns(model);
-  // `options` is a *second parameter* rather than a key inside `args`, so
-  // `Prisma.${model}${op.args}` keeps describing exactly what the operation
-  // accepts. Intersecting every args type with a gemi-specific key would make
-  // Prisma's own types wrong about our surface, which is the DX parity this
-  // project is built on. It also keeps the flag away from the compiler, so it
-  // cannot reach the plan key — which it must not, since it does not change SQL.
+  const types = `${model}Types`;
+  const argsType = `${op.args}<${types}>`;
+  const returns = op.returns(types);
+  // `options` is a *second parameter* rather than a key inside `args`, so the
+  // args type keeps describing exactly what the *query* accepts — one shape,
+  // matching `READ_ARGS` in the compiler, with nothing in it the compiler would
+  // reject. It also keeps the flag away from the plan key, which it must not
+  // reach, since it does not change the SQL.
   return `
   static ${op.name}<T extends ${argsType}>(
     args${op.required ? "" : "?"}: Subset<T, ${argsType}>,
@@ -558,18 +856,21 @@ function operation(model: string, op: ReadOperation): string {
  * is what keeps the return type exact rather than widening it to
  * `number | object` for every caller.
  *
- * `GetScalarType` is Prisma's own mapper for this: it turns the caller's select
- * into the shape of the payload it produces, which is how `count({ select: {
- * email: true } })` narrows to `{ email: number }` and not to the whole model.
+ * `CountPayload` is the mapper: it turns the caller's select into the shape it
+ * produces, which is how `count({ select: { email: true } })` narrows to
+ * `{ email: number }` and not to the whole model. Prisma spells the same thing
+ * `GetScalarType<T["select"], <M>CountAggregateOutputType>`, whose second
+ * parameter carries nothing the first does not.
  */
 function countOperation(model: string): string {
+  const types = `${model}Types`;
   return `
-  static count(args?: Omit<Prisma.${model}CountArgs, "select">): Promise<number>;
-  static count<T extends Prisma.${model}CountArgs>(
-    args: Prisma.SelectSubset<T, Prisma.${model}CountArgs> & {
+  static count(args?: Omit<CountArgs<${types}>, "select">): Promise<number>;
+  static count<T extends CountArgs<${types}>>(
+    args: SelectSubset<T, CountArgs<${types}>> & {
       select: NonNullable<T["select"]>;
     },
-  ): Promise<Prisma.GetScalarType<T["select"], Prisma.${model}CountAggregateOutputType>>;
+  ): Promise<CountPayload<T["select"]>>;
   static count(args?: unknown): Promise<unknown> {
     return this.$exec("count", args as never);
   }
@@ -579,42 +880,38 @@ function countOperation(model: string): string {
 /**
  * `aggregate` — `_count`, `_avg`, `_sum`, `_min`, `_max` over a filtered set.
  *
- * The payload type is Prisma's `GetXAggregateType<T>`, which is what makes
- * `_max: { position: true }` narrow to `{ _max: { position: number | null } }`
- * rather than to every field of every function. Same rule as everywhere else
- * here: the types are Prisma's own, so narrowing stays exact and there is no
- * second definition of the shape to drift.
+ * `AggregatePayload<M, T>` is what makes `_max: { position: true }` narrow to
+ * `{ _max: { position: number | null } }` rather than to every field of every
+ * function. It also restricts `_sum` and `_avg` to numeric columns and
+ * `_min`/`_max` to orderable ones, matching `NUMERIC` and its sibling in
+ * `compile/aggregate.ts` — so a `_sum` over a `String` is a compile error at the
+ * same place the runtime would refuse it.
  *
- * `groupBy` is beside it now, and its typing is the awkward one.
+ * `groupBy` is beside it, and one rule of its is still a runtime check.
  *
- * Prisma's `groupBy` signature is not a plain `Subset`: it carries a conditional
- * that reports a *missing* `by` field in `orderBy` as a type error naming the
- * field. Reproducing that machinery would mean copying a large conditional out
- * of the generated client, where it would then be a second definition free to
- * drift from the first — the thing every other operation here avoids.
- *
- * So the args type is Prisma's `${model}GroupByArgs` directly and the return is
- * its `Get${model}GroupByPayload<T>`, which still narrows the payload exactly.
- * The `orderBy`-must-be-in-`by` rule is enforced at runtime instead, with a
- * message naming the field and saying why — see `compile/group-by.ts`. A
- * compile-time error would be better; a *wrong* compile-time error, or a silent
- * one, would be worse than a precise runtime refusal.
+ * `orderBy` may only name a column that is in `by`. Expressing that in the type
+ * would mean making `orderBy`'s key set depend on the `by` literal, which is
+ * possible and which produces an error message about a mapped type rather than
+ * about the field. `compile/group-by.ts` refuses it by name instead, saying
+ * which field and why. A compile-time error would be better; a *worse-worded*
+ * compile-time error is not.
  */
 function aggregateOperation(model: string): string {
+  const types = `${model}Types`;
   return `
-  static aggregate<T extends Prisma.${model}AggregateArgs>(
-    args: Prisma.Subset<T, Prisma.${model}AggregateArgs>,
-  ): Promise<Prisma.Get${model}AggregateType<T>> {
+  static aggregate<T extends AggregateArgs<${types}>>(
+    args: Subset<T, AggregateArgs<${types}>>,
+  ): Promise<AggregatePayload<${types}, T>> {
     return this.$exec("aggregate", args) as Promise<
-      Prisma.Get${model}AggregateType<T>
+      AggregatePayload<${types}, T>
     >;
   }
 
-  static groupBy<T extends Prisma.${model}GroupByArgs>(
-    args: Prisma.Subset<T, Prisma.${model}GroupByArgs>,
-  ): Promise<Prisma.Get${model}GroupByPayload<T>> {
+  static groupBy<T extends GroupByArgs<${types}>>(
+    args: Subset<T, GroupByArgs<${types}>>,
+  ): Promise<GroupByPayload<${types}, T>> {
     return this.$exec("groupBy", args) as Promise<
-      Prisma.Get${model}GroupByPayload<T>
+      GroupByPayload<${types}, T>
     >;
   }
 `;
@@ -640,25 +937,25 @@ const WRITE_OPERATIONS: ReadOperation[] = [
   {
     name: "create",
     args: "CreateArgs",
-    returns: (m) => `Prisma.${m}GetPayload<T>`,
+    returns: (t) => `Payload<${t}, T>`,
     required: true,
   },
   {
     name: "update",
     args: "UpdateArgs",
-    returns: (m) => `Prisma.${m}GetPayload<T>`,
+    returns: (t) => `Payload<${t}, T>`,
     required: true,
   },
   {
     name: "delete",
     args: "DeleteArgs",
-    returns: (m) => `Prisma.${m}GetPayload<T>`,
+    returns: (t) => `Payload<${t}, T>`,
     required: true,
   },
   {
     name: "upsert",
     args: "UpsertArgs",
-    returns: (m) => `Prisma.${m}GetPayload<T>`,
+    returns: (t) => `Payload<${t}, T>`,
     required: true,
   },
 ];
@@ -676,7 +973,7 @@ function batchOperation(
 ): string {
   return `
   static ${op.name}(
-    args?: Prisma.${model}${op.args},
+    args?: ${op.args}<${model}Types>,
   ): Promise<{ count: number }> {
     return this.$exec("${op.name}", args) as Promise<{ count: number }>;
   }
@@ -684,49 +981,94 @@ function batchOperation(
 }
 
 /**
- * Where `models.ts` type-imports `Prisma` from.
+ * The types every emitted `models.ts` imports from `gemi/orm`.
  *
- * `@prisma/client` for every ordinary app, and the default is what keeps the
- * emitted file byte-identical to what it was before this parameter existed.
- *
- * It is a parameter at all because a schema can generate its client somewhere
- * else — `generator client { output = … }` — and then `@prisma/client` is not
- * where its types live. That is not a hypothetical: it is how a repository
- * covers a column one dialect has and the other cannot, which is exactly the
- * position `String[]` is in (#300). One `schema.prisma` cannot carry a scalar
- * list, because Prisma refuses the declaration outright on SQLite, so the
- * second schema needs a second client and the artifacts generated from it have
- * to import that one.
+ * A fixed list because every model gets every operation, so each of these is
+ * used by any non-empty schema. The two `Json` types are conditional: a schema
+ * with no `Json` column would import them unused, which `oxlint` reports in the
+ * app rather than here.
  */
-const DEFAULT_CLIENT = "@prisma/client";
+const RUNTIME_IMPORTS = [
+  "Model",
+  "ScopedPolicy",
+  "type AggregateArgs",
+  "type AggregatePayload",
+  "type CountArgs",
+  "type CountPayload",
+  "type CreateArgs",
+  "type CreateInput",
+  "type CreateManyArgs",
+  "type DeleteArgs",
+  "type DeleteManyArgs",
+  "type ExecOptions",
+  "type FindFirstArgs",
+  "type FindFirstOrThrowArgs",
+  "type FindManyArgs",
+  "type FindUniqueArgs",
+  "type FindUniqueOrThrowArgs",
+  "type GroupByArgs",
+  "type GroupByPayload",
+  "type ModelPolicy",
+  "type ModelTypeInfo",
+  "type Payload",
+  "type PolicyEntry",
+  "type SelectSubset",
+  "type Subset",
+  "type UpdateArgs",
+  "type UpdateManyArgs",
+  "type UpsertArgs",
+  "type WhereInput",
+];
+
+function usesJson(schemas: ModelSchema[]): boolean {
+  return schemas.some((schema) =>
+    Object.values(schema.fields).some((field) => field.type === "Json"),
+  );
+}
 
 export function emitModelsFile(
   schemas: ModelSchema[],
-  client: string = DEFAULT_CLIENT,
+  enums: EnumMap = {},
 ): string {
+  // A schema with no models needs none of them, and importing twenty-eight
+  // unused names would be reported by the *app's* linter, in a generated file it
+  // is told not to edit.
+  if (schemas.length === 0) return HEADER;
+
+  const imports = [...RUNTIME_IMPORTS];
+  if (usesJson(schemas)) {
+    imports.push("type JsonInput", "type JsonValue");
+  }
+  imports.sort((a, b) => {
+    // Values first, then types, each alphabetically — the order `oxlint` and a
+    // reader both expect, and stable regardless of what the schema contains.
+    const aType = a.startsWith("type ");
+    const bType = b.startsWith("type ");
+    if (aType !== bType) return aType ? 1 : -1;
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
+
   const parts = [
     HEADER,
-    `\nimport type { Prisma } from ${JSON.stringify(client)};\n`,
+    `
+// Every argument and result type here comes from \`gemi/orm\`, which is what lets
+// an app install \`prisma\` alone: nothing in this file resolves to
+// \`@prisma/client\`, so nothing forces it into the dependency graph for types
+// that are erased at build. Each model's \`…Types\` interface below is the
+// descriptor those generic types read.
+`,
     `import {
-  Model,
-  ScopedPolicy,
-  type ExecOptions,
-  type ModelPolicy,
-  type PolicyEntry,
+${imports.map((name) => `  ${name},`).join("\n")}
 } from "gemi/orm";\n`,
     `\nimport * as schema from "./schema";\n`,
-    `
-// Copied from Prisma's own generated client. It is what makes \`select\` and
-// \`include\` narrow the return type: \`T\` is inferred from the literal the
-// caller passes, and any key outside the operation's argument type collapses to
-// \`never\` rather than being quietly accepted.
-type Subset<T, U> = {
-  [key in keyof T]: key extends keyof U ? T[key] : never;
-};
-`,
   ];
 
   for (const schema of schemas) {
+    parts.push(scalarsType(schema, enums));
+    parts.push(createType(schema, enums));
+    parts.push(relationsType(schema));
+    parts.push(uniqueType(schema, enums));
+    parts.push(typesInterface(schema));
     parts.push(instanceShape(schema.name));
     parts.push(policyTypes(schema.name));
     parts.push(`
@@ -737,9 +1079,9 @@ export class ${schema.name}Model extends Model {
   // written for another model is a type error here rather than a scope compiled
   // against columns that do not exist.
   static $policies?: readonly PolicyEntry<
-    Prisma.${schema.name}WhereInput,
-    Prisma.${schema.name}CreateInput,
-    Prisma.${schema.name}GetPayload<{}>
+    WhereInput<${schema.name}Types>,
+    CreateInput<${schema.name}Types>,
+    ${schema.name}Scalars
   >[];
 ${READ_OPERATIONS.map((op) => operation(schema.name, op)).join("")}${countOperation(
       schema.name,
@@ -780,19 +1122,43 @@ export * as schema from "./schema";
 `;
 }
 
-export interface EmitOptions {
-  /** See {@link emitModelsFile}. Defaults to `@prisma/client`. */
-  client?: string;
+/**
+ * The enum members, keyed by name, so an enum column types as the union of what
+ * it can hold rather than as `string`.
+ *
+ * Read from `dmmf.datamodel.enums` and passed separately because
+ * `buildModelSchemas` deliberately drops them: `FieldSchema.enum` keeps the
+ * enum's *name* for the runtime, whose only interest is that the value travels
+ * as a string. The members matter to the compiler and to nothing else.
+ *
+ * **`dbName` wins over `name`, and that is a deliberate divergence from
+ * Prisma.** A value-level `@map` — `free @map("FREE")` — gives a member two
+ * spellings: `free` in the schema, `FREE` in the column. Prisma's client
+ * translates between them, so its types say `free`. gemi does not translate: its
+ * decoders hand back the string the database returned, and its encoders bind the
+ * string they were given, so the value an application sees and writes is `FREE`.
+ * Typing these as `name` would describe Prisma's behaviour and mistype gemi's.
+ *
+ * No schema in this repository has a value-level `@map`, so the differential
+ * harness never compares the two — which is exactly why this is written down and
+ * asserted in `emit.test.ts` rather than left to be rediscovered.
+ */
+function enumMap(enums: readonly DMMF.DatamodelEnum[]): EnumMap {
+  const out: EnumMap = {};
+  for (const item of enums) {
+    out[item.name] = item.values.map((value) => value.dbName ?? value.name);
+  }
+  return out;
 }
 
 export function emitArtifacts(
   models: readonly DMMF.Model[],
-  options: EmitOptions = {},
+  enums: readonly DMMF.DatamodelEnum[] = [],
 ): Record<GeneratedFile, string> {
   const schemas = buildModelSchemas(models);
   return {
     "schema.ts": emitSchemaFile(schemas),
-    "models.ts": emitModelsFile(schemas, options.client),
+    "models.ts": emitModelsFile(schemas, enumMap(enums)),
     "index.ts": emitIndexFile(schemas),
   };
 }

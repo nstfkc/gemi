@@ -13,6 +13,66 @@ export {
   type ScalarType,
 } from "./schema";
 
+// The argument and result types the generated model bases are built from.
+// Previously `@prisma/client`'s, which is what made an app install a 74MB
+// package for types that are erased at build — and which described Prisma's
+// query engine rather than gemi's compiler. See `types.ts`.
+export type {
+  AggregateArgs,
+  AggregatePayload,
+  CountArgs,
+  CountPayload,
+  CreateArgs,
+  CreateInput,
+  CreateManyArgs,
+  DeleteArgs,
+  DeleteManyArgs,
+  FieldFilter,
+  FindFirstArgs,
+  FindFirstOrThrowArgs,
+  FindManyArgs,
+  FindUniqueArgs,
+  FindUniqueOrThrowArgs,
+  GroupByArgs,
+  GroupByPayload,
+  IncludeInput,
+  JsonInput,
+  JsonValue,
+  ModelTypeInfo,
+  OmitInput,
+  OrderByInput,
+  Payload,
+  RelationInfo,
+  Row,
+  SelectInput,
+  SelectSubset,
+  SortOrder,
+  Subset,
+  UpdateArgs,
+  UpdateInput,
+  UpdateManyArgs,
+  UpsertArgs,
+  WhereInput,
+  WhereUniqueInput,
+} from "./types";
+
+// Prisma's two `Json` null sentinels, under gemi's own names.
+//
+// A nullable `Json` column has two legal empty states and they are different
+// rows, so the caller has to choose. `docs/orm.md` used to spell that choice
+// `Prisma.DbNull` — a *runtime* value import of `@prisma/client` in ordinary
+// application code, and the only one gemi's own documentation asked for.
+// `json-null.ts` has always recognised the sentinels structurally rather than by
+// identity, so these are accepted by exactly the same path Prisma's are, and an
+// app that still passes Prisma's keeps working.
+export {
+  AnyNull,
+  DbNull,
+  JsonNull,
+  jsonNullKind,
+  type JsonNullKind,
+} from "./json-null";
+
 export {
   DecodeError,
   MalformedRelationError,

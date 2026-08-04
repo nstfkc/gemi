@@ -1,6 +1,6 @@
 import { SQL } from "bun";
 
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient } from "../prisma-client";
 import { DatabaseManager } from "gemi/database";
 import { Application } from "gemi/foundation";
 import {

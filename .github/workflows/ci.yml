@@ -84,9 +84,35 @@ jobs:
 
       # The template's committed artifact is what its suite runs against, and
       # `generated.test.ts` asserts a second run produces a zero-line diff.
+      #
+      # This runs against `prisma/schema.prisma`, which has **no**
+      # `generator client` block — so it is also the check that the client-free
+      # path an application uses actually works. If the emitted bases ever went
+      # back to needing Prisma's types, this step would still pass and the
+      # typecheck below would fail; if `prisma generate` itself came to need a
+      # client, this step fails here.
       - name: Generate the template's model artifact
         run: bunx prisma generate
         working-directory: templates/saas-starter
+
+      # The differential harness compares gemi against Prisma, so it needs a
+      # Prisma client — generated from `differential.prisma`, which is
+      # `schema.prisma` plus a client block and nothing else. Uncommitted, like
+      # every generated client in this repo.
+      #
+      # **Run from the repository root, not from the template**, and the reason
+      # is not obvious. `prisma generate` decides whether `@prisma/client` is
+      # installed by reading the *nearest package.json* rather than by resolving
+      # the module: from `templates/saas-starter`, whose manifest deliberately no
+      # longer names it, Prisma concludes it is missing and runs
+      # `npm i @prisma/client`, which fails. The root manifest declares it — it
+      # is a dependency of gemi's test suite — so from here Prisma is satisfied
+      # and resolution finds the hoisted copy.
+      #
+      # The template not declaring it is the point of this whole arrangement, so
+      # the fix is to generate from the package that does.
+      - name: Generate the differential harness's Prisma client
+        run: bunx prisma generate --schema templates/saas-starter/prisma/differential.prisma
 
       # The step that would have caught #159. Kept before the tests, because a
       # type error is cheaper to read than a suite that still passes around it.
@@ -242,9 +268,26 @@ jobs:
         run: sed -i 's/^  provider = "sqlite"/  provider = "postgresql"/' prisma/schema.prisma
         working-directory: templates/saas-starter
 
+      # `differential.prisma` is derived from the schema edited above, so it has
+      # to be re-derived rather than left holding a sqlite datasource. Deriving
+      # it here also keeps it consistent with `schema.prisma` for
+      # `app-dependencies.test.ts`, which compares the two.
+      - name: Re-derive the differential schema
+        run: bun prisma/differential-schema.ts
+        working-directory: templates/saas-starter
+
       - name: Generate for Postgres
         run: bunx prisma generate
         working-directory: templates/saas-starter
+
+      # The harness's client, which is what the differential suites compare
+      # against — and it speaks one provider at a time, which is why it is
+      # generated after the schema was pointed at Postgres. Run from the root
+      # for the reason the sqlite job gives at length: Prisma reads the nearest
+      # package.json to decide whether the client is installed, and the
+      # template's deliberately does not name it.
+      - name: Generate the differential harness's Prisma client
+        run: bunx prisma generate --schema templates/saas-starter/prisma/differential.prisma
 
       - name: Create the schema
         run: bunx prisma db push --skip-generate
@@ -272,11 +315,17 @@ jobs:
           PGPASSWORD=postgres psql -h localhost -U postgres -d gemi_test
           -c 'CREATE DATABASE gemi_lists' || true
 
+      # Two generates, split the same way the main schema is: the gemi artifacts
+      # from `postgres-only.prisma` in the template, and the Prisma client the
+      # scalar-list suite compares against from its derived counterpart, at the
+      # root — because `prisma generate` reads the *cwd's* package.json to decide
+      # whether `@prisma/client` is installed, and the template's no longer
+      # names it.
       - name: Generate and push the scalar-list schema
         run: |
-          bunx prisma generate --schema prisma/postgres-only.prisma
-          bunx prisma db push --schema prisma/postgres-only.prisma --skip-generate
-        working-directory: templates/saas-starter
+          (cd templates/saas-starter && bunx prisma generate --schema prisma/postgres-only.prisma)
+          bunx prisma generate --schema templates/saas-starter/prisma/postgres-only-differential.prisma
+          (cd templates/saas-starter && bunx prisma db push --schema prisma/postgres-only.prisma --skip-generate)
         env:
           LISTS_DATABASE_URL: postgres://postgres:postgres@localhost:5432/gemi_lists
 

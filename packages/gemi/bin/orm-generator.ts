@@ -20,27 +20,21 @@ import { emitArtifacts } from "./orm/emit";
 // stdio, which is why it needs its own `bin` entry, a shebang and an executable
 // bit (see scripts/prepare-bin.ts).
 
-// The generated `models.ts` type-imports `@prisma/client`, so the client
-// generator has to have run. Prisma runs generator blocks in declaration order,
-// so `generator client` coming first is usually enough — but relying on that
-// silently means an app that reorders its blocks gets code that does not
-// typecheck and no explanation of why.
-const CLIENT_PROVIDERS = new Set(["prisma-client-js", "prisma-client"]);
-
-function assertPrismaClientGenerator(options: GeneratorOptions): void {
-  const hasClient = options.otherGenerators.some((generator) =>
-    CLIENT_PROVIDERS.has(generator.provider.value ?? ""),
-  );
-  if (hasClient) return;
-
-  throw new Error(
-    "The gemi ORM generator needs the Prisma client generator, because the " +
-      "model bases it emits type-import `@prisma/client`. Add a " +
-      '`generator client { provider = "prisma-client-js" }` block to your ' +
-      "schema, above the gemi block — Prisma runs generators in declaration " +
-      "order.",
-  );
-}
+// This generator needs no other generator to have run, and a schema whose only
+// generator block is this one is the ordinary case.
+//
+// It used to need `generator client`, and refused to run without it: the model
+// bases it emitted did `import type { Prisma } from "@prisma/client"`, so the
+// client had to exist for the app to typecheck. That single type-only import —
+// erased at build, never present in a bundle — was what made every gemi app
+// install a 74MB package, and generate a further 23MB of client, that it never
+// called.
+//
+// Nothing outside gemi ever wanted it. The `prisma` CLI depends on
+// `@prisma/config` and `@prisma/engines` and not on the client; `migrate dev`,
+// `migrate deploy`, `db push` and `migrate diff` all run to completion against a
+// schema with no generator block at all. The requirement was gemi's alone, and
+// removing the import removed it. See `orm/types.ts`.
 
 // `@prisma/generator-helper` is a devDependency bundled into this binary, so the
 // DMMF reader's version is frozen at gemi's publish time. An app on a much newer
@@ -98,45 +92,24 @@ generatorHandler({
       );
     }
 
-    assertPrismaClientGenerator(options);
     warnOnPrismaVersion(options);
     warnOnDatasource(options);
 
-    // Where the emitted `models.ts` type-imports `Prisma` from. Absent for
-    // every ordinary app, and then it is `@prisma/client`; supplied by a schema
-    // whose `generator client` writes somewhere else, where that name resolves
-    // to a different schema's types or to nothing at all.
-    //
-    //   generator gemi {
-    //     provider = "gemi-orm-generator"
-    //     output   = "../app/models/generated-lists"
-    //     client   = "./client"
-    //   }
-    //
-    // A module specifier, not a path: it is written into an `import` in the
-    // generated file, so it is resolved relative to `output` by whatever
-    // resolves that file — the same rule as any other import.
-    // Checked for emptiness as well as for type. A Prisma generator block
-    // cannot express `undefined`, so `client = ""` is how the option gets
-    // written by someone clearing it — and it would emit
-    // `import type { Prisma } from ""`, which fails at the *importing* file
-    // rather than here, naming a generated artifact nobody edited.
-    const client = options.generator.config?.client;
-    if (
-      client !== undefined &&
-      (typeof client !== "string" || client.trim() === "")
-    ) {
-      throw new Error(
-        "The gemi ORM generator's `client` option is the module specifier its " +
-          "generated models type-import `Prisma` from, so it must be a single " +
-          'non-empty string — `client = "./client"`. Remove the line entirely ' +
-          "to get the default, `@prisma/client`.",
-      );
-    }
+    // A `client` option used to sit here: the module specifier the emitted
+    // models type-imported `Prisma` from, for a schema whose `generator client`
+    // wrote somewhere other than `@prisma/client`. Nothing type-imports anything
+    // from Prisma any more, so the option describes a decision no longer being
+    // made and is gone. A schema still carrying the line is not an error —
+    // Prisma passes unknown generator config through, and refusing it would
+    // break a working schema over a word that now means nothing.
 
     // Prisma hands the DMMF over directly, so nothing here parses
-    // `schema.prisma`.
-    const files = emitArtifacts(options.dmmf.datamodel.models, { client });
+    // `schema.prisma`. Enums come along for the model bases, which type an enum
+    // column as the union of its members.
+    const files = emitArtifacts(
+      options.dmmf.datamodel.models,
+      options.dmmf.datamodel.enums,
+    );
 
     await mkdir(output, { recursive: true });
     for (const [name, content] of Object.entries(files)) {

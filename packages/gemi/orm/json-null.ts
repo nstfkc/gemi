@@ -53,8 +53,72 @@ const SENTINELS: Record<string, JsonNullKind> = {
  * of the rows it asks for. That was #259.
  */
 /**
- * The ORM's own spelling of `Prisma.JsonNull`, for a comparison the *compiler*
- * authors rather than the caller.
+ * A sentinel, built the way the recogniser below demands.
+ *
+ * **A class, so the prototype's `toString` is non-enumerable.** A method in an
+ * object literal is enumerable, `for…in` walks it, and the shape check below
+ * would reject it — which is how the first version of the test helper in
+ * `json-null.test.ts` failed while Prisma's real sentinels passed. Prisma builds
+ * them as classes; this matches, and `json-null.test.ts` pins that they are
+ * recognised so the two cannot drift apart.
+ *
+ * **The tag still reads `Prisma.…`, and that is deliberate.** It is what makes
+ * gemi's sentinel and Prisma's the *same value* as far as every reader is
+ * concerned: an app migrating off `@prisma/client` can swap the import without
+ * touching a call site, and one that still passes Prisma's keeps working. The
+ * tag is a wire format shared with another library, not a name gemi is free to
+ * choose.
+ */
+function sentinel(tag: string): object {
+  return new (class {
+    toString() {
+      return tag;
+    }
+  })();
+}
+
+/**
+ * Nominal types for the three sentinels.
+ *
+ * Branded rather than typed as `object`, so a `Json` column's input type can
+ * name exactly these and nothing else. The brand is a type-level fiction — the
+ * runtime values carry no such property, and must not: `jsonNullKind` rejects
+ * any object with own properties, which is what stops an ordinary value from
+ * being mistaken for a sentinel.
+ */
+declare const sentinelBrand: unique symbol;
+
+export interface DbNullValue {
+  readonly [sentinelBrand]: "db";
+}
+export interface JsonNullValue {
+  readonly [sentinelBrand]: "json";
+}
+export interface AnyNullValue {
+  readonly [sentinelBrand]: "any";
+}
+
+/**
+ * The two empty states of a nullable `Json` column, and the filter that means
+ * both.
+ *
+ * `docs/orm.md` used to spell these `Prisma.DbNull` and `Prisma.JsonNull`,
+ * which made a *runtime* value import of `@prisma/client` the one piece of
+ * ordinary application code that could not be written without the package. The
+ * recogniser never needed it — it has always matched structurally, precisely so
+ * that the ORM runtime could stay free of Prisma — so exporting gemi's own
+ * costs nothing and removes the last such import.
+ *
+ * `AnyNull` is a question, not a value: it is only meaningful in a filter, and
+ * both `cast.ts` and the SQLite encoder refuse it in a write.
+ */
+export const DbNull = sentinel("Prisma.DbNull") as DbNullValue;
+export const JsonNull = sentinel("Prisma.JsonNull") as JsonNullValue;
+export const AnyNull = sentinel("Prisma.AnyNull") as AnyNullValue;
+
+/**
+ * The ORM's own spelling of `JsonNull`, for a comparison the *compiler* authors
+ * rather than the caller.
  *
  * `AnyNull` compiles to `is null or = <JSON null>`, and the right-hand side has
  * no argument to read it out of — the caller wrote `AnyNull`, not `JsonNull`.
@@ -62,18 +126,11 @@ const SENTINELS: Record<string, JsonNullKind> = {
  * a literal into the SQL text, the compiler binds this and every existing path
  * treats it exactly as it treats the real sentinel.
  *
- * **A class, so the prototype's `toString` is non-enumerable.** A method in an
- * object literal is enumerable, `for…in` walks it, and the shape check below
- * would reject this — which is how the first version of the test helper in
- * `json-null.test.ts` failed while Prisma's real sentinels passed. Prisma builds
- * them as classes; this matches, and `json-null.test.ts` pins that it is
- * recognised so the two cannot drift apart.
+ * The same object as the exported `JsonNull` rather than a second one: two
+ * values with one tag would be two things to keep recognisable, and the
+ * compiler's need and the caller's are the same need.
  */
-export const JSON_NULL: object = new (class {
-  toString() {
-    return "Prisma.JsonNull";
-  }
-})();
+export const JSON_NULL: object = JsonNull as unknown as object;
 
 export function jsonNullKind(value: unknown): JsonNullKind | null {
   if (typeof value !== "object" || value === null) return null;

@@ -12,8 +12,11 @@
 #   1. a server                    — or every Postgres suite skips
 #   2. schema.prisma -> postgresql — or `prisma generate` emits a SQLite client
 #   3. db push                     — or the tables are not there
-#   4. prisma generate             — or the differential harness compares
-#                                    against a client built for the other dialect
+#   4. prisma generate, twice      — the gemi artifacts from schema.prisma, and
+#                                    the harness's own Prisma client from
+#                                    differential.prisma. Miss the second and the
+#                                    harness compares against a client built for
+#                                    the other dialect.
 #   5. the same two for            — or the scalar-list suite has no models and
 #      postgres-only.prisma          skips, which reads exactly like passing
 #
@@ -39,7 +42,10 @@ restore() {
   # Always, even on failure. A left-over `postgresql` provider is the trap this
   # script exists to close, so the cleanup cannot be conditional on success.
   sed -i '' 's/provider = "postgresql"/provider = "sqlite"/' prisma/schema.prisma || true
+  bun prisma/differential-schema.ts >/dev/null 2>&1 || true
   DATABASE_URL="file:./dev.db" npx prisma generate >/dev/null 2>&1 || true
+  (cd ../.. && DATABASE_URL="file:./dev.db" npx prisma generate \
+    --schema templates/saas-starter/prisma/differential.prisma >/dev/null 2>&1) || true
   if [ -n "$STARTED" ]; then docker rm -f "$CONTAINER" >/dev/null 2>&1 || true; fi
 }
 trap restore EXIT
@@ -59,10 +65,21 @@ fi
 
 echo "==> pointing schema.prisma at postgresql"
 sed -i '' 's/provider = "sqlite"/provider = "postgresql"/' prisma/schema.prisma
+# Derived from the file just edited, so it has to be rebuilt rather than left
+# holding a sqlite datasource.
+bun prisma/differential-schema.ts >/dev/null
 
 echo "==> db push + generate"
 DATABASE_URL="$URL" npx prisma db push --skip-generate --accept-data-loss >/dev/null
 DATABASE_URL="$URL" npx prisma generate >/dev/null
+# The harness's client. `schema.prisma` has no `generator client` block — an app
+# installs `prisma` alone — so this is the step that produces one.
+#
+# From the repository root, because `prisma generate` decides whether
+# `@prisma/client` is installed by reading the *nearest package.json* rather than
+# by resolving the module — and the template's deliberately does not name it.
+(cd ../.. && DATABASE_URL="$URL" npx prisma generate \
+  --schema templates/saas-starter/prisma/differential.prisma >/dev/null)
 
 # The scalar-list schema (#300), in its own database and with its own client.
 # `createdb` is idempotent here only because the failure is swallowed: it exists
@@ -73,6 +90,10 @@ LISTS_DATABASE_URL="$LISTS_URL" npx prisma db push \
   --schema prisma/postgres-only.prisma --skip-generate --accept-data-loss >/dev/null
 LISTS_DATABASE_URL="$LISTS_URL" npx prisma generate \
   --schema prisma/postgres-only.prisma >/dev/null
+# Its Prisma client, from the derived schema and from the root — same split, and
+# same reason, as the main schema's above.
+(cd ../.. && LISTS_DATABASE_URL="$LISTS_URL" npx prisma generate \
+  --schema templates/saas-starter/prisma/postgres-only-differential.prisma >/dev/null)
 
 echo "==> vitest"
 TZ=UTC TEST_POSTGRES_URL="$URL" TEST_POSTGRES_LISTS_URL="$LISTS_URL" \

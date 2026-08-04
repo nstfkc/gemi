@@ -1,24 +1,22 @@
+// Generated from schema.prisma by prisma/differential-schema.ts. Do not edit.
+//
+// schema.prisma with its `generator gemi` block swapped for a `generator client`
+// one: the same models, generating a Prisma client instead of gemi's artifacts.
+// The application's schema has no client block, so that an app installs
+// `prisma` alone; this file exists so that gemi can still compare itself against
+// Prisma. Re-run:
+//
+//     bun prisma/differential-schema.ts
+
+generator client {
+  provider        = "prisma-client-js"
+  output          = "../app/models/prisma-client"
+  previewFeatures = ["driverAdapters"]
+}
+
 // This is your Prisma schema file,
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
-// Runtime model metadata and the typed model bases the gemi ORM executes
-// queries through. The output is committed.
-//
-// **There is no `generator client` block, and that is the point.** Prisma owns
-// the schema and the migrations; gemi compiles and runs the SQL. Nothing in
-// `prisma migrate dev`, `migrate deploy`, `db push` or `migrate diff` needs the
-// Prisma client — the CLI depends on `@prisma/config` and `@prisma/engines`,
-// not on `@prisma/client` — and the artifacts emitted below no longer
-// type-import it either. So an app installs `prisma` and nothing else.
-//
-// gemi's own differential test harness *does* need a Prisma client, to compare
-// against. It generates one from `differential.prisma`, which is this file plus
-// a client block. That is a gemi development concern and deliberately not part
-// of the schema an application starts from.
-generator gemi {
-  provider = "gemi-orm-generator"
-  output   = "../app/models/generated"
-}
 
 datasource db {
   provider = "sqlite"
