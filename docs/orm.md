@@ -267,8 +267,8 @@ so it belongs in CI:
 Three things worth knowing before you wire it up.
 
 **It imports your model files.** There is no way to find a class without evaluating the module that
-declares it. A file that *does* something when imported does it here — `--ignore <paths>` skips a
-comma-separated list under `app/models`, and the command prints what it skipped. Tests, type tests,
+declares it. A file that *does* something when imported does it here — `--ignore <paths>` skips
+paths under `app/models`, comma-separated and repeatable, and the command prints what it skipped. Tests, type tests,
 benchmarks, `.d.ts` files and any directory with its own `package.json` are skipped already.
 
 **It does not credit a `register` call your file made on the way in.** A class that owns its name
@@ -276,9 +276,12 @@ only because loading its module said so loses it the day nothing imports the mod
 failure being checked for. The registry is put back to what `Kernel.models` made it before each file
 is audited.
 
-**It does not report a typed view carrying its own policies.** That class is *supposed* to be absent
-from the declared modules — see above — and a checker that demanded you export it would be telling
-you to undo what the framework told you to do.
+**It reports one thing: a class carrying policies the registered class does not.** A typed view
+carrying its own narrowing is *supposed* to be absent from the declared modules — see above — and so
+is an unpolicied class written against a model's schema, which
+`AmbiguousModelRegistrationError` likewise tells you to keep out. A checker that demanded you export
+either would be telling you to undo what the framework told you to do, and would turn a working boot
+into that error.
 
 Run it against another directory with `--dir`, and prefer it over a boot-time scan: enumerating the
 filesystem at start-up would couple the framework to your bundler and make every production process

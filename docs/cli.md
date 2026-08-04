@@ -94,11 +94,11 @@ This command walks `app/models`, imports every file, and asks the same question 
 ```
 
 - `--dir <path>` — walk somewhere other than `app/models`.
-- `--ignore <paths>` — comma-separated paths under `--dir` to skip. What was skipped is printed.
+- `--ignore <paths>` — paths under `--dir` to skip. Comma-separated, and repeatable. What was skipped is printed.
 
 > **Gotcha:** finding a class means evaluating the module that declares it, so every file walked is imported and a file that *does* something on import does it here. Tests, type tests, benchmarks, `.d.ts` files and directories with their own `package.json` are skipped already; `--ignore` is for the rest.
 
-A typed view carrying its own policies is deliberately *not* reported — that class is supposed to be absent from the declared modules. See [ORM → Your model class](./orm.md#your-model-class).
+It reports one thing: a class carrying policies the registered class does not. A typed view carrying its own narrowing, and an unpolicied class written against a model's schema, are both deliberately *not* reported — each is supposed to be absent from the declared modules, and exporting either would turn a working boot into `AmbiguousModelRegistrationError`. See [ORM → Your model class](./orm.md#your-model-class).
 
 ## `gemi ide:generate-api-manifest`
 

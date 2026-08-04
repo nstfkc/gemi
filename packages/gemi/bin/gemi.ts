@@ -214,9 +214,15 @@ check
   )
   .option(
     "--ignore <paths>",
-    "Comma-separated paths under --dir to skip, for model-adjacent code that " +
-      "runs something when imported",
-    (value: string) => value.split(",").map((entry) => entry.trim()).filter(Boolean),
+    "Paths under --dir to skip, for model-adjacent code that runs something " +
+      "when imported. Comma-separated, and repeatable",
+    // Accumulating, because a coercion that drops `previous` makes
+    // `--ignore a --ignore b` keep only `b` — silently, and while reading like
+    // it took both.
+    (value: string, previous: string[]) => [
+      ...previous,
+      ...value.split(",").map((entry) => entry.trim()).filter(Boolean),
+    ],
     [] as string[],
   )
   .action(async (options: { dir: string; ignore: string[] }) => {

@@ -7,7 +7,9 @@ import * as orm from "../orm/index";
 import { user } from "../orm/fixtures";
 import type { ModelPolicy } from "../orm/policy";
 import {
+  CheckModelsError,
   auditModules,
+  checkModels,
   modelFiles,
   printReport,
   snapshotRegistry,
@@ -38,8 +40,8 @@ class UserBase {
 
 /** A module record, as `import * as ns` produces one. */
 const module = (exports: Record<string, unknown>) => ({
-  path: "/app/models/x.ts",
   label: "app/models/x.ts",
+  specifier: "./x",
   module: exports,
 });
 
@@ -233,6 +235,36 @@ describe("what counts as a finding", () => {
     expect(auditModules(orm, [module({ Typed })], snapshotRegistry(orm))).toEqual([]);
   });
 
+  /**
+   * **The other answer that must not be reported**, and the one that is easy to
+   * miss because it does not look like a subclass at all.
+   *
+   * `asModelClass` asks for a `$schema` with a name and nothing more, so a class
+   * written against a model's schema without extending its base — a reporting
+   * projection, a read-side view — is a candidate for that name while sitting
+   * outside its prototype chain. Unpolicied, it comes back as
+   * `carries: "registered"`.
+   *
+   * Reporting it would contradict the rule above *and* print the wrong fix:
+   * exporting it from the barrel puts two unrelated classes claiming one model
+   * in the modules the Kernel is handed, which is `AmbiguousModelRegistrationError`
+   * and a boot that stops. Keeping it out is what that error asks for.
+   */
+  test("an unpolicied class claiming a policied model's name is not a finding", () => {
+    class User extends UserBase {
+      static $policies = [scope];
+    }
+    class UserSnapshot {
+      static $schema = user;
+    }
+
+    orm.registerModels({ UserBase }, { User });
+
+    expect(
+      auditModules(orm, [module({ UserSnapshot })], snapshotRegistry(orm)),
+    ).toEqual([]);
+  });
+
   test("non-model exports are ignored", () => {
     orm.registerModels({ UserBase });
 
@@ -254,8 +286,16 @@ describe("what counts as a finding", () => {
     orm.registerModels({ UserBase });
 
     const findings = auditModules(orm, [
-      { path: "/a.ts", label: "app/models/Membership.ts", module: { Membership } },
-      { path: "/b.ts", label: "app/models/Invoice.ts", module: { Invoice } },
+      {
+        label: "app/models/Membership.ts",
+        specifier: "./Membership",
+        module: { Membership },
+      },
+      {
+        label: "app/models/Invoice.ts",
+        specifier: "./Invoice",
+        module: { Invoice },
+      },
     ], snapshotRegistry(orm));
 
     expect(findings.map((finding) => finding.file)).toEqual([
@@ -312,6 +352,176 @@ describe("a register call that ran while the file was importing", () => {
   });
 });
 
+/**
+ * `checkModels` itself, over a project on disk.
+ *
+ * Everything above enters below the entry point, with module objects handed
+ * straight to the rule. That leaves the parts that only exist outside a test
+ * uncovered — loading the Kernel and reading `models` off it, walking and
+ * importing real files, and the ordering that decides which registry each file
+ * is judged against — and those are precisely where this command's failure mode
+ * lives. A regression in any of them prints *Every policied class owns its
+ * name*, exits 0, and CI stays green: a checker that reports nothing looks
+ * exactly like a project with nothing to report.
+ *
+ * So the assertion that matters is the red path, on the real function.
+ *
+ * The fixture imports nothing from `gemi` — a class needs a `$schema` with a
+ * name and a `$policies` array to be everything the audit reads, and the Kernel
+ * only has to be a default-exported constructor with a `models` field. That is
+ * what lets it live in a temp directory with no `node_modules` above it, and
+ * why `orm` is injected: resolving `gemi/orm` from the project is right for the
+ * command and impossible for a fixture.
+ */
+describe("the command, over a project on disk", () => {
+  const roots: string[] = [];
+
+  const write = (root: string, path: string, source: string) => {
+    mkdirSync(join(root, path, ".."), { recursive: true });
+    writeFileSync(join(root, path), source);
+  };
+
+  /**
+   * One generated base, one policied subclass the barrel exports, and one
+   * policied subclass in a subdirectory that it does not — which is #318's
+   * case A, in the layout that makes the printed fix worth getting right.
+   */
+  const project = (): string => {
+    const root = mkdtempSync(join(tmpdir(), "gemi-check-project-"));
+    roots.push(root);
+
+    write(
+      root,
+      "app/models/generated/index.ts",
+      `export class WidgetModel {
+         static $schema = { name: "Widget" };
+         static $generated = true;
+       }
+       export class GadgetModel {
+         static $schema = { name: "Gadget" };
+         static $generated = true;
+       }`,
+    );
+
+    write(
+      root,
+      "app/models/Widget.ts",
+      `import { WidgetModel } from "./generated";
+       export class Widget extends WidgetModel {
+         static $policies = [{ scope: () => ({ organizationId: 7 }) }];
+       }`,
+    );
+
+    // The one nobody exported.
+    write(
+      root,
+      "app/models/billing/Gadget.ts",
+      `import { GadgetModel } from "./../generated";
+       export class Gadget extends GadgetModel {
+         static $policies = [{ scope: () => ({ organizationId: 7 }) }];
+       }`,
+    );
+
+    write(root, "app/models/index.ts", `export { Widget } from "./Widget";`);
+
+    write(
+      root,
+      "app/kernel/Kernel.ts",
+      `import * as generated from "../models/generated";
+       import * as models from "../models";
+       export default class {
+         models = [generated, models];
+       }`,
+    );
+
+    return root;
+  };
+
+  afterAll(() => {
+    for (const root of roots) rmSync(root, { recursive: true, force: true });
+  });
+
+  test("reports the policied class the barrel forgot, and only that one", async () => {
+    const report = await checkModels({ rootDir: project(), orm });
+
+    expect(report.findings).toHaveLength(1);
+    expect(report.findings[0]!.file).toBe("app/models/billing/Gadget.ts");
+    expect(report.findings[0]!.className).toBe("Gadget");
+    // Spelled for a barrel at `app/models/index.ts`, which is the only place it
+    // is any use.
+    expect(report.findings[0]!.specifier).toBe("./billing/Gadget");
+  });
+
+  /**
+   * And the green path, on the same project — because a checker that reports
+   * everything is as useless as one that reports nothing, and `Widget` is the
+   * class that is arranged correctly.
+   */
+  test("says nothing about the class the barrel does export", async () => {
+    const report = await checkModels({ rootDir: project(), orm });
+
+    expect(report.files).toContain("app/models/Widget.ts");
+    expect(report.findings.map((finding) => finding.className)).not.toContain(
+      "Widget",
+    );
+    // The registry it judged against is the declared one, not an empty one —
+    // the failure that would make every other assertion here vacuous.
+    expect(report.registered).toBe(2);
+  });
+
+  test("--ignore keeps a directory out, and the report says so", async () => {
+    const report = await checkModels({
+      rootDir: project(),
+      ignore: ["billing"],
+      orm,
+    });
+
+    expect(report.findings).toEqual([]);
+    expect(report.ignored).toEqual(["billing"]);
+    expect(report.files.join()).not.toContain("billing");
+  });
+
+  /**
+   * The state an app upgrading from 0.48 is in. There is no declared
+   * arrangement to compare files against, so the command says that rather than
+   * comparing them against an empty registry and reporting every model.
+   */
+  test("an empty Kernel.models is refused, with the fix", async () => {
+    const root = project();
+    write(root, "app/kernel/Kernel.ts", `export default class {};`);
+
+    await expect(checkModels({ rootDir: root, orm })).rejects.toThrow(
+      /Kernel\.models` is empty/,
+    );
+  });
+
+  test("a project with no Kernel is refused by name", async () => {
+    const root = mkdtempSync(join(tmpdir(), "gemi-check-empty-"));
+    roots.push(root);
+    mkdirSync(join(root, "app/models"), { recursive: true });
+
+    await expect(checkModels({ rootDir: root, orm })).rejects.toThrow(
+      CheckModelsError,
+    );
+  });
+
+  /**
+   * With no `orm` injected there is nothing to resolve from a temp directory,
+   * which is the one branch a fixture cannot exercise from the inside. Its
+   * failure side is worth pinning anyway: run outside a project, the command
+   * should say so rather than throw a resolver's stack.
+   */
+  test("outside a gemi project it says so", async () => {
+    const root = mkdtempSync(join(tmpdir(), "gemi-check-bare-"));
+    roots.push(root);
+    mkdirSync(join(root, "app/models"), { recursive: true });
+
+    await expect(checkModels({ rootDir: root })).rejects.toThrow(
+      /Could not resolve `gemi\/orm`/,
+    );
+  });
+});
+
 describe("the printed report", () => {
   const lines = (report: Parameters<typeof printReport>[0]) => {
     const out: string[] = [];
@@ -340,6 +550,7 @@ describe("the printed report", () => {
       findings: [
         {
           file: "app/models/Membership.ts",
+          specifier: "./Membership",
           className: "Membership",
           message: "Membership carries\npolicies",
         },
@@ -358,15 +569,22 @@ describe("the printed report", () => {
    * correct fix and the wrong one to lead with here: the class was found by
    * walking a directory, so what went missing is the export, and a hand-written
    * `register` line puts the app back on the mechanism 0.51 replaced.
+   *
+   * **Spelled from the models directory, not from the project root and not from
+   * the basename.** A model in a subdirectory is the case the walker is built
+   * for, and `./ScopedMembership` pasted into `app/models/index.ts` resolves to
+   * nothing — an author who follows the advice trades a silent leak for a
+   * module-not-found.
    */
-  test("names the export that was missing, spelled for the file it was in", () => {
+  test("names the export that was missing, spelled for a barrel to import", () => {
     const { text } = lines({
-      files: ["app/models/ScopedMembership.ts"],
+      files: ["app/models/billing/ScopedMembership.ts"],
       registered: 13,
       ignored: [],
       findings: [
         {
-          file: "app/models/ScopedMembership.ts",
+          file: "app/models/billing/ScopedMembership.ts",
+          specifier: "./billing/ScopedMembership",
           className: "Membership",
           message: "…",
         },
@@ -374,7 +592,7 @@ describe("the printed report", () => {
     });
 
     expect(text).toContain(
-      'export { Membership } from "./ScopedMembership"',
+      'export { Membership } from "./billing/ScopedMembership"',
     );
   });
 
@@ -396,7 +614,9 @@ describe("the printed report", () => {
         files: ["a.ts"],
         registered: 1,
         ignored: [],
-        findings: [{ file: "a.ts", className: "A", message: "x" }],
+        findings: [
+          { file: "a.ts", specifier: "./a", className: "A", message: "x" },
+        ],
       }).text,
     ).toContain("1 model class is not registered");
 
@@ -406,8 +626,8 @@ describe("the printed report", () => {
         registered: 1,
         ignored: [],
         findings: [
-          { file: "a.ts", className: "A", message: "x" },
-          { file: "b.ts", className: "B", message: "y" },
+          { file: "a.ts", specifier: "./a", className: "A", message: "x" },
+          { file: "b.ts", specifier: "./b", className: "B", message: "y" },
         ],
       }).text,
     ).toContain("2 model classes are not registered");

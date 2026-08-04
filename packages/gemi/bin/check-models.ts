@@ -1,5 +1,5 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
-import { basename, join, relative, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 
 import type { UnregisteredPolicyClassError } from "../orm/errors";
 
@@ -46,14 +46,17 @@ import type { UnregisteredPolicyClassError } from "../orm/errors";
  * so is reported like any other. The fix printed for it — declare the module —
  * is the one that survives a tree-shake.
  *
- * **It does not report a policied view.** `AdminUser extends User` carrying its
- * own narrowing is refused by `registerModels` precisely so that its scope does
- * not silently reach every nested read of `User`, and the error for that case
- * tells the author to keep it out of `Kernel.models` and query it directly. A
- * checker that then demanded it be exported from the barrel would be telling
- * them to undo it. `carries === "narrowing"` is the discriminator.
+ * **It reports one of the audit's three answers.** `carries === "queried"` — a
+ * class carrying policies the registered one does not — and neither of the
+ * others, because both are arrangements the framework itself asked for:
+ * `narrowing` is a policied view, which `registerModels` refuses so that its
+ * scope does not silently reach every nested read, and whose error says to keep
+ * it out of `Kernel.models`; `registered` is an unpolicied class claiming a
+ * policied model's name, which `AmbiguousModelRegistrationError` likewise says
+ * to keep out. A checker that demanded either be exported from the barrel would
+ * be telling an author to undo what an error told them to do.
  *
- * **It does not report an unpolicied class.** One missing from the declared
+ * **So it does not report an unpolicied class.** One missing from the declared
  * modules is a real if smaller problem — its statics and row methods do not run
  * inside a nested read — but it is indistinguishable from a typed view somebody
  * meant to keep local, and a check whose findings are half false positives is a
@@ -88,8 +91,18 @@ export interface CheckReport {
 }
 
 export interface Finding {
-  /** Path relative to the project root, for the printed report. */
+  /** Path relative to the project root, for the printed report's heading. */
   file: string;
+  /**
+   * The module specifier a barrel in the model directory's root would import
+   * this file by — `./billing/Invoice`.
+   *
+   * Separate from `file` because they differ the moment a model lives in a
+   * subdirectory, and the printed fix is an `export … from` line: `file` is
+   * relative to the *project* root, and pasting a specifier derived from its
+   * basename into `app/models/index.ts` gives a module that does not resolve.
+   */
+  specifier: string;
   /** The class whose policies are not in effect inside an `include`. */
   className: string;
   message: string;
@@ -117,6 +130,7 @@ export interface OrmSurface {
     register: (name: string, model: unknown) => void;
     get: <T = unknown>(name: string) => T;
     registeredNames: () => string[];
+    clearRegistry: () => void;
   };
 }
 
@@ -188,15 +202,19 @@ export type RegistrySnapshot = ReadonlyArray<readonly [string, unknown]>;
 /**
  * The registry as the declared modules left it.
  *
- * Taken *before* a single model file is imported, and that ordering is the
- * whole of it: importing a file runs it, and a model file written the pre-0.51
- * way ends in `register("User", User)`. A snapshot taken afterwards would
- * already contain the answer the check is supposed to be testing.
+ * **What makes this the declared arrangement is `registerModels`, not the
+ * moment this is called.** The obvious reading — "taken before any model file
+ * is imported" — is false: loading the Kernel to read `models` off it imports
+ * `../models/generated` and `../models` on the way, so by the time this runs
+ * the generated `index.ts` has already run its `register` calls and every file
+ * the barrel reaches has run its top-level side effects, legacy
+ * `register("User", User)` lines included.
  *
- * `register` has no inverse, so a name the baseline does not hold cannot be
- * restored to absent. In an app that has one it is a model the generated
- * modules never emitted, which is a different thing entirely; and this is a
- * process that is about to exit.
+ * What restores the property is that `registerModels(...declared)` runs after
+ * all of that and re-asserts the election over whatever the imports left. So
+ * this snapshot is the arrangement the app boots with regardless of what ran
+ * during the loading — and the files walked *after* it are the ones whose
+ * import-time `register` calls the audit must not credit.
  */
 export function snapshotRegistry(orm: OrmSurface): RegistrySnapshot {
   return orm.registry
@@ -213,10 +231,18 @@ export function snapshotRegistry(orm: OrmSurface): RegistrySnapshot {
  */
 export function auditModules(
   orm: OrmSurface,
-  files: Array<{ path: string; label: string; module: Record<string, unknown> }>,
+  files: Array<{
+    label: string;
+    specifier: string;
+    module: Record<string, unknown>;
+  }>,
   baseline: RegistrySnapshot,
 ): Finding[] {
+  // Cleared rather than overwritten, so a name the baseline does not hold —
+  // registered by some file's own import — goes away instead of surviving into
+  // the next file's audit.
   const restore = () => {
+    orm.registry.clearRegistry();
     for (const [name, model] of baseline) orm.registry.register(name, model);
   };
 
@@ -226,13 +252,28 @@ export function auditModules(
     restore();
 
     for (const problem of orm.auditModelRegistrations(file.module)) {
-      // The arrangement `registerModels` refuses on purpose, and the arrangement
-      // its error tells the author to keep out of the declared modules. Being
-      // absent from them is what it is *supposed* to look like.
-      if (problem.carries === "narrowing") continue;
+      // Only `queried` — "this class carries policies the registered one does
+      // not" — is this command's business. The other two are shapes it would be
+      // wrong to report:
+      //
+      //   `narrowing` is a policied view, which `registerModels` refuses
+      //   *because* registering it would apply its scope to every nested read,
+      //   and whose error tells the author to keep it out of the declared
+      //   modules. Being absent from them is what following that advice looks
+      //   like.
+      //
+      //   `registered` is the mirror image: an *unpolicied* class claiming a
+      //   name the registered class carries policies for. That contradicts this
+      //   command's own rule about unpolicied classes, and its message is
+      //   written for a call site — "query the registered one instead" — under
+      //   which the export line printed below would land two unrelated classes
+      //   in one namespace and turn a working boot into
+      //   `AmbiguousModelRegistrationError`.
+      if (problem.carries !== "queried") continue;
 
       findings.push({
         file: file.label,
+        specifier: file.specifier,
         className: problem.queried,
         message: problem.message,
       });
@@ -293,6 +334,13 @@ export async function checkModels(options: {
   rootDir: string;
   modelsDir?: string;
   ignore?: string[];
+  /**
+   * The ORM to check against, for a test holding a fixture project rather than
+   * an installation. The command never passes it: resolving `gemi/orm` from the
+   * project is the point, and a fixture written into a temp directory has no
+   * `node_modules` above it to resolve through.
+   */
+  orm?: OrmSurface;
 }): Promise<CheckReport> {
   const rootDir = resolve(options.rootDir);
   const modelsDir = resolve(rootDir, options.modelsDir ?? "app/models");
@@ -300,7 +348,9 @@ export async function checkModels(options: {
 
   let orm: OrmSurface;
   try {
-    orm = (await import(Bun.resolveSync("gemi/orm", rootDir))) as OrmSurface;
+    orm =
+      options.orm ??
+      ((await import(Bun.resolveSync("gemi/orm", rootDir))) as OrmSurface);
   } catch {
     throw new CheckModelsError(
       `Could not resolve \`gemi/orm\` from ${rootDir}. Run this from the root ` +
@@ -350,22 +400,32 @@ export async function checkModels(options: {
     );
   }
 
-  // Before the first import, for the reason `snapshotRegistry` gives.
+  // After `registerModels`, which is what makes it the declared arrangement —
+  // see `snapshotRegistry`.
   const baseline = snapshotRegistry(orm);
 
   const paths = modelFiles(modelsDir, ignore);
   const files: Array<{
-    path: string;
     label: string;
+    specifier: string;
     module: Record<string, unknown>;
   }> = [];
 
   for (const path of paths) {
     const label = relative(rootDir, path);
+    // What a barrel at the model directory's root would import this file by,
+    // which is what the printed fix is a line of. Relative to `modelsDir`, not
+    // to `rootDir`, and not the basename: `app/models/billing/Invoice.ts` is
+    // `./billing/Invoice` there and `./Invoice` nowhere.
+    const specifier = `./${relative(modelsDir, path)
+      .split("\\")
+      .join("/")
+      .replace(/\.tsx?$/, "")}`;
+
     try {
       files.push({
-        path,
         label,
+        specifier,
         module: (await import(path)) as Record<string, unknown>,
       });
     } catch (error) {
@@ -417,7 +477,7 @@ export function printReport(report: CheckReport, log = console.log): number {
           `Or export it from a module \`Kernel.models\` declares, which is ` +
             `what makes\n` +
             `the registration survive without a \`register\` line:\n\n` +
-            `    export { ${finding.className} } from "./${basename(finding.file).replace(/\.tsx?$/, "")}"\n`,
+            `    export { ${finding.className} } from "${finding.specifier}"\n`,
         ),
     );
   }

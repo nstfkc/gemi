@@ -391,10 +391,16 @@ function elect(name: string, classes: ModelClass[]): ModelClass {
  * quietly invalidate an assumption made here.
  */
 function isGeneratedBase(candidate: ModelClass): boolean {
-  // Owning the mark, not merely having it: `Model` declares the property
-  // `declare static $generated?: true`, so `true` is the only value the type
-  // admits and presence is the whole question.
-  if ("$generated" in candidate) return Object.hasOwn(candidate, "$generated");
+  // Owning the mark, not merely having it — and owning it set to `true`. The
+  // declared type is `?: true`, so TypeScript already refuses `false`; reading
+  // the value anyway is what makes `static $generated = false` mean the thing
+  // it plainly says in an app with no typechecking between it and here.
+  if ("$generated" in candidate) {
+    return (
+      Object.hasOwn(candidate, "$generated") &&
+      (candidate as { $generated?: unknown }).$generated === true
+    );
+  }
 
   return Object.hasOwn(candidate, "$schema");
 }

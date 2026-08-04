@@ -163,13 +163,16 @@ jobs:
 
       # `gemi check models`, against the one real project in this repository.
       #
-      # The command's unit tests hand it module objects; nothing in them
-      # exercises the parts that only exist outside a test — resolving the app's
-      # `gemi/orm` rather than the copy bundled into `dist/bin/gemi.js`, reading
-      # `Kernel.models` off a constructed Kernel, and importing thirteen real
-      # model files. Each of those is a way for the command to be wrong while
-      # every unit test passes, and the failure it would hide is a check that
-      # reports nothing because it is looking at an empty registry.
+      # `check-models.test.ts` covers the command over a fixture project, so
+      # what is left for this step is the one thing a fixture cannot do:
+      # resolve the app's *installed* `gemi/orm` — the same instance the model
+      # files register into — rather than the copy bundled into
+      # `dist/bin/gemi.js`. Get that wrong and the command reads an empty
+      # registry, finds nothing to report, and exits 0.
+      #
+      # Which is why the count is asserted rather than the exit code. A green
+      # run and a run that checked nothing print the same *shape* of line, and
+      # differ only in the number in it.
       #
       # `--ignore bench` because `app/models/bench/` is a benchmark harness that
       # runs on import — which the command found by running it, and rewriting its
@@ -177,7 +180,10 @@ jobs:
       # hazard the flag exists for, so exercising the flag here is not
       # incidental.
       - name: Check the template's model registrations
-        run: bunx gemi check models --ignore bench
+        run: |
+          output=$(bunx gemi check models --ignore bench)
+          echo "$output"
+          echo "$output" | grep -qE 'against [1-9][0-9]* registered models'
         working-directory: templates/saas-starter
         env:
           TZ: UTC
