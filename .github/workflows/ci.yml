@@ -161,6 +161,27 @@ jobs:
         env:
           TZ: UTC
 
+      # `gemi check models`, against the one real project in this repository.
+      #
+      # The command's unit tests hand it module objects; nothing in them
+      # exercises the parts that only exist outside a test — resolving the app's
+      # `gemi/orm` rather than the copy bundled into `dist/bin/gemi.js`, reading
+      # `Kernel.models` off a constructed Kernel, and importing thirteen real
+      # model files. Each of those is a way for the command to be wrong while
+      # every unit test passes, and the failure it would hide is a check that
+      # reports nothing because it is looking at an empty registry.
+      #
+      # `--ignore bench` because `app/models/bench/` is a benchmark harness that
+      # runs on import — which the command found by running it, and rewriting its
+      # report, the first time it was pointed at this directory. That is the
+      # hazard the flag exists for, so exercising the flag here is not
+      # incidental.
+      - name: Check the template's model registrations
+        run: bunx gemi check models --ignore bench
+        working-directory: templates/saas-starter
+        env:
+          TZ: UTC
+
       # `.test-d.ts` files do not match vitest's default `include`, so the step
       # above collects none of them: 15 type assertions in `wrap.test-d.ts` and
       # `aggregate.test-d.ts` ran nowhere, locally or here. They are the only

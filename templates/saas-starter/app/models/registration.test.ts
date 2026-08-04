@@ -46,17 +46,28 @@ describe("the template's own models", () => {
    * than against a stand-in.**
    *
    * `registerModels` decides which of several candidates owns a name by asking
-   * whether a class declares `$schema` itself or inherits it: an own property
-   * means the generator emitted it, and an inherited one means an application
-   * wrote it. Every unit test of that rule uses a hand-written
-   * `class UserBase { static $schema = user }`, which is exactly the thing that
-   * cannot tell you whether real generator output still looks like this.
+   * which one the generator wrote, and the generator answers by marking its own
+   * output: `static $generated = true` on each emitted base, owned there and
+   * merely inherited below it. Every unit test of that rule uses a hand-written
+   * stand-in, which is exactly the thing that cannot tell you whether real
+   * generator output still carries the mark.
    *
-   * If `models.ts` ever moved `$schema` — onto the prototype, into a getter, up
-   * into `Model` — `elect` would read every candidate as a base and hand the
-   * name to the generated class over the application's subclass. That fails
-   * loudly rather than leaking, because the audit refuses it a moment later,
-   * but "loudly" is a worse day than this assertion.
+   * If `emit.ts` ever dropped the line, `isGeneratedBase` would fall back to the
+   * `$schema` inference it replaced (#318) — silently, since the fallback exists
+   * for artifacts generated before the mark did and cannot tell those from a
+   * regression. So this is the assertion that would fail instead.
+   */
+  test("the generator marks the classes it wrote", () => {
+    expect(Object.hasOwn(generated.UserModel, "$generated")).toBe(true);
+    expect(Object.hasOwn(models.User, "$generated")).toBe(false);
+    // Inherited, so the fallback is not what the app is running on.
+    expect("$generated" in models.User).toBe(true);
+  });
+
+  /**
+   * The signal the mark replaced, still asserted: it remains the fallback for
+   * artifacts generated before 0.51, and `Model.$exec` reads `$schema` off the
+   * prototype chain for its own reasons.
    */
   test("the generator declares $schema and subclasses inherit it", () => {
     expect(Object.hasOwn(generated.UserModel, "$schema")).toBe(true);

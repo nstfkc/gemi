@@ -49,6 +49,38 @@ than never.
 See [docs/orm.md](./docs/orm.md#your-model-class) for the full rules, including
 what happens with a typed view that carries its own policies.
 
+### And then run the check once
+
+`Kernel.models` can only audit the modules it is handed, so the mistake it
+removes has a smaller version one level up: a policied class in a file the
+barrel does not re-export. Nothing raises for that either.
+
+```sh
+bunx gemi check models
+```
+
+It walks `app/models`, imports every file, and reports any policied class the
+declared modules do not register — with the `export` line that fixes it. Exit
+code `1` on a finding, so it is worth a step in CI. It imports what it walks,
+which matters if a file under `app/models` does work on import; `--ignore` takes
+a comma-separated list, and the command prints what it skipped.
+
+## Regenerate, so registration stops guessing
+
+Nothing breaks if you skip this, and it is one command:
+
+```sh
+bunx prisma generate
+```
+
+The generator now marks each base it emits with `static $generated = true`, and
+`Kernel.models` reads that mark to decide which of several classes claiming one
+name is the generated one and which is yours. Artifacts generated before 0.51
+carry no mark, so registration falls back to the older signal — whether a class
+declares `$schema` itself — which a subclass that redeclares `static $schema`
+defeats, handing the name to the base. That case fails loudly rather than
+silently: boot refuses it and names both classes. Regenerating removes it.
+
 ## `@prisma/client` is gone
 
 0.51 removed the type-only `@prisma/client` import from the generated model

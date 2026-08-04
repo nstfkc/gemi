@@ -126,6 +126,27 @@ export abstract class Model {
   static $schema: ModelSchema;
 
   /**
+   * Set to `true` by the generator on each base it emits, and by nothing else.
+   *
+   * `registerModels` has to tell a generated base from an application class
+   * written over it, because when both are in one namespace the subclass is the
+   * one that must own the name — electing the base *is* #316's leak. It used to
+   * answer that by asking whether a class declared `$schema` itself, which is an
+   * inference about how the generator happens to be written rather than a
+   * statement by the generator, and a subclass that redeclared `static $schema`
+   * read as a base because of it. This is the generator saying so.
+   *
+   * **`declare`, and it has to stay `declare`.** The property must not exist on
+   * `Model` at runtime: `isGeneratedBase` reads `"$generated" in candidate` to
+   * decide whether the artifacts in front of it carry the mark at all, and falls
+   * back to the old inference for artifacts generated before this existed. A
+   * `Model.$generated` of `undefined` would answer that question `true` for
+   * every class, in every app, including the ones with no mark to read.
+   * `registration.test.ts` pins it.
+   */
+  declare static $generated?: true;
+
+  /**
    * The model's own policies, in the order they should apply.
    *
    * A list rather than the single `$policy` this replaced, because composition

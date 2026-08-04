@@ -248,8 +248,44 @@ Modules you hand it. A policied class in a file that no barrel re-exports is inv
 Kernel exactly as it was to a forgotten `register` line — which is the reason for the barrel: one
 file to add a model to, and a missing line in it is a thing you can notice.
 
+`gemi check models` is what notices it for you:
+
+```
+$ gemi check models
+Checked 10 model files against 13 registered models. Every policied class owns its name.
+```
+
+It walks `app/models`, imports every file, and asks the same question `Kernel.models` asks — of the
+classes the directory holds rather than of the modules the Kernel was handed. A policied class no
+declared module registers is reported with the export that would fix it, and the command exits `1`,
+so it belongs in CI:
+
+```yaml
+- run: bunx gemi check models
+```
+
+Three things worth knowing before you wire it up.
+
+**It imports your model files.** There is no way to find a class without evaluating the module that
+declares it. A file that *does* something when imported does it here — `--ignore <paths>` skips a
+comma-separated list under `app/models`, and the command prints what it skipped. Tests, type tests,
+benchmarks, `.d.ts` files and any directory with its own `package.json` are skipped already.
+
+**It does not credit a `register` call your file made on the way in.** A class that owns its name
+only because loading its module said so loses it the day nothing imports the module, which is the
+failure being checked for. The registry is put back to what `Kernel.models` made it before each file
+is audited.
+
+**It does not report a typed view carrying its own policies.** That class is *supposed* to be absent
+from the declared modules — see above — and a checker that demanded you export it would be telling
+you to undo what the framework told you to do.
+
+Run it against another directory with `--dir`, and prefer it over a boot-time scan: enumerating the
+filesystem at start-up would couple the framework to your bundler and make every production process
+pay, on every start, for a mistake that can only be made while editing.
+
 `assertPoliciesRegistered` is the same audit without the registration, for running over modules the
-Kernel does not own:
+Kernel does not own — a test over a package's models, a script that boots nothing:
 
 ```ts
 import { assertPoliciesRegistered } from "gemi/orm"
@@ -259,7 +295,8 @@ import * as models from "@/app/models"
 assertPoliciesRegistered(generated, models)
 ```
 
-In a test it closes the hole for CI at no runtime cost.
+`auditModelRegistrations` is the same rule again, returning the errors instead of throwing the first
+— which is what `gemi check models` uses to sort a leak from a view.
 
 ## Querying
 
@@ -1159,7 +1196,8 @@ Two limits, both deliberate:
 
 - **`asSystem` suspends all of it**, for the whole async subtree, not just the model you named.
 - **A policy only applies if its class is the registered one.** See [Setup](#your-model-class) —
-  this is the gap the guarantee genuinely has, and `assertPoliciesRegistered` is the backstop.
+  this is the gap the guarantee genuinely has. `Kernel.models` closes it for the modules you
+  declare, and `gemi check models` closes it for the files you forgot to declare.
 
 ### `ctx.user` denies by default
 

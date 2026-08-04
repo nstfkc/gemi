@@ -1075,6 +1075,13 @@ ${imports.map((name) => `  ${name},`).join("\n")}
 export class ${schema.name}Model extends Model {
   static $schema = schema.${schema.name};
 
+  // Says this class came out of the generator, so \`registerModels\` can prefer
+  // the application's subclass over it without having to *infer* which is which.
+  // It reads own-vs-inherited, and a subclass inherits this rather than
+  // declaring it — so the mark is on exactly one class per model. See
+  // \`isGeneratedBase\`.
+  static $generated = true;
+
   // Narrowed from \`Model\`'s \`PolicyEntry[]\` to this model's own, so a policy
   // written for another model is a type error here rather than a scope compiled
   // against columns that do not exist.

@@ -57,10 +57,47 @@ type ModelClass = object & { $schema: ModelSchema };
  *
  * It can only see modules it is handed, which is the residual either way: a
  * policied class in a file no barrel re-exports is invisible to it.
+ * `gemi check models` closes that by handing it the files instead of the
+ * barrel — see `auditModelRegistrations`, which is the same rule without the
+ * throw.
  */
 export function assertPoliciesRegistered(
   ...modules: Array<Record<string, unknown>>
 ): void {
+  const [first] = auditModelRegistrations(...modules);
+  if (first !== undefined) throw first;
+}
+
+/**
+ * Every problem `assertPoliciesRegistered` would report, as values rather than
+ * as a throw — in the order it would have reported them, so the first element is
+ * exactly what that function throws.
+ *
+ * ### Why the rule needed a second caller
+ *
+ * A throw is the right shape at boot: the first policied class that does not own
+ * its name is a reason not to start, and the rest of the list is noise nobody
+ * reads before fixing the first one.
+ *
+ * It is the wrong shape for a checker. `gemi check models` walks
+ * `app/models/**` and audits each file, so it wants *all* of them, and it wants
+ * to sort them — a policied class the Kernel never sees is a leak to report,
+ * while a policied view deliberately kept out of the declared modules is the
+ * arrangement the error for that case actually recommends, and reporting it
+ * would be telling an author to undo what the framework told them to do.
+ * `UnregisteredPolicyClassError.carries` is what separates the two, and it can
+ * only be read off an error somebody is holding.
+ *
+ * Errors rather than a plain finding type, because the message is the useful
+ * part and it is already written once, in the error. Constructing them is not
+ * free — a stack per finding — and it is a check somebody runs, not a request
+ * path.
+ */
+export function auditModelRegistrations(
+  ...modules: Array<Record<string, unknown>>
+): UnregisteredPolicyClassError[] {
+  const problems: UnregisteredPolicyClassError[] = [];
+
   for (const module of modules) {
     for (const exported of Object.values(module)) {
       const model = asModelClass(exported);
@@ -121,12 +158,15 @@ export function assertPoliciesRegistered(
           // Not registered, and it has policies: #316 itself. The policied
           // class is not the one the name resolves to, so every nested read
           // runs the ancestor and skips it.
-          throw new UnregisteredPolicyClassError(
-            name,
-            nameOf(registered),
-            nameOf(model),
-            ours.length > 0 ? "queried" : "registered",
+          problems.push(
+            new UnregisteredPolicyClassError(
+              name,
+              nameOf(registered),
+              nameOf(model),
+              ours.length > 0 ? "queried" : "registered",
+            ),
           );
+          continue;
         }
 
         // The ancestor carries policies of its own, so it is a registered model
@@ -135,11 +175,13 @@ export function assertPoliciesRegistered(
         // to every nested read, and leaving the ancestor registered skips the
         // view's policies entirely. Both are silent, so neither is chosen.
         if (diverges) {
-          throw new UnregisteredPolicyClassError(
-            name,
-            nameOf(ancestor),
-            nameOf(descendant),
-            "narrowing",
+          problems.push(
+            new UnregisteredPolicyClassError(
+              name,
+              nameOf(ancestor),
+              nameOf(descendant),
+              "narrowing",
+            ),
           );
         }
 
@@ -151,14 +193,18 @@ export function assertPoliciesRegistered(
 
       // Unrelated classes claiming one name. Whichever is registered, the
       // other's policies are simply not in effect.
-      throw new UnregisteredPolicyClassError(
-        name,
-        nameOf(registered),
-        nameOf(model),
-        ours.length > 0 ? "queried" : "registered",
+      problems.push(
+        new UnregisteredPolicyClassError(
+          name,
+          nameOf(registered),
+          nameOf(model),
+          ours.length > 0 ? "queried" : "registered",
+        ),
       );
     }
   }
+
+  return problems;
 }
 
 /**
@@ -314,24 +360,42 @@ function elect(name: string, classes: ModelClass[]): ModelClass {
  * Whether the generator wrote this class, rather than an application extending
  * one it wrote.
  *
- * `$schema` is declared on the emitted base and inherited by everything below
- * it, so owning the property is the difference. Nothing has to be added to the
- * generated output for this to hold — it is already how `models.ts` is written,
- * and `Model.$exec` already reads `$schema` off the prototype chain for exactly
- * that reason. `registration.test.ts` in the template asserts the contract
- * against real generator output, because this is the one place a generator
- * change could quietly invalidate an assumption made here.
+ * The generator marks its own output — `static $generated = true` on each
+ * emitted base, and on nothing else — so for artifacts that carry the mark this
+ * is a fact the generator stated rather than a property of how it happens to be
+ * written. A subclass *inherits* the mark and does not own it, which is what
+ * makes own-vs-inherited the whole test.
  *
- * **When it is wrong, it is wrong safely.** A subclass that redeclares
- * `static $schema` — pointing at a modified schema object, or by copy-paste —
- * reads as a base here. Every candidate then looks generated, `elect` falls
- * through to the whole set, and the least derived wins: the base takes the name
- * over the policied subclass. That is the arrangement #316 is about, so it does
- * not pass quietly — `assertPoliciesRegistered` runs immediately after and
- * refuses it, naming both classes. Loud and wrong beats silent and wrong, and
- * the reader's question at `Object.hasOwn` is exactly this one.
+ * ### The fallback, and why it is second
+ *
+ * `$schema` is also declared on the emitted base and inherited below it, so
+ * owning *that* used to answer the same question, and it answered it wrongly for
+ * one shape (#318): a subclass that redeclares `static $schema` — pointing at a
+ * modified schema object, or by copy-paste — read as a base, every candidate
+ * looked generated, and the least derived won. That did not pass quietly, since
+ * `assertPoliciesRegistered` runs immediately after `elect` and refuses a
+ * policied class that lost its name. But loud-and-wrong is still wrong, and the
+ * silent half — a subclass with statics and row methods but no policies, whose
+ * methods then never run inside a nested read — had nothing to refuse.
+ *
+ * The inference survives as the fallback for artifacts generated *before* the
+ * mark existed, where it is the only signal there is. `"$generated" in candidate`
+ * is what separates the two worlds: it walks the prototype chain, so it is true
+ * for a marked base and for everything under it, and false for every class in an
+ * app whose `app/models/generated` predates 0.51. Asking `Object.hasOwn` first
+ * and falling back on `false` would send a subclass of a *marked* base back into
+ * the inference — which is exactly the case the mark was added to fix.
+ *
+ * `registration.test.ts` in the template asserts the contract against real
+ * generator output, because this is the one place a generator change could
+ * quietly invalidate an assumption made here.
  */
 function isGeneratedBase(candidate: ModelClass): boolean {
+  // Owning the mark, not merely having it: `Model` declares the property
+  // `declare static $generated?: true`, so `true` is the only value the type
+  // admits and presence is the whole question.
+  if ("$generated" in candidate) return Object.hasOwn(candidate, "$generated");
+
   return Object.hasOwn(candidate, "$schema");
 }
 
