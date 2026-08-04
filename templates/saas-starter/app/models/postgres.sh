@@ -90,6 +90,10 @@ LISTS_DATABASE_URL="$LISTS_URL" npx prisma db push \
   --schema prisma/postgres-only.prisma --skip-generate --accept-data-loss >/dev/null
 LISTS_DATABASE_URL="$LISTS_URL" npx prisma generate \
   --schema prisma/postgres-only.prisma >/dev/null
+# Its Prisma client, from the derived schema and from the root — same split, and
+# same reason, as the main schema's above.
+(cd ../.. && LISTS_DATABASE_URL="$LISTS_URL" npx prisma generate \
+  --schema templates/saas-starter/prisma/postgres-only-differential.prisma >/dev/null)
 
 echo "==> vitest"
 TZ=UTC TEST_POSTGRES_URL="$URL" TEST_POSTGRES_LISTS_URL="$LISTS_URL" \

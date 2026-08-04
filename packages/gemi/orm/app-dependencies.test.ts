@@ -2,7 +2,10 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 
-import { derive } from "../../../templates/saas-starter/prisma/differential-schema";
+import {
+  SCHEMAS,
+  derive,
+} from "../../../templates/saas-starter/prisma/differential-schema";
 
 /**
  * **A gemi application installs `prisma` and not `@prisma/client`.**
@@ -62,14 +65,27 @@ describe("the template an app is scaffolded from", () => {
     expect(Object.keys(declared)).toContain("prisma");
   });
 
-  test("its schema has no client generator, so `prisma generate` needs no client", () => {
-    const schema = read("prisma/schema.prisma");
+  /**
+   * Every application-facing schema, not just the main one.
+   *
+   * `postgres-only.prisma` carried a client block too, and generating it from
+   * the template failed exactly as the main schema did once the dependency
+   * moved — `prisma generate` reads the *cwd's* package.json to decide whether
+   * `@prisma/client` is installed, and shells out to `npm i` when it is not
+   * declared there. Checking only `schema.prisma` would have left that second
+   * schema to be found by CI rather than by this test.
+   */
+  test.each(SCHEMAS.map((schema) => [schema.source]))(
+    "%s has no client generator, so `prisma generate` needs no client",
+    (source) => {
+      const schema = read(`prisma/${source}`);
 
-    // Comments in this file discuss the client block at length, so the check is
-    // for a *declaration* rather than for the words.
-    expect(schema).not.toMatch(/^generator\s+client\s*\{/m);
-    expect(schema).toMatch(/^generator\s+gemi\s*\{/m);
-  });
+      // Comments in these files discuss the client block at length, so the
+      // check is for a *declaration* rather than for the words.
+      expect(schema).not.toMatch(/^generator\s+client\s*\{/m);
+      expect(schema).toMatch(/^generator\s+gemi\s*\{/m);
+    },
+  );
 
   test("its generated artifacts import no Prisma package", () => {
     for (const file of ["models.ts", "schema.ts", "index.ts"]) {
@@ -93,10 +109,13 @@ describe("the template an app is scaffolded from", () => {
    * the worst way: the differential tests keep passing, having compared gemi
    * against a Prisma client built from different models.
    */
-  test("the differential schema is in sync with the app schema", () => {
-    expect(
-      read("prisma/differential.prisma"),
-      "prisma/differential.prisma is stale. Re-run: bun prisma/differential-schema.ts",
-    ).toBe(derive(read("prisma/schema.prisma")));
-  });
+  test.each(SCHEMAS.map((schema) => [schema.derived, schema] as const))(
+    "%s is in sync with the schema it is derived from",
+    (_name, schema) => {
+      expect(
+        read(`prisma/${schema.derived}`),
+        `prisma/${schema.derived} is stale. Re-run: bun prisma/differential-schema.ts`,
+      ).toBe(derive(read(`prisma/${schema.source}`), schema));
+    },
+  );
 });

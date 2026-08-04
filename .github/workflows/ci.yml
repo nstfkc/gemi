@@ -315,11 +315,17 @@ jobs:
           PGPASSWORD=postgres psql -h localhost -U postgres -d gemi_test
           -c 'CREATE DATABASE gemi_lists' || true
 
+      # Two generates, split the same way the main schema is: the gemi artifacts
+      # from `postgres-only.prisma` in the template, and the Prisma client the
+      # scalar-list suite compares against from its derived counterpart, at the
+      # root — because `prisma generate` reads the *cwd's* package.json to decide
+      # whether `@prisma/client` is installed, and the template's no longer
+      # names it.
       - name: Generate and push the scalar-list schema
         run: |
-          bunx prisma generate --schema prisma/postgres-only.prisma
-          bunx prisma db push --schema prisma/postgres-only.prisma --skip-generate
-        working-directory: templates/saas-starter
+          (cd templates/saas-starter && bunx prisma generate --schema prisma/postgres-only.prisma)
+          bunx prisma generate --schema templates/saas-starter/prisma/postgres-only-differential.prisma
+          (cd templates/saas-starter && bunx prisma db push --schema prisma/postgres-only.prisma --skip-generate)
         env:
           LISTS_DATABASE_URL: postgres://postgres:postgres@localhost:5432/gemi_lists
 

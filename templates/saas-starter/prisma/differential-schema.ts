@@ -23,22 +23,38 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-export const SOURCE = join(import.meta.dirname, "schema.prisma");
-export const DERIVED = join(import.meta.dirname, "differential.prisma");
-
 /**
- * Where the harness's client is generated.
+ * Every schema that needs a Prisma counterpart, and where its client goes.
  *
- * An explicit path rather than the default `node_modules/@prisma/client`,
- * so it is obvious that this client belongs to the test harness and not to the
- * application — and so nothing in `app/` can reach it by importing the bare
- * package name.
+ * Two, because the scalar lists (#300) cannot live in the main schema — a
+ * `String[]` is a validation error on SQLite, and that schema has its provider
+ * flipped between dialects — so they have their own schema, their own client and
+ * their own database. Both are in the same position: an application-facing
+ * schema with no `generator client`, and a derived one that has nothing else.
+ *
+ * The client paths are explicit rather than the default
+ * `node_modules/@prisma/client`, so it is obvious that these clients belong to
+ * the test harness and not to the application, and so nothing in `app/` can
+ * reach one by importing the bare package name.
  */
-const CLIENT_OUTPUT = "../app/models/prisma-client";
+export const SCHEMAS = [
+  {
+    source: "schema.prisma",
+    derived: "differential.prisma",
+    client: "../app/models/prisma-client",
+  },
+  {
+    source: "postgres-only.prisma",
+    derived: "postgres-only-differential.prisma",
+    client: "../app/models/generated-lists/client",
+  },
+] as const;
 
-const BANNER = `// Generated from schema.prisma by prisma/differential-schema.ts. Do not edit.
+const at = (name: string) => join(import.meta.dirname, name);
+
+const banner = (source: string) => `// Generated from ${source} by prisma/differential-schema.ts. Do not edit.
 //
-// schema.prisma with its \`generator gemi\` block swapped for a \`generator client\`
+// ${source} with its \`generator gemi\` block swapped for a \`generator client\`
 // one: the same models, generating a Prisma client instead of gemi's artifacts.
 // The application's schema has no client block, so that an app installs
 // \`prisma\` alone; this file exists so that gemi can still compare itself against
@@ -47,10 +63,10 @@ const BANNER = `// Generated from schema.prisma by prisma/differential-schema.ts
 //     bun prisma/differential-schema.ts
 `;
 
-const CLIENT_BLOCK = `
+const clientBlock = (output: string) => `
 generator client {
   provider        = "prisma-client-js"
-  output          = "${CLIENT_OUTPUT}"
+  output          = "${output}"
   previewFeatures = ["driverAdapters"]
 }
 `;
@@ -75,22 +91,39 @@ generator client {
  */
 const GEMI_BLOCK = /^generator\s+gemi\s*\{[^}]*\}\n?/m;
 
-export function derive(source: string): string {
-  const withoutGemi = source.replace(GEMI_BLOCK, "");
+export function derive(
+  contents: string,
+  { source, client }: { source: string; client: string },
+): string {
+  const withoutGemi = contents.replace(GEMI_BLOCK, "");
 
   // A silent no-op here would produce a schema with two generators, one of which
   // resolves unpredictably — exactly the failure this strip exists to prevent.
-  if (GEMI_BLOCK.test(withoutGemi) || withoutGemi === source) {
+  if (GEMI_BLOCK.test(withoutGemi) || withoutGemi === contents) {
     throw new Error(
-      "differential-schema: could not remove the `generator gemi` block from " +
-        "schema.prisma. It must be a single block with no nested braces.",
+      `differential-schema: could not remove the \`generator gemi\` block from ` +
+        `${source}. It must be a single block with no nested braces.`,
     );
   }
 
-  return `${BANNER}${CLIENT_BLOCK}\n${withoutGemi}`;
+  // An application-facing schema must not have carried a client block either —
+  // that is the property this whole arrangement exists to hold, and deriving
+  // from a source that already had one would produce a file with two.
+  if (/^generator\s+client\s*\{/m.test(withoutGemi)) {
+    throw new Error(
+      `differential-schema: ${source} already declares a \`generator client\` ` +
+        `block. An application's schema must not, so that an app installs ` +
+        `\`prisma\` alone.`,
+    );
+  }
+
+  return `${banner(source)}${clientBlock(client)}\n${withoutGemi}`;
 }
 
 if (import.meta.main) {
-  writeFileSync(DERIVED, derive(readFileSync(SOURCE, "utf8")), "utf8");
-  console.log(`wrote ${DERIVED}`);
+  for (const schema of SCHEMAS) {
+    const contents = readFileSync(at(schema.source), "utf8");
+    writeFileSync(at(schema.derived), derive(contents, schema), "utf8");
+    console.log(`wrote ${schema.derived}`);
+  }
 }
