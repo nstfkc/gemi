@@ -185,10 +185,14 @@ type Requested<S> = {
  * `true` in an `include` means "that model's scalars, nothing further".
  *
  * `unknown` rather than `{}` for the no-arguments case: every branch of
- * `Payload` asks `A extends { select: infer S }` and friends, and `unknown`
- * matches none of them, so it lands on the default selection. `{}` would too,
- * but only because an empty object type happens not to satisfy a required
- * property — a coincidence to rely on rather than a statement of intent.
+ * `Payload` asks whether a key is in `keyof A`, and `keyof unknown` is `never`,
+ * so `unknown` answers no to all of them and lands on the default selection.
+ * `{}` would too, but only because an empty object type happens to have no
+ * keys — a coincidence to rely on rather than a statement of intent.
+ *
+ * (This read `A extends { select: infer S }` until #326, when that form turned
+ * out to disagree with assignability for arguments inferred through `Subset`.
+ * The conclusion is unchanged; the reason it holds is now the key check.)
  */
 type ArgsOf<A> = A extends true ? unknown : A;
 
@@ -202,10 +206,8 @@ type RelationPayload<R extends RelationInfo, A> = R["kind"] extends "many"
  * `_count` inside a `select` or an `include`: the number of related rows, per
  * relation named.
  */
-type RelationCountPayload<M extends ModelTypeInfo, A> = A extends {
-  select: infer S;
-}
-  ? { [K in Requested<S> & keyof Relations<M>]: number }
+type RelationCountPayload<M extends ModelTypeInfo, A> = "select" extends keyof A
+  ? { [K in Requested<NonNullable<A["select"]>> & keyof Relations<M>]: number }
   : { [K in keyof Relations<M>]: number };
 
 type SelectPayload<M extends ModelTypeInfo, S> = {
@@ -236,25 +238,50 @@ type OmitPayload<M extends ModelTypeInfo, O> = Omit<Scalars<M>, Requested<O>>;
  * follows its `select`. That pairing type-checks and is refused at runtime by
  * `resolveSelection` — parity with Prisma, whose generated args accept it too,
  * and asserted in the template's `select.test-d.ts`.
+ *
+ * ### Why these ask `"k" extends keyof A` rather than `A extends { k: infer V }`
+ *
+ * The structural form is the one you would write, and it was what #326 was: a
+ * relation carrying `orderBy` (or `where`, `take`, `skip`) stopped resolving its
+ * own nested relations, coming back as the target's bare scalars. The row was
+ * there at runtime; only the type fell back, so a filtered, ordered list read —
+ * the products of this list in order, each with its product row — could not be
+ * spelled in a way that typed, in `select` or in `include`.
+ *
+ * The arguments reach here through `Subset`, the excess-property guard the
+ * generated signatures wrap them in. Inferring `T` through that mapped type
+ * leaves a relation's arguments in a shape that is *assignable* to
+ * `{ select: unknown }` — a value of it type-checks against that annotation —
+ * while `A extends { select: unknown }` is false. Assignability and the
+ * conditional's `extends` disagree, and the conditional took its else branch and
+ * returned the default selection. Only relations carrying arguments were
+ * affected: `{ select: … }` on its own never went through that path.
+ *
+ * Asking whether the key exists and then indexing avoids the disagreement
+ * entirely — `A["select"]` resolves correctly in exactly the cases where the
+ * `extends` did not. The `[…] extends [undefined]` guards were already here for
+ * an explicitly-`undefined` key and still are; `NonNullable` is what an optional
+ * key needs once it is reached by indexing rather than by inference.
+ *
+ * Dropping `Subset` also fixes it, and costs more than it saves: it is what
+ * rejects `orderBey` inside a relation's arguments, which nothing else catches.
  */
-export type Payload<M extends ModelTypeInfo, A> = A extends { select: infer S }
-  ? [S] extends [undefined]
+export type Payload<M extends ModelTypeInfo, A> = "select" extends keyof A
+  ? [A["select"]] extends [undefined]
     ? DefaultPayload<M, A>
-    : SelectPayload<M, S>
+    : SelectPayload<M, NonNullable<A["select"]>>
   : DefaultPayload<M, A>;
 
-type DefaultPayload<M extends ModelTypeInfo, A> = A extends { omit: infer O }
-  ? [O] extends [undefined]
+type DefaultPayload<M extends ModelTypeInfo, A> = "omit" extends keyof A
+  ? [A["omit"]] extends [undefined]
     ? WithInclude<M, A, Scalars<M>>
-    : WithInclude<M, A, OmitPayload<M, O>>
+    : WithInclude<M, A, OmitPayload<M, NonNullable<A["omit"]>>>
   : WithInclude<M, A, Scalars<M>>;
 
-type WithInclude<M extends ModelTypeInfo, A, Base> = A extends {
-  include: infer I;
-}
-  ? [I] extends [undefined]
+type WithInclude<M extends ModelTypeInfo, A, Base> = "include" extends keyof A
+  ? [A["include"]] extends [undefined]
     ? Base
-    : Base & IncludePayload<M, I>
+    : Base & IncludePayload<M, NonNullable<A["include"]>>
   : Base;
 
 /** Every column of the model, which is what `wrap` demands and `include` keeps. */

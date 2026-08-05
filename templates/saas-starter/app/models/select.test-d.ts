@@ -162,6 +162,109 @@ describe("on(connection) narrows exactly as the class does", () => {
 });
 
 /**
+ * **A relation carrying arguments keeps resolving its own relations** — #326.
+ *
+ * `orderBy`, `where`, `take` and `skip` on a to-many used to cost the payload
+ * everything underneath it. The relation came back as the target's scalar type,
+ * so reading a nested relation was a compile error even though the query
+ * returned it at runtime; `include` spelled it identically, so there was no
+ * spelling of a filtered list read that typed.
+ *
+ * The cause was `Payload` asking `A extends { select: infer S }`. `Subset` — the
+ * excess-property guard wrapping the argument — leaves the inferred arguments in
+ * a shape that satisfies *assignability* to `{ select: unknown }` but not that
+ * `extends`, so the check fell to its else branch and returned the default
+ * selection. Only relations with extra keys were affected, because only those
+ * reach the check with arguments that went through that inference path. Asking
+ * `"select" extends keyof A` and indexing instead is what fixed it.
+ *
+ * These are the ordinary shape of a list read — "the products of this list,
+ * ordered by position, each with its product row" — so the regression is worth
+ * pinning at every level it broke.
+ */
+describe("a relation carrying arguments keeps its own relations", () => {
+  test("select + orderBy still resolves the nested relation", async () => {
+    const user = await UserModel.findFirst({
+      select: {
+        accounts: {
+          orderBy: { id: "asc" },
+          select: { organization: { select: { id: true, name: true } } },
+        },
+      },
+    });
+
+    expectTypeOf(user!.accounts[0].organization!.name).toEqualTypeOf<string>();
+  });
+
+  test("include + orderBy spells it identically", async () => {
+    const user = await UserModel.findFirst({
+      include: {
+        accounts: { orderBy: { id: "asc" }, include: { organization: true } },
+      },
+    });
+
+    expectTypeOf(user!.accounts[0].organization!.name).toEqualTypeOf<string>();
+  });
+
+  test("where, take and skip behave the same as orderBy", async () => {
+    const filtered = await UserModel.findFirst({
+      select: {
+        accounts: {
+          where: { organizationId: 1 },
+          select: { organization: { select: { id: true } } },
+        },
+      },
+    });
+    const paged = await UserModel.findFirst({
+      select: {
+        accounts: {
+          take: 5,
+          skip: 1,
+          select: { organization: { select: { id: true } } },
+        },
+      },
+    });
+
+    expectTypeOf(
+      filtered!.accounts[0].organization!.id,
+    ).toEqualTypeOf<number>();
+    expectTypeOf(paged!.accounts[0].organization!.id).toEqualTypeOf<number>();
+  });
+
+  test("the narrowing is still a narrowing — unselected columns stay off", async () => {
+    const user = await UserModel.findFirst({
+      select: {
+        accounts: {
+          orderBy: { id: "asc" },
+          select: { organization: { select: { id: true } } },
+        },
+      },
+    });
+
+    // @ts-expect-error `name` was not selected on the nested organization
+    user!.accounts[0].organization!.name;
+    // @ts-expect-error `id` was not selected on the account itself
+    user!.accounts[0].id;
+  });
+
+  test("arguments at every level, three deep", async () => {
+    const accounts = await OrganizationModel.findFirst({
+      select: {
+        accounts: {
+          take: 2,
+          orderBy: { id: "asc" },
+          select: { user: { select: { email: true } } },
+        },
+      },
+    });
+
+    expectTypeOf(accounts!.accounts[0].user!.email).toEqualTypeOf<
+      string | null
+    >();
+  });
+});
+
+/**
  * **A `_count` can carry a filter** — #333.
  *
  * The SQL for this was always right. `compileRelationCount` reaches for
