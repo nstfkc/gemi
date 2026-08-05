@@ -63,12 +63,18 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
   const loaders = `{${templates.join(",")}}`;
 
   // Vite's manifest `css` field is a `string[]` — a client entry can emit more
-  // than one CSS chunk. Read and concatenate them all instead of interpolating
-  // the array into a single path (which only works for a one-element array).
+  // than one CSS chunk. Read them all instead of interpolating the array into a
+  // single path (which only works for a one-element array), and keep them as
+  // one entry per file rather than a concatenated blob: each needs its own
+  // stable id for React to hoist it into `<head>` (#328), and that id is what
+  // dedupes it against a route's own CSS.
   const appCssFiles: string[] = manifest["app/client.tsx"]?.css ?? [];
-  const appCSSContent = (
-    await Promise.all(appCssFiles.map((cssFile) => Bun.file(`${distDir}/client/${cssFile}`).text()))
-  ).join("\n");
+  const appStyles = await Promise.all(
+    appCssFiles.map(async (cssFile) => ({
+      id: cssFile,
+      content: await Bun.file(`${distDir}/client/${cssFile}`).text(),
+    })),
+  );
 
   const staticFilePattern = new URLPattern({
     pathname: "/*.:filetype(png|txt|js|css|jpg|svg|jpeg|avif|webp|ico|ttf|map)",
@@ -150,11 +156,7 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
       if (result instanceof Response) {
         return result;
       } else {
-        const styles = [];
-
-        styles.push({
-          content: appCSSContent,
-        });
+        const styles = [...appStyles];
 
         const getStyles = async (currentViews: string[]) => {
           if (!currentViews) {
