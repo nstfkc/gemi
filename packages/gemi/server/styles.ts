@@ -69,23 +69,41 @@ export async function createDevStyles(
     });
   }
 
-  return styles.map((style, i) => {
-    return createElement("style", {
-      key: i,
-      type: "text/css",
-      "data-vite-dev-id": style.id,
-      dangerouslySetInnerHTML: { __html: style.content },
-    });
-  });
+  return styles.map(hoistable);
 }
 
 export async function createStyles(styles = []) {
-  return styles.map((style, i) => {
-    return createElement("style", {
-      key: i,
-      id: style?.id,
-      type: "text/css",
-      dangerouslySetInnerHTML: { __html: style.content },
-    });
+  return styles.map(hoistable);
+}
+
+/**
+ * The precedence every gemi-emitted stylesheet is hoisted under. One shared
+ * name on purpose: React keeps same-precedence styles in a single tag in
+ * insertion order, which is the order the split assumes — the app bundle
+ * first, then the route's own CSS layered over it.
+ */
+const STYLE_PRECEDENCE = "gemi";
+
+/**
+ * A `<style>` React 19 will lift into `<head>` and block the first paint on.
+ *
+ * It only does that when the tag carries both `precedence` and `href` (the
+ * dedupe key). Without them the tag stays where it was rendered, and these are
+ * rendered as siblings *before* `<html>` — so React normalizes them into
+ * `<body>`, nothing in `<head>` is render-blocking, and the browser paints the
+ * whole document unstyled before the CSS applies (#328).
+ *
+ * React strips every other attribute off a hoisted style, `id` and
+ * `data-vite-dev-id` included, and leaves only `data-precedence` +
+ * `data-href`. `fetchRouteCSS` reads that `data-href` list to tell what is
+ * already on the page; nothing reads the dev id, and Vite re-injects its own
+ * tag for HMR rather than adopting this one.
+ */
+function hoistable(style: { id: string; content: string }, i: number) {
+  return createElement("style", {
+    key: i,
+    href: style.id,
+    precedence: STYLE_PRECEDENCE,
+    dangerouslySetInnerHTML: { __html: style.content },
   });
 }

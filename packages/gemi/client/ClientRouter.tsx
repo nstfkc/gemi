@@ -292,7 +292,13 @@ const Routes = (props: { componentTree: ComponentTree }) => {
 
       // `fetchRouteCSS` keys off the route manifest, so it needs the pattern
       // rather than the concrete path — `/posts/:id`, not `/posts/123`.
-      fetchRouteCSS(routerState.routePath).catch((e) => console.error(e));
+      // Started here so it runs alongside the payload fetch, but awaited
+      // before the transition commits: a surface that mounts ahead of its own
+      // stylesheet paints unstyled first (#328). Swallowing the rejection is
+      // what keeps a CSS failure from stranding the navigation.
+      const cssReady = fetchRouteCSS(routerState.routePath).catch((e) =>
+        console.error(e),
+      );
       // Through `loadViewModule` so the module registry — and with it each
       // view's `Loading`/`Error` exports — is populated before the
       // transition commits the new surface.
@@ -312,6 +318,8 @@ const Routes = (props: { componentTree: ComponentTree }) => {
           hydrate({ [path]: { [variantKey]: data } });
         },
       });
+
+      await cssReady;
 
       if (payload) {
         const {

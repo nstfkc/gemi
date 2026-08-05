@@ -77,6 +77,25 @@ interface ClientRouterProviderProps {
   breadcrumbs: Record<string, Breadcrumb>;
 }
 
+/**
+ * Whether `file`'s CSS is already on the page, in either of the two shapes it
+ * can take. A client navigation appends `<style id={file}>`; the styles the
+ * document was served with are hoisted into `<head>` by React, which strips
+ * their `id` and records the files it merged into one space-separated
+ * `data-href` list instead (#328). Missing the second shape means re-fetching
+ * and re-appending the CSS the page already has on every navigation.
+ */
+function isStyleOnPage(file: string) {
+  if (document.getElementById(file)) {
+    return true;
+  }
+  // `Array.from` rather than `for...of`: the browser build compiles without
+  // `DOM.Iterable`, so a `NodeList` is only an ArrayLike there.
+  return Array.from(document.querySelectorAll("style[data-href]")).some(
+    (style) => style.getAttribute("data-href").split(" ").includes(file),
+  );
+}
+
 export const ClientRouterProvider = (
   props: PropsWithChildren<ClientRouterProviderProps>,
 ) => {
@@ -260,7 +279,7 @@ export const ClientRouterProvider = (
         return cssManifest?.[view];
       })
       .filter(Boolean)
-      .filter((file) => !document.getElementById(file));
+      .filter((file) => !isStyleOnPage(file));
 
     if (cssFiles.length === 0) {
       return;
