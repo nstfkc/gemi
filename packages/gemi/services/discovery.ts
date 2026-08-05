@@ -82,7 +82,47 @@ export async function discoverJobs(
 ): Promise<Array<new () => Job>> {
   const resolved = resolveDir(dir);
   warnIfSourceIsMissing(resolved, "queue jobs", "queue");
-  return await discoverClasses(resolved, Job);
+  const jobs = await discoverClasses(resolved, Job);
+  warnIfNameWillNotSurviveTheBuild(jobs);
+  return jobs;
+}
+
+/**
+ * Says something about a discovered job that never declared `static name`.
+ *
+ * This is the one hazard discovery introduces rather than removes, and it is
+ * production-only. `gemi build` minifies the server entry, and app code
+ * reachable from it — a controller, and every job class that controller
+ * imports to dispatch — is bundled and minified with it. Minification renames
+ * the class binding, and a class's implicit `.name` is that binding: a
+ * `TestJob` in the bundle reports `"D"`. Discovery, meanwhile, imports
+ * `app/jobs/TestJob.ts` from source at runtime, where it is still `"TestJob"`.
+ * The queue is keyed by that name, so the two halves stop agreeing and the
+ * dispatch is dropped — in production, and only there.
+ *
+ * A declared `static name = "TestJob"` is a string literal, which survives
+ * minification intact, and the two halves agree again. `docs/jobs-and-queues.md`
+ * has always called it required; before discovery an app could get away without
+ * it, because the explicit `jobs` array was bundled too and both sides were
+ * wrong in the same way.
+ *
+ * The check is exact rather than a guess: a `static name = "..."` class field
+ * defines a *writable* own property, while the implicit class name is
+ * non-writable. Cron is unaffected — `CronJob.name` is an instance field
+ * holding a string literal, not the class binding.
+ */
+function warnIfNameWillNotSurviveTheBuild(jobs: Array<new () => Job>) {
+  for (const job of jobs) {
+    if (Object.getOwnPropertyDescriptor(job, "name")?.writable) continue;
+
+    console.warn(
+      `Queued job ${job.name} does not declare \`static name\`, so it is ` +
+        `registered under its class name. A production build minifies the ` +
+        `class that dispatches it and renames it, while discovery reads this ` +
+        `file from source and does not — so the dispatch would be dropped in ` +
+        `production and nowhere else. Add: static name = "${job.name}";`,
+    );
+  }
 }
 
 /**

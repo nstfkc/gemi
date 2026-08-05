@@ -97,10 +97,14 @@ export class Scheduler {
    * what the scheduler took.
    *
    * It lists what `start()` iterates, not what `Bun.cron` accepted. A job with
-   * no name or no expression is logged and skipped, and still appears here.
+   * no name, no expression, or a name another job already claimed is logged and
+   * skipped, and still appears here — a test walking this should see the
+   * problem rather than have it tidied away.
+   *
+   * A copy, so that walk cannot edit the set the scheduler is running from.
    */
   get jobs(): ReadonlyArray<new () => CronJob> {
-    return this.resolved;
+    return [...this.resolved];
   }
 
   /**

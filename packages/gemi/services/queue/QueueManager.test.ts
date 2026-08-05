@@ -67,6 +67,63 @@ describe("a dispatch nothing is registered under", () => {
   });
 });
 
+/**
+ * Two classes with one name.
+ *
+ * A directory walk is what makes this ordinary: `auth/SendEmail.ts` beside
+ * `billing/SendEmail.ts` is a natural thing to write, and nothing forces the
+ * import alias that a hand-written list would have demanded. The failure is
+ * also the worst one here — not a dropped dispatch but the wrong body running
+ * under the right name, reporting success.
+ */
+describe("two jobs claiming one class name", () => {
+  /** Same class name, different bodies — what two directories would produce. */
+  const sendEmail = (from: string) =>
+    ({
+      SendEmail: class SendEmail extends Job {
+        run() {
+          return from;
+        }
+      },
+    }).SendEmail;
+
+  test("the first keeps the name, the second is refused out loud", () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const auth = sendEmail("auth");
+    const billing = sendEmail("billing");
+
+    const queue = new QueueManager({ jobs: [auth, billing] });
+
+    // The registry resolves to the first. It used to resolve to the last —
+    // `Object.fromEntries` keeps the final occurrence of a repeated key — so
+    // dispatching the auth class ran billing's body and said nothing.
+    expect(queue.dispatchJob("SendEmail", "[]")).toBe("auth");
+    expect(vi.mocked(error).mock.calls[0]![0]).toContain(
+      'Two queued jobs are named "SendEmail"',
+    );
+  });
+
+  test("both still appear in `registeredJobs`, so a test can see the clash", () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const queue = new QueueManager({
+      jobs: [sendEmail("auth"), sendEmail("billing")],
+    });
+
+    expect(queue.registeredJobs).toHaveLength(2);
+  });
+});
+
+describe("the readable view", () => {
+  test("is a copy, so walking it cannot edit what the queue runs from", () => {
+    const queue = new QueueManager({ jobs: [ChargeCard] });
+
+    (queue.registeredJobs as Array<new () => Job>).length = 0;
+
+    expect(queue.registeredJobs).toHaveLength(1);
+  });
+});
+
 describe("a dispatch that resolves", () => {
   test("runs, and leaves the queue empty", () => {
     const queue = new QueueManager({ jobs: [ChargeCard] });

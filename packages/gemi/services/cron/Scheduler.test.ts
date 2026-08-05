@@ -440,6 +440,18 @@ describe("what a directory can hand the scheduler", () => {
     expect(second.registered).toBe(1);
   });
 
+  test("`jobs` is a copy, so walking it cannot edit what the scheduler runs from", () => {
+    class DailyDigest extends CronJob {
+      name = "DailyDigest";
+      cron = "@daily";
+    }
+
+    const { scheduler } = scheduled([DailyDigest]);
+    (scheduler.jobs as Array<new () => CronJob>).length = 0;
+
+    expect(scheduler.jobs).toHaveLength(1);
+  });
+
   test("a nameless class is refused by a message that names it and says why", () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
 

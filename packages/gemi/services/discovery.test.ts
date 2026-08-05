@@ -403,3 +403,66 @@ describe("when the source is not there at all", () => {
     expect(console.warn).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * The one hazard discovery adds rather than removes.
+ *
+ * A production build minifies the server entry, and the app code reachable from
+ * it — a controller, and the job classes it imports to dispatch — is bundled
+ * and minified with it. That renames the class binding, and a class's implicit
+ * `.name` *is* that binding: verified against `Bun.build({minify:true})`, a
+ * `TestJob` in the bundle reports `"D"`. Discovery imports the same file from
+ * source at runtime, where it is still `"TestJob"`, so the queue's key and the
+ * dispatch's key stop agreeing — in production and nowhere else.
+ *
+ * Before discovery an app could get away without `static name`, because the
+ * explicit `jobs` array was bundled too and both halves were wrong identically.
+ * So the warning is on the discovery path only, where the hazard is new.
+ */
+describe("a job whose name will not survive a production build", () => {
+  test("is warned about, by name, with the line that fixes it", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const root = project({
+      "app/jobs/SendWelcomeEmail.ts": job("SendWelcomeEmail"),
+    });
+
+    await discoverJobs(join(root, "app/jobs"));
+
+    const message = vi.mocked(warn).mock.calls.at(-1)![0] as string;
+    expect(message).toContain("SendWelcomeEmail");
+    expect(message).toContain('static name = "SendWelcomeEmail"');
+  });
+
+  test("a job that declares `static name` is left alone", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const root = project({
+      "app/jobs/SendWelcomeEmail.ts": `import { Job } from ${JOB};
+export class SendWelcomeEmail extends Job {
+  static name = "SendWelcomeEmail";
+  run() { return "SendWelcomeEmail"; }
+}`,
+    });
+
+    await discoverJobs(join(root, "app/jobs"));
+
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  test("the two are told apart exactly, not guessed at", () => {
+    class Implicit extends Job {}
+    class Explicit extends Job {
+      static name = "Explicit";
+    }
+
+    // A `static name = "..."` class field defines a writable own property; the
+    // implicit class name is non-writable. Both report the same string, so the
+    // descriptor is the only thing that separates them.
+    expect(Implicit.name).toBe("Implicit");
+    expect(Object.getOwnPropertyDescriptor(Implicit, "name")?.writable).toBe(
+      false,
+    );
+    expect(Object.getOwnPropertyDescriptor(Explicit, "name")?.writable).toBe(
+      true,
+    );
+  });
+});

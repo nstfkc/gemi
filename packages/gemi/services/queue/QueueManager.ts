@@ -96,19 +96,54 @@ export class QueueManager {
    */
   useJobs(jobs: Array<new () => Job>) {
     this.config.jobs = jobs;
-    this.jobs = Object.fromEntries(jobs.map((job) => [job.name, job]));
+
+    // Built one at a time rather than by `Object.fromEntries`, which resolves a
+    // repeated key by keeping the last and saying nothing.
+    //
+    // Two classes with one name is the worst failure in this subsystem, and it
+    // is worse than the dropped dispatch the rest of this file is about: the
+    // registry is keyed by class name, a dispatch carries a class name, so
+    // `SendEmail.dispatch(...)` on the one under `app/jobs/auth` would run the
+    // body of the one under `app/jobs/billing`. Nothing is dropped and nothing
+    // errors — the wrong work happens and reports success.
+    //
+    // Discovery is what makes it ordinary. A hand-written list forces an import
+    // alias in one visible file the moment two names clash; a directory walk
+    // does not, and `auth/SendEmail.ts` beside `billing/SendEmail.ts` is a
+    // perfectly natural thing to write. So the first claim wins and the second
+    // is refused out loud — the same rule `Scheduler.start` applies to a cron
+    // name, and the reverse of the silent last-wins this replaces.
+    this.jobs = {};
+    for (const job of jobs) {
+      const taken = this.jobs[job.name];
+      if (taken) {
+        console.error(
+          `Two queued jobs are named "${job.name}" — the first is registered ` +
+            `and this one is not, so dispatching either would have run one of ` +
+            `them. A class name is the queue's key, so only one job can hold ` +
+            `it. Rename one.`,
+        );
+        continue;
+      }
+      this.jobs[job.name] = job;
+    }
   }
 
   /**
-   * What the manager ended up with, discovered or declared.
+   * What the manager was handed, discovered or declared.
    *
    * The registry is keyed by name, and a name is exactly what a dispatch
    * carries, so "is this job registered?" is a question with a silent wrong
-   * answer — `next()` skips an unknown name and the work disappears. This is
-   * where a test asks it out loud.
+   * answer — `next()` drops an unknown name long after the caller moved on.
+   * This is where a test asks it out loud.
+   *
+   * It reports what came in, not what the registry accepted, so a name claimed
+   * twice appears twice here — deliberately, the same way `Scheduler.jobs`
+   * does. A test walking this should see the collision rather than have it
+   * tidied away. A copy, so that walk cannot edit the registry underneath it.
    */
   get registeredJobs(): ReadonlyArray<new () => Job> {
-    return this.config.jobs;
+    return [...this.config.jobs];
   }
 
   dispatchJob(jobName: string, args: string) {

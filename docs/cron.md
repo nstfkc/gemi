@@ -203,6 +203,12 @@ export class SubscriptionAudit extends CronJob {
 
 Both are scheduled. Neither is mentioned anywhere else.
 
+### Two jobs, one name
+
+`name` is the scheduler's key, so only one job can hold it. If two claim the same one, the first is scheduled and the second is refused with both class names on stderr — a directory walk makes this easy to write by accident, since `billing/DailyReport.ts` and `analytics/DailyReport.ts` never have to appear side by side the way two entries in a list would.
+
+Both still appear in `scheduler.jobs`, which reports what the scheduler was handed rather than what it accepted, so a test walking the schedule sees the clash instead of a tidied-up set.
+
 ### What the walk costs
 
 A class does not exist until its module has run, so there is no way to read a directory of classes without importing it. **Every `.ts`/`.tsx` file under `app/cron` is imported at boot** — in development and in production, on every start — and a file that *does something* when it is imported does that thing at boot. A module that opens a connection, seeds a cache, or registers a listener at the top level is doing it before the first request, from a directory nobody thought of as an entry point.
