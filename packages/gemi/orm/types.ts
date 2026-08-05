@@ -185,10 +185,14 @@ type Requested<S> = {
  * `true` in an `include` means "that model's scalars, nothing further".
  *
  * `unknown` rather than `{}` for the no-arguments case: every branch of
- * `Payload` asks `A extends { select: infer S }` and friends, and `unknown`
- * matches none of them, so it lands on the default selection. `{}` would too,
- * but only because an empty object type happens not to satisfy a required
- * property — a coincidence to rely on rather than a statement of intent.
+ * `Payload` asks whether a key is in `keyof A`, and `keyof unknown` is `never`,
+ * so `unknown` answers no to all of them and lands on the default selection.
+ * `{}` would too, but only because an empty object type happens to have no
+ * keys — a coincidence to rely on rather than a statement of intent.
+ *
+ * (This read `A extends { select: infer S }` until #326, when that form turned
+ * out to disagree with assignability for arguments inferred through `Subset`.
+ * The conclusion is unchanged; the reason it holds is now the key check.)
  */
 type ArgsOf<A> = A extends true ? unknown : A;
 
@@ -450,6 +454,44 @@ export type OrderByInput<M extends ModelTypeInfo> = {
 };
 
 /**
+ * What `_count` accepts per relation: `true`, or a filter over the rows counted.
+ *
+ * The filter half was emitted long before it could be written. `compileRelationCount`
+ * reaches for `_count.select.<relation>.where` and ANDs it into the correlated
+ * subquery, so the SQL for a filtered count has always been correct; this type
+ * said `boolean` and was the only thing refusing it (#333). The gap mattered
+ * because the wrong answer is silent — a card counting soft-deleted rows renders
+ * a number that is simply wrong, not one that fails.
+ *
+ * Shared by `SelectInput` and `IncludeInput` rather than written twice, because
+ * the two spellings of the same argument disagreeing is how it went unnoticed.
+ *
+ * A to-one is refused, because `countPlan` throws `UnsupportedQueryError` for
+ * one: the answer is 0 or 1, which the relation's own nullability already says.
+ * That is the same type-does-not-describe-the-compiler gap as the `where` above,
+ * in the other direction — accepting what the runtime rejects rather than
+ * rejecting what it accepts.
+ *
+ * **Why the branded type rather than dropping the key.** Remapping the to-one
+ * keys to `never` reads better and gives a better message, and it has a hole: a
+ * model whose relations are *all* to-one maps to `{}`, and every object literal
+ * is assignable to `{}` — so on exactly the models where counting is most
+ * obviously wrong, nothing is checked. Keeping the key and making its value
+ * uninhabitable holds either way. The alias exists only so the error names the
+ * reason; `never` alone prints as "not assignable to type 'undefined'", which
+ * sends the reader looking for a missing value rather than a bad key.
+ */
+type ToOneRelationsCannotBeCounted = {
+  "counting a to-one relation can only answer 0 or 1": never;
+};
+
+type CountSelection<M extends ModelTypeInfo> = {
+  [K in keyof Relations<M>]?: Relations<M>[K]["kind"] extends "many"
+    ? boolean | { where?: WhereInput<Relations<M>[K]["target"]> }
+    : ToOneRelationsCannotBeCounted;
+};
+
+/**
  * `select`, one level. Relations carry their own nested arguments, so the type
  * is mutually recursive with the operation args — bounded, as ever, by what the
  * caller wrote.
@@ -459,13 +501,13 @@ export type SelectInput<M extends ModelTypeInfo> = {
 } & {
   [K in keyof Relations<M>]?: boolean | RelationArgs<Relations<M>[K]>;
 } & {
-  _count?: boolean | { select?: { [K in keyof Relations<M>]?: boolean } };
+  _count?: boolean | { select?: CountSelection<M> };
 };
 
 export type IncludeInput<M extends ModelTypeInfo> = {
   [K in keyof Relations<M>]?: boolean | RelationArgs<Relations<M>[K]>;
 } & {
-  _count?: boolean | { select?: { [K in keyof Relations<M>]?: boolean } };
+  _count?: boolean | { select?: CountSelection<M> };
 };
 
 export type OmitInput<M extends ModelTypeInfo> = {

@@ -71,6 +71,35 @@ describe("the projected subquery", () => {
     );
   });
 
+  /**
+   * The filter goes through `compileWhere`, so it is a whole `where` and not a
+   * column list — a relation filter inside it nests an `exists` correlated to
+   * the count's own alias rather than to the outer table.
+   *
+   * Worth its own test because it is the shape #335 reported and the one every
+   * other test here misses: they all filter a scalar, which never exercises the
+   * qualifier the correlated alias has to supply. Get that wrong and the inner
+   * `exists` correlates to `"User"` instead of `"_c0"` — a count that silently
+   * answers a different question rather than failing.
+   */
+  test("the filter can reach through a relation of the counted model", () => {
+    expect(
+      projection({
+        include: {
+          _count: {
+            select: { accounts: { where: { organization: { name: "acme" } } } },
+          },
+        },
+      }),
+    ).toBe(
+      `, (select count(*) from "Account" as "_c0" ` +
+        `where "_c0"."userId" = "User"."id" and exists ` +
+        `(select 1 from "Organization" as "_r0" ` +
+        `where "_r0"."id" = "_c0"."organizationId" and "_r0"."name" = ?)) ` +
+        `as "_count.accounts"`,
+    );
+  });
+
   test("the filter's value is a parameter, not text", () => {
     const compiled = plan({
       include: {

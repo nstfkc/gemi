@@ -1,6 +1,6 @@
 import { expectTypeOf, test, describe } from "vitest";
 
-import { OrganizationModel, UserModel } from "./generated";
+import { AccountModel, OrganizationModel, UserModel } from "./generated";
 
 /**
  * **`select` and `include` narrow the result type**, which is the claim the
@@ -261,5 +261,135 @@ describe("a relation carrying arguments keeps its own relations", () => {
     expectTypeOf(accounts!.accounts[0].user!.email).toEqualTypeOf<
       string | null
     >();
+  });
+});
+
+/**
+ * **A `_count` can carry a filter** — #333.
+ *
+ * The SQL for this was always right. `compileRelationCount` reaches for
+ * `_count.select.<relation>.where` and ANDs it into the correlated subquery,
+ * and `relation-count.test.ts` has asserted the emitted text and its
+ * parameterisation for as long as the feature has existed. The input type said
+ * `boolean`, so the only thing that could not be written was the argument the
+ * compiler was already looking for.
+ *
+ * That gap is worth a type test rather than only a runtime one, because the
+ * wrong answer here is silent: a count that ignores its filter renders a number
+ * that is merely wrong — soft-deleted rows included in a total shown to a user —
+ * where a missing column would have failed loudly.
+ */
+describe("_count takes a filter over the rows it counts", () => {
+  test("a filtered count is still a number", async () => {
+    const user = await UserModel.findFirst({
+      select: {
+        _count: { select: { accounts: { where: { organizationId: 1 } } } },
+      },
+    });
+
+    expectTypeOf(user!._count.accounts).toEqualTypeOf<number>();
+  });
+
+  test("include spells it identically", async () => {
+    const user = await UserModel.findFirst({
+      include: {
+        _count: { select: { accounts: { where: { organizationId: 1 } } } },
+      },
+    });
+
+    expectTypeOf(user!._count.accounts).toEqualTypeOf<number>();
+  });
+
+  test("`true` still means every row, and mixes with a filtered sibling", async () => {
+    const org = await OrganizationModel.findFirst({
+      select: {
+        _count: {
+          select: {
+            accounts: { where: { organizationRole: 1 } },
+            invitations: true,
+          },
+        },
+      },
+    });
+
+    expectTypeOf(org!._count.accounts).toEqualTypeOf<number>();
+    expectTypeOf(org!._count.invitations).toEqualTypeOf<number>();
+  });
+
+  test("the filter is checked against the counted model, not the parent", async () => {
+    await UserModel.findFirst({
+      select: {
+        // @ts-expect-error `nonExistentColumn` is not a column on Account
+        _count: { select: { accounts: { where: { nonExistentColumn: 1 } } } },
+      },
+    });
+  });
+
+  /**
+   * The filter is a whole `WhereInput`, so it reaches through relations too —
+   * which is the shape #335 reported, and the one the tests above miss by all
+   * filtering a scalar.
+   *
+   * It is the shape that actually comes up: the count worth filtering is
+   * usually over a join row, and the condition worth filtering it by lives on
+   * what the join points at — "products on this list, not counting the
+   * soft-deleted ones" reads `deletedAt` on the product, not on the join.
+   * `relation-count.test.ts` asserts the nested `exists` this compiles to.
+   */
+  test("the filter reaches through a relation of the counted model", async () => {
+    const user = await UserModel.findFirst({
+      select: {
+        _count: {
+          select: { accounts: { where: { organization: { name: "acme" } } } },
+        },
+      },
+    });
+
+    expectTypeOf(user!._count.accounts).toEqualTypeOf<number>();
+  });
+
+  test("and is still checked one level down", async () => {
+    await UserModel.findFirst({
+      select: {
+        _count: {
+          select: {
+            accounts: {
+              where: {
+                // @ts-expect-error `nope` is not a column on Organization
+                organization: { nope: "acme" },
+              },
+            },
+          },
+        },
+      },
+    });
+  });
+
+  /**
+   * `countPlan` throws `UnsupportedQueryError` for a to-one — the answer is 0 or
+   * 1, which the relation's nullability already says — so the type has no
+   * business offering it.
+   *
+   * Both models are tested on purpose. `User` has to-many relations beside the
+   * to-one; `Account` has *only* to-one ones, and that is the case a key remap
+   * would miss, because a mapped type with every key removed is `{}` and every
+   * object literal is assignable to `{}`.
+   */
+  test("a to-one relation cannot be counted", async () => {
+    await UserModel.findFirst({
+      select: {
+        // @ts-expect-error `organization` is to-one; counting it is refused
+        _count: { select: { organization: true } },
+      },
+    });
+  });
+
+  test("including on a model whose relations are all to-one", async () => {
+    await AccountModel.findFirst({
+      select: {
+        // @ts-expect-error `organization` is to-one; counting it is refused
+        _count: { select: { organization: true } },
+      },
+    });
   });
 });
