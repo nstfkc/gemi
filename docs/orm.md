@@ -920,6 +920,26 @@ right side of it.
 instead — the shorthand names none, so a policy has nowhere to attach, and what it returns changes
 silently when the schema grows a relation.
 
+### Saying where nulls go
+
+```ts
+await User.findMany({ orderBy: { email: { sort: "asc", nulls: "last" } } })
+await User.findMany({ orderBy: [{ id: "desc" }, { email: { sort: "asc", nulls: "first" } }] })
+```
+
+`nulls first` / `nulls last` is emitted directly on both dialects. Prisma writes a
+`CASE WHEN … IS NULL` expression on SQLite instead, which dates from before SQLite 3.30 — it has
+understood the standard syntax since, and Bun bundles a newer one.
+
+**Worth writing even when the default already agrees.** Postgres sorts nulls above every non-null,
+so `asc` already means `nulls last` and the emitted SQL is equivalent. The difference is that the
+query then says what it means: the same default makes `desc` put nulls *first*, so an ordering that
+was correct by accident stops being correct the moment someone flips the direction. A negative
+`take` flips the placement along with the direction, so a reversed page keeps the intent too.
+
+The long form works wherever a direction does, including through a relation:
+`orderBy: { accounts: { _count: { sort: "desc", nulls: "last" } } }`.
+
 ### Ordering by a relation
 
 ```ts

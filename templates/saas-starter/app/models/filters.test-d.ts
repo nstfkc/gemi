@@ -282,6 +282,49 @@ describe("orderBy and pagination", () => {
     // @ts-expect-error "ascending" is not a SortOrder
     await UserModel.findMany({ orderBy: { id: "ascending" } });
   });
+
+  /**
+   * **The long form says where nulls go** — #337.
+   *
+   * Parsed and compiled long before it could be written: `read.test.ts:186`
+   * asserts `"name" asc nulls last` for a scalar, `order-relation.test.ts:55`
+   * the same through a relation, and `refusals.test.ts:85` rejects a `nulls`
+   * that is neither. The type was the only thing refusing the argument.
+   *
+   * Worth writing even where the dialect agrees. Postgres sorts nulls above
+   * every non-null, so `asc` already means `nulls last` and the SQL is
+   * equivalent — but then the query rests on that default instead of saying
+   * what it means, and `desc` makes the same default mean the opposite.
+   */
+  test("the long form takes a nulls placement", async () => {
+    await UserModel.findMany({
+      orderBy: { email: { sort: "asc", nulls: "last" } },
+    });
+
+    await UserModel.findMany({
+      orderBy: [{ id: "desc" }, { email: { sort: "asc", nulls: "first" } }],
+    });
+  });
+
+  test("`sort` is required, and `nulls` is not", async () => {
+    await UserModel.findMany({ orderBy: { email: { sort: "desc" } } });
+
+    // @ts-expect-error the long form has no direction to sort by
+    await UserModel.findMany({ orderBy: { email: { nulls: "last" } } });
+  });
+
+  test("a nulls placement that is neither is refused", async () => {
+    await UserModel.findMany({
+      // @ts-expect-error "sideways" is not a NullsOrder
+      orderBy: { email: { sort: "asc", nulls: "sideways" } },
+    });
+  });
+
+  test("ordering by a relation count takes it too", async () => {
+    await UserModel.findMany({
+      orderBy: { accounts: { _count: { sort: "desc", nulls: "last" } } },
+    });
+  });
 });
 
 describe("the payload still narrows, with the filters in place", () => {

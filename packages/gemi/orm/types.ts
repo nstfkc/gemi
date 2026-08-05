@@ -445,11 +445,32 @@ export type WhereUniqueInput<M extends ModelTypeInfo> = M["unique"] &
 
 export type SortOrder = "asc" | "desc";
 
+/** Where nulls sort, relative to every non-null value. */
+export type NullsOrder = "first" | "last";
+
+/**
+ * A direction, or a direction that says where nulls go.
+ *
+ * The long form was parsed and compiled long before it could be written:
+ * `parseOrderBy` has always accepted `{ sort, nulls }`, `compileOrderBy` emits
+ * the standard `nulls first` / `nulls last` on both dialects, and `reverse()`
+ * flips the placement along with the direction for a negative `take`. This type
+ * said `"asc" | "desc"` and was the only thing refusing it (#337) — the same
+ * divergence as the filtered `_count` two sections down.
+ *
+ * It is worth writing even where the dialect's default already agrees. Postgres
+ * sorts nulls above every non-null, so `asc` already means `nulls last` and the
+ * emitted SQL is equivalent — but the query is then resting on that default
+ * rather than saying what it means, and under `desc` the same default means the
+ * opposite. Saying it makes the intent survive a reordering.
+ */
+export type SortOrderInput = SortOrder | { sort: SortOrder; nulls?: NullsOrder };
+
 export type OrderByInput<M extends ModelTypeInfo> = {
-  [K in keyof Scalars<M>]?: SortOrder;
+  [K in keyof Scalars<M>]?: SortOrderInput;
 } & {
   [K in keyof Relations<M>]?:
-    | { _count?: SortOrder }
+    | { _count?: SortOrderInput }
     | OrderByInput<Relations<M>[K]["target"]>;
 };
 
