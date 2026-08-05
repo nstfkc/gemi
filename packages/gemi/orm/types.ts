@@ -454,11 +454,6 @@ export type OrderByInput<M extends ModelTypeInfo> = {
 };
 
 /**
- * `select`, one level. Relations carry their own nested arguments, so the type
- * is mutually recursive with the operation args — bounded, as ever, by what the
- * caller wrote.
- */
-/**
  * What `_count` accepts per relation: `true`, or a filter over the rows counted.
  *
  * The filter half was emitted long before it could be written. `compileRelationCount`
@@ -470,13 +465,37 @@ export type OrderByInput<M extends ModelTypeInfo> = {
  *
  * Shared by `SelectInput` and `IncludeInput` rather than written twice, because
  * the two spellings of the same argument disagreeing is how it went unnoticed.
+ *
+ * A to-one is refused, because `countPlan` throws `UnsupportedQueryError` for
+ * one: the answer is 0 or 1, which the relation's own nullability already says.
+ * That is the same type-does-not-describe-the-compiler gap as the `where` above,
+ * in the other direction — accepting what the runtime rejects rather than
+ * rejecting what it accepts.
+ *
+ * **Why the branded type rather than dropping the key.** Remapping the to-one
+ * keys to `never` reads better and gives a better message, and it has a hole: a
+ * model whose relations are *all* to-one maps to `{}`, and every object literal
+ * is assignable to `{}` — so on exactly the models where counting is most
+ * obviously wrong, nothing is checked. Keeping the key and making its value
+ * uninhabitable holds either way. The alias exists only so the error names the
+ * reason; `never` alone prints as "not assignable to type 'undefined'", which
+ * sends the reader looking for a missing value rather than a bad key.
  */
-type CountSelection<M extends ModelTypeInfo> = {
-  [K in keyof Relations<M>]?:
-    | boolean
-    | { where?: WhereInput<Relations<M>[K]["target"]> };
+type ToOneRelationsCannotBeCounted = {
+  "counting a to-one relation can only answer 0 or 1": never;
 };
 
+type CountSelection<M extends ModelTypeInfo> = {
+  [K in keyof Relations<M>]?: Relations<M>[K]["kind"] extends "many"
+    ? boolean | { where?: WhereInput<Relations<M>[K]["target"]> }
+    : ToOneRelationsCannotBeCounted;
+};
+
+/**
+ * `select`, one level. Relations carry their own nested arguments, so the type
+ * is mutually recursive with the operation args — bounded, as ever, by what the
+ * caller wrote.
+ */
 export type SelectInput<M extends ModelTypeInfo> = {
   [K in keyof Scalars<M>]?: boolean;
 } & {

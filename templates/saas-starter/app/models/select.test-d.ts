@@ -1,6 +1,6 @@
 import { expectTypeOf, test, describe } from "vitest";
 
-import { OrganizationModel, UserModel } from "./generated";
+import { AccountModel, OrganizationModel, UserModel } from "./generated";
 
 /**
  * **`select` and `include` narrow the result type**, which is the claim the
@@ -361,6 +361,34 @@ describe("_count takes a filter over the rows it counts", () => {
             },
           },
         },
+      },
+    });
+  });
+
+  /**
+   * `countPlan` throws `UnsupportedQueryError` for a to-one — the answer is 0 or
+   * 1, which the relation's nullability already says — so the type has no
+   * business offering it.
+   *
+   * Both models are tested on purpose. `User` has to-many relations beside the
+   * to-one; `Account` has *only* to-one ones, and that is the case a key remap
+   * would miss, because a mapped type with every key removed is `{}` and every
+   * object literal is assignable to `{}`.
+   */
+  test("a to-one relation cannot be counted", async () => {
+    await UserModel.findFirst({
+      select: {
+        // @ts-expect-error `organization` is to-one; counting it is refused
+        _count: { select: { organization: true } },
+      },
+    });
+  });
+
+  test("including on a model whose relations are all to-one", async () => {
+    await AccountModel.findFirst({
+      select: {
+        // @ts-expect-error `organization` is to-one; counting it is refused
+        _count: { select: { organization: true } },
       },
     });
   });
