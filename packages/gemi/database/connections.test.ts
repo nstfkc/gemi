@@ -184,7 +184,9 @@ describe("named connections", () => {
     expect(db.connection("analytics").config.slowTransactionThreshold).toBe(
       SLOW_TRANSACTION_THRESHOLD,
     );
-    expect(db.connection("digest").config.slowTransactionThreshold).toBe(60_000);
+    expect(db.connection("digest").config.slowTransactionThreshold).toBe(
+      60_000,
+    );
 
     await db.close();
   });

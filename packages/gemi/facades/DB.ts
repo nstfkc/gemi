@@ -43,7 +43,22 @@ export class ConnectionQueries {
     return this.bound ?? currentConnectionName();
   }
 
-  /** The Bun `SQL` client. Tagged-template queries go through here. */
+  /**
+   * The Bun `SQL` client. Tagged-template queries go through here.
+   *
+   * **The pool, not the open transaction.** `DB.sql` has always been Bun's own
+   * template and has never joined the ambient transaction — on Postgres it runs
+   * on a pooled connection and survives a rollback — and a named handle does
+   * not change that, only which pool it is. `query` and `execute` are the ones
+   * that join; reach for them when the difference matters.
+   *
+   * **This getter throws where the methods reject**, and it cannot do
+   * otherwise: an accessor has nowhere to put a rejection. So
+   * `DB.connection("typo").sql` throws `UnknownConnectionError` synchronously,
+   * and reading it while a transaction is open on another connection throws
+   * `CrossConnectionTransactionError` the same way. `query`, `execute` and
+   * `transaction` are `async` precisely so a `.catch()` cannot miss those.
+   */
   get sql(): SQL {
     return this.connection().sql;
   }
@@ -52,6 +67,8 @@ export class ConnectionQueries {
    * Which database is in use, inferred from the connection URL. Read this when
    * generating SQL that differs across databases (upserts, `RETURNING`,
    * autoincrement, boolean and timestamp types).
+   *
+   * Throws rather than rejects, for the reason given on `sql` above.
    */
   get dialect(): Dialect {
     return this.connection().dialect;
@@ -190,15 +207,6 @@ export class ConnectionQueries {
   }
 }
 
-/**
- * The handles `DB.connection` has already built.
- *
- * A handle holds a name and nothing else — it resolves the manager per call —
- * so one per name is enough, and reusing them keeps `DB.connection("analytics")`
- * free to be written inline in a hot path.
- */
-const handles = new Map<string, ConnectionQueries>();
-
 /** The unqualified handle: whichever connection is ambient, per call. */
 const ambient = new ConnectionQueries();
 
@@ -236,10 +244,13 @@ export class DB extends Facade {
    * `CrossConnectionTransactionError` rather than running the statement outside
    * that transaction, where it would survive the rollback.
    */
+  // Built per call rather than memoised by name. A handle is one string and a
+  // few methods that resolve everything else per call, so caching it saves an
+  // allocation — and a `Map` keyed on the caller's string is a slow leak the
+  // moment a name reaches it from a request, since an unknown name is not
+  // rejected until the handle is *used*. Nothing is worth keeping here.
   static connection(name: string): ConnectionQueries {
-    let handle = handles.get(name);
-    if (handle === undefined) handles.set(name, (handle = new ConnectionQueries(name)));
-    return handle;
+    return new ConnectionQueries(name);
   }
 
   // The Bun `SQL` client. Tagged-template queries go through here.

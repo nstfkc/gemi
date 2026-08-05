@@ -64,7 +64,10 @@ export class DatabaseManager implements DatabaseConnection {
     // The default first, so a `MissingDatabaseUrlError` from a missing
     // `DATABASE_URL` still comes out of construction the way it always has,
     // rather than after a named connection has already opened a client.
-    this.pools.set(DEFAULT_CONNECTION, new Connection(DEFAULT_CONNECTION, primary));
+    this.pools.set(
+      DEFAULT_CONNECTION,
+      new Connection(DEFAULT_CONNECTION, primary),
+    );
 
     // A connection that is built before the one whose config is wrong is still
     // a live client with an open handle, and on the throwing path nothing else
@@ -98,7 +101,8 @@ export class DatabaseManager implements DatabaseConnection {
     slowTransactionThreshold: number | false | undefined,
   ): void {
     for (const [name, connection] of Object.entries(connections)) {
-      if (name === DEFAULT_CONNECTION) throw new ReservedConnectionNameError(name);
+      if (name === DEFAULT_CONNECTION)
+        throw new ReservedConnectionNameError(name);
 
       this.pools.set(
         name,

@@ -4,7 +4,6 @@ import { DatabaseManager } from "../database/DatabaseManager";
 import { app } from "../foundation/app";
 import { type BindContext, createBindContext } from "./compile/fragment";
 import {
-  assertConnectionUsable,
   currentConnectionName,
   currentTransaction,
   isSystemScope,
@@ -325,6 +324,22 @@ export abstract class Model {
    *
    * Raises when handed an object with no provenance. See `untracked` for why
    * that is a loud failure rather than a fallback to writing everything.
+   *
+   * **It writes back to the connection the row was read on**, which is the one
+   * place a connection cannot be resolved from the ambient scope: a row read on
+   * `analytics` is an ordinary object that outlives the scope that produced it,
+   * and by the time it is saved — three functions later, from code that never
+   * named a connection — the scope is gone. So the connection is part of the
+   * row's provenance, exactly as the model and the primary key are, and for the
+   * same reason. Left to the ambient default, `save` compiled a correct
+   * `update` and sent it to the wrong database, where the same id usually names
+   * a real and different row.
+   *
+   * Naming a *different* connection explicitly — `User.on("default").save(row)`
+   * for a row read on `analytics` — is a contradiction rather than an
+   * instruction, and raises. Copying a row between connections is a write in
+   * its own right: say it with `update`, where the `where` and the `data` are
+   * both visible.
    */
   static async save<T extends object>(row: T): Promise<unknown> {
     const schema = this.$modelSchema();
@@ -339,6 +354,23 @@ export abstract class Model {
         "save",
         `This row came from ${record.model}, not ${schema.name}. Save it ` +
           `through the model it was read from.`,
+      );
+    }
+
+    if (
+      this.$connection !== undefined &&
+      this.$connection !== record.connection
+    ) {
+      throw new UnsupportedQueryError(
+        "save",
+        schema.name,
+        "save",
+        `This row was read on the "${record.connection}" connection and this ` +
+          `save names "${this.$connection}". A save writes the row back where ` +
+          `it came from, so the two cannot both be honoured. Drop the ` +
+          `\`on("${this.$connection}")\`, or write it as an explicit ` +
+          `${schema.name}.on("${this.$connection}").update({ where, data }) if ` +
+          `copying it across connections is what you meant.`,
       );
     }
 
@@ -365,10 +397,18 @@ export abstract class Model {
     const changed = changedFields(row, schema);
     if (Object.keys(changed).length === 0) return null;
 
-    const updated = await this.$exec("update", {
-      where: record.key,
-      data: changed,
-    });
+    // On the row's own connection, entered here rather than left to `$exec`:
+    // `$exec` resolves the *ambient* name, and the whole point is that the row
+    // outlived the scope that read it. Inside a transaction on another
+    // connection this raises `CrossConnectionTransactionError` from `$exec`,
+    // which is the correct answer — that update cannot join the transaction, so
+    // it must not run at all.
+    const updated = await runOnConnection(record.connection, () =>
+      this.$exec("update", {
+        where: record.key,
+        data: changed,
+      }),
+    );
 
     // Copy the *returned* row back over the caller's, not just the values sent.
     //
@@ -431,7 +471,21 @@ export abstract class Model {
     Object.assign(instance, row);
     // Tracked on the instance, not the argument — `save()` on the instance has
     // to diff against the values it was constructed from.
-    track(instance, schema);
+    //
+    // The connection is the argument's, when the argument has one. `wrap` runs
+    // *after* the query's scope has closed, so the ambient name here is
+    // whatever the caller happens to be in — usually the default — and a row
+    // read on `analytics` would be wrapped into an instance whose `save()`
+    // wrote to the hot path. Taken in order: an explicit `on`, then where the
+    // row actually came from, then the ambient connection for a row that was
+    // never tracked at all.
+    track(
+      instance,
+      schema,
+      this.$connection ??
+        provenanceOf(row)?.connection ??
+        currentConnectionName(),
+    );
 
     return instance;
   }
@@ -520,8 +574,8 @@ export abstract class Model {
     // `Subscription.on("analytics").transaction(...)` opens on that connection,
     // and a bare `Model.transaction` opens on whatever is ambient — which is
     // the default connection unless something outside has already named one.
+    // `withTransaction` refuses the mismatch; there is no second check here.
     const name = this.$connection ?? currentConnectionName();
-    assertConnectionUsable(name);
 
     return transact(app(DatabaseManager).connection(name), () =>
       runOnConnection(name, () => fn()),
@@ -545,16 +599,20 @@ export abstract class Model {
    * connection the open transaction cannot reach has to reject like every other
    * failure `$exec` produces, rather than being the one that throws before the
    * promise exists.
+   *
+   * The cross-connection refusal is `runOnConnection`'s, not repeated here:
+   * *entering* the connection is the only moment at which the scope still holds
+   * both the open transaction and the name it belongs to, so that is where the
+   * comparison has to live.
    */
   static async $exec(
     op: Operation,
     args: any = {},
     options?: ExecOptions,
   ): Promise<unknown> {
-    const name = this.$connection ?? currentConnectionName();
-    assertConnectionUsable(name);
-
-    return runOnConnection(name, () => this.$execute(op, args, options));
+    return runOnConnection(this.$connection ?? currentConnectionName(), () =>
+      this.$execute(op, args, options),
+    );
   }
 
   private static async $execute(
@@ -640,12 +698,23 @@ export abstract class Model {
     //
     // Cost on the common path: one `Map.get` and one reference compare, for a
     // model where nothing is registered under a different class.
+    //
+    // `inheritsPoliciesFrom` keeps that true for `Model.on(name)`, whose bound
+    // subclass is never the registered class and so failed the reference
+    // compare on *every* query — leaving each one to resolve the registered
+    // chain and walk it twice to reach the same conclusion. A direct subclass
+    // that declares no policies of its own has, by construction, the chain its
+    // parent has: there is nothing to compare.
     if (!system) {
       const registered = registry.has(schema.name)
         ? registry.get<unknown>(schema.name)
         : undefined;
 
-      if (registered !== undefined && registered !== this) {
+      if (
+        registered !== undefined &&
+        registered !== this &&
+        !inheritsPoliciesFrom(this, registered)
+      ) {
         const theirs = policiesFor(registered);
         const diverges =
           policies.length !== theirs.length ||
@@ -1111,6 +1180,31 @@ export abstract class Model {
   static $shape(plan: QueryPlan, rows: unknown[]): unknown {
     return plan.shape(rows);
   }
+}
+
+/**
+ * Whether `queried` can only have the policies `registered` has.
+ *
+ * True for a direct subclass that declares none of its own — which is what
+ * `Model.on(name)` builds, and also what `class AdminUser extends User {}` is.
+ * `policiesFor` walks the prototype chain and takes each level's own
+ * `$policies`; a level that declares none contributes nothing, so the walk from
+ * here and the walk from the parent visit the same levels in the same order and
+ * cannot disagree.
+ *
+ * Structural rather than a flag on the classes `on` mints, so the typed-view
+ * subclass the divergence guard already argues should be allowed gets the same
+ * short-circuit rather than paying for a second resolution of the chain.
+ *
+ * `$policy` — the removed name — is deliberately not checked: `policiesFor` has
+ * already walked this class by the time this is called, and it raises on that
+ * name at any level, so a class carrying it never reaches here.
+ */
+function inheritsPoliciesFrom(queried: unknown, registered: unknown): boolean {
+  return (
+    Object.getPrototypeOf(queried) === registered &&
+    !Object.hasOwn(queried as object, "$policies")
+  );
 }
 
 async function runSteps(

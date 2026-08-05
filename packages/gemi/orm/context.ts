@@ -130,6 +130,19 @@ export function runOnConnection<T>(
   const current = ormContext.getStore();
   if (currentConnectionName() === name) return fn();
 
+  // ENTERING A CONNECTION IS WHERE THE CROSS-CONNECTION CHECK BELONGS, not at
+  // each door — and it has to be *here*, before the scope is entered, because
+  // entering it is what makes the check impossible afterwards.
+  //
+  // The scope carries `tx` and `connection` together, so overwriting the name
+  // while an open handle stays in place produces a store that says "a
+  // transaction on analytics" while holding the *default* connection's handle.
+  // Every check downstream then agrees with itself and the statement runs on
+  // the wrong connection's transaction. `Model.save` found this: it routes to
+  // the row's own connection, so it is the one caller that switches connections
+  // with a transaction already open.
+  assertConnectionUsable(name);
+
   return ormContext.run(
     {
       ...current,

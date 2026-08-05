@@ -102,11 +102,36 @@ which row to update, and `save` says so rather than failing further down with a 
 instant the update happened rather than the one you fetched. Anything else the database rewrote
 comes back too.
 
+### It saves back to the connection the row came from
+
+If you read the row on a [named connection](./orm.md#connections), `save` writes it there:
+
+```ts
+const [row] = await User.on("analytics").findMany({}, { track: true })
+row.name = "changed"
+await User.save(row)                    // updates "analytics", with nothing said here
+```
+
+This is the one place a connection is not resolved from the surrounding scope, and it is why the
+connection is part of provenance alongside the model and the primary key. A tracked row is an
+ordinary object: it outlives the query that produced it, so by the time it is saved — three
+functions later, from code that never mentioned a connection — there is no scope left to read.
+Resolved the other way, `save` would compile a correct `update` and send it to the default
+connection, where the same id usually names a real and different row.
+
+Naming a *different* connection is a contradiction rather than an instruction and raises:
+`User.on("default").save(rowFromAnalytics)`. Copying a row between connections is a write in its
+own right — say it with `update`, where the `where` and the `data` are both visible.
+
+`wrap` carries the connection across too, so `User.wrap(row).save()` goes where `row` came from.
+
 ### Everything else still applies
 
 `save` compiles through the same path as any other write, so [policies](./orm.md#policies)
 scope it, `@updatedAt` stamps it, an open transaction contains it, and two saves touching the
-same columns share one cached plan.
+same columns share one cached plan. Inside a transaction on *another* connection it raises
+`CrossConnectionTransactionError` instead: that update cannot join the transaction, so it must not
+run at all.
 
 ## Level 3 — `wrap`, for behaviour
 

@@ -1,3 +1,4 @@
+import { currentConnectionName } from "./context";
 import { UnsupportedQueryError } from "./errors";
 import type { ModelSchema } from "./schema";
 
@@ -27,6 +28,22 @@ import type { ModelSchema } from "./schema";
 export interface Provenance {
   /** The model name, so `save` compiles against the right schema. */
   model: string;
+  /**
+   * The connection the row was read on, so `save` writes it back to the
+   * database it came from.
+   *
+   * The one piece of ORM state that cannot live in the ambient scope, and the
+   * reason it is recorded here instead. Everything else about a connection is
+   * true for an async subtree; this is true of a *value* that outlives the
+   * query that produced it — a row read on `analytics`, mutated three functions
+   * later, and saved from a scope that never named a connection.
+   *
+   * Without it `save` compiled a correct `update` and sent it to the default
+   * connection. In production, where two connections usually address the same
+   * database with the same id space, that is not a failed write: it is the
+   * *wrong row* updated, with no error to notice.
+   */
+  connection: string;
   /** The primary key values, captured at fetch time so a mutation cannot move the row. */
   key: Record<string, unknown>;
   /**
@@ -53,7 +70,19 @@ const provenance = new WeakMap<object, Provenance>();
  * means structural comparison per row per field, which is exactly the per-row
  * cost this feature is trying to keep off the default path.
  */
-export function track(row: object, schema: ModelSchema): void {
+export function track(
+  row: object,
+  schema: ModelSchema,
+  /**
+   * Defaults to the connection in scope, which is the right answer for the only
+   * caller that matters: `$exec` tracks inside the scope it entered, so a row
+   * from `User.on("analytics")` is stamped `analytics` with nothing passed.
+   *
+   * Explicit for `wrap`, which runs *after* that scope has closed and would
+   * otherwise stamp every wrapped row with the default connection.
+   */
+  connection: string = currentConnectionName(),
+): void {
   const snapshot: Record<string, unknown> = {};
   const key: Record<string, unknown> = {};
   const source = row as Record<string, unknown>;
@@ -80,7 +109,7 @@ export function track(row: object, schema: ModelSchema): void {
     key[name] = source[name];
   }
 
-  provenance.set(row, { model: schema.name, key, snapshot });
+  provenance.set(row, { model: schema.name, connection, key, snapshot });
 }
 
 export function provenanceOf(row: unknown): Provenance | undefined {

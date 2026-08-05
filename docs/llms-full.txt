@@ -3918,6 +3918,15 @@ falls back to the default: `Subscription.on("analitycs")` running on the hot pat
 incident the second pool was configured to prevent, and it would arrive weeks later with nothing
 pointing at the typo.
 
+`query`, `execute` and `transaction` on a handle *reject*, so a `.catch()` catches a wrong name or a
+refusal. The `sql` and `dialect` getters have nowhere to put a rejection and throw synchronously
+instead — and `DB.connection(name).sql` is Bun's raw template, so it runs on that connection's
+**pool** rather than on an open transaction, exactly as `DB.sql` always has. Use `query` and
+`execute` when the difference matters.
+
+A `save` writes back to the connection its row was read on, since a tracked row outlives the scope
+that produced it — see [Rows & entities](./orm-rows-and-entities.md).
+
 ### A transaction cannot span two connections
 
 This is the constraint to design around, and it is enforced rather than documented:
@@ -4553,7 +4562,6 @@ might lift next release.
   registry by name, so registering them at boot is what makes sign-in work.
 - **[Authorization](./authorization.md)** — route-level authorization, which policies complement
   rather than replace.
-
 ---
 
 ## Rows and entities
@@ -4660,11 +4668,36 @@ which row to update, and `save` says so rather than failing further down with a 
 instant the update happened rather than the one you fetched. Anything else the database rewrote
 comes back too.
 
+### It saves back to the connection the row came from
+
+If you read the row on a [named connection](./orm.md#connections), `save` writes it there:
+
+```ts
+const [row] = await User.on("analytics").findMany({}, { track: true })
+row.name = "changed"
+await User.save(row)                    // updates "analytics", with nothing said here
+```
+
+This is the one place a connection is not resolved from the surrounding scope, and it is why the
+connection is part of provenance alongside the model and the primary key. A tracked row is an
+ordinary object: it outlives the query that produced it, so by the time it is saved — three
+functions later, from code that never mentioned a connection — there is no scope left to read.
+Resolved the other way, `save` would compile a correct `update` and send it to the default
+connection, where the same id usually names a real and different row.
+
+Naming a *different* connection is a contradiction rather than an instruction and raises:
+`User.on("default").save(rowFromAnalytics)`. Copying a row between connections is a write in its
+own right — say it with `update`, where the `where` and the `data` are both visible.
+
+`wrap` carries the connection across too, so `User.wrap(row).save()` goes where `row` came from.
+
 ### Everything else still applies
 
 `save` compiles through the same path as any other write, so [policies](./orm.md#policies)
 scope it, `@updatedAt` stamps it, an open transaction contains it, and two saves touching the
-same columns share one cached plan.
+same columns share one cached plan. Inside a transaction on *another* connection it raises
+`CrossConnectionTransactionError` instead: that update cannot join the transaction, so it must not
+run at all.
 
 ## Level 3 — `wrap`, for behaviour
 
@@ -4738,8 +4771,6 @@ await Model.transaction(async () => {
 If this tier is ever pursued properly it gets its own plan and its own decision about whether
 the ORM is the product rather than one part of the framework. Until then, the levels above are
 what there is, and they are complete as described.
-
-
 ---
 
 ## Authentication

@@ -11,7 +11,14 @@ import {
 import { DB } from "gemi/facades";
 import { Application } from "gemi/foundation";
 import { Model, clearPlanCache, sql } from "gemi/orm";
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  test,
+} from "vitest";
 
 import { applyMigrations } from "./scratch";
 import { User } from "./User";
@@ -104,9 +111,11 @@ describe("named connections", () => {
 
   /** Emails, since `id` restarts from 1 in both files and cannot tell them apart. */
   const emails = async (client: SQL) =>
-    ((await client.unsafe(`select "email" from "User" order by "email"`)) as any[]).map(
-      (row) => row.email,
-    );
+    (
+      (await client.unsafe(
+        `select "email" from "User" order by "email"`,
+      )) as any[]
+    ).map((row) => row.email);
 
   test("a query without a connection goes to the default one", async () => {
     await User.create({ data: { email: "hot@example.dev" } });
@@ -194,7 +203,9 @@ describe("named connections", () => {
     const there = (await analytics.unsafe(
       `select count(*) as c from "Account"`,
     )) as any;
-    const here = (await hot.unsafe(`select count(*) as c from "Account"`)) as any;
+    const here = (await hot.unsafe(
+      `select count(*) as c from "Account"`,
+    )) as any;
 
     expect(there[0].c).toBe(1);
     expect(here[0].c).toBe(0);
@@ -206,9 +217,9 @@ describe("named connections", () => {
    * was configured to prevent, weeks later, with nothing pointing at the typo.
    */
   test("an unknown connection raises rather than falling back", async () => {
-    await expect(
-      User.on("analitycs").findMany({}),
-    ).rejects.toThrow(UnknownConnectionError);
+    await expect(User.on("analitycs").findMany({})).rejects.toThrow(
+      UnknownConnectionError,
+    );
 
     expect(await emails(hot)).toEqual([]);
   });
@@ -329,6 +340,96 @@ describe("named connections", () => {
 
       expect(refused).toBeInstanceOf(CrossConnectionTransactionError);
       expect(await emails(hot)).toEqual(["kept@example.dev"]);
+    });
+  });
+
+  /**
+   * `save` writes back to the connection the row was read on.
+   *
+   * The one piece of connection state that cannot be ambient: a tracked row is
+   * an ordinary object that outlives the scope that produced it, so by the time
+   * it is saved the scope is gone. It was reported in review, and the failure it
+   * produced is the worst shape available here — `save` compiled a correct
+   * `update` and sent it to the *other* database, where in production the same
+   * id names a real and different row. No error, one wrong row.
+   */
+  describe("save", () => {
+    beforeEach(async () => {
+      for (const [client, label] of [
+        [hot, "hot"],
+        [analytics, "cold"],
+      ] as const) {
+        await client.unsafe(
+          `insert into "User" ("id", "publicId", "name", "email", "createdAt", "updatedAt")
+           values (1, 'p-${label}', '${label}-original', '${label}@example.dev', 0, 0)`,
+        );
+      }
+    });
+
+    const names = async (client: SQL) =>
+      ((await client.unsafe(`select "name" from "User"`)) as any[]).map(
+        (row) => row.name,
+      );
+
+    test("a row read on a named connection is saved back to it", async () => {
+      const [row] = await User.on("analytics").findMany({}, { track: true });
+      row.name = "written-by-save";
+
+      await User.save(row);
+
+      expect(await names(analytics)).toEqual(["written-by-save"]);
+      expect(await names(hot)).toEqual(["hot-original"]);
+    });
+
+    test("...including from an instance `wrap` built", async () => {
+      const [row] = await User.on("analytics").findMany({}, { track: true });
+      const user = User.wrap(row);
+      user.name = "written-by-wrap";
+
+      await user.save();
+
+      expect(await names(analytics)).toEqual(["written-by-wrap"]);
+      expect(await names(hot)).toEqual(["hot-original"]);
+    });
+
+    test("naming a different connection is a contradiction, and raises", async () => {
+      const [row] = await User.on("analytics").findMany({}, { track: true });
+      row.name = "written-by-save";
+
+      await expect(User.on("default").save(row)).rejects.toThrow(
+        /read on the "analytics" connection and this save names "default"/,
+      );
+
+      expect(await names(hot)).toEqual(["hot-original"]);
+      expect(await names(analytics)).toEqual(["cold-original"]);
+    });
+
+    /**
+     * The update cannot join a transaction on another connection, so it must
+     * not run at all — the same refusal every other statement gets, reached
+     * through the one path that carries its connection in data.
+     */
+    test("saving into a transaction on another connection is refused", async () => {
+      const [row] = await User.on("analytics").findMany({}, { track: true });
+      row.name = "written-by-save";
+
+      await expect(
+        Model.transaction(async () => {
+          await User.save(row);
+        }),
+      ).rejects.toThrow(CrossConnectionTransactionError);
+
+      expect(await names(analytics)).toEqual(["cold-original"]);
+    });
+
+    test("an ordinary save still goes to the default connection", async () => {
+      const [row] = await User.findMany({}, { track: true });
+      row.name = "written-by-save";
+
+      await User.save(row);
+
+      expect(await names(hot)).toEqual(["written-by-save"]);
+      expect(await names(analytics)).toEqual(["cold-original"]);
     });
   });
 

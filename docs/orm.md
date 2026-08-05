@@ -1154,6 +1154,15 @@ falls back to the default: `Subscription.on("analitycs")` running on the hot pat
 incident the second pool was configured to prevent, and it would arrive weeks later with nothing
 pointing at the typo.
 
+`query`, `execute` and `transaction` on a handle *reject*, so a `.catch()` catches a wrong name or a
+refusal. The `sql` and `dialect` getters have nowhere to put a rejection and throw synchronously
+instead — and `DB.connection(name).sql` is Bun's raw template, so it runs on that connection's
+**pool** rather than on an open transaction, exactly as `DB.sql` always has. Use `query` and
+`execute` when the difference matters.
+
+A `save` writes back to the connection its row was read on, since a tracked row outlives the scope
+that produced it — see [Rows & entities](./orm-rows-and-entities.md).
+
 ### A transaction cannot span two connections
 
 This is the constraint to design around, and it is enforced rather than documented:

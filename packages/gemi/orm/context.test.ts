@@ -557,9 +557,13 @@ describe("the ambient connection", () => {
   test("a named transaction puts its connection in scope, and takes it out again", async () => {
     const pool = fakePool("analytics");
 
-    await withTransaction(pool, async () => {
-      expect(currentConnectionName()).toBe("analytics");
-    }, { connection: "analytics" });
+    await withTransaction(
+      pool,
+      async () => {
+        expect(currentConnectionName()).toBe("analytics");
+      },
+      { connection: "analytics" },
+    );
 
     expect(currentConnectionName()).toBe("default");
   });
@@ -574,19 +578,33 @@ describe("the ambient connection", () => {
   test("an unqualified statement inside one is not refused by it", async () => {
     const pool = fakePool("analytics");
 
-    await withTransaction(pool, async () => {
-      expect(() => assertConnectionUsable(currentConnectionName())).not.toThrow();
-    }, { connection: "analytics" });
+    await withTransaction(
+      pool,
+      async () => {
+        expect(() =>
+          assertConnectionUsable(currentConnectionName()),
+        ).not.toThrow();
+      },
+      { connection: "analytics" },
+    );
   });
 
   test("naming the same connection again is a savepoint, not a refusal", async () => {
     const pool = fakePool("analytics");
 
-    await withTransaction(pool, async () => {
-      await withTransaction(pool, async () => {
-        expect(transactionDepth()).toBe(1);
-      }, { connection: "analytics" });
-    }, { connection: "analytics" });
+    await withTransaction(
+      pool,
+      async () => {
+        await withTransaction(
+          pool,
+          async () => {
+            expect(transactionDepth()).toBe(1);
+          },
+          { connection: "analytics" },
+        );
+      },
+      { connection: "analytics" },
+    );
   });
 
   /**
@@ -599,22 +617,26 @@ describe("the ambient connection", () => {
     const hot = fakePool("default");
     const analytics = fakePool("analytics");
 
-    await withTransaction(hot, async () => {
-      // Synchronously, before `begin` — this function already throws that way
-      // for a closed pool, and the public doors (`Model.transaction`,
-      // `DB.connection(name).transaction`) are `async`, so what an application
-      // sees is a rejection either way.
-      expect(() =>
-        withTransaction(analytics, async () => "unreachable", {
-          connection: "analytics",
-        }),
-      ).toThrow(CrossConnectionTransactionError);
+    await withTransaction(
+      hot,
+      async () => {
+        // Synchronously, before `begin` — this function already throws that way
+        // for a closed pool, and the public doors (`Model.transaction`,
+        // `DB.connection(name).transaction`) are `async`, so what an application
+        // sees is a rejection either way.
+        expect(() =>
+          withTransaction(analytics, async () => "unreachable", {
+            connection: "analytics",
+          }),
+        ).toThrow(CrossConnectionTransactionError);
 
-      // Nothing was issued on either handle, which is the half that says it
-      // refused rather than ran and rolled back.
-      expect(analytics.log).toEqual([]);
-      expect(hot.log).toEqual([]);
-    }, { connection: "default" });
+        // Nothing was issued on either handle, which is the half that says it
+        // refused rather than ran and rolled back.
+        expect(analytics.log).toEqual([]);
+        expect(hot.log).toEqual([]);
+      },
+      { connection: "default" },
+    );
   });
 
   test("a statement naming another connection is refused too", async () => {
@@ -638,19 +660,47 @@ describe("the ambient connection", () => {
   });
 
   test("entering a connection merges the scope rather than replacing it", async () => {
+    await runAsSystem(async () => {
+      await runOnConnection("analytics", async () => {
+        // Suspended policies survive naming a connection — the same rule
+        // `asSystem` and `asUser` follow, and the one that would otherwise make
+        // a connection switch quietly re-enable them for its subtree.
+        expect(currentConnectionName()).toBe("analytics");
+        expect(isSystemScope()).toBe(true);
+      });
+    });
+  });
+
+  /**
+   * Entering a connection is *where* the refusal lives, and this is the reason
+   * it cannot live at the doors instead.
+   *
+   * The scope carries the handle and the connection name together. Switching
+   * the name with a transaction still open would leave a store that reads "a
+   * transaction on analytics" while holding the **default** connection's
+   * handle — after which every check downstream agrees with itself and the
+   * statement runs on the wrong connection's transaction, which is the failure
+   * this whole feature is about.
+   *
+   * Found by `Model.save`: it routes to the connection its row was read on, so
+   * it is the one caller that switches connections with a transaction already
+   * open. Review caught the missing stamp; this is the mechanism underneath it.
+   */
+  test("switching connections under an open transaction is refused, not merged", async () => {
     const pool = fakePool("default");
 
-    await runAsSystem(async () => {
-      await withTransaction(pool, async (tx) => {
-        await runOnConnection("analytics", async () => {
-          // The transaction handle and the suspended policies both survive
-          // naming a connection — the same rule `asSystem` and `asUser` follow,
-          // and the one that would otherwise drop an open handle.
-          expect(currentConnectionName()).toBe("analytics");
-          expect(currentTransaction()).toBe(tx);
-          expect(isSystemScope()).toBe(true);
-        });
-      });
+    await withTransaction(pool, async (tx) => {
+      // Synchronously, like `withTransaction`'s own refusal above — every
+      // caller of this is an `async` function, so an application sees a
+      // rejection.
+      expect(() =>
+        runOnConnection("analytics", async () => "unreachable"),
+      ).toThrow(CrossConnectionTransactionError);
+
+      // The scope the callback would have run in was never entered: the handle
+      // and the name still agree.
+      expect(currentTransaction()).toBe(tx);
+      expect(currentConnectionName()).toBe("default");
     });
   });
 
