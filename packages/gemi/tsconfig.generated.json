@@ -1,0 +1,40 @@
+{
+  // The generator's output, typechecked against the runtime it is generated
+  // for — the gate that would have caught #319's `static $generated = true`.
+  //
+  // That line widened to `boolean` against a `Model` declaring `?: true`, so
+  // every emitted class became a TS2417 the moment an app regenerated: 15 in
+  // this repository's template, 79 in the app that reported it. Neither check
+  // that runs could see it. `tsconfig.json` next door covers `bin/orm` — the
+  // code that *writes* the artifact — and not the artifact; the template's own
+  // `tsc --noEmit` does cover it, and reports 277 pre-existing errors in the
+  // template's app code alongside it, so 15 new ones are indistinguishable from
+  // the noise already there.
+  //
+  // **On this side of the repository rather than the template's**, because the
+  // options have to be ones something is already green under. gemi's own source
+  // is green under these and is not under the template's, and the artifact
+  // imports `gemi/orm` — so checking it from the template drags every gemi
+  // source file in under options it was never checked against, and the noise
+  // problem comes back one level down.
+  //
+  // `generated-lists` is the Postgres-only scalar-list schema's output. It is
+  // gitignored and generated on demand, so this matches nothing for it in a
+  // fresh clone and checks it in the job that creates it.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "emitDeclarationOnly": false,
+    // The artifact imports `gemi/orm` by package name, the way an application's
+    // does. Nothing resolves that from inside the package itself, so it is
+    // pointed at the source the template's `node_modules/gemi` symlink reaches.
+    "paths": {
+      "gemi/orm": ["./orm/index.ts"]
+    }
+  },
+  "include": [
+    "orm",
+    "../../templates/saas-starter/app/models/generated/**/*.ts",
+    "../../templates/saas-starter/app/models/generated-lists/**/*.ts"
+  ]
+}

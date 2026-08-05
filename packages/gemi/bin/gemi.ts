@@ -9,6 +9,7 @@ import { build } from "vite";
 import gemiVite from "../vite";
 
 import { program } from "commander";
+import { CheckModelsError, checkModels, printReport } from "./check-models";
 import { ApiManifestGenerator } from "./ide/generateApiManifest";
 
 // `bun --preload` args for the app's optional `app/preload.ts`. Preloaded (after
@@ -189,6 +190,71 @@ program
     );
     await runMigrate({ rootDir, dryRun: options.dryRun });
   });
+
+// A command group rather than a `check:models` colon name, which is the shape
+// the other namespaced commands use. Those namespaces are *areas* — `app:`,
+// `ide:` — and this one is a verb, so it reads with the bare verbs at the top
+// level (`gemi dev`, `gemi build`) and leaves room for `gemi check <other>`.
+const check = program
+  .command("check")
+  .description("Checks that can be run in CI, on a project that is not running");
+
+check
+  .command("models")
+  .description(
+    "Report policied model classes that the modules `Kernel.models` declares " +
+      "do not register — the leak `Kernel.models` cannot see, because it can " +
+      "only audit the modules it is handed. Imports every file it walks, so a " +
+      "model file that does work when imported does it here; use --ignore",
+  )
+  .option(
+    "--dir <path>",
+    "Model directory to walk, relative to the project root",
+    "app/models",
+  )
+  .option(
+    "--models <paths>",
+    "Module paths to register from, instead of reading `Kernel.models` — for " +
+      "a Kernel whose import graph needs build-time transforms this command " +
+      "cannot apply. Comma-separated, and repeatable",
+    (value: string, previous: string[]) => [
+      ...previous,
+      ...value.split(",").map((entry) => entry.trim()).filter(Boolean),
+    ],
+    [] as string[],
+  )
+  .option(
+    "--ignore <paths>",
+    "Paths under --dir to skip, for model-adjacent code that runs something " +
+      "when imported. Comma-separated, and repeatable",
+    // Accumulating, because a coercion that drops `previous` makes
+    // `--ignore a --ignore b` keep only `b` — silently, and while reading like
+    // it took both.
+    (value: string, previous: string[]) => [
+      ...previous,
+      ...value.split(",").map((entry) => entry.trim()).filter(Boolean),
+    ],
+    [] as string[],
+  )
+  .action(
+    async (options: { dir: string; ignore: string[]; models: string[] }) => {
+      try {
+        const report = await checkModels({
+          rootDir: path.resolve(process.cwd()),
+          modelsDir: options.dir,
+          ignore: options.ignore,
+          models: options.models,
+        });
+        process.exit(printReport(report));
+      } catch (error) {
+        // A `CheckModelsError` is a sentence written for this moment; anything
+        // else is a bug and keeps its stack.
+        if (!(error instanceof CheckModelsError)) throw error;
+        console.error(error.message);
+        process.exit(1);
+      }
+    },
+  );
 
 program.command("ide:generate-api-manifest").action(async () => {
   const parser = new ApiManifestGenerator();

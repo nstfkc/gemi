@@ -114,6 +114,19 @@ export abstract class AccountScopedPolicy extends ScopedPolicy<
 export class AccountModel extends Model {
   static $schema = schema.Account;
 
+  // Says this class came out of the generator, so `registerModels` can prefer
+  // the application's subclass over it without having to *infer* which is which.
+  // It reads own-vs-inherited, and a subclass inherits this rather than
+  // declaring it — so the mark is on exactly one class per model. See
+  // `isGeneratedBase`.
+  //
+  // `readonly` so the initialiser keeps the literal type. `Model` declares this
+  // `?: true`, and a mutable `= true` widens to `boolean` — which is not
+  // assignable to it, so every class in this file was a TS2417 until a reviewer
+  // regenerating a 79-model schema found 79 of them. `tsconfig.generated.json`
+  // is the check that now says so here rather than in an app.
+  static readonly $generated = true;
+
   // Narrowed from `Model`'s `PolicyEntry[]` to this model's own, so a policy
   // written for another model is a type error here rather than a scope compiled
   // against columns that do not exist.
@@ -292,6 +305,19 @@ export abstract class LedgerScopedPolicy extends ScopedPolicy<
 
 export class LedgerModel extends Model {
   static $schema = schema.Ledger;
+
+  // Says this class came out of the generator, so `registerModels` can prefer
+  // the application's subclass over it without having to *infer* which is which.
+  // It reads own-vs-inherited, and a subclass inherits this rather than
+  // declaring it — so the mark is on exactly one class per model. See
+  // `isGeneratedBase`.
+  //
+  // `readonly` so the initialiser keeps the literal type. `Model` declares this
+  // `?: true`, and a mutable `= true` widens to `boolean` — which is not
+  // assignable to it, so every class in this file was a TS2417 until a reviewer
+  // regenerating a 79-model schema found 79 of them. `tsconfig.generated.json`
+  // is the check that now says so here rather than in an app.
+  static readonly $generated = true;
 
   // Narrowed from `Model`'s `PolicyEntry[]` to this model's own, so a policy
   // written for another model is a type error here rather than a scope compiled
@@ -476,6 +502,19 @@ export abstract class LedgerEntryScopedPolicy extends ScopedPolicy<
 export class LedgerEntryModel extends Model {
   static $schema = schema.LedgerEntry;
 
+  // Says this class came out of the generator, so `registerModels` can prefer
+  // the application's subclass over it without having to *infer* which is which.
+  // It reads own-vs-inherited, and a subclass inherits this rather than
+  // declaring it — so the mark is on exactly one class per model. See
+  // `isGeneratedBase`.
+  //
+  // `readonly` so the initialiser keeps the literal type. `Model` declares this
+  // `?: true`, and a mutable `= true` widens to `boolean` — which is not
+  // assignable to it, so every class in this file was a TS2417 until a reviewer
+  // regenerating a 79-model schema found 79 of them. `tsconfig.generated.json`
+  // is the check that now says so here rather than in an app.
+  static readonly $generated = true;
+
   // Narrowed from `Model`'s `PolicyEntry[]` to this model's own, so a policy
   // written for another model is a type error here rather than a scope compiled
   // against columns that do not exist.
@@ -657,6 +696,19 @@ export abstract class MagicLinkTokenScopedPolicy extends ScopedPolicy<
 export class MagicLinkTokenModel extends Model {
   static $schema = schema.MagicLinkToken;
 
+  // Says this class came out of the generator, so `registerModels` can prefer
+  // the application's subclass over it without having to *infer* which is which.
+  // It reads own-vs-inherited, and a subclass inherits this rather than
+  // declaring it — so the mark is on exactly one class per model. See
+  // `isGeneratedBase`.
+  //
+  // `readonly` so the initialiser keeps the literal type. `Model` declares this
+  // `?: true`, and a mutable `= true` widens to `boolean` — which is not
+  // assignable to it, so every class in this file was a TS2417 until a reviewer
+  // regenerating a 79-model schema found 79 of them. `tsconfig.generated.json`
+  // is the check that now says so here rather than in an app.
+  static readonly $generated = true;
+
   // Narrowed from `Model`'s `PolicyEntry[]` to this model's own, so a policy
   // written for another model is a type error here rather than a scope compiled
   // against columns that do not exist.
@@ -835,6 +887,19 @@ export abstract class MembershipScopedPolicy extends ScopedPolicy<
 
 export class MembershipModel extends Model {
   static $schema = schema.Membership;
+
+  // Says this class came out of the generator, so `registerModels` can prefer
+  // the application's subclass over it without having to *infer* which is which.
+  // It reads own-vs-inherited, and a subclass inherits this rather than
+  // declaring it — so the mark is on exactly one class per model. See
+  // `isGeneratedBase`.
+  //
+  // `readonly` so the initialiser keeps the literal type. `Model` declares this
+  // `?: true`, and a mutable `= true` widens to `boolean` — which is not
+  // assignable to it, so every class in this file was a TS2417 until a reviewer
+  // regenerating a 79-model schema found 79 of them. `tsconfig.generated.json`
+  // is the check that now says so here rather than in an app.
+  static readonly $generated = true;
 
   // Narrowed from `Model`'s `PolicyEntry[]` to this model's own, so a policy
   // written for another model is a type error here rather than a scope compiled
@@ -1023,6 +1088,19 @@ export abstract class OrganizationScopedPolicy extends ScopedPolicy<
 export class OrganizationModel extends Model {
   static $schema = schema.Organization;
 
+  // Says this class came out of the generator, so `registerModels` can prefer
+  // the application's subclass over it without having to *infer* which is which.
+  // It reads own-vs-inherited, and a subclass inherits this rather than
+  // declaring it — so the mark is on exactly one class per model. See
+  // `isGeneratedBase`.
+  //
+  // `readonly` so the initialiser keeps the literal type. `Model` declares this
+  // `?: true`, and a mutable `= true` widens to `boolean` — which is not
+  // assignable to it, so every class in this file was a TS2417 until a reviewer
+  // regenerating a 79-model schema found 79 of them. `tsconfig.generated.json`
+  // is the check that now says so here rather than in an app.
+  static readonly $generated = true;
+
   // Narrowed from `Model`'s `PolicyEntry[]` to this model's own, so a policy
   // written for another model is a type error here rather than a scope compiled
   // against columns that do not exist.
@@ -1210,6 +1288,19 @@ export abstract class OrganizationInvitationScopedPolicy extends ScopedPolicy<
 export class OrganizationInvitationModel extends Model {
   static $schema = schema.OrganizationInvitation;
 
+  // Says this class came out of the generator, so `registerModels` can prefer
+  // the application's subclass over it without having to *infer* which is which.
+  // It reads own-vs-inherited, and a subclass inherits this rather than
+  // declaring it — so the mark is on exactly one class per model. See
+  // `isGeneratedBase`.
+  //
+  // `readonly` so the initialiser keeps the literal type. `Model` declares this
+  // `?: true`, and a mutable `= true` widens to `boolean` — which is not
+  // assignable to it, so every class in this file was a TS2417 until a reviewer
+  // regenerating a 79-model schema found 79 of them. `tsconfig.generated.json`
+  // is the check that now says so here rather than in an app.
+  static readonly $generated = true;
+
   // Narrowed from `Model`'s `PolicyEntry[]` to this model's own, so a policy
   // written for another model is a type error here rather than a scope compiled
   // against columns that do not exist.
@@ -1391,6 +1482,19 @@ export abstract class PasswordResetTokenScopedPolicy extends ScopedPolicy<
 export class PasswordResetTokenModel extends Model {
   static $schema = schema.PasswordResetToken;
 
+  // Says this class came out of the generator, so `registerModels` can prefer
+  // the application's subclass over it without having to *infer* which is which.
+  // It reads own-vs-inherited, and a subclass inherits this rather than
+  // declaring it — so the mark is on exactly one class per model. See
+  // `isGeneratedBase`.
+  //
+  // `readonly` so the initialiser keeps the literal type. `Model` declares this
+  // `?: true`, and a mutable `= true` widens to `boolean` — which is not
+  // assignable to it, so every class in this file was a TS2417 until a reviewer
+  // regenerating a 79-model schema found 79 of them. `tsconfig.generated.json`
+  // is the check that now says so here rather than in an app.
+  static readonly $generated = true;
+
   // Narrowed from `Model`'s `PolicyEntry[]` to this model's own, so a policy
   // written for another model is a type error here rather than a scope compiled
   // against columns that do not exist.
@@ -1567,6 +1671,19 @@ export abstract class PostScopedPolicy extends ScopedPolicy<
 
 export class PostModel extends Model {
   static $schema = schema.Post;
+
+  // Says this class came out of the generator, so `registerModels` can prefer
+  // the application's subclass over it without having to *infer* which is which.
+  // It reads own-vs-inherited, and a subclass inherits this rather than
+  // declaring it — so the mark is on exactly one class per model. See
+  // `isGeneratedBase`.
+  //
+  // `readonly` so the initialiser keeps the literal type. `Model` declares this
+  // `?: true`, and a mutable `= true` widens to `boolean` — which is not
+  // assignable to it, so every class in this file was a TS2417 until a reviewer
+  // regenerating a 79-model schema found 79 of them. `tsconfig.generated.json`
+  // is the check that now says so here rather than in an app.
+  static readonly $generated = true;
 
   // Narrowed from `Model`'s `PolicyEntry[]` to this model's own, so a policy
   // written for another model is a type error here rather than a scope compiled
@@ -1758,6 +1875,19 @@ export abstract class SessionScopedPolicy extends ScopedPolicy<
 
 export class SessionModel extends Model {
   static $schema = schema.Session;
+
+  // Says this class came out of the generator, so `registerModels` can prefer
+  // the application's subclass over it without having to *infer* which is which.
+  // It reads own-vs-inherited, and a subclass inherits this rather than
+  // declaring it — so the mark is on exactly one class per model. See
+  // `isGeneratedBase`.
+  //
+  // `readonly` so the initialiser keeps the literal type. `Model` declares this
+  // `?: true`, and a mutable `= true` widens to `boolean` — which is not
+  // assignable to it, so every class in this file was a TS2417 until a reviewer
+  // regenerating a 79-model schema found 79 of them. `tsconfig.generated.json`
+  // is the check that now says so here rather than in an app.
+  static readonly $generated = true;
 
   // Narrowed from `Model`'s `PolicyEntry[]` to this model's own, so a policy
   // written for another model is a type error here rather than a scope compiled
@@ -1954,6 +2084,19 @@ export abstract class SocialAccountScopedPolicy extends ScopedPolicy<
 export class SocialAccountModel extends Model {
   static $schema = schema.SocialAccount;
 
+  // Says this class came out of the generator, so `registerModels` can prefer
+  // the application's subclass over it without having to *infer* which is which.
+  // It reads own-vs-inherited, and a subclass inherits this rather than
+  // declaring it — so the mark is on exactly one class per model. See
+  // `isGeneratedBase`.
+  //
+  // `readonly` so the initialiser keeps the literal type. `Model` declares this
+  // `?: true`, and a mutable `= true` widens to `boolean` — which is not
+  // assignable to it, so every class in this file was a TS2417 until a reviewer
+  // regenerating a 79-model schema found 79 of them. `tsconfig.generated.json`
+  // is the check that now says so here rather than in an app.
+  static readonly $generated = true;
+
   // Narrowed from `Model`'s `PolicyEntry[]` to this model's own, so a policy
   // written for another model is a type error here rather than a scope compiled
   // against columns that do not exist.
@@ -2130,6 +2273,19 @@ export abstract class TagScopedPolicy extends ScopedPolicy<
 
 export class TagModel extends Model {
   static $schema = schema.Tag;
+
+  // Says this class came out of the generator, so `registerModels` can prefer
+  // the application's subclass over it without having to *infer* which is which.
+  // It reads own-vs-inherited, and a subclass inherits this rather than
+  // declaring it — so the mark is on exactly one class per model. See
+  // `isGeneratedBase`.
+  //
+  // `readonly` so the initialiser keeps the literal type. `Model` declares this
+  // `?: true`, and a mutable `= true` widens to `boolean` — which is not
+  // assignable to it, so every class in this file was a TS2417 until a reviewer
+  // regenerating a 79-model schema found 79 of them. `tsconfig.generated.json`
+  // is the check that now says so here rather than in an app.
+  static readonly $generated = true;
 
   // Narrowed from `Model`'s `PolicyEntry[]` to this model's own, so a policy
   // written for another model is a type error here rather than a scope compiled
@@ -2337,6 +2493,19 @@ export abstract class UserScopedPolicy extends ScopedPolicy<
 
 export class UserModel extends Model {
   static $schema = schema.User;
+
+  // Says this class came out of the generator, so `registerModels` can prefer
+  // the application's subclass over it without having to *infer* which is which.
+  // It reads own-vs-inherited, and a subclass inherits this rather than
+  // declaring it — so the mark is on exactly one class per model. See
+  // `isGeneratedBase`.
+  //
+  // `readonly` so the initialiser keeps the literal type. `Model` declares this
+  // `?: true`, and a mutable `= true` widens to `boolean` — which is not
+  // assignable to it, so every class in this file was a TS2417 until a reviewer
+  // regenerating a 79-model schema found 79 of them. `tsconfig.generated.json`
+  // is the check that now says so here rather than in an app.
+  static readonly $generated = true;
 
   // Narrowed from `Model`'s `PolicyEntry[]` to this model's own, so a policy
   // written for another model is a type error here rather than a scope compiled

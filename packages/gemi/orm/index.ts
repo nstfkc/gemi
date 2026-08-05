@@ -140,7 +140,11 @@ export {
   type SqlFragment,
 } from "./sql";
 
-export { assertPoliciesRegistered, registerModels } from "./registration";
+export {
+  assertPoliciesRegistered,
+  auditModelRegistrations,
+  registerModels,
+} from "./registration";
 
 export {
   softDelete,

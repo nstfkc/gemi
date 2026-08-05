@@ -12,7 +12,7 @@ bun run build
 bun run start
 ```
 
-> **Note:** Apart from `gemi migrate --dry-run`, the commands take no flags or options — each is a bare subcommand. gemi discovers your project from the current working directory (it expects `app/` and, for tooling commands, `app/kernel/Kernel.ts`).
+> **Note:** Apart from `gemi migrate --dry-run` and `gemi check models`, the commands take no flags or options — each is a bare subcommand. gemi discovers your project from the current working directory (it expects `app/` and, for tooling commands, `app/kernel/Kernel.ts`).
 
 ## `gemi dev`
 
@@ -75,6 +75,39 @@ Anything it cannot translate is left on disk and reported rather than guessed at
 It also annotates APIs retired after 0.43 rather than rewriting them, which is the half that applies to an app already on the config + container layout. Imports of the retired authentication adapters (`IAuthenticationAdapter`, `PrismaAuthenticationAdapter`, `OrmAuthenticationAdapter`) and the `userProvider` field in `app/config/auth.ts` get a TODO naming their replacement — subclass `UserProvider` and rebind `AuthManager` — because the substitute is an app-specific class no codemod can write. Retired fields are marked in place, never deleted: the value is an expression your app wrote, and removing it can strand an import or an instantiation you still need. See [Authentication](./authentication.md#changing-a-query).
 
 > The provider-to-config half only runs when `app/kernel/providers/` exists. Without it that step is skipped and your `Kernel.ts` is left alone — so re-running the command on an already-migrated app is safe, and the retired-API pass above is all it does.
+
+## `gemi check models`
+
+Reports model classes carrying policies that the modules your Kernel declares do not register.
+
+```bash
+gemi check models
+gemi check models --dir app/models --ignore bench,vendor
+```
+
+`Kernel.models` registers every model class in the modules it is handed and refuses a set where a policied class would lose its name. It can only see the modules it is given, so the mistake moves one level up: a policied `Membership` in `app/models/Membership.ts` that `app/models/index.ts` forgets to re-export leaves the generated base owning the name, and every nested `include` of that model comes back unscoped with nothing raised.
+
+This command walks `app/models`, imports every file, and asks the same question of the classes the directory holds. Findings are printed under their file with the export that fixes them, and the command exits `1` — so it belongs in CI:
+
+```yaml
+- run: bunx gemi check models
+```
+
+- `--dir <path>` — walk somewhere other than `app/models`.
+- `--ignore <paths>` — paths under `--dir` to skip. Comma-separated, and repeatable. What was skipped is printed.
+- `--models <paths>` — register from these modules instead of reading `Kernel.models`. Comma-separated, and repeatable.
+
+> **When you need `--models`:** the command reads the module list off your Kernel, which means importing it — and a Kernel's import graph does not have to survive a bare runtime import. `?raw` imports, virtual modules and asset imports are all ordinary in a gemi app, and a bundler resolves them where `await import()` does not. If loading the Kernel fails, the command says which file and exits `1` rather than passing green; naming the modules yourself is the way through:
+>
+> ```bash
+> gemi check models --models app/models/generated,app/models
+> ```
+>
+> This is not the tool guessing your model layout from a filename convention — that would let the check pass on an app whose Kernel declares nothing, which is the very state it exists to find. It's you stating the list, the same act as writing `models = [...]`, and the report prints how many models it registered so a wrong list is visible.
+
+> **Gotcha:** finding a class means evaluating the module that declares it, so every file walked is imported and a file that *does* something on import does it here. Tests, type tests, benchmarks, `.d.ts` files and directories with their own `package.json` are skipped already; `--ignore` is for the rest.
+
+It reports one thing: a class carrying policies the registered class does not. A typed view carrying its own narrowing, and an unpolicied class written against a model's schema, are both deliberately *not* reported — each is supposed to be absent from the declared modules, and exporting either would turn a working boot into `AmbiguousModelRegistrationError`. See [ORM → Your model class](./orm.md#your-model-class).
 
 ## `gemi ide:generate-api-manifest`
 

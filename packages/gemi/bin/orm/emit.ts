@@ -1075,6 +1075,19 @@ ${imports.map((name) => `  ${name},`).join("\n")}
 export class ${schema.name}Model extends Model {
   static $schema = schema.${schema.name};
 
+  // Says this class came out of the generator, so \`registerModels\` can prefer
+  // the application's subclass over it without having to *infer* which is which.
+  // It reads own-vs-inherited, and a subclass inherits this rather than
+  // declaring it — so the mark is on exactly one class per model. See
+  // \`isGeneratedBase\`.
+  //
+  // \`readonly\` so the initialiser keeps the literal type. \`Model\` declares this
+  // \`?: true\`, and a mutable \`= true\` widens to \`boolean\` — which is not
+  // assignable to it, so every class in this file was a TS2417 until a reviewer
+  // regenerating a 79-model schema found 79 of them. \`tsconfig.generated.json\`
+  // is the check that now says so here rather than in an app.
+  static readonly $generated = true;
+
   // Narrowed from \`Model\`'s \`PolicyEntry[]\` to this model's own, so a policy
   // written for another model is a type error here rather than a scope compiled
   // against columns that do not exist.

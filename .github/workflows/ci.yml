@@ -120,6 +120,19 @@ jobs:
         run: bun run typecheck
         working-directory: packages/gemi
 
+      # The generator's *output*, compiled against the runtime it is generated
+      # for. The step above covers `bin/orm` — the code that writes the artifact
+      # — and not the artifact, and the two can disagree: #319 shipped a
+      # `static $generated = true` that widened to `boolean` against a base
+      # declaring `?: true`, so every emitted class was a TS2417 and every check
+      # here was green. It was found by an app regenerating a 79-model schema.
+      #
+      # After `prisma generate` above, so it reads the artifact this run
+      # produced rather than the one that happens to be committed.
+      - name: Typecheck the generated artifact
+        run: bunx tsc --noEmit -p tsconfig.generated.json
+        working-directory: packages/gemi
+
       # Everything except a named red set, rather than a path filter.
       #
       # This step used to run `vitest run orm database`, chosen so
@@ -157,6 +170,33 @@ jobs:
 
       - name: Template tests
         run: bun --bun vitest run app/models
+        working-directory: templates/saas-starter
+        env:
+          TZ: UTC
+
+      # `gemi check models`, against the one real project in this repository.
+      #
+      # `check-models.test.ts` covers the command over a fixture project, so
+      # what is left for this step is the one thing a fixture cannot do:
+      # resolve the app's *installed* `gemi/orm` — the same instance the model
+      # files register into — rather than the copy bundled into
+      # `dist/bin/gemi.js`. Get that wrong and the command reads an empty
+      # registry, finds nothing to report, and exits 0.
+      #
+      # Which is why the count is asserted rather than the exit code. A green
+      # run and a run that checked nothing print the same *shape* of line, and
+      # differ only in the number in it.
+      #
+      # `--ignore bench` because `app/models/bench/` is a benchmark harness that
+      # runs on import — which the command found by running it, and rewriting its
+      # report, the first time it was pointed at this directory. That is the
+      # hazard the flag exists for, so exercising the flag here is not
+      # incidental.
+      - name: Check the template's model registrations
+        run: |
+          output=$(bunx gemi check models --ignore bench)
+          echo "$output"
+          echo "$output" | grep -qE 'against [1-9][0-9]* registered models'
         working-directory: templates/saas-starter
         env:
           TZ: UTC

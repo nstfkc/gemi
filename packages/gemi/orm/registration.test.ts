@@ -5,6 +5,7 @@ import {
   UnregisteredPolicyClassError,
 } from "./errors";
 import { user } from "./fixtures";
+import { Model } from "./Model";
 import { policiesFor, type ModelPolicy } from "./policy";
 import { assertPoliciesRegistered, registerModels } from "./registration";
 import * as registry from "./registry";
@@ -571,16 +572,82 @@ describe("a view that narrows a model it does not own", () => {
 });
 
 /**
- * `elect` turns on `Object.hasOwn(candidate, "$schema")`, and the reader's
- * question at that line is what happens when it is wrong. A subclass that
- * redeclares `$schema` reads as a base, every candidate looks generated, and
- * the least derived wins — the base takes the name over the policied subclass.
+ * Which class the generator wrote — stated by the generator, and inferred only
+ * where there is no statement to read (#318).
  *
- * That is #316's arrangement, so what matters is that it does not pass
- * quietly.
+ * `elect` has to prefer an application's subclass over the base it extends,
+ * because electing the base is #316's leak in the one file an author is most
+ * likely to write it in. It used to answer "which is the base" with
+ * `Object.hasOwn(candidate, "$schema")` — true of the emitted class, false of a
+ * subclass. That is an inference about how the generator happens to be written,
+ * and it reads a subclass that redeclares `static $schema` as a base.
+ *
+ * `UserBase` above deliberately carries no mark, so every test in this file
+ * other than these exercises the fallback — which is what an app whose
+ * `app/models/generated` predates 0.51 will be running on.
  */
-describe("when the generated-base test guesses wrong", () => {
-  test("a subclass that redeclares $schema fails loudly rather than leaking", () => {
+describe("the generator's mark on its own output", () => {
+  class MarkedBase {
+    static $schema = user;
+    static $generated = true;
+  }
+
+  /**
+   * The #318 case, with the mark: the subclass redeclares `$schema`, is
+   * therefore indistinguishable from a base by the old inference, and still
+   * takes the name — because the mark is *owned* by one class per model and a
+   * subclass only inherits it.
+   */
+  test("a subclass that redeclares $schema still takes the name", () => {
+    class User extends MarkedBase {
+      static $schema = user;
+      static $policies = [scope];
+    }
+
+    expect(() => registerModels({ MarkedBase, User })).not.toThrow();
+    expect(registry.get("User")).toBe(User);
+  });
+
+  test("an ordinary subclass of a marked base takes the name too", () => {
+    class User extends MarkedBase {
+      static $policies = [scope];
+    }
+
+    registerModels({ MarkedBase, User });
+
+    expect(registry.get("User")).toBe(User);
+  });
+
+  /**
+   * The mark does not disturb the shape it was not added for: a policied view
+   * over a marked model is still refused rather than silently registered.
+   */
+  test("a marked base does not make a narrowing view acceptable", () => {
+    class User extends MarkedBase {
+      static $policies = [scope];
+    }
+    class AdminUser extends User {
+      static $policies = [other];
+    }
+
+    expect(() => registerModels({ MarkedBase, User, AdminUser })).toThrow(
+      UnregisteredPolicyClassError,
+    );
+  });
+
+  /**
+   * **Unmarked artifacts keep the old behaviour, including the old sharp
+   * edge.** The fallback is chosen by `"$generated" in candidate`, which walks
+   * the prototype chain — so it separates apps, not classes. An app on
+   * pre-0.51 generated files gets the inference for everything, and the
+   * redeclaring subclass still loses its name there.
+   *
+   * That is not silent, which is why the fallback is acceptable at all:
+   * `assertPoliciesRegistered` runs immediately after `elect`, sees a policied
+   * class that did not get its name, and refuses. Regenerating is the fix, and
+   * the error names both classes.
+   */
+  test("an unmarked base still fails loudly rather than leaking", () => {
     class User extends UserBase {
       static $schema = user;
       static $policies = [scope];
@@ -589,5 +656,27 @@ describe("when the generated-base test guesses wrong", () => {
     expect(() => registerModels({ UserBase, User })).toThrow(
       UnregisteredPolicyClassError,
     );
+  });
+
+  /**
+   * **`Model.$generated` must not exist at runtime**, and this is what says so.
+   *
+   * It is declared on `Model` for a type and a place to document it, with
+   * `declare` so nothing is emitted. Drop that keyword and the property exists,
+   * valued `undefined`, on every model class in every application — which makes
+   * `"$generated" in candidate` true everywhere, retires the fallback for apps
+   * that have nothing else to read, and hands every name back to the generated
+   * base.
+   */
+  test("Model carries no mark of its own", () => {
+    expect("$generated" in Model).toBe(false);
+  });
+
+  test("the generated base owns the mark and its subclass does not", () => {
+    class User extends MarkedBase {}
+
+    expect(Object.hasOwn(MarkedBase, "$generated")).toBe(true);
+    expect(Object.hasOwn(User, "$generated")).toBe(false);
+    expect("$generated" in User).toBe(true);
   });
 });

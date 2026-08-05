@@ -732,6 +732,57 @@ describe("emitArtifacts()", () => {
     expect(files["index.ts"]).toContain('register("Post", PostModel);');
   });
 
+  /**
+   * **The generator says which classes it wrote, rather than leaving it to be
+   * inferred (#318).**
+   *
+   * `registerModels` has to prefer an application's subclass over the base it
+   * extends when both are in one namespace, because electing the base is #316's
+   * leak. It used to decide that by asking whether a class declared `$schema`
+   * itself — true of the emitted base, false of a subclass — which is an
+   * inference about how this file happens to be written, and one a subclass
+   * redeclaring `static $schema` defeated.
+   *
+   * So this line is a contract between two files, and it is asserted at both
+   * ends: `isGeneratedBase` reads it, `registration.test.ts` in the template
+   * checks that real generator output still carries it.
+   *
+   * One class per model carries it, because the mark has to be *own* rather than
+   * inherited to say anything — a subclass inherits `true` and must still read
+   * as an application class.
+   */
+  test("marks each emitted base as generated", () => {
+    const models = files["models.ts"];
+
+    expect(models).toContain("static readonly $generated = true;");
+    expect(
+      [...models.matchAll(/^\s*static readonly \$generated = true;$/gm)],
+    ).toHaveLength(2);
+  });
+
+  /**
+   * **`readonly`, and the artifact does not typecheck without it.**
+   *
+   * `Model` declares `declare static $generated?: true`, deliberately the
+   * literal rather than `boolean` so that a hand-written `= false` is the type
+   * error `isGeneratedBase` reads it as. A mutable `static $generated = true`
+   * widens to `boolean`, which is not assignable to `true`, so every class in
+   * the emitted file becomes
+   *
+   *     TS2417: Class static side 'typeof AccountModel' incorrectly extends
+   *     base class static side 'typeof Model'.
+   *
+   * It shipped that way in #319 and was found by an app regenerating a 79-model
+   * schema — 79 errors, and 15 in this repository's own template, with every
+   * check in CI green. `tsconfig.generated.json` is the gate that now compiles
+   * the artifact against the runtime it is generated for; this is the assertion
+   * that says *why* the keyword is there, next to the line, so it is not
+   * tidied away as noise.
+   */
+  test("the mark does not widen, because the base declares the literal", () => {
+    expect(files["models.ts"]).not.toMatch(/^\s*static \$generated = true;$/m);
+  });
+
   // Generated files hold data and thin delegating methods only. Anything smart
   // in there cannot be hotfixed without a codegen release.
   test("keeps the operations one-line delegations to the choke point", () => {
