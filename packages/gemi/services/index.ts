@@ -105,6 +105,11 @@ export { ScheduleServiceProvider } from "./cron/ScheduleServiceProvider";
 export { Scheduler } from "./cron/Scheduler";
 export { CronJob } from "./cron/CronJob";
 
+// Discovery. What a `jobs`-less `queue` or `schedule` slice resolves to, and
+// the only way left to ask an application what it has: the config array a test
+// used to import may not exist any more.
+export { discoverJobs, discoverCronJobs } from "./discovery";
+
 // Redis
 export { RedisServiceProvider } from "./redis/RedisServiceProvider";
 export { RedisManager } from "./redis/RedisManager";

@@ -8,9 +8,13 @@ import type { App } from "../app";
 import { Instrumentation } from "./types";
 import { printStartupBanner } from "./banner";
 import { RESERVED_ROUTE_PREFIX } from "../services/router/ViewRouteDispatcher";
+import { projectRoot } from "../support/discover";
 
-const projectDir = process.env.GEMI_PROJECT_DIR ?? "";
-const rootDir = join(process.cwd(), projectDir);
+// The rule this file used to spell out itself. It moved to `projectRoot`
+// because discovery needs the same answer during `waitForBoot()`, which is
+// before `ROOT_DIR` below exists — and two spellings of "where is the project"
+// is how a job gets looked for in one directory and served from another.
+const rootDir = projectRoot();
 
 const appDir = join(rootDir, "app");
 const distDir = join(rootDir, "dist");
