@@ -17,10 +17,17 @@ export class UnknownDatabaseUrlError extends Error {
 }
 
 export class MissingDatabaseUrlError extends Error {
-  constructor() {
+  // The connection's name, when it is not the default one. A named connection
+  // has no environment variable behind it and no top-level `url` to fall back
+  // on, so the generic message would send whoever reads it to check
+  // `DATABASE_URL`, which is set and is not what is missing.
+  constructor(connection?: string) {
     super(
-      "No database URL configured. Set the DATABASE_URL environment variable, " +
-        "or set `url` in app/config/database.ts.",
+      connection === undefined || connection === "default"
+        ? "No database URL configured. Set the DATABASE_URL environment " +
+            "variable, or set `url` in app/config/database.ts."
+        : `The "${connection}" database connection has no \`url\`. Set one ` +
+            `under \`connections.${connection}\` in app/config/database.ts.`,
     );
     this.name = "MissingDatabaseUrlError";
   }

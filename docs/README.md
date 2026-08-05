@@ -43,7 +43,7 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 - **[Navigation](./navigation.md)** — `Link`, `useNavigate`, `useParams`, `useSearchParams`, and the `Redirect` component vs. facade.
 
 ### Data
-- **[ORM](./orm.md)** — the Prisma-typed, gemi-executed query layer: models, relations, ambient transactions, policies, soft deletes.
+- **[ORM](./orm.md)** — the Prisma-typed, gemi-executed query layer: models, relations, ambient transactions, named connections, policies, soft deletes.
 - **[Rows & Entities](./orm-rows-and-entities.md)** — plain objects by default, `track` + `save`, and `wrap`.
 
 ### Auth

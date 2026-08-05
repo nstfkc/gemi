@@ -290,7 +290,12 @@ async function setup(url: string, ddl: string[]) {
       get(target, property, receiver) {
         if (property === "sql") return counting;
         const value = Reflect.get(target, property, receiver);
-        return typeof value === "function" ? value.bind(target) : value;
+        // Bound to the **proxy**, not to the manager behind it. `$exec` asks
+        // for its connection by name and the manager answers the default one
+        // with `this`; bound to the target, that `this` is the unwrapped
+        // manager, and every statement goes to the real client with nothing
+        // counting it. The symptom is a count of zero rather than an error.
+        return typeof value === "function" ? value.bind(receiver) : value;
       },
     }),
   );

@@ -1,12 +1,15 @@
 import type { SQL, TransactionSQL } from "bun";
+import type { DatabaseConnection } from "../database/Connection";
 import { DatabaseManager } from "../database/DatabaseManager";
 import { app } from "../foundation/app";
 import { type BindContext, createBindContext } from "./compile/fragment";
 import {
+  currentConnectionName,
   currentTransaction,
   isSystemScope,
   runAsSystem,
   runAsUser,
+  runOnConnection,
   withTransaction,
 } from "./context";
 import {
@@ -95,15 +98,38 @@ const ORTHROW = new Set([
  * quietly open a transaction that ignores the setting. `withTransaction` itself
  * takes the threshold as an argument on purpose; it knows nothing about the
  * container, and this is the seam where the two meet.
+ *
+ * The same argument now carries the connection's **name**: a pool cannot be
+ * asked which one it is, and `withTransaction` has to know in order to tell a
+ * nested transaction on the same connection (a savepoint) from one on another
+ * (a refusal). Taking the whole connection rather than the manager is what
+ * makes both come from the same object, so a named connection cannot end up
+ * with the default's threshold.
  */
 function transact<T>(
-  db: DatabaseManager,
+  connection: DatabaseConnection,
   fn: (tx: TransactionSQL) => Promise<T>,
 ): Promise<T> {
-  return withTransaction(db.sql, fn, {
-    slowTransactionThreshold: db.config.slowTransactionThreshold,
+  return withTransaction(connection.sql, fn, {
+    slowTransactionThreshold: connection.config.slowTransactionThreshold,
+    connection: connection.name,
   });
 }
+
+/**
+ * The classes `Model.on` has already built, keyed by the class it was called on
+ * and then by connection name.
+ *
+ * `User.on("analytics")` is a per-query call, so it can happen in a loop and in
+ * a hot path; minting a class each time would allocate one per query and defeat
+ * every identity comparison downstream — the policy-divergence guard's
+ * `registered !== this` among them, which would then run `policiesFor` against
+ * a class it had never seen before on every call.
+ *
+ * A `WeakMap` on the outside so a model class that goes out of scope takes its
+ * bound variants with it, which matters for tests that define models inline.
+ */
+const boundToConnection = new WeakMap<object, Map<string, typeof Model>>();
 
 export abstract class Model {
   /**
@@ -175,6 +201,75 @@ export abstract class Model {
   static $policies?: readonly PolicyEntry[];
 
   /**
+   * The connection this class's operations run on, set only by `on` below.
+   *
+   * `undefined` — which is what every model an application writes has — means
+   * *the ambient connection*, not *the default one*. The two differ inside
+   * `DB.connection("analytics").transaction(...)`, where an unqualified query
+   * has to join the open transaction rather than quietly reach for the hot
+   * path's pool.
+   */
+  static $connection?: string;
+
+  /**
+   * The same model, reading and writing on a named connection.
+   *
+   *     const rows = await Subscription.on("analytics").findMany({ where })
+   *
+   * **Per query, not per model**, which is the shape the problem actually has:
+   * the same `Subscription` is read on the hot path during sign-in and swept by
+   * the nightly audit. A `static $connection = "analytics"` on the class would
+   * force one of those two to be wrong, so the choice lives at the call site
+   * and every query that does not make it stays on the default connection.
+   *
+   * What it returns is the model class with the connection bound to it, so the
+   * whole typed surface — all fifteen operations, `transaction`, `save` — is
+   * there unchanged and narrows exactly as it does on the class itself. The
+   * connection reaches nested `include` reads and nested writes as well, which
+   * an argument on `findMany` could not have done: those recurse through the
+   * *target* model's `$exec` by way of the registry, so it is carried in the
+   * ambient scope rather than in anyone's parameter list.
+   *
+   * **A transaction cannot span connections.** Naming one inside a transaction
+   * open on another raises `CrossConnectionTransactionError` rather than
+   * running the statement outside the transaction, where it would survive the
+   * rollback. See that error for why refusing is the only honest answer.
+   *
+   * An unknown name raises `UnknownConnectionError` at the query, not here:
+   * `on` is a pure lookup and does not resolve the container, so a model bound
+   * in a module's top-level scope cannot force the database open at import
+   * time.
+   */
+  static on<T extends typeof Model>(this: T, connection: string): T {
+    let byName = boundToConnection.get(this);
+    if (byName === undefined) boundToConnection.set(this, (byName = new Map()));
+
+    const cached = byName.get(connection);
+    if (cached !== undefined) return cached as T;
+
+    // A subclass rather than a Proxy. Both would forward the operations, but a
+    // subclass *is* a class: `policiesFor` walks the prototype chain with
+    // `Object.hasOwn`, the generated statics are inherited by the language
+    // rather than by a trap, and `$exec`'s `this` needs no special handling to
+    // stay bound to it.
+    const bound = class extends (this as unknown as typeof Model) {
+      static $connection = connection;
+    };
+
+    // Otherwise the class expression takes its name from the binding above and
+    // every error that names the model says "bound". `UnregisteredPolicyClassError`
+    // reads `this.name` in particular, and it is exactly the kind of message
+    // that has to name the class the caller wrote.
+    Object.defineProperty(bound, "name", {
+      value: (this as { name: string }).name,
+      configurable: true,
+    });
+
+    byName.set(connection, bound);
+    return bound as unknown as T;
+  }
+
+  /**
    * Runs `fn` with policies suspended, for code that has no user and knows it:
    * a cron tick, a queue worker, a seed script, a migration.
    *
@@ -229,6 +324,22 @@ export abstract class Model {
    *
    * Raises when handed an object with no provenance. See `untracked` for why
    * that is a loud failure rather than a fallback to writing everything.
+   *
+   * **It writes back to the connection the row was read on**, which is the one
+   * place a connection cannot be resolved from the ambient scope: a row read on
+   * `analytics` is an ordinary object that outlives the scope that produced it,
+   * and by the time it is saved — three functions later, from code that never
+   * named a connection — the scope is gone. So the connection is part of the
+   * row's provenance, exactly as the model and the primary key are, and for the
+   * same reason. Left to the ambient default, `save` compiled a correct
+   * `update` and sent it to the wrong database, where the same id usually names
+   * a real and different row.
+   *
+   * Naming a *different* connection explicitly — `User.on("default").save(row)`
+   * for a row read on `analytics` — is a contradiction rather than an
+   * instruction, and raises. Copying a row between connections is a write in
+   * its own right: say it with `update`, where the `where` and the `data` are
+   * both visible.
    */
   static async save<T extends object>(row: T): Promise<unknown> {
     const schema = this.$modelSchema();
@@ -243,6 +354,23 @@ export abstract class Model {
         "save",
         `This row came from ${record.model}, not ${schema.name}. Save it ` +
           `through the model it was read from.`,
+      );
+    }
+
+    if (
+      this.$connection !== undefined &&
+      this.$connection !== record.connection
+    ) {
+      throw new UnsupportedQueryError(
+        "save",
+        schema.name,
+        "save",
+        `This row was read on the "${record.connection}" connection and this ` +
+          `save names "${this.$connection}". A save writes the row back where ` +
+          `it came from, so the two cannot both be honoured. Drop the ` +
+          `\`on("${this.$connection}")\`, or write it as an explicit ` +
+          `${schema.name}.on("${this.$connection}").update({ where, data }) if ` +
+          `copying it across connections is what you meant.`,
       );
     }
 
@@ -269,10 +397,18 @@ export abstract class Model {
     const changed = changedFields(row, schema);
     if (Object.keys(changed).length === 0) return null;
 
-    const updated = await this.$exec("update", {
-      where: record.key,
-      data: changed,
-    });
+    // On the row's own connection, entered here rather than left to `$exec`:
+    // `$exec` resolves the *ambient* name, and the whole point is that the row
+    // outlived the scope that read it. Inside a transaction on another
+    // connection this raises `CrossConnectionTransactionError` from `$exec`,
+    // which is the correct answer — that update cannot join the transaction, so
+    // it must not run at all.
+    const updated = await runOnConnection(record.connection, () =>
+      this.$exec("update", {
+        where: record.key,
+        data: changed,
+      }),
+    );
 
     // Copy the *returned* row back over the caller's, not just the values sent.
     //
@@ -335,7 +471,21 @@ export abstract class Model {
     Object.assign(instance, row);
     // Tracked on the instance, not the argument — `save()` on the instance has
     // to diff against the values it was constructed from.
-    track(instance, schema);
+    //
+    // The connection is the argument's, when the argument has one. `wrap` runs
+    // *after* the query's scope has closed, so the ambient name here is
+    // whatever the caller happens to be in — usually the default — and a row
+    // read on `analytics` would be wrapped into an instance whose `save()`
+    // wrote to the hot path. Taken in order: an explicit `on`, then where the
+    // row actually came from, then the ambient connection for a row that was
+    // never tracked at all.
+    track(
+      instance,
+      schema,
+      this.$connection ??
+        provenanceOf(row)?.connection ??
+        currentConnectionName(),
+    );
 
     return instance;
   }
@@ -415,11 +565,57 @@ export abstract class Model {
    * bound, or `false` switches it off. In production it just holds the
    * connection. Keep network and filesystem I/O outside.
    */
-  static transaction<T>(fn: () => Promise<T>): Promise<T> {
-    return transact(app(DatabaseManager), () => fn());
+  // `async`, so that naming a connection this transaction cannot reach —
+  // `Subscription.on("analytics").transaction(...)` inside a transaction on the
+  // hot path — *rejects* rather than throwing synchronously. The same reasoning
+  // `DB.query` records: an API that does one sometimes and the other otherwise
+  // is a footgun, and a `.catch()` would miss exactly this error.
+  static async transaction<T>(fn: () => Promise<T>): Promise<T> {
+    // `Subscription.on("analytics").transaction(...)` opens on that connection,
+    // and a bare `Model.transaction` opens on whatever is ambient — which is
+    // the default connection unless something outside has already named one.
+    // `withTransaction` refuses the mismatch; there is no second check here.
+    const name = this.$connection ?? currentConnectionName();
+
+    return transact(app(DatabaseManager).connection(name), () =>
+      runOnConnection(name, () => fn()),
+    );
   }
 
+  /**
+   * The choke point's outer half: which connection this operation runs on.
+   *
+   * Split from the body below so that the name is resolved and entered
+   * **once**, around everything — the policy pass, the plan lookup, the nested
+   * writes and every relation read that recurses back through here. The
+   * alternative, resolving it inside, would have left each nested read to
+   * rediscover it, and the one that did not would have run against the default
+   * connection with no error to show for it.
+   *
+   * Recursive calls cost a comparison: the ambient name already matches, so
+   * `runOnConnection` calls straight through without entering a second scope.
+   *
+   * `async` for the reason `transaction` is: an operation refused for naming a
+   * connection the open transaction cannot reach has to reject like every other
+   * failure `$exec` produces, rather than being the one that throws before the
+   * promise exists.
+   *
+   * The cross-connection refusal is `runOnConnection`'s, not repeated here:
+   * *entering* the connection is the only moment at which the scope still holds
+   * both the open transaction and the name it belongs to, so that is where the
+   * comparison has to live.
+   */
   static async $exec(
+    op: Operation,
+    args: any = {},
+    options?: ExecOptions,
+  ): Promise<unknown> {
+    return runOnConnection(this.$connection ?? currentConnectionName(), () =>
+      this.$execute(op, args, options),
+    );
+  }
+
+  private static async $execute(
     op: Operation,
     args: any = {},
     options?: ExecOptions,
@@ -428,7 +624,13 @@ export abstract class Model {
 
     // Resolved per call, never captured at module scope: that is what keeps the
     // connection swappable in tests.
-    const db = app(DatabaseManager);
+    //
+    // Through `connection()` rather than off the manager directly, so that a
+    // query on a named connection reads *that* pool's client and dialect. The
+    // default connection is the manager itself, which is what keeps every
+    // existing wrapper of it — the harnesses that Proxy `sql` to count
+    // statements — looking at the object this executes through.
+    const db = app(DatabaseManager).connection(currentConnectionName());
     const dialect = dialectFor(db.dialect);
 
     // The ambient-transaction hook, and the entire integration. It is one line
@@ -496,12 +698,23 @@ export abstract class Model {
     //
     // Cost on the common path: one `Map.get` and one reference compare, for a
     // model where nothing is registered under a different class.
+    //
+    // `inheritsPoliciesFrom` keeps that true for `Model.on(name)`, whose bound
+    // subclass is never the registered class and so failed the reference
+    // compare on *every* query — leaving each one to resolve the registered
+    // chain and walk it twice to reach the same conclusion. A direct subclass
+    // that declares no policies of its own has, by construction, the chain its
+    // parent has: there is nothing to compare.
     if (!system) {
       const registered = registry.has(schema.name)
         ? registry.get<unknown>(schema.name)
         : undefined;
 
-      if (registered !== undefined && registered !== this) {
+      if (
+        registered !== undefined &&
+        registered !== this &&
+        !inheritsPoliciesFrom(this, registered)
+      ) {
         const theirs = policiesFor(registered);
         const diverges =
           policies.length !== theirs.length ||
@@ -967,6 +1180,31 @@ export abstract class Model {
   static $shape(plan: QueryPlan, rows: unknown[]): unknown {
     return plan.shape(rows);
   }
+}
+
+/**
+ * Whether `queried` can only have the policies `registered` has.
+ *
+ * True for a direct subclass that declares none of its own — which is what
+ * `Model.on(name)` builds, and also what `class AdminUser extends User {}` is.
+ * `policiesFor` walks the prototype chain and takes each level's own
+ * `$policies`; a level that declares none contributes nothing, so the walk from
+ * here and the walk from the parent visit the same levels in the same order and
+ * cannot disagree.
+ *
+ * Structural rather than a flag on the classes `on` mints, so the typed-view
+ * subclass the divergence guard already argues should be allowed gets the same
+ * short-circuit rather than paying for a second resolution of the chain.
+ *
+ * `$policy` — the removed name — is deliberately not checked: `policiesFor` has
+ * already walked this class by the time this is called, and it raises on that
+ * name at any level, so a class carrying it never reaches here.
+ */
+function inheritsPoliciesFrom(queried: unknown, registered: unknown): boolean {
+  return (
+    Object.getPrototypeOf(queried) === registered &&
+    !Object.hasOwn(queried as object, "$policies")
+  );
 }
 
 async function runSteps(

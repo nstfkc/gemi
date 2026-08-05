@@ -1,6 +1,10 @@
 import type { SQL, TransactionSQL } from "bun";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { SLOW_TRANSACTION_THRESHOLD } from "../database/config";
+import {
+  CrossConnectionTransactionError,
+  DEFAULT_CONNECTION,
+} from "../database/Connection";
 
 /**
  * The ambient transaction: the ORM's own `AsyncLocalStorage`, holding nothing
@@ -33,6 +37,24 @@ export interface OrmScope {
   tx?: TransactionSQL;
   /** 0 for the outermost transaction, 1+ for each savepoint inside it. */
   depth: number;
+  /**
+   * Which named connection this subtree's queries run on, and — when `tx` is
+   * set — which connection the open transaction belongs to.
+   *
+   * Ambient rather than an argument threaded through `$exec`, for the same
+   * reason the handle above is: a relation read resolves its target through the
+   * registry and calls that class's `$exec`, so an argument would have to be
+   * carried by every intermediate that has no interest in it, and the one that
+   * forgot would silently read a nested `include` off the *other* pool. There
+   * is no error that shape produces; there are just rows from the wrong place.
+   *
+   * `undefined` means the default connection. Kept as absent-rather-than-
+   * `"default"` so that entering a scope on the default connection is
+   * indistinguishable from not entering one, which is what makes the
+   * cross-connection check below cost a comparison of two `undefined`s on every
+   * application that never declares a second connection.
+   */
+  connection?: string;
   /**
    * Whether policies are suspended for this scope. Set only by
    * `Model.asSystem`, and never by anything ambient — the whole point is that
@@ -75,6 +97,84 @@ export const ormContext = new AsyncLocalStorage<OrmScope>();
  */
 export function currentTransaction(): TransactionSQL | undefined {
   return ormContext.getStore()?.tx;
+}
+
+/**
+ * The connection every query in this scope runs on unless it names another.
+ *
+ * `"default"` outside any scope, so callers get a name rather than a
+ * `string | undefined` to normalise themselves — the store keeps it absent,
+ * which is not the same distinction and is nobody else's business.
+ */
+export function currentConnectionName(): string {
+  return ormContext.getStore()?.connection ?? DEFAULT_CONNECTION;
+}
+
+/**
+ * Run `fn` with `name` as the ambient connection.
+ *
+ * Merged into the current scope rather than replacing it, exactly as
+ * `runAsSystem` and `runAsUser` are: naming a connection must not drop an open
+ * transaction handle or re-enable policies underneath it.
+ *
+ * Deliberately absent from `orm/index.ts`, so it is not part of what an
+ * application can reach — `Model.on(name)` and `DB.connection(name)` are the
+ * two doors, and both funnel through here so that a nested relation read,
+ * which resolves its own class out of the registry and calls its `$exec`,
+ * inherits the connection without anything having to pass it along.
+ */
+export function runOnConnection<T>(
+  name: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const current = ormContext.getStore();
+  if (currentConnectionName() === name) return fn();
+
+  // ENTERING A CONNECTION IS WHERE THE CROSS-CONNECTION CHECK BELONGS, not at
+  // each door — and it has to be *here*, before the scope is entered, because
+  // entering it is what makes the check impossible afterwards.
+  //
+  // The scope carries `tx` and `connection` together, so overwriting the name
+  // while an open handle stays in place produces a store that says "a
+  // transaction on analytics" while holding the *default* connection's handle.
+  // Every check downstream then agrees with itself and the statement runs on
+  // the wrong connection's transaction. `Model.save` found this: it routes to
+  // the row's own connection, so it is the one caller that switches connections
+  // with a transaction already open.
+  assertConnectionUsable(name);
+
+  return ormContext.run(
+    {
+      ...current,
+      depth: current?.depth ?? 0,
+      connection: name === DEFAULT_CONNECTION ? undefined : name,
+    },
+    fn,
+  );
+}
+
+/**
+ * Refuse a statement that names one connection while a transaction is open on
+ * another.
+ *
+ * The check `withTransaction`'s single-connection note asked for, and the
+ * reasoning for refusing rather than routing is on
+ * `CrossConnectionTransactionError`. Both doors call it — `Model.$exec` for
+ * every model operation, `DB` for a raw fragment — because either one alone
+ * leaves the other free to straddle the two connections, and a raw `DB.execute`
+ * escaping a transaction is the more damaging of the two.
+ *
+ * Only ever fires on a query that *names* a connection: an unqualified one
+ * resolves to the ambient name, which is the transaction's own.
+ */
+export function assertConnectionUsable(name: string): void {
+  const store = ormContext.getStore();
+  if (store?.tx === undefined) return;
+
+  const open = store.connection ?? DEFAULT_CONNECTION;
+  if (open === name) return;
+
+  throw new CrossConnectionTransactionError(open, name);
 }
 
 /** How deeply nested the current transaction is; `null` outside one. */
@@ -274,6 +374,12 @@ function watchForSlowTransaction(configured?: number | false): () => void {
  * taking it as an argument keeps this file free of the container, so a bare
  * `SQL` is still enough to call it. Its tests rely on that.
  *
+ * `options.connection` is the name `pool` belongs to, and follows the same rule
+ * for the same reason: the pool cannot be asked what it is called. Passing it
+ * is what lets a nested `withTransaction` tell "the same connection, so take a
+ * savepoint" from "a different one, so refuse" — omitting it means the default
+ * connection, which is what a two-argument call always meant.
+ *
  * The return type is asserted rather than inferred for one reason worth
  * knowing: Bun's `begin` unwraps a callback that resolves to an *array of
  * promises*, awaiting each. So `Model.transaction(async () => [a, b])` where
@@ -283,23 +389,31 @@ function watchForSlowTransaction(configured?: number | false): () => void {
 export function withTransaction<T>(
   pool: SQL,
   fn: (tx: TransactionSQL) => Promise<T>,
-  options?: { slowTransactionThreshold?: number | false },
+  options?: { slowTransactionThreshold?: number | false; connection?: string },
 ): Promise<T> {
   const current = ormContext.getStore();
 
-  // SINGLE-CONNECTION ASSUMPTION, pinned here so it is found rather than
-  // discovered. The savepoint branch ignores `pool` entirely, which is correct
-  // today: there is one `DatabaseManager` and one `SQL`, so the ambient handle
-  // and whatever pool the caller passed are necessarily the same database.
+  // THE SINGLE-CONNECTION ASSUMPTION, WHICH IS NOW CHECKED RATHER THAN PINNED.
   //
-  // It stops being correct the moment a second connection is configurable. A
-  // `DB.transaction` against connection B, called inside a `Model.transaction`
-  // on A, would open a savepoint on **A** and hand the callback A's handle —
-  // statements landing in the wrong database, with no error. That is the same
-  // failure shape as the "handle on the Application" alternative this file
-  // argues against. Multi-connection support must compare the two and either
-  // join or refuse, not fall through to here.
+  // The savepoint branch below ignores `pool` entirely. That was correct while
+  // there was one `DatabaseManager` and one `SQL` — the ambient handle and
+  // whatever pool the caller passed were necessarily the same database — and
+  // the note that stood here said what would happen when a second connection
+  // became configurable (#327): a `DB.transaction` on B inside a
+  // `Model.transaction` on A would savepoint on **A** and hand the callback A's
+  // handle, so statements landed in the wrong database with no error at all.
   //
+  // So the name is compared before the branch is taken, and a mismatch raises.
+  // Refusing is the whole answer rather than half of one — there is no way to
+  // make one transaction span two pools, and the alternatives are covered on
+  // `CrossConnectionTransactionError`.
+  //
+  // A caller that passes no `connection` is treated as naming the default,
+  // which is what `withTransaction(pool, fn)` meant before this argument
+  // existed.
+  const name = options?.connection ?? DEFAULT_CONNECTION;
+  assertConnectionUsable(name);
+
   // `current?.tx` rather than `current`: since iteration 6 a scope can exist
   // with no open transaction — `Model.asSystem` enters one — and a savepoint
   // needs an actual handle, not merely a store.
@@ -331,10 +445,26 @@ export function withTransaction<T>(
   try {
     // Spread rather than replace: a `Model.transaction` inside a
     // `Model.asSystem` must not silently re-enable policies for its subtree.
+    //
+    // The connection goes into the scope alongside the handle, and the pair is
+    // what makes the check at the top of this function possible: "which
+    // connection is this transaction on" has to be answerable from the store,
+    // because the handle itself does not say. It is also what makes an
+    // unqualified query inside `DB.connection("analytics").transaction(...)`
+    // *join* the transaction instead of being refused by it — the query
+    // inherits the name rather than defaulting to the hot path.
     return (
       pool
         .begin((tx) =>
-          ormContext.run({ ...current, tx, depth: 0 }, () => fn(tx)),
+          ormContext.run(
+            {
+              ...current,
+              tx,
+              depth: 0,
+              connection: name === DEFAULT_CONNECTION ? undefined : name,
+            },
+            () => fn(tx),
+          ),
         )
         // `finally` and not a `then`/`catch` pair: the connection is released on
         // rollback exactly as it is on commit, so a throwing callback must clear

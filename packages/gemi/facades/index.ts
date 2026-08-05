@@ -11,4 +11,7 @@ export { Meta } from "./Meta";
 export { Cookie } from "./Cookie";
 export { Redis } from "./Redis";
 export { RateLimiter } from "./RateLimiter";
-export { DB } from "./DB";
+// `ConnectionQueries` is what `DB.connection(name)` hands back, so it has to be
+// nameable by an application that wants to keep one in a variable or annotate a
+// parameter with it.
+export { DB, ConnectionQueries } from "./DB";

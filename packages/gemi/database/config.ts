@@ -1,8 +1,14 @@
 import type { SQL } from "bun";
 import type { Dialect } from "./dialect";
 
-// Config key: `database`.
-export interface DatabaseConfig {
+// One connection: a URL, the dialect to compile for, and the pool behind it.
+//
+// Split out of `DatabaseConfig` when a second connection became configurable
+// (#327), so that a named connection is described by exactly the same fields
+// the default one is — rather than by a smaller, second-class shape that would
+// need widening the first time somebody's analytics pool needed a `dialect`
+// override or a threshold of its own.
+export interface ConnectionConfig {
   // Connection string. Defaults to the `DATABASE_URL` environment variable.
   // The dialect is inferred from it — `postgres://`, `mysql://`, `mariadb://`,
   // `sqlite://`, `file:`, or a SQLite path like `./dev.db` or `:memory:`.
@@ -32,7 +38,57 @@ export interface DatabaseConfig {
   // that is not a positive finite number falls back to the 2s default rather
   // than disabling, so the warning cannot be lost to a typo — say `false` when
   // you mean off.
+  //
+  // Per connection, and this is the field most likely to differ between two of
+  // them: a connection that exists *because* its queries are slow will warn on
+  // every transaction it opens if it inherits the hot path's threshold, and a
+  // warning that always fires is one nobody reads. A named connection that
+  // does not set it inherits the top-level value.
   slowTransactionThreshold?: number | false;
+}
+
+// Config key: `database`.
+//
+// The top-level `url` / `options` / `dialect` describe the connection called
+// `"default"` — the one every query uses unless it says otherwise. `connections`
+// declares the others.
+export interface DatabaseConfig extends ConnectionConfig {
+  // Additional connections, keyed by the name `DB.connection(name)` and
+  // `Model.on(name)` take.
+  //
+  // The case this exists for is two pools against **one** database with
+  // opposite workloads — a hot path that must never block, and an analytics
+  // path whose queries legitimately run for seconds:
+  //
+  //     export default defineDatabaseConfig({
+  //       url: process.env.DATABASE_URL,
+  //       options: { max: 12 },
+  //
+  //       connections: {
+  //         analytics: {
+  //           url: process.env.DATABASE_URL,
+  //           options: { max: 3, idleTimeout: 60, connectionTimeout: 45 },
+  //           slowTransactionThreshold: 60_000,
+  //         },
+  //       },
+  //     })
+  //
+  // A value that protects one of those is the wrong value for the other, which
+  // is the entire reason they cannot be one pool with one setting. The same URL
+  // twice is normal here and is not a mistake: what differs is the pool, not
+  // the database.
+  //
+  // Two consequences worth knowing before declaring one, both of them
+  // structural rather than incidental:
+  //
+  // - **A transaction cannot span two connections.** A statement that names one
+  //   while a transaction is open on another raises
+  //   `CrossConnectionTransactionError` rather than quietly running outside the
+  //   transaction.
+  // - **Every connection is a real pool**, counted separately against whatever
+  //   connection cap the server or the pooler enforces. Two pools of 12 is 24
+  //   connections, not 12.
+  connections?: Record<string, ConnectionConfig>;
 }
 
 export function defineDatabaseConfig(config: DatabaseConfig): DatabaseConfig {
@@ -45,6 +101,7 @@ export function databaseConfigDefaults(): DatabaseConfig {
     dialect: undefined,
     options: undefined,
     slowTransactionThreshold: SLOW_TRANSACTION_THRESHOLD,
+    connections: undefined,
   };
 }
 

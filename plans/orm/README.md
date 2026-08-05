@@ -611,6 +611,20 @@ makes the *SQLite* suites fail for an unrelated reason afterwards.
   there is no adapter to select and no `userProvider` line in the template. An
   application that must change a query subclasses `UserProvider` and passes it
   as `AuthManager`'s second constructor argument.
+- ~~**One connection per application.**~~ **Settled for #327: named connections,
+  and a transaction that refuses to span two of them.** `app/config/database.ts`
+  takes a `connections` map beside the top-level `url`; `Model.on(name)` and
+  `DB.connection(name)` are the two doors, and the name travels in the ORM's
+  ambient scope so a nested `include` or nested write cannot land on the other
+  pool. What made it a decision rather than a build is the second half: a
+  transaction lives on one reserved connection, so a statement naming another
+  one is refused (`CrossConnectionTransactionError`) rather than run outside the
+  transaction, where it would survive the rollback. The single-connection note
+  in `orm/context.ts` predicted exactly that failure and is now a check.
+
+  The connection is a **per-query** property, not a per-model one — the same
+  model is read on the hot path during sign-in and swept by the nightly audit,
+  so a `connection` on the class would force one of the two to be wrong.
 - ~~**Where this stack merges.**~~ **Settled: it merged to `next`.** PRs #30 and
   #33 were closed as already-shipped — their content had been on
   `release/v0.50.0-rc.2` since 2026-07-28 — and `feat/orm` is now an ancestor of

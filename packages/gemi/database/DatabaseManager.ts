@@ -1,6 +1,13 @@
-import { SQL } from "bun";
-import type { DatabaseConfig } from "./config";
-import { MissingDatabaseUrlError, inferDialect, type Dialect } from "./dialect";
+import type { SQL } from "bun";
+import type { ConnectionConfig, DatabaseConfig } from "./config";
+import {
+  Connection,
+  DEFAULT_CONNECTION,
+  ReservedConnectionNameError,
+  UnknownConnectionError,
+  type DatabaseConnection,
+} from "./Connection";
+import type { Dialect } from "./dialect";
 
 // Wraps Bun's `SQL` client. Bun ships one client that speaks SQLite, Postgres,
 // MySQL and MariaDB, so gemi does not need a driver per database — it needs to
@@ -10,76 +17,147 @@ import { MissingDatabaseUrlError, inferDialect, type Dialect } from "./dialect";
 // the first query, not at construction. It is still bound as a lazy singleton,
 // so an app that never touches the database never resolves it and never has to
 // have DATABASE_URL set.
-export class DatabaseManager {
+//
+// Since #327 it holds *connections*, plural: the top-level `url` and `options`
+// build the one called `"default"`, and each key under `connections` builds
+// another. What it does not do is decide which one a query uses — that is the
+// ORM's ambient scope and the `DB` facade, because the choice is per query
+// rather than per application. See `connection` below.
+export class DatabaseManager implements DatabaseConnection {
   static token = "database";
 
-  public readonly sql: SQL;
-  public readonly dialect: Dialect;
-  public readonly url: string;
+  /**
+   * This object *is* the default connection, so it answers to the name.
+   *
+   * Not a formality: `connection("default")` returns `this` rather than the
+   * `Connection` in the map, which is what keeps every existing reader —
+   * `DB.sql`, `db.dialect`, and the test harnesses that wrap the manager in a
+   * Proxy to count statements — looking at the same object the ORM executes
+   * through. A second object for the default pool would have quietly bypassed
+   * all of them while every test still passed.
+   */
+  public readonly name = DEFAULT_CONNECTION;
 
   /**
-   * Resolves once the connection has been configured, or rejects if it could
-   * not be. Only SQLite has anything to do; elsewhere it is already resolved.
+   * Every pool this manager owns, keyed by name and including the default one.
    *
-   * Exposed so a caller that needs the guarantee can wait for it. Nothing has
-   * to: SQLite queues statements on one connection in the order they were
-   * issued, so the pragma below is ahead of anything a caller sends after the
-   * constructor returns. That ordering is asserted in `DatabaseManager.test.ts`
-   * rather than assumed, because it is the load-bearing half.
+   * Private because the map is the manager's bookkeeping — `connection()` is
+   * the way in, and it is the only path that knows the default is `this`.
+   */
+  private readonly pools = new Map<string, Connection>();
+
+  /**
+   * Resolves once **every** connection has been configured, or rejects if one
+   * could not be. Only SQLite has anything to do; elsewhere it is already
+   * resolved.
+   *
+   * All of them rather than the default alone, because the thing a caller waits
+   * on this for — SQLite's `pragma foreign_keys` — is per client, so a second
+   * SQLite connection has its own and a caller awaiting one manager-level
+   * promise means all of them.
    */
   public readonly ready: Promise<void>;
 
   constructor(public config: DatabaseConfig = {}) {
-    const url = config.url;
-    if (!url) {
-      throw new MissingDatabaseUrlError();
+    const { connections = {}, ...primary } = config;
+
+    // The default first, so a `MissingDatabaseUrlError` from a missing
+    // `DATABASE_URL` still comes out of construction the way it always has,
+    // rather than after a named connection has already opened a client.
+    this.pools.set(
+      DEFAULT_CONNECTION,
+      new Connection(DEFAULT_CONNECTION, primary),
+    );
+
+    // A connection that is built before the one whose config is wrong is still
+    // a live client with an open handle, and on the throwing path nothing else
+    // will ever hold it: the manager never becomes a value, so nobody can call
+    // `close`. Left alone, the pragma this constructor issues for a SQLite
+    // connection settles against a client being torn down and surfaces as an
+    // unhandled rejection with no configuration error anywhere near it.
+    try {
+      this.build(connections, primary.slowTransactionThreshold);
+    } catch (error) {
+      for (const pool of this.pools.values()) {
+        // The in-flight configuration first: it is what rejects when the client
+        // under it goes away, and this is the only place that can say the
+        // rejection was expected.
+        pool.ready.catch(() => {});
+        pool.close().catch(() => {});
+      }
+      throw error;
     }
 
-    this.url = url;
-    // An explicit `dialect` wins, for URLs whose protocol we can't read (a
-    // pooler on a custom scheme). Otherwise infer, which throws rather than
-    // guessing — see the note in dialect.ts.
-    this.dialect = config.dialect ?? inferDialect(url);
-    this.sql = config.options
-      ? new SQL(url, config.options as any)
-      : new SQL(url);
-    this.ready = this.configure();
+    // Built once here rather than derived per read, so that a connection whose
+    // configuration rejects produces one unhandled rejection at most instead of
+    // a fresh one per access.
+    this.ready = Promise.all(
+      [...this.pools.values()].map((pool) => pool.ready),
+    ).then(() => undefined);
+  }
+
+  private build(
+    connections: Record<string, ConnectionConfig>,
+    slowTransactionThreshold: number | false | undefined,
+  ): void {
+    for (const [name, connection] of Object.entries(connections)) {
+      if (name === DEFAULT_CONNECTION)
+        throw new ReservedConnectionNameError(name);
+
+      this.pools.set(
+        name,
+        new Connection(name, {
+          // The threshold is the one setting a named connection is likely to
+          // want *unchanged*: it is a development diagnostic about holding a
+          // pooled connection, and that concern does not stop applying because
+          // the pool has a name. `url`, `options` and `dialect` are deliberately
+          // not inherited — a connection that borrowed the default's URL by
+          // omission would be a second pool onto the same database created by a
+          // typo in a key.
+          slowTransactionThreshold,
+          ...connection,
+        }),
+      );
+    }
   }
 
   /**
-   * `pragma foreign_keys = ON`, which SQLite leaves **off** by default — and so
-   * does Bun's driver, which reports `0` on a fresh connection.
+   * The connection called `name`, or the default one when called with nothing.
    *
-   * Without it SQLite enforces nothing at all. Not "cascades do not fire":
-   * nothing. An insert naming a parent that does not exist is accepted, a
-   * dangling reference survives the parent's deletion, and `ON DELETE RESTRICT`
-   * does not restrict — while the migrations declare all three. Postgres
-   * enforces them always, and Prisma turns the pragma on for every SQLite
-   * connection it opens, so leaving it off meant development and production
-   * disagreed about whether the schema's constraints were real.
-   *
-   * It is also why this is more than a dialect gap. The differential harness
-   * compares gemi against Prisma on one database per dialect; with the pragma
-   * off on one side, the two were being asked to agree while running under
-   * different integrity rules, so an entire class of divergence was invisible
-   * to the instrument rather than merely untested.
-   *
-   * **Per connection, not per database**, which is what makes this a live
-   * assumption rather than a one-line fix: Bun serves SQLite from a single
-   * connection today, so setting it once holds for every later statement. If
-   * that ever becomes a pool, one statement's worth of enforcement would move
-   * to whichever connection happened to serve it. `DatabaseManager.test.ts`
-   * pins both halves — the value, and that it is the same across concurrent
-   * queries — so the day it changes is a failing test rather than a silent
-   * regression.
-   *
-   * Issued outside any transaction. SQLite documents the pragma as a no-op
-   * inside one, so a lazy "set it on first use" would be correct exactly until
-   * the first use happened to be a transaction.
+   * Throws rather than falling back to the default for an unknown name, and
+   * that is the important half. A fallback would make `Model.on("analitycs")`
+   * run on the hot path — the exact pool the caller was trying to stay off —
+   * and the only symptom would be the incident it was meant to prevent,
+   * arriving weeks later with nothing pointing back at the typo.
    */
-  private async configure(): Promise<void> {
-    if (this.dialect !== "sqlite") return;
-    await this.sql.unsafe("pragma foreign_keys = ON");
+  connection(name: string = DEFAULT_CONNECTION): DatabaseConnection {
+    // `this`, not `pools.get(DEFAULT_CONNECTION)` — see `name` above.
+    if (name === DEFAULT_CONNECTION) return this;
+
+    const found = this.pools.get(name);
+    if (!found) throw new UnknownConnectionError(name, this.connectionNames);
+    return found;
+  }
+
+  /** Every configured name, default first. For error messages and diagnostics. */
+  get connectionNames(): string[] {
+    return [...this.pools.keys()];
+  }
+
+  /**
+   * The default connection's client. Unchanged in meaning: an application that
+   * never names a connection sees exactly what it saw before #327.
+   */
+  get sql(): SQL {
+    return this.default.sql;
+  }
+
+  get dialect(): Dialect {
+    return this.default.dialect;
+  }
+
+  get url(): string {
+    return this.default.url;
   }
 
   // Escape hatch matching Bun's own API, so `db.query` reads like `sql` does in
@@ -88,7 +166,16 @@ export class DatabaseManager {
     return this.sql;
   }
 
+  /** Closes every connection, not only the default one. */
   async close(): Promise<void> {
-    await this.sql.close();
+    // The aggregate promise needs the same treatment each connection's own
+    // `ready` gets in `Connection.close` — it is derived from them, so a
+    // rejection there arrives here as a second, separately unhandled one.
+    this.ready.catch(() => {});
+    await Promise.all([...this.pools.values()].map((pool) => pool.close()));
+  }
+
+  private get default(): Connection {
+    return this.pools.get(DEFAULT_CONNECTION)!;
   }
 }

@@ -376,7 +376,12 @@ export async function createDifferential(options: {
       get(target, property, receiver) {
         if (property === "sql") return counting;
         const value = Reflect.get(target, property, receiver);
-        return typeof value === "function" ? value.bind(target) : value;
+        // Bound to the **proxy**. `$exec` resolves its connection by name and
+        // the manager answers the default one with `this` — bound to the
+        // target, that is the unwrapped manager, and the statements it runs are
+        // never seen here. The delegation above is only as generic as this
+        // line lets it be.
+        return typeof value === "function" ? value.bind(receiver) : value;
       },
     }),
   );

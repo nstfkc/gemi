@@ -2921,7 +2921,8 @@ budget one of them used to have. Rebalance as models move across; when the last 
 Prisma client and give gemi the whole budget.
 
 Pointing gemi at a *different* `url` is the other honest answer — a separate pool with its own cap,
-at the cost of two things to configure per environment.
+at the cost of two things to configure per environment. The same arithmetic applies to gemi's own
+second pool: see [Connections](#connections).
 
 </details>
 
@@ -3906,6 +3907,111 @@ savepoint, the Postgres abort described above. Those need a database, and they b
 integration test rather than in a mock. Keep the seam for the control flow and test the transaction
 itself against Postgres.
 
+## Connections
+
+One connection is the default and needs no configuration. A second one is for the case where two
+workloads share a database and want opposite settings from it — a hot path that must never block,
+and an analytics path whose queries legitimately run for seconds:
+
+| | hot path | analytics |
+| --- | --- | --- |
+| pool max | 12 | 3 |
+| statement timeout | 8s | 45s |
+
+A value that protects one of those is the wrong value for the other, which is the whole reason they
+cannot be one pool with one setting. Without a second connection, a dashboard aggregate can drain
+the pool and block sign-in.
+
+The top-level `url` and `options` describe the connection called `default`. Everything else goes
+under `connections`:
+
+```typescript
+// app/config/database.ts
+export default defineDatabaseConfig({
+  url: process.env.DATABASE_URL,
+  options: { max: 12 },
+
+  connections: {
+    analytics: {
+      url: process.env.DATABASE_URL,          // the same database, deliberately
+      options: { max: 3, idleTimeout: 60 },   // a pool of its own
+      slowTransactionThreshold: 60_000,       // and a threshold that suits it
+    },
+  },
+})
+```
+
+The same URL twice is normal and is not a mistake: what differs is the pool, not the database.
+`url` and `options` are never inherited from the top level — a connection that borrowed the
+default's URL by omitting one would be a second pool created by a typo — but
+`slowTransactionThreshold` is, since it is a diagnostic that applies to any pool.
+
+### Naming one, per query
+
+```ts
+const rows = await Subscription.on("analytics").findMany({ where })
+const raw = await DB.connection("analytics").query(sql`select …`)
+```
+
+**Which connection a model uses is a per-query property, not a per-model one.** The same
+`Subscription` is read on the hot path during sign-in and swept by the nightly audit, so a
+`connection` declared on the model class would force one of those two to be wrong. `on` returns the
+model class with the connection bound to it, so the whole typed surface is there and narrows exactly
+as it does on the class itself.
+
+The connection reaches everything that query fans out into — the nested reads of an `include`, the
+extra statements of a nested write, the relation reads a `_count` compiles — because it travels in
+the same ambient scope the transaction does. There is no argument to forget to pass on.
+
+An unknown name raises `UnknownConnectionError` and lists the ones that are configured. It never
+falls back to the default: `Subscription.on("analitycs")` running on the hot path is the exact
+incident the second pool was configured to prevent, and it would arrive weeks later with nothing
+pointing at the typo.
+
+`query`, `execute` and `transaction` on a handle *reject*, so a `.catch()` catches a wrong name or a
+refusal. The `sql` and `dialect` getters have nowhere to put a rejection and throw synchronously
+instead — and `DB.connection(name).sql` is Bun's raw template, so it runs on that connection's
+**pool** rather than on an open transaction, exactly as `DB.sql` always has. Use `query` and
+`execute` when the difference matters.
+
+A `save` writes back to the connection its row was read on, since a tracked row outlives the scope
+that produced it — see [Rows & entities](./orm-rows-and-entities.md).
+
+### A transaction cannot span two connections
+
+This is the constraint to design around, and it is enforced rather than documented:
+
+```ts
+await Model.transaction(async () => {
+  await Invoice.create({ data })
+  await Subscription.on("analytics").findMany({})   // CrossConnectionTransactionError
+})
+```
+
+A transaction lives on one reserved connection of one pool. A statement on another pool cannot join
+it and cannot be rolled back with it, so the alternatives to raising are both worse: run it outside
+the transaction and it stays committed when the transaction rolls back; run it on the open handle
+and it goes to the wrong database, which is usually a table of the same shape and no error at all.
+
+Catching the error leaves the transaction usable, so the fix is local — move that query outside the
+transaction, or do the whole unit on one connection.
+
+Inside a transaction, a query that does **not** name a connection joins it, whichever connection it
+was opened on:
+
+```ts
+await DB.connection("analytics").transaction(async () => {
+  await Digest.create({ data })    // on "analytics", inside the transaction
+})
+```
+
+### What a second connection costs
+
+Every connection is a real pool, counted separately against whatever limit the server or the pooler
+enforces. Two pools of 12 is 24 connections, not 12 — so split the budget rather than adding to it,
+the same arithmetic as [running a Prisma client alongside gemi](#setup). `DB.close()` closes all of
+them.
+
 ## Policies
 
 A model carries a **list** of policies. Every member of a policy is optional; a model with none
@@ -4166,6 +4272,8 @@ Every failure is a typed error from `gemi/orm`, not a driver string.
 | `UnsupportedByDesignError` | A subclass of `UnsupportedQueryError` for the arguments under [Not in scope](#not-in-scope) — it says *decision*, where the parent says *not yet*. Catch this one to tell them apart. |
 | `InvalidArgumentError` | The other subclass: the argument exists and the *value* cannot mean anything — `take: "-2"`. Says what a good value looks like, rather than that the argument is unsupported. |
 | `UnsupportedDialectError` | A model operation on a dialect with no compiler — MySQL and MariaDB. See [Dialects](#dialects). |
+| `UnknownConnectionError` | A connection name that is not configured, listing the ones that are. Never a fall back to the default — see [Connections](#connections). |
+| `CrossConnectionTransactionError` | A statement naming one connection while a transaction is open on another. Both are named; the fix is to move that query outside the transaction. |
 | `ReturningUnsupportedError` | A write on a dialect without `RETURNING`, which is the same gap seen from the write path. |
 | `StaleSchemaArtifactError` | Generated files predate the running gemi. Re-run `prisma generate`. |
 | `MalformedRelationError` / `MissingModelSchemaError` / `UnregisteredRelationTargetError` | The generated artifact and the registry disagree — the same family as the two above, and the same fix. |
@@ -4610,11 +4718,36 @@ which row to update, and `save` says so rather than failing further down with a 
 instant the update happened rather than the one you fetched. Anything else the database rewrote
 comes back too.
 
+### It saves back to the connection the row came from
+
+If you read the row on a [named connection](./orm.md#connections), `save` writes it there:
+
+```ts
+const [row] = await User.on("analytics").findMany({}, { track: true })
+row.name = "changed"
+await User.save(row)                    // updates "analytics", with nothing said here
+```
+
+This is the one place a connection is not resolved from the surrounding scope, and it is why the
+connection is part of provenance alongside the model and the primary key. A tracked row is an
+ordinary object: it outlives the query that produced it, so by the time it is saved — three
+functions later, from code that never mentioned a connection — there is no scope left to read.
+Resolved the other way, `save` would compile a correct `update` and send it to the default
+connection, where the same id usually names a real and different row.
+
+Naming a *different* connection is a contradiction rather than an instruction and raises:
+`User.on("default").save(rowFromAnalytics)`. Copying a row between connections is a write in its
+own right — say it with `update`, where the `where` and the `data` are both visible.
+
+`wrap` carries the connection across too, so `User.wrap(row).save()` goes where `row` came from.
+
 ### Everything else still applies
 
 `save` compiles through the same path as any other write, so [policies](./orm.md#policies)
 scope it, `@updatedAt` stamps it, an open transaction contains it, and two saves touching the
-same columns share one cached plan.
+same columns share one cached plan. Inside a transaction on *another* connection it raises
+`CrossConnectionTransactionError` instead: that update cannot join the transaction, so it must not
+run at all.
 
 ## Level 3 — `wrap`, for behaviour
 
@@ -4688,8 +4821,6 @@ await Model.transaction(async () => {
 If this tier is ever pursued properly it gets its own plan and its own decision about whether
 the ORM is the product rather than one part of the framework. Until then, the levels above are
 what there is, and they are complete as described.
-
-
 ---
 
 ## Authentication

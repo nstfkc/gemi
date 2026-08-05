@@ -753,7 +753,11 @@ async function runDialect(
         get(target, property, receiver) {
           if (property === "sql") return counting;
           const value = Reflect.get(target, property, receiver);
-          return typeof value === "function" ? value.bind(target) : value;
+          // Bound to the **proxy**: `$exec` asks the manager for its connection
+          // by name and gets `this` back for the default one, which bound to
+          // the target would be the unwrapped manager — and every round trip
+          // would go uncounted.
+          return typeof value === "function" ? value.bind(receiver) : value;
         },
       }),
     );

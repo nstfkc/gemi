@@ -124,3 +124,39 @@ describe("include adds the relation to the type", () => {
     expectTypeOf(rows).toBeArray();
   });
 });
+
+/**
+ * **`on(name)` keeps the typed surface**, which is what makes it a per-query
+ * connection rather than an escape hatch (#327).
+ *
+ * A runtime test can only show that the rows came from the right database. What
+ * it cannot show is that the query in front of it still narrows the way the
+ * unbound class does — and that is the whole reason `on` hands back the model
+ * class rather than an untyped handle. It is also the property most easily lost
+ * by a later implementation that reaches for `any` in order to bind the name.
+ */
+describe("on(connection) narrows exactly as the class does", () => {
+  test("select still narrows the row", async () => {
+    const [user] = await UserModel.on("analytics").findMany({
+      select: { id: true, email: true },
+    });
+
+    expectTypeOf(user.id).toEqualTypeOf<number>();
+    expectTypeOf(user.email).toEqualTypeOf<string | null>();
+
+    // @ts-expect-error `name` was not selected, so it is not on the row
+    user.name;
+  });
+
+  test("include still narrows the relation", async () => {
+    const [user] = await UserModel.on("analytics").findMany({
+      include: { accounts: true },
+    });
+
+    expectTypeOf(user.accounts[0].id).toEqualTypeOf<number>();
+  });
+
+  test("it is still the same model class", () => {
+    expectTypeOf(UserModel.on("analytics")).toEqualTypeOf<typeof UserModel>();
+  });
+});
