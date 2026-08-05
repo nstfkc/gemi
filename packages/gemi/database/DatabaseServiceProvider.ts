@@ -44,13 +44,27 @@ export class DatabaseServiceProvider extends ServiceProvider {
  */
 function warnIfOrmUnavailable(database: DatabaseManager): void {
   if (process.env.NODE_ENV !== "development") return;
-  if (ormSupports(database.dialect)) return;
 
-  console.warn(
-    `[gemi] DATABASE_URL points at ${database.dialect}, which the gemi ORM ` +
-      `does not implement — only sqlite and postgres are. The connection ` +
-      `works, so raw SQL through DB.query / DB.sql and transactions are fine, ` +
-      `but every model operation will raise UnsupportedDialectError.\n` +
-      `(development only)`,
-  );
+  // Every connection, not only the default one. A named connection is a whole
+  // pool an application will run model queries on — `Model.on("analytics")` —
+  // so it can be pointed at MySQL exactly as the default can, and warning about
+  // only one of them would make the check pass while the query that raises is
+  // on the other.
+  for (const name of database.connectionNames) {
+    const connection = database.connection(name);
+    if (ormSupports(connection.dialect)) continue;
+
+    const source =
+      name === database.name
+        ? "DATABASE_URL"
+        : `The "${name}" database connection`;
+
+    console.warn(
+      `[gemi] ${source} points at ${connection.dialect}, which the gemi ORM ` +
+        `does not implement — only sqlite and postgres are. The connection ` +
+        `works, so raw SQL through DB.query / DB.sql and transactions are ` +
+        `fine, but every model operation will raise ` +
+        `UnsupportedDialectError.\n(development only)`,
+    );
+  }
 }

@@ -28,7 +28,7 @@ Each link below points to a self-contained Markdown page. For a single file cont
 
 ## Data
 
-- [ORM](https://nstfkc.github.io/gemi/orm.md): the Prisma-typed, gemi-executed query layer — the Prisma generator block, every operation, relations and the batched/lateral strategies, ambient transactions, policies that apply to nested reads, soft deletes.
+- [ORM](https://nstfkc.github.io/gemi/orm.md): the Prisma-typed, gemi-executed query layer — the Prisma generator block, every operation, relations and the batched/lateral strategies, ambient transactions, named connections, policies that apply to nested reads, soft deletes.
 - [Rows & Entities](https://nstfkc.github.io/gemi/orm-rows-and-entities.md): plain objects by default, opt-in provenance with track + save, and wrap for methods on a record.
 
 ## Auth

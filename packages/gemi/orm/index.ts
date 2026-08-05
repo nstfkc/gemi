@@ -129,6 +129,17 @@ export {
   type OrmScope,
 } from "./context";
 
+// The two failures a named connection can produce, re-exported from
+// `gemi/database` because this is where they are *caught*: both come out of a
+// model operation — `Subscription.on("analytics").findMany()` — and an
+// application should not have to know that the manager rather than the ORM
+// constructed them. `docs/orm.md`'s errors table is the list of what an
+// application can catch, and it is checked against this module's exports.
+export {
+  CrossConnectionTransactionError,
+  UnknownConnectionError,
+} from "../database/Connection";
+
 // Composable raw SQL. `DB.query` / `DB.execute` run what these build — the
 // place every shape the ORM declines is supposed to land.
 export {

@@ -1,12 +1,16 @@
 import type { SQL, TransactionSQL } from "bun";
+import type { DatabaseConnection } from "../database/Connection";
 import { DatabaseManager } from "../database/DatabaseManager";
 import { app } from "../foundation/app";
 import { type BindContext, createBindContext } from "./compile/fragment";
 import {
+  assertConnectionUsable,
+  currentConnectionName,
   currentTransaction,
   isSystemScope,
   runAsSystem,
   runAsUser,
+  runOnConnection,
   withTransaction,
 } from "./context";
 import {
@@ -95,15 +99,38 @@ const ORTHROW = new Set([
  * quietly open a transaction that ignores the setting. `withTransaction` itself
  * takes the threshold as an argument on purpose; it knows nothing about the
  * container, and this is the seam where the two meet.
+ *
+ * The same argument now carries the connection's **name**: a pool cannot be
+ * asked which one it is, and `withTransaction` has to know in order to tell a
+ * nested transaction on the same connection (a savepoint) from one on another
+ * (a refusal). Taking the whole connection rather than the manager is what
+ * makes both come from the same object, so a named connection cannot end up
+ * with the default's threshold.
  */
 function transact<T>(
-  db: DatabaseManager,
+  connection: DatabaseConnection,
   fn: (tx: TransactionSQL) => Promise<T>,
 ): Promise<T> {
-  return withTransaction(db.sql, fn, {
-    slowTransactionThreshold: db.config.slowTransactionThreshold,
+  return withTransaction(connection.sql, fn, {
+    slowTransactionThreshold: connection.config.slowTransactionThreshold,
+    connection: connection.name,
   });
 }
+
+/**
+ * The classes `Model.on` has already built, keyed by the class it was called on
+ * and then by connection name.
+ *
+ * `User.on("analytics")` is a per-query call, so it can happen in a loop and in
+ * a hot path; minting a class each time would allocate one per query and defeat
+ * every identity comparison downstream — the policy-divergence guard's
+ * `registered !== this` among them, which would then run `policiesFor` against
+ * a class it had never seen before on every call.
+ *
+ * A `WeakMap` on the outside so a model class that goes out of scope takes its
+ * bound variants with it, which matters for tests that define models inline.
+ */
+const boundToConnection = new WeakMap<object, Map<string, typeof Model>>();
 
 export abstract class Model {
   /**
@@ -173,6 +200,75 @@ export abstract class Model {
    * typing, which a bare `$policies = [...]` does not get on its own.
    */
   static $policies?: readonly PolicyEntry[];
+
+  /**
+   * The connection this class's operations run on, set only by `on` below.
+   *
+   * `undefined` — which is what every model an application writes has — means
+   * *the ambient connection*, not *the default one*. The two differ inside
+   * `DB.connection("analytics").transaction(...)`, where an unqualified query
+   * has to join the open transaction rather than quietly reach for the hot
+   * path's pool.
+   */
+  static $connection?: string;
+
+  /**
+   * The same model, reading and writing on a named connection.
+   *
+   *     const rows = await Subscription.on("analytics").findMany({ where })
+   *
+   * **Per query, not per model**, which is the shape the problem actually has:
+   * the same `Subscription` is read on the hot path during sign-in and swept by
+   * the nightly audit. A `static $connection = "analytics"` on the class would
+   * force one of those two to be wrong, so the choice lives at the call site
+   * and every query that does not make it stays on the default connection.
+   *
+   * What it returns is the model class with the connection bound to it, so the
+   * whole typed surface — all fifteen operations, `transaction`, `save` — is
+   * there unchanged and narrows exactly as it does on the class itself. The
+   * connection reaches nested `include` reads and nested writes as well, which
+   * an argument on `findMany` could not have done: those recurse through the
+   * *target* model's `$exec` by way of the registry, so it is carried in the
+   * ambient scope rather than in anyone's parameter list.
+   *
+   * **A transaction cannot span connections.** Naming one inside a transaction
+   * open on another raises `CrossConnectionTransactionError` rather than
+   * running the statement outside the transaction, where it would survive the
+   * rollback. See that error for why refusing is the only honest answer.
+   *
+   * An unknown name raises `UnknownConnectionError` at the query, not here:
+   * `on` is a pure lookup and does not resolve the container, so a model bound
+   * in a module's top-level scope cannot force the database open at import
+   * time.
+   */
+  static on<T extends typeof Model>(this: T, connection: string): T {
+    let byName = boundToConnection.get(this);
+    if (byName === undefined) boundToConnection.set(this, (byName = new Map()));
+
+    const cached = byName.get(connection);
+    if (cached !== undefined) return cached as T;
+
+    // A subclass rather than a Proxy. Both would forward the operations, but a
+    // subclass *is* a class: `policiesFor` walks the prototype chain with
+    // `Object.hasOwn`, the generated statics are inherited by the language
+    // rather than by a trap, and `$exec`'s `this` needs no special handling to
+    // stay bound to it.
+    const bound = class extends (this as unknown as typeof Model) {
+      static $connection = connection;
+    };
+
+    // Otherwise the class expression takes its name from the binding above and
+    // every error that names the model says "bound". `UnregisteredPolicyClassError`
+    // reads `this.name` in particular, and it is exactly the kind of message
+    // that has to name the class the caller wrote.
+    Object.defineProperty(bound, "name", {
+      value: (this as { name: string }).name,
+      configurable: true,
+    });
+
+    byName.set(connection, bound);
+    return bound as unknown as T;
+  }
 
   /**
    * Runs `fn` with policies suspended, for code that has no user and knows it:
@@ -415,11 +511,53 @@ export abstract class Model {
    * bound, or `false` switches it off. In production it just holds the
    * connection. Keep network and filesystem I/O outside.
    */
-  static transaction<T>(fn: () => Promise<T>): Promise<T> {
-    return transact(app(DatabaseManager), () => fn());
+  // `async`, so that naming a connection this transaction cannot reach —
+  // `Subscription.on("analytics").transaction(...)` inside a transaction on the
+  // hot path — *rejects* rather than throwing synchronously. The same reasoning
+  // `DB.query` records: an API that does one sometimes and the other otherwise
+  // is a footgun, and a `.catch()` would miss exactly this error.
+  static async transaction<T>(fn: () => Promise<T>): Promise<T> {
+    // `Subscription.on("analytics").transaction(...)` opens on that connection,
+    // and a bare `Model.transaction` opens on whatever is ambient — which is
+    // the default connection unless something outside has already named one.
+    const name = this.$connection ?? currentConnectionName();
+    assertConnectionUsable(name);
+
+    return transact(app(DatabaseManager).connection(name), () =>
+      runOnConnection(name, () => fn()),
+    );
   }
 
+  /**
+   * The choke point's outer half: which connection this operation runs on.
+   *
+   * Split from the body below so that the name is resolved and entered
+   * **once**, around everything — the policy pass, the plan lookup, the nested
+   * writes and every relation read that recurses back through here. The
+   * alternative, resolving it inside, would have left each nested read to
+   * rediscover it, and the one that did not would have run against the default
+   * connection with no error to show for it.
+   *
+   * Recursive calls cost a comparison: the ambient name already matches, so
+   * `runOnConnection` calls straight through without entering a second scope.
+   *
+   * `async` for the reason `transaction` is: an operation refused for naming a
+   * connection the open transaction cannot reach has to reject like every other
+   * failure `$exec` produces, rather than being the one that throws before the
+   * promise exists.
+   */
   static async $exec(
+    op: Operation,
+    args: any = {},
+    options?: ExecOptions,
+  ): Promise<unknown> {
+    const name = this.$connection ?? currentConnectionName();
+    assertConnectionUsable(name);
+
+    return runOnConnection(name, () => this.$execute(op, args, options));
+  }
+
+  private static async $execute(
     op: Operation,
     args: any = {},
     options?: ExecOptions,
@@ -428,7 +566,13 @@ export abstract class Model {
 
     // Resolved per call, never captured at module scope: that is what keeps the
     // connection swappable in tests.
-    const db = app(DatabaseManager);
+    //
+    // Through `connection()` rather than off the manager directly, so that a
+    // query on a named connection reads *that* pool's client and dialect. The
+    // default connection is the manager itself, which is what keeps every
+    // existing wrapper of it — the harnesses that Proxy `sql` to count
+    // statements — looking at the object this executes through.
+    const db = app(DatabaseManager).connection(currentConnectionName());
     const dialect = dialectFor(db.dialect);
 
     // The ambient-transaction hook, and the entire integration. It is one line

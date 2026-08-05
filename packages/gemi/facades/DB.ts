@@ -1,34 +1,60 @@
 import type { SQL } from "bun";
+import type { DatabaseConnection } from "../database/Connection";
 import { DatabaseManager } from "../database/DatabaseManager";
 import type { Dialect } from "../database/dialect";
-import { currentTransaction, withTransaction } from "../orm/context";
+import { app } from "../foundation/app";
+import {
+  assertConnectionUsable,
+  currentConnectionName,
+  currentTransaction,
+  runOnConnection,
+  withTransaction,
+} from "../orm/context";
 import { dialectFor } from "../orm/dialect";
 import { renderFragment, type SqlFragment } from "../orm/sql";
 import { Facade } from "./Facade";
 
-// Access to the app's database connection. Bun's `SQL` client is a tagged
-// template, so queries read the same here as they do in Bun's own docs:
-//
-//   const users = await DB.sql`select * from users where id = ${id}`
-//
-// Values interpolated into the template are bound as parameters, not
-// concatenated into the SQL string — `${id}` is a placeholder, so this is not a
-// SQL injection risk.
-export class DB extends Facade {
-  static getFacadeAccessor() {
-    return DatabaseManager;
+/**
+ * The raw-SQL surface, pointed at one connection.
+ *
+ * `DB` itself is one of these — the one that resolves the **ambient**
+ * connection per call — and `DB.connection(name)` returns one bound to a name.
+ * Written once rather than twice so the two cannot drift: a fragment run
+ * through a named connection has to reach the driver by exactly the path
+ * `DB.query` does, or the ambient transaction, the placeholder numbering and
+ * the string refusal would each be a thing that works on one of them.
+ *
+ * Every method resolves the manager, the connection and the dialect **per
+ * call** and captures none of them, which is the rule `Model.$exec` follows and
+ * what keeps the connection swappable in tests.
+ */
+export class ConnectionQueries {
+  /**
+   * `undefined` means *whichever connection is ambient*, which is the default
+   * one unless an enclosing transaction or `Model.on` named another. That is
+   * the mode `DB`'s own statics use, and it is why an unqualified `DB.query`
+   * inside `DB.connection("analytics").transaction(...)` joins that transaction
+   * instead of being refused by it.
+   */
+  constructor(private readonly bound?: string) {}
+
+  /** The name this handle will use for the call happening now. */
+  get name(): string {
+    return this.bound ?? currentConnectionName();
   }
 
-  // The Bun `SQL` client. Tagged-template queries go through here.
-  static get sql(): SQL {
-    return this.getFacadeRoot().sql;
+  /** The Bun `SQL` client. Tagged-template queries go through here. */
+  get sql(): SQL {
+    return this.connection().sql;
   }
 
-  // Which database is in use, inferred from the connection URL. Read this when
-  // generating SQL that differs across databases (upserts, `RETURNING`,
-  // autoincrement, boolean and timestamp types).
-  static get dialect(): Dialect {
-    return this.getFacadeRoot().dialect;
+  /**
+   * Which database is in use, inferred from the connection URL. Read this when
+   * generating SQL that differs across databases (upserts, `RETURNING`,
+   * autoincrement, boolean and timestamp types).
+   */
+  get dialect(): Dialect {
+    return this.connection().dialect;
   }
 
   // Runs a composed fragment and returns its rows.
@@ -57,7 +83,7 @@ export class DB extends Facade {
   // *rejects* instead of throwing synchronously. An API that does one sometimes
   // and the other otherwise is a footgun: `DB.query(...).catch(…)` would miss
   // exactly the errors this refuses to run.
-  static async query<T = any>(fragment: SqlFragment): Promise<T[]> {
+  async query<T = any>(fragment: SqlFragment): Promise<T[]> {
     return (await this.run(fragment, "query")) as T[];
   }
 
@@ -88,21 +114,9 @@ export class DB extends Facade {
   // because there the statement shape is ours to choose and an exact count that
   // depends on nothing undocumented is worth a key column per row. Here the
   // statement is the caller's, so there is nothing to add a `RETURNING` to.
-  static async execute(fragment: SqlFragment): Promise<number> {
+  async execute(fragment: SqlFragment): Promise<number> {
     const result = await this.run(fragment, "execute");
     return Number((result as { count?: unknown })?.count ?? 0);
-  }
-
-  private static run(fragment: SqlFragment, operation: string) {
-    const db = this.getFacadeRoot();
-    // Per call, never captured: the same rule `Model.$exec` follows, and what
-    // keeps the connection swappable in tests.
-    const { text, values } = renderFragment(
-      fragment,
-      dialectFor(db.dialect),
-      operation,
-    );
-    return (currentTransaction() ?? db.sql).unsafe(text, values);
   }
 
   // Runs the callback inside a transaction, committing when it resolves and
@@ -121,13 +135,145 @@ export class DB extends Facade {
   // The slow-transaction threshold comes from the same `database` config as it
   // does for the ORM, so a `DB.transaction` holding a connection too long warns
   // exactly as a `Model.transaction` would. Same reason as above: one system.
-  static transaction<T>(fn: (tx: SQL) => Promise<T>): Promise<T> {
-    const db = this.getFacadeRoot();
-    return withTransaction(db.sql, fn as (tx: SQL) => Promise<T>, {
-      slowTransactionThreshold: db.config.slowTransactionThreshold,
-    });
+  //
+  // On a named connection the whole callback runs with that connection ambient,
+  // so a `User.create` inside `DB.connection("analytics").transaction(...)`
+  // joins the transaction rather than opening a second one on the hot path.
+  //
+  // `async` so that a handle used inside a transaction on another connection
+  // *rejects* rather than throwing synchronously — the same reason `query`
+  // above is, and the same `.catch()` that would otherwise miss it.
+  async transaction<T>(fn: (tx: SQL) => Promise<T>): Promise<T> {
+    const name = this.name;
+    const connection = this.connection(name);
+
+    return withTransaction(
+      connection.sql,
+      (tx) => runOnConnection(name, () => fn(tx)),
+      {
+        slowTransactionThreshold: connection.config.slowTransactionThreshold,
+        connection: name,
+      },
+    );
   }
 
+  private run(fragment: SqlFragment, operation: string) {
+    const db = this.connection();
+    // Per call, never captured: the same rule `Model.$exec` follows, and what
+    // keeps the connection swappable in tests.
+    const { text, values } = renderFragment(
+      fragment,
+      dialectFor(db.dialect),
+      operation,
+    );
+    return (this.handle() ?? db.sql).unsafe(text, values);
+  }
+
+  /**
+   * The open transaction, but only when it belongs to this handle's connection.
+   *
+   * `assertConnectionUsable` has already refused the case where they differ, so
+   * reaching this with a mismatch is impossible — except for the unqualified
+   * handle, whose name *is* the transaction's. The comparison is kept anyway
+   * because it is what makes that reasoning local: nothing here has to know
+   * which caller checked what.
+   */
+  private handle() {
+    const tx = currentTransaction();
+    if (tx === undefined) return undefined;
+    return currentConnectionName() === this.name ? tx : undefined;
+  }
+
+  private connection(name = this.name): DatabaseConnection {
+    assertConnectionUsable(name);
+    return app(DatabaseManager).connection(name);
+  }
+}
+
+/**
+ * The handles `DB.connection` has already built.
+ *
+ * A handle holds a name and nothing else — it resolves the manager per call —
+ * so one per name is enough, and reusing them keeps `DB.connection("analytics")`
+ * free to be written inline in a hot path.
+ */
+const handles = new Map<string, ConnectionQueries>();
+
+/** The unqualified handle: whichever connection is ambient, per call. */
+const ambient = new ConnectionQueries();
+
+// Access to the app's database connections. Bun's `SQL` client is a tagged
+// template, so queries read the same here as they do in Bun's own docs:
+//
+//   const users = await DB.sql`select * from users where id = ${id}`
+//
+// Values interpolated into the template are bound as parameters, not
+// concatenated into the SQL string — `${id}` is a placeholder, so this is not a
+// SQL injection risk.
+//
+// Every static here works on the **ambient** connection: the default one,
+// unless an enclosing `DB.connection(name).transaction(...)` named another.
+// `DB.connection(name)` is the way to name one explicitly.
+export class DB extends Facade {
+  static getFacadeAccessor() {
+    return DatabaseManager;
+  }
+
+  /**
+   * The raw-SQL surface for a named connection.
+   *
+   *     const rows = await DB.connection("analytics").query(sql`…`)
+   *     await DB.connection("analytics").transaction(async () => { … })
+   *
+   * The names are the keys of `connections` in `app/config/database.ts`, plus
+   * `"default"` for the top-level `url`. An unknown one raises
+   * `UnknownConnectionError` when the handle is used, listing what is
+   * configured — never a silent fall back to the default, which would put the
+   * query on precisely the pool the caller was trying to stay off.
+   *
+   * A transaction cannot span two connections. Using a named handle while a
+   * transaction is open on another connection raises
+   * `CrossConnectionTransactionError` rather than running the statement outside
+   * that transaction, where it would survive the rollback.
+   */
+  static connection(name: string): ConnectionQueries {
+    let handle = handles.get(name);
+    if (handle === undefined) handles.set(name, (handle = new ConnectionQueries(name)));
+    return handle;
+  }
+
+  // The Bun `SQL` client. Tagged-template queries go through here.
+  static get sql(): SQL {
+    return ambient.sql;
+  }
+
+  // Which database is in use, inferred from the connection URL. Read this when
+  // generating SQL that differs across databases (upserts, `RETURNING`,
+  // autoincrement, boolean and timestamp types).
+  static get dialect(): Dialect {
+    return ambient.dialect;
+  }
+
+  // Runs a composed fragment and returns its rows, on the ambient transaction
+  // when there is one. See `ConnectionQueries.query`, which is the whole of it.
+  static query<T = any>(fragment: SqlFragment): Promise<T[]> {
+    return ambient.query<T>(fragment);
+  }
+
+  // The same, for a statement whose answer is *how many rows it touched* — the
+  // compare-and-swap primitive. See `ConnectionQueries.execute`.
+  static execute(fragment: SqlFragment): Promise<number> {
+    return ambient.execute(fragment);
+  }
+
+  // Runs the callback inside a transaction, committing when it resolves and
+  // rolling back if it throws. One transaction system with the ORM's, so a
+  // `User.create` inside this joins it. See `ConnectionQueries.transaction`.
+  static transaction<T>(fn: (tx: SQL) => Promise<T>): Promise<T> {
+    return ambient.transaction(fn);
+  }
+
+  /** Closes every configured connection, not only the default one. */
   static close(): Promise<void> {
     return this.getFacadeRoot().close();
   }
