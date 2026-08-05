@@ -431,18 +431,37 @@ export type OrderByInput<M extends ModelTypeInfo> = {
  * is mutually recursive with the operation args — bounded, as ever, by what the
  * caller wrote.
  */
+/**
+ * What `_count` accepts per relation: `true`, or a filter over the rows counted.
+ *
+ * The filter half was emitted long before it could be written. `compileRelationCount`
+ * reaches for `_count.select.<relation>.where` and ANDs it into the correlated
+ * subquery, so the SQL for a filtered count has always been correct; this type
+ * said `boolean` and was the only thing refusing it (#333). The gap mattered
+ * because the wrong answer is silent — a card counting soft-deleted rows renders
+ * a number that is simply wrong, not one that fails.
+ *
+ * Shared by `SelectInput` and `IncludeInput` rather than written twice, because
+ * the two spellings of the same argument disagreeing is how it went unnoticed.
+ */
+type CountSelection<M extends ModelTypeInfo> = {
+  [K in keyof Relations<M>]?:
+    | boolean
+    | { where?: WhereInput<Relations<M>[K]["target"]> };
+};
+
 export type SelectInput<M extends ModelTypeInfo> = {
   [K in keyof Scalars<M>]?: boolean;
 } & {
   [K in keyof Relations<M>]?: boolean | RelationArgs<Relations<M>[K]>;
 } & {
-  _count?: boolean | { select?: { [K in keyof Relations<M>]?: boolean } };
+  _count?: boolean | { select?: CountSelection<M> };
 };
 
 export type IncludeInput<M extends ModelTypeInfo> = {
   [K in keyof Relations<M>]?: boolean | RelationArgs<Relations<M>[K]>;
 } & {
-  _count?: boolean | { select?: { [K in keyof Relations<M>]?: boolean } };
+  _count?: boolean | { select?: CountSelection<M> };
 };
 
 export type OmitInput<M extends ModelTypeInfo> = {

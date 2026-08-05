@@ -160,3 +160,65 @@ describe("on(connection) narrows exactly as the class does", () => {
     expectTypeOf(UserModel.on("analytics")).toEqualTypeOf<typeof UserModel>();
   });
 });
+
+/**
+ * **A `_count` can carry a filter** — #333.
+ *
+ * The SQL for this was always right. `compileRelationCount` reaches for
+ * `_count.select.<relation>.where` and ANDs it into the correlated subquery,
+ * and `relation-count.test.ts` has asserted the emitted text and its
+ * parameterisation for as long as the feature has existed. The input type said
+ * `boolean`, so the only thing that could not be written was the argument the
+ * compiler was already looking for.
+ *
+ * That gap is worth a type test rather than only a runtime one, because the
+ * wrong answer here is silent: a count that ignores its filter renders a number
+ * that is merely wrong — soft-deleted rows included in a total shown to a user —
+ * where a missing column would have failed loudly.
+ */
+describe("_count takes a filter over the rows it counts", () => {
+  test("a filtered count is still a number", async () => {
+    const user = await UserModel.findFirst({
+      select: {
+        _count: { select: { accounts: { where: { organizationId: 1 } } } },
+      },
+    });
+
+    expectTypeOf(user!._count.accounts).toEqualTypeOf<number>();
+  });
+
+  test("include spells it identically", async () => {
+    const user = await UserModel.findFirst({
+      include: {
+        _count: { select: { accounts: { where: { organizationId: 1 } } } },
+      },
+    });
+
+    expectTypeOf(user!._count.accounts).toEqualTypeOf<number>();
+  });
+
+  test("`true` still means every row, and mixes with a filtered sibling", async () => {
+    const org = await OrganizationModel.findFirst({
+      select: {
+        _count: {
+          select: {
+            accounts: { where: { organizationRole: 1 } },
+            invitations: true,
+          },
+        },
+      },
+    });
+
+    expectTypeOf(org!._count.accounts).toEqualTypeOf<number>();
+    expectTypeOf(org!._count.invitations).toEqualTypeOf<number>();
+  });
+
+  test("the filter is checked against the counted model, not the parent", async () => {
+    await UserModel.findFirst({
+      select: {
+        // @ts-expect-error `nonExistentColumn` is not a column on Account
+        _count: { select: { accounts: { where: { nonExistentColumn: 1 } } } },
+      },
+    });
+  });
+});
