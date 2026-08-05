@@ -2,7 +2,7 @@
 
 Jobs move slow or non-essential work off the request path. Instead of making a user wait while you call an external API, generate an image, or send a batch of emails, you dispatch a **Job** — it runs in the background through gemi's in-process queue, and the request returns immediately.
 
-You define jobs as classes extending `Job` (from `gemi/services`), list them in `app/config/queue.ts`, and fire them with `Job.dispatch(...)`.
+You define jobs as classes extending `Job` (from `gemi/services`) in files under `app/jobs/`, and fire them with `Job.dispatch(...)`. The directory is read at boot, so there is no list to keep alongside it.
 
 ## Defining a job
 
@@ -69,9 +69,25 @@ ProcessVideoJob.dispatch({ videoId: video.id });
 
 `dispatch` enqueues the job and returns `void` (fire-and-forget) — it does not wait for the job to finish, and the payload is serialized as JSON, so pass plain, serializable data (not class instances or functions). See [Controllers](./controllers.md) for dispatching from request handlers.
 
-## Registering jobs — `app/config/queue.ts`
+## Registering jobs — `app/jobs/`
 
-Every job class must be listed in the `queue` config slice so the queue knows how to construct it by name. You also set the worker `concurrency` here.
+Jobs are discovered. Every class under `app/jobs` that extends `Job` is registered when the kernel boots, so writing the file is all it takes — there is no list to keep in step with it.
+
+That is deliberate, and it is about the failure that happens when the two disagree. The queue looks a dispatched job up by name; a name it has never heard of is dropped with a line on stderr and nothing else. `Job.dispatch` has already returned by then — it returns as soon as the job is queued, not when it runs — so the dispatch simply does not happen, whatever was supposed to follow it does not either, and the only trace is in the server log.
+
+### What the walk costs
+
+A class does not exist until its module has run, so there is no way to read a directory of classes without importing it. **Every `.ts`/`.tsx` file under `app/jobs` is imported at boot** — in development and in production, on every start — and a file that *does something* when it is imported does that thing at boot. A module that opens a connection, seeds a cache, or registers a listener at the top level is doing it before the first request, from a directory nobody thought of as an entry point.
+
+So `app/jobs` wants to hold job declarations rather than merely contain some. Keep a helper that runs work on import somewhere else, or list the jobs explicitly (below) and skip the walk entirely. A file that cannot be imported at all — one reaching a `?raw` or `.css` specifier through its imports, say — fails the boot naming itself, rather than being quietly left out of the registry.
+
+The walk skips what certainly is not a declaration: `.d.ts` files, tests, type tests and benchmarks by their filename suffix, dot-directories, `node_modules`, and anything under a directory carrying its own `package.json`. Nothing else is guessed at.
+
+A new file is picked up on the next server reload — under `gemi dev`, creating a file does not by itself trigger one, so save any other file (or restart) if a job you just wrote has not appeared.
+
+### Configuring the queue — `app/config/queue.ts`
+
+The `queue` slice is where `concurrency` lives, and where you can take over registration yourself. Declaring `jobs` turns discovery off and uses your list verbatim — reach for it when the jobs live somewhere the walk cannot reach, when you want a deliberate subset, or when the deploy ships only the build output and there is no `app/jobs` on disk to read.
 
 ```typescript
 // app/config/queue.ts
@@ -80,15 +96,18 @@ import { ProcessVideoJob } from "@/app/jobs/ProcessVideoJob";
 
 export default defineQueueConfig({
   concurrency: 20, // max jobs running at once (default 1)
-  jobs: [ProcessVideoJob],
+  jobs: [ProcessVideoJob], // omit to discover them from app/jobs
 });
 ```
 
 `defineQueueConfig` is an identity helper — it exists only to type the object.
 
+**A present `jobs` wins, and `jobs: []` is present.** An empty array means an application with no jobs and is honoured as such; it does not mean "go and find some". Leaving the key out — or leaving the slice out entirely — is what asks for discovery.
+
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `jobs` | `(new () => Job)[]` | `[]` | All dispatchable job classes. A job not listed here cannot be dispatched. |
+| `jobs` | `(new () => Job)[]` | *discovered* | All dispatchable job classes. Omit to discover them from `jobsDir`. A job that reaches neither is dispatched into nothing. |
+| `jobsDir` | `string` | `"app/jobs"` | Where to discover them. Relative to the project root, or absolute. |
 | `concurrency` | `number` | `1` | Maximum number of jobs processed simultaneously. |
 
 The slice is wired into the kernel by name:
@@ -103,7 +122,7 @@ export default class extends Kernel {
 }
 ```
 
-Behind the scenes the framework's `QueueServiceProvider` reads that slice in its `register()` and binds a `QueueManager` singleton into the container under the token `"queue"`. You never construct or reference the provider yourself — providers register bindings, config configures them.
+Behind the scenes the framework's `QueueServiceProvider` reads that slice in its `register()` and binds a `QueueManager` singleton into the container under the token `"queue"`, then fills in the discovered jobs in its `boot()`. You never construct or reference the provider yourself — providers register bindings, config configures them.
 
 ### Resolving the queue
 
@@ -114,6 +133,25 @@ import { app } from "gemi/foundation";
 import { QueueManager } from "gemi/services";
 
 app(QueueManager); // typed QueueManager, no cast
+```
+
+`registeredJobs` is the set it ended up with, discovered or declared. That is what a test asserts against now — an app that used to import the `jobs` array from its config module to check something about every job it dispatches asks the manager instead:
+
+```typescript
+import { app } from "gemi/foundation";
+import { QueueManager } from "gemi/services";
+
+for (const Registered of app(QueueManager).registeredJobs) {
+  expect(new Registered().maxAttempts).toBeGreaterThan(0);
+}
+```
+
+`discoverJobs()` answers the same question without an application around it — it walks `app/jobs` (or a directory you name) and returns the classes it finds. Every file it walks is imported, as above:
+
+```typescript
+import { discoverJobs } from "gemi/services";
+
+const jobs = await discoverJobs(); // every Job subclass under app/jobs
 ```
 
 See [Project Structure](./project-structure.md) for the full kernel layout.

@@ -1,7 +1,9 @@
 # Upgrading from 0.50 to 0.51
 
-Two changes need a hand. There is no codemod for either — `bunx gemi migrate` is
-the 0.42→0.43 tool and does not touch any of this.
+Three changes need a hand, and the third is a look rather than an edit — it only
+becomes work if you were using an unlisted job as an off switch. There is no
+codemod for any of them — `bunx gemi migrate` is the 0.42→0.43 tool and does not
+touch any of this.
 
 ## Declare your model modules on the Kernel
 
@@ -96,6 +98,37 @@ passed `Prisma.DbNull`, `Prisma.JsonNull` or `Prisma.AnyNull`, import them from
 
 The full detail, including the `Prisma.*` type mapping, is under
 **Setup** in [docs/orm.md](./docs/orm.md#setup).
+
+## Check `app/cron` and `app/jobs` before you drop the explicit list
+
+0.51 discovers jobs from the filesystem. Every `Job` subclass under `app/jobs` is
+registered and every `CronJob` under `app/cron` is scheduled — unless the config
+slice declares `jobs` itself, which still wins and still reads no directory.
+
+**Nothing to do if your `app/config/queue.ts` and `app/config/schedule.ts`
+already declare `jobs`.** That includes `jobs: []`, which every app scaffolded
+before 0.51 has in `app/config/queue.ts`: an empty array is an application saying
+it has no jobs, it is honoured as such, and nothing starts running under you.
+Delete the key when you want the directory read instead.
+
+Two things to look at before you do:
+
+- **A job you switched off by unlisting it.** Deleting a class from the array and
+  leaving the file in place used to disable it. Discovery finds the file, so it
+  starts running on the next boot. Delete the file, or keep the explicit list.
+- **Anything in those directories that is not a declaration.** Finding the
+  classes means importing the files — a class does not exist until its module has
+  run — so a helper sitting in `app/cron` that opens a connection or seeds a
+  cache at the top level now does that at boot, on every start. Move it out, or
+  keep the explicit list and skip the walk.
+
+The walk itself skips `.d.ts` files, tests and benchmarks by their filename
+suffix, dot-directories, `node_modules`, and anything under a directory with its
+own `package.json`. Nothing else is guessed at, so a file it cannot import fails
+the boot naming itself rather than being quietly left out.
+
+Both directories are covered in [docs/cron.md](./docs/cron.md) and
+[docs/jobs-and-queues.md](./docs/jobs-and-queues.md).
 
 ---
 

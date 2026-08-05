@@ -1,6 +1,7 @@
-import { existsSync, readdirSync, statSync } from "node:fs";
-import { join, relative, resolve } from "node:path";
+import { statSync } from "node:fs";
+import { relative, resolve } from "node:path";
 
+import { sourceFiles } from "../support/discover";
 import type { UnregisteredPolicyClassError } from "../orm/errors";
 
 /**
@@ -70,9 +71,9 @@ import type { UnregisteredPolicyClassError } from "../orm/errors";
  * command against the template imported `app/models/bench/run.ts`, which is a
  * benchmark, and it duly ran the benchmark and rewrote its report.
  *
- * The exclusions above keep tests and vendored packages out. `--ignore` is for
- * the rest, and what it skipped is printed, so a narrowed run does not read
- * like a complete one.
+ * The exclusions `sourceFiles` applies keep tests and vendored packages out.
+ * `--ignore` is for the rest, and what it skipped is printed, so a narrowed run
+ * does not read like a complete one.
  */
 
 /** The problems one run found, plus enough to say what was covered. */
@@ -137,63 +138,27 @@ export interface OrmSurface {
 /**
  * Files that could hold a model class.
  *
- * Everything under the directory, because apps do group models into folders,
- * minus what cannot be one. The check has to *import* each of these, so the
- * exclusions are about what is certainly not model source rather than about
- * what is probably not:
+ * The walk itself is `sourceFiles`, which this command shared with job and cron
+ * discovery when #322 asked for one mechanism rather than three. Its skip rules
+ * are written down there, and they are these ones: the question "which files
+ * under this directory might declare a class, given that answering means
+ * importing every one of them" has the same answer for models, jobs and crons.
  *
- *   - **Declaration files.** `.d.ts` has no runtime module behind it.
- *   - **Tests, type tests and benchmarks**, by the suffix a runner already
- *     recognises.
- *   - **Dot-directories and `node_modules`.**
- *   - **Any directory holding a `package.json`.** That is a package that
- *     happens to live here — a vendored client, a generated SDK — not this
- *     app's source, and importing its entry point runs somebody else's module
- *     graph. The template has two.
+ * What stays here is what is true of models in particular. `generated/` is
+ * deliberately *not* skipped — it is one of the declared modules, so its classes
+ * are registered and produce no findings, and skipping a directory because of
+ * its name would be one more inference about generator output, which is the
+ * thing #318's other half is about. And `ignore` is the escape hatch the
+ * `--ignore` flag fills, for model-adjacent code that runs something on import;
+ * the command prints what it honoured, so a narrowed run does not read like a
+ * complete one.
  *
- * `generated/` is deliberately *not* skipped. It is one of the declared
- * modules, so its classes are registered and produce no findings — and skipping
- * a directory because of its name would be one more inference about generator
- * output, which is the thing #318's other half is about.
- *
- * `ignore` is the escape hatch for the rest: a path prefix, relative to `dir`,
- * for a directory of model-adjacent code that runs something on import. Nothing
- * is ignored by default, and the command prints what was.
+ * A missing directory yields an empty list rather than throwing, which changes
+ * nothing for this command: `checkModels` stats the model directory first and
+ * says so in a sentence worth printing.
  */
 export function modelFiles(dir: string, ignore: string[] = []): string[] {
-  const out: string[] = [];
-
-  const ignored = (path: string) => {
-    const rel = relative(dir, path).split("\\").join("/");
-    return ignore.some(
-      (pattern) => rel === pattern || rel.startsWith(`${pattern}/`),
-    );
-  };
-
-  const walk = (current: string) => {
-    for (const entry of readdirSync(current, { withFileTypes: true }).sort(
-      (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0),
-    )) {
-      const path = join(current, entry.name);
-      if (ignored(path)) continue;
-
-      if (entry.isDirectory()) {
-        if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
-        if (existsSync(join(path, "package.json"))) continue;
-        walk(path);
-        continue;
-      }
-
-      if (!entry.name.endsWith(".ts") && !entry.name.endsWith(".tsx")) continue;
-      if (entry.name.endsWith(".d.ts")) continue;
-      if (/\.(test|test-d|spec|bench)\.tsx?$/.test(entry.name)) continue;
-
-      out.push(path);
-    }
-  };
-
-  walk(dir);
-  return out;
+  return sourceFiles(dir, ignore);
 }
 
 /** What the registry held at a moment, enough to put it back. */

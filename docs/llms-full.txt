@@ -268,7 +268,8 @@ app/
     requests/            # HttpRequest subclasses used for validation
   views/                 # React views (.tsx), layouts, and the RootLayout
   email/                 # email templates (jsx-email)
-  cron/                  # CronJob classes
+  cron/                  # CronJob classes — scheduled by being here
+  jobs/                  # Job classes — registered by being here
   i18n/                  # translation dictionaries
   database/
     prisma.ts            # the Prisma client instance
@@ -316,6 +317,12 @@ If present, `app/preload.ts` runs once, before the server starts, for both `gemi
 - **`email/`** — email templates built with `jsx-email`, extending `Email` from `gemi/email`.
 - **`i18n/`** — translation dictionaries created with `Dictionary.create` from `gemi/i18n`, exported as a single default object.
 - **`database/prisma.ts`** — your Prisma client instance, imported wherever you query the database.
+
+### `cron/` and `jobs/` — the two discovered directories
+
+These two directories are read, not listed. Every class under `app/cron` extending `CronJob` is scheduled at boot, and every class under `app/jobs` extending `Job` is registered at boot, with nothing anywhere naming them — writing the file is the registration. The `schedule` and `queue` slices can still declare `jobs` explicitly, which turns the walk off and uses the declared list verbatim; `jobs: []` is a declaration too, and means an app with none.
+
+Discovery imports every `.ts`/`.tsx` file it walks, because a class does not exist until its module has run — so a file in either directory that does work when imported does that work at boot. Keep them to declarations. See [Cron](./cron.md) and [Jobs & Queues](./jobs-and-queues.md) for the walk's skip rules and the reasons for reading a directory at all.
 
 ## The Kernel
 
@@ -547,7 +554,7 @@ The hooks are ordinary config values, so a service reads them the same way it re
 | `log` | `onLogCreated`, `onLogFileClosed` |
 | `translation` | `detectLocale`, `onLocaleChange` |
 | `route.api` | `onRequestStart`, `onRequestEnd`, `onRequestFail` |
-| `route.view` | `onRequestStart`, `onRequestEnd`, `onRequestFail` |
+| `route.view` | `onRequestStart`, `onRequestEnd`, `onRequestFail`, `onStreamComplete` |
 
 Request lifecycle hooks are the usual place for tracing and error reporting:
 
@@ -644,6 +651,49 @@ The boot is split in two because `new App({ kernel })` is a synchronous construc
 2. **`kernel.waitForBoot()` — asynchronous.** Runs every provider's `boot()` in registration order. Idempotent.
 
 `new App({ kernel })` performs phase one for you; `Server.start()` awaits phase two before binding the port. If you drive `App` yourself, `await app.waitForBoot()` before serving.
+
+### Instrumenting streamed responses
+
+View responses stream: the handler returns at time-to-shell while query payloads keep streaming for as long as the slowest query takes. A span that ends when the handler returns (or in a `finally` around `app.fetch`) therefore records ~milliseconds for a request whose body stayed open for a second — the duration of the shell, not the response.
+
+The `route.view` slice's `onStreamComplete(req, summary)` hook fires when the response body actually closes — after the last streamed chunk, or when the stream deadline aborts rendering. The `summary` reports:
+
+- **`shellAt`** — ms from request start to the response's first byte.
+- **`settledAt`** — ms to the last chunk, when the body closed.
+- **`aborted`** — whether the stream deadline cut rendering short.
+- **`queries`** — per-query `path`, `variantKey`, `startedAt`, `settledAt`, `status`, and `source` (`"prefetch"` or `"render"`).
+
+Non-streamed responses (`.json` navigation payloads, `"no-stream"` routes, bot requests) report `shellAt === settledAt`. The hook also fires when a shell render crashes (or the deadline aborts it before the shell resolved) — the fallback error document's body still closes, so the span still ends.
+
+> **Scope:** `onStreamComplete` fires for document and `.json` navigation bodies — the responses that stream. Responses without a query lifecycle (OG images, `FILE` routes, redirects and error responses produced by `RequestBreakerError`) do not fire it, so a span opened unconditionally in instrumentation needs a fallback end (e.g. also ending it in `onRequestEnd` / `onRequestFail` when no stream ever started).
+
+Start the span where you already do, and end it here instead:
+
+```typescript
+// app/config/route.ts
+import { defineRouteConfig } from "gemi/services";
+import type { StreamSummary } from "gemi/services";
+import type { HttpRequest } from "gemi/http";
+
+export default defineRouteConfig({
+  api: { rootRouter: RootApiRouter },
+  view: {
+    rootRouter: RootViewRouter,
+    root: createRoot(RootLayout),
+
+    onStreamComplete(req: HttpRequest, summary: StreamSummary) {
+      // e.g. end the Sentry span opened for this request:
+      // span.setAttribute("gemi.shell_ms", summary.shellAt);
+      // span.setAttribute("gemi.aborted", summary.aborted);
+      // span.end(); // now measures the full streamed response
+    },
+  },
+});
+```
+
+Query failures during the streamed render are routed through `onRequestFail(req, error)` exactly once per rejected query, with a `QueryError` carrying the query's path, variant, and status — so error tracking wired to `onRequestFail` keeps seeing server-side failures that React quietly hands over to client rendering. (`Query.instant` rethrows into the handler; that rejection is still reported only once.) An api handler that fails with a `RequestBreakerError` (or an error `Response`) yields a `QueryError` with that response's status; a raw `throw` inside the handler yields a status-500 `QueryError` with the original error on `cause`.
+
+> **Gotcha:** a raw `throw` inside an api handler also fires the **api** slice's `onRequestFail` — the query runs the api handler in-process, and the api router reports its own failures. If both slices report to the same error tracker, dedupe there (the view hook's error is the `QueryError` wrapper, the api hook's is the original error on its `cause`).
 
 ## App bootstrap
 
@@ -6482,7 +6532,7 @@ You can also set default `attachments` on the class if every send should carry t
 
 Jobs move slow or non-essential work off the request path. Instead of making a user wait while you call an external API, generate an image, or send a batch of emails, you dispatch a **Job** — it runs in the background through gemi's in-process queue, and the request returns immediately.
 
-You define jobs as classes extending `Job` (from `gemi/services`), list them in `app/config/queue.ts`, and fire them with `Job.dispatch(...)`.
+You define jobs as classes extending `Job` (from `gemi/services`) in files under `app/jobs/`, and fire them with `Job.dispatch(...)`. The directory is read at boot, so there is no list to keep alongside it.
 
 ## Defining a job
 
@@ -6549,9 +6599,25 @@ ProcessVideoJob.dispatch({ videoId: video.id });
 
 `dispatch` enqueues the job and returns `void` (fire-and-forget) — it does not wait for the job to finish, and the payload is serialized as JSON, so pass plain, serializable data (not class instances or functions). See [Controllers](./controllers.md) for dispatching from request handlers.
 
-## Registering jobs — `app/config/queue.ts`
+## Registering jobs — `app/jobs/`
 
-Every job class must be listed in the `queue` config slice so the queue knows how to construct it by name. You also set the worker `concurrency` here.
+Jobs are discovered. Every class under `app/jobs` that extends `Job` is registered when the kernel boots, so writing the file is all it takes — there is no list to keep in step with it.
+
+That is deliberate, and it is about the failure that happens when the two disagree. The queue looks a dispatched job up by name; a name it has never heard of is dropped with a line on stderr and nothing else. `Job.dispatch` has already returned by then — it returns as soon as the job is queued, not when it runs — so the dispatch simply does not happen, whatever was supposed to follow it does not either, and the only trace is in the server log.
+
+### What the walk costs
+
+A class does not exist until its module has run, so there is no way to read a directory of classes without importing it. **Every `.ts`/`.tsx` file under `app/jobs` is imported at boot** — in development and in production, on every start — and a file that *does something* when it is imported does that thing at boot. A module that opens a connection, seeds a cache, or registers a listener at the top level is doing it before the first request, from a directory nobody thought of as an entry point.
+
+So `app/jobs` wants to hold job declarations rather than merely contain some. Keep a helper that runs work on import somewhere else, or list the jobs explicitly (below) and skip the walk entirely. A file that cannot be imported at all — one reaching a `?raw` or `.css` specifier through its imports, say — fails the boot naming itself, rather than being quietly left out of the registry.
+
+The walk skips what certainly is not a declaration: `.d.ts` files, tests, type tests and benchmarks by their filename suffix, dot-directories, `node_modules`, and anything under a directory carrying its own `package.json`. Nothing else is guessed at.
+
+A new file is picked up on the next server reload — under `gemi dev`, creating a file does not by itself trigger one, so save any other file (or restart) if a job you just wrote has not appeared.
+
+### Configuring the queue — `app/config/queue.ts`
+
+The `queue` slice is where `concurrency` lives, and where you can take over registration yourself. Declaring `jobs` turns discovery off and uses your list verbatim — reach for it when the jobs live somewhere the walk cannot reach, when you want a deliberate subset, or when the deploy ships only the build output and there is no `app/jobs` on disk to read.
 
 ```typescript
 // app/config/queue.ts
@@ -6560,15 +6626,18 @@ import { ProcessVideoJob } from "@/app/jobs/ProcessVideoJob";
 
 export default defineQueueConfig({
   concurrency: 20, // max jobs running at once (default 1)
-  jobs: [ProcessVideoJob],
+  jobs: [ProcessVideoJob], // omit to discover them from app/jobs
 });
 ```
 
 `defineQueueConfig` is an identity helper — it exists only to type the object.
 
+**A present `jobs` wins, and `jobs: []` is present.** An empty array means an application with no jobs and is honoured as such; it does not mean "go and find some". Leaving the key out — or leaving the slice out entirely — is what asks for discovery.
+
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `jobs` | `(new () => Job)[]` | `[]` | All dispatchable job classes. A job not listed here cannot be dispatched. |
+| `jobs` | `(new () => Job)[]` | *discovered* | All dispatchable job classes. Omit to discover them from `jobsDir`. A job that reaches neither is dispatched into nothing. |
+| `jobsDir` | `string` | `"app/jobs"` | Where to discover them. Relative to the project root, or absolute. |
 | `concurrency` | `number` | `1` | Maximum number of jobs processed simultaneously. |
 
 The slice is wired into the kernel by name:
@@ -6583,7 +6652,7 @@ export default class extends Kernel {
 }
 ```
 
-Behind the scenes the framework's `QueueServiceProvider` reads that slice in its `register()` and binds a `QueueManager` singleton into the container under the token `"queue"`. You never construct or reference the provider yourself — providers register bindings, config configures them.
+Behind the scenes the framework's `QueueServiceProvider` reads that slice in its `register()` and binds a `QueueManager` singleton into the container under the token `"queue"`, then fills in the discovered jobs in its `boot()`. You never construct or reference the provider yourself — providers register bindings, config configures them.
 
 ### Resolving the queue
 
@@ -6594,6 +6663,25 @@ import { app } from "gemi/foundation";
 import { QueueManager } from "gemi/services";
 
 app(QueueManager); // typed QueueManager, no cast
+```
+
+`registeredJobs` is the set it ended up with, discovered or declared. That is what a test asserts against now — an app that used to import the `jobs` array from its config module to check something about every job it dispatches asks the manager instead:
+
+```typescript
+import { app } from "gemi/foundation";
+import { QueueManager } from "gemi/services";
+
+for (const Registered of app(QueueManager).registeredJobs) {
+  expect(new Registered().maxAttempts).toBeGreaterThan(0);
+}
+```
+
+`discoverJobs()` answers the same question without an application around it — it walks `app/jobs` (or a directory you name) and returns the classes it finds. Every file it walks is imported, as above:
+
+```typescript
+import { discoverJobs } from "gemi/services";
+
+const jobs = await discoverJobs(); // every Job subclass under app/jobs
 ```
 
 See [Project Structure](./project-structure.md) for the full kernel layout.
@@ -6624,7 +6712,7 @@ For work that must happen on a **schedule** (nightly reports, hourly cleanups) r
 
 ## Cron
 
-Cron jobs run code on a recurring schedule — nightly reports, hourly cleanups, periodic audits — without any incoming request. You define each one as a class extending `CronJob` (from `gemi/services`) and list it in `app/config/schedule.ts`. gemi schedules them in-process using `Bun.cron`.
+Cron jobs run code on a recurring schedule — nightly reports, hourly cleanups, periodic audits — without any incoming request. You define each one as a class extending `CronJob` (from `gemi/services`) in a file under `app/cron/`, and gemi schedules it in-process using `Bun.cron`. Nothing else is needed — the directory is read at boot.
 
 ## Defining a cron job
 
@@ -6646,15 +6734,7 @@ export class DailyDigest extends CronJob {
 }
 ```
 
-```typescript
-// app/config/schedule.ts
-import { defineScheduleConfig } from "gemi/services";
-import { DailyDigest } from "@/app/cron/DailyDigest";
-
-export default defineScheduleConfig({
-  jobs: [DailyDigest],
-});
-```
+That file is the whole registration — there is no list to add it to. **Registering jobs**, below, covers how the directory is read and how to take registration over yourself.
 
 Fields and hooks on `CronJob`:
 
@@ -6662,11 +6742,12 @@ Fields and hooks on `CronJob`:
 | --- | --- | --- |
 | `name` | `string` | Unique job name. Required — a job without a name is skipped with an error. Also used as the registry key so a hot reload updates the job in place instead of stacking duplicates. |
 | `cron` | `CronExpression` | The schedule. Required — a job without an expression is skipped. |
+| `shouldRun()` | `() => boolean \| Promise<boolean>` | Optional gate, evaluated once per tick before anything else. Returns `true` by default; returning `false` skips the whole tick — `onTick()`, `callback()` and `onComplete()` alike. See **Skipping a tick**, below. |
 | `callback()` | `() => void \| Promise<void>` | The work to run on each tick. |
-| `onTick()` | `() => void \| Promise<void>` | Optional hook run alongside each tick. |
-| `onComplete()` | `() => void \| Promise<void>` | Optional hook run when the tick's work completes. |
+| `onTick()` | `() => void \| Promise<void>` | Optional hook run immediately before `callback()` — sequentially, not alongside it. |
+| `onComplete()` | `() => void \| Promise<void>` | Optional hook run after `callback()` finishes, whether it returned or threw. |
 
-Each tick re-enters the application context, so a job body resolves services exactly like a request handler does — `prisma`, `Email`, the `Storage`/`Log`/`Lang` facades, `Job.dispatch`, or anything you resolve yourself with `app(SomeService)`. Scheduling happens in `ScheduleServiceProvider.boot()`, which runs after every provider has registered, so any binding the container holds is available by the time a job first ticks. Errors thrown in `callback`, `onTick`, or `onComplete` are caught and logged rather than crashing the scheduler.
+Each tick re-enters the application context, so a job body resolves services exactly like a request handler does — `prisma`, `Email`, the `Storage`/`Log`/`Lang` facades, `Job.dispatch`, or anything you resolve yourself with `app(SomeService)`. Scheduling happens in `ScheduleServiceProvider.boot()`, which runs after every provider has registered, so any binding the container holds is available by the time a job first ticks. Errors thrown in `shouldRun`, `onTick`, `callback`, or `onComplete` are caught and logged rather than crashing the scheduler — with one difference: a `shouldRun` that throws also skips the tick, while the other three log and carry on to the next hook.
 
 ## Schedule expressions — `CronJob.exp(...)`
 
@@ -6713,9 +6794,96 @@ cron = CronJob.exp("@hourly");
 
 > **Note:** Only the nicknames above and standard 5-field expressions are valid — they are handled by `Bun.cron`. Extended shortcuts you may see in older gemi apps (e.g. `@at_9:00`, `@every_5_minutes`, `@on_monday`, `@between_9_17`) came from gemi's previous custom cron engine and are **not** understood by the current `Bun.cron`-based scheduler. Translate them to standard expressions — for example `@at_9:00` becomes `"0 9 * * *"` (09:00 UTC), and `@every_5_minutes` becomes `"*/5 * * * *"`.
 
-## Registering jobs — `app/config/schedule.ts`
+## Skipping a tick — `shouldRun()`
 
-List every cron job class in the `schedule` config slice. The framework's `ScheduleServiceProvider` reads that slice, binds a `Scheduler` into the container, and schedules the jobs when the kernel boots.
+`shouldRun()` decides whether a tick happens at all. It is evaluated once per tick, before anything else, and returning `false` skips `onTick()`, `callback()` and `onComplete()` alike. The default returns `true`, so a job that says nothing about it behaves exactly as it always did.
+
+```typescript
+// app/cron/StorageAlert.ts
+import { CronJob } from "gemi/services";
+
+export class StorageAlert extends CronJob {
+  name = "StorageAlert";
+  cron = CronJob.exp("0 9 * * *");
+
+  shouldRun() {
+    return process.env.NODE_ENV === "production";
+  }
+
+  async callback() {
+    // ...check remaining capacity and page whoever is on call...
+  }
+}
+```
+
+The reason this is a member rather than a line at the top of `callback` is that `onTick` and `onComplete` are called *outside* `callback`, so a guard written inside `callback` only stops the work. A job that reports outward — mails a digest, opens a Sentry issue, pings a channel — usually announces itself in `onTick` and `onComplete`, and those would still fire from a laptop. `shouldRun()` is the one place that covers a whole tick.
+
+**It gates work, not registration.** A job whose gate returns `false` is still scheduled, still holds its `Bun.cron` handle, and still appears in `scheduler.jobs`. "Is it scheduled" and "will it do anything" are different questions, and the second is answered fresh on every tick — which is also why this is a method. A field would be read once, when the scheduler constructs the job at boot, and would freeze whatever it saw then.
+
+**A gate that throws skips the tick**, and the error is logged. A gate that failed has said nothing about whether the job may run, and the two wrong answers are not the same size: a skipped tick of recurring work comes back on the next tick, an email sent from the wrong machine does not come back at all.
+
+**Nothing calls `super` for you.** Writing the gate once on a base class that several jobs share is the ordinary case, and a subclass that overrides `shouldRun()` for a reason of its own silently drops whatever the base was gating on. Narrow rather than redefine:
+
+```typescript
+// app/support/AlertingCronJob.ts
+import { CronJob } from "gemi/services";
+
+export abstract class AlertingCronJob extends CronJob {
+  shouldRun(): boolean | Promise<boolean> {
+    return process.env.NODE_ENV === "production";
+  }
+}
+```
+
+> **Keep a shared base out of `app/cron`.** `abstract` is a TypeScript idea and is gone by the time the scheduler runs, so a base class sitting in the discovered directory is a class extending `CronJob` like any other: it is found, constructed, and — having no `name` — rejected on every boot with `Cron job must have a name`. It also lands in `scheduler.jobs`, which breaks the very assertion **Asking what is scheduled**, below, suggests writing. Any directory outside the walk will do — the template ships no particular home for this, and `app/support/` is just what these snippets picked.
+
+Annotate the return type on a shared base rather than letting it be inferred. A base that returns a plain `boolean` narrows the signature its subclasses inherit, and a subclass that needs to `await super.shouldRun()` has to be `async` — which TypeScript then rejects against the narrowed base. Writing the type `CronJob` declares keeps both spellings open.
+
+```typescript
+// app/cron/WeeklyRevenue.ts
+import { AlertingCronJob } from "@/app/support/AlertingCronJob";
+import { CronJob } from "gemi/services";
+
+export class WeeklyRevenue extends AlertingCronJob {
+  name = "WeeklyRevenue";
+  cron = CronJob.exp("0 8 * * 1");
+
+  async shouldRun() {
+    return (await super.shouldRun()) && (await this.hasSubscribers());
+  }
+
+  async hasSubscribers() {
+    // ...
+    return true;
+  }
+
+  async callback() {
+    // ...build and send the report...
+  }
+}
+```
+
+Note what the subclass keeps: `callback`, the name the rest of this page teaches. Holding only the gate is all the base class is for. Without `shouldRun()`, the only base class that could gate a job was one that shadowed `callback` itself:
+
+```typescript
+// the shape this replaces — don't write it
+export abstract class GatedCronJob extends CronJob {
+  abstract run(): Promise<void>;
+
+  async callback() {
+    if (process.env.NODE_ENV !== "production") return;
+    await this.run();
+  }
+}
+```
+
+That works, and it costs the app the framework's own vocabulary: a job under it reads `async run()` while every page of this documentation reads `async callback()`. The next person to follow the docs writes a `callback`, the base class overrides it, and the job silently does nothing — no error, no output, nothing to notice. It also never reached `onTick` and `onComplete`, which the scheduler calls outside `callback`.
+
+## Registering jobs — `app/cron/`
+
+Cron jobs are discovered. Every class under `app/cron` that extends `CronJob` is scheduled when the kernel boots, so writing the file is all it takes — there is no list to keep in step with it.
+
+That is deliberate, and it is about the failure that happens when the two disagree. A cron job that is written and never listed fires never, and unlike a dropped request there is nothing downstream waiting to notice: the report simply stops arriving, for as long as it takes somebody to ask why they stopped seeing it.
 
 ```typescript
 // app/cron/ProductCreationReport.ts
@@ -6745,6 +6913,24 @@ export class SubscriptionAudit extends CronJob {
 }
 ```
 
+Both are scheduled. Neither is mentioned anywhere else.
+
+### What the walk costs
+
+A class does not exist until its module has run, so there is no way to read a directory of classes without importing it. **Every `.ts`/`.tsx` file under `app/cron` is imported at boot** — in development and in production, on every start — and a file that *does something* when it is imported does that thing at boot. A module that opens a connection, seeds a cache, or registers a listener at the top level is doing it before the first request, from a directory nobody thought of as an entry point.
+
+So `app/cron` wants to hold cron declarations rather than merely contain some. Keep a helper that runs work on import somewhere else, or list the jobs explicitly (below) and skip the walk entirely. A file that cannot be imported at all — one reaching a `?raw` or `.css` specifier through its imports, say — fails the boot naming itself, rather than being quietly left out of the schedule.
+
+The walk takes every class that extends `CronJob`, and `abstract` does not survive to runtime — so a shared base class belongs outside this directory too. See **Skipping a tick**, above, where that is the pattern most likely to tempt you into writing one.
+
+The walk skips what certainly is not a declaration: `.d.ts` files, tests, type tests and benchmarks by their filename suffix, dot-directories, `node_modules`, and anything under a directory carrying its own `package.json`. Nothing else is guessed at.
+
+A new file is picked up on the next server reload — under `gemi dev`, creating a file does not by itself trigger one, so save any other file (or restart) if a job you just wrote has not appeared.
+
+### Listing them explicitly — `app/config/schedule.ts`
+
+Declaring `jobs` in the `schedule` config slice turns discovery off and uses your list verbatim. Reach for it when the jobs live somewhere the walk cannot reach, when you want a deliberate subset, or when the deploy ships only the build output and there is no `app/cron` on disk to read.
+
 ```typescript
 // app/config/schedule.ts
 import { defineScheduleConfig } from "gemi/services";
@@ -6756,7 +6942,9 @@ export default defineScheduleConfig({
 });
 ```
 
-`defineScheduleConfig` is an identity helper — it exists only to type the object. The slice's only field is `jobs`, an array of `CronJob` subclasses.
+`defineScheduleConfig` is an identity helper — it exists only to type the object.
+
+**A present `jobs` wins, and `jobs: []` is present.** An empty array means an application with nothing scheduled and is honoured as such; it does not mean "go and find some". Leaving the key out — or leaving the slice out entirely — is what asks for discovery.
 
 The file is wired into the kernel by name:
 
@@ -6770,13 +6958,14 @@ export default class extends Kernel {
 }
 ```
 
-| Config key | Field | Type | Default |
-| --- | --- | --- | --- |
-| `schedule` | `jobs` | `(new () => CronJob)[]` | `[]` |
+| Config key | Field | Type | Default | Description |
+| --- | --- | --- | --- | --- |
+| `schedule` | `jobs` | `(new () => CronJob)[]` | *discovered* | The scheduled job classes. Omit to discover them from `jobsDir`. |
+| `schedule` | `jobsDir` | `string` | `"app/cron"` | Where to discover them. Relative to the project root, or absolute. |
 
 See [Project Structure](./project-structure.md) for the full kernel layout.
 
-> **Coming from Laravel:** the vocabulary is the same — a `ServiceProvider` registers bindings into the `Container`, config lives in `app/config`, and facades are static proxies to container-resolved services. One thing is deliberately different: gemi has no `Schedule::command(...)` macro called from a provider's `boot()`. Recurring work is declared as `CronJob` classes in the `schedule` slice, and per-subsystem hooks (`filterRecipients`, `onLogCreated`, `detectLocale`, ...) are **config callbacks** in `app/config/*.ts` rather than things you register from `boot()`. `boot()` is for wiring you cannot express as data.
+> **Coming from Laravel:** the vocabulary is the same — a `ServiceProvider` registers bindings into the `Container`, config lives in `app/config`, and facades are static proxies to container-resolved services. One thing is deliberately different: gemi has no `Schedule::command(...)` macro called from a provider's `boot()`. Recurring work is declared as `CronJob` classes under `app/cron`, and per-subsystem hooks (`filterRecipients`, `onLogCreated`, `detectLocale`, ...) are **config callbacks** in `app/config/*.ts` rather than things you register from `boot()`. `boot()` is for wiring you cannot express as data.
 
 ### Resolving the scheduler
 
@@ -6787,6 +6976,28 @@ import { app } from "gemi/foundation";
 import { Scheduler } from "gemi/services";
 
 app(Scheduler); // typed Scheduler, no cast
+```
+
+### Asking what is scheduled
+
+`scheduler.jobs` is the set the scheduler took — discovered or declared, whichever the slice asked for. Reach for it in a test that wants to assert something about the whole schedule (that every report has an owner, that no two share an expression), which used to be written by importing the `jobs` array from the config module:
+
+```typescript
+import { app } from "gemi/foundation";
+import { Scheduler } from "gemi/services";
+
+for (const Job of app(Scheduler).jobs) {
+  const job = new Job();
+  expect(job.name).toBeTruthy();
+}
+```
+
+`discoverCronJobs()` answers the same question without an application around it — it walks `app/cron` (or a directory you name) and returns the classes it finds. `discoverJobs()` is its counterpart for the queue. Both import every file they walk, so calling one runs the app's cron modules the same way boot does.
+
+```typescript
+import { discoverCronJobs } from "gemi/services";
+
+const jobs = await discoverCronJobs(); // every CronJob subclass under app/cron
 ```
 
 > **Note:** Cron jobs run **in-process** in the server. Every running server instance registers and fires its own schedule, so if you run multiple replicas, a job scheduled `@daily` fires once per replica per day. For work that must run exactly once across a fleet, add your own coordination (e.g. an advisory lock) inside `callback`.
