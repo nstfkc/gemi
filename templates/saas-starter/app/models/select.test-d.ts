@@ -324,4 +324,44 @@ describe("_count takes a filter over the rows it counts", () => {
       },
     });
   });
+
+  /**
+   * The filter is a whole `WhereInput`, so it reaches through relations too —
+   * which is the shape #335 reported, and the one the tests above miss by all
+   * filtering a scalar.
+   *
+   * It is the shape that actually comes up: the count worth filtering is
+   * usually over a join row, and the condition worth filtering it by lives on
+   * what the join points at — "products on this list, not counting the
+   * soft-deleted ones" reads `deletedAt` on the product, not on the join.
+   * `relation-count.test.ts` asserts the nested `exists` this compiles to.
+   */
+  test("the filter reaches through a relation of the counted model", async () => {
+    const user = await UserModel.findFirst({
+      select: {
+        _count: {
+          select: { accounts: { where: { organization: { name: "acme" } } } },
+        },
+      },
+    });
+
+    expectTypeOf(user!._count.accounts).toEqualTypeOf<number>();
+  });
+
+  test("and is still checked one level down", async () => {
+    await UserModel.findFirst({
+      select: {
+        _count: {
+          select: {
+            accounts: {
+              where: {
+                // @ts-expect-error `nope` is not a column on Organization
+                organization: { nope: "acme" },
+              },
+            },
+          },
+        },
+      },
+    });
+  });
 });
