@@ -289,12 +289,56 @@ export function auditModules(
 export class CheckModelsError extends Error {}
 
 /**
+ * The modules named by `--models`, imported in the order given.
+ *
+ * **Why an app would want this instead of the Kernel.** Reading the list off
+ * `Kernel.models` means importing the Kernel, and that drags in the whole
+ * Kernel import graph — config slices, providers, and whatever they reach. A
+ * gemi app's does not have to be resolvable by a bare runtime import: `?raw`
+ * imports, virtual modules and asset imports are ordinary, and a bundler
+ * resolves them where `await import()` does not. The app that reported #316 and
+ * #318 is exactly that app; its Kernel transitively reaches a `.md?raw` import
+ * and the command cannot load it.
+ *
+ * It fails loudly there rather than passing green, which is the right failure —
+ * but a command that cannot run on the project that asked for it is not much
+ * use, and the whole check needs is the *model* modules.
+ *
+ * This is not the filename convention `declaredModules` rejects. That guess
+ * would let the check pass on an app whose Kernel declares nothing, because the
+ * tool would have supplied the list the app failed to. A flag is the author
+ * stating it, which is the same act as writing `models = [...]` — and if they
+ * state the wrong list, they see it in the count the report prints.
+ */
+async function namedModules(
+  rootDir: string,
+  paths: string[],
+): Promise<Array<Record<string, unknown>>> {
+  const modules: Array<Record<string, unknown>> = [];
+
+  for (const path of paths) {
+    const resolved = resolve(rootDir, path);
+    try {
+      modules.push((await import(resolved)) as Record<string, unknown>);
+    } catch (error) {
+      throw new CheckModelsError(
+        `--models named ${path}, which could not be imported:\n    ` +
+          `${(error as Error).message}`,
+      );
+    }
+  }
+
+  return modules;
+}
+
+/**
  * Loads the project's Kernel and returns the model modules it declares.
  *
- * The Kernel is where the modules are named, so it is where the check has to
- * read them from — inferring the list from a filename convention would let the
- * check pass on an app whose Kernel declares nothing, which is the state #316
- * describes.
+ * The Kernel is where the modules are named, so it is where the check reads
+ * them from by default — inferring the list from a filename convention would
+ * let the check pass on an app whose Kernel declares nothing, which is the
+ * state #316 describes. `--models` is the way to say it directly; see
+ * `namedModules`.
  *
  * `models` is `protected`, which is a statement about application code rather
  * than about the framework's own tooling; the cast is that distinction.
@@ -335,6 +379,12 @@ export async function checkModels(options: {
   modelsDir?: string;
   ignore?: string[];
   /**
+   * Module paths to register from, instead of reading `Kernel.models`. Empty or
+   * absent means load the Kernel, which is the default and the better answer
+   * when it works — see `namedModules`.
+   */
+  models?: string[];
+  /**
    * The ORM to check against, for a test holding a fixture project rather than
    * an installation. The command never passes it: resolving `gemi/orm` from the
    * project is the point, and a fixture written into a temp directory has no
@@ -371,7 +421,12 @@ export async function checkModels(options: {
     throw new CheckModelsError(`No model directory at ${modelsDir}.`);
   }
 
-  const declared = await declaredModules(rootDir);
+  const named = options.models ?? [];
+  const declared =
+    named.length > 0
+      ? await namedModules(rootDir, named)
+      : await declaredModules(rootDir);
+
   if (declared.length === 0) {
     throw new CheckModelsError(
       "`Kernel.models` is empty, so nothing is registered from a module and " +
@@ -382,6 +437,8 @@ export async function checkModels(options: {
         "    export default class extends Kernel {\n" +
         "      models = [generated, models];\n" +
         "    }\n\n" +
+        "Or name them directly, for a Kernel this command cannot import:\n\n" +
+        "    gemi check models --models app/models/generated,app/models\n\n" +
         "See UPGRADE.md and docs/orm.md#your-model-class.",
     );
   }

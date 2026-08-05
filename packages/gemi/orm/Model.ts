@@ -143,6 +143,13 @@ export abstract class Model {
    * `Model.$generated` of `undefined` would answer that question `true` for
    * every class, in every app, including the ones with no mark to read.
    * `registration.test.ts` pins it.
+   *
+   * **`?: true` and not `?: boolean`**, which is what makes a hand-written
+   * `static $generated = false` the type error `isGeneratedBase` reads it as.
+   * The cost is that the generator has to emit a non-widening initialiser —
+   * `static readonly $generated = true`, since a mutable one widens to
+   * `boolean` and every emitted class becomes a TS2417. That happened;
+   * `tsconfig.generated.json` is the check that catches it now.
    */
   declare static $generated?: true;
 

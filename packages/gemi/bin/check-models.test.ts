@@ -495,6 +495,73 @@ describe("the command, over a project on disk", () => {
     );
   });
 
+  /**
+   * `--models`, and the reason it exists: reading the list off the Kernel means
+   * importing the Kernel, and a gemi app's import graph does not have to be
+   * resolvable by a bare `await import()`. The app that reported #316 and #318
+   * transitively reaches a `.md?raw` import from its Kernel, so the command
+   * could not run on the project it was written for.
+   *
+   * The fixture reproduces that shape with an import nothing can resolve.
+   */
+  test("names the model modules directly, for a Kernel that will not import", async () => {
+    const root = project();
+    write(
+      root,
+      "app/kernel/Kernel.ts",
+      `import doc from "./guide.md?raw";
+       import * as generated from "../models/generated";
+       import * as models from "../models";
+       export default class {
+         models = [generated, models];
+         doc = doc;
+       }`,
+    );
+
+    // The Kernel path fails, loudly, naming the file rather than passing green.
+    await expect(checkModels({ rootDir: root, orm })).rejects.toThrow(
+      /Could not load app\/kernel\/Kernel\.ts/,
+    );
+
+    // And the flag gets the same answer without going near it.
+    const report = await checkModels({
+      rootDir: root,
+      models: ["app/models/generated", "app/models"],
+      orm,
+    });
+
+    expect(report.registered).toBe(2);
+    expect(report.findings).toHaveLength(1);
+    expect(report.findings[0]!.className).toBe("Gadget");
+  });
+
+  test("--models is checked in the order given, so a later module wins", async () => {
+    const report = await checkModels({
+      rootDir: project(),
+      models: ["app/models/generated", "app/models"],
+      orm,
+    });
+
+    // The barrel's subclass took the name from the base it extends, which is
+    // what "later wins" means and what makes `Widget` not a finding.
+    expect(
+      (orm.registry.get("Widget") as { name: string }).name,
+    ).toBe("Widget");
+    expect(report.findings.map((finding) => finding.className)).toEqual([
+      "Gadget",
+    ]);
+  });
+
+  test("a path --models names that cannot be imported says which", async () => {
+    await expect(
+      checkModels({
+        rootDir: project(),
+        models: ["app/models/nope"],
+        orm,
+      }),
+    ).rejects.toThrow(/--models named app\/models\/nope/);
+  });
+
   test("a project with no Kernel is refused by name", async () => {
     const root = mkdtempSync(join(tmpdir(), "gemi-check-empty-"));
     roots.push(root);

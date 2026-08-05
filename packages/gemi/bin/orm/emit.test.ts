@@ -754,10 +754,33 @@ describe("emitArtifacts()", () => {
   test("marks each emitted base as generated", () => {
     const models = files["models.ts"];
 
-    expect(models).toContain("static $generated = true;");
-    expect([...models.matchAll(/^\s*static \$generated = true;$/gm)]).toHaveLength(
-      2,
-    );
+    expect(models).toContain("static readonly $generated = true;");
+    expect(
+      [...models.matchAll(/^\s*static readonly \$generated = true;$/gm)],
+    ).toHaveLength(2);
+  });
+
+  /**
+   * **`readonly`, and the artifact does not typecheck without it.**
+   *
+   * `Model` declares `declare static $generated?: true`, deliberately the
+   * literal rather than `boolean` so that a hand-written `= false` is the type
+   * error `isGeneratedBase` reads it as. A mutable `static $generated = true`
+   * widens to `boolean`, which is not assignable to `true`, so every class in
+   * the emitted file becomes
+   *
+   *     TS2417: Class static side 'typeof AccountModel' incorrectly extends
+   *     base class static side 'typeof Model'.
+   *
+   * It shipped that way in #319 and was found by an app regenerating a 79-model
+   * schema — 79 errors, and 15 in this repository's own template, with every
+   * check in CI green. `tsconfig.generated.json` is the gate that now compiles
+   * the artifact against the runtime it is generated for; this is the assertion
+   * that says *why* the keyword is there, next to the line, so it is not
+   * tidied away as noise.
+   */
+  test("the mark does not widen, because the base declares the literal", () => {
+    expect(files["models.ts"]).not.toMatch(/^\s*static \$generated = true;$/m);
   });
 
   // Generated files hold data and thin delegating methods only. Anything smart

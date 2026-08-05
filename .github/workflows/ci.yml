@@ -120,6 +120,19 @@ jobs:
         run: bun run typecheck
         working-directory: packages/gemi
 
+      # The generator's *output*, compiled against the runtime it is generated
+      # for. The step above covers `bin/orm` — the code that writes the artifact
+      # — and not the artifact, and the two can disagree: #319 shipped a
+      # `static $generated = true` that widened to `boolean` against a base
+      # declaring `?: true`, so every emitted class was a TS2417 and every check
+      # here was green. It was found by an app regenerating a 79-model schema.
+      #
+      # After `prisma generate` above, so it reads the artifact this run
+      # produced rather than the one that happens to be committed.
+      - name: Typecheck the generated artifact
+        run: bunx tsc --noEmit -p tsconfig.generated.json
+        working-directory: packages/gemi
+
       # Everything except a named red set, rather than a path filter.
       #
       # This step used to run `vitest run orm database`, chosen so

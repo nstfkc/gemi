@@ -213,6 +213,17 @@ check
     "app/models",
   )
   .option(
+    "--models <paths>",
+    "Module paths to register from, instead of reading `Kernel.models` — for " +
+      "a Kernel whose import graph needs build-time transforms this command " +
+      "cannot apply. Comma-separated, and repeatable",
+    (value: string, previous: string[]) => [
+      ...previous,
+      ...value.split(",").map((entry) => entry.trim()).filter(Boolean),
+    ],
+    [] as string[],
+  )
+  .option(
     "--ignore <paths>",
     "Paths under --dir to skip, for model-adjacent code that runs something " +
       "when imported. Comma-separated, and repeatable",
@@ -225,22 +236,25 @@ check
     ],
     [] as string[],
   )
-  .action(async (options: { dir: string; ignore: string[] }) => {
-    try {
-      const report = await checkModels({
-        rootDir: path.resolve(process.cwd()),
-        modelsDir: options.dir,
-        ignore: options.ignore,
-      });
-      process.exit(printReport(report));
-    } catch (error) {
-      // A `CheckModelsError` is a sentence written for this moment; anything
-      // else is a bug and keeps its stack.
-      if (!(error instanceof CheckModelsError)) throw error;
-      console.error(error.message);
-      process.exit(1);
-    }
-  });
+  .action(
+    async (options: { dir: string; ignore: string[]; models: string[] }) => {
+      try {
+        const report = await checkModels({
+          rootDir: path.resolve(process.cwd()),
+          modelsDir: options.dir,
+          ignore: options.ignore,
+          models: options.models,
+        });
+        process.exit(printReport(report));
+      } catch (error) {
+        // A `CheckModelsError` is a sentence written for this moment; anything
+        // else is a bug and keeps its stack.
+        if (!(error instanceof CheckModelsError)) throw error;
+        console.error(error.message);
+        process.exit(1);
+      }
+    },
+  );
 
 program.command("ide:generate-api-manifest").action(async () => {
   const parser = new ApiManifestGenerator();

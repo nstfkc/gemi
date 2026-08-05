@@ -95,6 +95,15 @@ This command walks `app/models`, imports every file, and asks the same question 
 
 - `--dir <path>` — walk somewhere other than `app/models`.
 - `--ignore <paths>` — paths under `--dir` to skip. Comma-separated, and repeatable. What was skipped is printed.
+- `--models <paths>` — register from these modules instead of reading `Kernel.models`. Comma-separated, and repeatable.
+
+> **When you need `--models`:** the command reads the module list off your Kernel, which means importing it — and a Kernel's import graph does not have to survive a bare runtime import. `?raw` imports, virtual modules and asset imports are all ordinary in a gemi app, and a bundler resolves them where `await import()` does not. If loading the Kernel fails, the command says which file and exits `1` rather than passing green; naming the modules yourself is the way through:
+>
+> ```bash
+> gemi check models --models app/models/generated,app/models
+> ```
+>
+> This is not the tool guessing your model layout from a filename convention — that would let the check pass on an app whose Kernel declares nothing, which is the very state it exists to find. It's you stating the list, the same act as writing `models = [...]`, and the report prints how many models it registered so a wrong list is visible.
 
 > **Gotcha:** finding a class means evaluating the module that declares it, so every file walked is imported and a file that *does* something on import does it here. Tests, type tests, benchmarks, `.d.ts` files and directories with their own `package.json` are skipped already; `--ignore` is for the rest.
 

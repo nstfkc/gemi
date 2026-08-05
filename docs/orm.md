@@ -283,9 +283,17 @@ is an unpolicied class written against a model's schema, which
 either would be telling you to undo what the framework told you to do, and would turn a working boot
 into that error.
 
-Run it against another directory with `--dir`, and prefer it over a boot-time scan: enumerating the
-filesystem at start-up would couple the framework to your bundler and make every production process
-pay, on every start, for a mistake that can only be made while editing.
+Run it against another directory with `--dir`. And if it cannot load your Kernel — the module list
+lives there, so it has to import it, and a Kernel's import graph does not have to survive a bare
+runtime import (`?raw` imports, virtual modules, asset imports) — name the modules yourself instead:
+
+```bash
+gemi check models --models app/models/generated,app/models
+```
+
+Prefer all of this over a boot-time scan: enumerating the filesystem at start-up would couple the
+framework to your bundler and make every production process pay, on every start, for a mistake that
+can only be made while editing.
 
 `assertPoliciesRegistered` is the same audit without the registration, for running over modules the
 Kernel does not own — a test over a package's models, a script that boots nothing:
