@@ -24,9 +24,7 @@ import { OrganizationModel, UserModel } from "./generated";
  */
 describe("select narrows the result type", () => {
   test("a selected column is present and correctly typed", async () => {
-    const [user] = await UserModel.findMany({
-      select: { id: true, email: true },
-    });
+    const [user] = await UserModel.findMany({ select: { id: true, email: true } });
 
     expectTypeOf(user.id).toEqualTypeOf<number>();
     // Nullability survives the narrowing rather than being widened away.

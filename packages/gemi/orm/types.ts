@@ -58,7 +58,11 @@
 // in a conditional that has to resolve the whole shape — would turn a cyclic
 // schema into an instantiation-depth error rather than a slow compile.
 
-import type { AnyNullValue, DbNullValue, JsonNullValue } from "./json-null";
+import type {
+  AnyNullValue,
+  DbNullValue,
+  JsonNullValue,
+} from "./json-null";
 
 /**
  * Any value a `Json` column can hold, on either dialect.
@@ -90,7 +94,10 @@ export type JsonValue =
  * `metadata: null` compiled while `docs/orm.md` said in this same change that
  * it does not.
  */
-export type JsonInput = Exclude<JsonValue, null> | DbNullValue | JsonNullValue;
+export type JsonInput =
+  | Exclude<JsonValue, null>
+  | DbNullValue
+  | JsonNullValue;
 
 /**
  * Is this column a `Json` one?
@@ -239,7 +246,7 @@ type OmitPayload<M extends ModelTypeInfo, O> = Omit<Scalars<M>, Requested<O>>;
  *
  * The arguments reach here through `Subset`, the excess-property guard the
  * generated signatures wrap them in. Inferring `T` through that mapped type
- * leaves the relation's arguments in a shape that is *assignable* to
+ * leaves a relation's arguments in a shape that is *assignable* to
  * `{ select: unknown }` — a value of it type-checks against that annotation —
  * while `A extends { select: unknown }` is false. Assignability and the
  * conditional's `extends` disagree, and the conditional took its else branch and
@@ -318,26 +325,24 @@ type BaseFilter<V> = {
  */
 type NoKeys = Record<never, never>;
 
-type OrderingFilter<V> =
-  NonNullable<V> extends Comparable
-    ? {
-        lt?: NonNullable<V>;
-        lte?: NonNullable<V>;
-        gt?: NonNullable<V>;
-        gte?: NonNullable<V>;
-      }
-    : NoKeys;
+type OrderingFilter<V> = NonNullable<V> extends Comparable
+  ? {
+      lt?: NonNullable<V>;
+      lte?: NonNullable<V>;
+      gt?: NonNullable<V>;
+      gte?: NonNullable<V>;
+    }
+  : NoKeys;
 
-type StringFilter<V> =
-  NonNullable<V> extends string
-    ? {
-        contains?: string;
-        startsWith?: string;
-        endsWith?: string;
-        /** Postgres only; `SqliteDialect` refuses it, naming the dialect. */
-        mode?: "default" | "insensitive";
-      }
-    : NoKeys;
+type StringFilter<V> = NonNullable<V> extends string
+  ? {
+      contains?: string;
+      startsWith?: string;
+      endsWith?: string;
+      /** Postgres only; `SqliteDialect` refuses it, naming the dialect. */
+      mode?: "default" | "insensitive";
+    }
+  : NoKeys;
 
 type NestedFilter<V> = BaseFilter<V> & OrderingFilter<V> & StringFilter<V>;
 
@@ -402,15 +407,12 @@ type RelationFilter<R extends RelationInfo> = R["kind"] extends "many"
       none?: WhereInput<R["target"]>;
     }
   : /**
-       * A to-one takes the nested `where` directly — `{ user: { email } }` means
-       * `is` — and takes `null` for "there is no related row". `readOperators` in
-       * the where compiler folds the two spellings together.
-       */
-      | WhereInput<R["target"]>
-      | {
-          is?: WhereInput<R["target"]> | null;
-          isNot?: WhereInput<R["target"]> | null;
-        }
+     * A to-one takes the nested `where` directly — `{ user: { email } }` means
+     * `is` — and takes `null` for "there is no related row". `readOperators` in
+     * the where compiler folds the two spellings together.
+     */
+    | WhereInput<R["target"]>
+      | { is?: WhereInput<R["target"]> | null; isNot?: WhereInput<R["target"]> | null }
       | (R["nullable"] extends true ? null : never);
 
 export type WhereInput<M extends ModelTypeInfo> = {
@@ -537,10 +539,7 @@ export type FindUniqueOrThrowArgs<M extends ModelTypeInfo> = FindUniqueArgs<M>;
 type NestedCreate<R extends RelationInfo> = R["kind"] extends "many"
   ? {
       create?: CreateInput<R["target"]> | CreateInput<R["target"]>[];
-      createMany?: {
-        data: CreateInput<R["target"]>[];
-        skipDuplicates?: boolean;
-      };
+      createMany?: { data: CreateInput<R["target"]>[]; skipDuplicates?: boolean };
       connect?: WhereUniqueInput<R["target"]> | WhereUniqueInput<R["target"]>[];
       connectOrCreate?:
         | ConnectOrCreate<R["target"]>
@@ -564,9 +563,7 @@ type NestedUpdate<R extends RelationInfo> = NestedCreate<R> &
         disconnect?:
           | WhereUniqueInput<R["target"]>
           | WhereUniqueInput<R["target"]>[];
-        delete?:
-          | WhereUniqueInput<R["target"]>
-          | WhereUniqueInput<R["target"]>[];
+        delete?: WhereUniqueInput<R["target"]> | WhereUniqueInput<R["target"]>[];
         deleteMany?: WhereInput<R["target"]> | WhereInput<R["target"]>[];
         update?: NestedUpdateOne<R["target"]> | NestedUpdateOne<R["target"]>[];
         updateMany?:
@@ -737,10 +734,8 @@ export interface CountArgs<M extends ModelTypeInfo> {
   select?: CountSelect<M>;
 }
 
-export interface GroupByArgs<M extends ModelTypeInfo> extends Omit<
-  AggregateArgs<M>,
-  "orderBy"
-> {
+export interface GroupByArgs<M extends ModelTypeInfo>
+  extends Omit<AggregateArgs<M>, "orderBy"> {
   by: (keyof Scalars<M> & string)[] | (keyof Scalars<M> & string);
   having?: WhereInput<M>;
   orderBy?: OrderByInput<M> | OrderByInput<M>[];
