@@ -3745,11 +3745,16 @@ await User.findMany({ orderBy: [{ id: "desc" }, { email: { sort: "asc", nulls: "
 `CASE WHEN … IS NULL` expression on SQLite instead, which dates from before SQLite 3.30 — it has
 understood the standard syntax since, and Bun bundles a newer one.
 
-**Worth writing even when the default already agrees.** Postgres sorts nulls above every non-null,
-so `asc` already means `nulls last` and the emitted SQL is equivalent. The difference is that the
-query then says what it means: the same default makes `desc` put nulls *first*, so an ordering that
-was correct by accident stops being correct the moment someone flips the direction. A negative
-`take` flips the placement along with the direction, so a reversed page keeps the intent too.
+**The two dialects disagree by default, so this is not cosmetic.** Postgres sorts nulls above every
+non-null; SQLite sorts them below. The same `orderBy: { email: "asc" }` therefore returns
+`[1, 2, null]` on Postgres and `[null, 1, 2]` on SQLite — measured on both, not inferred — so a
+query moved between them changes its answer with nothing to notice. Saying `nulls` is what makes
+the ordering mean the same thing on either database.
+
+It is worth saying even on one dialect. The default that makes `asc` put nulls last on Postgres
+makes `desc` put them first, so an ordering that was correct by accident stops being correct the
+moment someone flips the direction. A negative `take` flips the placement along with the direction,
+so a reversed page keeps the intent too.
 
 The long form works wherever a direction does, including through a relation:
 `orderBy: { accounts: { _count: { sort: "desc", nulls: "last" } } }`.

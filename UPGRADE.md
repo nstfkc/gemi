@@ -105,12 +105,27 @@ part: both were doing something you probably did not want.
 all — the engine reads the rows and deduplicates them in JavaScript. So a
 `take` beside it neither reduced the rows pulled from the database nor
 paginated by distinct group, which is a performance and a correctness problem
-rather than a stylistic one. Write it as SQL:
+rather than a stylistic one. Write it as SQL.
+
+On **Postgres**, `distinct on` says it directly:
 
 ```ts
 const rows = await DB.query(sql`
   select distinct on ("userId") "userId", "createdAt"
   from "Session" order by "userId", "createdAt" desc
+`);
+```
+
+`distinct on` is Postgres-only — SQLite answers `near "on": syntax error`. The
+portable form is a window function, which both dialects have:
+
+```ts
+const rows = await DB.query(sql`
+  select "userId", "createdAt" from (
+    select "userId", "createdAt",
+           row_number() over (partition by "userId" order by "createdAt" desc) as "rn"
+    from "Session"
+  ) where "rn" = 1
 `);
 ```
 

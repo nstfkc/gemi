@@ -466,11 +466,24 @@ export type NullsOrder = "first" | "last";
  */
 export type SortOrderInput = SortOrder | { sort: SortOrder; nulls?: NullsOrder };
 
+/**
+ * Ordering, one level.
+ *
+ * The relation arm's `_count` is offered only on a to-many, for the reason
+ * `CountSelection` gives and reusing its type so the two say the same thing:
+ * `relationOrderExpression` throws for a to-one, since ordering by a count of
+ * 0 or 1 is ordering by the relation's own nullability. The runtime error names
+ * the fields to order by instead.
+ */
 export type OrderByInput<M extends ModelTypeInfo> = {
   [K in keyof Scalars<M>]?: SortOrderInput;
 } & {
   [K in keyof Relations<M>]?:
-    | { _count?: SortOrderInput }
+    | {
+        _count?: Relations<M>[K]["kind"] extends "many"
+          ? SortOrderInput
+          : ToOneRelationsCannotBeCounted;
+      }
     | OrderByInput<Relations<M>[K]["target"]>;
 };
 

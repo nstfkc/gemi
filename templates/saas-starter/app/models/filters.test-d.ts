@@ -325,6 +325,34 @@ describe("orderBy and pagination", () => {
       orderBy: { accounts: { _count: { sort: "desc", nulls: "last" } } },
     });
   });
+
+  /**
+   * `relationOrderExpression` throws for a to-one `_count` — ordering by a
+   * count of 0 or 1 is ordering by the relation's own nullability — so the type
+   * has no business offering it. Same hole `CountSelection` closed for `_count`
+   * in a `select`, and it reuses that type so both say the same thing.
+   */
+  test("a to-one relation cannot be ordered by its count", async () => {
+    // @ts-expect-error `organization` is to-one; its count is 0 or 1
+    await UserModel.findMany({ orderBy: { organization: { _count: "desc" } } });
+  });
+
+  test("but ordering a to-one by one of its fields is fine", async () => {
+    await UserModel.findMany({ orderBy: { organization: { name: "asc" } } });
+  });
+
+  /**
+   * `groupBy` is the one operation whose `orderBy` does not go through
+   * `parseOrderBy` — it has its own reader, because its ordering may name an
+   * aggregate. So the long form had to be taught there separately; before that
+   * this typechecked and threw.
+   */
+  test("groupBy takes the long form too, on a column and on an aggregate", async () => {
+    await UserModel.groupBy({
+      by: ["globalRole"],
+      orderBy: { globalRole: { sort: "asc", nulls: "last" } },
+    });
+  });
 });
 
 describe("the payload still narrows, with the filters in place", () => {
