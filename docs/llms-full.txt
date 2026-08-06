@@ -3254,6 +3254,9 @@ shape. Four rules are worth knowing because they are not what the arguments sugg
   in `by` and many for everything else, so ordering by anything else is a question with no answer.
   SQLite answers it anyway, by picking an arbitrary row's value, so this is refused rather than
   passed through. `orderBy: { _count: { field: "desc" } }` is the top-N-by-count query and is fine.
+  It compiles to `count(field)`, which counts the rows where `field` is not null — for the size of
+  the group, which is what `_count: true` returns, order by `_count: { _all: "desc" }` instead. On a
+  non-nullable column the two agree; on a nullable one they disagree exactly where nobody checks.
 - **`orderBy` is optional.** `groupBy` with none is a legal query.
 - **`having` filters groups, `where` filters rows.** `having: { role: { gt: 0 } }` needs `role` to be
   in `by`; `having: { email: { _count: { gt: 1 } } }` does not, because a count has one value per

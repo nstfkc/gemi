@@ -810,11 +810,150 @@ export interface CountArgs<M extends ModelTypeInfo> {
   select?: CountSelect<M>;
 }
 
+/**
+ * `groupBy`'s ordering grammar, which is a different grammar from `findMany`'s
+ * rather than a wider one — which is why #340 could not be closed the way #337
+ * was, by widening the type the two share.
+ *
+ * Two arms:
+ *
+ * - a **column**, ordered as anywhere else;
+ * - an **aggregate** — `orderBy: { _count: { role: "desc" } }`, the
+ *   top-N-by-count query `groupBy` mostly exists for. `findMany` has no notion
+ *   of one, so putting this on `OrderByInput` would have offered an ordering
+ *   there that `compileOrderBy` throws on.
+ *
+ * Which fields each kind takes is `assertAggregable`'s rule, reusing
+ * `AggregateArgs`' own key sets so the two cannot drift: `count` applies to
+ * anything, `_sum`/`_avg` need arithmetic, `_min`/`_max` need an ordering both
+ * dialects agree on. `_all` is `_count`'s alone — it compiles to `count(*)`,
+ * which names no column.
+ *
+ * Relations are absent because the compiler has no arm for them: an `orderBy`
+ * key here is looked up in `schema.fields`, and a relation is not one, so it is
+ * refused as an unknown field. `OrderByInput` accepted them.
+ *
+ * What this deliberately does not say is that a column has to be one of the
+ * `by` ones. That depends on the `by` literal rather than on `M`, and
+ * `bin/orm/emit.ts` records the reason it stays a runtime refusal: the
+ * type-level form reports a mapped type, where `compile/group-by.ts` names the
+ * field and says why. A worse-worded compile error is not an improvement.
+ */
+export type GroupByOrderByInput<M extends ModelTypeInfo> = {
+  [K in keyof Scalars<M>]?: SortOrderInput;
+} & {
+  _count?: { _all?: SortOrderInput } & {
+    [K in keyof Scalars<M>]?: SortOrderInput;
+  };
+  _avg?: { [K in NumericKeys<M>]?: SortOrderInput };
+  _sum?: { [K in NumericKeys<M>]?: SortOrderInput };
+  _min?: { [K in OrderableKeys<M>]?: SortOrderInput };
+  _max?: { [K in OrderableKeys<M>]?: SortOrderInput };
+};
+
+/**
+ * The six comparisons a `having` operand takes, which is `OPERATORS` in
+ * `compile/group-by.ts` and nothing else.
+ *
+ * Narrower than a `where`'s on purpose, because the compiler is: `having` walks
+ * its own operand reader, so `contains`, `in`, `startsWith` and `mode` are not
+ * offered here and throw *"A 'having' filter takes equals, gt, gte, lt, lte,
+ * not"* if written. A bare value is `equals`, the shorthand `where` accepts too,
+ * and `null` under `equals` / `not` becomes `is null` / `is not null`.
+ */
+type HavingComparison<V> = {
+  equals?: V | null;
+  not?: V | null;
+  lt?: V;
+  lte?: V;
+  gt?: V;
+  gte?: V;
+};
+
+type HavingFilter<V> = V | HavingComparison<V>;
+
+type AggregateNeedsArithmetic = {
+  "_sum and _avg need a number, and this column is not one": never;
+};
+
+type AggregateNeedsAnOrdering = {
+  "_min and _max need an ordering both dialects have": never;
+};
+
+/**
+ * A `having` filter on an aggregate *of* a column, rather than on the column.
+ *
+ * `count` and `avg` answer in their own type whatever the column was — a count
+ * is an integer and an average is a division — so those compare against a
+ * number. `_sum`, `_min` and `_max` keep the column's, which is `AggregatePayload`'s
+ * rule from the other direction.
+ *
+ * The two refusals are named types rather than absent keys because a `never`
+ * under an optional key reports *"not assignable to type 'undefined'"*, which
+ * says nothing about arithmetic. This prints the sentence.
+ */
+type HavingAggregates<M extends ModelTypeInfo, K extends keyof Scalars<M>> = {
+  _count?: HavingFilter<number>;
+  _avg?: K extends NumericKeys<M>
+    ? HavingFilter<number>
+    : AggregateNeedsArithmetic;
+  _sum?: K extends NumericKeys<M>
+    ? HavingFilter<NonNullable<Scalars<M>[K]>>
+    : AggregateNeedsArithmetic;
+  _min?: K extends OrderableKeys<M>
+    ? HavingFilter<NonNullable<Scalars<M>[K]>>
+    : AggregateNeedsAnOrdering;
+  _max?: K extends OrderableKeys<M>
+    ? HavingFilter<NonNullable<Scalars<M>[K]>>
+    : AggregateNeedsAnOrdering;
+};
+
+/**
+ * `having`, which was the same divergence as `orderBy` one line below it.
+ *
+ * It borrowed `WhereInput`, and `compileHaving` is a second predicate compiler
+ * rather than `compileWhere` with a flag — so the borrowed type was wrong in
+ * three directions at once. It refused the aggregate filter that is the whole
+ * point of a `having`:
+ *
+ *     having: { email: { _count: { gt: 1 } } }   // was TS2353, compiles and runs
+ *
+ * offered operators this compiler does not have (`contains`, `in`, `mode`), and
+ * offered a relation arm, where a `having` key is resolved against
+ * `schema.fields` and a relation is refused — *"aggregate its own model
+ * instead"*.
+ *
+ * **Prisma's rule is an `or`**, and it is why the two arms are a union rather
+ * than a choice made per field: *"every field used in `having` filters must
+ * either be an aggregation filter or be included in the selection of the
+ * query"*. A plain comparison needs its column in `by`; an aggregate one does
+ * not, because `count(email)` has one value per group whether or not `email` is
+ * grouped. Which of those applies depends on the operand, so it is `havingField`
+ * that decides it at runtime — the same `by`-dependence `GroupByOrderByInput`
+ * leaves alone, for the reason recorded there.
+ *
+ * One shape this still admits and the compiler still refuses: mixing the arms
+ * under one key, `having: { role: { gt: 0, _count: { gt: 1 } } }`. TypeScript
+ * relaxes excess-property checking against a union, so both keys are known to
+ * *some* member and the literal passes. Prisma's query engine panics on that
+ * shape rather than answering it, so `assertPureAggregate` refuses it by name
+ * and says to spell it as an `AND`. Stated rather than papered over.
+ */
+export type GroupByHavingInput<M extends ModelTypeInfo> = {
+  AND?: GroupByHavingInput<M> | GroupByHavingInput<M>[];
+  OR?: GroupByHavingInput<M>[];
+  NOT?: GroupByHavingInput<M> | GroupByHavingInput<M>[];
+} & {
+  [K in keyof Scalars<M>]?:
+    | HavingFilter<Scalars<M>[K]>
+    | HavingAggregates<M, K>;
+};
+
 export interface GroupByArgs<M extends ModelTypeInfo>
   extends Omit<AggregateArgs<M>, "orderBy"> {
   by: (keyof Scalars<M> & string)[] | (keyof Scalars<M> & string);
-  having?: WhereInput<M>;
-  orderBy?: OrderByInput<M> | OrderByInput<M>[];
+  having?: GroupByHavingInput<M>;
+  orderBy?: GroupByOrderByInput<M> | GroupByOrderByInput<M>[];
 }
 
 type GroupedKeys<A> = A extends { by: infer B }

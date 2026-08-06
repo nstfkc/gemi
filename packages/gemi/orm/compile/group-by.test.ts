@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { PostgresDialect } from "../dialect/postgres";
 import { SqliteDialect } from "../dialect/sqlite";
 import { UnknownFieldError, UnsupportedQueryError } from "../errors";
-import { account, organization, user } from "../fixtures";
+import { account, mapped, organization, user } from "../fixtures";
 import * as registry from "../registry";
 import { compileGroupBy } from "./group-by";
 
@@ -208,6 +208,43 @@ describe("having", () => {
     ).toThrow(/having.globalRole.contains/);
   });
 
+  /**
+   * The other half of what borrowing `WhereInput` got wrong: a `having` key is
+   * resolved against `schema.fields`, so a relation is refused here even though
+   * `where` filters by one. `GroupByHavingInput` has no relation arm for the
+   * same reason `GroupByOrderByInput` has none (#340).
+   *
+   * `resolveField` names it as a relation rather than reporting an unknown
+   * field. `compileGroupOrdering` does not — it reads `schema.fields` directly,
+   * so the same mistake in an `orderBy` gets the generic message. Left as it is:
+   * both are now compile errors for typed callers, and changing which error an
+   * untyped one gets is a behaviour change this PR did not set out to make.
+   */
+  test("a relation is refused here, unlike in where", () => {
+    expect(() =>
+      text({ by: ["globalRole"], _count: true, having: { accounts: { some: {} } } }),
+    ).toThrow(/'accounts' is a relation/);
+  });
+
+  /**
+   * `assertAggregable` applies to a `having` aggregate, not only to a selected
+   * one. It matters most here because this is the one case `GroupByHavingInput`
+   * cannot refuse: a `Json` column's filter is a union with `JsonValue`, which
+   * contains `{ [key: string]: JsonValue }`, so an object literal spelled like
+   * an aggregate filter is also a legal *value* for it. The type documents that
+   * hole; this is what closes it.
+   */
+  test("an aggregate the column cannot answer is refused, Json included", () => {
+    expect(() =>
+      compileGroupBy(
+        mapped,
+        "groupBy",
+        { by: ["size"], _count: true, having: { payload: { _max: { gt: 1 } } } },
+        sqlite,
+      ),
+    ).toThrow(/has no ordering/);
+  });
+
   test("no value reaches the SQL text", () => {
     const args = {
       by: ["globalRole"],
@@ -329,9 +366,35 @@ describe("orderBy", () => {
     ).toThrow(UnsupportedQueryError);
   });
 
+  /**
+   * An aggregate with no fields under it is no ordering at all, and the type
+   * admits it. Left that way rather than made loud: `orderBy: {}` and
+   * `where: {}` behave the same, an empty object is what a conditionally-built
+   * argument produces, and refusing it would refuse the shape that spelling is
+   * for. Pinned so it stays a decision.
+   */
+  test("an empty aggregate is no ordering, not an error", () => {
+    expect(text({ by: ["globalRole"], _count: true, orderBy: { _count: {} } })).not.toContain(
+      "order by",
+    );
+  });
+
   test("an unknown column is an unknown field, not a group error", () => {
     expect(() =>
       text({ by: ["globalRole"], _count: true, orderBy: { nope: "asc" } }),
+    ).toThrow(UnknownFieldError);
+  });
+
+  /**
+   * A relation reaches the same refusal, because this reader looks a key up in
+   * `schema.fields` and relations are not among them. `findMany` orders by a
+   * relation happily; `groupBy` never could, and `GroupByOrderByInput` is the
+   * type that finally says so — it has no relation arm, where the shared
+   * `OrderByInput` it used to borrow did (#340).
+   */
+  test("a relation is an unknown field here, unlike in findMany", () => {
+    expect(() =>
+      text({ by: ["globalRole"], _count: true, orderBy: { accounts: { _count: "desc" } } }),
     ).toThrow(UnknownFieldError);
   });
 });

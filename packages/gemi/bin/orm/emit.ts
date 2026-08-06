@@ -887,7 +887,10 @@ function countOperation(model: string): string {
  * `compile/aggregate.ts` — so a `_sum` over a `String` is a compile error at the
  * same place the runtime would refuse it.
  *
- * `groupBy` is beside it, and one rule of its is still a runtime check.
+ * `groupBy` is beside it, and takes `GroupByOrderByInput` rather than the
+ * `OrderByInput` the other reads take, because its ordering may name an
+ * aggregate and theirs may name a relation — different grammars, not a wider
+ * one (#340). One rule of its is still a runtime check.
  *
  * `orderBy` may only name a column that is in `by`. Expressing that in the type
  * would mean making `orderBy`'s key set depend on the `by` literal, which is
