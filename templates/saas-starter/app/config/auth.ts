@@ -19,6 +19,18 @@ export default defineAuthConfig({
   // Change this to true to only allow verified emails to login
   verifyEmail: false,
 
+  async onUserCreated(user: any) {
+    // This hook runs *inside* the transaction that creates the user, before it
+    // commits — provision an organization, a workspace, a default settings row
+    // here, and a throw rolls the user back with them. ORM queries join the
+    // transaction automatically; raw ones do not. Keep email and other I/O in
+    // `onSignUp` below, which fires after the commit.
+    //
+    // A sign-up has no authenticated user yet, so writes to a model carrying a
+    // policy have to say so: `Model.asSystem(() => Organization.create(...))`.
+    // Without it they raise `PolicyDeniedError` and the sign-up fails.
+  },
+
   async onSignUp(user: any, token: string) {
     // This hook will be called when a user signs up
     // You can send email verification here

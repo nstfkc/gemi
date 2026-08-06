@@ -174,6 +174,27 @@ export class UserProvider {
   }
 
   /**
+   * Runs `fn` inside a transaction on the connection the `User` model lives on.
+   * Every ORM query in it joins automatically, at any call depth — see
+   * `Model.transaction`.
+   *
+   * Here so that `AuthController` can make a sign-up atomic without importing a
+   * model: the controller has none, and reaching for a bare `Model.transaction`
+   * would open on the ambient connection rather than the one this provider's
+   * models are bound to. Nesting is a savepoint, so an application that already
+   * wrapped its own transaction around a sign-up composes instead of breaking.
+   *
+   * Deliberately **not** wrapped in `run`. `asSystem` is applied per query by
+   * the methods below, which keeps it to this class's own reads and writes;
+   * hoisting it here would silently suspend policies for `config.onUserCreated`
+   * too, and an application's provisioning writes should run under the same
+   * policy resolution as the rest of its code.
+   */
+  transaction<T>(fn: () => Promise<T>): Promise<T> {
+    return this.models.User.transaction(fn);
+  }
+
+  /**
    * Note the password is **removed from the returned object**, matching Prisma's
    * adapter, which uses `omit: { password: true }`.
    *

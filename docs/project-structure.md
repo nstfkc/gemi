@@ -315,7 +315,7 @@ The hooks are ordinary config values, so a service reads them the same way it re
 
 | Slice | Hooks |
 | --- | --- |
-| `auth` | `onSignUp`, `onSignIn`, `onSignOut`, `onForgotPassword`, `onResetPassword`, `onMagicLinkCreated`, `extendSession`, `verifyPassword`, `hashPassword`, `generateForgotPasswordToken`, `generateEmailVerificationToken`, `generateMagicLinkToken` |
+| `auth` | `onUserCreated`, `onSignUp`, `onSignIn`, `onSignOut`, `onForgotPassword`, `onResetPassword`, `onMagicLinkCreated`, `extendSession`, `verifyPassword`, `hashPassword`, `generateForgotPasswordToken`, `generateEmailVerificationToken`, `generateMagicLinkToken` |
 | `mail` | `filterRecipients` |
 | `log` | `onLogCreated`, `onLogFileClosed` |
 | `translation` | `detectLocale`, `onLocaleChange` |
