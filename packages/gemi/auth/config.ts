@@ -53,14 +53,26 @@ export interface AuthConfig {
    * written when this runs, so a hook provisioning an own workspace should
    * check before adding a second one.
    *
-   * Three constraints come from running inside the transaction:
+   * Four constraints come from where this runs:
+   *
+   * - **Writes to a policied model need `Model.asSystem`.** This runs with no
+   *   user in scope — a sign-up has not authenticated anybody yet — so a policy
+   *   whose `scope` or `onCreate` reads `ctx.user` raises `PolicyDeniedError`
+   *   under deny-by-default, and the rollback takes the user with it. That is
+   *   the correct behaviour and the reason this hook is *not* wrapped in
+   *   `UserProvider.run`: suspending policies for application code is a
+   *   sentence somebody types, never something a framework does quietly. Say it
+   *   at the call site:
+   *
+   *       await Model.asSystem(() => Organization.create({ data }))
    *
    * - **Errors thrown here reach the client as-is.** A `ValidationError` is a
-   *   400 on `POST /sign-up`; anything else is a 500. Either way no user is
-   *   created.
-   * - **Raw queries do not join it.** ORM calls at any depth do, automatically;
-   *   a hand-written Prisma or `DB` statement runs outside and survives the
-   *   rollback.
+   *   400 on `POST /sign-up`; anything else is a 500. On the OAuth path there
+   *   is no form to fail — a throw is a 500 page mid-redirect. Either way no
+   *   user is created.
+   * - **Raw queries do not join the transaction.** ORM calls at any depth do,
+   *   automatically; a hand-written Prisma or `DB` statement runs outside and
+   *   survives the rollback.
    * - **`Promise.all` over ORM calls is not safe here.** The transaction holds
    *   one reserved connection, so await them in sequence. Keep network and
    *   filesystem I/O out entirely — the connection is held for as long as this

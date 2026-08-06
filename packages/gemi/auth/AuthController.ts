@@ -327,7 +327,13 @@ export class AuthController extends Controller {
     }
 
     let newUser: User;
-    let verificationToken: string;
+    // `""` rather than left undefined, because only the `else` branch below
+    // assigns it. An invited sign-up sets `emailVerifiedAt` and never writes a
+    // token, so there is nothing to verify — the same reason `oauthCallback`
+    // passes `""` — and `onSignUp` is typed `verificationToken: string`. Left
+    // undeclared, the invited path handed the hook `undefined` against that
+    // signature.
+    let verificationToken = "";
 
     // Both branches write the user and everything that has to exist alongside
     // it in one transaction, `config.onUserCreated` last. A throw from the hook

@@ -5150,17 +5150,21 @@ shows up in production.
 
 ```typescript
 import { defineAuthConfig } from "gemi/services";
+import { Model } from "gemi/orm";
 
 import { Account } from "@/app/models/Account";
 import { Organization } from "@/app/models/Organization";
 
 export default defineAuthConfig({
   async onUserCreated(user) {
-    // Both of these join the open transaction automatically. If either throws,
-    // the user is rolled back with them.
-    const org = await Organization.create({ data: { name: `${user.name}'s org` } });
-    await Account.create({
-      data: { userId: user.id, organizationId: org.id, organizationRole: 0 },
+    // `asSystem` because a sign-up has no authenticated user yet — see the
+    // first bullet below. Both writes join the open transaction automatically,
+    // so if either throws, the user is rolled back with them.
+    await Model.asSystem(async () => {
+      const org = await Organization.create({ data: { name: `${user.name}'s org` } });
+      await Account.create({
+        data: { userId: user.id, organizationId: org.id, organizationRole: 0 },
+      });
     });
   },
 });
@@ -5169,16 +5173,32 @@ export default defineAuthConfig({
 It fires on all three paths that create a user — email/password sign-up, invited sign-up, and
 first OAuth sign-in — and receives the same password-stripped user the endpoint returns.
 
-Four things to know:
+Five things to know:
 
+- **Writing to a policied model needs `Model.asSystem`.** This hook runs with no user in
+  scope — a sign-up has not authenticated anybody yet — so a [policy](./orm.md) whose `scope`
+  or `onCreate` reads `ctx.user` raises `PolicyDeniedError` under deny-by-default, and the
+  rollback takes the new user with it. A tenant-scoped `Organization` is exactly that case, so
+  without the wrapper above the first sign-up 500s and nobody can get past it.
+
+  That is the framework working, not a bug to route around: suspending policies for
+  application code is a sentence you write, never something gemi does quietly on your behalf.
+  It is also why the hook is deliberately *not* wrapped in `UserProvider`'s own `asSystem` —
+  that would have made every provisioning write unpoliced with nothing at the call site to say
+  so. Use `Model.asUser(user, …)` instead when the new user is enough to satisfy the scope;
+  for a tenant scope reading `organizationId`, it is not, because that is the row being
+  created.
 - **Errors reach the client.** A [`ValidationError`](./forms.md) thrown here is a 400 on
-  `POST /sign-up`; anything else is a 500. Either way no user is created.
+  `POST /sign-up`; anything else is a 500. On the OAuth path there is no form to fail — a
+  throw is a 500 page mid-redirect. Either way no user is created.
 - **The invited path already has an `Account`.** When a sign-up carries an `invitationId`, the
   inviting organization's `Account` row is written before this runs, so a hook that
   unconditionally provisions an own workspace gives that user two. Check before adding one.
 - **Only ORM queries join the transaction.** They do at any call depth, through any number of
-  services, with nothing threaded through — that is `Model.transaction`'s contract. A raw
-  Prisma or `DB` statement runs outside it and survives the rollback.
+  services, with nothing threaded through — that is `Model.transaction`'s contract, and
+  `asSystem` does not break it: the wrapper merges into the current scope rather than
+  replacing it, so the open transaction survives. A raw Prisma or `DB` statement runs outside
+  it and survives the rollback.
 - **One statement at a time.** The transaction holds a single reserved connection, so
   `Promise.all` over ORM calls is not safe here — await them in sequence. Keep network and
   filesystem I/O out of the hook entirely; the connection is held for as long as it runs. Send
