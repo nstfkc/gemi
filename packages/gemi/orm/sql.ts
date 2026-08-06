@@ -17,10 +17,9 @@ import {
  * SQL fragments as first-class values: `sql`, `join`, `empty`, and one door out.
  *
  * The ORM deliberately does not implement every SQL shape — `distinct`, cursor
- * pagination, `groupBy`, window functions, recursive CTEs. That is the right
- * call, but it is only half a decision: the shapes it declines have to have
- * somewhere to go, and "drop to raw SQL" is not an answer if raw SQL cannot be
- * *composed*.
+ * pagination, window functions, recursive CTEs. That is the right call, but it
+ * is only half a decision: the shapes it declines have to have somewhere to go,
+ * and "drop to raw SQL" is not an answer if raw SQL cannot be *composed*.
  *
  * `DB.sql` — Bun's tagged template — covers a single self-contained statement,
  * and that is genuinely all it covers. The shape it cannot express is the common

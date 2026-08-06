@@ -352,6 +352,88 @@ describe("orderBy and pagination", () => {
       by: ["globalRole"],
       orderBy: { globalRole: { sort: "asc", nulls: "last" } },
     });
+
+    await UserModel.groupBy({
+      by: ["globalRole"],
+      _count: true,
+      orderBy: { _count: { globalRole: { sort: "desc", nulls: "first" } } },
+    });
+  });
+});
+
+/**
+ * `groupBy` orders by things `findMany` has no notion of, so it has its own
+ * input type rather than borrowing `OrderByInput` (#340). Borrowing it made the
+ * top-N-by-count query — the one `groupBy` mostly exists for, and the one the
+ * docs lead with — a compile error, while offering relation orderings the
+ * compiler refuses.
+ */
+describe("groupBy orders by an aggregate", () => {
+  test("the top-N-by-count query", async () => {
+    await UserModel.groupBy({
+      by: ["globalRole"],
+      _count: true,
+      orderBy: { _count: { globalRole: "desc" } },
+    });
+  });
+
+  test("`_all` names no column, because it compiles to count(*)", async () => {
+    await UserModel.groupBy({
+      by: ["globalRole"],
+      _count: true,
+      orderBy: { _count: { _all: "asc" } },
+    });
+  });
+
+  test("and `_all` belongs to `_count` alone", async () => {
+    await UserModel.groupBy({
+      by: ["globalRole"],
+      // @ts-expect-error only `count(*)` names no column; `sum()` needs one
+      orderBy: { _sum: { _all: "desc" } },
+    });
+  });
+
+  /**
+   * The same key sets `AggregateArgs` uses, so the ordering cannot drift from
+   * what `assertAggregable` allows: arithmetic for `_sum` / `_avg`, an ordering
+   * both dialects have for `_min` / `_max`.
+   */
+  test("`_sum` needs arithmetic", async () => {
+    await UserModel.groupBy({
+      by: ["globalRole"],
+      // @ts-expect-error `email` is a String, and sum needs a number
+      orderBy: { _sum: { email: "desc" } },
+    });
+  });
+
+  test("`_max` needs an ordering the two dialects agree on", async () => {
+    await UserModel.groupBy({
+      by: ["globalRole"],
+      // @ts-expect-error `metadata` is Json, which has one on neither dialect
+      orderBy: { _max: { metadata: "desc" } },
+    });
+  });
+
+  test("but `_count` applies to any column", async () => {
+    await UserModel.groupBy({
+      by: ["globalRole"],
+      orderBy: { _count: { metadata: "desc" } },
+    });
+  });
+
+  /**
+   * `findMany` orders by a relation; `groupBy` looks its `orderBy` keys up in
+   * `schema.fields`, where a relation is not, and throws. The shared type
+   * offered this — which is the same divergence in the other direction.
+   */
+  test("a relation is not an ordering here, though it is on findMany", async () => {
+    await UserModel.findMany({ orderBy: { accounts: { _count: "desc" } } });
+
+    await UserModel.groupBy({
+      by: ["globalRole"],
+      // @ts-expect-error groupBy has no relation ordering — the compiler refuses it
+      orderBy: { accounts: { _count: "desc" } },
+    });
   });
 });
 

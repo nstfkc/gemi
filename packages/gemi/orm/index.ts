@@ -34,6 +34,7 @@ export type {
   FindUniqueArgs,
   FindUniqueOrThrowArgs,
   GroupByArgs,
+  GroupByOrderByInput,
   GroupByPayload,
   IncludeInput,
   JsonInput,

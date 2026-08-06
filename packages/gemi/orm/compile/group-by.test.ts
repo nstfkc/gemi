@@ -334,6 +334,19 @@ describe("orderBy", () => {
       text({ by: ["globalRole"], _count: true, orderBy: { nope: "asc" } }),
     ).toThrow(UnknownFieldError);
   });
+
+  /**
+   * A relation reaches the same refusal, because this reader looks a key up in
+   * `schema.fields` and relations are not among them. `findMany` orders by a
+   * relation happily; `groupBy` never could, and `GroupByOrderByInput` is the
+   * type that finally says so — it has no relation arm, where the shared
+   * `OrderByInput` it used to borrow did (#340).
+   */
+  test("a relation is an unknown field here, unlike in findMany", () => {
+    expect(() =>
+      text({ by: ["globalRole"], _count: true, orderBy: { accounts: { _count: "desc" } } }),
+    ).toThrow(UnknownFieldError);
+  });
 });
 
 describe("arguments", () => {

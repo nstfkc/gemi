@@ -810,11 +810,52 @@ export interface CountArgs<M extends ModelTypeInfo> {
   select?: CountSelect<M>;
 }
 
+/**
+ * `groupBy`'s ordering grammar, which is a different grammar from `findMany`'s
+ * rather than a wider one — which is why #340 could not be closed the way #337
+ * was, by widening the type the two share.
+ *
+ * Two arms:
+ *
+ * - a **column**, ordered as anywhere else;
+ * - an **aggregate** — `orderBy: { _count: { role: "desc" } }`, the
+ *   top-N-by-count query `groupBy` mostly exists for. `findMany` has no notion
+ *   of one, so putting this on `OrderByInput` would have offered an ordering
+ *   there that `compileOrderBy` throws on.
+ *
+ * Which fields each kind takes is `assertAggregable`'s rule, reusing
+ * `AggregateArgs`' own key sets so the two cannot drift: `count` applies to
+ * anything, `_sum`/`_avg` need arithmetic, `_min`/`_max` need an ordering both
+ * dialects agree on. `_all` is `_count`'s alone — it compiles to `count(*)`,
+ * which names no column.
+ *
+ * Relations are absent because the compiler has no arm for them: an `orderBy`
+ * key here is looked up in `schema.fields`, and a relation is not one, so it is
+ * refused as an unknown field. `OrderByInput` accepted them.
+ *
+ * What this deliberately does not say is that a column has to be one of the
+ * `by` ones. That depends on the `by` literal rather than on `M`, and
+ * `bin/orm/emit.ts` records the reason it stays a runtime refusal: the
+ * type-level form reports a mapped type, where `compile/group-by.ts` names the
+ * field and says why. A worse-worded compile error is not an improvement.
+ */
+export type GroupByOrderByInput<M extends ModelTypeInfo> = {
+  [K in keyof Scalars<M>]?: SortOrderInput;
+} & {
+  _count?: { _all?: SortOrderInput } & {
+    [K in keyof Scalars<M>]?: SortOrderInput;
+  };
+  _avg?: { [K in NumericKeys<M>]?: SortOrderInput };
+  _sum?: { [K in NumericKeys<M>]?: SortOrderInput };
+  _min?: { [K in OrderableKeys<M>]?: SortOrderInput };
+  _max?: { [K in OrderableKeys<M>]?: SortOrderInput };
+};
+
 export interface GroupByArgs<M extends ModelTypeInfo>
   extends Omit<AggregateArgs<M>, "orderBy"> {
   by: (keyof Scalars<M> & string)[] | (keyof Scalars<M> & string);
   having?: WhereInput<M>;
-  orderBy?: OrderByInput<M> | OrderByInput<M>[];
+  orderBy?: GroupByOrderByInput<M> | GroupByOrderByInput<M>[];
 }
 
 type GroupedKeys<A> = A extends { by: infer B }
