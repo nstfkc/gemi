@@ -115,6 +115,17 @@ export const GROUPS: unknown[] = [
   { by: ["globalRole"], _count: true, having: { globalRole: { gt: 1 } } },
   { by: ["globalRole"], _count: true, having: { globalRole: { gt: 200 } } },
   { by: ["name"], _count: true, orderBy: { name: "asc" } },
+  // The top-N-by-count query, which `GroupByOrderByInput` made writable (#340)
+  // and which had no entry here while it was a compile error. The two forms are
+  // different statements — `count(*)` counts the group, `count("name")` counts
+  // its non-null rows — so both are here, and the plan-key suite is what would
+  // catch them collapsing into one.
+  { by: ["name"], _count: true, orderBy: { _count: { _all: "desc" } } },
+  { by: ["name"], _count: true, orderBy: { _count: { name: "desc" } } },
+  { by: ["name"], _count: true, orderBy: { _count: { _all: { sort: "desc", nulls: "last" } } } },
+  // An aggregate `having` on an ungrouped column, which Prisma's `or` allows and
+  // which `GroupByHavingInput` stopped refusing in the same PR.
+  { by: ["globalRole"], _count: true, having: { locale: { _count: { gt: 1 } } } },
 ];
 
 /**

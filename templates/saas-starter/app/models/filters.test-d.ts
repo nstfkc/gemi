@@ -437,6 +437,138 @@ describe("groupBy orders by an aggregate", () => {
   });
 });
 
+/**
+ * `having` was the same divergence as `orderBy`, one line above it in
+ * `GroupByArgs`: it borrowed `WhereInput`, and `compileHaving` is a second
+ * predicate compiler rather than `compileWhere` with a flag.
+ */
+describe("having filters an aggregate, or a grouped column", () => {
+  test("the aggregate filter, which is what a having is for", async () => {
+    await UserModel.groupBy({
+      by: ["globalRole"],
+      _count: true,
+      having: { email: { _count: { gt: 1 } } },
+    });
+
+    await UserModel.groupBy({
+      by: ["globalRole"],
+      _count: true,
+      having: { id: { _sum: { gt: 0 } } },
+    });
+  });
+
+  test("a plain comparison on the grouped column still works", async () => {
+    await UserModel.groupBy({
+      by: ["globalRole"],
+      _count: true,
+      having: { globalRole: { gt: 1 } },
+    });
+  });
+
+  test("and the bare value is `equals`, as in a where", async () => {
+    await UserModel.groupBy({
+      by: ["globalRole"],
+      _count: true,
+      having: { globalRole: 3 },
+    });
+  });
+
+  /**
+   * `count` and `avg` answer in their own type whatever the column was;
+   * `_sum` / `_min` / `_max` keep the column's.
+   */
+  test("a count compares against a number, whatever the column is", async () => {
+    await UserModel.groupBy({
+      by: ["globalRole"],
+      _count: true,
+      // @ts-expect-error `count(email)` is a number, not a string
+      having: { email: { _count: { gt: "1" } } },
+    });
+  });
+
+  test("a min keeps the column's type", async () => {
+    await UserModel.groupBy({
+      by: ["globalRole"],
+      _count: true,
+      having: { createdAt: { _min: { gt: new Date() } } },
+    });
+  });
+
+  test("`_sum` needs arithmetic here too", async () => {
+    await UserModel.groupBy({
+      by: ["globalRole"],
+      _count: true,
+      // @ts-expect-error `email` is a String, and sum needs a number
+      having: { email: { _sum: { gt: 1 } } },
+    });
+  });
+
+  test("`_max` needs an ordering the two dialects agree on", async () => {
+    await UserModel.groupBy({
+      by: ["globalRole"],
+      _count: true,
+      // @ts-expect-error `avatar` is Bytes, which has one on neither dialect
+      having: { avatar: { _max: { gt: 1 } } },
+    });
+  });
+
+  /**
+   * Except on a `Json` column, where it cannot be — and this is deliberately
+   * *not* a `@ts-expect-error`, because the directive would fail the run.
+   *
+   * A `Json` column's filter is a union with `JsonValue`, which contains
+   * `{ [key: string]: JsonValue }`, so any JSON-shaped object literal is a
+   * legal *value* for it — including one that happens to be spelled like an
+   * aggregate filter. The same hole `FieldFilter` documents rather than papers
+   * over, and Prisma has it too. `assertAggregable` refuses this at runtime,
+   * naming the column and its type.
+   */
+  test("but a Json column takes any object, so nothing here can refuse it", async () => {
+    await UserModel.groupBy({
+      by: ["globalRole"],
+      _count: true,
+      having: { metadata: { _max: { gt: 1 } } },
+    });
+  });
+
+  /**
+   * `having` has its own operand reader — six comparisons, and none of the
+   * string or list operators a `where` offers. The type used to offer all of
+   * them and the compiler threw.
+   */
+  test("the string operators a where has are not offered", async () => {
+    await UserModel.findMany({ where: { name: { contains: "a" } } });
+
+    await UserModel.groupBy({
+      by: ["name"],
+      _count: true,
+      // @ts-expect-error a having takes equals, gt, gte, lt, lte, not
+      having: { name: { contains: "a" } },
+    });
+  });
+
+  test("a relation is not a having key, though it is a where key", async () => {
+    await UserModel.findMany({ where: { accounts: { some: {} } } });
+
+    await UserModel.groupBy({
+      by: ["globalRole"],
+      _count: true,
+      // @ts-expect-error a having key resolves against the columns
+      having: { accounts: { some: {} } },
+    });
+  });
+
+  test("AND, OR and NOT still nest", async () => {
+    await UserModel.groupBy({
+      by: ["globalRole"],
+      _count: true,
+      having: {
+        AND: [{ globalRole: { gt: 7 } }, { globalRole: { _count: { lte: 9 } } }],
+      },
+    });
+  });
+});
+
 describe("the payload still narrows, with the filters in place", () => {
   test("a filtered select is narrowed to the selection", async () => {
     const [row] = await UserModel.findMany({
