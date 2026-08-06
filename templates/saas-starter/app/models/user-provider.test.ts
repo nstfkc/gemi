@@ -257,6 +257,13 @@ function suite(label: string, url?: string) {
       // The narrowed select must not carry the password into something handed
       // to a client.
       expect("password" in created.user).toBe(false);
+
+      // The organizations arrive through the accounts, and the user row itself
+      // carries no organization column. This schema happens to have one, so
+      // selecting it would pass here — which is exactly how the framework came
+      // to require a column no application should have to declare. Asserted as
+      // an absence so that re-adding it fails.
+      expect("organizationId" in created.user).toBe(false);
     });
 
     test("findSession returns the session with its user", async () => {

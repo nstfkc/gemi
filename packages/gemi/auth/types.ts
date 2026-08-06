@@ -75,6 +75,13 @@ export type Account = {
   organization: Organization;
 };
 
+/**
+ * A user's organizations are reached through `accounts`, each of which carries
+ * the organization it is a membership in. There is deliberately no
+ * `organizationId` here: a user may be in more than one organization, so a
+ * single column could not answer the question, and `SESSION_USER` no longer
+ * selects one — see the note there.
+ */
 export interface User {
   id: number;
   publicId: string;
@@ -83,7 +90,6 @@ export interface User {
   emailVerifiedAt: Date | null;
   globalRole: number;
   password: string | null;
-  organizationId: number | null;
   accounts: Account[];
   // TODO: Add type
   extension: Record<string, any>;

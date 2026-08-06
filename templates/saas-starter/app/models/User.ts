@@ -18,8 +18,8 @@ import { UserModel } from "./generated";
 //   export class User extends UserModel {
 //     static $policies: UserPolicy[] = [
 //       softDeletes<User>(),
-//       { scope: (ctx) => ({ organizationId: ctx.user.organizationId }),
-//         onCreate: (ctx, data) => ({ ...data, organizationId: ctx.user.organizationId }),
+//       { scope: (ctx) => ({ accounts: { some: { organizationId: orgOf(ctx) } } }),
+//         onCreate: (ctx, data) => data,
 //         onUpdate: (_ctx, data) => data },
 //     ]
 //   }
@@ -27,6 +27,15 @@ import { UserModel } from "./generated";
 // The `UserPolicy` annotation is what types `ctx`, `data` and the returned
 // `where` against this model — without it the entries are inferred from the
 // literal and the parameters are implicitly `any`.
+//
+// The scope goes through `accounts` because that is where a membership lives: a
+// user belongs to an organization by having an account in it, and may have
+// several. `ctx.user` is the session user, which carries `accounts[].organization`
+// and no `organizationId` of its own — so `ctx.user.organizationId` would be
+// `undefined`, and an undefined value in a scope is an *absent* filter rather
+// than an error. The scope would silently vanish and the read would return every
+// tenant's rows. Whatever picks the current organization out of `ctx.user.accounts`
+// is the application's own decision, which is what `orgOf` stands in for here.
 export class User extends UserModel {}
 
 // Registers the name against *this* class, replacing the generated base that
