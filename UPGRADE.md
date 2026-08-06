@@ -96,8 +96,55 @@ design — and `_sum` / `_avg` are now restricted to numeric columns. If you
 passed `Prisma.DbNull`, `Prisma.JsonNull` or `Prisma.AnyNull`, import them from
 `gemi/orm` instead.
 
+### What to write instead of `distinct` and `cursor`
+
+The compile error says the key is unknown, which does not tell you the useful
+part: both were doing something you probably did not want.
+
+**`distinct` was applied in memory.** Prisma's query log shows no `DISTINCT` at
+all — the engine reads the rows and deduplicates them in JavaScript. So a
+`take` beside it neither reduced the rows pulled from the database nor
+paginated by distinct group, which is a performance and a correctness problem
+rather than a stylistic one. Write it as SQL.
+
+On **Postgres**, `distinct on` says it directly:
+
+```ts
+const rows = await DB.query(sql`
+  select distinct on ("userId") "userId", "createdAt"
+  from "Session" order by "userId", "createdAt" desc
+`);
+```
+
+`distinct on` is Postgres-only — SQLite answers `near "on": syntax error`. The
+portable form is a window function, which both dialects have:
+
+```ts
+const rows = await DB.query(sql`
+  select "userId", "createdAt" from (
+    select "userId", "createdAt",
+           row_number() over (partition by "userId" order by "createdAt" desc) as "rn"
+    from "Session"
+  ) where "rn" = 1
+`);
+```
+
+Reproducing Prisma's behaviour faithfully would have meant hiding a full read
+and a JavaScript dedupe behind an argument that reads like a database
+operation; emitting a real `DISTINCT ON` under the same name would have
+silently diverged from Prisma. Hence neither.
+
+**`cursor` is only correct under a total ordering**, which Prisma does not
+enforce — under a non-unique `orderBy` it silently skips or repeats rows at the
+page boundary. Use `take` with a `where` on the last row's sort key, or compose
+the keyset comparison with `sql`.
+
+If you reach either from untyped code the runtime says the same thing, at
+length, rather than failing generically.
+
 The full detail, including the `Prisma.*` type mapping, is under
-**Setup** in [docs/orm.md](./docs/orm.md#setup).
+**Setup** in [docs/orm.md](./docs/orm.md#setup); the reasoning for these two is
+under [Not in scope](./docs/orm.md#not-in-scope).
 
 ## Check `app/cron` and `app/jobs` before you drop the explicit list
 

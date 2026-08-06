@@ -647,14 +647,47 @@ function aggregateOrdering(
   return parts;
 }
 
-/** A direction is structural, never a parameter — the same rule `orderBy` has. */
+/**
+ * A direction is structural, never a parameter — the same rule `orderBy` has.
+ *
+ * **And the same grammar, which is why the long form is here too.** `groupBy` is
+ * the one caller that does not go through `parseOrderBy`; it reimplements the
+ * parse because its `orderBy` may also name an aggregate, which `parseOrderBy`
+ * knows nothing about. That made `{ sort, nulls }` a compile error here long
+ * after `findMany` accepted it, and when `OrderByInput` learned the long form
+ * (#337) this became the divergence that type widening is supposed to remove —
+ * a type accepting what the compiler refuses, in the operation the ordering
+ * matters most in. `nulls first` / `nulls last` is valid on a grouped ordering
+ * on both dialects, including after an aggregate.
+ *
+ * Kept as its own reader rather than shared with `parseOrderBy`: that one
+ * resolves columns and relations and returns `OrderTerm`s, where this needs a
+ * string to append to an already-built expression.
+ */
 function direction(schema: ModelSchema, op: string, at: string, value: unknown): string {
   if (value === "asc" || value === "desc") return value;
+
+  if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+    const { sort, nulls } = value as Record<string, unknown>;
+    const sorted = direction(schema, op, at, sort);
+
+    if (nulls === undefined) return sorted;
+    if (nulls !== "first" && nulls !== "last") {
+      throw new UnsupportedQueryError(
+        `orderBy.${at}.nulls`,
+        schema.name,
+        op,
+        `Expected 'first' or 'last', got ${JSON.stringify(nulls)}.`,
+      );
+    }
+    return `${sorted} nulls ${nulls}`;
+  }
+
   throw new UnsupportedQueryError(
     `orderBy.${at}`,
     schema.name,
     op,
-    `Expected 'asc' or 'desc', got ${JSON.stringify(value)}.`,
+    `Expected 'asc', 'desc', or { sort, nulls }, got ${JSON.stringify(value)}.`,
   );
 }
 

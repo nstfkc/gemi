@@ -242,6 +242,57 @@ describe("orderBy", () => {
   });
 
   /**
+   * **The long form, which `groupBy` had to be taught separately** — #337.
+   *
+   * This is the one `orderBy` that does not go through `parseOrderBy`: it has
+   * its own reader, because a grouped ordering may name an aggregate rather
+   * than a column. So `{ sort, nulls }` was a runtime refusal here long after
+   * `findMany` accepted it, and widening `OrderByInput` without this would have
+   * left a type that accepts what the compiler throws on — in the operation
+   * where the placement matters most, since a grouped column is exactly the
+   * kind that is often null.
+   */
+  test("a grouped column takes the long form", () => {
+    expect(
+      text({
+        by: ["globalRole"],
+        _count: true,
+        orderBy: { globalRole: { sort: "asc", nulls: "last" } },
+      }),
+    ).toContain(`order by "globalRole" asc nulls last`);
+  });
+
+  test("and so does an aggregate ordering", () => {
+    expect(
+      text({
+        by: ["globalRole"],
+        _count: true,
+        orderBy: { _count: { globalRole: { sort: "desc", nulls: "first" } } },
+      }),
+    ).toContain(`order by count("globalRole") desc nulls first`);
+  });
+
+  test("the short form is unchanged, and `nulls` stays optional", () => {
+    expect(
+      text({
+        by: ["globalRole"],
+        _count: true,
+        orderBy: { globalRole: { sort: "desc" } },
+      }),
+    ).toContain(`order by "globalRole" desc`);
+  });
+
+  test.each([
+    ["a nulls that is neither", { sort: "asc", nulls: "sideways" }],
+    ["a sort that is not a direction", { sort: "up" }],
+    ["an array", ["asc"]],
+  ])("%s is refused", (_label, value) => {
+    expect(() =>
+      text({ by: ["globalRole"], _count: true, orderBy: { globalRole: value } }),
+    ).toThrow(UnsupportedQueryError);
+  });
+
+  /**
    * Prisma: *"Every field used for orderBy must be included in the
    * by-arguments of the query"*. A group has one value for a grouped column and
    * many for everything else, so ordering by an ungrouped one is a question
