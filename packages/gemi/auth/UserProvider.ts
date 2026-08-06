@@ -114,6 +114,25 @@ function registryModels(): AuthModels {
  * `./types.ts` carries `accounts[].organization`, which is a relation two levels
  * down — and because naming the columns is what keeps the *session* queries from
  * selecting `password` into something that is handed to a client.
+ *
+ * **Organizations come from the accounts, not from a column on `User`.** A user
+ * belongs to an organization by having an `Account` in it, which is the shape
+ * the rest of `auth/` already writes: `AuthController`'s invited sign-up creates
+ * the membership with `createAccount`, and nothing in this file has ever set an
+ * organization on the user row.
+ *
+ * This used to also select `User.organizationId`. Nothing in the framework read
+ * it — it was selected here and nowhere else — and selecting it made every
+ * application's `User` table have to carry the starter template's column: a
+ * schema without it fails `UnknownFieldError` inside `findSession`, which
+ * catches, logs, and returns null, so every request looks like an expired
+ * session rather than a misconfiguration.
+ *
+ * Note for a policy that scopes by tenant: `ctx.user.organizationId` is
+ * therefore no longer a thing to read. Scope through the membership —
+ * `{ accounts: { some: { organizationId: … } } }` — and take the organization
+ * from `user.accounts`. A scope naming a key the session user does not carry
+ * evaluates to `undefined`, which is an *absent* filter rather than an error.
  */
 const SESSION_USER = {
   select: {
@@ -123,7 +142,6 @@ const SESSION_USER = {
     name: true,
     locale: true,
     globalRole: true,
-    organizationId: true,
     accounts: {
       select: {
         id: true,
