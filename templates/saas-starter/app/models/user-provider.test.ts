@@ -179,6 +179,89 @@ function suite(label: string, url?: string) {
       expect([...stored][0].password).toBe("new-hash");
     });
 
+    /**
+     * `transaction` is the seam `config.onUserCreated` runs in, and the reason
+     * that hook exists rather than being another `onSignUp`: `AuthController`
+     * writes the user, writes whatever has to exist beside it, and calls the
+     * hook, all in here, so a throw from the hook takes the user with it.
+     *
+     * The hook itself is a config callback the controller invokes, and the
+     * controller needs an HTTP request to reach — what is testable here is the
+     * property the whole design rests on, which is that a throw after the
+     * insert leaves no user behind.
+     */
+    test("transaction rolls the user back when the callback throws", async () => {
+      await expect(
+        auth.transaction(async () => {
+          await auth.createUser({ name: "A", email: "a@x.test" });
+          // Standing in for a `config.onUserCreated` that failed — a
+          // provisioning insert that violated a constraint, say.
+          throw new Error("provisioning failed");
+        }),
+      ).rejects.toThrow("provisioning failed");
+
+      const rows: any = await raw.unsafe(
+        `SELECT "id" FROM "User" WHERE "email" = 'a@x.test'`,
+      );
+      expect([...rows]).toHaveLength(0);
+    });
+
+    /**
+     * The rollback has to cover what the hook itself wrote, not just the user —
+     * otherwise a failure halfway through provisioning leaves the orphan the
+     * hook exists to prevent, pointing at a user that no longer exists.
+     *
+     * Nothing is threaded through to make this happen: `Organization.create` is
+     * an ordinary ORM call several frames down, which is the property that
+     * makes an application's provisioning join the transaction without
+     * gemi handing it a `tx`.
+     */
+    test("transaction covers writes the callback makes through other models", async () => {
+      await expect(
+        auth.transaction(async () => {
+          const user: any = await auth.createUser({
+            name: "A",
+            email: "a@x.test",
+          });
+          await OrganizationModel.create({ data: { name: `${user.name}'s org` } });
+          throw new Error("provisioning failed");
+        }),
+      ).rejects.toThrow("provisioning failed");
+
+      const users: any = await raw.unsafe(`SELECT "id" FROM "User"`);
+      const orgs: any = await raw.unsafe(`SELECT "id" FROM "Organization"`);
+      expect([...users]).toHaveLength(0);
+      expect([...orgs]).toHaveLength(0);
+    });
+
+    test("transaction commits both when the callback returns", async () => {
+      const user: any = await auth.transaction(async () => {
+        const created: any = await auth.createUser({
+          name: "A",
+          email: "a@x.test",
+        });
+        const org: any = await OrganizationModel.create({
+          data: { name: "Acme" },
+        });
+        await auth.createAccount({
+          userId: created.id,
+          organizationId: org.id,
+          organizationRole: 0,
+        });
+        return created;
+      });
+
+      expect(user.email).toBe("a@x.test");
+      // The password strip survives the wrapper — the returned object is still
+      // the one `POST /sign-up` serialises.
+      expect("password" in user).toBe(false);
+
+      const accounts: any = await raw.unsafe(
+        `SELECT "userId" FROM "Account" WHERE "userId" = ${user.id}`,
+      );
+      expect([...accounts]).toHaveLength(1);
+    });
+
     test("findUserByEmailAddress without verification", async () => {
       await auth.createUser({ name: "A", email: "a@x.test" });
       const found: any = await auth.findUserByEmailAddress("a@x.test", false);

@@ -26,6 +26,48 @@ export interface AuthConfig {
   // Extra claims merged into the session payload.
   extendSession?: <T extends User>(user: T) => Promise<any> | any;
 
+  /**
+   * **This one is not a notification, whatever the name suggests.** It runs
+   * *inside* the transaction that creates the user, after the row is written
+   * and before it commits, and a throw rolls the user back. Every other `onXxx`
+   * here fires after its work is committed and can only report; this one
+   * participates in the write.
+   *
+   * The past tense is worth distrusting, then, and it is deliberate that this
+   * paragraph comes first: an application that mistakes this for `onSignUp`
+   * with better timing, and swallows its own errors inside it, gets exactly the
+   * orphaned user the hook exists to prevent.
+   *
+   * That is what it is for: an application that must create rows *alongside*
+   * every user — an organization, a workspace, a default settings row — has
+   * nowhere else to do it atomically. `onSignUp` fires after the commit on both
+   * paths, so provisioning there leaves an orphaned user when the second insert
+   * fails, which is a failure that only turns up in production.
+   *
+   * Fires on all three creation paths — email/password sign-up, invited
+   * sign-up, and first OAuth sign-in — and receives the same password-stripped
+   * user the endpoint returns, so a hook that logs its argument does not log a
+   * credential hash.
+   *
+   * On the invited path the inviting organization's `Account` row is already
+   * written when this runs, so a hook provisioning an own workspace should
+   * check before adding a second one.
+   *
+   * Three constraints come from running inside the transaction:
+   *
+   * - **Errors thrown here reach the client as-is.** A `ValidationError` is a
+   *   400 on `POST /sign-up`; anything else is a 500. Either way no user is
+   *   created.
+   * - **Raw queries do not join it.** ORM calls at any depth do, automatically;
+   *   a hand-written Prisma or `DB` statement runs outside and survives the
+   *   rollback.
+   * - **`Promise.all` over ORM calls is not safe here.** The transaction holds
+   *   one reserved connection, so await them in sequence. Keep network and
+   *   filesystem I/O out entirely — the connection is held for as long as this
+   *   runs.
+   */
+  onUserCreated?: (user: User) => Promise<void>;
+
   onSignUp?: (
     user: User,
     verificationToken: string,
@@ -91,6 +133,9 @@ export function authConfigDefaults(
 
     extendSession: () => ({}),
 
+    // `async`, unlike its neighbours: the call site awaits it inside a
+    // transaction, so it has to be a promise rather than sometimes one.
+    onUserCreated: async () => {},
     onSignUp: () => {},
     onSignIn: () => {},
     onSignOut: () => {},

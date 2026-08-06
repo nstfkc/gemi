@@ -173,25 +173,31 @@ The twenty-two methods, all overridable:
 | `createSocialAccount(args)` | Persist an OAuth-linked social account. |
 | `findInvitation(id, email)` / `deleteInvitationById(id)` / `createAccount(args)` | Invitation-based sign-up. |
 
+One more method is not a query: `transaction(fn)` runs `fn` inside a transaction on the
+connection the `User` model lives on. `AuthController` uses it to write a user and everything
+that has to exist beside it — the invited `Account`, the OAuth `SocialAccount`, and whatever
+[`onUserCreated`](#onusercreated) writes — atomically.
+
 ### Changing a query
 
-Subclass `UserProvider` and override the method(s) you need — for example to make sign-up
-atomic by provisioning an organization in the same transaction that creates the user:
+Subclass `UserProvider` and override the method(s) you need — for example so that a
+soft-deleted user cannot sign back in:
 
 ```typescript
 import { UserProvider } from "gemi/kernel";
-import type { CreateUserArgs, User } from "gemi/kernel";
+import type { User } from "gemi/kernel";
 
-import { Organization } from "@/app/models/Organization";
-import { User as UserModel } from "@/app/models/User";
-
-export class OrgProvisioningUserProvider extends UserProvider {
-  async createUser(args: CreateUserArgs): Promise<User> {
-    return UserModel.transaction(async () => {
-      const user = await super.createUser(args);
-      await Organization.create({ data: { name: `${user.name}'s org`, ownerId: user.id } });
-      return user;
-    });
+export class SoftDeleteUserProvider extends UserProvider {
+  async findUserByEmailAddress(email: string, verifyEmail: boolean): Promise<User> {
+    return this.run(() =>
+      this.models.User.findFirst({
+        where: {
+          email,
+          deletedAt: null,
+          ...(verifyEmail ? { emailVerifiedAt: { not: null } } : {}),
+        },
+      }),
+    );
   }
 }
 ```
@@ -209,7 +215,7 @@ argument:
 import { AuthManager } from "gemi/services";
 import { ServiceProvider } from "gemi/support";
 
-import { OrgProvisioningUserProvider } from "@/app/auth/OrgProvisioningUserProvider";
+import { SoftDeleteUserProvider } from "@/app/auth/SoftDeleteUserProvider";
 
 export default class AppServiceProvider extends ServiceProvider {
   register() {
@@ -218,7 +224,7 @@ export default class AppServiceProvider extends ServiceProvider {
       () =>
         new AuthManager(
           this.app.config.get("auth", {}),
-          new OrgProvisioningUserProvider(),
+          new SoftDeleteUserProvider(),
         ),
     );
   }
@@ -229,10 +235,11 @@ The provider has to be listed in your `Kernel`'s `providers` array to run — se
 [Project Structure](./project-structure.md#service-providers). App providers register *after*
 the framework's, so this binding replaces the default `AuthManager` rather than racing it.
 
-> **Note:** gemi runs `createUser` and then fires `onSignUp` *separately*. Provisioning
-> inside the `onSignUp` callback is therefore **not** atomic with user creation — a failure
-> there leaves an orphaned user. Do transactional provisioning inside a `createUser`
-> override, as above.
+> **Note:** provisioning does not need a subclass any more. `onSignUp` fires *after* the user
+> is committed, so provisioning there is not atomic — a failure leaves an orphaned user — but
+> [`onUserCreated`](#onusercreated) runs inside the transaction that writes the user and rolls it
+> back on a throw. Reach for a `createUser` override when you need to change *the query*; use
+> the hook to write rows alongside it.
 
 ### Upgrading from the adapter config
 
@@ -263,7 +270,8 @@ may be sync or async.
 
 | Hook | Signature | Fires when |
 | --- | --- | --- |
-| `onSignUp` | `(user, verificationToken, search)` | A new account is created (email/password, or first OAuth sign-in). `verificationToken` is empty when `verifyEmail` is off. |
+| `onUserCreated` | `(user) => Promise<void>` | A user row is written — **inside the transaction that writes it**, before it commits. A throw rolls the user back. See [onUserCreated](#onusercreated). |
+| `onSignUp` | `(user, verificationToken, search)` | A new account is created (email/password, or first OAuth sign-in), after it is committed. `verificationToken` is empty when `verifyEmail` is off, and on the OAuth path, where there is nothing to verify. |
 | `onSignIn` | `(session, search)` | A user authenticates (password, magic-link/PIN, or returning OAuth). |
 | `onSignOut` | `(session)` | The `/auth/sign-out` endpoint runs. |
 | `onForgotPassword` | `(user, token)` | A password-reset is requested — send the reset email with `token`. |
@@ -273,6 +281,55 @@ may be sync or async.
 
 `search` is the request's query string as a plain object (useful for attribution / redirect
 params).
+
+### onUserCreated
+
+Every other hook in that table is a notification: it fires after its work is committed and
+can only report. `onUserCreated` is not. It runs **inside the transaction that creates the
+user**, after the row is written and before it commits, and if it throws, the user is rolled
+back and the sign-up fails.
+
+That is what it is for. An application that has to create rows *alongside* every user — an
+organization, a workspace, a default settings row — has nowhere else to do it atomically.
+Provisioning in `onSignUp` runs after the commit, so a failed second insert leaves a user
+with no organization: no error the user sees, nothing to retry, and a failure that only
+shows up in production.
+
+```typescript
+import { defineAuthConfig } from "gemi/services";
+
+import { Account } from "@/app/models/Account";
+import { Organization } from "@/app/models/Organization";
+
+export default defineAuthConfig({
+  async onUserCreated(user) {
+    // Both of these join the open transaction automatically. If either throws,
+    // the user is rolled back with them.
+    const org = await Organization.create({ data: { name: `${user.name}'s org` } });
+    await Account.create({
+      data: { userId: user.id, organizationId: org.id, organizationRole: 0 },
+    });
+  },
+});
+```
+
+It fires on all three paths that create a user — email/password sign-up, invited sign-up, and
+first OAuth sign-in — and receives the same password-stripped user the endpoint returns.
+
+Four things to know:
+
+- **Errors reach the client.** A [`ValidationError`](./forms.md) thrown here is a 400 on
+  `POST /sign-up`; anything else is a 500. Either way no user is created.
+- **The invited path already has an `Account`.** When a sign-up carries an `invitationId`, the
+  inviting organization's `Account` row is written before this runs, so a hook that
+  unconditionally provisions an own workspace gives that user two. Check before adding one.
+- **Only ORM queries join the transaction.** They do at any call depth, through any number of
+  services, with nothing threaded through — that is `Model.transaction`'s contract. A raw
+  Prisma or `DB` statement runs outside it and survives the rollback.
+- **One statement at a time.** The transaction holds a single reserved connection, so
+  `Promise.all` over ORM calls is not safe here — await them in sequence. Keep network and
+  filesystem I/O out of the hook entirely; the connection is held for as long as it runs. Send
+  the welcome email from `onSignUp`, which fires after the commit.
 
 ### Example: magic-link PIN emails
 
@@ -400,8 +457,17 @@ The framework mounts two view routes per provider automatically:
 
 - `/auth/oauth/:provider` — redirects the browser to the provider's consent screen.
 - `/auth/oauth/:provider/callback` — exchanges the code, resolves the user's email/name,
-  signs them in (or creates the account + a `SocialAccount` on first login), sets the session
-  cookie, and fires `onSignUp` (new) or `onSignIn` (returning).
+  signs them in (or creates the account + a `SocialAccount` on first login, in one transaction
+  with [`onUserCreated`](#onusercreated)), sets the session cookie, and fires `onSignUp` (new) or
+  `onSignIn` (returning).
+
+> **Note:** `onSignUp`'s `verificationToken` is `""` on this path. A user arriving through
+> OAuth has `emailVerifiedAt` already set, so there is nothing to verify. To mail them a
+> magic link, mint a persisted one with `Auth.createMagicLink(user.email)` from the hook — as
+> in the [example above](#example-magic-link-pin-emails) — rather than expecting a token in
+> the argument. This path previously passed an unpersisted `generateMagicLinkToken` result,
+> which looked like a token and resolved to nothing — `generateMagicLinkToken` is a pure hash,
+> and only `Auth.createMagicLink` writes the row that makes one resolvable.
 
 A "Sign in with Google" button is just a link:
 

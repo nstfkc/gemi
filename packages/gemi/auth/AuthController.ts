@@ -324,37 +324,57 @@ export class AuthController extends Controller {
     let invitation: Invitation;
     if (invitationId) {
       invitation = await userProvider.findInvitation(invitationId, email);
-
-      if (invitation) {
-        await userProvider.deleteInvitationById(invitationId);
-      }
     }
 
     let newUser: User;
     let verificationToken: string;
 
+    // Both branches write the user and everything that has to exist alongside
+    // it in one transaction, `config.onUserCreated` last. A throw from the hook
+    // takes the user with it, which is the whole point of the hook: an app
+    // provisioning an organization in `onSignUp` — which fires after the commit
+    // — gets a user with no organization when that insert fails.
     if (invitation) {
-      newUser = await userProvider.createUser({
-        email,
-        name,
-        password: hashedPassword,
-        emailVerifiedAt: new Date(),
-        locale,
-      });
-      await userProvider.createAccount({
-        organizationId: invitation.organizationId,
-        userId: newUser.id,
-        organizationRole: invitation.role,
+      newUser = await userProvider.transaction(async () => {
+        // Consuming the invitation belongs in here too. Deleted before the
+        // transaction, a rollback would leave the invite burned and no user to
+        // show for it, so the invitee could not retry.
+        await userProvider.deleteInvitationById(invitationId);
+
+        const user = await userProvider.createUser({
+          email,
+          name,
+          password: hashedPassword,
+          emailVerifiedAt: new Date(),
+          locale,
+        });
+        await userProvider.createAccount({
+          organizationId: invitation.organizationId,
+          userId: user.id,
+          organizationRole: invitation.role,
+        });
+
+        await config.onUserCreated(user);
+
+        return user;
       });
     } else {
+      // Outside the transaction: it is a hash, not a query, and the
+      // transaction holds a connection for as long as it is open.
       verificationToken = await config.generateEmailVerificationToken(email);
 
-      newUser = await userProvider.createUser({
-        email,
-        name,
-        password: hashedPassword,
-        verificationToken,
-        locale,
+      newUser = await userProvider.transaction(async () => {
+        const user = await userProvider.createUser({
+          email,
+          name,
+          password: hashedPassword,
+          verificationToken,
+          locale,
+        });
+
+        await config.onUserCreated(user);
+
+        return user;
       });
     }
 
@@ -538,23 +558,34 @@ export class AuthController extends Controller {
 
     if (!user) {
       action = "signup";
-      user = await userProvider.createUser({
-        email,
-        name,
-        locale,
-        emailVerifiedAt: new Date(),
-      });
 
-      // TODO: fix missing fields
-      await userProvider.createSocialAccount({
-        provider,
-        userId: user.id,
-        email,
-        username: name,
-        providerId: "",
-        expiresAt: new Date(),
-        accessToken: "",
-        refreshToken: "",
+      // Same shape as `signUp`: the user, the row that has to exist beside it,
+      // and `onUserCreated`, in one transaction. The social account in
+      // particular has a foreign key onto the user — created outside, a rolled
+      // back user would leave it pointing at nothing.
+      user = await userProvider.transaction(async () => {
+        const created = await userProvider.createUser({
+          email,
+          name,
+          locale,
+          emailVerifiedAt: new Date(),
+        });
+
+        // TODO: fix missing fields
+        await userProvider.createSocialAccount({
+          provider,
+          userId: created.id,
+          email,
+          username: name,
+          providerId: "",
+          expiresAt: new Date(),
+          accessToken: "",
+          refreshToken: "",
+        });
+
+        await config.onUserCreated(created);
+
+        return created;
       });
     }
 
@@ -572,8 +603,25 @@ export class AuthController extends Controller {
     });
 
     if (action === "signup") {
-      const magicLink = await config.generateMagicLinkToken(email);
-      await config.onSignUp(user, magicLink, req.search.toJSON());
+      // `""`, and not a token, deliberately.
+      //
+      // This used to hand the hook `config.generateMagicLinkToken(email)`.
+      // That function is a pure hash and nothing here persisted what it
+      // returned — `userProvider.createMagicLinkToken`, which writes the
+      // `MagicLinkToken` row, was never called — so the value resolved in
+      // neither place a token can be looked up: not `User.verificationToken`,
+      // which `createUser` above does not set, and not the `MagicLinkToken`
+      // table. An application doing the obvious thing with the argument, and
+      // mailing a confirmation link carrying it, sent every OAuth signup a link
+      // that could not resolve, and it tested clean against email/password
+      // signup, where the same parameter is the persisted verification token.
+      //
+      // There is nothing to verify on this path — the user arrives with
+      // `emailVerifiedAt` already set — so "no token" is the honest value, and
+      // it is the one the email path already passes under `verifyEmail: false`.
+      // An app that does want to hand new OAuth users a magic link should mint
+      // a persisted one with `Auth.createMagicLink(user.email)` from the hook.
+      await config.onSignUp(user, "", req.search.toJSON());
     } else {
       await config.onSignIn(user, req.search.toJSON());
     }
