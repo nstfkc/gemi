@@ -2,10 +2,11 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type { DMMF } from "@prisma/generator-helper";
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { SCHEMA_ARTIFACT_VERSION } from "../../orm/schema";
 import {
+  RECOGNISED_DEFAULTS,
   UnsupportedSchemaError,
   buildModelSchemas,
   emitArtifacts,
@@ -276,6 +277,56 @@ describe("buildModelSchemas()", () => {
     expect(Object.keys(only.fields)).toEqual(["id"]);
   });
 
+  /**
+   * #350. `nanoid()` reached the `default:` branch and came out `dbgenerated`,
+   * which reads as "the database supplies this" — and the column Prisma's
+   * migration emits for it carries no `DEFAULT`, so nothing supplied it and the
+   * first `create` on the model failed on NOT NULL.
+   */
+  test("classifies nanoid as its own kind, not as dbgenerated", () => {
+    const [only] = buildModelSchemas([
+      model({
+        fields: [
+          field({
+            name: "publicId",
+            type: "String",
+            hasDefaultValue: true,
+            default: { name: "nanoid", args: [10] },
+          }),
+        ],
+      }),
+    ]);
+
+    expect(only.fields.publicId.default).toEqual({ kind: "nanoid", length: 10 });
+  });
+
+  /**
+   * The argument is part of the default, and this artifact is the only place it
+   * survives: the migration writes a plain `TEXT` for both, so a runtime reading
+   * a spec with no length cannot tell `nanoid(10)` from `nanoid()`.
+   */
+  test("records the length nanoid was written with", () => {
+    const lengthOf = (args: (string | number)[]) =>
+      buildModelSchemas([
+        model({
+          fields: [
+            field({
+              name: "publicId",
+              type: "String",
+              hasDefaultValue: true,
+              default: { name: "nanoid", args },
+            }),
+          ],
+        }),
+      ])[0].fields.publicId.default?.length;
+
+    expect(lengthOf([10])).toBe(10);
+    // `nanoid()` — written without one, which Prisma means as 21. Recorded
+    // rather than left absent, so the artifact says what the column holds
+    // instead of making the runtime know Prisma's default.
+    expect(lengthOf([])).toBe(21);
+  });
+
   test("describes an implicit many-to-many join table", () => {
     const tagged = model({
       name: "Tag",
@@ -490,6 +541,105 @@ describe("buildModelSchemas()", () => {
 
     // ...and the composite primary key it references survives too.
     expect(ledger.primaryKey).toEqual(["tenantId", "code"]);
+  });
+});
+
+/**
+ * The other half of #350: not the `nanoid` fix, but the reason it took an
+ * afternoon to find.
+ *
+ * A function default this generator does not recognise is recorded as
+ * `dbgenerated` — a guess that the database fills the column. It is the right
+ * guess most of the time and there is no way to check it from the DMMF, but
+ * when it is wrong on a *required* column the result is a row the driver
+ * rejects, and nothing says so until the first `create`. By then the function's
+ * name is gone; all the author has is a NOT NULL violation on a column that
+ * "should have a default".
+ *
+ * This is the one moment the name is still in hand, so this is where it gets
+ * said. A warning rather than a refusal: a `dbgenerated(...)` column really is
+ * the database's, and breaking a schema that generates and runs fine today
+ * would be a worse trade than a noisy one.
+ */
+describe("an unrecognised function default on a required column warns", () => {
+  const warn = () => vi.spyOn(console, "warn").mockImplementation(() => {});
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const withDefault = (
+    name: string,
+    over: Partial<DMMF.Field> = {},
+  ): DMMF.Model =>
+    model({
+      fields: [
+        field({
+          name: "publicId",
+          type: "String",
+          hasDefaultValue: true,
+          default: { name, args: [] },
+          ...over,
+        }),
+      ],
+    });
+
+  test("it names the model, the field and the function", () => {
+    const spy = warn();
+    buildModelSchemas([withDefault("auto")]);
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0][0]).toContain("User.publicId");
+    expect(spy.mock.calls[0][0]).toContain("auto()");
+  });
+
+  /**
+   * A nullable column takes NULL, so the guess costs nothing there and the
+   * warning would be noise — which is how a warning stops being read.
+   */
+  test("a nullable column is nobody's problem", () => {
+    const spy = warn();
+    buildModelSchemas([withDefault("auto", { isRequired: false })]);
+
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The defaults the generator handles are handled, and `dbgenerated(...)` is
+   * the author saying in as many words that the database supplies it — the one
+   * case where the guess is not a guess.
+   *
+   * Read off `RECOGNISED_DEFAULTS` rather than listed again here: a third copy
+   * of the same six names is one more place for them to drift apart, and this
+   * way a name added to the set has to actually be quiet to pass.
+   */
+  test.each([...RECOGNISED_DEFAULTS])(
+    "%s() is recognised and says nothing",
+    (name) => {
+      const spy = warn();
+      buildModelSchemas([withDefault(name)]);
+
+      expect(spy).not.toHaveBeenCalled();
+    },
+  );
+
+  /** A literal is not a function default and never reached the guess. */
+  test("a literal default says nothing", () => {
+    const spy = warn();
+    buildModelSchemas([
+      model({
+        fields: [
+          field({
+            name: "locale",
+            type: "String",
+            hasDefaultValue: true,
+            default: "en-US" as unknown as DMMF.FieldDefault,
+          }),
+        ],
+      }),
+    ]);
+
+    expect(spy).not.toHaveBeenCalled();
   });
 });
 

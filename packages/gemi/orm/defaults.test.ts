@@ -3,6 +3,7 @@ import { beforeAll, describe, expect, test, vi } from "vitest";
 import {
   clientSideValue,
   createCuid,
+  createNanoid,
   hasClientSideValue,
   isClientSideDefault,
 } from "./defaults";
@@ -210,10 +211,79 @@ describe("the random blocks are not biased toward the low symbols", () => {
 });
 
 /**
+ * A nanoid is `size` independent symbols and nothing else — no timestamp, no
+ * counter, no fingerprint — so unlike a cuid there is no structure to take
+ * apart. What is left to pin is the length, the alphabet, and that the mask
+ * over that alphabet is unbiased.
+ */
+describe("createNanoid matches the ids the Prisma client mints", () => {
+  const ALPHABET =
+    "useandom-26T198340PX75pxJACKVERYMINDBUSHWOLF_GQZbfghjklqvwyzrict";
+
+  /**
+   * The length is the argument, and it is the whole reason `DefaultSpec` grew a
+   * `length` field: `@default(nanoid(10))` and `@default(nanoid())` differ in
+   * nothing else, and the column Prisma emits for either is a plain `TEXT` that
+   * constrains neither.
+   */
+  test.each([1, 10, 21, 36])("nanoid(%i) is %i characters", (size) => {
+    expect(createNanoid(size)).toHaveLength(size);
+  });
+
+  /** `nanoid()` written with no argument. */
+  test("the default length is 21", () => {
+    expect(createNanoid()).toHaveLength(21);
+  });
+
+  test("every character is from nanoid's url alphabet", () => {
+    const symbols = new Set(
+      Array.from({ length: 200 }, () => createNanoid()).join(""),
+    );
+
+    for (const symbol of symbols) expect(ALPHABET).toContain(symbol);
+  });
+
+  test("an id is minted per call", () => {
+    expect(createNanoid()).not.toBe(createNanoid());
+  });
+
+  /**
+   * The alphabet is 64 symbols and the mask is `& 63`, so 256 is exactly four
+   * whole alphabets and every byte maps to one symbol with no tail to reject —
+   * which is why this needs none of `randomBlock`'s resample loop, and why
+   * "unbiased" is worth asserting rather than assumed.
+   *
+   * Sized against flake rather than against the mutant: 64,000 symbols puts the
+   * expected count per symbol at 1000 with a standard deviation of 31.4, and a
+   * ±20% window is over six sd in each direction. A mask that truncated or
+   * doubled part of the alphabet lands far outside it — `& 31` would leave 32
+   * symbols at zero.
+   */
+  test("the alphabet is drawn uniformly", () => {
+    const counts = new Map<string, number>();
+    for (const symbol of Array.from({ length: 1000 }, () =>
+      createNanoid(64),
+    ).join("")) {
+      counts.set(symbol, (counts.get(symbol) ?? 0) + 1);
+    }
+
+    expect(counts.size).toBe(64);
+    for (const count of counts.values()) {
+      expect(count).toBeGreaterThan(800);
+      expect(count).toBeLessThan(1200);
+    }
+  });
+});
+
+/**
  * `autoincrement()` and `dbgenerated(...)` stay with the database; everything
  * else gemi supplies. Written as an exhaustive record so that adding a
  * `DefaultKind` without deciding which side of the split it falls on is a type
  * error rather than an untested branch.
+ *
+ * `nanoid` is the kind that arrived by getting this wrong (#350): it was not a
+ * `DefaultKind` at all, so it fell into `dbgenerated`, and the exhaustive record
+ * could not notice a member that did not exist.
  */
 describe("isClientSideDefault splits gemi's defaults from the database's", () => {
   const expected: Record<DefaultKind, boolean> = {
@@ -221,6 +291,7 @@ describe("isClientSideDefault splits gemi's defaults from the database's", () =>
     dbgenerated: false,
     cuid: true,
     uuid: true,
+    nanoid: true,
     now: true,
     value: true,
   };
@@ -245,6 +316,16 @@ const field = (over: Partial<FieldSchema> = {}): FieldSchema => ({
 describe("hasClientSideValue asks which fields gemi must fill in", () => {
   test("a client-side default", () => {
     expect(hasClientSideValue(field({ default: { kind: "cuid" } }))).toBe(true);
+  });
+
+  /**
+   * The whole of #350 in one assertion: this answered `false`, so the write
+   * compiler never asked for a value and left the column out of the insert.
+   */
+  test("a nanoid, which Prisma also fills client-side", () => {
+    expect(
+      hasClientSideValue(field({ default: { kind: "nanoid", length: 10 } })),
+    ).toBe(true);
   });
 
   test("a database-side default", () => {
@@ -289,12 +370,38 @@ describe("clientSideValue produces one field's value", () => {
     );
   });
 
-  test.each(["cuid", "uuid"] as const)("a %s is minted per call", (kind) => {
-    const one = clientSideValue(field({ default: { kind } }), now);
-    const two = clientSideValue(field({ default: { kind } }), now);
-
-    expect(one).not.toBe(two);
+  /**
+   * The bug in #350: this returned `undefined`, so `Model.create` omitted the
+   * column, and Postgres rejected the row — the column Prisma's migration emits
+   * for a `nanoid()` default carries no `DEFAULT` to fall back on.
+   *
+   * The length is asserted alongside because it is the half that fails quietly:
+   * a spec that reached here without one would still produce an id, 21
+   * characters of the right alphabet, and the column would just be the wrong
+   * width.
+   */
+  test("nanoid, at the length the schema wrote", () => {
+    expect(
+      clientSideValue(field({ default: { kind: "nanoid", length: 10 } }), now),
+    ).toHaveLength(10);
   });
+
+  /** An artifact old enough to predate `length`, or a hand-written spec. */
+  test("a nanoid with no length is 21 characters", () => {
+    expect(
+      clientSideValue(field({ default: { kind: "nanoid" } }), now),
+    ).toHaveLength(21);
+  });
+
+  test.each(["cuid", "uuid", "nanoid"] as const)(
+    "a %s is minted per call",
+    (kind) => {
+      const one = clientSideValue(field({ default: { kind } }), now);
+      const two = clientSideValue(field({ default: { kind } }), now);
+
+      expect(one).not.toBe(two);
+    },
+  );
 
   test("a literal is passed through", () => {
     const spec = { kind: "value", value: false } as const;

@@ -102,6 +102,7 @@ export {
 
 export {
   createCuid,
+  createNanoid,
   clientSideValue,
   hasClientSideValue,
   isClientSideDefault,

@@ -124,6 +124,24 @@ function isFunctionDefault(
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** Prisma's `nanoid()` with no argument. */
+const NANOID_DEFAULT_LENGTH = 21;
+
+/**
+ * The length `@default(nanoid(n))` was written with.
+ *
+ * DMMF types an argument as `string | number`, so a non-number is not
+ * unreachable by the types even though the Prisma parser rejects one — and the
+ * failure it would cause is the quiet kind: `undefined` reaches
+ * `clientSideValue`, which falls back to 21, and every id is silently the wrong
+ * width. Falling back here instead keeps the wrong width from also being
+ * unrecorded, and there is one place that decides it.
+ */
+function nanoidLength(args: readonly (string | number)[] | undefined): number {
+  const [size] = args ?? [];
+  return typeof size === "number" ? size : NANOID_DEFAULT_LENGTH;
+}
+
 function defaultSpec(field: DMMF.Field): DefaultSpec | undefined {
   if (!field.hasDefaultValue || field.default === undefined) return undefined;
 
@@ -136,15 +154,91 @@ function defaultSpec(field: DMMF.Field): DefaultSpec | undefined {
       case "now":
       case "dbgenerated":
         return { kind: value.name };
+      // `nanoid()` is a *client-side* default, like `cuid()` and `uuid()` and
+      // unlike everything else in this switch: the column Prisma's own
+      // migration emits carries no `DEFAULT`, so a row inserted without the
+      // value violates NOT NULL (#350). It is the only one of the three that
+      // takes an argument, and the argument has to come with it — see
+      // `DefaultSpec.length`.
+      case "nanoid":
+        return { kind: "nanoid", length: nanoidLength(value.args) };
       default:
-        // An unrecognised function default (`auto()`, `nanoid()`, a future
-        // addition) still tells the runtime "the database supplies this", which
-        // is all iteration 4 needs to know when it omits the column on insert.
+        // An unrecognised function default (`auto()`, a future addition) still
+        // tells the runtime "the database supplies this", which is all
+        // iteration 4 needs to know when it omits the column on insert.
+        //
+        // `warnOnUnrecognisedDefault` is the other half: for a *required* column
+        // that guess is a row the driver will reject, and this is the last
+        // moment anything can say so before the first write does.
         return { kind: "dbgenerated" };
     }
   }
 
   return { kind: "value", value: value as unknown };
+}
+
+/**
+ * Every function default `defaultSpec` has a `case` for.
+ *
+ * A second list of the same names, and the duplication is worth naming rather
+ * than hiding: a `switch` is not enumerable, so there is nothing to derive this
+ * from. What drift costs is asymmetric, which is why the copy is tolerable. A
+ * name added to the switch and not to this set produces a warning about a
+ * default that is in fact handled — noise, and noise is how a warning stops
+ * being read. A name added here and not to the switch silences a warning that
+ * should have fired, which is the state before #350.
+ *
+ * Exported so the test that asserts each of these stays quiet reads the set
+ * rather than becoming a third copy of it.
+ */
+export const RECOGNISED_DEFAULTS = new Set([
+  "autoincrement",
+  "cuid",
+  "uuid",
+  "nanoid",
+  "now",
+  "dbgenerated",
+]);
+
+/**
+ * A required column whose default this generator did not recognise.
+ *
+ * The `default:` branch above assumes the database fills the column. When that
+ * assumption is wrong — the default is client-side, as `nanoid()` was — nothing
+ * fails at generation time and nothing fails at boot: the field *looks* handled,
+ * because it was classified. The first `create` on the model is what fails, with
+ * a NOT NULL violation from the driver naming the column but not the reason,
+ * and it fails on every write after that.
+ *
+ * A warning rather than a refusal, and rather than nothing:
+ *
+ * - A refusal would break a schema that generates and runs fine today. Most
+ *   `dbgenerated(...)` columns really are the database's, and a nullable one is
+ *   nobody's problem either way.
+ * - Silence is what made #350 cost an afternoon. The generator is the only place
+ *   that sees the function's *name*; by the time the driver rejects the row, the
+ *   name is gone and all that is left is a column that "should have a default".
+ *
+ * Prisma's own client-side defaults are all handled above, so in practice this
+ * fires for a provider-specific default (`auto()` on MongoDB) or one Prisma adds
+ * after this version of gemi — which is exactly the set worth naming out loud.
+ */
+function warnOnUnrecognisedDefault(model: string, field: DMMF.Field): void {
+  if (!field.isRequired) return;
+
+  const value = field.default;
+  if (!isFunctionDefault(value)) return;
+  if (!value.name || RECOGNISED_DEFAULTS.has(value.name)) return;
+
+  console.warn(
+    `gemi ORM: ${model}.${field.name} is required and defaults to ` +
+      `${value.name}(), which this generator does not recognise. It is ` +
+      `recorded as a database-side default, so the ORM will omit the column on ` +
+      `insert — and if ${value.name}() is a default Prisma fills in its own ` +
+      `client, the column has none in the database and every write to ` +
+      `${model} will fail on NOT NULL. Make the field optional, give it a ` +
+      `default the ORM knows, or upgrade gemi.`,
+  );
 }
 
 function fieldSchema(model: string, field: DMMF.Field): FieldSchema {
@@ -176,6 +270,8 @@ function fieldSchema(model: string, field: DMMF.Field): FieldSchema {
 
   const def = defaultSpec(field);
   if (def) schema.default = def;
+
+  warnOnUnrecognisedDefault(model, field);
 
   return schema;
 }

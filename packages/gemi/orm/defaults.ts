@@ -17,6 +17,11 @@ import type { DefaultSpec, FieldSchema } from "./schema";
  *   generates them in the client, so a row inserted without them violates a
  *   NOT NULL constraint. Missing `@updatedAt` on *create* is the quiet version
  *   of this bug: the column is only nullable on models where Prisma made it so.
+ *   `@default(nanoid())` is the same column with a different generator on it,
+ *   and was on the wrong side of this split until #350 — classified
+ *   `dbgenerated`, so the ORM omitted the column and the driver rejected the
+ *   row. `cuid()`, `uuid()` and `nanoid()` are Prisma's three client-side id
+ *   functions and all three belong here.
  * - `createdAt` does have a default, but it is `CURRENT_TIMESTAMP`, which SQLite
  *   stores as the *text* `YYYY-MM-DD HH:MM:SS` — while Prisma stores a DateTime
  *   as integer milliseconds. Letting the database fill it would write a
@@ -62,6 +67,11 @@ export function clientSideValue(field: FieldSchema, now: Date): unknown {
       return createCuid();
     case "uuid":
       return crypto.randomUUID();
+    case "nanoid":
+      // The generator always records the length, so the fallback is for an
+      // artifact generated before #350 — which cannot carry `kind: "nanoid"` at
+      // all — and for a hand-written spec. 21 is what `nanoid()` means.
+      return createNanoid(spec.length ?? NANOID_DEFAULT_LENGTH);
     case "now":
       return now;
     case "value":
@@ -142,4 +152,46 @@ export function createCuid(): string {
   const timestamp = Date.now().toString(BASE);
   const count = pad((counter++ % DISCRETE_VALUES).toString(BASE), BLOCK_SIZE);
   return `c${timestamp}${count}${FINGERPRINT}${randomBlock()}${randomBlock()}`;
+}
+
+// --- nanoid ----------------------------------------------------------------
+
+/**
+ * The alphabet, verbatim from the `nanoid` package Prisma bundles. Its order is
+ * not alphabetical and not arbitrary — it is what the library ships, and an id
+ * is a uniform draw from it, so a reordering changes nothing observable. It is
+ * copied exactly anyway, because "the same alphabet" is the property, and a
+ * character silently added or dropped would change the width of the mask below
+ * from unbiased to not.
+ *
+ * 64 characters, which is the whole reason `& 63` is correct where cuid's
+ * `% 36` needed a resample loop: every byte maps to exactly one symbol and
+ * 256 is four whole alphabets, so there is no tail to reject.
+ */
+const NANOID_ALPHABET =
+  "useandom-26T198340PX75pxJACKVERYMINDBUSHWOLF_GQZbfghjklqvwyzrict";
+
+/** What `@default(nanoid())` means when written without an argument. */
+const NANOID_DEFAULT_LENGTH = 21;
+
+/**
+ * The id `@default(nanoid(size))` produces in the Prisma client, generated here
+ * instead — same alphabet, same mask, same length, so a gemi-written column and
+ * a Prisma-written one are indistinguishable.
+ *
+ * Unlike a cuid there is no structure to match: a nanoid is `size` independent
+ * symbols and nothing more. No timestamp, no counter, no fingerprint — which is
+ * also why none of the collision reasoning around `createCuid` applies here.
+ * Uniformity is the only property, and `& 63` over a 64-symbol alphabet is what
+ * gives it.
+ */
+export function createNanoid(size: number = NANOID_DEFAULT_LENGTH): string {
+  const bytes = new Uint8Array(size);
+  crypto.getRandomValues(bytes);
+
+  let id = "";
+  for (let i = 0; i < size; i++) {
+    id += NANOID_ALPHABET[bytes[i] & 63];
+  }
+  return id;
 }

@@ -27,6 +27,16 @@
  * the flag came with a generator that refused to emit the column at all. The
  * reverse pairing, an old artifact on a new runtime, is what `isList` being
  * optional already covers.
+ *
+ * **`DefaultKind`'s `nanoid` member did not bump it either**, for the same
+ * reason and with a sharper consequence if the reasoning were wrong: an old
+ * runtime reading `{ kind: "nanoid" }` falls to `clientSideValue`'s `default:`
+ * branch, returns `undefined`, and omits the column — which is #350 exactly.
+ * The pairing is still impossible, because a runtime that does not know the
+ * kind shipped with a generator that does not emit it. The reverse pairing is
+ * the one apps actually hit on upgrade, and it is fine: an artifact generated
+ * before #350 says `dbgenerated`, which the new runtime reads as it always did,
+ * until `prisma generate` runs again.
  */
 export const SCHEMA_ARTIFACT_VERSION = 1;
 
@@ -50,6 +60,7 @@ export type DefaultKind =
   | "autoincrement"
   | "cuid"
   | "uuid"
+  | "nanoid"
   | "now"
   | "dbgenerated"
   | "value";
@@ -58,6 +69,16 @@ export interface DefaultSpec {
   kind: DefaultKind;
   /** Present only for `kind: "value"` — the literal written in the schema. */
   value?: unknown;
+  /**
+   * Present only for `kind: "nanoid"` — the id's length in characters.
+   *
+   * Part of the default rather than a detail of it: `nanoid()` is 21 characters
+   * and `nanoid(10)` is 10, and the column Prisma's migration emits is a plain
+   * `TEXT` that constrains neither. So the length lives nowhere but the schema,
+   * and if it does not survive into this artifact the runtime cannot mint the
+   * same id the Prisma client would.
+   */
+  length?: number;
 }
 
 export interface FieldSchema {
