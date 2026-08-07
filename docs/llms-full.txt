@@ -2972,6 +2972,75 @@ database than `prisma generate` saw, so refusing here refused the column for Pos
 now declines it at query time instead, with a message naming the dialect. `Decimal[]` is still
 refused, by the row above rather than by a rule about lists.
 
+### Column defaults
+
+`@default(...)` is filled by one of two parties, and the split is not a style choice — it is forced
+by the DDL Prisma emits. Read the migration for a model with the usual four columns:
+
+```sql
+"id"        INTEGER  NOT NULL PRIMARY KEY AUTOINCREMENT,     -- @default(autoincrement())
+"publicId"  TEXT     NOT NULL,                               -- @default(cuid())
+"createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,     -- @default(now())
+"updatedAt" DATETIME NOT NULL,                               -- @updatedAt
+```
+
+`publicId` and `updatedAt` carry **no database default at all**. Prisma generates them in its
+client, so a row inserted without them violates NOT NULL — if gemi does not supply them, nothing
+does.
+
+| `@default(...)` | Filled by | Notes |
+| --- | --- | --- |
+| `autoincrement()` | the database | The one identity column the database really does own. |
+| `dbgenerated(...)` | the database | You said so in as many words. |
+| `cuid()` | gemi | cuid v1, the format Prisma still emits — 25 characters, `c` and 24 lowercase alphanumerics. |
+| `uuid()` | gemi | v4. |
+| `nanoid()` / `nanoid(n)` | gemi | nanoid's url alphabet; 21 characters, or `n`. |
+| `now()` | gemi | Not the database's `CURRENT_TIMESTAMP` — see below. |
+| a literal | gemi | `@default("en-US")`, `@default(2)`, `@default(false)`. |
+| `@updatedAt` | gemi | Not a `@default` at all, and stamped on **create** as well as on update. |
+
+**`now()` is generated in gemi even though the column has a database default**, and the reason is
+storage form rather than correctness. SQLite stores `CURRENT_TIMESTAMP` as the *text*
+`YYYY-MM-DD HH:MM:SS`, while Prisma stores a `DateTime` as integer milliseconds. Letting the
+database fill it would write a different shape than Prisma writes, and drop sub-second precision.
+
+One instant is resolved per operation, not per field, so `createdAt` and `updatedAt` come back from
+a `create` as the *same* timestamp — which is what Prisma does:
+
+```ts
+const user = await User.create({ data: { email: "a@b.c" } })
+user.createdAt.getTime() === user.updatedAt.getTime()   // true
+```
+
+**A value you pass beats the default**, for every row in the table above:
+
+```ts
+await User.create({ data: { email: "a@b.c", publicId: "fixed", createdAt: new Date(2020, 0) } })
+```
+
+And a nullable column with no default is **omitted from the insert** rather than bound as `null`,
+so a database default you added by hand in a migration still applies.
+
+#### A default the generator does not recognise
+
+A function default this generator has no case for — one Prisma adds after your version of gemi, or
+a provider-specific one like `auto()` — is recorded as the database's, because that is the only
+safe guess. On a **required** column that guess may be a row the driver will reject, so
+`prisma generate` says so:
+
+```
+gemi ORM: Organization.publicId is required and defaults to auto(), which this generator
+does not recognise. It is recorded as a database-side default, so the ORM will omit the
+column on insert — and if auto() is a default Prisma fills in its own client, the column
+has none in the database and every write to Organization will fail on NOT NULL. Make the
+field optional, give it a default the ORM knows, or upgrade gemi.
+```
+
+A warning rather than a refusal: most `dbgenerated(...)` columns really are the database's, and a
+nullable one costs nothing either way. It is a warning rather than *nothing* because the generator
+is the only place that still knows the function's **name** — by the time the driver rejects the
+row, all you have is a NOT NULL violation on a column that ought to have had a default.
+
 ### Your model class
 
 The generated base is not the class you write code on. Subclass it, put the subclass in a barrel,
