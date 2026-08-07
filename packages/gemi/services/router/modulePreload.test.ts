@@ -43,6 +43,11 @@ class TestKernel extends Kernel {
 const app = new App({ kernel: TestKernel });
 
 /** What `httpProd` derives from the built client manifest. */
+const clientEntry = {
+  module: "/assets/client-entry.js",
+  preload: ["/assets/client-entry.js", "/assets/shared-react.js"],
+};
+
 const modulePreloadManifest = {
   Home: ["/assets/Home.js", "/assets/shared-react.js"],
   AppLayout: ["/assets/AppLayout.js", "/assets/nav.js", "/assets/shared-react.js"],
@@ -53,10 +58,10 @@ const prodParams = {
   getStyles: async () => [],
   viewImportMap: {},
   viewModules: {},
-  bootstrapModules: ["/assets/client-entry.js"],
   loaders: "{}",
   cssManifest: {},
   ogMap: {},
+  clientEntry,
   modulePreloadManifest,
 };
 
@@ -83,13 +88,20 @@ describe("route module preloads", () => {
     }
   });
 
+  test("announces the client entry's own chunks", async () => {
+    const html = await fetchDocument("/app");
+
+    expect(html).toContain(preloadTag("/assets/client-entry.js"));
+    expect(html).toContain(preloadTag("/assets/shared-react.js"));
+  });
+
   test("leaves out views the current route does not render", async () => {
     const html = await fetchDocument("/app");
 
     expect(html).not.toContain("/assets/Home.js");
   });
 
-  test("announces a chunk both views share once", async () => {
+  test("announces a chunk the entry and both views share once", async () => {
     const html = await fetchDocument("/app");
 
     expect(html.split(preloadTag("/assets/shared-react.js"))).toHaveLength(2);
@@ -103,7 +115,17 @@ describe("route module preloads", () => {
     );
   });
 
-  test("announces nothing when the server has no chunk graph (dev)", async () => {
+  test("boots the entry from the bootstrap script, not a React bootstrap module", async () => {
+    const html = await fetchDocument("/app");
+
+    // React would preload its own `bootstrapModules` at `fetchPriority="low"`,
+    // which is the whole reason the entry is imported here instead.
+    expect(html).toContain(`import("/assets/client-entry.js")`);
+    expect(html).not.toContain(`fetchPriority="low"`);
+    expect(html).not.toContain(`<script type="module"`);
+  });
+
+  test("still boots through bootstrapModules when the server passes them (dev)", async () => {
     const html = await fetchDocument("/app", {
       getStyles: async () => [],
       viewImportMap: {},
@@ -114,7 +136,10 @@ describe("route module preloads", () => {
       ogMap: {},
     });
 
-    // Vite serves unbundled source in dev, so there is nothing to announce.
+    // Vite serves unbundled source in dev, so there is no chunk graph to
+    // announce — React's own bootstrap handling is left alone.
+    expect(html).toContain(`<script type="module" src="/app/client.tsx"`);
     expect(html).not.toContain("/assets/");
+    expect(html).not.toContain("import(");
   });
 });

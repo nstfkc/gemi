@@ -74,6 +74,14 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
 
   const loaders = `{${templates.join(",")}}`;
 
+  // Booted from the bootstrap script rather than through React's
+  // `bootstrapModules`, which would preload it at `fetchPriority="low"` — see
+  // `clientEntry` in `ViewRouteDispatcher`.
+  const clientEntry = {
+    module: `/${manifest["app/client.tsx"].file}`,
+    preload: collectModulePreloads(manifest, "app/client.tsx"),
+  };
+
   // Vite's manifest `css` field is a `string[]` — a client entry can emit more
   // than one CSS chunk. Read and concatenate them all instead of interpolating
   // the array into a single path (which only works for a one-element array).
@@ -187,7 +195,7 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
 
         return await result({
           getStyles,
-          bootstrapModules: [`/${manifest["app/client.tsx"].file}`],
+          clientEntry,
           modulePreloadManifest,
           loaders,
           viewImportMap,

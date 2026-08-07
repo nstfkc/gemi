@@ -329,7 +329,7 @@ export class ViewRouteDispatcher {
     return async (params: {
       getStyles: (p: string[]) => Promise<any[]>;
       viewImportMap: any;
-      bootstrapModules: string[];
+      bootstrapModules?: string[];
       loaders: string;
       cssManifest: Record<string, string[]>;
       ogMap: Record<string, any>;
@@ -340,19 +340,33 @@ export class ViewRouteDispatcher {
        */
       viewModules?: Record<string, any>;
       /**
+       * The client entry, when the server wants it booted from the bootstrap
+       * script instead of handed to React as a `bootstrapModule`: `module` is
+       * imported, `preload` is every chunk that import pulls in.
+       *
+       * React preloads its own `bootstrapModules` with `fetchPriority="low"`
+       * hardcoded (Fizz has no option for it), which parks the one module
+       * that unblocks hydration behind everything else the page is fetching.
+       * Emitting the `modulepreload` ourselves gets it the browser's default
+       * script priority, and it is the same request either way — the
+       * `import()` below consumes the preloaded module (#352).
+       */
+      clientEntry?: { module: string; preload: string[] };
+      /**
        * Built chunk URLs per view name, like `cssManifest`. Only the current
        * route's chain is preloaded.
        */
       modulePreloadManifest?: Record<string, string[]>;
     }) => {
       const {
-        bootstrapModules,
+        bootstrapModules = [],
         loaders,
         getStyles,
         viewImportMap,
         cssManifest,
         ogMap,
         viewModules,
+        clientEntry,
         modulePreloadManifest,
       } = params;
 
@@ -364,12 +378,21 @@ export class ViewRouteDispatcher {
       // and restoring it a round trip later (#352). Preloaded in the shell
       // head, the whole chain is fetched in parallel with the entry and is
       // resident before hydration asks for it.
-      const preloadHrefs = new Set<string>();
+      const preloadHrefs = new Set<string>(clientEntry?.preload ?? []);
       for (const view of currentViews ?? []) {
         for (const href of modulePreloadManifest?.[view] ?? []) {
           preloadHrefs.add(href);
         }
       }
+
+      const bootstrapScriptContent = (data: string) =>
+        [
+          data,
+          `window.loaders=${loaders}`,
+          // Nothing imports the entry when the server routed it through
+          // `clientEntry` — the bootstrap script is where it starts.
+          ...(clientEntry ? [`import(${JSON.stringify(clientEntry.module)})`] : []),
+        ].join(";");
 
       if (isOgRequest) {
         let ogHandler = null;
@@ -484,7 +507,9 @@ export class ViewRouteDispatcher {
             ],
           }),
           {
-            bootstrapScriptContent: `window.__GEMI_DATA__ = ${JSON.stringify(result.data)}; window.loaders=${loaders}`,
+            bootstrapScriptContent: bootstrapScriptContent(
+              `window.__GEMI_DATA__ = ${JSON.stringify(result.data)}`,
+            ),
             bootstrapModules,
             signal: deadline.signal,
             ...(settled ? { progressiveChunkSize: Number.MAX_SAFE_INTEGER } : {}),
@@ -539,7 +564,9 @@ export class ViewRouteDispatcher {
       } catch (err) {
         clearTimeout(deadlineTimer);
         const stream = await renderToReadableStream(createElement("div"), {
-          bootstrapScriptContent: `window.error= ${JSON.stringify(err.message)}; window.stack_trace=${JSON.stringify(err.stack)};window.__GEMI_DATA__ = ${JSON.stringify(result.data)}; window.loaders=${loaders}`,
+          bootstrapScriptContent: bootstrapScriptContent(
+            `window.error= ${JSON.stringify(err.message)}; window.stack_trace=${JSON.stringify(err.stack)};window.__GEMI_DATA__ = ${JSON.stringify(result.data)}`,
+          ),
           bootstrapModules:
             process.env.NODE_ENV === "development"
               ? ["/render-error.js", ...bootstrapModules]
