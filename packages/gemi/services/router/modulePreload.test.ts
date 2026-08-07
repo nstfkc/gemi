@@ -99,7 +99,10 @@ describe("route module preloads", () => {
   test("leaves out views the current route does not render", async () => {
     const html = await fetchDocument("/app");
 
-    expect(html).not.toContain("/assets/Home.js");
+    // On the tag, not the raw string: the payload carries every view's list
+    // for client-side navigation, so `/assets/Home.js` legitimately appears
+    // there. What must not appear is a hint to fetch it now.
+    expect(html).not.toContain(preloadTag("/assets/Home.js"));
   });
 
   test("announces a chunk the entry and both views share once", async () => {
@@ -190,5 +193,14 @@ describe("route module preloads", () => {
     expect(html).toContain(`<script type="module" src="/app/client.tsx"`);
     expect(html).not.toContain("/assets/");
     expect(html).not.toContain(`import("/app/client.tsx")`);
+  });
+
+  test("ships the per-view chunk lists for client-side navigation", async () => {
+    const html = await fetchDocument("/app");
+
+    // Navigation walks the same chain the shell head just flattened, so it
+    // needs the same data — carried in the payload like `cssManifest`.
+    expect(html).toContain(`"modulePreloadManifest":`);
+    expect(html).toContain(`"/assets/Home.js"`);
   });
 });

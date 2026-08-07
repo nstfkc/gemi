@@ -502,6 +502,12 @@ export class ViewRouteDispatcher {
       }
 
       result.data["cssManifest"] = cssManifest;
+      // Client-side navigation reaches a route's chunks the same serial way a
+      // hard load did, one `import()` per level, so it needs the same list the
+      // shell head carries — shipped like `cssManifest` and warmed by
+      // `preloadRouteModules` (#352).
+      result.data["modulePreloadManifest"] = modulePreloadManifest ?? {};
+
       // Hydration reaches each route segment through `window.loaders`, i.e. an
       // `import()` the browser cannot see until the entry has run — and it
       // sees a nested chunk only once its parent has parsed. On a real

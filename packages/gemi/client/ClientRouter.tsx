@@ -212,7 +212,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
   const { componentTree } = props;
   const [isPending, startTransition] = useTransition();
   const [isFetching, setIsFetching] = useState(false);
-  const { routerSubject, fetchRouteCSS, takePrefetched } =
+  const { routerSubject, fetchRouteCSS, preloadRouteModules, takePrefetched } =
     useContext(ClientRouterContext);
   const { hydrate } = useContext(QueryManagerContext);
 
@@ -293,6 +293,10 @@ const Routes = (props: { componentTree: ComponentTree }) => {
       // `fetchRouteCSS` keys off the route manifest, so it needs the pattern
       // rather than the concrete path — `/posts/:id`, not `/posts/123`.
       fetchRouteCSS(routerState.routePath).catch((e) => console.error(e));
+      // Announced before the imports below start, so each view's own static
+      // imports are already in flight rather than discovered one parse at a
+      // time once its chunk lands (#352).
+      preloadRouteModules(routerState.routePath);
       // Through `loadViewModule` so the module registry — and with it each
       // view's `Loading`/`Error` exports — is populated before the
       // transition commits the new surface.
@@ -367,7 +371,14 @@ const Routes = (props: { componentTree: ComponentTree }) => {
       }
       setIsFetching(false);
     });
-  }, [routerSubject, fetchRouteCSS, takePrefetched, replace, hydrate]);
+  }, [
+    routerSubject,
+    fetchRouteCSS,
+    preloadRouteModules,
+    takePrefetched,
+    replace,
+    hydrate,
+  ]);
 
   return (
     <RouteTransitionProvider
@@ -402,6 +413,7 @@ export const ClientRouter = (props: {
     componentTree,
     pageData,
     cssManifest,
+    modulePreloadManifest,
     breadcrumbs,
     i18n,
   } = useContext(ServerDataContext);
@@ -417,6 +429,7 @@ export const ClientRouter = (props: {
             >
               <ClientRouterProvider
                 cssManifest={cssManifest}
+                modulePreloadManifest={modulePreloadManifest}
                 searchParams={router.searchParams}
                 params={router.params}
                 pageData={pageData}

@@ -51,6 +51,7 @@ interface ClientRouterContextValue {
   setNavigationAbortController: (controller: AbortController) => void;
   progressManager: ProgressManager;
   fetchRouteCSS: (routePath: string) => Promise<void>;
+  preloadRouteModules: (routePath: string) => void;
   prefetchRoute: (target: PrefetchTarget) => Promise<void>;
   takePrefetched: (url: string) => Promise<unknown> | null;
   clearPrefetchCache: () => void;
@@ -67,6 +68,7 @@ interface ClientRouterProviderProps {
   pathname: string;
   routeManifest: Record<string, string[]>;
   cssManifest: Record<string, string[]>;
+  modulePreloadManifest: Record<string, string[]>;
   pageData: Record<string, unknown>;
   currentPath: string;
   urlLocaleSegment: string | null;
@@ -88,6 +90,7 @@ export const ClientRouterProvider = (
     is500,
     routeManifest,
     cssManifest,
+    modulePreloadManifest,
     pageData,
     params,
     searchParams,
@@ -105,6 +108,8 @@ export const ClientRouterProvider = (
   const [prefetchCache] = useState(() => new PrefetchCache());
   const pageDataRef = useRef(structuredClone(pageData));
   const scrollHistoryRef = useRef<Map<string, number>>(new Map());
+  /** Hrefs already announced; `null` until seeded from the shell's own hints. */
+  const preloadedModulesRef = useRef<Set<string> | null>(null);
   const breadcrumbsCache = useRef<Map<string, Breadcrumb>>(
     new Map(Object.entries(breadcrumbs)),
   );
@@ -284,6 +289,51 @@ export const ClientRouterProvider = (
   };
 
   /**
+   * Announces every chunk a navigation to `routePath` will import.
+   *
+   * `loadViewModule` starts each view's own chunk, but a chunk's static
+   * imports are discoverable only once it has arrived and parsed — so a
+   * `layout -> view -> components` route still costs a round trip per level on
+   * every navigation, holding the transition open for exactly the interval the
+   * shell's head hints remove from the first load (#352). These are the same
+   * per-view lists the shell renders, shipped in the document payload.
+   *
+   * `modulepreload` rather than `import()`: it fills the HTTP cache without
+   * evaluating anything, so warming a link that is never clicked costs a
+   * download and no side effects.
+   */
+  const preloadRouteModules = (routePath: string) => {
+    if (typeof document === "undefined") {
+      return;
+    }
+    if (!preloadedModulesRef.current) {
+      // Seeded from the document because the shell already announced the
+      // landing route's chunks — re-announcing them would append dead
+      // <link> elements on every navigation back to it.
+      preloadedModulesRef.current = new Set(
+        Array.from(
+          document.querySelectorAll('link[rel="modulepreload"]'),
+          (link) => link.getAttribute("href") ?? "",
+        ),
+      );
+    }
+    const preloaded = preloadedModulesRef.current;
+
+    for (const view of routeManifest[routePath] ?? []) {
+      for (const href of modulePreloadManifest?.[view] ?? []) {
+        if (preloaded.has(href)) {
+          continue;
+        }
+        preloaded.add(href);
+        const link = document.createElement("link");
+        link.rel = "modulepreload";
+        link.href = href;
+        document.head.appendChild(link);
+      }
+    }
+  };
+
+  /**
    * Warms everything a navigation to `target` would need: the route's page
    * data, its stylesheets and its component chunks.
    *
@@ -311,6 +361,7 @@ export const ClientRouterProvider = (
     // Alongside the payload rather than joined to it: a stylesheet that 404s
     // must not throw away page data that arrived perfectly well.
     fetchRouteCSS(routePath).catch(() => {});
+    preloadRouteModules(routePath);
     // Through `loadViewModule` so each view's `Loading`/`Error`
     // exports are registered by the time the route commits.
     for (const view of routeManifest[routePath] ?? []) {
@@ -350,6 +401,7 @@ export const ClientRouterProvider = (
         setNavigationAbortController,
         progressManager,
         fetchRouteCSS,
+        preloadRouteModules,
         breadcrumbsCache: breadcrumbsCache.current,
         routerSubject,
         urlLocaleSegment,
