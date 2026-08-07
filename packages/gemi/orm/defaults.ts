@@ -1,4 +1,9 @@
-import type { DefaultSpec, FieldSchema } from "./schema";
+import {
+  NANOID_DEFAULT_LENGTH,
+  type DefaultKind,
+  type DefaultSpec,
+  type FieldSchema,
+} from "./schema";
 
 /**
  * The values gemi supplies itself on a write, rather than leaving to the
@@ -20,8 +25,14 @@ import type { DefaultSpec, FieldSchema } from "./schema";
  *   `@default(nanoid())` is the same column with a different generator on it,
  *   and was on the wrong side of this split until #350 — classified
  *   `dbgenerated`, so the ORM omitted the column and the driver rejected the
- *   row. `cuid()`, `uuid()` and `nanoid()` are Prisma's three client-side id
- *   functions and all three belong here.
+ *   row.
+ *
+ *   **Prisma's client registers four of these, not three.** Its generator
+ *   registry reads `register("uuid") register("cuid") register("ulid")
+ *   register("nanoid")`, and `prisma migrate diff` gives every one of them a
+ *   `TEXT NOT NULL` with no `DEFAULT`. #350's first fix said "three" and left
+ *   `ulid` falling through to `dbgenerated` — the same bug, one function over,
+ *   which is what its review caught. All four are here now.
  * - `createdAt` does have a default, but it is `CURRENT_TIMESTAMP`, which SQLite
  *   stores as the *text* `YYYY-MM-DD HH:MM:SS` — while Prisma stores a DateTime
  *   as integer milliseconds. Letting the database fill it would write a
@@ -35,9 +46,36 @@ import type { DefaultSpec, FieldSchema } from "./schema";
  * resolved once per logical operation and passed in rather than read per field.
  */
 
+/**
+ * The kinds gemi supplies a value for, as an allowlist.
+ *
+ * **It was a denylist** — `kind !== "autoincrement" && kind !== "dbgenerated"`
+ * — and the difference is what a *future* kind does on a runtime that predates
+ * it. A denylist says "yes, gemi supplies this" for a kind it cannot generate,
+ * so the column joins the insert and `clientSideValue` hands back `undefined`,
+ * which the dialect encodes as **NULL**. A nullable column then takes NULL on
+ * every row, silently, where an id belonged.
+ *
+ * An allowlist answers "no" instead, so the column is omitted and the database
+ * decides — a NOT NULL violation where it matters, and nothing where it does
+ * not. `SCHEMA_ARTIFACT_VERSION` should catch that skew first; this is what
+ * makes it loud if it ever does not.
+ *
+ * Every member must have an arm in `clientSideValue`, which the exhaustive
+ * `Record<DefaultKind, boolean>` in the tests is there to hold.
+ */
+const CLIENT_SIDE_KINDS: ReadonlySet<DefaultKind> = new Set<DefaultKind>([
+  "cuid",
+  "uuid",
+  "nanoid",
+  "ulid",
+  "now",
+  "value",
+]);
+
 /** Whether gemi supplies this default, or leaves the column to the database. */
 export function isClientSideDefault(spec: DefaultSpec): boolean {
-  return spec.kind !== "autoincrement" && spec.kind !== "dbgenerated";
+  return CLIENT_SIDE_KINDS.has(spec.kind);
 }
 
 /**
@@ -64,14 +102,21 @@ export function clientSideValue(field: FieldSchema, now: Date): unknown {
 
   switch (spec.kind) {
     case "cuid":
+      // v1 only. `cuid(2)` is refused by the generator rather than recorded,
+      // because gemi cannot reproduce `@paralleldrive/cuid2`'s output — see
+      // `emit.ts`. So no artifact reaches here carrying a cuid version.
       return createCuid();
     case "uuid":
-      return crypto.randomUUID();
+      // Absent means 4, which is what a bare `uuid()` has always meant. The
+      // DMMF in fact normalises `uuid()` to `args: [4]`, so the generator
+      // always records it; the fallback is for a hand-written spec.
+      return createUuid(spec.version ?? 4);
     case "nanoid":
-      // The generator always records the length, so the fallback is for an
-      // artifact generated before #350 — which cannot carry `kind: "nanoid"` at
-      // all — and for a hand-written spec. 21 is what `nanoid()` means.
+      // Likewise: the generator always records the length, so the fallback is
+      // for a hand-written spec. 21 is what `nanoid()` means.
       return createNanoid(spec.length ?? NANOID_DEFAULT_LENGTH);
+    case "ulid":
+      return createUlid();
     case "now":
       return now;
     case "value":
@@ -80,6 +125,46 @@ export function clientSideValue(field: FieldSchema, now: Date): unknown {
       // autoincrement / dbgenerated — the database's business.
       return undefined;
   }
+}
+
+// --- random symbols --------------------------------------------------------
+
+/**
+ * `size` symbols drawn uniformly from `alphabet`.
+ *
+ * The one place the uniformity argument lives, because it is the same argument
+ * for every id below and it used to be made twice, half in `randomBlock`'s
+ * comment and half in `createNanoid`'s.
+ *
+ * A byte is a draw from 256, and 256 is a multiple of the alphabet's size only
+ * when that size is a power of two. When it is not, `byte % size` would favour
+ * the first `256 % size` symbols — for cuid's 36 that is the first four,
+ * delivered 8 times in 256 against everyone else's 7, which is 12.5% above
+ * uniform and invisible in any single id. `limit` cuts the tail that causes it
+ * and those bytes are redrawn.
+ *
+ * For a 64-symbol alphabet `256 % 64` is 0, so `limit` is 256, the loop never
+ * rejects, and this is exactly the `& 63` mask nanoid ships — reached by
+ * arithmetic rather than by special-casing it.
+ */
+function randomChars(alphabet: string, size: number): string {
+  const base = alphabet.length;
+  const limit = 256 - (256 % base);
+
+  const bytes = new Uint8Array(size);
+  crypto.getRandomValues(bytes);
+
+  let out = "";
+  for (let i = 0; i < size; i++) {
+    let byte = bytes[i];
+    while (byte >= limit) {
+      const resample = new Uint8Array(1);
+      crypto.getRandomValues(resample);
+      byte = resample[0];
+    }
+    out += alphabet[byte % base];
+  }
+  return out;
 }
 
 // --- cuid v1 ---------------------------------------------------------------
@@ -128,24 +213,9 @@ function pad(text: string, size: number): string {
  */
 const FINGERPRINT = randomBlock();
 
+/** One four-character block of cuid's base-36 alphabet. */
 function randomBlock(): string {
-  const bytes = new Uint8Array(BLOCK_SIZE);
-  crypto.getRandomValues(bytes);
-
-  let out = "";
-  for (let i = 0; i < BLOCK_SIZE; i++) {
-    let byte = bytes[i];
-    // 256 is not a multiple of 36 — it is 7*36 + 4 — so taking the remainder of
-    // every byte would make the first four symbols of the alphabet slightly
-    // likelier than the rest. Resampling the 252-255 tail removes the bias.
-    while (byte >= 252) {
-      const resample = new Uint8Array(1);
-      crypto.getRandomValues(resample);
-      byte = resample[0];
-    }
-    out += ALPHABET[byte % BASE];
-  }
-  return out;
+  return randomChars(ALPHABET, BLOCK_SIZE);
 }
 
 export function createCuid(): string {
@@ -160,38 +230,126 @@ export function createCuid(): string {
  * The alphabet, verbatim from the `nanoid` package Prisma bundles. Its order is
  * not alphabetical and not arbitrary — it is what the library ships, and an id
  * is a uniform draw from it, so a reordering changes nothing observable. It is
- * copied exactly anyway, because "the same alphabet" is the property, and a
- * character silently added or dropped would change the width of the mask below
- * from unbiased to not.
+ * copied exactly anyway, because "the same alphabet" is the property.
  *
- * 64 characters, which is the whole reason `& 63` is correct where cuid's
- * `% 36` needed a resample loop: every byte maps to exactly one symbol and
- * 256 is four whole alphabets, so there is no tail to reject.
+ * 64 characters, so `randomChars` computes a `limit` of 256 for it and never
+ * rejects a byte — the same draw as nanoid's own `& 63`.
  */
 const NANOID_ALPHABET =
   "useandom-26T198340PX75pxJACKVERYMINDBUSHWOLF_GQZbfghjklqvwyzrict";
 
-/** What `@default(nanoid())` means when written without an argument. */
-const NANOID_DEFAULT_LENGTH = 21;
-
 /**
  * The id `@default(nanoid(size))` produces in the Prisma client, generated here
- * instead — same alphabet, same mask, same length, so a gemi-written column and
- * a Prisma-written one are indistinguishable.
+ * instead — same alphabet, same length, so a gemi-written column and a
+ * Prisma-written one are indistinguishable.
  *
  * Unlike a cuid there is no structure to match: a nanoid is `size` independent
  * symbols and nothing more. No timestamp, no counter, no fingerprint — which is
  * also why none of the collision reasoning around `createCuid` applies here.
- * Uniformity is the only property, and `& 63` over a 64-symbol alphabet is what
- * gives it.
  */
 export function createNanoid(size: number = NANOID_DEFAULT_LENGTH): string {
-  const bytes = new Uint8Array(size);
+  return randomChars(NANOID_ALPHABET, size);
+}
+
+// --- ulid ------------------------------------------------------------------
+
+/**
+ * Crockford's base32: the digits and the uppercase letters, less `I`, `L`, `O`
+ * and `U` — the four that are misread as `1`, `1`, `0` and each other. Copied
+ * from the string Prisma's client ships, which is the canonical one.
+ *
+ * 32 symbols, a power of two, so `randomChars` never rejects a byte here
+ * either.
+ */
+const ULID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+/** 48 bits of milliseconds, base 32. */
+const ULID_TIME_CHARS = 10;
+/** 80 bits of randomness, base 32 — the width Prisma's generator uses. */
+const ULID_RANDOM_CHARS = 16;
+
+/**
+ * `@default(ulid())`, which #350's first fix missed: it never had a `case`, so
+ * it fell through to `dbgenerated` and the column was omitted from every insert
+ * — the same bug the fix was written for, on a fourth id function.
+ *
+ * A ULID is a timestamp followed by randomness, and the *order* is the point:
+ * the time is big-endian and base 32 preserves byte order, so sorting ULIDs
+ * lexicographically sorts them by creation time. That is why the timestamp is
+ * built here digit by digit rather than through `toString(32)`, which would
+ * emit a variable number of characters and destroy the alignment the ordering
+ * depends on.
+ */
+export function createUlid(now: number = Date.now()): string {
+  let time = "";
+  let remaining = now;
+  for (let i = 0; i < ULID_TIME_CHARS; i++) {
+    time = ULID_ALPHABET[remaining % 32] + time;
+    remaining = Math.floor(remaining / 32);
+  }
+
+  return time + randomChars(ULID_ALPHABET, ULID_RANDOM_CHARS);
+}
+
+// --- uuid ------------------------------------------------------------------
+
+/**
+ * `@default(uuid(v))`. Prisma's client accepts 4 and 7 and throws on anything
+ * else; the generator refuses the rest before an artifact can carry it, so this
+ * only ever sees those two.
+ *
+ * **The version is not cosmetic**, which is why it had to travel with the spec.
+ * A v4 is 122 random bits. A v7 puts 48 bits of big-endian milliseconds at the
+ * front, so v7s sort by creation time and land next to each other in a B-tree —
+ * the entire reason a schema asks for one. Minting a v4 where the schema said 7
+ * loses both properties and leaves a column that still looks like a UUID, which
+ * is how it went unnoticed.
+ */
+export function createUuid(version: number = 4): string {
+  return version === 7 ? createUuidV7() : crypto.randomUUID();
+}
+
+const HEX = Array.from({ length: 256 }, (_, i) =>
+  i.toString(16).padStart(2, "0"),
+);
+
+/**
+ * RFC 9562 §5.7: 48 bits of Unix milliseconds, the 4-bit version `7`, 12 random
+ * bits, the 2-bit variant `0b10`, and 62 more random bits.
+ *
+ * The layout is asserted by the tests rather than trusted, because every field
+ * but the timestamp is invisible in a rendered UUID.
+ *
+ * The ordering this buys is **per millisecond**. Everything after the timestamp
+ * is random, so two ids minted in the same millisecond have no defined order
+ * between them; §6.2's monotonic counter is what would fix that, and neither
+ * Prisma's generator nor this one implements it. Sorting by a v7 orders rows by
+ * the millisecond they were written, which is the property an index cares about.
+ */
+function createUuidV7(): string {
+  const bytes = new Uint8Array(16);
   crypto.getRandomValues(bytes);
 
-  let id = "";
-  for (let i = 0; i < size; i++) {
-    id += NANOID_ALPHABET[bytes[i] & 63];
-  }
-  return id;
+  const now = Date.now();
+  // Big-endian, and `Math.floor(now / 2 ** 32)` rather than a shift: `>>>`
+  // truncates to 32 bits, and the timestamp needs 48.
+  bytes[0] = Math.floor(now / 2 ** 40) & 0xff;
+  bytes[1] = Math.floor(now / 2 ** 32) & 0xff;
+  bytes[2] = (now >>> 24) & 0xff;
+  bytes[3] = (now >>> 16) & 0xff;
+  bytes[4] = (now >>> 8) & 0xff;
+  bytes[5] = now & 0xff;
+
+  bytes[6] = (bytes[6] & 0x0f) | 0x70; // version 7, keeping the random low bits
+  bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 0b10, likewise
+
+  const hex = HEX;
+  return (
+    hex[bytes[0]] + hex[bytes[1]] + hex[bytes[2]] + hex[bytes[3]] +
+    "-" + hex[bytes[4]] + hex[bytes[5]] +
+    "-" + hex[bytes[6]] + hex[bytes[7]] +
+    "-" + hex[bytes[8]] + hex[bytes[9]] +
+    "-" + hex[bytes[10]] + hex[bytes[11]] + hex[bytes[12]] +
+      hex[bytes[13]] + hex[bytes[14]] + hex[bytes[15]]
+  );
 }

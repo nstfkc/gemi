@@ -174,16 +174,32 @@ by the DDL Prisma emits. Read the migration for a model with the usual four colu
 client, so a row inserted without them violates NOT NULL — if gemi does not supply them, nothing
 does.
 
+Prisma's client fills **four** id functions this way — `cuid`, `uuid`, `nanoid` and `ulid` — and
+every one of them gets a bare `TEXT NOT NULL`. All four are gemi's to supply:
+
 | `@default(...)` | Filled by | Notes |
 | --- | --- | --- |
 | `autoincrement()` | the database | The one identity column the database really does own. |
 | `dbgenerated(...)` | the database | You said so in as many words. |
-| `cuid()` | gemi | cuid v1, the format Prisma still emits — 25 characters, `c` and 24 lowercase alphanumerics. |
-| `uuid()` | gemi | v4. |
+| `cuid()` / `cuid(1)` | gemi | cuid v1 — 25 characters, `c` and 24 lowercase alphanumerics. |
+| `cuid(2)` | — | **Refused at generate time.** See below. |
+| `uuid()` / `uuid(4)` | gemi | v4: 122 random bits. |
+| `uuid(7)` | gemi | v7: 48 bits of big-endian milliseconds, then randomness — so v7s sort by creation time. |
 | `nanoid()` / `nanoid(n)` | gemi | nanoid's url alphabet; 21 characters, or `n`. |
+| `ulid()` | gemi | 26 characters of Crockford base 32, timestamp first, so ULIDs also sort by creation time. |
 | `now()` | gemi | Not the database's `CURRENT_TIMESTAMP` — see below. |
 | a literal | gemi | `@default("en-US")`, `@default(2)`, `@default(false)`. |
 | `@updatedAt` | gemi | Not a `@default` at all, and stamped on **create** as well as on update. |
+
+**The version argument is part of the default, not a detail of it.** `uuid()` and `uuid(7)` are one
+identical `TEXT` column apart in the DDL and two different kinds of identifier in practice — a v7 is
+time-ordered and a v4 is not, and both render as a UUID, so a column filled with the wrong one looks
+completely normal. gemi records the version in the generated artifact and mints what the schema
+asked for. The same goes for `nanoid(n)`'s length.
+
+`uuid(7)`'s ordering is per *millisecond*: everything after the timestamp is random, so two ids
+minted in the same millisecond have no defined order between them. RFC 9562 makes the monotonic
+counter that would fix that optional, and neither Prisma nor gemi implements it.
 
 **`now()` is generated in gemi even though the column has a database default**, and the reason is
 storage form rather than correctness. SQLite stores `CURRENT_TIMESTAMP` as the *text*
@@ -207,25 +223,40 @@ await User.create({ data: { email: "a@b.c", publicId: "fixed", createdAt: new Da
 And a nullable column with no default is **omitted from the insert** rather than bound as `null`,
 so a database default you added by hand in a migration still applies.
 
+#### Defaults the generator refuses
+
+Two, and both are refused for the reason `Decimal` is: emitting a value that silently disagrees with
+what Prisma would have written is worse than a generation error naming the field.
+
+| `@default(...)` | Why |
+| --- | --- |
+| `cuid(2)` | Prisma mints a cuid2 through `@paralleldrive/cuid2`, which hashes with SHA-3. gemi cannot reproduce it, and the formats do not even agree: a cuid2 is 24 characters and letter-first, a v1 is 25 and always starts `c`. Use `cuid(1)`, or keep the Prisma client for this model. |
+| `uuid(n)`, n ∉ {4, 7} | The only UUID versions Prisma generates. Its own client throws for the rest; gemi says so at generate time instead. |
+
 #### A default the generator does not recognise
 
-A function default this generator has no case for — one Prisma adds after your version of gemi, or
-a provider-specific one like `auto()` — is recorded as the database's, because that is the only
-safe guess. On a **required** column that guess may be a row the driver will reject, so
-`prisma generate` says so:
+A function default this generator has no case for — one Prisma adds after your version of gemi, or a
+provider-specific one — is recorded as the database's, because that is the only guess available. If
+that guess is wrong the column has no default anywhere, so `prisma generate` says so:
 
 ```
-gemi ORM: Organization.publicId is required and defaults to auto(), which this generator
-does not recognise. It is recorded as a database-side default, so the ORM will omit the
-column on insert — and if auto() is a default Prisma fills in its own client, the column
-has none in the database and every write to Organization will fail on NOT NULL. Make the
-field optional, give it a default the ORM knows, or upgrade gemi.
+gemi ORM: Organization.publicId defaults to auto(), which this generator does not
+recognise, so it is recorded as a database-side default and the ORM will omit the column
+on insert. If Prisma fills that default in its own client — as it does for cuid, uuid,
+nanoid and ulid — the column has no default in the database either, so every write to
+Organization either fails on NOT NULL or silently stores NULL. Give the field a default
+the ORM knows, or upgrade gemi.
 ```
 
-A warning rather than a refusal: most `dbgenerated(...)` columns really are the database's, and a
-nullable one costs nothing either way. It is a warning rather than *nothing* because the generator
-is the only place that still knows the function's **name** — by the time the driver rejects the
-row, all you have is a NOT NULL violation on a column that ought to have had a default.
+**A nullable column gets the same warning, and it is the one worth reading.** A required column
+fails loudly on the first write. A nullable one takes the NULL, and nothing fails at insert or at
+read — you find out later, when a lookup by that id returns nothing. That is why the warning does
+not suggest making the field optional: it would convert the loud failure into the silent one.
+
+A warning rather than a refusal, though: most `dbgenerated(...)` columns really are the database's,
+and refusing would break schemas that generate and run correctly today. It is a warning rather than
+*nothing* because the generator is the only place that still knows the function's **name** — by the
+time a row is rejected, all you have is a column that ought to have had a default.
 
 ### Your model class
 

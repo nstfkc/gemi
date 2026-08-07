@@ -95,25 +95,27 @@ describe("create", () => {
    * fixture changed: what is being pinned is that a `nanoid` spec reaches the
    * statement, not anything about `Account`.
    */
-  test("a nanoid default reaches the insert", () => {
-    const withNanoid = {
+  test.each([
+    [{ kind: "nanoid", length: 10 } as const, 10],
+    // `ulid()` is the one #350's first fix missed — no `case`, so it was
+    // classified `dbgenerated` and omitted exactly as `nanoid` had been.
+    [{ kind: "ulid" } as const, 26],
+  ])("a %s default reaches the insert", (spec, width) => {
+    const withSpec = {
       ...account,
       fields: {
         ...account.fields,
-        publicId: {
-          ...account.fields.publicId,
-          default: { kind: "nanoid", length: 10 } as const,
-        },
+        publicId: { ...account.fields.publicId, default: spec },
       },
     };
 
-    const compiled = compileWrite(withNanoid, "create", { data: {} }, sqlite);
+    const compiled = compileWrite(withSpec, "create", { data: {} }, sqlite);
     expect(compiled.text.split(" values ")[0]).toContain(`"publicId"`);
 
     // And the value is the width the schema wrote, which is the half that only
     // shows up later: an id of the wrong length is still an id.
     const values = compiled.bind({ data: {} }, createBindContext());
-    expect(String(values[0])).toHaveLength(10);
+    expect(String(values[0])).toHaveLength(width);
   });
 
   test("@updatedAt is stamped on create, not only on update", () => {

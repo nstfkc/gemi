@@ -1,6 +1,7 @@
 import type { DMMF } from "@prisma/generator-helper";
 
 import {
+  NANOID_DEFAULT_LENGTH,
   SCHEMA_ARTIFACT_VERSION,
   type DefaultSpec,
   type FieldSchema,
@@ -124,124 +125,166 @@ function isFunctionDefault(
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** Prisma's `nanoid()` with no argument. */
-const NANOID_DEFAULT_LENGTH = 21;
-
 /**
- * The length `@default(nanoid(n))` was written with.
+ * The first argument, when it is a number.
  *
- * DMMF types an argument as `string | number`, so a non-number is not
- * unreachable by the types even though the Prisma parser rejects one — and the
- * failure it would cause is the quiet kind: `undefined` reaches
- * `clientSideValue`, which falls back to 21, and every id is silently the wrong
- * width. Falling back here instead keeps the wrong width from also being
- * unrecorded, and there is one place that decides it.
+ * DMMF types an argument as `string | number`, so a non-number is not excluded
+ * by the types even though Prisma's parser only produces numbers here. The
+ * caller warns rather than falling back silently: a `nanoid` recorded at the
+ * wrong width, or a `uuid` at the wrong version, is authoritative-looking and
+ * wrong, and nothing downstream can tell it apart from what the schema asked
+ * for.
  */
-function nanoidLength(args: readonly (string | number)[] | undefined): number {
-  const [size] = args ?? [];
-  return typeof size === "number" ? size : NANOID_DEFAULT_LENGTH;
+function numericArg(
+  args: readonly (string | number)[] | undefined,
+): number | undefined {
+  const [first] = args ?? [];
+  return typeof first === "number" ? first : undefined;
 }
 
-function defaultSpec(field: DMMF.Field): DefaultSpec | undefined {
+/**
+ * Translates one DMMF default, and reports what it could not translate.
+ *
+ * **The warning lives in the `default:` arm rather than in a second pass over
+ * the same field**, which is where #350's review put it. There used to be a
+ * `RECOGNISED_DEFAULTS` set restating every `case` label so a separate function
+ * could ask "did the switch handle this?" — a hand-maintained copy of a list
+ * the switch already is. This arm *is* that question, so the copy is gone and
+ * the drift it could suffer is now unrepresentable.
+ */
+function defaultSpec(
+  model: string,
+  field: DMMF.Field,
+  warnings: string[],
+): DefaultSpec | undefined {
   if (!field.hasDefaultValue || field.default === undefined) return undefined;
 
   const value = field.default;
-  if (isFunctionDefault(value)) {
-    switch (value.name) {
-      case "autoincrement":
-      case "cuid":
-      case "uuid":
-      case "now":
-      case "dbgenerated":
-        return { kind: value.name };
-      // `nanoid()` is a *client-side* default, like `cuid()` and `uuid()` and
-      // unlike everything else in this switch: the column Prisma's own
-      // migration emits carries no `DEFAULT`, so a row inserted without the
-      // value violates NOT NULL (#350). It is the only one of the three that
-      // takes an argument, and the argument has to come with it — see
-      // `DefaultSpec.length`.
-      case "nanoid":
-        return { kind: "nanoid", length: nanoidLength(value.args) };
-      default:
-        // An unrecognised function default (`auto()`, a future addition) still
-        // tells the runtime "the database supplies this", which is all
-        // iteration 4 needs to know when it omits the column on insert.
-        //
-        // `warnOnUnrecognisedDefault` is the other half: for a *required* column
-        // that guess is a row the driver will reject, and this is the last
-        // moment anything can say so before the first write does.
-        return { kind: "dbgenerated" };
-    }
-  }
+  if (!isFunctionDefault(value)) return { kind: "value", value: value as unknown };
 
-  return { kind: "value", value: value as unknown };
+  const column = `${model}.${field.name}`;
+
+  switch (value.name) {
+    case "autoincrement":
+    case "now":
+    case "dbgenerated":
+      return { kind: value.name };
+
+    // The four Prisma fills in its own client. Each gets a `TEXT NOT NULL` with
+    // no `DEFAULT`, so each is gemi's to supply or the row does not insert —
+    // #350, and `ulid` is the one its first fix still missed.
+    case "ulid":
+      return { kind: "ulid" };
+
+    case "cuid": {
+      // The DMMF normalises a bare `cuid()` to `args: [1]`, so this is always
+      // present in practice; absent means a hand-built DMMF, and v1 is what
+      // `cuid()` has always meant.
+      const version = numericArg(value.args) ?? 1;
+      if (version !== 1) {
+        // Refused rather than recorded, and rather than silently minting a v1.
+        // Prisma builds a cuid2 with `@paralleldrive/cuid2`, which hashes with
+        // SHA-3; gemi cannot reproduce that without vendoring the hash, and the
+        // two formats do not even agree on length — 24 characters against v1's
+        // 25. Emitting a v1 here is what the generator did before, which put
+        // ids of the wrong shape in a column Prisma would fill differently.
+        throw new UnsupportedSchemaError(
+          `${column} is @default(cuid(${version})), which the gemi ORM cannot ` +
+            `generate: Prisma mints a cuid2 through @paralleldrive/cuid2, ` +
+            `whose output gemi cannot reproduce. Use @default(cuid(1)), or ` +
+            `keep the Prisma client for this model.`,
+        );
+      }
+      return { kind: "cuid" };
+    }
+
+    case "uuid": {
+      const version = numericArg(value.args) ?? 4;
+      if (version !== 4 && version !== 7) {
+        // Prisma's own client throws "Invalid UUID generator arguments" for
+        // these; saying so at generation time is the same answer, earlier.
+        throw new UnsupportedSchemaError(
+          `${column} is @default(uuid(${version})), and the only UUID ` +
+            `versions Prisma generates are 4 and 7.`,
+        );
+      }
+      return { kind: "uuid", version };
+    }
+
+    case "nanoid": {
+      const length = numericArg(value.args);
+      if (length === undefined && (value.args?.length ?? 0) > 0) {
+        warnings.push(
+          `gemi ORM: ${column} is @default(nanoid(${String(value.args?.[0])})), ` +
+            `whose argument is not a number. The length was recorded as ` +
+            `${NANOID_DEFAULT_LENGTH}, so every id gemi writes to this column ` +
+            `will be ${NANOID_DEFAULT_LENGTH} characters — check the schema.`,
+        );
+      }
+      return { kind: "nanoid", length: length ?? NANOID_DEFAULT_LENGTH };
+    }
+
+    default:
+      warnings.push(unrecognisedDefaultWarning(column, model, value.name));
+      return { kind: "dbgenerated" };
+  }
 }
 
 /**
- * Every function default `defaultSpec` has a `case` for.
+ * A function default this generator has no case for.
  *
- * A second list of the same names, and the duplication is worth naming rather
- * than hiding: a `switch` is not enumerable, so there is nothing to derive this
- * from. What drift costs is asymmetric, which is why the copy is tolerable. A
- * name added to the switch and not to this set produces a warning about a
- * default that is in fact handled — noise, and noise is how a warning stops
- * being read. A name added here and not to the switch silences a warning that
- * should have fired, which is the state before #350.
+ * It is recorded as the database's, which is the only guess available. When the
+ * guess is wrong — the default is one Prisma fills client-side, as `nanoid()`
+ * and `ulid()` both were — nothing fails at generation time and nothing fails
+ * at boot, because the field *looks* handled: it was classified.
  *
- * Exported so the test that asserts each of these stays quiet reads the set
- * rather than becoming a third copy of it.
+ * **Both outcomes are reported, not just the loud one.** This used to return
+ * early for a nullable column, on the reasoning that "a nullable one is nobody's
+ * problem either way". That is true for a genuinely database-side default and
+ * false for exactly the case the warning exists to catch: an unrecognised
+ * *client-side* default on a nullable column is omitted from the insert, the
+ * database has no `DEFAULT` to supply, and the row lands with NULL where an id
+ * belonged. Nothing fails at insert or at read. It surfaces much later, when a
+ * lookup by that id finds nothing.
+ *
+ * For the same reason the old text's first suggestion — "make the field
+ * optional" — is gone. It converted a loud NOT NULL failure into that silent
+ * one.
+ *
+ * A warning rather than a refusal: most `dbgenerated(...)` columns really are
+ * the database's, and refusing would break schemas that generate and run
+ * correctly today. But silence is what made #350 cost an afternoon — the
+ * generator is the only place that still knows the function's *name*, and by
+ * the time a row is rejected all that is left is a column that "should have had
+ * a default".
  */
-export const RECOGNISED_DEFAULTS = new Set([
-  "autoincrement",
-  "cuid",
-  "uuid",
-  "nanoid",
-  "now",
-  "dbgenerated",
-]);
+function unrecognisedDefaultWarning(
+  column: string,
+  model: string,
+  name: string | undefined,
+): string {
+  // `isFunctionDefault` deliberately admits an object default carrying no
+  // `name`, and that path is the *strongest* case for this warning rather than
+  // one to skip: the generator called the column the database's with no name to
+  // base the guess on at all.
+  const called = name ? `${name}()` : "a function this generator cannot name";
 
-/**
- * A required column whose default this generator did not recognise.
- *
- * The `default:` branch above assumes the database fills the column. When that
- * assumption is wrong — the default is client-side, as `nanoid()` was — nothing
- * fails at generation time and nothing fails at boot: the field *looks* handled,
- * because it was classified. The first `create` on the model is what fails, with
- * a NOT NULL violation from the driver naming the column but not the reason,
- * and it fails on every write after that.
- *
- * A warning rather than a refusal, and rather than nothing:
- *
- * - A refusal would break a schema that generates and runs fine today. Most
- *   `dbgenerated(...)` columns really are the database's, and a nullable one is
- *   nobody's problem either way.
- * - Silence is what made #350 cost an afternoon. The generator is the only place
- *   that sees the function's *name*; by the time the driver rejects the row, the
- *   name is gone and all that is left is a column that "should have a default".
- *
- * Prisma's own client-side defaults are all handled above, so in practice this
- * fires for a provider-specific default (`auto()` on MongoDB) or one Prisma adds
- * after this version of gemi — which is exactly the set worth naming out loud.
- */
-function warnOnUnrecognisedDefault(model: string, field: DMMF.Field): void {
-  if (!field.isRequired) return;
-
-  const value = field.default;
-  if (!isFunctionDefault(value)) return;
-  if (!value.name || RECOGNISED_DEFAULTS.has(value.name)) return;
-
-  console.warn(
-    `gemi ORM: ${model}.${field.name} is required and defaults to ` +
-      `${value.name}(), which this generator does not recognise. It is ` +
-      `recorded as a database-side default, so the ORM will omit the column on ` +
-      `insert — and if ${value.name}() is a default Prisma fills in its own ` +
-      `client, the column has none in the database and every write to ` +
-      `${model} will fail on NOT NULL. Make the field optional, give it a ` +
-      `default the ORM knows, or upgrade gemi.`,
+  return (
+    `gemi ORM: ${column} defaults to ${called}, which this generator does not ` +
+    `recognise, so it is recorded as a database-side default and the ORM will ` +
+    `omit the column on insert. If Prisma fills that default in its own client ` +
+    `— as it does for cuid, uuid, nanoid and ulid — the column has no default ` +
+    `in the database either, so every write to ${model} either fails on NOT ` +
+    `NULL or silently stores NULL. Give the field a default the ORM knows, or ` +
+    `upgrade gemi.`
   );
 }
 
-function fieldSchema(model: string, field: DMMF.Field): FieldSchema {
+function fieldSchema(
+  model: string,
+  field: DMMF.Field,
+  warnings: string[],
+): FieldSchema {
   // Key order here is the key order in the emitted file. Keep it stable.
   const schema: FieldSchema = {
     name: field.name,
@@ -268,10 +311,8 @@ function fieldSchema(model: string, field: DMMF.Field): FieldSchema {
   // admitted as a list of something no dialect can round-trip one of.
   if (field.isList) schema.isList = true;
 
-  const def = defaultSpec(field);
+  const def = defaultSpec(model, field, warnings);
   if (def) schema.default = def;
-
-  warnOnUnrecognisedDefault(model, field);
 
   return schema;
 }
@@ -361,6 +402,7 @@ function uniques(model: DMMF.Model): string[][] {
 export function buildModelSchema(
   model: DMMF.Model,
   byRelationName: Map<string, { model: string; field: DMMF.Field }[]>,
+  warnings: string[] = [],
 ): ModelSchema {
   const fields: Record<string, FieldSchema> = {};
   const relations: Record<string, RelationSchema> = {};
@@ -378,7 +420,7 @@ export function buildModelSchema(
       // types, so omitting them keeps our result shape identical to Prisma's.
       continue;
     }
-    fields[field.name] = fieldSchema(model.name, field);
+    fields[field.name] = fieldSchema(model.name, field, warnings);
   }
 
   const primaryKey = model.primaryKey
@@ -397,6 +439,7 @@ export function buildModelSchema(
 
 export function buildModelSchemas(
   models: readonly DMMF.Model[],
+  warnings: string[] = [],
 ): ModelSchema[] {
   const byRelationName = new Map<
     string,
@@ -415,7 +458,7 @@ export function buildModelSchemas(
   // Prisma schema does not churn the generated diff.
   return [...models]
     .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
-    .map((model) => buildModelSchema(model, byRelationName));
+    .map((model) => buildModelSchema(model, byRelationName, warnings));
 }
 
 // `JSON.stringify` is the serializer on purpose: the emitted metadata is plain
@@ -1263,11 +1306,29 @@ function enumMap(enums: readonly DMMF.DatamodelEnum[]): EnumMap {
   return out;
 }
 
+/**
+ * `warnings` is an out-parameter rather than a return value or a `console.warn`,
+ * and both alternatives were tried on the way here.
+ *
+ * Printing from this file is what #350's review objected to, and the header
+ * above is why: *"Everything here is a pure function of the DMMF so the emitters
+ * can be unit tested with no Prisma CLI and no database"*. A `console.warn` in
+ * `fieldSchema` makes `buildModelSchemas` write to stderr, so every unit test of
+ * it has to tolerate or stub console output, and the stated invariant stops
+ * being true. `bin/orm-generator.ts` already owns that boundary — it holds
+ * `warnOnPrismaVersion` and `warnOnDatasource` — and now prints these too.
+ *
+ * Widening the return type instead would have rippled through every call in
+ * `emit.test.ts`, which destructures the schemas directly. A defaulted
+ * out-parameter leaves those calls alone and lets the tests that *are* about
+ * diagnostics pass an array and read it.
+ */
 export function emitArtifacts(
   models: readonly DMMF.Model[],
   enums: readonly DMMF.DatamodelEnum[] = [],
+  warnings: string[] = [],
 ): Record<GeneratedFile, string> {
-  const schemas = buildModelSchemas(models);
+  const schemas = buildModelSchemas(models, warnings);
   return {
     "schema.ts": emitSchemaFile(schemas),
     "models.ts": emitModelsFile(schemas, enumMap(enums)),

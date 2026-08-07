@@ -4,6 +4,8 @@ import {
   clientSideValue,
   createCuid,
   createNanoid,
+  createUlid,
+  createUuid,
   hasClientSideValue,
   isClientSideDefault,
 } from "./defaults";
@@ -276,14 +278,132 @@ describe("createNanoid matches the ids the Prisma client mints", () => {
 });
 
 /**
+ * A ULID is a timestamp and then randomness, and the ordering is the property:
+ * base 32 preserves byte order, so sorting ULIDs as strings sorts them by the
+ * moment they were minted. That is the part a naive `toString(32)` would break,
+ * so it is the part worth pinning.
+ */
+describe("createUlid matches the ids the Prisma client mints", () => {
+  const ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+  test("26 characters of Crockford base 32", () => {
+    const ulid = createUlid();
+
+    expect(ulid).toHaveLength(26);
+    for (const symbol of ulid) expect(ALPHABET).toContain(symbol);
+  });
+
+  /** `I`, `L`, `O` and `U` are the four Crockford leaves out. */
+  test("it never emits the ambiguous letters", () => {
+    const ids = Array.from({ length: 200 }, () => createUlid()).join("");
+
+    expect(ids).not.toMatch(/[ILOU]/);
+  });
+
+  /**
+   * The whole point of the format. Two ULIDs a millisecond apart must compare
+   * in that order as plain strings — which is what fails if the timestamp is
+   * rendered with a variable width, because then the fields stop lining up.
+   */
+  test("ids sort lexicographically by the time they were minted", () => {
+    const early = createUlid(1_700_000_000_000);
+    const late = createUlid(1_700_000_000_001);
+    const muchLater = createUlid(1_900_000_000_000);
+
+    expect(early < late).toBe(true);
+    expect(late < muchLater).toBe(true);
+  });
+
+  /** The first ten characters are the clock, so they are shared at one instant. */
+  test("the timestamp block is the first ten characters", () => {
+    const at = 1_700_000_000_000;
+
+    expect(createUlid(at).slice(0, 10)).toBe(createUlid(at).slice(0, 10));
+    // ...and the remaining sixteen are not, or the id would be a constant.
+    expect(createUlid(at).slice(10)).not.toBe(createUlid(at).slice(10));
+  });
+});
+
+/**
+ * v4 and v7 are both UUIDs on the wire and only one of them is time-ordered, so
+ * every field that distinguishes them is invisible in the rendered string. That
+ * is exactly why they are asserted rather than eyeballed.
+ */
+describe("createUuid honours the version the schema asked for", () => {
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-([0-9a-f])[0-9a-f]{3}-([89ab])[0-9a-f]{3}-[0-9a-f]{12}$/;
+
+  test("the default is v4", () => {
+    expect(createUuid()).toMatch(UUID);
+    expect(createUuid().match(UUID)![1]).toBe("4");
+  });
+
+  test("v7 sets the version nibble and the variant", () => {
+    const match = createUuid(7).match(UUID);
+
+    expect(match).not.toBeNull();
+    expect(match![1]).toBe("7");
+    // RFC 9562's variant is the two high bits `10`, which renders as 8, 9, a
+    // or b in the first character of the fourth group.
+    expect("89ab").toContain(match![2]);
+  });
+
+  /**
+   * The reason a schema writes `uuid(7)`: the first 48 bits are big-endian
+   * milliseconds, so v7s sort by creation time and land beside each other in a
+   * B-tree. Minting a v4 loses that silently, which is what gemi did.
+   */
+  test("v7 embeds the current time, big-endian, in the first 48 bits", () => {
+    const before = Date.now();
+    const uuid = createUuid(7);
+    const after = Date.now();
+
+    const stamp = Number.parseInt(uuid.slice(0, 8) + uuid.slice(9, 13), 16);
+
+    expect(stamp).toBeGreaterThanOrEqual(before);
+    expect(stamp).toBeLessThanOrEqual(after);
+  });
+
+  /**
+   * The ordering v7 actually guarantees is **per millisecond**, not per call:
+   * inside one millisecond the 74 bits after the timestamp are random, so two
+   * ids minted together have no defined order. RFC 9562 offers a monotonic
+   * counter for that case as an option, and neither Prisma's generator nor this
+   * one takes it.
+   *
+   * Worth pinning at the granularity that is real rather than the one that
+   * sounds better — the first version of this test minted 20 ids in a loop,
+   * which all landed in the same millisecond and compared in random order.
+   */
+  test("v7s from different milliseconds compare in time order", () => {
+    const at = 1_700_000_000_000;
+    const ids = Array.from({ length: 20 }, (_, i) => {
+      vi.spyOn(Date, "now").mockReturnValue(at + i);
+      return createUuid(7);
+    });
+    vi.restoreAllMocks();
+
+    expect([...ids].sort()).toEqual(ids);
+  });
+
+  test("an id is minted per call", () => {
+    expect(createUuid(7)).not.toBe(createUuid(7));
+    expect(createUuid(4)).not.toBe(createUuid(4));
+  });
+});
+
+/**
  * `autoincrement()` and `dbgenerated(...)` stay with the database; everything
  * else gemi supplies. Written as an exhaustive record so that adding a
  * `DefaultKind` without deciding which side of the split it falls on is a type
  * error rather than an untested branch.
  *
- * `nanoid` is the kind that arrived by getting this wrong (#350): it was not a
- * `DefaultKind` at all, so it fell into `dbgenerated`, and the exhaustive record
- * could not notice a member that did not exist.
+ * `nanoid` and `ulid` are the kinds that arrived by getting this wrong (#350
+ * and its review): neither was a `DefaultKind` at all, so both fell into
+ * `dbgenerated`, and an exhaustive record cannot notice a member that does not
+ * exist. What the record *does* catch is the next one, which is why the
+ * predicate below is now an allowlist — a kind added to the union with no arm
+ * in `clientSideValue` is answered `false` and omitted, rather than answered
+ * `true` and bound as NULL.
  */
 describe("isClientSideDefault splits gemi's defaults from the database's", () => {
   const expected: Record<DefaultKind, boolean> = {
@@ -292,6 +412,7 @@ describe("isClientSideDefault splits gemi's defaults from the database's", () =>
     cuid: true,
     uuid: true,
     nanoid: true,
+    ulid: true,
     now: true,
     value: true,
   };
@@ -300,6 +421,21 @@ describe("isClientSideDefault splits gemi's defaults from the database's", () =>
     expect(isClientSideDefault({ kind: kind as DefaultKind })).toBe(
       isClientSide,
     );
+  });
+
+  /**
+   * The property the allowlist exists for, and the one the denylist got wrong.
+   *
+   * A kind this runtime has never heard of — a newer artifact against an older
+   * gemi — used to answer `true`, because it was neither `autoincrement` nor
+   * `dbgenerated`. The column then joined the insert, `clientSideValue` had no
+   * arm for it and returned `undefined`, and the dialect encoded that as NULL:
+   * a required column fails, a nullable one silently stores NULL in every row.
+   *
+   * Answering `false` omits the column instead, which is the loud failure.
+   */
+  test("a kind this runtime does not know is left to the database", () => {
+    expect(isClientSideDefault({ kind: "sequence" as DefaultKind })).toBe(false);
   });
 });
 
@@ -393,7 +529,36 @@ describe("clientSideValue produces one field's value", () => {
     ).toHaveLength(21);
   });
 
-  test.each(["cuid", "uuid", "nanoid"] as const)(
+  test("ulid", () => {
+    expect(
+      String(clientSideValue(field({ default: { kind: "ulid" } }), now)),
+    ).toMatch(/^[0-9A-HJKMNP-TV-Z]{26}$/);
+  });
+
+  /**
+   * The version has to reach `createUuid`, not just sit in the artifact. A spec
+   * that lost it here would hand back a v4 for a column declared `uuid(7)` —
+   * still a valid UUID, no longer time-ordered, and indistinguishable by eye.
+   */
+  test("a uuid is minted at the version the schema wrote", () => {
+    const versionOf = (value: unknown) => String(value).charAt(14);
+
+    expect(
+      versionOf(clientSideValue(field({ default: { kind: "uuid", version: 7 } }), now)),
+    ).toBe("7");
+    expect(
+      versionOf(clientSideValue(field({ default: { kind: "uuid", version: 4 } }), now)),
+    ).toBe("4");
+  });
+
+  /** An artifact old enough to predate `version`, or a hand-written spec. */
+  test("a uuid with no version is v4", () => {
+    expect(
+      String(clientSideValue(field({ default: { kind: "uuid" } }), now)).charAt(14),
+    ).toBe("4");
+  });
+
+  test.each(["cuid", "uuid", "nanoid", "ulid"] as const)(
     "a %s is minted per call",
     (kind) => {
       const one = clientSideValue(field({ default: { kind } }), now);

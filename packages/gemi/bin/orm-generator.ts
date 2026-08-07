@@ -106,10 +106,18 @@ generatorHandler({
     // Prisma hands the DMMF over directly, so nothing here parses
     // `schema.prisma`. Enums come along for the model bases, which type an enum
     // column as the union of its members.
+    //
+    // `emit.ts` collects its diagnostics rather than printing them, so that it
+    // stays the pure function of the DMMF its header claims to be. This is the
+    // process boundary — where `warnOnPrismaVersion` and `warnOnDatasource`
+    // already are — so this is where they get written.
+    const warnings: string[] = [];
     const files = emitArtifacts(
       options.dmmf.datamodel.models,
       options.dmmf.datamodel.enums,
+      warnings,
     );
+    for (const warning of warnings) console.warn(warning);
 
     await mkdir(output, { recursive: true });
     for (const [name, content] of Object.entries(files)) {
