@@ -67,21 +67,49 @@ code `1` on a finding, so it is worth a step in CI. It imports what it walks,
 which matters if a file under `app/models` does work on import; `--ignore` takes
 a comma-separated list, and the command prints what it skipped.
 
-## Regenerate, so registration stops guessing
+## Regenerate — this one is required
 
-Nothing breaks if you skip this, and it is one command:
+One command, and unlike the rest of this page it is not optional:
 
 ```sh
 bunx prisma generate
 ```
 
-The generator now marks each base it emits with `static $generated = true`, and
+**The schema artifact's version moved from 1 to 2**, so a `app/models/generated`
+emitted before 0.51 is now refused at registration with `StaleSchemaArtifactError`
+telling you to run exactly that. The bump is deliberate. Artifact version 1 also
+covered a *newer* artifact being read by an *older* runtime — the two do not
+travel together, because the generated directory is committed to git while the
+gemi version lives in a lockfile, so a teammate who pulls without installing had
+a real chance of pairing them. Version 1 said nothing in that case, and the
+mismatch surfaced as a column bound to NULL rather than as an error.
+
+Two things arrive with it, and both need the regenerate to take effect:
+
+- **`@default(nanoid())` and `@default(ulid())` now work.** Both were classified
+  as database-side defaults, and neither has a database default to fall back on
+   — Prisma fills them in its client. Every `create` on a model using one failed
+  on NOT NULL. See [docs/orm.md](./docs/orm.md#column-defaults).
+- **`@default(uuid(7))` mints a v7.** The version argument used to be dropped, so
+  a column declared v7 got random v4s — still valid UUIDs, no longer sorted by
+  creation time, and indistinguishable by eye.
+
+The generator also marks each base it emits with `static $generated = true`, and
 `Kernel.models` reads that mark to decide which of several classes claiming one
 name is the generated one and which is yours. Artifacts generated before 0.51
 carry no mark, so registration falls back to the older signal — whether a class
 declares `$schema` itself — which a subclass that redeclares `static $schema`
-defeats, handing the name to the base. That case fails loudly rather than
-silently: boot refuses it and names both classes. Regenerating removes it.
+defeats, handing the name to the base.
+
+### One schema may now fail to generate
+
+`@default(cuid(2))` is refused, naming the field. Prisma builds a cuid2 through
+`@paralleldrive/cuid2`, which hashes with SHA-3; gemi cannot reproduce that, and
+the two formats do not agree anyway — a cuid2 is 24 characters and letter-first,
+a cuid v1 is 25 and always starts `c`. Before this, gemi dropped the argument and
+wrote v1s into the column, so the rows it created and the rows Prisma created had
+different shapes. Use `@default(cuid(1))`, or keep the Prisma client for that
+model.
 
 ## `@prisma/client` is gone
 

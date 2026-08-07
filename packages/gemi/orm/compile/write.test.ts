@@ -85,6 +85,39 @@ describe("create", () => {
     expect(createdAt).toBe(updatedAt);
   });
 
+  /**
+   * #350, at the level the bug was actually felt: `@default(nanoid())` was
+   * classified `dbgenerated`, so `hasClientSideValue` said no, so the column was
+   * left out of the insert — and the column Prisma's migration emits for it
+   * carries no `DEFAULT`, so the driver rejected the row on NOT NULL.
+   *
+   * The fixtures use `cuid()`, so the field is swapped here rather than a
+   * fixture changed: what is being pinned is that a `nanoid` spec reaches the
+   * statement, not anything about `Account`.
+   */
+  test.each([
+    [{ kind: "nanoid", length: 10 } as const, 10],
+    // `ulid()` is the one #350's first fix missed — no `case`, so it was
+    // classified `dbgenerated` and omitted exactly as `nanoid` had been.
+    [{ kind: "ulid" } as const, 26],
+  ])("a %s default reaches the insert", (spec, width) => {
+    const withSpec = {
+      ...account,
+      fields: {
+        ...account.fields,
+        publicId: { ...account.fields.publicId, default: spec },
+      },
+    };
+
+    const compiled = compileWrite(withSpec, "create", { data: {} }, sqlite);
+    expect(compiled.text.split(" values ")[0]).toContain(`"publicId"`);
+
+    // And the value is the width the schema wrote, which is the half that only
+    // shows up later: an id of the wrong length is still an id.
+    const values = compiled.bind({ data: {} }, createBindContext());
+    expect(String(values[0])).toHaveLength(width);
+  });
+
   test("@updatedAt is stamped on create, not only on update", () => {
     const compiled = text("create", { data: { email: "a@b.c" } });
     expect(compiled).toContain(`"updatedAt"`);

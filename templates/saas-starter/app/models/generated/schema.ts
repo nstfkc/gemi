@@ -8,7 +8,7 @@ import type { ModelSchema } from "gemi/orm";
 // Compared against the runtime's own constant when this artifact is
 // registered, so a stale directory fails with "re-run prisma generate"
 // rather than with a TypeError inside the compiler.
-export const ARTIFACT_VERSION = 1;
+export const ARTIFACT_VERSION = 2;
 
 export const Account = {
   "name": "Account",
