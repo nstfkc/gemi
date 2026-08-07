@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 
-import { collectModulePreloads, type ViteManifest } from "./modulePreloads";
+import { collectModulePreloads, createClientEntry, type ViteManifest } from "./modulePreloads";
 
 /** Shaped like a real `dist/client/.vite/manifest.json`. */
 const manifest: ViteManifest = {
@@ -67,5 +67,28 @@ describe("collectModulePreloads", () => {
 
   test("is empty for a view with no built chunk", () => {
     expect(collectModulePreloads(manifest, "app/views/Missing.tsx")).toEqual([]);
+  });
+});
+
+describe("createClientEntry", () => {
+  test("carries the entry's URL and everything importing it pulls in", () => {
+    expect(createClientEntry(manifest)).toEqual({
+      module: "/assets/client-DJhrQPW5.js",
+      preload: [
+        "/assets/client-DJhrQPW5.js",
+        "/assets/jsx-runtime-DGeXAQPT.js",
+        "/assets/client-Dqbo_yR2.js",
+      ],
+    });
+  });
+
+  test("is undefined when the manifest has no client entry", () => {
+    // A `dist/` interrupted between the server and client build passes. This
+    // runs at boot, so throwing would take down API routes, static assets and
+    // health checks over what is only a document concern — the dispatcher
+    // treats the entry as optional and renders a shell that does not hydrate.
+    const { "app/client.tsx": _entry, ...withoutEntry } = manifest;
+
+    expect(createClientEntry(withoutEntry)).toBeUndefined();
   });
 });

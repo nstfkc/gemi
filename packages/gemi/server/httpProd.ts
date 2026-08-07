@@ -4,7 +4,7 @@ import { generateETag } from "./generateEtag";
 import { URLPattern } from "urlpattern-polyfill";
 import { exists } from "node:fs/promises";
 import { createStyles } from "./styles";
-import { collectModulePreloads } from "./modulePreloads";
+import { CLIENT_ENTRY_KEY, collectModulePreloads, createClientEntry } from "./modulePreloads";
 import type { App } from "../app";
 import { Instrumentation } from "./types";
 import { printStartupBanner } from "./banner";
@@ -77,10 +77,14 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
   // Booted from the bootstrap script rather than through React's
   // `bootstrapModules`, which would preload it at `fetchPriority="low"` — see
   // `clientEntry` in `ViewRouteDispatcher`.
-  const clientEntry = {
-    module: `/${manifest["app/client.tsx"].file}`,
-    preload: collectModulePreloads(manifest, "app/client.tsx"),
-  };
+  const clientEntry = createClientEntry(manifest);
+  if (!clientEntry) {
+    // Loudly, but without dying: this is boot, and an incomplete `dist/` must
+    // not cost the API routes and static assets too.
+    console.error(
+      `Client manifest has no "${CLIENT_ENTRY_KEY}" entry — dist/client is incomplete, so documents will render but never hydrate.`,
+    );
+  }
 
   // Vite's manifest `css` field is a `string[]` — a client entry can emit more
   // than one CSS chunk. Read and concatenate them all instead of interpolating

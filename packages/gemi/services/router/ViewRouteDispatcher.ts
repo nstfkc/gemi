@@ -169,6 +169,21 @@ export class ViewRouteDispatcher {
    */
   private shellReporter = createShellContentReporter();
 
+  /**
+   * `modulepreload` elements per route, built once instead of per request —
+   * everything they derive from (the built chunk graph, the client entry) is
+   * fixed at boot, and React elements are immutable, so one set is reusable
+   * across every render of that route.
+   *
+   * Keyed on the manifest object rather than a plain field so a process that
+   * ever renders against two of them — a test suite, most obviously — can
+   * never serve one route's chunks out of the other's cache.
+   */
+  private preloadCache = new WeakMap<
+    object,
+    { clientEntry: unknown; byRoute: Map<string, any[]> }
+  >();
+
   private readonly hooks: Required<
     Pick<
       ViewRouteConfig,
@@ -241,6 +256,49 @@ export class ViewRouteDispatcher {
     } catch (err) {
       logError(err);
     }
+  }
+
+  /** See `preloadCache`. */
+  private modulePreloadLinks(args: {
+    clientEntry?: { module: string; preload: string[] };
+    modulePreloadManifest?: Record<string, string[]>;
+    views: string[];
+    routeKey: string;
+  }) {
+    const { clientEntry, modulePreloadManifest, views, routeKey } = args;
+
+    const build = () => {
+      const hrefs = new Set<string>(clientEntry?.preload ?? []);
+      for (const view of views) {
+        for (const href of modulePreloadManifest?.[view] ?? []) {
+          hrefs.add(href);
+        }
+      }
+      return [...hrefs].map((href) =>
+        createElement("link", {
+          key: `modulepreload:${href}`,
+          rel: "modulepreload",
+          href,
+        }),
+      );
+    };
+
+    // Dev: no chunk graph to announce, so there is nothing worth caching.
+    if (!modulePreloadManifest) {
+      return build();
+    }
+
+    let cached = this.preloadCache.get(modulePreloadManifest);
+    if (!cached || cached.clientEntry !== clientEntry) {
+      cached = { clientEntry, byRoute: new Map() };
+      this.preloadCache.set(modulePreloadManifest, cached);
+    }
+    let links = cached.byRoute.get(routeKey);
+    if (!links) {
+      links = build();
+      cached.byRoute.set(routeKey, links);
+    }
+    return links;
   }
 
   private async render(props: {
@@ -370,34 +428,38 @@ export class ViewRouteDispatcher {
         modulePreloadManifest,
       } = params;
 
-      // Hydration reaches each route segment through `window.loaders`, i.e. an
-      // `import()` the browser cannot see until the entry has run — and it
-      // sees a nested chunk only once its parent has parsed. On a real
-      // network that serial chain shows every boundary's `Loading` fallback
-      // where server-rendered content already is, collapsing the page height
-      // and restoring it a round trip later (#352). Preloaded in the shell
-      // head, the whole chain is fetched in parallel with the entry and is
-      // resident before hydration asks for it.
-      const preloadHrefs = new Set<string>(clientEntry?.preload ?? []);
-      for (const view of currentViews ?? []) {
-        for (const href of modulePreloadManifest?.[view] ?? []) {
-          preloadHrefs.add(href);
-        }
-      }
+      // `clientEntry` and `bootstrapModules` are two spellings of the same job,
+      // and running both would boot the entry twice — once through React's
+      // `<script type="module">`, once through the `import()` below. The entry
+      // wins where it is offered, so React is handed nothing and never emits
+      // the `fetchPriority="low"` preload that made it worth taking over.
+      const reactBootstrapModules = clientEntry ? [] : bootstrapModules;
 
       const bootstrapScriptContent = (data: string) =>
         [
           data,
           `window.loaders=${loaders}`,
           // Nothing imports the entry when the server routed it through
-          // `clientEntry` — the bootstrap script is where it starts.
-          ...(clientEntry ? [`import(${JSON.stringify(clientEntry.module)})`] : []),
+          // `clientEntry` — the bootstrap script is where it starts. The
+          // `.catch` re-throws out of the microtask because a bare `import()`
+          // here would report a chunk that 404s after a deploy, or an entry
+          // that throws while evaluating, as an `unhandledrejection` only —
+          // which `window.onerror`-based reporters do not see. The page would
+          // then sit permanently unhydrated with nothing raised.
+          ...(clientEntry
+            ? [
+                `import(${JSON.stringify(clientEntry.module)}).catch(function(e){setTimeout(function(){throw e})})`,
+              ]
+            : []),
         ].join(";");
 
       if (isOgRequest) {
         let ogHandler = null;
         let ogComponent = null;
-        for (const view of currentViews) {
+        // `currentViews` is `undefined` on an unmatched route. Without the
+        // guard `GET /nope.og` throws here and `httpProd` answers with the raw
+        // stack trace, where the 404 below is what a crawler should get.
+        for (const view of currentViews ?? []) {
           if (typeof ogMap[view] === "function") {
             ogComponent = view;
             ogHandler = ogMap[view];
@@ -440,6 +502,26 @@ export class ViewRouteDispatcher {
       }
 
       result.data["cssManifest"] = cssManifest;
+      // Hydration reaches each route segment through `window.loaders`, i.e. an
+      // `import()` the browser cannot see until the entry has run — and it
+      // sees a nested chunk only once its parent has parsed. On a real
+      // network that serial chain shows every boundary's `Loading` fallback
+      // where server-rendered content already is, collapsing the page height
+      // and restoring it a round trip later (#352). Preloaded in the shell
+      // head, the whole chain is fetched in parallel with the entry and is
+      // resident before hydration asks for it.
+      //
+      // An unmatched route leaves `currentViews` undefined but still renders a
+      // document — the `404` view, the one route class most likely to be hit
+      // cold — so it preloads that view's chain, mirroring the `["404"]` the
+      // client mounts.
+      const preloadLinks = this.modulePreloadLinks({
+        clientEntry,
+        modulePreloadManifest,
+        views: currentViews ?? ["404"],
+        routeKey: currentPathName ?? "404",
+      });
+
       const styles = await getStyles(currentViews);
 
       // Everything resolved by now ships in the document payload; everything
@@ -483,13 +565,7 @@ export class ViewRouteDispatcher {
               // React hoists these into `<head>`, ahead of the inlined
               // stylesheets, so the browser starts the fetches on the shell's
               // first bytes.
-              ...[...preloadHrefs].map((href) =>
-                createElement("link", {
-                  key: `modulepreload:${href}`,
-                  rel: "modulepreload",
-                  href,
-                }),
-              ),
+              ...preloadLinks,
               ...styles,
               createElement("script", {
                 key: "theme-script",
@@ -510,7 +586,7 @@ export class ViewRouteDispatcher {
             bootstrapScriptContent: bootstrapScriptContent(
               `window.__GEMI_DATA__ = ${JSON.stringify(result.data)}`,
             ),
-            bootstrapModules,
+            bootstrapModules: reactBootstrapModules,
             signal: deadline.signal,
             ...(settled ? { progressiveChunkSize: Number.MAX_SAFE_INTEGER } : {}),
             // A query rejecting inside a streamed segment is expected: React
@@ -569,8 +645,8 @@ export class ViewRouteDispatcher {
           ),
           bootstrapModules:
             process.env.NODE_ENV === "development"
-              ? ["/render-error.js", ...bootstrapModules]
-              : bootstrapModules,
+              ? ["/render-error.js", ...reactBootstrapModules]
+              : reactBootstrapModules,
         });
         // The failed-render body still closes, and the span-ending hook is
         // pinned to the body closing, not the render succeeding — a span that
