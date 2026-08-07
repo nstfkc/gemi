@@ -4,6 +4,7 @@ import { generateETag } from "./generateEtag";
 import { URLPattern } from "urlpattern-polyfill";
 import { exists } from "node:fs/promises";
 import { createStyles } from "./styles";
+import { collectModulePreloads } from "./modulePreloads";
 import type { App } from "../app";
 import { Instrumentation } from "./types";
 import { printStartupBanner } from "./banner";
@@ -35,6 +36,9 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
   const ogMap = {};
   const viewModules = {};
   const cssManifest = {};
+  // Which chunks a route's views pull in, so the shell can preload the chain
+  // the client would otherwise discover one round trip at a time (#352).
+  const modulePreloadManifest: Record<string, string[]> = {};
   const template = (viewName: string, path: string) => `"${viewName}": () => import("${path}")`;
   const templates = [];
 
@@ -61,6 +65,10 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
     }
     if (clientFile) {
       templates.push(template(fileName, `/${clientFile?.file}`));
+      modulePreloadManifest[fileName] = collectModulePreloads(
+        manifest,
+        `app/views/${fileName}.tsx`,
+      );
     }
   }
 
@@ -180,6 +188,7 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
         return await result({
           getStyles,
           bootstrapModules: [`/${manifest["app/client.tsx"].file}`],
+          modulePreloadManifest,
           loaders,
           viewImportMap,
           viewModules,

@@ -339,6 +339,11 @@ export class ViewRouteDispatcher {
        * carries real fallbacks, and they must match what the client hydrates.
        */
       viewModules?: Record<string, any>;
+      /**
+       * Built chunk URLs per view name, like `cssManifest`. Only the current
+       * route's chain is preloaded.
+       */
+      modulePreloadManifest?: Record<string, string[]>;
     }) => {
       const {
         bootstrapModules,
@@ -348,7 +353,23 @@ export class ViewRouteDispatcher {
         cssManifest,
         ogMap,
         viewModules,
+        modulePreloadManifest,
       } = params;
+
+      // Hydration reaches each route segment through `window.loaders`, i.e. an
+      // `import()` the browser cannot see until the entry has run — and it
+      // sees a nested chunk only once its parent has parsed. On a real
+      // network that serial chain shows every boundary's `Loading` fallback
+      // where server-rendered content already is, collapsing the page height
+      // and restoring it a round trip later (#352). Preloaded in the shell
+      // head, the whole chain is fetched in parallel with the entry and is
+      // resident before hydration asks for it.
+      const preloadHrefs = new Set<string>();
+      for (const view of currentViews ?? []) {
+        for (const href of modulePreloadManifest?.[view] ?? []) {
+          preloadHrefs.add(href);
+        }
+      }
 
       if (isOgRequest) {
         let ogHandler = null;
@@ -436,6 +457,16 @@ export class ViewRouteDispatcher {
         const stream = await renderToReadableStream(
           createElement(Fragment, {
             children: [
+              // React hoists these into `<head>`, ahead of the inlined
+              // stylesheets, so the browser starts the fetches on the shell's
+              // first bytes.
+              ...[...preloadHrefs].map((href) =>
+                createElement("link", {
+                  key: `modulepreload:${href}`,
+                  rel: "modulepreload",
+                  href,
+                }),
+              ),
               ...styles,
               createElement("script", {
                 key: "theme-script",
