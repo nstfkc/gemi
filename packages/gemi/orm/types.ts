@@ -386,16 +386,30 @@ type ListFilter<E> = {
  * `path?: never`, `{ path: […], equals: DbNull }` landed here instead of on
  * `JsonPathFilter`, because a union ignores a property one member declares and
  * excess-property checking counts it known if *any* member has it.
+ *
+ * **`equals` and `not` are asymmetric, and the compiler is what makes them so.**
+ * `equals` binds its operand as a *value*, so an object under it is a document
+ * — `{ equals: { a: 1 } }` compiles to `"metadata" = $1::text::jsonb`. `not`
+ * delegates to `compileNot`, which sends any object operand back through
+ * `compileFieldFilter` as a *nested filter*: `{ not: { equals: { a: 1 } } }`
+ * compiles, `{ not: { path: […], equals: 1 } }` compiles to a negated path
+ * filter, and `{ not: { a: 1 } }` raises on the key `a`. So `not` recurses here
+ * and `equals` does not. Measured against `compileRead`, not inferred.
  */
 type JsonFilter = {
   path?: never;
   equals?: JsonValue | DbNullValue | JsonNullValue | AnyNullValue;
-  not?: JsonValue | DbNullValue | JsonNullValue | AnyNullValue;
+  not?:
+    | JsonValueOperand
+    | DbNullValue
+    | JsonNullValue
+    | AnyNullValue
+    | JsonFilter
+    | JsonPathFilter;
 };
 
 /**
- * `JsonValue`'s object member, named so that `JsonValueOperand` can subtract it
- * from the union and put it back with one property forbidden.
+ * `JsonValue`'s object member, named so that `JsonValueOperand` can subtract it.
  */
 type JsonObject = { [key: string]: JsonValue };
 
@@ -419,11 +433,28 @@ type JsonObject = { [key: string]: JsonValue };
  * array type to answer it with. The dialect refusal stays where it can name the
  * dialect and say "it works on postgres".
  *
- * Numbers are in because `assertPathShape` accepts them — a JSON array index is
- * how you reach into a list — where Prisma's generated `path` is `string[]`.
- * The type describes this compiler, not that one.
+ * **Numbers are in, and that is not the same choice as the dialect one above.**
+ * `assertPathShape` accepts a numeric segment, where Prisma's generated `path`
+ * is `string[]`, so gemi is a superset here — and this file refuses to be a
+ * superset on dialect operators for a stated reason: answering a query the
+ * oracle cannot is "precisely where a differential test stops being able to
+ * check anything" (`where.ts:945`). The two are consistent because that rule
+ * governs what the *compiler* answers, and a type cannot enforce it. Excluding
+ * numbers here would not remove the superset — `assertPathShape` would still
+ * accept `["items", 0]` from a `string[]`-typed variable, from `any`, from
+ * JSON off the wire — it would only stop the type describing what the compiler
+ * does, which is #336 again in the other direction. If the superset should go,
+ * the place to remove it is `assertPathShape` — #371, with both answers written
+ * out, rather than decided quietly here.
+ *
+ * **`readonly`, because a path is the natural thing to hoist.**
+ * `const PATH = ["operation"] as const` and a whole filter object written
+ * `as const` both produce a `readonly` tuple. `assertPathShape` uses
+ * `Array.isArray` and `.every`, which a frozen array answers, and the path is
+ * bound rather than mutated. A mutable array still assigns to a `readonly`
+ * parameter, so nothing that compiled before stops.
  */
-type JsonPath = string | (string | number)[];
+type JsonPath = string | readonly (string | number)[];
 
 /**
  * A scalar a JSON path filter can be compared against.
@@ -441,8 +472,22 @@ type JsonPath = string | (string | number)[];
  * distinction the sentinels exist to draw is gone before the comparison
  * happens. They stay on `JsonFilter`, which compiles against the column, where
  * the distinction survives.
+ *
+ * **`null` is absent too, and this one is the type going *further* than the
+ * compiler — the only place in this change that does.** `assertJsonOperand`
+ * lets `null` through and `{ path: […], equals: null }` compiles to
+ * `("metadata" #>> $1) = $2` bound to NULL, which is NULL rather than true on
+ * both dialects: a predicate no row can satisfy. Once the sentinels are refused
+ * there is no other reading of it — the two questions `null` could be asking
+ * are exactly the two the sentinels ask. The same operand under
+ * `string_contains` is already a runtime refusal, in this file's own words
+ * because the pattern "runs and returns the wrong rows", so refusing it here
+ * finishes a rule the compiler states rather than inventing one. The compiler
+ * should follow — #371 — and until it does a `null` arriving dynamically still
+ * reaches the binder, which is why this is stated and not claimed as a
+ * guarantee.
  */
-type JsonPathScalar = string | number | boolean | null;
+type JsonPathScalar = string | number | boolean;
 
 /**
  * `where: { metadata: { path: …, equals: … } }` — a filter on a value *inside*
@@ -455,10 +500,9 @@ type JsonPathScalar = string | number | boolean | null;
  * **`path` is required, and that is what makes the union above discriminate.**
  * `compileFieldFilter` dispatches on `filter.path !== undefined`: an operand
  * carrying a `path` *is* a path filter to the compiler, whatever else is in it.
- * So a JSON document that happens to have a top-level `path` key cannot be
- * written as the bare-value shorthand — it never could, the compiler always read
- * it as a path filter — and `{ equals: { path: … } }` is the spelling that
- * means the document.
+ * A JSON document with a top-level `path` key therefore has to be written
+ * `{ equals: { path: … } }` — which is the only spelling that ever worked, since
+ * an object operand is a filter here and never a document.
  *
  * Every operator is optional, so `{ path: ["a"] }` alone still type-checks and
  * still raises Prisma's *"A JSON path cannot be set without a scalar filter."*
@@ -481,29 +525,37 @@ type JsonPathFilter = {
 };
 
 /**
- * The bare-value half of a `Json` column's filter, **with `path` excluded** —
- * and that exclusion is the whole fix for #336, not the operators.
+ * The bare-value half of a `Json` column's filter — **`JsonValue` with its
+ * object member removed**, and that removal is the whole fix for #336, not the
+ * operators.
  *
  * `JsonValue` contains `{ [key: string]: JsonValue }`, so before this any object
- * literal at all satisfied the value arm as an `equals` shorthand, a union
- * permits a property present in any member, and excess-property checking never
- * fired. Adding `path` and the operators to a sibling arm does nothing on its
- * own: `{ path: 123, notAFilter: true }` is a perfectly good JSON *document* and
- * would go on compiling. The union has to stop being able to absorb it.
+ * literal at all satisfied the value arm, a union permits a property present in
+ * any member, and excess-property checking never fired. Adding `path` and the
+ * operators to a sibling arm does nothing on its own: `{ path: 123, notAFilter:
+ * true }` is a perfectly good JSON *document* and would go on compiling. The
+ * union has to stop being able to absorb it.
  *
- * `path?: never` on the object arm is what does that. It makes `path` a
- * discriminant, so an operand carrying one is matched against `JsonPathFilter`
- * alone and is then checked — operand types, and excess properties, which the
- * index signature had been suppressing for the whole union.
+ * **The object member is not merely absorbing — it was never true.** `where` has
+ * no bare-document branch for a `Json` column. `isFilterObject` reports any
+ * non-`Date`, non-array object as a filter, so `{ metadata: { a: 1 } }` reaches
+ * the scalar operator loop and raises *"A scalar filter takes contains,
+ * endsWith, equals, …"* on the key `a`. Only scalars and arrays fall through to
+ * `equals`, which is exactly what is left here. Measured against `compileRead`
+ * on Postgres, not read off the code:
  *
- * Written as an intersection rather than a property of the object type on
- * purpose: a declared `path?: never` beside a `[key: string]: JsonValue` is an
- * error, because `undefined` is not a `JsonValue`. The intersection is checked
- * member by member and has no such conflict.
+ * | operand | compiler |
+ * | --- | --- |
+ * | `{ metadata: "s" }`, `{ metadata: [1, 2] }` | `"metadata" = $1::text::jsonb` |
+ * | `{ metadata: { equals: { a: 1 } } }` | `"metadata" = $1::text::jsonb` |
+ * | `{ metadata: { a: 1 } }` | `InvalidArgumentError` on `where.metadata.a` |
+ *
+ * So the document goes under `equals`, which is the only spelling `docs/orm.md`
+ * has ever shown. An earlier draft of this type kept the object member with
+ * `path?: never` intersected onto it — clever, and its entire effect was to go
+ * on admitting operands that always throw.
  */
-type JsonValueOperand =
-  | Exclude<JsonValue, JsonObject>
-  | (JsonObject & { path?: never });
+type JsonValueOperand = Exclude<JsonValue, JsonObject>;
 
 /**
  * A filter on one column.
