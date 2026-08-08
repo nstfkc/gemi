@@ -176,6 +176,29 @@ describe("shape guards", () => {
       "data.profile.delete",
       /takes either a boolean/,
     ],
+    // `null` specifically, and on both sides, because it is the wrong value
+    // that a *translation* used to swallow: `toOneOperand` maps `false` onto
+    // `null`, so a check downstream of it could not tell the deliberate no-op
+    // from an operand Prisma has no arm for. Measured on 6.19.2 —
+    // `disconnect: null` is a PrismaClientValidationError there — so refusing
+    // it is matching the client rather than out-stricting it.
+    // `delete` rather than `disconnect` on this side, and not by preference:
+    // the shared fixture's `Profile.userId` is required, so `disconnect` is
+    // refused one guard earlier — on the *key* — and would pin that message
+    // instead of this one. `write.test.ts` has the nullable-key fixture and
+    // covers `disconnect: null` there.
+    [
+      "a to-one delete is null",
+      write({ where: { id: 1 }, data: { profile: { delete: null } } }),
+      "data.profile.delete",
+      /'null' is not one of them/,
+    ],
+    [
+      "a to-one disconnect this row owns is null",
+      write({ where: { id: 1 }, data: { organization: { disconnect: null } } }),
+      "data.organization.disconnect",
+      /'null' is not one of them/,
+    ],
     [
       "an array on a to-one whose child holds the key",
       write({ where: { id: 1 }, data: { profile: { create: [{ bio: "a" }] } } }),

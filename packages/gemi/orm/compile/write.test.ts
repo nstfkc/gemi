@@ -1483,6 +1483,42 @@ describe("nested writes", () => {
         expect(error!.message).toMatch(/takes either a boolean/);
         expect(error!.message).toContain("ProfileWhereInput | boolean");
       });
+
+      /**
+       * `null` is refused and `undefined` is not, and the pair has to be
+       * asserted together because they are one line apart in the guard and
+       * mean opposite things.
+       *
+       * `undefined` is the **absent** key: `canonicalShape` drops an undefined
+       * member, so `disconnect: undefined` and no `disconnect` at all are the
+       * same call and the same plan — refusing it would refuse the spelling a
+       * spread of optional arguments naturally produces. `null` is a value the
+       * caller wrote, and Prisma answers it with a validation error (6.19.2,
+       * measured on a one-to-one from both ends and on a many-to-one).
+       *
+       * The regression it guards is a *widening*: before #359 the owning side
+       * refused every operand but `true`, so `disconnect: null` raised there.
+       * Reaching the shared grammar made it silent for as long as the check ran
+       * after `toOneOperand` had folded `false` and `null` together.
+       */
+      test.each([
+        ["disconnect", { disconnect: null }],
+        ["delete", { delete: null }],
+      ])("%s: null is refused and points at false", (operand, value) => {
+        const error = refuse("profile", value as Record<string, unknown>);
+
+        expect(error).toBeInstanceOf(InvalidArgumentError);
+        expect(error!.argument).toBe(`data.profile.${operand}`);
+        expect(error!.message).toMatch(/'null' is not one of them/);
+        expect(error!.message).toMatch(/write 'false' for the no-op/);
+      });
+
+      test.each([
+        ["disconnect", { disconnect: undefined }],
+        ["delete", { delete: undefined }],
+      ])("%s: undefined is the absent key, not a bad value", (_operand, value) => {
+        expect(refuse("profile", value as Record<string, unknown>)).toBeNull();
+      });
     });
 
     /**

@@ -583,6 +583,15 @@ const CASES: Case[] = [
   ["M8c to-one disconnect with a non-matching filter is silent", "update", {
     where: { id: 1 }, data: { profile: { disconnect: { bio: "nope" } } },
   }, ["User", "Profile"]],
+  // M8d — and `null` is not a third spelling of the silence. Both clients
+  // refuse it: a `PrismaClientValidationError` there, an `InvalidArgumentError`
+  // here, so `other` on both sides and nothing written. The owning side's
+  // twin is `O11`, and the pair is the point — this is the grammar the two
+  // sides now share, so a value one of them swallowed and the other refused
+  // would be #359 again with the roles reversed.
+  ["M8d to-one disconnect null is refused by both", "update", {
+    where: { id: 1 }, data: { profile: { disconnect: null } },
+  }, ["User", "Profile"]],
 
   // M9 — the `{ data }` wrapper on the **foreign** side. It was measured on the
   // owning side only, and the three spellings (bare, `{ data }`,
@@ -658,20 +667,27 @@ const CASES: Case[] = [
     where: { id: 2 }, data: { profile: { connect: { id: 1 } } },
   }, ["User", "Profile"]],
 
-  // M11 — a nested `create` onto a to-one that **already has a child** (#360),
+  // M14 — a nested `create` onto a to-one that **already has a child** (#360),
   // which was a `UniqueConstraintError` here and an answer there until this
   // graduated out of the "still disagree" describe below.
+  //
+  // **Numbered from M14 rather than M11**, which is where these first landed:
+  // `M11` through `M12d` were already taken further down this file, and a
+  // duplicate id makes `-t "M12b"` select two unrelated tests. #361's
+  // acceptance criteria name `M11c` / `M11d` as the pins that have to stay
+  // green — they are `M14c` / `M14d` below, renamed for that reason and for no
+  // other.
   //
   // The incumbent is **orphaned, not deleted**: three rows afterwards, the old
   // one holding a null foreign key. That is the half worth reading the table
   // for — a fix that deleted the displaced row instead would be silent data
   // loss wearing this same green test, which is why `tables` names `Profile`.
-  ["M11 to-one create displaces the incumbent, orphaning it", "update", {
+  ["M14 to-one create displaces the incumbent, orphaning it", "update", {
     where: { id: 1 }, data: { profile: { create: { bio: "second" } } },
   }, ["User", "Profile"]],
   // The control on the other statement: a *new* parent can have nothing linked
   // to displace, so the same operand costs the same as it always did.
-  ["M11b to-one create under a create has nothing to displace", "create", {
+  ["M14b to-one create under a create has nothing to displace", "create", {
     data: { email: "fresh@example.dev", profile: { create: { bio: "first" } } },
   }, ["User", "Profile"]],
   // And the neighbours that do **not** displace. Measured rather than assumed
@@ -679,8 +695,8 @@ const CASES: Case[] = [
   // the *create branch* of `connectOrCreate` and of `upsert` collides on the
   // child's unique foreign key, where the bare `create` above detaches. So what
   // displaces is the bare `create` and anything that **links an existing row**
-  // (M12 below) — not "every operand that ends with a child pointing here".
-  ["M11c to-one connectOrCreate whose where misses collides", "update", {
+  // (M15 below) — not "every operand that ends with a child pointing here".
+  ["M14c to-one connectOrCreate whose where misses collides", "update", {
     where: { id: 1 },
     data: {
       profile: {
@@ -688,7 +704,7 @@ const CASES: Case[] = [
       },
     },
   }, ["User", "Profile"]],
-  ["M11d to-one upsert whose where misses collides", "update", {
+  ["M14d to-one upsert whose where misses collides", "update", {
     where: { id: 1 },
     data: {
       profile: {
@@ -697,31 +713,31 @@ const CASES: Case[] = [
     },
   }, ["User", "Profile"]],
 
-  // M12 — `connect` onto a to-one that **already has a child** (#361), the
-  // neighbour of M11 and the same displacement. Four shapes, and only this one
+  // M15 — `connect` onto a to-one that **already has a child** (#361), the
+  // neighbour of M14 and the same displacement. Four shapes, and only this one
   // ever diverged: the three above it — an empty to-one, a steal from another
   // parent, and the row already linked here — agreed before the fix and are
   // what kept it hidden.
-  ["M12 to-one connect displaces the incumbent, orphaning it", "update", {
+  ["M15 to-one connect displaces the incumbent, orphaning it", "update", {
     where: { id: 1 }, data: { profile: { connect: { id: 2 } } },
   }, ["User", "Profile"]],
   // The clear and the link cross on this one: `clearLinks` nulls the very row
   // the caller named and the repoint puts the key straight back. Net nothing,
   // which is Prisma's answer, and the case that would catch a clear scoped to
   // the wrong rows.
-  ["M12b to-one connect of the row already linked changes nothing", "update", {
+  ["M15b to-one connect of the row already linked changes nothing", "update", {
     where: { id: 1 }, data: { profile: { connect: { id: 1 } } },
   }, ["User", "Profile"]],
   // A miss detaches nothing — the repoint raises and takes the clear down with
   // it. `notFound` on both sides, so a gemi refusal could not pass for it.
-  ["M12c to-one connect naming no row raises and displaces nothing", "update", {
+  ["M15c to-one connect naming no row raises and displaces nothing", "update", {
     where: { id: 1 }, data: { profile: { connect: { id: 99 } } },
   }, ["User", "Profile"]],
   // ...and `connectOrCreate`'s *hit* branch is a connect, so it displaces where
-  // its miss branch (M11c) collides. Both branches of one operand, answering
+  // its miss branch (M14c) collides. Both branches of one operand, answering
   // differently, which is why `displaces` is consulted per branch rather than
   // per operand.
-  ["M12d to-one connectOrCreate hitting a row displaces the incumbent", "update", {
+  ["M15d to-one connectOrCreate hitting a row displaces the incumbent", "update", {
     where: { id: 1 },
     data: {
       profile: {
@@ -786,6 +802,22 @@ const OWNING_CASES: [string, string, unknown, string[]?][] = [
   ["O10 owning disconnect takes an operator filter", "update", {
     where: { id: 1 },
     data: { user: { disconnect: { name: { contains: "Ad" } } } },
+  }, ["Profile", "User"]],
+  // O11 — the value the grammar does **not** have an arm for, which is a case
+  // in this table rather than a divergence below because both clients refuse
+  // it: `PrismaClientValidationError` there (no `P` code, so `other` on both
+  // sides, which is all the harness can claim for an argument refusal) and
+  // `InvalidArgumentError` here.
+  //
+  // It is here at all because widening this side's grammar to Prisma's (#359)
+  // could have made it *silent*. `null` is what `toOneOperand` translates
+  // `false` into, so a shape check downstream of that translation sees one
+  // value for two calls — and the earlier refusal-of-everything-but-`true` had
+  // been covering the difference. A refusal quietly becoming a no-op is the
+  // failure class this suite exists to catch; that it would have been a
+  // harmless no-op is not the point, since nothing here would have said so.
+  ["O11 owning disconnect null is refused by both", "update", {
+    where: { id: 1 }, data: { user: { disconnect: null } },
   }, ["Profile", "User"]],
 ];
 
@@ -2578,7 +2610,14 @@ function suite(label: string, url?: string) {
        * The generated input type is identical on both — `XWhereInput | boolean`
        * — so this is the engine dropping the value, not a narrower grammar.
        * `delete: false` on the same relation is a correct no-op, which is what
-       * rules out "booleans are ignored here" as the explanation.
+       * rules out "booleans are ignored here" as the explanation. Logging the
+       * engine's own SQL shows the drop directly, quoting normalised: the
+       * lookup it issues for the operand is
+       * `select id from Organization where (1=1 and id in (?))` — the caller's
+       * `name = 'Nobody'` is simply not in it — and the `update` that follows
+       * carries `and 1=1` where the *one-to-one*'s carries an `exists`
+       * subquery over the filter. So the operand is discarded before a
+       * statement is built, rather than evaluated and found to match.
        *
        * **gemi does not reproduce it.** Matching Prisma is this suite's whole
        * point and it is overruled exactly here, because the behaviour to match
@@ -2587,24 +2626,62 @@ function suite(label: string, url?: string) {
        * plan cache. Reproducing it deliberately would be re-introducing it. So
        * gemi answers one grammar one way on both shapes, and this pins the
        * difference rather than hiding it.
+       *
+       * **Both halves the docs claim, not just the boolean.** `docs/orm.md`
+       * says Prisma ignores `disconnect: false` *and* a filter matching
+       * nothing; a pin that asserted only the first would let the second move
+       * without a word, which is exactly the gap a pin is for.
        */
-      test("Prisma ignores a many-to-one disconnect operand where gemi honours it", async () => {
+      test.each([
+        ["disconnect: false", false],
+        ["a filter matching nothing", { name: "Nobody" }],
+      ])(
+        "Prisma ignores a many-to-one disconnect operand where gemi honours it: %s",
+        async (_label, operand) => {
+          const args = {
+            where: { id: 1 },
+            data: { organization: { disconnect: operand } },
+          };
+
+          await differential.reset();
+          const fromPrisma = await differential.prisma.user.update(args as never);
+          // Prisma detached anyway. User 1 is seeded into Acme.
+          expect(fromPrisma.organizationId).toBe(null);
+
+          await differential.reset();
+          const fromGemi: any = await UserModel.update(args as never);
+          expect(fromGemi.organizationId).toBe(1);
+          expect(
+            await differential.prisma.user.findFirstOrThrow({ where: { id: 1 } }),
+          ).toMatchObject({ organizationId: 1 });
+        },
+      );
+
+      /**
+       * The control that keeps the case above about the *operand* rather than
+       * about many-to-one `disconnect` in general: a filter that **does** match
+       * nulls the key on both clients. Without it, "Prisma ignores the operand"
+       * and "gemi never detaches on a many-to-one" produce the same green test.
+       *
+       * In `CASES` it would have to be `Organization`-scoped to read the table
+       * back, and it belongs beside its sibling, so it is asserted here.
+       */
+      test("a matching many-to-one disconnect filter nulls the key on both", async () => {
         const args = {
           where: { id: 1 },
-          data: { organization: { disconnect: false } },
+          data: { organization: { disconnect: { name: "Acme" } } },
         };
 
         await differential.reset();
         const fromPrisma = await differential.prisma.user.update(args as never);
-        // Prisma detached anyway. User 1 is seeded into Acme.
         expect(fromPrisma.organizationId).toBe(null);
 
         await differential.reset();
         const fromGemi: any = await UserModel.update(args as never);
-        expect(fromGemi.organizationId).toBe(1);
+        expect(fromGemi.organizationId).toBe(null);
         expect(
           await differential.prisma.user.findFirstOrThrow({ where: { id: 1 } }),
-        ).toMatchObject({ organizationId: 1 });
+        ).toMatchObject({ organizationId: null });
       });
 
       /**
