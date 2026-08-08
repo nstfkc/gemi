@@ -3884,7 +3884,7 @@ await List.create({
 | --- | --- |
 | `create` | Writes new related rows. One statement each. On a **to-one that already has a child** the new row takes the link and the old one is detached — orphaned, not deleted. |
 | `createMany` | The same rows in **one** statement. To-many only, and the rows go inside `data`. |
-| `connect` | Points at an existing row — a bound column when it names the referenced key, a lookup otherwise. |
+| `connect` | Points at an existing row — a bound column when it names the referenced key, a lookup otherwise. On a **to-one that already has a child** it displaces the incumbent, as `create` does. |
 | `connectOrCreate` | Looks the row up by a unique key and creates it only if it is not there. **A hit ignores `create` entirely** — it is connect-*or*-create, not upsert. |
 | `disconnect` | Clears the link. A unique key, or a list of them, on a to-many; `true`, `false` or a filter on a to-one, whichever side holds the key. The column that goes null is on whichever side holds it, and it has to be nullable. |
 | `delete` | Deletes the named rows outright, not just the link. A unique key or a list of them on a to-many; `true`, or a filter, on a to-one whose child holds the key. |
@@ -3969,16 +3969,29 @@ With no policy on the child that is Prisma's `set` exactly. Two of its behaviour
 because the name does not suggest them — it will repoint a row belonging to another parent, exactly
 as `connect` does, and it silently ignores a named row that does not exist.
 
-**A nested `create` on a to-one that already has a child displaces it.** The new row takes the link
-and the incumbent is left in the table with a null foreign key — detached, not deleted, which is
-Prisma's answer and the one worth stating because deleting would be the silent version of the same
-call. What it can displace is what your policies let you see: an incumbent hidden from you is not
-detached, and the insert then collides with it on the child's unique key. `connectOrCreate` and
-`upsert` do *not* displace — they collide, on both clients — so the behaviour belongs to `create`
-rather than to the relation.
+**Writing onto a to-one that already has a child displaces it.** The new or newly-linked row takes
+the link and the incumbent is left in the table with a null foreign key — detached, not deleted,
+which is Prisma's answer and the one worth stating because deleting would be the silent version of
+the same call. What can be displaced is what your policies let you see: an incumbent hidden from you
+is not detached, and the write then collides with it on the child's unique key.
 
-`connect` onto an occupied to-one is the gap in that sentence: Prisma displaces there too, and gemi
-raises `UniqueConstraintError` instead. Detach the incumbent first, or write the child's foreign key
+Which operands displace is Prisma's, measured rather than derived, and it is not "everything that
+ends with a child pointing here":
+
+| operand | on an occupied to-one |
+| --- | --- |
+| `create` | displaces the incumbent |
+| `connect` | displaces the incumbent |
+| `connectOrCreate`, hit | displaces — it *is* a connect |
+| `connectOrCreate`, miss | collides on the child's unique key |
+| `upsert`, create branch | collides on the child's unique key |
+
+So the two branches of one `connectOrCreate` answer differently: linking an existing row displaces,
+and the `create` *inside* a compound operand does not, though a bare `create` does.
+
+One gap remains, on the other side of the key: pointing **this** row at a partner who already has
+one — `Profile.update({ data: { user: { connect: { id } } } })` where that user's profile is taken —
+collides here and displaces in Prisma. Detach the incumbent first, or write the foreign key
 directly.
 
 **On a to-one, `disconnect` and `delete` take `true` or a filter — and `false` is a no-op rather

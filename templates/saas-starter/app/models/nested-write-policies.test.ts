@@ -1031,6 +1031,64 @@ describe("policies on nested writes", () => {
       expect(covers[0].caption).toBe("theirs");
       expect(covers[0].folderId).toBe(2);
     });
+
+    /**
+     * `connect` displaces the same way `create` does (#361) and through the
+     * same `clearLinks`, so it inherits the same rule — asserted rather than
+     * assumed, because the two reach it by different routes: `create` writes a
+     * new row and `connect` repoints an existing one, and only the clear is
+     * shared.
+     *
+     * Both halves in one test, because the pair is the point: the loose cover
+     * this caller *can* see takes the link and our incumbent is orphaned; run
+     * against a hidden incumbent instead, nothing is detached and the repoint
+     * collides with the row the caller was never shown.
+     */
+    test("connect displaces a visible incumbent and not a hidden one", async () => {
+      await seedFolder();
+      await raw.unsafe(
+        `INSERT INTO "Cover" ("id", "folderId", "caption", "orgId") ` +
+          `VALUES (53, 2, 'ours', 7), (54, NULL, 'loose', 7)`,
+      );
+
+      await Model.asUser(OURS, () =>
+        Folder.$exec("update", {
+          where: { id: 2 },
+          data: { cover: { connect: { id: 54 } } },
+        }),
+      );
+
+      let covers: any = await raw.unsafe(
+        `SELECT "id", "folderId" FROM "Cover" ORDER BY "id"`,
+      );
+      expect([...covers].map((cover: any) => [cover.id, cover.folderId])).toEqual([
+        [53, null],
+        [54, 2],
+      ]);
+
+      // Now the incumbent is the other tenant's. Same call, same loose row.
+      await raw.unsafe(`DELETE FROM "Cover"`);
+      await hiddenCover();
+      await raw.unsafe(
+        `INSERT INTO "Cover" ("id", "folderId", "caption", "orgId") ` +
+          `VALUES (55, NULL, 'loose', 7)`,
+      );
+
+      await expect(
+        Model.asUser(OURS, () =>
+          Folder.$exec("update", {
+            where: { id: 2 },
+            data: { cover: { connect: { id: 55 } } },
+          }),
+        ),
+      ).rejects.toThrow(UniqueConstraintError);
+
+      covers = await raw.unsafe(`SELECT "id", "folderId" FROM "Cover" ORDER BY "id"`);
+      expect([...covers].map((cover: any) => [cover.id, cover.folderId])).toEqual([
+        [50, 2],
+        [55, null],
+      ]);
+    });
   });
 
   /**

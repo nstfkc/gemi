@@ -881,6 +881,37 @@ function planForeignSide(
   out.keyFields.push(parentField);
 
   /**
+   * **Whether linking through this relation has to displace what is linked
+   * already** — the to-one case, where the child's key carries the `@unique`
+   * that makes the relation hold one row, so a second link is a collision
+   * rather than a second row.
+   *
+   * Prisma detaches the incumbent rather than deleting it, and it does so for
+   * some of the operands that link and not others. That split is not derivable
+   * — it is measured, on one fixture, and it is the reason `displaces` is
+   * consulted per operand rather than applied to "anything that links":
+   *
+   *     create                    displaces the incumbent, links the new row
+   *     connect                   displaces the incumbent, links the named row
+   *     connectOrCreate, hit      the same — it *is* a connect (#361)
+   *     connectOrCreate, miss     collides: P2002 on the child's key
+   *     upsert, create branch     collides: P2002 on the child's key
+   *
+   * So the two branches of one `connectOrCreate` answer differently, which is
+   * Prisma's asymmetry and not an embellishment: what displaces is *linking an
+   * existing row*, plus the bare `create` — and the create inside the two
+   * compound operands does not.
+   *
+   * Nullable, because a detach has to leave a value behind. A required child
+   * key cannot be nulled at all, so the insert or repoint collides as it always
+   * did, which is the only thing the schema permits. `assertDisconnectable` is
+   * deliberately not called here: it would refuse the whole operand, including
+   * the empty-to-one case that has always worked.
+   */
+  const displaces =
+    relation.kind !== "many" && child.fields[childField]?.nullable === true;
+
+  /**
    * **A to-one whose key is on the child**, which this function otherwise plans
    * as though the child were a list.
    *
@@ -1522,20 +1553,11 @@ function planForeignSide(
    * `UniqueConstraintError` rather than a silent detach of a row the caller
    * cannot see. Conservative in the direction this file always chooses.
    *
-   * Only on a to-one, and only where the key is nullable:
-   *
-   *   - a to-many displaces nothing, and clearing every child before a nested
-   *     `create` would be a `set: []` nobody asked for;
-   *   - a **required** child key has no value to leave behind, so there is no
-   *     detach to run — the insert collides, which is what happens today and
-   *     the only thing the schema permits. `assertDisconnectable` is not
-   *     reached here for the same reason: it would refuse the whole `create`,
-   *     including the empty-to-one case that works.
+   * A to-many displaces nothing — clearing every child before a nested `create`
+   * would be a `set: []` nobody asked for — which is half of what `displaces`
+   * decides; see it for the other half and for which operands share this.
    */
   if (key === "create") {
-    const displaces =
-      relation.kind !== "many" && child.fields[childField]?.nullable === true;
-
     out.after.push({
       relation: relation.name,
       operation: "create",
@@ -1703,6 +1725,16 @@ function planForeignSide(
           )) as Record<string, unknown> | null;
 
           if (found) {
+            // The hit branch **is** a connect, so it displaces what is linked
+            // exactly as the bare operand does (#361) — and the miss branch
+            // below does not, which is Prisma's own split rather than a
+            // shortcut here. Measured on one fixture: `connectOrCreate` hitting
+            // a row orphans the incumbent and takes the link, while the same
+            // call missing collides on the child's unique key. See `displaces`.
+            if (displaces) {
+              await clearLinks(relation, childField, parent[parentField], executor);
+            }
+
             await executor.exec(
               relation.model,
               "update",
@@ -1748,12 +1780,42 @@ function planForeignSide(
   // table the foreign key is on (#110).
   assertNamedRows(schema, relation, child, operand, key, operation);
 
+  /**
+   * **On a to-one this repoint has to displace what is linked already** (#361),
+   * the same way the nested `create` beside it does and through the same
+   * `clearLinks`. Without it the child's `@unique` foreign key rejects the
+   * second link, so `connect` was a `UniqueConstraintError` on a call Prisma
+   * answers by orphaning the incumbent.
+   *
+   * Measured across the four shapes, because only one of them diverged and the
+   * other three are what kept it hidden:
+   *
+   *     connect onto an empty to-one          attaches           agreed already
+   *     connect a child of another parent     repoints it        agreed already
+   *     connect the row already linked here   no net change      agreed already
+   *     connect onto an occupied to-one       displaces          the divergence
+   *
+   * The third is worth its own line, because the clear and the link cross on
+   * it: `clearLinks` nulls the very row the caller named, and the update below
+   * puts the key straight back. One statement wasted on a call that changes
+   * nothing, and the alternative — excluding the named row from the clear —
+   * would need the caller's key resolved against the child before the clear can
+   * be written, which is a lookup on every `connect` to save one on a rare one.
+   *
+   * **A miss detaches nothing**, which is Prisma's answer (P2025, nothing
+   * written) and is not a special case here: the `update` below raises, and the
+   * clear is inside the transaction the nested steps already run in.
+   */
   out.after.push({
     relation: relation.name,
     operation: "connect",
     async run(args, _context, executor, rows) {
       const parent = rows[0];
       if (!parent) return;
+
+      if (displaces) {
+        await clearLinks(relation, childField, parent[parentField], executor);
+      }
 
       for (const item of listOf(at(args))) {
         await executor.exec(

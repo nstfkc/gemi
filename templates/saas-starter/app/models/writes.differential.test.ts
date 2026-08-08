@@ -674,12 +674,13 @@ const CASES: Case[] = [
   ["M11b to-one create under a create has nothing to displace", "create", {
     data: { email: "fresh@example.dev", profile: { create: { bio: "first" } } },
   }, ["User", "Profile"]],
-  // And the neighbours that do **not** displace, measured rather than assumed
-  // symmetric: Prisma's own `connectOrCreate` and `upsert` collide on the
-  // child's unique foreign key where `create` detaches. So the displacement
-  // belongs to the operand, not to the shape of the relation, and these pin
-  // that both clients raise `unique` rather than quietly detaching.
-  ["M11c to-one connectOrCreate onto an occupied link collides", "update", {
+  // And the neighbours that do **not** displace. Measured rather than assumed
+  // symmetric, and the asymmetry is worth stating because it is not derivable:
+  // the *create branch* of `connectOrCreate` and of `upsert` collides on the
+  // child's unique foreign key, where the bare `create` above detaches. So what
+  // displaces is the bare `create` and anything that **links an existing row**
+  // (M12 below) — not "every operand that ends with a child pointing here".
+  ["M11c to-one connectOrCreate whose where misses collides", "update", {
     where: { id: 1 },
     data: {
       profile: {
@@ -695,8 +696,39 @@ const CASES: Case[] = [
       },
     },
   }, ["User", "Profile"]],
-  // `connect` onto an *occupied* to-one is a **divergence**, not agreement, so
-  // it is not here — see the "still disagree" describe below.
+
+  // M12 — `connect` onto a to-one that **already has a child** (#361), the
+  // neighbour of M11 and the same displacement. Four shapes, and only this one
+  // ever diverged: the three above it — an empty to-one, a steal from another
+  // parent, and the row already linked here — agreed before the fix and are
+  // what kept it hidden.
+  ["M12 to-one connect displaces the incumbent, orphaning it", "update", {
+    where: { id: 1 }, data: { profile: { connect: { id: 2 } } },
+  }, ["User", "Profile"]],
+  // The clear and the link cross on this one: `clearLinks` nulls the very row
+  // the caller named and the repoint puts the key straight back. Net nothing,
+  // which is Prisma's answer, and the case that would catch a clear scoped to
+  // the wrong rows.
+  ["M12b to-one connect of the row already linked changes nothing", "update", {
+    where: { id: 1 }, data: { profile: { connect: { id: 1 } } },
+  }, ["User", "Profile"]],
+  // A miss detaches nothing — the repoint raises and takes the clear down with
+  // it. `notFound` on both sides, so a gemi refusal could not pass for it.
+  ["M12c to-one connect naming no row raises and displaces nothing", "update", {
+    where: { id: 1 }, data: { profile: { connect: { id: 99 } } },
+  }, ["User", "Profile"]],
+  // ...and `connectOrCreate`'s *hit* branch is a connect, so it displaces where
+  // its miss branch (M11c) collides. Both branches of one operand, answering
+  // differently, which is why `displaces` is consulted per branch rather than
+  // per operand.
+  ["M12d to-one connectOrCreate hitting a row displaces the incumbent", "update", {
+    where: { id: 1 },
+    data: {
+      profile: {
+        connectOrCreate: { where: { id: 2 }, create: { bio: "unused" } },
+      },
+    },
+  }, ["User", "Profile"]],
 ];
 
 /**
@@ -2576,54 +2608,57 @@ function suite(label: string, url?: string) {
       });
 
       /**
-       * **BUG (#361) — `connect` onto a to-one that already has a child.**
+       * **BUG (#363) — the owning side linking into an occupied to-one.**
        *
-       * The neighbour of #360, found while fixing it and left for its own
-       * change rather than folded in. Prisma **detaches** the incumbent and
-       * links the named row — the same displacement `create` does, measured the
-       * same way:
+       * The mirror of #361, which this PR fixed, and it is a different piece of
+       * work rather than the same one twice. #361 clears rows of the **child**
+       * model, which `clearLinks` does through the child's own operations. Here
+       * the collision is between two rows of the model being written: pointing
+       * profile 1 at user 2 collides with the profile user 2 already has, and
+       * nothing in `planOwningSide` writes a sibling row.
        *
-       *     user 1 already holds profile 1, and connects profile 2
-       *       prisma  ->  ("seed", null)  the incumbent, orphaned
-       *                   ("loose", 1)    the named row takes the link
+       *     profile 1 -> user 1, and user 2 already holds profile 2
+       *       prisma  ->  (1, "seed",  2)     the row written takes the link
+       *                   (2, "loose", null)  user 2's old profile, orphaned
        *       gemi    ->  UniqueConstraintError on Profile.userId
        *
-       * `CASES` already covers the two neighbouring shapes and they agree: an
-       * *empty* to-one connecting a loose child, and one stealing a child from
-       * another parent. Only the occupied case diverges, which is why nothing
-       * pointed at it.
+       * `connectOrCreate` hitting an existing row does the same; its *miss*
+       * branch creates the far row and so has nothing to displace.
        *
-       * Not fixed here on purpose. `create`'s displacement is #360's, measured
-       * and asked for; carrying an unfiled operand along with it would put a
-       * second behaviour change into a PR whose title names one.
+       * The seed has no profile on user 2 — every other case in this file wants
+       * the opposite — so this one arranges it, which is also why it is not in
+       * `OWNING_CASES`.
        */
-      test("connect onto an occupied to-one collides here and detaches in Prisma", async () => {
-        const args = {
-          where: { id: 1 },
-          data: { profile: { connect: { id: 2 } } },
-        };
+      test("the owning side collides linking into an occupied to-one", async () => {
+        const args = { where: { id: 1 }, data: { user: { connect: { id: 2 } } } };
+        const occupy = () =>
+          differential.prisma.profile.update({
+            where: { id: 2 },
+            data: { userId: 2 },
+          });
+        const profiles = async () =>
+          (
+            await differential.prisma.profile.findMany({ orderBy: { id: "asc" } })
+          ).map((row) => [row.bio, row.userId]);
 
         await differential.reset();
-        await differential.prisma.user.update(args);
-        const afterPrisma = await differential.prisma.profile.findMany({
-          orderBy: { id: "asc" },
-        });
-        expect(afterPrisma.map((row) => [row.bio, row.userId])).toEqual([
-          ["seed", null],
-          ["loose", 1],
+        await occupy();
+        await differential.prisma.profile.update(args as never);
+        expect(await profiles()).toEqual([
+          ["seed", 2],
+          // Detached, not deleted — the half a fix here would have to get right.
+          ["loose", null],
         ]);
 
         await differential.reset();
-        await expect(UserModel.update(args)).rejects.toBeInstanceOf(
+        await occupy();
+        await expect(ProfileModel.update(args as never)).rejects.toBeInstanceOf(
           UniqueConstraintError,
         );
-        // And nothing moved: the failed update rolls back with the statement.
-        const afterGemi = await differential.prisma.profile.findMany({
-          orderBy: { id: "asc" },
-        });
-        expect(afterGemi.map((row) => [row.bio, row.userId])).toEqual([
+        // And nothing moved: the failed statement takes nothing with it.
+        expect(await profiles()).toEqual([
           ["seed", 1],
-          ["loose", null],
+          ["loose", 2],
         ]);
       });
     });
