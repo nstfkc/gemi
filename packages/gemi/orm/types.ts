@@ -379,11 +379,131 @@ type ListFilter<E> = {
  * `{ [key: string]: JsonValue }`, and `{ equals: null }` is itself a valid JSON
  * object. Prisma has the same gap. Stated rather than papered over: a comment
  * claiming the type rejects it would be read as a guarantee.
+ *
+ * **This is the filter on the *column*, which is why `path` is excluded.** A
+ * `path` sends the whole operand to `compileJsonFilter`, where the sentinels are
+ * refused — `#>>` cannot tell an absent key from a JSON `null`. Without the
+ * `path?: never`, `{ path: […], equals: DbNull }` landed here instead of on
+ * `JsonPathFilter`, because a union ignores a property one member declares and
+ * excess-property checking counts it known if *any* member has it.
  */
 type JsonFilter = {
+  path?: never;
   equals?: JsonValue | DbNullValue | JsonNullValue | AnyNullValue;
   not?: JsonValue | DbNullValue | JsonNullValue | AnyNullValue;
 };
+
+/**
+ * `JsonValue`'s object member, named so that `JsonValueOperand` can subtract it
+ * from the union and put it back with one property forbidden.
+ */
+type JsonObject = { [key: string]: JsonValue };
+
+/**
+ * Where inside the document to look — and it is **one union covering two
+ * dialects**, which each refuse the other's half at runtime.
+ *
+ * Postgres takes `["a", "b"]` and refuses a string; SQLite takes `"$.a.b"` and
+ * refuses an array. That is Prisma's own split, measured on both through a
+ * generated client, and `assertPathShape` reproduces it with a message naming
+ * which form *this* database wants.
+ *
+ * **Typed flat rather than per-dialect, deliberately.** The generated artifact
+ * is dialect-agnostic — `ModelTypeInfo` records no dialect, and the dialect is
+ * chosen from `DATABASE_URL` at connect time — so there is nothing for a
+ * dialect-shaped type to read, and shaping it would mean threading a parameter
+ * the generator does not know through every model, every `WhereInput` and every
+ * call site. It is also how this file already handles the same divergence
+ * elsewhere: `mode: "insensitive"` is Postgres-only and is a flat property with
+ * a comment, and `ListFilter` is offered on both dialects though SQLite has no
+ * array type to answer it with. The dialect refusal stays where it can name the
+ * dialect and say "it works on postgres".
+ *
+ * Numbers are in because `assertPathShape` accepts them — a JSON array index is
+ * how you reach into a list — where Prisma's generated `path` is `string[]`.
+ * The type describes this compiler, not that one.
+ */
+type JsonPath = string | (string | number)[];
+
+/**
+ * A scalar a JSON path filter can be compared against.
+ *
+ * `assertJsonOperand`'s rule: `equals`, `not` and the four comparisons compile
+ * to one bound value against one extracted value, so an object or array operand
+ * "would bind as '[object Object]' and match nothing" and is refused. That is a
+ * refusal rather than a gap — answering it properly needs the `#> … ::jsonb`
+ * form, which is Postgres-only — so the type says the same thing rather than
+ * offering a query only one dialect could answer.
+ *
+ * **The sentinels are absent, and their absence is the point.** `DbNull`,
+ * `JsonNull` and `AnyNull` are refused at a path by `compileJsonFilter`, because
+ * `#>>` yields SQL NULL for an absent key and for a JSON `null` alike — the
+ * distinction the sentinels exist to draw is gone before the comparison
+ * happens. They stay on `JsonFilter`, which compiles against the column, where
+ * the distinction survives.
+ */
+type JsonPathScalar = string | number | boolean | null;
+
+/**
+ * `where: { metadata: { path: …, equals: … } }` — a filter on a value *inside*
+ * the document rather than on the column.
+ *
+ * The operator set is `JSON_FILTERS` in `compile/where.ts`, all ten of them, and
+ * the operand types are `assertJsonOperand`'s. `array_contains` is the one that
+ * takes a document, because containment is the operator that means one.
+ *
+ * **`path` is required, and that is what makes the union above discriminate.**
+ * `compileFieldFilter` dispatches on `filter.path !== undefined`: an operand
+ * carrying a `path` *is* a path filter to the compiler, whatever else is in it.
+ * So a JSON document that happens to have a top-level `path` key cannot be
+ * written as the bare-value shorthand — it never could, the compiler always read
+ * it as a path filter — and `{ equals: { path: … } }` is the spelling that
+ * means the document.
+ *
+ * Every operator is optional, so `{ path: ["a"] }` alone still type-checks and
+ * still raises Prisma's *"A JSON path cannot be set without a scalar filter."*
+ * Requiring one would mean a ten-way union in the position where the compiler
+ * reports a misspelled operator, and the runtime message already names the whole
+ * set. Prisma's generated input has the same shape for the same reason.
+ */
+type JsonPathFilter = {
+  path: JsonPath;
+  equals?: JsonPathScalar;
+  not?: JsonPathScalar;
+  string_contains?: string;
+  string_starts_with?: string;
+  string_ends_with?: string;
+  array_contains?: JsonValue;
+  lt?: JsonPathScalar;
+  lte?: JsonPathScalar;
+  gt?: JsonPathScalar;
+  gte?: JsonPathScalar;
+};
+
+/**
+ * The bare-value half of a `Json` column's filter, **with `path` excluded** —
+ * and that exclusion is the whole fix for #336, not the operators.
+ *
+ * `JsonValue` contains `{ [key: string]: JsonValue }`, so before this any object
+ * literal at all satisfied the value arm as an `equals` shorthand, a union
+ * permits a property present in any member, and excess-property checking never
+ * fired. Adding `path` and the operators to a sibling arm does nothing on its
+ * own: `{ path: 123, notAFilter: true }` is a perfectly good JSON *document* and
+ * would go on compiling. The union has to stop being able to absorb it.
+ *
+ * `path?: never` on the object arm is what does that. It makes `path` a
+ * discriminant, so an operand carrying one is matched against `JsonPathFilter`
+ * alone and is then checked — operand types, and excess properties, which the
+ * index signature had been suppressing for the whole union.
+ *
+ * Written as an intersection rather than a property of the object type on
+ * purpose: a declared `path?: never` beside a `[key: string]: JsonValue` is an
+ * error, because `undefined` is not a `JsonValue`. The intersection is checked
+ * member by member and has no such conflict.
+ */
+type JsonValueOperand =
+  | Exclude<JsonValue, JsonObject>
+  | (JsonObject & { path?: never });
 
 /**
  * A filter on one column.
@@ -399,7 +519,12 @@ type JsonFilter = {
  */
 export type FieldFilter<V> =
   IsJson<V> extends true
-    ? JsonValue | DbNullValue | JsonNullValue | JsonFilter
+    ?
+        | JsonValueOperand
+        | DbNullValue
+        | JsonNullValue
+        | JsonFilter
+        | JsonPathFilter
     : [NonNullable<V>] extends [Array<infer E>]
       ? E[] | ListFilter<E>
       : V | NestedFilter<V>;

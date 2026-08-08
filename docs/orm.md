@@ -752,6 +752,19 @@ merely unsupported:
 An empty path — `[]` or `""` — is refused on both dialects. On Postgres it would extract the whole
 document, which is a filter on the column rather than on a path.
 
+**What the type checks, and what it leaves to run time.** The path filter is typed: `path` takes
+either dialect's grammar, the ten operators are the ones above, and their operand types are the
+ones the compiler will compile. A misspelled operator, a `path` that is not one, a non-string under
+`string_contains` and a sentinel at a path are all compile errors. The type carries no dialect —
+the generated artifact does not know which database it will be pointed at — so the table above is
+offered in full on both and the wrong half is refused at run time, naming the dialect. The empty
+path is refused at run time too.
+
+One consequence worth naming: a JSON document with a **top-level `path` key** cannot be written as
+the bare-value shorthand, because `path` is what tells the compiler the operand is a path filter.
+It never could — `{ metadata: { path: "/a" } }` reached the path compiler and raised — and now says
+so at compile time. Write the document explicitly: `{ metadata: { equals: { path: "/a" } } }`.
+
 ### Scalar lists (Postgres only)
 
 ```ts
