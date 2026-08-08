@@ -286,11 +286,19 @@ describe("plan cache discrimination — writes", () => {
    *
    * **Nothing above could catch it**, and that is worth stating precisely
    * because it is what a reader will assume was covered. `plan-key.invariants`
-   * asserts *same key ⇒ same SQL text*, and these two have byte-identical text
-   * — the difference is in which value a `contribution` binds and in whether a
-   * step runs at all. The `DISTINCT` table cannot hold them either: the pair
-   * only exists as a pair, and `disconnect: false` **throws** when it is
-   * compiled, so a table that compiles every entry cannot include it.
+   * asserts *same key ⇒ same SQL text*, and at the time these two had
+   * byte-identical text — the difference was in which value a `contribution`
+   * binds and in whether a step runs at all.
+   *
+   * **The texts have since diverged, and the pin below moved onto them**: #359
+   * implemented `disconnect: false` as the no-op Prisma answers, so it now
+   * contributes no assignment and the statement degenerates to the read
+   * `compileUpdate` emits for an empty `data`. That is a stronger check than
+   * the refusal it replaces, which only ever proved that the compiler had run
+   * again. The hazard is unchanged: the boolean is decided *once*, when the
+   * plan is built, because it decides the SET list — so unlike the foreign
+   * side, where `toOneOperand` re-reads it at bind time, there is no second
+   * guard here and the key is the whole of it.
    *
    * Measured against the real client, so the two ends are pinned rather than
    * assumed: `disconnect: false` with a child present leaves the row untouched,
@@ -313,15 +321,45 @@ describe("plan cache discrimination — writes", () => {
       expect(new Set([on, off, absent]).size).toBe(3);
     });
 
-    // The bug itself: warm the cache with the accepted spelling, then ask for
-    // the one the compiler refuses. Before the guard this returned the cached
-    // plan and wrote a null; now it recompiles and the refusal fires, which is
-    // the answer the first call would have got.
+    // The bug itself: warm the cache with one spelling, then ask for the other
+    // and read what came back. Before the guard this was the *same plan* — the
+    // one that nulls the foreign key — for a call that asked for nothing.
     test("a warm 'true' plan does not serve 'false' on the owning side", () => {
-      expect(() => getOrCompile(user, "update", owning(true), sqlite)).not.toThrow();
-      expect(() => getOrCompile(user, "update", owning(false), sqlite)).toThrow(
-        /only 'disconnect: true' is implemented/,
+      const on = getOrCompile(user, "update", owning(true), sqlite).text;
+      const off = getOrCompile(user, "update", owning(false), sqlite).text;
+
+      // `true` assigns the key; `false` assigns nothing, so there is no update
+      // left to emit and the plan reads the row back instead — which is what
+      // Prisma returns for it.
+      expect(on).toMatch(/^update .* set .*"organizationId" = /);
+      expect(off).toMatch(/^select /);
+      expect(off).not.toContain("set");
+    });
+
+    // The filter arm shares its statement with `true` — one assignment, whose
+    // value the `before` step decides — so what keeps *it* off `true`'s entry
+    // is the operand's structure rather than the boolean guard. Two filters
+    // differing only in their values are one plan, as every other filter is.
+    test("a filter is its own plan, and two filters are one", () => {
+      const filter = (name: string) => ({
+        where: { id: 1 },
+        data: { organization: { disconnect: { name } } },
+      });
+
+      expect(planKey(sqlite, "User", "update", filter("Acme"))).toBe(
+        planKey(sqlite, "User", "update", filter("Globex")),
       );
+      expect(planKey(sqlite, "User", "update", filter("Acme"))).not.toBe(
+        planKey(sqlite, "User", "update", owning(true)),
+      );
+      // ...and the empty filter is neither, though it means what `true` means:
+      // it reaches that meaning through a step, so it may not share the plan.
+      expect(
+        planKey(sqlite, "User", "update", {
+          where: { id: 1 },
+          data: { organization: { disconnect: {} } },
+        }),
+      ).not.toBe(planKey(sqlite, "User", "update", owning(true)));
     });
 
     /**

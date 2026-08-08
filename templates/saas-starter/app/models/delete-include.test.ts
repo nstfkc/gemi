@@ -255,6 +255,62 @@ function suite(label: string, resolve: () => string, ddl: string[]) {
       expect(deleted.children[0]).toEqual({ label: expect.any(String) });
     });
 
+    /**
+     * `omit` beside the `include`, which is the pair the read-first path used to
+     * lose.
+     *
+     * Prisma rejects `select` + `omit` — they describe two different column
+     * lists — but accepts `include` + `omit`, and so does the compiler here:
+     * `delete`'s operand set names all four, and a `delete` with no relation
+     * compiles the `omit` into its `RETURNING` through `resolveSelection` like
+     * any other projection.
+     *
+     * The read-first path did not. It rebuilt the pre-read's projection from
+     * `select` or `include` alone and returned that row verbatim, so adding an
+     * `include` to a call that already omitted a column silently handed the
+     * column back. The column a caller omits is the one it had a reason to hide
+     * — a password hash, in the application that found this — so the failure
+     * mode is a leak, not a shape mismatch.
+     */
+    test("an omit beside the include still drops the column", async () => {
+      const parent = await only();
+
+      const deleted: any = await Model.asSystem(() =>
+        Parent.$exec("delete", {
+          where: { id: parent.id },
+          include: { children: true },
+          omit: { name: true },
+        }),
+      );
+
+      expect(deleted).not.toHaveProperty("name");
+      expect(deleted.id).toBe(parent.id);
+      expect(deleted.children.map((child: any) => child.label).sort()).toEqual([
+        "a",
+        "b",
+      ]);
+    });
+
+    /**
+     * A `_count` on its own takes the same path by the other half of the
+     * condition — `plan.counts` rather than `plan.relations` — so it has to
+     * carry the `omit` too.
+     */
+    test("an omit beside a _count still drops the column", async () => {
+      const parent = await only();
+
+      const deleted: any = await Model.asSystem(() =>
+        Parent.$exec("delete", {
+          where: { id: parent.id },
+          include: { _count: { select: { children: true } } },
+          omit: { name: true },
+        }),
+      );
+
+      expect(deleted).not.toHaveProperty("name");
+      expect(deleted._count).toEqual({ children: 2 });
+    });
+
     /** No relation asked for: still one statement, still no transaction. */
     test("a plain delete is unchanged", async () => {
       const parent = await only();
