@@ -103,6 +103,20 @@ export function auditModelRegistrations(
       const model = asModelClass(exported);
       if (model === null) continue;
 
+      // Resolved **before** the early return below, and that ordering is the
+      // whole of #321's coverage. `policiesFor` is what refuses a malformed
+      // `$policies` entry — a factory nobody called, or an entry whose only key
+      // is a typo of a hook — and this walk is the one place every model class
+      // an application declares passes through. Left below the return, the two
+      // commonest arrangements were never checked at all: a class that already
+      // owns its name, and one whose name nothing else claims. Both boot, and
+      // both read unscoped.
+      //
+      // It costs one prototype walk per exported class per boot, against a
+      // silent authorization hole. `registerModels` and `gemi check models` are
+      // both callers, so one placement covers both.
+      const ours = policiesFor(model);
+
       const name = model.$schema.name;
       const registered = registry.has(name)
         ? (registry.get<unknown>(name) as object)
@@ -114,7 +128,6 @@ export function auditModelRegistrations(
       // `ModelNotRegisteredError`. Not this function's business.
       if (registered === undefined || registered === model) continue;
 
-      const ours = policiesFor(model);
       const theirs = policiesFor(registered);
       const diverges =
         ours.length !== theirs.length ||

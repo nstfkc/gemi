@@ -498,6 +498,110 @@ export class UnregisteredPolicyClassError extends Error {
 }
 
 /**
+ * Thrown when a `$policies` array holds something that is not a usable policy.
+ *
+ * Every case it covers is refused today — by `tsc`, at the class declaration,
+ * with `TS2417`, because `Model` declares `static $policies?: readonly
+ * PolicyEntry[]` and `ModelPolicy`'s members are all optional, so a typo'd key
+ * trips weak-type detection. This is therefore a guard on the paths that import
+ * user code *without* having type-checked it: `registerModels` at boot, and
+ * `gemi check models`, whose whole job is to find mistakes in a file somebody is
+ * still writing.
+ *
+ * Two failures, and the second is the one that matters.
+ *
+ * **A function that cannot be constructed.** `resolveEntry` instantiates every
+ * function entry with no arguments, so a factory nobody called — `softDeletes`
+ * rather than `softDeletes({ field })` — used to reach `new entry` and produce a
+ * bare `TypeError: function is not a constructor`. Loud, and it named neither
+ * the model nor the index nor the file, which on a 79-model app leaves the first
+ * question unanswered.
+ *
+ * **An entry with no recognised hook.** `{ scopes: … }` and
+ * `{ default: { scope: … } }` were accepted in silence: `applyPolicies`
+ * dispatches on `before` / `scope` / `onCreate` / `onUpdate` and
+ * `applyRedaction` on `redact`, so an entry spelling none of them contributes
+ * nothing. The model then carries a visible `$policies` array, passes
+ * `gemi check models` as correctly registered, and **reads unscoped** — the same
+ * written-believed-not-in-effect shape `UnregisteredPolicyClassError` exists
+ * for, arriving through a typo instead of through the registry.
+ *
+ * The line between *empty but valid* and *malformed* is drawn at "would this
+ * ever run": an entry with at least one recognised hook that is callable is
+ * accepted whatever else it carries, because a factory's return value and a
+ * policy class routinely hold configuration and helpers beside the hooks, and
+ * refusing unknown *extra* keys would reject code that works. An entry with no
+ * callable hook at all is refused, `{}` included — it is indistinguishable from
+ * a policy that was meant to do something, and a conditional policy belongs in
+ * the array rather than in the entry.
+ */
+export class InvalidPolicyEntryError extends Error {
+  constructor(
+    /**
+     * The class whose **own** `$policies` array holds the entry — the class the
+     * author wrote the array on, which is not necessarily the model being
+     * queried when the array is on a base.
+     */
+    public readonly model: string,
+    /** The entry's index in that array. */
+    public readonly index: number,
+    public readonly reason:
+      | "not-a-policy"
+      | "not-constructable"
+      | "no-hooks"
+      | "hook-not-callable",
+    /** What was found in the entry's place, rendered for a human. */
+    public readonly found: string,
+    /**
+     * The hook names the runtime dispatches on, supplied by `policy.ts` so the
+     * list lives beside the code that reads it rather than being restated here.
+     */
+    hooks: readonly string[],
+    /**
+     * The nearest recognised hook to something the entry actually spells, when
+     * one is close enough to be worth naming.
+     */
+    public readonly suggestion?: string,
+  ) {
+    const where = `${model}.$policies[${index}]`;
+    const named =
+      hooks.length > 1
+        ? `${hooks.slice(0, -1).join(", ")} or ${hooks[hooks.length - 1]}`
+        : (hooks[0] ?? "");
+
+    super(
+      reason === "not-a-policy"
+        ? `${where} is ${found}, which is not a policy. An entry is either a ` +
+            `policy object — { scope, onCreate, … } — or a class the ORM ` +
+            `constructs with no arguments.\n\n` +
+            `A policy that only sometimes applies belongs in the array rather ` +
+            `than in the entry:\n\n` +
+            `    static $policies = [...(multiTenant ? [tenantScope] : [])]\n`
+        : reason === "not-constructable"
+          ? `${where} is ${found}, and a function entry is instantiated with ` +
+            `no arguments — so an arrow function, a plain function, or a ` +
+            `factory that was never called cannot be one.\n\n` +
+            `If it is a factory, call it:\n\n` +
+            `    static $policies = [softDeletes({ field: "deletedAt" })]\n\n` +
+            `If it is a class whose constructor takes arguments, construct ` +
+            `it yourself and put the instance in the array.\n`
+          : reason === "hook-not-callable"
+            ? `${where} has a ${found}, and every hook is called — so this ` +
+              `would throw on the first query that reached it rather than ` +
+              `doing whatever it was meant to do. Give it a function, or ` +
+              `leave the key out.\n`
+            : `${where} has none of ${named}, so it would never run. The ` +
+              `model carries a visible $policies array and nothing in it ` +
+              `applies to any query — which for a scope means the model ` +
+              `reads unscoped. ${found}` +
+              (suggestion ? ` Did you mean \`${suggestion}\`?` : "") +
+              `\n`,
+    );
+    this.name = "InvalidPolicyEntryError";
+  }
+}
+
+/**
  * Thrown when `registerModels` finds two unrelated classes in one module both
  * claiming the same model name.
  *

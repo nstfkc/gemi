@@ -700,3 +700,66 @@ describe("the printed report", () => {
     ).toContain("2 model classes are not registered");
   });
 });
+/**
+ * A `$policies` entry the ORM cannot use at all — #321, seen from the command
+ * this issue was found with.
+ *
+ * The audit reports divergences as values and *throws* for an entry that could
+ * never run, because there is no ranked finding to make of one: the file's
+ * answer does not exist. `InvalidPolicyEntryError` names the class and the
+ * index; only this walk knows the file, which was the third of the three things
+ * the original bare `TypeError` failed to answer on a 79-model app.
+ */
+describe("a file whose $policies cannot run", () => {
+  test("stops the run and names the file, the class and the index", () => {
+    class ScopedAccount extends UserBase {
+      static $policies = [() => ({ scope: () => ({ id: 0 }) })] as any;
+    }
+
+    orm.registerModels({ UserBase });
+
+    let thrown: unknown;
+    try {
+      auditModules(orm, [module({ ScopedAccount })], snapshotRegistry(orm));
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(CheckModelsError);
+    expect((thrown as Error).message).toContain("app/models/x.ts");
+    expect((thrown as Error).message).toContain("ScopedAccount.$policies[0]");
+    expect((thrown as Error).cause).toBeInstanceOf(orm.InvalidPolicyEntryError);
+  });
+
+  test("a typo'd hook is refused here too, rather than passing green", () => {
+    class ScopedAccount extends UserBase {
+      static $policies = [{ scopes: () => ({ organizationId: 7 }) }] as any;
+    }
+
+    orm.registerModels({ UserBase });
+
+    expect(() =>
+      auditModules(orm, [module({ ScopedAccount })], snapshotRegistry(orm)),
+    ).toThrow(/Did you mean `scope`\?/);
+  });
+
+  /**
+   * The registry is process-wide and the walk clears it per file, so a throw
+   * that skipped the final restore would leave whatever the failing file's
+   * import happened to register — for a test, or a dev server, to read next.
+   */
+  test("the baseline registry is restored even though it threw", () => {
+    class ScopedAccount extends UserBase {
+      static $policies = [{}] as any;
+    }
+
+    orm.registerModels({ UserBase });
+    const baseline = snapshotRegistry(orm);
+
+    expect(() =>
+      auditModules(orm, [module({ ScopedAccount })], baseline),
+    ).toThrow(CheckModelsError);
+
+    expect(snapshotRegistry(orm)).toEqual(baseline);
+  });
+});

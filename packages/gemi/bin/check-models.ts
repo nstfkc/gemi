@@ -213,41 +213,82 @@ export function auditModules(
 
   const findings: Finding[] = [];
 
-  for (const file of files) {
-    restore();
+  // `try`/`finally`, because `auditOne` throws for a file whose `$policies` the
+  // ORM cannot use at all. The registry is process-wide, so leaving it as that
+  // file happened to leave it would hand the next caller — a test, or a dev
+  // server that keeps going — an arrangement nobody chose.
+  try {
+    for (const file of files) {
+      restore();
 
-    for (const problem of orm.auditModelRegistrations(file.module)) {
-      // Only `queried` — "this class carries policies the registered one does
-      // not" — is this command's business. The other two are shapes it would be
-      // wrong to report:
-      //
-      //   `narrowing` is a policied view, which `registerModels` refuses
-      //   *because* registering it would apply its scope to every nested read,
-      //   and whose error tells the author to keep it out of the declared
-      //   modules. Being absent from them is what following that advice looks
-      //   like.
-      //
-      //   `registered` is the mirror image: an *unpolicied* class claiming a
-      //   name the registered class carries policies for. That contradicts this
-      //   command's own rule about unpolicied classes, and its message is
-      //   written for a call site — "query the registered one instead" — under
-      //   which the export line printed below would land two unrelated classes
-      //   in one namespace and turn a working boot into
-      //   `AmbiguousModelRegistrationError`.
-      if (problem.carries !== "queried") continue;
+      for (const problem of auditOne(orm, file)) {
+        // Only `queried` — "this class carries policies the registered one does
+        // not" — is this command's business. The other two are shapes it would
+        // be wrong to report:
+        //
+        //   `narrowing` is a policied view, which `registerModels` refuses
+        //   *because* registering it would apply its scope to every nested
+        //   read, and whose error tells the author to keep it out of the
+        //   declared modules. Being absent from them is what following that
+        //   advice looks like.
+        //
+        //   `registered` is the mirror image: an *unpolicied* class claiming a
+        //   name the registered class carries policies for. That contradicts
+        //   this command's own rule about unpolicied classes, and its message
+        //   is written for a call site — "query the registered one instead" —
+        //   under which the export line printed below would land two unrelated
+        //   classes in one namespace and turn a working boot into
+        //   `AmbiguousModelRegistrationError`.
+        if (problem.carries !== "queried") continue;
 
-      findings.push({
-        file: file.label,
-        specifier: file.specifier,
-        className: problem.queried,
-        message: problem.message,
-      });
+        findings.push({
+          file: file.label,
+          specifier: file.specifier,
+          className: problem.queried,
+          message: problem.message,
+        });
+      }
     }
+  } finally {
+    restore();
   }
 
-  restore();
-
   return findings;
+}
+
+/**
+ * One file's audit, with the file's name attached to anything it raises.
+ *
+ * `auditModelRegistrations` reports divergences as *values*, and separately
+ * refuses a model whose `$policies` cannot run at all — a factory nobody called,
+ * an entry whose only key is a typo of a hook. That refusal is a throw, and it
+ * has to be: an entry the runtime cannot use is not a finding to rank against
+ * others, it is a reason the audit's answer for that file does not exist.
+ *
+ * The error names the class and the index (#321). What it cannot know is the
+ * file, because it is raised inside the ORM, from a class object — and "which
+ * file" is the third of the three things the original bare `TypeError` failed to
+ * answer on a 79-model app. This walk is the one place that knows, so it says
+ * so, and keeps the original as `cause`.
+ *
+ * Deliberately catches everything rather than testing for a class: the ORM is
+ * resolved from the project being checked, so `instanceof` against a class
+ * imported here compares across two copies of the module and is false exactly
+ * when it matters — the reason `isUniqueConstraintError` exists in the first
+ * place. Whatever the reason, a file that could not be audited is worth naming.
+ */
+function auditOne(
+  orm: OrmSurface,
+  file: { label: string; module: Record<string, unknown> },
+): UnregisteredPolicyClassError[] {
+  try {
+    return orm.auditModelRegistrations(file.module);
+  } catch (error) {
+    throw new CheckModelsError(
+      `${file.label} could not be checked:\n    ${(error as Error).message}`,
+      { cause: error },
+    );
+  }
 }
 
 /** A condition that makes the check meaningless, phrased for the terminal. */

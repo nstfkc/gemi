@@ -1,11 +1,13 @@
 import { describe, expect, test } from "vitest";
 
 import {
+  InvalidPolicyEntryError,
   PolicyDeniedError,
   ScopeEscapeError,
   UnsupportedQueryError,
 } from "./errors";
 import { organization, user } from "./fixtures";
+import { softDeletes } from "./soft-deletes";
 import {
   applyNestedPolicies,
   applyPolicies,
@@ -1519,5 +1521,287 @@ describe("the old $policy name", () => {
     }
 
     expect(() => policiesFor(Derived)).toThrow(/\$policies/);
+  });
+});
+
+/**
+ * A `$policies` entry that could never do what it was written to do — #321.
+ *
+ * Two failures with one cause, and the file had nothing about either, which is
+ * how both survived: every test above hands `policiesFor` a well-formed entry.
+ *
+ * **A function that is not constructable** used to reach `new entry` and die
+ * with `TypeError: function is not a constructor`, naming neither the class nor
+ * the index nor the file. It is the boot path as well as the CLI's, because
+ * `registerModels` resolves policies to run its audit.
+ *
+ * **An entry with no recognised hook** used to register in silence. `applyPolicies`
+ * dispatches on `before` / `scope` / `onCreate` / `onUpdate` and `applyRedaction`
+ * on `redact`, so `{ scopes: … }` contributes nothing while the class visibly
+ * carries an array and `gemi check models` reports it as policied — a model that
+ * reads unscoped with nothing raised, which is #316 and #318's shape arriving
+ * through a typo.
+ *
+ * The boundary the tests below pin is the one that could break a working app:
+ * everything *beside* a recognised hook is left alone, and only "no callable
+ * hook at all" is refused.
+ */
+describe("a malformed $policies entry", () => {
+  const entry = (value: unknown) => {
+    class Account {
+      static $policies = [value] as unknown as ModelPolicy[];
+    }
+    return () => policiesFor(Account);
+  };
+
+  describe("a function that cannot be constructed", () => {
+    test("a factory nobody called is refused, and the factory is named", () => {
+      const softDeletes = (_options: { field: string }) => ({
+        scope: () => ({ deletedAt: null }),
+      });
+
+      expect(entry(softDeletes)).toThrow(InvalidPolicyEntryError);
+      expect(entry(softDeletes)).toThrow(
+        /Account\.\$policies\[0\] is the function `softDeletes`/,
+      );
+    });
+
+    // The issue's own reproduction. An arrow function has no name to report, so
+    // the class and the index are the whole of what identifies it — which is
+    // exactly what the bare TypeError did not carry.
+    test("an inline arrow entry names the class and the index", () => {
+      const thrown = (() => {
+        try {
+          entry(() => ({ scope: () => ({ id: 0 }) }))();
+        } catch (error) {
+          return error as InvalidPolicyEntryError;
+        }
+        return undefined;
+      })();
+
+      expect(thrown).toBeInstanceOf(InvalidPolicyEntryError);
+      expect(thrown!.model).toBe("Account");
+      expect(thrown!.index).toBe(0);
+      expect(thrown!.reason).toBe("not-constructable");
+      expect(thrown!.message).toContain("Account.$policies[0]");
+      expect(thrown!.message).toContain("softDeletes({ field:");
+    });
+
+    test("a generator function is refused too — it has a prototype and is not a constructor", () => {
+      expect(entry(function* () {})).toThrow(InvalidPolicyEntryError);
+    });
+
+    // The over-strict direction. `SomeClass.bind(null)` has no own `prototype`,
+    // which is the property the obvious implementation of this check reads — and
+    // it is perfectly constructable. Refusing it would stop an app booting over
+    // a policy that works.
+    test("a bound class is accepted, because it really is constructable", () => {
+      class Tenant {
+        scope() {
+          return { orgId: 1 };
+        }
+      }
+
+      expect(entry(Tenant.bind(null))).not.toThrow();
+    });
+
+    // `Reflect.construct` validates its `newTarget` before running the target's
+    // body, so the probe answers the question without executing user code. This
+    // runs at boot over every class in a declared module, so it matters.
+    test("the constructability probe does not run the policy's constructor", () => {
+      let constructed = 0;
+
+      class Counting {
+        constructor() {
+          constructed++;
+        }
+        scope() {
+          return {};
+        }
+      }
+      class Owner {
+        static $policies = [Counting] as unknown as ModelPolicy[];
+      }
+
+      policiesFor(Owner);
+      policiesFor(Owner);
+
+      // Once, by `resolveEntry` — the probe adds none.
+      expect(constructed).toBe(1);
+    });
+  });
+
+  describe("an entry with no hook the runtime dispatches on", () => {
+    test("a typo'd hook is refused rather than accepted in silence", () => {
+      expect(entry({ scopes: () => ({ id: 0 }) })).toThrow(
+        InvalidPolicyEntryError,
+      );
+      expect(entry({ scopes: () => ({ id: 0 }) })).toThrow(
+        /has none of before, scope, onCreate, onUpdate or redact/,
+      );
+    });
+
+    test("and the near miss is suggested", () => {
+      expect(entry({ scopes: () => ({ id: 0 }) })).toThrow(
+        /It spells 'scopes'\. Did you mean `scope`\?/,
+      );
+    });
+
+    // A wrong suggestion in an authorization error is worse than none, so the
+    // threshold is two edits and `default` is six from `scope`.
+    test("a key that is not a near miss gets no suggestion", () => {
+      const thrown = (() => {
+        try {
+          entry({ default: { scope: () => ({ id: 0 }) } })();
+        } catch (error) {
+          return error as InvalidPolicyEntryError;
+        }
+        return undefined;
+      })();
+
+      expect(thrown!.reason).toBe("no-hooks");
+      expect(thrown!.suggestion).toBeUndefined();
+      expect(thrown!.message).not.toContain("Did you mean");
+      // ...and the shape it actually is gets named instead.
+      expect(thrown!.message).toContain("module namespace");
+    });
+
+    test("an entry with nothing in it at all is refused", () => {
+      expect(entry({})).toThrow(/It is empty/);
+    });
+
+    // "has none of scope, …" beside "it spells 'scope'" is a contradiction the
+    // reader would have to resolve, so the nullish case says which key it is.
+    test("a hook written down and left unset says so, rather than reading as a typo", () => {
+      expect(entry({ scope: undefined })).toThrow(
+        /writes 'scope' down and leaves it unset/,
+      );
+    });
+
+    // The class form keeps its hooks on a prototype, so `Object.keys` of the
+    // instance is empty and every hook is still there. Reading the resolved
+    // instance rather than the entry is what makes this pass.
+    test("a policy class whose hooks are prototype methods is accepted", () => {
+      class Tenant {
+        scope() {
+          return { orgId: 1 };
+        }
+        onCreate(_context: PolicyContext, data: any) {
+          return data;
+        }
+      }
+
+      expect(entry(Tenant)).not.toThrow();
+    });
+
+    test("a policy class with no hooks is refused, and named", () => {
+      class Nothing {
+        helper() {
+          return 1;
+        }
+      }
+
+      expect(entry(Nothing)).toThrow(/has none of before, scope/);
+    });
+  });
+
+  /**
+   * The line between *empty but valid* and *malformed*, drawn where refusing
+   * would be worse than accepting.
+   *
+   * A factory's return value and a policy class both routinely carry
+   * configuration and helpers beside the hooks, so an unknown-key check would
+   * reject code that works. Only "no callable hook at all" is refused.
+   */
+  describe("what stays valid", () => {
+    test("extra keys beside a real hook are nobody's business", () => {
+      expect(
+        entry({ field: "deletedAt", scope: () => ({}), helper: () => 1 }),
+      ).not.toThrow();
+    });
+
+    test("a hook explicitly set to undefined is absence, not error", () => {
+      expect(
+        entry({ scope: undefined, onCreate: (_c: any, d: any) => d }),
+      ).not.toThrow();
+    });
+
+    test("each of the five hooks alone is enough on its own", () => {
+      for (const hook of [
+        "before",
+        "scope",
+        "onCreate",
+        "onUpdate",
+        "redact",
+      ]) {
+        expect(entry({ [hook]: () => undefined }), hook).not.toThrow();
+      }
+    });
+
+    test("softDeletes() — the shipped factory — passes", () => {
+      expect(entry(softDeletes())).not.toThrow();
+    });
+  });
+
+  describe("an entry that is not a policy at all", () => {
+    test.each([
+      ["null", null],
+      ["undefined", undefined],
+      ["false, from a && that did not hold", false],
+      ["a string", "softDeletes"],
+    ])("%s is refused", (_label, value) => {
+      expect(entry(value)).toThrow(/is not a policy/);
+    });
+
+    test("a recognised hook that is not a function is refused before it can throw", () => {
+      expect(entry({ scope: { orgId: 7 } })).toThrow(
+        /has a 'scope' that is an object rather than a function/,
+      );
+    });
+  });
+
+  /**
+   * The check runs where the array is *declared*, so the class in the message is
+   * the one the author typed the entry under — not whichever subclass a query
+   * happened to arrive through.
+   */
+  test("names the class that declares the array, not the one queried", () => {
+    class TenantBase {
+      static $policies = [{ scopes: () => ({}) }] as unknown as ModelPolicy[];
+    }
+    class Account extends TenantBase {}
+
+    expect(() => policiesFor(Account)).toThrow(/TenantBase\.\$policies\[0\]/);
+  });
+
+  test("the index is the entry's own, not the chain's", () => {
+    class Owner {
+      static $policies = [
+        { scope: () => ({}) },
+        { scope: () => ({}) },
+        { scopes: () => ({}) },
+      ] as unknown as ModelPolicy[];
+    }
+
+    expect(() => policiesFor(Owner)).toThrow(/Owner\.\$policies\[2\]/);
+  });
+
+  /**
+   * Checked once per array, not once per entry per query. `policiesFor` runs per
+   * query per node of an include tree and is deliberately uncached, so the guard
+   * has to cost a `WeakSet` lookup rather than a walk — and a reassigned
+   * `$policies` is a new array, so a test or a feature flag that swaps one is
+   * checked again.
+   */
+  test("a reassigned array is checked again", () => {
+    class Owner {
+      static $policies = [{ scope: () => ({}) }] as unknown as ModelPolicy[];
+    }
+
+    expect(() => policiesFor(Owner)).not.toThrow();
+
+    Owner.$policies = [{ scopes: () => ({}) }] as unknown as ModelPolicy[];
+
+    expect(() => policiesFor(Owner)).toThrow(InvalidPolicyEntryError);
   });
 });

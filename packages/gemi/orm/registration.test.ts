@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "vitest";
 
 import {
   AmbiguousModelRegistrationError,
+  InvalidPolicyEntryError,
   UnregisteredPolicyClassError,
 } from "./errors";
 import { user } from "./fixtures";
@@ -678,5 +679,78 @@ describe("the generator's mark on its own output", () => {
     expect(Object.hasOwn(MarkedBase, "$generated")).toBe(true);
     expect(Object.hasOwn(User, "$generated")).toBe(false);
     expect("$generated" in User).toBe(true);
+  });
+});
+/**
+ * A malformed `$policies` entry is caught at **boot**, not on the query — #321.
+ *
+ * `registerModels` is what an application's Kernel calls, so this walk is the
+ * last point before a policy that cannot run is live in production. It resolves
+ * policies to run its divergence comparison anyway; what #321 changed is *when*.
+ *
+ * The resolution used to sit below `if (registered === undefined || registered
+ * === model) continue`, and those two branches are the ordinary arrangements —
+ * a class that already owns its name, and a name nothing else claims. Both
+ * booted with the entry unexamined, which is how a `{ scopes: … }` typo reached
+ * a running app: registered, reported by `gemi check models` as correctly
+ * registered, and reading unscoped.
+ */
+describe("a malformed $policies entry at boot", () => {
+  test("a typo'd hook stops registerModels rather than registering", () => {
+    class User extends UserBase {
+      static $policies = [{ scopes: () => ({ organizationId: 7 }) }] as any;
+    }
+
+    expect(() => registerModels({ User })).toThrow(InvalidPolicyEntryError);
+  });
+
+  /**
+   * The branch the check was moved above. Nothing else claims the name, so the
+   * audit's comparison never runs — and before #321 neither did the resolution
+   * that would have refused the entry.
+   */
+  test("...even when nothing else claims the name", () => {
+    class Solo extends UserBase {
+      static $policies = [() => ({ scope: () => ({}) })] as any;
+    }
+
+    expect(() => registerModels({ Solo })).toThrow(InvalidPolicyEntryError);
+  });
+
+  test("...and when the class is the one already registered", () => {
+    class User extends UserBase {
+      static $policies = [{}] as any;
+    }
+
+    register("User", User);
+
+    expect(() => registerModels({ User })).toThrow(InvalidPolicyEntryError);
+  });
+
+  /**
+   * A refused boot must not leave the arrangement it refused installed. Same
+   * rule `registerModels` already keeps for a failed audit, and the same reason:
+   * a dev server that catches and keeps serving would serve the rest of the
+   * process from a registry this call rejected.
+   */
+  test("the registry is put back when the entry is refused", () => {
+    register("User", UserBase);
+
+    class User extends UserBase {
+      static $policies = [{ scopes: () => ({}) }] as any;
+    }
+
+    expect(() => registerModels({ User })).toThrow(InvalidPolicyEntryError);
+    expect(registry.get("User")).toBe(UserBase);
+  });
+
+  test("a well-formed list still registers", () => {
+    class User extends UserBase {
+      static $policies = [scope];
+    }
+
+    expect(() => registerModels({ UserBase, User })).not.toThrow();
+    expect(registry.get("User")).toBe(User);
+    expect(policiesFor(registry.get("User"))).toEqual([scope]);
   });
 });

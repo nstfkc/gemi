@@ -1543,6 +1543,23 @@ class TenantPolicy extends AccountScopedPolicy {
 Each level of the prototype chain contributes its own array and they concatenate **base first**, so
 a shared model base can impose a policy a subclass can only narrow, never drop.
 
+**An entry that could never run is refused, by name.** A class entry is constructed with no
+arguments, so a factory nobody called — `softDeletes` rather than `softDeletes({ field })` — is not
+one; and an entry has to spell at least one of `before`, `scope`, `onCreate`, `onUpdate` or
+`redact`, because those are the only names anything dispatches on. `{ scopes: … }` is a typo that
+used to register in silence and leave the model reading unscoped while `gemi check models` reported
+it as policied. Both are now `InvalidPolicyEntryError`, naming the class and the index:
+
+```
+InvalidPolicyEntryError: Account.$policies[0] has none of before, scope, onCreate,
+onUpdate or redact, so it would never run. … It spells 'scopes'. Did you mean `scope`?
+```
+
+Anything *beside* a recognised hook is left alone — a factory's configuration, a policy class's own
+helpers — so only "no hook at all" is refused. `tsc` already rejects every one of these shapes at
+the class declaration; the runtime check is for the paths that import model files without having
+type-checked them, which is `registerModels` at boot and `gemi check models`.
+
 | Member | When it runs | What it does |
 | --- | --- | --- |
 | `before(ctx)` | First | Return `false` (or throw) to deny outright. |
@@ -1746,6 +1763,7 @@ Every failure is a typed error from `gemi/orm`, not a driver string.
 | `UniqueConstraintError` | A unique constraint was violated, with the constraint identified. It is gemi's own error and carries no Prisma `code` — see below if a `"P2002"` check is what you have today. |
 | `PolicyDeniedError` | A `before` denied, or `ctx.user` was read with no user. |
 | `ScopeEscapeError` | An `update` wrote a column its own policy's `scope` selects on, with no `onUpdate`. |
+| `InvalidPolicyEntryError` | A `$policies` entry that cannot run — a factory nobody called, or an entry whose keys are none of `before` / `scope` / `onCreate` / `onUpdate` / `redact`. Names the class and the index. Raised at boot by `registerModels`, not on the query. |
 | `UnknownFieldError` / `UnknownRelationError` | A name that is not on the model. |
 | `UnsupportedQueryError` | A query shape the compiler does not implement — with what and why. |
 | `ModelNotRegisteredError` / `UnregisteredPolicyClassError` | Registry problems (see [Setup](#your-model-class)). |

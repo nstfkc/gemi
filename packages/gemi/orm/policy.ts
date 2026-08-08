@@ -1,6 +1,7 @@
 import { RequestContext } from "../http/requestContext";
 import { currentActor } from "./context";
 import {
+  InvalidPolicyEntryError,
   PolicyDeniedError,
   ScopeEscapeError,
   UnsupportedQueryError,
@@ -357,6 +358,16 @@ const INSERTING = new Set<string>(["create", "createMany"]);
  */
 const instantiated = new WeakMap<object, ModelPolicy>();
 
+/**
+ * Turns one `$policies` entry into the object the hooks are read off.
+ *
+ * **Every entry reaching here has been through `assertPolicyEntries`**, which is
+ * what makes the unchecked `new` below safe — a function entry has already been
+ * proved constructable. The check is there rather than here because the useful
+ * message names the class and the array index, and this function has neither:
+ * two of its three call sites are `.map(resolveEntry)` over an array held from a
+ * *different* level of the prototype walk than the one currently in hand.
+ */
 function resolveEntry(entry: PolicyEntry): ModelPolicy {
   if (typeof entry !== "function") return entry;
 
@@ -366,6 +377,309 @@ function resolveEntry(entry: PolicyEntry): ModelPolicy {
   const made = new (entry as new () => ModelPolicy)();
   instantiated.set(entry, made);
   return made;
+}
+
+/**
+ * The hooks the runtime actually dispatches on, in the order it consults them.
+ *
+ * `applyPolicies` reads the first four and `applyRedaction` the fifth. An entry
+ * that spells none of them contributes nothing to any query, which is the whole
+ * of case B in #321 — so this list is the definition of "a policy that would
+ * run", and it has to stay the same list.
+ *
+ * **Adding a member to {@link ModelPolicy} without adding it here is a compile
+ * error**, by the assertion below. That direction is the dangerous one: a new
+ * hook missing from this list would make an entry carrying only that hook look
+ * like a typo and be refused at boot — a working policy rejected — which is
+ * exactly the over-strictness this guard must not produce. The other direction
+ * is checked too, so a name removed from `ModelPolicy` cannot linger here and go
+ * on being accepted.
+ */
+const RECOGNISED_HOOKS = [
+  "before",
+  "scope",
+  "onCreate",
+  "onUpdate",
+  "redact",
+] as const;
+
+type _MissingHook = Exclude<
+  keyof ModelPolicy,
+  (typeof RECOGNISED_HOOKS)[number]
+>;
+type _ExtraHook = Exclude<(typeof RECOGNISED_HOOKS)[number], keyof ModelPolicy>;
+
+// Assigning `true` is what fails: either branch resolves to a string literal
+// type when the two lists disagree, and the message is the diagnostic.
+const _hooksExhaustive: [_MissingHook] extends [never]
+  ? [_ExtraHook] extends [never]
+    ? true
+    : "RECOGNISED_HOOKS names a hook ModelPolicy does not declare"
+  : "ModelPolicy declares a hook RECOGNISED_HOOKS does not list — an entry carrying only that hook would be refused at boot" =
+  true;
+void _hooksExhaustive;
+
+/**
+ * Entry arrays already checked, so the guard costs one lookup per contributing
+ * level per call rather than a walk of every entry.
+ *
+ * Keyed on the **array** and not on the entries, because that is the granularity
+ * the hot path already has: `policiesFor` runs per query per node of an include
+ * tree, and `$policies` is an ordinary static that a test or a feature flag
+ * reassigns — a reassignment produces a new array, which is unchecked and gets
+ * checked. Mutating an array in place after it has been read once is the one
+ * thing this does not re-examine, and it is not a shape anything writes.
+ */
+const checkedEntries = new WeakSet<readonly PolicyEntry[]>();
+
+/**
+ * Refuses a `$policies` entry that could not do what it was written to do,
+ * naming the class, the index, and what was found there.
+ *
+ * Called from `policiesFor` once per contributing level, with `owner` being the
+ * class that **declares** the array rather than the model being queried — so the
+ * name in the message is the one the author typed the entry under, which on a
+ * shared base is not the model whose query happened to reach it.
+ *
+ * One placement, and it is `policiesFor` rather than the audit the issue
+ * proposed, because `policiesFor` is what every path already goes through:
+ * `registerModels` at boot and `gemi check models` reach it through
+ * `auditModelRegistrations`, and `Model.$exec` reaches it directly on a class
+ * neither of those ever saw. Putting the check in the audit alone would leave
+ * the crash live on the query path and leave the naming problem unsolved, since
+ * the audit knows the model but not which level of the chain declared the array.
+ */
+function assertPolicyEntries(
+  owner: unknown,
+  entries: readonly PolicyEntry[],
+): void {
+  if (checkedEntries.has(entries)) return;
+
+  const model = (owner as { name?: string })?.name ?? "This model";
+
+  for (let index = 0; index < entries.length; index++) {
+    assertPolicyEntry(entries[index] as PolicyEntry, model, index);
+  }
+
+  checkedEntries.add(entries);
+}
+
+function assertPolicyEntry(
+  entry: PolicyEntry,
+  model: string,
+  index: number,
+): void {
+  const kind = typeof entry;
+
+  if (entry === null || (kind !== "object" && kind !== "function")) {
+    throw new InvalidPolicyEntryError(
+      model,
+      index,
+      "not-a-policy",
+      describeValue(entry),
+      RECOGNISED_HOOKS,
+    );
+  }
+
+  if (kind === "function") {
+    if (!isConstructable(entry as Function)) {
+      throw new InvalidPolicyEntryError(
+        model,
+        index,
+        "not-constructable",
+        describeFunction(entry as Function),
+        RECOGNISED_HOOKS,
+      );
+    }
+  }
+
+  // Resolved rather than inspected, because the class form puts its hooks on a
+  // prototype: `Object.keys(new TenantPolicy())` is empty and every one of them
+  // is still there. `resolveEntry` memoises, so the instance this proves things
+  // about is the instance every later call gets.
+  const policy = resolveEntry(entry) as Record<string, unknown>;
+
+  let callable = 0;
+  /** Hooks written down and left nullish — reported, so "it spells 'scope'"
+   * beside "it has no scope" is not a contradiction the reader has to resolve. */
+  const unset: string[] = [];
+
+  for (const hook of RECOGNISED_HOOKS) {
+    const value = policy[hook];
+    // `undefined` and `null` are absence, not error: `{ scope: undefined }` is
+    // what a conditionally-built policy leaves behind and `applyPolicies` skips
+    // it exactly as it skips a key that was never written.
+    if (value === undefined || value === null) {
+      if (hook in policy) unset.push(hook);
+      continue;
+    }
+
+    if (typeof value !== "function") {
+      throw new InvalidPolicyEntryError(
+        model,
+        index,
+        "hook-not-callable",
+        `'${hook}' that is ${describeValue(value)} rather than a function`,
+        RECOGNISED_HOOKS,
+      );
+    }
+
+    callable++;
+  }
+
+  if (callable > 0) return;
+
+  if (unset.length > 0) {
+    throw new InvalidPolicyEntryError(
+      model,
+      index,
+      "no-hooks",
+      `It writes ${unset.map((hook) => `'${hook}'`).join(", ")} down and ` +
+        `leaves ${unset.length === 1 ? "it" : "them"} unset, which reads as ` +
+        `absent — so nothing is left to run.`,
+      RECOGNISED_HOOKS,
+    );
+  }
+
+  const spelled = spelledKeys(policy);
+
+  throw new InvalidPolicyEntryError(
+    model,
+    index,
+    "no-hooks",
+    spelled.length === 0
+      ? "It is empty."
+      : `It spells ${spelled.map((key) => `'${key}'`).join(", ")}.` +
+          // The other half of #321's case B, and it is not a misspelling, so
+          // "did you mean" has nothing to offer it: an entry whose only key is
+          // `default` is a module namespace — `import * as p` or a CJS interop
+          // — put in the array instead of the policy inside it.
+          (spelled.length === 1 && spelled[0] === "default"
+            ? ` A lone 'default' is a module namespace rather than the policy ` +
+              `inside it — put \`entry.default\` in the array, or import the ` +
+              `policy by name.`
+            : ""),
+    RECOGNISED_HOOKS,
+    nearestHook(spelled),
+  );
+}
+
+/**
+ * Whether `new value()` is a thing that can be written.
+ *
+ * The language exposes `[[Construct]]` nowhere directly, and every syntactic
+ * proxy for it is wrong somewhere. `value.prototype === undefined` is the usual
+ * one — true of arrow functions, method shorthand and `async` functions, which
+ * are three of the four shapes a forgotten factory call takes — and it is also
+ * true of `SomeClass.bind(null)`, which *is* constructable. Refusing that would
+ * be the over-strict direction, where a policy somebody legitimately wrote stops
+ * an app from booting. A generator function fails the other way: it has a
+ * `prototype` and is not constructable.
+ *
+ * So the engine is asked outright. `Reflect.construct` validates `newTarget` as
+ * a constructor **before** it runs the target's body, so putting the entry there
+ * and a do-nothing constructor in the target position answers the question
+ * without executing the policy's own constructor — which matters, because that
+ * is user code and this runs at boot on every class in a declared module.
+ */
+function isConstructable(value: Function): boolean {
+  try {
+    Reflect.construct(NOOP, [], value as new () => unknown);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The do-nothing target of the probe above. Its body is what does not run. */
+const NOOP = function () {} as unknown as new () => unknown;
+
+/**
+ * The keys an entry spells, own and inherited, so the message can say what was
+ * found. Prototype methods are included because the class form is where the
+ * hooks live there; `Object.prototype` and `constructor` are not, because they
+ * are not something the author wrote.
+ */
+function spelledKeys(policy: object): string[] {
+  const keys = new Set<string>();
+
+  let current: object | null = policy;
+  while (current !== null && current !== Object.prototype) {
+    for (const key of Object.getOwnPropertyNames(current)) {
+      if (key !== "constructor") keys.add(key);
+    }
+    current = Object.getPrototypeOf(current) as object | null;
+  }
+
+  return [...keys];
+}
+
+/**
+ * The recognised hook a spelled key most plausibly meant, or nothing.
+ *
+ * Two edits, which covers the misspellings that reach here — `scopes`,
+ * `Scope`, `onCreated` — and stops short of the ones where a suggestion would
+ * be a guess: `default` is six edits from `scope` and gets no "did you mean",
+ * because a wrong suggestion in an authorization error is worse than none.
+ */
+function nearestHook(spelled: readonly string[]): string | undefined {
+  let best: string | undefined;
+  let bestDistance = 3;
+
+  for (const key of spelled) {
+    for (const hook of RECOGNISED_HOOKS) {
+      const distance = editDistance(key.toLowerCase(), hook.toLowerCase());
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = hook;
+      }
+    }
+  }
+
+  return best;
+}
+
+/** Levenshtein, iterative over one row. Inputs here are hook names. */
+function editDistance(a: string, b: string): number {
+  if (a === b) return 0;
+
+  let row = Array.from({ length: b.length + 1 }, (_value, index) => index);
+
+  for (let i = 1; i <= a.length; i++) {
+    let previous = row[0]!;
+    row[0] = i;
+
+    for (let j = 1; j <= b.length; j++) {
+      const held = row[j]!;
+      row[j] = Math.min(
+        row[j]! + 1,
+        row[j - 1]! + 1,
+        previous + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
+      previous = held;
+    }
+  }
+
+  return row[b.length]!;
+}
+
+/**
+ * A value as a message names it: what it is, not what it holds. Objects are not
+ * stringified — `[object Object]` names nothing, and a policy's own data is not
+ * something to print into a log line.
+ */
+function describeValue(value: unknown): string {
+  if (value === null) return "null";
+  if (value === undefined) return "undefined";
+  if (typeof value === "string") return `the string ${JSON.stringify(value)}`;
+  if (typeof value === "function") return describeFunction(value);
+  if (Array.isArray(value)) return "an array";
+  if (typeof value === "object") return "an object";
+  return `the ${typeof value} ${String(value)}`;
+}
+
+function describeFunction(value: Function): string {
+  return value.name ? `the function \`${value.name}\`` : "an anonymous function";
 }
 
 /**
@@ -418,6 +732,12 @@ export function policiesFor(model: unknown): readonly ModelPolicy[] {
     if (Object.hasOwn(current, "$policies") && current.$policies) {
       const level = current.$policies;
       if (level.length > 0) {
+        // Before anything is resolved, and with the declaring class in hand —
+        // which is what lets the refusal say `ScopedAccount.$policies[0]`
+        // instead of dying inside `new entry` with nothing named. Memoised on
+        // the array, so the per-query cost is one `WeakSet.has` per level.
+        assertPolicyEntries(current, level);
+
         if (only === undefined && found === undefined) {
           // First contributing level, walking derived to base. Held rather than
           // copied, in case it turns out to be the only one.
