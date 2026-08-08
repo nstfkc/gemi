@@ -4002,6 +4002,12 @@ is accepted here — Prisma accepts one, and refusing it would refuse a query th
 `false` is the value nobody guesses, and it is the reason to say this out loud: it writes nothing at
 all, so `disconnect: shouldDetach` leaves the row alone on the branch that asked for nothing.
 
+`null` is **not** a third spelling of `false`, on either side of the key: it is refused, with a
+message pointing at `false`. Prisma refuses it too — a `PrismaClientValidationError` — so this is
+matching the client rather than being stricter than it. A `disconnect` key whose value is
+`undefined` is the *absent* key and stays a no-op, which is what an optional argument spread
+produces; only an explicit `null` raises.
+
 The two operands then part company on a miss, still on a to-one, and it is Prisma's asymmetry rather
 than a choice gemi made: `delete` raises `RecordNotFoundError` when there is no row to delete, while
 `disconnect` is silent. That holds whichever way the row went missing — no child linked at all, or a

@@ -1319,6 +1319,52 @@ function assertNoNestedWrites(
  * `connect`, a hand-written `organizationId: null`, and every other column
  * write already give. Pre-existing, unchanged here, and matching it would mean
  * special-casing one operand to reproduce an inconsistency.
+ *
+ * **...and the *filter* arm (#359) carries it one step further: it stamps even
+ * when it detaches nothing.** `nested-writes.ts`'s owning-side `disconnect`
+ * defaults `context.resolved[fkField]` to the value already in the column and
+ * pushes the contribution unconditionally — it has to, because the statement's
+ * text cannot depend on a value read at bind time — so the assignment is in the
+ * SET list whether or not the linked row matched. Measured on both sides
+ * against a schema built for it, since the template's `Profile` has no
+ * `@updatedAt` (Prisma 6.19.2, SQLite, a one-to-one whose *owner* carries the
+ * attribute, `updatedAt` seeded to the epoch):
+ *
+ *     disconnect: true                update … set "userId" = ?
+ *                                       -> key nulled, updatedAt at the epoch
+ *     disconnect: { name: "Ada" }     update … set "userId" = ? where … and
+ *                                       exists(select … where "name" = ? …)
+ *                                       -> key nulled, updatedAt at the epoch
+ *     disconnect: { name: "Nobody" }  the same statement, matching zero rows
+ *                                       -> nothing written at all
+ *     disconnect: false               no update statement at all
+ *                                       -> nothing written at all
+ *
+ * So Prisma never stamps through this operand, matching filter or not — that is
+ * the paragraph above — and on a miss it writes *no row*, because the filter
+ * rides inside the `UPDATE`'s own `where` as an `exists` subquery. gemi's plan
+ * text is fixed at compile time and reads
+ * `update "User" set "organizationId" = ?, "updatedAt" = ? where "id" = ?` for
+ * every arm that writes, so `User.update({ where: { id: 1 }, data: {
+ * organization: { disconnect: { name: "Nobody" } } } })` leaves
+ * `organizationId` at 1 and moves `updatedAt` from the epoch to now: a call
+ * that changed no column of the row still stamps it.
+ *
+ * **There is no test for the stamp half and there cannot be one in this
+ * fixture**, which is why this docblock is the deliverable rather than a
+ * pointer to one. The template's only one-to-one owner is `Profile`, which has
+ * no `@updatedAt` column, and the differential harness lists `updatedAt` in its
+ * volatile set (`differential.ts`), so both sides compare as the descriptor
+ * `"date"` and two different instants match. The measurements above were taken
+ * against a purpose-built schema, not against the template's.
+ *
+ * **The two statements are also a lost-update window**, which `disconnect: true`
+ * does not have and Prisma does not have on either arm. The filter arm reads the
+ * current key with a `findFirst` and writes it back in a *second* statement, so
+ * under READ COMMITTED a concurrent transaction that `connect`s a different
+ * partner in between has its value silently reverted — by the call that decided
+ * to do nothing. Prisma's single guarded `UPDATE` above cannot lose it: there is
+ * no read to be stale, and on a miss there is no write at all.
  */
 function updateAssignments(
   schema: ModelSchema,

@@ -478,8 +478,12 @@ function planOwningSide(
     // translation and the same shape check the foreign side runs, reused rather
     // than restated so the two sides cannot answer one grammar differently
     // again — which is the defect #359 was filed for.
+    //
+    // The check goes **first**, on the operand as written: the translation is
+    // lossy in the one direction that matters, since it maps `false` onto the
+    // same `null` a caller may have spelled outright. See `assertToOneFilter`.
+    assertToOneFilter(schema, relation, child, operand, key, operation);
     const filter = toOneOperand(key, operand);
-    assertToOneFilter(schema, relation, child, filter, key, operation);
 
     // `false` — no contribution and no step, so the operand contributes
     // *nothing at all*: a `data` carrying only this compiles to the read
@@ -907,6 +911,25 @@ function planForeignSide(
    * did, which is the only thing the schema permits. `assertDisconnectable` is
    * deliberately not called here: it would refuse the whole operand, including
    * the empty-to-one case that has always worked.
+   *
+   * **`relation.kind` is the discriminator here and the unique index is the
+   * discriminator on the owning side (#363), and the two are not in
+   * disagreement — they are the same question asked from the two ends of the
+   * key.** `kind` is a property of *this* relation's back-reference, and Prisma
+   * will not let a non-list back-relation exist without `@unique` on the
+   * child's foreign key. Verified against 6.19.2 rather than assumed:
+   * `User.profile Profile?` beside a `Profile.userId` carrying no `@unique` is
+   * refused at parse time with P1012 — *"A one-to-one relation must use unique
+   * fields on the defining side. Either add an `@unique` attribute to the field
+   * `userId`, or change the relation to one-to-many"* — so the only schema that
+   * reaches this line either has the index or has `User.profile` as a list.
+   * `kind !== "many"` on the foreign side *is* "the child's key is
+   * unique", read off the side that records it. From the owning side there is
+   * no such reading available — `relation.kind` says `"one"` for a many-to-one
+   * and a one-to-one alike, because both point at a single far row — so the
+   * question has to be put to the schema directly, as `uniques` containing the
+   * foreign-key column. Same predicate, two spellings, and neither side can
+   * borrow the other's.
    */
   const displaces =
     relation.kind !== "many" && child.fields[childField]?.nullable === true;
@@ -935,6 +958,12 @@ function planForeignSide(
    * the implementation is a *translation* rather than three new bodies: see
    * {@link toOneOperand}.
    */
+  // The operand as the caller wrote it, kept because the rewrite below
+  // overwrites `operand` in place and `assertToOneFilter` has to read the
+  // spelling rather than the translation — `false` and `null` are one value
+  // afterwards and two very different calls before. See that function.
+  const spelledOperand = operand;
+
   if (relation.kind !== "many") {
     if (key === "set" || key === "updateMany" || key === "deleteMany") {
       throw new UnsupportedQueryError(
@@ -1425,7 +1454,14 @@ function planForeignSide(
     if (relation.kind === "many") {
       assertNamedRows(schema, relation, child, operand, key, operation);
     } else {
-      assertToOneFilter(schema, relation, child, operand, key, operation);
+      assertToOneFilter(
+        schema,
+        relation,
+        child,
+        spelledOperand,
+        key,
+        operation,
+      );
     }
 
     out.after.push({
@@ -2525,8 +2561,8 @@ function assertNamedRows(
 }
 
 /**
- * A to-one `disconnect` / `delete` operand, once {@link toOneOperand} has
- * translated the booleans away: `null` for the no-op, or a plain filter object.
+ * A to-one `disconnect` / `delete` operand, **as the caller spelled it** — a
+ * boolean, or a filter object, and nothing else.
  *
  * The counterpart of {@link assertNamedRows}, and deliberately *not* it. That
  * one runs `matchUniqueKey`, which is right where the caller is picking one row
@@ -2536,9 +2572,29 @@ function assertNamedRows(
  * have refused that at compile time with a list of unique keys the caller never
  * had to name.
  *
- * `null` is the normalised `false`, and it is a *value* rather than an
- * omission: `delete: false` is a call that deliberately asks for nothing, so it
- * passes here and reduces to no statement at all further down.
+ * **Run before {@link toOneOperand} rather than after it, which is what makes
+ * `null` reachable at all.** That translation maps `false` to `null`, so a
+ * check downstream of it sees one value for two very different calls: the
+ * deliberate no-op, and an operand of a type Prisma has no arm for. This used
+ * to sit downstream and pass both, and the second is the one that mattered —
+ * before #359 the owning side refused everything but `true`, so `disconnect:
+ * null` was an `UnsupportedQueryError` there, and widening the grammar turned a
+ * refusal into silence. That is the failure class the differential suite exists
+ * to pin, arrived at from the tidy direction, and it is not one to inherit on
+ * the strength of the far side having it too.
+ *
+ * Measured, so the refusal is matching Prisma rather than being stricter than
+ * it (6.19.2, SQLite): `disconnect: null` is a `PrismaClientValidationError` on
+ * all three shapes it can be written against — a one-to-one from either end and
+ * a many-to-one — with nothing written. `undefined` is the *absent* key and
+ * stays a no-op on both clients, which is why only `null` is named here:
+ * `canonicalShape` drops an undefined member outright, so `disconnect:
+ * undefined` and no `disconnect` at all are already one call.
+ *
+ * Sound at plan time for the same reason the boolean guard is (#358):
+ * `canonicalShape` records `null` as `"null"`, the booleans as `"true"` /
+ * `"false"` and a filter by its structure, so no two of them can share a cache
+ * entry and this refusal can never be decided on one call's behalf by another's.
  *
  * `InvalidArgumentError` because the argument is supported and the value is
  * wrong — the same reading `assertCreateManyOperand` uses, and the reason the
@@ -2552,8 +2608,11 @@ function assertToOneFilter(
   key: string,
   operation: string,
 ): void {
-  if (operand === null || operand === undefined) return;
-  if (typeof operand === "object" && !Array.isArray(operand)) return;
+  if (operand === undefined) return;
+  if (typeof operand === "boolean") return;
+  if (operand !== null && typeof operand === "object" && !Array.isArray(operand)) {
+    return;
+  }
 
   throw new InvalidArgumentError(
     `data.${relation.name}.${key}`,
@@ -2562,7 +2621,16 @@ function assertToOneFilter(
     `'${relation.name}' is a to-one, so '${key}' takes either a boolean — ` +
       `'true' for the connected ${child.name}, 'false' for nothing — or an ` +
       `object of filters it has to match. Prisma's operand here is ` +
-      `'${child.name}WhereInput | boolean'.`,
+      `'${child.name}WhereInput | boolean'.` +
+      // Named rather than left to the list above, because `null` is the one
+      // wrong value with an obvious intent: it is what an optional flag
+      // degrades to, and `false` is the spelling that means what it was
+      // reaching for. Prisma refuses it too, so pointing at `false` is a
+      // correction and not a workaround.
+      (operand === null
+        ? ` 'null' is not one of them — write 'false' for the no-op. Prisma ` +
+          `answers 'null' with a validation error rather than accepting it.`
+        : ""),
   );
 }
 
