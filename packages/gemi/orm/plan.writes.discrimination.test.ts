@@ -3,7 +3,13 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { createBindContext } from "./compile/fragment";
 import { PostgresDialect } from "./dialect/postgres";
 import { SqliteDialect } from "./dialect/sqlite";
-import { account, organization, user } from "./fixtures";
+import {
+  account,
+  organization,
+  profile,
+  user,
+  userWithProfile,
+} from "./fixtures";
 import * as registry from "./registry";
 import {
   clearPlanCache,
@@ -264,6 +270,122 @@ describe("plan cache discrimination — writes", () => {
     expect(planKey(sqlite, "User", "update", args)).not.toBe(
       planKey(sqlite, "User", "updateMany", args),
     );
+  });
+
+  /**
+   * **The one the whole suite could not see, and the only live wrong *write*
+   * this file has ever had to pin.**
+   *
+   * `disconnect: true` and `disconnect: false` shaped alike — a bare `boolean`
+   * under `data`, which is a value subtree — so they were one cache entry. On
+   * the owning side that is not a wasted entry, it is a wrong statement:
+   * `planOwningSide` refuses `operand !== true` **at compile time** and then
+   * pushes a constant `value: () => null`, and a cache hit skips compilation
+   * entirely. So a plan compiled from `disconnect: true` served `disconnect:
+   * false` and nulled the foreign key on a call that asked for nothing.
+   *
+   * **Nothing above could catch it**, and that is worth stating precisely
+   * because it is what a reader will assume was covered. `plan-key.invariants`
+   * asserts *same key ⇒ same SQL text*, and these two have byte-identical text
+   * — the difference is in which value a `contribution` binds and in whether a
+   * step runs at all. The `DISTINCT` table cannot hold them either: the pair
+   * only exists as a pair, and `disconnect: false` **throws** when it is
+   * compiled, so a table that compiles every entry cannot include it.
+   *
+   * Measured against the real client, so the two ends are pinned rather than
+   * assumed: `disconnect: false` with a child present leaves the row untouched,
+   * foreign key intact, and returns the parent.
+   */
+  describe("a to-one disconnect/delete boolean is part of the key", () => {
+    const owning = (value: boolean) => ({
+      where: { id: 1 },
+      data: { organization: { disconnect: value } },
+    });
+
+    test("true, false and absent are three keys", () => {
+      const on = planKey(sqlite, "User", "update", owning(true));
+      const off = planKey(sqlite, "User", "update", owning(false));
+      const absent = planKey(sqlite, "User", "update", {
+        where: { id: 1 },
+        data: { organization: { connect: { id: 1 } } },
+      });
+
+      expect(new Set([on, off, absent]).size).toBe(3);
+    });
+
+    // The bug itself: warm the cache with the accepted spelling, then ask for
+    // the one the compiler refuses. Before the guard this returned the cached
+    // plan and wrote a null; now it recompiles and the refusal fires, which is
+    // the answer the first call would have got.
+    test("a warm 'true' plan does not serve 'false' on the owning side", () => {
+      expect(() => getOrCompile(user, "update", owning(true), sqlite)).not.toThrow();
+      expect(() => getOrCompile(user, "update", owning(false), sqlite)).toThrow(
+        /only 'disconnect: true' is implemented/,
+      );
+    });
+
+    /**
+     * The foreign side, where both booleans are *legal* — so there is no
+     * refusal to fall back on and the plan has to be right on its own.
+     *
+     * Deliberately runs the **`true` plan** with `false` arguments, which is
+     * the mis-serve the plan key now prevents. It still writes nothing, because
+     * `toOneOperand` reads the boolean out of the call inside `at` rather than
+     * deciding it when the plan was built. Two independent guards on purpose:
+     * the key is a cache and caches are the thing that gets subtly wrong, while
+     * this one holds however the plan was reached.
+     */
+    describe("the child holds the key", () => {
+      beforeEach(() => {
+        registry.register("Profile", class { static $schema = profile });
+        registry.register("User", class { static $schema = userWithProfile });
+      });
+
+      const args = (value: boolean) => ({
+        where: { id: 1 },
+        data: { profile: { delete: value } },
+      });
+
+      // Every child statement the step runs, in order. The step reaches the
+      // child through `exec` alone, so this is the whole of what it writes.
+      const run = async (plan: ReturnType<typeof getOrCompile>, called: unknown) => {
+        const calls: string[] = [];
+        const executor = {
+          exec: async (model: string, operation: string) => {
+            calls.push(`${model}.${operation}`);
+            // A connected child, so the `true` control gets past the lookup.
+            return { userId: 1 };
+          },
+          query: async () => [],
+        };
+
+        for (const step of plan.after ?? []) {
+          await step.run(called, { now: new Date(0), resolved: {} }, executor as never, [
+            { id: 1 },
+          ]);
+        }
+        return calls;
+      };
+
+      test("the plan compiled from delete: true writes nothing when bound with false", async () => {
+        const plan = getOrCompile(userWithProfile, "update", args(true), sqlite);
+
+        // The control first: this plan does have a live step, so the assertion
+        // below is not passing because there was nothing to run.
+        expect(await run(plan, args(true))).toEqual([
+          "Profile.findFirst",
+          "Profile.deleteMany",
+        ]);
+
+        expect(await run(plan, args(false))).toEqual([]);
+      });
+
+      test("...and the two booleans are two keys here as well", () => {
+        expect(planKey(sqlite, "User", "update", args(true))).not.toBe(
+          planKey(sqlite, "User", "update", args(false)),
+        );
+      });
+    });
   });
 
   test("model is part of the key", () => {

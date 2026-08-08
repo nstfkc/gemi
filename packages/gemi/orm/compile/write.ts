@@ -192,24 +192,9 @@ function compileCreateMany(
   const ignore = skipDuplicatesClause(schema, op, args, dialect);
 
   // Prisma returns `{ count: 0 }` for an empty list without touching the
-  // database, but a plan must have a statement. A constant-false select is the
-  // cheapest thing that yields zero rows on both dialects, and it keeps the
-  // empty case on exactly the same code path as every other — no branch in the
-  // choke point, no plan that is a plan in name only.
+  // database. See {@link zeroCountPlan} for how that is spelled as a plan.
   if (rows.length === 0) {
-    const key = keyColumn(schema, dialect);
-    const { text, binders } = render(
-      sql(
-        `select ${key} from ${dialect.quoteIdent(schema.table)} where false`,
-      ),
-      dialect,
-      { model: schema.name, operation: op },
-    );
-    return {
-      text,
-      bind: bindValues(binders),
-      shape: (returned) => ({ count: returned.length }),
-    };
+    return zeroCountPlan(schema, op, dialect);
   }
 
   const grid = createManyColumns(schema, rows, op, dialect);
@@ -475,6 +460,26 @@ function compileUpdate(
 ): QueryPlan {
   const many = op === "updateMany";
 
+  // `data: null` reaches here: `requiredArgs` asks only about `undefined`, and
+  // `updateAssignments` admits a nullish `data` because `upsert`'s halves may
+  // legitimately be absent. It used to land on "At least one field must be
+  // updated", which was a poor message but a refusal. Now that an empty `data`
+  // reads the row back, a null one would read it back too — a malformed call
+  // answered with a row. Refused on the shape rather than on a Prisma code,
+  // because Prisma's client rejects this at the type level and the query engine
+  // never sees it, so there is no behaviour to match here, only one to not
+  // invent.
+  if (args?.data === null) {
+    throw new InvalidArgumentError(
+      "data",
+      schema.name,
+      op,
+      "Expected an object of the fields to set, like { name: 'new name' }. " +
+        "An empty object is accepted and reads the row back unchanged; null " +
+        "is not.",
+    );
+  }
+
   if (!many) {
     matchUniqueKey(schema, args?.where, {
       model: schema.name,
@@ -487,9 +492,14 @@ function compileUpdate(
   // relation keys — and rejects one with `Unknown argument 'organization'`.
   // Refused by name here for the same reason `createMany` refuses it: without
   // this the key is neither executed nor reported, since `planNestedWrites`
-  // never runs and `suppliedFields` skips relation keys silently. A `data` of
-  // only a relation key would then reach "At least one field must be updated",
-  // which names the wrong problem.
+  // never runs and `suppliedFields` skips relation keys silently.
+  //
+  // This guard carries more weight than it used to. A `data` of only a relation
+  // key leaves no assignment behind, so it used to land on "At least one field
+  // must be updated" — the wrong problem, but still a refusal. Now that an
+  // empty `data` is a legitimate `{ count: 0 }` (see below), the same call would
+  // instead *succeed*, having written nothing and said nothing. Remove this and
+  // the failure mode goes from a misleading error to no error at all.
   if (many) {
     assertNoNestedWrites(
       schema,
@@ -513,32 +523,6 @@ function compileUpdate(
     dialect,
   );
 
-  // An `update` whose `data` is *only* nested relation writes has no column to
-  // set — `Post.update({ where, data: { tags: { connect: … } } })` changes the
-  // join table and nothing on `Post` itself. Prisma accepts it, and there is no
-  // `UPDATE … SET` that expresses it.
-  //
-  // So the row is *selected* instead. The nested steps need the parent's key
-  // and the caller's `select` / `include` still has to be honoured, and both
-  // come from the same `returning` list — which a select produces just as well
-  // as an `update … returning` does. Same plan shape, same steps, one statement
-  // that happens to read rather than write.
-  //
-  // Only reachable when there are steps to run: with neither an assignment nor
-  // a nested write there is genuinely nothing to do, and that stays an error.
-  const relationOnly =
-    assignments.length === 0 &&
-    ((nested?.before.length ?? 0) > 0 || (nested?.after.length ?? 0) > 0);
-
-  if (assignments.length === 0 && !relationOnly) {
-    throw new UnsupportedQueryError(
-      "data",
-      schema.name,
-      op,
-      "At least one field must be updated.",
-    );
-  }
-
   const where = compileWhere(
     schema,
     args?.where,
@@ -546,9 +530,63 @@ function compileUpdate(
     (callArgs) => callArgs?.where,
   );
 
+  // MEASURED (Prisma 6.19.2, SQLite): `updateMany({ where, data: {} })` is
+  // accepted and answers `{ count: 0 }` — with three rows in the table and two
+  // matching the filter, again with a filter matching none, and again with no
+  // `where` at all. The count is a *constant*, not a row count: Prisma's own
+  // answer does not depend on how many rows the filter selects, and no row is
+  // touched. So there is nothing here to derive from the filter, and the
+  // cheapest honest match is the `createMany([])` plan — same shape, same
+  // reason, same `{ count: <rows returned> }` shaping, no special case in the
+  // choke point.
+  //
+  // The `where` above is compiled and then discarded on this path, deliberately:
+  // an unknown field in a filter must be refused whether or not there happened
+  // to be anything to write, for the reason `createMany` gives for validating
+  // `skipDuplicates` ahead of its own empty-list shortcut — validation that
+  // depends on how much data was supplied is the kind that passes in a test and
+  // fails in production.
+  if (many && assignments.length === 0) {
+    return zeroCountPlan(schema, op, dialect);
+  }
+
+  // An `update` whose `data` sets no column has no `UPDATE … SET` to emit, and
+  // there are two ways to get there. `Post.update({ where, data: { tags: {
+  // connect: … } } })` changes the join table and nothing on `Post` itself; and
+  // `data: {}` changes nothing at all. Prisma accepts both.
+  //
+  // So the row is *selected* instead. The nested steps need the parent's key
+  // and the caller's `select` / `include` still has to be honoured, and both
+  // come from the same `returning` list — which a select produces just as well
+  // as an `update … returning` does. Same plan shape, same steps, one statement
+  // that happens to read rather than write.
+  //
+  // The empty `data` used to be refused here, on the reasoning that with
+  // neither an assignment nor a nested write there is genuinely nothing to do.
+  // That is true of the *write* and false of the *call*. MEASURED, same client:
+  // `post.update({ where: { id: 1 }, data: {} })` returns `{ id: 1, title:
+  // "p1" }` with the row unchanged; with `include: { tags: true }` it returns
+  // the tags as well; with `select: { title: true }` it returns `{ title:
+  // "p1" }` and no `id`. A caller who passed an `include` asked a question with
+  // a defined answer, and this select is already exactly that answer — which is
+  // why the fix is deleting a condition rather than adding a branch.
+  //
+  // A miss is still fatal and costs nothing here: `{ where: { id: 99 }, data:
+  // {} }` raises P2025, and `update` is in `ORTHROW`, so `RecordNotFoundError`
+  // comes out of the existing machinery.
+  //
+  // Reachable on every model, including one carrying `@updatedAt`. That took a
+  // change in `updateAssignments`: the stamp used to be unconditional, so it
+  // was itself the assignment that kept this count off zero and made the whole
+  // branch dead on the models most likely to want it. Prisma does not stamp a
+  // call that sets no column — measured, see that function's docblock — so the
+  // two fixes are the same fix. `many` is excluded by the branch above, so this
+  // is `update` alone.
+  const readInstead = assignments.length === 0;
+
   const returning = returningClause(schema, args, dialect, op, nested);
 
-  const statement = relationOnly
+  const statement = readInstead
     ? concat(
         sql(`select `),
         returning.selected,
@@ -1245,6 +1283,42 @@ function assertNoNestedWrites(
  * *create* as well is handled by `hasClientSideValue`; missing that half is the
  * easy and quiet version of this bug, since the column is usually NOT NULL and
  * only fails on the models where Prisma made it nullable.
+ *
+ * **The stamp needs a column beside it**, which is not what "every write stamps
+ * `@updatedAt`" would suggest and is the rule Prisma actually follows. Measured
+ * against 6.19.2/SQLite, seeding `updatedAt` to the epoch and reading it back:
+ *
+ *     data: {}                                     epoch    not stamped
+ *     data: { profile: { create: … } }             epoch    not stamped
+ *     data: { profile: { update: … } }             epoch    not stamped
+ *     data: { name: "real" }                       now      stamped
+ *     data: { organization: { connect: … } }       now      stamped
+ *     data: { organizationId: null }               now      stamped
+ *
+ * The first three write no column of *this* row — a to-one whose key is on the
+ * child changes the child — and Prisma leaves the stamp alone for all three. So
+ * the condition is "this statement sets at least one other column", which is
+ * what `writesAColumn` asks, rather than "this call happened".
+ *
+ * Stamping unconditionally was load-bearing in the wrong direction twice. It
+ * made #355's empty-`data` read unreachable on any model carrying the attribute
+ * — the majority case, and the one the issue was filed from — because the stamp
+ * *was* the assignment that kept `assignments.length` off zero. And it put a
+ * timestamp Prisma does not write on every nested to-one write #354 added,
+ * where the differential harness could not see it: `updatedAt` is volatile, so
+ * both sides compare as the descriptor `"date"` and two different instants
+ * match. It took a by-value assertion to catch.
+ *
+ * **KNOWN DIVERGENCE — an owning-side `disconnect` stamps here and does not in
+ * Prisma.** Measured beside the rest: `data: { organization: { disconnect: true
+ * } }` writes `organizationId = NULL` (verified, the column really is cleared)
+ * and leaves `updatedAt` at the epoch, while `connect` one line above stamps
+ * it. Both write the same column through the same operand family, so this is
+ * Prisma disagreeing with itself rather than a rule to follow. gemi contributes
+ * the null as an ordinary assignment and therefore stamps, which is the answer
+ * `connect`, a hand-written `organizationId: null`, and every other column
+ * write already give. Pre-existing, unchanged here, and matching it would mean
+ * special-casing one operand to reproduce an inconsistency.
  */
 function updateAssignments(
   schema: ModelSchema,
@@ -1281,6 +1355,13 @@ function updateAssignments(
     contributions.map((contribution) => [contribution.field, contribution]),
   );
 
+  // Asked before the loop rather than from `out.length`, so the answer does not
+  // depend on where `@updatedAt` happens to sit in schema order: a model that
+  // declares it first would otherwise see an empty `out` and skip a stamp it
+  // owes. Both sets hold scalar field names only — `suppliedFields` skips
+  // relation keys, which is exactly the distinction being drawn here.
+  const writesAColumn = contributed.size > 0 || supplied.size > 0;
+
   const out: Fragment[] = [];
 
   for (const field of Object.values(schema.fields)) {
@@ -1315,8 +1396,9 @@ function updateAssignments(
       continue;
     }
 
-    // Every write stamps `@updatedAt` — that is the whole of the attribute.
-    if (field.isUpdatedAt) {
+    // A write that sets a column stamps `@updatedAt`; one that sets none does
+    // not, because there is no write to date. See the docblock's table.
+    if (field.isUpdatedAt && writesAColumn) {
       out.push(
         concat(
           sql(`${column} = `),
@@ -1615,8 +1697,8 @@ function returningClause(
       ...fields.map((field) => sql(dialect.quoteIdent(field.column))),
       // Last, for the same reason they go last on a read: the shaper reads
       // scalars by position and `_count` is attached afterwards from the raw
-      // row. The relation-only `select` below projects the same list, so a
-      // `_count` survives that path too.
+      // row. The reading `update` below projects the same list, so a `_count`
+      // survives that path too.
       ...counts.map((count) => count.column),
     ],
     ", ",
@@ -1625,12 +1707,47 @@ function returningClause(
   return {
     clause: concat(sql(" returning "), columns),
     // The same list without the keyword, for the one statement that reads the
-    // row rather than writing it — a relation-only `update`. See `compileUpdate`.
+    // row rather than writing it — an `update` with no column to set, whether
+    // because its `data` held only nested writes or because it was empty. See
+    // `compileUpdate`.
     selected: columns,
     fields,
     hidden,
     relations: plans,
     counts,
+  };
+}
+
+/**
+ * The plan for a counting write that Prisma answers `{ count: 0 }` to without
+ * touching the database: `createMany` with an empty list, and `updateMany` with
+ * an empty `data`.
+ *
+ * A plan must have a statement, so there is one. A constant-false select is the
+ * cheapest thing that yields zero rows on both dialects, and it keeps these
+ * cases on exactly the same code path as every other write — no branch in the
+ * choke point, no plan that is a plan in name only, and the count still comes
+ * from the number of rows returned rather than from a hard-coded zero, so the
+ * shaper is the shaper every other counting write uses.
+ *
+ * It costs one round trip that Prisma does not make. That is the price of the
+ * uniformity above, and it is paid only by calls that asked for nothing.
+ */
+function zeroCountPlan(
+  schema: ModelSchema,
+  op: Operation,
+  dialect: SqlDialect,
+): QueryPlan {
+  const key = keyColumn(schema, dialect);
+  const { text, binders } = render(
+    sql(`select ${key} from ${dialect.quoteIdent(schema.table)} where false`),
+    dialect,
+    { model: schema.name, operation: op },
+  );
+  return {
+    text,
+    bind: bindValues(binders),
+    shape: (returned) => ({ count: returned.length }),
   };
 }
 

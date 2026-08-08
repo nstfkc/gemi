@@ -460,10 +460,166 @@ describe("update", () => {
     ).toContain(`set "name" = ?`);
   });
 
-  test("an empty data object is refused rather than emitting invalid SQL", () => {
-    expect(() =>
-      compileWrite(organization, "update", { where: { id: 1 }, data: {} }, sqlite),
-    ).toThrow(/At least one field must be updated/);
+  /**
+   * #355. An empty `data` used to be refused here — "At least one field must be
+   * updated" — on the reasoning that there is nothing to do. Prisma disagrees:
+   * measured on 6.19.2/SQLite, `update({ where: { id: 1 }, data: {} })` returns
+   * the row unchanged, honours `include` and `select` while doing it, and still
+   * raises P2025 when the `where` matches nothing.
+   *
+   * **Every test below uses `organization`, and that is not incidental.**
+   * `updateAssignments` stamps `@updatedAt` unconditionally, so a model
+   * carrying one *always* has an assignment and can never reach this branch or
+   * the relation-only one — `user` would compile a real `UPDATE` here and prove
+   * nothing. `organization` has no `@updatedAt`. The last test in this block
+   * pins that difference so the choice of fixture stays legible.
+   */
+  describe("an empty data reads the row rather than writing it", () => {
+    const empty = (args: any, schema = organization) =>
+      compileWrite(schema, "update", { where: { id: 1 }, ...args }, sqlite);
+
+    test("it selects instead of emitting an UPDATE with no assignments", () => {
+      const plan = empty({ data: {} });
+      expect(plan.text).toBe(
+        `select "id", "publicId", "name", "logoUrl", "description" ` +
+          `from "Organization" where "id" = ?`,
+      );
+      expect(plan.text).not.toContain("update");
+    });
+
+    /**
+     * The invariant #355's acceptance rests on: the empty `data` is not a new
+     * code path, it is the *existing* relation-only one with its guard removed.
+     * If these two ever stop agreeing, something has grown a second way to read
+     * a row on the write path — which is how the `include` and `_count` cases
+     * below would start diverging silently.
+     */
+    test("it is byte-identical to a data of only nested writes", () => {
+      registry.clearRegistry();
+      registry.register("User", class { static $schema = user });
+      registry.register("Organization", class { static $schema = organization });
+
+      const relationOnly = empty({ data: { users: { connect: { id: 2 } } } });
+      expect(empty({ data: {} }).text).toBe(relationOnly.text);
+      // …and the nested step is still planned, so the agreement is about the
+      // statement rather than about both of them doing nothing.
+      expect(relationOnly.after).toHaveLength(1);
+
+      registry.clearRegistry();
+    });
+
+    // Measured: `post.update({ where, data: {} , include: { tags: true } })`
+    // comes back with the tags. It goes through the same `plan()` call as every
+    // other update, so this needs no clause of its own — but a bare row fetch
+    // that ignored `include` would pass every other test in this block.
+    test("include is honoured", () => {
+      registry.clearRegistry();
+      registry.register("User", class { static $schema = user });
+      registry.register("Organization", class { static $schema = organization });
+
+      const plan = empty({ data: {}, include: { users: true } });
+      expect(plan.relations).toHaveLength(1);
+      expect(plan.relations![0]).toMatchObject({ as: "users", kind: "many" });
+
+      registry.clearRegistry();
+    });
+
+    // Measured: `select: { title: true }` returns `{ title: "p1" }` with no
+    // `id`, exactly as it narrows a normal update.
+    test("select narrows the read", () => {
+      expect(empty({ data: {}, select: { name: true } }).text).toBe(
+        `select "name" from "Organization" where "id" = ?`,
+      );
+    });
+
+    // The `where` is still the caller's, so a miss returns no row — and
+    // `update` is in ORTHROW, where `$exec` turns that into
+    // `RecordNotFoundError`, Prisma's P2025 for the same call.
+    test("a miss shapes to null, which is what ORTHROW raises on", () => {
+      expect(empty({ data: {} }).shape([])).toBeNull();
+    });
+
+    // Not a divergence to fix: Prisma's client rejects this before the query
+    // engine sees it. The point is that it must not fall into the branch above
+    // and answer a malformed call with a row.
+    test("a null data is still refused, and says what a good one looks like", () => {
+      expect(() => empty({ data: null })).toThrow(InvalidArgumentError);
+      expect(() => empty({ data: null })).toThrow(/like \{ name: 'new name' \}/);
+    });
+
+    // `@updatedAt` does not keep a model out of this branch, and the fact that
+    // it used to is the reason #355 shipped half-finished the first time: the
+    // stamp was the assignment that kept the count off zero, so the read was
+    // dead on every model carrying the attribute — which is most of them, and
+    // is the one the issue was filed from.
+    //
+    // MEASURED (Prisma 6.19.2, SQLite), seeding `updatedAt` to the epoch and
+    // reading it back: `user.update({ where, data: {} })` leaves it at 0. So
+    // Prisma does not stamp a call that sets no column, and the same select is
+    // right here as on a model without one. See `updateAssignments`.
+    test("a model with @updatedAt reads too, and does not stamp", () => {
+      const plan = compileWrite(user, "update", { where: { id: 1 }, data: {} }, sqlite);
+      expect(plan.text).toBe(
+        `select "id", "publicId", "name", "email", "emailVerifiedAt", ` +
+          `"verificationToken", "locale", "globalRole", "password", ` +
+          `"organizationId", "createdAt", "updatedAt", "deletedAt" ` +
+          `from "User" where "id" = ?`,
+      );
+    });
+
+    // The other half of the same rule, so the fix cannot be read as "never
+    // stamp": one real column brings the stamp back. Measured alongside —
+    // `data: { name: "real" }` does move `updatedAt`.
+    test("one supplied column brings the stamp back", () => {
+      const plan = compileWrite(
+        user,
+        "update",
+        { where: { id: 1 }, data: { name: "real" } },
+        sqlite,
+      );
+      expect(plan.text).toContain(`set "name" = ?, "updatedAt" = ?`);
+    });
+  });
+
+  /**
+   * MEASURED (Prisma 6.19.2, SQLite): `updateMany({ where, data: {} })` answers
+   * `{ count: 0 }` — with two of three rows matching the filter, with a filter
+   * matching none, and with no `where` at all. The count is a constant, not a
+   * row count, and no row is touched.
+   *
+   * So this is `createMany([])`'s plan, and these assert it is *literally* that
+   * plan: the same constant-false select, so nothing is read and the filter is
+   * never evaluated.
+   */
+  describe("an empty data in updateMany counts zero", () => {
+    const many = (args: any) =>
+      compileWrite(organization, "updateMany", { data: {}, ...args }, sqlite);
+
+    test("it is the constant-zero plan, whatever the filter", () => {
+      const expected = `select "id" from "Organization" where false`;
+      expect(many({ where: { name: "x" } }).text).toBe(expected);
+      expect(many({ where: { name: "nope" } }).text).toBe(expected);
+      expect(many({}).text).toBe(expected);
+      expect(many({ where: { name: "x" } }).shape([])).toEqual({ count: 0 });
+    });
+
+    // The filter is discarded, not skipped: an unknown field is refused whether
+    // or not there was anything to write, for the reason `createMany` validates
+    // `skipDuplicates` ahead of its own empty-list shortcut.
+    test("the discarded where is still validated", () => {
+      expect(() => many({ where: { nosuchfield: 1 } })).toThrow(UnknownFieldError);
+    });
+
+    // A model with `@updatedAt` takes the same branch, exactly as on `update`.
+    // MEASURED: `user.updateMany({ where: { name: "n" }, data: {} })` answers
+    // `{ count: 0 }` against a matching row and leaves `updatedAt` at the epoch
+    // — so the constant is Prisma's answer here too, and the stamp that used to
+    // make this model write was a divergence rather than the attribute working.
+    test("a model with @updatedAt counts zero too, and does not stamp", () => {
+      const plan = compileWrite(user, "updateMany", { where: { name: "x" }, data: {} }, sqlite);
+      expect(plan.text).toBe(`select "id" from "User" where false`);
+      expect(plan.shape([])).toEqual({ count: 0 });
+    });
   });
 });
 
@@ -605,14 +761,36 @@ describe("upsert", () => {
     ).toContain(`set "globalRole" = "globalRole" + ?`);
   });
 
-  test("@updatedAt is stamped on the conflict branch too", () => {
+  /**
+   * The conflict branch follows the same rule as an ordinary update: a column
+   * beside the stamp, or no stamp. MEASURED (Prisma 6.19.2, SQLite), seeding
+   * `updatedAt` to the epoch:
+   *
+   *     upsert hit, update: {}              epoch   not stamped
+   *     upsert hit, update: { name: "x" }   now     stamped
+   *
+   * This test used to assert the first case stamped, which was gemi's answer
+   * and not Prisma's. `do update set "email" = "User"."email"` is the no-op
+   * self-assignment the compiler already emits to keep `on conflict do update`
+   * valid SQL with nothing to set, so the branch still fires and still returns
+   * the row — it simply writes no column, which is what was asked.
+   */
+  test("@updatedAt follows the column on the conflict branch too", () => {
     expect(
       text("upsert", {
         where: { email: "a@b.c" },
         create: { email: "a@b.c" },
         update: {},
       }),
-    ).toContain(`do update set "updatedAt" = ?`);
+    ).not.toContain(`"updatedAt" = ?`);
+
+    expect(
+      text("upsert", {
+        where: { email: "a@b.c" },
+        create: { email: "a@b.c" },
+        update: { name: "x" },
+      }),
+    ).toContain(`do update set "name" = ?, "updatedAt" = ?`);
   });
 
   // `on conflict` only fires when the inserted row actually collides on the
@@ -1039,6 +1217,14 @@ describe("nested writes", () => {
    *
    * Walked as a table over both sides, because the two disagreeing *is* the
    * defect and a one-sided test cannot see it.
+   *
+   * **The three refusals this describe used to pin have inverted**: `update`,
+   * `delete` and `upsert` compile on the foreign side now. What is left is a
+   * genuine asymmetry — `delete` and `upsert` are still refused *by name* on
+   * the owning side, each for a reason of its own — and it is asserted below
+   * rather than left implicit. An unasserted asymmetry in a describe titled
+   * "answers the same on both sides" is exactly how #116 happened: the sentence
+   * reads like a guarantee and nothing was checking the half it did not cover.
    */
   describe("a to-one answers the same on both sides", () => {
     beforeEach(() => {
@@ -1046,14 +1232,25 @@ describe("nested writes", () => {
       registry.register("User", class { static $schema = userWithProfile });
     });
 
-    const refuse = (relation: string, operand: Record<string, unknown>) => {
+    const write = (
+      relation: string,
+      operand: Record<string, unknown>,
+      schema: typeof user = userWithProfile,
+    ) =>
+      compileWrite(
+        schema,
+        "update",
+        { where: { id: 1 }, data: { [relation]: operand } } as never,
+        sqlite,
+      );
+
+    const refuse = (
+      relation: string,
+      operand: Record<string, unknown>,
+      schema: typeof user = userWithProfile,
+    ) => {
       try {
-        compileWrite(
-          userWithProfile,
-          "update",
-          { where: { id: 1 }, data: { [relation]: operand } } as never,
-          sqlite,
-        );
+        write(relation, operand, schema);
         return null;
       } catch (error) {
         return error as UnsupportedQueryError;
@@ -1082,22 +1279,68 @@ describe("nested writes", () => {
     });
 
     /**
-     * The three that *are* on Prisma's to-one input. Not implemented on the
-     * foreign side — the point is that the refusal now says so, instead of
-     * blaming the operand's shape.
+     * The three that *are* on Prisma's to-one input, and now compile on the
+     * side whose child holds the key.
+     *
+     * Each is one `after` step labelled with the operand it implements — the
+     * plan is what a later reader has to be able to trust, and a step labelled
+     * `connect` for a `delete` is how the fall-through bugs above went unseen.
      */
     test.each([
       ["update", { update: { bio: "y" } }],
       ["delete", { delete: true }],
       ["upsert", { upsert: { create: {}, update: {} } }],
-    ])("%s on the foreign side names the shape, not the spelling", (operand, value) => {
-      const error = refuse("profile", value);
+    ])("%s compiles on the foreign side, as one labelled step", (operand, value) => {
+      const plan = write("profile", value);
 
-      expect(error).not.toBeNull();
-      expect(error!.argument).toBe(`data.profile.${operand}`);
-      expect(error!.message).toMatch(/foreign key lives on Profile/);
-      // The old refusals complained about the operand's spelling instead.
-      expect(error!.message).not.toMatch(/Expected an object/);
+      expect(plan.after).toHaveLength(1);
+      expect(plan.after![0].relation).toBe("profile");
+      expect(plan.after![0].operation).toBe(operand);
+
+      // The child is reached after this row exists, so its key has to come
+      // back — and it does, whichever statement carries it. Both spellings are
+      // asserted rather than one, because which one this compiles to depends on
+      // something the operand does not say: a relation-only `data` writes no
+      // column of *this* row, so `User` reads (`select "id", …`) while a model
+      // whose `data` also set a scalar would write (`update … returning "id"`).
+      // Prisma agrees that nothing is written here — measured, it leaves
+      // `updatedAt` at the epoch for exactly these three calls — so the select
+      // is the match rather than a shortcut. See `updateAssignments`.
+      expect(plan.text).toMatch(/^(?:select|update .* returning) "id",/);
+    });
+
+    /**
+     * **The asymmetry that remains, asserted rather than implied.**
+     *
+     * Neither of these is the shape gap #116 was about; both are decisions with
+     * their own reasons, written at their refusal sites. `delete` through a key
+     * on *this* row would remove a row the statement is not about; `upsert`
+     * there would have to create the far row and then write back to a parent
+     * that has already been inserted.
+     *
+     * `update` is deliberately absent from this table: it works on both sides,
+     * which is what makes the two above a real difference rather than a general
+     * one.
+     */
+    test.each([
+      ["delete", { delete: true }, /would remove a row this statement is not about/],
+      ["upsert", { upsert: { create: {}, update: {} } }, /already been inserted/],
+    ])("%s stays refused by name on the owning side", (operand, value, why) => {
+      const error = refuse("organization", value);
+
+      expect(error, `organization.${operand} compiled`).not.toBeNull();
+      expect(error!.argument).toBe(`data.organization.${operand}`);
+      expect(error!.model).toBe("User");
+      expect(error!.message).toMatch(why);
+
+      // ...and the same operand on the other side does not refuse, which is
+      // what makes this an asymmetry rather than a shared refusal.
+      expect(refuse("profile", value)).toBeNull();
+    });
+
+    test("update is the one of the three that works on both sides", () => {
+      expect(refuse("organization", { update: { name: "n" } })).toBeNull();
+      expect(refuse("profile", { update: { bio: "b" } })).toBeNull();
     });
 
     // The operands that work on this shape, so the refusals above are not
@@ -1109,6 +1352,156 @@ describe("nested writes", () => {
     ])("%s still compiles on the foreign side", (_operand, value) => {
       expect(refuse("profile", value)).toBeNull();
     });
+
+    /**
+     * **The spellings, which are the whole of what #354 was.** Prisma's to-one
+     * input is a different grammar from its to-many one, so each of these is a
+     * legal query that used to be refused for looking wrong:
+     *
+     *   - `update` takes its data bare *and* wrapped, and both mean the same
+     *     write — measured on this side, not inherited from the owning side's
+     *     measurement.
+     *   - the `where` is optional on `update` and on `upsert`, and it is a
+     *     **filter**: `{ bio: … }` has no unique index behind it and Prisma
+     *     accepts it. A `matchUniqueKey` on this path would refuse it.
+     *   - `delete` takes a boolean or a filter.
+     */
+    test.each([
+      ["update, bare data", { update: { bio: "y" } }],
+      ["update, wrapped in data", { update: { data: { bio: "y" } } }],
+      ["update, with a non-unique filter", { update: { where: { bio: "old" }, data: { bio: "y" } } }],
+      ["delete: true", { delete: true }],
+      ["delete: false", { delete: false }],
+      ["delete by filter", { delete: { bio: "old" } }],
+      ["upsert without a where", { upsert: { create: { bio: "x" }, update: { bio: "y" } } }],
+      ["upsert with a non-unique where", { upsert: { where: { bio: "old" }, create: { bio: "x" }, update: { bio: "y" } } }],
+    ])("%s compiles on a to-one", (_label, value) => {
+      expect(refuse("profile", value)).toBeNull();
+    });
+
+    /**
+     * `delete: false` is a call that asks for nothing, and it has to compile —
+     * refusing it would be stricter than Prisma, which accepts it and leaves
+     * the child untouched, foreign key included.
+     *
+     * It still plans a step. That is deliberate and it is what makes the design
+     * safe: the step reads the boolean out of the *call* at bind time, so the
+     * emptiness is decided per execution rather than baked into a plan that a
+     * later call with the other boolean could be served. See `toOneOperand`.
+     */
+    test("delete: false plans a step that reads the boolean at bind time", () => {
+      const plan = write("profile", { delete: false });
+      expect(plan.after).toHaveLength(1);
+      expect(plan.after![0].operation).toBe("delete");
+    });
+
+    /**
+     * **Arrays on a to-one**, which compiled and wrote through a relation that
+     * holds one row: `create: [a, b]` inserted two children and
+     * `connect: [x, y]` repointed both. Prisma refuses every one of these as a
+     * validation error on the argument, so gemi refusing them is agreement
+     * rather than strictness — and the error class says which: a supported
+     * argument with a bad value.
+     */
+    test.each([
+      ["create", { create: [{ bio: "a" }, { bio: "b" }] }],
+      ["connect", { connect: [{ userId: 1 }, { userId: 2 }] }],
+      ["connectOrCreate", { connectOrCreate: [{ where: { userId: 1 }, create: { bio: "a" } }] }],
+      ["update", { update: [{ where: { userId: 1 }, data: { bio: "a" } }] }],
+      ["delete", { delete: [{ bio: "a" }] }],
+      ["upsert", { upsert: [{ create: { bio: "a" }, update: { bio: "b" } }] }],
+    ])("an array of %s is refused on a to-one", (operand, value) => {
+      const error = refuse("profile", value);
+
+      expect(error, `an array of ${operand} compiled`).not.toBeNull();
+      expect(error).toBeInstanceOf(InvalidArgumentError);
+      expect(error!.argument).toBe(`data.profile.${operand}`);
+      expect(error!.model).toBe("User");
+      // The message names the shape that works, rather than saying arrays are
+      // unimplemented — they are refused, not missing.
+      expect(error!.message).toMatch(/Expected a single object/);
+      // ...and it names the side that actually holds the key.
+      expect(error!.message).toContain("Profile holds the foreign key");
+    });
+
+    // The same operands, singular, are the compiling cases above — asserted
+    // here too so the table cannot pass by refusing everything.
+    test("...while the same operands compile as a single object", () => {
+      expect(refuse("profile", { create: { bio: "a" } })).toBeNull();
+      expect(refuse("profile", { connect: { userId: 1 } })).toBeNull();
+    });
+
+    /**
+     * `disconnect` needs a **nullable** foreign key, and the shared fixture's
+     * is required on purpose — that pairing is what makes the relation a to-one
+     * in Prisma's own terms. So the clone is built here rather than in
+     * `fixtures.ts`, following `strictAccount` below: four suites compare the
+     * fixtures wholesale, and a churned fixture is a diff in all of them.
+     */
+    describe("disconnect, where the child's key is nullable", () => {
+      const nullableProfile = {
+        ...profile,
+        fields: {
+          ...profile.fields,
+          userId: { ...profile.fields.userId, nullable: true },
+        },
+        relations: {
+          ...profile.relations,
+          user: { ...profile.relations.user, nullable: true },
+        },
+      } as typeof profile;
+
+      beforeEach(() => {
+        registry.register("Profile", class { static $schema = nullableProfile });
+      });
+
+      test.each([
+        ["disconnect: true", { disconnect: true }],
+        ["disconnect: false", { disconnect: false }],
+        ["disconnect by filter", { disconnect: { bio: "old" } }],
+      ])("%s compiles", (_label, value) => {
+        const plan = write("profile", value);
+        expect(plan.after).toHaveLength(1);
+        expect(plan.after![0].operation).toBe("disconnect");
+      });
+
+      // A filter, not a unique key — the same operand Prisma types as
+      // `ProfileWhereInput | boolean`. `bio` has no unique index, and
+      // `assertNamedRows` would have listed the ones it does have.
+      test("a non-unique filter is not refused", () => {
+        expect(refuse("profile", { disconnect: { bio: "old" } })).toBeNull();
+      });
+
+      test.each([
+        ["disconnect", { disconnect: 5 }],
+        ["delete", { delete: 5 }],
+      ])("%s of the wrong type says what a good value is", (operand, value) => {
+        const error = refuse("profile", value as Record<string, unknown>);
+
+        expect(error).toBeInstanceOf(InvalidArgumentError);
+        expect(error!.argument).toBe(`data.profile.${operand}`);
+        expect(error!.message).toMatch(/takes either a boolean/);
+        expect(error!.message).toContain("ProfileWhereInput | boolean");
+      });
+    });
+
+    /**
+     * ...and with the *required* key the shared fixture has, `disconnect` is
+     * still refused — on the **key**, not the value, which is why even
+     * `disconnect: false` is refused rather than quietly accepted as a no-op.
+     * Prisma leaves the field out of the input type entirely on a required
+     * relation, so both spellings are unknown arguments there.
+     */
+    test.each([[true], [false], [{ bio: "old" }]])(
+      "disconnect: %s is refused when the child's key is required",
+      (value) => {
+        const error = refuse("profile", { disconnect: value });
+
+        expect(error).not.toBeNull();
+        expect(error!.argument).toBe("data.profile.disconnect");
+        expect(error!.message).toContain("'Profile.userId' is required");
+      },
+    );
   });
 
   /**

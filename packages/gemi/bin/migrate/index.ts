@@ -14,6 +14,7 @@ import type { ClassDecl, ClassMember } from "./classBody";
 import { isUsed, parseImports, printImport, stripLiterals } from "./imports";
 import type { ImportDecl } from "./imports";
 import { renameIdentifier } from "./lex";
+import { annotateOrmPortHazards } from "./orm";
 import {
   DELETED_EXPORTS,
   EXTRACTION_TARGETS,
@@ -195,13 +196,17 @@ export async function runMigrate(options: MigrateOptions) {
   // 4. Provider files whose contents now live in app/config are superseded.
   for (const file of migratedFiles) changes.push({ file, contents: null });
 
-  // 5. Renames across the rest of the app, plus retired fields in app/config.
+  // 5. Renames across the rest of the app, plus retired fields in app/config
+  //    and the two ORM-port hazards. The ORM pass runs over every file, not
+  //    only `app/config`: what it looks for is a guard or a query argument, and
+  //    those live wherever the app writes and reads.
   const touched = new Set(changes.map((change) => change.file));
   for (const file of walk(appDir)) {
     if (touched.has(file)) continue;
     const source = readFileSync(file, "utf8");
     let rewritten = rewriteReferences(source, rel(rootDir, file), notes);
     rewritten = annotateRetiredFields(rewritten, file, rootDir, notes);
+    rewritten = annotateOrmPortHazards(rewritten, rel(rootDir, file), notes);
     if (rewritten !== source) changes.push({ file, contents: rewritten });
   }
 

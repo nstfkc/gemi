@@ -2,12 +2,18 @@ import { Prisma as PrismaNamespace, type PrismaClient } from "./prisma-client";
 import { UniqueConstraintError } from "gemi/orm";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 
-import { createDifferential, type Differential } from "./differential";
+import {
+  createDifferential,
+  stabilizeRelations,
+  type Differential,
+} from "./differential";
 import {
   AccountModel,
   MembershipModel,
   OrganizationModel,
+  PasswordResetTokenModel,
   PostModel,
+  ProfileModel,
   TagModel,
   SocialAccountModel,
   UserModel,
@@ -111,6 +117,29 @@ async function seed(prisma: PrismaClient) {
       { publicId: "acc-mine-2", userId: users[0].id, organizationRole: 2 },
       { publicId: "acc-theirs", userId: users[1].id, organizationRole: 1 },
     ],
+  });
+
+  // The to-one whose foreign key is on the **child** (#354) — the shape this
+  // schema had none of, so the foreign side of a nested write had never been
+  // compared against a real client at all.
+  //
+  // Two rows, and the split is the whole point. It is the same role `acc-theirs`
+  // plays for the to-many above: without a parent that has *no* child, every
+  // miss branch is unreachable and the cases below would all take the hit path
+  // and pass whatever the miss path did.
+  //
+  //   `seed`  -> the first user, so `update` / `delete` / `upsert` / `disconnect`
+  //             each have a child to act on
+  //   `loose` -> nobody, so the second user misses on all four, and `connect`
+  //             has an unattached row to attach
+  //
+  // Measured against this client before the cases were written: every to-one
+  // miss is P2025 — the same error and the same wording for "no child" as for
+  // "the child did not match the filter" — except an `upsert` whose `where`
+  // does not match, which takes the create branch and collides on
+  // `Profile.userId`'s unique index (P2002). Both are pinned below.
+  await prisma.profile.createMany({
+    data: [{ bio: "seed", userId: users[0].id }, { bio: "loose" }],
   });
 }
 
@@ -418,6 +447,218 @@ const CASES: Case[] = [
       accounts: { create: { organizationRole: 1, organizationId: 99999 } },
     },
   }, ["User", "Account"]],
+
+  // --- a to-one whose foreign key is on the child (#354) -----------------
+  //
+  // `update`, `delete` and `upsert` were refused by name on this side, and the
+  // reason nothing caught how much that mattered is that the harness had no
+  // relation of this shape to reach: every child-side relation in the schema
+  // was a list. `Profile` is that relation, and these are the measurements the
+  // implementation was written from, one case per answer, so the answer is
+  // pinned rather than remembered.
+  //
+  // The `M<n>` labels are the rows of the measurement table in the plan. They
+  // are in the test names on purpose: a failure here names the measurement it
+  // contradicts, which is the only way to tell "gemi regressed" from "Prisma
+  // changed its mind" without re-deriving the whole table.
+  //
+  // User 1 has a profile, user 2 does not — see the seed. Every case compares
+  // both tables, because the interesting half of a to-one write is usually the
+  // child's foreign key rather than the parent row that comes back.
+
+  // M1 — a nested `update` on a parent with no child. The open question was
+  // P2025 or a silent no-op; it is P2025, and the parent's own assignments do
+  // not land either. `notFound` on both sides, so a gemi refusal cannot pass
+  // for it: `failureKind` classifies an `UnsupportedQueryError` as `other`.
+  ["M1 to-one update with no child raises", "update", {
+    where: { id: 2 }, data: { profile: { update: { bio: "changed" } } },
+  }, ["User", "Profile"]],
+  // M1b — the `{ data }` wrapper makes no difference to the miss.
+  ["M1b to-one update with no child, wrapped in data", "update", {
+    where: { id: 2 }, data: { profile: { update: { data: { bio: "changed" } } } },
+  }, ["User", "Profile"]],
+
+  // M2 — the one the plan flagged as possibly changing the code's shape,
+  // because a `findFirst` miss is treated as fatal one level down. It does not:
+  // a `where` that matches nothing with a child *present* is the same P2025,
+  // with the same wording, as no child at all. Fatal-on-miss was already right.
+  ["M2 to-one update whose where matches nothing raises", "update", {
+    where: { id: 1 },
+    data: { profile: { update: { where: { bio: "nope" }, data: { bio: "changed" } } } },
+  }, ["User", "Profile"]],
+  // M2b — the control, and the one that shows the `where` is a **filter**:
+  // `bio` carries no unique index, and Prisma takes it anyway.
+  ["M2b to-one update whose where matches", "update", {
+    where: { id: 1 },
+    data: { profile: { update: { where: { bio: "seed" }, data: { bio: "changed" } } } },
+  }, ["User", "Profile"]],
+  // M2c — no child *and* a non-matching filter. One error for both, which is
+  // why gemi needs only one `RecordNotFoundError` message here.
+  ["M2c to-one update, no child and a non-matching where", "update", {
+    where: { id: 2 },
+    data: { profile: { update: { where: { bio: "nope" }, data: { bio: "changed" } } } },
+  }, ["User", "Profile"]],
+
+  // M3 — `delete: true` with nothing linked. P2025, *not* the to-many
+  // "the row named by `true` is not connected" refusal, which would classify as
+  // `other` here and disagree.
+  ["M3 to-one delete true with no child raises", "update", {
+    where: { id: 2 }, data: { profile: { delete: true } },
+  }, ["User", "Profile"]],
+  // M3b — the control. `delete: true` removes the row rather than unlinking it.
+  ["M3b to-one delete true removes the row", "update", {
+    where: { id: 1 }, data: { profile: { delete: true } },
+  }, ["User", "Profile"]],
+
+  // M4 — a `delete` filter that matches nothing, with a child present. Fatal,
+  // exactly like M3, so the filter form needs no miss handling of its own.
+  ["M4 to-one delete with a non-matching filter raises", "update", {
+    where: { id: 1 }, data: { profile: { delete: { bio: "nope" } } },
+  }, ["User", "Profile"]],
+  // M4b — the control, and the case that rules out `assertNamedRows` on this
+  // path: `bio` is not unique and the operand is accepted regardless.
+  ["M4b to-one delete takes a filter, not a unique key", "update", {
+    where: { id: 1 }, data: { profile: { delete: { bio: "seed" } } },
+  }, ["User", "Profile"]],
+
+  // M5 / M5b — the booleans that mean *nothing happens*, and the pair the plan
+  // cache used to collide: `disconnect`/`delete` recorded a non-literal boolean
+  // as `"boolean"`, so a plan compiled from `true` served `false` and cleared a
+  // foreign key on a call that asked for nothing. Both must leave the child
+  // untouched, which the table comparison is what actually checks.
+  ["M5 to-one delete false is a strict no-op", "update", {
+    where: { id: 1 }, data: { profile: { delete: false } },
+  }, ["User", "Profile"]],
+  ["M5b to-one disconnect false is a strict no-op", "update", {
+    where: { id: 1 }, data: { profile: { disconnect: false } },
+  }, ["User", "Profile"]],
+
+  // M6 — `upsert` with no child: the create branch runs **and stamps the
+  // child's foreign key** from the parent's key. `where` is genuinely optional
+  // on a to-one, which is why it is absent here.
+  ["M6 to-one upsert with no child creates and links", "update", {
+    where: { id: 2 },
+    data: {
+      profile: { upsert: { create: { bio: "created" }, update: { bio: "updated" } } },
+    },
+  }, ["User", "Profile"]],
+  // M6b — the other branch, still with no `where`: the single linked child.
+  ["M6b to-one upsert with a child updates it", "update", {
+    where: { id: 1 },
+    data: {
+      profile: { upsert: { create: { bio: "created" }, update: { bio: "updated" } } },
+    },
+  }, ["User", "Profile"]],
+  // M7 — the only to-one miss that is *not* P2025. A `where` that matches
+  // nothing takes the create branch, which then collides with the child's
+  // unique foreign key: `unique`, not `notFound`. gemi has to let the create
+  // run and surface the collision rather than pre-empting it, and the harness
+  // compares the kind, so pre-empting would show up here as a disagreement.
+  ["M7 to-one upsert whose where misses collides on the unique key", "update", {
+    where: { id: 1 },
+    data: {
+      profile: {
+        upsert: {
+          where: { bio: "nope" },
+          create: { bio: "created" },
+          update: { bio: "updated" },
+        },
+      },
+    },
+  }, ["User", "Profile"]],
+
+  // M8 — the asymmetry that keeps `delete` and `disconnect` from sharing their
+  // miss handling even though they share a body: a `disconnect` that finds
+  // nothing is **silent**, where the same `delete` is P2025 (M3).
+  ["M8 to-one disconnect true with no child is silent", "update", {
+    where: { id: 2 }, data: { profile: { disconnect: true } },
+  }, ["User", "Profile"]],
+  // M8b — the control, and adjacent defect 2: this used to be refused outright.
+  // The row survives; only the foreign key is cleared.
+  ["M8b to-one disconnect true clears the child's key", "update", {
+    where: { id: 1 }, data: { profile: { disconnect: true } },
+  }, ["User", "Profile"]],
+  // M8c — and a `disconnect` filter that matches nothing is silent too, so the
+  // silence is about the operand rather than about the spelling.
+  ["M8c to-one disconnect with a non-matching filter is silent", "update", {
+    where: { id: 1 }, data: { profile: { disconnect: { bio: "nope" } } },
+  }, ["User", "Profile"]],
+
+  // M9 — the `{ data }` wrapper on the **foreign** side. It was measured on the
+  // owning side only, and the three spellings (bare, `{ data }`,
+  // `{ where, data }`) are one operation, which is what lets the normaliser
+  // collapse them at compile time.
+  ["M9 to-one update wrapped in data, child present", "update", {
+    where: { id: 1 }, data: { profile: { update: { data: { bio: "changed" } } } },
+  }, ["User", "Profile"]],
+
+  // M10 — arrays on a to-one. Prisma refuses every one of them at *validation*
+  // time, with no `P` code: the generated operand types are singular, with no
+  // `| X[]` arm, unlike their to-many siblings. So this is not gemi being
+  // stricter than Prisma — compiling these was a live divergence that wrote or
+  // repointed several rows through a relation that holds one.
+  //
+  // `other` on both sides, which is all the harness can honestly claim for an
+  // argument-shape refusal; `refusals.test.ts` asserts the error class and the
+  // wording. What these add is the half that suite cannot see: that Prisma
+  // refuses them too, and that **nothing is written** by either client.
+  ["M10 an array of create on a to-one", "update", {
+    where: { id: 2 }, data: { profile: { create: [{ bio: "a" }, { bio: "b" }] } },
+  }, ["User", "Profile"]],
+  ["M10 an array of connect on a to-one", "update", {
+    where: { id: 2 }, data: { profile: { connect: [{ id: 1 }, { id: 2 }] } },
+  }, ["User", "Profile"]],
+  ["M10 an array of connectOrCreate on a to-one", "update", {
+    where: { id: 2 },
+    data: {
+      profile: {
+        connectOrCreate: [
+          { where: { id: 2 }, create: { bio: "a" } },
+          { where: { id: 99 }, create: { bio: "b" } },
+        ],
+      },
+    },
+  }, ["User", "Profile"]],
+  ["M10 an array of update on a to-one", "update", {
+    where: { id: 1 },
+    data: {
+      profile: {
+        update: [
+          { where: { bio: "seed" }, data: { bio: "a" } },
+          { where: { bio: "loose" }, data: { bio: "b" } },
+        ],
+      },
+    },
+  }, ["User", "Profile"]],
+  ["M10 an array of delete on a to-one", "update", {
+    where: { id: 1 }, data: { profile: { delete: [{ bio: "seed" }] } },
+  }, ["User", "Profile"]],
+  ["M10 an array of upsert on a to-one", "update", {
+    where: { id: 1 },
+    data: {
+      profile: {
+        upsert: [{ create: { bio: "a" }, update: { bio: "b" } }],
+      },
+    },
+  }, ["User", "Profile"]],
+  // The controls for the two operands that were *not* refused before, so the
+  // array refusal cannot have been bought by refusing the singular form too.
+  ["a single create on a to-one", "update", {
+    where: { id: 2 }, data: { profile: { create: { bio: "made" } } },
+  }, ["User", "Profile"]],
+  // `loose` belongs to nobody, so this attaches rather than repointing.
+  ["a single connect on a to-one", "update", {
+    where: { id: 2 }, data: { profile: { connect: { id: 2 } } },
+  }, ["User", "Profile"]],
+  // And the one whose answer is not guessable: connecting a child that is
+  // already somebody else's **repoints** it, leaving the first parent with no
+  // profile — measured, because the alternative (a unique violation) is just as
+  // plausible a thing for a one-to-one to do.
+  ["a single connect that steals another parent's child", "update", {
+    where: { id: 2 }, data: { profile: { connect: { id: 1 } } },
+  }, ["User", "Profile"]],
+  // `create` where a child already exists is a **divergence**, not agreement,
+  // so it is not here — see the "still disagree" describe below.
 ];
 
 function suite(label: string, url?: string) {
@@ -434,6 +675,11 @@ function suite(label: string, url?: string) {
           SocialAccount: SocialAccountModel as never,
           Account: AccountModel as never,
           Organization: OrganizationModel as never,
+          // `readTables` reads `$schema.primaryKey` off the registered class to
+          // order its comparison read, so a model that is compared but not
+          // listed here is not a missing convenience — it throws.
+          Profile: ProfileModel as never,
+          PasswordResetToken: PasswordResetTokenModel as never,
         },
         seed,
         url,
@@ -1800,6 +2046,373 @@ function suite(label: string, url?: string) {
       expect(Object.keys(created)).toEqual(["email"]);
     });
 
+    /**
+     * The same relation, written from the **child** — the owning side of the
+     * very to-one the `M…` cases above write from the parent.
+     *
+     * `write.test.ts` has a describe titled "a to-one answers the same on both
+     * sides", and an unasserted symmetry claim in a suite with that title is
+     * how #116 happened. It asserts the claim against the *compiler*; these
+     * assert it against a real client, which is the half that can tell a
+     * matching pair of statements from a matching pair of answers.
+     */
+    describe("the same to-one, written from the owning side", () => {
+      test("update reaches the parent through the child's relation", async () => {
+        await differential.expectSameWrite(
+          "Profile",
+          "update",
+          {
+            where: { id: 1 },
+            data: { user: { update: { name: "From the child" } } },
+          },
+          { tables: ["User", "Profile"] },
+        );
+      });
+
+      /**
+       * The owning side of the same operand as M8b, and the reason
+       * `Profile.userId` is nullable on purpose: Prisma omits `disconnect` from
+       * the input type entirely when the foreign key is required, so a required
+       * one would leave this unreachable rather than refused.
+       */
+      test("disconnect clears this row's own foreign key", async () => {
+        await differential.expectSameWrite(
+          "Profile",
+          "update",
+          { where: { id: 1 }, data: { user: { disconnect: true } } },
+          { tables: ["User", "Profile"] },
+        );
+      });
+    });
+
+    /**
+     * M11 — `disconnect` on a **required** foreign key, which is the case that
+     * keeps `assertDisconnectable` as it is.
+     *
+     * Prisma does not refuse a value here; it does not have the key at all.
+     * `PasswordResetTokenUpdateInput`'s `user` operand lists only
+     * create / connectOrCreate / upsert / connect / update, and the error is
+     * "Unknown argument `disconnect`. Did you mean `connect`?". So `false` is
+     * refused exactly as `true` is — the refusal is on the **key**, not on the
+     * value, which is why it has to fire ahead of any boolean normalisation.
+     * That is the assertion below that is easy to lose.
+     *
+     * Not in the seed and not through `expectSameWrite`: a `PasswordResetToken`
+     * row would make `deleteMany empty where` — which deletes every user — fail
+     * a foreign key on both clients, silently turning an existing case from a
+     * successful delete into a mutual error. The row is written here instead,
+     * after the reset that the case needs anyway.
+     */
+    test("M11 disconnect on a required foreign key is refused by both", async () => {
+      await differential.reset();
+      await differential.prisma.passwordResetToken.create({
+        data: { token: "reset-1", userId: 1 },
+      });
+
+      for (const operand of [true, false]) {
+        const args = { where: { token: "reset-1" }, data: { user: { disconnect: operand } } };
+
+        await expect(
+          differential.prisma.passwordResetToken.update(args as never),
+        ).rejects.toThrow(/Unknown argument `disconnect`/);
+
+        await expect(
+          PasswordResetTokenModel.update(args as never),
+        ).rejects.toThrow();
+      }
+
+      // Neither client got as far as the database.
+      const row = await differential.prisma.passwordResetToken.findFirstOrThrow({
+        where: { token: "reset-1" },
+      });
+      expect(row.userId).toBe(1);
+    });
+
+    /**
+     * #355 — an `update` whose `data` sets no column.
+     *
+     * Every case here uses a model with **no `@updatedAt`**, and that is not a
+     * detail: `updateAssignments` stamps one unconditionally, so on `User` there
+     * is always an assignment and this branch is unreachable. A version of these
+     * written against `User` would pass without ever running the code they are
+     * for.
+     *
+     * `Post` has neither timestamp; `Organization` has none either and has two
+     * seeded rows, which is what M13 needs.
+     */
+    describe("an empty data", () => {
+      // M12 — it is a **read**. Prisma returns the row, unchanged, rather than
+      // refusing or emitting an `UPDATE` with nothing to set.
+      test("M12 update with an empty data returns the row", async () => {
+        await differential.expectSameWrite(
+          "Post",
+          "update",
+          { where: { id: 1 }, data: {} },
+          { tables: ["Post"] },
+        );
+      });
+
+      // M12b — and it is a read through the *same* projection machinery: the
+      // `include` is honoured in full, which a bare row fetch would drop.
+      test("M12b the include is honoured", async () => {
+        await differential.expectSameWrite(
+          "Post",
+          "update",
+          {
+            where: { id: 1 },
+            data: {},
+            include: { tags: { orderBy: { id: "asc" } } },
+          },
+          { tables: ["Post", "Tag"] },
+        );
+      });
+
+      // M12c — a miss still raises P2025, so `update` staying in `ORTHROW` is
+      // both required and sufficient. `notFound` on both sides.
+      test("M12c a miss still raises", async () => {
+        await differential.expectSameWrite(
+          "Post",
+          "update",
+          { where: { id: 99999 }, data: {} },
+          { tables: ["Post"] },
+        );
+      });
+
+      // M12d — `select` narrows it exactly as it narrows a normal update.
+      test("M12d select narrows the read", async () => {
+        await differential.expectSameWrite(
+          "Post",
+          "update",
+          { where: { id: 1 }, data: {}, select: { title: true } },
+          { tables: ["Post"] },
+        );
+      });
+
+      /**
+       * M13 — the half that decided whether #355 implements or documents.
+       *
+       * `updateMany` answers `{ count: 0 }`, and the count is a **constant**
+       * rather than a row count: "Acme" matches one of the two seeded
+       * organisations and the answer is still 0. That is what makes it cheap to
+       * match — skip the statement, return the constant, never evaluate the
+       * filter — and it is surprising enough that it has to be pinned rather
+       * than remembered.
+       */
+      test("M13 updateMany counts zero even when rows match", async () => {
+        await differential.expectSameWrite(
+          "Organization",
+          "updateMany",
+          { where: { name: "Acme" }, data: {} },
+          { tables: ["Organization"] },
+        );
+      });
+
+      test("M13b a filter that matches nothing is indistinguishable", async () => {
+        await differential.expectSameWrite(
+          "Organization",
+          "updateMany",
+          { where: { name: "no such organisation" }, data: {} },
+          { tables: ["Organization"] },
+        );
+      });
+
+      test("M13c and no filter at all is still zero", async () => {
+        await differential.expectSameWrite(
+          "Organization",
+          "updateMany",
+          { data: {} },
+          { tables: ["Organization"] },
+        );
+      });
+    });
+
+    /**
+     * **The `@updatedAt` stamp follows the column, and both clients agree.**
+     *
+     * These two were bugs 1 and 2 in the describe below — gemi stamped where
+     * Prisma did not — and they are kept here, by value, rather than graduated
+     * into `CASES`, because `CASES` cannot see them: `updatedAt` is in
+     * `VOLATILE`, so `expectSameWrite` compares both sides as the descriptor
+     * `"date"` and two different instants match. That blindness is why the
+     * divergence survived the first pass; asserting the epoch by hand is what
+     * caught it and is what keeps it caught.
+     *
+     * The rule both clients follow: a statement that sets at least one column
+     * stamps, one that sets none does not. Measured on rows whose `updatedAt`
+     * was seeded to the epoch, so this is the stamp and not two clocks.
+     */
+    describe("the @updatedAt stamp follows the column, as Prisma's does", () => {
+      test("update with an empty data leaves the stamp alone on both", async () => {
+        const args = { where: { id: 1 }, data: {} };
+
+        await differential.reset();
+        const fromPrisma: any = await differential.prisma.user.update(args);
+
+        await differential.reset();
+        const fromGemi: any = await UserModel.update(args);
+        const storedByGemi = await differential.prisma.user.findFirstOrThrow({
+          where: { id: 1 },
+        });
+
+        expect(fromPrisma.updatedAt.getTime()).toBe(EPOCH);
+        expect(fromGemi.updatedAt.getTime()).toBe(EPOCH);
+        // And nothing was written, not merely nothing returned.
+        expect(storedByGemi.updatedAt.getTime()).toBe(EPOCH);
+      });
+
+      test("updateMany with an empty data counts zero and writes nothing on both", async () => {
+        const args = { where: { globalRole: { gte: 0 } }, data: {} };
+        const seeded = [EPOCH, EPOCH + 1000, EPOCH + 2000];
+
+        await differential.reset();
+        const fromPrisma = await differential.prisma.user.updateMany(args);
+        const afterPrisma = await differential.prisma.user.findMany({
+          orderBy: { id: "asc" },
+        });
+
+        await differential.reset();
+        const fromGemi = await UserModel.updateMany(args);
+        const afterGemi = await differential.prisma.user.findMany({
+          orderBy: { id: "asc" },
+        });
+
+        expect(fromPrisma).toEqual({ count: 0 });
+        expect(fromGemi).toEqual({ count: 0 });
+        expect(afterPrisma.map((row) => row.updatedAt.getTime())).toEqual(seeded);
+        expect(afterGemi.map((row) => row.updatedAt.getTime())).toEqual(seeded);
+      });
+
+      /**
+       * The half that keeps the fix from being read as "never stamp", and the
+       * one a regression would most likely break: a real column brings it back.
+       */
+      test("a supplied column still stamps on both", async () => {
+        const args = { where: { id: 1 }, data: { name: "written" } };
+
+        await differential.reset();
+        const fromPrisma: any = await differential.prisma.user.update(args);
+
+        await differential.reset();
+        const fromGemi: any = await UserModel.update(args);
+
+        expect(fromPrisma.updatedAt.getTime()).toBeGreaterThan(EPOCH);
+        expect(fromGemi.updatedAt.getTime()).toBeGreaterThan(EPOCH);
+      });
+
+      /**
+       * The shape #354 ships, and the reason this describe is not only about
+       * #355: a nested write whose child holds the foreign key sets no column
+       * of *this* row, so it must not stamp either. Measured — Prisma leaves it
+       * at the epoch for a nested `create`, `update` and `upsert` alike.
+       */
+      test("a relation-only nested write leaves the stamp alone on both", async () => {
+        const args = {
+          where: { id: 2 },
+          data: { profile: { create: { bio: "nested" } } },
+        };
+
+        await differential.reset();
+        const fromPrisma: any = await differential.prisma.user.update(args as never);
+
+        await differential.reset();
+        const fromGemi: any = await UserModel.update(args as never);
+        const storedByGemi = await differential.prisma.user.findFirstOrThrow({
+          where: { id: 2 },
+        });
+
+        expect(fromPrisma.updatedAt.getTime()).toBe(EPOCH + 1000);
+        expect(fromGemi.updatedAt.getTime()).toBe(EPOCH + 1000);
+        expect(storedByGemi.updatedAt.getTime()).toBe(EPOCH + 1000);
+        // The child still landed — the parent reading rather than writing must
+        // not cost the nested step.
+        expect(
+          await differential.prisma.profile.findFirst({ where: { userId: 2 } }),
+        ).toMatchObject({ bio: "nested" });
+      });
+    });
+
+    /**
+     * Where gemi and Prisma **still disagree**. Every one of these is a bug,
+     * found by running the measurements above through both clients, and none of
+     * them is a decision anybody made.
+     *
+     * They are not in `CASES`, because `expectSameWrite` asserts agreement: a
+     * case put there to disagree is a red suite carrying no information. Each
+     * one instead pins **both** answers — Prisma's *and* gemi's — so the day
+     * either side moves, this fails and says which one moved. That is the only
+     * form in which a known divergence is worth committing; a `test.skip` would
+     * record nothing and a comment would record it where nothing checks it.
+     *
+     * Fixing any of them is a compiler change, in files this suite does not own.
+     * Deleting the case is what closing the bug looks like: it graduates into
+     * `CASES` and the harness takes over from the prose.
+     */
+    describe("where the two clients still disagree — each of these is a bug", () => {
+      /**
+       * **BUG 1 — owning-side `disconnect: false`.**
+       *
+       * #354 made the *foreign* side take a boolean (M5b above, which passes).
+       * The owning side still refuses anything but `true`. Prisma's owning-side
+       * operand is `WhereInput | boolean` and it takes `false` as a no-op, so a
+       * caller passing a flag through — `disconnect: shouldDetach` — gets a
+       * refusal on the branch that asked for nothing.
+       *
+       * This is strictly better than what it replaced, which nulled the foreign
+       * key on that branch through a stale plan-cache entry. It is still wrong.
+       */
+      test("the owning side refuses disconnect: false, which Prisma no-ops", async () => {
+        const args = { where: { id: 1 }, data: { user: { disconnect: false } } };
+
+        await differential.reset();
+        const fromPrisma = await differential.prisma.profile.update(args as never);
+        expect(fromPrisma.userId).toBe(1);
+
+        await differential.reset();
+        await expect(ProfileModel.update(args as never)).rejects.toThrow(
+          /only 'disconnect: true' is implemented/,
+        );
+      });
+
+      /**
+       * **BUG 2 — `create` on a to-one that already has a child.**
+       *
+       * Prisma **detaches** the existing child first: the old row survives with
+       * a null foreign key and the new one takes the link. gemi inserts without
+       * clearing, and the child's `@unique` foreign key rejects it — a unique
+       * violation on a call Prisma answers.
+       *
+       * Not the same operand family as the three #354 closed, which is why it
+       * survived: `create` was never refused on this side, so nothing pointed at
+       * it. The fix belongs beside `set`, whose whole job is clearing the links
+       * that are in the way before writing the new ones.
+       */
+      test("create on an occupied to-one collides here and detaches in Prisma", async () => {
+        const args = {
+          where: { id: 1 },
+          data: { profile: { create: { bio: "second" } } },
+        };
+
+        await differential.reset();
+        await differential.prisma.user.update(args);
+        const afterPrisma = await differential.prisma.profile.findMany({
+          orderBy: { id: "asc" },
+        });
+        expect(afterPrisma.map((row) => [row.bio, row.userId])).toEqual([
+          // The row that was linked, now orphaned rather than deleted.
+          ["seed", null],
+          ["loose", null],
+          ["second", 1],
+        ]);
+
+        await differential.reset();
+        await expect(UserModel.update(args)).rejects.toBeInstanceOf(
+          UniqueConstraintError,
+        );
+        // And nothing is left behind: the failed insert rolls back.
+        expect(await differential.prisma.profile.count()).toBe(2);
+      });
+    });
+
     // --- typed errors ---------------------------------------------------
 
     test("a unique violation is typed, catchable, and names the field", async () => {
@@ -1968,3 +2581,65 @@ if (POSTGRES_URL) {
     });
   });
 }
+
+/**
+ * The harness's own relation-order stabilisation, tested directly because the
+ * thing it fixes cannot be reproduced on demand.
+ *
+ * `expectSameWrite` compares what the call returned, and an `include` is
+ * unordered in *both* clients — measured, by logging what Prisma 6.19.2 sends:
+ * `SELECT … FROM "public"."Account" WHERE … IN ($1) OFFSET $2`, with no
+ * `ORDER BY`. On Postgres an `UPDATE` relocates the row within the heap, so the
+ * child that was written comes back last, or first again once the page has been
+ * pruned. The two clients run one after the other and meet the heap in
+ * different states, so the same passing case fails perhaps one run in three —
+ * always as a plausible-looking divergence in which every field of every row is
+ * identical and only the array order differs.
+ *
+ * That is unreproducible by construction, which is why the guard is asserted
+ * here rather than left to the Postgres run to notice. Deleting the sort in
+ * `differential.ts` fails the first two cases below.
+ *
+ * Dialect-independent — it is a pure function — so it sits outside `suite`.
+ */
+describe("the harness compares relations as a set, not in storage order", () => {
+  const registry = { User: UserModel, Account: AccountModel } as any;
+
+  test("a relation array is reordered and a Json column is not", () => {
+    const out: any = stabilizeRelations(
+      {
+        id: 1,
+        // A `Json` column whose value *is* the order. The reason the walk is
+        // guided by the schema instead of sorting every array of objects.
+        metadata: [{ z: 1 }, { a: 2 }],
+        accounts: [
+          { id: 4, organizationRole: 2 },
+          { id: 3, organizationRole: 9 },
+        ],
+      },
+      "User",
+      registry,
+    );
+
+    expect(out.accounts.map((account: any) => account.id)).toEqual([3, 4]);
+    expect(out.metadata).toEqual([{ z: 1 }, { a: 2 }]);
+  });
+
+  test("the two orders a write can return collapse to one value", () => {
+    expect(
+      stabilizeRelations({ accounts: [{ id: 4 }, { id: 3 }] }, "User", registry),
+    ).toEqual(
+      stabilizeRelations({ accounts: [{ id: 3 }, { id: 4 }] }, "User", registry),
+    );
+  });
+
+  // The half that keeps the case above from being a way to pass anything: it is
+  // a multiset comparison, so a different *set* of children still fails.
+  test("a genuinely different set of children still differs", () => {
+    expect(
+      stabilizeRelations({ accounts: [{ id: 4 }, { id: 3 }] }, "User", registry),
+    ).not.toEqual(
+      stabilizeRelations({ accounts: [{ id: 4 }, { id: 5 }] }, "User", registry),
+    );
+  });
+});

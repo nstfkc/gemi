@@ -10,6 +10,7 @@ import {
   Model,
   RecordNotFoundError,
   ScopeEscapeError,
+  UniqueConstraintError,
   clearPlanCache,
   register,
   type ModelPolicy,
@@ -44,6 +45,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest"
  */
 
 const DDL = [
+  `DROP TABLE IF EXISTS "Cover"`,
   `DROP TABLE IF EXISTS "Note"`,
   `DROP TABLE IF EXISTS "Folder"`,
   `CREATE TABLE "Folder" (
@@ -55,6 +57,15 @@ const DDL = [
      "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
      "folderId" INTEGER,
      "label" TEXT NOT NULL,
+     "orgId" INTEGER
+   )`,
+  // The to-one half, and the `UNIQUE` is the whole point of it: a relation that
+  // holds one row is a foreign key with a unique index on it, which is what
+  // turns the `upsert` case below into a collision rather than a second row.
+  `CREATE TABLE "Cover" (
+     "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+     "folderId" INTEGER UNIQUE,
+     "caption" TEXT NOT NULL,
      "orgId" INTEGER
    )`,
 ];
@@ -91,6 +102,27 @@ const folderSchema: ModelSchema = {
       to: [],
       nullable: false,
     },
+    /**
+     * The **to-one whose key is on the child** — the shape #354 implemented,
+     * and the one this harness could not otherwise reach: every relation above
+     * that a policy can hide is a list, so a hidden row is always a *narrowing*
+     * of a set the caller named. Here the caller names nothing, so hiding the
+     * one row is the whole operand.
+     *
+     * Copied from the generated shape rather than guessed — `User.profile` in
+     * `app/models/generated/schema.ts` is exactly
+     * `{ kind: "one", from: [], to: [], nullable: true }`, and `from` being
+     * empty is what routes this to `planForeignSide`.
+     */
+    cover: {
+      name: "cover",
+      model: "Cover",
+      kind: "one",
+      relationName: "CoverToFolder",
+      from: [],
+      to: [],
+      nullable: true,
+    },
   },
 };
 
@@ -118,6 +150,32 @@ const noteSchema: ModelSchema = {
   },
 };
 
+const coverSchema: ModelSchema = {
+  name: "Cover",
+  table: "Cover",
+  fields: {
+    id: field("id", "Int", { isId: true, default: { kind: "autoincrement" } }),
+    folderId: field("folderId", "Int", { nullable: true }),
+    caption: field("caption", "String"),
+    orgId: field("orgId", "Int", { nullable: true }),
+  },
+  primaryKey: ["id"],
+  // The foreign key is the unique one, which is what makes the relation hold a
+  // single row — `Profile.userId @unique` in the template's schema.
+  uniques: [["folderId"]],
+  relations: {
+    folder: {
+      name: "folder",
+      model: "Folder",
+      kind: "one",
+      relationName: "CoverToFolder",
+      from: ["folderId"],
+      to: ["id"],
+      nullable: true,
+    },
+  },
+};
+
 const tenant = (): ModelPolicy => ({
   scope: (context) => ({ orgId: (context.user as any).orgId }),
   onCreate: (context, data) => ({
@@ -133,6 +191,11 @@ class Folder extends Model {
 
 class Note extends Model {
   static $schema = noteSchema;
+  static $policies = [tenant()];
+}
+
+class Cover extends Model {
+  static $schema = coverSchema;
   static $policies = [tenant()];
 }
 
@@ -164,9 +227,11 @@ describe("policies on nested writes", () => {
 
     register("Folder", Folder);
     register("Note", Note);
+    register("Cover", Cover);
   }, 120_000);
 
   afterAll(async () => {
+    await raw?.unsafe(`DROP TABLE IF EXISTS "Cover"`).catch(() => {});
     await raw?.unsafe(`DROP TABLE IF EXISTS "Note"`).catch(() => {});
     await raw?.unsafe(`DROP TABLE IF EXISTS "Folder"`).catch(() => {});
     await raw?.close();
@@ -177,6 +242,7 @@ describe("policies on nested writes", () => {
 
   beforeEach(async () => {
     clearPlanCache();
+    await raw.unsafe(`DELETE FROM "Cover"`);
     await raw.unsafe(`DELETE FROM "Note"`);
     await raw.unsafe(`DELETE FROM "Folder"`);
     // A folder belonging to somebody else, reachable only by its unique `code`.
@@ -484,6 +550,17 @@ describe("policies on nested writes", () => {
    * but carries the other tenant's `orgId`. So the link is right and the policy
    * is what has to refuse: without the child's scope this clears a foreign key
    * on a row we cannot see, and reports success.
+   *
+   * **`data` carries no scalar assignment, and that used to be impossible.**
+   * Both of these tests used to set `code` to the value it already had, with a
+   * note saying a relation-only `update` was refused for having nothing to
+   * `SET` and that #83 would make it compile to a select. #83 landed (`Writes
+   * through an implicit many-to-many join table`), and an empty `data` now
+   * takes the same select — so the no-op assignment is gone from both, which is
+   * what the note said should happen to it. It is worth removing rather than
+   * leaving: a stray `code: "ours"` reads as part of what is being tested, and
+   * it is the difference between this call emitting an `UPDATE` and emitting
+   * the `SELECT` a caller would really get.
    */
   test("disconnect cannot clear a row the child's policy hides", async () => {
     await raw.unsafe(
@@ -497,12 +574,7 @@ describe("policies on nested writes", () => {
     await Model.asUser(OURS, () =>
       Folder.$exec("update", {
         where: { id: 2 },
-        // `code` is here only to satisfy "at least one field must be
-        // updated": `Folder` has no `@updatedAt`, so a relation-only update has
-        // no scalar assignment and is refused on this branch. #83 makes that
-        // compile to a select of the same returning list; until it lands, a
-        // no-op assignment keeps the test about the disconnect.
-        data: { code: "ours", notes: { disconnect: { id: 10 } } },
+        data: { notes: { disconnect: { id: 10 } } },
       }),
     );
 
@@ -510,7 +582,7 @@ describe("policies on nested writes", () => {
     expect(notes[0].folderId).toBe(2);
   });
 
-  /** ...and a visible one is cleared. */
+  /** ...and a visible one is cleared. Relation-only `data`, as above. */
   test("disconnect clears a row the caller can see", async () => {
     await raw.unsafe(
       `INSERT INTO "Folder" ("id", "code", "orgId") VALUES (2, 'ours', 7)`,
@@ -523,12 +595,7 @@ describe("policies on nested writes", () => {
     await Model.asUser(OURS, () =>
       Folder.$exec("update", {
         where: { id: 2 },
-        // `code` is here only to satisfy "at least one field must be
-        // updated": `Folder` has no `@updatedAt`, so a relation-only update has
-        // no scalar assignment and is refused on this branch. #83 makes that
-        // compile to a select of the same returning list; until it lands, a
-        // no-op assignment keeps the test about the disconnect.
-        data: { code: "ours", notes: { disconnect: { id: 11 } } },
+        data: { notes: { disconnect: { id: 11 } } },
       }),
     );
 
@@ -627,6 +694,274 @@ describe("policies on nested writes", () => {
 
     const notes: any = await raw.unsafe(`SELECT "orgId" FROM "Note"`);
     expect(notes[0].orgId).toBe(7);
+  });
+
+  /**
+   * **A to-one whose key is on the child**, now that `update`, `delete` and
+   * `upsert` are implemented there.
+   *
+   * The normalisation that implemented them rewrites the operand's *shape* and
+   * nothing else — `delete: true` becomes `{}`, `false` becomes `null`, a bare
+   * `update` payload becomes `{ where, data }` — and then falls through to the
+   * same bodies the to-many uses. Read rather than assumed: every `executor.exec`
+   * on that path still passes `false` for pre-scoping, so the child's `$exec`
+   * runs its own policies exactly as it does for a list. The scope, the
+   * `onCreate`/`onUpdate` hooks and the scope-escape guard therefore need no
+   * to-one cases — they are the same calls, and the tests above already own
+   * them.
+   *
+   * **One thing is genuinely different, and it changes the answer's kind.** On a
+   * to-many the caller names the rows, so a row the child's policy hides is a
+   * *narrowing*: `disconnect: { id: 10 }` above quietly acts on nothing and the
+   * other operands still have the rows that were visible. On a to-one the caller
+   * names no row at all — `delete: true` means "the connected one" — so hiding
+   * that row does not narrow the operand, it empties it. The lookup misses, and
+   * a miss is the whole operand.
+   *
+   * Which matters because Prisma answers a to-one miss with P2025 rather than
+   * with silence. So a policy can turn a to-one nested write into an error where
+   * the same policy on a list turned it into a no-op.
+   */
+  describe("a to-one whose key is on the child", () => {
+    /** Ours; the cover seeded against it is the other tenant's. */
+    const seedFolder = () =>
+      raw.unsafe(
+        `INSERT INTO "Folder" ("id", "code", "orgId") VALUES (2, 'ours', 7)`,
+      );
+
+    const hiddenCover = () =>
+      raw.unsafe(
+        `INSERT INTO "Cover" ("id", "folderId", "caption", "orgId") ` +
+          `VALUES (50, 2, 'theirs', 99)`,
+      );
+
+    /**
+     * `delete: true` against a child the policy hides answers **exactly what it
+     * answers when there is no child at all**, and both assertions are here
+     * together because the point is that they are indistinguishable.
+     *
+     * That is the same conservative direction the to-many `delete` takes one
+     * screen up — a hidden row reports as not connected rather than as denied —
+     * arrived at through a different route. There the reason is that the row the
+     * caller named cannot be found among this parent's children; here the caller
+     * named nothing, so what cannot be found is the relation's single row. The
+     * error is `RecordNotFoundError` rather than the to-many's "is not
+     * connected", because on a to-one there is no name to quote back and because
+     * Prisma answers P2025.
+     *
+     * Reading it the other way round is what makes it worth pinning: a caller
+     * who can see a folder but not its cover is told the folder has no cover.
+     * They cannot tell a folder whose cover belongs to another tenant from one
+     * that has none, which is the property that stops the operand being a probe.
+     */
+    test("delete: true reads a hidden child as no child at all", async () => {
+      await seedFolder();
+      await hiddenCover();
+      await raw.unsafe(
+        `INSERT INTO "Folder" ("id", "code", "orgId") VALUES (3, 'bare', 7)`,
+      );
+
+      const hidden = Model.asUser(OURS, () =>
+        Folder.$exec("update", {
+          where: { id: 2 },
+          data: { cover: { delete: true } },
+        }),
+      );
+      await expect(hidden).rejects.toThrow(RecordNotFoundError);
+
+      // Folder 3 genuinely has no cover, and says the same thing.
+      const absent = Model.asUser(OURS, () =>
+        Folder.$exec("update", {
+          where: { id: 3 },
+          data: { cover: { delete: true } },
+        }),
+      );
+      await expect(absent).rejects.toThrow(RecordNotFoundError);
+
+      // Observed raw, because a scoped read could not see the row either way.
+      const covers: any = await raw.unsafe(`SELECT * FROM "Cover"`);
+      expect([...covers]).toHaveLength(1);
+      expect(covers[0].orgId).toBe(99);
+    });
+
+    /**
+     * The non-vacuity half: the same call against a visible child deletes it. A
+     * `delete: true` that raised for some reason of its own — the operand not
+     * reaching the child at all, say — would pass the test above for the wrong
+     * reason.
+     */
+    test("delete: true deletes a child the caller can see", async () => {
+      await seedFolder();
+      await raw.unsafe(
+        `INSERT INTO "Cover" ("id", "folderId", "caption", "orgId") ` +
+          `VALUES (51, 2, 'ours', 7)`,
+      );
+
+      await Model.asUser(OURS, () =>
+        Folder.$exec("update", {
+          where: { id: 2 },
+          data: { cover: { delete: true } },
+        }),
+      );
+
+      expect(await raw.unsafe(`SELECT * FROM "Cover"`)).toHaveLength(0);
+    });
+
+    /**
+     * ...and `disconnect: true` against the *same* hidden child is silent.
+     *
+     * The two operands share one body and differ only in whether a miss is
+     * fatal — Prisma's asymmetry, measured, not a choice made here. This asserts
+     * that the asymmetry survives a miss the *policy* caused rather than the
+     * data: a scoped-away child produces the same silence a genuinely absent one
+     * does, and does not acquire `delete`'s error by sharing its code path.
+     */
+    test("disconnect: true is silent about the same hidden child", async () => {
+      await seedFolder();
+      await hiddenCover();
+
+      await expect(
+        Model.asUser(OURS, () =>
+          Folder.$exec("update", {
+            where: { id: 2 },
+            data: { cover: { disconnect: true } },
+          }),
+        ),
+      ).resolves.toBeDefined();
+
+      const covers: any = await raw.unsafe(`SELECT "folderId" FROM "Cover"`);
+      expect(covers[0].folderId).toBe(2);
+    });
+
+    /**
+     * **The one that could genuinely surprise somebody.**
+     *
+     * A nested `upsert` decides its branch with a lookup, and the lookup runs
+     * through the child's own `$exec` — so a child the policy hides reads as a
+     * miss, and the miss takes the **create** branch. The create then stamps the
+     * parent's key into the child's foreign key, which on a to-one carries a
+     * unique index. It collides with the row the caller was not allowed to see.
+     *
+     * This is the to-one reading of a note already in `planForeignSide`: an
+     * upsert aimed at a row belonging to *another parent* takes the create
+     * branch and collides, and Prisma does the same, measured — `where` matching
+     * nothing with a child present gives P2002, *"Unique constraint failed on
+     * the fields: (`userId`)"*. What the implementation's comment does not
+     * predict is that a **policy** reaches the same place: the child is this
+     * parent's, the relation is right, and the reason the lookup misses is that
+     * this caller may not see the row.
+     *
+     * So the error a caller gets is `UniqueConstraintError` naming a field they
+     * never wrote. It does not leak the row's contents, and it is the same
+     * answer they would get from a genuine key collision — but it is a
+     * *different* answer from the one `delete` gives one test up, and that is
+     * worth having written down: the two hidden-child cases are not uniform, and
+     * only `delete` and `update` reduce to "no such row".
+     *
+     * Nothing is written either way, which is the part that has to hold.
+     */
+    test("an upsert whose child is hidden collides on the child's unique key", async () => {
+      await seedFolder();
+      await hiddenCover();
+
+      await expect(
+        Model.asUser(OURS, () =>
+          Folder.$exec("update", {
+            where: { id: 2 },
+            data: {
+              cover: {
+                upsert: {
+                  create: { caption: "mine" },
+                  update: { caption: "updated" },
+                },
+              },
+            },
+          }),
+        ),
+      ).rejects.toThrow(UniqueConstraintError);
+
+      // The other tenant's row is still there, still theirs, still unedited —
+      // and no second row was written beside it.
+      const covers: any = await raw.unsafe(`SELECT * FROM "Cover"`);
+      expect([...covers]).toHaveLength(1);
+      expect(covers[0].caption).toBe("theirs");
+      expect(covers[0].orgId).toBe(99);
+    });
+
+    /**
+     * Both branches against rows the caller *can* see, which is what says the
+     * test above is about the policy rather than about the upsert.
+     *
+     * The create half also pins that the child's `onCreate` runs on this path:
+     * the row it writes carries our tenant, and its foreign key comes from the
+     * parent rather than from the payload.
+     */
+    test("an upsert takes its branches normally when nothing is hidden", async () => {
+      await seedFolder();
+
+      await Model.asUser(OURS, () =>
+        Folder.$exec("update", {
+          where: { id: 2 },
+          data: {
+            cover: {
+              upsert: {
+                create: { caption: "made" },
+                update: { caption: "unused" },
+              },
+            },
+          },
+        }),
+      );
+
+      let covers: any = await raw.unsafe(`SELECT * FROM "Cover"`);
+      expect([...covers]).toHaveLength(1);
+      expect(covers[0].caption).toBe("made");
+      expect(covers[0].folderId).toBe(2);
+      // The child's `onCreate`, through its own `$exec`.
+      expect(covers[0].orgId).toBe(7);
+
+      // Now that one exists and is visible, the same call updates it.
+      await Model.asUser(OURS, () =>
+        Folder.$exec("update", {
+          where: { id: 2 },
+          data: {
+            cover: {
+              upsert: {
+                create: { caption: "unused" },
+                update: { caption: "updated" },
+              },
+            },
+          },
+        }),
+      );
+
+      covers = await raw.unsafe(`SELECT * FROM "Cover"`);
+      expect([...covers]).toHaveLength(1);
+      expect(covers[0].caption).toBe("updated");
+    });
+
+    /**
+     * The remaining to-one operand with a policy answer of its own: a nested
+     * `update` naming no row. It reduces to "no such row" like `delete`, so it
+     * is one assertion rather than a pair — but it is the operand a ported
+     * application reaches for most, and the scoped miss is what it gets.
+     */
+    test("update on a hidden child is a miss, and writes nothing", async () => {
+      await seedFolder();
+      await hiddenCover();
+
+      await expect(
+        Model.asUser(OURS, () =>
+          Folder.$exec("update", {
+            where: { id: 2 },
+            data: { cover: { update: { caption: "hacked" } } },
+          }),
+        ),
+      ).rejects.toThrow(RecordNotFoundError);
+
+      const covers: any = await raw.unsafe(`SELECT "caption" FROM "Cover"`);
+      expect(covers[0].caption).toBe("theirs");
+    });
   });
 
   /**

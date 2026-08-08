@@ -193,7 +193,7 @@ import { useSearchParams } from "gemi/client";
 
 function Pagination() {
   const searchParams = useSearchParams();
-  const page = Number(searchParams.get("page")) || 1;
+  const page = Math.max(1, Math.trunc(Number(searchParams.get("page"))) || 1);
 
   function goTo(next: number) {
     searchParams.set("page", String(next));
@@ -202,6 +202,13 @@ function Pagination() {
   // …
 }
 ```
+
+Truncate a page number where you read it, rather than trusting the query string: it holds
+whatever the last link, or a hand edit, left there, and the value is incremented and sent back
+to the server, where a fractional page arrives multiplied — as a fractional `skip`, which the
+ORM refuses. The server-side counterpart is `paginate` from `gemi/orm` (see
+[ORM](./orm.md#querying)); it belongs to the query layer, so on the client the whole of the job
+is the line above.
 
 `.set` accepts either `(key, value)` or an object of updates, and the value may be a
 function of the current value. `.push("hard")` forces a full data reload; the default

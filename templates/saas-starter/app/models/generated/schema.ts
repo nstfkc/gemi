@@ -699,6 +699,63 @@ export const Post = {
   }
 } satisfies ModelSchema;
 
+export const Profile = {
+  "name": "Profile",
+  "table": "Profile",
+  "fields": {
+    "id": {
+      "name": "id",
+      "column": "id",
+      "type": "Int",
+      "nullable": false,
+      "isId": true,
+      "isUpdatedAt": false,
+      "default": {
+        "kind": "autoincrement"
+      }
+    },
+    "bio": {
+      "name": "bio",
+      "column": "bio",
+      "type": "String",
+      "nullable": true,
+      "isId": false,
+      "isUpdatedAt": false
+    },
+    "userId": {
+      "name": "userId",
+      "column": "userId",
+      "type": "Int",
+      "nullable": true,
+      "isId": false,
+      "isUpdatedAt": false
+    }
+  },
+  "primaryKey": [
+    "id"
+  ],
+  "uniques": [
+    [
+      "userId"
+    ]
+  ],
+  "relations": {
+    "user": {
+      "name": "user",
+      "model": "User",
+      "kind": "one",
+      "relationName": "ProfileToUser",
+      "from": [
+        "userId"
+      ],
+      "to": [
+        "id"
+      ],
+      "nullable": true
+    }
+  }
+} satisfies ModelSchema;
+
 export const Session = {
   "name": "Session",
   "table": "Session",
@@ -1184,6 +1241,15 @@ export const User = {
       "from": [],
       "to": [],
       "nullable": false
+    },
+    "profile": {
+      "name": "profile",
+      "model": "Profile",
+      "kind": "one",
+      "relationName": "ProfileToUser",
+      "from": [],
+      "to": [],
+      "nullable": true
     }
   }
 } satisfies ModelSchema;

@@ -235,11 +235,17 @@ The callback also receives the `HttpRequest`, so you can read query params (`req
 
 ```typescript
 "/users": this.view("admin/UserList", (req: HttpRequest) => {
-  const limit = Number(req.search.get("limit")) || 25;
-  const page = Number(req.search.get("page")) || 1;
-  return { limit, page };
+  const { take, skip } = paginate({
+    page: req.search.get("page"),
+    perPage: req.search.get("perPage"),
+  });
+  return { take, skip };
 }),
 ```
+
+Query values are strings, and `paginate` (from `gemi/orm`) is the one to reach for when they
+are page arguments: it truncates and clamps, so `?page=2.5` or a cleared `?perPage=` produces a
+usable page instead of a value the ORM refuses. See [ORM](./orm.md#querying).
 
 ### Layouts
 

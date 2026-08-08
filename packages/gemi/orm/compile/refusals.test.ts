@@ -165,6 +165,32 @@ describe("shape guards", () => {
     ["update's operand is not an object", write({ where: { id: 1 }, data: { accounts: { update: 5 } } }), "data.accounts.update", /Expected an object with 'where' and 'data'/],
     ["disconnect's operand is not an object", write({ where: { id: 1 }, data: { accounts: { disconnect: 5 } } }), "data.accounts.disconnect", /Expected an object naming a unique field, or an array of them/],
     ["connectOrCreate's operand is not an object", write({ where: { id: 1 }, data: { accounts: { connectOrCreate: 5 } } }), "data.accounts.connectOrCreate", /Expected an object with 'where' and 'create'/],
+    // --- the to-one operands, whose grammar is Prisma's other one ----------
+    // `assertToOneFilter` is the guard `assertNamedRows` cannot be on this
+    // path: the operand is a filter, so there is no unique key to match. Born
+    // reachable, which is what this file exists to make true — the 36 sites
+    // #114 found were all reachable-in-principle and unreached in fact.
+    [
+      "a to-one delete is neither a boolean nor a filter",
+      write({ where: { id: 1 }, data: { profile: { delete: 5 } } }),
+      "data.profile.delete",
+      /takes either a boolean/,
+    ],
+    [
+      "an array on a to-one whose child holds the key",
+      write({ where: { id: 1 }, data: { profile: { create: [{ bio: "a" }] } } }),
+      "data.profile.create",
+      /Expected a single object/,
+    ],
+    // The owning side's half of the same refusal, pinned because the message
+    // now names *which* side holds the key and the two arms can only be told
+    // apart by reading both.
+    [
+      "an array of connectOrCreate on a to-one this row owns",
+      write({ where: { id: 1 }, data: { organization: { connectOrCreate: [{ where: { id: 1 }, create: {} }] } } }),
+      "data.organization.connectOrCreate",
+      /this row holds the foreign key/,
+    ],
 
     // --- the operation itself ---------------------------------------------
     // Both `default:` arms after an exhaustive-looking partition. Reachable,

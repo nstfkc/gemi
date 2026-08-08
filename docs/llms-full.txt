@@ -17,7 +17,7 @@ gemi is a strong fit for **B2B / SaaS apps** with many API endpoints and non-tri
 
 ```bash
 bunx create-gemi-app
-## then:
+# then:
 cd my-app
 mv .env.example .env
 bunx prisma migrate deploy
@@ -32,7 +32,8 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 - **[Getting Started](./getting-started.md)** — install, scaffold, dev/build/start, your first route + view.
 - **[Project Structure & the Kernel](./project-structure.md)** — the `app/` layout, the Kernel, the container, `app/config/*.ts`, service providers, and app bootstrap.
 - **[Configuration](./configuration.md)** — `gemi.config.ts` (build config), `.env` handling, HTML compression, `app/preload.ts`, Vite config.
-- **[CLI](./cli.md)** — `gemi dev`, `build`, `start`, and the codegen/inspection commands.
+- **[CLI](./cli.md)** — `gemi dev`, `build`, `start`, `gemi migrate`, and the codegen/inspection commands.
+- **[Upgrading](https://github.com/nstfkc/gemi/blob/main/UPGRADE.md)** — what to change per release, including the two silent breaks a Prisma-to-ORM port walks into. It lives at the repository root rather than in `docs/`, so this link leaves the documentation site.
 
 ### HTTP layer
 - **[Routing](./routing.md)** — `ApiRouter` / `ViewRouter`, path params, groups, nesting, `resource()`.
@@ -45,8 +46,12 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 - **[Forms](./forms.md)** — the `Form` component, surfacing validation errors, form status hooks.
 - **[Navigation](./navigation.md)** — `Link`, `useNavigate`, `useParams`, `useSearchParams`, and the `Redirect` component vs. facade.
 
+### Data
+- **[ORM](./orm.md)** — the Prisma-typed, gemi-executed query layer: models, relations, ambient transactions, named connections, policies, soft deletes.
+- **[Rows & Entities](./orm-rows-and-entities.md)** — plain objects by default, `track` + `save`, and `wrap`.
+
 ### Auth
-- **[Authentication](./authentication.md)** — `app/config/auth.ts`, adapters, sessions, magic links, OAuth, the `Auth` facade, and client auth hooks.
+- **[Authentication](./authentication.md)** — `app/config/auth.ts`, the user provider, sessions, magic links, OAuth, the `Auth` facade, and client auth hooks.
 - **[Authorization](./authorization.md)** — role-based middleware and authorization errors.
 
 ### Services & facades
@@ -1016,6 +1021,17 @@ It also annotates APIs retired after 0.43 rather than rewriting them, which is t
 
 > The provider-to-config half only runs when `app/kernel/providers/` exists. Without it that step is skipped and your `Kernel.ts` is left alone — so re-running the command on an already-migrated app is safe, and the retired-API pass above is all it does.
 
+### Porting a Prisma app onto the ORM
+
+Two more annotate-only passes run over every file under `app/`. Both look for a divergence that a Prisma port walks into silently — the code keeps compiling, keeps running and keeps passing its tests, and the thing that broke only shows up under a condition the app itself never produces.
+
+- **`"P2002"` in a file that also imports your models.** Moving a write onto the ORM changes the error it raises: gemi throws `UniqueConstraintError`, which carries `model`, `operation`, `fields` and `constraint` and no `code` at all. A `code === "P2002"` guard therefore returns `false`, the recovery branch it exists to run stops running, and a test that mocks `{ code: "P2002" }` keeps certifying it. The TODO points at `isUniqueConstraintError` from `gemi/orm` and at the two-armed bridge to keep while some writes in the app are still on Prisma. Files with no model import are left alone — there the guard is still correct.
+- **A `take:` or `skip:` whose value is not an integer literal.** The ORM refuses a fractional `take` with `InvalidArgumentError` where Prisma truncated it, so `Number(req.search.get("limit"))` is a 500 waiting for a hand-edited URL — and a fractional `page` is worse, because it reaches the ORM multiplied, as a fractional `skip`. The TODO points at `paginate` from `gemi/orm`, which truncates and clamps in one place.
+
+The second pass has a real false-positive rate and its wording says so: most non-literal `take`s are a constant or an already-truncated value, and the annotation asks you to confirm the value is truncated at the boundary rather than claiming a bug. Values that are integer literals, or a whole `Math.trunc(…)` / `Math.floor(…)` / `parseInt(…)` call, and `take?: number` in a type declaration, are not flagged.
+
+> **What it cannot find:** whether `limit` holds an integer, and whether a given `catch` sits over an ORM call or a Prisma one, are both run-time facts — so these passes annotate and never rewrite. The `"P2002"` pass also misses a guard living in a shared helper that imports nothing from your model surface; [UPGRADE.md](https://github.com/nstfkc/gemi/blob/main/UPGRADE.md) carries the plain grep for that case.
+
 ## `gemi check models`
 
 Reports model classes carrying policies that the modules your Kernel declares do not register.
@@ -1231,6 +1247,33 @@ routes = {
 };
 ```
 
+### Streaming and range requests
+
+`this.stream(...)` registers a `GET` (and `HEAD`) handler that understands the `Range` header, so browsers can seek within audio and video. Return a `FileStorage.read()` result and the byte window is pushed down to the storage backend, so a seek transfers one window rather than the whole object:
+
+```typescript
+routes = {
+  "/assets/:src*": this.stream(async (req) => FileStorage.read(req.params.src)),
+};
+```
+
+The route handles the HTTP side for you:
+
+- a request with no `Range` gets the complete object with `200` and `Accept-Ranges: bytes`
+- `bytes=S-E`, `bytes=S-` and `bytes=-N` get a `206` with `Content-Range: bytes S-E/TOTAL`
+- a range that starts past the end of the object gets a `416` with `Content-Range: bytes */TOTAL`
+- a malformed or multi-range header is ignored and the complete object is served, as RFC 7233 requires
+
+A handler can also return a `Blob` or a `Bun.file()` directly, and the framework will slice it — no storage driver involved:
+
+```typescript
+"/clip": this.stream(() => Bun.file("/videos/clip.mp4")),
+```
+
+Returning a `Response` yourself opts out of all of the above and is passed through untouched.
+
+Stream routes are excluded from the generated RPC client types, since a typed JSON client has no way to consume a byte stream.
+
 ### Per-route middleware
 
 Every handler returned by `this.get`/`this.post`/… (and `this.resource`) has a fluent `.middleware([...])` that adds middleware to that route only:
@@ -1296,11 +1339,17 @@ The callback also receives the `HttpRequest`, so you can read query params (`req
 
 ```typescript
 "/users": this.view("admin/UserList", (req: HttpRequest) => {
-  const limit = Number(req.search.get("limit")) || 25;
-  const page = Number(req.search.get("page")) || 1;
-  return { limit, page };
+  const { take, skip } = paginate({
+    page: req.search.get("page"),
+    perPage: req.search.get("perPage"),
+  });
+  return { take, skip };
 }),
 ```
+
+Query values are strings, and `paginate` (from `gemi/orm`) is the one to reach for when they
+are page arguments: it truncates and clamps, so `?page=2.5` or a cleared `?perPage=` produces a
+usable page instead of a value the ORM refuses. See [ORM](./orm.md#querying).
 
 ### Layouts
 
@@ -1468,12 +1517,23 @@ async show(req: HttpRequest<{ name: string }, { orgId: string }>) { /* ... */ }
 `req.search` wraps the query string. `get` returns the value (a string, or `string[]` for repeated keys):
 
 ```typescript
+import { paginate } from "gemi/orm";
+
 async list(req: HttpRequest) {
   const search = req.search.get("search");
-  const limit = Number(req.search.get("limit")) || 25;
+  const { take, skip } = paginate({
+    page: req.search.get("page"),
+    perPage: req.search.get("perPage"),
+  });
   // ...
 }
 ```
+
+Everything the query string holds is a string, so a numeric param has to be converted, and
+`Number(...)` alone is not enough for the ones that become query arguments: `?limit=1.5` is a
+fractional `take`, which the ORM refuses rather than truncates, and a blank `?page=` is `0`,
+which computes a negative `skip`. `paginate` takes them as they arrive and always returns
+integers — see [ORM](./orm.md#querying).
 
 ### Reading the body: `req.input()`
 
@@ -2618,13 +2678,111 @@ import { Link } from "gemi/client";
   available.
 - `hash` — appends a `#fragment`.
 - `active` — force the active state.
+- `prefetch` — warm the target route before it is clicked; see below.
 
 `Link` sets `data-active` when its target matches the current URL, and
 `data-pending` while a navigation to it is in flight — style against these:
 
 ```tsx
-<Link className="data-[pending=true]:opacity-50" href="/about">About</Link>
+<Link className="data-[pending=true]:opacity-50" href="/about">
+  About
+</Link>
 ```
+
+## Prefetching
+
+A navigation fetches the target route's page data, stylesheets and component
+chunks, and the visitor waits for it. `prefetch` does that work earlier, so the
+click commits from cache instead of a request. It is **off unless you ask for
+it**:
+
+```tsx
+<Link href="/about" prefetch="hover">
+  About
+</Link>
+```
+
+Pick when it happens:
+
+| strategy   | fires                                                                                        |
+| ---------- | -------------------------------------------------------------------------------------------- |
+| `hover`    | the pointer arrives, or on touch or keyboard focus                                           |
+| `intent`   | the pointer is held ~100ms, so a cursor crossing a nav bar doesn't warm every link it passes |
+| `viewport` | the link scrolls into view (200px ahead of it)                                               |
+| `render`   | the link renders                                                                             |
+
+Strategies combine. The pairing that earns its keep is a bulk strategy plus an
+interactive one — `viewport` warms the link on the way past, and `intent` warms
+it again on approach if the payload has since gone stale:
+
+```tsx
+// Hoisted: an inline array literal is a new value on every render, which
+// defeats the memo on Link.
+const PREFETCH = ["viewport", "intent"] as const;
+
+<Link href="/pricing" prefetch={PREFETCH}>
+  Pricing
+</Link>;
+```
+
+`prefetch` also accepts `false`, so it can be driven by a variable:
+
+```tsx
+<Link href="/pricing" prefetch={isMetered ? false : "hover"}>
+  Pricing
+</Link>
+```
+
+### What it costs
+
+A prefetch **runs the route's handlers on the server** — it is a real request
+for real data, just early. With `viewport` or `render` on a list page that
+multiplies backend work by the number of links on screen. Prefetch requests
+carry a `Purpose: prefetch` header so you can tell them apart in logs and rate
+limiters, and skip side effects that should only happen on a genuine visit:
+
+```typescript
+"/posts/:id": this.view("Post", async () => {
+  if (Request.header("purpose") !== "prefetch") {
+    await recordView(params.id); // don't count a page nobody opened
+  }
+  return { /* … */ };
+}),
+```
+
+gemi keeps the cost bounded on its side: prefetching stands down on metered
+connections (`Save-Data`) and very slow ones (`2g`), links pointing at the
+current path are skipped, at most 12 payloads are retained at a time, and each
+one expires after 10 seconds.
+
+### Staleness
+
+A prefetched payload can be committed up to 10 seconds after it was fetched, and
+it is committed wholesale — including into the `useQuery` cache. Writes through
+`useMutation` (and `Form`, `usePost`, `usePut`, `usePatch`, `useDelete`,
+`useUpload`) drop every warmed payload on success, so your own mutations can't
+be undone by a stale prefetch. Data changed elsewhere is only bounded by the
+10-second window; on a page where that matters, leave `prefetch` off.
+
+### `usePrefetch`
+
+For warming a route outside of a link — the next step of a wizard, the page a
+form submit will land on — `usePrefetch` returns the same machinery as a
+function. It takes a typed path with `params` / `search` / `locale`:
+
+```tsx
+import { usePrefetch } from "gemi/client";
+
+function Wizard({ step }) {
+  const prefetch = usePrefetch();
+
+  useEffect(() => {
+    prefetch("/checkout/:step", { params: { step: String(step + 1) } });
+  }, [step]);
+}
+```
+
+It honours the same guards as the `prefetch` prop, and is a no-op during SSR.
 
 ## `useNavigate`
 
@@ -2682,7 +2840,7 @@ import { useSearchParams } from "gemi/client";
 
 function Pagination() {
   const searchParams = useSearchParams();
-  const page = Number(searchParams.get("page")) || 1;
+  const page = Math.max(1, Math.trunc(Number(searchParams.get("page"))) || 1);
 
   function goTo(next: number) {
     searchParams.set("page", String(next));
@@ -2691,6 +2849,13 @@ function Pagination() {
   // …
 }
 ```
+
+Truncate a page number where you read it, rather than trusting the query string: it holds
+whatever the last link, or a hand edit, left there, and the value is incremented and sent back
+to the server, where a fractional page arrives multiplied — as a fractional `skip`, which the
+ORM refuses. The server-side counterpart is `paginate` from `gemi/orm` (see
+[ORM](./orm.md#querying)); it belongs to the query layer, so on the client the whole of the job
+is the line above.
 
 `.set` accepts either `(key, value)` or an object of updates, and the value may be a
 function of the current value. `.push("hard")` forces a full data reload; the default
@@ -3253,6 +3418,34 @@ number agrees with the row beside it: a `delete` carrying one reads the count *b
 goes, and a write whose nested `create` writes children *after* the statement recomputes it once
 they have — otherwise `include` and `_count` would describe the same relation and disagree.
 
+**An `update` whose `data` sets no column reads the row rather than writing it.** `data: {}` is
+accepted and comes back with the row unchanged, honouring `select`, `include` and `_count` exactly
+as any other `update` does, and a `where` that matches nothing still raises `RecordNotFoundError` —
+it is the same plan with a `select` where the `update … returning` would have been, not a different
+path. Prisma answers the same way. The case is not contrived either: it is what a payload assembled
+from optional fields degenerates to when the caller changed nothing, and it used to turn a Save with
+nothing edited into an error. A `data` carrying only
+nested writes behaves identically, and for the same reason — there is nothing to set on the parent,
+so the statement reads, and the nested steps still run.
+
+`updateMany({ where, data: {} })` answers `{ count: 0 }`, and the count is a **constant** rather
+than the number of rows the filter selected. Measured against Prisma with two of three rows
+matching, again with a filter matching none, and again with no `where` at all: the same zero every
+time, and no row touched. The filter is still compiled, so an unknown field in it is refused whether
+or not there happened to be anything to write.
+
+Both hold on a model carrying `@updatedAt` too, which takes saying because the stamp looks like it
+should get in the way. It does not: **`@updatedAt` follows the column rather than the call.** A
+statement that sets at least one column stamps it; one that sets none — an empty `data`, or a `data`
+of only nested writes whose child holds the foreign key — leaves it alone, because nothing about
+this row was updated. Prisma draws the line in the same place, measured on rows seeded to a known
+instant rather than inferred from the attribute's name.
+
+A `data` of `null` is refused with `InvalidArgumentError`, and the distinction is worth one line:
+now that an empty object reads the row back, a null one would read it back too, which is a malformed
+call answered with a row. The message says the difference — an empty object is accepted, `null` is
+not.
+
 **`take` and `skip` must be integers, and are refused rather than coerced.** They are the only
 arguments whose *sign* decides the SQL — a negative `take` means "the last N", which flips every
 ordering term — so a `take` arriving as a string does not merely have the wrong type, it takes the
@@ -3260,8 +3453,7 @@ wrong branch: `take: "-2"` used to return the **first** two rows, in the opposit
 error. A query string is exactly where a string `take` comes from, so parse it before you pass it:
 
 ```
-UnsupportedQueryError: gemi ORM does not support 'take' yet (User.findMany).
-Expected an integer, got "-2".
+Invalid 'take' (User.findMany). Expected an integer, got "-2".
 ```
 
 A negative `skip` is refused too — it counts rows to pass over — and both rules are the ones that
@@ -3271,6 +3463,16 @@ already applied inside an `include`.
 > zero; this refuses it. Binding one instead is a `datatype mismatch` error from SQLite and a
 > silently different row count on Postgres, which rounds — so the fraction has no single meaning to
 > match. One rule at both levels, failing loudly, beats three behaviours.
+>
+> **Where it bites is the boundary, not the query.** The value has to be truncated where it enters
+> the application, not where it reaches the ORM, and `Number(req.search.get("limit"))` is the exact
+> shape that breaks — `?limit=1.5` is a URL anybody can type or a client can compute, and nothing
+> between the request and the statement narrows it. `page` is the harder one to find, because it
+> never reaches the ORM at all: it reaches it **multiplied**, as a fractional `skip`, so the refusal
+> names an argument the call site never wrote and points at a line that only does arithmetic.
+
+[`paginate`](#paginate) below is the request-facing half of that rule: it takes the query string as
+it arrives and cannot produce a value this section refuses.
 
 `select` and `include` narrow the **return type**, exactly as they do in Prisma — `user.email`
 type-checks, `user.name` does not. A key outside the operation's argument type collapses to
@@ -3287,6 +3489,61 @@ Queries return **plain objects**, never class instances. That is the default and
 stepping stone: a `Pick<User, "id">` hydrated as a `User` would carry methods reading fields the
 query never fetched. See [Rows and entities](./orm-rows-and-entities.md) for the two opt-in levels
 above it — `track` + `save`, and `wrap`.
+
+### `paginate`
+
+The integer rule above is a refusal; this is the spelling that satisfies it, short enough that
+reaching for it is easier than reaching for `Number`:
+
+```ts
+import { paginate } from "gemi/orm"
+
+const { take, skip } = paginate({
+  page: req.search.get("page"),
+  perPage: req.search.get("perPage"),
+})
+
+await Post.findMany({ take, skip, orderBy: { createdAt: "desc" } })
+```
+
+```ts
+paginate(
+  args: { page?: unknown; perPage?: unknown },
+  options?: { perPage?: number; maxPerPage?: number },
+): { take: number; skip: number }
+```
+
+**Both arguments are `unknown` deliberately.** A query string is where these values come from —
+that is the whole point of the helper — and typing them as `number` would mean every caller writes
+the `Number(…)` that is the bug. `req.search.get` hands back `string | string[]`, and a repeated
+key is a case `Number` honours sometimes and not others: `Number(["2"])` is `2`, while
+`Number(["1", "2"])` is `NaN`.
+
+The rules, each of them a shape a real request produces:
+
+- Anything that is not a string or a number is **absent** — an array, an object, a boolean, `null`.
+- An empty or blank string is absent as well, rather than `0`. `Number("")` is `0`, and `page: 0`
+  computes `skip: -25`, so a cleared filter box would otherwise be a 500.
+- A non-finite value is absent. `Number("1e400")` is `Infinity`, which `Math.trunc` cannot repair.
+- What is left is truncated toward zero — the same direction Prisma truncates a fractional `take`,
+  so a call site moving off Prisma keeps the same page instead of trading a crash for a different
+  answer — with `page` clamped up to at least 1 and `perPage` clamped into `[1, maxPerPage]`.
+
+The defaults are **25 rows a page** and a ceiling of **100** on what a *request* may ask for, so
+`?perPage=100000` cannot ask for the whole table. An endpoint that genuinely serves larger pages
+says so where it is called, `paginate(args, { maxPerPage: 500 })`, which is one visible decision
+instead of an invisible default. `skip` is capped at `Number.MAX_SAFE_INTEGER`: `?page=1e300`
+survives every rule above and multiplies out past what either driver will bind.
+
+**The guarantee is the reason to import this rather than copy it.** Every return value is a pair of
+integers with `take >= 1` and `skip >= 0`, for every input — so `paginate`'s output cannot be a
+value the integer rule refuses. `Number(x) || 1` does not have that property: it
+rescues `?page=` and `?page=0`, which are falsy, and passes `?page=-1`, `?page=2.5` and
+`?page=1e400` straight through to a refusal.
+
+`bunx gemi migrate` annotates every `take:` and `skip:` under `app/` whose value is not provably an
+integer, which is how you find the call sites in an application already written — see
+[the CLI page](./cli.md).
 
 ### Aggregates
 
@@ -3625,13 +3882,13 @@ await List.create({
 | `createMany` | The same rows in **one** statement. To-many only, and the rows go inside `data`. |
 | `connect` | Points at an existing row — a bound column when it names the referenced key, a lookup otherwise. |
 | `connectOrCreate` | Looks the row up by a unique key and creates it only if it is not there. **A hit ignores `create` entirely** — it is connect-*or*-create, not upsert. |
-| `disconnect` | Clears the link. `true` on a to-one; a unique key, or a list of them, on a to-many. The column has to be nullable. |
-| `delete` | Deletes the named rows outright, not just the link. |
+| `disconnect` | Clears the link. A unique key, or a list of them, on a to-many; `true` on a to-one, and a filter as well when the child is the side holding the key. The column that goes null is on whichever side holds it, and it has to be nullable. |
+| `delete` | Deletes the named rows outright, not just the link. A unique key or a list of them on a to-many; `true`, or a filter, on a to-one whose child holds the key. |
 | `update` | Writes your columns to the named row. The child's own `onUpdate` and scope rules apply to the payload. |
 | `set` | Replaces the whole set — detaches what is linked now, attaches what you name. |
 | `updateMany` | Writes your columns to this parent's rows matching a filter. |
 | `deleteMany` | Deletes this parent's rows matching a filter — the filter goes directly under the key, not inside a `where`. |
-| `upsert` | Finds the row **among this parent's**, updates it, or creates it. |
+| `upsert` | Finds the row **among this parent's**, updates it, or creates it. A to-one has no `where` to require — the link already names the row. |
 
 **A relation may join on more than one field.** `@relation(fields: [tenantId, orderId], references:
 [tenantId, id])` is the tenant-scoped composite-key style, and every read surface handles it: an
@@ -3691,13 +3948,51 @@ connected" rather than as denied, since that is the same answer a genuinely unli
 your columns like a top-level `update` — so the payload goes through the child's own operation and
 is judged by the child's policies. Naming a column the child scopes on is refused exactly as it
 would be at the top level. On a to-one both spellings work, `update: { … }` and
-`update: { data: { … } }`, because Prisma accepts both.
+`update: { data: { … } }`, because Prisma accepts both — measured on the side that holds the key,
+and again on the side whose child holds it, since the two are separate input types in the generated
+client and only one of them had been checked.
+
+A to-one `update` may also carry a `where`, and it does not mean what the to-many's means. There is
+nothing to choose between, so the filter decides *whether the single linked row is written at all*:
+`update: { where: { status: "draft" }, data: { … } }` writes the child if it is a draft, and raises
+if it is not. That raise is the part to know — a filter that matches nothing is a miss, reported
+with the same error and the same wording as a parent that has no child at all, because Prisma
+answers both with P2025 and does not distinguish them either.
 
 `set` is the one supported operand that acts on rows you did **not** name, so it means *replace the
 set I can see*: it detaches the linked rows your policies let you read, and leaves the rest attached.
 With no policy on the child that is Prisma's `set` exactly. Two of its behaviours are worth knowing
 because the name does not suggest them — it will repoint a row belonging to another parent, exactly
 as `connect` does, and it silently ignores a named row that does not exist.
+
+**On a to-one, `disconnect` and `delete` take `true` or a filter — and `false` is a no-op rather
+than a synonym for `true`.** There is one row and nothing to name, so `true` is how you say *the
+one that is linked*. A filter narrows rather than picks: `delete: { status: "draft" }` acts only if
+that single row matches, and it is a filter and not a unique key, so a column with no unique index
+is accepted here — Prisma accepts one, and refusing it would refuse a query the client answers.
+`false` is the value nobody guesses, and it is the reason to say this out loud: it writes nothing at
+all, so `disconnect: shouldDetach` leaves the row alone on the branch that asked for nothing.
+
+The two operands then part company on a miss, still on a to-one, and it is Prisma's asymmetry rather
+than a choice gemi made: `delete` raises `RecordNotFoundError` when there is no row to delete, while
+`disconnect` is silent. That holds whichever way the row went missing — no child linked at all, or a
+child present that the filter does not match, or a child your policies hide, which reads as no row
+at all here exactly as it does everywhere else. Note the last one carries a different error from its
+to-many spelling, which reports a hidden row as *not connected*. On the side that holds the foreign
+key *itself* there is nothing to filter — the row being cleared is the one the statement already
+names — so `disconnect` takes `true` alone there, and a `false` is refused rather than ignored. That
+last one is a divergence: Prisma treats it as the no-op it reads like. It is a loud refusal on the
+branch that asked for nothing, which is the wrong answer given noisily rather than quietly.
+
+**An array is refused on a to-one whose child holds the key** — `create`, `connect`,
+`connectOrCreate`, `update`, `delete` and `upsert` alike — and that is matching Prisma rather than
+being stricter than it. All of them are a `PrismaClientValidationError` against a generated client,
+with nothing written. Because that is an *argument* refusal and carries no Prisma error code, gemi's
+is `InvalidArgumentError`, and the message names the single object the operand wants rather than
+announcing that arrays are unimplemented. What made it worth refusing rather than tolerating: the
+array used to compile, and a `connect` of two rows through a relation that holds one repointed
+**both**, the second silently winning. `connect` and `connectOrCreate` refuse an array on the other
+side too, and always did.
 
 `updateMany` and `deleteMany` take a **filter** rather than a key, and it applies to this parent's
 rows only. Their operands are shaped differently and it is easy to get backwards: `updateMany` wraps
@@ -3714,10 +4009,34 @@ semantics and is the detail that decides what it does: naming a row that exists 
 elsewhere takes the *create* branch and collides on the unique key, rather than updating somebody
 else's row.
 
-Every operand in Prisma's nested grammar is now implemented for an ordinary relation. Ones that act
-on rows already linked to this one — `disconnect`, `delete`, `update`, `updateMany`, `deleteMany`,
-`set`, `upsert` — are available on an `update` and refused on a `create`, which has nothing linked
-to it yet; Prisma reports them as unknown arguments there too.
+On a to-one there is no `where` to require, because the link already names the row — so
+`upsert: { create, update }` is the whole operand and the `update` branch runs against the single
+child. A `where` is still accepted, and it is the same sentence seen from the other side: one that
+does not match takes the **create** branch, and the create then collides with the unique foreign key
+the existing child is holding. That collision is a `UniqueConstraintError` and it is left to happen
+rather than pre-empted, because it is the answer Prisma gives.
+
+The same collision is how a *hidden* child surfaces, which is worth knowing before you meet it: a
+row your policies scope away reads as absent, absent takes the create branch, and the create runs
+into the unique key the row you cannot see is holding. So a to-one `upsert` can fail on a field the
+caller never wrote — the child's foreign key — and that is the shape of the answer, not a leak: it
+is the same refusal an unrelated row holding that key would produce.
+
+Every operand in Prisma's nested grammar is implemented for an ordinary relation — one that is not
+an implicit many-to-many — in the direction where the **child** holds the foreign key. That is every
+to-many, and a to-one read from the side the child points at. Ones that act on rows already linked
+to this one — `disconnect`, `delete`, `update`, `updateMany`, `deleteMany`, `set`, `upsert` — are
+available on an `update` and refused on a `create`, which has nothing linked to it yet; Prisma
+reports them as unknown arguments there too.
+
+**Two are refused on a to-one that holds its own key, and both are decisions rather than unfinished
+work.** `delete` there would remove a row the statement is not about — the far row lives in another
+table and is reached through a column of this one, and a delete firing as a side effect of an
+unrelated update is the kind of thing to implement deliberately or not at all. `upsert` would have
+to create the far row and then write its key back to a parent that has already been inserted, a
+shape no other operand on that side needs. Both refusals name the alternative: write the far row
+directly, then `connect` it. (`set`, `updateMany` and `deleteMany` describe *several* rows, so
+neither side of a to-one offers them, and neither does Prisma.)
 
 Two rules hold across all of them. The **foreign key is the ORM's to set**, so a nested row naming
 it is describing a different parent than the call is, and it is overwritten. And the **parent
@@ -4029,6 +4348,23 @@ vi.mock("@/app/models", () => ({
 `transaction: (cb) => cb()` is the whole trick: the callback runs inline, the assertions are about
 what it called, and no connection is involved. `vi.spyOn` on the model statics does the same job
 when you want the real module for everything else.
+
+**A mocked failure has to reject with the error the runtime really throws**, and this is the one
+place a mock can certify a branch that no longer exists. `create.mockRejectedValue({ code: "P2002" })`
+is the object a Prisma application already has lying around; against gemi it satisfies nothing —
+the guard under test is `isUniqueConstraintError`, that object is not one, so the recovery branch is
+never entered and the test passes anyway, having asserted the fallthrough. Construct the real error
+instead:
+
+```ts
+import { UniqueConstraintError } from "gemi/orm"
+
+User.create.mockRejectedValue(new UniqueConstraintError("User", "create", ["email"]))
+```
+
+The cost of getting this wrong is measured rather than imagined: in the first application ported
+onto this ORM, four `code === "P2002"` guards went dead when their writes moved over, roughly 2,700
+unit tests stayed green throughout, and what caught it was a person reading the diff.
 
 What this does not cover is the behaviour that only a real transaction has — the rollback, the
 savepoint, the Postgres abort described above. Those need a database, and they belong in an
@@ -4386,7 +4722,7 @@ Every failure is a typed error from `gemi/orm`, not a driver string.
 | Error | Raised when |
 | --- | --- |
 | `RecordNotFoundError` | An `…OrThrow` operation matched nothing. |
-| `UniqueConstraintError` | A unique constraint was violated, with the constraint identified. |
+| `UniqueConstraintError` | A unique constraint was violated, with the constraint identified. It is gemi's own error and carries no Prisma `code` — see below if a `"P2002"` check is what you have today. |
 | `PolicyDeniedError` | A `before` denied, or `ctx.user` was read with no user. |
 | `ScopeEscapeError` | An `update` wrote a column its own policy's `scope` selects on, with no `onUpdate`. |
 | `UnknownFieldError` / `UnknownRelationError` | A name that is not on the model. |
@@ -4405,6 +4741,39 @@ Every failure is a typed error from `gemi/orm`, not a driver string.
 | `ReturningUnsupportedError` | A write on a dialect without `RETURNING`, which is the same gap seen from the write path. |
 | `StaleSchemaArtifactError` | Generated files predate the running gemi. Re-run `prisma generate`. |
 | `MalformedRelationError` / `MissingModelSchemaError` / `UnregisteredRelationTargetError` | The generated artifact and the registry disagree — the same family as the two above, and the same fix. |
+
+**`isUniqueConstraintError` is the guard to write in a retry-on-collision `catch`**, which is where
+a unique-violation check almost always is. It is exported from `gemi/orm` beside the class itself:
+
+```ts
+try {
+  return await Invite.create({ data: { token } })
+} catch (error) {
+  if (!isUniqueConstraintError(error)) throw error
+  return await Invite.findUniqueOrThrow({ where: { token } })
+}
+```
+
+```ts
+isUniqueConstraintError(error: unknown): error is UniqueConstraintError
+```
+
+It tests `instanceof` **or** `error.name === "UniqueConstraintError"`, and the second half is the
+reason to import it rather than write `instanceof` yourself. `instanceof` compares against *this*
+module instance's class object, so it is false across a duplicate copy of `gemi/orm` — two versions
+in one dependency tree, a bundled build beside a linked one, a monorepo package resolving its own.
+The error would be the right error, thrown by the right code, and the guard would silently not fire.
+Every error here sets its own `name` for exactly that reason.
+
+> **Porting from Prisma: this is the check that dies quietly.** A collision arrives as
+> `UniqueConstraintError`, which names `model`, `operation`, `fields` and `constraint` and has no
+> `code` anywhere on its prototype chain. So `error.code === "P2002"` is `false` from the moment the
+> write it guards moves onto the ORM — nothing raises, nothing is logged, and the recovery branch
+> the guard exists to run never runs again. It compiles, it runs, and it reads correct. Go and find
+> the string rather than waiting to meet it: `bunx gemi migrate` annotates the occurrences it can
+> see (see [the CLI page](./cli.md)), and
+> [UPGRADE.md](https://github.com/nstfkc/gemi/blob/main/UPGRADE.md) carries the two-armed bridge to
+> write while some of your writes are still on Prisma, with the marker saying when to delete it.
 
 ## Performance
 

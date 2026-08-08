@@ -444,13 +444,23 @@ function planOwningSide(
       argument: `data.${relation.name}.disconnect`,
     });
 
+    // MEASURED, and narrower than what this used to claim: Prisma's owning-side
+    // operand is `XWhereInput | boolean`, so it takes `true`, `false` (a no-op —
+    // the row keeps its link) and a filter. gemi implements the `true` arm only.
+    // The message says that rather than asserting Prisma offers nothing else,
+    // which is what it said before the foreign side was measured and is
+    // contradicted by this repository's own differential suite one directory
+    // over. The gap is real but it is a gap, not the shape of the input.
     if (operand !== true) {
       throw new UnsupportedQueryError(
         `data.${relation.name}.disconnect`,
         schema.name,
         operation,
-        `'${relation.name}' is a to-one, so there is one row to clear and ` +
-          `nothing to name. Prisma takes 'true' here.`,
+        `'${relation.name}' is a to-one whose foreign key lives on this row, ` +
+          `and only 'disconnect: true' is implemented for it — that clears ` +
+          `the link. Prisma also accepts 'false', which does nothing, and a ` +
+          `filter; neither is implemented here yet. Pass 'true', or skip the ` +
+          `operand entirely on the branch that should not detach.`,
       );
     }
 
@@ -741,9 +751,12 @@ function planForeignSide(
    *
    * with no `createMany`, `set`, `updateMany` or `deleteMany` key at all — so
    * the first group below is refused for the same reason `planOwningSide`
-   * refuses it, and says so in the same words. The second group exists on that
-   * input but not here yet, and the refusal now says *that* instead of
-   * complaining about the operand's shape.
+   * refuses it, and says so in the same words.
+   *
+   * The rest of that input — `update`, `delete`, `upsert` — was refused here
+   * too, for being spelled unlike the to-many form. It is implemented now, and
+   * the implementation is a *translation* rather than three new bodies: see
+   * {@link toOneOperand}.
    */
   if (relation.kind !== "many") {
     if (key === "set" || key === "updateMany" || key === "deleteMany") {
@@ -758,30 +771,91 @@ function planForeignSide(
       );
     }
 
-    if (key === "update" || key === "delete" || key === "upsert") {
-      throw new UnsupportedQueryError(
+    /**
+     * **An array where the relation holds one row**, which compiled here and
+     * wrote through it.
+     *
+     * Nothing below this point consults `kind`, so `create: [a, b]` inserted
+     * two children, and `connect: [{ id: 1 }, { id: 2 }]` repointed *both* rows
+     * through a relation that can hold one — the second silently winning. That
+     * is a live divergence, not strictness: Prisma refuses all three, measured
+     * off the generated client rather than reasoned from the docs.
+     *
+     *     connect: [{ id: 1 }, { id: 2 }]
+     *       ->  PrismaClientValidationError, neither row repointed
+     *     create: [{ bio: "a" }, { bio: "b" }]
+     *       ->  "Expected ProfileCreateWithoutUserInput or
+     *            ProfileUncheckedCreateWithoutUserInput, provided (Object, Object)"
+     *
+     * `PrismaClientValidationError` carries **no `code`** — it is an argument
+     * refusal rather than a database one — which is why this is
+     * `InvalidArgumentError` and not either `Unsupported*`: the argument is
+     * supported and the value is wrong. So the message names the shape that
+     * would work rather than announcing that arrays are unimplemented.
+     *
+     * Sound at plan time because array-ness is *in the plan key*: an array and
+     * a single object are different structures to `canonicalShape`, so they can
+     * never share a cache entry and this refusal cannot be decided on one
+     * call's behalf by another's.
+     */
+    if (Array.isArray(operand)) {
+      throw new InvalidArgumentError(
         `data.${relation.name}.${key}`,
         schema.name,
         operation,
-        `'${relation.name}' is a to-one whose foreign key lives on ` +
-          `${child.name}, and '${key}' is not implemented for that shape yet. ` +
-          `On a to-one Prisma takes the data directly rather than the ` +
-          `{ where, data } form this side expects. Reach the row through the ` +
-          `${child.name} model directly, or use 'connect' and 'disconnect'.`,
+        `'${relation.name}' is a to-one — ${child.name} holds the foreign key, ` +
+          `so there is one row here at most. Expected a single object for ` +
+          `'${key}', not an array of them. Prisma refuses the array too.`,
       );
     }
+
+    /**
+     * The three that were refused are a **spelling** difference, not missing
+     * machinery. `conjoin` returns the parent restriction alone when the
+     * caller's filter is absent or `{}`, and `listOf(null)` is `[]` — so a
+     * to-one is a to-many of one, and the bodies below already do the work
+     * once the operand is written the way they read.
+     *
+     * **Rebinding `at` — translating at *bind* time and not only while the plan
+     * is compiled — is load-bearing for exactly one branch, and that is the
+     * correctness argument for this whole design.** Every other distinction the
+     * table draws is *structural*, so it may safely be decided once when the
+     * plan is built: `{ data }` against `{ where, data }`, a `where` present
+     * against absent, an array against an object — `canonicalShape` records all
+     * of those, so two calls that differ there are already two plans. The
+     * boolean is the one that is not. `delete: true` and `delete: false` are
+     * the same shape to everything except the guard `shapeOfMember` carries for
+     * exactly this, and a plan key is a cache rather than a contract. Reading
+     * the boolean inside `at` means the step consults the *call's* value on
+     * every execution, so a plan handed the wrong one still writes nothing —
+     * `listOf(null)` is `[]`. Belt and braces on purpose: the owning side's
+     * version of the same collision was a silent wrong write for its whole
+     * life, precisely because its `true`/`false` decision was made once at
+     * compile time and never revisited.
+     */
+    const spelled = at;
+    at = (args: any) => toOneOperand(key, spelled(args));
+    operand = toOneOperand(key, operand);
   }
 
   /**
-   * `disconnect` and `delete` on this side both act on rows the caller named by
+   * `disconnect` and `delete` on this side act on rows the caller named by
    * unique key — which is what makes them expressible at all, and what puts
    * them on the supported side of this file's line.
    *
+   * **On a to-one the caller names a *filter*, or nothing at all**, and that
+   * does not weaken the line: the row is still identified, by the parent's own
+   * key, which is the strongest naming available. `assertToOneFilter` is what
+   * replaces the unique-key match there, and the filter only narrows.
+   *
    * They differ on a row that is *not* linked to this parent, and the
-   * difference is Prisma's, measured rather than chosen:
+   * difference is Prisma's, measured rather than chosen — on both kinds, since
+   * the second pair is the same asymmetry read through the to-one spelling:
    *
    *     disconnect a row linked elsewhere  ->  succeeds, changes nothing
    *     delete     a row linked elsewhere  ->  raises "are not connected"
+   *     disconnect: true, nothing linked   ->  succeeds, changes nothing
+   *     delete: true,     nothing linked   ->  P2025
    *
    * So both filter by the parent key as well as the caller's key, and only
    * `delete` treats a miss as an error. That filter is doing two jobs at once:
@@ -896,8 +970,37 @@ function planForeignSide(
    * filter operand on this parent is what produces the right branch here, not
    * merely what keeps it safe.
    */
+  /**
+   * **The to-one reaches this same body, and it needed nothing added.** Its
+   * `where` is optional — `ProfileUpsertWithoutUserInput` is
+   * `{ update, create, where? }` — so `conjoin(undefined, link)` is the link
+   * alone and the lookup finds the single connected child. Measured on both
+   * branches:
+   *
+   *   no child, no `where`      ->  the create branch runs *and stamps the
+   *                                 foreign key* — Profile { bio: "created",
+   *                                 userId: 1 }
+   *   child present, no `where` ->  the update branch runs against it
+   *   child present, `where` matching nothing
+   *                             ->  the create branch runs and collides:
+   *                                 P2002, "Unique constraint failed on the
+   *                                 fields: (`userId`)"
+   *
+   * The third is the note above transposed to the foreign side, and it is the
+   * one to-one nested-write miss that is *not* P2025. It is left to happen
+   * rather than pre-empted: the create is what Prisma runs, so surfacing
+   * `UniqueConstraintError` from it is agreement, where refusing early would be
+   * a different error for the same query.
+   */
   if (key === "upsert") {
-    assertUpsertOperand(schema, relation, child, operand, operation);
+    assertUpsertOperand(
+      schema,
+      relation,
+      child,
+      operand,
+      operation,
+      relation.kind === "many",
+    );
 
     out.after.push({
       relation: relation.name,
@@ -1043,7 +1146,14 @@ function planForeignSide(
   }
 
   if (key === "update") {
-    assertNamedUpdates(schema, relation, child, operand, operation);
+    assertNamedUpdates(
+      schema,
+      relation,
+      child,
+      operand,
+      operation,
+      relation.kind === "many",
+    );
 
     out.after.push({
       relation: relation.name,
@@ -1080,6 +1190,17 @@ function planForeignSide(
             // *kind* precisely so a refusal cannot pass as agreement with a
             // miss. This one was `other` against Prisma's `notFound` until the
             // harness said so.
+            //
+            // **Fatal on the to-one too, which was the open question and is
+            // now measured.** The worry was that a to-one `update` naming a
+            // non-matching `where` might be a no-op there, which would have
+            // made this branch wrong for one `kind` and forced the two apart.
+            // It does not: with a child present and `where: { bio: "nope" }`
+            // Prisma raises P2025 — *"No 'Profile' record was found for a
+            // nested update on one-to-one relation 'ProfileToUser'"* — with
+            // wording identical to the no-child case, and the parent's own
+            // assignments roll back with it. Absent and not-matching are one
+            // condition to Prisma, so they stay one error here.
             throw new RecordNotFoundError(relation.model, "update");
           }
 
@@ -1102,6 +1223,13 @@ function planForeignSide(
   if (key === "disconnect" || key === "delete") {
     const deleting = key === "delete";
     if (!deleting) {
+      // Before any boolean normalisation would matter, and it has to be:
+      // Prisma leaves `disconnect` out of the input type *entirely* when the
+      // child's foreign key is required, so even `disconnect: false` is
+      // rejected there — *"Unknown argument `disconnect`. Did you mean
+      // `connect`?"*, with the available options listed as create /
+      // connectOrCreate / upsert / connect / update. The refusal is on the
+      // **key**, not on the value, and this one already reads only the schema.
       assertDisconnectable(child, relation, childField, {
         model: schema.name,
         operation,
@@ -1109,7 +1237,21 @@ function planForeignSide(
       });
     }
 
-    assertNamedRows(schema, relation, child, operand, key, operation);
+    /**
+     * **A to-one names a filter here; a to-many names rows by unique key.**
+     *
+     * `ProfileUpdateOneWithoutUserNestedInput` spells both operands
+     * `ProfileWhereInput | boolean`, and it means it — measured:
+     * `delete: { bio: "seed" }` is accepted with no `@unique` anywhere near
+     * `bio`, and it deletes the connected row. Running `matchUniqueKey` on this
+     * path would therefore refuse a query Prisma answers, which is why
+     * `assertToOneFilter` replaces `assertNamedRows` rather than joining it.
+     */
+    if (relation.kind === "many") {
+      assertNamedRows(schema, relation, child, operand, key, operation);
+    } else {
+      assertToOneFilter(schema, relation, child, operand, key, operation);
+    }
 
     out.after.push({
       relation: relation.name,
@@ -1153,6 +1295,34 @@ function planForeignSide(
           )) as Record<string, unknown> | null;
 
           if (!found) {
+            /**
+             * **Two misses, two errors — and this is the third time this exact
+             * mis-classification has had to be corrected** (see the notes at
+             * `planOwningSide`'s `update` and at this file's own `update`
+             * miss).
+             *
+             * On a to-one the caller named no row: `delete: true` means the
+             * connected child, and there is either one or there is not.
+             * Reporting *"the row named by `true` is not connected"* would be
+             * nonsense to read, and worse it classifies as `other` where Prisma
+             * answers P2025 — *"No 'Profile' record was found for a nested
+             * delete on one-to-one relation 'ProfileToUser'"* — so the
+             * differential harness would score a refusal as agreement with a
+             * miss. Measured on both spellings: `delete: true` with no child
+             * and `delete: { bio: "nope" }` with a child present give the same
+             * P2025, so one error covers both.
+             *
+             * **`disconnect` does not come through here at all, and that
+             * asymmetry is Prisma's.** A disconnect that matches nothing —
+             * `disconnect: true` with no child, or a filter matching none — is
+             * a *silent no-op* that still returns the parent, measured both
+             * ways. The two operands share this body but must not share their
+             * miss handling, which is why only `deleting` reaches this branch.
+             */
+            if (relation.kind !== "many") {
+              throw new RecordNotFoundError(relation.model, "delete");
+            }
+
             throw new UnsupportedQueryError(
               `data.${relation.name}.delete`,
               schema.name,
@@ -1299,13 +1469,20 @@ function planForeignSide(
    * answer the caller would get if it truly did not exist.
    */
   if (key === "connectOrCreate") {
+    // `relation.kind === "many"`, not a hardcoded `true`. This side is reached
+    // by both kinds — that is the whole of #116 — so a literal here told
+    // `assertConnectOrCreateOperand` that a to-one takes a list, and its array
+    // guard was unreachable from the one direction that needed it. The outer
+    // to-one guard above now refuses the array first; this keeps the function
+    // honest about which relation it was asked about rather than relying on
+    // the order of two checks.
     assertConnectOrCreateOperand(
       schema,
       relation,
       child,
       operand,
       operation,
-      true,
+      relation.kind === "many",
     );
 
     out.after.push({
@@ -1792,9 +1969,17 @@ async function runPairStatement(
 /**
  * `upsert`'s operand: `{ where, create, update }`, or a list of them.
  *
- * All three are required — the lookup, and one payload per branch. Checked at
- * plan time like every other operand here, so a missing key fails when the
- * query compiles rather than after the parent row is written.
+ * The two payloads are always required — one per branch. **The `where` is
+ * required only on a to-many**, which is Prisma's own split rather than a
+ * looseness: `AccountUpsertWithWhereUniqueWithoutUserInput` has `where:
+ * AccountWhereUniqueInput`, while `ProfileUpsertWithoutUserInput` is
+ * `{ update, create, where? }` — the to-one already knows which row it means,
+ * because the parent's key names it. So the unique-key match is skipped there
+ * too: a to-one `where` is a `WhereInput` filter narrowing the single linked
+ * row, not a key selecting one out of many.
+ *
+ * Checked at plan time like every other operand here, so a missing key fails
+ * when the query compiles rather than after the parent row is written.
  */
 function assertUpsertOperand(
   schema: ModelSchema,
@@ -1802,6 +1987,7 @@ function assertUpsertOperand(
   child: ModelSchema,
   operand: unknown,
   operation: string,
+  many: boolean,
 ): void {
   const at = `data.${relation.name}.upsert`;
   const entries = (Array.isArray(operand) ? operand : [operand]) as unknown[];
@@ -1812,22 +1998,31 @@ function assertUpsertOperand(
         at,
         schema.name,
         operation,
-        `Expected an object with 'where', 'create' and 'update'.`,
+        many
+          ? `Expected an object with 'where', 'create' and 'update'.`
+          : `Expected an object with 'create' and 'update' — on a to-one the ` +
+            `'where' is optional, since the parent's key already names the row.`,
       );
     }
 
     const record = entry as Record<string, unknown>;
-    for (const required of ["where", "create", "update"] as const) {
-      if (record[required] === undefined) {
+    const required = many
+      ? (["where", "create", "update"] as const)
+      : (["create", "update"] as const);
+
+    for (const name of required) {
+      if (record[name] === undefined) {
         throw new UnsupportedQueryError(
           at,
           schema.name,
           operation,
-          `Expected a '${required}' key — 'upsert' names the row to look for, ` +
+          `Expected a '${name}' key — 'upsert' names the row to look for, ` +
             `what to write if it is there, and what to write if it is not.`,
         );
       }
     }
+
+    if (!many) continue;
 
     matchUniqueKey(child, record.where, {
       model: schema.name,
@@ -1922,6 +2117,14 @@ function assertManyOperand(
  * `data` is *not* inspected here — it is the child's, and the child's own
  * `$exec` validates it against the child's schema and policies. Checking it
  * against this model would be checking the wrong shape.
+ *
+ * **On a to-one only `data` is required, and it may have been written bare.**
+ * `toOneOperand` has already turned `update: { bio: "x" }`,
+ * `update: { data: … }` and `update: { where, data }` into the one form this
+ * reads, so what arrives is always `{ where?, data }` — but the `where` is
+ * genuinely optional there (`UpdateToOneWithWhereWithoutUserInput` spells it
+ * `where?`) and it is a filter rather than a key, so `matchUniqueKey` does not
+ * run on it either.
  */
 function assertNamedUpdates(
   schema: ModelSchema,
@@ -1929,6 +2132,7 @@ function assertNamedUpdates(
   child: ModelSchema,
   operand: unknown,
   operation: string,
+  many: boolean,
 ): Record<string, unknown>[] {
   const at = `data.${relation.name}.update`;
   const entries = (Array.isArray(operand) ? operand : [operand]) as unknown[];
@@ -1945,24 +2149,28 @@ function assertNamedUpdates(
     }
 
     const record = entry as Record<string, unknown>;
+    const required = many ? (["where", "data"] as const) : (["data"] as const);
 
-    for (const required of ["where", "data"] as const) {
-      if (record[required] === undefined) {
+    for (const name of required) {
+      if (record[name] === undefined) {
         throw new UnsupportedQueryError(
           at,
           schema.name,
           operation,
-          `Expected a '${required}' key — 'update' names the row to write and ` +
+          `Expected a '${name}' key — 'update' names the row to write and ` +
             `the columns to write to it.`,
         );
       }
     }
 
-    matchUniqueKey(child, record.where, {
-      model: schema.name,
-      operation,
-      argument: `data.${relation.name}.update.where`,
-    });
+    if (many) {
+      matchUniqueKey(child, record.where, {
+        model: schema.name,
+        operation,
+        argument: `data.${relation.name}.update.where`,
+      });
+    }
+
     out.push(record);
   }
 
@@ -2006,6 +2214,48 @@ function assertNamedRows(
   }
 
   return out;
+}
+
+/**
+ * A to-one `disconnect` / `delete` operand, once {@link toOneOperand} has
+ * translated the booleans away: `null` for the no-op, or a plain filter object.
+ *
+ * The counterpart of {@link assertNamedRows}, and deliberately *not* it. That
+ * one runs `matchUniqueKey`, which is right where the caller is picking one row
+ * out of many and wrong here: Prisma's to-one operand is a `WhereInput`, and
+ * `delete: { bio: "seed" }` — a column with no unique index anywhere near it —
+ * is accepted and deletes the connected row. Sharing `assertNamedRows` would
+ * have refused that at compile time with a list of unique keys the caller never
+ * had to name.
+ *
+ * `null` is the normalised `false`, and it is a *value* rather than an
+ * omission: `delete: false` is a call that deliberately asks for nothing, so it
+ * passes here and reduces to no statement at all further down.
+ *
+ * `InvalidArgumentError` because the argument is supported and the value is
+ * wrong — the same reading `assertCreateManyOperand` uses, and the reason the
+ * message names the two shapes that work instead of announcing a gap.
+ */
+function assertToOneFilter(
+  schema: ModelSchema,
+  relation: RelationSchema,
+  child: ModelSchema,
+  operand: unknown,
+  key: string,
+  operation: string,
+): void {
+  if (operand === null || operand === undefined) return;
+  if (typeof operand === "object" && !Array.isArray(operand)) return;
+
+  throw new InvalidArgumentError(
+    `data.${relation.name}.${key}`,
+    schema.name,
+    operation,
+    `'${relation.name}' is a to-one, so '${key}' takes either a boolean — ` +
+      `'true' for the connected ${child.name}, 'false' for nothing — or an ` +
+      `object of filters it has to match. Prisma's operand here is ` +
+      `'${child.name}WhereInput | boolean'.`,
+  );
 }
 
 /**
@@ -2067,13 +2317,26 @@ function assertConnectOrCreateOperand(
   const at = `data.${relation.name}.connectOrCreate`;
 
   if (Array.isArray(operand) && !many) {
-    throw new UnsupportedQueryError(
+    // **Which side holds the key is read off the relation, not assumed.** This
+    // sentence used to say "this row holds the foreign key" unconditionally,
+    // which was true of the only caller that could pass `many: false` — the
+    // owning side — and false the moment the foreign side stopped hardcoding
+    // `true`. `from` is non-empty exactly on the side that holds the key, the
+    // same test `planOne` makes to choose between the two planners, so the two
+    // cannot drift.
+    const owning = relation.from.length > 0;
+
+    throw new InvalidArgumentError(
       at,
       schema.name,
       operation,
-      `'${relation.name}' is a to-one: this row holds the foreign key, so ` +
-        `there is one row to point at and a list has no meaning. Prisma ` +
-        `refuses an array here too.`,
+      `'${relation.name}' is a to-one: ` +
+        (owning
+          ? `this row holds the foreign key`
+          : `${child.name} holds the foreign key`) +
+        `, so there is one row to point at and a list has no meaning. Prisma ` +
+        `refuses an array here too — as a validation error on the argument, ` +
+        `which is why this is a bad value rather than a gap.`,
     );
   }
 
@@ -2204,4 +2467,88 @@ function assertCreateManyOperand(
 function listOf(value: unknown): unknown[] {
   if (value === undefined || value === null) return [];
   return Array.isArray(value) ? value : [value];
+}
+
+/**
+ * A to-one nested-write operand, rewritten in the spelling the to-many bodies
+ * above already read.
+ *
+ * **Prisma's to-one nested input is a different grammar, not a subset of the
+ * to-many one** — quoted from a generated client rather than from the docs
+ * (`ProfileUpdateOneWithoutUserNestedInput`):
+ *
+ *     update      XOR<UpdateToOneWithWhereWithoutUserInput, UpdateWithoutUserInput>
+ *                 where UpdateToOneWithWhereWithoutUserInput = { where?, data }
+ *     upsert      { update, create, where? }
+ *     disconnect  ProfileWhereInput | boolean
+ *     delete      ProfileWhereInput | boolean
+ *     connect     ProfileWhereUniqueInput
+ *
+ * Three of those differences would be got wrong by reading the to-many side and
+ * assuming symmetry, so each is named with the measurement behind it:
+ *
+ *   - **the `where` is optional, and it is a filter.** Not a unique key —
+ *     `WhereInput`, not `WhereUniqueInput` — which is why `assertToOneFilter`
+ *     replaces `assertNamedRows` here and `matchUniqueKey` does not run.
+ *     Measured: `delete: { bio: "seed" }` is accepted against a column with no
+ *     unique index and deletes the connected row.
+ *   - **the data may be written bare.** `update: { bio: "x" }` and
+ *     `update: { data: { bio: "x" } }` are one operation. The owning side
+ *     measured that years ago; this is the same measurement repeated on the
+ *     foreign side, because the owning side's said nothing about this one.
+ *   - **the boolean is not an empty filter.** `true` means the connected row;
+ *     `false` means *nothing at all*, measured — `delete: false` and
+ *     `disconnect: false` with a child present return the parent and leave the
+ *     child exactly as it was, foreign key included.
+ *
+ * So `true` becomes `{}`, which `conjoin` reduces to the parent link alone —
+ * precisely the one connected row — and `false` becomes `null`, which `listOf`
+ * reduces to `[]`, which is no statement.
+ */
+function toOneOperand(key: string, operand: unknown): unknown {
+  if (key === "update") {
+    // A `data` key is the wrapper; anything else is the payload itself. The
+    // same test `planOwningSide`'s `update` makes, deliberately — the two
+    // spellings collapse to one operation, so the compiler should not have two
+    // shapes of its own for them. It carries the same ambiguity, too: a child
+    // with a scalar column called `data` would be read as the wrapper. Prisma's
+    // own input types have that hazard by construction and it has never been
+    // reachable in practice, so it is inherited rather than invented.
+    //
+    // **`!== undefined` rather than `in`**, and the difference is a plan-cache
+    // bug rather than a style choice. `canonicalShape` drops a key whose value
+    // is `undefined` (see its object branch), so `update: {}` and `update: {
+    // data: undefined }` are ONE plan key. Branching on `in` gave them two
+    // compilations: the first normalised and compiled, the second reached
+    // `assertNamedUpdates` and was refused for a missing `data` — so whether
+    // the refusal fired depended on which spelling warmed the cache. Testing
+    // the value instead is what `assertNamedUpdates` itself does, one operand
+    // over, and it puts both spellings on the same branch.
+    //
+    // This is the same defect as the `disconnect` boolean two functions down,
+    // arrived at from the opposite direction: there the key was too coarse for
+    // the code, here the code was finer than the key. Both are decided by
+    // asking what `canonicalShape` actually records.
+    if (
+      operand !== null &&
+      typeof operand === "object" &&
+      (operand as Record<string, unknown>).data !== undefined
+    ) {
+      const record = operand as Record<string, unknown>;
+      return { where: record.where, data: record.data };
+    }
+    return { where: undefined, data: operand };
+  }
+
+  if (key === "delete" || key === "disconnect") {
+    if (operand === true) return {};
+    if (operand === false) return null;
+    return operand;
+  }
+
+  // `upsert` already arrives as `{ where?, create, update }`, and `create`,
+  // `connect` and `connectOrCreate` are already singular. Returned untouched
+  // rather than listed, so an operand added later does not silently acquire a
+  // translation it was never measured for.
+  return operand;
 }
