@@ -379,11 +379,183 @@ type ListFilter<E> = {
  * `{ [key: string]: JsonValue }`, and `{ equals: null }` is itself a valid JSON
  * object. Prisma has the same gap. Stated rather than papered over: a comment
  * claiming the type rejects it would be read as a guarantee.
+ *
+ * **This is the filter on the *column*, which is why `path` is excluded.** A
+ * `path` sends the whole operand to `compileJsonFilter`, where the sentinels are
+ * refused — `#>>` cannot tell an absent key from a JSON `null`. Without the
+ * `path?: never`, `{ path: […], equals: DbNull }` landed here instead of on
+ * `JsonPathFilter`, because a union ignores a property one member declares and
+ * excess-property checking counts it known if *any* member has it.
+ *
+ * **`equals` and `not` are asymmetric, and the compiler is what makes them so.**
+ * `equals` binds its operand as a *value*, so an object under it is a document
+ * — `{ equals: { a: 1 } }` compiles to `"metadata" = $1::text::jsonb`. `not`
+ * delegates to `compileNot`, which sends any object operand back through
+ * `compileFieldFilter` as a *nested filter*: `{ not: { equals: { a: 1 } } }`
+ * compiles, `{ not: { path: […], equals: 1 } }` compiles to a negated path
+ * filter, and `{ not: { a: 1 } }` raises on the key `a`. So `not` recurses here
+ * and `equals` does not. Measured against `compileRead`, not inferred.
  */
 type JsonFilter = {
+  path?: never;
   equals?: JsonValue | DbNullValue | JsonNullValue | AnyNullValue;
-  not?: JsonValue | DbNullValue | JsonNullValue | AnyNullValue;
+  not?:
+    | JsonValueOperand
+    | DbNullValue
+    | JsonNullValue
+    | AnyNullValue
+    | JsonFilter
+    | JsonPathFilter;
 };
+
+/**
+ * `JsonValue`'s object member, named so that `JsonValueOperand` can subtract it.
+ */
+type JsonObject = { [key: string]: JsonValue };
+
+/**
+ * Where inside the document to look — and it is **one union covering two
+ * dialects**, which each refuse the other's half at runtime.
+ *
+ * Postgres takes `["a", "b"]` and refuses a string; SQLite takes `"$.a.b"` and
+ * refuses an array. That is Prisma's own split, measured on both through a
+ * generated client, and `assertPathShape` reproduces it with a message naming
+ * which form *this* database wants.
+ *
+ * **Typed flat rather than per-dialect, deliberately.** The generated artifact
+ * is dialect-agnostic — `ModelTypeInfo` records no dialect, and the dialect is
+ * chosen from `DATABASE_URL` at connect time — so there is nothing for a
+ * dialect-shaped type to read, and shaping it would mean threading a parameter
+ * the generator does not know through every model, every `WhereInput` and every
+ * call site. It is also how this file already handles the same divergence
+ * elsewhere: `mode: "insensitive"` is Postgres-only and is a flat property with
+ * a comment, and `ListFilter` is offered on both dialects though SQLite has no
+ * array type to answer it with. The dialect refusal stays where it can name the
+ * dialect and say "it works on postgres".
+ *
+ * **Numbers are in, and that is not the same choice as the dialect one above.**
+ * `assertPathShape` accepts a numeric segment, where Prisma's generated `path`
+ * is `string[]`, so gemi is a superset here — and this file refuses to be a
+ * superset on dialect operators for a stated reason: answering a query the
+ * oracle cannot is "precisely where a differential test stops being able to
+ * check anything" (`where.ts:945`). The two are consistent because that rule
+ * governs what the *compiler* answers, and a type cannot enforce it. Excluding
+ * numbers here would not remove the superset — `assertPathShape` would still
+ * accept `["items", 0]` from a `string[]`-typed variable, from `any`, from
+ * JSON off the wire — it would only stop the type describing what the compiler
+ * does, which is #336 again in the other direction. If the superset should go,
+ * the place to remove it is `assertPathShape` — #371, with both answers written
+ * out, rather than decided quietly here.
+ *
+ * **`readonly`, because a path is the natural thing to hoist.**
+ * `const PATH = ["operation"] as const` and a whole filter object written
+ * `as const` both produce a `readonly` tuple. `assertPathShape` uses
+ * `Array.isArray` and `.every`, which a frozen array answers, and the path is
+ * bound rather than mutated. A mutable array still assigns to a `readonly`
+ * parameter, so nothing that compiled before stops.
+ */
+type JsonPath = string | readonly (string | number)[];
+
+/**
+ * A scalar a JSON path filter can be compared against.
+ *
+ * `assertJsonOperand`'s rule: `equals`, `not` and the four comparisons compile
+ * to one bound value against one extracted value, so an object or array operand
+ * "would bind as '[object Object]' and match nothing" and is refused. That is a
+ * refusal rather than a gap — answering it properly needs the `#> … ::jsonb`
+ * form, which is Postgres-only — so the type says the same thing rather than
+ * offering a query only one dialect could answer.
+ *
+ * **The sentinels are absent, and their absence is the point.** `DbNull`,
+ * `JsonNull` and `AnyNull` are refused at a path by `compileJsonFilter`, because
+ * `#>>` yields SQL NULL for an absent key and for a JSON `null` alike — the
+ * distinction the sentinels exist to draw is gone before the comparison
+ * happens. They stay on `JsonFilter`, which compiles against the column, where
+ * the distinction survives.
+ *
+ * **`null` is absent too, and this one is the type going *further* than the
+ * compiler — the only place in this change that does.** `assertJsonOperand`
+ * lets `null` through and `{ path: […], equals: null }` compiles to
+ * `("metadata" #>> $1) = $2` bound to NULL, which is NULL rather than true on
+ * both dialects: a predicate no row can satisfy. Once the sentinels are refused
+ * there is no other reading of it — the two questions `null` could be asking
+ * are exactly the two the sentinels ask. The same operand under
+ * `string_contains` is already a runtime refusal, in this file's own words
+ * because the pattern "runs and returns the wrong rows", so refusing it here
+ * finishes a rule the compiler states rather than inventing one. The compiler
+ * should follow — #371 — and until it does a `null` arriving dynamically still
+ * reaches the binder, which is why this is stated and not claimed as a
+ * guarantee.
+ */
+type JsonPathScalar = string | number | boolean;
+
+/**
+ * `where: { metadata: { path: …, equals: … } }` — a filter on a value *inside*
+ * the document rather than on the column.
+ *
+ * The operator set is `JSON_FILTERS` in `compile/where.ts`, all ten of them, and
+ * the operand types are `assertJsonOperand`'s. `array_contains` is the one that
+ * takes a document, because containment is the operator that means one.
+ *
+ * **`path` is required, and that is what makes the union above discriminate.**
+ * `compileFieldFilter` dispatches on `filter.path !== undefined`: an operand
+ * carrying a `path` *is* a path filter to the compiler, whatever else is in it.
+ * A JSON document with a top-level `path` key therefore has to be written
+ * `{ equals: { path: … } }` — which is the only spelling that ever worked, since
+ * an object operand is a filter here and never a document.
+ *
+ * Every operator is optional, so `{ path: ["a"] }` alone still type-checks and
+ * still raises Prisma's *"A JSON path cannot be set without a scalar filter."*
+ * Requiring one would mean a ten-way union in the position where the compiler
+ * reports a misspelled operator, and the runtime message already names the whole
+ * set. Prisma's generated input has the same shape for the same reason.
+ */
+type JsonPathFilter = {
+  path: JsonPath;
+  equals?: JsonPathScalar;
+  not?: JsonPathScalar;
+  string_contains?: string;
+  string_starts_with?: string;
+  string_ends_with?: string;
+  array_contains?: JsonValue;
+  lt?: JsonPathScalar;
+  lte?: JsonPathScalar;
+  gt?: JsonPathScalar;
+  gte?: JsonPathScalar;
+};
+
+/**
+ * The bare-value half of a `Json` column's filter — **`JsonValue` with its
+ * object member removed**, and that removal is the whole fix for #336, not the
+ * operators.
+ *
+ * `JsonValue` contains `{ [key: string]: JsonValue }`, so before this any object
+ * literal at all satisfied the value arm, a union permits a property present in
+ * any member, and excess-property checking never fired. Adding `path` and the
+ * operators to a sibling arm does nothing on its own: `{ path: 123, notAFilter:
+ * true }` is a perfectly good JSON *document* and would go on compiling. The
+ * union has to stop being able to absorb it.
+ *
+ * **The object member is not merely absorbing — it was never true.** `where` has
+ * no bare-document branch for a `Json` column. `isFilterObject` reports any
+ * non-`Date`, non-array object as a filter, so `{ metadata: { a: 1 } }` reaches
+ * the scalar operator loop and raises *"A scalar filter takes contains,
+ * endsWith, equals, …"* on the key `a`. Only scalars and arrays fall through to
+ * `equals`, which is exactly what is left here. Measured against `compileRead`
+ * on Postgres, not read off the code:
+ *
+ * | operand | compiler |
+ * | --- | --- |
+ * | `{ metadata: "s" }`, `{ metadata: [1, 2] }` | `"metadata" = $1::text::jsonb` |
+ * | `{ metadata: { equals: { a: 1 } } }` | `"metadata" = $1::text::jsonb` |
+ * | `{ metadata: { a: 1 } }` | `InvalidArgumentError` on `where.metadata.a` |
+ *
+ * So the document goes under `equals`, which is the only spelling `docs/orm.md`
+ * has ever shown. An earlier draft of this type kept the object member with
+ * `path?: never` intersected onto it — clever, and its entire effect was to go
+ * on admitting operands that always throw.
+ */
+type JsonValueOperand = Exclude<JsonValue, JsonObject>;
 
 /**
  * A filter on one column.
@@ -399,7 +571,12 @@ type JsonFilter = {
  */
 export type FieldFilter<V> =
   IsJson<V> extends true
-    ? JsonValue | DbNullValue | JsonNullValue | JsonFilter
+    ?
+        | JsonValueOperand
+        | DbNullValue
+        | JsonNullValue
+        | JsonFilter
+        | JsonPathFilter
     : [NonNullable<V>] extends [Array<infer E>]
       ? E[] | ListFilter<E>
       : V | NestedFilter<V>;

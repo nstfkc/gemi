@@ -3735,6 +3735,29 @@ merely unsupported:
 An empty path — `[]` or `""` — is refused on both dialects. On Postgres it would extract the whole
 document, which is a filter on the column rather than on a path.
 
+**What the type checks, and what it leaves to run time.** The path filter is typed: `path` takes
+either dialect's grammar, the ten operators are the ones above, and their operand types are the
+ones the compiler will compile. A misspelled operator, a `path` that is not one, a non-string under
+`string_contains`, a sentinel at a path and a `null` at a path are all compile errors. The type
+carries no dialect — the generated artifact does not know which database it will be pointed at —
+so the table above is offered in full on both and the wrong half is refused at run time, naming the
+dialect. The empty path is refused at run time too.
+
+**An object in a `Json` column's `where` is a filter, never a document.** `{ metadata: { a: 1 } }`
+does not ask for the document `{ a: 1 }` — it asks for the operator `a`, which does not exist, and
+raises `InvalidArgumentError`. Only a scalar or an array is read as a value. That has always been
+true and is now a compile error rather than a run-time one, `path` keys included:
+
+```ts
+await User.findMany({ where: { metadata: { equals: { a: 1 } } } })          // the document
+await User.findMany({ where: { metadata: { equals: { path: "/a" } } } })    // and this one
+await User.findMany({ where: { metadata: [1, 2] } })                        // arrays are values
+```
+
+`not` is the exception, and it is a filter too: it takes a whole nested filter, so
+`{ metadata: { not: { path: ["a"], equals: 1 } } }` is a negated path filter, while
+`{ metadata: { equals: { … } } }` binds its operand as a value.
+
 ### Scalar lists (Postgres only)
 
 ```ts

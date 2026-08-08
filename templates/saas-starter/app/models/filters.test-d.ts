@@ -1,6 +1,6 @@
 import { describe, expectTypeOf, test } from "vitest";
 
-import { DbNull, JsonNull } from "gemi/orm";
+import { AnyNull, DbNull, JsonNull } from "gemi/orm";
 
 import {
   AccountModel,
@@ -206,6 +206,204 @@ describe("Json columns", () => {
   test("filter by sentinel", async () => {
     await UserModel.findMany({ where: { metadata: { equals: DbNull } } });
     await UserModel.findMany({ where: { metadata: { equals: JsonNull } } });
+  });
+});
+
+/**
+ * **The path filter, which the compiler has implemented since `cc22399` and the
+ * type described not at all** — #336, and the fourth of the same kind after
+ * #326, #333 and #337.
+ *
+ * It is the worst of the four because the type did not *refuse* the argument,
+ * it **accepted anything**. `FieldFilter`'s `Json` arm unions in `JsonValue`,
+ * whose `{ [key: string]: JsonValue }` member absorbs any object literal as an
+ * `equals` shorthand; a union permits a property present in any member, so
+ * excess-property checking never fired and `{ path: 123, notAFilter: true }`
+ * compiled clean. Every refusal `orm.md` specifies was discoverable only by
+ * running the query, and the feature worked by accident for anyone who spelled
+ * it correctly.
+ *
+ * So the negatives below are the point of the file, not the trimmings — each
+ * one compiled before this and the runtime threw. `path?: never` on the value
+ * arm is what turns `path` into a discriminant and lets them be caught.
+ */
+describe("Json path filters", () => {
+  /**
+   * Both path grammars are offered, because the type has no dialect to consult
+   * — `ModelTypeInfo` records none, and `DATABASE_URL` picks it at connect
+   * time. `assertPathShape` refuses the other dialect's form with a message
+   * naming this one, the way `mode: "insensitive"` and `ListFilter` already do.
+   */
+  test("take either dialect's path grammar", async () => {
+    await UserModel.findMany({
+      where: { metadata: { path: ["operation"], equals: "video" } },
+    });
+    await UserModel.findMany({ where: { metadata: { path: "$.operation", equals: "video" } } });
+    // An array index is a key too, which is why numbers are in the union.
+    await UserModel.findMany({ where: { metadata: { path: ["items", 0, "id"], gt: 3 } } });
+  });
+
+  test("take the ten operators JSON_FILTERS accepts", async () => {
+    await UserModel.findMany({ where: { metadata: { path: ["a"], not: "x" } } });
+    await UserModel.findMany({ where: { metadata: { path: ["a"], string_contains: "x" } } });
+    await UserModel.findMany({ where: { metadata: { path: ["a"], string_starts_with: "x" } } });
+    await UserModel.findMany({ where: { metadata: { path: ["a"], string_ends_with: "x" } } });
+    await UserModel.findMany({
+      where: { metadata: { path: ["a"], lt: 1, lte: 2, gt: 3, gte: 4 } },
+    });
+    // The one operator whose operand is a document, because containment is the
+    // operator that means one.
+    await UserModel.findMany({ where: { metadata: { path: ["a"], array_contains: { b: 1 } } } });
+  });
+
+  test("a path that is not a path is refused", async () => {
+    // @ts-expect-error a path is an array of keys or a JSONPath string
+    await UserModel.findMany({ where: { metadata: { path: 123, notAFilter: true } } });
+  });
+
+  test("an operand the operator cannot compile is refused", async () => {
+    // @ts-expect-error `string_contains` builds a `like` pattern; 4 becomes '%4%'
+    await UserModel.findMany({ where: { metadata: { path: [], string_contains: 4 } } });
+  });
+
+  /**
+   * The misspelling, which is the case a half-fix lets through: adding the
+   * operators without excluding `path` from the value arm leaves the index
+   * signature answering "yes, `equalz` is a known property" on the union's
+   * behalf.
+   */
+  test("an operator that is not an operator is refused", async () => {
+    // @ts-expect-error `equalz` is not in JSON_FILTERS
+    await UserModel.findMany({ where: { metadata: { path: ["operation"], equalz: "video" } } });
+  });
+
+  /**
+   * `compileJsonFilter` refuses the sentinels at a path, and refuses the same
+   * shape one level down — `{ equals: { not: DbNull } }` — because `#>>` yields
+   * SQL NULL for an absent key and a JSON `null` alike, so the distinction the
+   * sentinels exist to draw is gone before the comparison happens. Folio's
+   * `{ payload: { path: […], equals: AnyNull } }` is exactly this, and typing
+   * it as valid is what this pair prevents.
+   */
+  test("a sentinel at a path is refused, and so is one a level down", async () => {
+    // @ts-expect-error an extracted value cannot tell the two empties apart
+    await UserModel.findMany({ where: { metadata: { path: ["a"], equals: DbNull } } });
+    // @ts-expect-error nor can it under `not`
+    await UserModel.findMany({ where: { metadata: { path: ["a"], not: JsonNull } } });
+    // @ts-expect-error and the nested operator object is refused with them
+    await UserModel.findMany({ where: { metadata: { path: ["a"], equals: { not: AnyNull } } } });
+  });
+
+  /**
+   * **`null` is refused, and it is the one place the type goes further than the
+   * compiler.** `assertJsonOperand` lets it through and the query compiles to
+   * `("metadata" #>> $1) = $2` bound to NULL, which is NULL and not true on
+   * both dialects — a predicate no row can satisfy. With the sentinels already
+   * refused there is nothing else it could be asking. Filed against the runtime
+   * as #371 rather than changed here, since this is a type-only change — so a
+   * `null` arriving dynamically still reaches the binder.
+   */
+  test("null at a path is refused, having no reading left", async () => {
+    // @ts-expect-error `= NULL` is never true; say which empty you mean, on the column
+    await UserModel.findMany({ where: { metadata: { path: ["a"], equals: null } } });
+  });
+
+  /**
+   * The column filter must not have lost anything — but "anything" is what the
+   * *compiler* accepts, and an object operand on a `Json` column is a filter to
+   * it, never a document. `isFilterObject` sends every non-`Date`, non-array
+   * object to the operator loop; only scalars and arrays reach `equals`. So the
+   * document goes under `equals`, which is the only spelling `docs/orm.md` has
+   * ever shown.
+   */
+  test("the column filter still takes every operand the compiler answers", async () => {
+    await UserModel.findMany({ where: { metadata: [1, 2] } });
+    await UserModel.findMany({ where: { metadata: "video" } });
+    await UserModel.findMany({ where: { metadata: { equals: { a: 1 } } } });
+    await UserModel.findMany({ where: { metadata: { not: AnyNull } } });
+    await UserModel.findMany({ where: { metadata: { equals: DbNull } } });
+  });
+
+  /**
+   * And refuses the ones it raises on. Both of these compiled before this
+   * change and threw `InvalidArgumentError` naming the key — the same
+   * type-checks-but-throws divergence #336 is about, reached from the value arm
+   * instead of the path arm.
+   */
+  test("a bare document is refused, because the compiler raises on it", async () => {
+    // @ts-expect-error InvalidArgumentError on `where.metadata.a` — write { equals: { a: 1 } }
+    await UserModel.findMany({ where: { metadata: { a: 1 } } });
+    // @ts-expect-error and `equalz` is not an operator either — same error, same fix
+    await UserModel.findMany({ where: { metadata: { equalz: "video" } } });
+  });
+
+  /**
+   * A document with a top-level `path` key is the same story with the key that
+   * happens to be the discriminant: `compileFieldFilter` dispatches on
+   * `filter.path !== undefined`, so the bare form reached `compileJsonFilter`
+   * and raised. `{ equals: … }` is the spelling, as it is for every other
+   * document.
+   */
+  test("a document with a `path` key is written as an explicit equals", async () => {
+    await UserModel.findMany({ where: { metadata: { equals: { path: "/a", method: "GET" } } } });
+    // @ts-expect-error the bare form is a path filter to the compiler, not a value
+    await UserModel.findMany({ where: { metadata: { path: "/a", method: "GET" } } });
+  });
+
+  /**
+   * **The discriminant must not leak downwards.** `path` is only special as the
+   * *operand's* own key; one level into a document it is an ordinary string
+   * key, and an index signature does not synthesise a property that would trip
+   * the check. If it did, this change would have broken every payload that
+   * stores a URL path.
+   */
+  test("a `path` key inside the document is an ordinary key", async () => {
+    await UserModel.findMany({ where: { metadata: { equals: { config: { path: "/x" } } } } });
+    await UserModel.findMany({ where: { metadata: { equals: { a: { b: { path: [1, 2] } } } } } });
+    await UserModel.findMany({ where: { metadata: [{ path: "/x" }, { path: "/y" }] } });
+  });
+
+  /**
+   * `not` is the asymmetric one, and the type now says so. `equals` binds its
+   * operand as a value; `not` hands an object operand back to
+   * `compileFieldFilter` as a nested filter, so a negated path filter is a real
+   * query and a misspelled operator under `not` is a real error. Both measured.
+   */
+  test("`not` carries a whole filter, including a path one", async () => {
+    await UserModel.findMany({ where: { metadata: { not: { path: ["a"], equals: 1 } } } });
+    await UserModel.findMany({ where: { metadata: { not: { equals: { a: 1 } } } } });
+    await UserModel.findMany({ where: { metadata: { not: [1, 2] } } });
+
+    // @ts-expect-error the recursion reaches the same refusal
+    await UserModel.findMany({ where: { metadata: { not: { path: ["a"], equalz: 1 } } } });
+    // @ts-expect-error and `a` is not an operator here either
+    await UserModel.findMany({ where: { metadata: { not: { a: 1 } } } });
+  });
+
+  /**
+   * A path is the natural thing to hoist out of a query, and hoisting it makes
+   * it `readonly`. `assertPathShape` uses `Array.isArray` and `.every`, which a
+   * frozen array answers, and the path is bound rather than mutated — so the
+   * type takes a `readonly` array. Without it, `as const` on the filter object
+   * was a compile error against a query that runs.
+   */
+  test("a hoisted or `as const` path still compiles", async () => {
+    const PATH = ["operation"] as const;
+    await UserModel.findMany({ where: { metadata: { path: PATH, equals: "video" } } });
+
+    const filter = { path: ["a"], equals: "x" } as const;
+    await UserModel.findMany({ where: { metadata: filter } });
+  });
+
+  test("and it narrows the same one level down, inside a relation filter", async () => {
+    await AccountModel.findMany({
+      where: { user: { metadata: { path: ["a"], equals: 1 } } },
+    });
+
+    await AccountModel.findMany({
+      // @ts-expect-error the same refusal reached through a to-one
+      where: { user: { metadata: { path: ["a"], equalz: 1 } } },
+    });
   });
 });
 
