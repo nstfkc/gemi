@@ -2417,10 +2417,17 @@ function suite(label: string, url?: string) {
      * Fixing any of them is a compiler change, in files this suite does not own.
      * Deleting the case is what closing the bug looks like: it graduates into
      * `CASES` and the harness takes over from the prose.
+     *
+     * Each carries its issue number, and that is the half a test cannot do for
+     * itself. #354 closes when this PR merges, so without them the only record
+     * of these two would be this describe — findable by someone already reading
+     * the file, and by nobody reading the tracker. The issues carry the
+     * measurement and point back here; this points forward. Neither is enough
+     * alone.
      */
     describe("where the two clients still disagree — each of these is a bug", () => {
       /**
-       * **BUG 1 — owning-side `disconnect: false`.**
+       * **BUG 1 (#359) — owning-side `disconnect: false`.**
        *
        * #354 made the *foreign* side take a boolean (M5b above, which passes).
        * The owning side still refuses anything but `true`. Prisma's owning-side
@@ -2445,7 +2452,7 @@ function suite(label: string, url?: string) {
       });
 
       /**
-       * **BUG 2 — `create` on a to-one that already has a child.**
+       * **BUG 2 (#360) — `create` on a to-one that already has a child.**
        *
        * Prisma **detaches** the existing child first: the old row survives with
        * a null foreign key and the new one takes the link. gemi inserts without

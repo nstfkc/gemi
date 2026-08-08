@@ -483,6 +483,59 @@ time is a marker people learn to skim past. Neither pass rewrites anything.
 The full description, including what each annotation says, is under [Porting a
 Prisma app onto the ORM](./docs/cli.md#porting-a-prisma-app-onto-the-orm).
 
+## `@updatedAt` now needs a column beside it
+
+**This one changes behaviour for apps already on gemi's ORM, not only for apps
+porting off Prisma** — it is the only entry here that does, which is why it is
+worth reading even if you have no Prisma left.
+
+The stamp used to fire on every `update` call. It now fires on every call that
+**sets at least one column**, which is the rule Prisma follows. Measured against
+6.19.2 by seeding the column to the epoch and reading it back:
+
+```
+data: {}                                epoch    not stamped
+data: { profile: { create: … } }        epoch    not stamped     nested write, child holds the key
+upsert hit, update: {}                  epoch    not stamped
+updateMany({ data: {} })                epoch    { count: 0 }
+data: { name: "real" }                  now      stamped
+data: { organization: { connect: … } }  now      stamped          writes this row's foreign key
+```
+
+Nothing that writes a column changes. What changes is the calls that write
+none — and there is one spelling worth searching for before you upgrade:
+
+```ts
+await User.update({ where: { id }, data: {} })   // no longer moves updatedAt
+```
+
+If you used that as a *touch* — a write with an empty payload, to bump the
+timestamp — it is now a read and the stamp stays where it was. It never worked
+that way under Prisma, so a ported app cannot depend on it; an app written
+against gemi's ORM directly could. Set the column yourself where you meant to:
+
+```ts
+await User.update({ where: { id }, data: { updatedAt: new Date() } })
+```
+
+The same applies to a `data` of only nested writes whose child holds the foreign
+key. Those write the *child* and nothing on the parent, so the parent's stamp no
+longer moves — which is what Prisma does, and what the ORM previously did not.
+
+**Why it changed rather than being left alone.** Stamping unconditionally made
+the empty-`data` read unreachable on any model carrying the attribute, because
+the stamp was itself the assignment keeping the statement from being empty — so
+the fix for `data: {}` was the same fix. And it put a timestamp Prisma does not
+write on every nested to-one write, where the differential harness could not see
+it: `updatedAt` is compared as a volatile descriptor, so two different instants
+match. It took asserting the epoch by hand to find.
+
+**One divergence remains, deliberately.** An owning-side `disconnect` writes the
+foreign key and so stamps here; Prisma writes the same column through the same
+operand family and does *not*, while its `connect` one operand over does. That is
+Prisma disagreeing with itself, and matching it would mean special-casing one
+operand to reproduce an inconsistency.
+
 ---
 
 # Upgrading from 0.42 to 0.43
