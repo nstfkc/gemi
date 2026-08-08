@@ -964,10 +964,26 @@ export abstract class Model {
     // own — hence the separate flag rather than a wider check.
     if (op === "delete" && (plan.relations !== undefined || plan.counts)) {
       const { where } = effective;
+      // All three operands, not two. The row this reads is the row the caller
+      // gets back — `return before`, below — so anything left out here is
+      // silently un-narrowed, and `omit` left out means the column the caller
+      // asked to drop comes back. A `delete` with no relation to read never
+      // reaches this branch and projects through `resolveSelection`, which
+      // honours `omit`; forwarding it here is what makes the two paths answer
+      // the same question the same way (#364).
+      //
+      // `omit` rides with the `include` arm only because it cannot legally ride
+      // with the other: `select` + `omit` is refused in `resolveSelection`, and
+      // the plan above has already been compiled, so a call naming both threw
+      // before reaching this line. Spreading it into both arms would be dead in
+      // one of them and would put a second, weaker copy of that rule here.
       const projection =
         effective.select !== undefined
           ? { select: effective.select }
-          : { include: effective.include };
+          : {
+              include: effective.include,
+              ...(effective.omit !== undefined ? { omit: effective.omit } : {}),
+            };
 
       // The pool, not `conn`: when a transaction is already open `withTransaction`
       // savepoints against the ambient handle and ignores this argument, and

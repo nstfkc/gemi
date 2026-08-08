@@ -414,6 +414,16 @@ const CASES: Case[] = [
     where: { publicId: "p1" },
     include: { _count: { select: { accounts: true } } },
   }],
+  // The same call with an `omit` on it. Prisma refuses `select` + `omit` — they
+  // describe two different column lists — but takes `include` + `omit`, and the
+  // read-first path above is where that stopped being true here: it rebuilt the
+  // pre-read's projection out of `select` or `include` alone, so adding a
+  // relation to a call that already omitted a column handed the column back.
+  ["delete with an omit beside an include", "delete", {
+    where: { publicId: "p1" },
+    include: { _count: { select: { accounts: true } } },
+    omit: { password: true },
+  }],
 
   // --- foreign keys (#89) -----------------------------------------------
   //
