@@ -963,11 +963,33 @@ export abstract class Model {
     // plan, so `relations` stays empty for an `include: { _count: … }` on its
     // own — hence the separate flag rather than a wider check.
     if (op === "delete" && (plan.relations !== undefined || plan.counts)) {
-      const { where } = effective;
-      const projection =
-        effective.select !== undefined
-          ? { select: effective.select }
-          : { include: effective.include };
+      // **Everything but the `where`, rather than the operands named one by
+      // one.** The row this reads is the row the caller gets back — `return
+      // before`, below — so an operand left out here is silently un-narrowed,
+      // and nothing downstream will notice. That is #364: this rebuilt the
+      // projection as `select` *or* `include`, `omit` was not among the names,
+      // and a `delete` that asked to drop a column got it back as soon as the
+      // same call also carried an `include`. A `delete` with no relation to read
+      // never reaches this branch and projects through `resolveSelection`, which
+      // had honoured `omit` all along — one operation, two paths, two answers.
+      //
+      // **Do not turn this back into named arms.** The rest is what makes the
+      // next projection operand — Prisma's `relationLoadStrategy`, a `distinct`
+      // on a write, whatever it turns out to be — arrive here for free instead
+      // of arriving as the same bug with a different column name. The `upsert`
+      // find-then-write branch a few hundred lines up spreads for the same
+      // reason and was never affected by #364.
+      //
+      // Bounded, not hopeful. `assertArgs` (`compile/write.ts`) rejects any
+      // operand outside `WRITE_ARGS.delete` — `where`, `select`, `include`,
+      // `omit` — and the plan above is already compiled, so the rest holds
+      // projection operands and nothing else. That set is a strict subset of
+      // `findFirst`'s, so every one of them is a legal read operand. `omit` and
+      // `select` cannot both be in it: `resolveSelection` refuses that pair, and
+      // a warm plan cannot smuggle it past, since both are in `LITERAL_KEYS`
+      // (`plan.ts`) and so key separately. An `undefined` operand is dropped from
+      // the plan key too, so carrying one costs no second cache entry.
+      const { where, ...projection } = effective;
 
       // The pool, not `conn`: when a transaction is already open `withTransaction`
       // savepoints against the ambient handle and ignores this argument, and
