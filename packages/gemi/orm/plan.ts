@@ -452,6 +452,34 @@ function shapeOfMember(
     );
   }
 
+  /**
+   * `disconnect: true` and `disconnect: false` are two different writes, and
+   * nothing above tells them apart: they sit under `data`, which is a
+   * {@link VALUE_KEYS} subtree, so both shape to `boolean` and share one entry.
+   *
+   * That was a live wrong write rather than a wrong refusal. On the owning side
+   * `planOwningSide` refuses `operand !== true` at compile time and then pushes
+   * a constant `value: () => null` — and a cache *hit* skips compilation, so
+   * the refusal never re-runs. A plan compiled from `disconnect: true` served
+   * `disconnect: false` and nulled the foreign key on a call that asked for
+   * nothing. Measured against the real client, so the damage is the gap and not
+   * the guess: `disconnect: false` with a child present leaves the row exactly
+   * as it was, foreign key intact.
+   *
+   * **It cannot simply join {@link LITERAL_KEYS}, which is the same bug class
+   * documented there twice already** — for `omit` and for `skipDuplicates`.
+   * Those keys match by *name at any depth* and raise `literal` over the whole
+   * subtree below them, so a to-many `disconnect: { id: 1 }` would record the
+   * `1` verbatim and mint one cache entry per id — the unbounded growth
+   * `VALUE_KEYS`' own comment exists to prevent, and user data in a long-lived
+   * global map. Only the boolean spelling is structural, so only the boolean is
+   * guarded; every other operand shape reaches the key through its structure,
+   * as it always did.
+   */
+  if ((key === "disconnect" || key === "delete") && typeof value === "boolean") {
+    return JSON.stringify(value);
+  }
+
   if (VALUE_KEYS.has(key)) {
     return canonicalShape(value, false, collapseLists, inHaving);
   }

@@ -118,6 +118,130 @@ function prismaDelegate(client: PrismaClient, model: string) {
   return delegate;
 }
 
+/** The generated `ModelSchema` behind a registered class, or nothing. */
+type RegisteredSchema = {
+  primaryKey?: string[];
+  relations?: Record<string, { model: string }>;
+};
+
+function schemaOf(registry: ModelMap, model: string): RegisteredSchema | undefined {
+  return (registry[model] as unknown as { $schema?: RegisteredSchema })?.$schema;
+}
+
+/**
+ * Sorts the rows of every **relation** array in a payload, so the comparison is
+ * of a set of children rather than of a storage order neither client promises.
+ *
+ * This is the rule `readTables` already applies to the after-state, arriving in
+ * the half that compares what the call *returned*. It is not a nicety:
+ *
+ * Prisma loads an `include` with a second query and, measured against 6.19.2 on
+ * Postgres by logging what it sends,
+ *
+ *     SELECT … FROM "public"."Account" WHERE "public"."Account"."userId" IN ($1) OFFSET $2
+ *
+ * there is no `ORDER BY` in it, and gemi's is unordered too. So the order is
+ * whatever a sequential scan hands back, and on Postgres an `UPDATE` writes a
+ * new tuple wherever there is room: usually at the end of the page, which puts
+ * the updated child *last*, but at a reclaimed line pointer once the page has
+ * been pruned, which puts it back where it was. Pruning is opportunistic, so
+ * which of the two happens depends on how much churn the table has already seen
+ * — and `expectSameWrite` runs the two clients one after the other, so they meet
+ * the heap in different states.
+ *
+ * The failure that came from this is worth writing down because it reads as a
+ * real divergence: "upsert updates the row when it is this parent's" reported
+ * gemi returning the accounts as `[4, 3]` against Prisma's `[3, 4]`, with every
+ * field of every row identical. It appeared only in the whole-suite run, not
+ * when the file ran alone, and a second whole-suite run moved it to a different
+ * case — which is the tell.
+ *
+ * Deliberately schema-guided rather than "sort any array of objects". A `Json`
+ * column holds arrays whose order *is* the value (`metadata: []` in
+ * `differential.test.ts`), and scalar lists (#300) are ordered by definition;
+ * sorting either would erase a divergence this suite exists to catch. Only keys
+ * the generated schema declares as relations are touched.
+ *
+ * Exported only so `writes.differential.test.ts` can assert it directly. The
+ * flake it closes is unreproducible on demand, so leaving it to be covered by
+ * the Postgres run would mean it is covered on the runs where it happens to
+ * matter and nowhere else.
+ *
+ * Sorted by the serialised row rather than by the primary key, because a
+ * `select` may not have asked for one. That makes the comparison a multiset
+ * comparison: two different sets of children still fail, which is the assertion
+ * worth keeping.
+ *
+ * **A node that asked for an `orderBy` keeps its order**, and that exception is
+ * the whole reason `selection` is threaded through. The flake above is a
+ * property of an *unordered* include — where neither client emits an `ORDER BY`,
+ * so neither promises anything and the heap decides. An include that named an
+ * `orderBy` is the opposite: the order is the answer, both clients emit the
+ * sort, and comparing it positionally is exactly what this suite is for.
+ * Sorting there would have made six existing cases unable to fail — a relation
+ * strategy that stopped honouring a nested `orderBy` and returned children in
+ * join-table order would compare equal, because both sides get re-sorted by the
+ * same comparator first.
+ */
+export function stabilizeRelations(
+  value: unknown,
+  model: string,
+  registry: ModelMap,
+  /** The `include` / `select` subtree that produced `value`, when there is one. */
+  selection?: unknown,
+): unknown {
+  if (Array.isArray(value)) {
+    return value.map((row) => stabilizeRelations(row, model, registry, selection));
+  }
+  if (value === null || typeof value !== "object") return value;
+
+  const relations = schemaOf(registry, model)?.relations;
+  if (!relations) return value;
+
+  const nodes = selectionNodes(selection);
+
+  const out: Record<string, unknown> = {};
+  for (const [key, member] of Object.entries(value as Record<string, unknown>)) {
+    const relation = relations[key];
+    if (!relation) {
+      out[key] = member;
+      continue;
+    }
+    const node = nodes?.[key];
+    const child = stabilizeRelations(member, relation.model, registry, node);
+    out[key] =
+      Array.isArray(child) && !askedForAnOrder(node)
+        ? [...child].sort((a, b) =>
+            JSON.stringify(a) < JSON.stringify(b) ? -1 : 1,
+          )
+        : child;
+  }
+  return out;
+}
+
+const askedForAnOrder = (node: unknown) =>
+  node !== null &&
+  typeof node === "object" &&
+  (node as Record<string, unknown>).orderBy !== undefined;
+
+/**
+ * The relation keys one level down, from whichever of `include` / `select`
+ * carried them. Both may appear on the same node, and a relation reached
+ * through `select` is as ordered as one reached through `include`.
+ */
+function selectionNodes(
+  selection: unknown,
+): Record<string, unknown> | undefined {
+  if (selection === null || typeof selection !== "object") return undefined;
+
+  const merged: Record<string, unknown> = {};
+  for (const which of ["include", "select"] as const) {
+    const node = (selection as Record<string, unknown>)[which];
+    if (node !== null && typeof node === "object") Object.assign(merged, node);
+  }
+  return Object.keys(merged).length > 0 ? merged : undefined;
+}
+
 /**
  * Prisma returns `Decimal` and `BigInt` instances that do not structurally
  * compare, and `undefined` where a `select` omitted a key. Normalising both
@@ -273,6 +397,11 @@ export async function createDifferential(options: {
     "PasswordResetToken",
     "MagicLinkToken",
     "Account",
+    // `Profile` is the to-one whose foreign key is on the *child* (#354), so it
+    // is a child of `User` and has to be cleared first — the same rule the
+    // comment below states, and the third model in this suite's history to
+    // need it said out loud.
+    "Profile",
     "User",
     "OrganizationInvitation",
     "Organization",
@@ -312,6 +441,13 @@ export async function createDifferential(options: {
     await prisma.passwordResetToken.deleteMany({});
     await prisma.magicLinkToken.deleteMany({});
     await prisma.account.deleteMany({});
+    // Before `user`, for the same reason as in `TABLES`: `Profile.userId` is a
+    // foreign key into `User`. Its `ON DELETE SET NULL` means the wrong order
+    // would not raise here — it would leave a detached `Profile` row behind on
+    // the dialect that enforces the key and none on the one that does not,
+    // which is the shape of divergence this harness exists to catch and would
+    // instead be manufacturing.
+    await prisma.profile.deleteMany({});
     await prisma.user.deleteMany({});
     await prisma.organizationInvitation.deleteMany({});
     await prisma.organization.deleteMany({});
@@ -482,10 +618,31 @@ export async function createDifferential(options: {
           at: label,
         });
       } else {
-        expect(
-          normalize(fromGemi.value, volatile),
-          `${label}: returned value`,
-        ).toEqual(normalize(fromPrisma.value, volatile));
+        // `stabilizeRelations` on both sides, for the reason written on it: an
+        // `include` is unordered in both clients, and a write moves the row it
+        // touched within the Postgres heap.
+        //
+        // Only here, not in `expectSame` above. A read leaves the heap alone, so
+        // the two clients there see the same physical order and comparing it
+        // positionally still holds — and that comparison is worth keeping,
+        // because a relation strategy that returned children in a different
+        // order from Prisma's would be a real difference to an application even
+        // though no `ORDER BY` promises otherwise. It is only a *write* that
+        // makes the order move under the comparison.
+        // `args` is threaded in so a node carrying an `orderBy` keeps its order:
+        // the flake is a property of an include that promised nothing, and one
+        // that named a sort is the case this suite most wants to compare.
+        const comparable = (value: unknown) =>
+          stabilizeRelations(
+            normalize(value, volatile),
+            model,
+            options.models,
+            args,
+          );
+
+        expect(comparable(fromGemi.value), `${label}: returned value`).toEqual(
+          comparable(fromPrisma.value),
+        );
       }
 
       // The half that catches a write which returned something plausible and
@@ -575,8 +732,7 @@ async function readTables(
     // A stable order still matters: the two clients write from the same seeded
     // state, so an unordered read could differ by storage order alone and
     // report a divergence that is not one.
-    const schema = (registry[model] as unknown as { $schema?: { primaryKey?: string[] } })
-      ?.$schema;
+    const schema = schemaOf(registry, model);
     const key = schema?.primaryKey?.length ? schema.primaryKey : ["id"];
 
     out[model] = await prismaDelegate(prisma, model).findMany({

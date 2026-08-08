@@ -76,6 +76,17 @@ It also annotates APIs retired after 0.43 rather than rewriting them, which is t
 
 > The provider-to-config half only runs when `app/kernel/providers/` exists. Without it that step is skipped and your `Kernel.ts` is left alone — so re-running the command on an already-migrated app is safe, and the retired-API pass above is all it does.
 
+### Porting a Prisma app onto the ORM
+
+Two more annotate-only passes run over every file under `app/`. Both look for a divergence that a Prisma port walks into silently — the code keeps compiling, keeps running and keeps passing its tests, and the thing that broke only shows up under a condition the app itself never produces.
+
+- **`"P2002"` in a file that also imports your models.** Moving a write onto the ORM changes the error it raises: gemi throws `UniqueConstraintError`, which carries `model`, `operation`, `fields` and `constraint` and no `code` at all. A `code === "P2002"` guard therefore returns `false`, the recovery branch it exists to run stops running, and a test that mocks `{ code: "P2002" }` keeps certifying it. The TODO points at `isUniqueConstraintError` from `gemi/orm` and at the two-armed bridge to keep while some writes in the app are still on Prisma. Files with no model import are left alone — there the guard is still correct.
+- **A `take:` or `skip:` whose value is not an integer literal.** The ORM refuses a fractional `take` with `InvalidArgumentError` where Prisma truncated it, so `Number(req.search.get("limit"))` is a 500 waiting for a hand-edited URL — and a fractional `page` is worse, because it reaches the ORM multiplied, as a fractional `skip`. The TODO points at `paginate` from `gemi/orm`, which truncates and clamps in one place.
+
+The second pass has a real false-positive rate and its wording says so: most non-literal `take`s are a constant or an already-truncated value, and the annotation asks you to confirm the value is truncated at the boundary rather than claiming a bug. Values that are integer literals, or a whole `Math.trunc(…)` / `Math.floor(…)` / `parseInt(…)` call, and `take?: number` in a type declaration, are not flagged.
+
+> **What it cannot find:** whether `limit` holds an integer, and whether a given `catch` sits over an ORM call or a Prisma one, are both run-time facts — so these passes annotate and never rewrite. The `"P2002"` pass also misses a guard living in a shared helper that imports nothing from your model surface; [UPGRADE.md](https://github.com/nstfkc/gemi/blob/main/UPGRADE.md) carries the plain grep for that case.
+
 ## `gemi check models`
 
 Reports model classes carrying policies that the modules your Kernel declares do not register.

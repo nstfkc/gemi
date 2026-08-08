@@ -648,15 +648,39 @@ type NestedUpdate<R extends RelationInfo> = NestedCreate<R> &
         upsert?: NestedUpsert<R["target"]> | NestedUpsert<R["target"]>[];
       }
     : {
-        disconnect?: boolean | WhereUniqueInput<R["target"]>;
-        delete?: boolean | WhereUniqueInput<R["target"]>;
-        update?: UpdateInput<R["target"]> | NestedUpdateOne<R["target"]>;
-        upsert?: Omit<NestedUpsert<R["target"]>, "where">;
+        disconnect?: boolean | WhereInput<R["target"]>;
+        delete?: boolean | WhereInput<R["target"]>;
+        update?: UpdateInput<R["target"]> | NestedUpdateToOne<R["target"]>;
+        upsert?: NestedUpsertToOne<R["target"]>;
       });
 
 interface NestedUpdateOne<M extends ModelTypeInfo> {
   where: WhereUniqueInput<M>;
   data: UpdateInput<M>;
+}
+
+/**
+ * The to-one forms of `update` and `upsert`, which are **not** the to-many ones
+ * with a key made optional.
+ *
+ * Both take a `WhereInput` rather than a `WhereUniqueInput`, and on both it is
+ * optional. That is Prisma's own split, read off a generated client:
+ * `UpdateToOneWithWhereWithoutUserInput` is `{ where?: ProfileWhereInput, data }`
+ * and `ProfileUpsertWithoutUserInput` is `{ update, create, where? }`, where
+ * their to-many siblings require a unique key. The parent's key already names
+ * the row here, so the filter only narrows it — and typing it as a unique key
+ * would refuse `update: { where: { bio: "x" }, data }`, which the compiler
+ * accepts and Prisma answers.
+ */
+interface NestedUpdateToOne<M extends ModelTypeInfo> {
+  where?: WhereInput<M>;
+  data: UpdateInput<M>;
+}
+
+interface NestedUpsertToOne<M extends ModelTypeInfo> {
+  where?: WhereInput<M>;
+  create: CreateInput<M>;
+  update: UpdateInput<M>;
 }
 
 interface NestedUpdateMany<M extends ModelTypeInfo> {

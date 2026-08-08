@@ -1,9 +1,16 @@
 # Upgrading from 0.50 to 0.51
 
 Three changes need a hand, and the third is a look rather than an edit — it only
-becomes work if you were using an unlisted job as an off switch. There is no
-codemod for any of them — `bunx gemi migrate` is the 0.42→0.43 tool and does not
-touch any of this.
+becomes work if you were using an unlisted job as an off switch. `bunx gemi
+migrate` does none of those three for you; it is the 0.42→0.43 tool, and all
+three are decisions a codemod cannot make.
+
+Two more sections follow them, and they apply only if you are moving queries off
+the Prisma client and onto gemi's ORM. Both are breaks you are not told about —
+the code compiles, runs, and passes its tests on either side of the move — so
+they are worth reading before the port rather than after. Those two the codemod
+*does* now find and annotate; see [Both of these are annotated by `bunx gemi
+migrate`](#both-of-these-are-annotated-by-bunx-gemi-migrate).
 
 ## Declare your model modules on the Kernel
 
@@ -204,6 +211,330 @@ the boot naming itself rather than being quietly left out.
 
 Both directories are covered in [docs/cron.md](./docs/cron.md) and
 [docs/jobs-and-queues.md](./docs/jobs-and-queues.md).
+
+## A `code === "P2002"` check stops firing when its write moves onto the ORM
+
+Do this before you move the first write, because afterwards nothing will tell
+you:
+
+```sh
+rg -n '"P2002"'
+```
+
+From the repository root rather than from `app/`: these guards live wherever the
+retry does, and a shared `lib/errors.ts` is as likely a home as a controller.
+
+Prisma reports a unique collision as a `PrismaClientKnownRequestError` carrying
+`code: "P2002"`. gemi reports it as a `UniqueConstraintError`, which carries
+`model`, `operation`, `fields` and `constraint` — and no `code`, anywhere on its
+prototype chain. So the moment the write inside the `try` becomes an ORM call,
+`error.code === "P2002"` is `false`, the recovery branch stops running, and the
+`throw error` line under it — the one you wrote for *some other error* —
+rethrows the collision you were handling.
+
+Every guard of this shape sits in code that *expects* the collision: catch it,
+re-read, retry. That is the only reason to test for it. So the branch that stops
+running is the branch holding a race together.
+
+**It is silent in four independent ways at once, which is why this is a grep
+rather than a note.**
+
+- **`tsc` is happy.** The guard takes `unknown` and narrows before reading
+  `.code`. That is the correct way to write it, and it stays correct against an
+  error that has no `code` — a type error here would need TypeScript to know
+  which error your `try` can now produce, which is a runtime fact.
+- **The runtime is happy.** Nothing new throws. The `catch` still runs, the
+  condition is false, and the rethrow arm does its job perfectly — that arm
+  exists to absorb exactly this.
+- **The tests are happy.** They reject with `{ code: "P2002" }`, because that is
+  what the code under test used to receive. They still pass, over a branch
+  production can no longer reach.
+- **Production is happy until the race happens.** A unique collision is rare and
+  load-dependent by nature. The symptom is not a missing retry; it is whatever
+  the rethrown error becomes three frames up, at a moment nobody can reproduce.
+
+In the first real port this reached review inside a merge-ready pull request —
+`tsc` clean, ~2700 tests green — carrying two dead guards: one on a credit
+balance read, one on an idempotent credit purchase. A human reading the diff
+caught them, and nothing else in the pipeline was capable of it.
+
+### The replacement
+
+```ts
+import { isUniqueConstraintError } from "gemi/orm";
+
+try {
+  return await Invite.create({ data: { token } });
+} catch (error) {
+  if (!isUniqueConstraintError(error)) throw error;
+  return await Invite.findUniqueOrThrow({ where: { token } });
+}
+```
+
+```ts
+function isUniqueConstraintError(error: unknown): error is UniqueConstraintError
+```
+
+It tests `instanceof UniqueConstraintError` **or** `error.name ===
+"UniqueConstraintError"`, and the second half is why it is worth importing
+instead of writing `instanceof` at the call site. `instanceof` compares against
+*one module instance's* class object, so it is false across a duplicate copy of
+`gemi/orm` — two versions in one dependency tree, a linked build beside a
+bundled one, a monorepo package resolving its own. The error is the right error,
+thrown by the right code, and your guard silently does not fire. That is not
+hypothetical: duck-typing rather than importing the class is precisely what the
+ported application had already done for *Prisma's* error, for precisely this
+reason.
+
+Other `P` codes have gemi errors too — `P2025` is `RecordNotFoundError`, for
+instance — but `P2002` is the one gemi ships a predicate for and the only one the
+codemod looks for. If you branch on others, the full table is under
+[Errors](./docs/orm.md#errors).
+
+### While some writes are still on Prisma
+
+A port is not atomic, and during one a collision on the same table can arrive as
+either error depending on which module wrote the row. Keep both, in one place,
+with the temporary arm marked as temporary:
+
+```ts
+// app/lib/errors.ts
+import { isUniqueConstraintError } from "gemi/orm";
+
+// TODO(port): drop the second arm — and this wrapper with it — when the last
+// write leaves the Prisma client.
+export const isUniqueCollision = (error: unknown) =>
+  isUniqueConstraintError(error) ||
+  (typeof error === "object" &&
+    error !== null &&
+    (error as { code?: unknown }).code === "P2002");
+```
+
+Wrap gemi's predicate rather than re-testing `instanceof` yourself: the name
+branch is the half you cannot write correctly by hand, and it is the half that
+survives a duplicate module copy.
+
+**gemi deliberately does not ship that second arm.** A Prisma code in gemi's
+permanent surface would imply the rest of the taxonomy came with it — `P2003`,
+`P2025`, `P2034`, and the fifty others an application would then reasonably
+expect to catch — and a compatibility surface that covers `P2002` and not
+`P2034` fails in exactly the same silent way, one layer further in. It would
+also be a bridge with no end: inside the framework there is nowhere to write the
+line saying when to delete it. In your own module there is, and it is the
+comment above.
+
+### Fix the tests in the same pass, not after
+
+A mock that rejects with `{ code: "P2002" }` keeps a dead guard green — that is
+the third silence above, and it outlives the fix unless you go and get it.
+Reject with the real error:
+
+```ts
+import { UniqueConstraintError } from "gemi/orm";
+
+vi.mock("@/app/models", () => ({
+  Invite: {
+    create: vi
+      .fn()
+      .mockRejectedValue(new UniqueConstraintError("Invite", "create", ["token"])),
+    findUniqueOrThrow: vi.fn(),
+  },
+}));
+```
+
+`UniqueConstraintError` is exported from `gemi/orm` for exactly this. The
+mocking pattern itself is under **Transactions → Unit-testing code that opens
+one** in [docs/orm.md](./docs/orm.md#transactions).
+
+## `take` and `skip` built from a query string must be integers
+
+The rule is not new and is not changing. gemi refuses a `take` or a `skip` that
+is not an integer, where Prisma truncated it toward zero:
+
+```
+InvalidArgumentError: Invalid 'take' (Post.findMany). Expected an integer, got 1.5.
+```
+
+It refuses rather than coercing because there is no coercion both dialects agree
+on: binding `limit 1.5` is an opaque `SQLITE_MISMATCH` on SQLite and two rows on
+Postgres, which rounds. One rule, failing loudly, beats three behaviours — the
+reasoning is under [Querying](./docs/orm.md#querying) and it stands. What is new
+is only this: a Prisma application has been getting the truncation for free, and
+the code that relied on it keeps compiling.
+
+**It is invisible by construction, in three ways:**
+
+- **`tsc` cannot see it.** `Number(x)` is a `number` and `take` takes a
+  `number`. TypeScript has no integer type, so there is no annotation that would
+  have caught this and none is coming.
+- **The unit tests cannot see it.** Every test passes an integer, because an
+  integer is what a developer types. `take: 25` has never been a bug.
+- **The failing input is not written by your code.** It is a hand-edited URL, a
+  shared link carrying a stale query string, an infinite-scroll client computing
+  a page size from the viewport, or a form's cleared field arriving as
+  `?perPage=` — and `Number("")` is `0`, so that one computes `skip: -25`, which
+  is refused as well.
+
+In the first real port, nine controllers derived pagination straight from the
+query string in the same two copied lines. Seven of them broke. The two that
+were caught were caught by a human reading the diff.
+
+It takes two greps, because the argument and the value that reaches it are
+usually in different files:
+
+```sh
+rg -n '\b(take|skip):' app/
+rg -n 'Number\(' app/ | rg -i 'page|limit|per.?page|offset|take|skip'
+```
+
+### The replacement
+
+```ts
+import { paginate } from "gemi/orm";
+
+async list(req: HttpRequest) {
+  const { take, skip } = paginate({
+    page: req.search.get("page"),
+    perPage: req.search.get("perPage"),
+  });
+  return Post.findMany({ take, skip, orderBy: { createdAt: "desc" } });
+}
+```
+
+```ts
+function paginate(
+  args: { page?: unknown; perPage?: unknown },
+  options?: { perPage?: number; maxPerPage?: number },
+): { take: number; skip: number }
+```
+
+The arguments are `unknown` on purpose: a query string is where these values
+come from, and typing them `number` would mean every caller writes the
+`Number(...)` that is the bug. `req.search.get` hands back `string | string[]`,
+a JSON body hands back whatever was sent, and both go in unconverted.
+
+**The guarantee is that its output cannot be refused.** Every return is a pair
+of integers with `take >= 1` and `skip >= 0`, for every input — `"2.5"`, `"-1"`,
+`""`, `"abc"`, `"1e400"`, an array, `undefined`, a missing key. So a route built
+on it has no page argument that can 500.
+
+- `perPage` defaults to **25**, which is the number gemi's own examples used to
+  teach as `|| 25` — so moving a call site onto the helper does not change
+  anybody's page size.
+- A *request* may not ask for more than **100** rows, because `?perPage=100000`
+  otherwise reads the table into memory. An endpoint that legitimately serves
+  larger pages says so where it is written: `paginate(args, { maxPerPage: 500 })`.
+- A `page` below 1 is clamped up rather than refused. The values that land there
+  are `""`, `"0"` and `"-1"`, and none of them is a request for a page that does
+  not exist; a 500 on a hand-edited link is the wrong answer.
+
+**`Number(x) || 1` is not the fix**, and it is worth knowing how far it does
+get: it rescues `?page=` and `?page=0`, because both are falsy. It does not
+rescue `?page=-1`, `?page=2.5` or `?page=1e400` — a negative `skip` and a
+fractional one are both refused, and `1e400` is `Infinity`, which `Math.trunc`
+cannot fix either.
+
+### On the client
+
+`paginate` belongs to the query layer and has no business in a browser bundle.
+The value still needs truncating where it is read, because a page number the
+client increments arrives at the server *multiplied* — as a fractional `skip`:
+
+```tsx
+const asked = Number(searchParams.get("page"));
+const page = Number.isFinite(asked) ? Math.max(1, Math.trunc(asked)) : 1;
+```
+
+The `Number.isFinite` is not decoration, and it is the half that is easy to drop:
+`?page=1e400` is `Infinity`, which `Math.trunc` returns unchanged and `Math.max`
+keeps — so a shorter clamp hands the component `Infinity`, writes `?page=Infinity`
+back into the URL on the next click, and renders `NaN` on any `page - 1` control.
+That is the same test the server-side `toWholeNumber` makes, for the same reason.
+
+## Both of these are annotated by `bunx gemi migrate`
+
+The codemod carries two annotate-only passes over everything under `app/`. They
+are re-run-safe, so this is worth doing even on an app already on 0.43:
+
+```sh
+bunx gemi migrate --dry-run   # print the plan, write nothing
+bunx gemi migrate
+rg 'TODO\(gemi-migrate\)'
+```
+
+- **The `"P2002"` pass** annotates every `P2002` literal in a file that also
+  imports from your model surface (`gemi/orm`, or a path ending in `models`),
+  and points at `isUniqueConstraintError` and the two-armed bridge above. Two
+  things it cannot find: a guard living in a shared `lib/errors.ts` that imports
+  nothing from your models — which is what the plain `rg` above is for — and a
+  check spelled `err.code?.startsWith("P200")`, since it matches the exact
+  literal only.
+- **The `take` / `skip` pass** annotates any `take:` or `skip:` whose value is
+  not provably an integer, and points at `paginate`. Integer literals (including
+  `1_000`), a whole `Math.trunc(…)` / `Math.floor(…)` / `parseInt(…)` call, and
+  `take?: number` in a type declaration are *not* flagged — so a call site you
+  have already truncated is silent for a reason rather than by oversight.
+
+The second pass asks you to confirm rather than telling you it found a bug, and
+it is worded that way on purpose: whether a value holds an integer is a runtime
+fact, most non-literal `take`s are fine, and a marker that is wrong most of the
+time is a marker people learn to skim past. Neither pass rewrites anything.
+
+The full description, including what each annotation says, is under [Porting a
+Prisma app onto the ORM](./docs/cli.md#porting-a-prisma-app-onto-the-orm).
+
+## `@updatedAt` now needs a column beside it
+
+**This one changes behaviour for apps already on gemi's ORM, not only for apps
+porting off Prisma** — it is the only entry here that does, which is why it is
+worth reading even if you have no Prisma left.
+
+The stamp used to fire on every `update` call. It now fires on every call that
+**sets at least one column**, which is the rule Prisma follows. Measured against
+6.19.2 by seeding the column to the epoch and reading it back:
+
+```
+data: {}                                epoch    not stamped
+data: { profile: { create: … } }        epoch    not stamped     nested write, child holds the key
+upsert hit, update: {}                  epoch    not stamped
+updateMany({ data: {} })                epoch    { count: 0 }
+data: { name: "real" }                  now      stamped
+data: { organization: { connect: … } }  now      stamped          writes this row's foreign key
+```
+
+Nothing that writes a column changes. What changes is the calls that write
+none — and there is one spelling worth searching for before you upgrade:
+
+```ts
+await User.update({ where: { id }, data: {} })   // no longer moves updatedAt
+```
+
+If you used that as a *touch* — a write with an empty payload, to bump the
+timestamp — it is now a read and the stamp stays where it was. It never worked
+that way under Prisma, so a ported app cannot depend on it; an app written
+against gemi's ORM directly could. Set the column yourself where you meant to:
+
+```ts
+await User.update({ where: { id }, data: { updatedAt: new Date() } })
+```
+
+The same applies to a `data` of only nested writes whose child holds the foreign
+key. Those write the *child* and nothing on the parent, so the parent's stamp no
+longer moves — which is what Prisma does, and what the ORM previously did not.
+
+**Why it changed rather than being left alone.** Stamping unconditionally made
+the empty-`data` read unreachable on any model carrying the attribute, because
+the stamp was itself the assignment keeping the statement from being empty — so
+the fix for `data: {}` was the same fix. And it put a timestamp Prisma does not
+write on every nested to-one write, where the differential harness could not see
+it: `updatedAt` is compared as a volatile descriptor, so two different instants
+match. It took asserting the epoch by hand to find.
+
+**One divergence remains, deliberately.** An owning-side `disconnect` writes the
+foreign key and so stamps here; Prisma writes the same column through the same
+operand family and does *not*, while its `connect` one operand over does. That is
+Prisma disagreeing with itself, and matching it would mean special-casing one
+operand to reproduce an inconsistency.
 
 ---
 

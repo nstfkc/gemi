@@ -85,6 +85,34 @@ export const WRITES: [string, unknown][] = [
   ["update", { where: { id: 1 }, data: { accounts: { disconnect: { id: 1 } } } }],
   ["update", { where: { id: 1 }, data: { accounts: { delete: { id: 1 } } } }],
   ["update", { where: { id: 1 }, data: { accounts: { deleteMany: {} } } }],
+  // A to-one whose foreign key is on the **child** — `User.profile`, which is
+  // why both invariant suites compile against `userWithProfile`. Its operands
+  // are a different grammar from the to-many ones above rather than a subset,
+  // so each spelling is its own entry: the plan-key suite is what would catch
+  // one of them minting an entry per bound value, and the binding suite is what
+  // would catch a filter value reaching the SQL text through the new
+  // normaliser.
+  //
+  // What neither suite can catch is two of these *collapsing into one entry*.
+  // The plan-key invariant is "same key implies same SQL", and these operands
+  // all compile the parent statement identically — the difference is in the
+  // `after` step, which is not SQL text. `plan.writes.discrimination.test.ts`
+  // is the only thing standing under that, which is worth knowing before
+  // trusting this list to protect the boolean pair below.
+  ["update", { where: { id: 1 }, data: { profile: { update: { bio: "x" } } } }],
+  ["update", { where: { id: 1 }, data: { profile: { update: { data: { bio: "x" } } } } }],
+  ["update", { where: { id: 1 }, data: { profile: { update: { where: { bio: "old" }, data: { bio: "x" } } } } }],
+  // The two booleans, which are one *shape* to everything except the guard
+  // `shapeOfMember` carries for them — and they are opposite writes. `vary`
+  // perturbs numbers and strings only, so it leaves them alone and the pair
+  // stays meaningful here.
+  ["update", { where: { id: 1 }, data: { profile: { delete: true } } }],
+  ["update", { where: { id: 1 }, data: { profile: { delete: false } } }],
+  ["update", { where: { id: 1 }, data: { profile: { delete: { bio: "old" } } } }],
+  ["update", { where: { id: 1 }, data: { profile: { upsert: { create: { bio: "x" }, update: { bio: "y" } } } } }],
+  ["update", { where: { id: 1 }, data: { profile: { upsert: { where: { bio: "old" }, create: { bio: "x" }, update: { bio: "y" } } } } }],
+  ["update", { where: { id: 1 }, data: { profile: { create: { bio: "x" } } } }],
+  ["update", { where: { id: 1 }, data: { profile: { connect: { userId: 1 } } } }],
   ["updateMany", { where: { id: 1 }, data: { name: "x" } }],
   ["updateMany", { data: { name: "x" } }],
   ["delete", { where: { id: 1 } }],

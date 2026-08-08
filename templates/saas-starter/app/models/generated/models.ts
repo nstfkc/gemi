@@ -1809,6 +1809,198 @@ export class PostModel extends Model {
   }
 }
 
+export type ProfileScalars = {
+  id: number;
+  bio: string | null;
+  userId: number | null;
+};
+
+export type ProfileCreateScalars = {
+  id?: number;
+  bio?: string | null;
+  userId?: number | null;
+};
+
+export type ProfileRelations = {
+  user: { kind: "one"; nullable: true; target: UserTypes };
+};
+
+export type ProfileUnique = { id: number } | { userId: number };
+
+export interface ProfileTypes extends ModelTypeInfo {
+  scalars: ProfileScalars;
+  relations: ProfileRelations;
+  unique: ProfileUnique;
+  create: ProfileCreateScalars;
+}
+
+// Merges the row's columns into the instance type, so a method on a subclass can
+// read `this.email`. No runtime output.
+//
+// oxlint flags class/interface merging because TypeScript does not check the
+// merged properties are initialised — a directly constructed instance would type
+// as carrying every column while holding none. That hazard is closed rather than
+// accepted: `Model`'s constructor is `protected`, so the only way to get an
+// instance is `wrap`, which assigns a complete row. See bin/orm/emit.ts.
+// oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
+export interface ProfileModel extends ProfileScalars {}
+
+export type ProfilePolicy = ModelPolicy<
+  WhereInput<ProfileTypes>,
+  CreateInput<ProfileTypes>,
+  ProfileScalars
+>;
+
+// The same shape with `scope`, `onCreate` and `onUpdate` abstract, so a policy
+// that scopes cannot omit the write halves. The runtime refuses those
+// combinations too — this makes it `TS2515` at the class declaration instead of
+// an error on the first write that reaches production.
+export abstract class ProfileScopedPolicy extends ScopedPolicy<
+  WhereInput<ProfileTypes>,
+  CreateInput<ProfileTypes>,
+  ProfileScalars
+> {}
+
+export class ProfileModel extends Model {
+  static $schema = schema.Profile;
+
+  // Says this class came out of the generator, so `registerModels` can prefer
+  // the application's subclass over it without having to *infer* which is which.
+  // It reads own-vs-inherited, and a subclass inherits this rather than
+  // declaring it — so the mark is on exactly one class per model. See
+  // `isGeneratedBase`.
+  //
+  // `readonly` so the initialiser keeps the literal type. `Model` declares this
+  // `?: true`, and a mutable `= true` widens to `boolean` — which is not
+  // assignable to it, so every class in this file was a TS2417 until a reviewer
+  // regenerating a 79-model schema found 79 of them. `tsconfig.generated.json`
+  // is the check that now says so here rather than in an app.
+  static readonly $generated = true;
+
+  // Narrowed from `Model`'s `PolicyEntry[]` to this model's own, so a policy
+  // written for another model is a type error here rather than a scope compiled
+  // against columns that do not exist.
+  static $policies?: readonly PolicyEntry<
+    WhereInput<ProfileTypes>,
+    CreateInput<ProfileTypes>,
+    ProfileScalars
+  >[];
+
+  static findMany<T extends FindManyArgs<ProfileTypes>>(
+    args?: Subset<T, FindManyArgs<ProfileTypes>>,
+    options?: ExecOptions,
+  ): Promise<Payload<ProfileTypes, T>[]> {
+    return this.$exec("findMany", args, options) as Promise<Payload<ProfileTypes, T>[]>;
+  }
+
+  static findFirst<T extends FindFirstArgs<ProfileTypes>>(
+    args?: Subset<T, FindFirstArgs<ProfileTypes>>,
+    options?: ExecOptions,
+  ): Promise<Payload<ProfileTypes, T> | null> {
+    return this.$exec("findFirst", args, options) as Promise<Payload<ProfileTypes, T> | null>;
+  }
+
+  static findFirstOrThrow<T extends FindFirstOrThrowArgs<ProfileTypes>>(
+    args?: Subset<T, FindFirstOrThrowArgs<ProfileTypes>>,
+    options?: ExecOptions,
+  ): Promise<Payload<ProfileTypes, T>> {
+    return this.$exec("findFirstOrThrow", args, options) as Promise<Payload<ProfileTypes, T>>;
+  }
+
+  static findUnique<T extends FindUniqueArgs<ProfileTypes>>(
+    args: Subset<T, FindUniqueArgs<ProfileTypes>>,
+    options?: ExecOptions,
+  ): Promise<Payload<ProfileTypes, T> | null> {
+    return this.$exec("findUnique", args, options) as Promise<Payload<ProfileTypes, T> | null>;
+  }
+
+  static findUniqueOrThrow<T extends FindUniqueOrThrowArgs<ProfileTypes>>(
+    args: Subset<T, FindUniqueOrThrowArgs<ProfileTypes>>,
+    options?: ExecOptions,
+  ): Promise<Payload<ProfileTypes, T>> {
+    return this.$exec("findUniqueOrThrow", args, options) as Promise<Payload<ProfileTypes, T>>;
+  }
+
+  static count(args?: Omit<CountArgs<ProfileTypes>, "select">): Promise<number>;
+  static count<T extends CountArgs<ProfileTypes>>(
+    args: SelectSubset<T, CountArgs<ProfileTypes>> & {
+      select: NonNullable<T["select"]>;
+    },
+  ): Promise<CountPayload<T["select"]>>;
+  static count(args?: unknown): Promise<unknown> {
+    return this.$exec("count", args as never);
+  }
+
+  static aggregate<T extends AggregateArgs<ProfileTypes>>(
+    args: Subset<T, AggregateArgs<ProfileTypes>>,
+  ): Promise<AggregatePayload<ProfileTypes, T>> {
+    return this.$exec("aggregate", args) as Promise<
+      AggregatePayload<ProfileTypes, T>
+    >;
+  }
+
+  static groupBy<T extends GroupByArgs<ProfileTypes>>(
+    args: Subset<T, GroupByArgs<ProfileTypes>>,
+  ): Promise<GroupByPayload<ProfileTypes, T>> {
+    return this.$exec("groupBy", args) as Promise<
+      GroupByPayload<ProfileTypes, T>
+    >;
+  }
+
+  static create<T extends CreateArgs<ProfileTypes>>(
+    args: Subset<T, CreateArgs<ProfileTypes>>,
+    options?: ExecOptions,
+  ): Promise<Payload<ProfileTypes, T>> {
+    return this.$exec("create", args, options) as Promise<Payload<ProfileTypes, T>>;
+  }
+
+  static update<T extends UpdateArgs<ProfileTypes>>(
+    args: Subset<T, UpdateArgs<ProfileTypes>>,
+    options?: ExecOptions,
+  ): Promise<Payload<ProfileTypes, T>> {
+    return this.$exec("update", args, options) as Promise<Payload<ProfileTypes, T>>;
+  }
+
+  static delete<T extends DeleteArgs<ProfileTypes>>(
+    args: Subset<T, DeleteArgs<ProfileTypes>>,
+    options?: ExecOptions,
+  ): Promise<Payload<ProfileTypes, T>> {
+    return this.$exec("delete", args, options) as Promise<Payload<ProfileTypes, T>>;
+  }
+
+  static upsert<T extends UpsertArgs<ProfileTypes>>(
+    args: Subset<T, UpsertArgs<ProfileTypes>>,
+    options?: ExecOptions,
+  ): Promise<Payload<ProfileTypes, T>> {
+    return this.$exec("upsert", args, options) as Promise<Payload<ProfileTypes, T>>;
+  }
+
+  static createMany(
+    args?: CreateManyArgs<ProfileTypes>,
+  ): Promise<{ count: number }> {
+    return this.$exec("createMany", args) as Promise<{ count: number }>;
+  }
+
+  static updateMany(
+    args?: UpdateManyArgs<ProfileTypes>,
+  ): Promise<{ count: number }> {
+    return this.$exec("updateMany", args) as Promise<{ count: number }>;
+  }
+
+  static deleteMany(
+    args?: DeleteManyArgs<ProfileTypes>,
+  ): Promise<{ count: number }> {
+    return this.$exec("deleteMany", args) as Promise<{ count: number }>;
+  }
+
+  static wrap<C extends { prototype: unknown }, R extends ProfileScalars>(
+    this: C,
+    row: R,
+  ): C["prototype"] & R {
+    return (Model.wrap as (row: object) => any).call(this, row);
+  }
+}
+
 export type SessionScalars = {
   id: number;
   token: string;
@@ -2453,6 +2645,7 @@ export type UserRelations = {
   session: { kind: "many"; nullable: false; target: SessionTypes };
   passwordResetToken: { kind: "many"; nullable: false; target: PasswordResetTokenTypes };
   socialAccount: { kind: "many"; nullable: false; target: SocialAccountTypes };
+  profile: { kind: "one"; nullable: true; target: ProfileTypes };
 };
 
 export type UserUnique = { id: number } | { publicId: string } | { email: string };

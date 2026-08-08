@@ -59,12 +59,23 @@ async show(req: HttpRequest<{ name: string }, { orgId: string }>) { /* ... */ }
 `req.search` wraps the query string. `get` returns the value (a string, or `string[]` for repeated keys):
 
 ```typescript
+import { paginate } from "gemi/orm";
+
 async list(req: HttpRequest) {
   const search = req.search.get("search");
-  const limit = Number(req.search.get("limit")) || 25;
+  const { take, skip } = paginate({
+    page: req.search.get("page"),
+    perPage: req.search.get("perPage"),
+  });
   // ...
 }
 ```
+
+Everything the query string holds is a string, so a numeric param has to be converted, and
+`Number(...)` alone is not enough for the ones that become query arguments: `?limit=1.5` is a
+fractional `take`, which the ORM refuses rather than truncates, and a blank `?page=` is `0`,
+which computes a negative `skip`. `paginate` takes them as they arrive and always returns
+integers — see [ORM](./orm.md#querying).
 
 ### Reading the body: `req.input()`
 

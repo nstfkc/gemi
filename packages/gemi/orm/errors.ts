@@ -191,12 +191,34 @@ export class RecordNotFoundError extends Error {
  *
  * Prisma raises `PrismaClientKnownRequestError` with code `P2002` and
  * `meta.target` holding the field names. Mirroring that would ease a migration
- * for code already branching on `P2002` — but nothing in this repository does
- * (checked), and carrying a `P` code implies the rest of the taxonomy is
- * implemented too: `P2003`, `P2025`, and the fifty others an application might
- * reasonably then expect to catch. Claiming a compatibility surface we have not
- * built is worse than asking the few call sites that need it to catch a gemi
- * error instead.
+ * for code already branching on `P2002`.
+ *
+ * **The premise this note used to rest on was wrong, and the conclusion is
+ * unchanged.** It said "nothing in this repository does (checked)", which was
+ * true of *this* repository and was never the question — the code that branches
+ * on `P2002` lives in the applications the ORM is for. The first real port
+ * measured four such guards, every one of them in concurrency-recovery code
+ * (catch the collision, re-read, retry), and every one of them silently dead the
+ * moment the write moved onto gemi: the `catch` still ran, the condition was
+ * false, the recovery did not happen. Nor was the repository itself clean —
+ * `templates/saas-starter/app/models/differential.ts:621` branches on `P2002`
+ * today, and did when this was written.
+ *
+ * What the premise was doing was answering "would anyone notice?", and the
+ * answer is that four people noticed at once. The decision never depended on it.
+ * Carrying a `P` code implies the rest of the taxonomy is implemented too:
+ * `P2003`, `P2025`, and the fifty others an application might reasonably then
+ * expect to catch. Claiming a compatibility surface we have not built is worse
+ * than asking the call sites that need it to catch a gemi error instead —
+ * *especially* when the code in question is a retry loop, because a
+ * compatibility surface that covers `P2002` and not `P2034` fails in exactly
+ * the same silent way, one layer further in.
+ *
+ * A porter reaches for `isUniqueConstraintError` below. `UPGRADE.md` carries
+ * the temporary `|| error.code === "P2002"` bridge, for a codebase halfway
+ * through the move, with the marker that says when to delete it; it is
+ * deliberately not exported, because a Prisma code in gemi's permanent surface
+ * is the thing this note declined.
  *
  * What the contract does promise is the part that matters: the error is typed,
  * catchable, and names the fields — as *field* names, the way Prisma's
@@ -221,6 +243,62 @@ export class UniqueConstraintError extends Error {
     );
     this.name = "UniqueConstraintError";
   }
+}
+
+/**
+ * The guard to write in a retry-on-collision `catch`, which is where a
+ * `code === "P2002"` test almost always was:
+ *
+ *     try {
+ *       return await Invite.create({ data: { token } })
+ *     } catch (error) {
+ *       if (!isUniqueConstraintError(error)) throw error
+ *       return await Invite.findUniqueOrThrow({ where: { token } })
+ *     }
+ *
+ * **Why this is worth shipping rather than telling people to write
+ * `instanceof`**, which is the obvious objection and the reason it nearly was
+ * not shipped. The second half of the test is the whole of it:
+ *
+ *     error instanceof UniqueConstraintError   ||   error.name === "UniqueConstraintError"
+ *
+ * `instanceof` compares against *this module instance's* class object, so it is
+ * false across a duplicate copy of `gemi/orm` — two versions in one dependency
+ * tree, a bundled build alongside a linked one, a monorepo package resolving
+ * its own. The error is the right error, thrown by the right code, and the
+ * guard silently does not fire. That is not a hypothetical: duck-typing rather
+ * than importing the class is precisely what the ported application had already
+ * done for Prisma's error, for precisely this reason, and shipping a predicate
+ * that only does `instanceof` would hand it back the same trap under a new
+ * name.
+ *
+ * So the name is load-bearing rather than a convenience: it is the identity
+ * that survives module duplication, which is why every error in this file sets
+ * `this.name` explicitly instead of relying on the class name surviving
+ * minification.
+ *
+ * **The narrowing is a claim, and this is what it rests on.** The name branch
+ * asserts `UniqueConstraintError` on the strength of a string — a second copy
+ * of this module really does carry `model`, `operation` and `fields`, so the
+ * claim holds for the case it exists for. An unrelated object named
+ * `"UniqueConstraintError"` would defeat it, and that is not something that
+ * happens by accident.
+ *
+ * **It deliberately does not match `code === "P2002"`.** See the DECISION
+ * above: the temporary bridge for a half-ported codebase is in `UPGRADE.md`,
+ * where it can carry a delete-me marker, rather than in gemi's permanent
+ * surface, where it would have neither.
+ */
+export function isUniqueConstraintError(
+  error: unknown,
+): error is UniqueConstraintError {
+  if (error instanceof UniqueConstraintError) return true;
+
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { name?: unknown }).name === "UniqueConstraintError"
+  );
 }
 
 /**

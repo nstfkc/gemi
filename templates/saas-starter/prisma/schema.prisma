@@ -120,6 +120,9 @@ model User {
   session            Session[]
   passwordResetToken PasswordResetToken[]
   socialAccount      SocialAccount[]
+  // The foreign side of a to-one — see `model Profile` below. Every other
+  // relation on this model is a list.
+  profile            Profile?
 
   @@index([organizationId])
 }
@@ -205,6 +208,27 @@ model Membership {
   createdAt      DateTime @default(now())
 
   @@id([organizationId, userId])
+}
+
+// A to-one whose foreign key lives on the **child**, which this schema had none
+// of — every child-side relation here is a list. So the foreign side of a
+// nested write was only ever reachable with `kind: "many"`, and nothing in this
+// harness could ask Prisma what `update`, `upsert`, `delete` or `disconnect`
+// does through a relation that holds one row. That gap is why #116 went
+// unnoticed for as long as it did, and it is the shape #354 is measured
+// against: the answers below (P2025 or no-op, and on which operand) cannot be
+// reasoned out, only run.
+//
+// `userId` is nullable **on purpose**. Prisma omits `disconnect` from the
+// nested input type entirely when the foreign key is required, so a required
+// one would leave that operand unreachable — the same "the harness cannot get
+// there" problem one level down. Nullable makes all four operands reachable at
+// once, and the required-FK refusal is asserted against the fixtures instead.
+model Profile {
+  id     Int     @id @default(autoincrement())
+  bio    String?
+  userId Int?    @unique
+  user   User?   @relation(fields: [userId], references: [id])
 }
 
 model MagicLinkToken {

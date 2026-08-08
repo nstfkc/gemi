@@ -11,7 +11,7 @@ Each link below points to a self-contained Markdown page. For a single file cont
 - [Getting Started](https://nstfkc.github.io/gemi/getting-started.md): install, scaffold with create-gemi-app, dev/build/start, a first route + view.
 - [Project Structure & the Kernel](https://nstfkc.github.io/gemi/project-structure.md): the app/ layout, the Kernel, the container, app/config/*.ts, service providers, and app bootstrap.
 - [Configuration](https://nstfkc.github.io/gemi/configuration.md): gemi.config.ts (BUILD config, distinct from app/config/), .env handling, HTML compression, app/preload.ts, Vite config.
-- [CLI](https://nstfkc.github.io/gemi/cli.md): gemi dev/build/start, gemi migrate (the 0.42 -> config/container codemod, and the retired-API TODOs), plus codegen and inspection commands.
+- [CLI](https://nstfkc.github.io/gemi/cli.md): gemi dev/build/start, gemi migrate (the 0.42 -> config/container codemod, the retired-API TODOs, and the two annotate-only passes for a Prisma-to-ORM port), plus codegen and inspection commands.
 
 ## HTTP layer
 
@@ -61,3 +61,4 @@ Each link below points to a self-contained Markdown page. For a single file cont
 
 - [Full documentation (single file)](https://nstfkc.github.io/gemi/llms-full.txt): every page concatenated for one-shot LLM context.
 - [Documentation index](https://nstfkc.github.io/gemi/README.md): the human-readable table of contents.
+- [Upgrade notes](https://github.com/nstfkc/gemi/blob/main/UPGRADE.md): per-release migration steps, including moving an app's queries from the Prisma client onto gemi's ORM — a `code === "P2002"` guard stops firing and a `take`/`skip` built with `Number(...)` starts being refused, both silently. Not part of this site; it lives at the repository root.

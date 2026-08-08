@@ -29,7 +29,8 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 - **[Getting Started](./getting-started.md)** — install, scaffold, dev/build/start, your first route + view.
 - **[Project Structure & the Kernel](./project-structure.md)** — the `app/` layout, the Kernel, the container, `app/config/*.ts`, service providers, and app bootstrap.
 - **[Configuration](./configuration.md)** — `gemi.config.ts` (build config), `.env` handling, HTML compression, `app/preload.ts`, Vite config.
-- **[CLI](./cli.md)** — `gemi dev`, `build`, `start`, and the codegen/inspection commands.
+- **[CLI](./cli.md)** — `gemi dev`, `build`, `start`, `gemi migrate`, and the codegen/inspection commands.
+- **[Upgrading](https://github.com/nstfkc/gemi/blob/main/UPGRADE.md)** — what to change per release, including the two silent breaks a Prisma-to-ORM port walks into. It lives at the repository root rather than in `docs/`, so this link leaves the documentation site.
 
 ### HTTP layer
 - **[Routing](./routing.md)** — `ApiRouter` / `ViewRouter`, path params, groups, nesting, `resource()`.

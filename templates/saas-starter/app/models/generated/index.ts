@@ -16,6 +16,7 @@ import {
   OrganizationInvitationModel,
   PasswordResetTokenModel,
   PostModel,
+  ProfileModel,
   SessionModel,
   SocialAccountModel,
   TagModel,
@@ -36,6 +37,7 @@ register("Organization", OrganizationModel);
 register("OrganizationInvitation", OrganizationInvitationModel);
 register("PasswordResetToken", PasswordResetTokenModel);
 register("Post", PostModel);
+register("Profile", ProfileModel);
 register("Session", SessionModel);
 register("SocialAccount", SocialAccountModel);
 register("Tag", TagModel);

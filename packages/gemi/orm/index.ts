@@ -77,6 +77,16 @@ export {
   type JsonNullKind,
 } from "./json-null";
 
+// The errors an application can catch, plus `isUniqueConstraintError` — the
+// predicate rather than the `instanceof`, because it also matches across a
+// duplicate copy of this module. See the note on it in `errors.ts`.
+//
+// The comment sits above the clause rather than inside it because
+// `docs-imports.test.ts` derives this module's export list by splitting the
+// clause on commas: a comment carrying one there is read as two names, and the
+// export it annotates becomes invisible to the scan. The symptom is a doc page
+// that cannot show `import { isUniqueConstraintError } from "gemi/orm"` in a
+// fenced block without failing a test that has nothing to do with the doc.
 export {
   AmbiguousModelRegistrationError,
   DecodeError,
@@ -98,6 +108,7 @@ export {
   InvalidArgumentError,
   UnsupportedByDesignError,
   UnsupportedQueryError,
+  isUniqueConstraintError,
 } from "./errors";
 
 export {
@@ -170,6 +181,12 @@ export {
   softDeletes,
   type SoftDeleteOptions,
 } from "./soft-deletes";
+
+// `take` / `skip` from a request's `page` / `perPage`. It lives in
+// `page-args.ts`, not `compile/paginate.ts` — the compiler's file of the same
+// idea is the *validator* this one exists to keep satisfied, and one of them
+// having a distinguishable filename is worth more than the tidier name.
+export { paginate } from "./page-args";
 
 export {
   Policy,
