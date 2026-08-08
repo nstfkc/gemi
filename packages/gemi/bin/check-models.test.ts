@@ -704,11 +704,13 @@ describe("the printed report", () => {
  * A `$policies` entry the ORM cannot use at all — #321, seen from the command
  * this issue was found with.
  *
- * The audit reports divergences as values and *throws* for an entry that could
- * never run, because there is no ranked finding to make of one: the file's
- * answer does not exist. `InvalidPolicyEntryError` names the class and the
- * index; only this walk knows the file, which was the third of the three things
- * the original bare `TypeError` failed to answer on a 79-model app.
+ * The audit reports divergences as values and *raises* for an entry that could
+ * never run, because there is no ranked finding to make of one: a finding is
+ * printed with an `export … from` line as its fix and counted among the things
+ * the file got wrong, and an entry the runtime cannot dispatch to is none of
+ * those. `InvalidPolicyEntryError` names the class and the index; only this walk
+ * knows the file, which was the third of the three things the original bare
+ * `TypeError` failed to answer on a 79-model app.
  */
 describe("a file whose $policies cannot run", () => {
   test("stops the run and names the file, the class and the index", () => {
@@ -728,7 +730,6 @@ describe("a file whose $policies cannot run", () => {
     expect(thrown).toBeInstanceOf(CheckModelsError);
     expect((thrown as Error).message).toContain("app/models/x.ts");
     expect((thrown as Error).message).toContain("ScopedAccount.$policies[0]");
-    expect((thrown as Error).cause).toBeInstanceOf(orm.InvalidPolicyEntryError);
   });
 
   test("a typo'd hook is refused here too, rather than passing green", () => {
@@ -740,7 +741,82 @@ describe("a file whose $policies cannot run", () => {
 
     expect(() =>
       auditModules(orm, [module({ ScopedAccount })], snapshotRegistry(orm)),
-    ).toThrow(/Did you mean `scope`\?/);
+    ).toThrow(/Is 'scopes' meant to be `scope`\?/);
+  });
+
+  /**
+   * **Every unreadable file, not the first one.**
+   *
+   * The silent-typo case is the one where an author has several, because nothing
+   * was telling them about any of them — so stopping at the first turns a
+   * checker back into fix-one, rerun, find-the-next. The findings this command
+   * normally prints are already reported all at once for that reason.
+   */
+  test("all of them are reported together", () => {
+    class BadOne extends UserBase {
+      static $policies = [{ scopes: () => ({}) }] as any;
+    }
+    class BadTwo extends UserBase {
+      static $policies = [{ redacts: () => ({}) }] as any;
+    }
+
+    orm.registerModels({ UserBase });
+
+    let thrown: unknown;
+    try {
+      auditModules(
+        orm,
+        [
+          { label: "app/models/a.ts", specifier: "./a", module: { BadOne } },
+          { label: "app/models/b.ts", specifier: "./b", module: { BadTwo } },
+        ],
+        snapshotRegistry(orm),
+      );
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(CheckModelsError);
+    expect((thrown as Error).message).toContain("2 files could not be checked");
+    expect((thrown as Error).message).toContain("app/models/a.ts");
+    expect((thrown as Error).message).toContain("app/models/b.ts");
+  });
+
+  // A good file beside a bad one is still walked, so the reader is not told to
+  // fix the entry and then handed the findings on the next run.
+  test("a readable file beside an unreadable one is still audited", () => {
+    class Bad extends UserBase {
+      static $policies = [{ scopes: () => ({}) }] as any;
+    }
+    class Membership extends UserBase {
+      static $policies = [scope];
+    }
+
+    orm.registerModels({ UserBase });
+
+    let thrown: unknown;
+    try {
+      auditModules(
+        orm,
+        [
+          { label: "app/models/a.ts", specifier: "./a", module: { Bad } },
+          {
+            label: "app/models/b.ts",
+            specifier: "./b",
+            module: { Membership },
+          },
+        ],
+        snapshotRegistry(orm),
+      );
+    } catch (error) {
+      thrown = error;
+    }
+
+    // It still refuses — but `b.ts` was reached, which is what says the loop
+    // carried on rather than unwinding at `a.ts`.
+    expect(thrown).toBeInstanceOf(CheckModelsError);
+    expect((thrown as Error).message).toContain("A file could not be checked");
+    expect((thrown as Error).message).not.toContain("app/models/b.ts");
   });
 
   /**

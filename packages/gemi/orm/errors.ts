@@ -510,12 +510,18 @@ export class UnregisteredPolicyClassError extends Error {
  *
  * Two failures, and the second is the one that matters.
  *
- * **A function that cannot be constructed.** `resolveEntry` instantiates every
- * function entry with no arguments, so a factory nobody called — `softDeletes`
- * rather than `softDeletes({ field })` — used to reach `new entry` and produce a
- * bare `TypeError: function is not a constructor`. Loud, and it named neither
- * the model nor the index nor the file, which on a 79-model app leaves the first
- * question unanswered.
+ * **A function the ORM cannot get a policy out of.** `resolveEntry` instantiates
+ * every function entry with no arguments, and there are two ways that goes
+ * wrong. A factory nobody called — `softDeletes` rather than
+ * `softDeletes({ field })` — is not constructable at all and reached `new entry`
+ * to produce `TypeError: function is not a constructor`. A class that *is*
+ * constructable and whose constructor wants an argument gets through that check
+ * and dies inside its own body instead, with
+ * `TypeError: undefined is not an object (evaluating 'opts.field')`. Both are
+ * loud and neither named the model, the index or the file, which on a 79-model
+ * app leaves the first question unanswered; the second is the case that survived
+ * a first pass at this error, because "constructable" is a fact about
+ * `[[Construct]]` and says nothing about what the constructor then does.
  *
  * **An entry with no recognised hook.** `{ scopes: … }` and
  * `{ default: { scope: … } }` were accepted in silence: `applyPolicies`
@@ -548,6 +554,7 @@ export class InvalidPolicyEntryError extends Error {
     public readonly reason:
       | "not-a-policy"
       | "not-constructable"
+      | "constructor-threw"
       | "no-hooks"
       | "hook-not-callable",
     /** What was found in the entry's place, rendered for a human. */
@@ -558,10 +565,17 @@ export class InvalidPolicyEntryError extends Error {
      */
     hooks: readonly string[],
     /**
-     * The nearest recognised hook to something the entry actually spells, when
-     * one is close enough to be worth naming.
+     * A key the entry actually spells and the hook it is within one edit of.
+     *
+     * **The pair, not the hook alone.** An unattributed "Did you mean `scope`?"
+     * after a list of five keys does not say which of them was read as a
+     * misspelling, so a reader who can see that none of them are has no way to
+     * dismiss it — and this error is about an authorization rule that is not in
+     * effect, where a suggestion followed wrongly costs a rename of something
+     * that was never the problem.
      */
-    public readonly suggestion?: string,
+    public readonly suggestion?: { key: string; hook: string },
+    options?: { cause?: unknown },
   ) {
     const where = `${model}.$policies[${index}]`;
     const named =
@@ -582,20 +596,30 @@ export class InvalidPolicyEntryError extends Error {
             `no arguments — so an arrow function, a plain function, or a ` +
             `factory that was never called cannot be one.\n\n` +
             `If it is a factory, call it:\n\n` +
-            `    static $policies = [softDeletes({ field: "deletedAt" })]\n\n` +
-            `If it is a class whose constructor takes arguments, construct ` +
-            `it yourself and put the instance in the array.\n`
-          : reason === "hook-not-callable"
-            ? `${where} has a ${found}, and every hook is called — so this ` +
-              `would throw on the first query that reached it rather than ` +
-              `doing whatever it was meant to do. Give it a function, or ` +
-              `leave the key out.\n`
-            : `${where} has none of ${named}, so it would never run. The ` +
-              `model carries a visible $policies array and nothing in it ` +
-              `applies to any query — which for a scope means the model ` +
-              `reads unscoped. ${found}` +
-              (suggestion ? ` Did you mean \`${suggestion}\`?` : "") +
-              `\n`,
+            `    static $policies = [softDeletes({ field: "deletedAt" })]\n`
+          : reason === "constructor-threw"
+            ? `${where} is ${found}\n\n` +
+              `A class entry is constructed with no arguments. If this one ` +
+              `needs some, construct it yourself and put the instance in the ` +
+              `array:\n\n` +
+              `    static $policies = [new TenantPolicy({ field: "orgId" })]\n\n` +
+              `If the constructor reaches for something that is not ready yet, ` +
+              `note that it runs on the first query through this model, not at ` +
+              `boot.\n`
+            : reason === "hook-not-callable"
+              ? `${where} has a ${found}, and every hook is called — so this ` +
+                `would throw on the first query that reached it rather than ` +
+                `doing whatever it was meant to do. Give it a function, or ` +
+                `leave the key out.\n`
+              : `${where} has none of ${named}, so it would never run. The ` +
+                `model carries a visible $policies array and nothing in it ` +
+                `applies to any query — which for a scope means the model ` +
+                `reads unscoped. ${found}` +
+                (suggestion
+                  ? ` Is '${suggestion.key}' meant to be \`${suggestion.hook}\`?`
+                  : "") +
+                `\n`,
+      options,
     );
     this.name = "InvalidPolicyEntryError";
   }

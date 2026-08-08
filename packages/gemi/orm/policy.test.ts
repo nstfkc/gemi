@@ -1605,6 +1605,58 @@ describe("a malformed $policies entry", () => {
       expect(entry(Tenant.bind(null))).not.toThrow();
     });
 
+    /**
+     * #321's case A3, and the one this error missed on its first pass.
+     *
+     * "Constructable" is a fact about `[[Construct]]` and says nothing about the
+     * body, so a class whose constructor wants an argument passes the check
+     * above and then dies inside `new` — which is where the bare `TypeError`
+     * naming no model, no index and no file came back. The `not-constructable`
+     * message even prints the advice for this shape, and that branch is
+     * unreachable for it.
+     */
+    test("a constructor that needs an argument is named rather than crashing raw", () => {
+      class TenantPolicy {
+        field: string;
+        constructor(options: { field: string }) {
+          this.field = options.field;
+        }
+        scope() {
+          return { [this.field]: null };
+        }
+      }
+
+      const thrown = (() => {
+        try {
+          entry(TenantPolicy)();
+        } catch (error) {
+          return error as InvalidPolicyEntryError;
+        }
+        return undefined;
+      })();
+
+      expect(thrown).toBeInstanceOf(InvalidPolicyEntryError);
+      expect(thrown!.reason).toBe("constructor-threw");
+      expect(thrown!.model).toBe("Account");
+      expect(thrown!.index).toBe(0);
+      expect(thrown!.message).toContain("Account.$policies[0]");
+      expect(thrown!.message).toContain("TenantPolicy");
+      // The constructor's own words are quoted, and kept.
+      expect(thrown!.message).toContain("constructing it threw");
+      expect(thrown!.cause).toBeInstanceOf(TypeError);
+    });
+
+    test("and so is a constructor that throws for any other reason", () => {
+      class Unready {
+        constructor() {
+          throw new Error("service container not ready");
+        }
+      }
+
+      expect(entry(Unready)).toThrow(/service container not ready/);
+      expect(entry(Unready)).toThrow(InvalidPolicyEntryError);
+    });
+
     // `Reflect.construct` validates its `newTarget` before running the target's
     // body, so the probe answers the question without executing user code. This
     // runs at boot over every class in a declared module, so it matters.
@@ -1641,14 +1693,16 @@ describe("a malformed $policies entry", () => {
       );
     });
 
-    test("and the near miss is suggested", () => {
+    // Attributed to the key it is about, so a reader who can see that none of
+    // their keys are misspellings has something to dismiss.
+    test("and the near miss is suggested, with the key it is about", () => {
       expect(entry({ scopes: () => ({ id: 0 }) })).toThrow(
-        /It spells 'scopes'\. Did you mean `scope`\?/,
+        /It spells 'scopes'\. Is 'scopes' meant to be `scope`\?/,
       );
     });
 
     // A wrong suggestion in an authorization error is worse than none, so the
-    // threshold is two edits and `default` is six from `scope`.
+    // threshold is one edit and `default` is six from `scope`.
     test("a key that is not a near miss gets no suggestion", () => {
       const thrown = (() => {
         try {
@@ -1661,9 +1715,47 @@ describe("a malformed $policies entry", () => {
 
       expect(thrown!.reason).toBe("no-hooks");
       expect(thrown!.suggestion).toBeUndefined();
-      expect(thrown!.message).not.toContain("Did you mean");
+      expect(thrown!.message).not.toContain("meant to be");
       // ...and the shape it actually is gets named instead.
       expect(thrown!.message).toContain("module namespace");
+    });
+
+    /**
+     * The mislead direction, which two edits got wrong and nothing was testing.
+     *
+     * `store`, `code` and `copy` are each two edits from `scope`, and `reduce`
+     * is two from `redact` — all ordinary names for things that sit beside a
+     * policy, none of them a misspelling of anything. At the old threshold every
+     * one of these produced a confident "Did you mean `scope`?" to an author who
+     * had not typed `scope` at all.
+     */
+    test.each([
+      ["store", { store: {}, currentOrg: () => 1 }],
+      ["code / copy / lookup", { code: 1, copy: () => 1, lookup: () => 1 }],
+      ["reduce", { reduce: () => 1 }],
+    ])("a key that merely resembles a hook is not suggested (%s)", (_l, shape) => {
+      const thrown = (() => {
+        try {
+          entry(shape)();
+        } catch (error) {
+          return error as InvalidPolicyEntryError;
+        }
+        return undefined;
+      })();
+
+      expect(thrown!.reason).toBe("no-hooks");
+      expect(thrown!.suggestion).toBeUndefined();
+      expect(thrown!.message).not.toContain("meant to be");
+    });
+
+    // An error whose useful sentence is buried under forty keys is a worse
+    // error than one that says "and 32 more".
+    test("the key list has a ceiling", () => {
+      const wide = Object.fromEntries(
+        Array.from({ length: 40 }, (_value, index) => [`key${index}`, 1]),
+      );
+
+      expect(entry(wide)).toThrow(/'key7' and 32 more/);
     });
 
     test("an entry with nothing in it at all is refused", () => {
@@ -1749,8 +1841,16 @@ describe("a malformed $policies entry", () => {
       ["undefined", undefined],
       ["false, from a && that did not hold", false],
       ["a string", "softDeletes"],
+      // `$policies = [[a, b]]` is a plausible slip, and reading the inner array
+      // as a policy listed `length`, `concat`, `pop` and the rest of
+      // `Array.prototype` as the keys it "spells".
+      ["a nested array", [{ scope: () => ({}) }]],
     ])("%s is refused", (_label, value) => {
       expect(entry(value)).toThrow(/is not a policy/);
+    });
+
+    test("a nested array does not print Array.prototype as its keys", () => {
+      expect(entry([{ scope: () => ({}) }])).not.toThrow(/concat/);
     });
 
     test("a recognised hook that is not a function is refused before it can throw", () => {
