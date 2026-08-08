@@ -766,6 +766,23 @@ const CASES: Case[] = [
       },
     },
   }, ["User", "Profile"]],
+
+  // M16 — the boundary on the other side of `displaces`, from the **owning**
+  // end of a key (#363): a *many*-to-one connect has no incumbent, so nothing
+  // is detached and both rows end up on the same parent. Measured, and the
+  // logged statements are the operand lookup and the `update` — Prisma does not
+  // even read the sibling.
+  //
+  // Here rather than left implied, because the two relations are one operand
+  // spelled identically and the discriminator between them is a schema property
+  // the caller cannot see. Without this, a `displaces` that widened from "the
+  // foreign key is unique" to "the relation points at one row" would detach
+  // user 1 from Acme on a call about user 2, and every existing case would stay
+  // green — `User.organization` is the ordinary many-to-one that a nested
+  // `connect` is nearly always written against.
+  ["M16 a many-to-one connect leaves the parent's other rows alone", "update", {
+    where: { id: 2 }, data: { organization: { connect: { id: 1 } } },
+  }, ["User", "Organization"]],
 ];
 
 /**
@@ -839,6 +856,118 @@ const OWNING_CASES: [string, string, unknown, string[]?][] = [
   // harmless no-op is not the point, since nothing here would have said so.
   ["O11 owning disconnect null is refused by both", "update", {
     where: { id: 1 }, data: { user: { disconnect: null } },
+  }, ["Profile", "User"]],
+
+  // O12 — `connect` into a to-one that is **already taken** (#363), the mirror
+  // of M15 across the key. gemi raised `UniqueConstraintError` on this and
+  // Prisma detaches the incumbent and takes the link, which is what the pin in
+  // the "still disagree" describe recorded until this graduated.
+  //
+  // **It reads left-to-right as the opposite of the pin it replaces, and that
+  // is the whole reason it can live in this table.** The pin moves profile 1
+  // into an occupied user 2, which the seed does not have and which every to-one
+  // case in `CASES` wants the opposite of — user 2's to-one being *empty* is
+  // what makes `M1`, `M3`, `M6` and `M8` reach their miss branches at all. Read
+  // the other way round the seed already carries the state: profile 2 (`loose`)
+  // holds nobody, and user 1 is occupied by profile 1. So `loose` moving into
+  // user 1 is the same collision with no arrangement at all, and #363's
+  // acceptance — "the case moves into `OWNING_CASES`" — costs nothing.
+  //
+  // The incumbent is **orphaned, not deleted**, which is why `tables` names
+  // `Profile`: a fix that deleted the displaced row would be silent data loss
+  // wearing this same green test.
+  ["O12 owning connect into an occupied to-one displaces the incumbent", "update", {
+    where: { id: 2 }, data: { user: { connect: { id: 1 } } },
+  }, ["Profile", "User"]],
+  // The control on the empty far row — the shape that always worked, and the
+  // one that keeps O12 about the *incumbent* rather than about owning-side
+  // `connect` in general. User 2 holds no profile.
+  ["O12b owning connect into an empty to-one attaches", "update", {
+    where: { id: 2 }, data: { user: { connect: { id: 2 } } },
+  }, ["Profile", "User"]],
+  // The row being written *is* the incumbent, and **Prisma writes nothing at
+  // all** — measured with logging on, the call is four selects between a
+  // `BEGIN` and a `COMMIT` and no `update`. gemi skips the clear for the same
+  // reason and reaches the same table, though it does still emit the repoint,
+  // which writes the value already there. The case that would catch a clear
+  // firing on the row the repoint was about to restore.
+  ["O12c owning connect of the user already linked here changes nothing", "update", {
+    where: { id: 1 }, data: { user: { connect: { id: 1 } } },
+  }, ["Profile", "User"]],
+  // Beside a real column write, for the reason O8 gives: without something else
+  // in `data` a step and an assignment are hard to tell apart.
+  ["O12d owning connect into an occupied to-one beside a column write", "update", {
+    where: { id: 2 }, data: { bio: "changed", user: { connect: { id: 1 } } },
+  }, ["Profile", "User"]],
+  // The **other** `connect` form, and it is a second code path rather than a
+  // second spelling: naming a unique key the relation does not reference costs
+  // a lookup, so the value the clear needs does not exist until that lookup has
+  // run. Without this case the whole displacing branch of the resolved form is
+  // unexercised — every case above takes the direct one, where the value is
+  // read straight out of the argument tree. `p1` is user 1, seeded by name.
+  ["O12e owning connect by a non-referenced unique displaces too", "update", {
+    where: { id: 2 }, data: { user: { connect: { publicId: "p1" } } },
+  }, ["Profile", "User"]],
+  // A `connect` naming no row detaches nothing: the resolve raises first, and
+  // the clear sits behind it in the same step. `notFound` on both sides.
+  ["O12f owning connect naming no row raises and displaces nothing", "update", {
+    where: { id: 2 }, data: { user: { connect: { publicId: "nobody" } } },
+  }, ["Profile", "User"]],
+  // And a statement with no row to write leaves the incumbent alone. Both
+  // clients get there through the transaction rather than through a guard:
+  // Prisma issues the detach and rolls it back — the logged statements are the
+  // clear, then `ROLLBACK`, then P2025 — and gemi's `update` raises
+  // `RecordNotFoundError`, which takes its own `before` step down with it. The
+  // committed state is the thing either client promises, and this pins it.
+  ["O12g owning connect whose own where matches nothing displaces nothing", "update", {
+    where: { id: 99 }, data: { user: { connect: { id: 1 } } },
+  }, ["Profile", "User"]],
+
+  // O13 — the same displacement under a `create`, which is a different statement
+  // and not a different rule. There is no row yet, so nothing this one holds can
+  // be the incumbent and the step reads nothing before clearing. Measured:
+  // Prisma logs the operand lookup, the incumbent clear and the `INSERT`, in
+  // that order, inside one transaction.
+  ["O13 owning connect into an occupied to-one under a create", "create", {
+    data: { bio: "fresh", user: { connect: { id: 1 } } },
+  }, ["Profile", "User"]],
+  ["O13b owning connect into an empty to-one under a create", "create", {
+    data: { bio: "fresh", user: { connect: { id: 2 } } },
+  }, ["Profile", "User"]],
+  // **The atomicity of the detach is asserted in `nested-write-policies.test.ts`
+  // and cannot be asserted here**, which is worth saying because this is where
+  // a reader would look for it. It needs a call that *clears and then fails*,
+  // and every shape reachable through this fixture either never clears (`O12g`
+  // returns before writing) or clears and succeeds — so a clear that escaped
+  // the transaction leaves every case in this table green. The one shape that
+  // does it, a `create` naming an `id` that collides after the detach, is not
+  // comparable: Prisma has no `id` in `ProfileCreateInput`, so it answers a
+  // validation error where gemi answers the unique violation, and the harness
+  // compares failure kinds.
+
+  // O14 — `connectOrCreate`, whose two branches answer differently for the same
+  // reason they do on the foreign side (M14c / M15d): a **hit** is a connect, so
+  // it displaces; a **miss** mints the far row, which nothing can already be
+  // pointing at.
+  ["O14 owning connectOrCreate hitting an occupied to-one displaces", "update", {
+    where: { id: 2 },
+    data: {
+      user: { connectOrCreate: { where: { id: 1 }, create: { email: "unused@example.dev" } } },
+    },
+  }, ["Profile", "User"]],
+  ["O14b owning connectOrCreate missing creates the far row and displaces nothing", "update", {
+    where: { id: 2 },
+    data: {
+      user: { connectOrCreate: { where: { id: 99 }, create: { email: "coc@example.dev" } } },
+    },
+  }, ["Profile", "User"]],
+
+  // O15 — the owning-side `create`, which has no incumbent by construction: the
+  // far row is minted by this very operand. Here so that "what displaces" is
+  // pinned as a *list* rather than as a rule that could quietly widen to
+  // "anything that ends with this row pointing somewhere".
+  ["O15 owning create mints the far row and displaces nothing", "update", {
+    where: { id: 2 }, data: { user: { create: { email: "minted@example.dev" } } },
   }, ["Profile", "User"]],
 ];
 
@@ -2339,6 +2468,60 @@ function suite(label: string, url?: string) {
           { tables: ["User", "Profile"] },
         );
       });
+
+      /**
+       * **#363, on the arrangement `OWNING_CASES` cannot express: both rows
+       * already linked.**
+       *
+       * This test *was* the pin in the "still disagree" describe, and it is
+       * rewritten rather than deleted. Its Prisma half is unchanged and was
+       * always the measurement; only gemi's half moved, from
+       * `UniqueConstraintError` with nothing written to the same three-row
+       * answer. Keeping it is what makes "the divergence closed" a thing the
+       * suite says rather than a thing a diff implies, and the shape is not a
+       * duplicate of `O12`: there both the mover (`loose`) and its destination
+       * are what the seed happens to hold, so the row being written starts
+       * *unlinked*. Here it starts linked to somebody else, which is the only
+       * arrangement in which one call detaches two rows — the incumbent, and
+       * the far row this one is leaving.
+       *
+       * It stays out of `OWNING_CASES` for the mechanical reason it always
+       * did: `expectSameWrite` resets to the seeded state before each client
+       * runs, so a table-driven case has nowhere to put the `occupy()` below.
+       * That is a property of the harness, not of the divergence, and it is why
+       * #363's acceptance is satisfied by `O12` rather than by this.
+       */
+      test("connect into an occupied to-one displaces the incumbent on both", async () => {
+        const args = { where: { id: 1 }, data: { user: { connect: { id: 2 } } } };
+        const occupy = () =>
+          differential.prisma.profile.update({
+            where: { id: 2 },
+            data: { userId: 2 },
+          });
+        const profiles = async () =>
+          (
+            await differential.prisma.profile.findMany({ orderBy: { id: "asc" } })
+          ).map((row) => [row.bio, row.userId]);
+
+        await differential.reset();
+        await occupy();
+        await differential.prisma.profile.update(args as never);
+        expect(await profiles()).toEqual([
+          ["seed", 2],
+          // Detached, not deleted — the half a fix here had to get right.
+          ["loose", null],
+        ]);
+
+        await differential.reset();
+        await occupy();
+        const fromGemi: any = await ProfileModel.update(args as never);
+        expect(fromGemi.userId).toBe(2);
+        expect(await profiles()).toEqual([
+          ["seed", 2],
+          ["loose", null],
+        ]);
+      });
+
     });
 
     /**
@@ -2604,15 +2787,18 @@ function suite(label: string, url?: string) {
      * `CASES` and the harness takes over from the prose.
      *
      * Each carries its issue number, and that is the half a test cannot do for
-     * itself. The two this describe was opened for — #359 and #360 — are gone
-     * from it and into `CASES` / `OWNING_CASES` above, which is what closing
-     * one looks like. The two below took their place, and both were found by
-     * the same method: measuring the neighbouring spelling of a call that was
-     * being fixed.
+     * itself. The three this describe has held — #359, #360 and #363 — are all
+     * gone from it and into `CASES` / `OWNING_CASES` above, which is what
+     * closing one looks like. #363's went last, and where it went is worth
+     * knowing: `O12` is the same collision spelled from the other end, so the
+     * seeded state expresses it and no arrangement is needed; the arranged
+     * shape it used to pin survives as a positive test beside the other
+     * owning-side to-one cases.
      *
-     * **One of them is not gemi's bug**, which is new here and changes what the
-     * describe is for. The rule stays "pin both answers"; what it cannot stay
-     * is "every one of these is ours to fix".
+     * **What is left is not gemi's bug**, which changes what the describe is
+     * for. The rule stays "pin both answers"; what it cannot stay is "every one
+     * of these is ours to fix" — the entry below is a divergence this ORM
+     * declines to reproduce, and the file has been down to one before.
      */
     describe("where the two clients still disagree", () => {
       /**
@@ -2705,60 +2891,6 @@ function suite(label: string, url?: string) {
         ).toMatchObject({ organizationId: null });
       });
 
-      /**
-       * **BUG (#363) — the owning side linking into an occupied to-one.**
-       *
-       * The mirror of #361, which this PR fixed, and it is a different piece of
-       * work rather than the same one twice. #361 clears rows of the **child**
-       * model, which `clearLinks` does through the child's own operations. Here
-       * the collision is between two rows of the model being written: pointing
-       * profile 1 at user 2 collides with the profile user 2 already has, and
-       * nothing in `planOwningSide` writes a sibling row.
-       *
-       *     profile 1 -> user 1, and user 2 already holds profile 2
-       *       prisma  ->  (1, "seed",  2)     the row written takes the link
-       *                   (2, "loose", null)  user 2's old profile, orphaned
-       *       gemi    ->  UniqueConstraintError on Profile.userId
-       *
-       * `connectOrCreate` hitting an existing row does the same; its *miss*
-       * branch creates the far row and so has nothing to displace.
-       *
-       * The seed has no profile on user 2 — every other case in this file wants
-       * the opposite — so this one arranges it, which is also why it is not in
-       * `OWNING_CASES`.
-       */
-      test("the owning side collides linking into an occupied to-one", async () => {
-        const args = { where: { id: 1 }, data: { user: { connect: { id: 2 } } } };
-        const occupy = () =>
-          differential.prisma.profile.update({
-            where: { id: 2 },
-            data: { userId: 2 },
-          });
-        const profiles = async () =>
-          (
-            await differential.prisma.profile.findMany({ orderBy: { id: "asc" } })
-          ).map((row) => [row.bio, row.userId]);
-
-        await differential.reset();
-        await occupy();
-        await differential.prisma.profile.update(args as never);
-        expect(await profiles()).toEqual([
-          ["seed", 2],
-          // Detached, not deleted — the half a fix here would have to get right.
-          ["loose", null],
-        ]);
-
-        await differential.reset();
-        await occupy();
-        await expect(ProfileModel.update(args as never)).rejects.toBeInstanceOf(
-          UniqueConstraintError,
-        );
-        // And nothing moved: the failed statement takes nothing with it.
-        expect(await profiles()).toEqual([
-          ["seed", 1],
-          ["loose", 2],
-        ]);
-      });
     });
 
     // --- typed errors ---------------------------------------------------

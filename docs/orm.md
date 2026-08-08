@@ -924,7 +924,7 @@ await List.create({
 | --- | --- |
 | `create` | Writes new related rows. One statement each. On a **to-one that already has a child** the new row takes the link and the old one is detached — orphaned, not deleted. |
 | `createMany` | The same rows in **one** statement. To-many only, and the rows go inside `data`. |
-| `connect` | Points at an existing row — a bound column when it names the referenced key, a lookup otherwise. On a **to-one that already has a child** it displaces the incumbent, as `create` does. |
+| `connect` | Points at an existing row — a bound column when it names the referenced key, a lookup otherwise. On a **one-to-one that is already taken** it displaces the incumbent, as `create` does, from either end of the key. |
 | `connectOrCreate` | Looks the row up by a unique key and creates it only if it is not there. **A hit ignores `create` entirely** — it is connect-*or*-create, not upsert. |
 | `disconnect` | Clears the link. A unique key, or a list of them, on a to-many; `true`, `false` or a filter on a to-one, whichever side holds the key. The column that goes null is on whichever side holds it, and it has to be nullable. |
 | `delete` | Deletes the named rows outright, not just the link. A unique key or a list of them on a to-many; `true`, or a filter, on a to-one whose child holds the key. |
@@ -1013,26 +1013,49 @@ as `connect` does, and it silently ignores a named row that does not exist.
 the link and the incumbent is left in the table with a null foreign key — detached, not deleted,
 which is Prisma's answer and the one worth stating because deleting would be the silent version of
 the same call. What can be displaced is what your policies let you see: an incumbent hidden from you
-is not detached, and the write then collides with it on the child's unique key.
+is not detached, and the write then collides with it on the unique key.
 
 Which operands displace is Prisma's, measured rather than derived, and it is not "everything that
-ends with a child pointing here":
+ends with a row pointing here":
 
 | operand | on an occupied to-one |
 | --- | --- |
 | `create` | displaces the incumbent |
 | `connect` | displaces the incumbent |
 | `connectOrCreate`, hit | displaces — it *is* a connect |
-| `connectOrCreate`, miss | collides on the child's unique key |
-| `upsert`, create branch | collides on the child's unique key |
+| `connectOrCreate`, miss | collides on the unique key |
+| `upsert`, create branch | collides on the unique key |
 
 So the two branches of one `connectOrCreate` answer differently: linking an existing row displaces,
 and the `create` *inside* a compound operand does not, though a bare `create` does.
 
-One gap remains, on the other side of the key: pointing **this** row at a partner who already has
-one — `Profile.update({ data: { user: { connect: { id } } } })` where that user's profile is taken —
-collides here and displaces in Prisma. Detach the incumbent first, or write the foreign key
-directly.
+**This holds from either end of the key.** Pointing *this* row at a partner who already has one —
+`Profile.update({ data: { user: { connect: { id } } } })` where that user's profile is taken —
+detaches that profile and takes the link, the same way the call spelled from the other side does.
+The row detached there is a *sibling* rather than a child: another row of the model you are writing,
+one that happened to hold the same foreign key. The table above applies unchanged, with the bare
+owning-side `create` reading as "no incumbent by construction" rather than as "displaces" — it mints
+the far row, so nothing can already be pointing at it.
+
+Three things are worth knowing about the owning side specifically.
+
+It applies only to a **true one-to-one**, and that is more than "the foreign key is `@unique`". The
+other side has to be a single row too — `User.profile Profile?`, not `Team.players Player[]`. Prisma
+accepts a `@unique` foreign key beside a list back-relation, and on that schema it does **not**
+displace: the second `connect` collides on the key instead. A many-to-one likewise has no incumbent,
+since several rows may point at the same parent, which is the whole meaning of the relation. So
+`connect` costs nothing extra on the many-to-one that most nested writes are written against.
+
+It needs a **nullable** foreign key, because a detach has to leave a value behind. Where yours is
+required, the repoint collides on the unique key. Prisma refuses the same call slightly earlier and
+more clearly, with P2014 — *"The change you are trying to make would violate the required relation"* —
+so the call fails on both and the class of failure differs.
+
+And **connecting the row you are already connected to writes nothing** — Prisma issues no statement
+at all for it, and gemi detaches nothing. One difference remains: gemi still emits the update that
+sets the key to the value it already holds, so on a one-to-one owner carrying `@updatedAt` gemi bumps
+the stamp where Prisma leaves it. That is the same stamp difference described under nested writes
+above, and it is specific to this case — on a many-to-one both clients update and both stamp.
 
 **On a to-one, `disconnect` and `delete` take `true` or a filter — and `false` is a no-op rather
 than a synonym for `true`.** There is one row and nothing to name, so `true` is how you say *the

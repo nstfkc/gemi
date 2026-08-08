@@ -23,6 +23,7 @@ import {
   userWithProfile,
 } from "../fixtures";
 import * as registry from "../registry";
+import type { ModelSchema } from "../schema";
 import { compileWrite } from "./write";
 
 const sqlite = new SqliteDialect();
@@ -1916,7 +1917,6 @@ describe("nested writes", () => {
       // second statement afterwards.
       expect(plan.after).toBeUndefined();
     });
-
     test("the foreign side resolves after it, and returns the key", () => {
       const plan = compileWrite(
         user,
@@ -2006,6 +2006,160 @@ describe("nested writes", () => {
           },
         }),
       ).toThrow();
+    });
+  });
+
+  /**
+   * **What makes an owning-side `connect` displace a sibling (#363), and the
+   * schema shape that must not.**
+   *
+   * The displacement clears a *sibling row of the model being written* — the
+   * one already holding the foreign-key value — so whether it fires at all is
+   * decided from the schema, at compile time, and shows up here as a `before`
+   * step that is present or absent. That makes this the cheapest place to pin
+   * it: the rows follow from the step, and the row-level answers are already
+   * covered by the differential's `O12` group.
+   *
+   * **The near-miss is a `@unique` foreign key beside a *list* back-relation**,
+   * which is a schema Prisma accepts — `prisma validate` says so — and on which
+   * Prisma does **not** displace:
+   *
+   *     model Team   { players Player[] }
+   *     model Player { teamId Int? @unique
+   *                    team Team? @relation(fields: [teamId], references: [id]) }
+   *
+   *     Player.update({ where: { id: 2 }, data: { team: { connect: { id: 2 } } } })
+   *       with player 1 already on team 2
+   *       ->  P2002.  Statements: select Team.id, the update, ROLLBACK.
+   *           The sibling is never read.
+   *
+   * The first version of #363 tested only "is the foreign key unique", on the
+   * argument that P1012 makes that equivalent to the far side's `kind`. P1012
+   * gives the implication one way — a non-list back-relation *forces* the index
+   * — and the converse is what the schema above disproves. So the index is
+   * necessary and not sufficient, and reading it as sufficient silently
+   * detached player 1 on a call that named only player 2.
+   *
+   * Three arms, because two of them are one character apart in the `.prisma`
+   * and opposite in the answer.
+   */
+  describe("an owning-side connect displaces only a true one-to-one", () => {
+    /** `Player.teamId Int? @unique`, holding the key and pointing at `Team`. */
+    const owner: ModelSchema = {
+      name: "Player",
+      table: "Player",
+      fields: {
+        id: {
+          name: "id",
+          column: "id",
+          type: "Int",
+          nullable: false,
+          isId: true,
+          isUpdatedAt: false,
+          default: { kind: "autoincrement" },
+        },
+        teamId: {
+          name: "teamId",
+          column: "teamId",
+          type: "Int",
+          // Nullable, or a detach would have nothing to leave behind and the
+          // discriminator short-circuits before the interesting test.
+          nullable: true,
+          isId: false,
+          isUpdatedAt: false,
+        },
+      },
+      primaryKey: ["id"],
+      uniques: [["teamId"]],
+      relations: {
+        team: {
+          name: "team",
+          model: "Team",
+          kind: "one",
+          relationName: "PlayerToTeam",
+          from: ["teamId"],
+          to: ["id"],
+          nullable: true,
+        },
+      },
+    };
+
+    /** The far model, whose back-relation's `kind` is the whole question. */
+    const far = (kind: "one" | "many"): ModelSchema => ({
+      name: "Team",
+      table: "Team",
+      fields: {
+        id: {
+          name: "id",
+          column: "id",
+          type: "Int",
+          nullable: false,
+          isId: true,
+          isUpdatedAt: false,
+          default: { kind: "autoincrement" },
+        },
+      },
+      primaryKey: ["id"],
+      uniques: [],
+      relations: {
+        players: {
+          name: "players",
+          model: "Player",
+          kind,
+          relationName: "PlayerToTeam",
+          from: [],
+          to: [],
+          nullable: true,
+        },
+      },
+    });
+
+    const planConnect = () =>
+      compileWrite(
+        owner,
+        "update",
+        { where: { id: 2 }, data: { team: { connect: { id: 2 } } } },
+        sqlite,
+      );
+
+    test("a list back-relation does not displace, though the key is unique", () => {
+      registry.register("Team", class { static $schema = far("many") });
+
+      const plan = planConnect();
+
+      // The whole defect in one assertion: no step, so no sibling is read and
+      // none is cleared. The key still lands as a bound column.
+      expect(plan.before).toBeUndefined();
+      expect(plan.text).toContain(`"teamId"`);
+    });
+
+    test("a non-list back-relation displaces, on the same foreign key", () => {
+      registry.register("Team", class { static $schema = far("one") });
+
+      const plan = planConnect();
+
+      expect(plan.before).toHaveLength(1);
+      expect(plan.before?.[0].relation).toBe("team");
+      expect(plan.before?.[0].operation).toBe("connect");
+    });
+
+    /**
+     * And the index is still doing work: drop it from an otherwise identical
+     * one-to-one and there is no unique constraint to collide on, so there is
+     * nothing to displace. Without this the pair above would pass for a
+     * discriminator that had stopped reading `uniques` at all.
+     */
+    test("a non-list back-relation with no unique index does not displace", () => {
+      registry.register("Team", class { static $schema = far("one") });
+
+      const plan = compileWrite(
+        { ...owner, uniques: [] },
+        "update",
+        { where: { id: 2 }, data: { team: { connect: { id: 2 } } } },
+        sqlite,
+      );
+
+      expect(plan.before).toBeUndefined();
     });
   });
 
