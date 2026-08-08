@@ -678,8 +678,136 @@ const CASES: Case[] = [
   ["a single connect that steals another parent's child", "update", {
     where: { id: 2 }, data: { profile: { connect: { id: 1 } } },
   }, ["User", "Profile"]],
-  // `create` where a child already exists is a **divergence**, not agreement,
-  // so it is not here — see the "still disagree" describe below.
+
+  // M11 — a nested `create` onto a to-one that **already has a child** (#360),
+  // which was a `UniqueConstraintError` here and an answer there until this
+  // graduated out of the "still disagree" describe below.
+  //
+  // The incumbent is **orphaned, not deleted**: three rows afterwards, the old
+  // one holding a null foreign key. That is the half worth reading the table
+  // for — a fix that deleted the displaced row instead would be silent data
+  // loss wearing this same green test, which is why `tables` names `Profile`.
+  ["M11 to-one create displaces the incumbent, orphaning it", "update", {
+    where: { id: 1 }, data: { profile: { create: { bio: "second" } } },
+  }, ["User", "Profile"]],
+  // The control on the other statement: a *new* parent can have nothing linked
+  // to displace, so the same operand costs the same as it always did.
+  ["M11b to-one create under a create has nothing to displace", "create", {
+    data: { email: "fresh@example.dev", profile: { create: { bio: "first" } } },
+  }, ["User", "Profile"]],
+  // And the neighbours that do **not** displace. Measured rather than assumed
+  // symmetric, and the asymmetry is worth stating because it is not derivable:
+  // the *create branch* of `connectOrCreate` and of `upsert` collides on the
+  // child's unique foreign key, where the bare `create` above detaches. So what
+  // displaces is the bare `create` and anything that **links an existing row**
+  // (M12 below) — not "every operand that ends with a child pointing here".
+  ["M11c to-one connectOrCreate whose where misses collides", "update", {
+    where: { id: 1 },
+    data: {
+      profile: {
+        connectOrCreate: { where: { id: 99 }, create: { bio: "coc" } },
+      },
+    },
+  }, ["User", "Profile"]],
+  ["M11d to-one upsert whose where misses collides", "update", {
+    where: { id: 1 },
+    data: {
+      profile: {
+        upsert: { where: { id: 99 }, create: { bio: "up" }, update: { bio: "x" } },
+      },
+    },
+  }, ["User", "Profile"]],
+
+  // M12 — `connect` onto a to-one that **already has a child** (#361), the
+  // neighbour of M11 and the same displacement. Four shapes, and only this one
+  // ever diverged: the three above it — an empty to-one, a steal from another
+  // parent, and the row already linked here — agreed before the fix and are
+  // what kept it hidden.
+  ["M12 to-one connect displaces the incumbent, orphaning it", "update", {
+    where: { id: 1 }, data: { profile: { connect: { id: 2 } } },
+  }, ["User", "Profile"]],
+  // The clear and the link cross on this one: `clearLinks` nulls the very row
+  // the caller named and the repoint puts the key straight back. Net nothing,
+  // which is Prisma's answer, and the case that would catch a clear scoped to
+  // the wrong rows.
+  ["M12b to-one connect of the row already linked changes nothing", "update", {
+    where: { id: 1 }, data: { profile: { connect: { id: 1 } } },
+  }, ["User", "Profile"]],
+  // A miss detaches nothing — the repoint raises and takes the clear down with
+  // it. `notFound` on both sides, so a gemi refusal could not pass for it.
+  ["M12c to-one connect naming no row raises and displaces nothing", "update", {
+    where: { id: 1 }, data: { profile: { connect: { id: 99 } } },
+  }, ["User", "Profile"]],
+  // ...and `connectOrCreate`'s *hit* branch is a connect, so it displaces where
+  // its miss branch (M11c) collides. Both branches of one operand, answering
+  // differently, which is why `displaces` is consulted per branch rather than
+  // per operand.
+  ["M12d to-one connectOrCreate hitting a row displaces the incumbent", "update", {
+    where: { id: 1 },
+    data: {
+      profile: {
+        connectOrCreate: { where: { id: 2 }, create: { bio: "unused" } },
+      },
+    },
+  }, ["User", "Profile"]],
+];
+
+/**
+ * The **owning** side of the same to-one: `Profile.update`, where the foreign
+ * key is on the row being written (#359).
+ *
+ * A table of its own rather than rows in `CASES`, for one mechanical reason:
+ * every `CASES` entry runs against `User`, and this side is only reachable from
+ * the model that holds the key. Same harness, same comparison, same rule that
+ * a case belongs here exactly when the two clients agree.
+ *
+ * `O5` and `O6` are the ones that decide what the filter arm *means*: a filter
+ * matching nothing is **silent**, not P2025, so this is a conditional detach
+ * rather than a guarded one. Measured on Prisma 6.19.2 before it was written.
+ */
+const OWNING_CASES: [string, string, unknown, string[]?][] = [
+  // User 1 is Ada and holds profile 1; profile 2 (`loose`) is linked to nobody.
+  ["O1 owning disconnect true clears the link", "update", {
+    where: { id: 1 }, data: { user: { disconnect: true } },
+  }, ["Profile", "User"]],
+  // The headline of #359: the branch that asked for *nothing*. A caller writes
+  // `disconnect: shouldDetach`, and this is the value that used to be refused —
+  // after a spell in which a warm `true` plan served it and nulled the key.
+  ["O2 owning disconnect false is a strict no-op", "update", {
+    where: { id: 1 }, data: { user: { disconnect: false } },
+  }, ["Profile", "User"]],
+  ["O3 owning disconnect {} clears the link", "update", {
+    where: { id: 1 }, data: { user: { disconnect: {} } },
+  }, ["Profile", "User"]],
+  ["O4 owning disconnect with a matching filter clears the link", "update", {
+    where: { id: 1 }, data: { user: { disconnect: { name: "Ada" } } },
+  }, ["Profile", "User"]],
+  ["O5 owning disconnect with a non-matching filter is silent", "update", {
+    where: { id: 1 }, data: { user: { disconnect: { name: "Grace" } } },
+  }, ["Profile", "User"]],
+  ["O6 owning disconnect with a filter and nothing linked is silent", "update", {
+    where: { id: 2 }, data: { user: { disconnect: { name: "Ada" } } },
+  }, ["Profile", "User"]],
+  ["O7 owning disconnect true with nothing linked is silent", "update", {
+    where: { id: 2 }, data: { user: { disconnect: true } },
+  }, ["Profile", "User"]],
+  // Beside a real column write, because `false` contributes no assignment at
+  // all: without something else in `data` the statement degenerates to a read,
+  // and this is what shows the two are independent rather than one hiding the
+  // other.
+  ["O8 owning disconnect false beside a column write", "update", {
+    where: { id: 1 }, data: { bio: "changed", user: { disconnect: false } },
+  }, ["Profile", "User"]],
+  ["O9 owning disconnect with a matching filter beside a column write", "update", {
+    where: { id: 1 },
+    data: { bio: "changed", user: { disconnect: { name: "Ada" } } },
+  }, ["Profile", "User"]],
+  // An operator filter, not just an equality: the operand is a `WhereInput`,
+  // and nothing about the implementation narrows it to scalars.
+  ["O10 owning disconnect takes an operator filter", "update", {
+    where: { id: 1 },
+    data: { user: { disconnect: { name: { contains: "Ad" } } } },
+  }, ["Profile", "User"]],
 ];
 
 function suite(label: string, url?: string) {
@@ -713,6 +841,10 @@ function suite(label: string, url?: string) {
 
     test.each(CASES)("%s", async (_name, operation, args, tables) => {
       await differential.expectSameWrite("User", operation, args, { tables });
+    });
+
+    test.each(OWNING_CASES)("%s", async (_name, operation, args, tables) => {
+      await differential.expectSameWrite("Profile", operation, args, { tables });
     });
 
     // Writing through a model whose `@@unique` is composite, which is the only
@@ -2440,75 +2572,115 @@ function suite(label: string, url?: string) {
      * `CASES` and the harness takes over from the prose.
      *
      * Each carries its issue number, and that is the half a test cannot do for
-     * itself. #354 closes when this PR merges, so without them the only record
-     * of these two would be this describe — findable by someone already reading
-     * the file, and by nobody reading the tracker. The issues carry the
-     * measurement and point back here; this points forward. Neither is enough
-     * alone.
+     * itself. The two this describe was opened for — #359 and #360 — are gone
+     * from it and into `CASES` / `OWNING_CASES` above, which is what closing
+     * one looks like. The two below took their place, and both were found by
+     * the same method: measuring the neighbouring spelling of a call that was
+     * being fixed.
+     *
+     * **One of them is not gemi's bug**, which is new here and changes what the
+     * describe is for. The rule stays "pin both answers"; what it cannot stay
+     * is "every one of these is ours to fix".
      */
-    describe("where the two clients still disagree — each of these is a bug", () => {
+    describe("where the two clients still disagree", () => {
       /**
-       * **BUG 1 (#359) — owning-side `disconnect: false`.**
+       * **A deliberate divergence, and the only one in this file: Prisma's
+       * owning-side `disconnect` ignores its operand on a many-to-one.**
        *
-       * #354 made the *foreign* side take a boolean (M5b above, which passes).
-       * The owning side still refuses anything but `true`. Prisma's owning-side
-       * operand is `WhereInput | boolean` and it takes `false` as a no-op, so a
-       * caller passing a flag through — `disconnect: shouldDetach` — gets a
-       * refusal on the branch that asked for nothing.
+       * `OWNING_CASES` above pins the whole grammar against `Profile.user` — a
+       * one-to-one — where Prisma honours it: `false` and a non-matching filter
+       * both leave the link alone. The *same operand type* on a many-to-one is
+       * answered differently by the engine, measured on three relations
+       * (`User.organization`, `Account.user`, `Account.organization`):
        *
-       * This is strictly better than what it replaced, which nulled the foreign
-       * key on that branch through a stale plan-cache entry. It is still wrong.
+       *     disconnect: false               ->  the foreign key is nulled
+       *     disconnect: { name: "Nobody" }  ->  the foreign key is nulled
+       *
+       * The generated input type is identical on both — `XWhereInput | boolean`
+       * — so this is the engine dropping the value, not a narrower grammar.
+       * `delete: false` on the same relation is a correct no-op, which is what
+       * rules out "booleans are ignored here" as the explanation.
+       *
+       * **gemi does not reproduce it.** Matching Prisma is this suite's whole
+       * point and it is overruled exactly here, because the behaviour to match
+       * is a silent destructive write on the call that asked for nothing —
+       * which is, word for word, the defect #358 removed from this ORM's own
+       * plan cache. Reproducing it deliberately would be re-introducing it. So
+       * gemi answers one grammar one way on both shapes, and this pins the
+       * difference rather than hiding it.
        */
-      test("the owning side refuses disconnect: false, which Prisma no-ops", async () => {
-        const args = { where: { id: 1 }, data: { user: { disconnect: false } } };
-
-        await differential.reset();
-        const fromPrisma = await differential.prisma.profile.update(args as never);
-        expect(fromPrisma.userId).toBe(1);
-
-        await differential.reset();
-        await expect(ProfileModel.update(args as never)).rejects.toThrow(
-          /only 'disconnect: true' is implemented/,
-        );
-      });
-
-      /**
-       * **BUG 2 (#360) — `create` on a to-one that already has a child.**
-       *
-       * Prisma **detaches** the existing child first: the old row survives with
-       * a null foreign key and the new one takes the link. gemi inserts without
-       * clearing, and the child's `@unique` foreign key rejects it — a unique
-       * violation on a call Prisma answers.
-       *
-       * Not the same operand family as the three #354 closed, which is why it
-       * survived: `create` was never refused on this side, so nothing pointed at
-       * it. The fix belongs beside `set`, whose whole job is clearing the links
-       * that are in the way before writing the new ones.
-       */
-      test("create on an occupied to-one collides here and detaches in Prisma", async () => {
+      test("Prisma ignores a many-to-one disconnect operand where gemi honours it", async () => {
         const args = {
           where: { id: 1 },
-          data: { profile: { create: { bio: "second" } } },
+          data: { organization: { disconnect: false } },
         };
 
         await differential.reset();
-        await differential.prisma.user.update(args);
-        const afterPrisma = await differential.prisma.profile.findMany({
-          orderBy: { id: "asc" },
-        });
-        expect(afterPrisma.map((row) => [row.bio, row.userId])).toEqual([
-          // The row that was linked, now orphaned rather than deleted.
-          ["seed", null],
+        const fromPrisma = await differential.prisma.user.update(args as never);
+        // Prisma detached anyway. User 1 is seeded into Acme.
+        expect(fromPrisma.organizationId).toBe(null);
+
+        await differential.reset();
+        const fromGemi: any = await UserModel.update(args as never);
+        expect(fromGemi.organizationId).toBe(1);
+        expect(
+          await differential.prisma.user.findFirstOrThrow({ where: { id: 1 } }),
+        ).toMatchObject({ organizationId: 1 });
+      });
+
+      /**
+       * **BUG (#363) — the owning side linking into an occupied to-one.**
+       *
+       * The mirror of #361, which this PR fixed, and it is a different piece of
+       * work rather than the same one twice. #361 clears rows of the **child**
+       * model, which `clearLinks` does through the child's own operations. Here
+       * the collision is between two rows of the model being written: pointing
+       * profile 1 at user 2 collides with the profile user 2 already has, and
+       * nothing in `planOwningSide` writes a sibling row.
+       *
+       *     profile 1 -> user 1, and user 2 already holds profile 2
+       *       prisma  ->  (1, "seed",  2)     the row written takes the link
+       *                   (2, "loose", null)  user 2's old profile, orphaned
+       *       gemi    ->  UniqueConstraintError on Profile.userId
+       *
+       * `connectOrCreate` hitting an existing row does the same; its *miss*
+       * branch creates the far row and so has nothing to displace.
+       *
+       * The seed has no profile on user 2 — every other case in this file wants
+       * the opposite — so this one arranges it, which is also why it is not in
+       * `OWNING_CASES`.
+       */
+      test("the owning side collides linking into an occupied to-one", async () => {
+        const args = { where: { id: 1 }, data: { user: { connect: { id: 2 } } } };
+        const occupy = () =>
+          differential.prisma.profile.update({
+            where: { id: 2 },
+            data: { userId: 2 },
+          });
+        const profiles = async () =>
+          (
+            await differential.prisma.profile.findMany({ orderBy: { id: "asc" } })
+          ).map((row) => [row.bio, row.userId]);
+
+        await differential.reset();
+        await occupy();
+        await differential.prisma.profile.update(args as never);
+        expect(await profiles()).toEqual([
+          ["seed", 2],
+          // Detached, not deleted — the half a fix here would have to get right.
           ["loose", null],
-          ["second", 1],
         ]);
 
         await differential.reset();
-        await expect(UserModel.update(args)).rejects.toBeInstanceOf(
+        await occupy();
+        await expect(ProfileModel.update(args as never)).rejects.toBeInstanceOf(
           UniqueConstraintError,
         );
-        // And nothing is left behind: the failed insert rolls back.
-        expect(await differential.prisma.profile.count()).toBe(2);
+        // And nothing moved: the failed statement takes nothing with it.
+        expect(await profiles()).toEqual([
+          ["seed", 1],
+          ["loose", 2],
+        ]);
       });
     });
 

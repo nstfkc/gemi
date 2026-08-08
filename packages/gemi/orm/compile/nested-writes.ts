@@ -9,6 +9,7 @@ import type { Binder } from "./fragment";
 import {
   type Link,
   type NestedWriteStep,
+  type RelationExecutor,
   relatedSchema,
   resolveLink,
   singleFieldLink,
@@ -423,13 +424,36 @@ function planOwningSide(
    * one row to point at, and Prisma refuses an array here too.
    */
   /**
-   * `disconnect: true` on a to-one — clear the foreign key this row holds.
+   * `disconnect` on a to-one whose key is on **this** row — the same three arms
+   * the foreign side takes, through the same two helpers (#359).
    *
-   * No step at all: the key lives on this row, so it is one more bound column
-   * set to `null`, exactly as `connect`'s direct form is one bound column set
-   * to a value. Nothing on the child is read or written, which is why there is
-   * no scoping question on this side — the row being changed is the one the
-   * statement already names.
+   * Prisma's operand here is `XWhereInput | boolean`, read off the generated
+   * client and measured against it:
+   *
+   *     disconnect: true                    clears the link
+   *     disconnect: false                   nothing happens, the link survives
+   *     disconnect: {}                      clears it — the empty filter matches
+   *     disconnect: { name: "Ada" }         clears it only if the linked row matches
+   *     disconnect: { name: "Grace" }       no match, so nothing happens — and
+   *                                         **silently**, not P2025
+   *     disconnect: <filter>, nothing linked   silently nothing
+   *
+   * The silence in the last two is what makes the filter arm a *conditional*
+   * detach rather than a guarded one: there is no miss to report, which is the
+   * same asymmetry the foreign side measured between `disconnect` and `delete`
+   * (M8c). So the arms differ only in what decides the value of one column.
+   *
+   * **The boolean is structural here, where the foreign side re-reads it at
+   * bind time**, and that difference is forced rather than chosen. The foreign
+   * side's operands are *statements* — `listOf(null)` is no statement — so a
+   * plan handed the wrong boolean can still write nothing. This side's is a
+   * *column in the SET list*: `false` emits no assignment and `true` emits one,
+   * so the two spellings cannot share a statement text and no bind-time check
+   * could rescue a cache hit that got it wrong. What makes that sound is
+   * `shapeOfMember`'s guard (#358), which gives a `disconnect` boolean its own
+   * plan key precisely because this decision is made once, at compile time.
+   * Before it, a plan compiled from `true` served `false` and nulled a foreign
+   * key on a call that asked for nothing.
    *
    * `delete` has no meaning here for the same reason it has no `createMany`:
    * this side is a to-one, and deleting the far row through a `data` key would
@@ -438,33 +462,114 @@ function planOwningSide(
    * of an unrelated update is the kind of thing to implement deliberately.
    */
   if (key === "disconnect") {
+    // Before the arms, so a required foreign key is refused whichever one was
+    // spelled — including `false`, which asks for nothing and still cannot be
+    // written. Prisma agrees for a reason of its own: it leaves `disconnect`
+    // out of the input type entirely when the relation is required, so
+    // `disconnect: false` there is *"Unknown argument `disconnect`"* rather
+    // than an accepted no-op. Measured on `SocialAccount.user`.
     assertDisconnectable(schema, relation, fkField, {
       model: schema.name,
       operation,
       argument: `data.${relation.name}.disconnect`,
     });
 
-    // MEASURED, and narrower than what this used to claim: Prisma's owning-side
-    // operand is `XWhereInput | boolean`, so it takes `true`, `false` (a no-op —
-    // the row keeps its link) and a filter. gemi implements the `true` arm only.
-    // The message says that rather than asserting Prisma offers nothing else,
-    // which is what it said before the foreign side was measured and is
-    // contradicted by this repository's own differential suite one directory
-    // over. The gap is real but it is a gap, not the shape of the input.
-    if (operand !== true) {
-      throw new UnsupportedQueryError(
-        `data.${relation.name}.disconnect`,
-        schema.name,
-        operation,
-        `'${relation.name}' is a to-one whose foreign key lives on this row, ` +
-          `and only 'disconnect: true' is implemented for it — that clears ` +
-          `the link. Prisma also accepts 'false', which does nothing, and a ` +
-          `filter; neither is implemented here yet. Pass 'true', or skip the ` +
-          `operand entirely on the branch that should not detach.`,
-      );
+    // `true` -> `{}`, `false` -> `null`, a filter passes through: the same
+    // translation and the same shape check the foreign side runs, reused rather
+    // than restated so the two sides cannot answer one grammar differently
+    // again — which is the defect #359 was filed for.
+    const filter = toOneOperand(key, operand);
+    assertToOneFilter(schema, relation, child, filter, key, operation);
+
+    // `false` — no contribution and no step, so the operand contributes
+    // *nothing at all*: a `data` carrying only this compiles to the read
+    // `compileUpdate` emits for an empty assignment list, and the row comes
+    // back with its link intact. That is Prisma's answer, and the reason the
+    // differential asserts it by value: what this replaces was a write.
+    if (filter === null || filter === undefined) return;
+
+    /**
+     * `true` — one bound column set to `null`, exactly as `connect`'s direct
+     * form is one bound column set to a value. No step, nothing on the child
+     * read or written, and so no scoping question: the row being changed is
+     * the one the statement already names.
+     */
+    if (operand === true) {
+      out.contributions.push({ field: fkField, value: () => null });
+      return;
     }
 
-    out.contributions.push({ field: fkField, value: () => null });
+    /**
+     * A filter — detach only if the row this one points at matches it.
+     *
+     * Two reads, and neither is avoidable from this side. The condition is a
+     * property of the *linked* row, and which row that is lives in a column of
+     * the row being updated, which the arguments do not carry — so the parent
+     * is read first and the child second. The far side needs neither: its
+     * filter goes straight into the `where` of the `updateMany` that clears the
+     * key, because there the key is on the row being filtered.
+     *
+     * **The child read goes through the child's own `$exec`, un-pre-scoped**,
+     * which is what puts this operand on the supported side of this file's
+     * line. A `disconnect` that acts on "whatever is there" has no lookup to
+     * hang a scope on; this one has, so a child the caller's policies hide
+     * reads as absent and the link survives — the same conservative answer
+     * `set` gives, and the same one the foreign side's `disconnect` gives for a
+     * hidden row.
+     *
+     * The parent read is **pre-scoped**: `args.where` is the effective `where`
+     * this call already put through this model's policies, so re-applying them
+     * would `AND` the same predicate twice. It reads one column of one row —
+     * `update` matched its `where` against a unique key — inside the
+     * transaction the nested steps already run in, so the value it returns is
+     * the one the statement below is about to write over.
+     */
+    out.before.push({
+      relation: relation.name,
+      operation: "disconnect",
+      async run(args, context, executor) {
+        // Default to the value that is already there, so a filter that matches
+        // nothing writes the column back unchanged. The contribution is in the
+        // SET list either way — the statement's text cannot depend on a value
+        // read at bind time — so "nothing happens" has to be spelled as an
+        // assignment that changes nothing rather than as an absent one.
+        context.resolved[fkField] = null;
+
+        const parent = (await executor.exec(
+          schema.name,
+          "findFirst",
+          { where: args?.where, select: { [fkField]: true } },
+          true,
+        )) as Record<string, unknown> | null;
+
+        const linked = parent?.[fkField];
+        // Nothing linked: no row for the filter to match, and Prisma is silent
+        // about it. `null` is already what the column holds.
+        if (linked === null || linked === undefined) return;
+
+        context.resolved[fkField] = linked;
+
+        const matched = await executor.exec(
+          relation.model,
+          "findFirst",
+          {
+            // `AND`, not a spread: a filter naming the referenced column itself
+            // must narrow rather than replace the restriction that keeps this
+            // on the linked row. Same rule as everywhere else here.
+            where: conjoin(at(args), { [referenced]: linked }),
+            select: { [referenced]: true },
+          },
+          false,
+        );
+
+        if (matched) context.resolved[fkField] = null;
+      },
+    });
+
+    out.contributions.push({
+      field: fkField,
+      value: (_args, context) => context.resolved[fkField],
+    });
     return;
   }
 
@@ -776,6 +881,37 @@ function planForeignSide(
   out.keyFields.push(parentField);
 
   /**
+   * **Whether linking through this relation has to displace what is linked
+   * already** — the to-one case, where the child's key carries the `@unique`
+   * that makes the relation hold one row, so a second link is a collision
+   * rather than a second row.
+   *
+   * Prisma detaches the incumbent rather than deleting it, and it does so for
+   * some of the operands that link and not others. That split is not derivable
+   * — it is measured, on one fixture, and it is the reason `displaces` is
+   * consulted per operand rather than applied to "anything that links":
+   *
+   *     create                    displaces the incumbent, links the new row
+   *     connect                   displaces the incumbent, links the named row
+   *     connectOrCreate, hit      the same — it *is* a connect (#361)
+   *     connectOrCreate, miss     collides: P2002 on the child's key
+   *     upsert, create branch     collides: P2002 on the child's key
+   *
+   * So the two branches of one `connectOrCreate` answer differently, which is
+   * Prisma's asymmetry and not an embellishment: what displaces is *linking an
+   * existing row*, plus the bare `create` — and the create inside the two
+   * compound operands does not.
+   *
+   * Nullable, because a detach has to leave a value behind. A required child
+   * key cannot be nulled at all, so the insert or repoint collides as it always
+   * did, which is the only thing the schema permits. `assertDisconnectable` is
+   * deliberately not called here: it would refuse the whole operand, including
+   * the empty-to-one case that has always worked.
+   */
+  const displaces =
+    relation.kind !== "many" && child.fields[childField]?.nullable === true;
+
+  /**
    * **A to-one whose key is on the child**, which this function otherwise plans
    * as though the child were a list.
    *
@@ -968,6 +1104,16 @@ function planForeignSide(
    * the scope-escape guard, because it cannot tell a column the ORM wrote from
    * one the caller did. #99 fixes that for every relation operand at once, and
    * this needs no change when it lands.
+   *
+   * **The clearing half stopped inheriting it and the linking half must not,
+   * which is measured rather than tidy.** `clearLinks` names the column as the
+   * ORM's, because a nested `create` on an occupied to-one needs the same clear
+   * and would otherwise be refused for a write nobody made. Naming it on the
+   * *link* too makes `set` succeed — and succeed wrongly: the clear nulls the
+   * key, which puts the row outside the very scope (`{ folderId: 2 }`) the link
+   * then has to select it by, so the row is detached and never re-attached. A
+   * silent half-write in place of a loud refusal. Left refused until #99 can
+   * answer the scope as well as the guard.
    */
   /**
    * `updateMany` and `deleteMany` — a **filter**, applied to this parent's rows.
@@ -1159,24 +1305,7 @@ function planForeignSide(
 
         const parentKey = parent[parentField];
 
-        // Everything currently linked *that this caller can see*. Not
-        // pre-scoped, which is the whole mechanism: the child's own policies
-        // decide what "currently linked" means for this caller.
-        const linked = (await executor.exec(
-          relation.model,
-          "findMany",
-          { where: { [childField]: parentKey }, select: { [childField]: true } },
-          false,
-        )) as Record<string, unknown>[];
-
-        if (linked.length > 0) {
-          await executor.exec(
-            relation.model,
-            "updateMany",
-            { where: { [childField]: parentKey }, data: { [childField]: null } },
-            false,
-          );
-        }
+        await clearLinks(relation, childField, parentKey, executor);
 
         for (const entry of listOf(at(args))) {
           await executor.exec(
@@ -1394,6 +1523,40 @@ function planForeignSide(
     return;
   }
 
+  /**
+   * `create` — insert the child, with this row's key stamped onto it.
+   *
+   * **On a to-one the new row has to displace the old one, and Prisma
+   * *detaches* the incumbent rather than deleting it** (#360). Measured, with
+   * user 1 already carrying a profile:
+   *
+   *     user.update({ data: { profile: { create: { bio: "second" } } } })
+   *       ->  ("seed",   null)   the incumbent, orphaned and still in the table
+   *           ("second", 1)      the new row takes the link
+   *
+   * The orphaning is the half that is not guessable, and getting it wrong in
+   * the other direction — deleting the displaced row — is silent data loss
+   * wearing the same green test. So the differential reads the table back
+   * rather than only checking that the call returned.
+   *
+   * Without the detach the insert simply collides: the child's foreign key
+   * carries the `@unique` that makes the relation a to-one, so this was a
+   * `UniqueConstraintError` on a call Prisma answers. `create` survived #354
+   * because that change was about the operands refused *by name* on this side,
+   * and `create` was never one of them — against an *empty* to-one it has
+   * always been correct, and no fixture had a to-one whose key is on the child
+   * until #358 added one.
+   *
+   * **`clearLinks`, so the scoping consequence is the same one `set` has** —
+   * which is why the two share it. A child hidden by the caller's policies is
+   * not detached, and the incumbent then wins the unique key: a
+   * `UniqueConstraintError` rather than a silent detach of a row the caller
+   * cannot see. Conservative in the direction this file always chooses.
+   *
+   * A to-many displaces nothing — clearing every child before a nested `create`
+   * would be a `set: []` nobody asked for — which is half of what `displaces`
+   * decides; see it for the other half and for which operands share this.
+   */
   if (key === "create") {
     out.after.push({
       relation: relation.name,
@@ -1403,6 +1566,17 @@ function planForeignSide(
         // No row means the statement matched nothing; `update` and `delete`
         // raise before this runs, so there is nothing to attach to.
         if (!parent) return;
+
+        // Runs on a parent `create` too, where nothing can be linked yet and it
+        // finds nothing. Deliberately not skipped by operation: gemi does not
+        // enable SQLite's foreign-key pragma, so "a row that was just inserted
+        // has no children" is a property of the database's enforcement rather
+        // than of the ORM — and a correctness argument resting on a pragma is
+        // the kind that holds until someone reads it. One read, on a path that
+        // already runs several.
+        if (displaces) {
+          await clearLinks(relation, childField, parent[parentField], executor);
+        }
 
         for (const item of listOf(at(args))) {
           await executor.exec(
@@ -1551,6 +1725,16 @@ function planForeignSide(
           )) as Record<string, unknown> | null;
 
           if (found) {
+            // The hit branch **is** a connect, so it displaces what is linked
+            // exactly as the bare operand does (#361) — and the miss branch
+            // below does not, which is Prisma's own split rather than a
+            // shortcut here. Measured on one fixture: `connectOrCreate` hitting
+            // a row orphans the incumbent and takes the link, while the same
+            // call missing collides on the child's unique key. See `displaces`.
+            if (displaces) {
+              await clearLinks(relation, childField, parent[parentField], executor);
+            }
+
             await executor.exec(
               relation.model,
               "update",
@@ -1596,12 +1780,42 @@ function planForeignSide(
   // table the foreign key is on (#110).
   assertNamedRows(schema, relation, child, operand, key, operation);
 
+  /**
+   * **On a to-one this repoint has to displace what is linked already** (#361),
+   * the same way the nested `create` beside it does and through the same
+   * `clearLinks`. Without it the child's `@unique` foreign key rejects the
+   * second link, so `connect` was a `UniqueConstraintError` on a call Prisma
+   * answers by orphaning the incumbent.
+   *
+   * Measured across the four shapes, because only one of them diverged and the
+   * other three are what kept it hidden:
+   *
+   *     connect onto an empty to-one          attaches           agreed already
+   *     connect a child of another parent     repoints it        agreed already
+   *     connect the row already linked here   no net change      agreed already
+   *     connect onto an occupied to-one       displaces          the divergence
+   *
+   * The third is worth its own line, because the clear and the link cross on
+   * it: `clearLinks` nulls the very row the caller named, and the update below
+   * puts the key straight back. One statement wasted on a call that changes
+   * nothing, and the alternative — excluding the named row from the clear —
+   * would need the caller's key resolved against the child before the clear can
+   * be written, which is a lookup on every `connect` to save one on a rare one.
+   *
+   * **A miss detaches nothing**, which is Prisma's answer (P2025, nothing
+   * written) and is not a special case here: the `update` below raises, and the
+   * clear is inside the transaction the nested steps already run in.
+   */
   out.after.push({
     relation: relation.name,
     operation: "connect",
     async run(args, _context, executor, rows) {
       const parent = rows[0];
       if (!parent) return;
+
+      if (displaces) {
+        await clearLinks(relation, childField, parent[parentField], executor);
+      }
 
       for (const item of listOf(at(args))) {
         await executor.exec(
@@ -2105,6 +2319,54 @@ function conjoin(
     return restriction;
   }
   return { AND: [filter as object, restriction] };
+}
+
+/**
+ * Detach every child currently pointing at this parent **that the caller can
+ * see** — the clearing half of `set`, and the same half a nested `create` on an
+ * occupied to-one needs before it can insert (#360).
+ *
+ * Shared rather than written twice because the *scoping* is the interesting
+ * part and it has to be identical on both: the read goes through the child's
+ * own `findMany` un-pre-scoped, so a row the child's policies hide is not
+ * detached. `set` therefore means "replace the set I can see" (#83), and the
+ * nested `create` means "displace the child I can see" — with a hidden
+ * incumbent the insert collides on the unique key instead, which is the
+ * conservative answer rather than a silent detach of somebody else's row.
+ *
+ * The `findMany` decides whether to issue the write at all. The `updateMany`
+ * would match the same rows on its own; what the read adds is that the common
+ * case — nothing linked — costs a select rather than an update, and that the
+ * scope is consulted through a read before anything is written.
+ *
+ * `[childField]` is ORM-authored: the caller named a row to `set`, or a payload
+ * to `create`, and the ORM chose to null this column. Without it a child scoped
+ * on its own foreign key is refused by the scope-escape guard for a write it
+ * never made — #98, and the reason `disconnect` one operand over passes the
+ * same list.
+ */
+async function clearLinks(
+  relation: RelationSchema,
+  childField: string,
+  parentKey: unknown,
+  executor: RelationExecutor,
+): Promise<void> {
+  const linked = (await executor.exec(
+    relation.model,
+    "findMany",
+    { where: { [childField]: parentKey }, select: { [childField]: true } },
+    false,
+  )) as Record<string, unknown>[];
+
+  if (linked.length === 0) return;
+
+  await executor.exec(
+    relation.model,
+    "updateMany",
+    { where: { [childField]: parentKey }, data: { [childField]: null } },
+    false,
+    [childField],
+  );
 }
 
 /**

@@ -182,6 +182,18 @@ describe("shape guards", () => {
       "data.profile.create",
       /Expected a single object/,
     ],
+    // The owning side reads the same grammar since #359, through the same
+    // guard — so a bad `disconnect` operand is refused in the same words
+    // wherever the key lives. Pinned on this side too because "the same words"
+    // is the property that was missing: it used to answer with a gap
+    // ("only 'disconnect: true' is implemented") where the far side answered
+    // with a shape.
+    [
+      "a to-one disconnect this row owns is neither a boolean nor a filter",
+      write({ where: { id: 1 }, data: { organization: { disconnect: 5 } } }),
+      "data.organization.disconnect",
+      /takes either a boolean/,
+    ],
     // The owning side's half of the same refusal, pinned because the message
     // now names *which* side holds the key and the two arms can only be told
     // apart by reading both.

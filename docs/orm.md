@@ -899,11 +899,11 @@ await List.create({
 
 | Operand | What it does |
 | --- | --- |
-| `create` | Writes new related rows. One statement each. |
+| `create` | Writes new related rows. One statement each. On a **to-one that already has a child** the new row takes the link and the old one is detached — orphaned, not deleted. |
 | `createMany` | The same rows in **one** statement. To-many only, and the rows go inside `data`. |
-| `connect` | Points at an existing row — a bound column when it names the referenced key, a lookup otherwise. |
+| `connect` | Points at an existing row — a bound column when it names the referenced key, a lookup otherwise. On a **to-one that already has a child** it displaces the incumbent, as `create` does. |
 | `connectOrCreate` | Looks the row up by a unique key and creates it only if it is not there. **A hit ignores `create` entirely** — it is connect-*or*-create, not upsert. |
-| `disconnect` | Clears the link. A unique key, or a list of them, on a to-many; `true` on a to-one, and a filter as well when the child is the side holding the key. The column that goes null is on whichever side holds it, and it has to be nullable. |
+| `disconnect` | Clears the link. A unique key, or a list of them, on a to-many; `true`, `false` or a filter on a to-one, whichever side holds the key. The column that goes null is on whichever side holds it, and it has to be nullable. |
 | `delete` | Deletes the named rows outright, not just the link. A unique key or a list of them on a to-many; `true`, or a filter, on a to-one whose child holds the key. |
 | `update` | Writes your columns to the named row. The child's own `onUpdate` and scope rules apply to the payload. |
 | `set` | Replaces the whole set — detaches what is linked now, attaches what you name. |
@@ -986,6 +986,31 @@ With no policy on the child that is Prisma's `set` exactly. Two of its behaviour
 because the name does not suggest them — it will repoint a row belonging to another parent, exactly
 as `connect` does, and it silently ignores a named row that does not exist.
 
+**Writing onto a to-one that already has a child displaces it.** The new or newly-linked row takes
+the link and the incumbent is left in the table with a null foreign key — detached, not deleted,
+which is Prisma's answer and the one worth stating because deleting would be the silent version of
+the same call. What can be displaced is what your policies let you see: an incumbent hidden from you
+is not detached, and the write then collides with it on the child's unique key.
+
+Which operands displace is Prisma's, measured rather than derived, and it is not "everything that
+ends with a child pointing here":
+
+| operand | on an occupied to-one |
+| --- | --- |
+| `create` | displaces the incumbent |
+| `connect` | displaces the incumbent |
+| `connectOrCreate`, hit | displaces — it *is* a connect |
+| `connectOrCreate`, miss | collides on the child's unique key |
+| `upsert`, create branch | collides on the child's unique key |
+
+So the two branches of one `connectOrCreate` answer differently: linking an existing row displaces,
+and the `create` *inside* a compound operand does not, though a bare `create` does.
+
+One gap remains, on the other side of the key: pointing **this** row at a partner who already has
+one — `Profile.update({ data: { user: { connect: { id } } } })` where that user's profile is taken —
+collides here and displaces in Prisma. Detach the incumbent first, or write the foreign key
+directly.
+
 **On a to-one, `disconnect` and `delete` take `true` or a filter — and `false` is a no-op rather
 than a synonym for `true`.** There is one row and nothing to name, so `true` is how you say *the
 one that is linked*. A filter narrows rather than picks: `delete: { status: "draft" }` acts only if
@@ -999,11 +1024,23 @@ than a choice gemi made: `delete` raises `RecordNotFoundError` when there is no 
 `disconnect` is silent. That holds whichever way the row went missing — no child linked at all, or a
 child present that the filter does not match, or a child your policies hide, which reads as no row
 at all here exactly as it does everywhere else. Note the last one carries a different error from its
-to-many spelling, which reports a hidden row as *not connected*. On the side that holds the foreign
-key *itself* there is nothing to filter — the row being cleared is the one the statement already
-names — so `disconnect` takes `true` alone there, and a `false` is refused rather than ignored. That
-last one is a divergence: Prisma treats it as the no-op it reads like. It is a loud refusal on the
-branch that asked for nothing, which is the wrong answer given noisily rather than quietly.
+to-many spelling, which reports a hidden row as *not connected*.
+
+**All three arms work on either side of the key**, and the side that holds it reaches them
+differently. Where the key is on the row you are writing, `true` is one bound column set to null and
+costs nothing; `false` writes nothing at all; a filter has to read the linked row before it can
+decide, so it costs a lookup — and that lookup goes through the far model's own policies, which
+means a linked row you cannot see reads as one that does not match and the link survives. `true` has
+no lookup to scope, so it clears the column either way. That difference is worth knowing before you
+reach for the filter to enforce something: it narrows *whether* the detach happens, and a policy can
+narrow it further.
+
+One divergence, and it is deliberate. On a **many-to-one** — a to-one whose other side is a list —
+Prisma ignores this operand's value: `disconnect: false` and a filter matching nothing both clear
+the key, though the generated input type is the same `WhereInput | boolean` it honours on a
+one-to-one. gemi answers one grammar the same way on both shapes, because the behaviour to match is
+a silent write on the call that asked for nothing. So `disconnect: shouldDetach` is safe here and is
+not safe through the Prisma client.
 
 **An array is refused on a to-one whose child holds the key** — `create`, `connect`,
 `connectOrCreate`, `update`, `delete` and `upsert` alike — and that is matching Prisma rather than
