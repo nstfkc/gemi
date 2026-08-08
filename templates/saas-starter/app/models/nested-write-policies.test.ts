@@ -962,6 +962,190 @@ describe("policies on nested writes", () => {
       const covers: any = await raw.unsafe(`SELECT "caption" FROM "Cover"`);
       expect(covers[0].caption).toBe("theirs");
     });
+
+    /**
+     * A nested `create` **displaces** the child that is already linked (#360),
+     * and the displaced row is orphaned rather than deleted — Prisma's answer,
+     * measured, and the half of it that would be silent data loss to get wrong.
+     *
+     * Here for the policy that decides *which* incumbent it can displace: the
+     * clearing read goes through the child's own `findMany`, so this is `set`'s
+     * rule reached by a different operand.
+     */
+    test("create displaces the linked child the caller can see, orphaning it", async () => {
+      await seedFolder();
+      await raw.unsafe(
+        `INSERT INTO "Cover" ("id", "folderId", "caption", "orgId") ` +
+          `VALUES (52, 2, 'ours', 7)`,
+      );
+
+      await Model.asUser(OURS, () =>
+        Folder.$exec("update", {
+          where: { id: 2 },
+          data: { cover: { create: { caption: "second" } } },
+        }),
+      );
+
+      const covers: any = await raw.unsafe(
+        `SELECT "caption", "folderId", "orgId" FROM "Cover" ORDER BY "id"`,
+      );
+      // Two rows: the incumbent survives with no link, the new one takes it.
+      expect([...covers].map((cover: any) => [cover.caption, cover.folderId])).toEqual([
+        ["ours", null],
+        ["second", 2],
+      ]);
+      // And the new row is ours, through the child's own `onCreate`.
+      expect(covers[1].orgId).toBe(7);
+    });
+
+    /**
+     * ...and the incumbent this caller **cannot see** is not displaced.
+     *
+     * The clearing read misses, so nothing is detached, and the insert then
+     * collides with the row the caller was never shown — `UniqueConstraintError`
+     * naming a column they did not write. That is the same answer the hidden
+     * `upsert` gives two tests up, and it is the conservative one: the
+     * alternative is detaching another tenant's row on a call that never named
+     * it, which is exactly what `set`'s lookup exists to prevent.
+     *
+     * The unhappy reading is worth stating plainly, because it is the cost:
+     * this caller cannot complete the write at all, and the error does not say
+     * why. Nothing is written either way, which is the part that has to hold.
+     */
+    test("create does not displace an incumbent the caller cannot see", async () => {
+      await seedFolder();
+      await hiddenCover();
+
+      await expect(
+        Model.asUser(OURS, () =>
+          Folder.$exec("update", {
+            where: { id: 2 },
+            data: { cover: { create: { caption: "second" } } },
+          }),
+        ),
+      ).rejects.toThrow(UniqueConstraintError);
+
+      // Theirs, still linked, still unedited — and no second row beside it.
+      const covers: any = await raw.unsafe(`SELECT * FROM "Cover"`);
+      expect([...covers]).toHaveLength(1);
+      expect(covers[0].caption).toBe("theirs");
+      expect(covers[0].folderId).toBe(2);
+    });
+  });
+
+  /**
+   * The **owning** side of a to-one — `Note.folder`, where the key is on the
+   * row being written (#359).
+   *
+   * The three arms do not consult the child equally, and that is the whole
+   * content of this describe:
+   *
+   *   disconnect: true      no lookup at all — the column is on this row
+   *   disconnect: false     no lookup, and no write either
+   *   disconnect: <filter>  reads the linked row through *its own* `$exec`
+   *
+   * So the filter arm acquires a scoping question the boolean does not have,
+   * and answers it the way every other lookup in this file does: a linked row
+   * the caller cannot see reads as one that does not match, and the link
+   * survives. `true` detaches it regardless, because there is nothing to read —
+   * the caller is writing a column of a row they already hold.
+   */
+  describe("a to-one whose key is on this row", () => {
+    /** Our note, pointing at the *other* tenant's folder. */
+    const seedNote = () =>
+      raw.unsafe(
+        `INSERT INTO "Note" ("id", "folderId", "label", "orgId") ` +
+          `VALUES (60, 1, 'ours', 7)`,
+      );
+
+    const folderIdOf = async (id: number) => {
+      const rows: any = await raw.unsafe(
+        `SELECT "folderId" FROM "Note" WHERE "id" = ${id}`,
+      );
+      return rows[0].folderId;
+    };
+
+    test("a filter does not detach a linked row the caller cannot see", async () => {
+      await seedNote();
+
+      await expect(
+        Model.asUser(OURS, () =>
+          Note.$exec("update", {
+            where: { id: 60 },
+            // An empty filter, which is the *widest* one there is: it matches
+            // every row, so the only thing that can make it miss is the scope.
+            data: { folder: { disconnect: {} } },
+          }),
+        ),
+      ).resolves.toBeDefined();
+
+      expect(await folderIdOf(60)).toBe(1);
+    });
+
+    test("a filter detaches a linked row the caller can see", async () => {
+      await raw.unsafe(
+        `INSERT INTO "Folder" ("id", "code", "orgId") VALUES (2, 'ours', 7)`,
+      );
+      await raw.unsafe(
+        `INSERT INTO "Note" ("id", "folderId", "label", "orgId") ` +
+          `VALUES (61, 2, 'ours', 7)`,
+      );
+
+      await Model.asUser(OURS, () =>
+        Note.$exec("update", {
+          where: { id: 61 },
+          data: { folder: { disconnect: { code: "ours" } } },
+        }),
+      );
+
+      expect(await folderIdOf(61)).toBeNull();
+      // Detached, not deleted: the far row is nobody's business here.
+      const folders: any = await raw.unsafe(`SELECT "id" FROM "Folder" WHERE "id" = 2`);
+      expect([...folders]).toHaveLength(1);
+    });
+
+    /**
+     * **`true` is not scoped, and that is deliberate rather than an oversight.**
+     *
+     * It writes one column of the row the statement already names, and that row
+     * is this caller's — the parent's own policies decided that before the
+     * statement ran. There is no read of the far model to scope, so hiding the
+     * far row cannot be made to matter without inventing a lookup the operand
+     * does not need. Prisma's `true` means "the connected row" and consults
+     * nothing either.
+     *
+     * Pinned because the pair reads as an inconsistency otherwise: the same
+     * operand, on the same relation, detaches under `true` and does not under
+     * `{}` — with the difference being which model's rows the call touches.
+     */
+    test("true detaches whatever is linked, hidden or not", async () => {
+      await seedNote();
+
+      await Model.asUser(OURS, () =>
+        Note.$exec("update", {
+          where: { id: 60 },
+          data: { folder: { disconnect: true } },
+        }),
+      );
+
+      expect(await folderIdOf(60)).toBeNull();
+    });
+
+    /** And `false` writes nothing at all, hidden far row or not. */
+    test("false leaves the link alone", async () => {
+      await seedNote();
+
+      await Model.asUser(OURS, () =>
+        Note.$exec("update", {
+          where: { id: 60 },
+          data: { label: "renamed", folder: { disconnect: false } },
+        }),
+      );
+
+      expect(await folderIdOf(60)).toBe(1);
+      const notes: any = await raw.unsafe(`SELECT "label" FROM "Note" WHERE "id" = 60`);
+      expect(notes[0].label).toBe("renamed");
+    });
   });
 
   /**
@@ -1064,16 +1248,44 @@ describe("policies on nested writes", () => {
           }),
         );
 
-      // Both operands, so this records that it is a property of the guard
-      // rather than of the one operand this PR added.
+      const linkOf = async () => {
+        const rows: any = await raw.unsafe(
+          `SELECT "folderId" FROM "Note" WHERE "id" = 20`,
+        );
+        return rows[0].folderId;
+      };
+
+      /**
+       * **`set` is still refused, and it goes first because it is the one that
+       * has something to leave behind.**
+       *
+       * It writes the column twice — null to clear, the parent's key to link —
+       * and `clearLinks` now names the clear as the ORM's, because the nested
+       * `create` beside it needs exactly that clear. The link is deliberately
+       * left un-named: with both named the call *succeeds* and leaves the row
+       * detached, because the clear puts it outside the very scope
+       * (`{ folderId: 2 }`) the link then selects it by. A silent half-write in
+       * place of a loud refusal, so the refusal stays until #99 can answer the
+       * scope as well as the guard.
+       *
+       * The row is read back because the clear does run before the link
+       * refuses: what makes that harmless is the transaction around the nested
+       * steps, not the order of the checks.
+       */
+      await expect(attempt({ set: [{ id: 20 }] })).rejects.toThrow(ScopeEscapeError);
+      expect(await linkOf()).toBe(2);
+
+      // Both of the operands #98 landed for, so this records that it is a
+      // property of the guard rather than of the one operand that PR added.
       //
-      // `connect` first, and the order is load-bearing now that both succeed:
-      // `disconnect` nulls `folderId`, which puts the row outside the very
-      // scope (`{ folderId: 2 }`) that has to select it, so a `connect` after
-      // it finds nothing. While both were refusals neither wrote anything and
-      // the order did not matter.
+      // `connect` before `disconnect`, and the order is load-bearing now that
+      // both succeed: `disconnect` nulls `folderId`, which puts the row outside
+      // the scope that has to select it, so a `connect` after it finds nothing.
+      // While both were refusals neither wrote anything and the order did not
+      // matter.
       await expect(attempt({ connect: { id: 20 } })).resolves.toBeDefined();
       await expect(attempt({ disconnect: { id: 20 } })).resolves.toBeDefined();
+      expect(await linkOf()).toBeNull();
     } finally {
       register("Note", Note);
     }
