@@ -885,10 +885,12 @@ const OWNING_CASES: [string, string, unknown, string[]?][] = [
   ["O12b owning connect into an empty to-one attaches", "update", {
     where: { id: 2 }, data: { user: { connect: { id: 2 } } },
   }, ["Profile", "User"]],
-  // The row being written *is* the incumbent. Prisma nulls it and writes the
-  // same value straight back for a net nothing; gemi skips the clear and
-  // reaches the same table. The case that would catch a clear which fired on
-  // the row the repoint was about to restore.
+  // The row being written *is* the incumbent, and **Prisma writes nothing at
+  // all** — measured with logging on, the call is four selects between a
+  // `BEGIN` and a `COMMIT` and no `update`. gemi skips the clear for the same
+  // reason and reaches the same table, though it does still emit the repoint,
+  // which writes the value already there. The case that would catch a clear
+  // firing on the row the repoint was about to restore.
   ["O12c owning connect of the user already linked here changes nothing", "update", {
     where: { id: 1 }, data: { user: { connect: { id: 1 } } },
   }, ["Profile", "User"]],
@@ -932,6 +934,16 @@ const OWNING_CASES: [string, string, unknown, string[]?][] = [
   ["O13b owning connect into an empty to-one under a create", "create", {
     data: { bio: "fresh", user: { connect: { id: 2 } } },
   }, ["Profile", "User"]],
+  // **The atomicity of the detach is asserted in `nested-write-policies.test.ts`
+  // and cannot be asserted here**, which is worth saying because this is where
+  // a reader would look for it. It needs a call that *clears and then fails*,
+  // and every shape reachable through this fixture either never clears (`O12g`
+  // returns before writing) or clears and succeeds — so a clear that escaped
+  // the transaction leaves every case in this table green. The one shape that
+  // does it, a `create` naming an `id` that collides after the detach, is not
+  // comparable: Prisma has no `id` in `ProfileCreateInput`, so it answers a
+  // validation error where gemi answers the unique violation, and the harness
+  // compares failure kinds.
 
   // O14 — `connectOrCreate`, whose two branches answer differently for the same
   // reason they do on the foreign side (M14c / M15d): a **hit** is a connect, so

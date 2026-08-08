@@ -4020,18 +4020,25 @@ one that happened to hold the same foreign key. The table above applies unchange
 owning-side `create` reading as "no incumbent by construction" rather than as "displaces" — it mints
 the far row, so nothing can already be pointing at it.
 
-Two things are worth knowing about the owning side specifically.
+Three things are worth knowing about the owning side specifically.
 
-It applies only to a **one-to-one**, which here means the foreign key on your row carries a `@unique`.
-A many-to-one has no incumbent to displace — several rows may point at the same parent, which is the
-whole meaning of the relation — so nothing is detached and both rows end up linked. That is Prisma's
-answer too, and it is why `connect` costs nothing extra on the many-to-one that most nested writes
-are written against.
+It applies only to a **true one-to-one**, and that is more than "the foreign key is `@unique`". The
+other side has to be a single row too — `User.profile Profile?`, not `Team.players Player[]`. Prisma
+accepts a `@unique` foreign key beside a list back-relation, and on that schema it does **not**
+displace: the second `connect` collides on the key instead. A many-to-one likewise has no incumbent,
+since several rows may point at the same parent, which is the whole meaning of the relation. So
+`connect` costs nothing extra on the many-to-one that most nested writes are written against.
 
-And it needs a **nullable** foreign key, because a detach has to leave a value behind. Where yours is
+It needs a **nullable** foreign key, because a detach has to leave a value behind. Where yours is
 required, the repoint collides on the unique key. Prisma refuses the same call slightly earlier and
 more clearly, with P2014 — *"The change you are trying to make would violate the required relation"* —
 so the call fails on both and the class of failure differs.
+
+And **connecting the row you are already connected to writes nothing** — Prisma issues no statement
+at all for it, and gemi detaches nothing. One difference remains: gemi still emits the update that
+sets the key to the value it already holds, so on a one-to-one owner carrying `@updatedAt` gemi bumps
+the stamp where Prisma leaves it. That is the same stamp difference described under nested writes
+above, and it is specific to this case — on a many-to-one both clients update and both stamp.
 
 **On a to-one, `disconnect` and `delete` take `true` or a filter — and `false` is a no-op rather
 than a synonym for `true`.** There is one row and nothing to name, so `true` is how you say *the

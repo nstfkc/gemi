@@ -1292,23 +1292,22 @@ describe("policies on nested writes", () => {
 
     /**
      * **The row being written is itself the incumbent, under a policy that
-     * scopes on the foreign key** — the one arrangement where reproducing
-     * Prisma's clear literally would be a silent half-write.
+     * scopes on the foreign key** — the arrangement where clearing it would be
+     * a silent half-write.
      *
-     * Prisma nulls the column and writes the same value straight back, for a
-     * net nothing. Here the repoint is not a statement of its own; it is a
-     * contribution to the main statement, whose `where` carries `folderId = 2`
-     * because the policy put it there. A clear that fired would move the row
-     * out of that scope *before* the statement ran, so the statement would
-     * match nothing and the row would end up detached and never re-attached —
-     * `set`'s hazard from #98/#99, arriving on the other side of the key. So
-     * `displaceSibling` reads this row first and skips the clear when it is
-     * already the incumbent, which is observationally identical to Prisma
-     * everywhere else because the only row the skip removes from the clear is
-     * the one the repoint was about to restore.
+     * Prisma writes nothing at all for an already-linked `connect`: measured
+     * with query logging, the call is four selects between a `BEGIN` and a
+     * `COMMIT`, with no `update` in it. So skipping the clear is parity rather
+     * than a departure — but the reason it is *load-bearing* here is local. The
+     * repoint on this side is not a statement of its own; it is a contribution
+     * to the main statement, whose `where` carries `folderId = 2` because the
+     * policy put it there. A clear that fired would move the row out of that
+     * scope *before* the statement ran, so the statement would match nothing
+     * and the row would end up detached and never re-attached — `set`'s hazard
+     * from #98/#99, arriving on the other side of the key.
      *
-     * The scope is what makes this assertable. Without it the clear-then-
-     * repoint and the skip land on the same table, and this test cannot fail.
+     * The scope is what makes this assertable. Without it a clear-then-repoint
+     * and the skip land on the same table, and this test cannot fail.
      */
     test("connecting the far row already linked here is a no-op under a key scope", async () => {
       class KeyScoped extends Model {
@@ -1335,6 +1334,49 @@ describe("policies on nested writes", () => {
       } finally {
         register("Cover", Cover);
       }
+    });
+
+    /**
+     * **The detach and the write are one unit** — #363's "a failure anywhere
+     * rolls back the detach as well as the repoint", asserted rather than
+     * argued from the fact that `$exec` opens a transaction for a plan carrying
+     * steps.
+     *
+     * Not a policy test, and here only because this file has the fixtures for
+     * it. The differential cannot host it: it needs a call that clears and
+     * *then* fails, and every shape the template's `Profile` can express either
+     * never clears — `O12g`'s parent is absent, so the step returns before
+     * writing — or clears and succeeds. The one shape that works, a `create`
+     * naming a colliding `id`, is not comparable against Prisma, which has no
+     * `id` in `ProfileCreateInput` and answers a validation error where gemi
+     * answers the unique violation.
+     *
+     * So: cover 75 holds folder 2 and is the incumbent. The `create` below
+     * detaches it to free the key, then collides with it again on the *primary*
+     * key. If the clear were outside the transaction, cover 75 would survive
+     * with a null `folderId` — detached by a statement that failed, which is
+     * the silent half-write this bullet exists to rule out.
+     *
+     * Verified to fail with the transaction disabled: it is the only test on
+     * the owning side that does.
+     */
+    test("a failure after the detach rolls the detach back", async () => {
+      await ourFolder();
+      await raw.unsafe(
+        `INSERT INTO "Cover" ("id", "folderId", "caption", "orgId") ` +
+          `VALUES (75, 2, 'incumbent', 7)`,
+      );
+
+      await expect(
+        Model.asUser(OURS, () =>
+          Cover.$exec("create", {
+            data: { id: 75, caption: "collides", folder: { connect: { id: 2 } } },
+          }),
+        ),
+      ).rejects.toThrow(UniqueConstraintError);
+
+      // Still linked. The detach went back with the insert that caused it.
+      expect(await links()).toEqual([[75, 2]]);
     });
   });
 

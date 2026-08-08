@@ -369,18 +369,52 @@ function planOwningSide(
    * makes the far row hold one partner, so pointing at an occupied one is a
    * collision rather than a second link (#363).
    *
-   * **The unique index is the discriminator here, where `planForeignSide` uses
-   * `relation.kind`, and the two are not in disagreement** — they are the same
-   * question asked from the two ends of the key. That function's `displaces`
-   * docblock has the argument in full; the half that matters here is its
-   * conclusion: `kind` says `"one"` for a many-to-one and a one-to-one alike,
-   * because both point at a single far row, so from this side there is nothing
-   * to read it off and the question has to go to `uniques` directly. Measured
-   * rather than assumed to matter: `Player.update({ data: { team: { connect:
-   * { id: 2 } } } })` against a `teamId` with no `@unique` leaves the other
-   * player on team 2 exactly where it was, and Prisma does not even read it —
-   * the logged statements are the operand lookup and the `update`, nothing
-   * else. Displacing there would be a write nobody asked for.
+   * **It takes both halves: the unique index *and* the far side's `kind`.** The
+   * first draft of this used the index alone, on the argument that
+   * `planForeignSide`'s `relation.kind` test and this one were "the same
+   * predicate, two spellings". They are not, and the difference is a silent
+   * destructive write rather than a wording problem.
+   *
+   * The implication holds one way only. P1012 gives *`kind !== "many"` implies
+   * the key is unique* — Prisma will not let a non-list back-relation exist
+   * beside a foreign key with no `@unique`. **The converse is false.** A
+   * `@unique` foreign key beside a *list* back-relation is a schema Prisma
+   * accepts:
+   *
+   *     model Team   { id Int @id  players Player[] }
+   *     model Player { id Int @id  teamId Int? @unique
+   *                    team Team? @relation(fields: [teamId], references: [id]) }
+   *
+   * `prisma validate` on that is *"The schema at b.prisma is valid"* — measured,
+   * not assumed. And the index alone would have displaced there, where Prisma
+   * does not: `Player.update({ where: { id: 2 }, data: { team: { connect:
+   * { id: 2 } } } })` with player 1 already on team 2 answers **P2002** and its
+   * whole statement log is `SELECT Team.id`, the `UPDATE`, `ROLLBACK` — the
+   * sibling is never even read. Against the same key with `keeper Keeper?` in
+   * place of `players Player[]`, the identical call displaces and the log gains
+   * the incumbent `SELECT` and its clear. So the *back-relation* is what
+   * decides, and the index is a necessary condition rather than the answer.
+   *
+   * It is not an exotic shape either: a `@unique` added to a foreign key for
+   * indexing, or a one-to-many half-migrated to a one-to-one, both land on it.
+   * Without the second half gemi's two ends disagreed about one relation — the
+   * foreign side saw `kind === "many"` and refused to displace, this side saw
+   * the index and did.
+   *
+   * So `relation.kind` is still not readable from here — it says `"one"` for a
+   * many-to-one and a one-to-one alike, because both point at a single far row,
+   * which is the part of the original argument that survives. The question goes
+   * to the *child's* copy of the relation instead, found by `relationName`, and
+   * `uniques` narrows it rather than answering it.
+   *
+   * **A back-relation that cannot be identified does not displace.** Absent or
+   * ambiguous, the answer is unknown, and of the two ways to be wrong only one
+   * writes to a row nobody named — so the fallback is the collision this
+   * operand raised before #363, which is also what a schema too malformed to
+   * read should get. The self-relation exclusion is `otherSide`'s, restated
+   * rather than shared because that function *throws* on the same condition and
+   * has never run on this path: turning a schema that compiled yesterday into a
+   * hard error is not this issue's to do.
    *
    * Nullable, for the same reason the foreign side is: a detach has to leave a
    * value behind. A required foreign key cannot be nulled, so the repoint
@@ -401,13 +435,25 @@ function planOwningSide(
    * the schema never said were exclusive. A foreign key that is also the `@id`
    * would not be found in `uniques`, which records `@unique` and `@@unique`
    * rather than the primary key; it is out of reach anyway, since `@id` implies
-   * `NOT NULL` and the guard above has already excluded it.
+   * `NOT NULL` and the nullable guard has already excluded it.
    */
+  const backRelations = Object.values(child.relations).filter(
+    (candidate) =>
+      candidate.relationName === relation.relationName &&
+      // A self-relation names the same model on both ends, so the *field* is
+      // what distinguishes them — `otherSide`'s test, and without it a
+      // self-referencing one-to-many would find its own owning side here,
+      // read `kind: "one"` off it and displace.
+      !(child.name === schema.name && candidate.name === relation.name),
+  );
+
   const displaces =
     schema.fields[fkField]?.nullable === true &&
     schema.uniques.some(
       (unique) => unique.length === 1 && unique[0] === fkField,
-    );
+    ) &&
+    backRelations.length === 1 &&
+    backRelations[0].kind !== "many";
 
   /**
    * Whether there is a row to displace *from* — false under a `create`, where
@@ -1034,24 +1080,29 @@ function planForeignSide(
    * deliberately not called here: it would refuse the whole operand, including
    * the empty-to-one case that has always worked.
    *
-   * **`relation.kind` is the discriminator here and the unique index is the
-   * discriminator on the owning side (#363), and the two are not in
-   * disagreement — they are the same question asked from the two ends of the
-   * key.** `kind` is a property of *this* relation's back-reference, and Prisma
-   * will not let a non-list back-relation exist without `@unique` on the
-   * child's foreign key. Verified against 6.19.2 rather than assumed:
-   * `User.profile Profile?` beside a `Profile.userId` carrying no `@unique` is
-   * refused at parse time with P1012 — *"A one-to-one relation must use unique
-   * fields on the defining side. Either add an `@unique` attribute to the field
-   * `userId`, or change the relation to one-to-many"* — so the only schema that
-   * reaches this line either has the index or has `User.profile` as a list.
-   * `kind !== "many"` on the foreign side *is* "the child's key is
-   * unique", read off the side that records it. From the owning side there is
-   * no such reading available — `relation.kind` says `"one"` for a many-to-one
-   * and a one-to-one alike, because both point at a single far row — so the
-   * question has to be put to the schema directly, as `uniques` containing the
-   * foreign-key column. Same predicate, two spellings, and neither side can
-   * borrow the other's.
+   * **`relation.kind` is the whole discriminator here, and it is *not* the same
+   * predicate as the owning side's (#363) — it is the stronger half of it.**
+   * `kind` is a property of this relation's back-reference, and Prisma will not
+   * let a non-list back-relation exist without `@unique` on the child's foreign
+   * key. Verified against 6.19.2 rather than assumed: `User.profile Profile?`
+   * beside a `Profile.userId` carrying no `@unique` is refused at parse time
+   * with P1012 — *"A one-to-one relation must use unique fields on the defining
+   * side. Either add an `@unique` attribute to the field `userId`, or change
+   * the relation to one-to-many"* — so a schema reaching this line with
+   * `kind !== "many"` **has** the index, and `kind` alone is sufficient here.
+   *
+   * **The converse does not hold, which is why the owning side needs two tests
+   * where this one needs one.** A `@unique` foreign key beside a *list*
+   * back-relation validates: `Player.teamId Int? @unique` next to
+   * `Team.players Player[]` is accepted, and Prisma refuses the displacing
+   * `connect` there with P2002 without reading the sibling. So "the key is
+   * unique" is strictly weaker than `kind !== "many"`, and an owning-side
+   * discriminator built on the index alone displaces on schemas this side
+   * correctly leaves alone. That is a real defect this file shipped for one
+   * review cycle; `planOwningSide`'s `displaces` now reads the *child's* copy of
+   * the relation for its `kind` and uses `uniques` only to narrow. From the
+   * owning side `relation.kind` is still unreadable — it says `"one"` for a
+   * many-to-one and a one-to-one alike, because both point at a single far row.
    */
   const displaces =
     relation.kind !== "many" && child.fields[childField]?.nullable === true;
@@ -2563,20 +2614,37 @@ async function clearLinks(
  * table with a null key — **orphaned, not deleted** — which is the half a fix
  * in the wrong direction turns into silent data loss wearing a green test.
  *
- * **Why the row being written is skipped rather than cleared and re-linked.**
- * Prisma's clear is not exclusive: `connect`ing the row a caller is already
- * connected to nulls that very row and then writes the same value straight
- * back, for a net nothing. Reproducing that literally is wrong *here* because
- * the repoint is not a statement of its own — it is a contribution to the main
- * statement, whose `where` has already been through this model's policies. A
- * model scoped on the foreign key would have its own row put outside that
- * scope by the clear, so the main statement would match nothing and leave the
- * row detached and never re-attached: a silent half-write in place of the
- * no-op Prisma performs. That is #98's hazard arriving on this side, and the
- * same argument #362 used to leave `set`'s *link* half not naming its column.
- * Skipping is observationally identical to Prisma in every other case, because
- * the only row the exclusion removes from the clear is the one the repoint was
- * about to restore.
+ * **Why the row being written is skipped: because Prisma skips it too.**
+ * `connect`ing the far row a caller is already connected to writes *nothing at
+ * all* — measured with logging on, the whole call is
+ *
+ *     BEGIN IMMEDIATE / select the operand / select this row /
+ *     select the operand again / select this row again / COMMIT
+ *
+ * with no `update` in it. So this is not a departure to be justified; it is the
+ * behaviour. (An earlier draft of this docblock claimed Prisma nulls the column
+ * and writes the same value straight back for a net nothing. It does not, and
+ * the claim survived into four places before it was measured rather than
+ * reasoned about.)
+ *
+ * The skip matters *more* here than it would as mere parity, which is worth
+ * keeping: the repoint on this side is not a statement of its own but a
+ * contribution to the main statement, whose `where` has already been through
+ * this model's policies. A model scoped on the foreign key would have its own
+ * row put outside that scope by a clear, so the main statement would match
+ * nothing and leave the row detached and never re-attached — a silent
+ * half-write, #98's hazard arriving on this side, and the same argument #362
+ * used to leave `set`'s *link* half not naming its column.
+ *
+ * **The residual divergence runs the other way and is not fixed here.** Prisma
+ * makes the whole call a no-op; gemi still emits the repoint `UPDATE`, because
+ * the contribution is in the SET list at compile time and cannot be withdrawn
+ * at bind time. Same rows either way — it writes the value already there — but
+ * on a one-to-one owner carrying `@updatedAt` gemi bumps the stamp where Prisma
+ * leaves it. That is an instance of the stamp divergence #370 documented rather
+ * than a new one, no fixture can see it (neither `Profile` nor `Cover` has the
+ * column), and it is specific to *this* path: on a many-to-one both clients
+ * issue the update and both stamp.
  *
  * **Why a `create` reads nothing.** There is no row yet, so there is no self to
  * be the incumbent and no `where` to read one through.
@@ -2637,6 +2705,14 @@ async function displaceSibling(
  * concrete rather than theoretical: `2n === 2` is `false`, and answering "these
  * are different rows" there is what would make the clear fire on the row it is
  * meant to skip.
+ *
+ * The fallback is deliberately loose in the other direction too — it calls the
+ * number `2` and the string `"2"` the same row. Harmless for every key type in
+ * reach: Prisma's unique keys are `Int`, `BigInt`, `String`, `Bytes` and the
+ * date types, and a `String` key whose value is `"2"` can only be compared
+ * against another `String`, since the column it came from decides both sides.
+ * Stated rather than tightened, because the tightening would have to know the
+ * field's type here and the looseness has no reachable victim.
  */
 function sameKey(a: unknown, b: unknown): boolean {
   if (a === null || a === undefined || b === null || b === undefined) {
