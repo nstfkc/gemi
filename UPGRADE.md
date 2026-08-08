@@ -441,8 +441,15 @@ The value still needs truncating where it is read, because a page number the
 client increments arrives at the server *multiplied* — as a fractional `skip`:
 
 ```tsx
-const page = Math.max(1, Math.trunc(Number(searchParams.get("page"))) || 1);
+const asked = Number(searchParams.get("page"));
+const page = Number.isFinite(asked) ? Math.max(1, Math.trunc(asked)) : 1;
 ```
+
+The `Number.isFinite` is not decoration, and it is the half that is easy to drop:
+`?page=1e400` is `Infinity`, which `Math.trunc` returns unchanged and `Math.max`
+keeps — so a shorter clamp hands the component `Infinity`, writes `?page=Infinity`
+back into the URL on the next click, and renders `NaN` on any `page - 1` control.
+That is the same test the server-side `toWholeNumber` makes, for the same reason.
 
 ## Both of these are annotated by `bunx gemi migrate`
 

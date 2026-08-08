@@ -2118,6 +2118,111 @@ describe("nested writes", () => {
       ).toThrow(/is a to-one/);
     });
   });
+
+  /**
+   * **What a to-one `update` / `upsert` operand is allowed to contain.**
+   *
+   * The to-many path gets this from `matchUniqueKey`. The to-one path cannot —
+   * Prisma's `where` here is a `WhereInput`, so there is no unique key to match
+   * — and for a while it had nothing in its place, which let three shapes
+   * through to places they should never have reached.
+   *
+   * All three are silent by construction, which is why they are asserted
+   * together: each one *writes*, and none of them raises where the caller wrote
+   * the query.
+   */
+  describe("a to-one update or upsert is shape-checked before it is rewritten", () => {
+    beforeEach(() => {
+      registry.register("Profile", class { static $schema = profile });
+      registry.register("User", class { static $schema = userWithProfile });
+    });
+
+    const write = (relation: string, operand: Record<string, unknown>) =>
+      compileWrite(
+        userWithProfile,
+        "update",
+        { where: { id: 1 }, data: { [relation]: operand } },
+        sqlite,
+      );
+
+    /**
+     * The rewrite rebuilds the operand from the keys it knows, so a key it does
+     * not know is gone before anything downstream could object — and what is
+     * lost here is the *filter*, so a guarded write becomes an unguarded one.
+     */
+    test.each(["profile", "organization"])(
+      "a misspelled where is refused rather than dropped (%s)",
+      (relation) => {
+        expect(() =>
+          write(relation, {
+            update: { data: { bio: "x" }, wehre: { bio: "old" } },
+          }),
+        ).toThrow(/Unknown key 'wehre'/);
+      },
+    );
+
+    // Both sides, because the operand grammar is shared and the whole point of
+    // the check is that neither side may be the lenient one.
+    test.each(["profile", "organization"])(
+      "a where that is not an object is refused (%s)",
+      (relation) => {
+        expect(() =>
+          write(relation, { update: { where: [{ bio: "x" }], data: {} } }),
+        ).toThrow(/'where' has to be an object of filters/);
+        expect(() =>
+          write(relation, { update: { where: 7, data: {} } }),
+        ).toThrow(/'where' has to be an object of filters/);
+      },
+    );
+
+    /**
+     * `conjoin` treats a non-object filter as no filter at all, so an unchecked
+     * one does not fail — it widens. `upsert` is the sharper case: Prisma
+     * applies the filter, matches nothing and takes the *create* branch onto a
+     * unique violation, where dropping it finds the connected row and takes the
+     * *update* branch. Two different rows written, no error either way.
+     */
+    test("an upsert where is checked too", () => {
+      expect(() =>
+        write("profile", {
+          upsert: {
+            where: [{ bio: "old" }],
+            create: { bio: "new" },
+            update: { bio: "touched" },
+          },
+        }),
+      ).toThrow(/'where' has to be an object of filters/);
+    });
+
+    /**
+     * Refused here rather than mid-transaction. Without this the parent row is
+     * already written when the step calls `updateMany` with a `null` payload,
+     * so the error names `Profile.updateMany` — a model and an operation the
+     * caller never wrote — and a written row has to be unwound to report it.
+     */
+    test.each([
+      ["null", null],
+      ["a number", 5],
+      ["a string", "bio"],
+    ])("a %s operand is refused at compile time", (_name, operand) => {
+      const call = () => write("profile", { update: operand });
+      expect(call).toThrow(InvalidArgumentError);
+      expect(call).toThrow(/Expected an object/);
+    });
+
+    /**
+     * The payload spelling stays unchecked, deliberately: those keys are the
+     * child's columns and belong to the child's schema, so checking them here
+     * would be checking the wrong shape. The wrapper is told apart by carrying
+     * a `data`, which is the same test the rewrite makes.
+     */
+    test("the payload spelling is not key-checked", () => {
+      expect(() => write("profile", { update: { bio: "x" } })).not.toThrow();
+      // ...and a key that is wrong there is the child's to refuse, which it
+      // does — through its own `$exec`, at the point the payload is applied.
+      expect(() => write("profile", { update: { nosuchcolumn: 1 } })).not.toThrow();
+    });
+  });
 });
 
 describe("arguments", () => {

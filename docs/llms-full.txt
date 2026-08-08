@@ -2840,7 +2840,11 @@ import { useSearchParams } from "gemi/client";
 
 function Pagination() {
   const searchParams = useSearchParams();
-  const page = Math.max(1, Math.trunc(Number(searchParams.get("page"))) || 1);
+  // `Number.isFinite` first: `?page=1e400` is `Infinity`, which `Math.trunc`
+  // returns unchanged and `Math.max` happily keeps — and it would go straight
+  // back into the URL through `goTo` below.
+  const asked = Number(searchParams.get("page"));
+  const page = Number.isFinite(asked) ? Math.max(1, Math.trunc(asked)) : 1;
 
   function goTo(next: number) {
     searchParams.set("page", String(next));

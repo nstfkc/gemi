@@ -196,18 +196,60 @@ export async function runMigrate(options: MigrateOptions) {
   // 4. Provider files whose contents now live in app/config are superseded.
   for (const file of migratedFiles) changes.push({ file, contents: null });
 
-  // 5. Renames across the rest of the app, plus retired fields in app/config
-  //    and the two ORM-port hazards. The ORM pass runs over every file, not
-  //    only `app/config`: what it looks for is a guard or a query argument, and
-  //    those live wherever the app writes and reads.
+  // 5. Renames across the rest of the app, plus retired fields in app/config.
   const touched = new Set(changes.map((change) => change.file));
   for (const file of walk(appDir)) {
     if (touched.has(file)) continue;
     const source = readFileSync(file, "utf8");
     let rewritten = rewriteReferences(source, rel(rootDir, file), notes);
     rewritten = annotateRetiredFields(rewritten, file, rootDir, notes);
-    rewritten = annotateOrmPortHazards(rewritten, rel(rootDir, file), notes);
     if (rewritten !== source) changes.push({ file, contents: rewritten });
+  }
+
+  // 6. The two ORM-port hazards, over every file this run will leave behind —
+  //    which is a wider set than the loop above walks, and deliberately so.
+  //
+  //    Step 4 supersedes the provider files by moving their bodies into
+  //    `app/config/*.ts`, and steps 2 and 3 rewrite `Kernel.ts` and write
+  //    `AppServiceProvider.ts`. All of those land in `changes`, so the loop
+  //    above skips them — and they hold *user* code, carried over verbatim from
+  //    a provider's `boot()`. On the one run that matters, the first run on an
+  //    old-layout app, a `"P2002"` guard or a query-string `take` inside any of
+  //    them would never have been looked at. A second run finds them, but only
+  //    because by then the passes that moved them have become no-ops, which is
+  //    not a property to rely on.
+  //
+  //    So this runs last and over `changes` as well as over the tree: what the
+  //    pass looks for is a guard or a query argument, and those live wherever
+  //    the app writes and reads, including in a file this command just created.
+  const pending = new Map<string, number>();
+  const removed = new Set<string>();
+  changes.forEach((change, index) => {
+    if (change.contents === null) removed.add(change.file);
+    else pending.set(change.file, index);
+  });
+
+  const swept = new Set<string>();
+  for (const file of walk(appDir)) {
+    if (removed.has(file)) continue;
+    swept.add(file);
+    const index = pending.get(file);
+    const before =
+      index === undefined ? readFileSync(file, "utf8") : changes[index]!.contents!;
+    const after = annotateOrmPortHazards(before, rel(rootDir, file), notes);
+    if (after === before) continue;
+    if (index === undefined) changes.push({ file, contents: after });
+    else changes[index]!.contents = after;
+  }
+
+  // A file `changes` creates does not exist yet, so `walk` cannot yield it.
+  for (const change of changes) {
+    if (change.contents === null || swept.has(change.file)) continue;
+    change.contents = annotateOrmPortHazards(
+      change.contents,
+      rel(rootDir, change.file),
+      notes,
+    );
   }
 
   // Apply.

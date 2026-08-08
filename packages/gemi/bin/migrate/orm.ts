@@ -16,6 +16,26 @@
 // integer or whether the `catch` this `"P2002"` sits in wraps an ORM call or a
 // Prisma one. A rewrite would need that. A sentence beside the line does not,
 // and a sentence beside the line is what both issues asked for.
+//
+// **Except in a file that can hold JSX, where a `//` line is not a comment.**
+// Inside JSX children it is page text, and the `{ code: "P2002" }` this module's
+// own message contains becomes an expression container — so splicing one in
+// stops the file parsing. Measured, on the obvious shape:
+//
+//     {error?.code === "P2002" ? <p>Email taken</p> : null}
+//
+// annotated and fed to Bun's `tsx` loader answers `Expected "}" but found ":"`.
+// A migration command that leaves the app unable to build is worse than one that
+// says nothing, and the `take` pass is exposed further still — it has no import
+// gate, and its message parses in children position, so it would have rendered a
+// paragraph of migration advice onto the page.
+//
+// The gate is the file extension, and that is a guarantee rather than a guess:
+// TypeScript permits JSX only in `.tsx` / `.jsx`, so a `.ts` file cannot contain
+// any. Those files are *reported* instead, with line numbers, which is what the
+// splice was carrying anyway. Neither pass can hit inside a string or template
+// literal — `skipAtomic` steps over both before either finder looks — so on a
+// file that cannot hold JSX every hit is ordinary code and the splice is safe.
 
 import { parseImports } from "./imports";
 import { matchDelims, skipAtomic, skipTrivia } from "./lex";
@@ -91,6 +111,7 @@ export function annotateOrmPortHazards(
   label: string,
   notes: Notes,
 ): string {
+  const spliceable = !JSX_FILE.test(label);
   let result = source;
 
   // The import gate is #357's, and it is what keeps this pass worth reading. A
@@ -105,15 +126,15 @@ export function annotateOrmPortHazards(
   // here. UPGRADE.md carries the plain grep for that, because a codemod that
   // followed call graphs would need the parser this command does not have.
   if (importsModelSurface(result)) {
-    const hits = prismaErrorCodeLiterals(result);
-    const marked = annotateLines(result, hits, P2002_HAZARD);
-    result = marked.text;
-    if (marked.annotated > 0) {
-      notes.push({
-        file: label,
-        message: `\`"P2002"\` (${occurrences(hits.length)}) — ${P2002_HAZARD}`,
-      });
-    }
+    result = runPass(
+      result,
+      prismaErrorCodeLiterals(result),
+      '`"P2002"`',
+      P2002_HAZARD,
+      label,
+      notes,
+      spliceable,
+    );
   }
 
   // No import gate on this one, on purpose. A fractional `skip` is produced
@@ -121,25 +142,83 @@ export function annotateOrmPortHazards(
   // file holding `take: limit` need not import a model at all — it is often a
   // repository or a service that takes the numbers and passes them along. The
   // gate would remove exactly the hop that makes the value hard to trace.
-  {
-    const hits = nonIntegerPageArguments(result);
-    const marked = annotateLines(result, hits, PAGE_ARGUMENT_HAZARD);
-    result = marked.text;
-    if (marked.annotated > 0) {
-      notes.push({
-        file: label,
-        message:
-          `\`take\` / \`skip\` (${occurrences(hits.length)}) — ` +
-          PAGE_ARGUMENT_HAZARD,
-      });
-    }
-  }
+  result = runPass(
+    result,
+    nonIntegerPageArguments(result),
+    "`take` / `skip`",
+    PAGE_ARGUMENT_HAZARD,
+    label,
+    notes,
+    spliceable,
+  );
 
   return result;
 }
 
+/**
+ * TypeScript accepts JSX only in these two extensions, which is what makes the
+ * test a guarantee rather than a heuristic: a `.ts` file cannot contain JSX, so
+ * it cannot contain a position where a `//` line means something else.
+ */
+const JSX_FILE = /\.[jt]sx$/i;
+
+/**
+ * One pass: splice where that is safe, report where it is not.
+ *
+ * The report is not a lesser outcome. It carries the line numbers the splice
+ * carried by sitting on them, and it is what the `--dry-run` reader sees either
+ * way; what it loses is surviving into the diff, which is worth less than the
+ * file continuing to parse.
+ */
+function runPass(
+  src: string,
+  hits: number[],
+  what: string,
+  message: string,
+  label: string,
+  notes: Notes,
+  spliceable: boolean,
+): string {
+  if (!hits.length) return src;
+
+  if (!spliceable) {
+    notes.push({
+      file: label,
+      message:
+        `${what} on ${lineList(src, hits)} — reported rather than annotated: ` +
+        `a \`//\` line inside JSX children is page text, not a comment, so ` +
+        `writing one here would stop the file parsing. ${message}`,
+    });
+    return src;
+  }
+
+  const marked = annotateLines(src, hits, message);
+  if (marked.annotated > 0) {
+    notes.push({
+      file: label,
+      message: `${what} (${occurrences(hits.length)}) — ${message}`,
+    });
+  }
+  return marked.text;
+}
+
 const occurrences = (count: number) =>
   count === 1 ? "1 occurrence" : `${count} occurrences`;
+
+/** `line 12` / `lines 12, 40` — 1-based, deduplicated, in source order. */
+function lineList(src: string, offsets: number[]): string {
+  const numbers: number[] = [];
+  for (const offset of offsets) {
+    let line = 1;
+    for (let i = 0; i < offset && i < src.length; i++) {
+      if (src[i] === "\n") line++;
+    }
+    if (numbers[numbers.length - 1] !== line) numbers.push(line);
+  }
+  return numbers.length === 1
+    ? `line ${numbers[0]}`
+    : `lines ${numbers.join(", ")}`;
+}
 
 // ---------------------------------------------------------------------------
 // #357 — a `"P2002"` literal in a file that also imports the model surface

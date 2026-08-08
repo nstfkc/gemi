@@ -1753,6 +1753,77 @@ function suite(label: string, url?: string) {
     });
 
     /**
+     * **The owning side honours its `where`**, which for a while it accepted and
+     * ignored — writing the linked row whether or not the filter matched, while
+     * the foreign side conjoined the same filter and raised. One spelling, two
+     * answers, and the owning one was the silent wrong write.
+     *
+     * Both directions are pinned, because only the pair distinguishes "the
+     * filter is applied" from "the filter is dropped": with the filter dropped
+     * the matching case still passes.
+     */
+    test("a to-one update with a matching where writes", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { id: 1 },
+          data: {
+            organization: {
+              update: { where: { name: "Acme" }, data: { name: "Filtered" } },
+            },
+          },
+          include: { organization: true },
+        },
+        { tables: ["User", "Organization"] },
+      );
+    });
+
+    test("a to-one update whose where matches nothing raises rather than writing", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { id: 1 },
+          data: {
+            organization: {
+              update: {
+                where: { name: "NotTheOrganisation" },
+                data: { name: "MustNotLand" },
+              },
+            },
+          },
+          include: { organization: true },
+        },
+        { tables: ["User", "Organization"] },
+      );
+    });
+
+    /**
+     * `data: undefined` — the ordinary spelling of a conditional write, and the
+     * reason `suppliedFields` skips `undefined` everywhere else.
+     *
+     * `canonicalShape` drops an `undefined`-valued key, so this and `update: {}`
+     * are one plan entry; the owning side used to branch on the key's
+     * *presence*, pass `data: undefined` down to `updateMany`, and answer a
+     * no-op call with `updateMany requires 'data'`. Both sides now read the
+     * value, which is what Prisma does — it treats an explicit `undefined` as
+     * absent.
+     */
+    test("a to-one update with data: undefined is a no-op, on both sides", async () => {
+      await differential.expectSameWrite(
+        "User",
+        "update",
+        {
+          where: { id: 1 },
+          data: { organization: { update: { data: undefined } } },
+          include: { organization: true },
+        },
+        { tables: ["User", "Organization"] },
+      );
+    });
+
+    /**
      * The owning-side miss — the case that was missing, and the reason its
      * twin's fix did not carry over.
      *
@@ -2640,6 +2711,71 @@ describe("the harness compares relations as a set, not in storage order", () => 
       stabilizeRelations({ accounts: [{ id: 4 }, { id: 3 }] }, "User", registry),
     ).not.toEqual(
       stabilizeRelations({ accounts: [{ id: 4 }, { id: 5 }] }, "User", registry),
+    );
+  });
+
+  /**
+   * **An include that named an `orderBy` keeps its order.**
+   *
+   * Without this the relaxation would reach past the flake it was for: the
+   * flake is a property of an *unordered* include, where neither client emits
+   * an `ORDER BY` and the heap decides. When the caller asked for a sort, the
+   * order is the answer — so a relation strategy that stopped honouring a
+   * nested `orderBy` has to still fail here, and several existing cases in this
+   * file pass exactly that argument.
+   */
+  test("a node that asked for an orderBy is compared positionally", () => {
+    const ordered = { include: { accounts: { orderBy: { id: "asc" } } } };
+
+    expect(
+      stabilizeRelations(
+        { accounts: [{ id: 4 }, { id: 3 }] },
+        "User",
+        registry,
+        ordered,
+      ),
+    ).not.toEqual(
+      stabilizeRelations(
+        { accounts: [{ id: 3 }, { id: 4 }] },
+        "User",
+        registry,
+        ordered,
+      ),
+    );
+  });
+
+  // ...and the exception is the `orderBy`, not the presence of a selection: an
+  // include with no sort is still the unordered case the sort exists for.
+  test("an include with no orderBy is still sorted", () => {
+    const plain = { include: { accounts: true } };
+
+    expect(
+      stabilizeRelations({ accounts: [{ id: 4 }, { id: 3 }] }, "User", registry, plain),
+    ).toEqual(
+      stabilizeRelations({ accounts: [{ id: 3 }, { id: 4 }] }, "User", registry, plain),
+    );
+  });
+
+  // A relation reached through `select` is as ordered as one through `include`.
+  test("select carries the orderBy too", () => {
+    const viaSelect = {
+      select: { id: true, accounts: { orderBy: { id: "asc" } } },
+    };
+
+    expect(
+      stabilizeRelations(
+        { accounts: [{ id: 4 }, { id: 3 }] },
+        "User",
+        registry,
+        viaSelect,
+      ),
+    ).not.toEqual(
+      stabilizeRelations(
+        { accounts: [{ id: 3 }, { id: 4 }] },
+        "User",
+        registry,
+        viaSelect,
+      ),
     );
   });
 });

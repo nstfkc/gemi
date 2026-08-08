@@ -171,19 +171,34 @@ function schemaOf(registry: ModelMap, model: string): RegisteredSchema | undefin
  * `select` may not have asked for one. That makes the comparison a multiset
  * comparison: two different sets of children still fail, which is the assertion
  * worth keeping.
+ *
+ * **A node that asked for an `orderBy` keeps its order**, and that exception is
+ * the whole reason `selection` is threaded through. The flake above is a
+ * property of an *unordered* include — where neither client emits an `ORDER BY`,
+ * so neither promises anything and the heap decides. An include that named an
+ * `orderBy` is the opposite: the order is the answer, both clients emit the
+ * sort, and comparing it positionally is exactly what this suite is for.
+ * Sorting there would have made six existing cases unable to fail — a relation
+ * strategy that stopped honouring a nested `orderBy` and returned children in
+ * join-table order would compare equal, because both sides get re-sorted by the
+ * same comparator first.
  */
 export function stabilizeRelations(
   value: unknown,
   model: string,
   registry: ModelMap,
+  /** The `include` / `select` subtree that produced `value`, when there is one. */
+  selection?: unknown,
 ): unknown {
   if (Array.isArray(value)) {
-    return value.map((row) => stabilizeRelations(row, model, registry));
+    return value.map((row) => stabilizeRelations(row, model, registry, selection));
   }
   if (value === null || typeof value !== "object") return value;
 
   const relations = schemaOf(registry, model)?.relations;
   if (!relations) return value;
+
+  const nodes = selectionNodes(selection);
 
   const out: Record<string, unknown> = {};
   for (const [key, member] of Object.entries(value as Record<string, unknown>)) {
@@ -192,14 +207,39 @@ export function stabilizeRelations(
       out[key] = member;
       continue;
     }
-    const child = stabilizeRelations(member, relation.model, registry);
-    out[key] = Array.isArray(child)
-      ? [...child].sort((a, b) =>
-          JSON.stringify(a) < JSON.stringify(b) ? -1 : 1,
-        )
-      : child;
+    const node = nodes?.[key];
+    const child = stabilizeRelations(member, relation.model, registry, node);
+    out[key] =
+      Array.isArray(child) && !askedForAnOrder(node)
+        ? [...child].sort((a, b) =>
+            JSON.stringify(a) < JSON.stringify(b) ? -1 : 1,
+          )
+        : child;
   }
   return out;
+}
+
+const askedForAnOrder = (node: unknown) =>
+  node !== null &&
+  typeof node === "object" &&
+  (node as Record<string, unknown>).orderBy !== undefined;
+
+/**
+ * The relation keys one level down, from whichever of `include` / `select`
+ * carried them. Both may appear on the same node, and a relation reached
+ * through `select` is as ordered as one reached through `include`.
+ */
+function selectionNodes(
+  selection: unknown,
+): Record<string, unknown> | undefined {
+  if (selection === null || typeof selection !== "object") return undefined;
+
+  const merged: Record<string, unknown> = {};
+  for (const which of ["include", "select"] as const) {
+    const node = (selection as Record<string, unknown>)[which];
+    if (node !== null && typeof node === "object") Object.assign(merged, node);
+  }
+  return Object.keys(merged).length > 0 ? merged : undefined;
 }
 
 /**
@@ -589,8 +629,16 @@ export async function createDifferential(options: {
         // order from Prisma's would be a real difference to an application even
         // though no `ORDER BY` promises otherwise. It is only a *write* that
         // makes the order move under the comparison.
+        // `args` is threaded in so a node carrying an `orderBy` keeps its order:
+        // the flake is a property of an include that promised nothing, and one
+        // that named a sort is the case this suite most wants to compare.
         const comparable = (value: unknown) =>
-          stabilizeRelations(normalize(value, volatile), model, options.models);
+          stabilizeRelations(
+            normalize(value, volatile),
+            model,
+            options.models,
+            args,
+          );
 
         expect(comparable(fromGemi.value), `${label}: returned value`).toEqual(
           comparable(fromPrisma.value),

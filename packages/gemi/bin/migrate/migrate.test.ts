@@ -482,3 +482,157 @@ export const list = (perPage) => Post.findMany({ take: perPage });
     ).toHaveLength(1);
   });
 });
+
+/**
+ * **A file that can hold JSX is reported, never spliced.**
+ *
+ * A `//` line above a hit is a comment in a `.ts` file and page text in a
+ * `.tsx` one — and the `{ code: "P2002" }` inside the P2002 message becomes a
+ * JSX expression container, so the splice stopped the file parsing outright.
+ * A migration command that leaves the app unable to build is worse than one
+ * that says nothing, so these assert the *file* first and the report second.
+ *
+ * The gate is the extension, which TypeScript makes a guarantee: JSX is legal
+ * only in `.tsx` / `.jsx`.
+ */
+describe("a view file, where a comment is not a comment", () => {
+  const VIEW = `import { User } from "@/app/models";
+
+export function SignupForm({ error }: { error?: { code?: string } }) {
+  return (
+    <div>
+      {error?.code === "P2002" ? <p>Email taken</p> : null}
+    </div>
+  );
+}
+`;
+
+  test("the P2002 guard is not annotated, and the file still parses", async () => {
+    write("app/views/SignupForm.tsx", VIEW);
+    await runMigrate({ rootDir: root });
+
+    const after = read("app/views/SignupForm.tsx");
+    expect(after).toBe(VIEW);
+
+    // The assertion that matters is not "unchanged" but "still builds" — the
+    // first is a proxy and this is the property.
+    expect(() =>
+      new Bun.Transpiler({ loader: "tsx" }).transformSync(after),
+    ).not.toThrow();
+  });
+
+  test("it is reported instead, with the line to look at", async () => {
+    write("app/views/SignupForm.tsx", VIEW);
+    await runMigrate({ rootDir: root });
+
+    const summary = logged.join("\n");
+    expect(summary).toContain("app/views/SignupForm.tsx");
+    // The splice carried its location by sitting on it; the report has to say
+    // it, or the reader is left grepping the file the command just declined to
+    // mark.
+    expect(summary).toContain("line 6");
+    expect(summary).toContain("isUniqueConstraintError");
+  });
+
+  test("the take/skip pass holds off there too", async () => {
+    // Worse-exposed than the P2002 pass: no import gate, and its message parses
+    // in children position rather than failing — so it would have rendered a
+    // paragraph of migration advice onto the page instead of erroring.
+    const list = `export function List({ limit }: { limit: string }) {
+  const rows = usePosts({ take: Number(limit) });
+  return <ul>{rows.map((r) => <li key={r.id}>{r.title}</li>)}</ul>;
+}
+`;
+    write("app/views/List.tsx", list);
+    await runMigrate({ rootDir: root });
+
+    expect(read("app/views/List.tsx")).toBe(list);
+    expect(logged.join("\n")).toContain("app/views/List.tsx");
+  });
+
+  test("the same code in a .ts file is still annotated", async () => {
+    // The gate is the extension and nothing else, so the pass must not have
+    // quietly become conservative everywhere.
+    write(
+      "app/services/signup.ts",
+      `import { User } from "@/app/models";
+export const failed = (error: any) => error.code === "P2002";
+`,
+    );
+    await runMigrate({ rootDir: root });
+
+    expect(read("app/services/signup.ts")).toContain("TODO(gemi-migrate)");
+  });
+});
+
+/**
+ * **The ORM passes sweep the files this command itself writes.**
+ *
+ * Step 4 supersedes a provider by moving its body into `app/config/*.ts`, so
+ * the user code inside it lands in a file the earlier `touched` skip excluded
+ * from the sweep. On the one run that matters — the first run on an old-layout
+ * app — a guard carried over that way was never looked at.
+ */
+describe("hazards inside the files the migration itself produces", () => {
+  const PROVIDER_WITH_HAZARDS = `import { AuthenticationServiceProvider } from "gemi/services";
+import { User } from "@/app/models";
+
+export default class AuthServiceProvider extends AuthenticationServiceProvider {
+  verifyEmail = false;
+  pageSize = { take: Number(process.env.PAGE) };
+}
+`;
+
+  test("a take carried out of a provider into app/config is annotated", async () => {
+    write("app/kernel/providers/AuthServiceProvider.ts", PROVIDER_WITH_HAZARDS);
+    write("app/kernel/Kernel.ts", KERNEL_43);
+
+    await runMigrate({ rootDir: root });
+
+    // The provider is gone and its body is here — user code, in a file that
+    // did not exist when the tree was walked. Before the sweep moved, this was
+    // never looked at on the only run where it could have been.
+    const config = read("app/config/auth.ts");
+    expect(config).toContain("pageSize: { take: Number(process.env.PAGE) }");
+    expect(config).toContain("TODO(gemi-migrate)");
+    expect(logged.join("\n")).toContain("app/config/auth.ts");
+  });
+
+  test("a second run adds nothing, so the sweep is idempotent across both paths", async () => {
+    write("app/kernel/providers/AuthServiceProvider.ts", PROVIDER_WITH_HAZARDS);
+    write("app/kernel/Kernel.ts", KERNEL_43);
+
+    await runMigrate({ rootDir: root });
+    await runMigrate({ rootDir: root });
+
+    expect(read("app/config/auth.ts").match(/TODO\(gemi-migrate\)/g)).toHaveLength(1);
+  });
+
+  /**
+   * The P2002 half does **not** reach this file, and the reason is the import
+   * gate rather than the sweep: the generated config imports `gemi/services`
+   * and not the model surface, because the provider's own model import is not
+   * carried across. That is the gate's documented false negative arriving by a
+   * new route — asserted rather than left for someone to discover, since the
+   * neighbouring `take` hazard in the same file *is* found and the asymmetry
+   * would otherwise read as a bug in the sweep.
+   *
+   * UPGRADE.md carries the plain grep, which is what covers this.
+   */
+  test("the P2002 gate still asks for a model import, even here", async () => {
+    write(
+      "app/kernel/providers/AuthServiceProvider.ts",
+      PROVIDER_WITH_HAZARDS.replace(
+        "  verifyEmail = false;",
+        '  verifyEmail = false;\n  onDuplicate = (error: any) => error.code === "P2002";',
+      ),
+    );
+    write("app/kernel/Kernel.ts", KERNEL_43);
+
+    await runMigrate({ rootDir: root });
+
+    const config = read("app/config/auth.ts");
+    expect(config).toContain('error.code === "P2002"');
+    expect(config).not.toContain("isUniqueConstraintError");
+  });
+});

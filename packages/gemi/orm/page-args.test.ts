@@ -177,6 +177,28 @@ describe("paginate's page size", () => {
     expect(paginate({ perPage: "500" }, { maxPerPage: 500 }).take).toBe(500);
   });
 
+  /**
+   * `Infinity` is the natural spelling of "no ceiling", and it used to be read
+   * by the same rule that refuses a non-finite *request* — so an internal
+   * export written to opt out of the cap silently got the default 100 back,
+   * returned a plausible first page, and lost the rest without a word.
+   *
+   * The distinction is who wrote it: `?perPage=1e400` is hostile input and is
+   * still refused, and this is the application saying so on purpose.
+   */
+  test("Infinity lifts the ceiling rather than falling back to the default", () => {
+    expect(paginate({ perPage: "1000" }, { maxPerPage: Infinity }).take).toBe(1000);
+  });
+
+  test("...and the request still cannot spell Infinity itself", () => {
+    // The guarantee has to survive the lifted ceiling: whatever comes back is
+    // an integer the ORM accepts, so a hostile `perPage` falls to the default
+    // rather than through the gap the option just opened.
+    const lifted = paginate({ perPage: "1e400" }, { maxPerPage: Infinity });
+    expect(lifted.take).toBe(25);
+    expect(Number.isSafeInteger(lifted.take)).toBe(true);
+  });
+
   test("the caller's default is used when the request names none", () => {
     expect(paginate({}, { perPage: 10 })).toEqual({ take: 10, skip: 0 });
     expect(paginate({ page: "2" }, { perPage: 10 })).toEqual({

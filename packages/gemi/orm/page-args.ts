@@ -164,7 +164,20 @@ export function paginate(
   // them. They are clamped anyway, because the guarantee this function makes is
   // unconditional — `paginate(args, { perPage: 0 })` returning `take: 0` would
   // be an empty page for ever, with the helper's own name on it.
-  const maxPerPage = Math.max(1, toWholeNumber(options.maxPerPage) ?? DEFAULT_MAX_PER_PAGE);
+  //
+  // `Infinity` is honoured rather than rejected, and it is the one place the
+  // options are read differently from the arguments. `toWholeNumber` refuses a
+  // non-finite value because that rule is about hostile input — `?perPage=1e400`
+  // is `Infinity`, and binding it as a `take` is not a page size. Reusing the
+  // same rule here made `{ maxPerPage: Infinity }`, the natural spelling of "no
+  // ceiling", fall back to the default 100 instead: an internal export written
+  // to opt out of the cap silently got it back, returned a plausible first page,
+  // and was found when somebody noticed 900 rows missing. The caller who writes
+  // `Infinity` here is the application, saying so deliberately.
+  const maxPerPage =
+    options.maxPerPage === Infinity
+      ? Infinity
+      : Math.max(1, toWholeNumber(options.maxPerPage) ?? DEFAULT_MAX_PER_PAGE);
   const fallback = clamp(
     toWholeNumber(options.perPage) ?? DEFAULT_PER_PAGE,
     1,

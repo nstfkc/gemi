@@ -496,6 +496,13 @@ function planOwningSide(
   if (key === "update") {
     out.keyFields.push(fkField);
 
+    // The same check the foreign side runs, on the same operand grammar. Both
+    // sides accept `{ where?, data }` and both must refuse an unknown key
+    // inside it, or a misspelled `where` silently widens the write on whichever
+    // side missed the check — the asymmetry #116 was filed about, arriving one
+    // operand later.
+    assertToOneWriteOperand(schema, relation, child, key, operand, operation);
+
     out.after.push({
       relation: relation.name,
       operation: "update",
@@ -520,18 +527,52 @@ function planOwningSide(
           throw new RecordNotFoundError(relation.model, "update");
         }
 
+        // `.data !== undefined` rather than `"data" in operandAt`, which is the
+        // test {@link toOneOperand} makes and the one this used to disagree
+        // with. `canonicalShape` drops an `undefined`-valued key, so `update:
+        // {}` and `update: { data: undefined }` are one plan entry — and an
+        // explicit `undefined` is the ordinary way a conditional write is
+        // spelled, which is why `suppliedFields` skips it everywhere else.
+        // Keying on presence sent `data: undefined` down to `updateMany` and
+        // answered a no-op call with `updateMany requires 'data'`, on the side
+        // this file cites as the precedent for the other one.
         const operandAt = at(args);
-        const data =
+        const wrapped =
           operandAt !== null &&
           typeof operandAt === "object" &&
-          "data" in operandAt
-            ? (operandAt as Record<string, unknown>).data
-            : operandAt;
+          (operandAt as Record<string, unknown>).data !== undefined;
+        const record = operandAt as Record<string, unknown> | null;
+        const data = wrapped ? record!.data : operandAt;
+
+        // The caller's filter, conjoined with the link — so `update: { where,
+        // data }` narrows *which* single row is written rather than being
+        // decoration. Ignoring it was a silent wrong write: the operand
+        // type-checks on both sides, the foreign side conjoins it and raises on
+        // a miss, and this side renamed the linked row whether or not it
+        // matched. Prisma answers P2025 for the non-matching case, which is
+        // what the lookup below reproduces.
+        //
+        // The lookup only happens when a `where` is actually present, and that
+        // is shape-stable — `canonicalShape` records a `where` key's presence —
+        // so the common `update: { … }` spelling still costs one statement.
+        const filter = wrapped ? record!.where : undefined;
+        const where = conjoin(filter, { [referenced]: linked });
+
+        if (filter !== undefined) {
+          const found = (await executor.exec(
+            relation.model,
+            "findFirst",
+            { where, select: { [referenced]: true } },
+            false,
+          )) as Record<string, unknown> | null;
+
+          if (!found) throw new RecordNotFoundError(relation.model, "update");
+        }
 
         await executor.exec(
           relation.model,
           "updateMany",
-          { where: { [referenced]: linked }, data },
+          { where, data },
           // NOT pre-scoped: the child's own policies decide whether this row is
           // reachable and whether the payload is allowed to write what it
           // names — its `onUpdate` and its scope-escape guard.
@@ -833,6 +874,11 @@ function planForeignSide(
      * life, precisely because its `true`/`false` decision was made once at
      * compile time and never revisited.
      */
+    // Checked *before* the rewrite, because the rewrite is lossy by
+    // construction: it rebuilds the operand from the keys it knows, so a key it
+    // does not know is gone by the time anything downstream could refuse it.
+    assertToOneWriteOperand(schema, relation, child, key, operand, operation);
+
     const spelled = at;
     at = (args: any) => toOneOperand(key, spelled(args));
     operand = toOneOperand(key, operand);
@@ -2256,6 +2302,104 @@ function assertToOneFilter(
       `object of filters it has to match. Prisma's operand here is ` +
       `'${child.name}WhereInput | boolean'.`,
   );
+}
+
+/**
+ * The plan-time shape check for a to-one `update` / `upsert`, run **before**
+ * {@link toOneOperand} rewrites the operand.
+ *
+ * Three holes it closes, all of the same kind: the to-one path dropped the
+ * `matchUniqueKey` its to-many sibling runs — correctly, since Prisma's to-one
+ * `where` is a `WhereInput` and not a unique key — and then put nothing in its
+ * place, so the operand reached the step unexamined.
+ *
+ *   1. **A key the rewrite does not know is discarded silently.** The wrapper
+ *      branch rebuilds `{ where, data }` from the keys it recognises, so
+ *      `update: { data: { … }, wehre: { … } }` loses the typo and the filter
+ *      with it — and `conjoin(undefined, link)` is the parent link alone, so a
+ *      nested update the caller *guarded* runs unguarded. A write that should
+ *      not have happened, with nothing raised anywhere. Prisma answers `Unknown
+ *      argument 'wehre'`, and `assertConnectOrCreateOperand` in this file
+ *      already refuses extra keys for exactly this reason.
+ *   2. **A `where` that is not an object is dropped by `conjoin`**, whose first
+ *      arm treats an array or a scalar as "no filter". So `upsert: { where:
+ *      [{ bio: "old" }], … }` finds the connected row and takes the *update*
+ *      branch, where Prisma applies the filter, matches nothing and takes the
+ *      *create* branch onto a unique violation. Two different rows written.
+ *   3. **A non-object operand escapes to run time.** `update: null` normalises
+ *      to `{ where: undefined, data: null }`, which `assertNamedUpdates` passes
+ *      because its `data` key is present — and the failure then arrives from
+ *      inside the `after` step as `InvalidArgumentError('data', 'Profile',
+ *      'updateMany')`, naming a model and an operation the caller never wrote,
+ *      after the parent row has already been written and has to be unwound.
+ *      Plan-time validation exists in this file precisely to prevent that.
+ *
+ * The payload spelling is deliberately *not* key-checked. `update: { bio: "x" }`
+ * is the child's own `data`, so every key in it is the child's business and
+ * belongs to the child's schema — checking it here would be checking the wrong
+ * shape, which is the rule {@link assertNamedUpdates} states. The wrapper is
+ * distinguishable because it carries a `data`, which is the same test the
+ * rewrite makes one function down.
+ */
+function assertToOneWriteOperand(
+  schema: ModelSchema,
+  relation: RelationSchema,
+  child: ModelSchema,
+  key: string,
+  operand: unknown,
+  operation: string,
+): void {
+  if (key !== "update" && key !== "upsert") return;
+
+  const argument = `data.${relation.name}.${key}`;
+  const refuse = (reason: string): never => {
+    throw new InvalidArgumentError(argument, schema.name, operation, reason);
+  };
+
+  if (operand === null || typeof operand !== "object" || Array.isArray(operand)) {
+    refuse(
+      `Expected an object, got ${JSON.stringify(operand) ?? typeof operand}. ` +
+        (key === "upsert"
+          ? `'upsert' on a to-one takes { create, update } — and an optional ` +
+            `'where' the connected ${child.name} has to match.`
+          : `'update' on a to-one takes the ${child.name} columns directly, ` +
+            `or { data } — and an optional 'where' the connected row has to ` +
+            `match.`),
+    );
+  }
+
+  const record = operand as Record<string, unknown>;
+  const wrapper = key === "upsert" || record.data !== undefined;
+  if (!wrapper) return;
+
+  const known =
+    key === "upsert" ? ["where", "create", "update"] : ["where", "data"];
+
+  for (const name of Object.keys(record)) {
+    if (record[name] === undefined || known.includes(name)) continue;
+    refuse(
+      `Unknown key '${name}'. '${key}' on a to-one takes ` +
+        `${known.map((one) => `'${one}'`).join(", ")} and nothing else, so ` +
+        `'${name}' would be dropped rather than applied — a misspelled ` +
+        `'where' would turn a filtered write into an unconditional one. ` +
+        `Prisma refuses the same key by name.`,
+    );
+  }
+
+  if (
+    record.where !== undefined &&
+    (record.where === null ||
+      typeof record.where !== "object" ||
+      Array.isArray(record.where))
+  ) {
+    refuse(
+      `'where' has to be an object of filters — Prisma's is a ` +
+        `'${child.name}WhereInput', which narrows *which* single row is ` +
+        `written rather than choosing among several. Anything else is dropped ` +
+        `by the conjunction that keeps this operand on the connected row, so ` +
+        `the write would land unfiltered.`,
+    );
+  }
 }
 
 /**
