@@ -1207,6 +1207,138 @@ describe("policies on nested writes", () => {
   });
 
   /**
+   * **`connect` into an occupied to-one from the owning side (#363)** — where
+   * the incumbent is a *sibling of the model being written* rather than a row
+   * of the child model.
+   *
+   * `Cover` is the fixture for it and needs no new one: its `folderId` is the
+   * unique foreign key, so `Cover.folder` is the one-to-one read from the end
+   * that holds it. Which is exactly why the policy question is different from
+   * every other one in this file. The clearing read goes through `Cover`'s own
+   * `$exec`, un-pre-scoped — the same rule `clearLinks` applies on the far
+   * side — but the statement it runs under is `Cover`'s too, and *that* has
+   * already been through the same policies once. One model's scope, consulted
+   * twice for two purposes: to choose the row being written, and to choose the
+   * rows that may be detached for it.
+   *
+   * The two answers below are what that resolves to, and neither is derivable
+   * from the foreign side's:
+   *
+   *   a visible incumbent   detached, orphaned, and this row takes the link
+   *   a hidden incumbent    nothing detached; the repoint collides on the key
+   *
+   * The second is the conservative one and the same one `set`, a nested
+   * `create` and #361's `connect` give: detaching another tenant's row on a
+   * call that never named it is the failure worth refusing, and the cost is a
+   * caller who cannot complete the write and is not told why.
+   */
+  describe("linking into an occupied to-one from the owning side", () => {
+    const ourFolder = () =>
+      raw.unsafe(
+        `INSERT INTO "Folder" ("id", "code", "orgId") VALUES (2, 'ours', 7)`,
+      );
+
+    const links = async () => {
+      const rows: any = await raw.unsafe(
+        `SELECT "id", "folderId" FROM "Cover" ORDER BY "id"`,
+      );
+      return [...rows].map((row: any) => [row.id, row.folderId]);
+    };
+
+    test("displaces an incumbent sibling the caller can see, orphaning it", async () => {
+      await ourFolder();
+      await raw.unsafe(
+        `INSERT INTO "Cover" ("id", "folderId", "caption", "orgId") ` +
+          `VALUES (70, 2, 'incumbent', 7), (71, NULL, 'mover', 7)`,
+      );
+
+      await Model.asUser(OURS, () =>
+        Cover.$exec("update", {
+          where: { id: 71 },
+          data: { folder: { connect: { id: 2 } } },
+        }),
+      );
+
+      // Orphaned, not deleted — two rows still, one of them unlinked.
+      expect(await links()).toEqual([
+        [70, null],
+        [71, 2],
+      ]);
+    });
+
+    test("does not displace an incumbent sibling the caller cannot see", async () => {
+      await ourFolder();
+      await raw.unsafe(
+        `INSERT INTO "Cover" ("id", "folderId", "caption", "orgId") ` +
+          `VALUES (72, 2, 'theirs', 99), (73, NULL, 'mover', 7)`,
+      );
+
+      await expect(
+        Model.asUser(OURS, () =>
+          Cover.$exec("update", {
+            where: { id: 73 },
+            data: { folder: { connect: { id: 2 } } },
+          }),
+        ),
+      ).rejects.toThrow(UniqueConstraintError);
+
+      // Theirs still linked, ours still loose: the failed repoint took the
+      // clear down with it, and the clear never saw the row anyway.
+      expect(await links()).toEqual([
+        [72, 2],
+        [73, null],
+      ]);
+    });
+
+    /**
+     * **The row being written is itself the incumbent, under a policy that
+     * scopes on the foreign key** — the one arrangement where reproducing
+     * Prisma's clear literally would be a silent half-write.
+     *
+     * Prisma nulls the column and writes the same value straight back, for a
+     * net nothing. Here the repoint is not a statement of its own; it is a
+     * contribution to the main statement, whose `where` carries `folderId = 2`
+     * because the policy put it there. A clear that fired would move the row
+     * out of that scope *before* the statement ran, so the statement would
+     * match nothing and the row would end up detached and never re-attached —
+     * `set`'s hazard from #98/#99, arriving on the other side of the key. So
+     * `displaceSibling` reads this row first and skips the clear when it is
+     * already the incumbent, which is observationally identical to Prisma
+     * everywhere else because the only row the skip removes from the clear is
+     * the one the repoint was about to restore.
+     *
+     * The scope is what makes this assertable. Without it the clear-then-
+     * repoint and the skip land on the same table, and this test cannot fail.
+     */
+    test("connecting the far row already linked here is a no-op under a key scope", async () => {
+      class KeyScoped extends Model {
+        static $schema = coverSchema;
+        static $policies = [{ scope: () => ({ folderId: 2 }) } as ModelPolicy];
+      }
+      register("Cover", KeyScoped);
+
+      try {
+        await ourFolder();
+        await raw.unsafe(
+          `INSERT INTO "Cover" ("id", "folderId", "caption", "orgId") ` +
+            `VALUES (74, 2, 'already', 7)`,
+        );
+
+        await Model.asUser(OURS, () =>
+          KeyScoped.$exec("update", {
+            where: { id: 74 },
+            data: { folder: { connect: { id: 2 } } },
+          }),
+        );
+
+        expect(await links()).toEqual([[74, 2]]);
+      } finally {
+        register("Cover", Cover);
+      }
+    });
+  });
+
+  /**
    * `set` means **"replace the set I can see"** — #83's answer, applied to an
    * ordinary relation.
    *
