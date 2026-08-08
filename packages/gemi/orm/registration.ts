@@ -2,7 +2,7 @@ import {
   AmbiguousModelRegistrationError,
   UnregisteredPolicyClassError,
 } from "./errors";
-import { policiesFor } from "./policy";
+import { assertPolicyShapes, policiesFor } from "./policy";
 import * as registry from "./registry";
 import type { ModelSchema } from "./schema";
 
@@ -102,6 +102,24 @@ export function auditModelRegistrations(
     for (const exported of Object.values(module)) {
       const model = asModelClass(exported);
       if (model === null) continue;
+
+      // #321's boot-time half, run **before** the early return below and for
+      // every class rather than only the diverging ones. Left below the return,
+      // the two commonest arrangements were never checked at all — a class that
+      // already owns its name, and one whose name nothing else claims — so a
+      // `{ scopes: … }` typo registered, reported green, and read unscoped.
+      //
+      // `assertPolicyShapes` and not `policiesFor`, and the difference is the
+      // point: this walk checks the entries and constructs nothing. Resolving
+      // here instead is one line and would additionally catch a policy class
+      // whose constructor throws — at the price of constructing every policy
+      // class in the application at `registerModels` time, ahead of whatever
+      // config or container the constructor reaches for. A guard against a
+      // policy that does nothing must not become the reason a working
+      // application stops booting, so the cases that need an instance are left
+      // to `policiesFor`, which is reached below, on the first query, and by
+      // `Model.$exec`.
+      assertPolicyShapes(model);
 
       const name = model.$schema.name;
       const registered = registry.has(name)

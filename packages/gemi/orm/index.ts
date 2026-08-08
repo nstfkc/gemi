@@ -90,6 +90,7 @@ export {
 export {
   AmbiguousModelRegistrationError,
   DecodeError,
+  InvalidPolicyEntryError,
   MalformedRelationError,
   MissingModelSchemaError,
   MissingRequiredValueError,

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "vitest";
 
 import {
   AmbiguousModelRegistrationError,
+  InvalidPolicyEntryError,
   UnregisteredPolicyClassError,
 } from "./errors";
 import { user } from "./fixtures";
@@ -678,5 +679,158 @@ describe("the generator's mark on its own output", () => {
     expect(Object.hasOwn(MarkedBase, "$generated")).toBe(true);
     expect(Object.hasOwn(User, "$generated")).toBe(false);
     expect("$generated" in User).toBe(true);
+  });
+});
+/**
+ * A malformed `$policies` entry is caught at **boot**, not on the query — #321.
+ *
+ * `registerModels` is what an application's Kernel calls, so this walk is the
+ * last point before a policy that cannot run is live in production, and
+ * `assertPolicyShapes` runs over every model class in every declared module
+ * rather than only the ones whose registration diverges. Below the
+ * `registered === undefined || registered === model` return there are the two
+ * ordinary arrangements — a class that already owns its name, and a name nothing
+ * else claims — and both booted with the entry unexamined, which is how a
+ * `{ scopes: … }` typo reached a running app: registered, reported by
+ * `gemi check models` as correctly registered, and reading unscoped.
+ *
+ * **Shape, and nothing that needs an instance.** The tests at the end of this
+ * block are the other half of the rule, and they are the ones that would catch a
+ * regression nobody would notice until an application failed to start.
+ */
+describe("a malformed $policies entry at boot", () => {
+  test("a typo'd hook stops registerModels rather than registering", () => {
+    class User extends UserBase {
+      static $policies = [{ scopes: () => ({ organizationId: 7 }) }] as any;
+    }
+
+    expect(() => registerModels({ User })).toThrow(InvalidPolicyEntryError);
+  });
+
+  /**
+   * The branch the check was moved above. Nothing else claims the name, so the
+   * audit's comparison never runs — and before #321 neither did the resolution
+   * that would have refused the entry.
+   */
+  test("...even when nothing else claims the name", () => {
+    class Solo extends UserBase {
+      static $policies = [() => ({ scope: () => ({}) })] as any;
+    }
+
+    expect(() => registerModels({ Solo })).toThrow(InvalidPolicyEntryError);
+  });
+
+  test("...and when the class is the one already registered", () => {
+    class User extends UserBase {
+      static $policies = [{}] as any;
+    }
+
+    register("User", User);
+
+    expect(() => registerModels({ User })).toThrow(InvalidPolicyEntryError);
+  });
+
+  /**
+   * A refused boot must not leave the arrangement it refused installed. Same
+   * rule `registerModels` already keeps for a failed audit, and the same reason:
+   * a dev server that catches and keeps serving would serve the rest of the
+   * process from a registry this call rejected.
+   */
+  test("the registry is put back when the entry is refused", () => {
+    register("User", UserBase);
+
+    class User extends UserBase {
+      static $policies = [{ scopes: () => ({}) }] as any;
+    }
+
+    expect(() => registerModels({ User })).toThrow(InvalidPolicyEntryError);
+    expect(registry.get("User")).toBe(UserBase);
+  });
+
+  test("a well-formed list still registers", () => {
+    class User extends UserBase {
+      static $policies = [scope];
+    }
+
+    expect(() => registerModels({ UserBase, User })).not.toThrow();
+    expect(registry.get("User")).toBe(User);
+    expect(policiesFor(registry.get("User"))).toEqual([scope]);
+  });
+
+  /**
+   * **The boot walk constructs nothing**, and these are the tests that say so.
+   *
+   * Resolving here instead of checking shapes is one line, and it catches one
+   * more case — a policy class whose constructor throws. It also drags every
+   * policy class in the application into `registerModels`, ahead of whatever
+   * wires the config, the environment or the service container its constructor
+   * reaches for. A class that was fine because it was built lazily then takes
+   * the app's boot with it, reported as whatever its constructor happened to
+   * throw, and the entry it was refusing may have been perfectly good: a guard
+   * against a policy that does nothing turned into a working application that
+   * does not start.
+   *
+   * The three arrangements below are exactly the ones a resolving walk changes.
+   */
+  describe("and the check does not construct anything to find it", () => {
+    let ready = false;
+
+    class Unready {
+      constructor() {
+        if (!ready) throw new Error("service container not ready");
+      }
+      scope() {
+        return {};
+      }
+    }
+
+    test("a class that owns its name boots", () => {
+      class Owns extends UserBase {
+        static $policies = [Unready] as any;
+      }
+
+      register("User", Owns);
+
+      expect(() => registerModels({ Owns })).not.toThrow();
+    });
+
+    test("a class whose name nothing claims boots", () => {
+      class Solo extends UserBase {
+        static $policies = [Unready] as any;
+      }
+
+      expect(() => registerModels({ Solo })).not.toThrow();
+    });
+
+    /**
+     * The `$policy` rename tripwire lives in `policiesFor`, and the boot walk
+     * deliberately does not carry it. Firing it from a walk that reaches
+     * strictly more classes would turn a first-query error into a boot failure
+     * for models this check has no opinion about.
+     */
+    test("a class still carrying the old $policy name boots, and fails on the query", () => {
+      class Legacy extends UserBase {
+        static $policy = { scope: () => ({ organizationId: 7 }) };
+      }
+
+      register("User", Legacy);
+
+      expect(() => registerModels({ Legacy })).not.toThrow();
+      expect(() => policiesFor(Legacy)).toThrow(/\$policies/);
+    });
+
+    // ...and the deferral is a deferral, not a hole: the same class refuses on
+    // the first query through it, with the class and the index named.
+    test("the constructor that throws is still refused, at the first query", () => {
+      class Owns extends UserBase {
+        static $policies = [Unready] as any;
+      }
+
+      register("User", Owns);
+      registerModels({ Owns });
+
+      expect(() => policiesFor(Owns)).toThrow(InvalidPolicyEntryError);
+      expect(() => policiesFor(Owns)).toThrow(/Owns\.\$policies\[0\]/);
+    });
   });
 });
