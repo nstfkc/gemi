@@ -80,6 +80,14 @@ How it composes with the rest of the framework:
   visitors included — with the `"no-stream"` middleware directive (see the
   middleware docs). `Query.prefetch` is **not required** for streaming — see
   "Avoiding server waterfalls" below for when it still earns its keep.
+- **Hydration doesn't flash the fallback.** A production shell announces every
+  chunk the current route's views will import with `<link rel="modulepreload">`,
+  so the browser fetches the whole layout → view → component chain in parallel
+  with the client entry. Without those hints it discovers them one `import()`
+  at a time, and on a real network each boundary shows its `Loading` export in
+  place of content the server already rendered — collapsing the page height and
+  restoring it a round trip later. Client-side navigation announces the target
+  route's chunks the same way, so a transition doesn't re-pay that chain either.
 - **Navigation** — the router commits navigations inside a transition, so when
   the next page's queries suspend, the previous page stays on screen
   (`Link[data-pending]` / `useRouteTransition()` report it) until they resolve.

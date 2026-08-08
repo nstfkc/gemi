@@ -30,6 +30,8 @@ export interface ServerDataContextValue {
   };
   __csrf: string;
   cssManifest: Record<string, string[]>;
+  /** Built chunk URLs per view name, for warming a navigation's imports. */
+  modulePreloadManifest: Record<string, string[]>;
   meta: any;
   appId: string;
 }

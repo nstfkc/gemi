@@ -4,6 +4,7 @@ import { generateETag } from "./generateEtag";
 import { URLPattern } from "urlpattern-polyfill";
 import { exists } from "node:fs/promises";
 import { createStyles } from "./styles";
+import { CLIENT_ENTRY_KEY, collectModulePreloads, createClientEntry } from "./modulePreloads";
 import type { App } from "../app";
 import { Instrumentation } from "./types";
 import { printStartupBanner } from "./banner";
@@ -35,6 +36,9 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
   const ogMap = {};
   const viewModules = {};
   const cssManifest = {};
+  // Which chunks a route's views pull in, so the shell can preload the chain
+  // the client would otherwise discover one round trip at a time (#352).
+  const modulePreloadManifest: Record<string, string[]> = {};
   const template = (viewName: string, path: string) => `"${viewName}": () => import("${path}")`;
   const templates = [];
 
@@ -61,10 +65,26 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
     }
     if (clientFile) {
       templates.push(template(fileName, `/${clientFile?.file}`));
+      modulePreloadManifest[fileName] = collectModulePreloads(
+        manifest,
+        `app/views/${fileName}.tsx`,
+      );
     }
   }
 
   const loaders = `{${templates.join(",")}}`;
+
+  // Booted from the bootstrap script rather than through React's
+  // `bootstrapModules`, which would preload it at `fetchPriority="low"` — see
+  // `clientEntry` in `ViewRouteDispatcher`.
+  const clientEntry = createClientEntry(manifest);
+  if (!clientEntry) {
+    // Loudly, but without dying: this is boot, and an incomplete `dist/` must
+    // not cost the API routes and static assets too.
+    console.error(
+      `Client manifest has no "${CLIENT_ENTRY_KEY}" entry — dist/client is incomplete, so documents will render but never hydrate.`,
+    );
+  }
 
   // Vite's manifest `css` field is a `string[]` — a client entry can emit more
   // than one CSS chunk. Read and concatenate them all instead of interpolating
@@ -179,7 +199,8 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
 
         return await result({
           getStyles,
-          bootstrapModules: [`/${manifest["app/client.tsx"].file}`],
+          clientEntry,
+          modulePreloadManifest,
           loaders,
           viewImportMap,
           viewModules,
