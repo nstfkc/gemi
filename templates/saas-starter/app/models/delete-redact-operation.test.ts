@@ -360,15 +360,12 @@ function suite(
      * whatever statement encloses it.
      *
      * Pinned under `batched` explicitly because that is the strategy both
-     * dialects have. Which read-name a *folded* child sees is strategy-dependent
-     * today — `redactFolded` passes the enclosing operation down, so a lateral
-     * child of this pre-read is told `findFirst` where a batched one is told
-     * `findMany`. Both were measured; the divergence predates this change, is
-     * about two reads disagreeing rather than a read reporting a write, and is
-     * out of #366's scope. It is filed as **#388**, whose fix — handing
-     * `redactFolded` the same `NESTED_READ` constant — would make the case below
-     * pinnable as an equality on both dialects. What must hold until then is the
-     * case below.
+     * dialects have. Which read-name a *folded* child saw used to be
+     * strategy-dependent — `redactFolded` passed the enclosing operation down, so
+     * a lateral child of this pre-read was told `findFirst` where a batched one
+     * was told `findMany`. That was **#388**, fixed by handing `redactFolded` the
+     * same `NESTED_READ` constant, and the equality it was waiting for is the
+     * test after next.
      */
     test("a nested read is still redacted as a read", async () => {
       const parent = await only();
@@ -393,14 +390,80 @@ function suite(
         include: { children: true },
       });
 
-      // Not an equality: the value differs by dialect, because the default
-      // strategy does. Measured — `findMany` on SQLite (batched), `findFirst` on
-      // Postgres (lateral, where `redactFolded` passes the enclosing read's
-      // name — #388). Neither is the write, which is the part that has to hold,
-      // and pinning either literal here would make this suite fail on one
-      // dialect for a divergence that is not #366's.
+      // Kept as the weaker claim it always was — that the child is never told
+      // the enclosing write — because that is #366's part and it has to hold
+      // whatever the strategy does. The stronger claim, that both strategies say
+      // the same thing, is the test below and belongs to #388.
       expect(childOperations).not.toContain("delete");
       expect(childOperations.length).toBeGreaterThan(0);
+    });
+
+    /**
+     * **#388 — the two strategies have to agree.**
+     *
+     * Written as an equality between the two runs rather than against a literal,
+     * and that is the whole point: the bug was that the *same* relation read,
+     * over the *same* rows, told the child's `redact` a different
+     * `context.operation` depending on which strategy planned it. A per-dialect
+     * literal cannot express that, and pinning one would have made this suite
+     * fail on whichever dialect it was not written for — which is why the case
+     * above stayed weak until the fix landed.
+     *
+     * The comparison is `batched` against the **dialect's default**, not against
+     * an explicit `lateral`. On Postgres the default *is* lateral, so this is the
+     * real test and it is the run that used to answer `findFirst`. On SQLite both
+     * sides are batched, so it degenerates to a control — worth keeping, because
+     * a fix that made the folded path agree by breaking the batched one would
+     * pass on Postgres alone. Asking SQLite for `lateral` explicitly would
+     * instead exercise a strategy that dialect never chooses.
+     *
+     * Deduplicated before comparing: `redact` runs per row and the fixture seeds
+     * two children, but the claim is about which name they are told, not how
+     * many of them there are.
+     */
+    test("a folded child is redacted as the same read a batched one is", async () => {
+      // `delete`, not `findFirst`, and not by preference: `parentReadScope`
+      // scopes a `findFirst` to a label no row has, so a direct one returns null
+      // and reads no children at all. The delete pre-read is `markPreScoped`, so
+      // that fragment never reaches it — which is what makes this the only shape
+      // here whose enclosing operation is not `findMany` *and* which actually
+      // reaches the child.
+      const first = await only();
+      await DelOpParent.$exec(
+        "delete",
+        { where: { id: first.id }, include: { children: true } },
+        { strategy: "batched" } as never,
+      );
+      const batched = [...new Set(childOperations)];
+
+      // The row is gone, so the second run needs its own. Seeded under
+      // `asSystem` for the same reason `beforeEach` does it: a `scope` with no
+      // `onCreate` is refused by name.
+      childOperations.length = 0;
+      clearPlanCache();
+      await Model.asSystem(async () => {
+        const parent: any = await DelOpParent.$exec("create", {
+          data: { label: "kept", secret: "hunter2" },
+        });
+        await DelOpChild.$exec("create", {
+          data: { parentId: parent.id, name: "a" },
+        });
+        await DelOpChild.$exec("create", {
+          data: { parentId: parent.id, name: "b" },
+        });
+      });
+
+      const second = await only();
+      await DelOpParent.$exec("delete", {
+        where: { id: second.id },
+        include: { children: true },
+      });
+      const planned = [...new Set(childOperations)];
+
+      expect(planned).toEqual(batched);
+      // ...and both are the read the child actually is, which is what makes the
+      // equality worth having rather than two matching wrong answers.
+      expect(planned).toEqual(["findMany"]);
     });
 
     /**

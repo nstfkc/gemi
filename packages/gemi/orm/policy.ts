@@ -1548,7 +1548,7 @@ export type PolicyLookup = (model: string) => {
  * accepting one at all is what makes it unrepresentable — the same reason #79
  * made `resolveLink`'s `operation` required rather than defaulted.
  */
-const NESTED_READ: Operation = "findMany";
+export const NESTED_READ: Operation = "findMany";
 
 /**
  * Applies every *nested* model's policies to its own node in the argument tree,
