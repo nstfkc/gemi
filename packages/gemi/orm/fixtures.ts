@@ -833,9 +833,35 @@ export const profile: ModelSchema = {
  * `user`, plus the far side of {@link profile} — `kind: "one"` with empty
  * `from`/`to`, which is how the foreign side of any relation is spelled: the
  * link is resolved through the child's opposing relation, not stated here.
+ *
+ * **...and `metadata Json?`, which is the schema `corpus.ts` is compiled
+ * against.** A `where: { … : { path: …, equals: … } }` entry needs a Json
+ * column: aimed at anything else it is refused — *"A 'path' filter reads inside
+ * a JSON document, and 'name' is a String column"* — and the invariant suites
+ * track refusals rather than swallowing them, so the corpus could not carry a
+ * JSON path filter at all until some fixture grew one (#301). That refusal is
+ * itself a corpus entry now; what it could not be was the only one.
+ *
+ * Here rather than on `user` for the reason the `profile` relation is here:
+ * `user` is a faithful copy of the template's `User` *as the read tests assert
+ * it*, and {@link USER_COLUMNS} is spelled out in several of them. The template
+ * schema does declare `metadata Json?` on `User`, so this is the fixture moving
+ * *toward* the real model rather than away from it — `user` is the one that has
+ * drifted, and re-baselining it is not this change's business.
  */
 export const userWithProfile: ModelSchema = {
   ...user,
+  fields: {
+    ...user.fields,
+    metadata: {
+      name: "metadata",
+      column: "metadata",
+      type: "Json",
+      nullable: true,
+      isId: false,
+      isUpdatedAt: false,
+    },
+  },
   relations: {
     ...user.relations,
     profile: {

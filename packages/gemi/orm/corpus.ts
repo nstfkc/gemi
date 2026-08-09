@@ -62,6 +62,116 @@ export const READS: unknown[] = [
   { take: 5 },
   { skip: 1 },
   { skip: 1, take: 2 },
+
+  // ---------------------------------------------------------------------
+  // JSON path filters (#299), and the reason they arrived late (#301).
+  //
+  // They need a `Json` column, and the schema both invariant suites compile
+  // against did not have one — a `path` on a String column is refused outright,
+  // and a refused entry covers nothing. `userWithProfile` grew `metadata` for
+  // this; see the note there for why that cost nothing.
+  //
+  // **Every entry in the two *grammar* blocks below is refused on exactly one
+  // dialect, by name, and that is the point rather than a nuisance.** `path` is
+  // the only argument in this corpus whose *grammar* is dialect-specific:
+  // Postgres takes `path: ["a", "b"]` and refuses a string, SQLite takes
+  // `path: "$.a.b"` and refuses an array. That is Prisma's own split, measured
+  // against a generated client on both, so writing one spelling would leave the
+  // other dialect's half of the feature unwalked.
+  // `plan-key.invariants.test.ts` lists both messages in `EXPECTED_REFUSALS` and
+  // asserts each still fires, so a dialect that quietly started accepting the
+  // other form fails there.
+  //
+  // It is **not** true of the refusal block at the end, and the earlier draft of
+  // this note claimed it of the whole section: an empty path, a `path` on a
+  // String column, a malformed segment and `path: 5` are refused on *both*
+  // dialects. Which ones split and which do not is spelled out at the block
+  // itself, because it is exactly the thing that decides whether an entry needs
+  // writing twice.
+
+  // The Postgres grammar. The first three are the shape #301 opened to measure:
+  // three depths compiling to the *same* statement — `("metadata" #>> $1) = $2`
+  // — because `#>` takes the whole path as one `text[]` parameter. Recording
+  // them element-wise minted three cache entries holding one statement, keyed by
+  // a depth that is as request-derived as an `in` list's length; `path` is in
+  // `LIST_KEYS` now, and this is what measures it.
+  { where: { metadata: { path: ["a"], equals: "x" } } },
+  { where: { metadata: { path: ["a", "b"], equals: "x" } } },
+  { where: { metadata: { path: ["a", "b", "c"], equals: "x" } } },
+  // An array *index*, spelled as a string. `#>` takes a `text[]` and reaches the
+  // same element either way, and the string spelling is the one #380 keeps when
+  // it narrows `JsonPath` to `readonly string[]` — this entry sits among the
+  // reads expected to compile, so a numeric segment here would report itself as
+  // an unexpected refusal the moment that lands.
+  { where: { metadata: { path: ["a", "0"], equals: "x" } } },
+  { where: { metadata: { path: ["a"], not: "x" } } },
+  { where: { metadata: { path: ["a"], string_contains: "x" } } },
+  { where: { metadata: { path: ["a"], string_starts_with: "x" } } },
+  { where: { metadata: { path: ["a"], string_ends_with: "x" } } },
+  // The four Postgres-only filters, which SQLite's `jsonFilters` withholds
+  // because Prisma refuses them there with "Unknown argument".
+  { where: { metadata: { path: ["a"], array_contains: "x" } } },
+  { where: { metadata: { path: ["a"], gt: 1 } } },
+  { where: { metadata: { path: ["a"], gte: 1 } } },
+  { where: { metadata: { path: ["a"], lt: 1 } } },
+  { where: { metadata: { path: ["a"], lte: 1 } } },
+  // Two filters on one path — the `and`-grouped branch, and the only shape that
+  // extracts the same path twice in one statement.
+  { where: { metadata: { path: ["a"], gt: 1, lt: 9 } } },
+
+  // The SQLite grammar, same filters minus the ones the dialect declines.
+  { where: { metadata: { path: "$.a", equals: "x" } } },
+  { where: { metadata: { path: "$.a.b", equals: "x" } } },
+  { where: { metadata: { path: "$.a", not: "x" } } },
+  { where: { metadata: { path: "$.a", string_contains: "x" } } },
+  { where: { metadata: { path: "$.a", string_starts_with: "x" } } },
+  { where: { metadata: { path: "$.a", string_ends_with: "x" } } },
+  { where: { metadata: { path: "$.a", equals: "x", not: "y" } } },
+  // Refused on SQLite for the *filter* rather than for the grammar, which is a
+  // different message and the one that would fall silent if `jsonFilters` were
+  // ever widened there to match Postgres.
+  { where: { metadata: { path: "$.a", gt: 1 } } },
+  { where: { metadata: { path: "$.a", array_contains: "x" } } },
+
+  // The refusals #299 owns. Every one is written in **both** grammars, but for
+  // two different reasons, and the distinction was got wrong here first time —
+  // measured by compiling each entry on both dialects.
+  //
+  // **The first two pairs genuinely need both spellings.** `assertPathShape`
+  // runs before the bare-path and unknown-filter checks, so the array form
+  // reaches them on Postgres and is swallowed by the grammar message on SQLite,
+  // and the string form does the mirror of that. One spelling would leave one
+  // dialect's copy of the message unwalked.
+  { where: { metadata: { path: ["a"] } } },
+  { where: { metadata: { path: "$.a" } } },
+  { where: { metadata: { path: ["a"], nonsense: "x" } } },
+  { where: { metadata: { path: "$.a", nonsense: "x" } } },
+  // **The next two pairs do not**, and saying otherwise was the error. The empty
+  // check sits *above* the grammar branch inside `assertPathShape`, and the
+  // `field.type !== "Json"` throw sits above `assertPathShape` altogether, so
+  // each of these fires the same message on both dialects from either spelling.
+  // They are kept because they are the pairs whose redundancy depends on that
+  // ordering — the ordering the four entries above rely on being the other way
+  // round — so if a refactor ever hoists the grammar check to the top of
+  // `compileJsonFilter`, these are what keep both dialects covered instead of
+  // half of each. `[]` and `""` are distinct inputs in their own right besides.
+  { where: { metadata: { path: [] } } },
+  { where: { metadata: { path: "" } } },
+  { where: { name: { path: ["a"], equals: "x" } } },
+  { where: { name: { path: "$.a", equals: "x" } } },
+  // Neither grammar. Not its own branch — `got` is `"other"`, which falls
+  // through to the same `got !== wanted` throw and the same message as the
+  // wrong-grammar entries above — but a distinct input class, and the one a
+  // caller reaches by forgetting to split a dotted string.
+  { where: { metadata: { path: 5, equals: "x" } } },
+  // An array whose *segments* are malformed, which is the case the `LIST_KEYS`
+  // collapse has to keep out of a valid path's cache entry: refused cold on both
+  // dialects — the array grammar's own message on Postgres, the wrong-grammar
+  // one on SQLite — where `["a"]` beside it compiles. `plan-key.invariants` owns
+  // the assertion that the two do not share a key; a refused entry can never
+  // reach the same-key-implies-same-SQL property, so the corpus alone would not
+  // have caught it.
+  { where: { metadata: { path: ["a", null], equals: "x" } } },
 ];
 
 export const WRITES: [string, unknown][] = [
@@ -115,6 +225,12 @@ export const WRITES: [string, unknown][] = [
   ["update", { where: { id: 1 }, data: { profile: { connect: { userId: 1 } } } }],
   ["updateMany", { where: { id: 1 }, data: { name: "x" } }],
   ["updateMany", { data: { name: "x" } }],
+  // A JSON path filter in a *write's* `where`, both grammars. The predicate
+  // compiler is shared, but its entry point is not — `compileWrite` builds its
+  // own `WhereContext` — and a `path` binder that located against the read's
+  // argument tree would only show up from here.
+  ["updateMany", { where: { metadata: { path: ["a"], equals: "x" } }, data: { name: "x" } }],
+  ["updateMany", { where: { metadata: { path: "$.a", equals: "x" } }, data: { name: "x" } }],
   ["delete", { where: { id: 1 } }],
   ["delete", { where: { id: 1 }, select: { id: true } }],
   // The conflict target has to be set by `create`, or `Model.upsert` runs it as

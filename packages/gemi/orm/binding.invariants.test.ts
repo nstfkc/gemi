@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test } from "vitest";
+import { beforeEach, describe, expect, test, vi } from "vitest";
 
 import { compileAggregate } from "./compile/aggregate";
 import { createBindContext } from "./compile/fragment";
@@ -119,6 +119,119 @@ describe("no value reaches the SQL text", () => {
   });
 
   /**
+   * **...and a plan compiled from one call's values binds the *next* call's.**
+   *
+   * The property above compiles each shape twice and compares the two texts,
+   * which is blind to a whole class: a compiler that reads a value at compile
+   * time and closes over it emits byte-identical text for both, keys
+   * identically, and is still wrong the moment the plan is reused. And it is
+   * reused — that is what `getOrCompile` is for, so this is the live path
+   * rather than a hypothetical one.
+   *
+   * Found while covering JSON path filters (#301), because a path is where the
+   * mistake is easiest to make: it is the one argument whose value decides part
+   * of an expression's *meaning*, so building the fragment from it reads as
+   * natural. Written over the whole corpus rather than over `path` alone,
+   * since nothing about the failure is specific to it — `where: { name: "a" }`
+   * compiled with a captured `"a"` fails the same way and was equally
+   * unasserted.
+   *
+   * `bind` rather than `text` is the whole point: compile from `args`, bind
+   * `twin`, and require the same array the plan compiled *for* `twin` produces.
+   */
+  test.each(DIALECTS)("a plan compiled for one call binds the next call's values — %s", (_name, dialect) => {
+    /**
+     * Two bound values are *supposed* to differ between two calls of one plan:
+     * `@default(now())` / `@updatedAt`, and `@default(cuid())`. Both are
+     * generated at bind time, which is the whole reason they are generated
+     * there rather than compiled in, so neither can be compared as-is.
+     *
+     * The clock is **frozen** rather than masked, because masking it cannot be
+     * done in a dialect-agnostic way: `encode` turns a `Date` into a number on
+     * SQLite and passes it through on Postgres, so a `value instanceof Date`
+     * mask covers one dialect and silently drops the other — and then flakes
+     * on whichever millisecond boundary falls between two binds. Freezing
+     * removes the difference instead of hiding it, and leaves a genuinely stale
+     * timestamp visible.
+     *
+     * `cuid` has no clock to freeze — it is random by construction — so it is
+     * masked, by kind rather than by position so it stays right if the column
+     * order moves.
+     */
+    const CUID = /^c[a-z0-9]{20,}$/;
+    const masked = (bound: unknown[]) =>
+      bound.map((value) =>
+        typeof value === "string" && CUID.test(value) ? "<generated cuid>" : value,
+      );
+
+    const stale: string[] = [];
+    let checked = 0;
+
+    vi.useFakeTimers();
+    try {
+      for (const [op, args] of entries) {
+        const twin = vary(args);
+        if (JSON.stringify(twin) === JSON.stringify(args)) continue;
+
+        let reused: unknown[];
+        let fresh: unknown[];
+        try {
+          // The cache hit, spelled out: a plan compiled for `args`, handed
+          // `twin`. `getOrCompile` does exactly this whenever two calls share a
+          // key, which every pair here does by construction.
+          reused = masked(compileAny(op, args, dialect).bind(twin, createBindContext()));
+          fresh = masked(compileAny(op, twin, dialect).bind(twin, createBindContext()));
+        } catch {
+          continue; // Refusals are `plan-key.invariants.test.ts`'s subject.
+        }
+
+        checked++;
+        if (JSON.stringify(reused) !== JSON.stringify(fresh)) {
+          stale.push(
+            `${op} ${JSON.stringify(args)}\n  reused ${JSON.stringify(reused)}\n  fresh  ${JSON.stringify(fresh)}`,
+          );
+        }
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(stale, stale.join("\n\n")).toEqual([]);
+    expect(checked).toBeGreaterThan(40);
+  });
+
+  /**
+   * A JSON path, in each dialect's own grammar — appended to the cases below
+   * because it is the value hardest to keep bound.
+   *
+   * The path is the one argument whose *value* decides what an expression
+   * means, and `compile/where.ts` says so at the branch. That makes "read it at
+   * compile time and build the fragment from it" the natural mistake, and it is
+   * invisible to the two properties above: such a compiler emits byte-identical
+   * text for two different paths and keys them identically. What it does not do
+   * is put the path in the binding, which is what this asks.
+   *
+   * Dialect-keyed rather than shared, because the grammars are not
+   * interchangeable: Postgres refuses `"$.a"` and SQLite refuses `["a"]`.
+   */
+  const JSON_BINDING_CASES: Record<string, [string, unknown, unknown[]][]> = {
+    sqlite: [
+      [
+        "findMany",
+        { where: { metadata: { path: "$.needlePath", equals: "needleValue" } } },
+        ["$.needlePath", "needleValue"],
+      ],
+    ],
+    postgres: [
+      [
+        "findMany",
+        { where: { metadata: { path: ["needlePath"], equals: "needleValue" } } },
+        ["needlePath", "needleValue"],
+      ],
+    ],
+  };
+
+  /**
    * ...and the values are **actually bound**, not dropped.
    *
    * Without this the property above is satisfiable by a compiler that throws
@@ -126,13 +239,14 @@ describe("no value reaches the SQL text", () => {
    * anything. Same vacuity trap that made `plan-key.invariants.test.ts` pass
    * against a reintroduced #92 on its first run.
    */
-  test.each(DIALECTS)("...and every value is present in the binding — %s", (_name, dialect) => {
+  test.each(DIALECTS)("...and every value is present in the binding — %s", (name, dialect) => {
     const cases: [string, unknown, unknown[]][] = [
       ["findMany", { where: { name: "needle" } }, ["needle"]],
       ["findMany", { where: { name: { contains: "needle" } } }, ["%needle%"]],
       ["findMany", { where: { id: { in: [11, 22, 33] } } }, [11, 22, 33]],
       ["update", { where: { id: 7 }, data: { name: "needle" } }, ["needle", 7]],
       ["deleteMany", { where: { name: "needle" } }, ["needle"]],
+      ...JSON_BINDING_CASES[name],
     ];
 
     for (const [op, args, expected] of cases) {

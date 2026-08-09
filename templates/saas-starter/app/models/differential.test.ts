@@ -1713,6 +1713,75 @@ function suite(label: string, url?: string) {
       ).rejects.toThrow(/only one of them/);
     });
 
+    // --- the plan cache -------------------------------------------------
+
+    /**
+     * Two JSON paths of **different depth** are one plan, and the second call
+     * still reads its own path (#301).
+     *
+     * The path binds whole — a `text[]` through `#>` on Postgres, a string
+     * through `json_extract` on SQLite — so depth never reaches the SQL text,
+     * and `plan.ts` collapses it out of the cache key rather than minting an
+     * entry per depth. That collapse is only safe if a warm plan binds the
+     * *new* call's path, and nothing above can show it: `expectSame` calls
+     * `clearPlanCache()` per case, so every JSON path case in `CASES` compiles
+     * fresh and a plan serving a stale path would leave all of them green.
+     *
+     * So the two calls run back to back through one warm cache, which is what
+     * an application does. The pair is chosen to be **discriminating rather
+     * than merely equal**: the shallow path matches Ada and the deep one
+     * matches nobody, so a plan that answered the second with the first's path
+     * would return a row instead of none. Run in both orders, because "the
+     * first shape compiled decides for the second" is directional.
+     *
+     * Prisma is still the oracle for both answers — `expectSame` pins them
+     * first, and the warm-cache rows are then required to equal those.
+     */
+    test("a JSON path is one plan whatever its depth is", async () => {
+      const { clearPlanCache, planCacheStats } = await import("gemi/orm");
+
+      // Prisma refuses the other dialect's grammar, so the spelling is the
+      // dialect's. `url` is set only for the Postgres suite.
+      const shallow = url ? ["plan"] : "$.plan";
+      const deep = url ? ["limits", "plan"] : "$.limits.plan";
+      const args = (path: unknown) => ({
+        where: { metadata: { path, equals: "pro" } },
+        orderBy: { id: "asc" as const },
+      });
+
+      const fromPrismaShallow = (await differential.expectSame(
+        "User",
+        "findMany",
+        args(shallow),
+      )) as any[];
+      const fromPrismaDeep = (await differential.expectSame(
+        "User",
+        "findMany",
+        args(deep),
+      )) as any[];
+
+      // The fixture has to discriminate, or everything below passes vacuously.
+      expect(fromPrismaShallow).toHaveLength(1);
+      expect(fromPrismaDeep).toHaveLength(0);
+
+      for (const [first, second, firstRows, secondRows] of [
+        [shallow, deep, fromPrismaShallow, fromPrismaDeep],
+        [deep, shallow, fromPrismaDeep, fromPrismaShallow],
+      ] as const) {
+        clearPlanCache();
+        const a = (await UserModel.findMany(args(first) as never)) as any[];
+        const b = (await UserModel.findMany(args(second) as never)) as any[];
+
+        // One statement, so one compile — and the second call is a *hit*, which
+        // is the arrangement the assertions below are about.
+        expect(planCacheStats().compiles).toBe(1);
+        expect(planCacheStats().hits).toBe(1);
+
+        expect(a.map((row) => row.id)).toEqual(firstRows.map((row) => row.id));
+        expect(b.map((row) => row.id)).toEqual(secondRows.map((row) => row.id));
+      }
+    });
+
     // A guard on the harness itself: if `expectSame` compared nothing, every
     // case above would pass vacuously.
     test("the harness actually compares rows", async () => {
