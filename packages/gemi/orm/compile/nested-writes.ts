@@ -2061,19 +2061,57 @@ function planForeignSide(
    *
    *     connect onto an empty to-one          attaches           agreed already
    *     connect a child of another parent     repoints it        agreed already
-   *     connect the row already linked here   no net change      agreed already
+   *     connect the row already linked here   writes nothing     see below
    *     connect onto an occupied to-one       displaces          the divergence
    *
-   * The third is worth its own line, because the clear and the link cross on
-   * it: `clearLinks` nulls the very row the caller named, and the update below
-   * puts the key straight back. One statement wasted on a call that changes
-   * nothing, and the alternative — excluding the named row from the clear —
-   * would need the caller's key resolved against the child before the clear can
-   * be written, which is a lookup on every `connect` to save one on a rare one.
+   * **The third is the one the clear and the link cross on, and #361 got it
+   * right in the table and wrong in the statements** (#372). `clearLinks` nulls
+   * the very row the caller named and the repoint puts the key straight back,
+   * so the committed state agrees — and that is all `M15b` could see. The two
+   * statements in between are not harmless. **The repoint has to re-select the
+   * row by the column the clear just changed, so it fails whenever anything in
+   * that `where` depends on the old value** — and there are two ways to get
+   * one, not just the policy shape #372 was reported through:
+   *
+   *   - a child whose policy scopes on *its own foreign key*
+   *     (`{ folderId: 2 }`) — the scope is `AND`ed into the repoint's `where`,
+   *     and the clear has just moved the row out of it;
+   *   - **no policy anywhere**, when the caller names the row *by* that foreign
+   *     key (`connect: { folderId: 2 }`). `assertNamedRows` accepts that
+   *     operand because the column is in `uniques`, which is the same fact that
+   *     makes the relation a to-one in the first place — and then the caller's
+   *     own `where` is the thing the clear invalidates.
+   *
+   * Either way the repoint matches nothing and the whole call raises
+   * `RecordNotFoundError` naming a model and an operation the caller never
+   * wrote. A call that worked before #361. The second shape is what makes this
+   * a plain correctness bug rather than a policy interaction, and it is why the
+   * differential can pin it at all: `M15e` in `writes.differential.test.ts` is
+   * that spelling, `error` against `ok`, with no policy in it.
+   *
+   * So the named row is resolved first and the operand short-circuits when it
+   * already points here — {@link alreadyLinked}. That is Prisma's own shape
+   * rather than a repair invented for the scope: measured on 6.19.2/SQLite with
+   * query logging, `folder.update({ data: { cover: { connect: { id: 30 } } } })`
+   * where cover 30 already holds folder 2 logs **four selects and no `UPDATE`**
+   * between its `BEGIN` and `COMMIT`, where the same call onto an occupied
+   * folder logs the incumbent clear and the repoint. The lookup itself is
+   * Prisma's too — every `connect` above begins by selecting the operand's row
+   * with its foreign key in the projection.
+   *
+   * #361 declined this as "a lookup on every `connect` to save one write on a
+   * rare one", which was the right trade for the fact it had in view. Two
+   * things changed it: the write it saves is a live failure rather than a
+   * redundancy, and the lookup is not on every `connect` — only where
+   * `displaces` holds, which is a to-one, so every many-to-one and every
+   * to-many `connect` costs exactly what it did.
    *
    * **A miss detaches nothing**, which is Prisma's answer (P2025, nothing
-   * written) and is not a special case here: the `update` below raises, and the
-   * clear is inside the transaction the nested steps already run in.
+   * written) and is not a special case here: a row the lookup cannot find is
+   * left to the repoint, which raises, and the clear is inside the transaction
+   * the nested steps already run in. That covers the row that does not exist
+   * and the row this caller's policies hide alike — both read as absent, and
+   * both get the answer they had before this change.
    */
   out.after.push({
     relation: relation.name,
@@ -2082,11 +2120,35 @@ function planForeignSide(
       const parent = rows[0];
       if (!parent) return;
 
+      // `displaces` is only ever true on a to-one, where the array spelling is
+      // refused above — so this is one extra select at most, never one per item.
+      const pending: unknown[] = [];
+      for (const item of listOf(at(args))) {
+        if (
+          displaces &&
+          (await alreadyLinked(
+            relation.model,
+            childField,
+            item,
+            parent[parentField],
+            executor,
+          ))
+        ) {
+          continue;
+        }
+        pending.push(item);
+      }
+
+      // Nothing left to link means nothing to displace either: the only row that
+      // could hold this parent's key is the one the caller named, and it holds
+      // it already. Returning here is what makes the call write nothing at all.
+      if (pending.length === 0) return;
+
       if (displaces) {
         await clearLinks(relation.model, childField, parent[parentField], executor);
       }
 
-      for (const item of listOf(at(args))) {
+      for (const item of pending) {
         await executor.exec(
           relation.model,
           "update",
@@ -2646,6 +2708,59 @@ async function clearLinks(
     false,
     [field],
   );
+}
+
+/**
+ * **Whether the row a `connect` named already points at this parent** — the
+ * question that turns a clear-then-repoint into no statements at all (#372).
+ *
+ * The foreign-side twin of the `sameKey` test inside {@link displaceSibling},
+ * and the same answer read from the other end of the key: on the owning side
+ * the row that must not be cleared is the one being written, here it is the one
+ * being named. Both exist because clearing a row and then selecting it by the
+ * column just cleared is a contradiction the moment anything in that `where`
+ * depends on the old value — a policy scoping on the column, or a caller who
+ * named the row by it.
+ *
+ * **Prisma issues no write for an already-linked `connect` from either end, and
+ * only this end matches that outright.** The owning side skips the *clear* and
+ * still emits the repoint — {@link displaceSibling}'s docblock says so in plain
+ * terms, and that residual divergence is #370's class, not something #363/#375
+ * closed. Do not read the symmetry above as parity.
+ *
+ * **Un-pre-scoped, so the child's own policies decide what this can see** — the
+ * same rule every other statement in this step follows, and it is what makes
+ * the miss answer fall out rather than needing a branch. A row that does not
+ * exist and a row this caller cannot see both read as absent, so both are
+ * treated as "not linked here" and left to the repoint, which raises
+ * `RecordNotFoundError` for them exactly as it did before.
+ *
+ * Getting that direction backwards would be the expensive mistake: a lookup
+ * that ignored the scope could answer "already linked" for another tenant's row
+ * and make the whole operand a silent no-op, which is a `connect` that reports
+ * success and links nothing.
+ *
+ * `findUnique` rather than `findFirst` because `assertNamedRows` has already
+ * run `matchUniqueKey` over this operand — the same lookup, and the same
+ * spelling, that `connectOrCreate`'s hit branch uses one screen up.
+ */
+async function alreadyLinked(
+  model: string,
+  field: string,
+  where: unknown,
+  value: unknown,
+  executor: RelationExecutor,
+): Promise<boolean> {
+  const named = (await executor.exec(
+    model,
+    "findUnique",
+    { where, select: { [field]: true } },
+    false,
+  )) as Record<string, unknown> | null;
+
+  if (named === null || named === undefined) return false;
+
+  return sameKey(named[field], value);
 }
 
 /**

@@ -1089,6 +1089,194 @@ describe("policies on nested writes", () => {
         [55, null],
       ]);
     });
+
+    /**
+     * **`connect` naming the row that is already linked here, under a child
+     * scoped on its own foreign key** — #372, and the case #361's displacement
+     * broke without any test being able to see it.
+     *
+     * `M15b` pins this call in the differential and stays green either way,
+     * because it reads the *table*: `clearLinks` nulled the named row and the
+     * repoint put the key straight back, so the committed state agreed with
+     * Prisma's. What it could not see is that the two statements contradict each
+     * other the moment a policy scopes on the column they both write. The clear
+     * moves the row out of `{ folderId: 2 }`; the repoint has to select it *by*
+     * `{ folderId: 2 }`; so the repoint matched nothing and the call raised
+     * `RecordNotFoundError: No Cover found (Cover.update)` — a model and an
+     * operation the caller never wrote, on a call that worked before #361.
+     *
+     * The fix resolves the named row first and short-circuits, which is also
+     * what Prisma does — the same call on a generated 6.19.2 client logs four
+     * selects and no `UPDATE`. So the assertion is that this succeeds and the
+     * link survives, which is what this call answers when the operand is
+     * `{ id: 56 }` and no policy is registered.
+     *
+     * **The scope is one way to reach the crossing, not the only one.** The
+     * repoint fails whenever anything in its `where` depends on the value the
+     * clear just nulled, and a caller who spells the operand as
+     * `connect: { folderId: 2 }` supplies that himself — no policy needed.
+     * That shape is pinned in the differential as `M15e`, where it shows up as
+     * `error` against `ok`; this file cannot host it, because it is
+     * SQLite-only by construction (its `beforeAll` builds its own `sqlite://`
+     * workspace, so the Postgres job never reaches these three tests).
+     *
+     * Read this next to `"a foreign-key scope allows relation operands the ORM
+     * keyed"` further down, which is the same scope on the to-many side and
+     * where `set` is still refused: the two answers are different because
+     * `set`'s *link* half deliberately does not name its column as ORM-authored,
+     * so it is stopped by the guard before it can reach the scope. `connect`
+     * passes the guard (#98) and used to fail on the scope instead.
+     */
+    test("connect of the row already linked here survives a key scope", async () => {
+      class KeyScoped extends Model {
+        static $schema = coverSchema;
+        static $policies = [{ scope: () => ({ folderId: 2 }) } as ModelPolicy];
+      }
+      register("Cover", KeyScoped);
+
+      try {
+        await seedFolder();
+        await raw.unsafe(
+          `INSERT INTO "Cover" ("id", "folderId", "caption", "orgId") ` +
+            `VALUES (56, 2, 'already', 7)`,
+        );
+
+        await Model.asUser(OURS, () =>
+          Folder.$exec("update", {
+            where: { id: 2 },
+            data: { cover: { connect: { id: 56 } } },
+          }),
+        );
+
+        const covers: any = await raw.unsafe(
+          `SELECT "id", "folderId" FROM "Cover" ORDER BY "id"`,
+        );
+        expect([...covers].map((cover: any) => [cover.id, cover.folderId])).toEqual([
+          [56, 2],
+        ]);
+      } finally {
+        register("Cover", Cover);
+      }
+    });
+
+    /**
+     * ...and it succeeds by **writing nothing**, which is the half the table
+     * cannot show and the half that fixes the case above.
+     *
+     * Two repairs reach the assertion in the test before this one. Excluding the
+     * named row from the clear leaves the repoint in place, writing the value
+     * that is already there; short-circuiting the whole operand issues neither.
+     * Both leave `[[56, 2]]` behind, and only the second is what Prisma does —
+     * measured on 6.19.2/SQLite with `log: [{ emit: "event", level: "query" }]`,
+     * the call is `BEGIN IMMEDIATE`, four selects, `COMMIT`, with no `UPDATE`
+     * anywhere in it, where the same `connect` onto an *occupied* folder logs
+     * the incumbent clear and the repoint.
+     *
+     * The difference is reachable rather than theoretical: a child carrying
+     * `@updatedAt` would have its stamp bumped by the repoint on a call Prisma
+     * does not write at all. `Cover` has no such column — which is why this is
+     * asserted on the writes rather than on the row.
+     *
+     * **Counted through `onUpdate` rather than through the SQL**, which is not
+     * merely convenient: every write to `Cover` on this path goes through
+     * `Cover`'s own `$exec` and therefore through its policies, so a hook that
+     * counts sees the clear's `updateMany` and the repoint's `update` alike —
+     * `MUTATING` in `policy.ts` carries both. Intercepting statements would have
+     * to reach inside the transaction the nested steps run in, where
+     * `database.sql` is no longer the object issuing them.
+     *
+     * The occupied-folder call is in the same test as the control, so the
+     * counter is shown to count before it is trusted to count zero.
+     */
+    test("that connect writes nothing, where an occupied folder writes twice", async () => {
+      let updates = 0;
+      class Counted extends Model {
+        static $schema = coverSchema;
+        static $policies = [
+          {
+            scope: (context: any) => ({ orgId: context.user.orgId }),
+            onUpdate: (_context: any, data: any) => {
+              updates++;
+              return data;
+            },
+          } as ModelPolicy,
+        ];
+      }
+      register("Cover", Counted);
+
+      try {
+        await seedFolder();
+        await raw.unsafe(
+          `INSERT INTO "Cover" ("id", "folderId", "caption", "orgId") ` +
+            `VALUES (57, 2, 'already', 7)`,
+        );
+
+        await Model.asUser(OURS, () =>
+          Folder.$exec("update", {
+            where: { id: 2 },
+            data: { cover: { connect: { id: 57 } } },
+          }),
+        );
+
+        expect(updates).toBe(0);
+
+        // The control: the same operand where the named row is *not* the one
+        // linked here. Two writes — the incumbent's clear and the repoint — so
+        // the zero above is a measurement rather than a hook that never fires.
+        await raw.unsafe(
+          `INSERT INTO "Cover" ("id", "folderId", "caption", "orgId") ` +
+            `VALUES (58, NULL, 'loose', 7)`,
+        );
+
+        await Model.asUser(OURS, () =>
+          Folder.$exec("update", {
+            where: { id: 2 },
+            data: { cover: { connect: { id: 58 } } },
+          }),
+        );
+
+        expect(updates).toBe(2);
+      } finally {
+        register("Cover", Cover);
+      }
+    });
+
+    /**
+     * **The short-circuit is scoped, and getting that backwards is the expensive
+     * mistake** — so it is pinned rather than left to the code comment.
+     *
+     * Cover 50 holds folder 2 and belongs to the other tenant. The lookup that
+     * decides "already linked here" runs through `Cover`'s own `$exec`
+     * un-pre-scoped, so this caller's policies apply and the row reads as
+     * absent — the same rule the repoint beside it follows. The operand is
+     * therefore *not* short-circuited, the clear finds nothing it may touch, and
+     * the repoint raises.
+     *
+     * An unscoped lookup would answer "already linked" here and make the whole
+     * `connect` a silent no-op: a call that reports success, links nothing, and
+     * tells the caller a row they cannot see is theirs. That is strictly worse
+     * than the miss, which is why the direction is asserted.
+     */
+    test("the no-op does not fire for a linked row the caller cannot see", async () => {
+      await seedFolder();
+      await hiddenCover();
+
+      await expect(
+        Model.asUser(OURS, () =>
+          Folder.$exec("update", {
+            where: { id: 2 },
+            data: { cover: { connect: { id: 50 } } },
+          }),
+        ),
+      ).rejects.toThrow(RecordNotFoundError);
+
+      const covers: any = await raw.unsafe(
+        `SELECT "id", "folderId" FROM "Cover" ORDER BY "id"`,
+      );
+      expect([...covers].map((cover: any) => [cover.id, cover.folderId])).toEqual([
+        [50, 2],
+      ]);
+    });
   });
 
   /**
