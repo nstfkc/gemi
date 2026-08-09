@@ -46,9 +46,11 @@ import {
   isPreScoped,
   markOrmAuthored,
   markPreScoped,
+  markRedactedAs,
   ormAuthoredFields,
   policiesFor,
   policyContext,
+  redactedAs,
   type PolicyEntry,
   type PolicyContext,
 } from "./policy";
@@ -812,7 +814,32 @@ export abstract class Model {
       // policy that never consults the user — a soft-delete scope, say — has
       // nothing to deny and must keep working with no request in sight. See
       // `policyContext`.
-      policy = policyContext(schema.name, op, currentUser(), system);
+      //
+      // `redactedAs` is the one thing that can make `context.operation` differ
+      // from `op`, and it exists to *remove* a difference the caller can see: a
+      // `delete` that has to read before it writes runs its pre-read as a
+      // `findFirst` and hands that row back, so without this a `redact` keyed on
+      // `"delete"` stopped firing the moment the call also carried an `include`
+      // (#366). The row is the delete's return value; it is redacted as one.
+      //
+      // **Only on a pre-scoped call, which is what keeps it a redaction
+      // concern.** `applyPolicies` below is skipped when `preScoped`, so on the
+      // one call that sets this marker the context reaches nothing but
+      // `applyRedaction`. Reading the marker unconditionally would leave a
+      // shape — a future non-pre-scoped caller — where a `before` or a `scope`
+      // could be handed an operation the statement is not, and `SCOPABLE` is
+      // keyed on exactly that. The guard does not make that shape
+      // unconstructible — `markRedactedAs(options, "delete")` on its own is
+      // still a value anyone can build — it makes it *unread*, so the
+      // consequence is absent rather than the shape. That is the whole of what
+      // is claimed, and it is enough: the marker changes nothing on any call
+      // that policies still rewrite.
+      policy = policyContext(
+        schema.name,
+        (preScoped ? redactedAs(options) : undefined) ?? op,
+        currentUser(),
+        system,
+      );
 
       // **The context is built even when pre-scoped; only the rewrite is
       // skipped.** `preScoped` means "the scope is already in these args" — not
@@ -939,9 +966,43 @@ export abstract class Model {
     //   model's policies once already; re-applying them would `AND` the same
     //   predicate twice — same rows, different plan key.
     // - **The read is scoped as the delete was**, including its nested policies.
-    //   A policy that varies by `context.operation` therefore sees "delete" for
-    //   the children of a row being deleted, which is the conservative reading:
-    //   these are the rows the delete is about to remove.
+    //   `effective` was rewritten by `applyPolicies` and `applyNestedPolicies`
+    //   under operation `"delete"`, and `markPreScoped` stops the pre-read
+    //   redoing either — so the `where` the `findFirst` runs is the delete's,
+    //   predicate for predicate.
+    // - **`markRedactedAs`, so the row is redacted as the delete it belongs
+    //   to.** This bullet used to claim `context.operation` was already
+    //   `"delete"` here. It was not, and the row it was most wrong about was the
+    //   root one — the one returned. The pre-read is a `findFirst`, so
+    //   `policyContext` was built with `"findFirst"` and a `redact` keyed on
+    //   `"delete"` silently stopped firing as soon as the same call carried an
+    //   `include` (#366). The `delete` statement below *does* run under
+    //   `"delete"`, and its row is thrown away, so nothing observable came of
+    //   that half.
+    //
+    //   The marker covers the returned row and nothing else. Nested reads are
+    //   *scoped* as `findMany` on both strategies — `NESTED_READ` in `policy.ts`
+    //   is a constant on purpose, because a read of another model is a read
+    //   whatever statement encloses it — and the marker does not reach them: the
+    //   relation executor rebuilds its options from `{ strategy }` rather than
+    //   forwarding these.
+    //
+    //   Which name a nested row is *redacted* as is a second mechanism and it
+    //   does not currently agree with the first. A **batched** child runs its
+    //   own `$exec` under `NESTED_READ`, so it is redacted as `findMany`; a
+    //   **folded** (lateral, the Postgres default) child never enters its own
+    //   `$exec`, so `redactFolded` below redacts it on the parent's behalf and
+    //   builds its context from the enclosing `$exec`'s `op` — which on this
+    //   call is the pre-read, a `findFirst`. Measured, same query, same rows:
+    //
+    //     sqlite   (batched) child redact context.operation -> "findMany"
+    //     postgres (folded)  child redact context.operation -> "findFirst"
+    //
+    //   Pre-existing, not widened here, and the same on an ordinary `findFirst`
+    //   with an `include`. Filed as #388; the fix is to hand `redactFolded`
+    //   `NESTED_READ` too. Neither value is the write, which is the part #366
+    //   is about and the only part `delete-redact-operation.test.ts` pins under
+    //   the default strategy.
     //
     // Only when there is something to read. A plain `delete` still compiles to
     // one statement and opens no transaction.
@@ -998,7 +1059,14 @@ export abstract class Model {
         const before = await this.$exec(
           "findFirst",
           { where, ...projection },
-          markPreScoped({ strategy: options?.strategy }) as never,
+          // `op` rather than the literal `"delete"`: the branch is guarded on
+          // it, so they are the same string, and taking it from the variable
+          // keeps the two from drifting if the guard ever admits a second
+          // operation that has to read before it writes.
+          markRedactedAs(
+            markPreScoped({ strategy: options?.strategy }),
+            op,
+          ) as never,
         );
 
         // `findFirst` shapes a miss to `null`; the caller asked for a delete, so

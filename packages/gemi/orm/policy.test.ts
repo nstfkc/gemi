@@ -12,9 +12,13 @@ import {
   applyNestedPolicies,
   applyPolicies,
   applyRedaction,
+  isPreScoped,
+  markPreScoped,
+  markRedactedAs,
   policiesFor,
   policyContext,
   redactNullable,
+  redactedAs,
   type ModelPolicy,
   type PolicyContext,
 } from "./policy";
@@ -1903,5 +1907,80 @@ describe("a malformed $policies entry", () => {
     Owner.$policies = [{ scopes: () => ({}) }] as unknown as ModelPolicy[];
 
     expect(() => policiesFor(Owner)).toThrow(InvalidPolicyEntryError);
+  });
+});
+
+/**
+ * The marker that lets a read-first `delete` say which operation the row it is
+ * about to return belongs to — #366.
+ *
+ * The behaviour it produces needs a database, and lives in
+ * `templates/saas-starter/app/models/delete-redact-operation.test.ts`. What is
+ * checkable here is the property that makes it safe to have at all: the key is a
+ * module-private `Symbol`, so it cannot be spelled from outside this module and
+ * cannot become a way for an application to make a query claim to be an
+ * operation it is not — the same door `PRE_SCOPED` and `ORM_AUTHORED` are shut
+ * the same way.
+ */
+describe("the operation a returned row is redacted as", () => {
+  test("survives being carried on an options object", () => {
+    expect(redactedAs(markRedactedAs({ strategy: "batched" }, "delete"))).toBe(
+      "delete",
+    );
+  });
+
+  test("does not disturb the options it rides on", () => {
+    const marked = markRedactedAs({ strategy: "batched" }, "delete") as {
+      strategy?: string;
+    };
+
+    expect(marked.strategy).toBe("batched");
+    // Named keys only. `toEqual` compares symbol keys too, and the point here is
+    // that the strategy the caller asked for still reaches the pre-read — which
+    // is what carries a `{ strategy: "lateral" }` down from `$exec`'s options.
+    expect(Object.keys(marked)).toEqual(["strategy"]);
+  });
+
+  /**
+   * The property the one call site actually rests on, which the `strategy` case
+   * above does *not* cover: the spread inside `markRedactedAs` has to carry the
+   * `PRE_SCOPED` **symbol** it is wrapping.
+   *
+   * `markRedactedAs(markPreScoped({ strategy }), op)` is the only construction
+   * in the codebase, and it is load-bearing twice over. If that spread ever
+   * stopped carrying symbol keys the pre-read would be scoped a second time —
+   * and `redactedAs` is read only when `preScoped`, so the marker would go
+   * unread as well, silently restoring #366. Both failures are caught today, but
+   * only by the live-database suite and only as a `RecordNotFoundError` a long
+   * way from its cause. One line pins it where the mechanism is.
+   */
+  test("carries the pre-scoped marker it wraps", () => {
+    const marked = markRedactedAs(
+      markPreScoped({ strategy: "batched" }),
+      "delete",
+    );
+
+    expect(isPreScoped(marked)).toBe(true);
+    expect(redactedAs(marked)).toBe("delete");
+  });
+
+  test("is absent from options that were never marked", () => {
+    expect(redactedAs({ strategy: "batched" })).toBeUndefined();
+    expect(redactedAs(undefined)).toBeUndefined();
+    expect(redactedAs(null)).toBeUndefined();
+  });
+
+  /**
+   * The forgery attempt, written out rather than argued: a string key is not the
+   * key, and neither is a symbol of the caller's own carrying the same
+   * description — `Symbol()` mints a fresh identity every call.
+   */
+  test("cannot be spelled from outside the module", () => {
+    expect(redactedAs({ redactedAs: "delete" })).toBeUndefined();
+    expect(
+      redactedAs({
+        [Symbol("gemi.orm.operationTheRowIsReturnedFor")]: "delete",
+      }),
+    ).toBeUndefined();
   });
 });
