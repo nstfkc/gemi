@@ -166,8 +166,10 @@ export const READS: unknown[] = [
   { where: { metadata: { path: 5, equals: "x" } } },
   // An array whose *segments* are malformed, which is the case the `LIST_KEYS`
   // collapse has to keep out of a valid path's cache entry: refused cold on both
-  // dialects — the array grammar's own message on Postgres, the wrong-grammar
-  // one on SQLite — where `["a"]` beside it compiles. `plan-key.invariants` owns
+  // dialects — since #380, the segment check's own message on Postgres, and the
+  // wrong-grammar one on SQLite — where `["a"]` beside it compiles. Before #380
+  // a bad segment fell through to the array grammar's throw, which is what the
+  // Postgres half of this note used to say. `plan-key.invariants` owns
   // the assertion that the two do not share a key; a refused entry can never
   // reach the same-key-implies-same-SQL property, so the corpus alone would not
   // have caught it.

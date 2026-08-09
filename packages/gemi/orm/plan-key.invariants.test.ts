@@ -137,6 +137,20 @@ describe("the plan key", () => {
       // The JSONPath-**string** grammar, which is SQLite's. The mirror of the
       // entry above.
       /a JSON path is an array of keys/,
+      // A malformed *segment* inside a well-formed array, which only Postgres
+      // reaches: on SQLite the array form is refused by the grammar entry above
+      // before any segment is looked at.
+      //
+      // This entry belongs to neither PR alone. #385 added the `["a", null]`
+      // corpus case when a bad segment still fell through to the grammar throw,
+      // so the message above already covered it; #380 gave the segment case its
+      // own sentence, and the two merged without either seeing the other.
+      //
+      // **Anchored on the segment clause deliberately.** The bare
+      // /A JSON path is an array of strings/ also passes here, and it is wrong:
+      // it swallows #385's numeric-segment tripwire too, so reverting `["a","0"]`
+      // to `["a",0]` would stay green. Measured both ways.
+      /A JSON path is an array of strings, and path\[\d+\] is null/,
     ],
   };
 
