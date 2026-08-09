@@ -766,6 +766,21 @@ const CASES: Case[] = [
       },
     },
   }, ["User", "Profile"]],
+  // M15b's other spelling: the hit branch naming the row **already linked
+  // here**. gemi short-circuits it and writes nothing at all, where it used to
+  // clear the link and put the same key straight back; this is the case that
+  // says the two are the same answer as far as anything observable goes. Net
+  // nothing on both sides, so it would stay green either way — it is here as
+  // the parity record for that short-circuit, since the divergence it fixes is
+  // only visible through a policy and the differential harness has none.
+  ["M15e to-one connectOrCreate of the row already linked changes nothing", "update", {
+    where: { id: 1 },
+    data: {
+      profile: {
+        connectOrCreate: { where: { id: 1 }, create: { bio: "unused" } },
+      },
+    },
+  }, ["User", "Profile"]],
 
   // M16 — the boundary on the other side of `displaces`, from the **owning**
   // end of a key (#363): a *many*-to-one connect has no incumbent, so nothing

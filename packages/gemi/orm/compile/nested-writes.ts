@@ -1934,6 +1934,31 @@ function planForeignSide(
           )) as Record<string, unknown> | null;
 
           if (found) {
+            // **The row is already this parent's, so there is nothing to do.**
+            //
+            // Free here in a way it is not for the bare `connect` below: the
+            // `findUnique` above already selected the child's foreign key, so
+            // the comparison costs no statement. `connect` has no such read —
+            // giving it the same short-circuit means buying a lookup, which is
+            // why it is #372's question rather than this branch's.
+            //
+            // Without this the pair below is a **clear followed by a repoint of
+            // the row the clear just nulled**, and on a child scoped by that
+            // same foreign key the clear puts it outside the scope the repoint
+            // selects it through — so the operand raises `RecordNotFoundError`
+            // on a call that should change nothing. Net-nothing either way for
+            // an unscoped child, which is why it stayed hidden; the scoped one
+            // is where the wasted statement becomes a wrong answer.
+            //
+            // `displaces` gates it because that is the only shape the clear
+            // runs in. On a to-many there is no clear, so the repoint is one
+            // redundant `update` writing the value already there — measured to
+            // agree with Prisma, and skipping it would be an unmeasured change
+            // to a branch this issue is not about.
+            if (displaces && sameKey(found[childField], parent[parentField])) {
+              continue;
+            }
+
             // The hit branch **is** a connect, so it displaces what is linked
             // exactly as the bare operand does (#361) — and the miss branch
             // below does not, which is Prisma's own split rather than a
