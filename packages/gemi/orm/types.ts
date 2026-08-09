@@ -57,12 +57,41 @@
 // eagerly evaluated — mapping over `keyof` at the top level, say, or wrapping one
 // in a conditional that has to resolve the whole shape — would turn a cyclic
 // schema into an instantiation-depth error rather than a slow compile.
+//
+// **The operator grammars below map over a tuple, and that is not the mapping
+// the paragraph above warns about.** `RelationFilter`, `NestedCreate` and
+// `NestedUpdate` are `[K in <five literal strings>]`, not `[K in keyof M]`: the
+// key set is fixed and finite whatever the schema is, and the property types
+// are deferred exactly as an interface's are. Measured rather than assumed —
+// the template's fourteen mutually recursive models typecheck in the same time
+// they did before (1.6–1.8s, warm, either way).
 
 import type {
   AnyNullValue,
   DbNullValue,
   JsonNullValue,
 } from "./json-null";
+// The operator and statement names below are **the compiler's own lists**, not
+// copies of them. Each filter grammar here used to spell its operators a second
+// time, in a file the compiler neither imports nor is imported by, so the two
+// could differ with nothing failing: #326, #333, #336 and #337 are four
+// instances of exactly that, and every one of them ran the same way — the
+// compiler answered a query the type had no spelling for. Mapping over the
+// runtime tuple turns the next such drift into a compile error here.
+//
+// `import type`, so this is erased entirely: no runtime edge is created from
+// the type layer into the compiler, and `orm/index.js` is unchanged.
+import type { HavingOperator } from "./compile/group-by";
+import type {
+  CollectionOnlyStatement,
+  ExistingRowStatement,
+  NestedWriteStatement,
+} from "./compile/nested-writes";
+import type { JsonFilterName, ListFilterName } from "./compile/where";
+import type {
+  ManyRelationOperator,
+  OneRelationOperator,
+} from "./relation-filters";
 
 /**
  * Any value a `Json` column can hold, on either dialect.
@@ -351,18 +380,30 @@ type StringFilter<V> = NonNullable<V> extends string
 type NestedFilter<V> = BaseFilter<V> & OrderingFilter<V> & StringFilter<V>;
 
 /**
+ * What each scalar-list filter compares against.
+ *
+ * `has` asks about one element and `isEmpty` about the array's length; the
+ * other three take a whole array. Split out so {@link ListFilter} can be a
+ * mapped type — the operand still has to be stated per operator, but *which
+ * operators exist* is no longer stated twice.
+ */
+type ListFilterOperand<K extends ListFilterName, E> = K extends "has"
+  ? E
+  : K extends "isEmpty"
+    ? boolean
+    : E[];
+
+/**
  * The filters that apply to a **scalar list** — `tags String[]`.
  *
- * A different set on a different left-hand side, mirroring `LIST_FILTERS` in
- * the where compiler. Postgres only: `SqliteDialect.listFilters` refuses the
- * column outright, because SQLite has no array type.
+ * A different set on a different left-hand side, and the set is
+ * `LIST_FILTER_NAMES` in the where compiler — read from there rather than
+ * mirrored, which is what this comment used to claim it did. Postgres only:
+ * `SqliteDialect.listFilters` refuses the column outright, because SQLite has
+ * no array type.
  */
 type ListFilter<E> = {
-  equals?: E[];
-  has?: E;
-  hasEvery?: E[];
-  hasSome?: E[];
-  isEmpty?: boolean;
+  [K in ListFilterName]?: ListFilterOperand<K, E>;
 };
 
 /**
@@ -493,9 +534,11 @@ type JsonPathScalar = string | number | boolean;
  * `where: { metadata: { path: …, equals: … } }` — a filter on a value *inside*
  * the document rather than on the column.
  *
- * The operator set is `JSON_FILTERS` in `compile/where.ts`, all ten of them, and
- * the operand types are `assertJsonOperand`'s. `array_contains` is the one that
- * takes a document, because containment is the operator that means one.
+ * The operator set **is** `JSON_FILTER_NAMES` in `compile/where.ts`, all ten of
+ * them — mapped over rather than copied, so the compiler's list is this type's
+ * list (#369). The operand types are `assertJsonOperand`'s. `array_contains` is
+ * the one that takes a document, because containment is the operator that means
+ * one.
  *
  * **`path` is required, and that is what makes the union above discriminate.**
  * `compileFieldFilter` dispatches on `filter.path !== undefined`: an operand
@@ -510,19 +553,31 @@ type JsonPathScalar = string | number | boolean;
  * reports a misspelled operator, and the runtime message already names the whole
  * set. Prisma's generated input has the same shape for the same reason.
  */
-type JsonPathFilter = {
-  path: JsonPath;
-  equals?: JsonPathScalar;
-  not?: JsonPathScalar;
-  string_contains?: string;
-  string_starts_with?: string;
-  string_ends_with?: string;
-  array_contains?: JsonValue;
-  lt?: JsonPathScalar;
-  lte?: JsonPathScalar;
-  gt?: JsonPathScalar;
-  gte?: JsonPathScalar;
+type JsonPathFilter = { path: JsonPath } & {
+  [K in JsonFilterName]?: JsonPathOperand<K>;
 };
+
+/**
+ * What each JSON path operator compares the extracted value against, which is
+ * `assertJsonOperand`'s rule restated as a type.
+ *
+ * Three answers for ten operators: the `string_*` three build a `like` pattern
+ * and so need a string; `array_contains` is the one operator whose operand is a
+ * *document*, because containment is the question that means one; the remaining
+ * six compare one bound scalar against one extracted value.
+ *
+ * The default arm is `JsonPathScalar` rather than `never` deliberately. An
+ * eleventh operator added to `JSON_FILTER_NAMES` lands here with the operand
+ * type five of the current six have, which is the likeliest right answer and is
+ * in any case *usable* — where a `never` would give the new operator a key
+ * nothing can be passed under, which is a quieter kind of wrong than the one
+ * this change removes.
+ */
+type JsonPathOperand<K extends JsonFilterName> = K extends "array_contains"
+  ? JsonValue
+  : K extends "string_contains" | "string_starts_with" | "string_ends_with"
+    ? string
+    : JsonPathScalar;
 
 /**
  * The bare-value half of a `Json` column's filter — **`JsonValue` with its
@@ -581,19 +636,25 @@ export type FieldFilter<V> =
       ? E[] | ListFilter<E>
       : V | NestedFilter<V>;
 
+/**
+ * The operator names are `relation-filters.ts`'s two tuples, which is the same
+ * pair `readOperators` iterates and `isOperatorForm` tests against — so the
+ * grammar the caller may write and the grammar the compiler recognises are one
+ * list (#369).
+ *
+ * `relation-filters.ts` already existed to stop the where compiler and the
+ * policy walk disagreeing about this shape; the type was the third party to
+ * that agreement and was not in it.
+ */
 type RelationFilter<R extends RelationInfo> = R["kind"] extends "many"
-  ? {
-      some?: WhereInput<R["target"]>;
-      every?: WhereInput<R["target"]>;
-      none?: WhereInput<R["target"]>;
-    }
+  ? { [K in ManyRelationOperator]?: WhereInput<R["target"]> }
   : /**
      * A to-one takes the nested `where` directly — `{ user: { email } }` means
      * `is` — and takes `null` for "there is no related row". `readOperators` in
      * the where compiler folds the two spellings together.
      */
     | WhereInput<R["target"]>
-      | { is?: WhereInput<R["target"]> | null; isNot?: WhereInput<R["target"]> | null }
+      | { [K in OneRelationOperator]?: WhereInput<R["target"]> | null }
       | (R["nullable"] extends true ? null : never);
 
 export type WhereInput<M extends ModelTypeInfo> = {
@@ -784,24 +845,99 @@ export type FindUniqueOrThrowArgs<M extends ModelTypeInfo> = FindUniqueArgs<M>;
 // ---------------------------------------------------------------------------
 
 /**
- * The nested write statements, from `SUPPORTED` in `compile/nested-writes.ts`.
+ * The statements a nested write may name **under a `create`**, which is
+ * `SUPPORTED` minus `EXISTING_ROW_ONLY` in `compile/nested-writes.ts` —
+ * subtracted rather than listed again, so the two files cannot answer
+ * differently (#369). Concretely: `connect`, `connectOrCreate`, `create`,
+ * `createMany`.
+ *
+ * The subtraction is the compiler's own reasoning, not an approximation of it.
+ * `assertNestedOperand` refuses an `EXISTING_ROW_ONLY` key whenever the
+ * operation is a `create`, because there is nothing linked to a row that does
+ * not exist yet.
+ */
+type NestedCreateStatement = Exclude<NestedWriteStatement, ExistingRowStatement>;
+
+/**
+ * What each statement's operand is on a **to-many**.
+ *
+ * The `| T[]` on nearly every arm is Prisma's own shape and the compiler's:
+ * `listOf` accepts a single object or an array of them everywhere a collection
+ * is being written.
+ *
+ * A statement added to `SUPPORTED_STATEMENTS` with no arm here resolves to
+ * {@link NestedStatementHasNoOperandType}, whose one property is a sentence —
+ * the same device `AggregateNeedsArithmetic` uses two sections down, and for
+ * the same reason: an optional `never` reports *"not assignable to type
+ * 'undefined'"*, which says nothing about what went wrong.
+ */
+type ManyNestedOperand<
+  K extends NestedWriteStatement,
+  M extends ModelTypeInfo,
+> = K extends "create"
+  ? CreateInput<M> | CreateInput<M>[]
+  : K extends "createMany"
+    ? { data: CreateInput<M>[]; skipDuplicates?: boolean }
+    : K extends "connect" | "set" | "disconnect" | "delete"
+      ? WhereUniqueInput<M> | WhereUniqueInput<M>[]
+      : K extends "connectOrCreate"
+        ? ConnectOrCreate<M> | ConnectOrCreate<M>[]
+        : K extends "deleteMany"
+          ? WhereInput<M> | WhereInput<M>[]
+          : K extends "update"
+            ? NestedUpdateOne<M> | NestedUpdateOne<M>[]
+            : K extends "updateMany"
+              ? NestedUpdateMany<M> | NestedUpdateMany<M>[]
+              : K extends "upsert"
+                ? NestedUpsert<M> | NestedUpsert<M>[]
+                : NestedStatementHasNoOperandType;
+
+/**
+ * ...and on a **to-one**, where four statements do not exist at all and none of
+ * the rest takes an array — there is one related row, so there is nothing for a
+ * list of operands to address, and `planForeignSide` refuses one by name.
+ *
+ * Three differ in more than that. `disconnect` and `delete` take a boolean —
+ * "the link, whatever it points at" — where a to-many has to say *which* rows;
+ * and `update` takes the bare `data` as well as `{ where?, data }`, because the
+ * parent's key already names the row.
+ */
+type OneNestedOperand<
+  K extends Exclude<NestedWriteStatement, CollectionOnlyStatement>,
+  M extends ModelTypeInfo,
+> = K extends "create"
+  ? CreateInput<M>
+  : K extends "connect"
+    ? WhereUniqueInput<M>
+    : K extends "connectOrCreate"
+      ? ConnectOrCreate<M>
+      : K extends "disconnect" | "delete"
+        ? boolean | WhereInput<M>
+        : K extends "update"
+          ? UpdateInput<M> | NestedUpdateToOne<M>
+          : K extends "upsert"
+            ? NestedUpsertToOne<M>
+            : NestedStatementHasNoOperandType;
+
+/** @see {@link ManyNestedOperand} */
+type NestedStatementHasNoOperandType = {
+  "this nested-write statement is in SUPPORTED_STATEMENTS but has no operand type here": never;
+};
+
+/**
+ * The nested write statements a `create`'s `data` may carry.
  *
  * A to-one cannot take the collection-shaped ones, which is the only structural
- * difference between the two sides.
+ * difference between the two sides — and `COLLECTION_ONLY_STATEMENTS` is the
+ * list both planners refuse there, subtracted rather than restated.
  */
 type NestedCreate<R extends RelationInfo> = R["kind"] extends "many"
-  ? {
-      create?: CreateInput<R["target"]> | CreateInput<R["target"]>[];
-      createMany?: { data: CreateInput<R["target"]>[]; skipDuplicates?: boolean };
-      connect?: WhereUniqueInput<R["target"]> | WhereUniqueInput<R["target"]>[];
-      connectOrCreate?:
-        | ConnectOrCreate<R["target"]>
-        | ConnectOrCreate<R["target"]>[];
-    }
+  ? { [K in NestedCreateStatement]?: ManyNestedOperand<K, R["target"]> }
   : {
-      create?: CreateInput<R["target"]>;
-      connect?: WhereUniqueInput<R["target"]>;
-      connectOrCreate?: ConnectOrCreate<R["target"]>;
+      [K in Exclude<
+        NestedCreateStatement,
+        CollectionOnlyStatement
+      >]?: OneNestedOperand<K, R["target"]>;
     };
 
 interface ConnectOrCreate<M extends ModelTypeInfo> {
@@ -809,27 +945,23 @@ interface ConnectOrCreate<M extends ModelTypeInfo> {
   create: CreateInput<M>;
 }
 
-type NestedUpdate<R extends RelationInfo> = NestedCreate<R> &
-  (R["kind"] extends "many"
-    ? {
-        set?: WhereUniqueInput<R["target"]> | WhereUniqueInput<R["target"]>[];
-        disconnect?:
-          | WhereUniqueInput<R["target"]>
-          | WhereUniqueInput<R["target"]>[];
-        delete?: WhereUniqueInput<R["target"]> | WhereUniqueInput<R["target"]>[];
-        deleteMany?: WhereInput<R["target"]> | WhereInput<R["target"]>[];
-        update?: NestedUpdateOne<R["target"]> | NestedUpdateOne<R["target"]>[];
-        updateMany?:
-          | NestedUpdateMany<R["target"]>
-          | NestedUpdateMany<R["target"]>[];
-        upsert?: NestedUpsert<R["target"]> | NestedUpsert<R["target"]>[];
-      }
-    : {
-        disconnect?: boolean | WhereInput<R["target"]>;
-        delete?: boolean | WhereInput<R["target"]>;
-        update?: UpdateInput<R["target"]> | NestedUpdateToOne<R["target"]>;
-        upsert?: NestedUpsertToOne<R["target"]>;
-      });
+/**
+ * An `update`'s `data` carries the whole of `SUPPORTED_STATEMENTS`, so this is
+ * the unsubtracted set rather than `NestedCreate` intersected with the rest.
+ *
+ * Stated as one mapped type for a reason beyond brevity: written as an
+ * intersection, the create-half and the update-half were two places a
+ * statement's operand could be given, and a statement listed in both with
+ * different operands would silently intersect to something neither file meant.
+ */
+type NestedUpdate<R extends RelationInfo> = R["kind"] extends "many"
+  ? { [K in NestedWriteStatement]?: ManyNestedOperand<K, R["target"]> }
+  : {
+      [K in Exclude<
+        NestedWriteStatement,
+        CollectionOnlyStatement
+      >]?: OneNestedOperand<K, R["target"]>;
+    };
 
 interface NestedUpdateOne<M extends ModelTypeInfo> {
   where: WhereUniqueInput<M>;
@@ -1053,22 +1185,20 @@ export type GroupByOrderByInput<M extends ModelTypeInfo> = {
 };
 
 /**
- * The six comparisons a `having` operand takes, which is `OPERATORS` in
- * `compile/group-by.ts` and nothing else.
+ * The six comparisons a `having` operand takes, which **is** `OPERATORS` in
+ * `compile/group-by.ts` and nothing else — its keys, mapped over, rather than
+ * the same six names written out again beside a comment saying they match
+ * (#369).
  *
  * Narrower than a `where`'s on purpose, because the compiler is: `having` walks
  * its own operand reader, so `contains`, `in`, `startsWith` and `mode` are not
  * offered here and throw *"A 'having' filter takes equals, gt, gte, lt, lte,
  * not"* if written. A bare value is `equals`, the shorthand `where` accepts too,
- * and `null` under `equals` / `not` becomes `is null` / `is not null`.
+ * and `null` under `equals` / `not` becomes `is null` / `is not null` — which is
+ * why those two alone widen by `null`, and the four orderings do not.
  */
 type HavingComparison<V> = {
-  equals?: V | null;
-  not?: V | null;
-  lt?: V;
-  lte?: V;
-  gt?: V;
-  gte?: V;
+  [K in HavingOperator]?: K extends "equals" | "not" ? V | null : V;
 };
 
 type HavingFilter<V> = V | HavingComparison<V>;

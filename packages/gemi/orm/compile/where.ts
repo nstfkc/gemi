@@ -673,14 +673,23 @@ function assertCompositeInOperand(
  * about a substring, and on a `String[]` there is no such question — the one
  * Prisma spells is `has`. Sharing the table would have made every scalar
  * operator compile against an array column and answer something.
+ *
+ * A tuple for the same reason {@link JSON_FILTER_NAMES} is one: `ListFilter` in
+ * `../types` said in a comment that it mirrors this list, and a comment is not
+ * something the compiler checks.
  */
-const LIST_FILTERS = new Set([
+const LIST_FILTER_NAMES = [
   "equals",
   "has",
   "hasEvery",
   "hasSome",
   "isEmpty",
-]);
+] as const;
+
+/** One of {@link LIST_FILTER_NAMES}. `ListFilter` maps over this. */
+export type ListFilterName = (typeof LIST_FILTER_NAMES)[number];
+
+const LIST_FILTERS: ReadonlySet<string> = new Set(LIST_FILTER_NAMES);
 
 /**
  * `where: { tags: { has: "urgent" } }`.
@@ -915,8 +924,22 @@ export function assertListDialect(
   );
 }
 
-/** The filters Prisma applies to a value extracted from a JSON path. */
-const JSON_FILTERS = new Set([
+/**
+ * The filters Prisma applies to a value extracted from a JSON path.
+ *
+ * **A tuple, and the caller-facing type is a mapped type over it.**
+ * `JsonPathFilter` in `../types` used to spell these ten names a second time,
+ * in a file that neither imports this one nor is imported by it, so the two
+ * lists could differ with no compile error, no failing test and no diff a
+ * reviewer would flag. That is the mechanism behind #326, #333, #336 and #337 —
+ * the compiler accepting something the type refuses to describe — and #336 was
+ * the worst of them because the undescribed filter was silently absorbed as an
+ * `equals` shorthand rather than refused.
+ *
+ * Deriving the type from this list makes the drift a compile error at the call
+ * sites instead of something the next reviewer has to notice.
+ */
+const JSON_FILTER_NAMES = [
   "equals",
   "not",
   "string_contains",
@@ -927,7 +950,12 @@ const JSON_FILTERS = new Set([
   "lte",
   "gt",
   "gte",
-]);
+] as const;
+
+/** One of {@link JSON_FILTER_NAMES}. `JsonPathFilter` maps over this. */
+export type JsonFilterName = (typeof JSON_FILTER_NAMES)[number];
+
+const JSON_FILTERS: ReadonlySet<string> = new Set(JSON_FILTER_NAMES);
 
 /**
  * `where: { metadata: { path: …, equals: … } }`.
