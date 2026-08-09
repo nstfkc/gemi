@@ -1,6 +1,7 @@
 import { describe, expectTypeOf, test } from "vitest";
 
 import { AnyNull, DbNull, JsonNull } from "gemi/orm";
+import type { FieldFilter } from "gemi/orm";
 
 import {
   AccountModel,
@@ -87,10 +88,11 @@ describe("scalar filters, per storage class", () => {
    * faked with a cast: a type test whose subject is invented proves the type
    * accepts the invention. `Boolean` reaches the same `NoKeys` branches through
    * the same code path as `Bytes`, so it is covered in mechanism if not by name.
-   * `String[]` is likewise absent here — scalar lists are a Postgres-only schema
-   * (`postgres-only.prisma`), whose artifacts are uncommitted and so cannot be
-   * typechecked in the SQLite job. Both are genuine gaps in what this file can
-   * reach, recorded rather than papered over.
+   * `String[]` has no *column* here for the same reason — scalar lists are a
+   * Postgres-only schema (`postgres-only.prisma`), whose artifacts are
+   * uncommitted and so cannot be typechecked in the SQLite job. Its arm is
+   * still asserted, one test down: the list grammar is a function of the
+   * element type alone, so it does not need a model to reach.
    */
   test("Bytes takes equality but not ordering or patterns", async () => {
     await AccountModel.findMany({ where: { token: { equals: null } } });
@@ -98,6 +100,42 @@ describe("scalar filters, per storage class", () => {
       where: { token: { equals: new Uint8Array([1]) } },
     });
     await AccountModel.findMany({ where: { token: { not: null } } });
+  });
+
+  /**
+   * **The scalar-list arm, without a scalar-list column.**
+   *
+   * Every other grammar #369 derived from the compiler's own operator tuple has
+   * something committed pinning it. `ListFilter` was the exception — a
+   * `String[]` is a validation error on SQLite, so there is no column here to
+   * ask through, and the write-up said the derivation therefore could not be
+   * asserted in this repository at all.
+   *
+   * That was true of asking *through a model* and false of the type. `ListFilter`
+   * is reached from `FieldFilter`'s array branch on the element type alone, and
+   * `FieldFilter` is public, so a type argument is enough. No column, no
+   * Postgres, no generated artifact.
+   *
+   * Two assertions rather than one, because they fail on different drift. The
+   * key set is `LIST_FILTER_NAMES` in `compile/where.ts`; the operand of each
+   * key is `ListFilterOperand`'s three-way split — `has` asks about one element,
+   * `isEmpty` about the array's length, the other three take a whole array — and
+   * that split is the part that still has to be stated per operator.
+   */
+  test("the scalar-list arm is the compiler's list, on its element type", () => {
+    type ListArm = Exclude<FieldFilter<string[]>, string[]>;
+
+    expectTypeOf<keyof ListArm>().toEqualTypeOf<
+      "equals" | "has" | "hasEvery" | "hasSome" | "isEmpty"
+    >();
+
+    expectTypeOf<ListArm>().toEqualTypeOf<{
+      equals?: string[];
+      has?: string;
+      hasEvery?: string[];
+      hasSome?: string[];
+      isEmpty?: boolean;
+    }>();
   });
 
   test("an enum column is the union of its members", async () => {
@@ -321,13 +359,25 @@ describe("Json path filters", () => {
    * `null` and answers it. gemi's `#>>` yields SQL NULL for an absent key and a
    * JSON null alike, which is the same collapse that keeps the sentinels off
    * this filter.
+   *
+   * **`array_contains` is the same refusal for a different reason**, and it is
+   * the one path operator whose operand is a whole document, so it does not
+   * come along with the scalar arm. A bare `null` there reaches
+   * `dialect.jsonArrayContains` and binds as SQL NULL; `x @> NULL` is NULL, not
+   * false, so the filter matches no row rather than asking anything. Only the
+   * top-level operand goes — a `null` *inside* the document is an ordinary JSON
+   * value, and the line below pins that it stays expressible. (The finding is
+   * #380's, on the hand-written literal this branch replaced with a mapped
+   * type; the narrowing lives on `JsonPathOperand`'s `array_contains` arm so
+   * the two do not come down to which side of a merge is taken.)
    */
   test("null at a path is refused, because gemi cannot ask Prisma's question", async () => {
     // @ts-expect-error `= NULL` is never true; say which empty you mean, on the column
     await UserModel.findMany({ where: { metadata: { path: ["a"], equals: null } } });
-    // @ts-expect-error `x @> NULL` is NULL too — a null *inside* the document is fine
+    // @ts-expect-error `x @> NULL` is NULL too, so containment against a bare null asks nothing
     await UserModel.findMany({ where: { metadata: { path: ["a"], array_contains: null } } });
-    await UserModel.findMany({ where: { metadata: { path: ["a"], array_contains: [null] } } });
+    // ...and it is only the *top level* that goes: a null inside the document is a value.
+    await UserModel.findMany({ where: { metadata: { path: ["a"], array_contains: [1, null] } } });
   });
 
   /**

@@ -475,15 +475,41 @@ function assertPureAggregate(
   );
 }
 
-/** The comparison operators a `having` operand may use. */
-const OPERATORS: Record<string, string> = {
+/**
+ * The comparison operators a `having` operand may use.
+ *
+ * **`as const`, so `HavingComparison` in `../types` can be a mapped type over
+ * its keys rather than a second copy of them.** The type used to list the same
+ * six names in another file, with nothing making the two agree — the same
+ * mechanism as `JSON_FILTER_NAMES` in `./where.ts`, and the one that let #326,
+ * #333, #336 and #337 each ship a compiler and a type that disagreed.
+ *
+ * Narrower than a `where`'s set on purpose: `having` walks this table and
+ * nothing else, so `contains`, `in`, `startsWith` and `mode` are refused here.
+ */
+const OPERATORS = {
   equals: "=",
   not: "<>",
   lt: "<",
   lte: "<=",
   gt: ">",
   gte: ">=",
-};
+} as const;
+
+/** One of {@link OPERATORS}' keys. `HavingComparison` maps over this. */
+export type HavingOperator = keyof typeof OPERATORS;
+
+/**
+ * The same table, widened for lookup: the key comes from a caller's object and
+ * is `string`, not {@link HavingOperator} — that is the question being asked.
+ *
+ * `Readonly`, because this alias points at the object {@link HavingOperator} is
+ * derived from: without it `OPERATOR_SQL.contains = "like"` would typecheck and
+ * mutate the source of truth. The `| undefined` is the load-bearing half — it
+ * is what makes the `if (!operator)` guard below honest rather than a cast that
+ * claims every string is a key.
+ */
+const OPERATOR_SQL: Readonly<Record<string, string | undefined>> = OPERATORS;
 
 function comparison(
   lhs: string,
@@ -506,7 +532,7 @@ function comparison(
     const value = source[key];
     if (value === undefined) continue;
 
-    const operator = OPERATORS[key];
+    const operator = OPERATOR_SQL[key];
     if (!operator) {
       throw new UnsupportedQueryError(
         `${argument}.${key}`,

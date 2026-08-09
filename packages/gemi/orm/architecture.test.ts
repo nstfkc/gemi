@@ -240,10 +240,47 @@ describe("the ORM's seams", () => {
    *
    * Test files count as references, because an export existing *for* a test is
    * a real reason — `isTracked` says so in as many words.
+   *
+   * **`export type` and `export interface` count too, and did not until #369.**
+   * The scan was three alternations over `function`, `const` and `class`, so a
+   * type export was invisible to it — which mattered the moment a type export
+   * became load-bearing. #369 makes six caller-facing grammars in `types.ts`
+   * map over the compiler's own operator tuples via exported unions
+   * (`JsonFilterName`, `ListFilterName`, `HavingOperator`, the two relation
+   * unions, the three nested-write unions). Reverting `types.ts` wholesale left
+   * every one of those an export nothing imports, and the whole package stayed
+   * green: typecheck clean, 3110 tests, `oxlint --deny-warnings` 0/0. The one
+   * test whose stated property is exactly "an export nothing else uses" could
+   * not see them. It can now, so the derivation is load-bearing at test time
+   * rather than only by inspection.
+   *
+   * A type export is erased, so this is not an argument about bundle size — it
+   * is the same argument as for a `const`: an `export` is how a name becomes
+   * something another file may reach for, and one that nothing reaches for is a
+   * wider surface for nothing.
    */
   const MAY_BE_EXPORTED_UNUSED: string[] = [
-    // Nothing today. An entry here is a deliberate exception with a reason
-    // beside it, not a place to put whatever this test happens to flag.
+    // The six type exports the widened scan turned up, each a deliberate
+    // exception rather than a name to unexport. All six describe a *parameter
+    // or field of a public signature*: the value they carry is that a caller
+    // reading `orm.d.ts` — or writing an implementation against one of these
+    // shapes — can name what a position holds, which is not a use this scan can
+    // see because it only counts references inside `orm/**`.
+    //
+    // `policy.ts` — the two halves of the policy surface an application writes
+    // against. `PolicedModel` is what `$policies` is declared on and
+    // `PolicyLookup` is the map an application's own resolver returns.
+    "PolicedModel",
+    "PolicyLookup",
+    // The callback shape `warnOnProtocolSkew` takes, so a host embedding the
+    // ORM can declare its own warner rather than inferring the signature.
+    "ProtocolSkewWarner",
+    // The three schema-walk shapes. `RelationNode` and `RelationOrdering` are
+    // the vocabulary the include/order-by planners' public results are built
+    // from, and `SchemaFields` names the record `ModelSchema.fields` holds.
+    "RelationNode",
+    "RelationOrdering",
+    "SchemaFields",
   ];
 
   test("no export is referenced only inside its own file", () => {
@@ -255,10 +292,14 @@ describe("the ORM's seams", () => {
       sources.set(name, content);
       if (name === "index.ts") continue;
 
+      // `export type (\w+)` deliberately does not match `export type { … }`:
+      // a re-export declares nothing here, and counting it would name the
+      // wrong home file.
       for (const match of content.matchAll(
-        /^export (?:async )?function (\w+)|^export const (\w+)|^export class (\w+)/gm,
+        /^export (?:async )?function (\w+)|^export const (\w+)|^export class (\w+)|^export type (\w+)|^export interface (\w+)/gm,
       )) {
-        const exported = match[1] ?? match[2] ?? match[3];
+        const exported =
+          match[1] ?? match[2] ?? match[3] ?? match[4] ?? match[5];
         // A name declared in two files is ambiguous to a text scan; skip rather
         // than guess, since a false positive here reads as a real finding.
         declared.set(exported, declared.has(exported) ? "" : name);
@@ -266,8 +307,15 @@ describe("the ORM's seams", () => {
     }
 
     // Tests are references: an export that exists for a test is justified.
+    //
+    // This file is the exception, and has to be. It is the scanner, and its
+    // prose names the very exports it is scanning for — the docblock above
+    // names three of #369's operator unions, and that alone was enough to make
+    // reverting `types.ts` a *passing* run for those three while the other five
+    // went red. A comment is not a use.
     for (const path of readdirSync(ROOT, { recursive: true, withFileTypes: true })) {
       if (!path.name.endsWith(".test.ts")) continue;
+      if (path.name === "architecture.test.ts") continue;
       const full = join((path as { parentPath?: string }).parentPath ?? ROOT, path.name);
       sources.set(`test:${full}`, read(full));
     }

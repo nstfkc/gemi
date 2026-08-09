@@ -26,6 +26,26 @@
 const MANY_FILTER_OPERATORS = ["every", "none", "some"] as const;
 const ONE_FILTER_OPERATORS = ["is", "isNot"] as const;
 
+/**
+ * A **third** consumer of the same two tuples, and the reason the two unions
+ * below exist: `RelationFilter` in `types.ts` is a mapped type over these,
+ * rather than a hand-written copy of the five names.
+ *
+ * The tuples themselves stay module-private — `architecture.test.ts` records
+ * that they were deliberately unexported, being used only by the function
+ * directly beneath them, and that is still true. What crosses the file
+ * boundary is the derived type, which is erased.
+ *
+ * The paragraph above says two places must agree about this shape and must not
+ * import each other. The caller-facing type is the place that was left out of
+ * that arrangement — it spelled `some`/`every`/`none` and `is`/`isNot` again,
+ * in a file that imports nothing from here, so nothing failed when the two
+ * drifted. That is the mechanism #369 exists to close, and the same one behind
+ * #326, #333, #336 and #337: a type free to describe a compiler it never reads.
+ */
+export type ManyRelationOperator = (typeof MANY_FILTER_OPERATORS)[number];
+export type OneRelationOperator = (typeof ONE_FILTER_OPERATORS)[number];
+
 export function relationFilterOperators(
   kind: "one" | "many",
 ): readonly string[] {

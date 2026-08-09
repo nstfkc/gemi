@@ -75,7 +75,7 @@ import { matchUniqueKey, type RefusalOrigin } from "./unique";
  * back the parent row too.
  */
 
-const SUPPORTED = new Set([
+const SUPPORTED_STATEMENTS = [
   "connect",
   "connectOrCreate",
   "create",
@@ -87,7 +87,21 @@ const SUPPORTED = new Set([
   "updateMany",
   "deleteMany",
   "upsert",
-]);
+] as const;
+
+/**
+ * One of {@link SUPPORTED_STATEMENTS}.
+ *
+ * `NestedCreate` and `NestedUpdate` in `../types` are mapped types over this
+ * and the two tuples below, rather than four hand-written key lists in another
+ * file. Which statements exist, and which exist only on a to-many or only on a
+ * statement with a row to act on, are decisions made *here* — and until #369
+ * the caller-facing type made them a second time, with nothing checking that
+ * the two answers matched.
+ */
+export type NestedWriteStatement = (typeof SUPPORTED_STATEMENTS)[number];
+
+const SUPPORTED: ReadonlySet<string> = new Set(SUPPORTED_STATEMENTS);
 
 /**
  * Operands that only exist on a statement with a row to act on.
@@ -97,7 +111,7 @@ const SUPPORTED = new Set([
  * row that does not exist yet. Refused here rather than accepted and made a
  * no-op, so a caller who wrote one on the wrong operation hears about it.
  */
-const EXISTING_ROW_ONLY = new Set([
+const EXISTING_ROW_ONLY_STATEMENTS = [
   "disconnect",
   "delete",
   "update",
@@ -105,7 +119,46 @@ const EXISTING_ROW_ONLY = new Set([
   "updateMany",
   "deleteMany",
   "upsert",
-]);
+] as const;
+
+/** One of {@link EXISTING_ROW_ONLY_STATEMENTS}. `NestedCreate` subtracts it. */
+export type ExistingRowStatement = (typeof EXISTING_ROW_ONLY_STATEMENTS)[number];
+
+const EXISTING_ROW_ONLY: ReadonlySet<string> = new Set(
+  EXISTING_ROW_ONLY_STATEMENTS,
+);
+
+/**
+ * The operands that describe *many* rows, and so exist on a to-many alone.
+ *
+ * Prisma's to-one nested input is `{ create, connectOrCreate, upsert,
+ * disconnect, delete, connect, update }` — measured off a generated client —
+ * with no `createMany`, `set`, `updateMany` or `deleteMany` key at all. Both
+ * {@link planOwningSide} and {@link planForeignSide} refuse all four on a
+ * to-one; this is the list they refuse, named once so the type can subtract it.
+ */
+const COLLECTION_ONLY_STATEMENTS = [
+  "createMany",
+  "set",
+  "updateMany",
+  "deleteMany",
+] as const;
+
+/** One of {@link COLLECTION_ONLY_STATEMENTS}. The to-one arms subtract it. */
+export type CollectionOnlyStatement = (typeof COLLECTION_ONLY_STATEMENTS)[number];
+
+/**
+ * The three of the four that share one refusal message.
+ *
+ * `createMany` is excluded because it is refused on its own, in both planners,
+ * with a message about there being *one related row* rather than about there
+ * being no *set of rows* — and on the foreign side that refusal also guards the
+ * operand check that follows it. Derived by subtraction rather than written out
+ * again, so a fifth collection-shaped operand added above lands here too.
+ */
+const NO_SET_OF_ROWS: ReadonlySet<string> = new Set(
+  COLLECTION_ONLY_STATEMENTS.filter((statement) => statement !== "createMany"),
+);
 
 /** Statements that insert a new row, so nothing is linked to it yet. */
 const CREATE_ONLY_STATEMENTS = new Set(["create", "createMany"]);
@@ -817,8 +870,12 @@ function planOwningSide(
    * in `SUPPORTED` with no branch on this side, so they fell through to the
    * `connect` handling below and reported `connect` back to a caller who wrote
    * something else. Same fall-through as `upsert`'s, found by the same test.
+   *
+   * The fourth collection operand, `createMany`, is refused above this with its
+   * own wording, which is why the set read here is {@link NO_SET_OF_ROWS} and
+   * not {@link COLLECTION_ONLY_STATEMENTS} whole.
    */
-  if (key === "set" || key === "updateMany" || key === "deleteMany") {
+  if (NO_SET_OF_ROWS.has(key)) {
     throw new UnsupportedQueryError(
       `data.${relation.name}.${key}`,
       schema.name,
@@ -1138,7 +1195,10 @@ function planForeignSide(
   const spelledOperand = operand;
 
   if (relation.kind !== "many") {
-    if (key === "set" || key === "updateMany" || key === "deleteMany") {
+    // {@link NO_SET_OF_ROWS} rather than {@link COLLECTION_ONLY_STATEMENTS}:
+    // `createMany` is the fourth of them and is refused further down, where its
+    // own message and its operand check live together.
+    if (NO_SET_OF_ROWS.has(key)) {
       throw new UnsupportedQueryError(
         `data.${relation.name}.${key}`,
         schema.name,
