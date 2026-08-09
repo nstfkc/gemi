@@ -322,7 +322,7 @@ describe("Json path filters", () => {
    * JSON null alike, which is the same collapse that keeps the sentinels off
    * this filter.
    */
-  test("null at a path is refused, having no reading left", async () => {
+  test("null at a path is refused, because gemi cannot ask Prisma's question", async () => {
     // @ts-expect-error `= NULL` is never true; say which empty you mean, on the column
     await UserModel.findMany({ where: { metadata: { path: ["a"], equals: null } } });
     // @ts-expect-error `x @> NULL` is NULL too — a null *inside* the document is fine

@@ -989,6 +989,21 @@ function compileJsonFilter(
   // `{ path: ["a"] }` both raise P2019 *"A JSON path cannot be set without a
   // scalar filter."*, and `{ path: ["a"], equals: 1, gt: undefined }` compiles
   // the `equals` alone.
+  //
+  // **This is also what makes the plan cache safe here**, which is the stronger
+  // reason and the one a reader will otherwise have to re-derive.
+  // `canonicalShape` drops `undefined` members, so the two spellings were
+  // already *one* cache key — measured:
+  //
+  //     planKey(postgres, "User", "findMany", { where: { metadata: { path: ["a"] } } })
+  //     planKey(postgres, "User", "findMany", { where: { metadata: { path: ["a"], equals: undefined } } })
+  //       both -> postgres:batched:User:findMany:{where:{metadata:{path:[string]}}}
+  //
+  // while they compiled to two different things, a refusal and a `= NULL` plan.
+  // Whichever compiled first decided for the other, so a bare `path` arriving
+  // second was served the never-true plan instead of the refusal it raises
+  // cold. Both throw now, so there is nothing left for the shared key to
+  // collide on.
   const applied = Object.keys(filter)
     .filter((key) => key !== "path" && filter[key] !== undefined)
     .sort();
@@ -1163,10 +1178,15 @@ function assertJsonOperand(
   // The `string_contains` guard above names that failure in this file's own
   // words, "runs and returns the wrong rows"; only the arithmetic differs.
   //
-  // `array_contains` is included rather than exempt. It takes the `#>` form, so
-  // the collapse argument does not apply to it — but `jsonArrayContains` binds
-  // `null` as SQL NULL, and `x @> NULL` is NULL too. Prisma binds it as the
-  // JSON value and runs a real containment test.
+  // `array_contains` is included rather than exempt, **and its mechanism is a
+  // different one**. It takes the `#>` form, so the text collapse above does
+  // not apply to it — but `jsonArrayContains` binds the operand raw, so `null`
+  // arrives as SQL NULL and `x @> NULL` is NULL too. Prisma binds it as the
+  // JSON value and runs a real containment test. The message below branches for
+  // that reason: telling an `array_contains` caller about `#>>` would name a
+  // mechanism this operator does not have, and pointing them at
+  // `{ equals: Prisma.JsonNull }` would answer a containment question with an
+  // equality on the column.
   //
   // Answering any of them properly means the `#> … ::jsonb` form on Postgres
   // and `json_type` on SQLite, which is a second implementation of the same
@@ -1177,13 +1197,21 @@ function assertJsonOperand(
       `where.${field.name}.${key}`,
       schema.name,
       context.operation,
-      `null cannot be compared through a JSON path: the extraction yields ` +
-        `SQL NULL for an absent key and for a JSON null alike, and the ` +
-        `comparison against it is NULL rather than true — the query would run ` +
-        `and match nothing. Prisma reads it as the JSON value null and does ` +
-        `answer it; gemi does not yet. Filter the column itself — ` +
-        `{ ${field.name}: { equals: Prisma.JsonNull } } — or test the path ` +
-        `against the value you mean.`,
+      key === "array_contains"
+        ? `null cannot be tested for containment through a JSON path: the ` +
+          `operand binds as SQL NULL rather than as the JSON value, and ` +
+          `'x @> NULL' is NULL rather than true — the query would run and ` +
+          `match nothing. Prisma binds it as the JSON value and runs a real ` +
+          `containment test; gemi does not yet. A null *inside* the document ` +
+          `is an ordinary value and still compiles: ` +
+          `{ ${field.name}: { path: […], array_contains: [null] } }.`
+        : `null cannot be compared through a JSON path: the extraction yields ` +
+          `SQL NULL for an absent key and for a JSON null alike, and the ` +
+          `comparison against it is NULL rather than true — the query would ` +
+          `run and match nothing. Prisma reads it as the JSON value null and ` +
+          `does answer it; gemi does not yet. Filter the column itself — ` +
+          `{ ${field.name}: { equals: Prisma.JsonNull } } — or test the path ` +
+          `against the value you mean.`,
     );
   }
 
@@ -1333,16 +1361,35 @@ function assertPathShape(
     );
     if (offending === -1) return;
 
+    // `a ${typeof part}` alone reads as "a undefined" / "a object" for every
+    // segment but the number, so the description is spelled out. And the array
+    // index sentence is advice for one mistake in particular — a caller who
+    // wrote `null` did not write an index — so it is gated on the number
+    // rather than emitted for everything.
     const part = (path as unknown[])[offending];
+    const described =
+      part === null
+        ? "null"
+        : part === undefined
+          ? "undefined"
+          : Array.isArray(part)
+            ? "an array"
+            : typeof part === "object"
+              ? "an object"
+              : `a ${typeof part}`;
+
     throw new UnsupportedQueryError(
       `${field.name}.path`,
       schema.name,
       context.operation,
       `A JSON path is an array of strings, and path[${offending}] is ` +
-        `${part === null ? "null" : `a ${typeof part}`}. An array index is a ` +
-        `key too — write ["items", "0"] rather than ["items", 0]; it reaches ` +
-        `the same element, because ${dialect.name} takes the path as text. ` +
-        `Prisma's path is string[] and its client refuses a number here too.`,
+        `${described}. ` +
+        (typeof part === "number"
+          ? `An array index is a key too — write ["items", "0"] rather than ` +
+            `["items", 0]; it reaches the same element, because ` +
+            `${dialect.name} takes the path as text. Prisma's path is ` +
+            `string[] and its client refuses a number here too.`
+          : `Prisma's path is string[] too.`),
     );
   }
 

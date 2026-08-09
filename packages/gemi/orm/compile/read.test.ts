@@ -1259,6 +1259,21 @@ describe("json path filters", () => {
       pgText({ where: { metadata: { path: ["a"], equalz: 1 } } }),
     ).toThrow(/A JSON path filter takes/);
 
+    // `path: undefined` is absent too — the dispatch into this branch tests
+    // `filter.path !== undefined`, so the filter falls through to the column
+    // arm rather than becoming a bare path. That half was already right before
+    // this change; asserted here so the rule holds on both sides of the
+    // dispatch. Prisma answers it the same way — `{ path: undefined,
+    // equals: { a: 1 } }` is a filter on the column there too.
+    const columnArgs = {
+      where: { metadata: { path: undefined, equals: { a: 1 } } },
+    };
+    expect(pgText(columnArgs)).toContain(`"metadata" = $1::text::jsonb`);
+    expect(pgText(columnArgs)).not.toContain("#>>");
+    expect(
+      compileRead(jsonUser, "findMany", columnArgs, postgres).bind(columnArgs),
+    ).toEqual([`{"a":1}`]);
+
     // ...and one live operator beside it is still a filter, so the guard drops
     // keys rather than the whole operand.
     const args = { where: { metadata: { path: ["a"], equals: 1, gt: undefined } } };
@@ -1420,31 +1435,49 @@ describe("json path filters", () => {
    * containment test.
    */
   describe("null at a path is refused", () => {
-    const operators = [
-      "equals",
-      "not",
-      "string_contains",
-      "array_contains",
-      "gt",
-      "lte",
+    /**
+     * **Each row asserts its message, not just `InvalidArgumentError`**, and
+     * that is what pins the two things the class alone cannot see.
+     *
+     * The `string_*` rows already threw before this change, from the non-string
+     * guard, with the `'%null%'` reasoning — so a class assertion passes either
+     * way and leaves the new guard's *placement* unpinned. It sits deliberately
+     * **after** that guard so the better message survives; moving it above used
+     * to leave all 153 tests green while `string_contains: null` silently swapped
+     * its message for the generic one.
+     *
+     * The `array_contains` row asserts the other sentence for the same kind of
+     * reason: that operator does not extract with `#>>`, so its refusal names
+     * the raw bind and `x @> NULL` instead of the text collapse.
+     */
+    const postgresOperators = [
+      ["equals", /null cannot be compared through a JSON path/],
+      ["not", /null cannot be compared through a JSON path/],
+      ["gt", /null cannot be compared through a JSON path/],
+      ["lte", /null cannot be compared through a JSON path/],
+      ["string_contains", /'%null%', which runs and returns the wrong rows/],
+      ["array_contains", /null cannot be tested for containment/],
     ] as const;
 
-    test.each(operators)("%s on postgres", (key) => {
-      expect(() =>
-        pgText({ where: { metadata: { path: ["a"], [key]: null } } }),
-      ).toThrow(InvalidArgumentError);
+    test.each(postgresOperators)("%s on postgres", (key, message) => {
+      const compile = () =>
+        pgText({ where: { metadata: { path: ["a"], [key]: null } } });
+      expect(compile).toThrow(InvalidArgumentError);
+      expect(compile).toThrow(message);
     });
 
     // SQLite offers only the six its dialect answers; the other four raise the
     // dialect refusal first, which is a different message and already pinned.
-    test.each(["equals", "not", "string_ends_with"] as const)(
-      "%s on sqlite",
-      (key) => {
-        expect(() =>
-          sqliteText({ where: { metadata: { path: "$.a", [key]: null } } }),
-        ).toThrow(InvalidArgumentError);
-      },
-    );
+    test.each([
+      ["equals", /null cannot be compared through a JSON path/],
+      ["not", /null cannot be compared through a JSON path/],
+      ["string_ends_with", /'%null%', which runs and returns the wrong rows/],
+    ] as const)("%s on sqlite", (key, message) => {
+      const compile = () =>
+        sqliteText({ where: { metadata: { path: "$.a", [key]: null } } });
+      expect(compile).toThrow(InvalidArgumentError);
+      expect(compile).toThrow(message);
+    });
 
     /**
      * The load-bearing negative: only the *bare* operand is refused. A `null`
@@ -1460,14 +1493,21 @@ describe("json path filters", () => {
       ]);
     });
 
-    /** Nothing of it reaches the SQL, which is the actual defect. */
+    /**
+     * Nothing of it reaches the SQL, which is the actual defect. The message is
+     * asserted alongside because a bare `text === ""` passes for *any* throw,
+     * including one from an unrelated future guard — it would say "no SQL was
+     * built" where it means "this guard built no SQL".
+     */
     test("it never becomes a bound NULL", () => {
       let text = "";
+      let message = "";
       try {
         text = pgText({ where: { metadata: { path: ["a"], equals: null } } });
-      } catch {
-        // expected
+      } catch (error) {
+        message = (error as Error).message;
       }
+      expect(message).toMatch(/null cannot be compared through a JSON path/);
       expect(text).toBe("");
     });
   });
@@ -1525,6 +1565,29 @@ describe("json path filters", () => {
     expect(() =>
       pgText({ where: { metadata: { path: ["a", null], equals: "x" } } }),
     ).toThrow(/path\[1\] is null/);
+
+    // Every other non-string reads grammatically too — `a ${typeof part}`
+    // alone gives "a undefined" and "a object", and the number is the only
+    // segment it happens to fit.
+    expect(() =>
+      pgText({ where: { metadata: { path: ["a", undefined], equals: "x" } } }),
+    ).toThrow(/path\[1\] is undefined\./);
+    expect(() =>
+      pgText({ where: { metadata: { path: ["a", { b: 1 }], equals: "x" } } }),
+    ).toThrow(/path\[1\] is an object\./);
+    expect(() =>
+      pgText({ where: { metadata: { path: ["a", ["b"]], equals: "x" } } }),
+    ).toThrow(/path\[1\] is an array\./);
+
+    // And the array-index advice is advice for *one* mistake, so it is emitted
+    // for the number and withheld from the rest — a caller who wrote `null`
+    // did not write an index.
+    expect(() =>
+      pgText({ where: { metadata: { path: ["items", 0], equals: "x" } } }),
+    ).toThrow(/write \["items", "0"\] rather than \["items", 0\]/);
+    expect(() =>
+      pgText({ where: { metadata: { path: ["a", null], equals: "x" } } }),
+    ).not.toThrow(/An array index is a key too/);
 
     // The string spelling reaches the element, and the bound path is identical
     // to what the numeric one used to produce — which is why this is a
