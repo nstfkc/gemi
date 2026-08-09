@@ -2179,7 +2179,12 @@ function planForeignSide(
             // redundant `update` writing the value already there — measured to
             // agree with Prisma, and skipping it would be an unmeasured change
             // to a branch this issue is not about.
-            if (displaces && sameKey(found[childField], parent[parentField])) {
+            if (
+              displaces &&
+              childFields.every((field, index) =>
+                sameKey(found[field], parent[parentFields[index]]),
+              )
+            ) {
               continue;
             }
 
@@ -2219,7 +2224,7 @@ function planForeignSide(
               // says so for displacement, and provenance follows from the same
               // fact. The miss branch below needs no marker: it creates the far
               // row, so there is no caller-supplied key to tell ours apart from.
-              [childField],
+              childFields,
             );
             continue;
           }
@@ -2332,9 +2337,9 @@ function planForeignSide(
           displaces &&
           (await alreadyLinked(
             relation.model,
-            childField,
+            childFields,
             item,
-            parent[parentField],
+            valuesOf(parent, parentFields),
             executor,
           ))
         ) {
@@ -3063,21 +3068,26 @@ async function clearLinks(
  */
 async function alreadyLinked(
   model: string,
-  field: string,
+  fields: readonly string[],
   where: unknown,
-  value: unknown,
+  values: readonly unknown[],
   executor: RelationExecutor,
 ): Promise<boolean> {
   const named = (await executor.exec(
     model,
     "findUnique",
-    { where, select: { [field]: true } },
+    { where, select: keySelect(fields) },
     false,
   )) as Record<string, unknown> | null;
 
   if (named === null || named === undefined) return false;
 
-  return sameKey(named[field], value);
+  // **`every`, not `some`** — the row is already linked here only if the whole
+  // key matches. A composite key agreeing on one column and not the rest points
+  // somewhere else entirely, and short-circuiting on it would skip a repoint
+  // that has to happen. This is the one site of #386's generalisation that is
+  // not a rename: `sameKey` compares a single value, so the fold belongs here.
+  return fields.every((field, index) => sameKey(named[field], values[index]));
 }
 
 /**
