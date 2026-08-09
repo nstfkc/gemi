@@ -29,3 +29,7 @@ app/models/generated-lists/
 # An application never has one of these: `prisma/schema.prisma` has no
 # `generator client` block, which is what lets an app install `prisma` alone.
 app/models/prisma-client/
+
+# Local SQLite database created by `prisma db push` / the dev server.
+dev.db
+dev.db-journal
