@@ -51,6 +51,7 @@ import {
   policiesFor,
   policyContext,
   redactedAs,
+  NESTED_READ,
   type PolicyEntry,
   type PolicyContext,
 } from "./policy";
@@ -987,22 +988,19 @@ export abstract class Model {
     //   relation executor rebuilds its options from `{ strategy }` rather than
     //   forwarding these.
     //
-    //   Which name a nested row is *redacted* as is a second mechanism and it
-    //   does not currently agree with the first. A **batched** child runs its
-    //   own `$exec` under `NESTED_READ`, so it is redacted as `findMany`; a
-    //   **folded** (lateral, the Postgres default) child never enters its own
-    //   `$exec`, so `redactFolded` below redacts it on the parent's behalf and
-    //   builds its context from the enclosing `$exec`'s `op` — which on this
-    //   call is the pre-read, a `findFirst`. Measured, same query, same rows:
+    //   Which name a nested row is *redacted* as is a second mechanism, and it
+    //   agrees with the first since #388. Both strategies answer `NESTED_READ`:
+    //   a **batched** child runs its own `$exec` under it, and a **folded**
+    //   (lateral, the Postgres default) child is handed the same constant by
+    //   `redactFolded` below, which redacts it on the parent's behalf because
+    //   its rows never enter its own `$exec`.
     //
-    //     sqlite   (batched) child redact context.operation -> "findMany"
-    //     postgres (folded)  child redact context.operation -> "findFirst"
-    //
-    //   Pre-existing, not widened here, and the same on an ordinary `findFirst`
-    //   with an `include`. Filed as #388; the fix is to hand `redactFolded`
-    //   `NESTED_READ` too. Neither value is the write, which is the part #366
-    //   is about and the only part `delete-redact-operation.test.ts` pins under
-    //   the default strategy.
+    //   Until #388 the folded path built its context from the enclosing
+    //   `$exec`'s `op` — on this call the pre-read, a `findFirst` — so the same
+    //   query over the same rows reported `findMany` on SQLite and `findFirst`
+    //   on Postgres. Neither value was ever the write, which is the part #366 is
+    //   about and the only part `delete-redact-operation.test.ts` pins under the
+    //   default strategy; `nested-redact-strategy.test.ts` pins the agreement.
     //
     // Only when there is something to read. A plain `delete` still compiles to
     // one statement and opens no transaction.
@@ -1217,6 +1215,17 @@ export abstract class Model {
       // cannot: it is a row transform in the shaping stage, with no argument to
       // rewrite. So the parent runs it on the child's behalf, which is the only
       // place that can.
+      //
+      // **`NESTED_READ`, not `op` — #388.** Running it here is a fact about where
+      // the rows were shaped, not about what they are. The child is a read of
+      // another model whatever statement encloses it, which is the whole reason
+      // `applyNestedPolicies` scopes every nested node under the same constant,
+      // and its docblock argues that at length. Handing the enclosing `op` down
+      // made the *same* relation read, over the same rows, tell the child's
+      // `redact` a different `context.operation` depending on which strategy
+      // planned it: `findMany` batched, `findFirst` folded. A policy written as
+      // `context.operation === "findMany"` therefore protected a child on SQLite
+      // and leaked it on Postgres, for identical application code.
       if (plan.relations !== undefined && !system) {
         for (const relation of plan.relations) {
           if (relation.root === undefined) continue;
@@ -1227,7 +1236,7 @@ export abstract class Model {
               folded: relation.root.folded,
             },
             result,
-            op,
+            NESTED_READ,
             system,
           );
         }
