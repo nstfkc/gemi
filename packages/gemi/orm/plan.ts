@@ -312,7 +312,8 @@ export function canonicalShape(
 }
 
 /**
- * The operators whose operand is a list of values rather than a structure.
+ * The keys whose operand is an array that binds as **one** parameter, so its
+ * length never reaches the SQL text and must not reach the cache key either.
  *
  * `in` / `notIn` bind as one `= any($1)` on Postgres. So do a scalar list's
  * `hasEvery`, `hasSome` and `push` (#300) — `col @> $1`, `col && $1` and
@@ -331,8 +332,42 @@ export function canonicalShape(
  * the note above warns about for `OR`. Checked in `compile/nested-writes.ts`
  * rather than assumed from the name.
  *
- * The three below carry no such second meaning: `grep` finds them only in the
+ * Those three carry no such second meaning: `grep` finds them only in the
  * scalar-list filter set and the list write operators.
+ *
+ * **`path` is not a list of values at all, and reaches the same arithmetic from
+ * a different direction (#301).** `where: { metadata: { path: ["a", "b"],
+ * equals: … } }` binds the whole path as one `text[]` through `#>`, so every
+ * depth compiles to the identical `("metadata" #>> $1) = $2`. Measured over the
+ * corpus: `["a"]`, `["a","b"]`, `["a","b","c"]` and `["a", 0]` were four cache
+ * entries holding one statement, and a path depth taken off a request is as
+ * ordinary as a list length taken off one.
+ *
+ * SQLite needs nothing here and gets nothing: a path is a *string* there
+ * (`"$.a.b"`), so depth was never in the shape to begin with, and
+ * `collapseLists` is false on that dialect anyway.
+ *
+ * **The gate is `collapseLists` — that is `bindsListAsOneParameter`, a property
+ * about `in` lists rather than about paths — and the conflation deserves
+ * stating.** It is the right condition on both implemented dialects because the
+ * array path *grammar* exists only where `jsonPathSyntax` is `"array"`, and the
+ * one dialect with that grammar binds the array whole. A dialect that spelled a
+ * path as an array but emitted one parameter per segment would make this wrong
+ * in the dangerous direction — a plan reached with the wrong number of
+ * placeholders, the trap this comment already describes for SQLite's `in` — and
+ * would need a flag of its own. None exists to hang one on today that is not
+ * speculative, and `plan-key.invariants.test.ts` walks both grammars on both
+ * dialects asserting same-key-implies-same-SQL, so that is what would fail.
+ *
+ * **A *column* named `path` is the other collision, and it is harmless —
+ * measured rather than assumed**, since `LIST_KEYS` matches by name at any
+ * depth. Every position where a bare array can sit directly under such a key
+ * binds as one parameter on Postgres: `where: { path: [...] }` on a Json column
+ * is `"path" = $1::text::jsonb`, `equals: [...]` on a scalar list is
+ * `"path" = $1`, and `data: { path: [...] }` is one `values` placeholder for
+ * either. A bare-array *filter* on a scalar list is refused outright. So the
+ * collapse is correct there rather than merely unreachable, which incidentally
+ * closes a sliver of the case named next.
  *
  * **One case is still uncollapsed and needs a schema to fix.** A bare array as
  * a *write* value — `data: { tags: ["a", "b"] }` — is keyed by the **field
@@ -343,7 +378,14 @@ export function canonicalShape(
  * collapse is a wrong statement. The filter side — which is where a
  * user-sized list actually arrives — is covered.
  */
-const LIST_KEYS = new Set(["in", "notIn", "hasEvery", "hasSome", "push"]);
+const LIST_KEYS = new Set([
+  "in",
+  "notIn",
+  "hasEvery",
+  "hasSome",
+  "push",
+  "path",
+]);
 
 /**
  * The internal composite-`in` key — see `compile/where.ts`, which owns it.

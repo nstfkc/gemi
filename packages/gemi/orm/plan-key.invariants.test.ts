@@ -119,17 +119,52 @@ describe("the plan key", () => {
   const EXPECTED_REFUSALS: Record<string, RegExp[]> = {
     // Postgres has ILIKE; SQLite has no case-insensitive LIKE for non-ASCII,
     // and Prisma refuses `mode` there too.
-    sqlite: [/mode: "insensitive"/],
-    postgres: [],
+    sqlite: [
+      /mode: "insensitive"/,
+      // The **array** path grammar, which is Postgres's. Prisma refuses it here
+      // too — the split is the client's, not this ORM's — so every array-form
+      // corpus entry is refused on this dialect and every JSONPath-string one
+      // is refused on the other. Both lists exist so that a dialect quietly
+      // accepting the form it should not fails here rather than silently
+      // gaining coverage.
+      /a JSON path is a JSONPath string/,
+      // ...and the filters `jsonFilters` withholds on SQLite — `gt` and
+      // `array_contains` in the corpus. Prisma answers "Unknown argument" for
+      // both, so this refusal is parity rather than a gap.
+      /is not available on sqlite/,
+    ],
+    postgres: [
+      // The JSONPath-**string** grammar, which is SQLite's. The mirror of the
+      // entry above.
+      /a JSON path is an array of keys/,
+    ],
   };
+
+  /**
+   * Refusals both dialects produce, kept apart from the per-dialect lists so
+   * that "this is a dialect split" and "this is refused everywhere" do not read
+   * alike.
+   */
+  const SHARED_REFUSALS = [
+    // A per-parent `take` inside a to-many needs the lateral strategy, and
+    // these compile with the default (batched) on both dialects — so it is
+    // refused everywhere here, not only on SQLite.
+    /accounts\.take/,
+    // The four JSON path refusals that are about the *argument* rather than
+    // about the database. Each is in the corpus in both grammars, because the
+    // grammar check runs before all of them — written in one spelling only,
+    // each would fire on one dialect and be swallowed by the grammar message on
+    // the other.
+    /is a String column/,
+    /A JSON path cannot be empty/,
+    /A 'path' needs a filter beside it/,
+    /A JSON path filter takes/,
+  ];
 
   test.each(DIALECTS)("every corpus entry compiles, or is refused by name — %s", (name, dialect) => {
     const { out, refused } = compiled(dialect);
 
-    // A per-parent `take` inside a to-many needs the lateral strategy, and
-    // these compile with the default (batched) on both dialects — so it is
-    // refused everywhere here, not only on SQLite.
-    const expected = [/accounts\.take/, ...EXPECTED_REFUSALS[name]];
+    const expected = [...SHARED_REFUSALS, ...EXPECTED_REFUSALS[name]];
     const unexpected = refused.filter(
       (message) => !expected.some((pattern) => pattern.test(message)),
     );
@@ -240,5 +275,58 @@ describe("the plan key", () => {
     // ...and present-versus-absent still differs, since that changes the text.
     expect(key({ take: 1 })).not.toBe(key({}));
     expect(key({ skip: 1, take: 2 })).not.toBe(key({ take: 2 }));
+  });
+
+  /**
+   * A JSON path's **depth** is bound too, which is the case #301 opened to
+   * measure rather than to reason about.
+   *
+   * Same shape as `take`/`skip` above and the opposite of the intuition: a
+   * deeper path plainly selects something else, so it looks structural. It is
+   * not. Postgres's `#>` takes the whole path as one `text[]` parameter, so
+   * `["a"]` and `["a", "b", "c"]` compile to the same `("metadata" #>> $1)`,
+   * and SQLite's path is a string, where depth was never in the shape at all.
+   *
+   * Left alone, `canonicalShape` records an array element-wise, so on Postgres
+   * every distinct depth minted its own entry holding a statement identical to
+   * its neighbours' — and a path built from a request (`?field=address.city`)
+   * varies with the data the way an `in` list's length does. `path` is in
+   * `LIST_KEYS` for that reason; this is what would notice it leaving.
+   *
+   * The SQL is asserted alongside the key deliberately. "One entry" is only
+   * correct while it is also "one statement" — assert the key on its own and a
+   * collapse that started serving the wrong text would still pass.
+   */
+  const JSON_PATHS: Record<string, unknown[]> = {
+    sqlite: ["$.a", "$.a.b", "$.a.b.c"],
+    postgres: [["a"], ["a", "b"], ["a", "b", "c"], ["a", 0]],
+  };
+
+  test.each(DIALECTS)("a JSON path's depth is bound, not compiled in — %s", (name, dialect) => {
+    const shapes = JSON_PATHS[name].map((path) => ({
+      where: { metadata: { path, equals: "x" } },
+    }));
+
+    const texts = new Set(
+      shapes.map(
+        (args) =>
+          compileRead(userWithProfile, "findMany" as never, args as never, dialect as never).text,
+      ),
+    );
+    const keys = new Set(
+      shapes.map((args) => planKey(dialect as never, "User", "findMany" as never, args)),
+    );
+
+    expect(texts.size, [...texts].join("\n")).toBe(1);
+    expect(keys.size, [...keys].join("\n")).toBe(1);
+
+    // ...and the *filter* beside the path still discriminates, which is the
+    // direction a too-eager collapse would break: these are two statements.
+    const filterKey = (filter: Record<string, unknown>) =>
+      planKey(dialect as never, "User", "findMany" as never, {
+        where: { metadata: { path: JSON_PATHS[name][0], ...filter } },
+      });
+    expect(filterKey({ equals: "x" })).not.toBe(filterKey({ not: "x" }));
+    expect(filterKey({ equals: "x" })).not.toBe(filterKey({ string_contains: "x" }));
   });
 });
