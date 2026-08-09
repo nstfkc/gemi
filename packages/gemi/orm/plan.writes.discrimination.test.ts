@@ -279,17 +279,21 @@ describe("plan cache discrimination — writes", () => {
    * `disconnect: true` and `disconnect: false` shaped alike — a bare `boolean`
    * under `data`, which is a value subtree — so they were one cache entry. On
    * the owning side that is not a wasted entry, it is a wrong statement:
-   * `planOwningSide` refused `operand !== true` **at compile time** back then
-   * and then pushed a constant `value: () => null`, and a cache hit skips
+   * back then, `planOwningSide` refused `operand !== true` **at compile time**
+   * and pushed a constant `value: () => null`, and a cache hit skips
    * compilation entirely. So a plan compiled from `disconnect: true` served
    * `disconnect: false` and nulled the foreign key on a call that asked for
    * nothing.
    *
    * **Nothing above could catch it**, and that is worth stating precisely
    * because it is what a reader will assume was covered. `plan-key.invariants`
-   * asserts *same key ⇒ same SQL text*, and at the time these two had
+   * asserts *same key ⇒ same SQL text*, and neither side gave it anything to
+   * catch. On the **foreign** side the two spellings genuinely had
    * byte-identical text — the difference was in which value a `contribution`
-   * binds and in whether a step runs at all.
+   * binds and in whether a step runs at all. On the **owning** side, at the
+   * time, `disconnect: false` threw at compile time and so had no text to
+   * compare with; it acquired one, and a differing one, only when #359 gave it
+   * an arm.
    *
    * **The texts have since diverged, and the pin below moved onto them**: #359
    * implemented `disconnect: false` as the no-op Prisma answers, so it now
