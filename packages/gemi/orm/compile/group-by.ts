@@ -502,8 +502,14 @@ export type HavingOperator = keyof typeof OPERATORS;
 /**
  * The same table, widened for lookup: the key comes from a caller's object and
  * is `string`, not {@link HavingOperator} — that is the question being asked.
+ *
+ * `Readonly`, because this alias points at the object {@link HavingOperator} is
+ * derived from: without it `OPERATOR_SQL.contains = "like"` would typecheck and
+ * mutate the source of truth. The `| undefined` is the load-bearing half — it
+ * is what makes the `if (!operator)` guard below honest rather than a cast that
+ * claims every string is a key.
  */
-const OPERATOR_SQL: Record<string, string | undefined> = OPERATORS;
+const OPERATOR_SQL: Readonly<Record<string, string | undefined>> = OPERATORS;
 
 function comparison(
   lhs: string,

@@ -59,12 +59,15 @@
 // schema into an instantiation-depth error rather than a slow compile.
 //
 // **The operator grammars below map over a tuple, and that is not the mapping
-// the paragraph above warns about.** `RelationFilter`, `NestedCreate` and
-// `NestedUpdate` are `[K in <five literal strings>]`, not `[K in keyof M]`: the
-// key set is fixed and finite whatever the schema is, and the property types
-// are deferred exactly as an interface's are. Measured rather than assumed —
-// the template's fourteen mutually recursive models typecheck in the same time
-// they did before (1.6–1.8s, warm, either way).
+// the paragraph above warns about.** All six of them — `ListFilter`,
+// `JsonPathFilter`, `HavingComparison`, `RelationFilter`, `NestedCreate` and
+// `NestedUpdate` — are `[K in a fixed tuple of literals]`, not `[K in keyof M]`:
+// the key set is decided by the compiler's own list and is the same size
+// whatever the schema is, and the property types are deferred exactly as an
+// interface's are. (The sizes differ per grammar — two to eleven keys — and
+// none of them is a function of the model.) Measured rather than assumed: the
+// template's fourteen mutually recursive models typecheck in the same time they
+// did before (1.6–1.8s, warm, either way).
 
 import type {
   AnyNullValue,
@@ -572,9 +575,19 @@ type JsonPathFilter = { path: JsonPath } & {
  * in any case *usable* — where a `never` would give the new operator a key
  * nothing can be passed under, which is a quieter kind of wrong than the one
  * this change removes.
+ *
+ * **`array_contains` takes a document but not a bare `null`.** It is the one
+ * operator `assertJsonOperand` waves through without a scalar check, so a bare
+ * `null` reaches `dialect.jsonArrayContains` and binds as SQL NULL — and
+ * `x @> NULL` is NULL, not false, so the filter silently matches no row rather
+ * than asking anything. A `null` *inside* the document is fine and stays
+ * expressible; only the top-level operand is excluded. (#380 found this and
+ * narrows the same property on the hand-written literal this mapped type
+ * replaces; the narrowing lives on the arm here so the two do not resolve to
+ * whichever side of the merge is taken.)
  */
 type JsonPathOperand<K extends JsonFilterName> = K extends "array_contains"
-  ? JsonValue
+  ? Exclude<JsonValue, null>
   : K extends "string_contains" | "string_starts_with" | "string_ends_with"
     ? string
     : JsonPathScalar;
