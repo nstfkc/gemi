@@ -11,33 +11,44 @@ nested reads**. Performance is the top priority throughout.
 
 ## Stack position
 
-**There is no stack. The ORM has landed.** `feat/orm` is an ancestor of
-`origin/next`, which carries `0.51.0-rc.0` and proposes to `main` as PR #273.
-Branch from `next`.
+**There is no stack, and there is no integration branch. Branch from `main`.**
+
+`refactor/laravel-container-architecture`, `feat/database-layer`, `feat/orm` and
+`next` are all ancestors of `origin/main`. `next` merged as PR #273 on
+**2026-08-04**; `origin/next` has not moved since 2026-08-03 and is 0 commits
+ahead of `main`, so branching from it now starts you behind the trunk rather than
+level with it.
 
 ```
-main
- └── next                    0.51.0-rc.0, PR #273 — contains the ORM
+main   contains the ORM, and everything since targets it directly
 ```
 
-The stack this section described is history, and reading it as instructions is
-the mistake it now exists to prevent:
+Every branch this section has ever told a reader to use is history, and reading
+it as instructions is the mistake it now exists to prevent:
 
 ```
 main
  └── refactor/laravel-container-architecture   PR #30, CLOSED — shipped in rc.2
       └── feat/database-layer                  PR #33, CLOSED — shipped in rc.2
            └── feat/orm                        PR #45, CLOSED — landed on next
+                └── next                       PR #273, MERGED 2026-08-04
 ```
 
 #30 and #33 were closed as already-shipped: their content reached
 `release/v0.50.0-rc.2` on 2026-07-28 and their PRs were simply never closed, so
 for three days two open PRs described history. #45 is closed because the work
-went into `next` directly rather than into a base with nothing above it.
+went into `next` directly rather than into a base with nothing above it. `next`
+then went into `main` and was left behind in turn.
 
-**This section has now gone stale three times** — the original diagram, the
-correction below it, and this. Each rewrite has been to replace a *status* with
-a *date*, because a status rots silently and this document has no way to notice.
+**This section has now gone stale four times** — the original diagram, the
+correction below it, the correction below that, and this. Each rewrite has been
+to replace a *status* with a *date*, because a status rots silently and this
+document has no way to notice. The fourth rewrite is the evidence that writing
+the date down is not sufficient on its own: the previous version *was* dated and
+still said "branch from `next`", because a date records when a branch was right
+and not when it stopped being. What would notice is
+[the audit script](#the-runbook), which answers the question by measurement every
+time it is run.
 
 ### How the stack landed
 
@@ -110,8 +121,14 @@ feat/orm-08-eloquent-doorway      15 ahead of feat/orm-07-performance
 
 ### The runbook
 
-**Detect it.** One command, worth running before treating a stack as shipped,
-because every PR showing `MERGED` looks exactly like success:
+`plans/orm/branch-audit.sh` runs all of this. It is a file rather than a
+paragraph because the check has always been one command and nothing invoked it,
+so the failure below recurred three times while the section documenting it was
+being written. What follows is what the script does, for a reader who needs to
+run one of the steps by hand against some other pair of branches.
+
+**Detect it.** Worth running before treating a stack as shipped, because every
+PR showing `MERGED` looks exactly like success:
 
 ```
 git rev-list --count origin/<trunkward-branch>..origin/<stack-tip>
@@ -135,6 +152,19 @@ them.**
 and the intermediates can be deleted rather than repaired one at a time. Without
 that second check the first number is alarming and misleading in the expensive
 direction: "nine PRs merged and nothing landed" reads as nine repairs.
+
+**A non-zero count is not proof the work is unlanded**, which is the one place
+the two commands above will mislead you in the other direction. They compare
+*commits*, and a rebase changes the commit while keeping the content:
+`feat/orm-json-filters` holds `1fae1ea`, whose content is on `main` as `cc22399`
+— #299 rebased it, adding a `docs/llms-full.txt` hunk and shifting every other
+one, though the seven shared files add 648 lines on each side and differ on
+exactly one of them. That is enough for two different patch-ids, so `git cherry`
+calls it unmerged too, and the count will read 1 for as long as the branch
+exists. The audit script narrows the answer
+by matching the commit *subject* against the trunk, which survives a rebase where
+a patch-id does not, and reports those separately from branches that genuinely
+hold something.
 
 `feat/database-layer` is at `e3c2e0b`. Everything this plan depends on exists
 there — `database/`, `container/`, `foundation/`, `kernel/`, `support/`,
@@ -553,8 +583,10 @@ makes the *SQLite* suites fail for an unrelated reason afterwards.
 
 ## Picking up an iteration
 
-0. Confirm you are on a branch descended from `next` (see
-   [Stack position](#stack-position)), not from `main`.
+0. Confirm you are on a branch descended from `main` (see
+   [Stack position](#stack-position)). `next` and `feat/orm` still exist and are
+   both behind it; branching from either is the pooling failure this plan is
+   about, entered from the top.
 1. Read this file, then the iteration's doc.
 2. Read the "Read first" list in that doc before writing anything.
 3. Respect the six invariants. If one is in the way, raise it — do not work around it.
@@ -625,10 +657,15 @@ makes the *SQLite* suites fail for an unrelated reason afterwards.
   The connection is a **per-query** property, not a per-model one — the same
   model is read on the hot path during sign-in and swept by the nightly audit,
   so a `connection` on the class would force one of the two to be wrong.
-- ~~**Where this stack merges.**~~ **Settled: it merged to `next`.** PRs #30 and
+- ~~**Where this stack merges.**~~ ~~**Settled: it merged to `next`.**~~
+  **Finished: `next` merged to `main` as PR #273 on 2026-08-04.** PRs #30 and
   #33 were closed as already-shipped — their content had been on
-  `release/v0.50.0-rc.2` since 2026-07-28 — and `feat/orm` is now an ancestor of
-  `origin/next`, which carries `0.51.0-rc.0` and proposes to `main` as PR #273.
-  PR #45 is closed. **This section has gone stale three times; it is now a
-  statement about history rather than a plan, which is the only form that
-  cannot.** See #268 for the branch hygiene that outlived it.
+  `release/v0.50.0-rc.2` since 2026-07-28 — and #45 is closed because the work
+  went to `next` directly. All four of `refactor/laravel-container-architecture`,
+  `feat/database-layer`, `feat/orm` and `next` are now ancestors of
+  `origin/main`, and the twenty PRs merged since that landing — along with every
+  one open at the time of writing — target `main`. **This entry
+  has gone stale four times; it is now a statement about history rather than a
+  plan, which is the only form that cannot.** See #268 for the branch hygiene
+  that outlived it, and `branch-audit.sh` for the check that would have caught
+  each of the four.
