@@ -716,10 +716,13 @@ export interface Link {
    * guarantees the two sides are the same length, which `resolveLink` checks
    * rather than assumes.
    *
-   * Singular access is a *narrowing* and has to be justified: nested writes
-   * still take one field at a time, so they go through {@link singleFieldLink},
-   * which refuses a composite relation by name. That is a type-level guard
-   * rather than a convention — there is no `parentField` to reach for.
+   * Singular access is a *narrowing* and has to be justified. Nested writes
+   * needed one until #271 and went through {@link singleFieldLink}, which
+   * refused a composite relation by name; they contribute every column now, so
+   * the only caller left is the implicit many-to-many join table, where one
+   * field a side is an invariant of Prisma's own schema rather than a limit
+   * here. That is still a type-level guard rather than a convention — there is
+   * no `parentField` to reach for.
    */
   parentFields: string[];
   /** Fields on the child holding the matching values. */
@@ -729,12 +732,21 @@ export interface Link {
 }
 
 /**
- * The one-field view of a link, for the callers that genuinely cannot take more.
+ * The one-field view of a link, for the caller that genuinely cannot take more.
  *
- * A nested write contributes a *column* to an insert, so a composite relation
- * would be several — a different piece of work from reading across one, and
- * refused here rather than silently writing the first field. #67's acceptance
- * list is the read surfaces; this keeps the write side honest about the gap.
+ * **That is now exactly one: the implicit many-to-many join table.** Prisma
+ * builds it from the two models' *primary keys*, one column each side, into a
+ * table with no schema of its own — so "one field" there is a property of the
+ * shape rather than a limit of this compiler, and it can never be widened
+ * without Prisma changing what an implicit m-n is.
+ *
+ * It used to serve nested writes as well, refusing a composite relation by name
+ * on the argument that contributing *n* foreign-key columns to an insert is a
+ * different piece of work from reading across one. #271 did that work, so the
+ * refusal below is unreachable from an ordinary relation: `planOne` resolves
+ * the full link and only narrows on the join-table branch. Kept as an assertion
+ * of the invariant — the alternative is `link.parentFields[0]` at the call
+ * site, which is the same narrowing with nothing checking it.
  */
 export function singleFieldLink(
   link: Link,
@@ -748,10 +760,9 @@ export function singleFieldLink(
       parent.name,
       operation,
       `${relation.name} joins on ${link.parentFields.length} fields ` +
-        `(${link.parentFields.join(", ")}). Reading across a composite ` +
-        `relation works; writing through one would have to contribute that ` +
-        `many foreign-key columns to this insert, which is not implemented. ` +
-        `Write the child separately with its keys set.`,
+        `(${link.parentFields.join(", ")}), and it is planned through a join ` +
+        `table, which links two models by a single primary key each side. ` +
+        `Prisma does not build an implicit many-to-many over a composite key.`,
     );
   }
   return {

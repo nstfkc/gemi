@@ -5,7 +5,6 @@ import { compileRead } from "./compile/read";
 import { compileWrite } from "./compile/write";
 import { PostgresDialect } from "./dialect/postgres";
 import { SqliteDialect } from "./dialect/sqlite";
-import { UnsupportedQueryError } from "./errors";
 import { ledger, ledgerEntry } from "./fixtures";
 import * as registry from "./registry";
 
@@ -19,7 +18,9 @@ const postgres = new PostgresDialect();
  * wherever a relation is correlated — `include` under either strategy, a
  * relation filter, `_count`, an `orderBy` through a relation, and nested
  * writes". Four of those five stopped being true when #95 and #100 landed, and
- * the entry did not move with them.
+ * the entry did not move with them. The fifth stopped being true at #271, and
+ * the entry is gone: there is nothing left on that list for a reader to plan
+ * around.
  *
  * That is the direction #145 was about: a *Not in scope* list is written so a
  * reader can plan around it, and one that names something already implemented
@@ -108,30 +109,43 @@ describe("a relation that joins on two fields", () => {
   });
 
   /**
-   * The one still refused, and the reason the docs entry is narrowed rather
-   * than deleted. When this starts compiling, this test fails — which is the
-   * prompt to move the entry again.
+   * The sixth, which used to be the one refused (#271).
+   *
+   * This test previously asserted the refusal and said *"when this starts
+   * compiling, this test fails — which is the prompt to move the entry again"*.
+   * It started compiling; the entry moved; this asserts the property the
+   * refusal was standing in for.
+   *
+   * **The parent's `RETURNING` is what makes it the same property.** A nested
+   * write on this side repoints the child by the parent's key, so the columns
+   * the statement returns are the columns the repoint can correlate on — return
+   * one of two and the `update` below writes `tenantId` and leaves `ledgerCode`
+   * holding whatever it held, which is the *first-field join* the refusal
+   * existed to prevent, one layer down.
    */
-  test("a nested write is still refused, by name", () => {
-    let error: UnsupportedQueryError | null = null;
-    try {
-      compileWrite(
-        ledger,
-        "update",
-        {
-          where: { tenantId_code: { tenantId: 1, code: "x" } },
-          data: { entries: { connect: { id: 1 } } },
-        } as never,
-        sqlite,
-      );
-    } catch (raised) {
-      error = raised as UnsupportedQueryError;
-    }
+  test("a nested write returns every key field to correlate on", () => {
+    const plan = compileWrite(
+      ledger,
+      "update",
+      {
+        where: { tenantId_code: { tenantId: 1, code: "x" } },
+        data: { title: "t", entries: { connect: { id: 1 } } },
+        // Narrow, so the key columns below are in the statement *only* because
+        // the nested step asked for them. Without this they would be there
+        // anyway — they are the primary key — and the assertion would hold
+        // whether or not the planner had asked.
+        select: { title: true },
+      } as never,
+      sqlite,
+    );
 
-    expect(error).toBeInstanceOf(UnsupportedQueryError);
-    // The message names the count and the fields, which is what makes it
-    // actionable rather than a shrug.
-    expect(error!.message).toMatch(/joins on 2 fields/);
-    expect(error!.message).toContain("tenantId");
+    expect(plan.after).toHaveLength(1);
+    expect(plan.after?.[0].operation).toBe("connect");
+    expect(plan.text).toContain(`returning "tenantId", "code", "title"`);
+    // Both fetched to stitch with, neither asked for — so both are stripped
+    // from the row the caller sees. One here would mean the repoint writes half
+    // a key: `tenantId` set and `ledgerCode` left holding whatever it held,
+    // which is the first-field join this file's refusal existed to prevent.
+    expect(plan.hidden).toEqual(["tenantId", "code"]);
   });
 });

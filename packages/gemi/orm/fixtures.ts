@@ -521,6 +521,162 @@ export const ledgerEntry: ModelSchema = {
 };
 
 /**
+ * The **optional** composite key — the same two columns as {@link ledgerEntry},
+ * nullable (#271).
+ *
+ * `ledgerEntry`'s is required, which is the ordinary tenant-scoped shape, and
+ * Prisma leaves `disconnect` out of a required relation's nested input type
+ * entirely. So every operand that *detaches* a composite link — `disconnect`,
+ * `set`, and the branches of `connect` / `create` / `connectOrCreate` that
+ * displace an incumbent — was unreachable from these fixtures, in the same way
+ * the foreign side of a to-one was unreachable before {@link profile}.
+ *
+ * Both columns are optional together, which is Prisma's rule rather than a
+ * choice here: *"The fields of a relation must either all be optional or all be
+ * required"*. `assertDisconnectable` and the two `displaces` predicates test
+ * every column and expect one answer, and this is the shape that gives it.
+ */
+export const ledgerNote: ModelSchema = {
+  name: "LedgerNote",
+  table: "LedgerNote",
+  fields: {
+    id: {
+      name: "id",
+      column: "id",
+      type: "Int",
+      nullable: false,
+      isId: true,
+      isUpdatedAt: false,
+      default: { kind: "autoincrement" },
+    },
+    tenantId: {
+      name: "tenantId",
+      column: "tenantId",
+      type: "Int",
+      nullable: true,
+      isId: false,
+      isUpdatedAt: false,
+    },
+    ledgerCode: {
+      name: "ledgerCode",
+      column: "ledgerCode",
+      type: "String",
+      nullable: true,
+      isId: false,
+      isUpdatedAt: false,
+    },
+    body: {
+      name: "body",
+      column: "body",
+      type: "String",
+      nullable: false,
+      isId: false,
+      isUpdatedAt: false,
+    },
+  },
+  primaryKey: ["id"],
+  uniques: [],
+  relations: {
+    ledger: {
+      name: "ledger",
+      model: "Ledger",
+      kind: "one",
+      relationName: "LedgerToLedgerNote",
+      from: ["tenantId", "ledgerCode"],
+      to: ["tenantId", "code"],
+      nullable: true,
+    },
+  },
+};
+
+/**
+ * A composite **one-to-one** — {@link ledgerNote}'s columns plus the
+ * `@@unique` covering exactly them, which is what makes the far row hold one
+ * partner.
+ *
+ * {@link profile} is the single-field version of this shape. Over one column
+ * *"the index covers exactly the relation's fields"* and *"the index is one
+ * column"* are the same sentence; here they are not, which is the whole reason
+ * this fixture exists.
+ *
+ * `uniques: [["tenantId", "ledgerCode"]]` is the group Prisma requires — and
+ * the only one it accepts, measured on 6.19.2: both a wider
+ * `@@unique([tenantId, ledgerCode, seal])` and a reordered
+ * `@@unique([ledgerCode, tenantId])` are refused at parse time with P1012,
+ * *"Either add an `@@unique([tenantId, ledgerCode])` attribute to the model, or
+ * change the relation to one-to-many"*.
+ */
+export const ledgerSeal: ModelSchema = {
+  name: "LedgerSeal",
+  table: "LedgerSeal",
+  fields: {
+    id: ledgerNote.fields.id,
+    tenantId: ledgerNote.fields.tenantId,
+    ledgerCode: ledgerNote.fields.ledgerCode,
+    seal: {
+      name: "seal",
+      column: "seal",
+      type: "String",
+      nullable: false,
+      isId: false,
+      isUpdatedAt: false,
+    },
+  },
+  primaryKey: ["id"],
+  uniques: [["tenantId", "ledgerCode"]],
+  relations: {
+    ledger: {
+      name: "ledger",
+      model: "Ledger",
+      kind: "one",
+      relationName: "LedgerToLedgerSeal",
+      from: ["tenantId", "ledgerCode"],
+      to: ["tenantId", "code"],
+      nullable: true,
+    },
+  },
+};
+
+/**
+ * `ledger`, plus the far sides of {@link ledgerNote} and {@link ledgerSeal}.
+ *
+ * A separate export rather than an edit to `ledger` for the reason
+ * {@link userWithProfile} is: the read suites count that model's relations, and
+ * a fixture that grew two would change what they assert without saying so.
+ *
+ * `seal` is `kind: "one"`, which is the *foreign* side's whole displacement
+ * discriminator — P1012 gives that a non-list back-relation implies the child's
+ * key is unique, and that implication holds over a composite `@@unique` exactly
+ * as it does over a single-column one. Measured on 6.19.2 rather than assumed:
+ * `prisma validate` accepts `LedgerSeal.@@unique([tenantId, ledgerCode])`
+ * beside `Ledger.seal LedgerSeal?`.
+ */
+export const ledgerWithOptional: ModelSchema = {
+  ...ledger,
+  relations: {
+    ...ledger.relations,
+    notes: {
+      name: "notes",
+      model: "LedgerNote",
+      kind: "many",
+      relationName: "LedgerToLedgerNote",
+      from: [],
+      to: [],
+      nullable: false,
+    },
+    seal: {
+      name: "seal",
+      model: "LedgerSeal",
+      kind: "one",
+      relationName: "LedgerToLedgerSeal",
+      from: [],
+      to: [],
+      nullable: true,
+    },
+  },
+};
+
+/**
  * A self-relation — the one topology where the parent and the child are the same
  * table, which the template's schema has no example of.
  *

@@ -265,6 +265,8 @@ export type LedgerCreateScalars = {
 
 export type LedgerRelations = {
   entries: { kind: "many"; nullable: false; target: LedgerEntryTypes };
+  notes: { kind: "many"; nullable: false; target: LedgerNoteTypes };
+  seal: { kind: "one"; nullable: true; target: LedgerSealTypes };
 };
 
 export type LedgerUnique = { tenantId_code: { tenantId: number; code: string } };
@@ -632,6 +634,394 @@ export class LedgerEntryModel extends Model {
   }
 
   static wrap<C extends { prototype: unknown }, R extends LedgerEntryScalars>(
+    this: C,
+    row: R,
+  ): C["prototype"] & R {
+    return (Model.wrap as (row: object) => any).call(this, row);
+  }
+}
+
+export type LedgerNoteScalars = {
+  id: number;
+  tenantId: number | null;
+  ledgerCode: string | null;
+  body: string;
+};
+
+export type LedgerNoteCreateScalars = {
+  id?: number;
+  tenantId?: number | null;
+  ledgerCode?: string | null;
+  body: string;
+};
+
+export type LedgerNoteRelations = {
+  ledger: { kind: "one"; nullable: true; target: LedgerTypes };
+};
+
+export type LedgerNoteUnique = { id: number };
+
+export interface LedgerNoteTypes extends ModelTypeInfo {
+  scalars: LedgerNoteScalars;
+  relations: LedgerNoteRelations;
+  unique: LedgerNoteUnique;
+  create: LedgerNoteCreateScalars;
+}
+
+// Merges the row's columns into the instance type, so a method on a subclass can
+// read `this.email`. No runtime output.
+//
+// oxlint flags class/interface merging because TypeScript does not check the
+// merged properties are initialised — a directly constructed instance would type
+// as carrying every column while holding none. That hazard is closed rather than
+// accepted: `Model`'s constructor is `protected`, so the only way to get an
+// instance is `wrap`, which assigns a complete row. See bin/orm/emit.ts.
+// oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
+export interface LedgerNoteModel extends LedgerNoteScalars {}
+
+export type LedgerNotePolicy = ModelPolicy<
+  WhereInput<LedgerNoteTypes>,
+  CreateInput<LedgerNoteTypes>,
+  LedgerNoteScalars
+>;
+
+// The same shape with `scope`, `onCreate` and `onUpdate` abstract, so a policy
+// that scopes cannot omit the write halves. The runtime refuses those
+// combinations too — this makes it `TS2515` at the class declaration instead of
+// an error on the first write that reaches production.
+export abstract class LedgerNoteScopedPolicy extends ScopedPolicy<
+  WhereInput<LedgerNoteTypes>,
+  CreateInput<LedgerNoteTypes>,
+  LedgerNoteScalars
+> {}
+
+export class LedgerNoteModel extends Model {
+  static $schema = schema.LedgerNote;
+
+  // Says this class came out of the generator, so `registerModels` can prefer
+  // the application's subclass over it without having to *infer* which is which.
+  // It reads own-vs-inherited, and a subclass inherits this rather than
+  // declaring it — so the mark is on exactly one class per model. See
+  // `isGeneratedBase`.
+  //
+  // `readonly` so the initialiser keeps the literal type. `Model` declares this
+  // `?: true`, and a mutable `= true` widens to `boolean` — which is not
+  // assignable to it, so every class in this file was a TS2417 until a reviewer
+  // regenerating a 79-model schema found 79 of them. `tsconfig.generated.json`
+  // is the check that now says so here rather than in an app.
+  static readonly $generated = true;
+
+  // Narrowed from `Model`'s `PolicyEntry[]` to this model's own, so a policy
+  // written for another model is a type error here rather than a scope compiled
+  // against columns that do not exist.
+  static $policies?: readonly PolicyEntry<
+    WhereInput<LedgerNoteTypes>,
+    CreateInput<LedgerNoteTypes>,
+    LedgerNoteScalars
+  >[];
+
+  static findMany<T extends FindManyArgs<LedgerNoteTypes>>(
+    args?: Subset<T, FindManyArgs<LedgerNoteTypes>>,
+    options?: ExecOptions,
+  ): Promise<Payload<LedgerNoteTypes, T>[]> {
+    return this.$exec("findMany", args, options) as Promise<Payload<LedgerNoteTypes, T>[]>;
+  }
+
+  static findFirst<T extends FindFirstArgs<LedgerNoteTypes>>(
+    args?: Subset<T, FindFirstArgs<LedgerNoteTypes>>,
+    options?: ExecOptions,
+  ): Promise<Payload<LedgerNoteTypes, T> | null> {
+    return this.$exec("findFirst", args, options) as Promise<Payload<LedgerNoteTypes, T> | null>;
+  }
+
+  static findFirstOrThrow<T extends FindFirstOrThrowArgs<LedgerNoteTypes>>(
+    args?: Subset<T, FindFirstOrThrowArgs<LedgerNoteTypes>>,
+    options?: ExecOptions,
+  ): Promise<Payload<LedgerNoteTypes, T>> {
+    return this.$exec("findFirstOrThrow", args, options) as Promise<Payload<LedgerNoteTypes, T>>;
+  }
+
+  static findUnique<T extends FindUniqueArgs<LedgerNoteTypes>>(
+    args: Subset<T, FindUniqueArgs<LedgerNoteTypes>>,
+    options?: ExecOptions,
+  ): Promise<Payload<LedgerNoteTypes, T> | null> {
+    return this.$exec("findUnique", args, options) as Promise<Payload<LedgerNoteTypes, T> | null>;
+  }
+
+  static findUniqueOrThrow<T extends FindUniqueOrThrowArgs<LedgerNoteTypes>>(
+    args: Subset<T, FindUniqueOrThrowArgs<LedgerNoteTypes>>,
+    options?: ExecOptions,
+  ): Promise<Payload<LedgerNoteTypes, T>> {
+    return this.$exec("findUniqueOrThrow", args, options) as Promise<Payload<LedgerNoteTypes, T>>;
+  }
+
+  static count(args?: Omit<CountArgs<LedgerNoteTypes>, "select">): Promise<number>;
+  static count<T extends CountArgs<LedgerNoteTypes>>(
+    args: SelectSubset<T, CountArgs<LedgerNoteTypes>> & {
+      select: NonNullable<T["select"]>;
+    },
+  ): Promise<CountPayload<T["select"]>>;
+  static count(args?: unknown): Promise<unknown> {
+    return this.$exec("count", args as never);
+  }
+
+  static aggregate<T extends AggregateArgs<LedgerNoteTypes>>(
+    args: Subset<T, AggregateArgs<LedgerNoteTypes>>,
+  ): Promise<AggregatePayload<LedgerNoteTypes, T>> {
+    return this.$exec("aggregate", args) as Promise<
+      AggregatePayload<LedgerNoteTypes, T>
+    >;
+  }
+
+  static groupBy<T extends GroupByArgs<LedgerNoteTypes>>(
+    args: Subset<T, GroupByArgs<LedgerNoteTypes>>,
+  ): Promise<GroupByPayload<LedgerNoteTypes, T>> {
+    return this.$exec("groupBy", args) as Promise<
+      GroupByPayload<LedgerNoteTypes, T>
+    >;
+  }
+
+  static create<T extends CreateArgs<LedgerNoteTypes>>(
+    args: Subset<T, CreateArgs<LedgerNoteTypes>>,
+    options?: ExecOptions,
+  ): Promise<Payload<LedgerNoteTypes, T>> {
+    return this.$exec("create", args, options) as Promise<Payload<LedgerNoteTypes, T>>;
+  }
+
+  static update<T extends UpdateArgs<LedgerNoteTypes>>(
+    args: Subset<T, UpdateArgs<LedgerNoteTypes>>,
+    options?: ExecOptions,
+  ): Promise<Payload<LedgerNoteTypes, T>> {
+    return this.$exec("update", args, options) as Promise<Payload<LedgerNoteTypes, T>>;
+  }
+
+  static delete<T extends DeleteArgs<LedgerNoteTypes>>(
+    args: Subset<T, DeleteArgs<LedgerNoteTypes>>,
+    options?: ExecOptions,
+  ): Promise<Payload<LedgerNoteTypes, T>> {
+    return this.$exec("delete", args, options) as Promise<Payload<LedgerNoteTypes, T>>;
+  }
+
+  static upsert<T extends UpsertArgs<LedgerNoteTypes>>(
+    args: Subset<T, UpsertArgs<LedgerNoteTypes>>,
+    options?: ExecOptions,
+  ): Promise<Payload<LedgerNoteTypes, T>> {
+    return this.$exec("upsert", args, options) as Promise<Payload<LedgerNoteTypes, T>>;
+  }
+
+  static createMany(
+    args?: CreateManyArgs<LedgerNoteTypes>,
+  ): Promise<{ count: number }> {
+    return this.$exec("createMany", args) as Promise<{ count: number }>;
+  }
+
+  static updateMany(
+    args?: UpdateManyArgs<LedgerNoteTypes>,
+  ): Promise<{ count: number }> {
+    return this.$exec("updateMany", args) as Promise<{ count: number }>;
+  }
+
+  static deleteMany(
+    args?: DeleteManyArgs<LedgerNoteTypes>,
+  ): Promise<{ count: number }> {
+    return this.$exec("deleteMany", args) as Promise<{ count: number }>;
+  }
+
+  static wrap<C extends { prototype: unknown }, R extends LedgerNoteScalars>(
+    this: C,
+    row: R,
+  ): C["prototype"] & R {
+    return (Model.wrap as (row: object) => any).call(this, row);
+  }
+}
+
+export type LedgerSealScalars = {
+  id: number;
+  tenantId: number | null;
+  ledgerCode: string | null;
+  seal: string;
+};
+
+export type LedgerSealCreateScalars = {
+  id?: number;
+  tenantId?: number | null;
+  ledgerCode?: string | null;
+  seal: string;
+};
+
+export type LedgerSealRelations = {
+  ledger: { kind: "one"; nullable: true; target: LedgerTypes };
+};
+
+export type LedgerSealUnique = { id: number } | { tenantId_ledgerCode: { tenantId: number; ledgerCode: string } };
+
+export interface LedgerSealTypes extends ModelTypeInfo {
+  scalars: LedgerSealScalars;
+  relations: LedgerSealRelations;
+  unique: LedgerSealUnique;
+  create: LedgerSealCreateScalars;
+}
+
+// Merges the row's columns into the instance type, so a method on a subclass can
+// read `this.email`. No runtime output.
+//
+// oxlint flags class/interface merging because TypeScript does not check the
+// merged properties are initialised — a directly constructed instance would type
+// as carrying every column while holding none. That hazard is closed rather than
+// accepted: `Model`'s constructor is `protected`, so the only way to get an
+// instance is `wrap`, which assigns a complete row. See bin/orm/emit.ts.
+// oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
+export interface LedgerSealModel extends LedgerSealScalars {}
+
+export type LedgerSealPolicy = ModelPolicy<
+  WhereInput<LedgerSealTypes>,
+  CreateInput<LedgerSealTypes>,
+  LedgerSealScalars
+>;
+
+// The same shape with `scope`, `onCreate` and `onUpdate` abstract, so a policy
+// that scopes cannot omit the write halves. The runtime refuses those
+// combinations too — this makes it `TS2515` at the class declaration instead of
+// an error on the first write that reaches production.
+export abstract class LedgerSealScopedPolicy extends ScopedPolicy<
+  WhereInput<LedgerSealTypes>,
+  CreateInput<LedgerSealTypes>,
+  LedgerSealScalars
+> {}
+
+export class LedgerSealModel extends Model {
+  static $schema = schema.LedgerSeal;
+
+  // Says this class came out of the generator, so `registerModels` can prefer
+  // the application's subclass over it without having to *infer* which is which.
+  // It reads own-vs-inherited, and a subclass inherits this rather than
+  // declaring it — so the mark is on exactly one class per model. See
+  // `isGeneratedBase`.
+  //
+  // `readonly` so the initialiser keeps the literal type. `Model` declares this
+  // `?: true`, and a mutable `= true` widens to `boolean` — which is not
+  // assignable to it, so every class in this file was a TS2417 until a reviewer
+  // regenerating a 79-model schema found 79 of them. `tsconfig.generated.json`
+  // is the check that now says so here rather than in an app.
+  static readonly $generated = true;
+
+  // Narrowed from `Model`'s `PolicyEntry[]` to this model's own, so a policy
+  // written for another model is a type error here rather than a scope compiled
+  // against columns that do not exist.
+  static $policies?: readonly PolicyEntry<
+    WhereInput<LedgerSealTypes>,
+    CreateInput<LedgerSealTypes>,
+    LedgerSealScalars
+  >[];
+
+  static findMany<T extends FindManyArgs<LedgerSealTypes>>(
+    args?: Subset<T, FindManyArgs<LedgerSealTypes>>,
+    options?: ExecOptions,
+  ): Promise<Payload<LedgerSealTypes, T>[]> {
+    return this.$exec("findMany", args, options) as Promise<Payload<LedgerSealTypes, T>[]>;
+  }
+
+  static findFirst<T extends FindFirstArgs<LedgerSealTypes>>(
+    args?: Subset<T, FindFirstArgs<LedgerSealTypes>>,
+    options?: ExecOptions,
+  ): Promise<Payload<LedgerSealTypes, T> | null> {
+    return this.$exec("findFirst", args, options) as Promise<Payload<LedgerSealTypes, T> | null>;
+  }
+
+  static findFirstOrThrow<T extends FindFirstOrThrowArgs<LedgerSealTypes>>(
+    args?: Subset<T, FindFirstOrThrowArgs<LedgerSealTypes>>,
+    options?: ExecOptions,
+  ): Promise<Payload<LedgerSealTypes, T>> {
+    return this.$exec("findFirstOrThrow", args, options) as Promise<Payload<LedgerSealTypes, T>>;
+  }
+
+  static findUnique<T extends FindUniqueArgs<LedgerSealTypes>>(
+    args: Subset<T, FindUniqueArgs<LedgerSealTypes>>,
+    options?: ExecOptions,
+  ): Promise<Payload<LedgerSealTypes, T> | null> {
+    return this.$exec("findUnique", args, options) as Promise<Payload<LedgerSealTypes, T> | null>;
+  }
+
+  static findUniqueOrThrow<T extends FindUniqueOrThrowArgs<LedgerSealTypes>>(
+    args: Subset<T, FindUniqueOrThrowArgs<LedgerSealTypes>>,
+    options?: ExecOptions,
+  ): Promise<Payload<LedgerSealTypes, T>> {
+    return this.$exec("findUniqueOrThrow", args, options) as Promise<Payload<LedgerSealTypes, T>>;
+  }
+
+  static count(args?: Omit<CountArgs<LedgerSealTypes>, "select">): Promise<number>;
+  static count<T extends CountArgs<LedgerSealTypes>>(
+    args: SelectSubset<T, CountArgs<LedgerSealTypes>> & {
+      select: NonNullable<T["select"]>;
+    },
+  ): Promise<CountPayload<T["select"]>>;
+  static count(args?: unknown): Promise<unknown> {
+    return this.$exec("count", args as never);
+  }
+
+  static aggregate<T extends AggregateArgs<LedgerSealTypes>>(
+    args: Subset<T, AggregateArgs<LedgerSealTypes>>,
+  ): Promise<AggregatePayload<LedgerSealTypes, T>> {
+    return this.$exec("aggregate", args) as Promise<
+      AggregatePayload<LedgerSealTypes, T>
+    >;
+  }
+
+  static groupBy<T extends GroupByArgs<LedgerSealTypes>>(
+    args: Subset<T, GroupByArgs<LedgerSealTypes>>,
+  ): Promise<GroupByPayload<LedgerSealTypes, T>> {
+    return this.$exec("groupBy", args) as Promise<
+      GroupByPayload<LedgerSealTypes, T>
+    >;
+  }
+
+  static create<T extends CreateArgs<LedgerSealTypes>>(
+    args: Subset<T, CreateArgs<LedgerSealTypes>>,
+    options?: ExecOptions,
+  ): Promise<Payload<LedgerSealTypes, T>> {
+    return this.$exec("create", args, options) as Promise<Payload<LedgerSealTypes, T>>;
+  }
+
+  static update<T extends UpdateArgs<LedgerSealTypes>>(
+    args: Subset<T, UpdateArgs<LedgerSealTypes>>,
+    options?: ExecOptions,
+  ): Promise<Payload<LedgerSealTypes, T>> {
+    return this.$exec("update", args, options) as Promise<Payload<LedgerSealTypes, T>>;
+  }
+
+  static delete<T extends DeleteArgs<LedgerSealTypes>>(
+    args: Subset<T, DeleteArgs<LedgerSealTypes>>,
+    options?: ExecOptions,
+  ): Promise<Payload<LedgerSealTypes, T>> {
+    return this.$exec("delete", args, options) as Promise<Payload<LedgerSealTypes, T>>;
+  }
+
+  static upsert<T extends UpsertArgs<LedgerSealTypes>>(
+    args: Subset<T, UpsertArgs<LedgerSealTypes>>,
+    options?: ExecOptions,
+  ): Promise<Payload<LedgerSealTypes, T>> {
+    return this.$exec("upsert", args, options) as Promise<Payload<LedgerSealTypes, T>>;
+  }
+
+  static createMany(
+    args?: CreateManyArgs<LedgerSealTypes>,
+  ): Promise<{ count: number }> {
+    return this.$exec("createMany", args) as Promise<{ count: number }>;
+  }
+
+  static updateMany(
+    args?: UpdateManyArgs<LedgerSealTypes>,
+  ): Promise<{ count: number }> {
+    return this.$exec("updateMany", args) as Promise<{ count: number }>;
+  }
+
+  static deleteMany(
+    args?: DeleteManyArgs<LedgerSealTypes>,
+  ): Promise<{ count: number }> {
+    return this.$exec("deleteMany", args) as Promise<{ count: number }>;
+  }
+
+  static wrap<C extends { prototype: unknown }, R extends LedgerSealScalars>(
     this: C,
     row: R,
   ): C["prototype"] & R {

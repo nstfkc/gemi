@@ -935,17 +935,32 @@ await List.create({
 | `upsert` | Finds the row **among this parent's**, updates it, or creates it. A to-one has no `where` to require — the link already names the row. |
 
 **A relation may join on more than one field.** `@relation(fields: [tenantId, orderId], references:
-[tenantId, id])` is the tenant-scoped composite-key style, and every read surface handles it: an
-`include` under either strategy, a relation filter, a `_count`, and an `orderBy` through the
-relation. The correlation becomes one equality per field; the batched strategy filters its children
-with an `OR` of `AND`s rather than a tuple `in`, because that is one shape both dialects already
-compile.
+[tenantId, id])` is the tenant-scoped composite-key style, and every surface handles it — reads and
+nested writes alike. On the read side: an `include` under either strategy, a relation filter, a
+`_count`, and an `orderBy` through the relation. The correlation becomes one equality per field; the
+batched strategy filters its children with an `OR` of `AND`s rather than a tuple `in`, because that
+is one shape both dialects already compile.
 
-Two consequences worth knowing. A composite join uses one placeholder *per field per parent*, so
-SQLite's parameter ceiling arrives proportionally sooner on a wide `include` — `ParameterLimitError`
-still names it rather than letting the driver fail. And a **nested write** through a composite
-relation is refused: it would have to contribute that many foreign-key columns to the insert, which
-is not implemented. Write the child separately with its keys set.
+**A nested write through one contributes every column**, in every operand that writes a key —
+`connect`, `create`, `connectOrCreate`, `createMany`, `set`, `disconnect`, `update`, `upsert`,
+`delete` and the two `*Many` — and on both sides of the relation. Three details follow from the key
+having more than one column, and they are the ones worth knowing:
+
+- **`connect` names the row in Prisma's compound form**, `connect: { tenantId_code: { tenantId: 1,
+  code: "a" } }`, because that is what a multi-column unique key is called. Unlike the single-field
+  case there is no zero-query shortcut — the operand does not carry the referenced values directly —
+  so it costs one lookup, which is what Prisma issues anyway.
+- **A key with any column `null` links nothing.** That is SQL's rule, not a choice: `(tenantId,
+  orderId) = (1, NULL)` is unknown, so the join finds no row. A `disconnect` clears every column
+  together, and an `update` through a half-written key reports the row as missing rather than
+  matching on the half that is set.
+- **A composite one-to-one displaces**, the same way a single-column one does — the discriminator is
+  a `@@unique` covering *exactly* the relation's own fields. `@@unique([tenantId, orderId, kind])`
+  covers them and something else, so it does not make the relation exclusive and does not displace.
+
+One consequence of the join itself: a composite `include` uses one placeholder *per field per
+parent*, so SQLite's parameter ceiling arrives proportionally sooner on a wide one —
+`ParameterLimitError` still names it rather than letting the driver fail.
 
 Which direction a nested write runs in is decided by **who holds the foreign key**. When this model
 holds it, the far row is resolved or created *first* and collapses into one more column. When the
@@ -2211,12 +2226,6 @@ Stated so you can plan around them rather than discover them:
   an identity map is worse than none.
 - **No lazy loading.** A relation you did not `include` is absent, not a proxy that queries when
   touched.
-- **No multi-field relations in a nested write.** `@relation(fields: [a, b], references: [c, d])`
-  now works everywhere a relation is *read* — `include` under either strategy, a relation filter,
-  `_count`, and an `orderBy` through a relation all correlate on every field. What is still refused
-  is reaching one from a nested write, and the error names the fields on both sides and the
-  operation it came from, rather than joining on the first field and writing plausible wrong rows.
-  Pending rather than declined.
 - **No migrations, no schema DSL.** Prisma owns both, and gemi must not shadow the Prisma CLI.
 - **No `distinct`, and this one is deliberate rather than pending.** Prisma applies it **in
   memory** — its query log shows no `DISTINCT` at all, so `take` neither reduces the rows pulled
