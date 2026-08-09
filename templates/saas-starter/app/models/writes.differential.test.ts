@@ -790,6 +790,26 @@ const CASES: Case[] = [
       },
     },
   }, ["User", "Profile"]],
+  // M15b's other spelling: the hit branch naming the row **already linked
+  // here**. gemi short-circuits it and writes nothing at all, where it used to
+  // clear the link and put the same key straight back; this is the case that
+  // says the two are the same answer as far as anything observable goes. Net
+  // nothing on both sides, so it would stay green either way — it is here as
+  // the parity record for that short-circuit, since the divergence it fixes is
+  // only visible through a policy and the differential harness has none.
+  // Labelled `M15f` at the merge: #379 landed its own `M15e` in this array in
+  // the same batch. Both cases run and both pass, so nothing here would have
+  // caught the collision — but `vitest -t M15e` would then select two unrelated
+  // cases, and #379's prose references to "M15e" (nested-write-policies.test.ts,
+  // nested-writes.ts) would name an ambiguous thing.
+  ["M15f to-one connectOrCreate of the row already linked changes nothing", "update", {
+    where: { id: 1 },
+    data: {
+      profile: {
+        connectOrCreate: { where: { id: 1 }, create: { bio: "unused" } },
+      },
+    },
+  }, ["User", "Profile"]],
 
   // M16 — the boundary on the other side of `displaces`, from the **owning**
   // end of a key (#363): a *many*-to-one connect has no incumbent, so nothing

@@ -991,14 +991,32 @@ same answer you would get if it truly did not exist. That is deliberate. `connec
 tenant.
 
 A child whose policy *scopes on the foreign key itself* — `scope: () => ({ folderId: mine })` — can
-still use the relation operands that write that key. `connect`, `disconnect` and the rest go
-through without an `onUpdate`, because the scope-escape guard judges **the columns you supplied**
-rather than the ones the nested step put there: the ORM records which columns it wrote and exempts
-those from the check.
+still use the relation operands that write that key. `connect`, `disconnect` and `connectOrCreate`'s
+**hit** branch go through without an `onUpdate`, because the scope-escape guard judges **the columns
+you supplied** rather than the ones the nested step put there: the ORM records which columns it
+wrote and exempts those from the check.
+
+The hit branch, and not `connectOrCreate` whole, because its other branch is a `create` — and a
+policy that carries a `scope` with no `onCreate` is refused there by a different rule, before the
+scope-escape guard is reached:
+
+```
+UnsupportedQueryError: gemi ORM does not support 'create' yet (Note.create).
+Note has a policy that scopes reads but no 'onCreate' …
+```
+
+So on a model scoped this way, `connectOrCreate` links an existing row and cannot fall back. Give
+the policy an `onCreate` if you want the fallback as well.
 
 The exemption is provenance, not permission. A column *you* name is refused exactly as before —
 writing `folderId` yourself on a model scoped by it is still a scope escape, and still needs an
 `onUpdate` to say so deliberately.
+
+`set` is the one operand still refused here, and deliberately. It writes the key twice — `null` to
+clear the old links, then the parent's key to make the new ones — and only the clear is recorded as
+the ORM's. Exempting both would make the call *succeed* and leave the rows detached, because the
+clear moves them outside the very scope the link then selects them by. A refusal is the better
+answer until that is fixed.
 
 `disconnect` and `delete` only exist on an `update` — a `create` has nothing linked to it yet, and
 Prisma reports them as an unknown argument there too. They differ on a row that is **not** linked to

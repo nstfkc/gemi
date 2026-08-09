@@ -1160,6 +1160,131 @@ describe("policies on nested writes", () => {
     });
 
     /**
+     * **The same call spelled two ways has to give one answer** (#373).
+     *
+     * `connectOrCreate`'s hit branch repoints through the very `update` the
+     * bare `connect` uses — the neighbouring branch of `planForeignSide` — and
+     * used not to name `folderId` as the ORM's. Under a child scoped on its own
+     * foreign key that split the two apart, the operand that carries a fallback
+     * it does not take raising about a write the caller never made:
+     *
+     *     connect          resolved
+     *     connectOrCreate  ScopeEscapeError: Cover.update writes 'folderId', …
+     *
+     * **The scope is `{ in: [2, 3] }` rather than the bare `{ folderId: 2 }` an
+     * earlier draft used, and the widening is what makes the test mean
+     * anything.** Under `{ folderId: 2 }` the only cover this policy can see is
+     * one already pointing at folder 2 — so the only reachable `connect` is of
+     * the row already linked, and *that* case is decided before the repoint is
+     * reached (by `clearLinks` on the way in, and now by the hit branch's
+     * already-linked short-circuit). The marked `update` this issue is about
+     * never ran, and the whole assertion turned on which way two unrelated
+     * refusals happened to fall. A scope that admits two folders lets a cover be
+     * *visible on folder 3 and repointed to folder 2*, which is a real repoint
+     * through the guard, with both spellings resolving.
+     *
+     * It also makes the pin **independent of #372/#379**: neither spelling is
+     * already linked here, so an already-linked short-circuit on either side
+     * cannot pull the two apart. The equality is asserted against a literal as
+     * well — `"resolved"` — so a future change that made *both* raise would be
+     * caught rather than agreed with.
+     *
+     * The `set` refusal in *"a foreign-key scope allows relation operands the
+     * ORM keyed"* below is the deliberate counter-example: its link half is
+     * *not* named as the ORM's, so it is still refused. That is a choice about
+     * a half-write, not an oversight — see the comment there.
+     */
+    test("connectOrCreate's hit branch answers exactly as connect does", async () => {
+      class KeyScoped extends Model {
+        static $schema = coverSchema;
+        static $policies = [
+          { scope: () => ({ folderId: { in: [2, 3] } }) } as ModelPolicy,
+        ];
+      }
+      register("Cover", KeyScoped);
+
+      try {
+        await seedFolder();
+        // The second folder the scope admits, so a visible cover can start off
+        // somewhere other than where it is being connected.
+        await raw.unsafe(
+          `INSERT INTO "Folder" ("id", "code", "orgId") VALUES (3, 'spare', 7)`,
+        );
+
+        const park = async () => {
+          await raw.unsafe(`DELETE FROM "Cover"`);
+          await raw.unsafe(
+            `INSERT INTO "Cover" ("id", "folderId", "caption", "orgId") ` +
+              `VALUES (56, 3, 'parked', 7)`,
+          );
+        };
+
+        const outcome = async (operand: unknown) => {
+          try {
+            await Model.asUser(OURS, () =>
+              Folder.$exec("update", {
+                where: { id: 2 },
+                data: { code: "ours", cover: operand },
+              }),
+            );
+            return "resolved";
+          } catch (error) {
+            return (error as Error).constructor.name;
+          }
+        };
+
+        const table = async () => {
+          const rows: any = await raw.unsafe(
+            `SELECT "id", "folderId" FROM "Cover" ORDER BY "id"`,
+          );
+          return [...rows].map((cover: any) => [cover.id, cover.folderId]);
+        };
+
+        await park();
+        const bare = await outcome({ connect: { id: 56 } });
+        const after = await table();
+
+        await park();
+        const paired = await outcome({
+          connectOrCreate: { where: { id: 56 }, create: { caption: "made" } },
+        });
+
+        expect(bare).toBe("resolved");
+        expect(paired).toBe(bare);
+        // The table too, and not only the verdict: the two could agree on
+        // "resolved" while one of them wrote something the other did not.
+        expect(await table()).toEqual(after);
+        // ...and the non-vacuity, which is *this* line and not the count: the
+        // cover really moved off folder 3, so the marked `update` ran rather
+        // than the operand falling through to its create branch.
+        expect(after).toEqual([[56, 2]]);
+
+        /**
+         * **The hit branch on the row already linked here writes nothing.**
+         *
+         * Cover 56 now points at folder 2, so this is the case the paragraph
+         * above says `{ folderId: 2 }` could only ever reach. Without the
+         * short-circuit the branch clears the link and then repoints the row it
+         * just nulled — and a null `folderId` is outside `{ in: [2, 3] }`, so
+         * the repoint cannot select it back and the operand raises
+         * `RecordNotFoundError` on a call that should change nothing.
+         *
+         * The bare `connect` still does exactly that (#372), which is why this
+         * asserts the hit branch alone rather than another equality: the two
+         * spellings are *allowed* to differ here until #372 lands, and pinning
+         * their agreement would go red the moment it does.
+         */
+        const again = await outcome({
+          connectOrCreate: { where: { id: 56 }, create: { caption: "made" } },
+        });
+        expect(again).toBe("resolved");
+        expect(await table()).toEqual([[56, 2]]);
+      } finally {
+        register("Cover", Cover);
+      }
+    });
+
+    /**
      * ...and it succeeds by **writing nothing**, which is the half the table
      * cannot show and the half that fixes the case above.
      *
