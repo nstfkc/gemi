@@ -1449,6 +1449,52 @@ export function ormAuthoredFields(options: unknown): readonly string[] {
 
 const EMPTY_FIELDS: readonly string[] = [];
 
+/**
+ * The operation whose *return value* this `$exec` is producing, when that is not
+ * the operation it runs.
+ *
+ * There is exactly one such call: the pre-read a read-first `delete` performs.
+ * `delete({ where, include })` cannot be one statement — the children have to be
+ * read before the row goes away — so `$exec` runs a `findFirst` inside a
+ * transaction and hands **that** row to the caller, discarding what the `delete`
+ * statement returned. Every other consequence of the split was already made
+ * invisible: the read is scoped as the delete was, a miss raises
+ * `RecordNotFoundError` naming `delete`, and #364 taught it to carry the `omit`.
+ * `context.operation` was the last one left visible, and it was visible in the
+ * worst direction — a `redact` keyed on `"delete"` stopped firing on the row the
+ * caller got back, the moment an `include` was added (#366).
+ *
+ * **Redaction only, which is why it is named for redaction.** By the time this
+ * is read the pre-read is already `markPreScoped`, so `applyPolicies` does not
+ * run on it at all — no `before`, no `scope`, no `onCreate` / `onUpdate` sees
+ * this value, and a scope written for reads cannot be turned off by it. The
+ * remaining reader of the context is `applyRedaction`, over the one row that is
+ * about to be returned.
+ *
+ * **Not the nested reads.** A relation read underneath is scoped and redacted as
+ * `findMany` — see {@link NESTED_READ}, which is a constant for the reason this
+ * is narrow: a nested read is a read of another model, whatever statement
+ * encloses it. This marker travels no further than the row it names.
+ *
+ * A module-private `Symbol`, for the same reason `PRE_SCOPED` and `ORM_AUTHORED`
+ * are: it is not exported from `orm/index.ts`, so an application cannot forge it
+ * and cannot use it to make a query claim to be an operation it is not.
+ */
+const REDACTED_AS = Symbol("gemi.orm.operationTheRowIsReturnedFor");
+
+export function markRedactedAs(
+  options: object | undefined,
+  operation: Operation,
+): object {
+  return { ...options, [REDACTED_AS]: operation };
+}
+
+export function redactedAs(options: unknown): Operation | undefined {
+  if (typeof options !== "object" || options === null) return undefined;
+  const operation = (options as Record<symbol, unknown>)[REDACTED_AS];
+  return typeof operation === "string" ? (operation as Operation) : undefined;
+}
+
 /** Resolves a model name to its policies, so this file need not import the registry. */
 export type PolicyLookup = (model: string) => {
   policies: readonly ModelPolicy[];
