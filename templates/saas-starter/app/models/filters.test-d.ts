@@ -239,8 +239,22 @@ describe("Json path filters", () => {
       where: { metadata: { path: ["operation"], equals: "video" } },
     });
     await UserModel.findMany({ where: { metadata: { path: "$.operation", equals: "video" } } });
-    // An array index is a key too, which is why numbers are in the union.
-    await UserModel.findMany({ where: { metadata: { path: ["items", 0, "id"], gt: 3 } } });
+    // An array index is a key too, and it is spelled as one — `#>` takes a
+    // `text[]`, so this reaches the same element a numeric segment used to.
+    await UserModel.findMany({ where: { metadata: { path: ["items", "0", "id"], gt: 3 } } });
+  });
+
+  /**
+   * **#371's third gap, closed on the narrow side.** This type read
+   * `readonly (string | number)[]` because `assertPathShape` accepted a numeric
+   * segment, and a type-only change (#368) could not remove a superset the
+   * compiler had. `assertPathShape` refuses one now: Prisma's generated `path`
+   * is `string[]` and its client answers *"Argument `path`: Invalid value
+   * provided. Expected String, provided Int."* at run time, measured on 6.19.2.
+   */
+  test("a numeric path segment is refused, as Prisma refuses one", async () => {
+    // @ts-expect-error write ["items", "0"]; it reaches the same element
+    await UserModel.findMany({ where: { metadata: { path: ["items", 0], equals: "x" } } });
   });
 
   test("take the ten operators JSON_FILTERS accepts", async () => {
@@ -295,17 +309,25 @@ describe("Json path filters", () => {
   });
 
   /**
-   * **`null` is refused, and it is the one place the type goes further than the
-   * compiler.** `assertJsonOperand` lets it through and the query compiles to
-   * `("metadata" #>> $1) = $2` bound to NULL, which is NULL and not true on
-   * both dialects — a predicate no row can satisfy. With the sentinels already
-   * refused there is nothing else it could be asking. Filed against the runtime
-   * as #371 rather than changed here, since this is a type-only change — so a
-   * `null` arriving dynamically still reaches the binder.
+   * **`null` is refused, and the compiler agrees now — #371.** This was the one
+   * place the type went further than the runtime: `assertJsonOperand` let it
+   * through and the query compiled to `("metadata" #>> $1) = $2` bound to NULL,
+   * which is NULL and not true on both dialects — a predicate no row can
+   * satisfy. It is an `InvalidArgumentError` there now, so a `null` arriving
+   * dynamically is refused rather than answered wrong.
+   *
+   * The refusal is a divergence rather than a gap in the type: Prisma extracts
+   * with `#>` and compares as `jsonb`, so it reads this as the JSON value
+   * `null` and answers it. gemi's `#>>` yields SQL NULL for an absent key and a
+   * JSON null alike, which is the same collapse that keeps the sentinels off
+   * this filter.
    */
-  test("null at a path is refused, having no reading left", async () => {
+  test("null at a path is refused, because gemi cannot ask Prisma's question", async () => {
     // @ts-expect-error `= NULL` is never true; say which empty you mean, on the column
     await UserModel.findMany({ where: { metadata: { path: ["a"], equals: null } } });
+    // @ts-expect-error `x @> NULL` is NULL too — a null *inside* the document is fine
+    await UserModel.findMany({ where: { metadata: { path: ["a"], array_contains: null } } });
+    await UserModel.findMany({ where: { metadata: { path: ["a"], array_contains: [null] } } });
   });
 
   /**
