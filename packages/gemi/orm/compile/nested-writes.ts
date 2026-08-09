@@ -192,12 +192,62 @@ export function planNestedWrites(
     keyFields: [],
   };
 
+  /** Which relation contributed each foreign-key column, for the guard below. */
+  const contributedBy = new Map<string, string>();
+
   for (const key of entries) {
     const relation = schema.relations[key];
     const node = (data as Record<string, unknown>)[key];
     const locate = (args: any) => locateData(args)?.[key];
+    const before = planning.contributions.length;
 
     planOne(schema, relation, node, operation, locate, planning, dialect);
+
+    // **Two relations that share a foreign-key column are refused by name**
+    // (#271). A composite relation joins on *n* columns and nothing stops two
+    // of them from sharing one — it is the tenant-scoped shape this whole
+    // change is about:
+    //
+    //     ledger Ledger @relation(fields: [tenantId, ledgerCode], …)
+    //     note   Ledger @relation(fields: [tenantId, noteCode],   …)
+    //
+    // `prisma validate` accepts that on 6.19.2, and before #271 both relations
+    // were refused here for their width, so writing through both at once was
+    // unreachable. It is reachable now, and the two `tenantId` contributions
+    // collide: `insertColumns` folds contributions through a `Map` keyed by
+    // field, so the later one wins, and `entries` above is sorted, so the
+    // winner is whichever relation sorts last.
+    //
+    // **Prisma resolves the operands in the opposite direction and lets the
+    // first resolved win, so the caller's last `data` key decides the shared
+    // column** — measured on 6.19.2 with query events on: writing
+    // `{ note: connect(2,"b"), ledger: connect(1,"a") }` stores `tenantId=1`
+    // where `{ ledger: …, note: … }` stores `2`. gemi stores `2` either way.
+    //
+    // Matching that would mean giving up the sorted key order, which the plan
+    // cache needs — two argument objects differing only in key order have to
+    // be one plan. So this refuses instead, which is what the width refusal
+    // this change replaced was buying: no plausible wrong row. A caller who
+    // wants both links connects through one relation — which writes the shared
+    // column — and sets the other relation's remaining columns directly, since
+    // `insertColumns` only refuses a column that is written *both* ways.
+    for (let index = before; index < planning.contributions.length; index++) {
+      const field = planning.contributions[index].field;
+      const owner = contributedBy.get(field);
+      if (owner !== undefined && owner !== key) {
+        throw new UnsupportedQueryError(
+          `data.${key}`,
+          schema.name,
+          operation,
+          `'${field}' is written by both the '${owner}' and '${key}' relations, ` +
+            `which join on it in common. Prisma lets the last key in 'data' win; ` +
+            `gemi plans relations in a fixed order and will not guess which row ` +
+            `you meant. Write one of them through the relation and set the ` +
+            `other's own columns directly.`,
+        );
+      }
+      contributedBy.set(field, key);
+    }
   }
 
   return planning;
@@ -3315,8 +3365,16 @@ function assertToOneWriteOperand(
  * all be required"* — so on a schema Prisma accepted the columns agree and any
  * one of them answers. Checking all of them anyway costs nothing and means the
  * refusal does not depend on a validation rule enforced in another program:
- * a hand-built `ModelSchema` with `tenantId` required beside a nullable
- * `orderId` is refused here rather than nulling half a key.
+ * a hand-built `ModelSchema` with a nullable `tenantId` beside a required
+ * `ledgerCode` is refused here rather than nulling half a key.
+ *
+ * That is a claim about behaviour, so it is measured rather than asserted —
+ * `ledgerSealMixed` in `fixtures.ts` is exactly that schema, and
+ * `composite-relations.test.ts` names the column this refuses on. **The
+ * nullable column is first there deliberately**: `[fieldNames[0]]` is what this
+ * collapses to if the generalisation is undone, and over `(nullable, required)`
+ * that answers *"detachable"*. The same fixture pins the two `displaces`
+ * predicates, which generalised the same way and were equally unpinned.
  */
 function assertDisconnectable(
   owner: ModelSchema,

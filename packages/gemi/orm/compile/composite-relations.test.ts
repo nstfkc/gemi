@@ -5,9 +5,12 @@ import { SqliteDialect } from "../dialect/sqlite";
 import { RecordNotFoundError, UnknownFieldError } from "../errors";
 import {
   ledger,
+  ledgerCrossEntry,
   ledgerEntry,
   ledgerNote,
   ledgerSeal,
+  ledgerSealMixed,
+  ledgerWithMixed,
   ledgerWithOptional,
 } from "../fixtures";
 import * as registry from "../registry";
@@ -846,6 +849,251 @@ describe("a nested write contributes every joined field", () => {
 
     const cleared = calls.find((call) => call.op === "updateMany")!;
     expect(cleared.args.data).toEqual({ tenantId: null, ledgerCode: null });
+    expect(calls[calls.length - 1].args.data).toEqual({
+      seal: "s",
+      tenantId: 1,
+      ledgerCode: "a",
+    });
+  });
+});
+
+/**
+ * **Two composite relations on one model, sharing a foreign-key column.**
+ *
+ * Reachable only because #271 stopped refusing composite relations by width.
+ * `prisma validate` accepts the schema on 6.19.2:
+ *
+ *     ledger Ledger @relation("L", fields: [tenantId, ledgerCode], references: [tenantId, code])
+ *     note   Ledger @relation("N", fields: [tenantId, noteCode],   references: [tenantId, code])
+ *
+ * Prisma resolves the operands in reverse key order and lets the first resolved
+ * win, so the caller's **last** `data` key decides `tenantId` — measured on
+ * 6.19.2 with query events on. gemi sorts its relation keys, because the plan
+ * cache needs two argument objects differing only in key order to be one plan,
+ * so it cannot reproduce that without giving up the canonical order. It refuses
+ * instead, which keeps the property the width refusal was buying: no plausible
+ * wrong row.
+ */
+describe("two relations that share a foreign-key column", () => {
+  beforeEach(() => {
+    registry.clearRegistry();
+    registry.register("Ledger", class { static $schema = ledgerWithMixed });
+    registry.register("LedgerEntry", class { static $schema = ledgerEntry });
+    registry.register("LedgerNote", class { static $schema = ledgerNote });
+    registry.register("LedgerSeal", class { static $schema = ledgerSeal });
+    registry.register(
+      "LedgerSealMixed",
+      class {
+        static $schema = ledgerSealMixed;
+      },
+    );
+    registry.register(
+      "LedgerCrossEntry",
+      class {
+        static $schema = ledgerCrossEntry;
+      },
+    );
+  });
+
+  /** The refusal names the column and both relations that write it. */
+  test("writing through both at once is refused by column", () => {
+    expect(() =>
+      compileWrite(
+        ledgerCrossEntry,
+        "create",
+        {
+          data: {
+            amount: 1,
+            ledger: { connect: { tenantId_code: { tenantId: 1, code: "a" } } },
+            note: { connect: { tenantId_code: { tenantId: 2, code: "b" } } },
+          },
+        },
+        sqlite,
+      ),
+    ).toThrow(/'tenantId' is written by both the 'ledger' and 'note' relations/);
+  });
+
+  /**
+   * ...and it is refused in either spelling.
+   *
+   * This is the whole point: the two orders are *different rows* under Prisma
+   * and one plan under gemi. A refusal that fired for one order and not the
+   * other would be the divergence wearing a different hat.
+   */
+  test("the caller's key order does not change the answer", () => {
+    const data = {
+      note: { connect: { tenantId_code: { tenantId: 2, code: "b" } } },
+      ledger: { connect: { tenantId_code: { tenantId: 1, code: "a" } } },
+      amount: 1,
+    };
+
+    expect(() =>
+      compileWrite(ledgerCrossEntry, "create", { data }, sqlite),
+    ).toThrow(/'tenantId' is written by both/);
+  });
+
+  /**
+   * The guard is over the *pair*, not over composite relations as such — one
+   * of them alone still contributes its whole key.
+   */
+  test("either relation on its own still writes every column it joins on", () => {
+    const args = {
+      where: { id: 1 },
+      data: { note: { connect: { tenantId_code: { tenantId: 2, code: "b" } } } },
+    };
+    const plan = compileWrite(ledgerCrossEntry, "update", args, sqlite);
+
+    expect(plan.text).toContain(`"tenantId" = ?`);
+    expect(plan.text).toContain(`"noteCode" = ?`);
+    // The column the *other* relation joins on is untouched — it appears in
+    // `returning`, never in `set`.
+    expect(plan.text).not.toContain(`"ledgerCode" = ?`);
+  });
+
+  /**
+   * ...and two operands on the *same* relation are not a collision either.
+   *
+   * They contribute the same columns twice by construction — that is what a
+   * `connect` beside a `create` on one to-one has always done, and folding them
+   * is `insertColumns`' existing behaviour rather than something this guard is
+   * entitled to change. Pinned so a later tightening has to notice it is
+   * tightening.
+   */
+  test("one relation contributing twice is not a collision", () => {
+    expect(() =>
+      compileWrite(
+        ledgerEntry,
+        "create",
+        {
+          data: {
+            amount: 1,
+            ledger: {
+              connect: { tenantId_code: { tenantId: 1, code: "a" } },
+              create: { tenantId: 9, code: "z", title: "t" },
+            },
+          },
+        },
+        sqlite,
+      ),
+    ).not.toThrow(/is written by both/);
+  });
+});
+
+/**
+ * **The three "every column is nullable" predicates**, pinned on the one shape
+ * that can tell them from `fields[0]`.
+ *
+ * `planOwningSide`'s `displaces`, `planForeignSide`'s `displaces` and
+ * `assertDisconnectable` each generalised from *"this column is nullable"* to
+ * *"every column is"*, and the first review of #271 measured that all three stay
+ * green when crippled back — because Prisma makes a composite relation optional
+ * or required as a whole, so no schema it validates distinguishes them.
+ *
+ * {@link ledgerSealMixed} is the hand-built `ModelSchema` that does: `tenantId`
+ * nullable, `ledgerCode` required, **in that order**, so `fields[0]` answers
+ * *"detachable"* where the tuple answers *"not"*. Each case below flips if any
+ * one of the three is narrowed.
+ */
+describe("a composite key whose columns disagree about being optional", () => {
+  interface Call {
+    model: string;
+    op: string;
+    args: any;
+  }
+
+  const recorder = (returns: Record<string, unknown[]> = {}) => {
+    const calls: Call[] = [];
+    const executor = {
+      async exec(model: string, op: string, args: unknown) {
+        calls.push({ model, op, args });
+        const queue = returns[`${model}.${op}`];
+        return queue && queue.length > 0 ? queue.shift() : null;
+      },
+    };
+    return { calls, executor: executor as never };
+  };
+
+  beforeEach(() => {
+    registry.clearRegistry();
+    registry.register("Ledger", class { static $schema = ledgerWithMixed });
+    registry.register("LedgerEntry", class { static $schema = ledgerEntry });
+    registry.register("LedgerNote", class { static $schema = ledgerNote });
+    registry.register("LedgerSeal", class { static $schema = ledgerSeal });
+    registry.register(
+      "LedgerSealMixed",
+      class {
+        static $schema = ledgerSealMixed;
+      },
+    );
+  });
+
+  /**
+   * `assertDisconnectable` names the required column, and the required one is
+   * *second*.
+   *
+   * Its docblock makes this claim outright — a mixed key "is refused here rather
+   * than nulling half a key" — and until this case nothing measured it.
+   */
+  test("disconnect is refused, naming the column that is not nullable", () => {
+    expect(() =>
+      compileWrite(
+        ledgerSealMixed,
+        "update",
+        { where: { id: 1 }, data: { ledger: { disconnect: true } } },
+        sqlite,
+      ),
+    ).toThrow(/'LedgerSealMixed\.ledgerCode' is required/);
+  });
+
+  /**
+   * The owning side does not displace, though the index and the back-relation
+   * both say one-to-one.
+   *
+   * `LedgerSealMixed` carries `@@unique([tenantId, ledgerCode])` and `Ledger`
+   * carries a non-list `sealMixed` — so the two halves of `displaces` that are
+   * *not* about nullability are both satisfied, and the nullability of the whole
+   * tuple is the only thing left deciding. Half a detach would leave the
+   * incumbent holding a key that joins nowhere while still occupying the index.
+   */
+  test("the owning side does not clear an incumbent it cannot fully detach", async () => {
+    const args = {
+      where: { id: 1 },
+      data: {
+        ledger: { connect: { tenantId_code: { tenantId: 1, code: "a" } } },
+      },
+    };
+    const plan = compileWrite(ledgerSealMixed, "update", args, sqlite);
+
+    const { calls, executor } = recorder({
+      "Ledger.findUniqueOrThrow": [{ tenantId: 1, code: "a" }],
+      "LedgerSealMixed.findFirst": [{ tenantId: 1, ledgerCode: "b" }],
+      "LedgerSealMixed.findMany": [[{ id: 2, tenantId: 1, ledgerCode: "a" }]],
+    });
+    const context = createBindContext();
+    await plan.before![0].run(args, context, executor, []);
+
+    // The lookup happens; the sibling is never read and never nulled.
+    expect(context.resolved).toEqual({ tenantId: 1, ledgerCode: "a" });
+    expect(calls.map((call) => call.op)).toEqual(["findUniqueOrThrow"]);
+  });
+
+  /** The foreign side reaches the same answer from the other end of the key. */
+  test("the foreign side does not clear an incumbent it cannot fully detach", async () => {
+    const args = {
+      where: { tenantId_code: { tenantId: 1, code: "a" } },
+      data: { sealMixed: { create: { seal: "s" } } },
+    };
+    const plan = compileWrite(ledgerWithMixed, "update", args, sqlite);
+
+    const { calls, executor } = recorder({
+      "LedgerSealMixed.findMany": [[{ id: 2, tenantId: 1, ledgerCode: "a" }]],
+    });
+    await plan.after![0].run(args, createBindContext(), executor, [
+      { tenantId: 1, code: "a" } as never,
+    ]);
+
+    expect(calls.some((call) => call.op === "updateMany")).toBe(false);
+    // ...and the new row is still stamped with the whole key.
     expect(calls[calls.length - 1].args.data).toEqual({
       seal: "s",
       tenantId: 1,

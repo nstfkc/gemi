@@ -677,6 +677,155 @@ export const ledgerWithOptional: ModelSchema = {
 };
 
 /**
+ * **A composite key whose columns disagree about being optional** — `tenantId`
+ * nullable beside a required `ledgerCode` (#271).
+ *
+ * Prisma cannot produce this: *"The fields of a relation must either all be
+ * optional or all be required"*, so every schema it validates has columns that
+ * agree and the first one answers for all of them. That is exactly why the
+ * three "every column" *nullability* tests — `planOwningSide`'s `displaces`,
+ * `planForeignSide`'s `displaces`, and `assertDisconnectable` — had no case
+ * that could tell them from their single-field spellings, and the first review
+ * of #271 said so.
+ *
+ * A hand-built `ModelSchema` is the one thing that can, and this is where a
+ * hand-built `ModelSchema` lives. **The nullable column is deliberately
+ * first**: `[fields[0]]` is the mutation these three predicates collapse to,
+ * and over `(nullable, required)` that mutation answers *"detachable"* where
+ * the whole tuple answers *"not"* — so a test written against this fixture goes
+ * red when any of the three is narrowed, and green only on the real thing.
+ *
+ * `uniques` covers exactly the relation's fields, so the *index* half of the
+ * owning side's `displaces` is satisfied and the nullability half is the only
+ * thing left deciding — otherwise the case would pass for the wrong reason.
+ */
+export const ledgerSealMixed: ModelSchema = {
+  name: "LedgerSealMixed",
+  table: "LedgerSealMixed",
+  fields: {
+    id: ledgerNote.fields.id,
+    tenantId: ledgerNote.fields.tenantId,
+    ledgerCode: { ...ledgerNote.fields.ledgerCode, nullable: false },
+    seal: ledgerSeal.fields.seal,
+  },
+  primaryKey: ["id"],
+  uniques: [["tenantId", "ledgerCode"]],
+  relations: {
+    ledger: {
+      name: "ledger",
+      model: "Ledger",
+      kind: "one",
+      relationName: "LedgerToLedgerSealMixed",
+      from: ["tenantId", "ledgerCode"],
+      to: ["tenantId", "code"],
+      nullable: true,
+    },
+  },
+};
+
+/**
+ * **Two composite relations that share a foreign-key column** — the shape #271
+ * makes reachable and the first review of it caught (#386).
+ *
+ * `prisma validate` accepts this on 6.19.2. Before #271 both relations were
+ * refused by name for their width, so no call could write through both at
+ * once; now both compile, both contribute a `tenantId`, and `insertColumns`
+ * folds contributions through a `Map` keyed by field — so without the guard in
+ * `planNestedWrites` the alphabetically-last relation would silently decide the
+ * shared column, where Prisma lets the caller's last `data` key decide it.
+ *
+ * `ledgerCode` and `noteCode` are the columns the two relations do *not* share,
+ * which is what makes the divergence a wrong row rather than a wrong error:
+ * both links are plausible, and only one of the two `tenantId`s is right.
+ */
+export const ledgerCrossEntry: ModelSchema = {
+  name: "LedgerCrossEntry",
+  table: "LedgerCrossEntry",
+  fields: {
+    id: ledgerEntry.fields.id,
+    tenantId: ledgerEntry.fields.tenantId,
+    ledgerCode: ledgerEntry.fields.ledgerCode,
+    noteCode: {
+      name: "noteCode",
+      column: "noteCode",
+      type: "String",
+      nullable: false,
+      isId: false,
+      isUpdatedAt: false,
+    },
+    amount: ledgerEntry.fields.amount,
+  },
+  primaryKey: ["id"],
+  uniques: [],
+  relations: {
+    ledger: {
+      name: "ledger",
+      model: "Ledger",
+      kind: "one",
+      relationName: "LedgerToCrossEntry",
+      from: ["tenantId", "ledgerCode"],
+      to: ["tenantId", "code"],
+      nullable: false,
+    },
+    note: {
+      name: "note",
+      model: "Ledger",
+      kind: "one",
+      relationName: "NoteToCrossEntry",
+      from: ["tenantId", "noteCode"],
+      to: ["tenantId", "code"],
+      nullable: false,
+    },
+  },
+};
+
+/**
+ * `ledgerWithOptional`, plus the far sides of {@link ledgerSealMixed} and
+ * {@link ledgerCrossEntry}.
+ *
+ * A third variant rather than an edit, for the reason {@link ledgerWithOptional}
+ * is a second one: the suites that count a fixture's relations should not have
+ * to move every time a case needs one more back-reference.
+ *
+ * `sealMixed` is `kind: "one"` so that the *foreign* side's `displaces` reaches
+ * its nullability test — with `kind: "many"` the predicate short-circuits and
+ * the column check is never evaluated, which would pin nothing.
+ */
+export const ledgerWithMixed: ModelSchema = {
+  ...ledgerWithOptional,
+  relations: {
+    ...ledgerWithOptional.relations,
+    sealMixed: {
+      name: "sealMixed",
+      model: "LedgerSealMixed",
+      kind: "one",
+      relationName: "LedgerToLedgerSealMixed",
+      from: [],
+      to: [],
+      nullable: true,
+    },
+    crossEntries: {
+      name: "crossEntries",
+      model: "LedgerCrossEntry",
+      kind: "many",
+      relationName: "LedgerToCrossEntry",
+      from: [],
+      to: [],
+      nullable: false,
+    },
+    crossNotes: {
+      name: "crossNotes",
+      model: "LedgerCrossEntry",
+      kind: "many",
+      relationName: "NoteToCrossEntry",
+      from: [],
+      to: [],
+      nullable: false,
+    },
+  },
+};
+
+/**
  * A self-relation — the one topology where the parent and the child are the same
  * table, which the template's schema has no example of.
  *

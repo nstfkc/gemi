@@ -941,10 +941,15 @@ nested writes alike. On the read side: an `include` under either strategy, a rel
 batched strategy filters its children with an `OR` of `AND`s rather than a tuple `in`, because that
 is one shape both dialects already compile.
 
-**A nested write through one contributes every column**, in every operand that writes a key —
-`connect`, `create`, `connectOrCreate`, `createMany`, `set`, `disconnect`, `update`, `upsert`,
-`delete` and the two `*Many` — and on both sides of the relation. Three details follow from the key
-having more than one column, and they are the ones worth knowing:
+**A nested write through one contributes every column**, on both sides of the relation, in every
+operand that side offers. Which operands those are is unchanged by the width of the key: the
+**foreign** side — where the children hold it — takes all of `connect`, `create`, `connectOrCreate`,
+`createMany`, `set`, `disconnect`, `update`, `upsert`, `delete` and the two `*Many`; the **owning**
+side takes `connect`, `create`, `connectOrCreate`, `disconnect` and `update`, and refuses
+`createMany`, `set`, `delete`, `upsert` and the two `*Many` by name, because this row holds one
+foreign key and there is nothing there to write many of. A composite relation is refused in exactly
+the same places a single-field one is, and nowhere else. Four details follow from the key having
+more than one column, and they are the ones worth knowing:
 
 - **`connect` names the row in Prisma's compound form**, `connect: { tenantId_code: { tenantId: 1,
   code: "a" } }`, because that is what a multi-column unique key is called. Unlike the single-field
@@ -957,6 +962,13 @@ having more than one column, and they are the ones worth knowing:
 - **A composite one-to-one displaces**, the same way a single-column one does — the discriminator is
   a `@@unique` covering *exactly* the relation's own fields. `@@unique([tenantId, orderId, kind])`
   covers them and something else, so it does not make the relation exclusive and does not displace.
+- **Two relations that share a column cannot both be written in one call.** Nothing stops a model
+  from carrying `@relation(fields: [tenantId, orderId], …)` beside `@relation(fields: [tenantId,
+  noteId], …)` — Prisma accepts it — and then a single `data` writing through both says `tenantId`
+  twice. Prisma lets the *last* key in your `data` object win, which makes the row depend on a key
+  order gemi deliberately does not preserve: two argument objects differing only in key order have
+  to compile to one cached plan. So this is refused, naming the column and both relations. Write one
+  of them through the relation and set the other's own columns directly.
 
 One consequence of the join itself: a composite `include` uses one placeholder *per field per
 parent*, so SQLite's parameter ceiling arrives proportionally sooner on a wide one —
@@ -2243,7 +2255,7 @@ Stated so you can plan around them rather than discover them:
   column at schema validation. They are otherwise fully supported — see
   [Scalar lists](#scalar-lists-postgres-only).
 
-Both of the last two throw `UnsupportedByDesignError`, which says *"and this is a decision rather
+`distinct` and `cursor` throw `UnsupportedByDesignError`, which says *"and this is a decision rather
 than a gap"* rather than *"yet"* — so a refusal you can plan around reads differently from one that
 might lift next release.
 
