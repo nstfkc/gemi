@@ -457,14 +457,39 @@ function shapeOfMember(
    * nothing above tells them apart: they sit under `data`, which is a
    * {@link VALUE_KEYS} subtree, so both shape to `boolean` and share one entry.
    *
-   * That was a live wrong write rather than a wrong refusal. On the owning side
-   * `planOwningSide` refuses `operand !== true` at compile time and then pushes
-   * a constant `value: () => null` — and a cache *hit* skips compilation, so
-   * the refusal never re-runs. A plan compiled from `disconnect: true` served
-   * `disconnect: false` and nulled the foreign key on a call that asked for
-   * nothing. Measured against the real client, so the damage is the gap and not
-   * the guess: `disconnect: false` with a child present leaves the row exactly
-   * as it was, foreign key intact.
+   * **On the owning side the boolean is structural — it decides the SET list
+   * rather than a value bound into one**, and that is the whole of why the
+   * guard has to exist. `disconnect: true` pushes a contribution for the
+   * foreign key, so the statement is `update "User" set "organizationId" = ?,
+   * "updatedAt" = ? …`; `disconnect: false` pushes no contribution at all, so
+   * no assignment is left and `compileUpdate` degenerates to a bare `select`
+   * of the row — which is the no-op Prisma answers. Two different statement
+   * *texts*, chosen once, when the plan is built. A cache **hit** skips
+   * compilation, so a hit that got the boolean wrong runs the other
+   * spelling's statement, and nothing downstream can rescue it: on this side
+   * the compiled plan *is* the decision.
+   *
+   * **The foreign side is not like it, and the contrast is what makes the key
+   * load-bearing here and merely prudent there.** Where the child holds the
+   * key the operand becomes a *statement the step runs*, and `toOneOperand`
+   * re-reads the boolean out of the call at bind time — `listOf(null)` is no
+   * statement — so a plan mis-served there still writes nothing. `delete`
+   * shares this guard for that side's sake; on this side it is refused
+   * outright, since deleting the far row through a `data` key would remove a
+   * row the statement is not about.
+   *
+   * **The history, which is why the guard was added rather than why it stays.**
+   * When #358 added it, `planOwningSide` still refused `operand !== true` at
+   * compile time and then pushed a constant `value: () => null` for the one arm
+   * it took — and the refusal was no protection at all, because a cache *hit*
+   * skips compilation and so never re-runs it. A plan compiled from
+   * `disconnect: true` served `disconnect: false` and nulled the foreign key on
+   * a call that asked for nothing. Measured against the real client, so the
+   * damage was the gap and not the guess: `disconnect: false` with a child
+   * present leaves the row exactly as it was, foreign key intact. #359 then
+   * implemented all three arms and removed that refusal, which did not retire
+   * the guard — it made it load-bearing a second way, since the two spellings
+   * now differ in statement text and not only in what a contribution binds.
    *
    * **It cannot simply join {@link LITERAL_KEYS}, which is the same bug class
    * documented there twice already** — for `omit` and for `skipDuplicates`.

@@ -279,10 +279,11 @@ describe("plan cache discrimination — writes", () => {
    * `disconnect: true` and `disconnect: false` shaped alike — a bare `boolean`
    * under `data`, which is a value subtree — so they were one cache entry. On
    * the owning side that is not a wasted entry, it is a wrong statement:
-   * `planOwningSide` refuses `operand !== true` **at compile time** and then
-   * pushes a constant `value: () => null`, and a cache hit skips compilation
-   * entirely. So a plan compiled from `disconnect: true` served `disconnect:
-   * false` and nulled the foreign key on a call that asked for nothing.
+   * `planOwningSide` refused `operand !== true` **at compile time** back then
+   * and then pushed a constant `value: () => null`, and a cache hit skips
+   * compilation entirely. So a plan compiled from `disconnect: true` served
+   * `disconnect: false` and nulled the foreign key on a call that asked for
+   * nothing.
    *
    * **Nothing above could catch it**, and that is worth stating precisely
    * because it is what a reader will assume was covered. `plan-key.invariants`
