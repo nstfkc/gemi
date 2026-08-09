@@ -46,6 +46,33 @@ branches=$(
 		grep -v '^origin/feat/orm$' || true
 )
 
+# An empty result is two different states and they must not print the same
+# thing. "Every ORM branch has been deleted" is the success this exercise is
+# aiming at; "this clone holds no remote-tracking refs to speak of" is a broken
+# invocation, and it is the likely one wherever this runs as a gate —
+# `actions/checkout@v4` fetches a single ref by default, which would make the
+# check vacuously green forever. That is a worse failure than the red check this
+# file deliberately does not land yet, so the two are separated by how many refs
+# `origin` has at all, and the broken one exits 2 like the missing-trunk guard
+# rather than 0.
+n_origin=$(git for-each-ref --format='%(refname:short)' refs/remotes/origin |
+	grep -cv '^origin/HEAD$' || true)
+
+if [ -z "$branches" ]; then
+	if [ "$n_origin" -le 1 ]; then
+		echo "refs/remotes/origin holds $n_origin branch(es) — nothing was fetched to audit." >&2
+		echo "Run 'git fetch origin' (a single-ref or shallow checkout is not enough)." >&2
+		exit 2
+	fi
+	printf 'no ORM-named branches among %d on origin — nothing to audit.\n' "$n_origin"
+	exit 0
+fi
+
+# The subjects on the trunk, read once rather than once per candidate commit.
+trunk_subjects=$(mktemp)
+trap 'rm -f "$trunk_subjects"' EXIT HUP INT TERM
+git log "$TRUNK" --format='%s' >"$trunk_subjects"
+
 deletable=''
 superseded=''
 holds=''
@@ -74,13 +101,26 @@ for branch in $branches; do
 	# for the plain count to report 1 forever. Subjects survive a rebase where
 	# patch-ids do not, so the subject is what is matched.
 	#
-	# It is a heuristic, and the output labels it as one. Two unrelated commits
-	# can share a subject, so this narrows the list a person reads rather than
-	# deciding anything on its own.
+	# It is a heuristic, and it decides rather than advises: a branch in this
+	# bucket is not counted as holding work, so it is what makes the exit status
+	# 0, and it is concatenated into the printed `git push origin --delete` line
+	# below. A false hit therefore proposes a live branch for deletion, which is
+	# why the match is exact and not merely close.
+	#
+	# `--grep` would be the obvious spelling and is the wrong one: it searches
+	# the whole message, subject *and* body, for a *substring*. `--grep="0.51.0-rc.1"`
+	# matches `0.51.0-rc.12` and `Bump version from 0.51.0-rc.1 to 0.51.0-rc.2`;
+	# `--grep="JSON path filters"` also matches `9c8f3ef`, whose subject contains
+	# no such text. Short subjects are common enough in this history for that to
+	# be a real class and not a contrived one. `grep -Fxq` compares whole lines,
+	# which is what "the same subject" means.
+	#
+	# What is left is the genuine heuristic the output labels: two unrelated
+	# commits can share an identical subject.
 	carried=1
 	for sha in $(git rev-list --no-merges "$TRUNK..$branch"); do
 		subject=$(git log -1 --format='%s' "$sha")
-		if [ -z "$(git log "$TRUNK" --format='%h' --fixed-strings --grep="$subject" --max-count=1)" ]; then
+		if ! grep -Fxq -e "$subject" "$trunk_subjects"; then
 			carried=0
 			break
 		fi
@@ -102,7 +142,8 @@ if [ -n "$holds" ]; then
 fi
 
 if [ -n "$superseded" ]; then
-	echo 'SUPERSEDED — the commits are not on the trunk, the content is (matched by subject):'
+	echo 'SUPERSEDED — the commits are not on the trunk, the content is (exact subject'
+	echo 'match), so these are proposed for deletion alongside the empty ones:'
 	for b in $superseded; do echo "  $b"; done
 	echo
 fi
