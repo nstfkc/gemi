@@ -1952,7 +1952,20 @@ function planForeignSide(
                 data: { [childField]: parent[parentField] },
                 select: { [childField]: true },
               },
+              // NOT pre-scoped, for the reason the bare `connect` below is not:
+              // this repoints an existing child, so the child's scope decides
+              // which rows are reachable.
               false,
+              // ...and the column is *ours*, the same one and for the same
+              // reason (#98). Left off here while `connect` carried it, so one
+              // operand spelled two ways answered a child scoped on its own
+              // foreign key differently: `connect` went through and this raised
+              // `ScopeEscapeError` about a `folderId` the caller never wrote
+              // (#373). The hit branch **is** a connect — the docblock above
+              // says so for displacement, and provenance follows from the same
+              // fact. The miss branch below needs no marker: it creates the far
+              // row, so there is no caller-supplied key to tell ours apart from.
+              [childField],
             );
             continue;
           }

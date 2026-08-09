@@ -1089,6 +1089,87 @@ describe("policies on nested writes", () => {
         [55, null],
       ]);
     });
+
+    /**
+     * **The same call spelled two ways has to give one answer** (#373).
+     *
+     * `connectOrCreate`'s hit branch repoints through the very `update` the
+     * bare `connect` uses — the neighbouring branch of `planForeignSide` — and
+     * used not to name `folderId` as the ORM's. Under a child scoped on its own
+     * foreign key that split the two apart:
+     *
+     *     connect          RecordNotFoundError: No Cover found (Cover.update).
+     *     connectOrCreate  ScopeEscapeError: Cover.update writes 'folderId', …
+     *
+     * — a refusal describing a write the caller never made, on the spelling
+     * that only differs by carrying a fallback it does not take.
+     *
+     * **Asserted as an equality between the two outcomes, not against a
+     * literal**, because the answer they now share is not yet the right one:
+     * `clearLinks` nulls the row the caller named before the repoint selects it
+     * by the scope, so both miss. That is #372, and it belongs to #372's pin —
+     * this one says only that the two spellings cannot diverge, which stays
+     * true when that lands and both succeed. What it does rule out by name is
+     * the guard firing on one of them, since that is the divergence this fixes.
+     *
+     * The `set` refusal in *"a foreign-key scope allows relation operands the
+     * ORM keyed"* below is the deliberate counter-example: its link half is
+     * *not* named as the ORM's, so it is still refused. That is a choice about
+     * a half-write, not an oversight — see the comment there.
+     */
+    test("connectOrCreate's hit branch answers exactly as connect does", async () => {
+      class KeyScoped extends Model {
+        static $schema = coverSchema;
+        static $policies = [{ scope: () => ({ folderId: 2 }) } as ModelPolicy];
+      }
+      register("Cover", KeyScoped);
+
+      try {
+        await seedFolder();
+        await raw.unsafe(
+          `INSERT INTO "Cover" ("id", "folderId", "caption", "orgId") ` +
+            `VALUES (56, 2, 'linked', 7)`,
+        );
+
+        const outcome = async (operand: unknown) => {
+          try {
+            await Model.asUser(OURS, () =>
+              Folder.$exec("update", {
+                where: { id: 2 },
+                data: { code: "ours", cover: operand },
+              }),
+            );
+            return "resolved";
+          } catch (error) {
+            return (error as Error).constructor.name;
+          }
+        };
+
+        const table = async () => {
+          const rows: any = await raw.unsafe(
+            `SELECT "id", "folderId" FROM "Cover" ORDER BY "id"`,
+          );
+          return [...rows].map((cover: any) => [cover.id, cover.folderId]);
+        };
+
+        const bare = await outcome({ connect: { id: 56 } });
+        const after = await table();
+
+        const paired = await outcome({
+          connectOrCreate: { where: { id: 56 }, create: { caption: "made" } },
+        });
+
+        expect(paired).toBe(bare);
+        // The table too, and not only the verdict: the two could agree on
+        // "threw" while one of them had already written something the other had
+        // not. This also carries the non-vacuity — cover 56 is still the only
+        // row, so the hit branch really was the branch taken.
+        expect(await table()).toEqual(after);
+        expect(paired).not.toBe("ScopeEscapeError");
+      } finally {
+        register("Cover", Cover);
+      }
+    });
   });
 
   /**
@@ -1516,6 +1597,31 @@ describe("policies on nested writes", () => {
       // While both were refusals neither wrote anything and the order did not
       // matter.
       await expect(attempt({ connect: { id: 20 } })).resolves.toBeDefined();
+
+      /**
+       * **...and the third operand that writes the key: `connectOrCreate`'s hit
+       * branch** (#373), which is a `connect` spelled with a fallback.
+       *
+       * It repoints through the same `update` the bare `connect` uses — the
+       * neighbouring branch of `planForeignSide` — and used to omit the
+       * ORM-authored column list that one passes. So one operation spelled two
+       * ways answered a foreign-key scope two different ways: `connect` went
+       * through and this raised `ScopeEscapeError` about a `folderId` the
+       * caller never wrote.
+       *
+       * Between `connect` and `disconnect` for the ordering reason above — the
+       * row has to still be inside `{ folderId: 2 }` for the hit branch to find
+       * it — which is also why the row count is asserted: a miss here would
+       * *create* a second note and pass on the operand's other branch.
+       */
+      await expect(
+        attempt({
+          connectOrCreate: { where: { id: 20 }, create: { label: "made" } },
+        }),
+      ).resolves.toBeDefined();
+      expect(await linkOf()).toBe(2);
+      expect(await raw.unsafe(`SELECT "id" FROM "Note"`)).toHaveLength(1);
+
       await expect(attempt({ disconnect: { id: 20 } })).resolves.toBeDefined();
       expect(await linkOf()).toBeNull();
     } finally {
