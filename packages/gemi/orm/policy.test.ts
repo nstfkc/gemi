@@ -12,6 +12,8 @@ import {
   applyNestedPolicies,
   applyPolicies,
   applyRedaction,
+  isPreScoped,
+  markPreScoped,
   markRedactedAs,
   policiesFor,
   policyContext,
@@ -1937,6 +1939,29 @@ describe("the operation a returned row is redacted as", () => {
     // that the strategy the caller asked for still reaches the pre-read — which
     // is what carries a `{ strategy: "lateral" }` down from `$exec`'s options.
     expect(Object.keys(marked)).toEqual(["strategy"]);
+  });
+
+  /**
+   * The property the one call site actually rests on, which the `strategy` case
+   * above does *not* cover: the spread inside `markRedactedAs` has to carry the
+   * `PRE_SCOPED` **symbol** it is wrapping.
+   *
+   * `markRedactedAs(markPreScoped({ strategy }), op)` is the only construction
+   * in the codebase, and it is load-bearing twice over. If that spread ever
+   * stopped carrying symbol keys the pre-read would be scoped a second time —
+   * and `redactedAs` is read only when `preScoped`, so the marker would go
+   * unread as well, silently restoring #366. Both failures are caught today, but
+   * only by the live-database suite and only as a `RecordNotFoundError` a long
+   * way from its cause. One line pins it where the mechanism is.
+   */
+  test("carries the pre-scoped marker it wraps", () => {
+    const marked = markRedactedAs(
+      markPreScoped({ strategy: "batched" }),
+      "delete",
+    );
+
+    expect(isPreScoped(marked)).toBe(true);
+    expect(redactedAs(marked)).toBe("delete");
   });
 
   test("is absent from options that were never marked", () => {

@@ -1471,10 +1471,33 @@ const EMPTY_FIELDS: readonly string[] = [];
  * remaining reader of the context is `applyRedaction`, over the one row that is
  * about to be returned.
  *
- * **Not the nested reads.** A relation read underneath is scoped and redacted as
- * `findMany` — see {@link NESTED_READ}, which is a constant for the reason this
- * is narrow: a nested read is a read of another model, whatever statement
- * encloses it. This marker travels no further than the row it names.
+ * **Not the nested reads.** A relation read underneath is *scoped* as `findMany`
+ * — see {@link NESTED_READ}, which is a constant for the reason this marker is
+ * narrow: a nested read is a read of another model, whatever statement encloses
+ * it. This marker travels no further than the row it names, and the relation
+ * executor rebuilds its options from `{ strategy }` rather than forwarding
+ * these, so it cannot travel even by accident.
+ *
+ * *Redaction* of a nested row is the same answer only when the child went
+ * through its own `$exec`. Scoping and redaction are two mechanisms here and
+ * they do not currently agree:
+ *
+ * - **batched** — the child runs its own `$exec` under `NESTED_READ`, so its
+ *   `redact` is handed `findMany`. True on both dialects.
+ * - **folded** (lateral, the Postgres default) — the child's rows never enter
+ *   its own `$exec`, so the parent redacts them on its behalf via
+ *   `redactFolded`, which builds its context from the **enclosing** `$exec`'s
+ *   operation rather than from `NESTED_READ`. Under this marker's one call site
+ *   that enclosing operation is the pre-read, so a folded child of a
+ *   `delete({ where, include })` is redacted as `findFirst`. Measured on
+ *   postgres:16.
+ *
+ * That divergence predates this marker and is not widened by it — it is two
+ * reads disagreeing by strategy, not a read reporting a write, and it is the
+ * same on an ordinary `findFirst`. It is filed as #388. It is also the reason
+ * `REDACTED_AS` must **not** be widened to nested rows: doing so would hand a
+ * child's policy the enclosing *write*'s name on one strategy and not the other,
+ * which is strictly worse than two read names disagreeing.
  *
  * A module-private `Symbol`, for the same reason `PRE_SCOPED` and `ORM_AUTHORED`
  * are: it is not exported from `orm/index.ts`, so an application cannot forge it

@@ -828,8 +828,12 @@ export abstract class Model {
       // `applyRedaction`. Reading the marker unconditionally would leave a
       // shape — a future non-pre-scoped caller — where a `before` or a `scope`
       // could be handed an operation the statement is not, and `SCOPABLE` is
-      // keyed on exactly that. The guard makes that shape unrepresentable
-      // rather than merely absent.
+      // keyed on exactly that. The guard does not make that shape
+      // unconstructible — `markRedactedAs(options, "delete")` on its own is
+      // still a value anyone can build — it makes it *unread*, so the
+      // consequence is absent rather than the shape. That is the whole of what
+      // is claimed, and it is enough: the marker changes nothing on any call
+      // that policies still rewrite.
       policy = policyContext(
         schema.name,
         (preScoped ? redactedAs(options) : undefined) ?? op,
@@ -976,11 +980,29 @@ export abstract class Model {
     //   `"delete"`, and its row is thrown away, so nothing observable came of
     //   that half.
     //
-    //   The marker covers the returned row and nothing else. Nested reads keep
-    //   seeing `findMany` — `NESTED_READ` in `policy.ts` is a constant on
-    //   purpose, because a read of another model is a read whatever statement
-    //   encloses it, and that is also what a batched relation read has always
-    //   reported here.
+    //   The marker covers the returned row and nothing else. Nested reads are
+    //   *scoped* as `findMany` on both strategies — `NESTED_READ` in `policy.ts`
+    //   is a constant on purpose, because a read of another model is a read
+    //   whatever statement encloses it — and the marker does not reach them: the
+    //   relation executor rebuilds its options from `{ strategy }` rather than
+    //   forwarding these.
+    //
+    //   Which name a nested row is *redacted* as is a second mechanism and it
+    //   does not currently agree with the first. A **batched** child runs its
+    //   own `$exec` under `NESTED_READ`, so it is redacted as `findMany`; a
+    //   **folded** (lateral, the Postgres default) child never enters its own
+    //   `$exec`, so `redactFolded` below redacts it on the parent's behalf and
+    //   builds its context from the enclosing `$exec`'s `op` — which on this
+    //   call is the pre-read, a `findFirst`. Measured, same query, same rows:
+    //
+    //     sqlite   (batched) child redact context.operation -> "findMany"
+    //     postgres (folded)  child redact context.operation -> "findFirst"
+    //
+    //   Pre-existing, not widened here, and the same on an ordinary `findFirst`
+    //   with an `include`. Filed as #388; the fix is to hand `redactFolded`
+    //   `NESTED_READ` too. Neither value is the write, which is the part #366
+    //   is about and the only part `delete-redact-operation.test.ts` pins under
+    //   the default strategy.
     //
     // Only when there is something to read. A plain `delete` still compiles to
     // one statement and opens no transaction.

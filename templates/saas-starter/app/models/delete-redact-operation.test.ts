@@ -198,14 +198,30 @@ class DelOpChild extends Model {
   ];
 }
 
-function suite(label: string, resolve: () => string, ddl: string[]) {
+/**
+ * `resolve` owns whatever it had to create to produce a URL, and hands back the
+ * teardown for it. The alternative — a module-level `workspace` the SQLite
+ * resolver sets and both `afterAll`s read — is cross-suite mutable state: the
+ * Postgres suite would try to remove the SQLite suite's temp directory. Harmless
+ * while describes run in order in one worker and `force: true` swallows the
+ * second call, but it is exactly the kind of shared handle that stops being
+ * harmless the day the two dialects run in separate workers.
+ */
+function suite(
+  label: string,
+  resolve: () => { url: string; cleanup?: () => void },
+  ddl: string[],
+) {
   describe(label, () => {
     let database: DatabaseManager;
     let raw: SQL;
     let previous: Application | undefined;
+    let cleanup: (() => void) | undefined;
 
     beforeAll(async () => {
-      const url = resolve();
+      const resolved = resolve();
+      const url = resolved.url;
+      cleanup = resolved.cleanup;
       database = new DatabaseManager({ url });
       raw = new SQL(url);
       for (const statement of ddl) await raw.unsafe(statement);
@@ -229,7 +245,7 @@ function suite(label: string, resolve: () => string, ddl: string[]) {
       await raw?.close();
       await database?.close();
       if (previous) Application.setInstance(previous);
-      if (workspace) rmSync(workspace, { recursive: true, force: true });
+      cleanup?.();
     });
 
     beforeEach(async () => {
@@ -349,7 +365,10 @@ function suite(label: string, resolve: () => string, ddl: string[]) {
      * child of this pre-read is told `findFirst` where a batched one is told
      * `findMany`. Both were measured; the divergence predates this change, is
      * about two reads disagreeing rather than a read reporting a write, and is
-     * out of #366's scope. What must hold under either is the case below.
+     * out of #366's scope. It is filed as **#388**, whose fix — handing
+     * `redactFolded` the same `NESTED_READ` constant — would make the case below
+     * pinnable as an equality on both dialects. What must hold until then is the
+     * case below.
      */
     test("a nested read is still redacted as a read", async () => {
       const parent = await only();
@@ -377,9 +396,9 @@ function suite(label: string, resolve: () => string, ddl: string[]) {
       // Not an equality: the value differs by dialect, because the default
       // strategy does. Measured — `findMany` on SQLite (batched), `findFirst` on
       // Postgres (lateral, where `redactFolded` passes the enclosing read's
-      // name). Neither is the write, which is the part that has to hold, and
-      // pinning either literal here would make this suite fail on one dialect
-      // for a divergence that is not #366's.
+      // name — #388). Neither is the write, which is the part that has to hold,
+      // and pinning either literal here would make this suite fail on one
+      // dialect for a divergence that is not #366's.
       expect(childOperations).not.toContain("delete");
       expect(childOperations.length).toBeGreaterThan(0);
     });
@@ -418,21 +437,24 @@ function suite(label: string, resolve: () => string, ddl: string[]) {
   });
 }
 
-let workspace: string | undefined;
-
 suite(
   "delete redaction operation — sqlite",
   () => {
-    workspace = mkdtempSync(join(tmpdir(), "gemi-orm-delete-redact-"));
-    return `sqlite://${join(workspace, "delete-redact.db")}`;
+    const workspace = mkdtempSync(join(tmpdir(), "gemi-orm-delete-redact-"));
+    return {
+      url: `sqlite://${join(workspace, "delete-redact.db")}`,
+      cleanup: () => rmSync(workspace, { recursive: true, force: true }),
+    };
   },
   SQLITE_DDL,
 );
 
 if (POSTGRES_URL) {
+  // No `cleanup`: the database is the caller's, and the tables are dropped by
+  // the shared `afterAll` either way.
   suite(
     "delete redaction operation — postgres",
-    () => POSTGRES_URL,
+    () => ({ url: POSTGRES_URL }),
     POSTGRES_DDL,
   );
 } else {
