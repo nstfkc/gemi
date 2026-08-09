@@ -4965,13 +4965,14 @@ stops at this door.
 
 Values are handed to the driver as they arrive, with two exceptions that exist so a fragment means
 the same thing on both dialects: a `Date` binds as milliseconds on SQLite — which is what the ORM
-stores — and a boolean as `0`/`1`.
+stores — and a boolean as `0`/`1`. A third applies only where the statement itself says the
+parameter is JSON — see [below](#a-jsonb-cast-you-write-types-the-parameter-as-text).
 
-A plain object is **not** JSON-encoded for you. The compiler only knows to do that because a field
-says `Json`, and guessing from the value would turn a mistyped parameter into a successfully-written
-string. What the driver then does with it differs: Bun binds an object into a Postgres `jsonb`
-column correctly, and on SQLite binds it to something no row matches. Stringify it yourself if the
-column is JSON and you want the same answer on both.
+A plain object is otherwise **not** JSON-encoded for you. The compiler only knows to do that because
+a field says `Json`, and guessing from the value would turn a mistyped parameter into a
+successfully-written string. What the driver then does with it differs: Bun binds an object into a
+Postgres `jsonb` column correctly, and on SQLite binds it to something no row matches. Stringify it
+yourself if the column is JSON and you want the same answer on both.
 
 **The separator `join` takes is written into the SQL**, so it is not a free string: whitespace,
 commas, or `and` / `or`, and nothing else. Anything more expressive is legitimate but has to say so
@@ -4991,6 +4992,63 @@ through, which has none of them and is still an injection.
 interpolation slot is bound — including an object that merely *looks* like a fragment, which is what
 a parsed request body can be made to contain. That check is membership, not shape, precisely so that
 `{"text": "…", "binders": []}` arriving from outside the program is a parameter and not a statement.
+
+### A `::jsonb` cast you write types the parameter as `text`
+
+**Read this before porting a raw statement off Prisma's `$executeRaw`.** On Postgres this is the one
+place a byte-identical statement used to change meaning, and it changed it silently.
+
+```ts
+// Merges the patch into the document, on both clients.
+await DB.execute(
+  sql`update "AsyncJob" set "payload" = "payload" || ${JSON.stringify(patch)}::jsonb
+      where "id" = ${id}`,
+)
+```
+
+The divergence is in the **parameter's** type, not the cast's. Prisma sends a JS string as `text` and
+lets Postgres parse it into the target type. Bun asks the server what the statement wants, is told
+`jsonb`, and JSON-encodes the string it was handed — so the document arrives as a jsonb *string*.
+Measured on Postgres 16, binding the JS string `'{"version":1}'`:
+
+| statement | Prisma | Bun, unassisted |
+| --- | --- | --- |
+| `values ($1)` | error: `jsonb` vs `text` | `"{\"version\":1}"` — a jsonb string |
+| `values ($1::jsonb)` | `{"version": 1}` | `"{\"version\":1}"` |
+| `values (cast($1 as jsonb))` | `{"version": 1}` | `"{\"version\":1}"` |
+| `values ($1::text::jsonb)` | `{"version": 1}` | `{"version": 1}` |
+
+The `||` case is the sharp end: concatenating an object with a jsonb *string* is **array
+concatenation, not a merge**, so a statement written to merge metadata appends the serialised text as
+a new element. The write succeeds, nothing raises, the SQL reads correctly by eye, and the damage is
+found later by whatever reads the column.
+
+So gemi reads the cast. Where a parameter carries one, the placeholder is retyped through `text` —
+`$1::text::jsonb` — and the value is serialised to match, which is what Prisma did implicitly and
+what a `Json` *column* has always compiled to. Recognised: `::jsonb`, `::json`, `::text::jsonb`,
+`cast(… as jsonb)`, in any case and with whitespace anywhere Postgres allows it.
+
+At such a parameter, **a string is JSON text** — `${'{"a":1}'}::jsonb` stores the object — where a
+`Json` column takes the same string as a JSON string value. That is not an inconsistency to
+work around: it is which of the two Prisma does on each path. Pass the serialisation you mean:
+
+```ts
+sql`… = ${JSON.stringify(patch)}::jsonb`               // the object
+sql`… = ${JSON.stringify(JSON.stringify(patch))}::jsonb`  // the jsonb string, if you want that
+```
+
+Everything else follows from "the parameter is JSON text": an object or array is serialised for you,
+so `${patch}::jsonb` works too; a number and a boolean become JSON numbers and booleans; `null` stays
+SQL NULL, and `DbNull` / `JsonNull` mean what they mean on a column. A `bigint` has no JSON form and
+raises rather than binding something wrong.
+
+**What is not covered, and why that is the right line:** a bare `$1` into a `jsonb` column has the
+same fault and there is nothing to read — no cast, no column type. It is also the shape a Prisma port
+cannot be carrying, because Prisma *refuses* it (`column "payload" is of type jsonb but expression is
+of type text`); write the cast. Schema-qualified spellings (`$1::pg_catalog.jsonb`) and `jsonb[]` are
+deliberately left alone — the second is an array of documents, and serialising the JS array into one
+would be wrong. `DB.sql`, Bun's own tagged template, is untouched by all of this: it binds through
+the driver directly, so `::text::jsonb` is yours to write there.
 
 ### The rowcount is a primitive, not a diagnostic
 
@@ -5126,6 +5184,11 @@ On Postgres the parameter is cast — `$1::text::jsonb` — and the value serial
 is what lets a bare number or boolean through. Binding it raw makes the driver send an `integer` to
 a `jsonb` column, and serialising *without* the cast stores the jsonb string `"42"` instead of the
 number, which is worse than refusing it. SQLite needs neither: it stores JSON as text.
+
+A raw statement gets the same cast from the one you write yourself — see
+[A `::jsonb` cast you write types the parameter as `text`](#a-jsonb-cast-you-write-types-the-parameter-as-text),
+which is also where the one difference between the two paths is spelled out: at a cast you wrote, a
+JS string is JSON *text* rather than a JSON string value.
 
 > **Upgrading:** `Json` values written by a *pre-release* build of this ORM on Postgres were stored
 > as JSON **strings** rather than as objects — `{ a: 1 }` landed as `"{\"a\":1}"`. Reads undid it,

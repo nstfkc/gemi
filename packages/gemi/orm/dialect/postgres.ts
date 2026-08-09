@@ -494,6 +494,13 @@ export class PostgresDialect implements SqlDialect {
     // about. Keeping the two together in `fieldParam` means a site nobody
     // converted still binds raw and still fails loudly.
     //
+    // **The second row is also what a raw statement hits**, and there the cast
+    // is the caller's rather than the dialect's: `payload || $1::jsonb` is a
+    // Prisma port's spelling, and under Bun it appends the serialised text to an
+    // array instead of merging. `json-param.ts` retypes it, on the same
+    // reasoning and with the cast and the serialisation kept together for the
+    // same reason.
+    //
     return value;
   }
 
@@ -502,6 +509,9 @@ export class PostgresDialect implements SqlDialect {
   // declared type to be legitimate. `Date`, `boolean`, `bigint` and arrays all
   // bind natively, which is why a raw fragment is portable across the two
   // dialects even though only SQLite has to normalise anything.
+  //
+  // A parameter the caller cast to `json`/`jsonb` never arrives here: it has a
+  // declared type after all, and `renderFragment` binds it as JSON text.
   encodeUntyped(value: unknown): unknown {
     return value;
   }

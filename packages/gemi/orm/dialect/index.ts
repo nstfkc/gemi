@@ -134,6 +134,11 @@ export interface SqlDialect {
    * plain object is *not* JSON-encoded here: the compiler only knows to do that
    * because a field says `Json`, and guessing from the value would turn a
    * mistyped parameter into a successfully-written string.
+   *
+   * The exception is a parameter the *caller* cast to `json`/`jsonb`, which is
+   * a declared type by another route and does not reach this at all — see
+   * `json-param.ts`. It is still not a guess from the value: the statement says
+   * so.
    */
   encodeUntyped(value: unknown): unknown;
 

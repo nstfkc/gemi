@@ -295,6 +295,152 @@ function suite(label: string, url?: string) {
       expect(await emails()).toHaveLength(4);
     });
 
+    // --- a jsonb parameter -------------------------------------------------
+
+    /**
+     * **A `::jsonb` cast in a raw statement, which is where a Prisma port goes
+     * wrong silently.** Postgres only: SQLite has no `jsonb` type and no `::`
+     * operator, so these statements are not expressible there at all.
+     *
+     * The divergence is the parameter's type rather than the cast's. Prisma's
+     * `$executeRaw` sends a JS string as `text` and lets Postgres parse it; Bun
+     * asks the server what the statement wants, is told `jsonb`, and
+     * JSON-encodes the string — so the document is stored as a jsonb *string*.
+     * `renderFragment` now retypes such a parameter through `text`.
+     *
+     * `jsonb_typeof` is asserted rather than the value alone, for the reason
+     * `writes.coercion.test.ts` gives about the same mis-store: the wrong answer
+     * *reads back correctly through this ORM* and wrongly through everything
+     * else, so equality cannot tell the two apart.
+     */
+    const metadataOf = async (email: string) => {
+      const rows: any = await raw.unsafe(
+        `SELECT jsonb_typeof("metadata") AS kind, "metadata" AS value
+           FROM "User" WHERE "email" = $1`,
+        [email],
+      );
+      return [...rows][0];
+    };
+
+    test("a document at a ::jsonb cast is stored as the document — postgres", async () => {
+      if (!url) return;
+
+      const document = { version: 1, tags: ["a", "b"] };
+
+      expect(
+        await DB.execute(
+          sql`update "User" set "metadata" = ${JSON.stringify(document)}::jsonb
+              where "email" = ${"ada@x.test"}`,
+        ),
+      ).toBe(1);
+
+      const stored = await metadataOf("ada@x.test");
+      expect(stored.kind).toBe("object");
+      expect(stored.value).toEqual(document);
+    });
+
+    /**
+     * The sharp end, and the reason this is worth a fix rather than a caveat.
+     * `||` between an object and a jsonb *string* is array concatenation, not a
+     * merge: the statement below appended the serialised text as a new element
+     * and the column stopped being an object at all. Downstream code that
+     * expects an object gets an array, or drops the row when a guard fails.
+     */
+    test("|| merges into the document rather than appending to it — postgres", async () => {
+      if (!url) return;
+
+      await DB.execute(
+        sql`update "User" set "metadata" = ${JSON.stringify({ attribution: "x" })}::jsonb
+            where "email" = ${"ada@x.test"}`,
+      );
+
+      await DB.execute(
+        sql`update "User" set "metadata" = "metadata" || ${JSON.stringify({ version: 1 })}::jsonb
+            where "email" = ${"ada@x.test"}`,
+      );
+
+      const stored = await metadataOf("ada@x.test");
+      expect(stored.kind).toBe("object");
+      expect(stored.value).toEqual({ attribution: "x", version: 1 });
+    });
+
+    /**
+     * The claim about the *driver* that the fix rests on, pinned at the level it
+     * is true. Nothing in the ORM would notice Bun changing this, and if a later
+     * version binds it differently the retyping is solving a problem that no
+     * longer exists — which this failing is the only way to find out.
+     */
+    test("the same statement unretyped stores a jsonb string — postgres", async () => {
+      if (!url) return;
+
+      const document = JSON.stringify({ version: 1 });
+      await raw.unsafe(
+        `UPDATE "User" SET "metadata" = $1::jsonb WHERE "email" = $2`,
+        [document, "ada@x.test"],
+      );
+
+      const stored = await metadataOf("ada@x.test");
+      expect(stored.kind).toBe("string");
+      expect(stored.value).toBe(document);
+
+      // ...and the `||` above, on the same binding: an array, not a merge.
+      await raw.unsafe(
+        `UPDATE "User" SET "metadata" = '{"attribution":"x"}'::jsonb || $1::jsonb
+           WHERE "email" = $2`,
+        [document, "ada@x.test"],
+      );
+      expect((await metadataOf("ada@x.test")).kind).toBe("array");
+    });
+
+    /**
+     * Every shape, through the cast, and the function spelling of it — which is
+     * the other form a port can be carrying (`CAST($1 AS jsonb)`), and which
+     * mis-stores identically without the retyping.
+     */
+    test.each([
+      ["an object", { a: 1 }, "object"],
+      ["an array", [1, 2], "array"],
+      ["a document as text", `{"a":1}`, "object"],
+      ["a number", 42, "number"],
+      ["a boolean", true, "boolean"],
+    ])("%s survives both cast spellings — postgres", async (_label, value, kind) => {
+      if (!url) return;
+
+      for (const fragment of [
+        sql`update "User" set "metadata" = ${value}::jsonb where "email" = ${"ada@x.test"}`,
+        sql`update "User" set "metadata" = cast(${value} as jsonb) where "email" = ${"ada@x.test"}`,
+      ]) {
+        await DB.execute(fragment);
+        expect((await metadataOf("ada@x.test")).kind).toBe(kind);
+      }
+    });
+
+    /**
+     * The two paths agree about what a `Json` column holds — which is the
+     * property that makes raw SQL an escape hatch rather than a second
+     * representation. The ORM writes the column through `fieldParam`'s
+     * `::text::jsonb`; the raw filter finds that row through the same cast, now
+     * that the caller's `::jsonb` means the same thing.
+     */
+    test("a raw jsonb filter matches a row the ORM wrote — postgres", async () => {
+      if (!url) return;
+
+      const document = { version: 1, tags: ["a"] };
+      await Model.asSystem(async () => {
+        await User.update({
+          where: { email: "ada@x.test" },
+          data: { metadata: document },
+        });
+      });
+
+      const rows = await DB.query<{ email: string }>(
+        sql`select "email" from "User"
+            where "metadata" = ${JSON.stringify(document)}::jsonb`,
+      );
+
+      expect(rows.map((row) => row.email)).toEqual(["ada@x.test"]);
+    });
+
     // --- the ambient transaction -----------------------------------------
 
     /**

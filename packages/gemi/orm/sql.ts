@@ -12,6 +12,7 @@ import {
   render,
   sql as text,
 } from "./compile/fragment";
+import { jsonTextParameter, retypeJsonParameters } from "./json-param";
 
 /**
  * SQL fragments as first-class values: `sql`, `join`, `empty`, and one door out.
@@ -119,6 +120,18 @@ function isFragment(value: unknown): value is Fragment {
  * Postgres's `= any($1)` wants, and it is the only reading that does not depend
  * on the dialect. For a comma-separated list of placeholders, say so with
  * `join`.
+ *
+ * A value at a `::jsonb` cast the caller wrote is the one parameter with a type
+ * behind it, and it is bound as **JSON text** so that the statement means what
+ * the same statement meant under Prisma's `$executeRaw`:
+ *
+ * ```ts
+ * sql`… set payload = payload || ${JSON.stringify(patch)}::jsonb`  // merges
+ * ```
+ *
+ * Without that the driver would JSON-encode the string and the column would
+ * hold the document as a jsonb *string* — which `||` appends as an array
+ * element rather than merging. `json-param.ts` has the measurements.
  */
 export function sql(
   strings: TemplateStringsArray,
@@ -344,7 +357,16 @@ export function renderFragment(
     );
   }
 
-  const rendered = render(fragment, dialect, { model: "DB", operation });
+  // The one thing a raw parameter can be *told* about its type: a `::jsonb` the
+  // caller wrote onto their own placeholder. Where there is one, the parameter
+  // is retyped through `text` and its value serialised, because Bun otherwise
+  // JSON-encodes a string bound to a `jsonb` parameter and stores the document
+  // as a jsonb *string* where Prisma stored the object. See `json-param.ts` —
+  // the mechanism, the measurements, and why a string is not serialised here
+  // while `fieldParam` serialises one.
+  const json = retypeJsonParameters(fragment);
+
+  const rendered = render(json.fragment, dialect, { model: "DB", operation });
   return {
     text: rendered.text,
     // `encodeUntyped` and not `encode`: there is no field here to ask, which is
@@ -352,10 +374,12 @@ export function renderFragment(
     // plan's. It normalises the two JavaScript types whose SQL form the ORM has
     // already decided — a `Date` and a boolean — so a raw statement compares
     // against ORM-written rows on both dialects rather than only on Postgres.
-    values: bindValues(rendered.binders)(undefined).map((value) =>
-      value === null || value === undefined
-        ? (value ?? null)
-        : dialect.encodeUntyped(value),
+    values: bindValues(rendered.binders)(undefined).map((value, index) =>
+      json.jsonParameters.has(index)
+        ? jsonTextParameter(value, operation)
+        : value === null || value === undefined
+          ? (value ?? null)
+          : dialect.encodeUntyped(value),
     ),
   };
 }
