@@ -339,13 +339,37 @@ export function canonicalShape(
  * a different direction (#301).** `where: { metadata: { path: ["a", "b"],
  * equals: … } }` binds the whole path as one `text[]` through `#>`, so every
  * depth compiles to the identical `("metadata" #>> $1) = $2`. Measured over the
- * corpus: `["a"]`, `["a","b"]`, `["a","b","c"]` and `["a", 0]` were four cache
- * entries holding one statement, and a path depth taken off a request is as
- * ordinary as a list length taken off one.
+ * corpus: `["a"]`, `["a","b"]` and `["a","b","c"]` were three cache entries
+ * holding one statement, and a path depth taken off a request is as ordinary as
+ * a list length taken off one.
  *
  * SQLite needs nothing here and gets nothing: a path is a *string* there
  * (`"$.a.b"`), so depth was never in the shape to begin with, and
  * `collapseLists` is false on that dialect anyway.
+ *
+ * **`path` collapses only when every segment is a `string`, and that narrowing
+ * is the whole safety argument rather than a fussy detail.** `collapsedList`
+ * erases the elements as well as the count, so `[*]` says nothing about what is
+ * *in* the array — while `assertPathShape` (`compile/where.ts`) refuses an
+ * array whose segments are not each a string or a number. Collapse the two
+ * together and the refusal stops being reachable on a cache hit, the `disconnect:
+ * true`/`false` failure this file describes a few lines below, arriving from the
+ * other side: a plan compiled for `["a"]` served `["a", null]`, `[["a"]]` and
+ * `[{ k: 1 }]` without recompiling, and `[["a"]]` is the bad one — it flattens
+ * to `{"a"}` and answers as if the caller had written `["a"]`. Wrong rows, no
+ * error. Measured through `getOrCompile` + `bind` on Postgres, and it is a
+ * regression this collapse would have introduced: on `main` those three key
+ * apart from `["a"]` element-wise, so each is refused on every call.
+ *
+ * The predicate has to stay a **subset** of what `assertPathShape` accepts, not
+ * an equal — a collapsed shape must never cover an argument the compiler would
+ * refuse, but leaving an accepted one uncollapsed costs a cache entry and
+ * nothing else. `string` is that subset today (`assertPathShape` also takes a
+ * `number`, so a numeric segment simply keeps its element-wise shape) and it
+ * stays one under #380, which narrows `JsonPath` to `readonly string[]`. It is
+ * duplicated knowledge either way — `plan.ts` holds no dependency on the
+ * compiler, deliberately — so `plan-key.invariants.test.ts` asserts the
+ * subset relation directly, over the malformed shapes above.
  *
  * **The gate is `collapseLists` — that is `bindsListAsOneParameter`, a property
  * about `in` lists rather than about paths — and the conflation deserves
@@ -357,7 +381,9 @@ export function canonicalShape(
  * placeholders, the trap this comment already describes for SQLite's `in` — and
  * would need a flag of its own. None exists to hang one on today that is not
  * speculative, and `plan-key.invariants.test.ts` walks both grammars on both
- * dialects asserting same-key-implies-same-SQL, so that is what would fail.
+ * dialects asserting same-key-implies-same-SQL, so that is what would fail —
+ * conditional on the new dialect being added to `DIALECTS` there, which is the
+ * same condition every other property in that file already carries.
  *
  * **A *column* named `path` is the other collision, and it is harmless —
  * measured rather than assumed**, since `LIST_KEYS` matches by name at any
@@ -464,8 +490,17 @@ function shapeOfMember(
   // one plan entry per page. The root's `skip` never had the problem, which is
   // exactly why it went unnoticed until a node could carry one.
   if (key === "skip" && typeof value === "number") return "number";
+  // `path` is the one member of `LIST_KEYS` whose *elements* are checked by the
+  // compiler, so it is the one that cannot be collapsed unconditionally: `[*]`
+  // erases the segment kinds, and `assertPathShape` refuses a segment that is
+  // neither a string nor a number. A malformed path therefore keeps its
+  // element-wise shape, keys apart from every valid one, and is refused on every
+  // call rather than served by a plan compiled for a path it does not resemble.
+  // See {@link LIST_KEYS}.
   if (collapseLists && LIST_KEYS.has(key) && Array.isArray(value)) {
-    return collapsedList(value);
+    if (key !== "path" || value.every((segment) => typeof segment === "string")) {
+      return collapsedList(value);
+    }
   }
   /**
    * A composite `in`'s tuple list collapses on exactly the dialects where its

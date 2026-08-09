@@ -16,7 +16,7 @@ import {
   userWithProfile,
 } from "./fixtures";
 import { AGGREGATES, GROUPS, READS, vary, WRITES } from "./corpus";
-import { planKey } from "./plan";
+import { clearPlanCache, getOrCompile, planCacheStats, planKey } from "./plan";
 import * as registry from "./registry";
 
 const sqlite = new SqliteDialect();
@@ -151,10 +151,18 @@ describe("the plan key", () => {
     // refused everywhere here, not only on SQLite.
     /accounts\.take/,
     // The four JSON path refusals that are about the *argument* rather than
-    // about the database. Each is in the corpus in both grammars, because the
-    // grammar check runs before all of them — written in one spelling only,
-    // each would fire on one dialect and be swallowed by the grammar message on
-    // the other.
+    // about the database.
+    //
+    // Two of them need both grammars in the corpus and two do not, which is
+    // worth stating precisely because the first draft here claimed the first
+    // reason for all four. `assertPathShape` runs before the bare-path and
+    // unknown-filter checks, so those two are reached by the array form on
+    // Postgres and by the string form on SQLite — one spelling would leave one
+    // dialect's copy unwalked. The other two are reached from either spelling on
+    // either dialect: the `field.type !== "Json"` throw is above
+    // `assertPathShape` entirely, and the empty check is above the grammar
+    // branch inside it. Both spellings are in the corpus regardless; see the
+    // note there for why.
     /is a String column/,
     /A JSON path cannot be empty/,
     /A 'path' needs a filter beside it/,
@@ -299,7 +307,10 @@ describe("the plan key", () => {
    */
   const JSON_PATHS: Record<string, unknown[]> = {
     sqlite: ["$.a", "$.a.b", "$.a.b.c"],
-    postgres: [["a"], ["a", "b"], ["a", "b", "c"], ["a", 0]],
+    // The last is an array *index*, spelled as a string — `#>` takes a `text[]`
+    // and reaches the same element either way, and it is the spelling #380
+    // leaves standing when it narrows `JsonPath` to `readonly string[]`.
+    postgres: [["a"], ["a", "b"], ["a", "b", "c"], ["a", "0"]],
   };
 
   test.each(DIALECTS)("a JSON path's depth is bound, not compiled in — %s", (name, dialect) => {
@@ -329,4 +340,71 @@ describe("the plan key", () => {
     expect(filterKey({ equals: "x" })).not.toBe(filterKey({ not: "x" }));
     expect(filterKey({ equals: "x" })).not.toBe(filterKey({ string_contains: "x" }));
   });
+
+  /**
+   * ...and the other half of that collapse, which the first revision of #301
+   * got wrong: **a shape may only be collapsed if every argument it now covers
+   * would still be accepted by a cold compile.**
+   *
+   * `collapsedList` erases the array's elements along with its length, so `[*]`
+   * says nothing about what is *in* the path — while `assertPathShape` refuses
+   * an array whose segments are not scalars. Collapsed unconditionally, a plan
+   * compiled for `["a"]` answered `["a", null]`, `[["a"]]` and `[{ k: 1 }]` off
+   * the cache without recompiling, and the refusal never re-ran. `[["a"]]` is
+   * the one that matters: it flattens into `{"a"}` and returns the rows for
+   * `["a"]`, so the failure is wrong rows rather than a wrong error. It is the
+   * `disconnect: true`/`false` trap `plan.ts` documents, arriving from the
+   * direction where the *values* are checked rather than the structure.
+   *
+   * Asserted against `getOrCompile` rather than against `planKey` alone, because
+   * a distinct key is the mechanism and "the refusal still fires on a warm
+   * cache" is the property. Both are checked: the key comparison says why, the
+   * cache run says what.
+   */
+  const MALFORMED_PATHS: unknown[] = [
+    ["a", null],
+    ["a", undefined],
+    ["a", true],
+    [["a"]],
+    [{ k: 1 }],
+  ];
+
+  test.each(DIALECTS)(
+    "a path a cold compile refuses is not served by a warm plan — %s",
+    (name, dialect) => {
+      const args = (path: unknown) => ({
+        where: { metadata: { path, equals: "x" } },
+      });
+      const good = JSON_PATHS[name][0];
+      const goodKey = planKey(dialect as never, "User", "findMany" as never, args(good));
+
+      for (const bad of MALFORMED_PATHS) {
+        const label = JSON.stringify(bad);
+        // The premise: a cold compile refuses every one of these. Without this
+        // the rest of the test would pass vacuously the day the compiler
+        // started accepting them.
+        expect(
+          () =>
+            compileRead(userWithProfile, "findMany" as never, args(bad) as never, dialect as never),
+          label,
+        ).toThrow();
+        expect(
+          planKey(dialect as never, "User", "findMany" as never, args(bad)),
+          label,
+        ).not.toBe(goodKey);
+      }
+
+      clearPlanCache();
+      getOrCompile(userWithProfile, "findMany" as never, args(good), dialect as never);
+      for (const bad of MALFORMED_PATHS) {
+        expect(() =>
+          getOrCompile(userWithProfile, "findMany" as never, args(bad), dialect as never),
+          JSON.stringify(bad),
+        ).toThrow(/does not support/);
+      }
+      // None of them reached the warm entry at all — a hit here would mean the
+      // plan was returned rather than the argument refused.
+      expect(planCacheStats().hits).toBe(0);
+    },
+  );
 });
