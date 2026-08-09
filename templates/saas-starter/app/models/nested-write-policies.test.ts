@@ -1108,8 +1108,17 @@ describe("policies on nested writes", () => {
      * The fix resolves the named row first and short-circuits, which is also
      * what Prisma does — the same call on a generated 6.19.2 client logs four
      * selects and no `UPDATE`. So the assertion is that this succeeds and the
-     * link survives, which is exactly what the same call answers with no policy
-     * at all.
+     * link survives, which is what this call answers when the operand is
+     * `{ id: 56 }` and no policy is registered.
+     *
+     * **The scope is one way to reach the crossing, not the only one.** The
+     * repoint fails whenever anything in its `where` depends on the value the
+     * clear just nulled, and a caller who spells the operand as
+     * `connect: { folderId: 2 }` supplies that himself — no policy needed.
+     * That shape is pinned in the differential as `M15e`, where it shows up as
+     * `error` against `ok`; this file cannot host it, because it is
+     * SQLite-only by construction (its `beforeAll` builds its own `sqlite://`
+     * workspace, so the Postgres job never reaches these three tests).
      *
      * Read this next to `"a foreign-key scope allows relation operands the ORM
      * keyed"` further down, which is the same scope on the to-many side and

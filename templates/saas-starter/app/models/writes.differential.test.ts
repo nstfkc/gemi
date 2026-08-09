@@ -736,9 +736,11 @@ const CASES: Case[] = [
 
   // M15 — `connect` onto a to-one that **already has a child** (#361), the
   // neighbour of M14 and the same displacement. Four shapes, and only this one
-  // ever diverged: the three above it — an empty to-one, a steal from another
-  // parent, and the row already linked here — agreed before the fix and are
-  // what kept it hidden.
+  // diverged in the *table*: an empty to-one, a steal from another parent, and
+  // the row already linked here all agreed before the fix, and are what kept it
+  // hidden. "Agreed in the table" is not "agreed" — the third of those was
+  // reaching that agreement through a pair of contradictory statements, which
+  // M15e below names in a spelling the table can see (#372).
   ["M15 to-one connect displaces the incumbent, orphaning it", "update", {
     where: { id: 1 }, data: { profile: { connect: { id: 2 } } },
   }, ["User", "Profile"]],
@@ -746,8 +748,30 @@ const CASES: Case[] = [
   // the caller named and the repoint puts the key straight back. Net nothing,
   // which is Prisma's answer, and the case that would catch a clear scoped to
   // the wrong rows.
+  //
+  // **Green either way, and that is its limit** — it reads the table, and the
+  // table is the same whether the pair of statements fires or neither does.
+  // M15e below is the same crossing named so that the table can see it.
   ["M15b to-one connect of the row already linked changes nothing", "update", {
     where: { id: 1 }, data: { profile: { connect: { id: 1 } } },
+  }, ["User", "Profile"]],
+  // ...and the same call with the operand spelled through the **unique foreign
+  // key itself** (#372). This is M15b's crossing made visible from outside: the
+  // repoint has to re-select the row by `userId`, which is the column the clear
+  // just nulled, so on the base commit it raised `RecordNotFoundError` with the
+  // table unchanged while Prisma answers it — measured on 6.19.2/SQLite, four
+  // selects between `BEGIN` and `COMMIT` and no `UPDATE`.
+  //
+  // No policy is involved, which is the whole reason it belongs here rather
+  // than only in `nested-write-policies.test.ts`: an `error` against an `ok`
+  // is exactly what this harness compares (`M15c` already leans on it matching
+  // raised errors), and that file builds its own `sqlite://` workspace, so its
+  // three #372 tests never run under the Postgres job. This one does.
+  //
+  // `Profile.userId` is `Int? @unique`, so `assertNamedRows` accepts it — the
+  // same fact that makes `profile` a to-one and makes `displaces` true.
+  ["M15e to-one connect of the already-linked row named by its unique foreign key", "update", {
+    where: { id: 1 }, data: { profile: { connect: { userId: 1 } } },
   }, ["User", "Profile"]],
   // A miss detaches nothing — the repoint raises and takes the clear down with
   // it. `notFound` on both sides, so a gemi refusal could not pass for it.

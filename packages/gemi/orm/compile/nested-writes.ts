@@ -2008,11 +2008,26 @@ function planForeignSide(
    * right in the table and wrong in the statements** (#372). `clearLinks` nulls
    * the very row the caller named and the repoint puts the key straight back,
    * so the committed state agrees — and that is all `M15b` could see. The two
-   * statements in between are not harmless: with a child whose policy scopes on
-   * *its own foreign key* (`{ folderId: 2 }`), the clear puts the row outside
-   * the scope the repoint then has to select it by, so the repoint matches
-   * nothing and the whole call raises `RecordNotFoundError` naming a model and
-   * an operation the caller never wrote. A call that worked before #361.
+   * statements in between are not harmless. **The repoint has to re-select the
+   * row by the column the clear just changed, so it fails whenever anything in
+   * that `where` depends on the old value** — and there are two ways to get
+   * one, not just the policy shape #372 was reported through:
+   *
+   *   - a child whose policy scopes on *its own foreign key*
+   *     (`{ folderId: 2 }`) — the scope is `AND`ed into the repoint's `where`,
+   *     and the clear has just moved the row out of it;
+   *   - **no policy anywhere**, when the caller names the row *by* that foreign
+   *     key (`connect: { folderId: 2 }`). `assertNamedRows` accepts that
+   *     operand because the column is in `uniques`, which is the same fact that
+   *     makes the relation a to-one in the first place — and then the caller's
+   *     own `where` is the thing the clear invalidates.
+   *
+   * Either way the repoint matches nothing and the whole call raises
+   * `RecordNotFoundError` naming a model and an operation the caller never
+   * wrote. A call that worked before #361. The second shape is what makes this
+   * a plain correctness bug rather than a policy interaction, and it is why the
+   * differential can pin it at all: `M15e` in `writes.differential.test.ts` is
+   * that spelling, `error` against `ok`, with no policy in it.
    *
    * So the named row is resolved first and the operand short-circuits when it
    * already points here — {@link alreadyLinked}. That is Prisma's own shape
@@ -2643,9 +2658,15 @@ async function clearLinks(
  * and the same answer read from the other end of the key: on the owning side
  * the row that must not be cleared is the one being written, here it is the one
  * being named. Both exist because clearing a row and then selecting it by the
- * column just cleared is a contradiction the moment a policy scopes on that
- * column, and both match Prisma, which issues no write for an already-linked
- * `connect` from either end.
+ * column just cleared is a contradiction the moment anything in that `where`
+ * depends on the old value — a policy scoping on the column, or a caller who
+ * named the row by it.
+ *
+ * **Prisma issues no write for an already-linked `connect` from either end, and
+ * only this end matches that outright.** The owning side skips the *clear* and
+ * still emits the repoint — {@link displaceSibling}'s docblock says so in plain
+ * terms, and that residual divergence is #370's class, not something #363/#375
+ * closed. Do not read the symmetry above as parity.
  *
  * **Un-pre-scoped, so the child's own policies decide what this can see** — the
  * same rule every other statement in this step follows, and it is what makes
