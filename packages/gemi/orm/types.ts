@@ -433,28 +433,27 @@ type JsonObject = { [key: string]: JsonValue };
  * array type to answer it with. The dialect refusal stays where it can name the
  * dialect and say "it works on postgres".
  *
- * **Numbers are in, and that is not the same choice as the dialect one above.**
- * `assertPathShape` accepts a numeric segment, where Prisma's generated `path`
- * is `string[]`, so gemi is a superset here — and this file refuses to be a
- * superset on dialect operators for a stated reason: answering a query the
+ * **Every segment is a string, and #371 is what settled that.** This type
+ * briefly read `readonly (string | number)[]`, because `assertPathShape`
+ * accepted a numeric segment and a type-only change could not remove a superset
+ * the compiler had. `assertPathShape` refuses one now — Prisma's generated
+ * `path` is `string[]` and its client refuses a number at run time too
+ * (*"Argument `path`: Invalid value provided. Expected String, provided Int."*,
+ * measured on 6.19.2) — so the two agree again, and they agree on the narrow
+ * side for the reason this file gives everywhere else: answering a query the
  * oracle cannot is "precisely where a differential test stops being able to
- * check anything" (`where.ts:945`). The two are consistent because that rule
- * governs what the *compiler* answers, and a type cannot enforce it. Excluding
- * numbers here would not remove the superset — `assertPathShape` would still
- * accept `["items", 0]` from a `string[]`-typed variable, from `any`, from
- * JSON off the wire — it would only stop the type describing what the compiler
- * does, which is #336 again in the other direction. If the superset should go,
- * the place to remove it is `assertPathShape` — #371, with both answers written
- * out, rather than decided quietly here.
+ * check anything". Nothing is lost, because `["items", "0"]` reaches the same
+ * array element on Postgres: `#>` takes a `text[]`, so the segment arrives as
+ * text either way.
  *
  * **`readonly`, because a path is the natural thing to hoist.**
  * `const PATH = ["operation"] as const` and a whole filter object written
  * `as const` both produce a `readonly` tuple. `assertPathShape` uses
- * `Array.isArray` and `.every`, which a frozen array answers, and the path is
- * bound rather than mutated. A mutable array still assigns to a `readonly`
+ * `Array.isArray` and `.findIndex`, which a frozen array answers, and the path
+ * is bound rather than mutated. A mutable array still assigns to a `readonly`
  * parameter, so nothing that compiled before stops.
  */
-type JsonPath = string | readonly (string | number)[];
+type JsonPath = string | readonly string[];
 
 /**
  * A scalar a JSON path filter can be compared against.
@@ -473,19 +472,21 @@ type JsonPath = string | readonly (string | number)[];
  * happens. They stay on `JsonFilter`, which compiles against the column, where
  * the distinction survives.
  *
- * **`null` is absent too, and this one is the type going *further* than the
- * compiler — the only place in this change that does.** `assertJsonOperand`
- * lets `null` through and `{ path: […], equals: null }` compiles to
- * `("metadata" #>> $1) = $2` bound to NULL, which is NULL rather than true on
- * both dialects: a predicate no row can satisfy. Once the sentinels are refused
- * there is no other reading of it — the two questions `null` could be asking
- * are exactly the two the sentinels ask. The same operand under
- * `string_contains` is already a runtime refusal, in this file's own words
- * because the pattern "runs and returns the wrong rows", so refusing it here
- * finishes a rule the compiler states rather than inventing one. The compiler
- * should follow — #371 — and until it does a `null` arriving dynamically still
- * reaches the binder, which is why this is stated and not claimed as a
- * guarantee.
+ * **`null` is absent too, and the compiler now agrees — #371.** This comment
+ * used to record it as the one place the type went further than the runtime:
+ * `assertJsonOperand` let `null` through and `{ path: […], equals: null }`
+ * compiled to `("metadata" #>> $1) = $2` bound to NULL, which is NULL rather
+ * than true on both dialects — a predicate no row can satisfy. It is an
+ * `InvalidArgumentError` now, so a `null` arriving dynamically is refused
+ * rather than silently answered wrong.
+ *
+ * The refusal is a *divergence*, not a gap in the type. Prisma extracts with
+ * `#>` and compares as `jsonb`, so it reads `equals: null` as the JSON value
+ * `null` and returns the rows holding one — measured on 6.19.2, identical SQL
+ * and identical rows to `equals: Prisma.JsonNull`. gemi extracts with `#>>`,
+ * which yields SQL NULL for an absent key and a JSON null alike, so the
+ * question cannot be asked at a path here at all — the same collapse that
+ * keeps the sentinels off this type.
  */
 type JsonPathScalar = string | number | boolean;
 
@@ -509,6 +510,12 @@ type JsonPathScalar = string | number | boolean;
  * Requiring one would mean a ten-way union in the position where the compiler
  * reports a misspelled operator, and the runtime message already names the whole
  * set. Prisma's generated input has the same shape for the same reason.
+ *
+ * **Writing `undefined` is writing nothing**, on every operator, which is what
+ * `?:` already says and what `compileJsonFilter` now does — a key holding
+ * `undefined` is dropped before the bare-path check, so
+ * `{ path: ["a"], equals: undefined }` raises the same refusal as
+ * `{ path: ["a"] }`. That is Prisma's answer to both, measured.
  */
 type JsonPathFilter = {
   path: JsonPath;
@@ -517,7 +524,13 @@ type JsonPathFilter = {
   string_contains?: string;
   string_starts_with?: string;
   string_ends_with?: string;
-  array_contains?: JsonValue;
+  /**
+   * A document, minus a bare `null` — `assertJsonOperand` refuses that one for
+   * the reason `JsonPathScalar` gives, since `jsonArrayContains` binds it as
+   * SQL NULL and `x @> NULL` is NULL. A `null` *inside* the document is an
+   * ordinary JSON value and still compiles.
+   */
+  array_contains?: Exclude<JsonValue, null>;
   lt?: JsonPathScalar;
   lte?: JsonPathScalar;
   gt?: JsonPathScalar;

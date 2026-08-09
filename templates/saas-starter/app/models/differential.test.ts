@@ -1079,6 +1079,22 @@ const POSTGRES_ONLY: [string, string, unknown][] = [
     where: { metadata: { path: ["nope"], equals: "x" } },
     orderBy: { id: "asc" },
   }],
+  // **An array index, spelled as a string** — which is the whole of #371's
+  // third answer. `assertPathShape` used to accept `["tags", 0]` as well,
+  // where Prisma's generated `path` is `string[]` and its client refuses a
+  // number outright: *"Argument `path`: Invalid value provided. Expected
+  // String, provided Int."* So the superset went, and this pair is the proof
+  // that nothing went with it — `#>` takes a `text[]`, so the string reaches
+  // the element either way. The miss is here because a hit alone would also
+  // pass against a path that silently selected the whole array.
+  ["json path with a string array index", "findMany", {
+    where: { metadata: { path: ["tags", "0"], equals: "a" } },
+    orderBy: { id: "asc" },
+  }],
+  ["json path with a string array index that misses", "findMany", {
+    where: { metadata: { path: ["tags", "1"], equals: "a" } },
+    orderBy: { id: "asc" },
+  }],
   ["json array_contains a scalar", "findMany", {
     where: { metadata: { path: ["tags"], array_contains: "a" } },
     orderBy: { id: "asc" },

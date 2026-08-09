@@ -1226,6 +1226,52 @@ describe("json path filters", () => {
   });
 
   /**
+   * #371, the first of three. `applied` was built from `Object.keys` alone, so
+   * the one branch in this file that did **not** treat `undefined` as absent
+   * was the one where the operand goes on to be bound: the scalar loop skips it
+   * (`if (operand === undefined …) continue`) and the dispatch into this branch
+   * skips a `path` that is `undefined`.
+   *
+   * The two spellings therefore disagreed — the key omitted got a loud, correct
+   * refusal, and the key present-but-undefined compiled to `= NULL`, a
+   * predicate no row can satisfy. An optional filter assembled from a form or a
+   * query string carries exactly that.
+   *
+   * Prisma answers both identically: P2019 *"A JSON path cannot be set without
+   * a scalar filter."* Measured on a generated 6.19.2 client against Postgres.
+   */
+  test("an undefined operand is absent, so the path is bare", () => {
+    for (const key of ["equals", "not", "string_contains", "array_contains"]) {
+      expect(() =>
+        pgText({ where: { metadata: { path: ["a"], [key]: undefined } } }),
+      ).toThrow(/needs a filter beside it/);
+    }
+
+    // A *misspelled* key holding `undefined` is absent too, so the bare-path
+    // refusal wins over the unknown-operator one — which is the order Prisma
+    // resolves them in: `{ path: ["a"], equalz: undefined }` answers P2019
+    // there, and `{ path: ["a"], equalz: 1 }` answers *"Unknown argument
+    // `equalz`. Did you mean `equals`?"*.
+    expect(() =>
+      pgText({ where: { metadata: { path: ["a"], equalz: undefined } } }),
+    ).toThrow(/needs a filter beside it/);
+    expect(() =>
+      pgText({ where: { metadata: { path: ["a"], equalz: 1 } } }),
+    ).toThrow(/A JSON path filter takes/);
+
+    // ...and one live operator beside it is still a filter, so the guard drops
+    // keys rather than the whole operand.
+    const args = { where: { metadata: { path: ["a"], equals: 1, gt: undefined } } };
+    expect(pgText(args)).toContain(`("metadata" #>> $1) = $2`);
+    // `gt` compiles to `cast(… as real) >`, so its absence is visible.
+    expect(pgText(args)).not.toContain("as real");
+    expect(compileRead(jsonUser, "findMany", args, postgres).bind(args)).toEqual([
+      `{"a"}`,
+      "1",
+    ]);
+  });
+
+  /**
    * `array_contains` and the numeric comparisons are refused by Prisma's own
    * client on SQLite — *"Unknown argument"* — so implementing them would make
    * gemi answer a query the oracle cannot check. The message says it is a
@@ -1352,6 +1398,81 @@ describe("json path filters", () => {
   });
 
   /**
+   * #371, the second of three. `null` fell between `assertJsonOperand`'s two
+   * branches — the string branch refuses a non-string, the object branch tested
+   * `operand !== null` first — so it reached the binder and compiled to
+   * `("metadata" #>> $1) = $2` bound to NULL. `= NULL` is NULL rather than true
+   * on both dialects: the query runs, raises nothing, and matches no row.
+   *
+   * **Prisma does answer this one**, which is why it is a refusal rather than a
+   * gap being closed. Measured on a generated 6.19.2 client against Postgres:
+   * `{ path: ["a"], equals: null }` compiles to
+   * `("metadata"#>ARRAY[$1]::text[])::jsonb::jsonb = $2` and returns the rows
+   * whose `a` is the JSON value `null` — byte-identical SQL and identical rows
+   * to `equals: Prisma.JsonNull`. It can, because it extracts with `#>` and
+   * compares as `jsonb`; gemi extracts with `#>>`, which yields SQL NULL for an
+   * absent key and a JSON null alike. That is the same collapse the sentinel
+   * refusal above names, so the same answer follows.
+   *
+   * `array_contains` is refused too, and its mechanism is the other one:
+   * `jsonArrayContains` binds the operand raw, so `null` arrives as SQL NULL
+   * and `x @> NULL` is NULL. Prisma binds it as the JSON value and runs a real
+   * containment test.
+   */
+  describe("null at a path is refused", () => {
+    const operators = [
+      "equals",
+      "not",
+      "string_contains",
+      "array_contains",
+      "gt",
+      "lte",
+    ] as const;
+
+    test.each(operators)("%s on postgres", (key) => {
+      expect(() =>
+        pgText({ where: { metadata: { path: ["a"], [key]: null } } }),
+      ).toThrow(InvalidArgumentError);
+    });
+
+    // SQLite offers only the six its dialect answers; the other four raise the
+    // dialect refusal first, which is a different message and already pinned.
+    test.each(["equals", "not", "string_ends_with"] as const)(
+      "%s on sqlite",
+      (key) => {
+        expect(() =>
+          sqliteText({ where: { metadata: { path: "$.a", [key]: null } } }),
+        ).toThrow(InvalidArgumentError);
+      },
+    );
+
+    /**
+     * The load-bearing negative: only the *bare* operand is refused. A `null`
+     * inside a document under `array_contains` is an ordinary JSON value, and
+     * containment against `[null]` is a question Postgres answers.
+     */
+    test("a null inside an array_contains document still compiles", () => {
+      const args = { where: { metadata: { path: ["a"], array_contains: [null] } } };
+      expect(pgText(args)).toContain(`("metadata" #> $1) @> $2::jsonb`);
+      expect(compileRead(jsonUser, "findMany", args, postgres).bind(args)).toEqual([
+        `{"a"}`,
+        [null],
+      ]);
+    });
+
+    /** Nothing of it reaches the SQL, which is the actual defect. */
+    test("it never becomes a bound NULL", () => {
+      let text = "";
+      try {
+        text = pgText({ where: { metadata: { path: ["a"], equals: null } } });
+      } catch {
+        // expected
+      }
+      expect(text).toBe("");
+    });
+  });
+
+  /**
    * `[]` on Postgres extracts the whole document — `[].every` is vacuously
    * true, so it passed the grammar check — and `""` on SQLite raises inside
    * `json_extract` at execution time. Neither is a path.
@@ -1377,6 +1498,49 @@ describe("json path filters", () => {
       "{\"n\"}",
       2,
     ]);
+  });
+
+  /**
+   * #371, the third of three, and the one that was a *choice* rather than a
+   * defect. `assertPathShape` accepted `typeof part === "number"`, where
+   * Prisma's generated `path` on Postgres is `string[]` — so gemi answered a
+   * query the oracle could not express, which is the situation
+   * `compileJsonFilter`'s docblock refuses on purpose for the SQLite operators:
+   * "implementing them would make gemi answer a query the oracle cannot, which
+   * is precisely where a differential test stops being able to check anything."
+   *
+   * Prisma's refusal is a run-time one as well as a type one. Measured on a
+   * generated 6.19.2 client: `path: ["items", 0]` answers *"Argument `path`:
+   * Invalid value provided. Expected String, provided Int."* before any SQL is
+   * built.
+   *
+   * **Nothing is lost by narrowing**, which is what makes it the cheap answer:
+   * `#>` takes a `text[]`, so `["items", "0"]` reaches the same array element.
+   * Both spellings bind the identical path on Prisma and on gemi.
+   */
+  test("a path segment is a string, matching the oracle", () => {
+    expect(() =>
+      pgText({ where: { metadata: { path: ["items", 0], equals: "x" } } }),
+    ).toThrow(/path\[1\] is a number/);
+    expect(() =>
+      pgText({ where: { metadata: { path: ["a", null], equals: "x" } } }),
+    ).toThrow(/path\[1\] is null/);
+
+    // The string spelling reaches the element, and the bound path is identical
+    // to what the numeric one used to produce — which is why this is a
+    // narrowing rather than a removal.
+    const args = { where: { metadata: { path: ["items", "0"], equals: "x" } } };
+    expect(pgText(args)).toContain(`("metadata" #>> $1) = $2`);
+    expect(compileRead(jsonUser, "findMany", args, postgres).bind(args)).toEqual([
+      `{"items","0"}`,
+      "x",
+    ]);
+
+    // SQLite is untouched: its grammar is a JSONPath string, where an index is
+    // spelled inside the string and never reaches this check.
+    expect(() =>
+      sqliteText({ where: { metadata: { path: "$.items[0]", equals: "x" } } }),
+    ).not.toThrow();
   });
 
   test("two filters on one path are ANDed", () => {

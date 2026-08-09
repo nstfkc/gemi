@@ -735,13 +735,26 @@ implementing them there would answer a query the differential harness has no ora
 expression's meaning, and both dialects take it natively — Postgres's `#>` accepts a `text[]`,
 SQLite's `json_extract` a string — so the feature fits inside invariant 2 rather than bending it.
 
-Three things a path filter refuses, each because answering would be silently wrong rather than
+**On Postgres a path segment is a string, and an array index is spelled as one** —
+`{ path: ["items", "0"] }`, not `["items", 0]`. `#>` takes a `text[]`, so both reach the same
+element; Prisma's generated `path` is `string[]` and its client refuses a number, so gemi refuses
+one too rather than answering a query the differential harness has no oracle for. On SQLite the
+index lives inside the JSONPath string, `"$.items[0]"`.
+
+Four things a path filter refuses, each because answering would be silently wrong rather than
 merely unsupported:
 
 - **The null sentinels.** `{ path: […], equals: DbNull }` is refused. An extracted value
   cannot tell an absent key from a JSON `null` — `#>>` yields SQL NULL for both — so the
   distinction the sentinels exist to make is already gone by the time the comparison happens.
   Filter the column itself: `{ metadata: { equals: DbNull } }`.
+- **A bare `null`, under every operator**, for the same reason and one more. `= NULL` is NULL
+  rather than true, so `{ path: […], equals: null }` would run and match nothing; and under
+  `array_contains`, `x @> NULL` is NULL as well. Prisma *does* answer this one — it extracts with
+  `#>` and compares as `jsonb`, so it reads `null` as the JSON value and returns the rows holding
+  one, the same answer as `equals: JsonNull`. gemi cannot follow it there without a second,
+  Postgres-only implementation of every operator, so it names the limitation instead. A `null`
+  *inside* an `array_contains` document is an ordinary value and still compiles.
 - **A non-string operand to `string_contains` / `string_starts_with` / `string_ends_with`**, for
   the same reason the scalar `contains` refuses one: the pattern would become `%null%`, which runs
   and returns the wrong rows.
@@ -752,13 +765,19 @@ merely unsupported:
 An empty path — `[]` or `""` — is refused on both dialects. On Postgres it would extract the whole
 document, which is a filter on the column rather than on a path.
 
+**An `undefined` operand is an absent one**, as it is everywhere else in `where`:
+`{ path: ["a"], equals: undefined }` is the same query as `{ path: ["a"] }`, and gets the same
+refusal — a path needs a filter beside it. That is Prisma's answer to both, and it is what lets a
+filter assembled from a form or a query string carry an unfilled operator without silently
+compiling to a predicate no row can satisfy.
+
 **What the type checks, and what it leaves to run time.** The path filter is typed: `path` takes
 either dialect's grammar, the ten operators are the ones above, and their operand types are the
-ones the compiler will compile. A misspelled operator, a `path` that is not one, a non-string under
-`string_contains`, a sentinel at a path and a `null` at a path are all compile errors. The type
-carries no dialect — the generated artifact does not know which database it will be pointed at —
-so the table above is offered in full on both and the wrong half is refused at run time, naming the
-dialect. The empty path is refused at run time too.
+ones the compiler will compile. A misspelled operator, a `path` that is not one, a numeric path
+segment, a non-string under `string_contains`, a sentinel at a path and a `null` at a path are all
+compile errors. The type carries no dialect — the generated artifact does not know which database
+it will be pointed at — so the table above is offered in full on both and the wrong half is refused
+at run time, naming the dialect. The empty path is refused at run time too.
 
 **An object in a `Json` column's `where` is a filter, never a document.** `{ metadata: { a: 1 } }`
 does not ask for the document `{ a: 1 }` — it asks for the operator `a`, which does not exist, and

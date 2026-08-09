@@ -974,8 +974,23 @@ function compileJsonFilter(
   assertPathShape(schema, field, filter.path, context);
 
   const path: Binder = (args) => locate(args)?.path;
+  // **An `undefined` operand is an absent one**, which is the rule the scalar
+  // operator loop already follows (`if (operand === undefined …) continue`) and
+  // the rule the dispatch above follows for `path` itself
+  // (`filter.path !== undefined`). Building `applied` from `Object.keys` alone
+  // made this branch the one place that broke it: a filter assembled from a
+  // form or a query string carries `equals: undefined` for the field nobody
+  // filled in, and that compiled to `= NULL` — a predicate no row can satisfy —
+  // where the same query with the key simply omitted got the bare-path refusal
+  // below.
+  //
+  // Prisma answers both spellings identically. Measured on a generated 6.19.2
+  // client against Postgres: `{ path: ["a"], equals: undefined }` and
+  // `{ path: ["a"] }` both raise P2019 *"A JSON path cannot be set without a
+  // scalar filter."*, and `{ path: ["a"], equals: 1, gt: undefined }` compiles
+  // the `equals` alone.
   const applied = Object.keys(filter)
-    .filter((key) => key !== "path")
+    .filter((key) => key !== "path" && filter[key] !== undefined)
     .sort();
 
   if (applied.length === 0) {
@@ -1078,8 +1093,8 @@ function compileJsonFilter(
 /**
  * What each JSON filter will accept as its operand.
  *
- * Two defects, both of them the shape the scalar path is already careful about
- * and both silent:
+ * Three defects, all of them the shape the scalar path is already careful about
+ * and all silent:
  *
  *   - **The string filters had no non-string guard.** Their scalar siblings
  *     refuse one, with a comment explaining that `String(null)` makes the
@@ -1092,14 +1107,19 @@ function compileJsonFilter(
  *     binds `String(raw)` because `#>>` yields text, so `equals: { b: 1 }` bound
  *     the string `"[object Object]"` and matched nothing.
  *
- * The second is a **refusal rather than an implementation**, deliberately.
+ *   - **`null` fell between the two.** The string branch refuses a non-string
+ *     and the object branch tests `operand !== null` first, so `equals: null`
+ *     reached the binder and compiled to `= NULL` — see the guard below.
+ *
+ * The last two are a **refusal rather than an implementation**, deliberately.
  * Prisma does accept an object or an array there, and answering it properly
  * means the `#>` + `::jsonb` form `array_contains` already uses — which is
  * Postgres-only, so implementing it would give SQLite either a second wrong
  * answer or a silent divergence. Refusing names the limitation on both
  * dialects, which is what this file does everywhere else it cannot answer.
- * `array_contains` is exempt because containment is precisely the operator that
- * takes a document.
+ * `array_contains` is exempt from the object rule because containment is
+ * precisely the operator that takes a document — but not from the `null` one,
+ * because a bound SQL NULL is not a JSON `null` on either side of `@>`.
  */
 function assertJsonOperand(
   key: string,
@@ -1125,11 +1145,54 @@ function assertJsonOperand(
     );
   }
 
+  // **`null` is refused under every path operator, and it is a refusal rather
+  // than a gap.**
+  //
+  // Measured on a generated 6.19.2 client against Postgres, with query-event
+  // logging and the rows read back: Prisma extracts with `#>` and compares as
+  // `jsonb`, so `{ path: ["a"], equals: null }` asks for the JSON value `null`
+  // and returns the rows that hold one — the same SQL and the same rows as
+  // `equals: Prisma.JsonNull`. gemi extracts with `#>>`, which yields *text*,
+  // and NULL for an absent key and for a JSON null alike. That collapse is
+  // exactly why the sentinels are refused a few lines above, and it leaves this
+  // operand nothing to mean.
+  //
+  // Left alone it reached the binder and compiled to `("metadata" #>> $1) = $2`
+  // bound to NULL — `= NULL` is NULL rather than true on both dialects, so the
+  // query ran, raised nothing, and matched no row where Prisma matched some.
+  // The `string_contains` guard above names that failure in this file's own
+  // words, "runs and returns the wrong rows"; only the arithmetic differs.
+  //
+  // `array_contains` is included rather than exempt. It takes the `#>` form, so
+  // the collapse argument does not apply to it — but `jsonArrayContains` binds
+  // `null` as SQL NULL, and `x @> NULL` is NULL too. Prisma binds it as the
+  // JSON value and runs a real containment test.
+  //
+  // Answering any of them properly means the `#> … ::jsonb` form on Postgres
+  // and `json_type` on SQLite, which is a second implementation of the same
+  // operator per dialect rather than a guard — the same reason the object
+  // operand below is refused instead of compiled.
+  if (operand === null) {
+    throw new InvalidArgumentError(
+      `where.${field.name}.${key}`,
+      schema.name,
+      context.operation,
+      `null cannot be compared through a JSON path: the extraction yields ` +
+        `SQL NULL for an absent key and for a JSON null alike, and the ` +
+        `comparison against it is NULL rather than true — the query would run ` +
+        `and match nothing. Prisma reads it as the JSON value null and does ` +
+        `answer it; gemi does not yet. Filter the column itself — ` +
+        `{ ${field.name}: { equals: Prisma.JsonNull } } — or test the path ` +
+        `against the value you mean.`,
+    );
+  }
+
   if (key === "array_contains" || stringly) return;
 
   // `equals`, `not`, and the four numeric comparisons all compare an extracted
-  // scalar against one bound value.
-  if (operand !== null && typeof operand === "object") {
+  // scalar against one bound value. No `!== null` here: `typeof null` is
+  // `"object"`, and the guard above has already refused it with its own reason.
+  if (typeof operand === "object") {
     throw new UnsupportedQueryError(
       `where.${field.name}.${key}`,
       schema.name,
@@ -1209,7 +1272,7 @@ function jsonComparison(
   );
 }
 
-/** The path is a string on SQLite and an array of keys on Postgres. */
+/** The path is a string on SQLite and an array of string keys on Postgres. */
 function assertPathShape(
   schema: ModelSchema,
   field: FieldSchema,
@@ -1246,9 +1309,41 @@ function assertPathShape(
 
   if (got === wanted) {
     if (wanted !== "array") return;
-    if ((path as unknown[]).every((part) => typeof part === "string" || typeof part === "number")) {
-      return;
-    }
+
+    // **Every segment is a string, and the number that used to be allowed here
+    // was a superset of the oracle.** Prisma's generated `path` on Postgres is
+    // `string[]`, and its client refuses a number at run time as well as at
+    // compile time — measured on 6.19.2: `path: ["items", 0]` answers
+    // *"Argument `path`: Invalid value provided. Expected String, provided
+    // Int."* before any SQL is built.
+    //
+    // Refused rather than kept, because this file already states the rule that
+    // decides it: answering a query the oracle cannot express is "precisely
+    // where a differential test stops being able to check anything"
+    // (`compileJsonFilter`'s docblock, on the SQLite operators). Nothing is
+    // lost — `["items", "0"]` reaches the same array element, since `#>` takes
+    // a `text[]` and the segment arrives as text either way. Measured: both
+    // spellings bind `["items", "0"]` and return the same row on Prisma, and
+    // gemi's binder already stringifies through the `text[]` cast.
+    //
+    // Its own sentence rather than the grammar message below, which would tell
+    // a caller who wrote an array to write an array.
+    const offending = (path as unknown[]).findIndex(
+      (part) => typeof part !== "string",
+    );
+    if (offending === -1) return;
+
+    const part = (path as unknown[])[offending];
+    throw new UnsupportedQueryError(
+      `${field.name}.path`,
+      schema.name,
+      context.operation,
+      `A JSON path is an array of strings, and path[${offending}] is ` +
+        `${part === null ? "null" : `a ${typeof part}`}. An array index is a ` +
+        `key too — write ["items", "0"] rather than ["items", 0]; it reaches ` +
+        `the same element, because ${dialect.name} takes the path as text. ` +
+        `Prisma's path is string[] and its client refuses a number here too.`,
+    );
   }
 
   throw new UnsupportedQueryError(
