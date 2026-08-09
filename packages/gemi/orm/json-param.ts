@@ -3,6 +3,7 @@ import {
   fromParamSegments,
   paramSegments,
 } from "./compile/fragment";
+import type { SqlDialect } from "./dialect";
 import { InvalidArgumentError } from "./errors";
 import { jsonNullKind } from "./json-null";
 
@@ -90,7 +91,34 @@ import { jsonNullKind } from "./json-null";
  * Schema-qualified spellings (`$1::pg_catalog.jsonb`) and `jsonb[]` are
  * deliberately not matched. The first is not what anyone writes and the second
  * is a different operand — an array of documents, where serialising the JS
- * array to one JSON text would be wrong.
+ * array to one JSON text would be wrong. Nor is a cast on an *expression
+ * around* the placeholder: `(${v})::jsonb` and `cast(coalesce(${v}) as jsonb)`
+ * read as an untyped parameter and still mis-store. Detection is textual, and
+ * parsing parentheses to reach a spelling nobody writes buys less than it
+ * costs; `docs/orm.md` says so where a reader looking for the covered set will
+ * find it.
+ *
+ * ## Postgres only, and that is a dialect capability rather than a regex's luck
+ *
+ * The first version of this ran on both dialects, on the argument that `::` is
+ * not SQLite syntax and SQLite has no `jsonb`, so nothing could match a
+ * statement SQLite could run. **The first half of that is true and the second
+ * is not.** SQLite's `CAST` accepts an arbitrary type name, so `cast(? as
+ * json)` parses and runs there — and means something else entirely, since a
+ * type name matching none of INT/CHAR/CLOB/TEXT/BLOB/REAL/FLOA/DOUB gets
+ * NUMERIC affinity:
+ *
+ *   select cast(? as jsonb)                           -> 0
+ *   select json_set('{"a":1}','$.b', cast(? as json))  -> {"a":1,"b":2}   (the cast
+ *                                                        is what makes it the number
+ *                                                        2 rather than the string)
+ *   select cast(? as text)::json                       -> unrecognized token: ":"
+ *
+ * So the rewrite would have turned a working SQLite statement into a syntax
+ * error. The gate is {@link SqlDialect.typesParametersFromStatement}, asked
+ * rather than matched on `dialect.name`, because "cannot fire" was exactly the
+ * kind of claim that should have been a capability someone can typecheck
+ * instead of a property of two regular expressions.
  */
 
 /**
@@ -110,7 +138,19 @@ import { jsonNullKind } from "./json-null";
  */
 const OPERATOR_CAST = /^\s*::\s*(?:text\s*::\s*)?(jsonb|json)\b(?!\s*\[)/i;
 
-/** The same cast written as a function: `cast($1 as jsonb)`. */
+/**
+ * The same cast written as a function: `cast($1 as jsonb)`.
+ *
+ * **This is the branch that is reachable on SQLite, and the reason the whole
+ * function is gated on a dialect capability rather than on the shape of these
+ * two patterns.** `::` is Postgres-only *syntax* — SQLite's parser rejects it,
+ * so `OPERATOR_CAST` genuinely cannot fire on a statement SQLite could run.
+ * `cast(… as …)` is not: SQLite takes any type name there, `cast(? as json)`
+ * parses and runs, and the rewrite this pairs with emits `as text)::json`,
+ * which SQLite refuses. "SQLite has no jsonb type" is a claim about semantics;
+ * what matters here is what the parser accepts. See
+ * {@link SqlDialect.typesParametersFromStatement}.
+ */
 const FUNCTION_CAST = /^\s*as\s+(jsonb|json)\s*\)/i;
 
 /**
@@ -121,17 +161,30 @@ const FUNCTION_CAST = /^\s*as\s+(jsonb|json)\s*\)/i;
  */
 const CAST_OPEN = /\bcast\s*\(\s*$/i;
 
+/** The answer on a dialect that is gated out, before any set is built. */
+const EMPTY: ReadonlySet<number> = new Set<number>();
+
 /**
  * The fragment with every JSON-cast parameter retyped through `text`, and the
  * positions of the parameters that were.
  *
  * Returns the fragment unchanged, and an empty set, when there is no such cast
- * — which is every statement in the compiler and nearly every raw one.
+ * — which is every statement in the compiler and nearly every raw one — and on
+ * any dialect that does not type a parameter from the statement, which today is
+ * SQLite. See the header: there the correction is unnecessary, the cast means
+ * NUMERIC affinity rather than JSON, and the rewrite does not parse.
  */
-export function retypeJsonParameters(fragment: Fragment): {
+export function retypeJsonParameters(
+  fragment: Fragment,
+  dialect: SqlDialect,
+): {
   fragment: Fragment;
   jsonParameters: ReadonlySet<number>;
 } {
+  if (!dialect.typesParametersFromStatement) {
+    return { fragment, jsonParameters: EMPTY };
+  }
+
   const segments = paramSegments(fragment);
   const jsonParameters = new Set<number>();
   let rewritten: string[] | undefined;
@@ -182,7 +235,10 @@ export function retypeJsonParameters(fragment: Fragment): {
 export function jsonTextParameter(value: unknown, operation: string): unknown {
   // SQL NULL rather than the JSON value `null`, the same reading `fieldParam`
   // takes for a nullable `Json` column: an absent value is not a stored null.
-  // Prisma binds a JS `null` at `$1::jsonb` to SQL NULL too — measured.
+  // Prisma binds a JS `null` at `$1::jsonb` to SQL NULL too — which follows
+  // from the parameter being declared `text` (the `values ($1)` error text in
+  // the table above is what shows that it is), since `NULL::text::jsonb` is SQL
+  // NULL. Reasoned, not measured: it is the one row of that table nobody ran.
   if (value === null || value === undefined) return null;
 
   // Prisma's null sentinels, which `JSON.stringify` turns into `{}` — #259's

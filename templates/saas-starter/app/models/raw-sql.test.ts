@@ -299,8 +299,15 @@ function suite(label: string, url?: string) {
 
     /**
      * **A `::jsonb` cast in a raw statement, which is where a Prisma port goes
-     * wrong silently.** Postgres only: SQLite has no `jsonb` type and no `::`
-     * operator, so these statements are not expressible there at all.
+     * wrong silently.** Postgres only — but for a narrower reason than "SQLite
+     * cannot say this". `::` is Postgres-only *syntax* and SQLite's parser
+     * rejects it; `cast(x as jsonb)`, which the `test.each` below also
+     * exercises, parses and runs on SQLite perfectly well and simply means
+     * something else there (any type name is accepted, and one matching none of
+     * INT/CHAR/CLOB/TEXT/BLOB/REAL/FLOA/DOUB gets NUMERIC affinity, so
+     * `cast('{"a":1}' as json)` is `0`). The retyping is therefore gated on
+     * `SqlDialect.typesParametersFromStatement` rather than left to the
+     * patterns; the SQLite half of that is pinned below, in this same suite.
      *
      * The divergence is the parameter's type rather than the cast's. Prisma's
      * `$executeRaw` sends a JS string as `text` and lets Postgres parse it; Bun
@@ -439,6 +446,45 @@ function suite(label: string, url?: string) {
       );
 
       expect(rows.map((row) => row.email)).toEqual(["ada@x.test"]);
+    });
+
+    /**
+     * **The other side of the gate, and the reason there is one.** The first
+     * version of the retyping ran on every dialect, on the argument that
+     * nothing it matches could appear in a statement SQLite can run. That is
+     * true of `::` and false of `cast(… as …)`: SQLite accepts any type name
+     * there, so this statement runs today — and the rewrite would have emitted
+     * `cast(? as text)::jsonb`, which SQLite answers with *unrecognized token:
+     * ":"*. A working raw statement would have become a syntax error.
+     *
+     * The returned values are the second half, and they are why leaving it
+     * alone is right rather than merely harmless. A type name matching none of
+     * INT/CHAR/CLOB/TEXT/BLOB/REAL/FLOA/DOUB gets NUMERIC affinity, so this is
+     * a numeric coercion and not a JSON parse at all: `"2"` becomes the number
+     * `2` and a whole document becomes `0`. There is no mis-store here to
+     * correct, and serialising for it would invent one.
+     *
+     * Run against a real SQLite database rather than asserted as emitted text,
+     * because the claim is about what SQLite's *parser* accepts — and the
+     * emitted text is exactly what the first version got wrong.
+     */
+    test("cast( ... as jsonb) still runs, untouched — sqlite", async () => {
+      if (url) return;
+
+      expect(
+        (await DB.query<{ v: unknown }>(sql`select cast(${"2"} as jsonb) as v`))[0]
+          ?.v,
+      ).toBe(2);
+
+      // NUMERIC affinity, not a JSON parse. Retyping this would have been a
+      // wrong answer even if `::` had parsed here.
+      expect(
+        (
+          await DB.query<{ v: unknown }>(
+            sql`select cast(${`{"a":1}`} as json) as v`,
+          )
+        )[0]?.v,
+      ).toBe(0);
     });
 
     // --- the ambient transaction -----------------------------------------

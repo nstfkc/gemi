@@ -306,14 +306,11 @@ describe("values with no column type behind them", () => {
 describe("a parameter the caller cast to json", () => {
   const document = `{"version":1}`;
 
-  test("the placeholder is retyped through text, on both dialects", () => {
+  test("the placeholder is retyped through text", () => {
     const fragment = sql`update "Job" set "payload" = "payload" || ${document}::jsonb where "id" = ${7}`;
 
     expect(render(fragment, postgres).text).toBe(
       `update "Job" set "payload" = "payload" || $1::text::jsonb where "id" = $2`,
-    );
-    expect(render(fragment, sqlite).text).toBe(
-      `update "Job" set "payload" = "payload" || ?::text::jsonb where "id" = ?`,
     );
   });
 
@@ -333,7 +330,6 @@ describe("a parameter the caller cast to json", () => {
     ["undefined stays SQL NULL", undefined, null],
   ])("%s", (_label, value, expected) => {
     expect(render(sql`${value}::jsonb`, postgres).values).toEqual([expected]);
-    expect(render(sql`${value}::jsonb`, sqlite).values).toEqual([expected]);
   });
 
   /**
@@ -395,16 +391,64 @@ describe("a parameter the caller cast to json", () => {
     expect(render(fragment).values).toEqual(values);
   });
 
+  /**
+   * **Postgres only, and the function spelling is why that had to become a
+   * dialect capability rather than a property of the patterns.**
+   *
+   * The first version of this ran on both dialects, arguing that `::` is not
+   * SQLite syntax and SQLite has no `jsonb`, so nothing could match a statement
+   * SQLite could run. Half right. `::` really does not parse there — which is
+   * why the `::jsonb` row below costs nothing either way and could never have
+   * caught this. But SQLite's `CAST` accepts an *arbitrary* type name, so
+   * `cast(? as json)` parses, runs, and means NUMERIC affinity; measured
+   * through `bun:sqlite` (Bun 1.3.14):
+   *
+   *   select cast(? as jsonb)                            -> 0
+   *   select json_set('{"a":1}','$.b', cast(? as json))   -> {"a":1,"b":2}
+   *   select cast(? as text)::json                        -> unrecognized token: ":"
+   *
+   * So the rewrite turned a working SQLite statement into a syntax error. The
+   * function-cast row is the one that pins the gate; `raw-sql.test.ts` runs the
+   * same statement against a real SQLite database, because what a parser
+   * accepts is not a claim emitted text can settle.
+   */
+  test.each([
+    ["the function spelling", sql`cast(${document} as jsonb)`, `cast(? as jsonb)`],
+    ["the operator spelling", sql`${document}::jsonb`, `?::jsonb`],
+    ["json rather than jsonb", sql`cast(${document} as json)`, `cast(? as json)`],
+  ])("%s is emitted unchanged on sqlite", (_label, fragment, text) => {
+    expect(render(fragment, sqlite).text).toBe(text);
+  });
+
+  /**
+   * ...and the value is not serialised either, which is the half a text
+   * assertion cannot see. `cast(x as json)` on SQLite is a numeric coercion,
+   * not a JSON parse, so serialising for it would be a wrong answer rather than
+   * a redundant one.
+   */
+  test("the value is not serialised on sqlite", () => {
+    expect(render(sql`cast(${document} as jsonb)`, sqlite).values).toEqual([
+      document,
+    ]);
+    expect(render(sql`${42}::jsonb`, sqlite).values).toEqual([42]);
+  });
+
+  /**
+   * The neighbour is the assertion: a `Date` still reaches `encodeUntyped`,
+   * which passes one through on Postgres. Were its index in the json set it
+   * would arrive as the ISO string `JSON.stringify` gives a `Date`, so the row
+   * distinguishes "only the cast parameter" from "every parameter".
+   */
   test("only the cast parameter is affected", () => {
     const at = new Date(1_700_000_000_000);
     const { text, values } = render(
       sql`update "Job" set "payload" = ${{ a: 1 }}::jsonb where "at" > ${at}`,
-      sqlite,
     );
 
-    expect(text).toBe(`update "Job" set "payload" = ?::text::jsonb where "at" > ?`);
-    // The second parameter still goes through `encodeUntyped`.
-    expect(values).toEqual([`{"a":1}`, at.getTime()]);
+    expect(text).toBe(
+      `update "Job" set "payload" = $1::text::jsonb where "at" > $2`,
+    );
+    expect(values).toEqual([`{"a":1}`, at]);
   });
 
   /**

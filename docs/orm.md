@@ -2045,6 +2045,16 @@ So gemi reads the cast. Where a parameter carries one, the placeholder is retype
 what a `Json` *column* has always compiled to. Recognised: `::jsonb`, `::json`, `::text::jsonb`,
 `cast(… as jsonb)`, in any case and with whitespace anywhere Postgres allows it.
 
+**On Postgres only, including the `cast(…)` spelling.** SQLite has no `jsonb` type and no `::`
+operator, so the mis-store cannot arise there — but `cast(x as json)` *does* parse and run on SQLite,
+where it means something else entirely: SQLite accepts any type name in a `CAST` and applies affinity
+rules, so `cast('{"a":1}' as json)` is `0`. gemi therefore leaves such a statement exactly as you
+wrote it on SQLite — retyping it would rewrite working SQL into a syntax error, and serialise for a
+cast that never meant JSON. There is no portable spelling to reach for: the two dialects do not share
+a JSON grammar at all, which is the same reason `path:` takes an array on Postgres and a `$.a.b`
+string on SQLite for the ORM's own filters. A raw statement that touches JSON is a per-dialect
+statement.
+
 At such a parameter, **a string is JSON text** — `${'{"a":1}'}::jsonb` stores the object — where a
 `Json` column takes the same string as a JSON string value. That is not an inconsistency to
 work around: it is which of the two Prisma does on each path. Pass the serialisation you mean:
@@ -2064,8 +2074,10 @@ same fault and there is nothing to read — no cast, no column type. It is also 
 cannot be carrying, because Prisma *refuses* it (`column "payload" is of type jsonb but expression is
 of type text`); write the cast. Schema-qualified spellings (`$1::pg_catalog.jsonb`) and `jsonb[]` are
 deliberately left alone — the second is an array of documents, and serialising the JS array into one
-would be wrong. `DB.sql`, Bun's own tagged template, is untouched by all of this: it binds through
-the driver directly, so `::text::jsonb` is yours to write there.
+would be wrong. A cast on an expression **around** the placeholder rather than on the placeholder
+itself is not read either — `(${'{"a":1}'})::jsonb` and `cast(coalesce(${v}) as jsonb)` still
+mis-store, so put the cast on the placeholder. `DB.sql`, Bun's own tagged template, is untouched by
+all of this: it binds through the driver directly, so `::text::jsonb` is yours to write there.
 
 ### The rowcount is a primitive, not a diagnostic
 

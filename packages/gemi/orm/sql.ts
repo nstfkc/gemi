@@ -364,7 +364,13 @@ export function renderFragment(
   // as a jsonb *string* where Prisma stored the object. See `json-param.ts` —
   // the mechanism, the measurements, and why a string is not serialised here
   // while `fieldParam` serialises one.
-  const json = retypeJsonParameters(fragment);
+  //
+  // The dialect is passed because this is not universal, and the reason is
+  // narrower than it looks: `::` is Postgres-only syntax, but `cast(? as json)`
+  // *parses and runs* on SQLite, where it means NUMERIC affinity — so retyping
+  // it would rewrite a working statement into `cast(? as text)::json`, which
+  // SQLite cannot parse. `typesParametersFromStatement` is false there.
+  const json = retypeJsonParameters(fragment, dialect);
 
   const rendered = render(json.fragment, dialect, { model: "DB", operation });
   return {

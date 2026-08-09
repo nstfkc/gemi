@@ -34,6 +34,11 @@ export class PostgresDialect implements SqlDialect {
   // it the driver's error names neither the model nor the cause.
   readonly maxBoundParameters = 65535;
 
+  // The server describes the statement and Bun encodes to the type it is told,
+  // which is why a `::jsonb` on the placeholder changes what a JS string means.
+  // See `json-param.ts`.
+  readonly typesParametersFromStatement = true;
+
   quoteIdent(name: string): string {
     // See the SQLite implementation: NUL is the parameter sentinel in
     // compile/fragment.ts, so it is the one character that could shift a
