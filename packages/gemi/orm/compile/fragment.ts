@@ -96,6 +96,34 @@ export function param(binder: Binder, cast = ""): Fragment {
   return { text: PARAM_MARKER + cast, binders: [binder] };
 }
 
+/**
+ * A fragment's text cut at every parameter: `segments[i]` is the text that
+ * precedes parameter `i`, and `segments[i + 1]` the text that follows it. The
+ * inverse is `fromParamSegments`.
+ *
+ * It exists so that one caller — `renderFragment` — can read *what the author
+ * wrote next to a parameter* before placeholders are assigned. A `::jsonb` a
+ * caller wrote onto their own placeholder is the only thing that says a raw
+ * parameter is JSON, and it is only readable here, in the marker's own
+ * coordinates; after `render` the text holds `$1` and the segment boundaries
+ * are gone.
+ *
+ * Nothing in the compiler uses this. A plan's casts come from the dialect and
+ * are already correct, and re-deriving them from text would be a second,
+ * weaker source for something the schema already answers.
+ */
+export function paramSegments(fragment: Fragment): string[] {
+  return fragment.text.split(PARAM_MARKER);
+}
+
+/** `paramSegments` reversed: the segments woven back around the markers. */
+export function fromParamSegments(
+  segments: readonly string[],
+  binders: Binder[],
+): Fragment {
+  return { text: segments.join(PARAM_MARKER), binders };
+}
+
 export function concat(...parts: Fragment[]): Fragment {
   return joinFragments(parts, "");
 }

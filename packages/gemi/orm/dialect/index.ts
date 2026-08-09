@@ -85,6 +85,36 @@ export interface SqlDialect {
    */
   readonly maxBoundParameters: number;
 
+  /**
+   * Whether the **statement** decides a parameter's type, so a cast the caller
+   * wrote onto their own placeholder changes how the driver encodes the value.
+   *
+   * True on Postgres: the server describes the statement, the client is told
+   * the parameter is `jsonb`, and Bun then JSON-*encodes* whatever JS value it
+   * was handed. That is the whole of #376 — the reason `json-param.ts` retypes
+   * such a parameter through `text` and serialises it to match.
+   *
+   * False on SQLite, and not merely because the correction is unnecessary
+   * there: it would be **wrong**, and it would not parse. A parameter's type is
+   * the bound value's, and `cast(x as json)` is not a JSON cast at all — SQLite
+   * takes any type name and applies affinity rules, and a name containing none
+   * of INT/CHAR/CLOB/TEXT/BLOB/REAL/FLOA/DOUB gets NUMERIC affinity, so
+   * `cast('{"a":1}' as json)` is `0`. Measured through `bun:sqlite` (Bun
+   * 1.3.14):
+   *
+   *   select cast(? as jsonb)                            -> 0        (runs)
+   *   select json_set('{"a":1}','$.b', cast(? as json))   -> {"a":1,"b":2}
+   *   select cast(? as text)::json                        -> ERROR unrecognized token: ":"
+   *
+   * So the retyping's rewrite — `cast(? as text)::json` — turns a statement
+   * that runs on SQLite today into a syntax error. `::` genuinely cannot fire
+   * there (it does not parse), but `cast(… as …)` is not Postgres-only syntax,
+   * and "SQLite has no jsonb type" is a claim about semantics rather than about
+   * what the parser accepts. Asking here rather than matching on `name` is what
+   * makes that a fact `tsc` and a test can hold.
+   */
+  readonly typesParametersFromStatement: boolean;
+
   /** Quote a table or column name. Only ever called with names from the schema. */
   quoteIdent(name: string): string;
 
@@ -134,6 +164,11 @@ export interface SqlDialect {
    * plain object is *not* JSON-encoded here: the compiler only knows to do that
    * because a field says `Json`, and guessing from the value would turn a
    * mistyped parameter into a successfully-written string.
+   *
+   * The exception is a parameter the *caller* cast to `json`/`jsonb`, which is
+   * a declared type by another route and does not reach this at all — see
+   * `json-param.ts`. It is still not a guess from the value: the statement says
+   * so.
    */
   encodeUntyped(value: unknown): unknown;
 

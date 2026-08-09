@@ -3,6 +3,7 @@ import { describe, expect, test } from "vitest";
 import { PostgresDialect } from "./dialect/postgres";
 import { SqliteDialect } from "./dialect/sqlite";
 import { ParameterLimitError, UnsupportedQueryError } from "./errors";
+import { AnyNull, DbNull, JsonNull } from "./json-null";
 import { empty, join, renderFragment, sql, unsafeSql } from "./sql";
 
 /**
@@ -288,6 +289,221 @@ describe("values with no column type behind them", () => {
   test("undefined becomes null rather than reaching the driver", () => {
     expect(render(sql`${undefined}`, sqlite).values).toEqual([null]);
     expect(render(sql`${undefined}`, postgres).values).toEqual([null]);
+  });
+});
+
+/**
+ * ...with the one exception: a cast the caller wrote is a declared type.
+ *
+ * The statement that made this necessary is byte-identical under Prisma's
+ * `$executeRaw` and under `DB.execute`, and did two different things — Prisma
+ * sends a string parameter as `text` and lets Postgres parse it, while Bun is
+ * told the parameter is `jsonb` and JSON-encodes the string, so the document is
+ * stored as a jsonb *string*. `payload || $1::jsonb` then appends it as an array
+ * element instead of merging. `json-param.ts` carries the measurements; these
+ * pin the emitted statement, which is where the fix lives.
+ */
+describe("a parameter the caller cast to json", () => {
+  const document = `{"version":1}`;
+
+  test("the placeholder is retyped through text", () => {
+    const fragment = sql`update "Job" set "payload" = "payload" || ${document}::jsonb where "id" = ${7}`;
+
+    expect(render(fragment, postgres).text).toBe(
+      `update "Job" set "payload" = "payload" || $1::text::jsonb where "id" = $2`,
+    );
+  });
+
+  /**
+   * The half a text assertion cannot see. `::text::jsonb` alone would still
+   * mis-store an object — Bun sends `[object Object]` for one bound to a `text`
+   * parameter — so the cast and the serialisation are one change, exactly as
+   * `fieldParam` treats them.
+   */
+  test.each([
+    ["a string is already JSON text", `{"a":1}`, `{"a":1}`],
+    ["an object is serialised", { a: 1 }, `{"a":1}`],
+    ["an array is serialised", [1, 2], `[1,2]`],
+    ["a number is serialised", 42, `42`],
+    ["a boolean is serialised", true, `true`],
+    ["null stays SQL NULL", null, null],
+    ["undefined stays SQL NULL", undefined, null],
+  ])("%s", (_label, value, expected) => {
+    expect(render(sql`${value}::jsonb`, postgres).values).toEqual([expected]);
+  });
+
+  /**
+   * A string is handed over as it arrived, where `fieldParam` serialises one —
+   * and that is which of the two Prisma does on each path, measured against
+   * 6.19.2 rather than reasoned about:
+   *
+   *   create({ data: { payload: '{"a":1}' } })      -> the jsonb string
+   *   $executeRaw`… values (${'{"a":1}'}::jsonb)`   -> the jsonb object
+   *
+   * The caller who wants the string writes the serialisation they mean.
+   */
+  test("a caller who wants the jsonb string serialises it themselves", () => {
+    expect(render(sql`${JSON.stringify(document)}::jsonb`).values).toEqual([
+      `"{\\"version\\":1}"`,
+    ]);
+  });
+
+  test.each([
+    ["spaces around the operator", sql`${document} :: jsonb`, `$1::text::jsonb`],
+    ["the type in capitals", sql`${document}::JSONB`, `$1::text::JSONB`],
+    ["json rather than jsonb", sql`${document}::json`, `$1::text::json`],
+    [
+      "the function spelling",
+      sql`cast(${document} as jsonb)`,
+      `cast($1 as text)::jsonb`,
+    ],
+    [
+      "the spelling that was already right",
+      sql`${document}::text::jsonb`,
+      `$1::text::jsonb`,
+    ],
+  ])("%s is recognised", (_label, fragment, text) => {
+    const rendered = render(fragment);
+    expect(rendered.text).toBe(text);
+    expect(rendered.values).toEqual([document]);
+  });
+
+  /**
+   * The `::text::jsonb` row above is the one worth stating twice: the cast is
+   * already correct and is left alone, but the *value* is still serialised, so
+   * the two spellings mean the same thing rather than one of them being a
+   * second trap.
+   */
+  test("an object at the already-correct spelling is serialised too", () => {
+    expect(render(sql`${{ a: 1 }}::text::jsonb`).values).toEqual([`{"a":1}`]);
+  });
+
+  test.each([
+    ["a cast to something else", sql`${document}::text`, [document]],
+    ["an array of documents", sql`${[document]}::jsonb[]`, [[document]]],
+    ["a jsonpath operand", sql`${document}::jsonpath`, [document]],
+    [
+      "`as jsonb)` with no cast( opening it",
+      sql`select ${document} as jsonb)`,
+      [document],
+    ],
+  ])("%s is left alone", (_label, fragment, values) => {
+    expect(render(fragment).values).toEqual(values);
+  });
+
+  /**
+   * **Postgres only, and the function spelling is why that had to become a
+   * dialect capability rather than a property of the patterns.**
+   *
+   * The first version of this ran on both dialects, arguing that `::` is not
+   * SQLite syntax and SQLite has no `jsonb`, so nothing could match a statement
+   * SQLite could run. Half right. `::` really does not parse there — which is
+   * why the `::jsonb` row below costs nothing either way and could never have
+   * caught this. But SQLite's `CAST` accepts an *arbitrary* type name, so
+   * `cast(? as json)` parses, runs, and means NUMERIC affinity; measured
+   * through `bun:sqlite` (Bun 1.3.14):
+   *
+   *   select cast(? as jsonb)                            -> 0
+   *   select json_set('{"a":1}','$.b', cast(? as json))   -> {"a":1,"b":2}
+   *   select cast(? as text)::json                        -> unrecognized token: ":"
+   *
+   * So the rewrite turned a working SQLite statement into a syntax error. The
+   * function-cast row is the one that pins the gate; `raw-sql.test.ts` runs the
+   * same statement against a real SQLite database, because what a parser
+   * accepts is not a claim emitted text can settle.
+   */
+  test.each([
+    ["the function spelling", sql`cast(${document} as jsonb)`, `cast(? as jsonb)`],
+    ["the operator spelling", sql`${document}::jsonb`, `?::jsonb`],
+    ["json rather than jsonb", sql`cast(${document} as json)`, `cast(? as json)`],
+  ])("%s is emitted unchanged on sqlite", (_label, fragment, text) => {
+    expect(render(fragment, sqlite).text).toBe(text);
+  });
+
+  /**
+   * ...and the value is not serialised either, which is the half a text
+   * assertion cannot see. `cast(x as json)` on SQLite is a numeric coercion,
+   * not a JSON parse, so serialising for it would be a wrong answer rather than
+   * a redundant one.
+   */
+  test("the value is not serialised on sqlite", () => {
+    expect(render(sql`cast(${document} as jsonb)`, sqlite).values).toEqual([
+      document,
+    ]);
+    expect(render(sql`${42}::jsonb`, sqlite).values).toEqual([42]);
+  });
+
+  /**
+   * The neighbour is the assertion: a `Date` still reaches `encodeUntyped`,
+   * which passes one through on Postgres. Were its index in the json set it
+   * would arrive as the ISO string `JSON.stringify` gives a `Date`, so the row
+   * distinguishes "only the cast parameter" from "every parameter".
+   */
+  test("only the cast parameter is affected", () => {
+    const at = new Date(1_700_000_000_000);
+    const { text, values } = render(
+      sql`update "Job" set "payload" = ${{ a: 1 }}::jsonb where "at" > ${at}`,
+    );
+
+    expect(text).toBe(
+      `update "Job" set "payload" = $1::text::jsonb where "at" > $2`,
+    );
+    expect(values).toEqual([`{"a":1}`, at]);
+  });
+
+  /**
+   * The cast is written by whoever assembles the *outer* statement, and the
+   * value comes from a fragment built somewhere else — so this cannot be
+   * decided where the value is interpolated. It is decided at render, over the
+   * assembled text, which is the only place both halves exist.
+   */
+  test("a nested fragment's parameter is retyped by the outer cast", () => {
+    const patch = sql`${{ a: 1 }}`;
+    const { text, values } = render(
+      sql`update "Job" set "payload" = "payload" || ${patch}::jsonb`,
+    );
+
+    expect(text).toBe(
+      `update "Job" set "payload" = "payload" || $1::text::jsonb`,
+    );
+    expect(values).toEqual([`{"a":1}`]);
+  });
+
+  test("two of them in one statement, each retyped", () => {
+    const { text, values } = render(
+      sql`select cast(${{ a: 1 }} as jsonb) || ${{ b: 2 }}::jsonb`,
+    );
+
+    expect(text).toBe(`select cast($1 as text)::jsonb || $2::text::jsonb`);
+    expect(values).toEqual([`{"a":1}`, `{"b":2}`]);
+  });
+
+  test.each([
+    ["a bigint, which has no JSON form", 1n],
+    ["a function", () => 1],
+    ["a symbol", Symbol("x")],
+  ])("%s is refused rather than bound", (_label, value) => {
+    expect(() => render(sql`${value}::jsonb`)).toThrow(UnsupportedQueryError);
+  });
+
+  test("a circular structure names the parameter rather than JSON.stringify", () => {
+    const cycle: any = {};
+    cycle.self = cycle;
+
+    expect(() => renderFragment(sql`${cycle}::jsonb`, postgres, "execute")).toThrow(
+      /DB\.execute/,
+    );
+  });
+
+  /**
+   * Prisma's null sentinels, which `JSON.stringify` turns into `{}` — the same
+   * mis-store `compile/cast.ts` handles for a typed column, reachable a second
+   * way now that a raw parameter can be JSON.
+   */
+  test("the null sentinels mean what they mean on a typed column", () => {
+    expect(render(sql`${DbNull}::jsonb`).values).toEqual([null]);
+    expect(render(sql`${JsonNull}::jsonb`).values).toEqual(["null"]);
+    expect(() => render(sql`${AnyNull}::jsonb`)).toThrow(UnsupportedQueryError);
   });
 });
 

@@ -34,6 +34,11 @@ export class PostgresDialect implements SqlDialect {
   // it the driver's error names neither the model nor the cause.
   readonly maxBoundParameters = 65535;
 
+  // The server describes the statement and Bun encodes to the type it is told,
+  // which is why a `::jsonb` on the placeholder changes what a JS string means.
+  // See `json-param.ts`.
+  readonly typesParametersFromStatement = true;
+
   quoteIdent(name: string): string {
     // See the SQLite implementation: NUL is the parameter sentinel in
     // compile/fragment.ts, so it is the one character that could shift a
@@ -494,6 +499,13 @@ export class PostgresDialect implements SqlDialect {
     // about. Keeping the two together in `fieldParam` means a site nobody
     // converted still binds raw and still fails loudly.
     //
+    // **The second row is also what a raw statement hits**, and there the cast
+    // is the caller's rather than the dialect's: `payload || $1::jsonb` is a
+    // Prisma port's spelling, and under Bun it appends the serialised text to an
+    // array instead of merging. `json-param.ts` retypes it, on the same
+    // reasoning and with the cast and the serialisation kept together for the
+    // same reason.
+    //
     return value;
   }
 
@@ -502,6 +514,9 @@ export class PostgresDialect implements SqlDialect {
   // declared type to be legitimate. `Date`, `boolean`, `bigint` and arrays all
   // bind natively, which is why a raw fragment is portable across the two
   // dialects even though only SQLite has to normalise anything.
+  //
+  // A parameter the caller cast to `json`/`jsonb` never arrives here: it has a
+  // declared type after all, and `renderFragment` binds it as JSON text.
   encodeUntyped(value: unknown): unknown {
     return value;
   }

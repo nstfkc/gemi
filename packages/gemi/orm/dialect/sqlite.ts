@@ -74,6 +74,13 @@ export class SqliteDialect implements SqlDialect {
   // safe, which is the direction that matters for a guard.
   readonly maxBoundParameters = 32766;
 
+  // A parameter's type is the bound value's, and `cast(x as json)` is NUMERIC
+  // affinity rather than a JSON cast — `cast('{"a":1}' as json)` is `0`. So
+  // there is no #376 mis-store to correct here, and correcting one anyway would
+  // emit `cast(? as text)::json`, which SQLite refuses to parse. Measured with
+  // `bun:sqlite`; the table is on `SqlDialect.typesParametersFromStatement`.
+  readonly typesParametersFromStatement = false;
+
   quoteIdent(name: string): string {
     // NUL is the parameter sentinel in compile/fragment.ts, so it is the one
     // character that could shift a placeholder's position rather than merely

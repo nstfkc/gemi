@@ -87,4 +87,40 @@ describe("divergences the source knows about are documented", () => {
 
     expect(sources.some((source) => source.includes("KNOWN DIVERGENCE"))).toBe(true);
   });
+
+  /**
+   * The third of the kind, and the only one gemi *fixed* rather than recorded —
+   * which is exactly why the page still has to say it.
+   *
+   * `$1::jsonb` bound a JS string as a jsonb **string** under Bun where Prisma
+   * bound the parsed document, so a byte-identical raw statement changed meaning
+   * on a port. `json-param.ts` retypes the parameter through `text`, and a
+   * reader who does not know that will write `${JSON.stringify(v)}::jsonb`
+   * against `DB.sql` — Bun's own tag, which this does not reach — or read the
+   * two paths' treatment of a string as a bug. The fix is not self-describing
+   * from the call site, so the page carries it.
+   */
+  test("the page tells a porter what a raw ::jsonb parameter does", () => {
+    expect(DOC).toMatch(/###\s+A `::jsonb` cast you write types the parameter as `text`/);
+
+    const section = DOC.slice(DOC.indexOf("### A `::jsonb` cast you write"));
+    // The three things a porter cannot recover from the call site: the spelling
+    // that fixes it, the operator whose meaning silently changed, and the one
+    // shape left uncovered.
+    expect(section).toMatch(/\$1::text::jsonb/);
+    expect(section).toMatch(/array\s*\n?\s*concatenation, not a merge/);
+    expect(section).toMatch(/bare `\$1`/);
+  });
+
+  test("the source the section is derived from is still there", () => {
+    const source = readFileSync(
+      join(ROOT, "packages/gemi/orm/json-param.ts"),
+      "utf8",
+    );
+
+    // The measurement, not the prose: if the table goes, the page above is
+    // describing driver behaviour that nothing in the repository records.
+    expect(source).toMatch(/prisma\s+bun/i);
+    expect(source).toMatch(/\$1::text::jsonb/);
+  });
 });
