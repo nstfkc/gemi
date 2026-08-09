@@ -10,6 +10,8 @@ import {
   AccountModel,
   LedgerModel,
   LedgerEntryModel,
+  LedgerNoteModel,
+  LedgerSealModel,
   MagicLinkTokenModel,
   MembershipModel,
   OrganizationModel,
@@ -31,6 +33,8 @@ assertSchemaArtifactVersion(ARTIFACT_VERSION);
 register("Account", AccountModel);
 register("Ledger", LedgerModel);
 register("LedgerEntry", LedgerEntryModel);
+register("LedgerNote", LedgerNoteModel);
+register("LedgerSeal", LedgerSealModel);
 register("MagicLinkToken", MagicLinkTokenModel);
 register("Membership", MembershipModel);
 register("Organization", OrganizationModel);

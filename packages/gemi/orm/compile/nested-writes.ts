@@ -245,12 +245,62 @@ export function planNestedWrites(
     keyFields: [],
   };
 
+  /** Which relation contributed each foreign-key column, for the guard below. */
+  const contributedBy = new Map<string, string>();
+
   for (const key of entries) {
     const relation = schema.relations[key];
     const node = (data as Record<string, unknown>)[key];
     const locate = (args: any) => locateData(args)?.[key];
+    const before = planning.contributions.length;
 
     planOne(schema, relation, node, operation, locate, planning, dialect);
+
+    // **Two relations that share a foreign-key column are refused by name**
+    // (#271). A composite relation joins on *n* columns and nothing stops two
+    // of them from sharing one — it is the tenant-scoped shape this whole
+    // change is about:
+    //
+    //     ledger Ledger @relation(fields: [tenantId, ledgerCode], …)
+    //     note   Ledger @relation(fields: [tenantId, noteCode],   …)
+    //
+    // `prisma validate` accepts that on 6.19.2, and before #271 both relations
+    // were refused here for their width, so writing through both at once was
+    // unreachable. It is reachable now, and the two `tenantId` contributions
+    // collide: `insertColumns` folds contributions through a `Map` keyed by
+    // field, so the later one wins, and `entries` above is sorted, so the
+    // winner is whichever relation sorts last.
+    //
+    // **Prisma resolves the operands in the opposite direction and lets the
+    // first resolved win, so the caller's last `data` key decides the shared
+    // column** — measured on 6.19.2 with query events on: writing
+    // `{ note: connect(2,"b"), ledger: connect(1,"a") }` stores `tenantId=1`
+    // where `{ ledger: …, note: … }` stores `2`. gemi stores `2` either way.
+    //
+    // Matching that would mean giving up the sorted key order, which the plan
+    // cache needs — two argument objects differing only in key order have to
+    // be one plan. So this refuses instead, which is what the width refusal
+    // this change replaced was buying: no plausible wrong row. A caller who
+    // wants both links connects through one relation — which writes the shared
+    // column — and sets the other relation's remaining columns directly, since
+    // `insertColumns` only refuses a column that is written *both* ways.
+    for (let index = before; index < planning.contributions.length; index++) {
+      const field = planning.contributions[index].field;
+      const owner = contributedBy.get(field);
+      if (owner !== undefined && owner !== key) {
+        throw new UnsupportedQueryError(
+          `data.${key}`,
+          schema.name,
+          operation,
+          `'${field}' is written by both the '${owner}' and '${key}' relations, ` +
+            `which join on it in common. Prisma lets the last key in 'data' win; ` +
+            `gemi plans relations in a fixed order and will not guess which row ` +
+            `you meant. Write one of them through the relation and set the ` +
+            `other's own columns directly.`,
+        );
+      }
+      contributedBy.set(field, key);
+    }
   }
 
   return planning;
@@ -297,34 +347,42 @@ function planOne(
 
   const child = relatedSchema(schema, relation);
 
-  // **Narrowed to one field, deliberately.** Reading across a composite
-  // relation works (#67); writing through one would have to contribute that
-  // many foreign-key columns to this insert, which is a different piece of
-  // work — so it is refused here by name rather than silently writing the
-  // first field. The narrowing is a function call rather than an index, so
-  // there is no single-field property on `Link` to reach for by accident.
+  // **Every joined field, not the first one** (#271).
   //
-  // Safe to do before the join-table branch below: an implicit many-to-many
-  // links parent and child by their primary keys, one field each side, so the
-  // narrowing never refuses one — and it carries `join` through untouched.
-  const link = singleFieldLink(
-    resolveLink(schema, child, relation, operation),
-    schema,
-    relation,
-    operation,
-  );
+  // This used to be `singleFieldLink(resolveLink(…))`: reading across
+  // `@relation(fields: [tenantId, orderId], references: [tenantId, id])` was
+  // implemented by #67 on all six read surfaces, and the write surface refused
+  // it by name rather than joining on the first field and writing plausible
+  // wrong rows. The refusal was honest and it was the only thing left on that
+  // list, so the narrowing is gone and what follows contributes *n* foreign-key
+  // columns wherever it used to contribute one.
+  //
+  // Nothing here branches on how many there are. The two sides read the link
+  // through {@link childLink}, {@link keySelect} and {@link nullKey}, which are
+  // the same three shapes for one field as for four — so a relation joining on
+  // one field compiles to exactly the arguments it did before, and there is no
+  // single-field path left to diverge from the composite one.
+  const link = resolveLink(schema, child, relation, operation);
 
   // An implicit many-to-many is *neither* side: the keys live in a third table
   // with no model, so both directions are the same work and the operand set is
   // wider — `disconnect` and `set` are a delete against the join table, which
   // needs no schema to compile.
   if (link.join) {
+    // **The one caller that still cannot take more than one field**, and it is
+    // an invariant rather than a gap: Prisma's implicit many-to-many links
+    // parent and child by their *primary keys*, one column each side, into a
+    // two-column join table there is no schema to widen. `singleFieldLink`
+    // states that rather than letting `planJoinTable` index into `[0]` and be
+    // silently wrong if it ever stopped holding.
+    const pair = singleFieldLink(link, schema, relation, operation);
+
     for (const key of keys) {
       planJoinTable(
         schema,
         relation,
         child,
-        link,
+        pair,
         key,
         (node as Record<string, unknown>)[key],
         operation,
@@ -398,23 +456,55 @@ function planOne(
 
 /**
  * This model holds the foreign key, so the far row must exist — or be created —
- * before the insert can bind, and the whole thing collapses to one extra column.
+ * before the insert can bind, and the whole thing collapses to *n* extra
+ * columns — one, in the ordinary schema; as many as the relation joins on in a
+ * tenant-scoped one (#271).
+ *
+ * **The columns are contributed to the statement the caller already asked for,
+ * which is what makes a composite key here atomic without arranging anything.**
+ * `contributions` is a list keyed by field, and `insertColumns` /
+ * `updateAssignments` fold every entry into the single `INSERT` or `UPDATE`
+ * this operation compiles to — so "some keys written, some not" is not a state
+ * this side can reach: the `before` step either resolves the whole tuple or
+ * throws, and the statement either runs or does not. The partial-write hazard
+ * is real on the *foreign* side, where each linked row is its own statement,
+ * and it is answered there by the transaction every plan carrying steps opens.
  */
 function planOwningSide(
   schema: ModelSchema,
   relation: RelationSchema,
   child: ModelSchema,
-  link: { parentField: string; childField: string },
+  link: Link,
   key: string,
   operand: unknown,
   operation: string,
   at: (args: any) => any,
   out: NestedWritePlanning,
 ): void {
-  // `link.parentField` is the FK on this model; `link.childField` is what it
-  // references on the other one.
-  const fkField = link.parentField;
-  const referenced = link.childField;
+  // `parentFields` are the FK columns on this model; `childFields` are what
+  // they reference on the other one, paired positionally.
+  const fkFields = link.parentFields;
+  const referencedFields = link.childFields;
+
+  /** Assign the resolved key onto the statement — one contribution per column. */
+  const contributeResolved = () => {
+    for (const field of fkFields) {
+      out.contributions.push({
+        field,
+        value: (_args, context) => context.resolved[field],
+      });
+    }
+  };
+
+  /** Record a whole key on the plan's per-call scratch space. */
+  const resolveKey = (
+    context: { resolved: Record<string, unknown> },
+    values: readonly unknown[],
+  ) => {
+    for (let index = 0; index < fkFields.length; index++) {
+      context.resolved[fkFields[index]] = values[index] ?? null;
+    }
+  };
 
   /**
    * **Whether linking through this relation has to displace a sibling** — the
@@ -481,14 +571,38 @@ function planOwningSide(
    * the foreign side: it would refuse the whole operand, including the
    * empty-far-row case that has always worked.
    *
-   * A single-column index only, which is what `singleFieldLink` has already
-   * narrowed this whole function to. A composite `@@unique` covering the key
-   * *and something else* does not make the relation one-to-one — Prisma wants
-   * the relation's own `fields` unique — and reading it as one would clear rows
-   * the schema never said were exclusive. A foreign key that is also the `@id`
-   * would not be found in `uniques`, which records `@unique` and `@@unique`
-   * rather than the primary key; it is out of reach anyway, since `@id` implies
-   * `NOT NULL` and the nullable guard has already excluded it.
+   * **An index over exactly the relation's own fields**, which is what the
+   * single-field test used to say and reads differently now that there may be
+   * several (#271). Prisma's rule is on the relation: *"A one-to-one relation
+   * must use unique fields on the defining side"*, meaning `fields` — so
+   * `@@unique([tenantId, ownerId])` beside `@relation(fields: [tenantId,
+   * ownerId], …)` is the composite one-to-one, and it is the same fact the
+   * single-column form was stating.
+   *
+   * **Both halves of that rule are Prisma's, measured on 6.19.2 rather than
+   * inferred**, because between them they are the whole discriminator:
+   *
+   *     @@unique([tenantId, ledgerCode])         accepted — the one-to-one
+   *     @@unique([tenantId, ledgerCode, seal])   P1012, "Either add an
+   *                                              `@@unique([tenantId,
+   *                                              ledgerCode])` attribute"
+   *     @@unique([ledgerCode, tenantId])         the identical P1012
+   *
+   * So a wider group does *not* make the relation one-to-one — reading it as
+   * one would clear rows the schema never said were exclusive — and the order
+   * has to match the relation's `fields` as well.
+   *
+   * Written as set equality all the same, and the second row is why that is not
+   * laxity: the length check is what carries the weight, and a positional loop
+   * would read as though order were a thing this had decided, when on any
+   * schema Prisma accepted the two lists are already identical. It also keeps a
+   * hand-built `ModelSchema` — a fixture, or a generator that reorders — out of
+   * the branch where the index is not recognised at all.
+   *
+   * A foreign key that is also the `@id` would not be found in `uniques`, which
+   * records `@unique` and `@@unique` rather than the primary key; it is out of
+   * reach anyway, since `@id` implies `NOT NULL` and the nullable guard has
+   * already excluded it.
    */
   const backRelations = Object.values(child.relations).filter(
     (candidate) =>
@@ -500,10 +614,13 @@ function planOwningSide(
       !(child.name === schema.name && candidate.name === relation.name),
   );
 
+  const keyed = new Set(fkFields);
+
   const displaces =
-    schema.fields[fkField]?.nullable === true &&
+    fkFields.every((field) => schema.fields[field]?.nullable === true) &&
     schema.uniques.some(
-      (unique) => unique.length === 1 && unique[0] === fkField,
+      (unique) =>
+        unique.length === keyed.size && unique.every((name) => keyed.has(name)),
     ) &&
     backRelations.length === 1 &&
     backRelations[0].kind !== "many";
@@ -543,19 +660,16 @@ function planOwningSide(
         const created = (await executor.exec(
           relation.model,
           "create",
-          { data: at(args), select: { [referenced]: true } },
+          { data: at(args), select: keySelect(referencedFields) },
           // NOT pre-scoped. Nothing walks `data.<relation>.create`, so the
           // child's own `onCreate` is the only thing that can scope this row.
           false,
         )) as Record<string, unknown> | null;
 
-        context.resolved[fkField] = created?.[referenced] ?? null;
+        resolveKey(context, valuesOf(created, referencedFields));
       },
     });
-    out.contributions.push({
-      field: fkField,
-      value: (_args, context) => context.resolved[fkField],
-    });
+    contributeResolved();
     return;
   }
 
@@ -619,7 +733,7 @@ function planOwningSide(
     // out of the input type entirely when the relation is required, so
     // `disconnect: false` there is *"Unknown argument `disconnect`"* rather
     // than an accepted no-op. Measured on `SocialAccount.user`.
-    assertDisconnectable(schema, relation, fkField, {
+    assertDisconnectable(schema, relation, fkFields, {
       model: schema.name,
       operation,
       argument: `data.${relation.name}.disconnect`,
@@ -644,13 +758,15 @@ function planOwningSide(
     if (filter === null || filter === undefined) return;
 
     /**
-     * `true` — one bound column set to `null`, exactly as `connect`'s direct
-     * form is one bound column set to a value. No step, nothing on the child
-     * read or written, and so no scoping question: the row being changed is
-     * the one the statement already names.
+     * `true` — the link's columns bound to `null`, exactly as `connect`'s
+     * direct form binds them to a value. No step, nothing on the child read or
+     * written, and so no scoping question: the row being changed is the one the
+     * statement already names.
      */
     if (operand === true) {
-      out.contributions.push({ field: fkField, value: () => null });
+      for (const field of fkFields) {
+        out.contributions.push({ field, value: () => null });
+      }
       return;
     }
 
@@ -683,48 +799,51 @@ function planOwningSide(
       relation: relation.name,
       operation: "disconnect",
       async run(args, context, executor) {
-        // Default to the value that is already there, so a filter that matches
-        // nothing writes the column back unchanged. The contribution is in the
-        // SET list either way — the statement's text cannot depend on a value
-        // read at bind time — so "nothing happens" has to be spelled as an
-        // assignment that changes nothing rather than as an absent one.
-        context.resolved[fkField] = null;
+        // Default to the values that are already there, so a filter that
+        // matches nothing writes the columns back unchanged. The contributions
+        // are in the SET list either way — the statement's text cannot depend
+        // on a value read at bind time — so "nothing happens" has to be spelled
+        // as assignments that change nothing rather than as absent ones.
+        resolveKey(context, nullsFor(fkFields));
 
         const parent = (await executor.exec(
           schema.name,
           "findFirst",
-          { where: args?.where, select: { [fkField]: true } },
+          { where: args?.where, select: keySelect(fkFields) },
           true,
         )) as Record<string, unknown> | null;
 
-        const linked = parent?.[fkField];
+        const linked = valuesOf(parent, fkFields);
         // Nothing linked: no row for the filter to match, and Prisma is silent
-        // about it. `null` is already what the column holds.
-        if (linked === null || linked === undefined) return;
+        // about it. `null` is already what the columns hold. A *partially*
+        // written composite key lands here too, and that is the right answer —
+        // it joins to no row, so no filter can match through it.
+        if (!isLinked(linked)) return;
 
-        context.resolved[fkField] = linked;
+        resolveKey(context, linked);
 
         const matched = await executor.exec(
           relation.model,
           "findFirst",
           {
-            // `AND`, not a spread: a filter naming the referenced column itself
+            // `AND`, not a spread: a filter naming a referenced column itself
             // must narrow rather than replace the restriction that keeps this
             // on the linked row. Same rule as everywhere else here.
-            where: conjoin(at(args), { [referenced]: linked }),
-            select: { [referenced]: true },
+            // `link` reads the same way on this side: its `parentFields` are
+            // this row's foreign key and its `childFields` are what they
+            // reference, so `childLink` yields the far row's own columns bound
+            // to the values just read off this one.
+            where: conjoin(at(args), childLink(link, parent as Record<string, unknown>)),
+            select: keySelect(referencedFields),
           },
           false,
         );
 
-        if (matched) context.resolved[fkField] = null;
+        if (matched) resolveKey(context, nullsFor(fkFields));
       },
     });
 
-    out.contributions.push({
-      field: fkField,
-      value: (_args, context) => context.resolved[fkField],
-    });
+    contributeResolved();
     return;
   }
 
@@ -754,7 +873,7 @@ function planOwningSide(
    * nothing returned at all.
    */
   if (key === "update") {
-    out.keyFields.push(fkField);
+    out.keyFields.push(...fkFields);
 
     // The same check the foreign side runs, on the same operand grammar. Both
     // sides accept `{ where?, data }` and both must refuse an unknown key
@@ -770,8 +889,10 @@ function planOwningSide(
         const parent = rows[0];
         if (!parent) return;
 
-        const linked = parent[fkField];
-        if (linked === null || linked === undefined) {
+        // A composite key with any column null names no row — see
+        // {@link isLinked} — so a half-written link is the *absent* case here
+        // rather than a lookup that finds nothing later.
+        if (!isLinked(valuesOf(parent, fkFields))) {
           // The same error as the foreign side's miss, and for the same reason
           // — this is one condition with two spellings, not two conditions.
           // Measured rather than inferred: Prisma answers P2025 here too,
@@ -816,13 +937,13 @@ function planOwningSide(
         // is shape-stable — `canonicalShape` records a `where` key's presence —
         // so the common `update: { … }` spelling still costs one statement.
         const filter = wrapped ? record!.where : undefined;
-        const where = conjoin(filter, { [referenced]: linked });
+        const where = conjoin(filter, childLink(link, parent));
 
         if (filter !== undefined) {
           const found = (await executor.exec(
             relation.model,
             "findFirst",
-            { where, select: { [referenced]: true } },
+            { where, select: keySelect(referencedFields) },
             false,
           )) as Record<string, unknown> | null;
 
@@ -918,7 +1039,7 @@ function planOwningSide(
         const found = (await executor.exec(
           relation.model,
           "findUnique",
-          { where, select: { [referenced]: true } },
+          { where, select: keySelect(referencedFields) },
           // NOT pre-scoped, for the reason `connect` is not: this reads another
           // model's rows to decide what to attach, so that model's policies say
           // which rows exist. Scoped away, a hit becomes a miss and the row is
@@ -928,7 +1049,7 @@ function planOwningSide(
         )) as Record<string, unknown> | null;
 
         if (found) {
-          const value = found[referenced] ?? null;
+          const values = valuesOf(found, referencedFields);
           // A hit **is** a connect, so it displaces where the miss below cannot
           // — measured on both sides, and the reason `displaces` is consulted
           // per *branch* rather than per operand. `planForeignSide`'s table
@@ -936,21 +1057,21 @@ function planOwningSide(
           if (displaces) {
             await displaceSibling(
               schema,
-              fkField,
-              value,
+              fkFields,
+              values,
               args?.where,
               existing,
               executor,
             );
           }
-          context.resolved[fkField] = value;
+          resolveKey(context, values);
           return;
         }
 
         const created = (await executor.exec(
           relation.model,
           "create",
-          { data: at(args)?.create, select: { [referenced]: true } },
+          { data: at(args)?.create, select: keySelect(referencedFields) },
           // NOT pre-scoped — the child's own `onCreate` scopes the new row.
           false,
         )) as Record<string, unknown> | null;
@@ -959,14 +1080,11 @@ function planOwningSide(
         // row was minted a line ago, so nothing can already be pointing at it.
         // Prisma agrees by construction rather than by rule — its miss branch
         // logs the insert and the repoint and no incumbent lookup at all.
-        context.resolved[fkField] = created?.[referenced] ?? null;
+        resolveKey(context, valuesOf(created, referencedFields));
       },
     });
 
-    out.contributions.push({
-      field: fkField,
-      value: (_args, context) => context.resolved[fkField],
-    });
+    contributeResolved();
     return;
   }
 
@@ -990,13 +1108,44 @@ function planOwningSide(
     );
   }
 
+  /**
+   * **Single-field only, and a composite `connect` takes the lookup** (#271).
+   *
+   * The optimisation is "the caller already handed us the value the column
+   * needs", and on a composite relation they did not: Prisma spells a
+   * multi-column unique key in its *compound* form —
+   * `connect: { tenantId_code: { tenantId: 1, code: "a" } }`, one argument key
+   * named after the index — so there is no key here whose value is a referenced
+   * column. Reading one out would mean reproducing the generator's `_`-joined
+   * naming rule inside the planner, and then assuming the caller reached for
+   * the group the relation *references* rather than any other unique key on the
+   * child, which `connect` explicitly allows.
+   *
+   * So the composite case pays one `findUniqueOrThrow`, and that costs parity
+   * nothing: Prisma issues the same lookup. Measured on 6.19.2 with query
+   * events on, `LedgerEntry.create({ data: { amount: 1, ledger: { connect:
+   * { tenantId_code: { tenantId: 1, code: "ab" } } } } })` logs
+   *
+   *     BEGIN IMMEDIATE
+   *     select Ledger.tenantId, Ledger.code where tenantId = ? and code = ?
+   *     insert into LedgerEntry (tenantId, ledgerCode, amount) values (?,?,?)
+   *     select the row back
+   *     COMMIT
+   *
+   * — the resolve is a statement there too. The zero-query path was always a
+   * gemi-only shortcut over the shape where the operand *is* the value.
+   */
   const direct =
-    (operand as Record<string, unknown>)[referenced] !== undefined &&
+    referencedFields.length === 1 &&
+    (operand as Record<string, unknown>)[referencedFields[0]] !== undefined &&
     Object.keys(operand as Record<string, unknown>).filter(
       (name) => (operand as Record<string, unknown>)[name] !== undefined,
     ).length === 1;
 
   if (direct) {
+    const referenced = referencedFields[0];
+    const fkField = fkFields[0];
+
     /**
      * **The direct form still costs a step when it has an incumbent to
      * displace**, and only then.
@@ -1018,8 +1167,8 @@ function planOwningSide(
         async run(args, _context, executor) {
           await displaceSibling(
             schema,
-            fkField,
-            at(args)?.[referenced],
+            [fkField],
+            [at(args)?.[referenced]],
             args?.where,
             existing,
             executor,
@@ -1052,14 +1201,14 @@ function planOwningSide(
       const found = (await executor.exec(
         relation.model,
         "findUniqueOrThrow",
-        { where: at(args), select: { [referenced]: true } },
+        { where: at(args), select: keySelect(referencedFields) },
         // NOT pre-scoped. This lookup reads another model's rows to decide what
         // to attach, so it is that model's policies that say which rows exist —
         // otherwise a `connect` by any unique key reaches every tenant's.
         false,
       )) as Record<string, unknown> | null;
 
-      const value = found?.[referenced] ?? null;
+      const values = valuesOf(found, referencedFields);
 
       // After the lookup, which is the ordering #363 asked how to get: the
       // clear cannot be written until the referenced value is known, and
@@ -1071,43 +1220,49 @@ function planOwningSide(
       if (displaces) {
         await displaceSibling(
           schema,
-          fkField,
-          value,
+          fkFields,
+          values,
           args?.where,
           existing,
           executor,
         );
       }
 
-      context.resolved[fkField] = value;
+      resolveKey(context, values);
     },
   });
-  out.contributions.push({
-    field: fkField,
-    value: (_args, context) => context.resolved[fkField],
-  });
+  contributeResolved();
 }
 
 /**
  * The *child* holds the foreign key, so nothing can be written until this row
  * exists and its key is known. Both forms are therefore `after` steps, and both
- * need the key in the statement's `RETURNING` list.
+ * need the key in the statement's `RETURNING` list — **every column of it**,
+ * since a composite link is only usable once the whole tuple is known (#271).
+ *
+ * **This is the side the partial-write hazard is real on**, and it is answered
+ * rather than avoided. The owning side folds its columns into one statement;
+ * here each linked row is its own `update` or `create`, so a composite key
+ * whose second statement fails leaves the first row repointed. `$exec` opens a
+ * transaction for any plan carrying steps — iteration 5 — so the failure rolls
+ * the parent row back with it, which is the same guarantee that already covers
+ * a `connect` of three rows where the third does not exist.
  */
 function planForeignSide(
   schema: ModelSchema,
   relation: RelationSchema,
   child: ModelSchema,
-  link: { parentField: string; childField: string },
+  link: Link,
   key: string,
   operand: unknown,
   operation: string,
   at: (args: any) => any,
   out: NestedWritePlanning,
 ): void {
-  const parentField = link.parentField;
-  const childField = link.childField;
+  const parentFields = link.parentFields;
+  const childFields = link.childFields;
 
-  out.keyFields.push(parentField);
+  out.keyFields.push(...parentFields);
 
   /**
    * **Whether linking through this relation has to displace what is linked
@@ -1160,9 +1315,16 @@ function planForeignSide(
    * the relation for its `kind` and uses `uniques` only to narrow. From the
    * owning side `relation.kind` is still unreadable — it says `"one"` for a
    * many-to-one and a one-to-one alike, because both point at a single far row.
+   *
+   * **Every column has to be nullable, not the first one** (#271). Prisma makes
+   * a composite relation optional or required as a whole and refuses a mixture,
+   * so on a schema it accepted the columns agree — but the test is over all of
+   * them because half a detach is worse than none: the incumbent would keep a
+   * key that still joins nowhere while the unique index still holds it.
    */
   const displaces =
-    relation.kind !== "many" && child.fields[childField]?.nullable === true;
+    relation.kind !== "many" &&
+    childFields.every((field) => child.fields[field]?.nullable === true);
 
   /**
    * **A to-one whose key is on the child**, which this function otherwise plans
@@ -1464,14 +1626,12 @@ function planForeignSide(
         if (!parent) return;
 
         for (const entry of listOf(at(args)) as Record<string, unknown>[]) {
-          const where = conjoin(entry.where, {
-            [childField]: parent[parentField],
-          });
+          const where = conjoin(entry.where, childLink(link, parent));
 
           const hit = (await executor.exec(
             relation.model,
             "findFirst",
-            { where, select: { [childField]: true } },
+            { where, select: keySelect(childFields) },
             false,
           )) as Record<string, unknown> | null;
 
@@ -1492,11 +1652,8 @@ function planForeignSide(
             "create",
             {
               // The foreign key is ours, as it is for every create here.
-              data: {
-                ...(entry.create as object),
-                [childField]: parent[parentField],
-              },
-              select: { [childField]: true },
+              data: { ...(entry.create as object), ...childLink(link, parent) },
+              select: keySelect(childFields),
             },
             false,
           );
@@ -1534,7 +1691,7 @@ function planForeignSide(
         // Conjoining also keeps the parent restriction *unforgeable* while
         // letting the caller's predicate narrow, which is exactly what
         // `withScope` does for a policy fragment and for the same reason.
-        const where = conjoin(filter, { [childField]: parent[parentField] });
+        const where = conjoin(filter, childLink(link, parent));
 
         await executor.exec(
           relation.model,
@@ -1552,7 +1709,7 @@ function planForeignSide(
 
   if (key === "set") {
     assertNamedRows(schema, relation, child, operand, "set", operation);
-    assertDisconnectable(child, relation, childField, {
+    assertDisconnectable(child, relation, childFields, {
       model: schema.name,
       operation,
       argument: `data.${relation.name}.set`,
@@ -1565,15 +1722,20 @@ function planForeignSide(
         const parent = rows[0];
         if (!parent) return;
 
-        const parentKey = parent[parentField];
+        const attach = childLink(link, parent);
 
-        await clearLinks(relation.model, childField, parentKey, executor);
+        await clearLinks(
+          relation.model,
+          childFields,
+          valuesOf(parent, parentFields),
+          executor,
+        );
 
         for (const entry of listOf(at(args))) {
           await executor.exec(
             relation.model,
             "updateMany",
-            { where: entry as object, data: { [childField]: parentKey } },
+            { where: entry as object, data: attach },
             false,
           );
         }
@@ -1608,14 +1770,12 @@ function planForeignSide(
           // and it does the same two jobs. `AND` rather than a spread for the
           // reason `updateMany` documents: a key naming the foreign column
           // itself would otherwise be overwritten rather than honoured.
-          const where = conjoin(entry.where, {
-            [childField]: parent[parentField],
-          });
+          const where = conjoin(entry.where, childLink(link, parent));
 
           const found = (await executor.exec(
             relation.model,
             "findFirst",
-            { where, select: { [childField]: true } },
+            { where, select: keySelect(childFields) },
             false,
           )) as Record<string, unknown> | null;
 
@@ -1667,7 +1827,7 @@ function planForeignSide(
       // `connect`?"*, with the available options listed as create /
       // connectOrCreate / upsert / connect / update. The refusal is on the
       // **key**, not on the value, and this one already reads only the schema.
-      assertDisconnectable(child, relation, childField, {
+      assertDisconnectable(child, relation, childFields, {
         model: schema.name,
         operation,
         argument: `data.${relation.name}.disconnect`,
@@ -1710,23 +1870,22 @@ function planForeignSide(
           // The caller's key *and* the link, so neither operand can reach a row
           // attached to a different parent. `AND` rather than a spread — see
           // `updateMany`.
-          const where = conjoin(list[index], {
-            [childField]: parent[parentField],
-          });
+          const where = conjoin(list[index], childLink(link, parent));
 
           if (!deleting) {
             await executor.exec(
               relation.model,
               "updateMany",
-              { where, data: { [childField]: null } },
+              { where, data: nullKey(childFields) },
               // NOT pre-scoped: clearing a foreign key is a write to the child,
               // so the child's scope decides which rows are reachable.
               false,
-              // ...but the column is *ours*: the caller wrote `disconnect: { id }`
-              // and the ORM chose to null the key. Without this a child scoped
-              // on its own foreign key is refused for a write it never made —
-              // the same case as `connect`, see #98 and `ormAuthoredFields`.
-              [childField],
+              // ...but the columns are *ours*: the caller wrote `disconnect:
+              // { id }` and the ORM chose to null the key. Without this a child
+              // scoped on its own foreign key is refused for a write it never
+              // made — the same case as `connect`, see #98 and
+              // `ormAuthoredFields`.
+              childFields,
             );
             continue;
           }
@@ -1734,7 +1893,7 @@ function planForeignSide(
           const found = (await executor.exec(
             relation.model,
             "findFirst",
-            { where, select: { [childField]: true } },
+            { where, select: keySelect(childFields) },
             false,
           )) as Record<string, unknown> | null;
 
@@ -1844,7 +2003,12 @@ function planForeignSide(
         // the kind that holds until someone reads it. One read, on a path that
         // already runs several.
         if (displaces) {
-          await clearLinks(relation.model, childField, parent[parentField], executor);
+          await clearLinks(
+            relation.model,
+            childFields,
+            valuesOf(parent, parentFields),
+            executor,
+          );
         }
 
         for (const item of listOf(at(args))) {
@@ -1854,10 +2018,10 @@ function planForeignSide(
             {
               // The foreign key is set by us, not by the caller: a nested create
               // that also named it would be describing two different parents.
-              data: { ...(item as object), [childField]: parent[parentField] },
+              data: { ...(item as object), ...childLink(link, parent) },
               // Nothing reads the result, and the narrowest select keeps the
               // returned payload from growing with the child's column count.
-              select: { [childField]: true },
+              select: keySelect(childFields),
             },
             // NOT pre-scoped — the child's `onCreate` is what scopes this row.
             false,
@@ -1910,7 +2074,7 @@ function planForeignSide(
           // nested input type entirely, so a row naming it is describing a
           // different parent than the call is.
           ...(item as object),
-          [childField]: parent[parentField],
+          ...childLink(link, parent),
         }));
 
         // **No short-circuit on an empty list**, and that is worth the round
@@ -1989,7 +2153,7 @@ function planForeignSide(
           const found = (await executor.exec(
             relation.model,
             "findUnique",
-            { where: item.where, select: { [childField]: true } },
+            { where: item.where, select: keySelect(childFields) },
             false,
           )) as Record<string, unknown> | null;
 
@@ -2026,7 +2190,12 @@ function planForeignSide(
             // a row orphans the incumbent and takes the link, while the same
             // call missing collides on the child's unique key. See `displaces`.
             if (displaces) {
-              await clearLinks(relation.model, childField, parent[parentField], executor);
+              await clearLinks(
+                relation.model,
+                childFields,
+                valuesOf(parent, parentFields),
+                executor,
+              );
             }
 
             await executor.exec(
@@ -2034,8 +2203,8 @@ function planForeignSide(
               "update",
               {
                 where: item.where,
-                data: { [childField]: parent[parentField] },
-                select: { [childField]: true },
+                data: childLink(link, parent),
+                select: keySelect(childFields),
               },
               // NOT pre-scoped, for the reason the bare `connect` below is not:
               // this repoints an existing child, so the child's scope decides
@@ -2062,11 +2231,8 @@ function planForeignSide(
               // The foreign key is ours, not the caller's — the same rule the
               // nested `create` above follows, and Prisma leaves it out of the
               // nested input type entirely.
-              data: {
-                ...(item.create as object),
-                [childField]: parent[parentField],
-              },
-              select: { [childField]: true },
+              data: { ...(item.create as object), ...childLink(link, parent) },
+              select: keySelect(childFields),
             },
             false,
           );
@@ -2183,7 +2349,12 @@ function planForeignSide(
       if (pending.length === 0) return;
 
       if (displaces) {
-        await clearLinks(relation.model, childField, parent[parentField], executor);
+        await clearLinks(
+          relation.model,
+          childFields,
+          valuesOf(parent, parentFields),
+          executor,
+        );
       }
 
       for (const item of pending) {
@@ -2192,17 +2363,18 @@ function planForeignSide(
           "update",
           {
             where: item,
-            data: { [childField]: parent[parentField] },
-            select: { [childField]: true },
+            data: childLink(link, parent),
+            select: keySelect(childFields),
           },
           // NOT pre-scoped. Repointing an existing row at this parent is a write
           // to the child, and the child's scope decides which rows are reachable
           // — otherwise `connect` re-parents another tenant's row.
           false,
-          // ...and the column being written is *ours*, not the caller's. Without
-          // this, a child whose policy scopes on its foreign key is refused for
-          // a write it never made — see #98 and `ormAuthoredFields`.
-          [childField],
+          // ...and the columns being written are *ours*, not the caller's.
+          // Without this, a child whose policy scopes on its foreign key is
+          // refused for a write it never made — see #98 and
+          // `ormAuthoredFields`.
+          childFields,
         );
       }
     },
@@ -2691,7 +2863,95 @@ function conjoin(
 }
 
 /**
- * Null one foreign-key column on every row that currently holds `value` **and
+ * The three shapes a link takes in an argument object, and the two questions
+ * asked about its *values* — written once so that a relation joining on four
+ * fields goes down the same path as one joining on one (#271).
+ *
+ * Before these, every site spelled the link as `{ [childField]: parent[
+ * parentField] }` or `select: { [childField]: true }` by hand, in about forty
+ * places across the two sides. Generalising each of them separately is how a
+ * composite relation ends up correlating on every field in nine operands and on
+ * the first field in the tenth — a silent wrong write, which is precisely what
+ * the refusal these replace was protecting against. One function per shape
+ * means the count of fields is invisible to the callers, so there is no
+ * single-field spelling left for a new operand to copy.
+ */
+
+/**
+ * `{ <childField>: row[<parentField>], … }` — the far side's columns bound to
+ * the values this row holds.
+ *
+ * On the foreign side that reads as "belonging to this parent": the child's
+ * foreign key set to the parent's key. On the owning side the same call reads
+ * as "the row this one points at": `link.parentFields` are this row's foreign
+ * key and `link.childFields` are what they reference, so the object is the far
+ * row's own columns. One function, because the arithmetic is identical and the
+ * two sides differ only in which table the result is applied to.
+ *
+ * An object with several keys is a conjunction in every `where` this ORM
+ * compiles, and several assignments in every `data`, so the same shape serves
+ * both — which is why `create`, `connect`, `update`, `delete` and the two
+ * `*Many` operands can all take it unchanged.
+ */
+function childLink(
+  link: { parentFields: string[]; childFields: string[] },
+  parent: Record<string, unknown>,
+): Record<string, unknown> {
+  const key: Record<string, unknown> = {};
+  for (let index = 0; index < link.childFields.length; index++) {
+    key[link.childFields[index]] = parent[link.parentFields[index]];
+  }
+  return key;
+}
+
+/** `{ <field>: true, … }` — the narrowest select that reads a whole link back. */
+function keySelect(fields: readonly string[]): Record<string, true> {
+  const select: Record<string, true> = {};
+  for (const field of fields) select[field] = true;
+  return select;
+}
+
+/** `{ <field>: null, … }` — a detach, which has to clear *every* column. */
+function nullKey(fields: readonly string[]): Record<string, null> {
+  const cleared: Record<string, null> = {};
+  for (const field of fields) cleared[field] = null;
+  return cleared;
+}
+
+/** The same detach spelled as *values* rather than as a `data` object. */
+function nullsFor(fields: readonly string[]): null[] {
+  return fields.map(() => null);
+}
+
+/** The values of `fields` on `row`, positionally. */
+function valuesOf(
+  row: Record<string, unknown> | null | undefined,
+  fields: readonly string[],
+): unknown[] {
+  return fields.map((field) => row?.[field]);
+}
+
+/**
+ * Whether a link's columns actually name a row.
+ *
+ * **A partially-null composite key links nothing**, which is SQL's rule and not
+ * a choice made here: `(tenantId, orderId) = (1, NULL)` is `UNKNOWN`, so the
+ * join finds no row however many other columns match. Prisma agrees at the
+ * type level — an optional relation over composite fields makes *all* of them
+ * optional together, and `include` on a row holding `(1, NULL)` returns `null`.
+ *
+ * So every place that used to test one value for `null` — "is anything linked
+ * here" — tests the whole key through this, and a half-written key reads as
+ * *absent* rather than as a link to a row that does not exist. Getting this
+ * backwards is what would make `clearLinks` null the key of every unlinked row
+ * in the table, and `disconnect`'s filter arm read a child by a `NULL` key.
+ */
+function isLinked(values: readonly unknown[]): boolean {
+  return values.every((value) => value !== null && value !== undefined);
+}
+
+/**
+ * Null the foreign-key columns of every row that currently holds `values` **and
  * that the caller can see** — the clearing half of `set`, the half a nested
  * `create` on an occupied to-one needs before it can insert (#360), and the
  * half the owning side's `connect` needs before it can repoint (#363).
@@ -2718,22 +2978,41 @@ function conjoin(
  * case — nothing linked — costs a select rather than an update, and that the
  * scope is consulted through a read before anything is written.
  *
- * `[field]` is ORM-authored: the caller named a row to `set`, or a payload to
- * `create`, or a row to `connect`, and the ORM chose to null this column.
- * Without it a model scoped on that same foreign key is refused by the
- * scope-escape guard for a write it never made — #98, and the reason
- * `disconnect` one operand over passes the same list.
+ * `fields` is ORM-authored: the caller named a row to `set`, or a payload to
+ * `create`, or a row to `connect`, and the ORM chose to null these columns.
+ * Without it a model scoped on one of them is refused by the scope-escape guard
+ * for a write it never made — #98, and the reason `disconnect` one operand over
+ * passes the same list. **Every** column of the link goes in it, because a
+ * composite key is cleared by writing null to all of them and each one is as
+ * much the ORM's as the first.
+ *
+ * **A key with a null component clears nothing** (#271), and the guard is not
+ * defensive tidying. `where: { tenantId: 1, orderId: null }` matches every row
+ * whose order is unset in that tenant — rows linked to *nothing*, which is the
+ * opposite of the set this is asked for — and the `updateMany` behind it would
+ * then write null over null across all of them. See {@link isLinked}. Nothing
+ * reaches here with a null today (`displaceSibling` returns first, and the
+ * foreign side reads its values out of a primary key), so this buys no
+ * behaviour; it means a caller that one day does cannot silently rewrite the
+ * table.
  */
 async function clearLinks(
   model: string,
-  field: string,
-  value: unknown,
+  fields: readonly string[],
+  values: readonly unknown[],
   executor: RelationExecutor,
 ): Promise<void> {
+  if (!isLinked(values)) return;
+
+  const where: Record<string, unknown> = {};
+  for (let index = 0; index < fields.length; index++) {
+    where[fields[index]] = values[index];
+  }
+
   const linked = (await executor.exec(
     model,
     "findMany",
-    { where: { [field]: value }, select: { [field]: true } },
+    { where, select: keySelect(fields) },
     false,
   )) as Record<string, unknown>[];
 
@@ -2742,9 +3021,9 @@ async function clearLinks(
   await executor.exec(
     model,
     "updateMany",
-    { where: { [field]: value }, data: { [field]: null } },
+    { where, data: nullKey(fields) },
     false,
-    [field],
+    fields,
   );
 }
 
@@ -2876,9 +3155,17 @@ async function alreadyLinked(
  */
 async function displaceSibling(
   schema: ModelSchema,
-  fkField: string,
-  /** The value about to be written into this row's foreign key. */
-  value: unknown,
+  fkFields: readonly string[],
+  /**
+   * The values about to be written into this row's foreign key, positionally
+   * paired with `fkFields`.
+   *
+   * **A key with a null component displaces nothing**, which is the composite
+   * generalisation of the `value === null` return this has always had rather
+   * than a new rule: the row is being *un*linked, and there is no incumbent for
+   * a link that is not being made. See {@link isLinked}.
+   */
+  values: readonly unknown[],
   /**
    * This statement's own `where`, **already through this model's policies** —
    * so the read below is pre-scoped, exactly as the `disconnect` filter arm's
@@ -2890,21 +3177,29 @@ async function displaceSibling(
   existing: boolean,
   executor: RelationExecutor,
 ): Promise<void> {
-  if (value === null || value === undefined) return;
+  if (!isLinked(values)) return;
 
   if (existing) {
     const self = (await executor.exec(
       schema.name,
       "findFirst",
-      { where, select: { [fkField]: true } },
+      { where, select: keySelect(fkFields) },
       true,
     )) as Record<string, unknown> | null;
 
     if (self === null || self === undefined) return;
-    if (sameKey(self[fkField], value)) return;
+    // **Every column, not the first that differs** — the skip is "this row
+    // already points at that row", and on a composite key that is only true
+    // when the whole tuple matches. Reading it as "some column matches" would
+    // skip the clear for a sibling holding `(1, "b")` while this row takes
+    // `(1, "a")`, and the repoint would then collide on the unique index the
+    // caller cannot see.
+    if (fkFields.every((field, index) => sameKey(self[field], values[index]))) {
+      return;
+    }
   }
 
-  await clearLinks(schema.name, fkField, value, executor);
+  await clearLinks(schema.name, fkFields, values, executor);
 }
 
 /**
@@ -3276,21 +3571,38 @@ function assertToOneWriteOperand(
  * *structured* model is always the caller's. Passing `owner` for both meant a
  * `User.update` reported `model = "Account"` on the foreign side while the
  * owning side reported `User`, from the same function (#112).
+ *
+ * **Every column of the link, and the first required one is named** (#271).
+ * Prisma makes a composite relation optional or required as a whole — it
+ * refuses a mixture, *"The fields of a relation must either all be optional or
+ * all be required"* — so on a schema Prisma accepted the columns agree and any
+ * one of them answers. Checking all of them anyway costs nothing and means the
+ * refusal does not depend on a validation rule enforced in another program:
+ * a hand-built `ModelSchema` with a nullable `tenantId` beside a required
+ * `ledgerCode` is refused here rather than nulling half a key.
+ *
+ * That is a claim about behaviour, so it is measured rather than asserted —
+ * `ledgerSealMixed` in `fixtures.ts` is exactly that schema, and
+ * `composite-relations.test.ts` names the column this refuses on. **The
+ * nullable column is first there deliberately**: `[fieldNames[0]]` is what this
+ * collapses to if the generalisation is undone, and over `(nullable, required)`
+ * that answers *"detachable"*. The same fixture pins the two `displaces`
+ * predicates, which generalised the same way and were equally unpinned.
  */
 function assertDisconnectable(
   owner: ModelSchema,
   relation: RelationSchema,
-  fieldName: string,
+  fieldNames: readonly string[],
   caller: RefusalOrigin,
 ): void {
-  const field = owner.fields[fieldName];
-  if (field && field.nullable) return;
+  const required = fieldNames.find((name) => !owner.fields[name]?.nullable);
+  if (required === undefined) return;
 
   throw new UnsupportedQueryError(
     caller.argument,
     caller.model,
     caller.operation,
-    `'${owner.name}.${fieldName}' is required, so there is no value to leave ` +
+    `'${owner.name}.${required}' is required, so there is no value to leave ` +
       `behind — a disconnected row would have to be deleted or repointed ` +
       `instead. Prisma does not offer 'disconnect' on a required relation ` +
       `either.`,

@@ -9,6 +9,10 @@ import {
 } from "./differential";
 import {
   AccountModel,
+  LedgerEntryModel,
+  LedgerModel,
+  LedgerNoteModel,
+  LedgerSealModel,
   MembershipModel,
   OrganizationModel,
   PasswordResetTokenModel,
@@ -140,6 +144,60 @@ async function seed(prisma: PrismaClient) {
   // `Profile.userId`'s unique index (P2002). Both are pinned below.
   await prisma.profile.createMany({
     data: [{ bio: "seed", userId: users[0].id }, { bio: "loose" }],
+  });
+
+  /**
+   * The composite-relation family (#271) — a relation joining on **two**
+   * fields, written through rather than read across.
+   *
+   * The tenant scoping is what makes a partial join *wrong* rather than empty,
+   * and it is arranged the same way `differential.test.ts`'s read seed is: the
+   * code `"a"` exists in both tenants, and tenant 1 also has `"ab"`, whose code
+   * has `"a"` as a prefix. So a nested write that stamped only `tenantId` would
+   * attach to two ledgers, one that stamped only `ledgerCode` would reach
+   * across tenants, and a stitch that concatenated the columns would confuse
+   * `(1, "ab")` with `(1, "a") + "b"`. Every one of those *writes rows*, which
+   * is why these are compared against Prisma rather than counted.
+   *
+   * `LedgerNote` and `LedgerSeal` carry the same two columns nullable, which is
+   * what makes `disconnect`, `set` and the displacement branches reachable at
+   * all — Prisma leaves `disconnect` out of a required relation's nested input
+   * type entirely, and `LedgerEntry.ledger` is required.
+   *
+   * The split inside each is the one `Profile` established: a row attached to
+   * `(1, "a")` and a row attached to nothing, so a miss branch is reachable and
+   * `connect` has something loose to attach. `LedgerSeal` gets the same split
+   * across two *ledgers* instead — the relation holds one row per ledger, so
+   * the second seal is what an occupied displacement has to displace.
+   */
+  await prisma.ledger.createMany({
+    data: [
+      { tenantId: 1, code: "a", title: "one-a" },
+      { tenantId: 1, code: "ab", title: "one-ab" },
+      { tenantId: 2, code: "a", title: "two-a" },
+    ],
+  });
+  await prisma.ledgerEntry.createMany({
+    data: [
+      { tenantId: 1, ledgerCode: "a", amount: 10, memo: "first" },
+      { tenantId: 1, ledgerCode: "a", amount: 20, memo: null },
+      { tenantId: 1, ledgerCode: "ab", amount: 30, memo: "ab only" },
+      { tenantId: 2, ledgerCode: "a", amount: 40, memo: "other tenant" },
+    ],
+  });
+  await prisma.ledgerNote.createMany({
+    data: [
+      { tenantId: 1, ledgerCode: "a", body: "mine" },
+      { tenantId: 1, ledgerCode: "ab", body: "sibling" },
+      { tenantId: 2, ledgerCode: "a", body: "other tenant" },
+      { body: "loose" },
+    ],
+  });
+  await prisma.ledgerSeal.createMany({
+    data: [
+      { tenantId: 1, ledgerCode: "a", seal: "mine" },
+      { tenantId: 1, ledgerCode: "ab", seal: "sibling" },
+    ],
   });
 }
 
@@ -1034,6 +1092,13 @@ function suite(label: string, url?: string) {
           // listed here is not a missing convenience — it throws.
           Profile: ProfileModel as never,
           PasswordResetToken: PasswordResetTokenModel as never,
+          // The composite family (#271). Registered even where only the parent
+          // is written through, because `readTables` reads `$schema.primaryKey`
+          // off the class to order its comparison read.
+          Ledger: LedgerModel as never,
+          LedgerEntry: LedgerEntryModel as never,
+          LedgerNote: LedgerNoteModel as never,
+          LedgerSeal: LedgerSealModel as never,
         },
         seed,
         url,
@@ -1192,6 +1257,512 @@ function suite(label: string, url?: string) {
           },
           { tables: ["Post", "Tag"] },
         );
+      });
+    });
+
+    /**
+     * **Nested writes through a relation joining on two fields** (#271).
+     *
+     * This was the last entry on `docs/orm.md`'s *Not in scope* list that said
+     * *"pending"* rather than *"declined"*: every read surface correlated on
+     * every field from #67, and a nested write refused by name because it would
+     * have to contribute that many foreign-key columns to an insert.
+     *
+     * Compared against Prisma rather than asserted, and the table contents are
+     * read back on every case, because the failure mode here does not raise. A
+     * stamp that wrote `tenantId` and left `ledgerCode` alone attaches the row
+     * to *no* ledger while returning a perfectly plausible payload; a filter
+     * that conjoined only `tenantId` reaches the sibling ledger's children and
+     * updates them. Both are green tests against a client that only checks what
+     * came back.
+     *
+     * `tables` names both ends on every case for that reason: the parent's own
+     * row is rarely the interesting half.
+     */
+    describe("a composite relation", () => {
+      /** Prisma's spelling of `Ledger`'s two-column `@@id`. */
+      const ledgerKey = (tenantId: number, code: string) => ({
+        tenantId_code: { tenantId, code },
+      });
+
+      /**
+       * The **owning** side: `LedgerEntry` holds `(tenantId, ledgerCode)`, so
+       * every operand here resolves the far row and folds two columns into the
+       * entry's own statement.
+       */
+      describe("the owning side", () => {
+        test("connect by the compound key", async () => {
+          await differential.expectSameWrite(
+            "LedgerEntry",
+            "create",
+            {
+              data: { amount: 1, ledger: { connect: ledgerKey(1, "ab") } },
+              include: { ledger: true },
+            },
+            { tables: ["LedgerEntry", "Ledger"] },
+          );
+        });
+
+        /**
+         * Connecting into the *other tenant*, which is the case a
+         * first-field-only stamp cannot distinguish from the one above: both
+         * ledgers have code `"a"`, so the row lands in tenant 1 or tenant 2
+         * depending on whether `tenantId` was written.
+         */
+        test("connect across tenants keeps both columns", async () => {
+          await differential.expectSameWrite(
+            "LedgerEntry",
+            "create",
+            {
+              data: { amount: 2, ledger: { connect: ledgerKey(2, "a") } },
+              include: { ledger: true },
+            },
+            { tables: ["LedgerEntry", "Ledger"] },
+          );
+        });
+
+        test("connect naming no row", async () => {
+          await differential.expectSameWrite(
+            "LedgerEntry",
+            "create",
+            { data: { amount: 3, ledger: { connect: ledgerKey(9, "nope") } } },
+            { tables: ["LedgerEntry", "Ledger"] },
+          );
+        });
+
+        test("create writes the parent and binds its whole key", async () => {
+          await differential.expectSameWrite(
+            "LedgerEntry",
+            "create",
+            {
+              data: {
+                amount: 4,
+                ledger: { create: { tenantId: 3, code: "new", title: "three" } },
+              },
+              include: { ledger: true },
+            },
+            { tables: ["LedgerEntry", "Ledger"] },
+          );
+        });
+
+        test("connectOrCreate hitting an existing ledger", async () => {
+          await differential.expectSameWrite(
+            "LedgerEntry",
+            "create",
+            {
+              data: {
+                amount: 5,
+                ledger: {
+                  connectOrCreate: {
+                    where: ledgerKey(1, "a"),
+                    // Ignored on a hit — it is connect-or-create, not upsert —
+                    // and a different title makes that observable.
+                    create: { tenantId: 1, code: "a", title: "would-be" },
+                  },
+                },
+              },
+              include: { ledger: true },
+            },
+            { tables: ["LedgerEntry", "Ledger"] },
+          );
+        });
+
+        test("connectOrCreate missing and creating", async () => {
+          await differential.expectSameWrite(
+            "LedgerEntry",
+            "create",
+            {
+              data: {
+                amount: 6,
+                ledger: {
+                  connectOrCreate: {
+                    where: ledgerKey(4, "fresh"),
+                    create: { tenantId: 4, code: "fresh", title: "four" },
+                  },
+                },
+              },
+              include: { ledger: true },
+            },
+            { tables: ["LedgerEntry", "Ledger"] },
+          );
+        });
+
+        /**
+         * `update` through the owning side finds the far row by *this* row's
+         * key, which the arguments do not carry — so both columns come back in
+         * the statement's `RETURNING` and both go into the child's filter.
+         * Entry 1 is in `(1, "a")`, whose sibling `(1, "ab")` must not move.
+         */
+        test("update the far row through the link", async () => {
+          await differential.expectSameWrite(
+            "LedgerEntry",
+            "update",
+            { where: { id: 1 }, data: { ledger: { update: { title: "renamed" } } } },
+            { tables: ["LedgerEntry", "Ledger"] },
+          );
+        });
+
+        test("update through the link with a filter that matches nothing", async () => {
+          await differential.expectSameWrite(
+            "LedgerEntry",
+            "update",
+            {
+              where: { id: 1 },
+              data: {
+                ledger: { update: { where: { title: "nope" }, data: { title: "x" } } },
+              },
+            },
+            { tables: ["LedgerEntry", "Ledger"] },
+          );
+        });
+
+        /**
+         * A **required** composite relation cannot be detached, and Prisma
+         * refuses it on the key rather than the value — the operand is not in
+         * the input type at all.
+         */
+        test("disconnect on the required side is refused", async () => {
+          await expect(
+            LedgerEntryModel.update({
+              where: { id: 1 },
+              data: { ledger: { disconnect: true } },
+            } as never),
+          ).rejects.toThrow(/is required/);
+        });
+
+        /** ...and on the optional one it clears both columns together. */
+        test("disconnect clears the whole key", async () => {
+          await differential.expectSameWrite(
+            "LedgerSeal",
+            "update",
+            {
+              where: { id: 1 },
+              data: { ledger: { disconnect: true } },
+              include: { ledger: true },
+            },
+            { tables: ["LedgerSeal", "Ledger"] },
+          );
+        });
+
+        /**
+         * The filter arm: detach only if the linked row matches. Both arms are
+         * compared because a filter that correlated on one column would match
+         * the sibling ledger and detach a link the caller guarded.
+         */
+        test.each([
+          ["matching", "one-a"],
+          ["not matching", "one-ab"],
+        ])("disconnect by a filter, %s", async (_label, title) => {
+          await differential.expectSameWrite(
+            "LedgerSeal",
+            "update",
+            {
+              where: { id: 1 },
+              data: { ledger: { disconnect: { title } } },
+              include: { ledger: true },
+            },
+            { tables: ["LedgerSeal", "Ledger"] },
+          );
+        });
+
+        /**
+         * **The composite one-to-one displaces**, and the incumbent is
+         * *orphaned* rather than deleted — the answer #360 and #363 measured
+         * over one column, asked again over two.
+         *
+         * Seal 1 holds `(1, "a")` and seal 2 holds `(1, "ab")`; pointing seal 2
+         * at `(1, "a")` collides on `@@unique([tenantId, ledgerCode])` unless
+         * seal 1 is detached first, and detaching it means nulling *both* of
+         * its columns.
+         */
+        test("connect onto an occupied composite one-to-one", async () => {
+          await differential.expectSameWrite(
+            "LedgerSeal",
+            "update",
+            {
+              where: { id: 2 },
+              data: { ledger: { connect: ledgerKey(1, "a") } },
+              include: { ledger: true },
+            },
+            { tables: ["LedgerSeal", "Ledger"] },
+          );
+        });
+
+        /** Connecting the ledger it already holds writes nothing net. */
+        test("connect onto the ledger already held", async () => {
+          await differential.expectSameWrite(
+            "LedgerSeal",
+            "update",
+            {
+              where: { id: 1 },
+              data: { ledger: { connect: ledgerKey(1, "a") } },
+              include: { ledger: true },
+            },
+            { tables: ["LedgerSeal", "Ledger"] },
+          );
+        });
+      });
+
+      /**
+       * The **foreign** side: `Ledger` holds nothing, so every operand is an
+       * `after` step that stamps or filters by the two columns the parent's
+       * `RETURNING` supplied.
+       */
+      describe("the foreign side", () => {
+        const on = (tenantId: number, code: string) => ({
+          where: ledgerKey(tenantId, code),
+        });
+
+        test("create stamps both columns onto the new child", async () => {
+          await differential.expectSameWrite(
+            "Ledger",
+            "update",
+            {
+              ...on(1, "a"),
+              data: { entries: { create: [{ amount: 99 }] } },
+              include: { entries: { orderBy: { id: "asc" } } },
+            },
+            { tables: ["Ledger", "LedgerEntry"] },
+          );
+        });
+
+        test("createMany stamps them onto every row", async () => {
+          await differential.expectSameWrite(
+            "Ledger",
+            "update",
+            {
+              ...on(1, "ab"),
+              data: { entries: { createMany: { data: [{ amount: 1 }, { amount: 2 }] } } },
+              include: { entries: { orderBy: { id: "asc" } } },
+            },
+            { tables: ["Ledger", "LedgerEntry"] },
+          );
+        });
+
+        /**
+         * Repointing a child that belongs to the *other tenant*, which is where
+         * a half-written stamp is visible: entry 4 is in `(2, "a")`, and moving
+         * it to `(1, "ab")` has to change both of its columns.
+         */
+        test("connect repoints a child across the composite key", async () => {
+          await differential.expectSameWrite(
+            "Ledger",
+            "update",
+            {
+              ...on(1, "ab"),
+              data: { entries: { connect: [{ id: 4 }] } },
+              include: { entries: { orderBy: { id: "asc" } } },
+            },
+            { tables: ["Ledger", "LedgerEntry"] },
+          );
+        });
+
+        test("connectOrCreate, hit and miss", async () => {
+          await differential.expectSameWrite(
+            "Ledger",
+            "update",
+            {
+              ...on(1, "ab"),
+              data: {
+                entries: {
+                  connectOrCreate: [
+                    { where: { id: 4 }, create: { amount: 0 } },
+                    { where: { id: 99 }, create: { amount: 77 } },
+                  ],
+                },
+              },
+              include: { entries: { orderBy: { id: "asc" } } },
+            },
+            { tables: ["Ledger", "LedgerEntry"] },
+          );
+        });
+
+        /**
+         * The parent restriction is a conjunction rather than a spread, and
+         * over two columns that matters twice: `(1, "a")` and `(2, "a")` share
+         * a code, `(1, "a")` and `(1, "ab")` share a tenant. A filter conjoined
+         * on one of the two reaches one of those neighbours.
+         */
+        test("updateMany writes only this ledger's entries", async () => {
+          await differential.expectSameWrite(
+            "Ledger",
+            "update",
+            {
+              ...on(1, "a"),
+              data: { entries: { updateMany: { where: {}, data: { memo: "touched" } } } },
+            },
+            { tables: ["Ledger", "LedgerEntry"] },
+          );
+        });
+
+        test("deleteMany deletes only this ledger's entries", async () => {
+          await differential.expectSameWrite(
+            "Ledger",
+            "update",
+            { ...on(1, "a"), data: { entries: { deleteMany: {} } } },
+            { tables: ["Ledger", "LedgerEntry"] },
+          );
+        });
+
+        test("update names a row and cannot reach another ledger's", async () => {
+          await differential.expectSameWrite(
+            "Ledger",
+            "update",
+            {
+              ...on(1, "a"),
+              data: { entries: { update: [{ where: { id: 1 }, data: { amount: 11 } }] } },
+            },
+            { tables: ["Ledger", "LedgerEntry"] },
+          );
+        });
+
+        /** Entry 3 belongs to `(1, "ab")`, so this is the "not connected" arm. */
+        test("update naming another ledger's row raises", async () => {
+          await differential.expectSameWrite(
+            "Ledger",
+            "update",
+            {
+              ...on(1, "a"),
+              data: { entries: { update: [{ where: { id: 3 }, data: { amount: 0 } }] } },
+            },
+            { tables: ["Ledger", "LedgerEntry"] },
+          );
+        });
+
+        test("delete a connected row", async () => {
+          await differential.expectSameWrite(
+            "Ledger",
+            "update",
+            { ...on(1, "a"), data: { entries: { delete: [{ id: 1 }] } } },
+            { tables: ["Ledger", "LedgerEntry"] },
+          );
+        });
+
+        test("upsert, both branches", async () => {
+          await differential.expectSameWrite(
+            "Ledger",
+            "update",
+            {
+              ...on(1, "a"),
+              data: {
+                entries: {
+                  upsert: [
+                    { where: { id: 1 }, update: { amount: 111 }, create: { amount: 0 } },
+                    { where: { id: 98 }, update: { amount: 0 }, create: { amount: 222 } },
+                  ],
+                },
+              },
+              include: { entries: { orderBy: { id: "asc" } } },
+            },
+            { tables: ["Ledger", "LedgerEntry"] },
+          );
+        });
+
+        /** `set` needs the child's columns nullable, so it goes through notes. */
+        test("set replaces the whole set", async () => {
+          await differential.expectSameWrite(
+            "Ledger",
+            "update",
+            {
+              ...on(1, "a"),
+              // Note 4 is loose and note 3 belongs to the other tenant, so this
+              // detaches one, attaches two, and has to write both columns in
+              // both directions.
+              data: { notes: { set: [{ id: 3 }, { id: 4 }] } },
+              include: { notes: { orderBy: { id: "asc" } } },
+            },
+            { tables: ["Ledger", "LedgerNote"] },
+          );
+        });
+
+        test("set to nothing detaches every note", async () => {
+          await differential.expectSameWrite(
+            "Ledger",
+            "update",
+            {
+              ...on(1, "a"),
+              data: { notes: { set: [] } },
+              include: { notes: true },
+            },
+            { tables: ["Ledger", "LedgerNote"] },
+          );
+        });
+
+        test("disconnect nulls both columns of the named row", async () => {
+          await differential.expectSameWrite(
+            "Ledger",
+            "update",
+            {
+              ...on(1, "a"),
+              data: { notes: { disconnect: [{ id: 1 }] } },
+              include: { notes: true },
+            },
+            { tables: ["Ledger", "LedgerNote"] },
+          );
+        });
+
+        /**
+         * The foreign side of the composite one-to-one: creating a seal where
+         * one is linked orphans the incumbent rather than deleting it, and
+         * orphaning it means clearing both of its columns.
+         */
+        test("create onto an occupied composite one-to-one", async () => {
+          await differential.expectSameWrite(
+            "Ledger",
+            "update",
+            {
+              ...on(1, "a"),
+              data: { seal: { create: { seal: "second" } } },
+              include: { seal: true },
+            },
+            { tables: ["Ledger", "LedgerSeal"] },
+          );
+        });
+
+        /** ...and `connect` onto an occupied one does the same. */
+        test("connect onto an occupied composite one-to-one", async () => {
+          await differential.expectSameWrite(
+            "Ledger",
+            "update",
+            {
+              ...on(1, "a"),
+              data: { seal: { connect: { id: 2 } } },
+              include: { seal: true },
+            },
+            { tables: ["Ledger", "LedgerSeal"] },
+          );
+        });
+
+        /**
+         * A parent `create` reaching every operand at once, which is the shape
+         * the ordering argument is about: the parent's composite key does not
+         * exist until its own statement runs, so every stamp below depends on
+         * a `RETURNING` that has to carry both columns.
+         */
+        test("a parent create with children of every kind", async () => {
+          await differential.expectSameWrite(
+            "Ledger",
+            "create",
+            {
+              data: {
+                tenantId: 5,
+                code: "mixed",
+                title: "five",
+                entries: {
+                  create: [{ amount: 1 }],
+                  createMany: { data: [{ amount: 2 }] },
+                  connect: [{ id: 4 }],
+                },
+                notes: { create: [{ body: "fresh" }] },
+              },
+              include: {
+                entries: { orderBy: { id: "asc" } },
+                notes: { orderBy: { id: "asc" } },
+              },
+            },
+            { tables: ["Ledger", "LedgerEntry", "LedgerNote"] },
+          );
+        });
       });
     });
 

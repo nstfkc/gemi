@@ -405,11 +405,18 @@ export async function createDifferential(options: {
     "User",
     "OrganizationInvitation",
     "Organization",
-    // The composite-relation pair (#67). Adding a model to the schema without
-    // adding it here is a *silent* omission on SQLite, where every run gets a
-    // fresh temp database, and a loud one on Postgres, where the second run's
-    // seed collides with the first's rows — which is exactly how this was
+    // The composite-relation family (#67, #271). Adding a model to the schema
+    // without adding it here is a *silent* omission on SQLite, where every run
+    // gets a fresh temp database, and a loud one on Postgres, where the second
+    // run's seed collides with the first's rows — which is exactly how this was
     // found, and the second time in this suite's history.
+    //
+    // Children before the parent, as everywhere in this list. All three hold a
+    // composite foreign key into `Ledger`; `LedgerNote` and `LedgerSeal` hold a
+    // nullable one, so the wrong order would detach rather than raise — the
+    // same silent shape `Profile` is ordered for above.
+    "LedgerSeal",
+    "LedgerNote",
     "LedgerEntry",
     "Ledger",
   ];
@@ -451,6 +458,17 @@ export async function createDifferential(options: {
     await prisma.user.deleteMany({});
     await prisma.organizationInvitation.deleteMany({});
     await prisma.organization.deleteMany({});
+
+    // The composite family, children first — the same order and the same reason
+    // as `TABLES` above. It was absent here while present there, which cost
+    // nothing while the only composite cases were reads against a temp database
+    // that is fresh per file. A write comparison resets between the two runs,
+    // so a table this does not clear carries the first client's rows into the
+    // second's and fails every case for a reason that is not the code's.
+    await prisma.ledgerSeal.deleteMany({});
+    await prisma.ledgerNote.deleteMany({});
+    await prisma.ledgerEntry.deleteMany({});
+    await prisma.ledger.deleteMany({});
 
     // SQLite keeps the high-water mark for an AUTOINCREMENT column in this
     // table, and clearing it is the only way to make ids start from 1 again.

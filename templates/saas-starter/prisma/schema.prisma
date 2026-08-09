@@ -256,6 +256,8 @@ model Ledger {
   title    String
 
   entries LedgerEntry[]
+  notes   LedgerNote[]
+  seal    LedgerSeal?
 
   @@id([tenantId, code])
 }
@@ -270,6 +272,60 @@ model LedgerEntry {
   ledger Ledger @relation(fields: [tenantId, ledgerCode], references: [tenantId, code])
 
   @@index([tenantId, ledgerCode])
+}
+
+/// The **optional** half of the composite relation, and the reason it is a
+/// second model rather than a change to `LedgerEntry` (#271).
+///
+/// `LedgerEntry.ledger` is required, which is the ordinary tenant-scoped shape
+/// and the one the read surfaces are measured on. Prisma leaves `disconnect`
+/// out of a required relation's nested input type entirely — so every operand
+/// that *detaches* a composite link was unreachable from this schema, in the
+/// same way the foreign side of a to-one was unreachable before `Profile`
+/// (#358). `set` and `disconnect` need the columns nullable; nothing else here
+/// does.
+///
+/// Both columns are optional together, which is Prisma's rule rather than a
+/// choice: *"The fields of a relation must either all be optional or all be
+/// required"*. It is also the rule the ORM's `assertDisconnectable` and its two
+/// `displaces` predicates lean on when they test every column and expect one
+/// answer.
+model LedgerNote {
+  id         Int     @id @default(autoincrement())
+  tenantId   Int?
+  ledgerCode String?
+  body       String
+
+  ledger Ledger? @relation(fields: [tenantId, ledgerCode], references: [tenantId, code])
+
+  @@index([tenantId, ledgerCode])
+}
+
+/// A composite **one-to-one** — the displacing shape, over two columns.
+///
+/// `Profile` is the single-field version of this (#358, #360, #361, #363), and
+/// displacement is the one branch whose discriminator reads the relation's own
+/// fields as a unique index. Over one column "the index covers exactly the
+/// relation's fields" and "the index is one column" are the same sentence, and
+/// they stop being the same sentence here.
+///
+/// The `@@unique` below covers exactly the relation, which is what Prisma
+/// requires of a one-to-one and what it *only* accepts — measured on 6.19.2,
+/// both directions: `@@unique([tenantId, ledgerCode, seal])` and
+/// `@@unique([ledgerCode, tenantId])` are each refused at parse time with
+/// P1012, *"Either add an `@@unique([tenantId, ledgerCode])` attribute to the
+/// model, or change the relation to one-to-many"*. Without a model of this
+/// shape the harness cannot ask Prisma what a composite one-to-one does with
+/// an occupied link.
+model LedgerSeal {
+  id         Int     @id @default(autoincrement())
+  tenantId   Int?
+  ledgerCode String?
+  seal       String
+
+  ledger Ledger? @relation(fields: [tenantId, ledgerCode], references: [tenantId, code])
+
+  @@unique([tenantId, ledgerCode])
 }
 
 enum OrganizationPlan {

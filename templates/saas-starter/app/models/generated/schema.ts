@@ -189,6 +189,24 @@ export const Ledger = {
       "from": [],
       "to": [],
       "nullable": false
+    },
+    "notes": {
+      "name": "notes",
+      "model": "LedgerNote",
+      "kind": "many",
+      "relationName": "LedgerToLedgerNote",
+      "from": [],
+      "to": [],
+      "nullable": false
+    },
+    "seal": {
+      "name": "seal",
+      "model": "LedgerSeal",
+      "kind": "one",
+      "relationName": "LedgerToLedgerSeal",
+      "from": [],
+      "to": [],
+      "nullable": true
     }
   }
 } satisfies ModelSchema;
@@ -260,6 +278,137 @@ export const LedgerEntry = {
         "code"
       ],
       "nullable": false
+    }
+  }
+} satisfies ModelSchema;
+
+export const LedgerNote = {
+  "name": "LedgerNote",
+  "table": "LedgerNote",
+  "fields": {
+    "id": {
+      "name": "id",
+      "column": "id",
+      "type": "Int",
+      "nullable": false,
+      "isId": true,
+      "isUpdatedAt": false,
+      "default": {
+        "kind": "autoincrement"
+      }
+    },
+    "tenantId": {
+      "name": "tenantId",
+      "column": "tenantId",
+      "type": "Int",
+      "nullable": true,
+      "isId": false,
+      "isUpdatedAt": false
+    },
+    "ledgerCode": {
+      "name": "ledgerCode",
+      "column": "ledgerCode",
+      "type": "String",
+      "nullable": true,
+      "isId": false,
+      "isUpdatedAt": false
+    },
+    "body": {
+      "name": "body",
+      "column": "body",
+      "type": "String",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false
+    }
+  },
+  "primaryKey": [
+    "id"
+  ],
+  "uniques": [],
+  "relations": {
+    "ledger": {
+      "name": "ledger",
+      "model": "Ledger",
+      "kind": "one",
+      "relationName": "LedgerToLedgerNote",
+      "from": [
+        "tenantId",
+        "ledgerCode"
+      ],
+      "to": [
+        "tenantId",
+        "code"
+      ],
+      "nullable": true
+    }
+  }
+} satisfies ModelSchema;
+
+export const LedgerSeal = {
+  "name": "LedgerSeal",
+  "table": "LedgerSeal",
+  "fields": {
+    "id": {
+      "name": "id",
+      "column": "id",
+      "type": "Int",
+      "nullable": false,
+      "isId": true,
+      "isUpdatedAt": false,
+      "default": {
+        "kind": "autoincrement"
+      }
+    },
+    "tenantId": {
+      "name": "tenantId",
+      "column": "tenantId",
+      "type": "Int",
+      "nullable": true,
+      "isId": false,
+      "isUpdatedAt": false
+    },
+    "ledgerCode": {
+      "name": "ledgerCode",
+      "column": "ledgerCode",
+      "type": "String",
+      "nullable": true,
+      "isId": false,
+      "isUpdatedAt": false
+    },
+    "seal": {
+      "name": "seal",
+      "column": "seal",
+      "type": "String",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false
+    }
+  },
+  "primaryKey": [
+    "id"
+  ],
+  "uniques": [
+    [
+      "tenantId",
+      "ledgerCode"
+    ]
+  ],
+  "relations": {
+    "ledger": {
+      "name": "ledger",
+      "model": "Ledger",
+      "kind": "one",
+      "relationName": "LedgerToLedgerSeal",
+      "from": [
+        "tenantId",
+        "ledgerCode"
+      ],
+      "to": [
+        "tenantId",
+        "code"
+      ],
+      "nullable": true
     }
   }
 } satisfies ModelSchema;
