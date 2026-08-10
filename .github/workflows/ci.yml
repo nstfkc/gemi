@@ -201,6 +201,39 @@ jobs:
         env:
           TZ: UTC
 
+      # `gemi run`, against the one real project in this repository.
+      #
+      # `console/runner.test.ts` covers the runner over fixture projects, so what
+      # is left is what a fixture cannot do. Its command files import
+      # `defineCommand` by absolute path, which makes the class identity hold by
+      # construction; a real project imports it from its *installed* gemi, while
+      # the CLI runs from `dist/bin/gemi.js` with a bundled copy of its own.
+      # Discovery decides what is a command by walking the prototype chain, so
+      # if `gemi run` ever stops spawning a process and resolving the runner out
+      # of the app's own `node_modules`, every command in every project becomes
+      # invisible — and every unit test still passes.
+      #
+      # The template ships no commands, so this asserts the empty-directory
+      # listing: enough to prove the spawn, both preloads, the app's Kernel and
+      # the config slice all lined up. Add a command to `app/commands/` here and
+      # this becomes an end-to-end assertion.
+      #
+      # `timeout 60` because the second failure this covers is a command that
+      # finishes its work and then sits there — an open database pool, a Redis
+      # client or a cron handle holding the loop open. Without the bound that is
+      # a six-hour job rather than a red step.
+      - name: Run the console command runner
+        run: |
+          output=$(timeout 60 bunx gemi run)
+          echo "$output"
+          echo "$output" | grep -q 'app/commands'
+          if timeout 60 bunx gemi run no-such-command; then
+            echo "expected a non-zero exit for an unknown command"; exit 1
+          fi
+        working-directory: templates/saas-starter
+        env:
+          TZ: UTC
+
       # `.test-d.ts` files do not match vitest's default `include`, so the step
       # above collects none of them: 15 type assertions in `wrap.test-d.ts` and
       # `aggregate.test-d.ts` ran nowhere, locally or here. They are the only

@@ -17,7 +17,7 @@ import type { ConfigItems } from "../support/Repository";
 import { Scheduler } from "./cron/Scheduler";
 import { ScheduleServiceProvider } from "./cron/ScheduleServiceProvider";
 import { CronJob } from "./cron/CronJob";
-import { discoverCronJobs, discoverJobs } from "./discovery";
+import { discoverCommands, discoverCronJobs, discoverJobs } from "./discovery";
 import { Job } from "./queue/Job";
 import { QueueManager } from "./queue/QueueManager";
 import { QueueServiceProvider } from "./queue/QueueServiceProvider";
@@ -370,6 +370,139 @@ describe("the schedule", () => {
     );
 
     expect(application.make(Scheduler).jobs).toEqual([]);
+  });
+
+  /**
+   * `GEMI_NO_SCHEDULE=1` is what `gemi run` sets on the process it spawns.
+   *
+   * Booting the application is how a console command reaches the container, and
+   * starting the schedule is a side effect of that which nobody asked for: a
+   * `gemi run backfill` that takes four minutes would otherwise fire the whole
+   * schedule in a process no operator is watching, and the `Bun.cron` handles
+   * hold the loop open besides.
+   *
+   * The half worth pinning is the *first* assertion. Suppressing the schedule by
+   * skipping discovery too would look identical from the outside — nothing ticks
+   * either way — and would quietly make `app(Scheduler).jobs` answer differently
+   * depending on which process asked, so a command that wanted to fire a tick by
+   * hand would find nothing to fire.
+   */
+  test("GEMI_NO_SCHEDULE resolves and lists the jobs, and starts none of them", async () => {
+    const root = project({
+      "app/cron/EveryMinute.ts": cron("EveryMinute", "* * * * *"),
+    });
+
+    const previous = process.env.GEMI_NO_SCHEDULE;
+    process.env.GEMI_NO_SCHEDULE = "1";
+
+    try {
+      const application = await boot(
+        { schedule: { jobsDir: join(root, "app/cron") } },
+        ScheduleServiceProvider,
+      );
+
+      expect(names(application.make(Scheduler).jobs)).toEqual(["EveryMinute"]);
+      expect(globalThis.__gemiCronJobs?.size ?? 0).toBe(0);
+    } finally {
+      if (previous === undefined) delete process.env.GEMI_NO_SCHEDULE;
+      else process.env.GEMI_NO_SCHEDULE = previous;
+    }
+  });
+
+  test("without it, the same schedule does start", async () => {
+    const root = project({
+      "app/cron/EveryMinute.ts": cron("EveryMinute", "* * * * *"),
+    });
+
+    const application = await boot(
+      { schedule: { jobsDir: join(root, "app/cron") } },
+      ScheduleServiceProvider,
+    );
+
+    expect(names(application.make(Scheduler).jobs)).toEqual(["EveryMinute"]);
+    expect(globalThis.__gemiCronJobs?.size ?? 0).toBe(1);
+  });
+});
+
+/**
+ * Commands, the third directory discovery reads.
+ *
+ * The walk is the same one, so the skip rules and the base-class exclusion are
+ * covered above and only spot-checked here. What is specific to commands is the
+ * failure the builder introduces: a chain that never reached `.handle()` is a
+ * plain object rather than a class, so the walk would discard it exactly as it
+ * discards a helper — and the command would vanish from `gemi run` with nothing
+ * raised, which is the silence this whole file exists to remove.
+ */
+describe("asking an application what commands it has", () => {
+  const BUILDER = JSON.stringify(
+    resolve(import.meta.dirname, "../console/builder.ts"),
+  );
+
+  const declaration = (name: string) =>
+    `import { defineCommand } from ${BUILDER};
+export default defineCommand(${JSON.stringify(name)}).handle(() => {});`;
+
+  test("finds every command under the directory, nested included", async () => {
+    const root = project({
+      "app/commands/Seed.ts": declaration("db:seed"),
+      "app/commands/tenants/Repair.ts": declaration("tenants:repair"),
+    });
+
+    const found = await discoverCommands(join(root, "app/commands"));
+
+    expect(found.map((command) => command.commandName)).toEqual([
+      "db:seed",
+      "tenants:repair",
+    ]);
+  });
+
+  test("never returns the base class, however it got re-exported", async () => {
+    const root = project({
+      "app/commands/Seed.ts": declaration("db:seed"),
+      "app/commands/base.ts": `export { Command } from ${JSON.stringify(
+        resolve(import.meta.dirname, "../console/Command.ts"),
+      )};`,
+    });
+
+    expect(
+      (await discoverCommands(join(root, "app/commands"))).map(
+        (command) => command.commandName,
+      ),
+    ).toEqual(["db:seed"]);
+  });
+
+  test("a directory that does not exist is an empty list, not a throw", async () => {
+    const root = project({ "app/config/command.ts": "" });
+
+    expect(await discoverCommands(join(root, "app/commands"))).toEqual([]);
+  });
+
+  test("an unfinished builder stops the walk and names the file", async () => {
+    const root = project({
+      "app/commands/Seed.ts": declaration("db:seed"),
+      "app/commands/Half.ts": `import { defineCommand } from ${BUILDER};
+export default defineCommand("half-written").arg("who");`,
+    });
+
+    await expect(
+      discoverCommands(join(root, "app/commands")),
+    ).rejects.toThrow(/never called `\.handle\(\)`/);
+  });
+
+  test("the ordinary things a command file exports are not mistaken for one", async () => {
+    const root = project({
+      "app/commands/Seed.ts": `${declaration("db:seed")}
+export const BATCH_SIZE = 100;
+export function helper() {}
+export const config = { retries: 3 };`,
+    });
+
+    expect(
+      (await discoverCommands(join(root, "app/commands"))).map(
+        (command) => command.commandName,
+      ),
+    ).toEqual(["db:seed"]);
   });
 });
 

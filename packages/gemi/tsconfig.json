@@ -36,6 +36,7 @@
     "facades",
     "email",
     "services",
+    "console",
     "broadcasting",
     "client",
     "i18n",

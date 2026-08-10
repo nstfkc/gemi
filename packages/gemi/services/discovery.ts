@@ -1,7 +1,14 @@
 import { existsSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 
-import { discoverClasses, projectRoot } from "../support/discover";
+import {
+  discoverClasses,
+  DiscoveryError,
+  projectRoot,
+} from "../support/discover";
+import { Command, type CommandClass } from "../console/Command";
+import { commandConfigDefaults } from "../console/config";
+import { isUnfinishedBuilder } from "../console/builder";
 import { CronJob } from "./cron/CronJob";
 import { scheduleConfigDefaults } from "./cron/config";
 import { Job } from "./queue/Job";
@@ -143,4 +150,71 @@ export async function discoverCronJobs(
   const resolved = resolveDir(dir);
   warnIfSourceIsMissing(resolved, "cron jobs", "schedule");
   return await discoverClasses(resolved, CronJob);
+}
+
+/**
+ * The `Command` subclasses under `dir`, defaulting to the config slice's
+ * `app/commands`.
+ *
+ * This is what a `commands`-less `command` slice resolves to, and what
+ * `gemi run` lists. Unlike the two above it is not called during boot — a
+ * command registry has one consumer, and importing every file under
+ * `app/commands` into every server process would be a cost paid on every start
+ * for code no request reaches.
+ *
+ * Every file underneath is imported, so calling this runs the app's command
+ * modules — the cost `discoverClasses` documents at length, paid once per call.
+ */
+export async function discoverCommands(
+  dir: string = commandConfigDefaults().commandsDir,
+): Promise<CommandClass[]> {
+  const resolved = resolveDir(dir);
+  warnIfSourceIsMissing(resolved, "commands", "command");
+
+  const unfinished: string[] = [];
+
+  const commands = await discoverClasses(
+    resolved,
+    Command,
+    [],
+    (value, file) => {
+      if (isUnfinishedBuilder(value)) unfinished.push(file);
+    },
+  );
+
+  refuseUnfinishedBuilders(unfinished);
+
+  return commands as CommandClass[];
+}
+
+/**
+ * Stops the walk for a builder chain that was never finished.
+ *
+ * This is the one silence the builder introduces, and it is the exact shape
+ * #322 and #323 exist to remove. `defineCommand(...).arg(...)` without a
+ * trailing `.handle(...)` is a plain object rather than a class, so
+ * `discoverClasses` discards it along with every constant and helper a command
+ * file happens to export — and the command disappears from `gemi run` with
+ * nothing raised. The author sees a listing containing every command except the
+ * one they just wrote.
+ *
+ * A throw rather than a warning, because there is no reading of an unfinished
+ * builder under which the author meant it: the chain builds a description of a
+ * command and then discards it.
+ */
+function refuseUnfinishedBuilders(files: string[]): void {
+  if (files.length === 0) return;
+
+  const subject =
+    files.length === 1
+      ? `${files[0]} exports a command builder that never called \`.handle()\``
+      : `${files.length} files export a command builder that never called ` +
+        `\`.handle()\`:\n    ${files.join("\n    ")}`;
+
+  throw new DiscoveryError(
+    `${subject}, so there is no command to run. \`.handle()\` is what turns ` +
+      `the chain into a command — finish it:\n\n` +
+      `    export default defineCommand("my-command")\n` +
+      `      .handle(async ({ line }) => { line("hello") })`,
+  );
 }

@@ -105,10 +105,28 @@ export { ScheduleServiceProvider } from "./cron/ScheduleServiceProvider";
 export { Scheduler } from "./cron/Scheduler";
 export { CronJob } from "./cron/CronJob";
 
+// Console commands. `defineCommand` is the authoring surface — the `Command`
+// base class below is what it produces and what discovery finds, and
+// subclassing it by hand gives up the typing that is the point (see
+// `console/builder.ts`).
+export { defineCommand } from "../console/builder";
+export type { CommandBuilder } from "../console/builder";
+export { Command, CommandFailed } from "../console/Command";
+export type {
+  ArgSpec,
+  OptionSpec,
+  CommandArgument,
+  CommandOption,
+  CommandClass,
+  CommandResult,
+} from "../console/Command";
+export type { CommandContext } from "../console/context";
+export { CommandRegistry } from "../console/CommandRegistry";
+
 // Discovery. What a `jobs`-less `queue` or `schedule` slice resolves to, and
 // the only way left to ask an application what it has: the config array a test
 // used to import may not exist any more.
-export { discoverJobs, discoverCronJobs } from "./discovery";
+export { discoverJobs, discoverCronJobs, discoverCommands } from "./discovery";
 
 // Redis
 export { RedisServiceProvider } from "./redis/RedisServiceProvider";
@@ -163,6 +181,11 @@ export {
   scheduleConfigDefaults,
   type ScheduleConfig,
 } from "./cron/config";
+export {
+  defineCommandConfig,
+  commandConfigDefaults,
+  type CommandConfig,
+} from "../console/config";
 export {
   defineRedisConfig,
   redisConfigDefaults,

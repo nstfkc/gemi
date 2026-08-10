@@ -36,6 +36,7 @@ app/
   email/                 # email templates (jsx-email)
   cron/                  # CronJob classes — scheduled by being here
   jobs/                  # Job classes — registered by being here
+  commands/              # Command chains — available to `gemi run` by being here
   i18n/                  # translation dictionaries
   database/
     prisma.ts            # the Prisma client instance
@@ -84,11 +85,15 @@ If present, `app/preload.ts` runs once, before the server starts, for both `gemi
 - **`i18n/`** — translation dictionaries created with `Dictionary.create` from `gemi/i18n`, exported as a single default object.
 - **`database/prisma.ts`** — your Prisma client instance, imported wherever you query the database.
 
-### `cron/` and `jobs/` — the two discovered directories
+### `cron/`, `jobs/` and `commands/` — the three discovered directories
 
-These two directories are read, not listed. Every class under `app/cron` extending `CronJob` is scheduled at boot, and every class under `app/jobs` extending `Job` is registered at boot, with nothing anywhere naming them — writing the file is the registration. The `schedule` and `queue` slices can still declare `jobs` explicitly, which turns the walk off and uses the declared list verbatim; `jobs: []` is a declaration too, and means an app with none.
+These directories are read, not listed. Every class under `app/cron` extending `CronJob` is scheduled at boot, every class under `app/jobs` extending `Job` is registered at boot, and every command under `app/commands` is available to `gemi run` — with nothing anywhere naming them. Writing the file is the registration. The `schedule`, `queue` and `command` slices can still declare their list explicitly, which turns the walk off and uses the declared list verbatim; an empty array is a declaration too, and means an app with none.
 
-Discovery imports every `.ts`/`.tsx` file it walks, because a class does not exist until its module has run — so a file in either directory that does work when imported does that work at boot. Keep them to declarations. See [Cron](./cron.md) and [Jobs & Queues](./jobs-and-queues.md) for the walk's skip rules and the reasons for reading a directory at all.
+Discovery imports every `.ts`/`.tsx` file it walks, because a class does not exist until its module has run — so a file in one of these directories that does work when imported does that work when the directory is read. Keep them to declarations.
+
+`app/commands` differs in **when** it is read: cron and queue discovery happen during boot, because a tick or a dispatch can arrive at any moment afterwards, while commands are walked only by `gemi run`. A registry no request consults has no reason to cost every production process an import of every file under it.
+
+See [Cron](./cron.md), [Jobs & Queues](./jobs-and-queues.md) and [Commands](./commands.md) for the walk's skip rules and the reasons for reading a directory at all.
 
 ## The Kernel
 
