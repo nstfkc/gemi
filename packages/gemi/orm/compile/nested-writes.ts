@@ -38,9 +38,17 @@ import { matchUniqueKey, type RefusalOrigin } from "./unique";
  * `createMany` is the second shape and only exists on the foreign side: the same
  * rows as a nested `create`, in one statement rather than one per row.
  *
- * Everything else in Prisma's nested-write grammar — `set`, `disconnect`,
- * `update`, `upsert`, `delete`, `deleteMany`, `updateMany` — throws
- * `UnsupportedQueryError` naming the operation *and the reason*; see `REFUSED`.
+ * The rest of Prisma's nested-write grammar — `set`, `disconnect`, `update`,
+ * `upsert`, `delete`, `deleteMany`, `updateMany` — is implemented too, and this
+ * paragraph used to say that all seven throw. What is left refused is refused
+ * by *shape* rather than by name, at the site that knows why: the four
+ * collection operands on a to-one, which Prisma's to-one input does not carry
+ * either; `delete` through a key on this row, which would remove a row the
+ * statement is not about (#391 left it the only one of the seven still refused
+ * on that side); everything in {@link EXISTING_ROW_ONLY_STATEMENTS} under a
+ * `create`; and the four that reach the far row *through* an implicit
+ * many-to-many's pairs. `REFUSED` — the table this sentence pointed at — is
+ * empty, and its docblock says why that is worth reading.
  *
  * **The line this file draws has two halves: which rows an operand can name,
  * and whose columns it writes.**
@@ -965,25 +973,6 @@ function planOwningSide(
   }
 
   /**
-   * `upsert` through a to-one, refused **by name**.
-   *
-   * The far row is identified by *this* row's foreign key, so an absent one
-   * means creating the far row and then writing back to a parent that has
-   * already been inserted — a shape no other operand here needs, and the
-   * reason this side is not implemented.
-   *
-   * Named rather than left to fall through, which is what it did: with no
-   * branch of its own it reached the `connect` handling below and reported
-   * `'where' yet (Organization.update.organization.connect)` — a different
-   * operand, a different model, and a claim that `{ id: 1 }` is not a unique
-   * field when it is. The real failure was that a `{ where, create, update }`
-   * operand was being read as a connect key.
-   *
-   * That is the shape #85 was filed for and #101 fixed on its own path: a
-   * refusal that misnames its origin sends the reader to a query they did not
-   * write.
-   */
-  /**
    * The list operands, refused by name on a to-one.
    *
    * `set`, `updateMany` and `deleteMany` describe *many* rows, and this side
@@ -1007,17 +996,184 @@ function planOwningSide(
     );
   }
 
+  /**
+   * `upsert` through a to-one whose key is on **this** row — update the far row
+   * this one points at, or mint one and point at it (#391).
+   *
+   * **Its refusal named a write-back that this side does not need**: *"an
+   * absent far row would have to be created and then written back to a
+   * `<parent>` that has already been inserted"*. It has not been inserted. The
+   * statement the caller asked for is the one this step runs *before*, so a
+   * created row's key reaches it as a contribution — which is exactly what the
+   * `create` and `connectOrCreate` branches above already do, and they are the
+   * two operands either side of this one. What was genuinely missing was
+   * deciding the branch, and that is a lookup, the same one `connectOrCreate`
+   * has been deciding since #94. The seventh refusal in this file to describe
+   * machinery one layer down.
+   *
+   * The refusal also pointed at a workaround that does not exist here: *"upsert
+   * the `<child>` directly, then 'connect' it"*. On the **foreign** side that
+   * works, because the child carries the back-reference to key the upsert on —
+   * `Image.upsert({ where: { thumbnailForMediaId: id }, … })`, which is what
+   * #354 shipped. On this side there is no such column: the link is this row's
+   * `previewImageId`, and `Image` has nothing pointing back. So the caller was
+   * being sent to a spelling with nothing to put in its `where`, and the real
+   * workaround — read the foreign key, then branch by hand into `create` or
+   * `update` — was left to be rediscovered per call site. That is the half of
+   * #391 a wording fix would not have closed.
+   *
+   * **A `before` step, and the branch is decided from the parent's own key.**
+   * The far row is identified by a column of this row, which the arguments do
+   * not carry, so the parent is read first — pre-scoped, exactly as the
+   * `disconnect` filter arm's parent read is and for the same reason: `args.where`
+   * has already been through this model's policies. Then:
+   *
+   *     linked, and the far row matches   ->  update it, key written back unchanged
+   *     linked, filter matches nothing    ->  the create branch, as Prisma's does
+   *     nothing linked                    ->  create it and take the new key
+   *
+   * Measured against 6.19.2/SQLite on `Profile.user` (a one-to-one) and
+   * `User.organization` (a many-to-one), which answer identically:
+   *
+   *     no where, nothing linked   insert the far row, update this row's key
+   *     no where, linked           select the far row, update it, **this row is
+   *                                not written at all**
+   *     where matching, linked     the same update, filtered
+   *
+   * **Nothing displaces**, and that is per branch rather than an omission. The
+   * update branch keeps the link it found; the create branch mints a row a line
+   * earlier, so nothing can already be pointing at it — `connectOrCreate`'s miss
+   * branch says the same thing in the same words, and Prisma agrees by
+   * construction: its log for the create branch is the insert and the repoint,
+   * with no incumbent lookup in it.
+   *
+   * **KNOWN DIVERGENCE — a `where` that matches nothing is served here and is a
+   * Prisma bug there.** Prisma splices the operand's filter into the *parent's*
+   * `UPDATE`, so the create branch emits
+   * `update "Profile" set "userId" = ? where ("id" in (?) and "User"."name" = ?)`
+   * — a column of the far table in this row's statement — and answers P2022,
+   * *"The column `main.User.name` does not exist in the current database"*,
+   * having already inserted the far row inside the transaction it then rolls
+   * back. Measured on SQLite on both relation shapes above and on the composite
+   * `LedgerNote.ledger`; the statement is invalid on Postgres too, though as a
+   * missing `FROM`-clause entry rather than an unknown column, so the pin
+   * asserts the failure and not its class. gemi runs the create branch the
+   * operand asks for. It is the same operand the *hit* branch serves correctly
+   * on both clients, so refusing the `where` outright would refuse a query
+   * Prisma answers; the divergence is pinned in `writes.differential.test.ts`
+   * rather than matched.
+   *
+   * **The hit branch writes this row's foreign key back unchanged**, which is
+   * the one thing here that costs anything: the contribution is in the SET list
+   * whether or not the branch that changes it ran, because a statement's text
+   * cannot depend on a value read at bind time. On a model carrying
+   * `@updatedAt` that stamps a row Prisma leaves alone. Pre-existing rather than
+   * introduced — it is the same mechanism, and the same trade, as the owning
+   * side's `disconnect` filter arm, whose measurements are in
+   * `updateAssignments`' docblock in `write.ts`.
+   *
+   * A branch of its own is also what keeps the refusals honest, and that is why
+   * this sits above `connect` rather than after it. With none, the operand fell
+   * through to the `connect` handling and reported *"'where' yet
+   * (Organization.update.organization.connect)"* — a different operand, a
+   * different model, and a claim that `{ id: 1 }` is not a unique field when it
+   * is. That is the shape #85 was filed for and #101 fixed on its own path.
+   */
   if (key === "upsert") {
-    throw new UnsupportedQueryError(
-      `data.${relation.name}.upsert`,
-      schema.name,
-      operation,
-      `'${relation.name}' is a to-one, and this row holds its foreign key — ` +
-        `so an absent far row would have to be created and then written back ` +
-        `to a ${schema.name} that has already been inserted. That is not ` +
-        `implemented. Upsert the ${relation.model} directly, then 'connect' ` +
-        `it.`,
-    );
+    // Both checks, in this order, and neither subsumes the other: the first is
+    // the to-one *shape* — an array, a scalar, a misspelled `where` that would
+    // otherwise be dropped and turn a filtered write into an unconditional one
+    // — and the second is `upsert`'s own grammar, that both payloads are there.
+    // `false` rather than `many`, for the reason its docblock gives: a to-one's
+    // `where` is an optional `WhereInput`, not a unique key.
+    assertToOneWriteOperand(schema, relation, child, key, operand, operation);
+    assertUpsertOperand(schema, relation, child, operand, operation, false);
+
+    out.before.push({
+      relation: relation.name,
+      operation: "upsert",
+      async run(args, context, executor) {
+        // Optional throughout, the way `connectOrCreate`'s reads are: the
+        // plan-time checks above ran on the *shape*, and `canonicalShape`
+        // records a key's presence, so a plan hit implies the same keys — but
+        // nothing in a step should be the first place a missing one is a
+        // `TypeError` rather than an error naming the argument.
+        const record = at(args) as Record<string, unknown> | null | undefined;
+
+        // Pre-scoped: `args.where` is the effective `where` this call already
+        // put through this model's policies, so re-applying them would `AND`
+        // the same predicate twice. One column of one row, inside the
+        // transaction the nested steps already run in.
+        const parent = (await executor.exec(
+          schema.name,
+          "findFirst",
+          { where: args?.where, select: keySelect(fkFields) },
+          true,
+        )) as Record<string, unknown> | null;
+
+        // A composite key with any column null names no row — see
+        // {@link isLinked} — so a half-written link is the *absent* case here
+        // and takes the create branch, as does a parent this statement will go
+        // on to match nothing of. Prisma reaches the second the same way: its
+        // parent read finds nothing, it inserts the far row, and the failure
+        // arrives from the write-back as P2025, rolling the insert back. gemi's
+        // own `update` raises `RecordNotFoundError` for the same call and takes
+        // this step down with it.
+        if (isLinked(valuesOf(parent, fkFields))) {
+          // `AND`, not a spread: a filter naming a referenced column itself
+          // must narrow rather than replace the restriction that keeps this on
+          // the linked row. `childLink` reads as "the row this one points at"
+          // on this side — the far row's own columns bound to the values just
+          // read off this one.
+          const where = conjoin(
+            record?.where,
+            childLink(link, parent as Record<string, unknown>),
+          );
+
+          const hit = (await executor.exec(
+            relation.model,
+            "findFirst",
+            { where, select: keySelect(referencedFields) },
+            // NOT pre-scoped: the child's own policies decide which rows exist,
+            // and a row this caller cannot see reads as absent — which sends it
+            // to the create branch, exactly as a hidden child does on the
+            // foreign side. The conservative answer, and the same one there.
+            false,
+          )) as Record<string, unknown> | null;
+
+          if (hit) {
+            // The key this row already holds, written back unchanged. The
+            // contribution is structural, so "the link does not move" has to be
+            // spelled as an assignment that changes nothing rather than as an
+            // absent one — the rule the `disconnect` filter arm states.
+            resolveKey(context, valuesOf(hit, referencedFields));
+
+            await executor.exec(
+              relation.model,
+              "updateMany",
+              { where, data: record?.update },
+              // NOT pre-scoped: the child's `onUpdate` and its scope-escape
+              // guard judge the payload, as they do for a nested `update`.
+              false,
+            );
+            return;
+          }
+        }
+
+        const created = (await executor.exec(
+          relation.model,
+          "create",
+          { data: record?.create, select: keySelect(referencedFields) },
+          // NOT pre-scoped — the child's own `onCreate` scopes the new row.
+          false,
+        )) as Record<string, unknown> | null;
+
+        resolveKey(context, valuesOf(created, referencedFields));
+      },
+    });
+
+    contributeResolved();
+    return;
   }
 
   if (key === "connectOrCreate") {
