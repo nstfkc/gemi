@@ -885,6 +885,48 @@ const CASES: Case[] = [
   ["M16 a many-to-one connect leaves the parent's other rows alone", "update", {
     where: { id: 2 }, data: { organization: { connect: { id: 1 } } },
   }, ["User", "Organization"]],
+
+  // M17 — the owning-side `upsert` (#391) on a **many**-to-one, which is the
+  // shape the issue was filed from and the one `OWNING_CASES` cannot reach:
+  // every case there runs against `Profile`, whose `user` is a one-to-one.
+  //
+  // The two relations answer identically — measured on 6.19.2 before this was
+  // written — and that is the point of running both. The owning side's
+  // discriminators differ between them (`displaces` reads the *child's* copy of
+  // the relation, #363), so "it works on the one-to-one" is not evidence about
+  // this one, and a `displaces` that widened would detach a sibling here.
+  //
+  // User 1 is in Acme; user 2 is in no organization.
+  ["M17 many-to-one upsert with a linked row updates it", "update", {
+    where: { id: 1 },
+    data: {
+      organization: {
+        upsert: { create: { name: "Created" }, update: { name: "Updated" } },
+      },
+    },
+  }, ["User", "Organization"]],
+  ["M17b many-to-one upsert with nothing linked creates and links", "update", {
+    where: { id: 2 },
+    data: {
+      organization: {
+        upsert: { create: { name: "Created" }, update: { name: "Updated" } },
+      },
+    },
+  }, ["User", "Organization"]],
+  // The other user in Acme is left where it is — the update branch writes the
+  // far row, and this row's key does not move, so nothing about a *shared*
+  // parent changes. The case that would catch an implementation reaching for
+  // the create branch and repointing this user out of the organization its
+  // sibling is still in.
+  ["M17c many-to-one upsert leaves the parent's other rows alone", "update", {
+    where: { id: 1 },
+    data: {
+      name: "Renamed",
+      organization: {
+        upsert: { create: { name: "Created" }, update: { name: "Updated" } },
+      },
+    },
+  }, ["User", "Organization"]],
 ];
 
 /**
@@ -1070,6 +1112,130 @@ const OWNING_CASES: [string, string, unknown, string[]?][] = [
   // "anything that ends with this row pointing somewhere".
   ["O15 owning create mints the far row and displaces nothing", "update", {
     where: { id: 2 }, data: { user: { create: { email: "minted@example.dev" } } },
+  }, ["Profile", "User"]],
+
+  // O16 — the owning-side `upsert` (#391), which was refused at *compile* time
+  // and so failed on every call rather than on a missing row.
+  //
+  // Both branches are reachable from the seed without arranging anything, which
+  // is why they are table cases: profile 1 holds user 1 and profile 2 (`loose`)
+  // holds nobody. The branch is decided by this row's own foreign key, so the
+  // two cases below differ only in which profile they name.
+  //
+  // Every one compares both tables, because the interesting half is which row
+  // moved: an implementation that took the create branch on a linked parent
+  // would return a perfectly plausible payload and leave a second `User` behind.
+  ["O16 owning upsert with nothing linked creates the far row and links it", "update", {
+    where: { id: 2 },
+    data: {
+      user: {
+        upsert: {
+          create: { email: "upserted@example.dev", name: "Created" },
+          update: { name: "Updated" },
+        },
+      },
+    },
+  }, ["Profile", "User"]],
+  // The other branch, and the case that pins what Prisma leaves alone: user 1
+  // is updated and **this row is not written at all** — the link does not move.
+  ["O16b owning upsert with a linked row updates it", "update", {
+    where: { id: 1 },
+    data: {
+      user: {
+        upsert: {
+          create: { email: "upserted@example.dev", name: "Created" },
+          update: { name: "Updated" },
+        },
+      },
+    },
+  }, ["Profile", "User"]],
+  // The `where` is optional and it is a **filter**, not a unique key — `name`
+  // carries no index. One that matches narrows the row that was already named
+  // by the link, so the update branch runs exactly as O16b's does.
+  ["O16c owning upsert whose where matches updates the linked row", "update", {
+    where: { id: 1 },
+    data: {
+      user: {
+        upsert: {
+          where: { name: "Ada" },
+          create: { email: "upserted@example.dev" },
+          update: { name: "Updated" },
+        },
+      },
+    },
+  }, ["Profile", "User"]],
+  // Beside a real column write, for the reason O8 and O12d give: with nothing
+  // else in `data` a contribution and a step are hard to tell apart, and on the
+  // update branch this row's statement writes only the key it already held.
+  ["O16d owning upsert beside a column write", "update", {
+    where: { id: 1 },
+    data: {
+      bio: "changed",
+      user: {
+        upsert: {
+          create: { email: "upserted@example.dev" },
+          update: { name: "Updated" },
+        },
+      },
+    },
+  }, ["Profile", "User"]],
+  // The create branch colliding on a unique of the far model — `email` here,
+  // not the link. `unique` on both sides, and nothing written: the insert is
+  // what fails, so there is no branch to pre-empt it with.
+  ["O16e owning upsert whose create collides raises", "update", {
+    where: { id: 2 },
+    data: {
+      user: {
+        upsert: {
+          create: { email: "ada@example.dev" },
+          update: { name: "Updated" },
+        },
+      },
+    },
+  }, ["Profile", "User"]],
+  // A parent this statement matches nothing of. Both clients reach the same
+  // answer through different routes and the committed state is what either
+  // promises: Prisma inserts the far row, fails the write-back with P2025 and
+  // rolls back; gemi's `update` raises `RecordNotFoundError`, which takes the
+  // step's insert down with it. `notFound` on both sides, and no `User` left.
+  ["O16f owning upsert whose parent where matches nothing writes nothing", "update", {
+    where: { id: 99 },
+    data: {
+      user: {
+        upsert: {
+          create: { email: "upserted@example.dev" },
+          update: { name: "Updated" },
+        },
+      },
+    },
+  }, ["Profile", "User"]],
+  // An array, refused by both — `UserUpsertWithoutProfileInput` has no `| X[]`
+  // arm, so this is a `PrismaClientValidationError` there and an
+  // `InvalidArgumentError` here. `other` on both sides, which is all the
+  // harness can claim for an argument refusal; what it adds is that neither
+  // client wrote anything. The owning-side twin of M10's row for `upsert`.
+  ["O16g an array of upsert on an owning to-one is refused by both", "update", {
+    where: { id: 1 },
+    data: {
+      user: {
+        upsert: [{ create: { email: "upserted@example.dev" }, update: { name: "x" } }],
+      },
+    },
+  }, ["Profile", "User"]],
+  // ...and `upsert` under a `create`, which has nothing linked yet. Prisma does
+  // not have the key at all there — *"Unknown argument `upsert`"* — and gemi
+  // refuses it with `EXISTING_ROW_ONLY`. Here rather than left to the compiler
+  // suite because the half that matters is that Prisma agrees.
+  ["O16h owning upsert under a create is refused by both", "create", {
+    data: {
+      bio: "fresh",
+      user: {
+        upsert: {
+          create: { email: "upserted@example.dev" },
+          update: { name: "x" },
+        },
+      },
+    },
   }, ["Profile", "User"]],
 ];
 
@@ -1500,6 +1666,132 @@ function suite(label: string, url?: string) {
             },
             { tables: ["LedgerSeal", "Ledger"] },
           );
+        });
+
+        /**
+         * `upsert` (#391), whose two branches are the two halves a composite
+         * key can get wrong in opposite directions.
+         *
+         * The **update** branch finds the far row by *this* row's whole key, so
+         * a filter correlating on `tenantId` alone would rename the sibling
+         * ledger `(1, "ab")` — or both — where the caller named one. The
+         * **create** branch writes both columns back into this row, so a stamp
+         * that carried only one attaches the note to no ledger at all and still
+         * returns a plausible payload. `tables` names `Ledger` for the first and
+         * `LedgerNote` for the second; both are read on both.
+         *
+         * Note 1 holds `(1, "a")`; note 4 (`loose`) holds nothing — the same
+         * split every other composite case here leans on.
+         */
+        test("upsert updates the ledger this note points at", async () => {
+          await differential.expectSameWrite(
+            "LedgerNote",
+            "update",
+            {
+              where: { id: 1 },
+              data: {
+                ledger: {
+                  upsert: {
+                    create: { tenantId: 9, code: "z", title: "created" },
+                    update: { title: "updated" },
+                  },
+                },
+              },
+              include: { ledger: true },
+            },
+            { tables: ["LedgerNote", "Ledger"] },
+          );
+        });
+
+        test("upsert with nothing linked creates the ledger and takes both columns", async () => {
+          await differential.expectSameWrite(
+            "LedgerNote",
+            "update",
+            {
+              where: { id: 4 },
+              data: {
+                ledger: {
+                  upsert: {
+                    create: { tenantId: 9, code: "z", title: "created" },
+                    update: { title: "updated" },
+                  },
+                },
+              },
+              include: { ledger: true },
+            },
+            { tables: ["LedgerNote", "Ledger"] },
+          );
+        });
+
+        /**
+         * The same operand on the **required** composite relation, which is a
+         * different input type rather than the same one with a nullable key:
+         * `LedgerEntry.ledger` is `LedgerUpdateOneRequiredWithoutEntriesNested`,
+         * which has no `disconnect` — and does have `upsert`. So a required
+         * link can only ever take the update branch, and the case that proves
+         * it takes it is that no third ledger appears.
+         */
+        test("upsert on a required composite link updates the ledger", async () => {
+          await differential.expectSameWrite(
+            "LedgerEntry",
+            "update",
+            {
+              where: { id: 1 },
+              data: {
+                ledger: {
+                  upsert: {
+                    create: { tenantId: 9, code: "z", title: "created" },
+                    update: { title: "updated" },
+                  },
+                },
+              },
+              include: { ledger: true },
+            },
+            { tables: ["LedgerEntry", "Ledger"] },
+          );
+        });
+
+        /**
+         * A **half-written** key links nothing — SQL's rule, and the one this
+         * side reads through `isLinked` — so this takes the create branch
+         * rather than joining on the column that is set. Without it, "nothing
+         * linked" and "linked to no row" would be the same case here and only
+         * the fully-null one would ever be exercised.
+         */
+        test("upsert through a half-written key creates rather than joining on the set column", async () => {
+          await differential.reset();
+          const half = () =>
+            differential.prisma.ledgerNote.update({
+              where: { id: 4 },
+              data: { tenantId: 1 },
+            });
+          const args = {
+            where: { id: 4 },
+            data: {
+              ledger: {
+                upsert: {
+                  create: { tenantId: 9, code: "z", title: "created" },
+                  update: { title: "updated" },
+                },
+              },
+            },
+          };
+          const ledgers = async () =>
+            (await differential.prisma.ledger.findMany({
+              orderBy: [{ tenantId: "asc" }, { code: "asc" }],
+            })).map((row) => [row.tenantId, row.code, row.title]);
+
+          await half();
+          await differential.prisma.ledgerNote.update(args as never);
+          const fromPrisma = await ledgers();
+
+          await differential.reset();
+          await half();
+          await LedgerNoteModel.update(args as never);
+          expect(await ledgers()).toEqual(fromPrisma);
+          // ...and it really is the create branch: `(1, "a")` keeps its title.
+          expect(fromPrisma).toContainEqual([1, "a", "one-a"]);
+          expect(fromPrisma).toContainEqual([9, "z", "created"]);
         });
       });
 
@@ -3504,6 +3796,137 @@ function suite(label: string, url?: string) {
         expect(
           await differential.prisma.user.findFirstOrThrow({ where: { id: 1 } }),
         ).toMatchObject({ organizationId: null });
+      });
+
+      /**
+       * **The create branch of an owning-side `upsert` carrying a `where` is a
+       * Prisma bug, and gemi serves the call** (#391).
+       *
+       * Prisma splices the operand's filter into the *parent's* statement, so
+       * the branch that should insert the far row and repoint this row emits
+       *
+       *     update "Profile" set "userId" = ?
+       *       where ("id" in (?) and "User"."name" = ?)
+       *
+       * — a column of the far table in this row's `UPDATE` — after inserting
+       * the far row inside the transaction it then rolls back. Measured on
+       * 6.19.2/SQLite on all three owning shapes this schema has: the
+       * one-to-one below, the many-to-one `User.organization`, and the
+       * composite `LedgerNote.ledger`. The *hit* branch of the same operand is
+       * correct on both clients — `O16c` — which is what makes this the create
+       * branch's bug rather than the `where`'s.
+       *
+       * **The failure's class is deliberately not asserted, only that there is
+       * one.** On SQLite it is `P2022`, *"The column `main.User.name` does not
+       * exist in the current database"*. The statement is invalid in a
+       * dialect-specific way, though — an unknown column there, a missing
+       * `FROM`-clause entry on Postgres — and this describe runs under both, so
+       * pinning the SQLite code would be pinning something this file has not
+       * measured on the dialect it would fail on. What the pin needs is that
+       * Prisma cannot run the call and that gemi can, and both halves below say
+       * so by value.
+       *
+       * **gemi runs the branch the operand asks for.** There is nothing here to
+       * reproduce: P2022 is the engine reporting its own invalid SQL, not a
+       * semantic Prisma chose, and refusing the `where` outright would refuse
+       * the call `O16c` shows both clients answering. So this pins both sides —
+       * Prisma's failure *and* gemi's answer — the way this describe's rule
+       * requires, and it is the pair that fails the day either moves.
+       *
+       * The far row is a fresh `User`, so nothing displaces: profile 1 leaves
+       * user 1 behind holding no profile, which is the same orphaning `M14` and
+       * `O12` measure for the operands that do link an existing row.
+       */
+      test("Prisma emits invalid SQL for an owning upsert whose where misses; gemi creates and links", async () => {
+        const args = {
+          where: { id: 1 },
+          data: {
+            user: {
+              upsert: {
+                where: { name: "Nobody" },
+                create: { email: "created@example.dev", name: "Created" },
+                update: { name: "Updated" },
+              },
+            },
+          },
+        };
+
+        await differential.reset();
+        await expect(
+          differential.prisma.profile.update(args as never),
+        ).rejects.toThrow();
+        // Rolled back: the far row it inserted before the invalid statement is
+        // not there, and the link did not move.
+        expect(await differential.prisma.user.count()).toBe(3);
+        expect(
+          await differential.prisma.profile.findFirstOrThrow({ where: { id: 1 } }),
+        ).toMatchObject({ userId: 1 });
+
+        await differential.reset();
+        const fromGemi: any = await ProfileModel.update(args as never);
+        const created = await differential.prisma.user.findFirstOrThrow({
+          where: { email: "created@example.dev" },
+        });
+        expect(fromGemi.userId).toBe(created.id);
+        expect(await differential.prisma.user.count()).toBe(4);
+        // The row it stopped pointing at survives, holding no profile.
+        expect(
+          await differential.prisma.profile.findMany({ where: { userId: 1 } }),
+        ).toEqual([]);
+      });
+
+      /**
+       * **The update branch writes this row's foreign key back unchanged, and
+       * that stamps `@updatedAt` where Prisma writes nothing at all** (#391).
+       *
+       * Not a decision about `upsert`: the contribution is in the SET list
+       * because a plan's text cannot depend on a value read at bind time — the
+       * create branch needs the column and the branch is a run-time answer — so
+       * "the link does not move" is spelled as an assignment that changes
+       * nothing. The owning side's `disconnect` filter arm has had the identical
+       * trade since #359, and `updateAssignments`' docblock in `write.ts`
+       * carries the measurements for it.
+       *
+       * **`Profile` cannot show it and `User` can**, which is why this runs
+       * against the many-to-one: the template's only one-to-one owner has no
+       * `@updatedAt` column. It is also invisible to `expectSameWrite` — the
+       * harness lists `updatedAt` as volatile, so both sides compare as the
+       * descriptor `"date"` and two different instants match. `M17` is green
+       * over exactly this call; only a by-value assertion can see it, which is
+       * the same reason #355's stamp cases are hand-written rather than table
+       * rows.
+       *
+       * The half that keeps this honest is the second expectation: Prisma is
+       * not merely leaving the stamp alone, it is issuing no `UPDATE` for the
+       * parent at all — the logged call is a select, a select, and the child's
+       * update.
+       */
+      test("gemi stamps @updatedAt on an upsert's update branch where Prisma leaves it", async () => {
+        const args = {
+          where: { id: 1 },
+          data: {
+            organization: {
+              upsert: { create: { name: "Created" }, update: { name: "Updated" } },
+            },
+          },
+        };
+
+        await differential.reset();
+        const fromPrisma: any = await differential.prisma.user.update(args as never);
+        expect(fromPrisma.updatedAt.getTime()).toBe(EPOCH);
+        expect(fromPrisma.organizationId).toBe(1);
+
+        await differential.reset();
+        const fromGemi: any = await UserModel.update(args as never);
+        expect(fromGemi.updatedAt.getTime()).toBeGreaterThan(EPOCH);
+        // The link itself is untouched, which is the whole claim: the same
+        // value, written again.
+        expect(fromGemi.organizationId).toBe(1);
+        // ...and the far row was updated on both, so this is not a case where
+        // gemi took some other branch.
+        expect(
+          await differential.prisma.organization.findFirstOrThrow({ where: { id: 1 } }),
+        ).toMatchObject({ name: "Updated" });
       });
 
     });

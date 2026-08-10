@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, afterEach, describe, expect, test } from "vitest";
+import { afterAll, afterEach, describe, expect, test, vi } from "vitest";
 
 import * as orm from "../orm/index";
 import { user } from "../orm/fixtures";
@@ -577,15 +577,30 @@ describe("the command, over a project on disk", () => {
    * which is the one branch a fixture cannot exercise from the inside. Its
    * failure side is worth pinning anyway: run outside a project, the command
    * should say so rather than throw a resolver's stack.
+   *
+   * The resolution is stubbed rather than left to the temp directory, because
+   * `Bun.resolveSync` falls back to the global install cache: on a machine that
+   * has ever installed gemi, `gemi/orm` resolves from *any* path — the check
+   * then got as far as the missing Kernel and this branch was never reached.
+   * That made the test pass or fail on whether `~/.bun/install/cache` happened
+   * to hold a gemi tarball.
    */
   test("outside a gemi project it says so", async () => {
     const root = mkdtempSync(join(tmpdir(), "gemi-check-bare-"));
     roots.push(root);
     mkdirSync(join(root, "app/models"), { recursive: true });
 
-    await expect(checkModels({ rootDir: root })).rejects.toThrow(
-      /Could not resolve `gemi\/orm`/,
-    );
+    const resolveSync = vi.spyOn(Bun, "resolveSync").mockImplementation(() => {
+      throw new Error("Cannot find module 'gemi/orm'");
+    });
+
+    try {
+      await expect(checkModels({ rootDir: root })).rejects.toThrow(
+        /Could not resolve `gemi\/orm`/,
+      );
+    } finally {
+      resolveSync.mockRestore();
+    }
   });
 });
 

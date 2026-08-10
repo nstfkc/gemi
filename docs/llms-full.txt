@@ -3934,7 +3934,7 @@ await List.create({
 | `set` | Replaces the whole set — detaches what is linked now, attaches what you name. |
 | `updateMany` | Writes your columns to this parent's rows matching a filter. |
 | `deleteMany` | Deletes this parent's rows matching a filter — the filter goes directly under the key, not inside a `where`. |
-| `upsert` | Finds the row **among this parent's**, updates it, or creates it. A to-one has no `where` to require — the link already names the row. |
+| `upsert` | Finds the row **among this parent's**, updates it, or creates it. A to-one has no `where` to require — the link already names the row, from either end of the key. |
 
 **A relation may join on more than one field.** `@relation(fields: [tenantId, orderId], references:
 [tenantId, id])` is the tenant-scoped composite-key style, and every surface handles it — reads and
@@ -3947,8 +3947,8 @@ is one shape both dialects already compile.
 operand that side offers. Which operands those are is unchanged by the width of the key: the
 **foreign** side — where the children hold it — takes all of `connect`, `create`, `connectOrCreate`,
 `createMany`, `set`, `disconnect`, `update`, `upsert`, `delete` and the two `*Many`; the **owning**
-side takes `connect`, `create`, `connectOrCreate`, `disconnect` and `update`, and refuses
-`createMany`, `set`, `delete`, `upsert` and the two `*Many` by name, because this row holds one
+side takes `connect`, `create`, `connectOrCreate`, `disconnect`, `update` and `upsert`, and refuses
+`createMany`, `set`, `delete` and the two `*Many` by name, because this row holds one
 foreign key and there is nothing there to write many of. A composite relation is refused in exactly
 the same places a single-field one is, and nowhere else. Four details follow from the key having
 more than one column, and they are the ones worth knowing:
@@ -4141,11 +4141,12 @@ one-to-one. gemi answers one grammar the same way on both shapes, because the be
 a silent write on the call that asked for nothing. So `disconnect: shouldDetach` is safe here and is
 not safe through the Prisma client.
 
-**An array is refused on a to-one whose child holds the key** — `create`, `connect`,
-`connectOrCreate`, `update`, `delete` and `upsert` alike — and that is matching Prisma rather than
-being stricter than it. All of them are a `PrismaClientValidationError` against a generated client,
-with nothing written. Because that is an *argument* refusal and carries no Prisma error code, gemi's
-is `InvalidArgumentError`, and the message names the single object the operand wants rather than
+**An array is refused on a to-one** — `create`, `connect`, `connectOrCreate`, `update`, `delete` and
+`upsert` alike where the child holds the key, and `upsert` from the side that holds it — and that is
+matching Prisma rather than being stricter than it. All of them are a
+`PrismaClientValidationError` against a generated client, with nothing written. Because that is an
+*argument* refusal and carries no Prisma error code, gemi's is `InvalidArgumentError`, and the
+message names the single object the operand wants rather than
 announcing that arrays are unimplemented. What made it worth refusing rather than tolerating: the
 array used to compile, and a `connect` of two rows through a relation that holds one repointed
 **both**, the second silently winning. `connect` and `connectOrCreate` refuse an array on the other
@@ -4179,6 +4180,37 @@ into the unique key the row you cannot see is holding. So a to-one `upsert` can 
 caller never wrote — the child's foreign key — and that is the shape of the answer, not a leak: it
 is the same refusal an unrelated row holding that key would produce.
 
+**From the side that holds the key, the same operand reads the branch off your own foreign key** —
+`Workflow.update({ data: { previewImage: { upsert: { create, update } } } })` where
+`Workflow.previewImageId` is the link. Null takes the create branch, and the new row's key lands in
+the very statement you asked for, so it costs no extra write; a key that points somewhere updates
+the row it points at. The `where` narrows that row and nothing else. This is one call rather than
+the read-then-branch it replaces — reading the foreign key first and choosing `create` or `update`
+by hand, inside a transaction — which is what an application had to write before, because the
+`connect`-after-upsert alternative needs a unique back-reference on the far model and there is none
+on this side.
+
+Two consequences of it being your own column, neither of which the other side has:
+
+- **A linked row your policies hide reads as absent**, so the create branch runs and this row is
+  repointed at the new one. The hidden row is left exactly as it was — not edited, not deleted. The
+  foreign side answers the same situation with a `UniqueConstraintError`, because there the created
+  row's key collides with the one the hidden row holds; here the key being written is yours, and
+  nothing constrains it.
+- **The update branch writes your foreign key back unchanged**, which stamps `@updatedAt` on a row
+  Prisma leaves alone. The column has to be in the statement — the create branch needs it, and which
+  branch runs is not known until the call runs — so "the link did not move" is spelled as an
+  assignment that changes nothing. The same is true of `disconnect` with a filter.
+
+One divergence here, and this one is Prisma's bug rather than a decision: on the owning side, an
+`upsert` carrying a `where` that **matches nothing** fails against the Prisma client — measured on
+6.19.2/SQLite, where it is a `P2022` — because it splices the operand's filter into the parent's own
+`UPDATE` and emits a statement naming a column of the far table (*"The column `User.name` does not
+exist"*), having already inserted the far row inside the transaction it then rolls back. gemi runs
+the create branch the operand asks for. The *matching* case is served correctly by both, so this is
+the create branch's bug rather than the `where`'s — and it is one of the shapes to check by hand if
+you are porting a call that relied on the failure.
+
 Every operand in Prisma's nested grammar is implemented for an ordinary relation — one that is not
 an implicit many-to-many — in the direction where the **child** holds the foreign key. That is every
 to-many, and a to-one read from the side the child points at. Ones that act on rows already linked
@@ -4186,14 +4218,13 @@ to this one — `disconnect`, `delete`, `update`, `updateMany`, `deleteMany`, `s
 available on an `update` and refused on a `create`, which has nothing linked to it yet; Prisma
 reports them as unknown arguments there too.
 
-**Two are refused on a to-one that holds its own key, and both are decisions rather than unfinished
+**One is refused on a to-one that holds its own key, and it is a decision rather than unfinished
 work.** `delete` there would remove a row the statement is not about — the far row lives in another
 table and is reached through a column of this one, and a delete firing as a side effect of an
-unrelated update is the kind of thing to implement deliberately or not at all. `upsert` would have
-to create the far row and then write its key back to a parent that has already been inserted, a
-shape no other operand on that side needs. Both refusals name the alternative: write the far row
-directly, then `connect` it. (`set`, `updateMany` and `deleteMany` describe *several* rows, so
-neither side of a to-one offers them, and neither does Prisma.)
+unrelated update is the kind of thing to implement deliberately or not at all. The refusal names the
+alternative: delete the far row directly, or `disconnect` it first. (`set`, `updateMany` and
+`deleteMany` describe *several* rows, so neither side of a to-one offers them, and neither does
+Prisma.)
 
 Two rules hold across all of them. The **foreign key is the ORM's to set**, so a nested row naming
 it is describing a different parent than the call is, and it is overwritten. And the **parent
