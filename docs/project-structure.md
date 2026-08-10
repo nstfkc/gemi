@@ -409,12 +409,34 @@ register() {
 - **`register()`** — bind factories. Runs synchronously for every provider, in order, at `Kernel.boot()`. **Never resolve anything here** — the providers after you have not registered yet.
 - **`boot()`** — may be `async`. Runs after *every* provider has registered, so resolving is safe. This is where cross-cutting wiring belongs.
 
+### Your own services need neither
+
+A provider plus a config slice is the shape for rebinding something the *framework* owns. For your app's own singletons there is a shorter path — a `Service` subclass listed in the Kernel's `services` array, with its settings as fields and an `async boot()`:
+
+```typescript
+export class Billing extends Service {
+  static token = "billing";
+  apiKey = process.env.BILLING_API_KEY;
+  async boot() { /* ... */ }
+}
+```
+
+```typescript
+export class CheckoutController extends Controller {
+  constructor(private billing = Billing.inject()) {
+    super();
+  }
+}
+```
+
+See [Services](./services.md). Reach for a provider when the class is not yours, when you need a new instance per resolve, or when you are replacing a framework token.
+
 ## Boot phases
 
 The boot is split in two because `new App({ kernel })` is a synchronous constructor while providers may need to `await` during startup:
 
-1. **`kernel.boot()` — synchronous.** Merges the Kernel's `config` into the `Repository`, sets the current `Application` instance, and runs every provider's `register()`. Only bindings are recorded; no service is constructed.
-2. **`kernel.waitForBoot()` — asynchronous.** Runs every provider's `boot()` in registration order. Idempotent.
+1. **`kernel.boot()` — synchronous.** Merges the Kernel's `config` into the `Repository`, sets the current `Application` instance, runs every provider's `register()`, then constructs every service in `services` and binds it into the container. Only bindings are recorded for providers; no *framework* service is constructed.
+2. **`kernel.waitForBoot()` — asynchronous.** Runs every provider's `boot()` in registration order, then every service's `boot()` in `services` order. Idempotent.
 
 `new App({ kernel })` performs phase one for you; `Server.start()` awaits phase two before binding the port. If you drive `App` yourself, `await app.waitForBoot()` before serving.
 

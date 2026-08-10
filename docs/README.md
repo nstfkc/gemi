@@ -52,6 +52,7 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 - **[Authorization](./authorization.md)** — role-based middleware and authorization errors.
 
 ### Services & facades
+- **[Services](./services.md)** — your own singletons: `Service`, `boot()`, and constructor-default injection.
 - **[Facades](./facades.md)** — reference for `Auth`, `Redirect`, `Lang`, `Storage`, `Query`, `Broadcast`, `Url`, `Log`, `Meta`, `Cookie`, `Redis`.
 - **[File Storage](./file-storage.md)** — the `Storage` facade, filesystem/S3 drivers, image optimization, the `Image` component.
 - **[Email](./email.md)** — the `Email` class, jsx-email templates, the Resend driver, localization and scheduling.
@@ -68,6 +69,7 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 | **Container** | The `Application` every service is resolved from — `app(MailManager)` | [project-structure](./project-structure.md) |
 | **Config slice** | `app/config/<name>.ts` — runtime settings and hooks for one subsystem | [project-structure](./project-structure.md) |
 | **Service provider** | Registers bindings into the container (`register()` / `boot()`) | [project-structure](./project-structure.md) |
+| **Service** | Your own singleton — async `boot()`, injected as a constructor default | [services](./services.md) |
 | **Router** | Class declaring a `routes` object; routers nest | [routing](./routing.md) |
 | **Controller** | Server logic behind a route; receives `HttpRequest` | [controllers](./controllers.md) |
 | **Facade** | Static proxy to a container-resolved service | [facades](./facades.md) |

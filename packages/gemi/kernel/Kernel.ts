@@ -2,6 +2,7 @@ import { Application } from "../foundation/Application";
 import type { ServiceProviderConstructor } from "../foundation/Application";
 import type { ServiceToken } from "../container/Container";
 import type { ConfigItems } from "../support/Repository";
+import type { Service, ServiceConstructor } from "../support/Service";
 import { registerModels } from "../orm/registration";
 import { registeredNames } from "../orm/registry";
 import { Scheduler } from "../services/cron/Scheduler";
@@ -30,6 +31,22 @@ export class Kernel {
    * rebind anything the framework bound.
    */
   protected providers: ServiceProviderConstructor[] = [];
+
+  /**
+   * The app's own singleton services. Each is constructed during the
+   * synchronous boot phase and its `boot()` awaited during the asynchronous
+   * one, in the order listed — so a service whose `boot()` depends on another
+   * goes after it.
+   *
+   * An entry is either the class itself or a configured instance from
+   * `Service.with({ ... })`. Listing is explicit rather than discovered because
+   * the order is load-bearing here, and because a service is always imported by
+   * whatever injects it — there is no file the import graph would miss.
+   */
+  protected services: Array<ServiceConstructor | Service> = [];
+
+  private serviceInstances: Service[] = [];
+  private servicesBooted = false;
 
   /**
    * The modules holding the app's model classes — normally
@@ -79,6 +96,47 @@ export class Kernel {
     this.app.config.merge(this.config);
     Application.setInstance(this.app);
     this.app.registerMany([...frameworkProviders, ...this.providers]);
+    this.registerServices();
+  }
+
+  /**
+   * Constructs every listed service and binds it into the container. Runs after
+   * the providers have registered, so a provider's `boot()` can `inject()` one;
+   * a `Service` constructor does no I/O, so doing this synchronously costs
+   * nothing beyond the field initializers.
+   */
+  private registerServices() {
+    this.serviceInstances = [];
+    this.servicesBooted = false;
+
+    const owners = new Map<string, string>();
+
+    for (const declaration of this.services) {
+      const instance =
+        typeof declaration === "function" ? new declaration() : declaration;
+      const ctor = instance.constructor as ServiceConstructor;
+
+      if (!ctor.token) {
+        throw new Error(
+          `Service [${ctor.name}] is listed in \`services\` but does not declare a \`static token\`.`,
+        );
+      }
+
+      // Two services under one token is the failure this refuses to have
+      // silently: the second would replace the first in the container, and
+      // every `inject()` written against either would hand back whichever was
+      // listed last.
+      const owner = owners.get(ctor.token);
+      if (owner) {
+        throw new Error(
+          `Services [${owner}] and [${ctor.name}] both declare the token "${ctor.token}". Tokens are the container's keys, so they must be unique.`,
+        );
+      }
+      owners.set(ctor.token, ctor.name);
+
+      this.app.instance(ctor as unknown as ServiceToken<Service>, instance);
+      this.serviceInstances.push(instance);
+    }
   }
 
   /**
@@ -87,6 +145,22 @@ export class Kernel {
    */
   async waitForBoot() {
     await this.app.boot();
+    await this.bootServices();
+  }
+
+  /**
+   * Phase two for services, after every provider's `boot()` — so a service may
+   * use the facades and anything else a provider owns. Idempotent, like the
+   * provider phase it follows.
+   */
+  private async bootServices() {
+    if (this.servicesBooted) {
+      return;
+    }
+    for (const service of this.serviceInstances) {
+      await service.boot();
+    }
+    this.servicesBooted = true;
   }
 
   run<T>(cb: () => T) {
