@@ -95,9 +95,20 @@ export abstract class Service {
    *
    *   services = [Billing.with({ apiKey: process.env.STAGING_KEY })];
    *   const billing = Billing.with({ apiKey: "test" }); // in a test
+   *
+   * A key whose value is `undefined` is skipped rather than assigned. The first
+   * line above is the reason: `process.env.STAGING_KEY` is `undefined` in every
+   * environment that does not set it, and `Object.assign` would copy that over
+   * the field's declared default — so the service would boot holding
+   * `undefined` where it had a perfectly good fallback. An absent value is not
+   * an override; write `null` if you mean to clear a field.
    */
   static with<T extends Service>(this: new () => T, overrides: Partial<T>): T {
-    return Object.assign(new this(), overrides);
+    const instance = new this();
+    for (const [key, value] of Object.entries(overrides)) {
+      if (value !== undefined) instance[key] = value;
+    }
+    return instance;
   }
 }
 

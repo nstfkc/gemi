@@ -41,6 +41,11 @@ class Clashing extends Service {
   static token = "billing";
 }
 
+/** The token `MailManager` is bound under, taken by an app service. */
+class Impostor extends Service {
+  static token = "mail";
+}
+
 class TestKernel extends Kernel {
   constructor(services: Kernel["services"] = []) {
     super();
@@ -103,6 +108,13 @@ describe("Service", () => {
     expect(Billing.with({ apiKey: "x" })).toBeInstanceOf(Billing);
   });
 
+  it("keeps the default when an override is undefined", () => {
+    // `with({ apiKey: process.env.STAGING_KEY })` in an environment that does
+    // not set it. Object.assign would have written undefined over the default
+    // and the service would have booted with no key at all.
+    expect(Billing.with({ apiKey: undefined }).apiKey).toBe("live-key");
+  });
+
   it("refuses a service without a static token", () => {
     const kernel = new TestKernel([Untokened as never]);
     expect(() => kernel.boot()).toThrow(/does not declare a `static token`/);
@@ -111,6 +123,13 @@ describe("Service", () => {
   it("refuses two services sharing a token", () => {
     const kernel = new TestKernel([Billing, Clashing]);
     expect(() => kernel.boot()).toThrow(/both declare the token "billing"/);
+  });
+
+  it("refuses a token the framework already owns", () => {
+    // Binding it would replace MailManager for every Mail.* call in the
+    // process, and the container would report nothing.
+    const kernel = new TestKernel([Impostor]);
+    expect(() => kernel.boot()).toThrow(/already bound in the container/);
   });
 
   it("explains an inject() that resolves nothing", async () => {

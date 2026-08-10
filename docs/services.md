@@ -1,6 +1,6 @@
 # Services
 
-A **service** is one of your app's own long-lived singletons — an API client, a billing gateway, a search index, anything that needs to exist once per application and be reachable from controllers, jobs, cron and commands. You write a class extending `Service` (from `gemi/support`), list it on the Kernel, and inject it as a constructor default.
+A **service** is one of your app's own long-lived singletons — an API client, a billing gateway, a search index, anything that needs to exist once per application and be reachable from controllers, jobs and cron. You write a class extending `Service` (from `gemi/support`), list it on the Kernel, and inject it as a constructor default.
 
 ```typescript
 // app/services/Billing.ts
@@ -111,7 +111,7 @@ Two things follow from that being an ordinary default parameter, and both are th
 - **It is evaluated when the controller is constructed** — per request, inside the kernel's async context — so it resolves against the Application handling that request, never one captured at module load.
 - **Passing an argument skips it entirely.** `new CheckoutController(new FakeBilling())` never calls `inject()`, so a controller test needs no container and no mocking.
 
-You can call `inject()` from anywhere that runs after boot — a method body, a job's `run`, a cron `callback`, a command handler. What you cannot do is call it at **module top level**:
+You can call `inject()` from anywhere that runs after boot — a method body, a job's `run`, a cron `callback`. What you cannot do is call it at **module top level**:
 
 ```typescript
 const billing = Billing.inject(); // ✗ throws — this runs at import, before the kernel boots
@@ -136,7 +136,7 @@ services = [Database, SearchIndex]; // SearchIndex.boot() may inject Database
 
 ### Keep `boot()` cheap
 
-`Container.make` is synchronous, so a lazily-constructed service could never await anything. That is why construction and async initialization are split — and the consequence is that **every listed service is constructed and booted on every application boot**, whether or not this process uses it. Applications boot more often than you might think: once per server start, once per `gemi run` command, once per test that boots a kernel, and once per `worker: true` job dispatch (each spawns a fresh Worker with its own cloned application).
+`Container.make` is synchronous, so a lazily-constructed service could never await anything. That is why construction and async initialization are split — and the consequence is that **every listed service is constructed and booted on every application boot**, whether or not this process uses it. Applications boot more often than you might think: once per server start, once per CLI command that loads the application (`gemi app:route-manifest`, `gemi ide:generate-api-manifest`, …), once per test that boots a kernel, and once per `worker: true` job dispatch (each spawns a fresh Worker with its own cloned application).
 
 So validate settings in `boot()`, and open connections lazily in the methods that need them:
 
@@ -165,9 +165,9 @@ A `boot()` that opens a socket turns into a per-test and per-worker-job cost, an
 
 ## Registration is explicit
 
-Unlike jobs, cron jobs and commands, services are **not** discovered from a directory. Two reasons: boot order is load-bearing here and a directory walk has no order to offer, and a service is always imported by whatever injects it, so there is no file the import graph would miss anyway.
+Unlike jobs and cron jobs, services are **not** discovered from a directory. Two reasons: boot order is load-bearing here and a directory walk has no order to offer, and a service is always imported by whatever injects it, so there is no file the import graph would miss anyway.
 
-Two services declaring the same `static token` fail the boot rather than silently replacing one another — the container is keyed by token, so the second would win every `inject()` written against either.
+Two services declaring the same `static token` fail the boot rather than silently replacing one another — the container is keyed by token, so the second would win every `inject()` written against either. A token that is already bound by the framework or by one of your providers fails the boot for the same reason: `static token = "mail"` would replace `MailManager` for every `Mail.*` call in the process, so pick a token nothing else owns.
 
 ## Services vs. providers vs. config
 
@@ -186,4 +186,4 @@ A provider is still the right tool when the thing you are binding is not yours, 
 - [Facades](./facades.md) — static proxies over container-resolved framework services.
 - [Controllers](./controllers.md) — where injection usually happens.
 - [Jobs & Queues](./jobs-and-queues.md) — background work, and the worker-thread boot cost mentioned above.
-- [Commands](./commands.md) — one-off work that also boots the application.
+- [CLI](./cli.md) — the commands that load the application, and so boot every service.

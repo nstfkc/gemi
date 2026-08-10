@@ -46,6 +46,7 @@ export class Kernel {
   protected services: Array<ServiceConstructor | Service> = [];
 
   private serviceInstances: Service[] = [];
+  private serviceTokens = new Set<string>();
   private servicesBooted = false;
 
   /**
@@ -106,7 +107,12 @@ export class Kernel {
    * nothing beyond the field initializers.
    */
   private registerServices() {
+    // What a previous pass bound, so re-running this on the same kernel is not
+    // mistaken for a collision with something else.
+    const ours = this.serviceTokens;
+
     this.serviceInstances = [];
+    this.serviceTokens = new Set();
     this.servicesBooted = false;
 
     const owners = new Map<string, string>();
@@ -134,8 +140,23 @@ export class Kernel {
       }
       owners.set(ctor.token, ctor.name);
 
-      this.app.instance(ctor as unknown as ServiceToken<Service>, instance);
+      // The same failure one level out. `Container.instance()` writes into
+      // `instances`, which `make()` consults before `bindings`, so a token that
+      // is already spoken for is not shared with its owner — it replaces it, for
+      // every `app()` and `inject()` in the process. An app service that named
+      // itself "mail" would leave `Mail.send()` resolving to an object with no
+      // `send`, and the boot that caused it would report nothing. Providers have
+      // all registered by now, so anything bound here belongs to somebody else.
+      const token = ctor as unknown as ServiceToken<Service>;
+      if (!ours.has(ctor.token) && this.app.bound(token)) {
+        throw new Error(
+          `Service [${ctor.name}] declares the token "${ctor.token}", which is already bound in the container by the framework or a provider. Binding it would replace that service everywhere, so pick a token nothing else owns.`,
+        );
+      }
+
+      this.app.instance(token, instance);
       this.serviceInstances.push(instance);
+      this.serviceTokens.add(ctor.token);
     }
   }
 

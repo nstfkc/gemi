@@ -72,9 +72,9 @@ export class RedirectRoute<Input, Output, Params> {
       this.handler = handler as any;
     } else {
       const [controller, methodName] = handler;
-      this.handler = (_req: HttpRequest<Input, Params>): Promise<RedirectOutput> => {
+      this.handler = (req: HttpRequest<Input, Params>): Promise<RedirectOutput> => {
         const controllerInstance = new controller();
-        return controllerInstance[methodName]();
+        return controllerInstance[methodName](req);
       };
     }
   }
@@ -211,9 +211,9 @@ export class ViewRoute<Input, Output, Params> {
       this.handler = handler as any;
     } else {
       const [controller, methodName] = handler;
-      this.handler = (_req: HttpRequest<Input, Params>): Output => {
+      this.handler = (req: HttpRequest<Input, Params>): Output => {
         const controllerInstance = new controller();
-        return controllerInstance[methodName]();
+        return controllerInstance[methodName](req);
       };
     }
   }
