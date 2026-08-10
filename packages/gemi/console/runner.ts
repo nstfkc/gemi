@@ -8,8 +8,11 @@ import { CommandFailed, type CommandClass } from "./Command";
 import { CommandRegistry } from "./CommandRegistry";
 import { commandConfigDefaults, type CommandConfig } from "./config";
 import { createContext, processWriters, type CommandWriters } from "./context";
-import { parseArgv, wantsHelp } from "./parse";
+import { ConsoleError } from "./errors";
+import { parseArgv } from "./parse";
 import { renderList, renderUsage } from "./usage";
+
+export { ConsoleError };
 
 /**
  * `gemi run`, from the inside.
@@ -40,19 +43,11 @@ import { renderList, renderUsage } from "./usage";
  * full boot and takes it.
  */
 
-/** A failure with a sentence written for the terminal. Never printed with a stack. */
-export class ConsoleError extends Error {
-  constructor(message: string, options?: { cause?: unknown }) {
-    super(message, options);
-    this.name = "ConsoleError";
-  }
-}
-
 export interface RunConsoleParams {
   rootDir: string;
   /** The command to run. Absent means "list what there is". */
   name?: string;
-  /** Everything after the name, already stripped of a leading `--`. */
+  /** Everything after the name, exactly as it was typed — including any `--`. */
   argv: readonly string[];
   writers?: CommandWriters;
 }
@@ -63,6 +58,8 @@ export async function runConsole(params: RunConsoleParams): Promise<number> {
   const err = (message: string) => writers.stderr(`${message}\n`);
 
   let kernel: Kernel | undefined;
+  // Hoisted only so the catch can name the command in an exit-code complaint.
+  let running: CommandClass | undefined;
 
   try {
     kernel = await loadKernel(params.rootDir);
@@ -99,6 +96,7 @@ export async function runConsole(params: RunConsoleParams): Promise<number> {
     }
 
     const command = registry.get(params.name);
+    running = command;
 
     if (!command) {
       const suggestions = registry.suggest(params.name);
@@ -121,12 +119,16 @@ export async function runConsole(params: RunConsoleParams): Promise<number> {
       options: command.options,
     };
 
-    if (wantsHelp(spec, params.argv)) {
+    const parsed = parseArgv(spec, params.argv);
+
+    // Before the error branch, so `--help` works on the invocation that most
+    // needs it: the one that is already a usage error. And *from the parse*
+    // rather than from a token scan, because only the parse knows that the
+    // `--help` in `--message --help` is a value — see `ParseResult["help"]`.
+    if (parsed.help) {
       out(renderUsage(command));
       return 0;
     }
-
-    const parsed = parseArgv(spec, params.argv);
 
     // `=== false` rather than `!parsed.ok`: the package compiles with
     // `strictNullChecks` off, and under it a `!x.ok` test does not narrow a
@@ -173,7 +175,14 @@ export async function runConsole(params: RunConsoleParams): Promise<number> {
     // runner's frames, which is not where anybody needs to look.
     if (error instanceof CommandFailed) {
       err(error.message);
-      return error.code;
+
+      // Through the same guard a returned value gets. `fail` takes the same
+      // kind of number and the same kind of expression produces it, so
+      // ``ctx.fail(`${bad.length} rows failed`, bad.length)`` with 256 bad rows
+      // handed 256 straight to `process.exit`, which the shell reports as
+      // status **0** — a failed command read as a success by the `&&` chain or
+      // CI step waiting on it. 300 arrives as 44; 512 is 0 again.
+      return exitCodeFor(error.code, running, err, "called fail() with");
     }
 
     if (error instanceof ConsoleError || error instanceof DiscoveryError) {
@@ -217,17 +226,23 @@ async function loadKernel(rootDir: string): Promise<Kernel> {
 }
 
 /**
- * What the handler returned, as something a shell can branch on.
+ * What the command asked the shell to see, if a shell can actually see it.
  *
- * A returned value that is not an exit code is reported rather than coerced:
- * `return users.length` is an easy thing to write and would otherwise turn 300
- * backfilled users into exit status 44 (300 & 255), which reads as a failure to
- * everything downstream.
+ * An exit status is one byte. Anything else a handler offers is reported rather
+ * than coerced, because coercion here is silent and inverts the answer: `return
+ * users.length` after 300 backfilled users would exit 44 (300 & 255), and 256
+ * would exit **0** — a failure indistinguishable from success to the `&&` chain,
+ * CI step or cron wrapper waiting on it.
+ *
+ * Both ways a command names its status come through here — `return n` and
+ * `ctx.fail(msg, n)` — because both take the same kind of number from the same
+ * kind of expression, and a guard on only one of them is a guard on neither.
  */
 function exitCodeFor(
   result: unknown,
-  command: CommandClass,
+  command: CommandClass | undefined,
   err: (message: string) => void,
+  source = "returned",
 ): number {
   if (result === undefined || result === null) return 0;
 
@@ -240,10 +255,12 @@ function exitCodeFor(
     return result;
   }
 
+  const subject = command ? `Command "${command.commandName}"` : "The command";
+
   err(
-    `Command "${command.commandName}" returned ${JSON.stringify(result)}, ` +
-      `which is not an exit code. Return nothing for success, or an integer ` +
-      `from 0 to 255. Treating this as a failure.`,
+    `${subject} ${source} ${JSON.stringify(result)}, which is not an exit ` +
+      `code — an exit code is an integer from 0 to 255. Treating this as a ` +
+      `failure.`,
   );
   return 1;
 }

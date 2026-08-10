@@ -25,6 +25,7 @@ import { runConsole } from "./runner";
  */
 
 const BUILDER = JSON.stringify(resolve(import.meta.dirname, "builder.ts"));
+const COMMAND = JSON.stringify(resolve(import.meta.dirname, "Command.ts"));
 const KERNEL = JSON.stringify(
   resolve(import.meta.dirname, "../kernel/Kernel.ts"),
 );
@@ -260,6 +261,78 @@ describe("help", () => {
     expect(stdout).toContain("--limit <number>");
     expect(stdout).toContain("(default: 50)");
   });
+
+  /**
+   * A `--help` in *value* position is a value. Deciding otherwise from a flat
+   * token scan meant `gemi run notify --message --help` printed usage and exited
+   * 0 — the notification never sent, and a cron wrapper branching on the exit
+   * code recording a success for work that did not happen.
+   */
+  test("a --help that is an option's value runs the command", async () => {
+    const root = project({
+      "app/kernel/Kernel.ts": kernel(),
+      "app/commands/Notify.ts": command(
+        "notify",
+        `ctx.line("sent: " + ctx.options.message);`,
+        `.option("message", { type: "string" })`,
+      ),
+    });
+
+    const { code, stdout } = await run(root, "notify", ["--message=--help"]);
+
+    expect(code).toBe(0);
+    expect(stdout).toContain("sent: --help");
+    expect(stdout).not.toContain("Usage:");
+  });
+
+  /**
+   * The ambiguous spelling, which is the one the reviewer's case turned on:
+   * `--message "--help"` reaches the process as two tokens, indistinguishable
+   * from asking for help. Printing usage and exiting 0 meant the notification
+   * was never sent and the wrapper waiting on the status saw a success — so the
+   * ambiguity is reported instead, naming the fix.
+   */
+  test("a --help the shell stripped the quotes from is an error, not a success", async () => {
+    const root = project({
+      "app/kernel/Kernel.ts": kernel(),
+      "app/commands/Notify.ts": command(
+        "notify",
+        `ctx.line("sent");`,
+        `.option("message", { type: "string" })`,
+      ),
+    });
+
+    const { code, stdout, stderr } = await run(root, "notify", [
+      "--message",
+      "--help",
+    ]);
+
+    expect(code).toBe(1);
+    expect(stdout).not.toContain("sent");
+    expect(stderr).toContain("write --message=--help");
+  });
+
+  /**
+   * The other direction, and the reason help is checked before the usage
+   * errors: the invocation somebody reaches for `--help` on is usually the one
+   * that is already wrong.
+   */
+  test("--help works on an invocation that is otherwise a usage error", async () => {
+    const root = project({
+      "app/kernel/Kernel.ts": kernel(),
+      "app/commands/Seed.ts": command(
+        "db:seed",
+        "",
+        `.arg("tenant", { required: true })`,
+      ),
+    });
+
+    const { code, stdout, stderr } = await run(root, "db:seed", ["--help"]);
+
+    expect(code).toBe(0);
+    expect(stdout).toContain("Usage: gemi run db:seed <tenant>");
+    expect(stderr).toBe("");
+  });
 });
 
 describe("running one", () => {
@@ -381,6 +454,35 @@ describe("exit codes", () => {
     expect(stderr).toContain("boom");
     expect(stderr).toMatch(/^\s+at /m);
   });
+
+  /**
+   * The guard on `return` was worthless while `fail` had none, because both take
+   * the same kind of number from the same kind of expression:
+   *
+   *     ctx.fail(`${bad.length} rows failed`, bad.length)
+   *
+   * An exit status is one byte, so 256 reached `process.exit` and the shell read
+   * status **0** — a failed command reported as a success to the `&&` chain or
+   * CI step waiting on it. 300 arrives as 44; 512 is 0 again.
+   */
+  test("fail() with a number that is not an exit code cannot report success", async () => {
+    const { code, stderr } = await run(
+      withReturn(`ctx.fail("256 rows failed", 256);`),
+      "ret",
+    );
+
+    expect(code).not.toBe(0);
+    expect(code).toBe(1);
+    expect(stderr).toContain("256 rows failed");
+    expect(stderr).toContain("not an exit code");
+  });
+
+  test("fail() with a real exit code is untouched", async () => {
+    expect((await run(withReturn(`ctx.fail("no", 2);`), "ret")).code).toBe(2);
+    expect((await run(withReturn(`ctx.fail("no", 255);`), "ret")).code).toBe(
+      255,
+    );
+  });
 });
 
 describe("what an invocation pays for", () => {
@@ -498,6 +600,14 @@ export default defineCommand("half-written").arg("who");`,
     expect(stderr).not.toMatch(/^\s+at /m);
   });
 
+  /**
+   * The registry's refusals are sentences with the fix named in them, about a
+   * mistake in the application's own source — the same class of thing the
+   * `DiscoveryError` above is, and they have to print the same way. Raised as
+   * plain `Error`s they fell through to the bug branch, and the operator read
+   * the message buried under `at new CommandRegistry (…)` plus the runner's own
+   * frames, pointing them at framework code they cannot fix.
+   */
   test("two commands claiming one name refuse rather than picking", async () => {
     const root = project({
       "app/kernel/Kernel.ts": kernel(),
@@ -509,6 +619,49 @@ export default defineCommand("half-written").arg("who");`,
 
     expect(code).toBe(1);
     expect(stderr).toContain('Two commands are named "db:seed"');
+    expect(stderr).not.toMatch(/^\s+at /m);
+  });
+
+  test("a command with no name refuses, also without a stack", async () => {
+    const root = project({
+      "app/kernel/Kernel.ts": kernel(),
+      "app/commands/Bare.ts": `import { Command } from ${COMMAND};
+export default class extends Command {}`,
+    });
+
+    const { code, stderr } = await run(root);
+
+    expect(code).toBe(1);
+    expect(stderr).toContain("does not declare a command name");
+    expect(stderr).not.toMatch(/^\s+at /m);
+  });
+
+  /**
+   * The natural way to share option declarations between commands. `base` is a
+   * builder that *did* produce a command, so the file is fine — but the
+   * unfinished-builder check keyed off the export still being a builder object,
+   * so it threw before the registry existed and took every other command in the
+   * project down with it.
+   */
+  test("a builder held in a shared const does not abort the whole run", async () => {
+    const root = project({
+      "app/kernel/Kernel.ts": kernel(),
+      "app/commands/Shared.ts": `import { defineCommand } from ${BUILDER};
+export const base = defineCommand("reindex").option("verbose", { type: "boolean" });
+export default base.handle(async ({ line }) => { line("reindexed") });`,
+      "app/commands/Other.ts": command("db:seed"),
+    });
+
+    const listed = await run(root);
+
+    expect(listed.code).toBe(0);
+    expect(listed.stdout).toContain("reindex");
+    expect(listed.stdout).toContain("db:seed");
+
+    const ran = await run(root, "reindex");
+
+    expect(ran.code).toBe(0);
+    expect(ran.stdout).toContain("reindexed");
   });
 });
 

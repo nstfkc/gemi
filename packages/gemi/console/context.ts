@@ -67,10 +67,56 @@ export interface CommandWriters {
   stderr: (chunk: string) => void;
 }
 
-export function processWriters(): CommandWriters {
+/**
+ * Writers onto this process's streams, and the means to know they landed.
+ *
+ * ### Why `flush` exists
+ *
+ * `process.stdout.write` is asynchronous when stdout is a pipe, and `gemi run`
+ * ends in an explicit `process.exit` — which it must, or a command holding a
+ * database pool open would finish its work and then sit there. Those two facts
+ * together truncate output at the pipe buffer: measured on Bun 1.3.14, a
+ * 2,000,000-byte write followed immediately by `process.exit(0)` delivers
+ * exactly 65,536 bytes through a pipe, and exits 0 while doing it. So
+ * `gemi run export-users | gzip > out.gz` silently stores a fragment — the exact
+ * idiom the three-stream design above exists to protect.
+ *
+ * The fence is the *last* write's completion callback. Chunks are flushed in
+ * order, so awaiting the newest one awaits all of them. The obvious alternatives
+ * do not work here: a zero-length `write("", cb)` used as a fence delivered only
+ * 1,310,720 of those bytes, and `writableLength` reports 0 while data is still
+ * pending, so a drain loop exits immediately. Both were measured rather than
+ * assumed.
+ */
+export interface ProcessWriters extends CommandWriters {
+  /** Resolves once everything written so far has reached the OS. */
+  flush(): Promise<void>;
+}
+
+export function processWriters(): ProcessWriters {
+  // One per stream: the last write issued to it, resolved when that write (and
+  // therefore every write queued before it) has been handed over.
+  let stdout: Promise<void> = Promise.resolve();
+  let stderr: Promise<void> = Promise.resolve();
+
+  const write = (stream: NodeJS.WriteStream, chunk: string): Promise<void> =>
+    new Promise((resolve) => {
+      // Resolved on the callback rather than on the return value: `write`
+      // returning false means "buffered", not "failed", and an error here is
+      // still a completed attempt — a closed pipe must not hang the exit.
+      stream.write(chunk, () => resolve());
+    });
+
   return {
-    stdout: (chunk) => process.stdout.write(chunk),
-    stderr: (chunk) => process.stderr.write(chunk),
+    stdout: (chunk) => {
+      stdout = write(process.stdout, chunk);
+    },
+    stderr: (chunk) => {
+      stderr = write(process.stderr, chunk);
+    },
+    flush: async () => {
+      await Promise.all([stdout, stderr]);
+    },
   };
 }
 

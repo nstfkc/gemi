@@ -39,13 +39,30 @@ export interface CommandSpec {
   options: CommandOption[];
 }
 
-export type ParseResult =
+export type ParseResult = {
+  /**
+   * The invocation asked for help rather than for work.
+   *
+   * Reported by the parse rather than by a separate scan, because whether a
+   * `--help` is a request for help or the *value* of the option before it is a
+   * question only something tracking option arity can answer. A flat token scan
+   * reads `--message --help` as a request for help, prints usage and exits 0 —
+   * so the message is never sent and a cron wrapper branching on the exit code
+   * records a success for work that did not happen.
+   *
+   * Present on both branches, and the runner checks it first: `--help` has to
+   * work on an invocation that would otherwise be a usage error, which is
+   * precisely when somebody reaches for it.
+   */
+  help: boolean;
+} & (
   | {
       ok: true;
       args: Record<string, string | string[] | undefined>;
       options: Record<string, string | number | boolean | undefined>;
     }
-  | { ok: false; errors: string[] };
+  | { ok: false; errors: string[] }
+);
 
 function optionIndex(options: CommandOption[]) {
   const byName = new Map<string, CommandOption>();
@@ -66,21 +83,32 @@ function optionIndex(options: CommandOption[]) {
 /**
  * Whether this invocation is asking for help rather than running.
  *
- * A command that declares its own `help` option or `-h` alias keeps them — the
- * application's schema wins over the framework's convenience, because the
- * alternative is a flag that silently does something other than what the command
- * documents.
+ * A thin read of the parse, so the two cannot disagree about what counts as a
+ * `--help`. See `ParseResult["help"]` for why that question needs a parse at all.
  */
 export function wantsHelp(spec: CommandSpec, argv: readonly string[]): boolean {
-  const { byName, byAlias } = optionIndex(spec.options);
-  if (byName.has("help") || byAlias.has("h")) return false;
+  return parseArgv(spec, argv).help;
+}
 
-  for (const token of argv) {
-    if (token === "--") return false;
-    if (token === "--help" || token === "-h") return true;
-  }
-
-  return false;
+/**
+ * Whether a token is the next option rather than the previous one's value.
+ *
+ * `--message --dry-run` should not set `message` to the literal `"--dry-run"`
+ * and leave `dryRun` false — a dry run that executes for real is the worst shape
+ * a parser bug can take. So a value-taking option refuses an option-shaped
+ * token and says how to override it.
+ *
+ * The two exceptions are both real values that happen to start with a dash: a
+ * negative number, and a bare `-` (the long-standing spelling of "stdin"). For
+ * anything else `--opt=value` is the escape hatch, which is how every getopt
+ * since the 1980s has handled it.
+ */
+function looksLikeAnotherOption(token: string): boolean {
+  if (token === "--") return true;
+  if (!token.startsWith("-")) return false;
+  if (token === "-") return false;
+  if (/^-(\d|\.\d)/.test(token)) return false;
+  return true;
 }
 
 export function parseArgv(
@@ -92,8 +120,36 @@ export function parseArgv(
   const positionals: string[] = [];
   const raw = new Map<string, string | boolean>();
 
+  // Split, rather than one guard over both. A command that declares an option
+  // called `help` has claimed `--help`, and a command that declares a `-h` alias
+  // has claimed `-h` — but neither claims the other, and treating them as one
+  // switch means a `.option("host", { alias: "h" })` silently removes the long
+  // `--help` the command never asked for, while `usage.ts` goes on advertising
+  // it. The application's schema wins over the framework's convenience, exactly
+  // as far as the application actually reached.
+  const helpIsFree = !byName.has("help");
+  const shortHelpIsFree = !byAlias.has("h");
+  let requested = false;
+
+  // Set when the token refused as a value was itself a `--help`, which is the
+  // one case where "did they want help?" has no honest answer. See the note
+  // above the return.
+  let ambiguous = false;
+
   const unknown = (token: string) =>
     errors.push(`Unknown option ${token} for command "${spec.commandName}".`);
+
+  const needsValue = (label: string, next: string | undefined) => {
+    if (next === "--help" || next === "-h") ambiguous = true;
+
+    errors.push(
+      next === undefined
+        ? `Option ${label} needs a value.`
+        : `Option ${label} needs a value, but the next token is ` +
+            `${JSON.stringify(next)}, which is another option. If that really is ` +
+            `the value, write ${label}=${next}.`,
+    );
+  };
 
   let index = 0;
   while (index < argv.length) {
@@ -124,6 +180,13 @@ export function parseArgv(
         }
       }
 
+      // Only once the command's own options have had their chance at the name.
+      if (!option && key === "help" && helpIsFree) {
+        requested = true;
+        index += 1;
+        continue;
+      }
+
       if (!option) {
         unknown(`--${key}`);
         index += 1;
@@ -144,15 +207,21 @@ export function parseArgv(
         continue;
       }
 
-      const value = inline ?? argv[index + 1];
-      if (value === undefined) {
-        errors.push(`Option --${kebab(option.name)} needs a value.`);
+      if (inline !== undefined) {
+        raw.set(option.name, inline);
         index += 1;
         continue;
       }
 
-      raw.set(option.name, value);
-      index += inline === undefined ? 2 : 1;
+      const next = argv[index + 1];
+      if (next === undefined || looksLikeAnotherOption(next)) {
+        needsValue(`--${kebab(option.name)}`, next);
+        index += 1;
+        continue;
+      }
+
+      raw.set(option.name, next);
+      index += 2;
       continue;
     }
 
@@ -166,6 +235,10 @@ export function parseArgv(
       for (let position = 0; position < chars.length; position += 1) {
         const option = byAlias.get(chars[position]!);
         if (!option) {
+          if (chars[position] === "h" && shortHelpIsFree) {
+            requested = true;
+            continue;
+          }
           unknown(`-${chars[position]}`);
           break;
         }
@@ -179,12 +252,17 @@ export function parseArgv(
         const inline = rest.startsWith("=") ? rest.slice(1) : rest;
         if (inline !== "") {
           raw.set(option.name, inline);
-        } else if (argv[index + 1] !== undefined) {
-          raw.set(option.name, argv[index + 1]!);
-          consumedNext = true;
-        } else {
-          errors.push(`Option -${option.alias} needs a value.`);
+          break;
         }
+
+        const next = argv[index + 1];
+        if (next === undefined || looksLikeAnotherOption(next)) {
+          needsValue(`-${option.alias}`, next);
+          break;
+        }
+
+        raw.set(option.name, next);
+        consumedNext = true;
         break;
       }
 
@@ -201,8 +279,22 @@ export function parseArgv(
 
   for (const declared of spec.args) {
     if (declared.variadic) {
-      args[declared.name] = positionals.slice(cursor);
+      const collected = positionals.slice(cursor);
       cursor = positionals.length;
+      args[declared.name] = collected;
+
+      // `required` on a variadic means "at least one", and honouring it is the
+      // only reading that matches what the operator is shown: `usage.ts` prints
+      // `<files...>` for this declaration, which says mandatory. Ignoring it
+      // meant `gemi run import-files` with the paths forgotten booted the
+      // application, ran the handler over an empty list and exited 0 — a no-op
+      // that reads as a successful import.
+      if (declared.required && collected.length === 0) {
+        errors.push(
+          `Missing required argument <${declared.name}...>. Command ` +
+            `"${spec.commandName}" needs at least one.`,
+        );
+      }
       continue;
     }
 
@@ -282,6 +374,27 @@ export function parseArgv(
     options[declared.name] = value;
   }
 
-  if (errors.length > 0) return { ok: false, errors };
-  return { ok: true, args, options };
+  /**
+   * A `--help` refused as a value is not a request for help.
+   *
+   * `gemi run notify --message --help` has two readings and no way to tell them
+   * apart: the operator wanted the usage, or they wanted to send the literal
+   * text `--help` and the shell ate their quotes. Answering either one silently
+   * is how the reviewer's case goes wrong — showing usage and exiting 0 means
+   * the notification was never sent and the wrapper waiting on the status
+   * records a success.
+   *
+   * So the ambiguity is reported instead. `needsValue` has already written the
+   * sentence naming both readings and the fix (`--message=--help`), and
+   * suppressing the help request here is what lets the operator see it rather
+   * than a usage screen with no explanation.
+   *
+   * Help still wins over an ordinary usage error — `gemi run deploy --help`
+   * with `<env>` missing prints the usage, because that is the invocation
+   * somebody reaches for `--help` on.
+   */
+  const help = requested && !ambiguous;
+
+  if (errors.length > 0) return { ok: false, help, errors };
+  return { ok: true, help, args, options };
 }

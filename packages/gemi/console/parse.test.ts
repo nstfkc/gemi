@@ -94,6 +94,29 @@ describe("positional arguments", () => {
     });
   });
 
+  /**
+   * `usage.ts` prints `<files...>` for this declaration, which tells the
+   * operator it is mandatory. Ignoring `required` meant `gemi run import-files`
+   * with the paths forgotten booted the application, ran the handler over an
+   * empty list and exited 0 — a no-op that reads as a successful import.
+   */
+  test("a required variadic argument needs at least one value", () => {
+    const declared = spec([{ name: "files", required: true, variadic: true }]);
+
+    expect(errors(parseArgv(declared, []))).toEqual([
+      'Missing required argument <files...>. Command "demo" needs at least one.',
+    ]);
+    expect(ok(parseArgv(declared, ["a", "b"])).args).toEqual({
+      files: ["a", "b"],
+    });
+  });
+
+  test("an optional variadic argument is still happy with nothing", () => {
+    expect(
+      ok(parseArgv(spec([{ name: "files", variadic: true }]), [])).args,
+    ).toEqual({ files: [] });
+  });
+
   test("an argument the command never declared is reported, not ignored", () => {
     expect(errors(parseArgv(spec([{ name: "who" }]), ["a", "b"]))).toEqual([
       'Unexpected argument "b". Command "demo" takes 1 argument.',
@@ -174,6 +197,60 @@ describe("options", () => {
     ]);
   });
 
+  /**
+   * The worst shape a parser bug can take: `--tag --dry-run` setting `tag` to
+   * the literal `"--dry-run"` and leaving `dryRun` false means the operator's
+   * dry run executes for real, with a nonsense value, and nothing is printed.
+   */
+  describe("a value-taking option and an option-shaped token", () => {
+    const declared = spec([{ name: "rest", variadic: true }], [tag, flag]);
+
+    test("the next option is refused, not swallowed", () => {
+      expect(errors(parseArgv(declared, ["--tag", "--dry-run"]))).toEqual([
+        'Option --tag needs a value, but the next token is "--dry-run", which ' +
+          "is another option. If that really is the value, write --tag=--dry-run.",
+      ]);
+    });
+
+    test("a bare -- is refused too, so the escape hatch survives", () => {
+      expect(errors(parseArgv(declared, ["--tag", "--", "x"]))[0]).toContain(
+        "Option --tag needs a value",
+      );
+      // And the `--` still did its job rather than vanishing into the option.
+      expect(
+        ok(
+          parseArgv(spec([{ name: "rest", variadic: true }], [flag]), [
+            "--",
+            "--dry-run",
+          ]),
+        ).args,
+      ).toEqual({ rest: ["--dry-run"] });
+    });
+
+    test("an alias refuses it as well", () => {
+      expect(errors(parseArgv(declared, ["-t", "--dry-run"]))[0]).toContain(
+        "Option -t needs a value",
+      );
+    });
+
+    test("`=` is the way to say a value really does start with a dash", () => {
+      expect(ok(parseArgv(declared, ["--tag=--dry-run"])).options.tag).toBe(
+        "--dry-run",
+      );
+    });
+
+    /** Both of these are values, not options, and refusing them would be wrong. */
+    test("a negative number and a bare - are still values", () => {
+      expect(
+        ok(parseArgv(spec([], [limit]), ["--limit", "-5"])).options.limit,
+      ).toBe(-5);
+      expect(
+        ok(parseArgv(spec([], [limit]), ["--limit", "-2.5"])).options.limit,
+      ).toBe(-2.5);
+      expect(ok(parseArgv(declared, ["--tag", "-"])).options.tag).toBe("-");
+    });
+  });
+
   test("an unknown option names the command", () => {
     expect(errors(parseArgv(spec([], [flag]), ["--bogus"]))).toEqual([
       'Unknown option --bogus for command "demo".',
@@ -242,6 +319,80 @@ describe("wantsHelp", () => {
         "-h",
       ]),
     ).toBe(false);
+  });
+
+  /**
+   * The two yields are independent. A `-h` alias is a claim on `-h` and nothing
+   * else — treating it as a claim on `--help` too meant a command with a
+   * `-h, --host` lost the long spelling it never asked for, while `usage.ts`
+   * went on advertising `-h, --help` right beside the `-h, --host` that had
+   * taken it.
+   */
+  test("declaring a -h alias does not also surrender --help", () => {
+    const host = spec([], [{ name: "host", type: "string", alias: "h" }]);
+
+    expect(wantsHelp(host, ["--help"])).toBe(true);
+    expect(wantsHelp(host, ["-h", "example.com"])).toBe(false);
+  });
+
+  test("declaring a `help` option does not also surrender -h", () => {
+    const own = spec([], [{ name: "help", type: "boolean" }]);
+
+    expect(wantsHelp(own, ["--help"])).toBe(false);
+    expect(wantsHelp(own, ["-h"])).toBe(true);
+  });
+
+  /**
+   * A flat token scan cannot tell these apart, and got the second one wrong:
+   * `--message --help` printed usage and exited 0, so the notification was never
+   * sent and a wrapper branching on the exit code recorded a success.
+   *
+   * Now `--help` in *value* position is a value, and `--help` in option position
+   * is help even when the rest of the line is a usage error — which is exactly
+   * when somebody reaches for it.
+   */
+  describe("help against an option that takes a value", () => {
+    const notify = spec(
+      [{ name: "env", required: true }],
+      [{ name: "message", type: "string" }],
+    );
+
+    test("a --help attached as a value is the value", () => {
+      const result = ok(parseArgv(notify, ["--message=--help", "prod"]));
+
+      expect(result.help).toBe(false);
+      expect(result.options.message).toBe("--help");
+    });
+
+    test("a --help after -- is the command's argument", () => {
+      expect(parseArgv(notify, ["prod", "--", "--help"]).help).toBe(false);
+    });
+
+    /**
+     * The genuinely ambiguous one: the operator wanted usage, or they wanted to
+     * send the literal text `--help` and the shell ate their quotes. Guessing
+     * either way is silent, and guessing "help" is the worse of the two — usage
+     * printed, exit 0, nothing sent. So it is reported, with both readings and
+     * the fix named.
+     */
+    test("a --help refused as a value is reported, not answered", () => {
+      const result = parseArgv(notify, ["prod", "--message", "--help"]);
+
+      expect(result.help).toBe(false);
+      expect(result.ok).toBe(false);
+      expect(result.ok === false && result.errors[0]).toContain(
+        "write --message=--help",
+      );
+    });
+
+    test("--help still works when the invocation is otherwise unusable", () => {
+      // No `env`, so this is a usage error — and help has to win, or the flag
+      // is useless precisely when it is needed.
+      const result = parseArgv(notify, ["--help"]);
+
+      expect(result.help).toBe(true);
+      expect(result.ok).toBe(false);
+    });
   });
 });
 

@@ -47,6 +47,34 @@ describe("what the builder produces", () => {
     expect(defineCommand("db:seed").handle(() => {}).name).toBe("db:seed");
   });
 
+  /**
+   * The statics are a snapshot, not a window onto the builder.
+   *
+   * The builder goes on owning its `args`/`options` arrays and pushing to them,
+   * so storing the instances themselves let a chain reach back into a class it
+   * had already produced. Both `--help` and the parser read these statics, so a
+   * finished command's printed usage and accepted arguments could change
+   * afterwards.
+   */
+  test("copies the declarations, so a later .arg() cannot reach back in", () => {
+    const builder = defineCommand("demo").arg("first");
+    const Produced = builder.handle(() => {});
+
+    builder.arg("late").option("later", { type: "boolean" });
+
+    expect(Produced.args).toEqual([{ name: "first" }]);
+    expect(Produced.options).toEqual([]);
+  });
+
+  test("two commands off one builder do not share a schema", () => {
+    const builder = defineCommand("demo");
+    const First = builder.handle(() => {});
+    const Second = builder.arg("only-on-second").handle(() => {});
+
+    expect(First.args).toEqual([]);
+    expect(Second.args).toEqual([{ name: "only-on-second" }]);
+  });
+
   test("runs the handler it was given, and passes the context through", () => {
     const Produced = defineCommand("demo").handle(
       (ctx: any) => `saw ${ctx.args.who}`,
@@ -110,6 +138,19 @@ describe("declarations that contradict themselves", () => {
   });
 
   /**
+   * A variadic collects whatever is left and is an empty list when there is
+   * nothing, so there is no "absent" for a default to fill. Refused rather than
+   * ignored, because a declaration the parser silently drops reads — to whoever
+   * wrote it — exactly like one it honours. (`required` on a variadic *does*
+   * mean something, and `parse.ts` enforces it: at least one.)
+   */
+  test("a variadic argument cannot have a default", () => {
+    expect(() =>
+      defineCommand("demo").arg("files", { variadic: true, default: "x" }),
+    ).toThrow(/variadic and has a default/);
+  });
+
+  /**
    * A variadic argument collects everything that follows, so anything declared
    * after it could never receive a value — the command would run, and one of its
    * arguments would be permanently empty with nothing to say so.
@@ -162,5 +203,30 @@ describe("recognising a chain that was never finished", () => {
     for (const value of [undefined, null, {}, [], "x", 42, () => {}, Command]) {
       expect(isUnfinishedBuilder(value)).toBe(false);
     }
+  });
+
+  /**
+   * "Unfinished" has to mean *this chain produced nothing*, not *this export is
+   * still a builder object*. The two differ for the natural way to share
+   * declarations between commands:
+   *
+   *     export const base = defineCommand("reindex").option("verbose", …);
+   *     export default base.handle(async () => {});
+   *
+   * Both exports are visible to discovery, and `base` is a builder that did
+   * produce a command. Keying off the shape alone made that file throw — and
+   * because the throw happens before the registry is built, it took *every other
+   * command in the project* down with it, under a message that was untrue.
+   */
+  test("a chain that did reach .handle() is finished, however it was held", () => {
+    const base = defineCommand("reindex").option("verbose", {
+      type: "boolean",
+    });
+
+    expect(isUnfinishedBuilder(base)).toBe(true);
+
+    base.handle(() => {});
+
+    expect(isUnfinishedBuilder(base)).toBe(false);
   });
 });

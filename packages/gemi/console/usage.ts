@@ -27,6 +27,33 @@ function argSlot(arg: {
   return arg.required ? `<${inner}>` : `[${inner}]`;
 }
 
+/**
+ * The `--help` line, listed only in the spellings the command left free.
+ *
+ * `parse.ts` yields `--help` to a command that declares an option called `help`
+ * and `-h` to one that declares that alias, independently. Printing an
+ * unconditional `-h, --help` meant a command with a `-h, --host` was shown two
+ * contradictory `-h` entries, one of which did nothing — help that lies about
+ * the parser is worse than no help line at all.
+ */
+function helpEntry(command: CommandClass): Array<[string, string]> {
+  const claimed = (
+    predicate: (option: CommandClass["options"][number]) => boolean,
+  ) => command.options.some(predicate);
+
+  const longTaken = claimed(
+    (option) => option.name === "help" || kebab(option.name) === "help",
+  );
+  const shortTaken = claimed(
+    (option) => "alias" in option && option.alias === "h",
+  );
+
+  if (longTaken && shortTaken) return [];
+  if (longTaken) return [["-h", "Show this message"]];
+
+  return [[`${shortTaken ? "" : "-h, "}--help`, "Show this message"]];
+}
+
 export function renderUsage(command: CommandClass): string {
   const lines: string[] = [];
 
@@ -86,7 +113,7 @@ export function renderUsage(command: CommandClass): string {
           string,
         ];
       }),
-      ["-h, --help", "Show this message"],
+      ...helpEntry(command),
     ]),
   );
 

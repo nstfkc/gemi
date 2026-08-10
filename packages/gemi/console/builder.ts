@@ -183,6 +183,19 @@ export function defineCommand(name: string): CommandBuilder<{}, {}> {
         );
       }
 
+      // A variadic collects whatever is left, so there is no "absent" for a
+      // default to fill — the empty list is the answer. Refused rather than
+      // ignored, for the same reason as the pair above: a declaration the parser
+      // silently drops reads, to whoever wrote it, exactly like one it honours.
+      if (spec.variadic && spec.default !== undefined) {
+        throw new Error(
+          `Argument "${argName}" of command "${name}" is variadic and has a ` +
+            `default. A variadic argument collects the remaining values and is ` +
+            `an empty list when there are none, so the default could never ` +
+            `apply — drop it, or drop \`variadic\`.`,
+        );
+      }
+
       const variadic = args.find((existing) => existing.variadic);
       if (variadic) {
         throw new Error(
@@ -235,13 +248,32 @@ export function defineCommand(name: string): CommandBuilder<{}, {}> {
       const cls = class extends Command {
         static commandName = commandName;
         static description = commandDescription;
-        static args = args;
-        static options = options;
+        // Copied, not aliased. The builder goes on owning `args`/`options` and
+        // mutating them on every subsequent `.arg()`/`.option()`, so storing the
+        // instances themselves let a chain reach back into a class it had
+        // already produced — and `--help` and the parser both read these
+        // statics, so the printed usage and the accepted arguments would change
+        // under a command that was finished.
+        static args = [...args];
+        static options = [...options];
 
         run(ctx: any) {
           return fn(ctx);
         }
       };
+
+      // This chain produced a command, so it is no longer unfinished. The brand
+      // exists to catch a file that exports a builder and never calls `.handle()`
+      // — see `refuseUnfinishedBuilders` in `services/discovery.ts`. Leaving it
+      // set meant the natural way to share declarations,
+      //
+      //     export const base = defineCommand("reindex").option("verbose", ...);
+      //     export default base.handle(async () => {});
+      //
+      // left a branded object among the file's exports and aborted the whole of
+      // `gemi run` — every command in the project unrunnable, under a message
+      // that was untrue for that file.
+      delete (builder as Record<PropertyKey, unknown>)[BUILDER_BRAND];
 
       // An anonymous class expression reports `name === ""`, and the duplicate-
       // name error's whole job is to say *which two*. Give it the one name it

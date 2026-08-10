@@ -201,6 +201,17 @@ export async function discoverCommands(
  * A throw rather than a warning, because there is no reading of an unfinished
  * builder under which the author meant it: the chain builds a description of a
  * command and then discards it.
+ *
+ * "Unfinished" is decided by `.handle()` clearing the brand, not by the export
+ * still being a builder object. Those differ for the natural way to share
+ * declarations —
+ *
+ *     export const base = defineCommand("reindex").option("verbose", …);
+ *     export default base.handle(async () => {});
+ *
+ * — where `base` is a builder that *did* produce a command. Keying off the shape
+ * alone made that file abort the whole of `gemi run`, taking every other command
+ * in the project down with it, under a message that was untrue for it.
  */
 function refuseUnfinishedBuilders(files: string[]): void {
   if (files.length === 0) return;

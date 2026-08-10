@@ -73,23 +73,28 @@ Positional values, in the order they are declared and the order they are typed.
 .arg("extra", { variadic: true })
 ```
 
-| Key           | Type      | Description                                                 |
-| ------------- | --------- | ----------------------------------------------------------- |
-| `description` | `string`  | Shown in `--help`.                                          |
-| `required`    | `boolean` | Omitting it is a usage error rather than an `undefined`.    |
-| `default`     | `string`  | Supplied when the argument is absent.                       |
-| `variadic`    | `boolean` | Collects every remaining positional. Must be declared last. |
+| Key           | Type      | Description                                                                                 |
+| ------------- | --------- | ------------------------------------------------------------------------------------------- |
+| `description` | `string`  | Shown in `--help`.                                                                          |
+| `required`    | `boolean` | Omitting it is a usage error rather than an `undefined`. On a variadic, means at least one. |
+| `default`     | `string`  | Supplied when the argument is absent.                                                       |
+| `variadic`    | `boolean` | Collects every remaining positional. Must be declared last.                                 |
 
 What each combination gives the handler:
 
-| Declaration                     | Type in `args`                      |
-| ------------------------------- | ----------------------------------- |
-| `.arg("x")`                     | `string \| undefined`               |
-| `.arg("x", { required: true })` | `string`                            |
-| `.arg("x", { default: "…" })`   | `string`                            |
-| `.arg("x", { variadic: true })` | `string[]` — `[]` when it took none |
+| Declaration                                     | Type in `args`                        |
+| ----------------------------------------------- | ------------------------------------- |
+| `.arg("x")`                                     | `string \| undefined`                 |
+| `.arg("x", { required: true })`                 | `string`                              |
+| `.arg("x", { default: "…" })`                   | `string`                              |
+| `.arg("x", { variadic: true })`                 | `string[]` — `[]` when it took none   |
+| `.arg("x", { variadic: true, required: true })` | `string[]` — a usage error when empty |
 
-`required` and `default` together are refused: an argument that is supplied when absent cannot also be absent. So is anything declared after a variadic argument, which would collect everything and leave the one after it permanently empty.
+Declarations that contradict themselves are refused where you wrote them rather than surfacing later as a confusing usage error:
+
+- `required` with `default` — an argument that is supplied when absent cannot also be absent.
+- Anything declared after a `variadic` one, which would collect everything and leave the next permanently empty.
+- `variadic` with `default` — a variadic is an empty list when it takes nothing, so the default could never apply.
 
 ## Options — `.option()`
 
@@ -120,6 +125,16 @@ Option --limit expects a number, but got "abc".
 
 All the usual spellings work: `--limit 5`, `--limit=5`, `-l 5`, `-l5`, `-l=5`, and clustered flags like `-dl 5`. A boolean can be turned off with `--no-dry-run`. Everything after a bare `--` is positional, however it is spelled — the escape hatch for an argument that looks like a flag.
 
+An option that takes a value will not swallow the next flag as that value:
+
+```
+$ gemi run notify --message --dry-run
+Option --message needs a value, but the next token is "--dry-run", which is
+another option. If that really is the value, write --message=--dry-run.
+```
+
+Without this, `--message --dry-run` would set the message to the literal `"--dry-run"` and leave `dryRun` false — the dry run executes for real, and nothing says so. Use `=` when a value really does begin with a dash. Negative numbers (`--limit -5`) and a bare `-` are values, not flags, and need no escaping.
+
 ## The handler
 
 `.handle(fn)` receives one argument holding everything the command has.
@@ -147,7 +162,7 @@ There is no `info`, `success`, `warn`, table or progress bar. Colour is your app
 | calls `fail(message, code)`  | `code` (default `1`), with `message` on stderr and no stack |
 | throws                       | `1`, with the stack                                         |
 
-Returning something that is not an exit code is reported rather than coerced. `return users.length` is an easy thing to write, and coercing it would turn 300 backfilled users into exit status 44 — which reads as a failure to everything downstream, for a command that succeeded.
+An exit status is one byte, and both ways of naming one go through the same check. Anything outside `0`–`255` is reported rather than coerced, because coercion here is silent and inverts the answer: `return users.length` after 300 backfilled users would exit `44`, and ``fail(`${bad.length} rows failed`, bad.length)`` with 256 bad rows would exit **`0`** — a failure the `&&` chain or CI step waiting on it reads as a success.
 
 ```typescript
 export default defineCommand("verify-invoices").handle(
@@ -172,6 +187,8 @@ gemi run backfill-avatars --help
 ```
 
 Everything after the name belongs to the command, including its flags — `gemi run send-digest --queue` forwards `--queue` untouched, and `gemi run send-digest --help` prints that command's usage rather than `gemi run`'s. A `--` is available for a genuinely hostile tail (`gemi run x -- --weird`) but is never required.
+
+`--help` is offered in whichever spellings your command has left free: declare an option called `help` and `--help` is yours, declare a `-h` alias and `-h` is yours, and each is decided on its own — a `.option("host", { alias: "h" })` keeps the long `--help` it never claimed. The usage screen lists only the spellings that actually work.
 
 An unrecognised name prints a suggestion and the list, and exits `1`:
 

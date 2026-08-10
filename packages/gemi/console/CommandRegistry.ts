@@ -1,4 +1,5 @@
 import type { CommandClass } from "./Command";
+import { ConsoleError } from "./errors";
 
 /**
  * The commands an application has, and the rules about what a command may be.
@@ -21,19 +22,25 @@ export class CommandRegistry {
   private readonly byName = new Map<string, CommandClass>();
 
   /**
-   * @throws Error naming the offending class for a command that cannot be run.
+   * @throws ConsoleError naming the offending class for a command that cannot
+   * be run.
    *
    * Every refusal here is loud and immediate. There is a human at a terminal,
    * and every one of these is a mistake in the application's own source that
    * they are better off seeing now than after the command they meant to run
    * silently did not exist.
+   *
+   * `ConsoleError` rather than a plain `Error` so the runner prints the message
+   * alone. These are sentences with the fix named in them, and burying one under
+   * `at new CommandRegistry (…)` plus the runner's own frames points the reader
+   * at framework code when the mistake is in their `app/commands`.
    */
   constructor(commands: CommandClass[]) {
     for (const command of commands) {
       const name = command.commandName;
 
       if (!name || name === "unset") {
-        throw new Error(
+        throw new ConsoleError(
           `${describe(command)} does not declare a command name, so there is ` +
             `no name to run it by. Commands are written with \`defineCommand\`:` +
             `\n\n    export default defineCommand("my-command")\n` +
@@ -49,7 +56,7 @@ export class CommandRegistry {
         // refusing to start at all. Here there is no boot to protect and a
         // person is waiting: running the wrong one of two commands called
         // `db:seed` is strictly worse than running neither and being told why.
-        throw new Error(
+        throw new ConsoleError(
           `Two commands are named "${name}": ${describe(existing)} and ` +
             `${describe(command)}. A command name is how it is run, so one of ` +
             `them could never be reached — rename one.`,
