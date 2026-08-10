@@ -927,6 +927,34 @@ const CASES: Case[] = [
       },
     },
   }, ["User", "Organization"]],
+  // **The payload moving the very column this row's key references.** Prisma
+  // issues no parent `UPDATE` on this branch, so its answer is the schema's
+  // `ON UPDATE CASCADE` carrying the new id across; gemi has to write the key
+  // back either way, and the value it binds is derived from the payload rather
+  // than from the read it took before the payload landed. Without that it binds
+  // `1` over a row that is now `42` — a foreign-key error where the constraint
+  // is enforced and a silently orphaned user where it is not. Both tables,
+  // because the whole question is whether the two rows still point at each
+  // other.
+  ["M17d many-to-one upsert whose update moves the referenced key", "update", {
+    where: { id: 1 },
+    data: {
+      organization: {
+        upsert: { create: { name: "Created" }, update: { id: 42 } },
+      },
+    },
+  }, ["User", "Organization"]],
+  // The same, in Prisma's explicit operator spelling: `{ set }` names the
+  // resulting value, so it derives where `{ increment }` — which does not — is
+  // refused at compile time.
+  ["M17e many-to-one upsert moving the referenced key with 'set'", "update", {
+    where: { id: 1 },
+    data: {
+      organization: {
+        upsert: { create: { name: "Created" }, update: { id: { set: 42 } } },
+      },
+    },
+  }, ["User", "Organization"]],
 ];
 
 /**
@@ -1701,6 +1729,73 @@ function suite(label: string, url?: string) {
             },
             { tables: ["LedgerNote", "Ledger"] },
           );
+        });
+
+        /**
+         * The update branch **renaming one half of the key this note points
+         * at**, which is the composite shape of the same hazard `M17d` pins and
+         * the one that decides how it is answered.
+         *
+         * `Ledger`'s `@@id` *is* `(tenantId, code)` — the columns being
+         * referenced and the columns being moved are one set — so there is no
+         * key left to find the row by after the write. The new value therefore
+         * comes off the payload rather than from a second read, which is also
+         * what the database's `ON UPDATE CASCADE` computes, and Prisma's answer
+         * here is that cascade alone.
+         */
+        test("upsert renaming the key this note points at carries the note with it", async () => {
+          await differential.expectSameWrite(
+            "LedgerNote",
+            "update",
+            {
+              where: { id: 1 },
+              data: {
+                ledger: {
+                  upsert: {
+                    create: { tenantId: 9, code: "z", title: "created" },
+                    update: { code: "renamed" },
+                  },
+                },
+              },
+              include: { ledger: true },
+            },
+            { tables: ["LedgerNote", "Ledger"] },
+          );
+        });
+
+        /**
+         * The same rename twice, with **no reset between the calls**, so the
+         * second runs on the plan the first compiled.
+         *
+         * Which column moves is a property of the argument *shape* and so of
+         * the plan; which value it moves to is not — `canonicalShape` records
+         * both `"first"` and `"second"` as `string`. A step that closed over
+         * the value it read at plan time would write the first caller's key for
+         * every caller after them, and every case above would stay green,
+         * because each of them compiles its own plan. gemi only.
+         */
+        test("a second upsert of the same shape binds its own new key", async () => {
+          await differential.reset();
+          const rename = (code: string) =>
+            LedgerNoteModel.update({
+              where: { id: 1 },
+              data: {
+                ledger: {
+                  upsert: {
+                    create: { tenantId: 9, code: "z", title: "created" },
+                    update: { code },
+                  },
+                },
+              },
+            } as never);
+
+          await rename("first");
+          await rename("second");
+
+          const note = await differential.prisma.ledgerNote.findFirstOrThrow({
+            where: { id: 1 },
+          });
+          expect([note.tenantId, note.ledgerCode]).toEqual([1, "second"]);
         });
 
         test("upsert with nothing linked creates the ledger and takes both columns", async () => {
@@ -3799,11 +3894,11 @@ function suite(label: string, url?: string) {
       });
 
       /**
-       * **The create branch of an owning-side `upsert` carrying a `where` is a
-       * Prisma bug, and gemi serves the call** (#391).
+       * **An owning-side `upsert` whose `where` misses on a linked row writes
+       * nothing on either client, and only the failure differs** (#391).
        *
        * Prisma splices the operand's filter into the *parent's* statement, so
-       * the branch that should insert the far row and repoint this row emits
+       * the branch it takes emits
        *
        *     update "Profile" set "userId" = ?
        *       where ("id" in (?) and "User"."name" = ?)
@@ -3814,30 +3909,27 @@ function suite(label: string, url?: string) {
        * one-to-one below, the many-to-one `User.organization`, and the
        * composite `LedgerNote.ledger`. The *hit* branch of the same operand is
        * correct on both clients — `O16c` — which is what makes this the create
-       * branch's bug rather than the `where`'s.
+       * branch's bug rather than the `where`'s, and why refusing the `where`
+       * outright is not the answer on this side either.
        *
-       * **The failure's class is deliberately not asserted, only that there is
-       * one.** On SQLite it is `P2022`, *"The column `main.User.name` does not
-       * exist in the current database"*. The statement is invalid in a
-       * dialect-specific way, though — an unknown column there, a missing
-       * `FROM`-clause entry on Postgres — and this describe runs under both, so
-       * pinning the SQLite code would be pinning something this file has not
-       * measured on the dialect it would fail on. What the pin needs is that
-       * Prisma cannot run the call and that gemi can, and both halves below say
-       * so by value.
+       * **gemi refuses, for a reason of its own.** This row is linked, and the
+       * only thing a create branch could do from there is repoint it off the
+       * row the caller's filter deliberately excluded — a guard causing the
+       * write it was written to prevent. `RecordNotFoundError` is what the
+       * `update` operand already answers for its own filtered miss, and the
+       * same answer covers a linked child the caller's policies hide.
        *
-       * **gemi runs the branch the operand asks for.** There is nothing here to
-       * reproduce: P2022 is the engine reporting its own invalid SQL, not a
-       * semantic Prisma chose, and refusing the `where` outright would refuse
-       * the call `O16c` shows both clients answering. So this pins both sides —
-       * Prisma's failure *and* gemi's answer — the way this describe's rule
-       * requires, and it is the pair that fails the day either moves.
-       *
-       * The far row is a fresh `User`, so nothing displaces: profile 1 leaves
-       * user 1 behind holding no profile, which is the same orphaning `M14` and
-       * `O12` measure for the operands that do link an existing row.
+       * **So the outcome agrees and the class does not**, which is what keeps
+       * this in this describe: `notFound` against Prisma's `other`. Only gemi's
+       * is asserted by class. Prisma's is `P2022` on SQLite — *"The column
+       * `main.User.name` does not exist in the current database"* — but the
+       * statement is invalid in a dialect-specific way, an unknown column there
+       * against a missing `FROM`-clause entry on Postgres, and this describe
+       * runs under both; pinning the code would pin something this file has not
+       * measured on the dialect it would fail on. What is pinned is that
+       * neither client ran the call and neither left a row behind.
        */
-      test("Prisma emits invalid SQL for an owning upsert whose where misses; gemi creates and links", async () => {
+      test("an owning upsert whose where misses writes nothing on either client, and they disagree only about the failure", async () => {
         const args = {
           where: { id: 1 },
           data: {
@@ -3863,16 +3955,15 @@ function suite(label: string, url?: string) {
         ).toMatchObject({ userId: 1 });
 
         await differential.reset();
-        const fromGemi: any = await ProfileModel.update(args as never);
-        const created = await differential.prisma.user.findFirstOrThrow({
-          where: { email: "created@example.dev" },
-        });
-        expect(fromGemi.userId).toBe(created.id);
-        expect(await differential.prisma.user.count()).toBe(4);
-        // The row it stopped pointing at survives, holding no profile.
+        await expect(ProfileModel.update(args as never)).rejects.toThrow(
+          /No User found/,
+        );
+        // Nothing minted, and profile 1 is still on user 1 — the parent's own
+        // `UPDATE` went down with the `before` step's transaction.
+        expect(await differential.prisma.user.count()).toBe(3);
         expect(
-          await differential.prisma.profile.findMany({ where: { userId: 1 } }),
-        ).toEqual([]);
+          await differential.prisma.profile.findFirstOrThrow({ where: { id: 1 } }),
+        ).toMatchObject({ userId: 1 });
       });
 
       /**

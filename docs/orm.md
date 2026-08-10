@@ -1207,26 +1207,44 @@ by hand, inside a transaction — which is what an application had to write befo
 `connect`-after-upsert alternative needs a unique back-reference on the far model and there is none
 on this side.
 
-Two consequences of it being your own column, neither of which the other side has:
+**The create branch is for a key that points at nothing, and only for that.** If your foreign key
+points somewhere and the far row cannot be found — the `where` matched nothing, or your policies
+hide the row it names — the call raises `RecordNotFoundError` and writes nothing, rather than
+minting a second row and moving the link onto it. That would be a repoint you did not ask for, off a
+row the lookup by construction did not return: a filter written to *guard* the write causing a
+bigger one. It is the same answer `update` gives on this side when its own `where` misses.
 
-- **A linked row your policies hide reads as absent**, so the create branch runs and this row is
-  repointed at the new one. The hidden row is left exactly as it was — not edited, not deleted. The
-  foreign side answers the same situation with a `UniqueConstraintError`, because there the created
-  row's key collides with the one the hidden row holds; here the key being written is yours, and
-  nothing constrains it.
+Two consequences of the key being your own column, neither of which the other side has:
+
+- **A linked row your policies hide is not reachable and not repointed away from.** The hidden row is
+  left exactly as it was — not edited, not deleted — and so is your link to it. The foreign side
+  answers the same situation with a `UniqueConstraintError`, because there the created row's key
+  collides with the one the hidden row holds; the error differs, what is written does not.
 - **The update branch writes your foreign key back unchanged**, which stamps `@updatedAt` on a row
   Prisma leaves alone. The column has to be in the statement — the create branch needs it, and which
   branch runs is not known until the call runs — so "the link did not move" is spelled as an
   assignment that changes nothing. The same is true of `disconnect` with a filter.
 
-One divergence here, and this one is Prisma's bug rather than a decision: on the owning side, an
-`upsert` carrying a `where` that **matches nothing** fails against the Prisma client — measured on
+Three things the operand refuses on this side, all at compile time:
+
+- **A second operand on the same relation.** `{ disconnect: true, upsert: … }` — or any two of
+  `connect`, `connectOrCreate`, `create`, `disconnect` and `upsert` — describe one foreign-key
+  column between them, so only the last would survive into the statement. Prisma applies them in
+  order; gemi will not drop one silently.
+- **A nested write inside `upsert`'s `update`.** The update branch reaches the far row through a
+  filter rather than a unique key, so there is no single row to attach one to. The `create` half does
+  accept them, and writing the far row through its own `update` works.
+- **An operator on the column your key references** — `update: { id: { increment: 1 } }`. The new
+  value has to go into your foreign key too, and an operator leaves it to the database rather than
+  naming it. A literal or `{ set: … }` is fine, and the link follows the row.
+
+One divergence, and this one is Prisma's bug rather than a decision: on the owning side, an `upsert`
+carrying a `where` that **matches nothing** also fails against the Prisma client — measured on
 6.19.2/SQLite, where it is a `P2022` — because it splices the operand's filter into the parent's own
 `UPDATE` and emits a statement naming a column of the far table (*"The column `User.name` does not
-exist"*), having already inserted the far row inside the transaction it then rolls back. gemi runs
-the create branch the operand asks for. The *matching* case is served correctly by both, so this is
-the create branch's bug rather than the `where`'s — and it is one of the shapes to check by hand if
-you are porting a call that relied on the failure.
+exist"*), having already inserted the far row inside the transaction it then rolls back. Neither
+client writes anything; the failures are different classes of the same outcome. The *matching* case
+is served correctly by both, so this is the create branch's bug rather than the `where`'s.
 
 Every operand in Prisma's nested grammar is implemented for an ordinary relation — one that is not
 an implicit many-to-many — in the direction where the **child** holds the foreign key. That is every

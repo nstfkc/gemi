@@ -132,6 +132,26 @@ export interface RelationExecutor {
      * optional where `preScoped` may not.
      */
     ormAuthored?: readonly string[],
+    /**
+     * Whether this read is **machinery** — rows that decide what a nested step
+     * does and never reach the caller. Set, the target model's `redact` is
+     * suspended for the call; unset, it runs as it does for any other read.
+     *
+     * `redact` is about what a caller *sees*, and a step reading a foreign key
+     * to decide a branch is not a caller. `redactNullable` explicitly permits
+     * nullable columns, and an optional owning-side foreign key is exactly one
+     * — so without this a policy hiding `Note.folderId` made a linked row read
+     * as unlinked, and `upsert` answered that by minting a second child and
+     * repointing the parent off the row it was really on. The reads it covers
+     * select nothing but link columns, and what they produce is a `where` or a
+     * foreign-key contribution whose value was already in that column.
+     *
+     * Suspending the model's policies wholesale is what implements it — there
+     * is no narrower switch — so it is only ever passed with `preScoped`, where
+     * the scope is already in `args` and the suspension therefore removes
+     * nothing but the row transform.
+     */
+    unredacted?: boolean,
   ): Promise<unknown>;
   /**
    * A statement with no model behind it. Exactly one query in the ORM is like

@@ -923,19 +923,40 @@ export abstract class Model {
       // grandchild folded anyway and the statement count was one lower than the
       // caller asked for. Found by the query-count test, which is the only thing
       // that could have found it: the results were identical either way.
-      exec: (model, operation, relationArgs, preScoped, ormAuthored) => {
+      exec: (
+        model,
+        operation,
+        relationArgs,
+        preScoped,
+        ormAuthored,
+        unredacted,
+      ) => {
         const base = preScoped
           ? markPreScoped({ strategy: options?.strategy })
           : { strategy: options?.strategy };
-        return registry
-          .get<typeof Model>(model)
-          .$exec(
-            operation as Operation,
-            relationArgs,
-            (ormAuthored && ormAuthored.length > 0
-              ? markOrmAuthored(base, ormAuthored)
-              : base) as never,
-          );
+        const call = () =>
+          registry
+            .get<typeof Model>(model)
+            .$exec(
+              operation as Operation,
+              relationArgs,
+              (ormAuthored && ormAuthored.length > 0
+                ? markOrmAuthored(base, ormAuthored)
+                : base) as never,
+            );
+        // `unredacted` is spelled as the system scope because that is the only
+        // switch `$exec` has for it: `applyRedaction` is keyed on the policy
+        // context, which is built whenever the model has policies at all. Under
+        // `runAsSystem` there are none, so the row transform does not run.
+        //
+        // It removes nothing else on the calls that pass it. They are all
+        // pre-scoped, so `applyPolicies` was already being skipped — the scope
+        // is in `relationArgs` — and they select link columns from one row with
+        // no include tree, so there is no nested read for `redactFolded` to
+        // have covered either. The suspension is not ambient: `runAsSystem`
+        // spreads the current store, so an open transaction is carried through
+        // and nothing outside this await sees it.
+        return unredacted === true ? runAsSystem(call) : call();
       },
       // The one query with no model behind it — the implicit m-n join table —
       // resolves its connection here rather than reaching for the pool, so it

@@ -544,6 +544,34 @@ Prisma's does not. The far row is updated identically on both. Worth searching
 for in the same places as the `disconnect` above: a row whose `updatedAt` you
 show, written through a relation rather than through a column.
 
+## Two operands on one to-one whose key you hold are now refused
+
+Only on the side that **holds** the foreign key — `data: { organization: { … } }`
+where `organizationId` is a column of the row being written:
+
+```ts
+await User.update({
+  where: { id },
+  data: { organization: { disconnect: true, connect: { id: 5 } } },
+})
+```
+
+`connect`, `connectOrCreate`, `create`, `disconnect` and `upsert` all decide what
+that one column holds, and each compiles to an assignment on the statement you
+asked for. Two of them are one assignment, so the operand that ran last won and
+the other was dropped with nothing raised — the call above left the user in the
+old organization rather than in 5. It is now an `UnsupportedQueryError` naming
+both.
+
+Prisma applies them in sequence instead, so a ported call spelling two is a real
+behaviour difference and not only a refusal. Write the one you mean: `connect`
+alone repoints, `disconnect` alone detaches.
+
+`disconnect: false` is exempt, because it asks for nothing and compiles to
+nothing — `{ disconnect: cond, upsert: … }` keeps working when `cond` is false.
+The other end of a relation is unaffected: each operand there is its own
+statement against the child's rows, so two of them compose.
+
 ---
 
 # Upgrading from 0.42 to 0.43

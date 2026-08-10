@@ -249,6 +249,65 @@ describe("shape guards", () => {
       "data.organization.upsert",
       /takes \{ create, update \}/,
     ],
+    // **Present is not the same as usable**, and the grammar check asked only
+    // the first question. `create: null` reached the step as `data: null`,
+    // which `insertColumns` admits — so it inserted a row of nothing but
+    // defaults and repointed the parent at it. Both payloads, and the guard is
+    // shared, so the foreign side gains the same refusal.
+    [
+      "an upsert create is null",
+      write({ where: { id: 1 }, data: { organization: { upsert: { create: null, update: {} } } } }),
+      "data.organization.upsert.create",
+      /Expected an object of Organization columns/,
+    ],
+    [
+      "an upsert update is null",
+      write({ where: { id: 1 }, data: { organization: { upsert: { create: {}, update: null } } } }),
+      "data.organization.upsert.update",
+      /Expected an object of Organization columns/,
+    ],
+    // The update branch reaches the far row through the child's `updateMany`,
+    // which has no single row to attach a nested write to. Refused here so the
+    // refusal names the query the caller wrote: from inside the step it arrived
+    // as `('data.users', 'Organization', 'updateMany')` — the misnamed-origin
+    // shape of #85/#101 that this operand's own docblock cites as the reason it
+    // needed a branch of its own.
+    [
+      "a nested write inside an owning upsert's update payload",
+      write({ where: { id: 1 }, data: { organization: { upsert: { create: {}, update: { name: "n", users: { connect: { id: 2 } } } } } } }),
+      "data.organization.upsert.update.users",
+      /The 'create' half does accept them/,
+    ],
+    // **Two operands, one column.** Every owning-side operand compiles to a
+    // step writing `context.resolved[fkField]` and a contribution reading it
+    // back, and `updateAssignments` folds those into a single assignment — so
+    // the step that sorts last wins and the rest are dropped in silence.
+    // `upsert` is the pair that made it worth refusing: those arguments were an
+    // `UnsupportedQueryError` until #391 served the operand, so the caller went
+    // from told to unaware.
+    [
+      "a disconnect and an upsert on the same owned to-one",
+      write({ where: { id: 1 }, data: { organization: { disconnect: true, upsert: { create: {}, update: {} } } } }),
+      "data.organization.upsert",
+      /only the last of them would survive/,
+    ],
+    [
+      "a connect and a disconnect on the same owned to-one",
+      write({ where: { id: 1 }, data: { organization: { connect: { id: 2 }, disconnect: true } } }),
+      "data.organization.disconnect",
+      /only the last of them would survive/,
+    ],
+    // The update branch can move the column this row's key *references*, and
+    // the value it moves to is what the step has to write back — so the
+    // assignment has to name that value. An operator computes it in the
+    // database instead, which leaves nothing to bind; refused rather than
+    // guessed at, and a literal or `{ set }` compiles.
+    [
+      "an operator on the column an owned to-one references",
+      write({ where: { id: 1 }, data: { organization: { upsert: { create: {}, update: { id: { increment: 1 } } } } } }),
+      "data.organization.upsert.update.id",
+      /an operator computes that value in the database/,
+    ],
 
     // --- the operation itself ---------------------------------------------
     // Both `default:` arms after an exhaustive-looking partition. Reachable,
@@ -264,6 +323,52 @@ describe("shape guards", () => {
     expect(error).toBeInstanceOf(UnsupportedQueryError);
     expect(error!.argument).toBe(argument);
     expect(error!.message).toMatch(detail);
+  });
+
+  /**
+   * **A `where` on a to-one operand, checked when the query compiles rather
+   * than when a row happens to be linked.**
+   *
+   * Both operands carrying one — `update` and `upsert` — conjoin it with the
+   * link and compile it only on the branch that has a linked row to apply it
+   * to. So a typo used to be a query whose *validity depended on the data*: on
+   * a `User` with no organization the `upsert` created it with the filter
+   * silently dropped, and on a `User` who had one the same call raised from
+   * `Organization.findFirst`. The guard is the one place that can see both.
+   *
+   * `UnknownFieldError` rather than a refusal of its own, and with the child's
+   * own field list, so the two paths are indistinguishable rather than merely
+   * both-failing — it is the error `compileWhere` raises one layer down.
+   */
+  describe("a to-one operand's where names an unknown column", () => {
+    test.each([
+      ["upsert", { upsert: { where: { naem: "Acme" }, create: {}, update: {} } }],
+      ["update", { update: { where: { naem: "Acme" }, data: {} } }],
+      // Below a combinator too: the walk mirrors `compileWhere`'s dispatch, so
+      // a group is descended into rather than waved through.
+      ["upsert, under an AND", { upsert: { where: { AND: [{ naem: "Acme" }] }, create: {}, update: {} } }],
+    ])("%s", (_label, operand) => {
+      expect(
+        write({ where: { id: 1 }, data: { organization: operand } }),
+      ).toThrow(/'naem' is not a field on model Organization/);
+    });
+
+    test("a real column, a relation and a composite unique are all accepted", () => {
+      expect(
+        write({
+          where: { id: 1 },
+          data: {
+            organization: {
+              upsert: {
+                where: { name: "Acme", users: { some: { id: 1 } } },
+                create: {},
+                update: {},
+              },
+            },
+          },
+        }),
+      ).not.toThrow();
+    });
   });
 
   /**

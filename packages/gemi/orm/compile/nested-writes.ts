@@ -1,6 +1,7 @@
 import {
   InvalidArgumentError,
   RecordNotFoundError,
+  UnknownFieldError,
   UnsupportedQueryError,
 } from "../errors";
 import type { SqlDialect } from "../dialect";
@@ -15,6 +16,7 @@ import {
   singleFieldLink,
 } from "./plan-relations";
 import { matchUniqueKey, type RefusalOrigin } from "./unique";
+import { COMPOSITE_IN } from "./where";
 
 /**
  * Nested writes: `connect`, `connectOrCreate`, shallow `create`, and
@@ -170,6 +172,22 @@ const NO_SET_OF_ROWS: ReadonlySet<string> = new Set(
 
 /** Statements that insert a new row, so nothing is linked to it yet. */
 const CREATE_ONLY_STATEMENTS = new Set(["create", "createMany"]);
+
+/**
+ * The owning-side operands that decide what this row's foreign key holds — one
+ * column, so at most one of them can. See where `planOne` refuses the rest.
+ *
+ * `update` and `delete` are not here and it is not an omission: `update` writes
+ * the *far* row and leaves the key alone, and `delete` is refused on this side
+ * outright.
+ */
+const RESOLVES_THE_KEY: ReadonlySet<string> = new Set([
+  "connect",
+  "connectOrCreate",
+  "create",
+  "disconnect",
+  "upsert",
+]);
 
 /**
  * The operands still refused, and what each would take.
@@ -429,6 +447,58 @@ function planOne(
 
   // `from` is non-empty exactly on the side that holds the foreign key.
   const owning = relation.from.length > 0;
+
+  /**
+   * **Two operands on one to-one, both writing the same foreign key** — refused
+   * here, because the one that runs last is the one that wins and nothing tells
+   * the caller which that was.
+   *
+   * On this side every one of {@link RESOLVES_THE_KEY} compiles to the same two
+   * things: a `before` step that writes `context.resolved[fkField]`, and a
+   * contribution reading it back. `updateAssignments` folds the contributions
+   * through a field-keyed Map, so *n* of them are one assignment — and the
+   * steps run in the sorted order above, so the alphabet decides. `"connect" <
+   * "disconnect" < "upsert"`:
+   *
+   *     data: { organization: { disconnect: true, upsert: { … } } }
+   *
+   * edited the current organization and wrote `organizationId` back unchanged.
+   * The user was not detached, and nothing was raised. The same arguments were
+   * an `UnsupportedQueryError` until `upsert` landed on this side (#391), which
+   * is what turned a told caller into a silent one — but the pairs that were
+   * always accepted, `connect` beside `disconnect` and either beside `create`,
+   * had the same defect and are refused with them.
+   *
+   * The *foreign* side has no equivalent: each operand there is its own
+   * statement against the child's own rows, so two of them compose rather than
+   * collide. This is a property of a single column being the whole link.
+   *
+   * `disconnect: false` is excluded because it plans nothing at all — its
+   * branch returns before it contributes, which is the same value-at-plan-time
+   * test {@link toOneOperand} already makes — so it can neither swallow another
+   * operand nor be swallowed. That keeps the conditional spelling working.
+   */
+  if (owning) {
+    const resolvers = keys.filter((key) => {
+      if (!RESOLVES_THE_KEY.has(key)) return false;
+      const operand = (node as Record<string, unknown>)[key];
+      return key !== "disconnect" || (operand !== false && operand !== null);
+    });
+
+    if (resolvers.length > 1) {
+      throw new UnsupportedQueryError(
+        `data.${relation.name}.${resolvers[1]}`,
+        schema.name,
+        operation,
+        `'${resolvers.join("' and '")}' both decide what ` +
+          `'${schema.name}.${link.parentFields.join("', '")}' ` +
+          `${link.parentFields.length > 1 ? "hold" : "holds"}, and this row ` +
+          `has one such link — so only the last of them would survive into the ` +
+          `statement and the rest would be dropped without a word. Name the ` +
+          `one you mean.`,
+      );
+    }
+  }
 
   for (const key of keys) {
     const operand = (node as Record<string, unknown>)[key];
@@ -796,12 +866,9 @@ function planOwningSide(
      * `set` gives, and the same one the foreign side's `disconnect` gives for a
      * hidden row.
      *
-     * The parent read is **pre-scoped**: `args.where` is the effective `where`
-     * this call already put through this model's policies, so re-applying them
-     * would `AND` the same predicate twice. It reads one column of one row —
-     * `update` matched its `where` against a unique key — inside the
-     * transaction the nested steps already run in, so the value it returns is
-     * the one the statement below is about to write over.
+     * The parent read is {@link readOwnKey}, which is where its two flags are
+     * argued — the same read `upsert` and `displaceSibling` take, and the same
+     * argument, which is why it is one function rather than three paragraphs.
      */
     out.before.push({
       relation: relation.name,
@@ -814,12 +881,12 @@ function planOwningSide(
         // as assignments that change nothing rather than as absent ones.
         resolveKey(context, nullsFor(fkFields));
 
-        const parent = (await executor.exec(
+        const parent = await readOwnKey(
           schema.name,
-          "findFirst",
-          { where: args?.where, select: keySelect(fkFields) },
-          true,
-        )) as Record<string, unknown> | null;
+          fkFields,
+          args?.where,
+          executor,
+        );
 
         const linked = valuesOf(parent, fkFields);
         // Nothing linked: no row for the filter to match, and Prisma is silent
@@ -1022,15 +1089,13 @@ function planOwningSide(
    * `update` — was left to be rediscovered per call site. That is the half of
    * #391 a wording fix would not have closed.
    *
-   * **A `before` step, and the branch is decided from the parent's own key.**
-   * The far row is identified by a column of this row, which the arguments do
-   * not carry, so the parent is read first — pre-scoped, exactly as the
-   * `disconnect` filter arm's parent read is and for the same reason: `args.where`
-   * has already been through this model's policies. Then:
+   * **A `before` step, and the branch is decided from the parent's own key** —
+   * {@link readOwnKey}, because the far row is identified by a column of this
+   * row which the arguments do not carry. Then:
    *
-   *     linked, and the far row matches   ->  update it, key written back unchanged
-   *     linked, filter matches nothing    ->  the create branch, as Prisma's does
    *     nothing linked                    ->  create it and take the new key
+   *     linked, and the far row matches   ->  update it, key written back unchanged
+   *     linked, and it does not           ->  `RecordNotFoundError`, nothing written
    *
    * Measured against 6.19.2/SQLite on `Profile.user` (a one-to-one) and
    * `User.organization` (a many-to-one), which answer identically:
@@ -1040,16 +1105,38 @@ function planOwningSide(
    *                                not written at all**
    *     where matching, linked     the same update, filtered
    *
-   * **Nothing displaces**, and that is per branch rather than an omission. The
-   * update branch keeps the link it found; the create branch mints a row a line
+   * **`linked` decides the branch, and nothing on the far side can move it.**
+   * That is the third row, and it is the rule the rest of this side already
+   * follows rather than a special case for `upsert`: no owning-side operand
+   * repoints a link the caller did not name a new target for. Reaching the
+   * create branch from a *linked* parent would be exactly that repoint — and
+   * silently, since the row it moves off is by construction one the lookup did
+   * not return. Three separate conditions arrive there:
+   *
+   *   - the operand's `where` matches nothing, so a filter the caller wrote to
+   *     *guard* the write would have caused a bigger one;
+   *   - the linked child is hidden by the child's own policies — soft-deleted,
+   *     another tenant's — which is when "mint a second one and repoint" is
+   *     most expensive and least visible, and an application looping over such
+   *     rows accumulates duplicates and loses the originals;
+   *   - the foreign key is dangling, which is the one case where creating is
+   *     arguably right, and is unreachable with the constraint enforced.
+   *
+   * One answer for all three, and it is the one the `update` operand two
+   * branches up already gives for its own filtered miss: `RecordNotFoundError`,
+   * which is Prisma's P2025 and this file's word for "the row this points at
+   * was not found". The create branch is for a parent that points at nothing.
+   *
+   * **Nothing displaces**, then, in either branch that writes: the update
+   * branch keeps the link it found, and the create branch mints a row a line
    * earlier, so nothing can already be pointing at it — `connectOrCreate`'s miss
    * branch says the same thing in the same words, and Prisma agrees by
    * construction: its log for the create branch is the insert and the repoint,
    * with no incumbent lookup in it.
    *
-   * **KNOWN DIVERGENCE — a `where` that matches nothing is served here and is a
-   * Prisma bug there.** Prisma splices the operand's filter into the *parent's*
-   * `UPDATE`, so the create branch emits
+   * **KNOWN DIVERGENCE — a `where` that matches nothing fails on both clients,
+   * and Prisma's failure is a bug.** It splices the operand's filter into the
+   * *parent's* `UPDATE`, so its create branch emits
    * `update "Profile" set "userId" = ? where ("id" in (?) and "User"."name" = ?)`
    * — a column of the far table in this row's statement — and answers P2022,
    * *"The column `main.User.name` does not exist in the current database"*,
@@ -1057,11 +1144,11 @@ function planOwningSide(
    * back. Measured on SQLite on both relation shapes above and on the composite
    * `LedgerNote.ledger`; the statement is invalid on Postgres too, though as a
    * missing `FROM`-clause entry rather than an unknown column, so the pin
-   * asserts the failure and not its class. gemi runs the create branch the
-   * operand asks for. It is the same operand the *hit* branch serves correctly
-   * on both clients, so refusing the `where` outright would refuse a query
-   * Prisma answers; the divergence is pinned in `writes.differential.test.ts`
-   * rather than matched.
+   * asserts the failure and not its class. Both write nothing, which is the
+   * part a caller can act on; the *kind* differs — `notFound` against `other` —
+   * so it is pinned in `writes.differential.test.ts` rather than matched.
+   * Refusing the `where` outright is what this must not do: the *hit* branch of
+   * the same operand is correct on both clients.
    *
    * **The hit branch writes this row's foreign key back unchanged**, which is
    * the one thing here that costs anything: the contribution is in the SET list
@@ -1089,6 +1176,107 @@ function planOwningSide(
     assertToOneWriteOperand(schema, relation, child, key, operand, operation);
     assertUpsertOperand(schema, relation, child, operand, operation, false);
 
+    /**
+     * The `update` payload's column names, read here rather than in the step.
+     *
+     * `canonicalShape` records which keys an argument object carries when it
+     * builds the plan key, so *which columns the branch writes* is a property
+     * of the plan and not of this call's values — which is what lets the two
+     * questions below be asked once, at compile time, and their answers baked
+     * into the step.
+     */
+    const wrapper =
+      operand !== null && typeof operand === "object" && !Array.isArray(operand)
+        ? (operand as Record<string, unknown>).update
+        : undefined;
+    const payload =
+      wrapper !== null && typeof wrapper === "object" && !Array.isArray(wrapper)
+        ? (wrapper as Record<string, unknown>)
+        : {};
+    const written = Object.keys(payload).filter(
+      (name) => payload[name] !== undefined,
+    );
+
+    /**
+     * **A nested write in the update payload, refused here so the refusal names
+     * the query the caller wrote.**
+     *
+     * The update branch reaches the far row through the child's `updateMany`,
+     * which has no single row to attach nested writes to and says so — but from
+     * inside a step, as `UnsupportedQueryError('data.users', 'Organization',
+     * 'updateMany')` for a `User.update` the caller spelled with an `upsert`.
+     * That is the misnamed-origin shape #85 was filed for and #101 fixed, and
+     * this operand's own docblock cites it as the reason it needed a branch of
+     * its own; arriving at it one layer further down is not an improvement.
+     *
+     * Refused rather than served, because the two halves of the operand
+     * genuinely differ: the create branch goes through the child's `create`,
+     * which plans nested writes, and the update branch cannot reach a `update`
+     * with them — the row it acts on is named by a filter, not by a unique key.
+     * So the honest answer is the asymmetry, stated at plan time, with the
+     * spelling that does work next to it.
+     */
+    const nested = written.find((name) => name in child.relations);
+    if (nested !== undefined) {
+      throw new UnsupportedQueryError(
+        `data.${relation.name}.upsert.update.${nested}`,
+        schema.name,
+        operation,
+        `'upsert' reaches the connected ${child.name} through a filter rather ` +
+          `than a unique key, so its 'update' has no single row to attach a ` +
+          `nested write to — '${nested}' would be dropped rather than applied. ` +
+          `The 'create' half does accept them. Write the ${child.name} through ` +
+          `its own 'update' if the row exists, or move '${nested}' into ` +
+          `'create'.`,
+      );
+    }
+
+    /**
+     * **The update branch can move the very key this step is about to write
+     * back**, and the value it wrote is the only thing that knows where to.
+     *
+     * `update: { code: "renamed" }` on a relation referencing `code` rewrites
+     * the far row out from under the contribution, which was resolved from the
+     * read taken *before* it — so the statement this step runs before would
+     * bind a key naming no row. With the constraint enforced and Prisma's
+     * default `ON UPDATE CASCADE` behind it the database has already carried
+     * the new key across and the write-back undoes it; without the cascade the
+     * parent is orphaned. Prisma issues no parent `UPDATE` at all here, so that
+     * cascade is the whole of its answer.
+     *
+     * **Read off the payload rather than re-read from the database**, which is
+     * not the cheaper of the two options but the only correct one: the columns
+     * that moved are the referenced ones, and on a composite link those are
+     * routinely the child's `@@id` as well — `Ledger` is exactly that — so
+     * there is no key left to find the row by afterwards. The payload has the
+     * answer without looking, and it is the same answer the cascade computes.
+     *
+     * Which restricts what may be written *to* a referenced column, and the
+     * restriction is checked here: a literal, or `{ set }`, both of which name
+     * the resulting value. `{ increment: 1 }` and its siblings do not — the
+     * result is the database's arithmetic — so they are refused rather than
+     * guessed at. Refused, not read back, because "increment a column another
+     * table's key points at" has no sound answer to reach for.
+     */
+    const moved = referencedFields.filter((name) => written.includes(name));
+
+    const derived = moved.find(
+      (name) => literalOf(payload[name]) === UNDERIVABLE,
+    );
+    if (derived !== undefined) {
+      throw new UnsupportedQueryError(
+        `data.${relation.name}.upsert.update.${derived}`,
+        schema.name,
+        operation,
+        `'${relation.model}.${derived}' is what ` +
+          `'${schema.name}.${fkFields.join("', '")}' ` +
+          `${fkFields.length > 1 ? "reference" : "references"}, so this ` +
+          `statement has to write the new value into it — and an operator ` +
+          `computes that value in the database rather than naming it. Write ` +
+          `the value itself, or move the key change out of the nested write.`,
+      );
+    }
+
     out.before.push({
       relation: relation.name,
       operation: "upsert",
@@ -1100,16 +1288,12 @@ function planOwningSide(
         // `TypeError` rather than an error naming the argument.
         const record = at(args) as Record<string, unknown> | null | undefined;
 
-        // Pre-scoped: `args.where` is the effective `where` this call already
-        // put through this model's policies, so re-applying them would `AND`
-        // the same predicate twice. One column of one row, inside the
-        // transaction the nested steps already run in.
-        const parent = (await executor.exec(
+        const parent = await readOwnKey(
           schema.name,
-          "findFirst",
-          { where: args?.where, select: keySelect(fkFields) },
-          true,
-        )) as Record<string, unknown> | null;
+          fkFields,
+          args?.where,
+          executor,
+        );
 
         // A composite key with any column null names no row — see
         // {@link isLinked} — so a half-written link is the *absent* case here
@@ -1119,56 +1303,88 @@ function planOwningSide(
         // arrives from the write-back as P2025, rolling the insert back. gemi's
         // own `update` raises `RecordNotFoundError` for the same call and takes
         // this step down with it.
-        if (isLinked(valuesOf(parent, fkFields))) {
-          // `AND`, not a spread: a filter naming a referenced column itself
-          // must narrow rather than replace the restriction that keeps this on
-          // the linked row. `childLink` reads as "the row this one points at"
-          // on this side — the far row's own columns bound to the values just
-          // read off this one.
-          const where = conjoin(
-            record?.where,
-            childLink(link, parent as Record<string, unknown>),
-          );
-
-          const hit = (await executor.exec(
+        if (!isLinked(valuesOf(parent, fkFields))) {
+          const created = (await executor.exec(
             relation.model,
-            "findFirst",
-            { where, select: keySelect(referencedFields) },
-            // NOT pre-scoped: the child's own policies decide which rows exist,
-            // and a row this caller cannot see reads as absent — which sends it
-            // to the create branch, exactly as a hidden child does on the
-            // foreign side. The conservative answer, and the same one there.
+            "create",
+            { data: record?.create, select: keySelect(referencedFields) },
+            // NOT pre-scoped — the child's own `onCreate` scopes the new row.
             false,
           )) as Record<string, unknown> | null;
 
-          if (hit) {
-            // The key this row already holds, written back unchanged. The
-            // contribution is structural, so "the link does not move" has to be
-            // spelled as an assignment that changes nothing rather than as an
-            // absent one — the rule the `disconnect` filter arm states.
-            resolveKey(context, valuesOf(hit, referencedFields));
-
-            await executor.exec(
-              relation.model,
-              "updateMany",
-              { where, data: record?.update },
-              // NOT pre-scoped: the child's `onUpdate` and its scope-escape
-              // guard judge the payload, as they do for a nested `update`.
-              false,
-            );
-            return;
-          }
+          resolveKey(context, valuesOf(created, referencedFields));
+          return;
         }
 
-        const created = (await executor.exec(
+        // `AND`, not a spread: a filter naming a referenced column itself
+        // must narrow rather than replace the restriction that keeps this on
+        // the linked row. `childLink` reads as "the row this one points at"
+        // on this side — the far row's own columns bound to the values just
+        // read off this one.
+        const where = conjoin(
+          record?.where,
+          childLink(link, parent as Record<string, unknown>),
+        );
+
+        const hit = (await executor.exec(
           relation.model,
-          "create",
-          { data: record?.create, select: keySelect(referencedFields) },
-          // NOT pre-scoped — the child's own `onCreate` scopes the new row.
+          "findFirst",
+          { where, select: keySelect(referencedFields) },
+          // NOT pre-scoped: the child's own policies decide which rows exist,
+          // as they do for every other operand that reaches the far side.
           false,
         )) as Record<string, unknown> | null;
 
-        resolveKey(context, valuesOf(created, referencedFields));
+        // The linked row, and the caller's filter, and the child's policies all
+        // have to agree — and if they do not, this row keeps the link it has.
+        // The operand's docblock argues the case; the error is the `update`
+        // operand's, for the condition the `update` operand also has.
+        if (!hit) throw new RecordNotFoundError(relation.model, "upsert");
+
+        // The key this row already holds, written back unchanged — except for
+        // whatever the payload is about to move it to, which is a value the
+        // payload names rather than one the far row can be asked for
+        // afterwards. The contribution is structural either way, so "the link
+        // does not move" has to be spelled as an assignment that changes
+        // nothing rather than as an absent one — the rule the `disconnect`
+        // filter arm states.
+        //
+        // **This call's values, not the plan's.** `moved` is a list of column
+        // names and so a property of the shape — `canonicalShape` records a
+        // literal as `number` and `{ increment: 1 }` as a subtree of its own,
+        // which is what makes the plan-time check above sound — but *which*
+        // number is not, and a step closing over one would write the first
+        // caller's key for every caller after them.
+        const updates = (record?.update ?? {}) as Record<string, unknown>;
+        const next = { ...hit } as Record<string, unknown>;
+        for (const name of moved) next[name] = literalOf(updates[name]);
+
+        resolveKey(context, valuesOf(next, referencedFields));
+
+        const applied = (await executor.exec(
+          relation.model,
+          "updateMany",
+          { where, data: record?.update },
+          // NOT pre-scoped: the child's `onUpdate` and its scope-escape
+          // guard judge the payload, as they do for a nested `update`.
+          false,
+        )) as { count?: number } | null;
+
+        // **Read and written under two different scopes, so the row can be
+        // there for one and not the other**, and `updateMany` answers that with
+        // `{ count: 0 }` rather than by raising. A policy scoping reads to the
+        // tenant and mutations to rows the actor owns is the ordinary shape of
+        // it. Without this the caller gets a successful `update` whose nested
+        // payload was never applied — no error, no count anywhere to read — and
+        // the create branch cannot cover for it, since the read already sent the
+        // call down this one. Prisma either applies the update or raises P2025.
+        //
+        // Only where the payload names a column: `update: {}` asks for no write,
+        // so a zero count is the answer rather than a mismatch, and the count is
+        // the driver's rows-affected either way.
+        if (written.length > 0 && applied?.count === 0) {
+          throw new RecordNotFoundError(relation.model, "upsert");
+        }
       },
     });
 
@@ -2982,6 +3198,30 @@ function assertUpsertOperand(
             `what to write if it is there, and what to write if it is not.`,
         );
       }
+
+      // **Present is not the same as usable**, and the loop above only asked
+      // the first question. `create: null` reached the step as `data: null`,
+      // which `insertColumns` explicitly admits — so on a child whose columns
+      // are all nullable or defaulted it committed a blank row and repointed
+      // the parent at it, and on one with a required column it surfaced as a
+      // raw NOT NULL violation from inside a nested step rather than as an
+      // argument refusal. `where` is excluded because it has its own checks:
+      // `matchUniqueKey` below on a to-many, `assertToOneWriteOperand` on a
+      // to-one, where it is optional and a `WhereInput` rather than a key.
+      const value = record[name];
+      if (
+        name !== "where" &&
+        (value === null || typeof value !== "object" || Array.isArray(value))
+      ) {
+        throw new InvalidArgumentError(
+          `${at}.${name}`,
+          schema.name,
+          operation,
+          `Expected an object of ${child.name} columns, got ` +
+            `${JSON.stringify(value) ?? typeof value}. Prisma refuses the same ` +
+            `value at validation, with nothing written.`,
+        );
+      }
     }
 
     if (!many) continue;
@@ -3065,11 +3305,91 @@ function childLink(
   return key;
 }
 
+/**
+ * **This row's own foreign key**, read back inside the transaction the nested
+ * steps already run in — the one lookup an owning-side operand cannot avoid,
+ * because which far row it acts on lives in a column the arguments do not
+ * carry.
+ *
+ * Written once because the *scoping* is the interesting part and three operands
+ * had it spelled out identically, each re-arguing it in its own paragraph: the
+ * `disconnect` filter arm, `upsert`'s branch decision, and `displaceSibling`'s
+ * "does this row already point there". A change to how the key is read — either
+ * flag below, a `where` that can match more than one row, what a missing parent
+ * means — has to be one change, or one operand quietly gets a different rule
+ * from its neighbours. That is what {@link childLink} and {@link keySelect}
+ * exist to prevent one layer down, and this is the same argument for the read
+ * that feeds them.
+ *
+ * **Pre-scoped**: `where` is the effective `where` this call already put
+ * through this model's policies, so re-applying them would `AND` the same
+ * predicate twice.
+ *
+ * **Unredacted**: the row decides a branch and is never handed back, and a
+ * `redact` over the foreign key would otherwise make a linked row read as
+ * unlinked — `redactNullable` permits exactly the nullable columns an optional
+ * foreign key is made of. See `RelationExecutor.exec`'s parameter, where the
+ * argument is. The misread is a silent no-op in `disconnect` and
+ * `displaceSibling`, which have nothing to do when nothing is linked, and a
+ * *destructive* one in `upsert`, which read it as a row to create.
+ */
+async function readOwnKey(
+  model: string,
+  fields: readonly string[],
+  where: unknown,
+  executor: RelationExecutor,
+): Promise<Record<string, unknown> | null> {
+  return (await executor.exec(
+    model,
+    "findFirst",
+    { where, select: keySelect(fields) },
+    true,
+    undefined,
+    true,
+  )) as Record<string, unknown> | null;
+}
+
 /** `{ <field>: true, … }` — the narrowest select that reads a whole link back. */
 function keySelect(fields: readonly string[]): Record<string, true> {
   const select: Record<string, true> = {};
   for (const field of fields) select[field] = true;
   return select;
+}
+
+/** The answer {@link literalOf} gives for a value it cannot name in advance. */
+const UNDERIVABLE = Symbol("underivable");
+
+/**
+ * The value an assignment will leave in the column, when that is knowable from
+ * the assignment alone.
+ *
+ * `"renamed"` is itself; `{ set: "renamed" }` is Prisma's explicit spelling of
+ * the same thing and unwraps to it. `{ increment: 1 }` is not knowable — the
+ * result is the database's arithmetic over a value nobody here has read — and
+ * neither is any other operator, so they all answer {@link UNDERIVABLE} and the
+ * one caller refuses rather than guessing.
+ *
+ * **A plain object is the test**, not "an object": `Date` and `Uint8Array` are
+ * ordinary values of `DateTime` and `Bytes` columns and reach this as
+ * themselves. Prisma's operator objects are always object literals, so the
+ * prototype is what separates the two — and it separates them the safe way
+ * round, since an exotic wrapper falls to `UNDERIVABLE` rather than being
+ * written through as a value.
+ */
+function literalOf(value: unknown): unknown {
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    Object.getPrototypeOf(value) !== Object.prototype
+  ) {
+    return value;
+  }
+
+  const keys = Object.keys(value as Record<string, unknown>);
+  if (keys.length === 1 && keys[0] === "set") {
+    return (value as Record<string, unknown>).set;
+  }
+  return UNDERIVABLE;
 }
 
 /** `{ <field>: null, … }` — a detach, which has to clear *every* column. */
@@ -3334,9 +3654,8 @@ async function displaceSibling(
   values: readonly unknown[],
   /**
    * This statement's own `where`, **already through this model's policies** —
-   * so the read below is pre-scoped, exactly as the `disconnect` filter arm's
-   * parent read is, and for the same reason: applying them again would `AND`
-   * the same predicate twice.
+   * which is what {@link readOwnKey} below is documented to expect, and the
+   * reason it is the same call the `disconnect` filter arm and `upsert` make.
    */
   where: unknown,
   /** False on a `create`, where the row does not exist yet. */
@@ -3346,12 +3665,7 @@ async function displaceSibling(
   if (!isLinked(values)) return;
 
   if (existing) {
-    const self = (await executor.exec(
-      schema.name,
-      "findFirst",
-      { where, select: keySelect(fkFields) },
-      true,
-    )) as Record<string, unknown> | null;
+    const self = await readOwnKey(schema.name, fkFields, where, executor);
 
     if (self === null || self === undefined) return;
     // **Every column, not the first that differs** — the skip is "this row
@@ -3719,6 +4033,67 @@ function assertToOneWriteOperand(
         `by the conjunction that keeps this operand on the connected row, so ` +
         `the write would land unfiltered.`,
     );
+  }
+
+  assertFilterFields(child, record.where);
+}
+
+/** The keys of a `where` that are not columns. Mirrors `compileWhere`'s. */
+const FILTER_COMBINATORS: ReadonlySet<string> = new Set([
+  "AND",
+  "OR",
+  "NOT",
+  COMPOSITE_IN,
+]);
+
+/**
+ * Every column a to-one operand's `where` names, checked against the child at
+ * **plan** time rather than when a row happens to be there.
+ *
+ * Both operands compile that filter only on the branch that has a linked row to
+ * apply it to — `update` throws `RecordNotFoundError` before it looks, `upsert`
+ * takes the create branch — so a typo was a query that succeeded or failed
+ * depending on the data:
+ *
+ *     User.update({ where: { id: 2 }, data: { organization: { upsert: {
+ *       where: { naem: "Acme" }, create: { … }, update: { … } } } } })
+ *
+ * against a user with no organization created it with the filter silently
+ * dropped, and against a user who had one raised `UnknownFieldError` from
+ * `Organization.findFirst`. Same query, two answers, and the failing one only
+ * appears once production data changes shape. Prisma refuses the unknown
+ * argument in both cases.
+ *
+ * `UnknownFieldError` deliberately, and with the child's own field list: it is
+ * the error {@link compileWhere} raises one layer down, so the two paths are now
+ * indistinguishable rather than merely both-failing. The check mirrors that
+ * function's dispatch — a key is a combinator, a relation, a field, or Prisma's
+ * `a_b` spelling of a composite `@@unique` — and stops at the top level of each
+ * group, because everything below it is an operator whose grammar the field's
+ * own filter owns.
+ */
+function assertFilterFields(child: ModelSchema, filter: unknown): void {
+  if (filter === null || typeof filter !== "object") return;
+
+  if (Array.isArray(filter)) {
+    for (const one of filter) assertFilterFields(child, one);
+    return;
+  }
+
+  const record = filter as Record<string, unknown>;
+
+  for (const name of Object.keys(record)) {
+    if (record[name] === undefined) continue;
+
+    if (FILTER_COMBINATORS.has(name)) {
+      assertFilterFields(child, record[name]);
+      continue;
+    }
+
+    if (name in child.fields || name in child.relations) continue;
+    if (child.uniques.some((unique) => unique.join("_") === name)) continue;
+
+    throw new UnknownFieldError(name, child.name, Object.keys(child.fields));
   }
 }
 

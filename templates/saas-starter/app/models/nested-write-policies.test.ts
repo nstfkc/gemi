@@ -1524,17 +1524,22 @@ describe("policies on nested writes", () => {
      * it does for the `disconnect` filter arm two tests up and for
      * `connectOrCreate` on the other side.
      *
-     * **A linked row the caller cannot see reads as absent, so the create
-     * branch runs and this row is repointed at the new one.** That is a
-     * different answer from the foreign side's, where the same hidden row gives
-     * `UniqueConstraintError`, and the difference is structural rather than a
-     * choice: there the create stamps the parent's key into a column carrying a
-     * unique index the hidden row is holding, and here the key being written is
-     * this row's own, which nothing else constrains.
+     * **A linked row the caller cannot see reads as absent — and this row is
+     * linked, so the answer is `RecordNotFoundError` rather than the create
+     * branch.** Falling through to create would mint a second `Folder` and move
+     * the note onto it, severing a link the caller never asked to change and
+     * orphaning a row they could not see; an application calling `upsert` in a
+     * loop over policy-filtered children would accumulate duplicates and lose
+     * every original association, with nothing raised. The `where`-misses case
+     * one describe over is the same condition and gets the same answer.
      *
-     * What both answers have in common is the part that matters: the row the
-     * caller may not see is **not written**. This one leaves it where it is and
-     * stops pointing at it; it does not edit it, and it does not delete it.
+     * It agrees with the foreign side, which raises `UniqueConstraintError` for
+     * the same hidden row, on the part that matters: the row the caller may not
+     * see is **not written**, and neither is the link to it. The error differs
+     * because the collision does — there the create stamps the parent's key into
+     * a column carrying a unique index the hidden row holds, and here the key
+     * being written is this row's own, which nothing else constrains, so the
+     * lookup has to be what refuses.
      */
     // By `code` rather than by `id`: the table's autoincrement is not reset
     // between cases, so a minted row's id is whatever this file has reached.
@@ -1552,27 +1557,27 @@ describe("policies on nested writes", () => {
       return rows[0].id;
     };
 
-    test("upsert creates and repoints rather than editing a hidden linked row", async () => {
+    test("upsert refuses rather than repointing off a hidden linked row", async () => {
       await seedNote();
 
-      await Model.asUser(OURS, () =>
-        Note.$exec("update", {
-          where: { id: 60 },
-          data: {
-            folder: {
-              upsert: { create: { code: "made" }, update: { code: "hacked" } },
+      await expect(
+        Model.asUser(OURS, () =>
+          Note.$exec("update", {
+            where: { id: 60 },
+            data: {
+              folder: {
+                upsert: { create: { code: "made" }, update: { code: "hacked" } },
+              },
             },
-          },
-        }),
-      );
+          }),
+        ),
+      ).rejects.toThrow(/No Folder found/);
 
-      // The other tenant's folder is untouched, and the new one carries our
-      // tenant — the child's `onCreate`, through its own `$exec`.
-      expect(await folders()).toEqual([
-        ["theirs", 99],
-        ["made", 7],
-      ]);
-      expect(await folderIdOf(60)).toBe(await folderIdBy("made"));
+      // Nothing was minted, the other tenant's folder is untouched, and note 60
+      // still points at it — the transaction the `before` step runs in took the
+      // parent's own `UPDATE` down with it.
+      expect(await folders()).toEqual([["theirs", 99]]);
+      expect(await folderIdOf(60)).toBe(1);
     });
 
     test("upsert updates a linked row the caller can see", async () => {
@@ -1640,6 +1645,127 @@ describe("policies on nested writes", () => {
         ["theirs", 99],
         ["ours", 7],
       ]);
+    });
+
+    /**
+     * **A `redact` over this row's own foreign key must not decide the branch.**
+     *
+     * The parent read is pre-scoped, which skips `applyPolicies` — but not
+     * `applyRedaction`, which `$exec` runs on the shaped row whenever the model
+     * has policies at all. `redactNullable` explicitly permits nullable
+     * columns, and an optional owning-side foreign key is exactly one, so a
+     * policy hiding `Note.folderId` made a linked note read as unlinked. That is
+     * a no-op in `disconnect`, which has nothing to do when nothing is linked,
+     * and here it was the destructive branch: a second `Folder`, and the note
+     * moved onto it.
+     *
+     * The read is machinery — one column of one row, used to build a `where`
+     * and a contribution whose value was already in that column — so it is
+     * taken unredacted. See `readOwnKey`, which is the one place all three
+     * operands that take it now read through.
+     */
+    test("a redacted foreign key does not send a linked row to the create branch", async () => {
+      await raw.unsafe(
+        `INSERT INTO "Folder" ("id", "code", "orgId") VALUES (2, 'ours', 7)`,
+      );
+      await raw.unsafe(
+        `INSERT INTO "Note" ("id", "folderId", "label", "orgId") ` +
+          `VALUES (61, 2, 'ours', 7)`,
+      );
+
+      const previous = (Note as any).$policies;
+      (Note as any).$policies = [
+        {
+          ...tenant(),
+          redact: (_context: any, row: any) => {
+            if ("folderId" in row) row.folderId = null;
+          },
+        } as ModelPolicy,
+      ];
+
+      try {
+        await Model.asUser(OURS, () =>
+          Note.$exec("update", {
+            where: { id: 61 },
+            data: {
+              folder: {
+                upsert: { create: { code: "made" }, update: { code: "renamed" } },
+              },
+            },
+          }),
+        );
+      } finally {
+        (Note as any).$policies = previous;
+      }
+
+      // The update branch: the linked folder was renamed, no third row was
+      // minted, and the note still points where it did.
+      expect(await folders()).toEqual([
+        ["theirs", 99],
+        ["renamed", 7],
+      ]);
+      expect(await folderIdOf(61)).toBe(2);
+    });
+
+    /**
+     * **Read under one scope and written under another**, which a policy keyed
+     * on `context.operation` is free to do — reads to the tenant, mutations to
+     * rows the actor owns is the ordinary shape of it. The branch is chosen by
+     * the read, so the row is there; the `updateMany` that follows matches
+     * nothing and answers `{ count: 0 }` rather than raising.
+     *
+     * Left alone that is a successful `update` whose nested payload was never
+     * applied — no error, and no count the caller can reach — and the create
+     * branch cannot cover for it, since the read already sent the call this way.
+     * So the count is checked, and it is the only thing that can tell the two
+     * apart.
+     */
+    test("a child readable but not writable raises rather than applying nothing", async () => {
+      await raw.unsafe(
+        `INSERT INTO "Folder" ("id", "code", "orgId") VALUES (2, 'ours', 7)`,
+      );
+      await raw.unsafe(
+        `INSERT INTO "Note" ("id", "folderId", "label", "orgId") ` +
+          `VALUES (61, 2, 'ours', 7)`,
+      );
+
+      const previous = (Folder as any).$policies;
+      (Folder as any).$policies = [
+        {
+          ...tenant(),
+          scope: (context: any) =>
+            context.operation === "updateMany"
+              ? { orgId: -1 }
+              : { orgId: context.user.orgId },
+        } as ModelPolicy,
+      ];
+
+      try {
+        await expect(
+          Model.asUser(OURS, () =>
+            Note.$exec("update", {
+              where: { id: 61 },
+              data: {
+                folder: {
+                  upsert: {
+                    create: { code: "made" },
+                    update: { code: "renamed" },
+                  },
+                },
+              },
+            }),
+          ),
+        ).rejects.toThrow(RecordNotFoundError);
+      } finally {
+        (Folder as any).$policies = previous;
+      }
+
+      // Nothing renamed, nothing minted, and the link is where it was.
+      expect(await folders()).toEqual([
+        ["theirs", 99],
+        ["ours", 7],
+      ]);
+      expect(await folderIdOf(61)).toBe(2);
     });
   });
 
