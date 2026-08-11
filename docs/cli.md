@@ -12,7 +12,7 @@ bun run build
 bun run start
 ```
 
-> **Note:** Apart from `gemi migrate --dry-run` and `gemi check models`, the commands take no flags or options — each is a bare subcommand. gemi discovers your project from the current working directory (it expects `app/` and, for tooling commands, `app/kernel/Kernel.ts`).
+> **Note:** Apart from `gemi run`, `gemi migrate --dry-run` and `gemi check models`, the commands take no flags or options — each is a bare subcommand. gemi discovers your project from the current working directory (it expects `app/` and, for tooling commands, `app/kernel/Kernel.ts`).
 
 ## `gemi dev`
 
@@ -58,6 +58,26 @@ gemi start
 It launches `dist/server/server.mjs` in a fresh Bun process with `NODE_ENV=production`, registering the same runtime preloads as `dev` (`gemi/bun/preload`, then `app/preload.ts` if present). The fresh process is required so Bun starts with the production JSX runtime and production React DOM export conditions.
 
 > **Gotcha:** `start` requires a completed [`gemi build`](#gemi-build) — it does not build for you. In deployments you'll typically run migrations first, e.g. `bunx prisma migrate deploy && gemi start`.
+
+## `gemi run`
+
+Runs one of your application's [commands](./commands.md) — a seeder, a backfill, a report — inside your booted app.
+
+```bash
+gemi run                                    # list every command
+gemi run backfill-avatars 2024-01-01 --dry-run
+gemi run backfill-avatars --help            # that command's usage
+```
+
+Commands are the classes under `app/commands/`, written as `defineCommand(...)` chains. `gemi run` with no name lists them; an unrecognised name prints a suggestion and the list and exits `1`. The handler's return value is the exit code — see [Commands](./commands.md#exit-codes) for the full table.
+
+Like `dev` and `start`, it launches a fresh Bun process with the same two runtime preloads (`gemi/bun/preload`, then `app/preload.ts` if present) and boots the application fully, so a command reaches models, facades and the container exactly as a request handler does.
+
+> **Gotcha:** everything after the command's name belongs to the command. `gemi run send-digest --queue` forwards `--queue` untouched rather than treating it as a `gemi run` option, and `gemi run send-digest --help` prints the command's usage — `gemi run --help`, with no name, is the one that describes `gemi run` itself. Use `--` (`gemi run x -- --weird`) if a tail ever needs escaping; it is never required.
+
+> **Gotcha:** the cron scheduler does not start under `gemi run`, so a long-running command cannot fire your whole schedule in a process nobody is watching. Jobs are still discovered and `app(Scheduler).jobs` still answers honestly. The command sets `GEMI_NO_SCHEDULE=1` on the process it spawns, which also works as a general "boot this app but do not schedule anything" switch.
+
+> **Gotcha:** `NODE_ENV` is inherited rather than forced, unlike `dev` (development) and `start` (production), which each are one mode by definition. Run `NODE_ENV=production gemi run <name>` for production semantics.
 
 ## `gemi migrate`
 
@@ -152,6 +172,7 @@ Like `app:component-tree`, it loads the app from the kernel and prints the resol
 
 ## Related
 
+- [Commands](./commands.md) — writing the application commands `gemi run` runs.
 - [Getting Started](./getting-started.md) — installing gemi and running your first commands.
 - [Configuration](./configuration.md) — `.env`, `preload.ts`, and `gemi.config.ts` that these commands consume.
 - [Project Structure & the Kernel](./project-structure.md) — `server.ts`, the kernel, and how the app boots.

@@ -51,6 +51,26 @@ export class ScheduleServiceProvider extends ServiceProvider {
       scheduler.useJobs(await discoverCronJobs(jobsDir));
     }
 
+    // Resolved, listed, and not started.
+    //
+    // `gemi run` sets this on the process it spawns. Booting the application is
+    // how a console command reaches the container, and starting the schedule is
+    // a side effect of that which nobody asked for: a `gemi run backfill` that
+    // takes four minutes would otherwise fire the application's whole cron
+    // schedule in a process no operator is watching, and `Bun.cron` handles hold
+    // the loop open besides.
+    //
+    // Deliberately above `start` and below `useJobs`, so `app(Scheduler).jobs`
+    // still answers honestly — a command that wants to fire a tick by hand can,
+    // and a test asking what this application schedules gets the same answer
+    // either way.
+    //
+    // An environment variable rather than a config field, because this is a
+    // property of *this process* and not of the application: the same variable
+    // is how a deploy runs one cron dyno beside several web ones, and a config
+    // slice would have to know which command started it.
+    if (process.env.GEMI_NO_SCHEDULE === "1") return;
+
     const app = this.app;
     scheduler.start((cb) => kernelContext.run(app, cb));
   }

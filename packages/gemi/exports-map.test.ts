@@ -44,9 +44,9 @@ const entries = Object.entries(PKG.exports).filter(
 describe("the package's exports map", () => {
   test("names at least the entrypoints the docs and templates import", () => {
     // Guards against an `exports` that parsed to something empty, which would
-    // make every assertion below vacuously true. Pinned just under the 19 the
+    // make every assertion below vacuously true. Pinned just under the 20 the
     // map currently holds, so losing a couple is noticed rather than absorbed.
-    expect(entries.length).toBeGreaterThanOrEqual(18);
+    expect(entries.length).toBeGreaterThanOrEqual(19);
   });
 
   test("every source target exists", () => {

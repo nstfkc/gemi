@@ -174,6 +174,90 @@ program.command("start").action(async () => {
   await proc.exited;
 });
 
+// Everything after the command's name belongs to the command, including its
+// flags. Two commander settings do that, and both are load-bearing:
+//
+//   - `enablePositionalOptions()` on the program, so a subcommand may own the
+//     options that follow it. Program-level options must then precede the
+//     subcommand name; the program declares none, so nothing changes for the
+//     commands above.
+//   - `passThroughOptions()` here, so everything after the first operand is an
+//     operand — `gemi run send-email --queue` forwards `--queue` untouched, and
+//     `gemi run send-email --help` reaches the command rather than printing
+//     commander's help for `run` (`gemi run --help`, with no name, still does).
+//
+// NOT `allowUnknownOption()`, which was the first thing tried: commander
+// collects unknown options into a separate list and concatenates it *after* the
+// operands, so `gemi run job --flag value` arrives as `job value --flag`. Order
+// silently mangled is the worst failure available to an argument forwarder.
+//
+// For the same reason this subcommand declares no options of its own. Any it
+// declared would be shadowed after the first operand and would read as a
+// `gemi run` flag that mysteriously does nothing; a future one goes *before* the
+// name, as `gemi run --env=staging send-email`.
+program.enablePositionalOptions();
+
+program
+  .command("run")
+  .description(
+    "Run a Command from app/commands. Everything after the name is the " +
+      "command's own, including its flags. Omit the name to list them",
+  )
+  .argument("[name]", "The command's name")
+  .argument("[args...]", "Passed through to the command untouched")
+  .passThroughOptions()
+  .action(async (name: string | undefined, args: string[]) => {
+    const rootDir = path.resolve(process.cwd());
+    const appDir = path.join(rootDir, "app");
+
+    // Resolved from the *application's* gemi, never bundled into this binary.
+    // Discovery decides what is a command by walking the prototype chain, and
+    // the `Command` the app's files extend is the app's copy — a base bundled
+    // in here is a different class object and would match nothing, silently.
+    // `bin/check-models.ts` resolves `gemi/orm` the same way and for the same
+    // reason.
+    let entry: string;
+    try {
+      entry = Bun.resolveSync("gemi/console/run", rootDir);
+    } catch {
+      console.error(
+        `Could not resolve \`gemi/console/run\` from ${rootDir}. Run this from ` +
+          `the root of a gemi project, on a version of gemi that has console ` +
+          `commands.`,
+      );
+      process.exit(1);
+    }
+
+    const proc = Bun.spawn({
+      cmd: [
+        "bun",
+        // The same two preloads as `dev` and `start`, in the same order and for
+        // the same reasons: a command reaches controllers and models, so the
+        // custom-request transform and the app's own preload both have to be in
+        // place before any of it loads.
+        "--preload",
+        "gemi/bun/preload",
+        ...appPreloadArgs(appDir),
+        entry,
+        ...(name === undefined ? [] : [name]),
+        ...args,
+      ],
+      stdout: "inherit",
+      stderr: "inherit",
+      // Explicit: `Bun.spawn` ignores stdin by default, and a destructive
+      // command that asks for confirmation would read EOF and take the default.
+      stdin: "inherit",
+      // NODE_ENV is passed through unchanged rather than forced. `dev` and
+      // `start` each are one mode by definition; this is not, and spawning is
+      // what makes `NODE_ENV=production gemi run backfill` correct from the
+      // child's first line.
+      env: { ...process.env, GEMI_NO_SCHEDULE: "1" },
+    });
+
+    await proc.exited;
+    process.exit(proc.exitCode ?? 1);
+  });
+
 program
   .command("migrate")
   .description(
@@ -197,7 +281,9 @@ program
 // level (`gemi dev`, `gemi build`) and leaves room for `gemi check <other>`.
 const check = program
   .command("check")
-  .description("Checks that can be run in CI, on a project that is not running");
+  .description(
+    "Checks that can be run in CI, on a project that is not running",
+  );
 
 check
   .command("models")
@@ -219,7 +305,10 @@ check
       "cannot apply. Comma-separated, and repeatable",
     (value: string, previous: string[]) => [
       ...previous,
-      ...value.split(",").map((entry) => entry.trim()).filter(Boolean),
+      ...value
+        .split(",")
+        .map((entry) => entry.trim())
+        .filter(Boolean),
     ],
     [] as string[],
   )
@@ -232,7 +321,10 @@ check
     // it took both.
     (value: string, previous: string[]) => [
       ...previous,
-      ...value.split(",").map((entry) => entry.trim()).filter(Boolean),
+      ...value
+        .split(",")
+        .map((entry) => entry.trim())
+        .filter(Boolean),
     ],
     [] as string[],
   )

@@ -175,6 +175,14 @@ export class DiscoveryError extends Error {
  * where the caller is a scheduler and the alternative is a boot order that
  * depends on the filesystem.
  *
+ * `onSkipped` is handed every export that did *not* match, with the file it came
+ * from. Discovery's characteristic failure is a thing the author wrote and this
+ * walk cannot see, and by the time an export has been discarded here the
+ * information about why is gone — the caller is left holding "four classes"
+ * where the directory holds five. A caller that can recognise its own
+ * near-misses, as `discoverCommands` recognises a builder chain that was never
+ * finished, uses this to say so by name instead.
+ *
  * @throws DiscoveryError if a walked file cannot be imported. Not a skip: a file
  * that will not load is a class the caller was going to be told about and now is
  * not, which is the failure discovery exists to remove.
@@ -183,6 +191,7 @@ export async function discoverClasses<T extends ClassLike>(
   dir: string,
   base: T,
   ignore: string[] = [],
+  onSkipped?: (value: unknown, file: string) => void,
 ): Promise<T[]> {
   const found = new Set<T>();
 
@@ -202,9 +211,16 @@ export async function discoverClasses<T extends ClassLike>(
     }
 
     for (const value of Object.values(module)) {
-      if (typeof value !== "function" || value === base) continue;
-      if (!Object.prototype.isPrototypeOf.call(base, value)) continue;
-      found.add(value as unknown as T);
+      if (
+        typeof value === "function" &&
+        value !== base &&
+        Object.prototype.isPrototypeOf.call(base, value)
+      ) {
+        found.add(value as unknown as T);
+        continue;
+      }
+
+      onSkipped?.(value, path);
     }
   }
 

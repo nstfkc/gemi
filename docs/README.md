@@ -57,6 +57,7 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 - **[Email](./email.md)** — the `Email` class, jsx-email templates, the Resend driver, localization and scheduling.
 - **[Jobs & Queues](./jobs-and-queues.md)** — defining and dispatching background `Job`s.
 - **[Cron](./cron.md)** — scheduling recurring `CronJob`s.
+- **[Commands](./commands.md)** — one-off application commands run with `gemi run`.
 - **[Broadcasting](./broadcasting.md)** — websocket channels, the `Broadcast` facade, `useSubscription` / `useBroadcast`.
 - **[Internationalization](./i18n.md)** — component-scoped dictionaries, `useTranslator`, `useLocale`, locale detection.
 
