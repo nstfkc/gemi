@@ -38,6 +38,7 @@ Each link below points to a self-contained Markdown page. For a single file cont
 
 ## Services & facades
 
+- [Services](https://nstfkc.github.io/gemi/services.md): your own singletons — the Service base class, `services` on the Kernel, async `boot()`, and constructor-default injection.
 - [Facades](https://nstfkc.github.io/gemi/facades.md): reference for Auth, Redirect, Lang, Storage, Query, Broadcast, Url, Log, Meta, Cookie, and Redis.
 - [File Storage](https://nstfkc.github.io/gemi/file-storage.md): the Storage facade, filesystem/S3 drivers, image optimization, and the Image component.
 - [Email](https://nstfkc.github.io/gemi/email.md): the Email class, jsx-email templates, the Resend driver, localization and scheduling.

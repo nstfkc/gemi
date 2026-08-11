@@ -40,4 +40,10 @@ export default class extends Kernel {
   };
 
   providers = [AppServiceProvider];
+
+  // The app's own singletons. Each is constructed during the synchronous boot
+  // phase and its `boot()` awaited during the asynchronous one, in this order —
+  // so a service whose `boot()` needs another goes after it. Inject one with a
+  // constructor default: `constructor(private billing = Billing.inject()) {}`.
+  services = [];
 }

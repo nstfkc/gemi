@@ -72,10 +72,9 @@ export class RedirectRoute<Input, Output, Params> {
       this.handler = handler as any;
     } else {
       const [controller, methodName] = handler;
-      const controllerInstance = new controller();
-      const controllerHandler = controllerInstance[methodName].bind(controllerInstance);
-      this.handler = (_req: HttpRequest<Input, Params>): Promise<RedirectOutput> => {
-        return controllerHandler();
+      this.handler = (req: HttpRequest<Input, Params>): Promise<RedirectOutput> => {
+        const controllerInstance = new controller();
+        return controllerInstance[methodName](req);
       };
     }
   }
@@ -174,9 +173,10 @@ export class FileRoute<Input, Params> {
       this.handler = handler as any;
     } else {
       const [controller, methodName] = handler;
-      const controllerInstance = new controller();
-      const controllerHandler = controllerInstance[methodName].bind(controllerInstance);
-      this.handler = (req: HttpRequest<Input, Params>) => controllerHandler(req);
+      this.handler = (req: HttpRequest<Input, Params>) => {
+        const controllerInstance = new controller();
+        return controllerInstance[methodName](req);
+      };
     }
   }
 
@@ -211,10 +211,9 @@ export class ViewRoute<Input, Output, Params> {
       this.handler = handler as any;
     } else {
       const [controller, methodName] = handler;
-      const controllerInstance = new controller();
-      const controllerHandler = controllerInstance[methodName].bind(controllerInstance);
-      this.handler = (_req: HttpRequest<Input, Params>): Output => {
-        return controllerHandler();
+      this.handler = (req: HttpRequest<Input, Params>): Output => {
+        const controllerInstance = new controller();
+        return controllerInstance[methodName](req);
       };
     }
   }
@@ -260,10 +259,9 @@ export class LayoutRoute<T extends ViewRoutes, Input, Output, Params> {
       };
     } else if (Array.isArray(handlerOrRoutes)) {
       const [controller, methodName] = handlerOrRoutes;
-      const controllerInstance = new controller();
-      const controllerHandler = controllerInstance[methodName].bind(controllerInstance);
       this.handler = (req: HttpRequest<Input, Params>): Output => {
-        return controllerHandler(req);
+        const controllerInstance = new controller();
+        return controllerInstance[methodName](req);
       };
       this.children = class extends ViewRouter {
         routes = routes ?? ({} as T);
