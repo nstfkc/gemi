@@ -536,6 +536,14 @@ operand family and does *not*, while its `connect` one operand over does. That i
 Prisma disagreeing with itself, and matching it would mean special-casing one
 operand to reproduce an inconsistency.
 
+An owning-side `upsert` — `data: { organization: { upsert: … } }` — inherits it
+on the branch that **updates**. The foreign key is written back unchanged there,
+because the create branch needs that column in the statement and which branch
+runs is not known until the call runs, so the parent's stamp moves where
+Prisma's does not. The far row is updated identically on both. Worth searching
+for in the same places as the `disconnect` above: a row whose `updatedAt` you
+show, written through a relation rather than through a column.
+
 ---
 
 # Upgrading from 0.42 to 0.43

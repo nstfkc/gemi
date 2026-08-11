@@ -1350,13 +1350,29 @@ function assertNoNestedWrites(
  * `organizationId` at 1 and moves `updatedAt` from the epoch to now: a call
  * that changed no column of the row still stamps it.
  *
- * **There is no test for the stamp half and there cannot be one in this
+ * **There is no test for `disconnect`'s stamp and there cannot be one in this
  * fixture**, which is why this docblock is the deliverable rather than a
  * pointer to one. The template's only one-to-one owner is `Profile`, which has
  * no `@updatedAt` column, and the differential harness lists `updatedAt` in its
  * volatile set (`differential.ts`), so both sides compare as the descriptor
  * `"date"` and two different instants match. The measurements above were taken
- * against a purpose-built schema, not against the template's.
+ * against a purpose-built schema, not against the template's. `User` carries
+ * the attribute and is a *many*-to-one owner, which is the shape Prisma answers
+ * by ignoring the operand outright — so there the divergence to compare against
+ * is a different one.
+ *
+ * **The owning-side `upsert` (#391) is the third operand here and the one that
+ * *is* pinned**, for exactly the reason the paragraph above cannot be. Its
+ * update branch resolves the key to the value already in the column and writes
+ * it back, on the identical mechanism — the create branch needs the column and
+ * the branch is a run-time answer, so the assignment is unconditional. Prisma
+ * honours this operand on a many-to-one, unlike `disconnect`, so `User` can ask
+ * the question: `User.update({ where: { id: 1 }, data: { organization: {
+ * upsert: { create, update } } } })` issues no `UPDATE` on `User` at all there
+ * and leaves `updatedAt` at the epoch, where gemi writes `organizationId` back
+ * and stamps. Asserted by value in `writes.differential.test.ts`'s "where the
+ * two clients still disagree" — the harness's own comparison cannot see it, for
+ * the volatility reason above.
  *
  * **The two statements are also a lost-update window**, which `disconnect: true`
  * does not have and Prisma does not have on either arm. The filter arm reads the

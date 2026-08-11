@@ -1517,6 +1517,130 @@ describe("policies on nested writes", () => {
       const notes: any = await raw.unsafe(`SELECT "label" FROM "Note" WHERE "id" = 60`);
       expect(notes[0].label).toBe("renamed");
     });
+
+    /**
+     * `upsert` on this side (#391), whose branch is decided by a lookup through
+     * the far model's own `$exec` — so the scope decides the branch, exactly as
+     * it does for the `disconnect` filter arm two tests up and for
+     * `connectOrCreate` on the other side.
+     *
+     * **A linked row the caller cannot see reads as absent, so the create
+     * branch runs and this row is repointed at the new one.** That is a
+     * different answer from the foreign side's, where the same hidden row gives
+     * `UniqueConstraintError`, and the difference is structural rather than a
+     * choice: there the create stamps the parent's key into a column carrying a
+     * unique index the hidden row is holding, and here the key being written is
+     * this row's own, which nothing else constrains.
+     *
+     * What both answers have in common is the part that matters: the row the
+     * caller may not see is **not written**. This one leaves it where it is and
+     * stops pointing at it; it does not edit it, and it does not delete it.
+     */
+    // By `code` rather than by `id`: the table's autoincrement is not reset
+    // between cases, so a minted row's id is whatever this file has reached.
+    const folders = async () => {
+      const rows: any = await raw.unsafe(
+        `SELECT "code", "orgId" FROM "Folder" ORDER BY "id"`,
+      );
+      return [...rows].map((row: any) => [row.code, row.orgId]);
+    };
+
+    const folderIdBy = async (code: string) => {
+      const rows: any = await raw.unsafe(
+        `SELECT "id" FROM "Folder" WHERE "code" = '${code}'`,
+      );
+      return rows[0].id;
+    };
+
+    test("upsert creates and repoints rather than editing a hidden linked row", async () => {
+      await seedNote();
+
+      await Model.asUser(OURS, () =>
+        Note.$exec("update", {
+          where: { id: 60 },
+          data: {
+            folder: {
+              upsert: { create: { code: "made" }, update: { code: "hacked" } },
+            },
+          },
+        }),
+      );
+
+      // The other tenant's folder is untouched, and the new one carries our
+      // tenant — the child's `onCreate`, through its own `$exec`.
+      expect(await folders()).toEqual([
+        ["theirs", 99],
+        ["made", 7],
+      ]);
+      expect(await folderIdOf(60)).toBe(await folderIdBy("made"));
+    });
+
+    test("upsert updates a linked row the caller can see", async () => {
+      await raw.unsafe(
+        `INSERT INTO "Folder" ("id", "code", "orgId") VALUES (2, 'ours', 7)`,
+      );
+      await raw.unsafe(
+        `INSERT INTO "Note" ("id", "folderId", "label", "orgId") ` +
+          `VALUES (61, 2, 'ours', 7)`,
+      );
+
+      await Model.asUser(OURS, () =>
+        Note.$exec("update", {
+          where: { id: 61 },
+          data: {
+            folder: {
+              upsert: { create: { code: "unused" }, update: { code: "renamed" } },
+            },
+          },
+        }),
+      );
+
+      // No third folder, and the link did not move.
+      expect(await folders()).toEqual([
+        ["theirs", 99],
+        ["renamed", 7],
+      ]);
+      expect(await folderIdOf(61)).toBe(2);
+    });
+
+    /**
+     * The payload goes through the far model's own `onUpdate` and its
+     * scope-escape guard, because the branch runs as that model's `updateMany`
+     * un-pre-scoped — the same rule a nested `update` follows. A caller naming
+     * the scoped column is refused rather than moving the row out of its tenant.
+     */
+    test("upsert's update branch cannot write the far model's scoped column", async () => {
+      await raw.unsafe(
+        `INSERT INTO "Folder" ("id", "code", "orgId") VALUES (2, 'ours', 7)`,
+      );
+      await raw.unsafe(
+        `INSERT INTO "Note" ("id", "folderId", "label", "orgId") ` +
+          `VALUES (61, 2, 'ours', 7)`,
+      );
+
+      await expect(
+        Model.asUser(OURS, () =>
+          Note.$exec("update", {
+            where: { id: 61 },
+            data: {
+              folder: {
+                upsert: {
+                  create: { code: "unused" },
+                  update: { code: "renamed", orgId: 99 },
+                },
+              },
+            },
+          }),
+        ),
+      ).rejects.toThrow(ScopeEscapeError);
+
+      // Nothing landed — the parent's own statement is inside the transaction
+      // the step took down with it.
+      expect(await folders()).toEqual([
+        ["theirs", 99],
+        ["ours", 7],
+      ]);
+    });
   });
 
   /**

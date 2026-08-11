@@ -226,6 +226,29 @@ describe("shape guards", () => {
       "data.organization.connectOrCreate",
       /this row holds the foreign key/,
     ],
+    // ...and `upsert` reads the same two guards from both ends since #391 —
+    // `assertToOneWriteOperand` for the shape and `assertUpsertOperand` for the
+    // grammar. Pinned on the owning side because it is the side that used to
+    // refuse the operand outright: a missing payload was reported as an
+    // unimplemented operand rather than as the incomplete one it is.
+    [
+      "an upsert this row owns is missing a payload",
+      write({ where: { id: 1 }, data: { organization: { upsert: { create: { name: "n" } } } } }),
+      "data.organization.upsert",
+      /Expected a 'update' key/,
+    ],
+    [
+      "an upsert this row owns names an unknown key",
+      write({ where: { id: 1 }, data: { organization: { upsert: { wehre: {}, create: {}, update: {} } } } }),
+      "data.organization.upsert",
+      /Unknown key 'wehre'/,
+    ],
+    [
+      "an array of upsert on a to-one this row owns",
+      write({ where: { id: 1 }, data: { organization: { upsert: [{ create: {}, update: {} }] } } }),
+      "data.organization.upsert",
+      /takes \{ create, update \}/,
+    ],
 
     // --- the operation itself ---------------------------------------------
     // Both `default:` arms after an exhaustive-looking partition. Reachable,

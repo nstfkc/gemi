@@ -1313,19 +1313,21 @@ describe("nested writes", () => {
     /**
      * **The asymmetry that remains, asserted rather than implied.**
      *
-     * Neither of these is the shape gap #116 was about; both are decisions with
-     * their own reasons, written at their refusal sites. `delete` through a key
-     * on *this* row would remove a row the statement is not about; `upsert`
-     * there would have to create the far row and then write back to a parent
-     * that has already been inserted.
+     * This table held two rows and holds one (#391). `delete` through a key on
+     * *this* row would remove a row the statement is not about, which is a
+     * decision with its reason written at the refusal site. `upsert`'s reason —
+     * that it would have to create the far row and write back to a parent that
+     * has already been inserted — described a write-back this side does not
+     * make: the parent statement runs *after* the step, so a created row's key
+     * reaches it as a contribution, the way `create`'s and `connectOrCreate`'s
+     * already do.
      *
-     * `update` is deliberately absent from this table: it works on both sides,
-     * which is what makes the two above a real difference rather than a general
-     * one.
+     * A `test.each` over one row is deliberate: the next operand to be refused
+     * on one side alone belongs here, and the shape of the table is what says
+     * so.
      */
     test.each([
       ["delete", { delete: true }, /would remove a row this statement is not about/],
-      ["upsert", { upsert: { create: {}, update: {} } }, /already been inserted/],
     ])("%s stays refused by name on the owning side", (operand, value, why) => {
       const error = refuse("organization", value);
 
@@ -1339,9 +1341,52 @@ describe("nested writes", () => {
       expect(refuse("profile", value)).toBeNull();
     });
 
-    test("update is the one of the three that works on both sides", () => {
-      expect(refuse("organization", { update: { name: "n" } })).toBeNull();
-      expect(refuse("profile", { update: { bio: "b" } })).toBeNull();
+    /**
+     * The two operands that work on **both** sides, which is what makes the one
+     * above a real difference rather than a general one. `update` has been in
+     * this pair since #354; `upsert` joined it in #391.
+     *
+     * Two operand columns rather than one, because the payload is the child's
+     * own `data` and the two children have different columns.
+     */
+    test.each([
+      ["update", { update: { name: "n" } }, { update: { bio: "b" } }],
+      [
+        "upsert",
+        { upsert: { create: { name: "n" }, update: { name: "n" } } },
+        { upsert: { create: { bio: "b" }, update: { bio: "b" } } },
+      ],
+    ])("%s works on both sides", (_operand, owning, foreign) => {
+      expect(refuse("organization", owning)).toBeNull();
+      expect(refuse("profile", foreign)).toBeNull();
+    });
+
+    /**
+     * ...and the owning side's `upsert` is a **`before`** step where the
+     * foreign side's is an `after` one, which is the whole difference between
+     * the two directions rather than a detail (#391).
+     *
+     * The far row has to exist before this row's statement can bind its key, so
+     * the step runs first and contributes the column — the same shape `create`
+     * and `connectOrCreate` compile to on this side. Asserted as *one labelled*
+     * step, because a step labelled for a different operand is how the
+     * fall-throughs above went unseen, and by the column's presence in the
+     * statement, which is where a contribution is observable from here.
+     */
+    test("upsert on the owning side is one labelled before step that contributes the key", () => {
+      const plan = write("organization", {
+        upsert: { create: { name: "n" }, update: { name: "n" } },
+      });
+
+      expect(plan.after ?? []).toHaveLength(0);
+      expect(plan.before).toHaveLength(1);
+      expect(plan.before![0].relation).toBe("organization");
+      expect(plan.before![0].operation).toBe("upsert");
+      // The key is written by the caller's own statement, which is what makes
+      // the create branch cost no write-back: `organizationId` is in the SET
+      // list, so the plan is an `update` rather than the read a relation-only
+      // `data` compiles to on the foreign side.
+      expect(plan.text).toMatch(/^update .*"organizationId" = /);
     });
 
     // The operands that work on this shape, so the refusals above are not
