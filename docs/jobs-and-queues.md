@@ -182,6 +182,7 @@ For work that must happen on a **schedule** (nightly reports, hourly cleanups) r
 
 ## Related
 
+- [Commands](./commands.md) — one-off work a person starts by hand, which often dispatches jobs.
 - [Cron](./cron.md) — scheduled, recurring background work.
 - [Controllers](./controllers.md) — dispatching jobs from request handlers.
 - [Project Structure](./project-structure.md) — the kernel, `app/config/*.ts`, and service providers.

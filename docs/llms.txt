@@ -11,7 +11,7 @@ Each link below points to a self-contained Markdown page. For a single file cont
 - [Getting Started](https://nstfkc.github.io/gemi/getting-started.md): install, scaffold with create-gemi-app, dev/build/start, a first route + view.
 - [Project Structure & the Kernel](https://nstfkc.github.io/gemi/project-structure.md): the app/ layout, the Kernel, the container, app/config/*.ts, service providers, and app bootstrap.
 - [Configuration](https://nstfkc.github.io/gemi/configuration.md): gemi.config.ts (BUILD config, distinct from app/config/), .env handling, HTML compression, app/preload.ts, Vite config.
-- [CLI](https://nstfkc.github.io/gemi/cli.md): gemi dev/build/start, gemi migrate (the 0.42 -> config/container codemod, the retired-API TODOs, and the two annotate-only passes for a Prisma-to-ORM port), plus codegen and inspection commands.
+- [CLI](https://nstfkc.github.io/gemi/cli.md): gemi dev/build/start, gemi migrate (the 0.42 -> config/container codemod, the retired-API TODOs, and the two annotate-only passes for a Prisma-to-ORM port), gemi run for application commands, plus codegen and inspection commands.
 
 ## HTTP layer
 
@@ -44,11 +44,13 @@ Each link below points to a self-contained Markdown page. For a single file cont
 - [Email](https://nstfkc.github.io/gemi/email.md): the Email class, jsx-email templates, the Resend driver, localization and scheduling.
 - [Jobs & Queues](https://nstfkc.github.io/gemi/jobs-and-queues.md): defining and dispatching background Jobs through the in-process queue.
 - [Cron](https://nstfkc.github.io/gemi/cron.md): scheduling recurring CronJobs with Bun.cron.
+- [Commands](https://nstfkc.github.io/gemi/commands.md): one-off application commands written with defineCommand and run with `gemi run <name>`.
 - [Broadcasting](https://nstfkc.github.io/gemi/broadcasting.md): websocket channels, the Broadcast facade, useSubscription/useBroadcast.
 - [Internationalization](https://nstfkc.github.io/gemi/i18n.md): component-scoped dictionaries, useTranslator, useLocale, locale detection.
 
 ## Notes
 
+- Application commands are `defineCommand(...).handle(...)` chains under `app/commands`, run with `gemi run <name>` — a chain, not a class, because a class body cannot type its own handler.
 - The client query hook is `useQuery` (not `useGet`).
 - The server-side `Redirect` facade works by throwing — never wrap it in try/catch.
 - Middleware is a string DSL (`auth`, `cache:...`, `rate-limit:N`); `-name` cancels an inherited middleware.

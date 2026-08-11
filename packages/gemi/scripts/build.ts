@@ -24,6 +24,13 @@ const result = await Bun.build({
     "./support/index.ts",
     "./database/index.ts",
     "./orm/index.ts",
+    // The entry `gemi run` spawns. It belongs in *this* build rather than one of
+    // its own: `splitting: true` is what puts the `Command` base class in a
+    // chunk shared with `dist/services/index.js`, so the published runner and
+    // the `gemi/services` an application imports from hold the same class
+    // object. Discovery decides what is a command by walking the prototype
+    // chain, so two copies would mean the runner finds nothing.
+    "./console/run.ts",
   ],
   outdir: "./dist",
   external: [
