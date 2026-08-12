@@ -40,6 +40,17 @@ export function loadViewModule(name: string): Promise<any> {
     const isNew = !viewModules.has(name);
     viewModules.set(name, mod);
 
+    // Notify on first registration so a `Route` that rendered before its
+    // module arrived re-reads it — otherwise a hard load could suspend into
+    // a `null` fallback while the view's `Loading` export sits in the module.
+    //
+    // Before the dictionary await, not after: this exists to surface the view's
+    // `Loading` export the moment it lands, and holding it behind a network
+    // fetch would put back the very `null` flash it removes.
+    if (isNew) {
+      for (const listener of viewModuleListeners) listener();
+    }
+
     // The single choke point every view chunk passes through — prefetch,
     // navigation and hydration alike — so it is where a view's dictionaries get
     // warmed. Awaited before the module is handed back, which folds the
@@ -47,12 +58,6 @@ export function loadViewModule(name: string): Promise<any> {
     // of letting the view render and suspend a beat later.
     await preloadDictionaries(currentLocale(), mark);
 
-    // Notify on first registration so a `Route` that rendered before its
-    // module arrived re-reads it — otherwise a hard load could suspend into
-    // a `null` fallback while the view's `Loading` export sits in the module.
-    if (isNew) {
-      for (const listener of viewModuleListeners) listener();
-    }
     return mod;
   });
 }

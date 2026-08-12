@@ -5,7 +5,11 @@ import { renderToReadableStream } from "react-dom/server.browser";
 import { afterEach, describe, expect, test } from "vitest";
 
 import { defineDictionary, __gemi_dict__ } from "../i18n/defineDictionary";
-import { __resetDictionaryRegistry } from "../i18n/dictionaryRegistry";
+import {
+  __resetDictionaryRegistry,
+  dictionaryRegistrationMark,
+  preloadDictionaries,
+} from "../i18n/dictionaryRegistry";
 import { createDictionarySink } from "../i18n/dictionarySink";
 import { dictionaryId, localeStrings } from "../i18n/dictionaryShape";
 import { ServerQueryStore } from "../services/router/ServerQueryStore";
@@ -175,6 +179,74 @@ describe("a bundled dictionary", () => {
     // The client registry finds streamed strings by id, so the id has to be a
     // property of the literal, not of how it was built.
     expect(bundled().id).toBe(defineDictionary(TRANSLATIONS).id);
+  });
+});
+
+describe("preloading", () => {
+  function counted(id: string) {
+    const state = { loads: 0 };
+    const dict = __gemi_dict__(id, {
+      "en-US": async () => {
+        state.loads++;
+        return { default: { cta: "Get started" } };
+      },
+    });
+    return { dict, state };
+  }
+
+  test("a warmed dictionary renders without suspending", async () => {
+    const { dict } = counted("d_warm");
+    await preloadDictionaries("en-US");
+
+    const View = () => <p>{useDictionary(dict)("cta")}</p>;
+    const html = await render(
+      <App locale="en-US">
+        <View />
+      </App>,
+    );
+    expect(html).toContain("Get started");
+    // The reason the server preloads at all: a suspend here would split the
+    // segment out of the shell, one reveal chunk per dictionary.
+    expect(html).not.toContain("skeleton");
+  });
+
+  test("an unmarked preload resumes from where the locale got to", async () => {
+    // The server calls this per request with no mark. Rescanning from zero
+    // every time would make each request cost O(every dictionary in the app) —
+    // the same shape of problem this change exists to remove.
+    const first = counted("d_first");
+    await preloadDictionaries("en-US");
+    expect(first.state.loads).toBe(1);
+
+    const second = counted("d_second");
+    await preloadDictionaries("en-US");
+
+    expect(second.state.loads).toBe(1);
+    // Already warm, and not revisited.
+    expect(first.state.loads).toBe(1);
+  });
+
+  test("a mark limits the preload to what registered after it", async () => {
+    const before = counted("d_before");
+    const mark = dictionaryRegistrationMark();
+    const after = counted("d_after");
+
+    await preloadDictionaries("en-US", mark);
+
+    expect(after.state.loads).toBe(1);
+    expect(before.state.loads).toBe(0);
+  });
+
+  test("each locale keeps its own watermark", async () => {
+    const { dict, state } = counted("d_perlocale");
+    // Same dictionary, two locales — warming one must not mark the other done.
+    await preloadDictionaries("en-US");
+    expect(state.loads).toBe(1);
+
+    await preloadDictionaries("tr-TR");
+    // Falls back to the only loader it has, but it does get asked.
+    expect(state.loads).toBe(2);
+    expect(dict.id).toBe("d_perlocale");
   });
 });
 
