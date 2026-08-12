@@ -379,6 +379,34 @@ describe("a dictionary that fails to load", () => {
   });
 });
 
+describe("a handle whose registry entry has gone", () => {
+  test("re-registers itself rather than throwing", async () => {
+    // Dictionaries are declared at module scope, so a handle is created once
+    // and then outlives anything that clears the registry under it — a test's
+    // `afterEach` reset, an HMR boundary. Holding only an id, it would be
+    // permanently orphaned and throw "Unknown dictionary" for a dictionary the
+    // caller has in its hand.
+    const dict = defineDictionary(TRANSLATIONS);
+    __resetDictionaryRegistry();
+
+    const View = () => <p>{useDictionary(dict)("cta")}</p>;
+    const html = await render(
+      <App locale="tr-TR">
+        <View />
+      </App>,
+    );
+    expect(html).toContain("Başla");
+  });
+
+  test("the same holds for the non-React readers", async () => {
+    const dict = defineDictionary(TRANSLATIONS);
+    __resetDictionaryRegistry();
+
+    expect(await dict.load("en-US")).toMatchObject({ cta: "Get started" });
+    expect(dict.get("en-US")).toMatchObject({ cta: "Get started" });
+  });
+});
+
 describe("a dictionary inside a dynamically imported component", () => {
   /**
    * The one case no preload can cover. A `lazy()` module does not evaluate — and

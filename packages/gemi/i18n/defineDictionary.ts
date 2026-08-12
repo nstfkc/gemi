@@ -5,7 +5,11 @@ import {
   type DictionaryTranslations,
   type LocaleStrings,
 } from "./dictionaryShape";
-import { loadDictionary, registerDictionary } from "./dictionaryRegistry";
+import {
+  loadDictionary,
+  loadDictionaryForRender,
+  registerDictionary,
+} from "./dictionaryRegistry";
 
 declare const brand: unique symbol;
 
@@ -21,6 +25,12 @@ export interface DictionaryHandle<
    * bundled one.
    */
   load(locale: string): LocaleStrings | Promise<LocaleStrings>;
+  /**
+   * `load`, but never rejecting — safe to hand React's `use()`. A failed locale
+   * chunk resolves to no strings so the component degrades to rendering keys
+   * instead of unmounting into an error boundary.
+   */
+  loadForRender(locale: string): LocaleStrings | Promise<LocaleStrings>;
   get(locale: string): LocaleStrings | undefined;
   /** Type-only: carries the literal's shape through to `useDictionary`. */
   readonly [brand]?: T;
@@ -97,15 +107,32 @@ function createHandle<T extends DictionaryTranslations>(
   locales: string[],
   load: (locale: string) => LocaleStrings | Promise<LocaleStrings>,
 ): DictionaryHandle<T> {
-  registerDictionary({ id, locales, load });
+  const entry = { id, locales, load };
+  registerDictionary(entry);
+
+  // Re-asserted on every read rather than only at construction. A handle is
+  // created once, at module scope, but the registry it delegates to can be
+  // emptied under it — a test's `afterEach` reset, an HMR boundary — and the
+  // handle would then be permanently orphaned, throwing "Unknown dictionary"
+  // for a dictionary the caller is holding. `registerDictionary` is a no-op
+  // when the id is already there, so this costs one Map lookup.
+  const ensure = () => registerDictionary(entry);
 
   return {
     id,
     locales,
     // Routed through the registry rather than calling `load` directly so
     // concurrent readers share one in-flight import and results are cached.
-    load: (locale: string) => loadDictionary(id, locale),
+    load: (locale: string) => {
+      ensure();
+      return loadDictionary(id, locale);
+    },
+    loadForRender: (locale: string) => {
+      ensure();
+      return loadDictionaryForRender(id, locale);
+    },
     get: (locale: string) => {
+      ensure();
       const strings = loadDictionary(id, locale);
       if (strings instanceof Promise) {
         // Nothing downstream awaits this one — `get` is the synchronous peek,
