@@ -379,6 +379,24 @@ describe("a dictionary that fails to load", () => {
   });
 });
 
+describe("the registry's shared state", () => {
+  test("lives on globalThis, so duplicate bundles find each other", () => {
+    // Not an implementation detail — it is the only thing making the published
+    // package work. `gemi/dictionary` ships from the Bun build and
+    // `gemi/client`/`gemi/testing` from a separate Vite build, so the registry
+    // module is compiled into two bundles; verified against `.publish/`, both
+    // carry their own copy. Module scope would give a published app one
+    // registry for the views' `__gemi_dict__` and another for `useDictionary`,
+    // and the hydration payload would come out empty — passing every test here
+    // and failing only once installed.
+    defineDictionary(TRANSLATIONS);
+
+    const state = (globalThis as any).__GEMI_DICTIONARY_REGISTRY__;
+    expect(state).toBeDefined();
+    expect(state.registry.size).toBeGreaterThan(0);
+  });
+});
+
 describe("a handle whose registry entry has gone", () => {
   test("re-registers itself rather than throwing", async () => {
     // Dictionaries are declared at module scope, so a handle is created once
