@@ -77,6 +77,50 @@ export function localeStrings(
   return out;
 }
 
+export interface SourceDisagreement {
+  key: string;
+  first: string;
+  againstKey: string;
+  againstFirst: string;
+}
+
+/**
+ * Whether the inferred source language survives reordering the literal.
+ *
+ * `dictionaryLocales` collects locales entry by entry, so `locales[0]` is the
+ * first locale of the first entry. That is invariant under key reordering
+ * exactly when every entry lists the same locale first — and order-dependent
+ * the moment two entries disagree, because then whichever happens to be written
+ * first decides what the *whole* dictionary falls back to. Adding one key at
+ * the top can flip every other key's fallback language, from a diff that reads
+ * as an addition.
+ *
+ * Returns the disagreement so the build can name both keys; `null` when the
+ * inference is stable. `sourceLocale` settles it and makes the question moot.
+ */
+export function findSourceDisagreement(
+  translations: DictionaryTranslations,
+): SourceDisagreement | null {
+  let againstKey: string | undefined;
+  let againstFirst: string | undefined;
+
+  for (const [key, byLocale] of Object.entries(translations)) {
+    const first = Object.keys(byLocale ?? {})[0];
+    // A key with no locales at all is a different problem, reported elsewhere.
+    if (first === undefined) continue;
+
+    if (againstFirst === undefined) {
+      againstFirst = first;
+      againstKey = key;
+      continue;
+    }
+    if (first !== againstFirst) {
+      return { key, first, againstKey: againstKey!, againstFirst };
+    }
+  }
+  return null;
+}
+
 /**
  * Canonical serialization — key order in the source file must not change the
  * id, or an innocuous reordering would break the payload/registry match.

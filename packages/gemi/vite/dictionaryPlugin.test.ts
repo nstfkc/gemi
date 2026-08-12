@@ -234,6 +234,66 @@ describe("sourceLocale", () => {
     expect(importSpecifiers(result.code)[0]).toMatch(/\/en-US$/);
   });
 
+  test("is required when keys disagree about which locale comes first", async () => {
+    // The shape the whole option exists for: `onlyTurkish` at the top makes
+    // tr-TR the fallback for the entire dictionary, so `both` would resolve to
+    // Turkish for an English reader — and moving the key back would silently
+    // change it again. Refused at build time rather than guessed.
+    await expect(
+      transform(
+        plugin(),
+        `import { defineDictionary } from "gemi/client";
+         export const d = defineDictionary({
+           onlyTurkish: { "tr-TR": "Merhaba" },
+           both: { "en-US": "Hello", "tr-TR": "Merhaba" },
+         });`,
+      ),
+    ).rejects.toThrow(/cannot infer a source language[\s\S]*onlyTurkish[\s\S]*both/);
+  });
+
+  test("is not required when every key lists the same locale first", async () => {
+    // Half-translated is fine as long as it is consistently authored: every key
+    // starts with en-US, so no reordering can move the fallback.
+    const result = await transform(
+      plugin(),
+      `import { defineDictionary } from "gemi/client";
+       export const d = defineDictionary({
+         done: { "en-US": "Done", "tr-TR": "Bitti" },
+         pending: { "en-US": "Pending" },
+       });`,
+    );
+    expect(result.code).toContain("__gemi_dict__(");
+  });
+
+  test("what it permits really is order-independent", async () => {
+    // The rule's actual claim: where it stays quiet, reordering the literal
+    // cannot move the fallback language. Asserting only that the error fires
+    // would leave that untested — and it is the reason the rule is drawn where
+    // it is rather than at "not uniformly translated".
+    const order = (body: string) =>
+      transform(
+        plugin(),
+        `import { defineDictionary } from "gemi/client";
+         export const d = defineDictionary({${body}});`,
+      ).then((r) => importSpecifiers(r.code).map((s) => s.split("/").pop()));
+
+    const done = `done: { "en-US": "Done", "tr-TR": "Bitti" }`;
+    const pending = `pending: { "en-US": "Pending" }`;
+
+    expect(await order(`${done}, ${pending}`)).toEqual(["en-US", "tr-TR"]);
+    expect(await order(`${pending}, ${done}`)).toEqual(["en-US", "tr-TR"]);
+  });
+
+  test("is not required for a uniformly translated dictionary", async () => {
+    const result = await transform(plugin(), SOURCE);
+    expect(result.code).toContain("__gemi_dict__(");
+  });
+
+  test("silences the error once pinned", async () => {
+    const result = await transform(plugin(), HALF_TRANSLATED);
+    expect(result.code).toContain("__gemi_dict__(");
+  });
+
   test("must be a string literal", async () => {
     await expect(
       transform(

@@ -3,6 +3,7 @@ import { parseAstAsync, type Plugin } from "vite";
 import {
   dictionaryId,
   dictionaryLocales,
+  findSourceDisagreement,
   localeStrings,
   type DictionaryTranslations,
 } from "../i18n/dictionaryShape";
@@ -216,6 +217,28 @@ export function gemiDictionaryPlugin(): Plugin {
             message: `defineDictionary() declares no locales — every key needs at least one "<locale>": "<string>" entry.`,
             pos: call.start,
           });
+        }
+
+        // Refused rather than guessed. Without `sourceLocale` the fallback
+        // language is whichever locale is seen first while reading the literal,
+        // which is stable only while every key carries it. Once one does not,
+        // adding a key at the top re-points every other key's fallback — a
+        // dictionary-wide change in what language a reader sees, from a diff
+        // that added one line, with nothing to notice it. Same reasoning as
+        // `readObjectLiteral` below: the alternative to failing here is failing
+        // silently in production.
+        if (!sourceLocale) {
+          const clash = findSourceDisagreement(translations);
+          if (clash) {
+            this.error({
+              message:
+                `defineDictionary() cannot infer a source language. Key "${clash.againstKey}" lists "${clash.againstFirst}" first ` +
+                `but "${clash.key}" lists "${clash.first}" first, so the locale every key falls back to depends on the order ` +
+                `they are written in — moving one key would change what language a reader sees. ` +
+                `Pass { sourceLocale: "<locale>" } as the second argument to pin it.`,
+              pos: call.start,
+            });
+          }
         }
 
         extracted.set(virtualKey, { id: runtimeId, locales, translations });
