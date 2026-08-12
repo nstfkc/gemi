@@ -1,5 +1,5 @@
 /** @vitest-environment node */
-import { Suspense } from "react";
+import { lazy, Suspense } from "react";
 // @ts-ignore — same untyped entry the view router renders with.
 import { renderToReadableStream } from "react-dom/server.browser";
 import { afterEach, describe, expect, test } from "vitest";
@@ -376,6 +376,99 @@ describe("a dictionary that fails to load", () => {
       </App>,
     );
     expect(html).toContain("Get started");
+  });
+});
+
+describe("a dictionary inside a dynamically imported component", () => {
+  /**
+   * The one case no preload can cover. A `lazy()` module does not evaluate — and
+   * so does not register its dictionary — until React renders it, which is long
+   * after the view router warmed everything it could see. `use()` is the
+   * fallback here by design, so what matters is that the fallback is *correct*:
+   * the right locale renders, and the strings still reach the client ahead of
+   * the segment that used them.
+   */
+  function lazyView(loaderDelayMs = 0) {
+    return lazy(async () => {
+      await new Promise((r) => setTimeout(r, loaderDelayMs));
+      // Registration happens here, mid-render — exactly like a real chunk
+      // evaluating its module-scope `defineDictionary`.
+      const dict = __gemi_dict__(dictionaryId(TRANSLATIONS), {
+        "en-US": async () => ({ default: localeStrings(TRANSLATIONS, "en-US") }),
+        "tr-TR": async () => ({ default: localeStrings(TRANSLATIONS, "tr-TR") }),
+      });
+      return {
+        default: () => <p id="late">{useDictionary(dict)("cta")}</p>,
+      };
+    });
+  }
+
+  test("renders the active locale, not the source language", async () => {
+    const Late = lazyView();
+    const html = await render(
+      <App locale="tr-TR">
+        <Late />
+      </App>,
+    );
+    expect(html).toContain("Başla");
+    expect(html).not.toContain("Get started");
+  });
+
+  test("its strings still reach the hydration payload", async () => {
+    // The sink is render-scoped, and this component renders after the shell has
+    // flushed — if collection only worked for the shell, hydration would find
+    // nothing and refetch the chunk it already has.
+    const sink = createDictionarySink();
+    const Late = lazyView(5);
+
+    const html = await render(
+      <App locale="tr-TR" sink={sink}>
+        <Late />
+      </App>,
+      sink,
+    );
+
+    const payload = dictionaryScripts(html);
+    expect(payload).toHaveLength(1);
+    expect(payload[0]).toContain("Başla");
+    expect(payload[0]).not.toContain("Get started");
+  });
+
+  test("the payload lands ahead of the segment that used it", async () => {
+    // Hydration must never meet revealed markup whose strings are not yet in
+    // the registry.
+    const sink = createDictionarySink();
+    const Late = lazyView(5);
+
+    const html = await render(
+      <App locale="en-US" sink={sink}>
+        <Late />
+      </App>,
+      sink,
+    );
+
+    const payloadAt = html.indexOf("__GEMI_DICT__");
+    const revealAt = html.indexOf("Get started");
+    expect(payloadAt).toBeGreaterThan(-1);
+    expect(revealAt).toBeGreaterThan(-1);
+    expect(payloadAt).toBeLessThan(revealAt);
+  });
+
+  test("a failed load degrades to keys rather than killing the boundary", async () => {
+    const Late = lazy(async () => {
+      const dict = __gemi_dict__("d_lazy_broken", {
+        "en-US": () => Promise.reject(new Error("chunk 404")),
+      });
+      return { default: () => <p>{useDictionary(dict)("cta")}</p> };
+    });
+
+    const html = await render(
+      <App locale="en-US">
+        <Late />
+      </App>,
+    );
+    expect(html).toContain("cta");
+    expect(html).not.toContain("chunk 404");
   });
 });
 
