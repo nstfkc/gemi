@@ -1,5 +1,12 @@
-import { Form, FormError, ValidationErrors, useFormStatus } from "gemi/client";
+import {
+  Form,
+  FormError,
+  ValidationErrors,
+  useDictionary,
+  useFormStatus,
+} from "gemi/client";
 import { useState } from "react";
+import { homeDict } from "./Home.i18n";
 
 function SubmitButton() {
   const { isPending } = useFormStatus();
@@ -16,10 +23,14 @@ function SubmitButton() {
 
 export default function Home() {
   const [result, setResult] = useState<Record<string, unknown> | null>(null);
+  // Keys and params are inferred from the literal in `Home.i18n.ts` — no name
+  // string, and nothing declared in `gemi.d.ts`.
+  const t = useDictionary(homeDict);
 
   return (
     <div className="mx-auto max-w-md space-y-6 p-8">
-      <h1 className="text-2xl font-semibold">Home</h1>
+      <h1 className="text-2xl font-semibold">{t("title", { version: "0.52" })}</h1>
+      <p className="text-sm text-neutral-600">{t("description")}</p>
 
       <Form
         action="/home"

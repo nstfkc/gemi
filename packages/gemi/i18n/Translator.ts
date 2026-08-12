@@ -29,6 +29,21 @@ export class Translator {
     this.translations = translations;
   }
 
+  /**
+   * Whether the app does locale-aware routing and rendering at all.
+   *
+   * `isEnabled` only means the legacy `prefetch` config has dictionaries to
+   * serve. An app on `defineDictionary` has an empty `prefetch` and declares
+   * its locales through `supportedLocales` alone, so gating on `isEnabled`
+   * leaves it without locale detection or a locale URL prefix. Both the render
+   * path and the redirect read this, because when they disagreed a migrated app
+   * rendered a non-default locale at `/` with no redirect and no `Vary` — one
+   * cache fill away from serving that document to everyone.
+   */
+  get isLocaleAware(): boolean {
+    return this.isEnabled || this.config.supportedLocales.length > 0;
+  }
+
   get supportedLocales(): string[] {
     return this.config.supportedLocales;
   }

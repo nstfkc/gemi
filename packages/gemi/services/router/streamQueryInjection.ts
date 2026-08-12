@@ -1,3 +1,4 @@
+import type { DictionarySink, DictionaryUse } from "../../i18n/dictionarySink";
 import type { ServerQueryEntry, ServerQueryStore } from "./ServerQueryStore";
 
 /**
@@ -17,6 +18,17 @@ export function queryPayloadScript(entry: ServerQueryEntry): string {
   // Self-shimming: the first payload to arrive creates the buffer, so no
   // separate bootstrap is needed and execution order never matters.
   return `<script>(self.__GEMI_STREAM__=self.__GEMI_STREAM__||[]).push(${payload})</script>`;
+}
+
+/**
+ * The same trick for a `defineDictionary` dictionary a segment just rendered
+ * with. It rides the same queue as query payloads, so it lands ahead of the
+ * reveal chunk for the segment that used it and hydration never re-fetches
+ * strings the document already carries.
+ */
+export function dictionaryPayloadScript(use: DictionaryUse): string {
+  const payload = htmlSafeJson([use.id, use.locale, use.strings]);
+  return `<script>(self.__GEMI_DICT__=self.__GEMI_DICT__||[]).push(${payload})</script>`;
 }
 
 /**
@@ -70,6 +82,7 @@ export function injectQueryPayloads(
   source: ReadableStream<Uint8Array>,
   store: ServerQueryStore,
   hooks: StreamLifecycleHooks = {},
+  dictionaries?: DictionarySink,
 ): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
   const queue: string[] = [];
@@ -86,6 +99,14 @@ export function injectQueryPayloads(
     // the browser's own `/api` fetch surfaces the error into the boundary.
     if (entry.status !== "resolved") return;
     queue.push(queryPayloadScript(entry));
+  });
+
+  // Dictionaries read during render join the same queue, and inherit its
+  // ordering guarantee: `useDictionary` reports a dictionary while rendering
+  // the segment that uses it, so the script is queued before React can emit
+  // that segment's chunk.
+  dictionaries?.onUse((use) => {
+    queue.push(dictionaryPayloadScript(use));
   });
 
   const reader = source.getReader();

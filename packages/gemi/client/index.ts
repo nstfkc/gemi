@@ -52,6 +52,13 @@ export { useResetPassword } from "./auth/useResetPassword";
 export { useUser } from "./auth/useUser";
 
 export { useTranslator } from "./useTranslator";
+export { useDictionary } from "./useDictionary";
+// Re-exported here as well as from `gemi/dictionary`: a dictionary lives next
+// to the component that reads it, so both halves come from one import.
+export {
+  defineDictionary,
+  type DictionaryHandle,
+} from "../i18n/defineDictionary";
 export { useLocale } from "./useLocale";
 
 // Websocket

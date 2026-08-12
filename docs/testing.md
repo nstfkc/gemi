@@ -38,7 +38,7 @@ test("renders the organisation's messages", () => {
 | `params` | `{}` | `useParams()`, and the params `useQuery` / `Form` / `Link` apply when a call site omits its own. |
 | `searchParams` | `""` | `useSearchParams()`. Accepts `"?tab=recent"`, `"tab=recent"` or `{ tab: "recent" }`. |
 | `hash` | `""` | `useLocation().hash`. |
-| `locale` | `"en-US"` | `useLocale()`, and which locale `useTranslator` reads translations from. |
+| `locale` | `"en-US"` | `useLocale()`, and which locale `useTranslator` and `useDictionary` read from. |
 | `defaultLocale` | same as `locale` | The locale that gets no URL segment. Set it to render a page being viewed in a non-default locale — links then carry the `/tr-TR` prefix. |
 | `supportedLocales` | the two above | The app's locale list, verbatim — a switcher maps over it, so the order is yours. `defaultLocale` and `locale` are appended if absent. |
 | `dictionaries` | `[]` | `useTranslator("Name")`. Pass the app's real dictionaries, or literals of the same `{ name, dictionary }` shape. |
@@ -120,6 +120,37 @@ For those, seed the client's own shape directly. It imports nothing:
 ```
 
 `translations` is `{ dictionary name: { key: string } }` for the current locale — exactly what the server puts on the page. It is merged over `dictionaries`, so the two compose: seed from the app's real dictionary and override the one key a test is about.
+
+### `useDictionary` needs no seeding at all
+
+Everything above is about `useTranslator`, where the strings have to be handed to `<Page>` because the browser only ever sees what the server serialized. A component on the newer [`defineDictionary`](./i18n.md) API carries its own: the dictionary is a module the component imports, and outside the bundler it holds every locale and resolves synchronously.
+
+So a test seeds `locale` and nothing else:
+
+```tsx
+import { Page } from "gemi/testing";
+import Greeter from "@/app/views/Greeter";
+
+test("greets in Turkish", () => {
+  render(
+    <Page locale="tr-TR">
+      <Greeter />
+    </Page>,
+  );
+  expect(screen.getByRole("heading").textContent).toBe("Merhaba Enes");
+});
+```
+
+No `dictionaries`, no `translations`, and no dictionary name that can drift out of sync with the component. The import cost described above does not apply either — a `defineDictionary` module imports `gemi/client`, not `gemi/i18n`, so it never pulls the container in and works under a real-browser runner.
+
+Both APIs compose on one page, which is what a half-migrated app needs:
+
+```tsx
+<Page locale="tr-TR" dictionaries={[dictionaries.Legacy]}>
+  <Greeter />      {/* useDictionary — brings its own */}
+  <LegacyPanel />  {/* useTranslator — reads the seeded payload */}
+</Page>
+```
 
 ## Navigation
 

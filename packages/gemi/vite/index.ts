@@ -1,6 +1,7 @@
 import type { PluginOption } from "vite";
 import { loadGemiConfig } from "../config/load";
 import { isGemiExternal } from "../internal/gemiExternals";
+import { gemiDictionaryPlugin } from "./dictionaryPlugin";
 
 // Async so it can load `gemi.config.ts` before returning the plugin list. Both
 // consumers run under Bun (the CLI's `build()` and dev's `createServer`, spawned
@@ -93,6 +94,9 @@ const gemi = async (): Promise<PluginOption[]> => {
     },
     // App-provided Vite plugins run after gemi's own.
     ...userVitePlugins,
+    // Last, and `enforce: "post"` on top of that: it parses JavaScript, so TS
+    // and JSX have to be gone by the time it sees a module.
+    gemiDictionaryPlugin(),
   ];
 };
 

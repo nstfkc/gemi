@@ -16,6 +16,7 @@ const result = await Bun.build({
     "./services/index.ts",
     "./broadcasting/index.ts",
     "./i18n/index.ts",
+    "./i18n/dictionaryRuntime.ts",
     "./bun/plugin.ts",
     "./bun/preload.ts",
     "./config/index.ts",
