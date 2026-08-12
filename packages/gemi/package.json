@@ -20,6 +20,7 @@
   "exports": {
     "./http": "./http/index.ts",
     "./client": "./client/index.ts",
+    "./testing": "./testing/index.ts",
     "./app": "./app/index.ts",
     "./facades": "./facades/index.ts",
     "./email": "./email/index.ts",

@@ -42,6 +42,7 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 - **[Data Fetching](./data-fetching.md)** — `useQuery`, the mutation hooks, the `Query` prefetch facade, and the type-safe `gemi.d.ts` layer.
 - **[Forms](./forms.md)** — the `Form` component, surfacing validation errors, form status hooks.
 - **[Navigation](./navigation.md)** — `Link`, `useNavigate`, `useParams`, `useSearchParams`, and the `Redirect` component vs. facade.
+- **[Testing Views](./testing.md)** — `<Page>` from `gemi/testing`: mounting a view with route params, dictionaries, prefetched query data and a signed-in user.
 
 ### Data
 - **[ORM](./orm.md)** — the Prisma-typed, gemi-executed query layer: models, relations, ambient transactions, named connections, policies, soft deletes.
