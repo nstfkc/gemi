@@ -24,7 +24,7 @@
     "types": ["vite/client", "bun"],
     "outDir": "dist"
   },
-  "include": ["client"],
+  "include": ["client", "testing"],
   "exclude": [
     "node_modules",
     "dist",

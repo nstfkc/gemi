@@ -21,8 +21,20 @@ function storeTheme(theme: string) {
   }
 }
 
-export const ThemeProvider = (props: { children: ReactNode }) => {
+export const ThemeProvider = (props: {
+  children: ReactNode;
+  /**
+   * The theme to start on, ahead of the stored one. The app leaves this unset —
+   * a visitor's choice lives in `localStorage` — but a test has no browser
+   * session to have made that choice in, so `gemi/testing`'s `<Page>` passes
+   * it through to render a component in a theme without writing to storage.
+   */
+  theme?: Theme;
+}) => {
   const [theme, setTheme] = useState(() => {
+    if (props.theme) {
+      return props.theme;
+    }
     if (typeof window === "undefined") {
       return "light"; // Default theme for server-side rendering
     }

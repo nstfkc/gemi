@@ -1,4 +1,12 @@
-import { Lang } from "../facades";
+// The module, not the `../facades` barrel. A dictionary is the one server-side
+// artifact a *component* test has to import — `<Page dictionaries={[…]}>` takes
+// the app's real `app/i18n/index.ts` — and the barrel drags the whole facade
+// set in behind it, including `Redis` and its `import { RedisClient } from
+// "bun"`. Under a browser-targeted runner (vitest/jsdom) that specifier does
+// not resolve, so importing the app's dictionaries failed to collect before it
+// rendered anything. `Lang` itself only needs the translator and the request
+// context.
+import { Lang } from "../facades/Lang";
 import { parseTranslation } from "../utils/parseTranslation";
 import type {
   ParseTranslationParams,
