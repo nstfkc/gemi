@@ -39,6 +39,7 @@
     "console",
     "broadcasting",
     "client",
+    "testing",
     "i18n",
     "server",
     "container",

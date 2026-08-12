@@ -16,7 +16,7 @@ import { ServerQueryContext } from "./ServerQueryContext";
 import { DEFAULT_STALE_TIME } from "./QueryResource";
 import { applyParams } from "../utils/applyParams";
 import type { UrlParser } from "./types";
-import { omitNullishValues } from "../utils/omitNullishValues";
+import { toVariantKey } from "../utils/variantKey";
 import { useParams } from "./useParams";
 import { useRouteData } from "./useRouteData";
 import { isPlainObject } from "./isPlainObject";
@@ -213,9 +213,7 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
   const { getResource } = useContext(QueryManagerContext);
   const serverQueries = useContext(ServerQueryContext);
   const currentPath = applyParams(url, params);
-  const searchParams = new URLSearchParams(omitNullishValues(search));
-  searchParams.sort();
-  const currentVariantKey = searchParams.toString();
+  const currentVariantKey = toVariantKey(search);
   // `keepPreviousData` under suspense: read through deferred keys so a
   // variant change never suspends the committed tree. The urgent render keeps
   // showing the previous variant's data; React re-renders in the background
@@ -354,7 +352,9 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
     process.env.NODE_ENV !== "production"
   ) {
     const searchHint = variantKey
-      ? `, { search: ${JSON.stringify(Object.fromEntries(searchParams))} }`
+      ? `, { search: ${JSON.stringify(
+          Object.fromEntries(new URLSearchParams(variantKey)),
+        )} }`
       : "";
     console.warn(
       `[gemi] useQuery("${url}") rendered on the server without data. ` +

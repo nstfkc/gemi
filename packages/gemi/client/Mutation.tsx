@@ -219,10 +219,14 @@ export function useFormData() {
 
   const { formDataSubject } = context;
 
+  // Unbound on purpose: `Subject` binds in its constructor, so these are
+  // stable across renders. The `.bind` calls that used to be here allocated a
+  // fresh `subscribe` every render, which made `useSyncExternalStore` drop and
+  // re-add this component's subscription on each pass.
   return useSyncExternalStore(
-    formDataSubject.current.subscribe.bind(formDataSubject.current),
-    formDataSubject.current.getValue.bind(formDataSubject.current),
-    formDataSubject.current.getValue.bind(formDataSubject.current),
+    formDataSubject.current.subscribe,
+    formDataSubject.current.getValue,
+    formDataSubject.current.getValue,
   );
 }
 
