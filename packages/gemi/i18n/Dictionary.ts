@@ -51,6 +51,13 @@ export class Dictionary<T extends Translations> {
     return parseTranslation(this.dictionary[key][locale], params ?? {});
   }
 
+  /**
+   * @deprecated Use `defineDictionary` from `gemi/client`, declared next to the
+   * component that reads it. A dictionary made here has to be re-exported from
+   * `app/i18n/index.ts` and listed against a route in the `prefetch` config,
+   * and every locale of it stays resident whether a page uses it or not. Still
+   * supported; see `docs/i18n.md`.
+   */
   static create<const T extends Translations>(name: string, translations: T) {
     return new Dictionary<T>(name, translations);
   }

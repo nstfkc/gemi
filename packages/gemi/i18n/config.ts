@@ -5,7 +5,13 @@ import type { HttpRequest } from "../http/HttpRequest";
 export interface TranslationConfig {
   supportedLocales?: string[];
   defaultLocale?: string;
+  /**
+   * @deprecated Only for `Dictionary.create` dictionaries. A `defineDictionary`
+   * dictionary needs no entry here — the component that reads it pulls it in,
+   * and the bundler ships only the active locale.
+   */
   prefetch?: Record<string, Array<Dictionary<any>>>;
+  /** @deprecated Only for `Dictionary.create` dictionaries. See `prefetch`. */
   components?: Record<string, Dictionary<any>>;
 
   // Returning `null` falls back to gemi's own locale detection.

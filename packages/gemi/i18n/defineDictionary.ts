@@ -1,0 +1,101 @@
+import {
+  dictionaryId,
+  dictionaryLocales,
+  localeStrings,
+  type DictionaryTranslations,
+  type LocaleStrings,
+} from "./dictionaryShape";
+import { loadDictionary, registerDictionary } from "./dictionaryRegistry";
+
+declare const brand: unique symbol;
+
+export interface DictionaryHandle<
+  T extends DictionaryTranslations = DictionaryTranslations,
+> {
+  readonly id: string;
+  /** Locales this dictionary declares, source language first. */
+  readonly locales: readonly string[];
+  /**
+   * Strings for `locale`. Synchronous when they are already in memory —
+   * always, for an unbundled dictionary; after a preload or the SSR seed, for a
+   * bundled one.
+   */
+  load(locale: string): LocaleStrings | Promise<LocaleStrings>;
+  get(locale: string): LocaleStrings | undefined;
+  /** Type-only: carries the literal's shape through to `useDictionary`. */
+  readonly [brand]?: T;
+}
+
+/**
+ * Declare the strings a component needs, next to the component.
+ *
+ * ```ts
+ * export const homeDict = defineDictionary({
+ *   title: { "en-US": "Welcome {{name}}", "tr-TR": "Hoş geldin {{name}}" },
+ * });
+ * ```
+ *
+ * As written this holds every locale. Under gemi's Vite plugin the call is
+ * rewritten so each locale becomes its own chunk and a page downloads only the
+ * one it renders in — but the plugin is strictly an optimization, and the
+ * behaviour is identical without it (in `bun test`, and in server code that
+ * does not go through the bundler).
+ *
+ * The first locale in the literal is the source language: a key missing from
+ * another locale falls back to it rather than rendering as its own key.
+ */
+export function defineDictionary<const T extends DictionaryTranslations>(
+  translations: T,
+): DictionaryHandle<T> {
+  const locales = dictionaryLocales(translations);
+  return createHandle(
+    dictionaryId(translations),
+    locales,
+    (locale) => localeStrings(translations, locale, locales),
+  );
+}
+
+/**
+ * The rewritten form of a `defineDictionary` call — emitted by
+ * `packages/gemi/vite/dictionaryPlugin.ts`, never written by hand. `loaders`
+ * holds one dynamic import per locale so the bundler emits one chunk per
+ * locale and the untaken ones never reach the browser.
+ */
+export function __gemi_dict__<
+  const T extends DictionaryTranslations = DictionaryTranslations,
+>(
+  id: string,
+  loaders: Record<string, () => Promise<{ default: LocaleStrings }>>,
+): DictionaryHandle<T> {
+  const locales = Object.keys(loaders);
+  return createHandle(id, locales, (locale) => {
+    // An unknown locale falls back to the source language, matching what
+    // `localeStrings` does per key on the unbundled path.
+    const load = loaders[locale] ?? loaders[locales[0]];
+    if (!load) {
+      return {};
+    }
+    return load().then((mod) => mod.default);
+  });
+}
+
+function createHandle<T extends DictionaryTranslations>(
+  id: string,
+  locales: string[],
+  load: (locale: string) => LocaleStrings | Promise<LocaleStrings>,
+): DictionaryHandle<T> {
+  registerDictionary({ id, locales, load });
+
+  return {
+    id,
+    locales,
+    // Routed through the registry rather than calling `load` directly so
+    // concurrent readers share one in-flight import and results are cached.
+    load: (locale: string) => loadDictionary(id, locale),
+    get: (locale: string) => {
+      const strings = loadDictionary(id, locale);
+      return strings instanceof Promise ? undefined : strings;
+    },
+  };
+}
+

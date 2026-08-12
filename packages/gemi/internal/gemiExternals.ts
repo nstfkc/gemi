@@ -30,6 +30,10 @@ export const GEMI_EXTERNAL_SPECIFIERS = [
   "gemi/services",
   "gemi/broadcasting",
   "gemi/i18n",
+  // Not optional: `defineDictionary` handles register themselves in a
+  // module-level registry that the view router preloads and snapshots through.
+  // A bundled second copy would give SSR two registries and empty payloads.
+  "gemi/dictionary",
 ] as const;
 
 // Predicate form for rollup's `external`: covers `gemi` and every `gemi/*`

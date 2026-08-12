@@ -14,6 +14,14 @@ type ParamsOrNever<T> = T extends Record<string, never>
   ? [params?: never]
   : [params: T];
 
+/**
+ * @deprecated Use `useDictionary(dict)` with a `defineDictionary` dictionary
+ * declared next to the component. This resolves a dictionary by name through
+ * the global `I18nDictionary` interface, which needs a `gemi.d.ts`
+ * declaration, a central `app/i18n/index.ts`, and a hand-maintained `prefetch`
+ * map naming every route's dictionaries — and it ships whatever that map says
+ * whether the page reads it or not. Still supported; see `docs/i18n.md`.
+ */
 export function useTranslator<T extends keyof I18nDictionary>(component: T) {
   const { i18n } = useRouteData();
 

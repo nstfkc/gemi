@@ -23,6 +23,8 @@ import { createComponentTree } from "./createComponentTree";
 import { flattenComponentTree } from "../../client/helpers/flattenComponentTree";
 import type { ComponentTree } from "../../client/types";
 import { Translator } from "../../i18n/Translator";
+import { preloadDictionaries } from "../../i18n/dictionaryRegistry";
+import { createDictionarySink } from "../../i18n/dictionarySink";
 import { MiddlewareRegistry } from "../middleware/MiddlewareRegistry";
 import { Log } from "../../facades/Log";
 import { Lang } from "../../facades/Lang";
@@ -564,6 +566,12 @@ export class ViewRouteDispatcher {
           ? createShellContentObserver()
           : null;
 
+      // Which dictionaries a page reads is only knowable once it has rendered,
+      // so they cannot ride the `__GEMI_DATA__` snapshot (serialized below,
+      // before the render starts). The sink collects them during the render and
+      // the injector streams each one into the document.
+      const dictionarySink = createDictionarySink();
+
       try {
         const stream = await renderToReadableStream(
           createElement(Fragment, {
@@ -584,6 +592,7 @@ export class ViewRouteDispatcher {
                 viewImportMap,
                 viewModules,
                 serverQueries,
+                dictionarySink,
                 key: "root",
               }),
             ],
@@ -637,7 +646,8 @@ export class ViewRouteDispatcher {
                   this.shellReporter.report(currentPathName, shellObserver.measure());
                 }
               }),
-          }),
+          },
+          dictionarySink),
           {
             status: !currentPathName ? 404 : 200,
             headers,
@@ -824,7 +834,14 @@ export class ViewRouteDispatcher {
         await app(MiddlewareRegistry).runMiddleware(middlewares);
 
         const translator = app(Translator);
-        const isI18nEnabled = translator.isEnabled;
+        // Two ways to be an i18n app now. `isEnabled` means the legacy
+        // `prefetch` config has dictionaries to serve; configured
+        // `supportedLocales` alone means the app uses `defineDictionary` and
+        // still needs its locale detected, or every `useDictionary` would fall
+        // back to its source language.
+        const hasLegacyDictionaries = translator.isEnabled;
+        const isI18nEnabled =
+          hasLegacyDictionaries || translator.supportedLocales.length > 0;
         let i18n: Record<string, any> = {};
         if (isI18nEnabled) {
           let locale = null;
@@ -838,10 +855,9 @@ export class ViewRouteDispatcher {
             ctx.setLocale(locale);
           }
 
-          const translations = translator.getPageTranslations(
-            locale,
-            httpRequest.routePath,
-          );
+          const translations = hasLegacyDictionaries
+            ? translator.getPageTranslations(locale, httpRequest.routePath)
+            : {};
 
           i18n = {
             supportedLocales: translator.supportedLocales,
@@ -851,6 +867,16 @@ export class ViewRouteDispatcher {
             },
             defaultLocale: translator.defaultLocale,
           };
+
+          // Resolve every `defineDictionary` dictionary this process knows
+          // about for the locale, before rendering. The view modules were
+          // imported (and so registered their dictionaries) before the request
+          // arrived, and already-resolved ones return from cache, so this costs
+          // one pass over freshly imported modules. It buys a render in which
+          // `useDictionary` never suspends — which matters more here than on
+          // the client: a suspend splits the segment out of the shell, and a
+          // page would otherwise fragment into one reveal chunk per dictionary.
+          await preloadDictionaries(locale);
         }
 
         // Handlers gate the response — they decide redirects, status codes,
