@@ -142,20 +142,44 @@ export function gemiDictionaryPlugin(): Plugin {
           }
         }
       }
-      if (localNames.size === 0) {
-        return null;
-      }
-
       const calls: any[] = [];
+      let unresolved = 0;
       walk(ast, (node) => {
-        if (
-          node.type === "CallExpression" &&
-          node.callee?.type === "Identifier" &&
-          localNames.has(node.callee.name)
-        ) {
+        if (node.type !== "CallExpression") return;
+        const callee = node.callee;
+        if (callee?.type === "Identifier" && localNames.has(callee.name)) {
           calls.push(node);
+          return;
+        }
+        // A call that *looks* like one and did not resolve to a tracked import:
+        // a namespace import (`gemi.defineDictionary(...)`), a re-export through
+        // an app-local barrel, or a linked workspace package whose id this
+        // skipped. Silently leaving those inline is the fail-open path
+        // `readObjectLiteral` refuses to take — every locale would ship to every
+        // visitor with no build signal that splitting had stopped applying.
+        const name =
+          callee?.type === "Identifier"
+            ? callee.name
+            : callee?.type === "MemberExpression" && !callee.computed
+              ? callee.property?.name
+              : undefined;
+        if (name === "defineDictionary") {
+          unresolved++;
         }
       });
+
+      // An app is free to have a `defineDictionary` of its own; warning about
+      // that would be noise, and noise is how a real warning gets ignored.
+      if (unresolved > 0 && declaresOwn(ast, "defineDictionary")) {
+        unresolved = 0;
+      }
+
+      if (unresolved > 0) {
+        this.warn(
+          `${id}: ${unresolved} defineDictionary() call(s) could not be traced to an import of "gemi/dictionary", "gemi/client" or "gemi/i18n", so their locales were left inline and will all ship to the browser. Import defineDictionary directly by name rather than through a namespace import or a local re-export.`,
+        );
+      }
+
       if (calls.length === 0) {
         return null;
       }
@@ -164,9 +188,9 @@ export function gemiDictionaryPlugin(): Plugin {
       let rewrote = false;
 
       for (const call of calls) {
-        if (call.arguments?.length !== 1) {
+        if (call.arguments?.length < 1 || call.arguments?.length > 2) {
           this.error({
-            message: `defineDictionary() takes exactly one object literal.`,
+            message: `defineDictionary() takes an object literal and an optional options object.`,
             pos: call.start,
           });
         }
@@ -175,9 +199,17 @@ export function gemiDictionaryPlugin(): Plugin {
           this.error({ message, pos: call.arguments[0]?.start ?? call.start }),
         );
 
+        // Read here as well as at runtime, because it decides the fallback
+        // order baked into each per-locale chunk. If the two disagreed, a
+        // bundled dictionary would fall back differently from the same literal
+        // read directly by a controller.
+        const sourceLocale = readSourceLocale(call.arguments[1], (message) =>
+          this.error({ message, pos: call.arguments[1]?.start ?? call.start }),
+        );
+
         const runtimeId = dictionaryId(translations);
         const virtualKey = `${Buffer.from(id).toString("base64url")}/${runtimeId}`;
-        const locales = dictionaryLocales(translations);
+        const locales = dictionaryLocales(translations, sourceLocale);
 
         if (locales.length === 0) {
           this.error({
@@ -286,6 +318,45 @@ function readObjectLiteral(
     out[key] = byLocale;
   }
   return out;
+}
+
+/** The `sourceLocale` from `defineDictionary`'s optional options argument. */
+function readSourceLocale(
+  node: any,
+  fail: (message: string) => never,
+): string | undefined {
+  if (node === undefined) {
+    return undefined;
+  }
+  if (node.type !== "ObjectExpression") {
+    fail(
+      `defineDictionary() options must be an inline object literal — it is read at build time.`,
+    );
+  }
+  for (const prop of node.properties) {
+    if (propertyName(prop) !== "sourceLocale") continue;
+    const value = prop.value;
+    if (value?.type !== "Literal" || typeof value.value !== "string") {
+      fail(`defineDictionary() sourceLocale must be a string literal.`);
+    }
+    return value.value;
+  }
+  return undefined;
+}
+
+/** Whether the module declares `name` itself, rather than importing it. */
+function declaresOwn(ast: any, name: string): boolean {
+  let found = false;
+  walk(ast, (node) => {
+    if (found) return;
+    if (node.type === "FunctionDeclaration" && node.id?.name === name) {
+      found = true;
+    }
+    if (node.type === "VariableDeclarator" && node.id?.name === name) {
+      found = true;
+    }
+  });
+  return found;
 }
 
 function propertyName(prop: any): string | null {

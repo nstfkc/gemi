@@ -14,10 +14,13 @@ import { dictionaryId } from "../i18n/dictionaryShape";
  * `this.error` throws, matching Rollup, so the "must be static" cases can be
  * asserted with `rejects`.
  */
-function ctx() {
+function ctx(warnings: string[] = []) {
   return {
     error(e: any): never {
       throw new Error(typeof e === "string" ? e : e.message);
+    },
+    warn(w: any) {
+      warnings.push(typeof w === "string" ? w : w.message);
     },
     async load() {
       return null;
@@ -27,13 +30,25 @@ function ctx() {
 
 const plugin = () => gemiDictionaryPlugin() as any;
 
-async function transform(p: any, code: string, id = "/app/views/Home.i18n.ts") {
-  return await p.transform.call(ctx(), code, id);
+async function transform(
+  p: any,
+  code: string,
+  id = "/app/views/Home.i18n.ts",
+  warnings: string[] = [],
+) {
+  return await p.transform.call(ctx(warnings), code, id);
 }
 
 async function load(p: any, id: string) {
   const resolved = p.resolveId.call(ctx(), id);
   return await p.load.call(ctx(), resolved);
+}
+
+/** Warnings emitted while transforming `code`. */
+async function warningsFor(code: string, id?: string): Promise<string[]> {
+  const collected: string[] = [];
+  await transform(plugin(), code, id, collected);
+  return collected;
 }
 
 /** The specifier of the Nth `import(...)` in the rewritten output. */
@@ -150,6 +165,84 @@ describe("the dictionary plugin's virtual modules", () => {
     const trModule = await load(p, tr);
     expect(trModule).toContain("Bitti");
     expect(trModule).toContain("Pending");
+  });
+});
+
+describe("calls the import scan cannot resolve", () => {
+  /**
+   * The transform is what makes locale splitting real, so a call it silently
+   * declines to rewrite ships every locale to every visitor — the exact outcome
+   * `readObjectLiteral` hard-fails the build to avoid. These forms cannot be
+   * rewritten safely, so the least they must do is say so.
+   */
+  test("a namespace import warns", async () => {
+    const warnings = await warningsFor(
+      `import * as gemi from "gemi/client";
+       export const d = gemi.defineDictionary({ a: { "en-US": "A" } });`,
+    );
+    expect(warnings.join()).toMatch(/could not be traced to an import/);
+  });
+
+  test("a re-export through an app-local barrel warns", async () => {
+    const warnings = await warningsFor(
+      `import { defineDictionary } from "@/app/lib/gemi";
+       export const d = defineDictionary({ a: { "en-US": "A" } });`,
+    );
+    expect(warnings.join()).toMatch(/could not be traced to an import/);
+  });
+
+  test("an app's own defineDictionary does not warn", async () => {
+    // Noise is how a real warning gets ignored.
+    const warnings = await warningsFor(
+      `function defineDictionary(x) { return x }
+       export const d = defineDictionary({ a: { "en-US": "A" } });`,
+    );
+    expect(warnings).toEqual([]);
+  });
+
+  test("a properly imported call warns about nothing", async () => {
+    expect(await warningsFor(SOURCE)).toEqual([]);
+  });
+});
+
+describe("sourceLocale", () => {
+  const HALF_TRANSLATED = `
+    import { defineDictionary } from "gemi/client";
+    export const dict = defineDictionary({
+      onlyTr: { "tr-TR": "Merhaba" },
+      both: { "en-US": "Hello", "tr-TR": "Merhaba" },
+    }, { sourceLocale: "en-US" });
+  `;
+
+  test("pins the fallback language regardless of key order", async () => {
+    // Without the pin, `onlyTr` coming first makes tr-TR the source language
+    // for the whole dictionary, so `both` would fall back to Turkish for
+    // English readers — from a diff that only reordered keys.
+    const p = plugin();
+    const result = await transform(p, HALF_TRANSLATED);
+    const en = importSpecifiers(result.code).find((s) => s.endsWith("/en-US"))!;
+
+    expect(en).toBeTruthy();
+    const enModule = await load(p, en);
+    expect(enModule).toContain("Hello");
+    // The untranslated key still degrades to the one string that exists.
+    expect(enModule).toContain("Merhaba");
+  });
+
+  test("puts the source locale first in the loader map", async () => {
+    const result = await transform(plugin(), HALF_TRANSLATED);
+    expect(importSpecifiers(result.code)[0]).toMatch(/\/en-US$/);
+  });
+
+  test("must be a string literal", async () => {
+    await expect(
+      transform(
+        plugin(),
+        `import { defineDictionary } from "gemi/client";
+         const l = "en-US";
+         export const d = defineDictionary({ a: { "en-US": "A" } }, { sourceLocale: l });`,
+      ),
+    ).rejects.toThrow(/sourceLocale/);
   });
 });
 

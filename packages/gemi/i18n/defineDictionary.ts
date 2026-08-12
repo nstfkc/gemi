@@ -44,14 +44,27 @@ export interface DictionaryHandle<
  * The first locale in the literal is the source language: a key missing from
  * another locale falls back to it rather than rendering as its own key.
  */
+export interface DefineDictionaryOptions {
+  /**
+   * The locale this dictionary is authored in. Keys missing from another locale
+   * fall back to it, and it is what renders when the app has no locale
+   * configured.
+   *
+   * Optional, but worth setting on any dictionary that is not uniformly
+   * translated: without it the source language is whichever locale appears
+   * first in the literal, so adding a key at the top can re-point every
+   * fallback in the dictionary.
+   */
+  sourceLocale?: string;
+}
+
 export function defineDictionary<const T extends DictionaryTranslations>(
   translations: T,
+  options: DefineDictionaryOptions = {},
 ): DictionaryHandle<T> {
-  const locales = dictionaryLocales(translations);
-  return createHandle(
-    dictionaryId(translations),
-    locales,
-    (locale) => localeStrings(translations, locale, locales),
+  const locales = dictionaryLocales(translations, options.sourceLocale);
+  return createHandle(dictionaryId(translations), locales, (locale) =>
+    localeStrings(translations, locale, locales),
   );
 }
 
@@ -94,7 +107,17 @@ function createHandle<T extends DictionaryTranslations>(
     load: (locale: string) => loadDictionary(id, locale),
     get: (locale: string) => {
       const strings = loadDictionary(id, locale);
-      return strings instanceof Promise ? undefined : strings;
+      if (strings instanceof Promise) {
+        // Nothing downstream awaits this one — `get` is the synchronous peek,
+        // and the caller is about to discard it. An unattached rejection (a
+        // locale chunk that 404s mid-deploy) would surface as an
+        // `unhandledRejection`, which under Node's default handler takes the
+        // process down over one missing translation file. The load itself is
+        // still cached and still retried through `loadDictionary`.
+        strings.catch(() => {});
+        return undefined;
+      }
+      return strings;
     },
   };
 }

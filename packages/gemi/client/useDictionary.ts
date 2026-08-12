@@ -1,6 +1,9 @@
 import { use, useContext, type JSX } from "react";
 import type { DictionaryHandle } from "../i18n/defineDictionary";
-import { loadDictionary, setActiveLocale } from "../i18n/dictionaryRegistry";
+import {
+  loadDictionaryForRender,
+  setActiveLocale,
+} from "../i18n/dictionaryRegistry";
 import type { DictionaryTranslations } from "../i18n/dictionaryShape";
 import { parseTranslation } from "../utils/parseTranslation";
 import type { ParseTranslationParams, Prettify } from "../utils/type";
@@ -49,7 +52,10 @@ export function useDictionary<const T extends DictionaryTranslations>(
   // navigation. `__GEMI_DATA__` only knows the locale the document loaded in.
   setActiveLocale(locale);
 
-  const pending = loadDictionary(dictionary.id, locale);
+  // `ForRender`, not the plain loader: a rejected locale chunk must not rethrow
+  // out of `use()` and take the route down. It degrades to no strings, and the
+  // per-key lookup below falls back to the key — what `useTranslator` did.
+  const pending = loadDictionaryForRender(dictionary.id, locale);
   const strings = pending instanceof Promise ? use(pending) : pending;
 
   // Reported from the render phase, and deliberately so: on the server the

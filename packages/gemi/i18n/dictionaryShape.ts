@@ -13,17 +13,28 @@ export type DictionaryTranslations = Record<string, Record<string, string>>;
 export type LocaleStrings = Record<string, string>;
 
 /**
- * Locales the dictionary declares, in first-seen order.
+ * Locales the dictionary declares, source language first.
  *
  * The order is meaningful: the first locale is the source language, and a key
- * missing from some other locale falls back along this list. Write the locale
- * you author in first.
+ * missing from some other locale falls back along this list.
+ *
+ * `sourceLocale` pins that choice. Without it the source language is whichever
+ * locale is seen first while walking the literal, which makes it an emergent
+ * property of key order — adding a key at the top of a dictionary whose other
+ * keys happen to lack `en-US` would silently re-point every fallback in it. Any
+ * dictionary that is not uniformly translated should say which locale it is
+ * authored in.
  */
 export function dictionaryLocales(
   translations: DictionaryTranslations,
+  sourceLocale?: string,
 ): string[] {
   const locales: string[] = [];
   const seen = new Set<string>();
+  if (sourceLocale) {
+    seen.add(sourceLocale);
+    locales.push(sourceLocale);
+  }
   for (const byLocale of Object.values(translations)) {
     for (const locale of Object.keys(byLocale)) {
       if (!seen.has(locale)) {

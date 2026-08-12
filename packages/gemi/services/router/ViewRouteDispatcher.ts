@@ -707,7 +707,7 @@ export class ViewRouteDispatcher {
       urlLocale = maybeLocale;
     }
 
-    if (translator.isEnabled && !isOgRequest) {
+    if (translator.isLocaleAware && !isOgRequest) {
       const locale = app(Translator).detectLocale(
         new HttpRequest(req, {}, "view", urlPathname),
       );
@@ -838,10 +838,10 @@ export class ViewRouteDispatcher {
         // `prefetch` config has dictionaries to serve; configured
         // `supportedLocales` alone means the app uses `defineDictionary` and
         // still needs its locale detected, or every `useDictionary` would fall
-        // back to its source language.
+        // back to its source language. `isLocaleAware` is the same predicate
+        // the locale-prefix redirect above uses — they have to agree.
         const hasLegacyDictionaries = translator.isEnabled;
-        const isI18nEnabled =
-          hasLegacyDictionaries || translator.supportedLocales.length > 0;
+        const isI18nEnabled = translator.isLocaleAware;
         let i18n: Record<string, any> = {};
         if (isI18nEnabled) {
           let locale = null;
@@ -867,17 +867,22 @@ export class ViewRouteDispatcher {
             },
             defaultLocale: translator.defaultLocale,
           };
-
-          // Resolve every `defineDictionary` dictionary this process knows
-          // about for the locale, before rendering. The view modules were
-          // imported (and so registered their dictionaries) before the request
-          // arrived, and already-resolved ones return from cache, so this costs
-          // one pass over freshly imported modules. It buys a render in which
-          // `useDictionary` never suspends — which matters more here than on
-          // the client: a suspend splits the segment out of the shell, and a
-          // page would otherwise fragment into one reveal chunk per dictionary.
-          await preloadDictionaries(locale);
         }
+
+        // Outside the `isI18nEnabled` branch on purpose. `defineDictionary`
+        // needs no `translation` config at all — that is what `docs/i18n.md`
+        // presents as the whole setup — so gating the preload on it left the
+        // documented minimal app taking the unwarmed path: every
+        // `useDictionary` suspends, and on a streamed route each component's
+        // markup lands in `<div hidden>` behind a `$RC()` reveal instead of
+        // inline in the shell (#286/#289). A reader without JS would see the
+        // Suspense fallback where the page text belongs.
+        //
+        // An empty locale means the app configured none; `preloadDictionaries`
+        // then warms each dictionary under its own source language, which is
+        // the key `useDictionary` will ask for. It returns immediately when
+        // nothing is registered, so an app with no dictionaries pays nothing.
+        await preloadDictionaries(i18n.currentLocale ?? "");
 
         // Handlers gate the response — they decide redirects, status codes,
         // cookies — so they are awaited. Queries do not: `Query.prefetch`

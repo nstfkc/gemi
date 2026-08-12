@@ -237,6 +237,65 @@ describe("preloading", () => {
     expect(before.state.loads).toBe(0);
   });
 
+  test("a concurrent preload does not skip past loads still in flight", async () => {
+    // The watermark used to move before the imports settled, so a second
+    // request arriving mid-flight found an empty slice, returned immediately,
+    // and then suspended on those same in-flight promises anyway — the stream
+    // fragmentation the preload exists to prevent.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    let loads = 0;
+    const dict = __gemi_dict__("d_concurrent", {
+      "en-US": async () => {
+        loads++;
+        await gate;
+        return { default: { cta: "Get started" } };
+      },
+    });
+
+    const first = preloadDictionaries("en-US");
+    const second = preloadDictionaries("en-US");
+
+    release();
+    await Promise.all([first, second]);
+
+    // Both callers waited for the same single load.
+    expect(loads).toBe(1);
+    // And it really is resolved for whoever renders next.
+    const View = () => <p>{useDictionary(dict)("cta")}</p>;
+    const html = await render(
+      <App locale="en-US">
+        <View />
+      </App>,
+    );
+    expect(html).not.toContain("skeleton");
+  });
+
+  test("a failed load stays below the watermark and is retried", async () => {
+    // The doc comment promises exactly this, and advancing the watermark over a
+    // swallowed failure would have made it a lie: the dictionary would never be
+    // reloaded by a later preload.
+    let fail = true;
+    let attempts = 0;
+    __gemi_dict__("d_retry", {
+      "en-US": () => {
+        attempts++;
+        return fail
+          ? Promise.reject(new Error("gone"))
+          : Promise.resolve({ default: { cta: "Get started" } });
+      },
+    });
+
+    await preloadDictionaries("en-US");
+    expect(attempts).toBe(1);
+
+    fail = false;
+    await preloadDictionaries("en-US");
+    expect(attempts).toBe(2);
+  });
+
   test("each locale keeps its own watermark", async () => {
     const { dict, state } = counted("d_perlocale");
     // Same dictionary, two locales — warming one must not mark the other done.
@@ -247,6 +306,76 @@ describe("preloading", () => {
     // Falls back to the only loader it has, but it does get asked.
     expect(state.loads).toBe(2);
     expect(dict.id).toBe("d_perlocale");
+  });
+});
+
+describe("a dictionary that fails to load", () => {
+  /**
+   * A locale chunk going missing is routine — a browser holding stale HTML
+   * after a rolling deploy asks for a hashed filename that no longer exists.
+   * The deprecated `useTranslator` degraded any i18n failure to rendering the
+   * key; letting a rejection out of `use()` instead would unmount the route
+   * into its error boundary, or fail the server render outright.
+   */
+  test("renders keys instead of taking the render down", async () => {
+    const dict = __gemi_dict__(dictionaryId(TRANSLATIONS), {
+      "en-US": () => Promise.reject(new Error("Failed to fetch dynamically imported module")),
+    });
+    const View = () => <p>{useDictionary(dict)("cta")}</p>;
+
+    const html = await render(
+      <App locale="en-US">
+        <View />
+      </App>,
+    );
+
+    expect(html).toContain("cta");
+    expect(html).not.toContain("Failed to fetch");
+  });
+
+  test("stays degraded across re-renders rather than suspending forever", async () => {
+    // `use()` needs a stable promise. Rebuilding the degraded one per render
+    // would suspend on a fresh promise every pass and never settle.
+    const dict = __gemi_dict__(dictionaryId(TRANSLATIONS), {
+      "en-US": () => Promise.reject(new Error("gone")),
+    });
+    const View = () => <span>{useDictionary(dict)("cta")}</span>;
+
+    const html = await render(
+      <App locale="en-US">
+        <View />
+        <View />
+      </App>,
+    );
+
+    expect(html.match(/cta/g) ?? []).toHaveLength(2);
+  });
+
+  test("a later successful load supersedes the degraded result", async () => {
+    let fail = true;
+    const dict = __gemi_dict__(dictionaryId(TRANSLATIONS), {
+      "en-US": () =>
+        fail
+          ? Promise.reject(new Error("gone"))
+          : Promise.resolve({ default: { cta: "Get started" } }),
+    });
+    const View = () => <p>{useDictionary(dict)("cta")}</p>;
+
+    await render(
+      <App locale="en-US">
+        <View />
+      </App>,
+    );
+
+    fail = false;
+    await preloadDictionaries("en-US");
+
+    const html = await render(
+      <App locale="en-US">
+        <View />
+      </App>,
+    );
+    expect(html).toContain("Get started");
   });
 });
 
