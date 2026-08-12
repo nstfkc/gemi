@@ -202,6 +202,41 @@ describe("<Page> translations", () => {
     expect(screen.getByText("Merhaba Ada")).toBeDefined();
   });
 
+  test("`translations` seeds the client's own shape, for the current locale", () => {
+    function View() {
+      const t = useTranslator("Test" as never);
+      return <div>{t("greeting" as never, { name: "Ada" } as never)}</div>;
+    }
+
+    // No dictionary object anywhere — this is what the server serializes onto
+    // the page, so a test can seed it without importing anything of the app's.
+    render(
+      <Page translations={{ Test: { greeting: "Hi {{name}}" } }}>
+        <View />
+      </Page>,
+    );
+
+    expect(screen.getByText("Hi Ada")).toBeDefined();
+  });
+
+  test("`translations` overrides a key the dictionary also defines", () => {
+    function View() {
+      const t = useTranslator("Test" as never);
+      return <div>{t("greeting" as never, { name: "Ada" } as never)}</div>;
+    }
+
+    render(
+      <Page
+        dictionaries={[Greeting]}
+        translations={{ Test: { greeting: "Yo {{name}}" } }}
+      >
+        <View />
+      </Page>,
+    );
+
+    expect(screen.getByText("Yo Ada")).toBeDefined();
+  });
+
   test("a non-default locale prefixes the links on the page", () => {
     render(
       <Page locale="tr-TR" defaultLocale="en-US">

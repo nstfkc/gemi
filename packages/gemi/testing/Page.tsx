@@ -34,9 +34,18 @@ import { applyParams } from "../utils/applyParams";
 import { Subject } from "../utils/Subject";
 
 /**
- * A dictionary as `Dictionary.create` produces it. Typed structurally rather
- * than as `Dictionary<T>` so this module never imports `gemi/i18n` — that entry
- * reaches the `Lang` facade and, through it, the server container.
+ * A dictionary as `Dictionary.create` produces it: a name and a
+ * `{ key: { locale: string } }` map.
+ *
+ * Typed structurally rather than as `Dictionary<T>` for two reasons. It keeps
+ * `gemi/testing` from importing `gemi/i18n` — a server entry, which reaches the
+ * `Lang` facade and through it the container. And it means an object literal of
+ * the same shape is accepted, so a test never *has* to import the app's
+ * dictionaries at all.
+ *
+ * Only `name` and `dictionary` are read — both plain data. `Dictionary`'s
+ * server-only methods (`render`, `reference`, which throw once `window` is
+ * defined) are never called from here.
  */
 export interface PageDictionary {
   name: string;
@@ -63,8 +72,31 @@ export interface PageProps {
    */
   defaultLocale?: string;
   supportedLocales?: string[];
-  /** Dictionaries the components under test translate against. */
+  /**
+   * Dictionaries the components under test translate against — the app's own,
+   * or literals of the same shape.
+   *
+   * Note what importing the app's costs: `app/i18n/index.ts` imports
+   * `gemi/i18n`, a server entry, so the test file pulls the container and
+   * `node:async_hooks` into its module graph. Nothing there runs (and nothing
+   * here calls it), so it is fine under any runner that has Node builtins —
+   * vitest, `bun test` — and not under one that renders in a real browser. Use
+   * `translations` there, which is the shape the client actually receives.
+   */
   dictionaries?: PageDictionary[];
+  /**
+   * Translations for the current locale, already resolved: dictionary name →
+   * key → string. This is the shape the server serializes onto the page, so it
+   * is what the client reads at runtime — and it imports nothing.
+   *
+   * ```tsx
+   * <Page translations={{ Chat: { greeting: "Hello {{name}}" } }}>
+   * ```
+   *
+   * Merged over `dictionaries`, so the two compose: seed from the app's real
+   * dictionary and override the one key a test is about.
+   */
+  translations?: Record<string, Record<string, string>>;
   /**
    * Data `useQuery` finds already cached, keyed by API path — the path passed
    * to `useQuery`, without the `/api` prefix the client adds when it fetches.
@@ -152,26 +184,41 @@ function toPrefetchedData(
   return prefetchedData;
 }
 
-/** `{ [locale]: { [dictionary]: { [key]: string } } }`, as the server ships it. */
+/**
+ * `{ [locale]: { [dictionary]: { [key]: string } } }` — the payload
+ * `Translator` serializes onto the page, which is the only form the client
+ * ever sees. `dictionaries` are transposed into it (they are keyed the other
+ * way round, by key then locale); `translations` is already in it and lands
+ * under `locale`, last, so it wins.
+ */
 function toClientDictionary(
   dictionaries: PageDictionary[],
   locales: string[],
+  locale: string,
+  translations: Record<string, Record<string, string>>,
 ): Record<string, Record<string, Record<string, string>>> {
   const clientDictionary: Record<
     string,
     Record<string, Record<string, string>>
   > = {};
-  for (const locale of locales) {
-    clientDictionary[locale] ??= {};
+  for (const supported of locales) {
+    clientDictionary[supported] ??= {};
   }
   for (const { name, dictionary } of dictionaries) {
     for (const [key, byLocale] of Object.entries(dictionary ?? {})) {
-      for (const [locale, translation] of Object.entries(byLocale ?? {})) {
-        clientDictionary[locale] ??= {};
-        clientDictionary[locale][name] ??= {};
-        clientDictionary[locale][name][key] = translation;
+      for (const [dictLocale, translation] of Object.entries(byLocale ?? {})) {
+        clientDictionary[dictLocale] ??= {};
+        clientDictionary[dictLocale][name] ??= {};
+        clientDictionary[dictLocale][name][key] = translation;
       }
     }
+  }
+  for (const [name, keys] of Object.entries(translations)) {
+    clientDictionary[locale] ??= {};
+    clientDictionary[locale][name] = {
+      ...clientDictionary[locale][name],
+      ...keys,
+    };
   }
   return clientDictionary;
 }
@@ -217,6 +264,7 @@ export const Page = (props: PropsWithChildren<PageProps>) => {
     locale = "en-US",
     defaultLocale = locale,
     dictionaries = [],
+    translations = {},
     queryData = {},
     queryConfig,
     user = null,
@@ -234,7 +282,12 @@ export const Page = (props: PropsWithChildren<PageProps>) => {
   // The URL's locale segment, which the default locale does not get.
   const urlLocaleSegment = locale === defaultLocale ? null : locale;
 
-  const dictionary = toClientDictionary(dictionaries, supportedLocales);
+  const dictionary = toClientDictionary(
+    dictionaries,
+    supportedLocales,
+    locale,
+    translations,
+  );
   const prefetchedData = toPrefetchedData(queryData, params);
   // `useUser` reads `/auth/me` like any other query. Seeding it — with `null`
   // for the anonymous default — is what keeps a component test off the network
