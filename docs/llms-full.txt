@@ -9022,7 +9022,7 @@ test("renders the organisation's messages", () => {
 });
 ```
 
-`<Page>` is a plain component and imports no test runner, so it works with `@testing-library/react`, `renderToString`, or anything else that renders React.
+`<Page>` is a plain component and imports no test runner, so it works with `@testing-library/react`, `react-test-renderer`, or `renderToString` (with [one caveat](#server-rendering)).
 
 ## Props
 
@@ -9034,15 +9034,16 @@ test("renders the organisation's messages", () => {
 | `hash` | `""` | `useLocation().hash`. |
 | `locale` | `"en-US"` | `useLocale()`, and which locale `useTranslator` reads translations from. |
 | `defaultLocale` | same as `locale` | The locale that gets no URL segment. Set it to render a page being viewed in a non-default locale — links then carry the `/tr-TR` prefix. |
-| `supportedLocales` | the two above | `Lang`-style locale lists on the client. |
+| `supportedLocales` | the two above | The app's locale list, verbatim — a switcher maps over it, so the order is yours. `defaultLocale` and `locale` are appended if absent. |
 | `dictionaries` | `[]` | `useTranslator("Name")`. Pass the app's real dictionaries, or literals of the same `{ name, dictionary }` shape. |
 | `translations` | `{}` | The same thing already resolved for `locale` — `{ Chat: { greeting: "Hello" } }`. Merged over `dictionaries`. |
 | `queryData` | `{}` | The query cache — see below. |
 | `queryConfig` | — | App-wide `useQuery` defaults, as `createRoot` threads them. |
 | `user` | `null` | `useUser()`. |
 | `breadcrumbs` | `[]` | `useBreadcrumbs()`, in order. |
+| `theme` | stored, else `"light"` | `useTheme()`. A test has no browser session to have chosen one in; `setTheme` still works from whatever this seeds. |
 | `fallback` | `null` | The `Suspense` fallback wrapped around the children, standing in for the view's own `Loading` export. |
-| `errorFallback` | — | Rendered in place of the children when one throws, standing in for the view's `Error` export. |
+| `errorFallback` | — | Rendered in place of the children when one throws, standing in for the view's `Error` export. Its `resetErrorBoundary` clears query errors, so the retry path works as it does in the app. |
 | `onNavigate` | — | Called with `(href, "push" \| "replace")` when something navigates. |
 
 ## Seeding queries
@@ -9053,7 +9054,7 @@ test("renders the organisation's messages", () => {
 <Page queryData={{ "/todos": [{ id: 1 }, { id: 2 }] }}>
 ```
 
-A key may carry `:params`, resolved against the page's `params`, and a query string, which seeds one search variant:
+A key may carry a query string, which seeds one search variant, and `:params`, which resolve against the page's:
 
 ```tsx
 <Page
@@ -9067,6 +9068,14 @@ A key may carry `:params`, resolved against the page's `params`, and a query str
   }}
 >
 ```
+
+The cache is keyed by the **resolved** path, so a `:param` the page does not carry fails the render with an error naming the key. That is deliberate: a query's params often come from the call site rather than the route —
+
+```tsx
+const { data } = useQuery("/orgs/:orgId/lists", { params: { orgId } }); // orgId is state
+```
+
+— and the seed for that is the resolved path, `"/orgs/abc/lists"`, not the template.
 
 A seeded query renders its data on the first pass and issues no request. A query with no seed behaves exactly as it does in the browser: under the default `suspense: true` it suspends into `fallback` and fetches, so intercepting `fetch` (MSW, `vi.stubGlobal`) covers the loading-to-loaded path.
 
@@ -9124,6 +9133,16 @@ expect(onNavigate).toHaveBeenCalledWith("/app/abc/settings", "push");
 ```
 
 `useLocation()` keeps reporting the pathname the page was given. To assert what the destination renders, render it in its own `<Page>`.
+
+A navigation issued from a mount effect — `<Redirect>`, or an auth guard that pushes on render — is reported too.
+
+## Server rendering
+
+`renderToString(<Page …>…</Page>)` works, and a **seeded** query renders its data there exactly as it does in the browser. An **unseeded** one does not suspend: it renders the server's no-data branch and logs the framework's "rendered on the server without data … add `Query.prefetch(…)`" warning.
+
+That is the real SSR contract rather than a gap in the harness. Suspending on the server is the streaming renderer's job: `createRoot` threads the request's query store through `ServerQueryContext`, and that store is what runs the route handler and produces the data to wait on. A harness has no request and no handler, so there is nothing to suspend on — the same thing happens to a real route whose view handler declares no `Query.prefetch`.
+
+So: assert seeded output under `renderToString`, and use a DOM renderer for the suspend-then-resolve path.
 
 ## Runner setup
 

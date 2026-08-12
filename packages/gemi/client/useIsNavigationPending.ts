@@ -3,15 +3,16 @@ import { ClientRouterContext } from "./ClientRouterContext";
 
 export function useIsNavigationPending() {
   const { isNavigatingSubject } = useContext(ClientRouterContext);
-  // Bound, like `useFormData` binds its own subject's: `Subject`'s methods
-  // read `this`, and `useSyncExternalStore` calls whatever it is handed as a
-  // plain function — so the unbound references this used to pass threw
-  // `undefined is not an object (evaluating 'this.value')` on the first render
-  // of any component that called this hook.
+  // These read `this`, and `useSyncExternalStore` calls whatever it is handed
+  // as a plain function — which used to throw `undefined is not an object
+  // (evaluating 'this.value')` on the first render of any component calling
+  // this hook. `Subject` now binds in its constructor, so the references are
+  // both correct and stable across renders; binding here instead would hand
+  // uSES a new `subscribe` every render and churn the subscription.
   const isNavigating = useSyncExternalStore(
-    isNavigatingSubject.subscribe.bind(isNavigatingSubject),
-    isNavigatingSubject.getValue.bind(isNavigatingSubject),
-    isNavigatingSubject.getValue.bind(isNavigatingSubject),
+    isNavigatingSubject.subscribe,
+    isNavigatingSubject.getValue,
+    isNavigatingSubject.getValue,
   );
 
   return isNavigating;

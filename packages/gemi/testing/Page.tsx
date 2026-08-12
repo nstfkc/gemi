@@ -1,6 +1,7 @@
 import {
   Suspense,
-  useEffect,
+  useContext,
+  useMemo,
   useRef,
   useState,
   type ComponentType,
@@ -15,6 +16,7 @@ import { ClientRouterContext } from "../client/ClientRouterContext";
 import { I18nProvider } from "../client/I18nContext";
 import { ProgressManager } from "../client/ProgressManager";
 import {
+  QueryManagerContext,
   QueryManagerProvider,
   type QueryConfig,
 } from "../client/QueryManagerContext";
@@ -28,10 +30,12 @@ import {
   ServerDataContext,
   type ServerDataContextValue,
 } from "../client/ServerDataProvider";
+import { ThemeProvider } from "../client/ThemeProvider";
 import type { Breadcrumb } from "../client/useBreadcrumbs";
 import { WebSocketContext } from "../client/WebsocketContext";
 import { applyParams } from "../utils/applyParams";
 import { Subject } from "../utils/Subject";
+import { toVariantKey } from "../utils/variantKey";
 
 /**
  * A dictionary as `Dictionary.create` produces it: a name and a
@@ -100,8 +104,16 @@ export interface PageProps {
   /**
    * Data `useQuery` finds already cached, keyed by API path — the path passed
    * to `useQuery`, without the `/api` prefix the client adds when it fetches.
-   * Keys may carry a query string (`"/lists?page=2"`) to seed one search
-   * variant, and may use `:params`, which resolve against `params`.
+   * A key may carry a query string (`"/lists?page=2"`) to seed one search
+   * variant.
+   *
+   * The cache is keyed by the *resolved* path, so a key's `:params` are
+   * resolved against the page's `params` — and a key naming one the page does
+   * not carry is an error, naming the key. That case is common enough to be
+   * worth the loud failure: a query often takes its params from the call site
+   * rather than the route (`useQuery("/orgs/:orgId/lists", { params: { orgId } })`
+   * with `orgId` in component state), and the right seed for it is the resolved
+   * path, `"/orgs/abc/lists"`.
    *
    * Seeded at mount only: a component that mutates or refetches its data owns
    * the cache from then on.
@@ -116,6 +128,12 @@ export interface PageProps {
   user?: Partial<User> | null;
   /** What `useBreadcrumbs()` returns, in order. */
   breadcrumbs?: Breadcrumb[];
+  /**
+   * The theme `useTheme()` starts on. The app reads a visitor's stored choice
+   * out of `localStorage`; a test has no session to have made one in, so this
+   * seeds it without writing to storage. `setTheme` works from either.
+   */
+  theme?: "light" | "dark" | "system";
   /**
    * Fallback for the `Suspense` boundary wrapped around the children — the
    * stand-in for the view's own `Loading` export, which the real router
@@ -150,11 +168,61 @@ function toSearchString(search: PageProps["searchParams"]): string {
   return query ? `?${query}` : "";
 }
 
-/** The cache's variant key: sorted search params, empty when there are none. */
-function toVariantKey(search: string): string {
-  const searchParams = new URLSearchParams(search);
-  searchParams.sort();
-  return searchParams.toString();
+/**
+ * The `:params` a seed key needs supplied. Wildcards (`:rest*`) are excluded —
+ * `applyParams` drops those when missing, which is a resolution rather than a
+ * failure.
+ *
+ * Optional params (`:id?`) cannot reach here at all: a key is split at its
+ * first `?` to separate the search string, so `"/lists/:folderId?"` arrives as
+ * the path `/lists/:folderId`. Seed the resolved path for those.
+ */
+function requiredParamsOf(path: string): string[] {
+  return Array.from(path.matchAll(/:([^/]+)/g), ([, name]) => name).filter(
+    (name) => !name.endsWith("*"),
+  );
+}
+
+/**
+ * Fails a `queryData` key whose `:params` the page does not carry, saying so
+ * in terms of the key.
+ *
+ * Without this the two documented runners disagree, and neither is legible.
+ * `applyParams` throws `Missing parameter: orgId` under `import.meta.env.DEV`
+ * (vitest) — a router-utility stack trace out of `<Page>`'s render, before
+ * anything mounts, naming nothing that appears in the test. Under `bun test`
+ * that flag is falsy, so it logs and seeds the literal `/orgs/undefined/lists`
+ * instead: the seed misses, the query goes to the network, and the assertion
+ * runs against a loading state.
+ *
+ * The case is common because a query's params often come from the call site
+ * rather than the route — `useQuery("/orgs/:orgId/lists", { params: { orgId } })`
+ * with `orgId` in component state. The cache is keyed by the *resolved* path,
+ * so the way out is to seed that path directly.
+ */
+function resolveSeedPath(
+  key: string,
+  rawPath: string,
+  params: Record<string, string>,
+): string {
+  const missing = requiredParamsOf(rawPath).filter(
+    (name) => params[name] === undefined,
+  );
+  if (missing.length > 0) {
+    throw new Error(
+      `[gemi] <Page> cannot resolve the queryData key "${key}": no value for ` +
+        `${missing.map((name) => `:${name}`).join(", ")}. The query cache is ` +
+        `keyed by the resolved path, so either add ${missing
+          .map((name) => `\`${name}\``)
+          .join(", ")} to the page's \`params\`, or seed the resolved path ` +
+        `(e.g. "${applyParams(
+          rawPath,
+          Object.fromEntries(missing.map((name) => [name, "123"])),
+        )}") — which is what a query taking its params from component state ` +
+        `reads under.`,
+    );
+  }
+  return applyParams(rawPath, params);
 }
 
 /**
@@ -164,18 +232,22 @@ function toVariantKey(search: string): string {
 function toPrefetchedData(
   queryData: Record<string, unknown>,
   params: Record<string, string>,
+  warned: Set<string>,
 ) {
   const prefetchedData: Record<string, Record<string, unknown>> = {};
   for (const [key, data] of Object.entries(queryData)) {
     const [rawPath, rawSearch = ""] = key.split("?");
-    if (rawPath.startsWith("/api/")) {
+    // Once per key per page, not once per render: this runs again on every
+    // re-render, and a duplicated warning reads as a second mistake.
+    if (rawPath.startsWith("/api/") && !warned.has(key)) {
+      warned.add(key);
       console.warn(
         `[gemi] queryData key "${key}" starts with /api. useQuery is keyed by ` +
           `the path you pass it — the /api prefix is added when it fetches — ` +
           `so this entry seeds a path no query reads.`,
       );
     }
-    const path = applyParams(rawPath, params);
+    const path = resolveSeedPath(key, rawPath, params);
     prefetchedData[path] = {
       ...prefetchedData[path],
       [toVariantKey(rawSearch)]: data,
@@ -248,11 +320,22 @@ function toClientDictionary(
  * ```
  *
  * It is a plain component, so it composes with any renderer — Testing
- * Library's `render`, `renderToString`, `react-test-renderer`.
+ * Library's `render`, `react-test-renderer`, or `renderToString`.
  *
- * What it does not do is route. There is no view tree and no route manifest
- * behind it, so a navigation is reported through `onNavigate` rather than
- * resolved; to assert the page *after* a navigation, render a second `<Page>`.
+ * Two things it does not do.
+ *
+ * It does not route: there is no view tree and no route manifest behind it, so
+ * a navigation is reported through `onNavigate` rather than resolved. To
+ * assert the page *after* one, render a second `<Page>`.
+ *
+ * And under `renderToString` it renders the server's own no-data branch for an
+ * *unseeded* query rather than suspending — deliberately, because suspending
+ * there is the streaming server's job: `createRoot` threads the request's
+ * `ServerQueryStore` through `ServerQueryContext`, and that store is what runs
+ * the route handler. A harness has no request and no handler to run, so there
+ * is nothing to suspend on. Seeded queries render their data on the server
+ * exactly as they do in the browser; unseeded ones behave as a route with no
+ * `Query.prefetch` does, framework warning included.
  */
 export const Page = (props: PropsWithChildren<PageProps>) => {
   const {
@@ -269,41 +352,61 @@ export const Page = (props: PropsWithChildren<PageProps>) => {
     queryConfig,
     user = null,
     breadcrumbs = [],
+    theme,
     fallback = null,
     errorFallback,
     onNavigate,
   } = props;
 
-  const supportedLocales = Array.from(
-    new Set([defaultLocale, locale, ...(props.supportedLocales ?? [])]),
+  // The caller's list, in the caller's order — a language switcher maps over
+  // it, so hoisting the page's own locale to the front would reorder the
+  // rendered options. The defaults are appended, only to guarantee presence.
+  const supportedLocales = useMemo(
+    () =>
+      Array.from(
+        new Set([...(props.supportedLocales ?? []), defaultLocale, locale]),
+      ),
+    [props.supportedLocales, defaultLocale, locale],
   );
   const pathname = applyParams(routePath, params) || "/";
   const search = toSearchString(searchParams);
   // The URL's locale segment, which the default locale does not get.
   const urlLocaleSegment = locale === defaultLocale ? null : locale;
 
-  const dictionary = toClientDictionary(
-    dictionaries,
-    supportedLocales,
-    locale,
-    translations,
+  const dictionary = useMemo(
+    () =>
+      toClientDictionary(dictionaries, supportedLocales, locale, translations),
+    [dictionaries, supportedLocales, locale, translations],
   );
-  const prefetchedData = toPrefetchedData(queryData, params);
-  // `useUser` reads `/auth/me` like any other query. Seeding it — with `null`
-  // for the anonymous default — is what keeps a component test off the network
-  // for a hook nothing in the test asked for.
-  prefetchedData["/auth/me"] ??= { "": user ?? null };
+
+  // Keys that have already drawn a warning, so a re-render does not repeat it.
+  const warnedRef = useRef<Set<string>>(new Set());
+  const prefetchedData = useMemo(() => {
+    const seeded = toPrefetchedData(queryData, params, warnedRef.current);
+    // `useUser` reads `/auth/me` like any other query. Seeding it — with `null`
+    // for the anonymous default — is what keeps a component test off the
+    // network for a hook nothing in the test asked for.
+    seeded["/auth/me"] ??= { "": user ?? null };
+    return seeded;
+  }, [queryData, params, user]);
 
   // Keyed by `${view}:${pathname}` in the router's cache; the view names are
   // ours to choose here, and only their order reaches `useBreadcrumbs`.
-  const breadcrumbViews = breadcrumbs.map((_, index) => `breadcrumb-${index}`);
-  const breadcrumbsCache = new Map<string, Breadcrumb>(
-    breadcrumbs.map((breadcrumb, index) => [
-      `${breadcrumbViews[index]}:${pathname}`,
-      breadcrumb,
-    ]),
-  );
-  const breadcrumbsRecord = Object.fromEntries(breadcrumbsCache);
+  const { breadcrumbViews, breadcrumbsCache, breadcrumbsRecord } =
+    useMemo(() => {
+      const views = breadcrumbs.map((_, index) => `breadcrumb-${index}`);
+      const cache = new Map<string, Breadcrumb>(
+        breadcrumbs.map((breadcrumb, index) => [
+          `${views[index]}:${pathname}`,
+          breadcrumb,
+        ]),
+      );
+      return {
+        breadcrumbViews: views,
+        breadcrumbsCache: cache,
+        breadcrumbsRecord: Object.fromEntries(cache),
+      };
+    }, [breadcrumbs, pathname]);
 
   const [isNavigatingSubject] = useState(() => new Subject<boolean>(false));
   const [progressManager] = useState(
@@ -313,123 +416,216 @@ export const Page = (props: PropsWithChildren<PageProps>) => {
     createMemoryHistory({ initialEntries: [`${pathname}${search}${hash}`] }),
   );
 
-  const routeState: RouteState & PageData = {
-    views: [],
-    params,
-    search,
-    state: {},
-    pathname,
-    hash,
-    action: null,
-    routePath,
-    locale: urlLocaleSegment,
-    data: {},
-    i18n: { currentLocale: locale, dictionary, supportedLocales },
-    prefetchedData,
-    breadcrumbs: breadcrumbsRecord,
-    appId: "test",
-  };
+  const routeState: RouteState & PageData = useMemo(
+    () => ({
+      views: [],
+      params,
+      search,
+      state: {},
+      pathname,
+      hash,
+      action: null,
+      routePath,
+      locale: urlLocaleSegment,
+      data: {},
+      i18n: { currentLocale: locale, dictionary, supportedLocales },
+      prefetchedData,
+      breadcrumbs: breadcrumbsRecord,
+      appId: "test",
+    }),
+    [
+      params,
+      search,
+      pathname,
+      hash,
+      routePath,
+      urlLocaleSegment,
+      locale,
+      dictionary,
+      supportedLocales,
+      prefetchedData,
+      breadcrumbsRecord,
+    ],
+  );
 
   const [routerSubject] = useState(() => new Subject<RouteState>(routeState));
 
   const onNavigateRef = useRef(onNavigate);
   onNavigateRef.current = onNavigate;
-  useEffect(() => {
-    return history.listen(({ location, action }) => {
+  // Subscribed during render, not in an effect, because React flushes child
+  // effects before parent ones — and mount-time navigation is a real pattern:
+  // `<Redirect>` pushes from its own mount effect, as does any auth guard. A
+  // listener registered in `<Page>`'s effect is not there yet when those fire,
+  // so `onNavigate` would silently miss exactly the redirects a test most
+  // wants to assert. Ref-guarded, so React's double-invoke registers one.
+  //
+  // Nothing unsubscribes: this history is created per `<Page>` and reachable
+  // from nowhere else, so it is collected with the page it belongs to.
+  const listeningRef = useRef(false);
+  if (!listeningRef.current) {
+    listeningRef.current = true;
+    history.listen(({ location, action }) => {
       const href = `${location.pathname}${location.search}${location.hash}`;
       onNavigateRef.current?.(
         href,
         action === Action.Replace ? "replace" : "push",
       );
     });
-  }, [history]);
+  }
 
-  const serverData: ServerDataContextValue = {
-    routeManifest: {},
-    pageData: {},
-    breadcrumbs: breadcrumbsRecord,
-    prefetchedData,
-    router: {
+  const serverData: ServerDataContextValue = useMemo(
+    () => ({
+      routeManifest: {},
+      pageData: {},
+      breadcrumbs: breadcrumbsRecord,
+      prefetchedData,
+      router: {
+        pathname,
+        params,
+        currentPath: routePath,
+        is404: false,
+        searchParams: search,
+        urlLocaleSegment,
+      },
+      i18n: {
+        dictionary,
+        currentLocale: locale,
+        supportedLocales,
+        defaultLocale,
+      },
+      componentTree: [],
+      auth: { user: user as User },
+      __csrf: "test-csrf-token",
+      cssManifest: {},
+      modulePreloadManifest: {},
+      meta: {},
+      appId: "test",
+    }),
+    [
+      breadcrumbsRecord,
+      prefetchedData,
       pathname,
       params,
-      currentPath: routePath,
-      is404: false,
-      searchParams: search,
+      routePath,
+      search,
       urlLocaleSegment,
-    },
-    i18n: {
       dictionary,
-      currentLocale: locale,
+      locale,
       supportedLocales,
       defaultLocale,
-    },
-    componentTree: [],
-    auth: { user: user as User },
-    __csrf: "test-csrf-token",
-    cssManifest: {},
-    modulePreloadManifest: {},
-    meta: {},
-    appId: "test",
-  };
+      user,
+    ],
+  );
 
   // Everything the router hooks read, inert: nothing here fetches, preloads or
   // resolves a route, but every hook finds the shape it expects rather than an
   // empty context to crash on.
-  const routerContext = {
-    viewEntriesSubject: new Subject<string[]>([]),
-    history,
-    updatePageData: () => {},
-    getPageData: () => ({}),
-    getScrollPosition: () => 0,
-    getViewPathsFromPathname: () => breadcrumbViews,
-    getRoutePathnameFromHref: (href: string) => href,
-    isNavigatingSubject,
-    setNavigationAbortController: () => {},
-    progressManager,
-    fetchRouteCSS: async () => {},
-    preloadRouteModules: () => {},
-    prefetchRoute: async () => {},
-    takePrefetched: () => null,
-    clearPrefetchCache: () => {},
-    breadcrumbsCache,
-    routerSubject,
-    urlLocaleSegment,
-  };
+  const [viewEntriesSubject] = useState(() => new Subject<string[]>([]));
+  const routerContext = useMemo(
+    () => ({
+      viewEntriesSubject,
+      history,
+      updatePageData: () => {},
+      getPageData: () => ({}),
+      getScrollPosition: () => 0,
+      getViewPathsFromPathname: () => breadcrumbViews,
+      getRoutePathnameFromHref: (href: string) => href,
+      isNavigatingSubject,
+      setNavigationAbortController: () => {},
+      progressManager,
+      fetchRouteCSS: async () => {},
+      preloadRouteModules: () => {},
+      prefetchRoute: async () => {},
+      takePrefetched: () => null,
+      clearPrefetchCache: () => {},
+      breadcrumbsCache,
+      routerSubject,
+      urlLocaleSegment,
+    }),
+    [
+      viewEntriesSubject,
+      history,
+      breadcrumbViews,
+      isNavigatingSubject,
+      progressManager,
+      breadcrumbsCache,
+      routerSubject,
+      urlLocaleSegment,
+    ],
+  );
 
-  const websocket = {
+  const [websocket] = useState(() => ({
     subscribe: async () => {},
     unsubscribe: async () => {},
     broadcast: () => {},
-  };
-
-  const ErrorFallback = errorFallback;
-  const content = <Suspense fallback={fallback}>{children}</Suspense>;
+  }));
 
   return (
-    <ServerDataContext.Provider value={serverData}>
-      <I18nProvider>
-        <WebSocketContext.Provider value={websocket}>
-          <QueryManagerProvider queryConfig={queryConfig}>
-            <ClientRouterContext.Provider value={routerContext}>
-              <RouteTransitionProvider
-                isPending={false}
-                isFetching={false}
-                transitionPath={["", pathname]}
-              >
-                <RouteStateProvider state={routeState}>
-                  {ErrorFallback ? (
-                    <ErrorBoundary FallbackComponent={ErrorFallback}>
-                      {content}
-                    </ErrorBoundary>
-                  ) : (
-                    content
-                  )}
-                </RouteStateProvider>
-              </RouteTransitionProvider>
-            </ClientRouterContext.Provider>
-          </QueryManagerProvider>
-        </WebSocketContext.Provider>
-      </I18nProvider>
-    </ServerDataContext.Provider>
+    <ThemeProvider theme={theme}>
+      <ServerDataContext.Provider value={serverData}>
+        <I18nProvider>
+          <WebSocketContext.Provider value={websocket}>
+            <QueryManagerProvider queryConfig={queryConfig}>
+              <ClientRouterContext.Provider value={routerContext}>
+                <RouteTransitionProvider
+                  isPending={false}
+                  isFetching={false}
+                  transitionPath={["", pathname]}
+                >
+                  <RouteStateProvider state={routeState}>
+                    <Boundary
+                      errorFallback={errorFallback}
+                      fallback={fallback}
+                      resetKey={pathname}
+                    >
+                      {children}
+                    </Boundary>
+                  </RouteStateProvider>
+                </RouteTransitionProvider>
+              </ClientRouterContext.Provider>
+            </QueryManagerProvider>
+          </WebSocketContext.Provider>
+        </I18nProvider>
+      </ServerDataContext.Provider>
+    </ThemeProvider>
+  );
+};
+
+/**
+ * The `Suspense` boundary every view renders inside, and — when the test
+ * supplies a fallback for it — the error boundary too.
+ *
+ * `onReset={clearErrors}` is the part that has to be here rather than inline
+ * above: it needs `QueryManagerContext`, and it is what makes a view's real
+ * `Error` export testable. A fallback whose "Try again" calls
+ * `resetErrorBoundary()` re-renders the child, and `useQuery` reads the
+ * failure still stored on the `QueryResource` and throws it straight back —
+ * so without this the fallback never goes away and the retry path that works
+ * in the app cannot be exercised. `ClientRouter`'s own boundary wires exactly
+ * this pair.
+ */
+const Boundary = (
+  props: PropsWithChildren<{
+    errorFallback?: ComponentType<FallbackProps>;
+    fallback: ReactNode;
+    resetKey: string;
+  }>,
+) => {
+  const { errorFallback: ErrorFallback, fallback, resetKey, children } = props;
+  const { clearErrors } = useContext(QueryManagerContext);
+  const content = <Suspense fallback={fallback}>{children}</Suspense>;
+
+  if (!ErrorFallback) {
+    return content;
+  }
+
+  return (
+    <ErrorBoundary
+      FallbackComponent={ErrorFallback}
+      resetKeys={[resetKey]}
+      onReset={clearErrors}
+    >
+      {content}
+    </ErrorBoundary>
   );
 };

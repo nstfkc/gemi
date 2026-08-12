@@ -1,10 +1,21 @@
 /** @vitest-environment jsdom */
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { useContext } from "react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+
+import { I18nContext } from "../client/I18nContext";
 
 import { Page } from "./Page";
 import { Form } from "../client/Mutation";
 import { Link } from "../client/Link";
+import { Redirect } from "../client/Redirect";
+import { useTheme } from "../client/ThemeProvider";
 import { useBreadcrumbs } from "../client/useBreadcrumbs";
 import { useIsNavigationPending } from "../client/useIsNavigationPending";
 import { useLocation } from "../client/useLocation";
@@ -123,6 +134,64 @@ describe("<Page> route state", () => {
     screen.getByText("Settings").click();
 
     expect(onNavigate).toHaveBeenCalledWith("/app/abc/settings", "push");
+  });
+
+  test("catches a navigation issued from a child's mount effect", () => {
+    // `<Redirect>` pushes from its own effect, and React flushes child effects
+    // before the parent's — so a listener registered in `<Page>`'s effect
+    // would not exist yet, and the auth-guard views that redirect on mount
+    // would look like they do nothing.
+    const onNavigate = vi.fn();
+
+    render(
+      <Page pathname="/app" onNavigate={onNavigate}>
+        <Redirect href={"/login" as never} action="replace" />
+      </Page>,
+    );
+
+    expect(onNavigate).toHaveBeenCalledWith("/login", "replace");
+  });
+
+  test("keeps the caller's `supportedLocales` order", () => {
+    function View() {
+      const { supportedLocales } = useContext(I18nContext);
+      return <div>{supportedLocales.join(",")}</div>;
+    }
+
+    // A language switcher maps over this list, so the page's own locale must
+    // not be hoisted to the front of it.
+    render(
+      <Page
+        locale="de-DE"
+        defaultLocale="en-US"
+        supportedLocales={["en-US", "tr-TR", "de-DE"]}
+      >
+        <View />
+      </Page>,
+    );
+
+    expect(screen.getByText("en-US,tr-TR,de-DE")).toBeDefined();
+  });
+
+  test("seeds the theme, and `setTheme` still works from there", () => {
+    function View() {
+      const { theme, setTheme } = useTheme();
+      return (
+        <button type="button" onClick={() => setTheme("light")}>
+          {theme}
+        </button>
+      );
+    }
+
+    render(
+      <Page theme="dark">
+        <View />
+      </Page>,
+    );
+
+    expect(screen.getByText("dark")).toBeDefined();
+    fireEvent.click(screen.getByText("dark"));
+    expect(screen.getByText("light")).toBeDefined();
   });
 
   test("the navigation-state hooks read from the page's idle router", () => {
@@ -324,6 +393,38 @@ describe("<Page> query data", () => {
     expect(fetchSpy).toHaveBeenCalled();
   });
 
+  test("a key whose `:param` the page cannot fill fails naming the key", () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    // `useQuery("/orgs/:orgId/lists", { params: { orgId } })` with `orgId` in
+    // component state resolves to a path the page's params know nothing about.
+    // Left to `applyParams`, that throws `Missing parameter: orgId` under
+    // vitest and silently seeds `/orgs/undefined/lists` under `bun test` —
+    // two wrong behaviours for one mistake, neither naming the seed key.
+    expect(() =>
+      render(
+        <Page queryData={{ "/orgs/:orgId/lists": [] }}>
+          <div>never rendered</div>
+        </Page>,
+      ),
+    ).toThrow(/queryData key "\/orgs\/:orgId\/lists".*:orgId/s);
+  });
+
+  test("the /api-prefix warning fires once per key, not once per render", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const ui = (
+      <Page queryData={{ "/api/todos": [] }}>
+        <div>rendered</div>
+      </Page>
+    );
+    const { rerender } = render(ui);
+    rerender(ui);
+    rerender(ui);
+
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
   test("a throwing view renders `errorFallback` instead of failing the render", () => {
     function View(): never {
       throw new Error("boom");
@@ -338,6 +439,44 @@ describe("<Page> query data", () => {
     );
 
     expect(screen.getByText("caught:boom")).toBeDefined();
+  });
+
+  test("`resetErrorBoundary` clears the stored query error, so a retry recovers", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    // The retry path a view's real `Error` export offers. Without
+    // `onReset={clearErrors}`, resetting re-renders the child, `useQuery`
+    // reads the failure still held on the resource and throws it straight
+    // back, and the fallback never goes away.
+    fetchSpy.mockImplementationOnce(
+      async () =>
+        new Response(JSON.stringify({ error: "nope" }), { status: 500 }),
+    );
+
+    function View() {
+      const { data } = useQuery("/todos" as never);
+      return <div>{`items:${(data as any as unknown[]).length}`}</div>;
+    }
+
+    render(
+      <Page
+        errorFallback={({ resetErrorBoundary }) => (
+          <button type="button" onClick={resetErrorBoundary}>
+            Try again
+          </button>
+        )}
+      >
+        <View />
+      </Page>,
+    );
+
+    await waitFor(() => expect(screen.getByText("Try again")).toBeDefined());
+
+    fetchSpy.mockImplementation(
+      async () => new Response(JSON.stringify([{ id: 1 }]), { status: 200 }),
+    );
+    screen.getByText("Try again").click();
+
+    await waitFor(() => expect(screen.getByText("items:1")).toBeDefined());
   });
 });
 

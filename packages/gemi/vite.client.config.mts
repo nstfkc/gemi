@@ -22,6 +22,13 @@ export default defineConfig({
     outDir: "dist",
     // `dist/` already holds the output of `build:core`, `build:bin` and
     // `build:types` by the time this runs — this build adds to it.
+    //
+    // Which loses the sweep vite does for free on an outDir it owns, and that
+    // matters now the output is content-hashed: run `build:client` twice
+    // without a clean and the first run's `chunks/*-<oldhash>.js` stays on
+    // disk, `build-publish.ts` copies `dist/` wholesale, and `files:
+    // ["dist/**/*"]` ships the dead chunks. The `build:client` script removes
+    // exactly the three directories this config writes before invoking it.
     emptyOutDir: false,
     rollupOptions: {
       output: { chunkFileNames: "chunks/[name]-[hash].js" },
