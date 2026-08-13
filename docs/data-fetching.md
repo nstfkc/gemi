@@ -177,6 +177,7 @@ const { data } = useQuery("/feed", {}, {
   refreshInterval: 5000,   // poll every 5s
   retryIntervalOnError: 10000, // background retry — suspense: false only
   revalidateOnFocus: false, // revalidate when the tab comes back to the foreground
+  focusThrottleInterval: 5000, // minimum gap between two focus revalidations
   staleTime: 5000,         // how long cached data stays fresh (default 5000ms)
   lazy: false,             // when true, no fetch until trigger()/refetch(); implies suspense: false
 });
@@ -200,11 +201,26 @@ entirely — `mutate()` and `refetch()` still fetch, since those are explicit.
 
 `revalidateOnFocus` refetches when the tab comes back to the foreground — the
 user switching windows, returning from another tab, or unlocking the device.
-It is off by default, and `staleTime` gates it: a quick tab-out-and-back costs
-nothing, and only data older than its freshness window goes back to the wire.
-The refetch is silent, so what's on screen keeps rendering (no `loading` flip,
-no fallback) until the new data lands. A `lazy` query that hasn't been
-triggered stays untouched.
+It is off by default, and the refetch is always silent: what's on screen keeps
+rendering (no `loading` flip, no fallback) until the new data lands.
+
+Three things keep it from firing more than it should:
+
+- **`staleTime`** — a quick tab-out-and-back costs nothing; only data older
+  than its freshness window goes back to the wire.
+- **A return actually has to have happened.** `focus` also fires for things
+  that never left the page (dismissing an `alert` or a file picker, closing
+  devtools), so a revalidation is only owed when the window lost focus or the
+  tab was hidden first.
+- **`focusThrottleInterval`** (default 5000ms) — the minimum gap between two
+  focus revalidations of the same query. Clicking in and out of an embedded
+  iframe (a payment form, a video) blurs and focuses the window every time, and
+  the handler runs for *every* mounted query, so without this a dashboard under
+  `staleTime: 0` would fire a request per query per click.
+
+A `lazy` query only becomes eligible once something has explicitly fetched it —
+`trigger()`, `refetch()` or `mutate()`. `prefetch()` deliberately does not
+count: it is "fetch once" for data the user may never look at.
 
 ### Optimistic updates with `mutate`
 

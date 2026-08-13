@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { Suspense, act } from "react";
+import { Suspense, act, useState } from "react";
 import type { PropsWithChildren } from "react";
 import { cleanup, render } from "@testing-library/react";
 
@@ -81,15 +81,30 @@ function setVisibility(state: DocumentVisibilityState) {
   });
 }
 
-/** Age the cache past the default `staleTime` (5s). */
-function ageCache() {
-  vi.setSystemTime(Date.now() + 10_000);
+/**
+ * Age the cache past the default `staleTime` (5s) — and, with the same tick,
+ * past the default `focusThrottleInterval` (5s).
+ */
+function ageCache(ms = 10_000) {
+  vi.setSystemTime(Date.now() + ms);
 }
 
 async function focusWindow() {
   await act(async () => {
     window.dispatchEvent(new Event("focus"));
   });
+}
+
+async function blurWindow() {
+  await act(async () => {
+    window.dispatchEvent(new Event("blur"));
+  });
+}
+
+/** The whole gesture the feature is named after: leave, come back. */
+async function leaveAndReturn() {
+  await blurWindow();
+  await focusWindow();
 }
 
 async function fireVisibilityChange() {
@@ -129,7 +144,7 @@ describe("revalidateOnFocus", () => {
     expect(screen.queryByText("items:1")).not.toBeNull();
     ageCache();
 
-    await focusWindow();
+    await leaveAndReturn();
     await fireVisibilityChange();
 
     expect(net.fetchMock).not.toHaveBeenCalled();
@@ -153,7 +168,7 @@ describe("revalidateOnFocus", () => {
     expect(net.fetchMock).not.toHaveBeenCalled();
     ageCache();
 
-    await focusWindow();
+    await leaveAndReturn();
 
     expect(net.fetchMock).toHaveBeenCalledTimes(1);
     // Silent: the seeded rows stay on screen while the refetch is in flight.
@@ -208,11 +223,11 @@ describe("revalidateOnFocus", () => {
     );
 
     // No time passes, so the seeded data is inside its freshness window.
-    await focusWindow();
+    await leaveAndReturn();
     expect(net.fetchMock).not.toHaveBeenCalled();
 
     ageCache();
-    await focusWindow();
+    await leaveAndReturn();
     expect(net.fetchMock).toHaveBeenCalledTimes(1);
   });
 
@@ -235,7 +250,7 @@ describe("revalidateOnFocus", () => {
     );
     expect(net.fetchMock).not.toHaveBeenCalled();
 
-    await focusWindow();
+    await leaveAndReturn();
 
     expect(net.fetchMock).not.toHaveBeenCalled();
     expect(screen.queryByText("items:none loading:false")).not.toBeNull();
@@ -254,7 +269,7 @@ describe("revalidateOnFocus", () => {
     );
     ageCache();
 
-    await focusWindow();
+    await leaveAndReturn();
 
     expect(net.fetchMock).toHaveBeenCalledTimes(1);
   });
@@ -276,9 +291,149 @@ describe("revalidateOnFocus", () => {
     );
     ageCache();
 
-    await focusWindow();
+    await leaveAndReturn();
 
     expect(net.fetchMock).not.toHaveBeenCalled();
+  });
+
+  test("silent even for a variant sitting on a failed fetch", async () => {
+    let rerender: (() => void) | null = null;
+    function View() {
+      // A non-silent fetch writes `loading: true` into the cache without
+      // notifying subscribers, so the flip only shows up on the next render
+      // the component performs for any other reason — this is that render.
+      const [, bump] = useState(0);
+      rerender = () => bump((n) => n + 1);
+      const { data, loading, error } = useQuery(
+        "/other" as any,
+        {},
+        { suspense: false, revalidateOnFocus: true },
+      );
+      return (
+        <div>
+          {`items:${data ? (data as any[]).length : "none"} loading:${loading} err:${error ? "yes" : "no"}`}
+        </div>
+      );
+    }
+
+    const screen = render(
+      <Providers>
+        <View />
+      </Providers>,
+    );
+    // The first load fails, leaving a variant with an error and no data.
+    await net.resolve({ message: "boom" }, false);
+    expect(
+      screen.queryByText("items:none loading:false err:yes"),
+    ).not.toBeNull();
+    expect(net.fetchMock).toHaveBeenCalledTimes(1);
+
+    ageCache();
+    await leaveAndReturn();
+    expect(net.fetchMock).toHaveBeenCalledTimes(2);
+
+    // The retry is on the wire; the rendered state is exactly what it was.
+    await act(async () => rerender!());
+    expect(
+      screen.queryByText("items:none loading:false err:yes"),
+    ).not.toBeNull();
+
+    await net.resolve([{ id: 1 }]);
+    expect(screen.queryByText("items:1 loading:false err:no")).not.toBeNull();
+  });
+
+  test("prefetch() does not enrol a lazy query; trigger() does", async () => {
+    let controls: { prefetch: () => void; trigger: () => void } | null = null;
+    function View() {
+      const { data, prefetch, trigger } = useQuery(
+        "/other" as any,
+        {},
+        { lazy: true, revalidateOnFocus: true },
+      );
+      controls = { prefetch, trigger };
+      return <div>{`items:${data ? (data as any[]).length : "none"}`}</div>;
+    }
+
+    render(
+      <Providers>
+        <View />
+      </Providers>,
+    );
+
+    // A hover prefetch is "fetch once" — data the user may never look at.
+    await act(async () => controls!.prefetch());
+    await net.resolve([{ id: 1 }]);
+    expect(net.fetchMock).toHaveBeenCalledTimes(1);
+
+    ageCache();
+    await leaveAndReturn();
+    expect(net.fetchMock).toHaveBeenCalledTimes(1);
+
+    // Triggering it puts the data on screen, and from then on it revalidates.
+    await act(async () => controls!.trigger());
+    ageCache();
+    await leaveAndReturn();
+    expect(net.fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  test("a focus with nothing to return from is ignored", async () => {
+    function View() {
+      const { data } = useQuery(
+        "/todos" as any,
+        {},
+        { revalidateOnFocus: true },
+      );
+      return <div>{`items:${(data as any[]).length}`}</div>;
+    }
+
+    render(
+      <Providers>
+        <View />
+      </Providers>,
+    );
+    ageCache();
+
+    // A dismissed `alert()` or a closed devtools pane: `focus` without the
+    // window ever having lost it.
+    await focusWindow();
+    expect(net.fetchMock).not.toHaveBeenCalled();
+
+    await leaveAndReturn();
+    expect(net.fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test("focusThrottleInterval spaces out repeated returns", async () => {
+    function View() {
+      const { data } = useQuery(
+        "/todos" as any,
+        {},
+        { staleTime: 0, revalidateOnFocus: true },
+      );
+      return <div>{`items:${(data as any[]).length}`}</div>;
+    }
+
+    render(
+      <Providers>
+        <View />
+      </Providers>,
+    );
+    // `staleTime: 0` — every read is stale, so the throttle is the only guard.
+    ageCache();
+
+    await leaveAndReturn();
+    expect(net.fetchMock).toHaveBeenCalledTimes(1);
+    await net.resolve([{ id: 1 }]);
+
+    // Clicking in and out of an embedded iframe: blur/focus pairs, no time
+    // passing. The throttle absorbs them.
+    await leaveAndReturn();
+    await leaveAndReturn();
+    expect(net.fetchMock).toHaveBeenCalledTimes(1);
+
+    // Past the interval, the next return revalidates again.
+    ageCache(6000);
+    await leaveAndReturn();
+    expect(net.fetchMock).toHaveBeenCalledTimes(2);
   });
 
   test("unmounting removes the listeners", async () => {
@@ -299,7 +454,7 @@ describe("revalidateOnFocus", () => {
     ageCache();
 
     screen.unmount();
-    await focusWindow();
+    await leaveAndReturn();
     await fireVisibilityChange();
 
     expect(net.fetchMock).not.toHaveBeenCalled();

@@ -42,6 +42,14 @@ interface Config<T> {
    * back to the wire — silently, keeping what's on screen rendered.
    */
   revalidateOnFocus?: boolean;
+  /**
+   * Minimum gap between two `revalidateOnFocus` revalidations of the same
+   * query, in ms (default 5000). `focus` fires on far more than tab returns —
+   * dismissing a file picker, closing a popup, clicking in and out of an
+   * embedded iframe — and `staleTime: 0` would otherwise turn each of those
+   * into a request per mounted query.
+   */
+  focusThrottleInterval?: number;
   /** How long cached data stays fresh before a read revalidates it, in ms. */
   staleTime?: number;
   debug?: boolean;
@@ -66,6 +74,7 @@ const defaultConfig: Config<any> = {
   retryIntervalOnError: 10000,
   refreshInterval: 999999,
   revalidateOnFocus: false,
+  focusThrottleInterval: 5000,
   staleTime: DEFAULT_STALE_TIME,
   debug: false,
   lazy: false,
@@ -275,6 +284,18 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
   );
   const refetchUntilDurationRef = useRef(0);
   const prefetchedRef = useRef(false);
+  // Focus revalidation eligibility, deliberately *not* `fetchedRef`: that one
+  // is flipped by `prefetch()` too, and a hover prefetch is documented as
+  // "fetch once" for data the user may never look at — enrolling it in focus
+  // revalidation would keep re-requesting it for the life of the component.
+  // Only the reads that put data on screen (`trigger`, `refetch`, `mutate`,
+  // or simply not being lazy) count.
+  const focusEligibleRef = useRef(!lazy);
+  // The away latch: `focus` fires for things that never left the page —
+  // dismissing an `alert`, returning from devtools — so a revalidation is only
+  // owed when the window actually lost focus or the tab was hidden first.
+  const wasAwayRef = useRef(false);
+  const lastFocusRevalidationRef = useRef(0);
 
   const subscribe = useCallback(
     (onStoreChange: () => void) => resource.store.subscribe(onStoreChange),
@@ -455,31 +476,62 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
   }, [config.refreshInterval, handleReload]);
 
   // Revalidate when the tab comes back to the foreground — opt-in via
-  // `revalidateOnFocus` (per call or app-wide). `getVariant` applies
-  // `staleTime`, so this is the same read the mount effect performs: data
-  // still inside its freshness window is left alone, and anything older
-  // refetches *silently*, so what's on screen never flashes a loading state.
+  // `revalidateOnFocus` (per call or app-wide). `resource.revalidate` applies
+  // `staleTime` like the mount effect does, but always fetches silently, so
+  // data still inside its freshness window is left alone and anything older
+  // is refreshed without what's on screen ever flashing a loading state.
+  //
+  // Three guards decide whether a return to the foreground is owed a request,
+  // because `focus` alone is a poor proxy for one:
+  //   - eligibility — an untriggered lazy query has nothing on screen;
+  //   - the away latch — `focus` also fires for a dismissed `alert` or a
+  //     closed devtools pane, neither of which is a return from anywhere;
+  //   - the throttle — clicking in and out of an embedded iframe (a payment
+  //     form, a video) blurs and focuses the window every time, and `focus`
+  //     runs this for *every* mounted query, so a dashboard would otherwise
+  //     fire a dozen requests per interaction under `staleTime: 0`.
   //
   // Both events are listened for because neither covers the other: switching
   // between windows fires `focus` while the document stays visible, and
   // switching tabs (or unlocking the device) fires `visibilitychange` without
-  // necessarily firing `focus`. Landing on the same `getVariant` call makes
-  // the overlap a no-op — the second read finds the fetch in flight.
+  // necessarily firing `focus`. They land on one guarded call, so the overlap
+  // costs nothing — the latch is already spent by the time the second fires.
   useEffect(() => {
     if (!config.revalidateOnFocus) return;
-    const revalidate = () => {
-      // A lazy query that was never triggered stays untouched, and a
-      // `focus` fired while the document is hidden isn't a return to the
-      // foreground.
-      if (!fetchedRef.current) return;
-      if (document.visibilityState === "hidden") return;
-      resource.getVariant(variantKey, configRef.current.staleTime);
+    const markAway = () => {
+      wasAwayRef.current = true;
     };
+    const revalidate = () => {
+      if (!focusEligibleRef.current) return;
+      if (document.visibilityState === "hidden") return;
+      if (!wasAwayRef.current) return;
+      const now = Date.now();
+      // Throttled: leave the latch armed so the next return, once the
+      // interval has passed, still revalidates.
+      if (
+        now - lastFocusRevalidationRef.current <
+        configRef.current.focusThrottleInterval
+      ) {
+        return;
+      }
+      wasAwayRef.current = false;
+      lastFocusRevalidationRef.current = now;
+      resource.revalidate(variantKey, configRef.current.staleTime);
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") {
+        markAway();
+      } else {
+        revalidate();
+      }
+    };
+    window.addEventListener("blur", markAway);
     window.addEventListener("focus", revalidate);
-    document.addEventListener("visibilitychange", revalidate);
+    document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
+      window.removeEventListener("blur", markAway);
       window.removeEventListener("focus", revalidate);
-      document.removeEventListener("visibilitychange", revalidate);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, [config.revalidateOnFocus, resource, variantKey]);
 
@@ -502,6 +554,7 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
 
   const trigger = useCallback(() => {
     fetchedRef.current = true;
+    focusEligibleRef.current = true;
     const store = resource.store.getValue();
     const variant = store.get(variantKey);
     if (!variant || (!variant.loading && !variant.hasData)) {
@@ -520,6 +573,7 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
 
   const refetch = useCallback(() => {
     fetchedRef.current = true;
+    focusEligibleRef.current = true;
     resource.refetch(variantKey);
   }, [resource, variantKey]);
 
@@ -528,6 +582,9 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
     fn?: (data: NestedPrettify<Data<T>>) => NestedPrettify<Data<T>>,
   ): void;
   function mutate(fn?: any) {
+    // Either form ends in a fetch whose result the component renders, so a
+    // lazy query mutated by hand is as focus-eligible as a triggered one.
+    focusEligibleRef.current = true;
     if (!fn) {
       fetchedRef.current = true;
       resource.refetch(variantKey);

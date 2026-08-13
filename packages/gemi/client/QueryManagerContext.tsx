@@ -36,6 +36,11 @@ export interface QueryConfig {
    * `staleTime`. Off by default.
    */
   revalidateOnFocus?: boolean;
+  /**
+   * Minimum gap between two focus revalidations of the same query, in ms
+   * (default 5000).
+   */
+  focusThrottleInterval?: number;
 }
 
 export const QueryConfigContext = createContext<QueryConfig | null>(null);
@@ -56,6 +61,7 @@ const APP_WIDE_QUERY_CONFIG_KEYS = [
   "retryIntervalOnError",
   "refreshInterval",
   "revalidateOnFocus",
+  "focusThrottleInterval",
 ] as const satisfies ReadonlyArray<keyof QueryConfig>;
 
 export function pickAppWideQueryConfig(
