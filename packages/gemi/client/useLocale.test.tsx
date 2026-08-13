@@ -105,6 +105,41 @@ describe("useLocale().setLocale", () => {
     expect(replaced).toHaveLength(1);
   });
 
+  test("navigates on a runtime with no fetch at all", async () => {
+    // Old WebViews. An unguarded call throws *synchronously*, which would skip
+    // the navigation the same way the awaited cookie write used to.
+    vi.stubGlobal("fetch", undefined);
+
+    const { setLocale, replaced } = renderSetLocale();
+    await act(async () => {
+      await setLocale("en-US");
+    });
+
+    expect(replaced).toHaveLength(1);
+  });
+
+  test("keeps a malformed locale inside the cookie value", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => new Promise(() => {})),
+    );
+
+    const { setLocale } = renderSetLocale();
+    await act(async () => {
+      await setLocale("en-US; Domain=.example.com");
+    });
+
+    // The `;` has to stay inside the value. Written raw it would terminate it
+    // and the rest would be parsed as a `Domain` attribute, leaving `en-US`
+    // behind as the stored locale.
+    const value = document.cookie
+      .split("; ")
+      .find((pair) => pair.startsWith("i18n-locale="))
+      ?.slice("i18n-locale=".length);
+
+    expect(decodeURIComponent(value ?? "")).toBe("en-US; Domain=.example.com");
+  });
+
   test("writes the locale cookie before navigating", async () => {
     // Switching *to* the default locale produces a URL with no locale segment,
     // so the route-data request is resolved by the cookie alone — write it late
