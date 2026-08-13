@@ -207,6 +207,31 @@ export class QueryResource {
   }
 
   /**
+   * A background revalidation: the staleness gate `getVariant` applies, but
+   * the fetch is *always* silent — `loading: true` is never written to the
+   * cache, so what the caller renders is untouched until the new data lands.
+   *
+   * That is the difference from `getVariant`, which only takes the silent path
+   * for a variant that already `hasData`: a variant sitting on a failed fetch
+   * (`hasData: false`, an error stored) would otherwise flip `loading` on for
+   * the duration of the request. Focus revalidation reads through here so its
+   * "never changes what's on screen" contract holds in that case too.
+   */
+  revalidate(variantKey: string, staleTime: number = DEFAULT_STALE_TIME) {
+    if (typeof window === "undefined") return;
+    // Joining beats racing — a render-initiated read or the mount effect may
+    // already have this variant on the wire.
+    if (this.inflight.has(variantKey)) return;
+    const state = this.peek(variantKey);
+    if (state?.loading) return;
+    if (state?.hasData) {
+      if (!this.isStale(variantKey, staleTime)) return;
+      this.lastFetchRecord.set(variantKey, Date.now());
+    }
+    this.resolveVariant(variantKey, true);
+  }
+
+  /**
    * Drop the error for one variant (or every variant when omitted), so an
    * error boundary reset re-renders into a clean read instead of instantly
    * re-throwing the stored failure.
