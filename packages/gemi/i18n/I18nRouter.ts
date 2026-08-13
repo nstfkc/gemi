@@ -5,11 +5,16 @@ import { Translator } from "./Translator";
 export class I18nRouter extends ApiRouter {
   middlewares = ["cache:private,0,no-store"];
   routes = {
+    // Fires `onLocaleChange` and nothing else. The `i18n-locale` cookie is
+    // written by the client before it navigates (`useLocale`), because the
+    // navigation's own route-data request already has to carry it. Setting it
+    // here as well could only ever undo that: this response would replace the
+    // client's year-long cookie with a session one, and two switches in quick
+    // succession put two responses in flight, where the later-landing one wins
+    // regardless of which locale the user actually stopped on.
     "/set-locale/:locale": this.get(async () => {
       const req = new HttpRequest<any, any>();
       const locale = req.params.locale;
-      console.log(`Setting locale to ${locale}`);
-      req.ctx().setCookie("i18n-locale", locale);
       await app(Translator).onLocaleChange(locale);
       return { locale };
     }),

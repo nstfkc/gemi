@@ -26,7 +26,11 @@ function persistLocale(locale: string) {
   }
   try {
     document.cookie = [
-      `${LOCALE_COOKIE}=${locale}`,
+      // Encoded, not interpolated: `cookieStore.set()` rejected malformed
+      // values, a raw string write does not. A locale carrying `;` would
+      // otherwise write cookie *attributes* — `Domain`, `Path` — from whatever
+      // the app happens to feed the switcher.
+      `${LOCALE_COOKIE}=${encodeURIComponent(locale)}`,
       `Max-Age=${LOCALE_COOKIE_MAX_AGE}`,
       "SameSite=Strict",
       "Path=/",
@@ -38,6 +42,24 @@ function persistLocale(locale: string) {
   }
 }
 
+/**
+ * `onLocaleChange` is a server-side hook, so it takes a request to fire it. The
+ * switch must not wait on that round trip, nor be cancelled by one that fails —
+ * including one that fails *synchronously*: `fetch` is absent in some old
+ * WebViews, and an unguarded call would throw before the navigation ran, which
+ * is the same silent no-op this hook exists to prevent through another door.
+ */
+function notifyLocaleChange(locale: string) {
+  try {
+    void fetch(
+      `/api/__gemi__/services/i18n/set-locale/${encodeURIComponent(locale)}`,
+    ).catch(() => {});
+  } catch {
+    // `fetch` itself is unavailable. The locale is already persisted and the
+    // navigation still runs; only the server-side hook misses this switch.
+  }
+}
+
 export function useLocale() {
   const { i18n } = useRouteData();
   const { pathname, search } = useLocation();
@@ -46,14 +68,7 @@ export function useLocale() {
 
   const setLocale = async (locale: string) => {
     persistLocale(locale);
-
-    // `onLocaleChange` is a server-side hook, so it needs a request to fire —
-    // but the language switch must not wait on a round trip, nor be cancelled
-    // by one that fails. Fire and forget: the route re-sets the same cookie,
-    // which is already correct locally either way.
-    void fetch(`/api/__gemi__/services/i18n/set-locale/${locale}`).catch(
-      () => {},
-    );
+    notifyLocaleChange(locale);
 
     const urlSearchParams = new URLSearchParams(search);
     await replace(pathname, {
