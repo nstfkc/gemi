@@ -176,6 +176,7 @@ const { data } = useQuery("/feed", {}, {
   keepPreviousData: true,  // keep the previous variant's data on screen while a new one loads (default true)
   refreshInterval: 5000,   // poll every 5s
   retryIntervalOnError: 10000, // background retry — suspense: false only
+  revalidateOnFocus: false, // revalidate when the tab comes back to the foreground
   staleTime: 5000,         // how long cached data stays fresh (default 5000ms)
   lazy: false,             // when true, no fetch until trigger()/refetch(); implies suspense: false
 });
@@ -196,6 +197,14 @@ reads it kicks off a silent refetch. Raise it for data that rarely changes
 (`staleTime: 60_000`) to stop it being re-requested on every navigation, or set
 `staleTime: 0` to always revalidate. `Infinity` disables age-based revalidation
 entirely — `mutate()` and `refetch()` still fetch, since those are explicit.
+
+`revalidateOnFocus` refetches when the tab comes back to the foreground — the
+user switching windows, returning from another tab, or unlocking the device.
+It is off by default, and `staleTime` gates it: a quick tab-out-and-back costs
+nothing, and only data older than its freshness window goes back to the wire.
+The refetch is silent, so what's on screen keeps rendering (no `loading` flip,
+no fallback) until the new data lands. A `lazy` query that hasn't been
+triggered stays untouched.
 
 ### Optimistic updates with `mutate`
 

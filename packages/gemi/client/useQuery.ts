@@ -35,6 +35,13 @@ interface Config<T> {
   keepPreviousData?: boolean;
   retryIntervalOnError?: number;
   refreshInterval?: number;
+  /**
+   * When true, the query revalidates whenever the tab comes back to the
+   * foreground. Off by default. `staleTime` still gates it, so a quick
+   * tab-out-and-back costs nothing and only data that has actually aged goes
+   * back to the wire — silently, keeping what's on screen rendered.
+   */
+  revalidateOnFocus?: boolean;
   /** How long cached data stays fresh before a read revalidates it, in ms. */
   staleTime?: number;
   debug?: boolean;
@@ -58,6 +65,7 @@ const defaultConfig: Config<any> = {
   keepPreviousData: true,
   retryIntervalOnError: 10000,
   refreshInterval: 999999,
+  revalidateOnFocus: false,
   staleTime: DEFAULT_STALE_TIME,
   debug: false,
   lazy: false,
@@ -445,6 +453,35 @@ export function useFrameworkQuery<T extends keyof GetRPC>(
       }
     };
   }, [config.refreshInterval, handleReload]);
+
+  // Revalidate when the tab comes back to the foreground — opt-in via
+  // `revalidateOnFocus` (per call or app-wide). `getVariant` applies
+  // `staleTime`, so this is the same read the mount effect performs: data
+  // still inside its freshness window is left alone, and anything older
+  // refetches *silently*, so what's on screen never flashes a loading state.
+  //
+  // Both events are listened for because neither covers the other: switching
+  // between windows fires `focus` while the document stays visible, and
+  // switching tabs (or unlocking the device) fires `visibilitychange` without
+  // necessarily firing `focus`. Landing on the same `getVariant` call makes
+  // the overlap a no-op — the second read finds the fetch in flight.
+  useEffect(() => {
+    if (!config.revalidateOnFocus) return;
+    const revalidate = () => {
+      // A lazy query that was never triggered stays untouched, and a
+      // `focus` fired while the document is hidden isn't a return to the
+      // foreground.
+      if (!fetchedRef.current) return;
+      if (document.visibilityState === "hidden") return;
+      resource.getVariant(variantKey, configRef.current.staleTime);
+    };
+    window.addEventListener("focus", revalidate);
+    document.addEventListener("visibilitychange", revalidate);
+    return () => {
+      window.removeEventListener("focus", revalidate);
+      document.removeEventListener("visibilitychange", revalidate);
+    };
+  }, [config.revalidateOnFocus, resource, variantKey]);
 
   useEffect(() => {
     // Feature-checked per method: vitest's `import.meta.hot` shim has `on`

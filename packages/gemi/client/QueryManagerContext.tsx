@@ -31,6 +31,11 @@ export interface QueryConfig {
   keepPreviousData?: boolean;
   retryIntervalOnError?: number;
   refreshInterval?: number;
+  /**
+   * Revalidate every query when the tab comes back to the foreground, gated by
+   * `staleTime`. Off by default.
+   */
+  revalidateOnFocus?: boolean;
 }
 
 export const QueryConfigContext = createContext<QueryConfig | null>(null);
@@ -50,6 +55,7 @@ const APP_WIDE_QUERY_CONFIG_KEYS = [
   "keepPreviousData",
   "retryIntervalOnError",
   "refreshInterval",
+  "revalidateOnFocus",
 ] as const satisfies ReadonlyArray<keyof QueryConfig>;
 
 export function pickAppWideQueryConfig(
