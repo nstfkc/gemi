@@ -132,6 +132,28 @@ export { discoverJobs, discoverCronJobs, discoverCommands } from "./discovery";
 export { RedisServiceProvider } from "./redis/RedisServiceProvider";
 export { RedisManager } from "./redis/RedisManager";
 
+// Feature flags
+export { FeaturesServiceProvider } from "./features/FeaturesServiceProvider";
+export { FeatureManager, FeatureScope } from "./features/FeatureManager";
+export { FeatureFlagStore, type FlagSnapshot } from "./features/FeatureFlagStore";
+export { FeatureFlagSource, FeatureModelMissingError } from "./features/sources/FeatureFlagSource";
+export { DatabaseFeatureFlagSource } from "./features/sources/DatabaseFeatureFlagSource";
+export {
+  StaticFeatureFlagSource,
+  type StaticFlag,
+} from "./features/sources/StaticFeatureFlagSource";
+export { evaluateFlag } from "./features/evaluate";
+export type { FeatureSubject } from "./features/context";
+export type {
+  Condition,
+  ConditionOperator,
+  EvaluationContext,
+  FeatureFlagDefinition,
+  FlagEvaluation,
+  Rule,
+  VariantWeight,
+} from "./features/types";
+
 // Runtime config (`app/config/*.ts`)
 export {
   defineFilesystemConfig,
@@ -191,6 +213,11 @@ export {
   redisConfigDefaults,
   type RedisConfig,
 } from "./redis/config";
+export {
+  defineFeaturesConfig,
+  featuresConfigDefaults,
+  type FeaturesConfig,
+} from "./features/config";
 export {
   defineAuthConfig,
   authConfigDefaults,

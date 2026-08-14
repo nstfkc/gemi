@@ -226,6 +226,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
     pageData,
     i18n,
     prefetchedData,
+    features,
     appId: currentAppId,
   } = useContext(ServerDataContext);
 
@@ -243,6 +244,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
     data: pageData,
     i18n,
     prefetchedData,
+    features: features ?? {},
     appId: currentAppId,
   });
 
@@ -327,6 +329,7 @@ const Routes = (props: { componentTree: ComponentTree }) => {
           directive = {},
           is404 = false,
           appId,
+          features,
         } = payload;
         updateMeta(meta);
         if (directive?.kind === "Redirect") {
@@ -360,6 +363,10 @@ const Routes = (props: { componentTree: ComponentTree }) => {
             ...routerState,
             appId,
             i18n,
+            // `?? state.features` rather than a bare assignment: an error-path
+            // or older-server envelope carrying no flags must leave the current
+            // values on screen, not blank every flag mid-session.
+            features: features ?? state.features,
             prefetchedData,
             ...mergeCarriedSegments(
               state,

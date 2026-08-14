@@ -251,6 +251,216 @@ export class AccountModel extends Model {
   }
 }
 
+export type FeatureFlagScalars = {
+  id: number;
+  publicId: string;
+  key: string;
+  description: string | null;
+  enabled: boolean;
+  offValue: JsonValue | null;
+  defaultValue: JsonValue | null;
+  rules: JsonValue | null;
+  seed: string;
+  bucketBy: string | null;
+  archivedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+export type FeatureFlagCreateScalars = {
+  id?: number;
+  publicId?: string;
+  key: string;
+  description?: string | null;
+  enabled?: boolean;
+  offValue?: JsonInput;
+  defaultValue?: JsonInput;
+  rules?: JsonInput;
+  seed?: string;
+  bucketBy?: string | null;
+  archivedAt?: Date | null;
+  createdAt?: Date;
+  updatedAt?: Date;
+};
+
+export type FeatureFlagRelations = Record<never, never>;
+
+export type FeatureFlagUnique = { id: number } | { publicId: string } | { key: string };
+
+export interface FeatureFlagTypes extends ModelTypeInfo {
+  scalars: FeatureFlagScalars;
+  relations: FeatureFlagRelations;
+  unique: FeatureFlagUnique;
+  create: FeatureFlagCreateScalars;
+}
+
+// Merges the row's columns into the instance type, so a method on a subclass can
+// read `this.email`. No runtime output.
+//
+// oxlint flags class/interface merging because TypeScript does not check the
+// merged properties are initialised — a directly constructed instance would type
+// as carrying every column while holding none. That hazard is closed rather than
+// accepted: `Model`'s constructor is `protected`, so the only way to get an
+// instance is `wrap`, which assigns a complete row. See bin/orm/emit.ts.
+// oxlint-disable-next-line typescript-eslint/no-unsafe-declaration-merging
+export interface FeatureFlagModel extends FeatureFlagScalars {}
+
+export type FeatureFlagPolicy = ModelPolicy<
+  WhereInput<FeatureFlagTypes>,
+  CreateInput<FeatureFlagTypes>,
+  FeatureFlagScalars
+>;
+
+// The same shape with `scope`, `onCreate` and `onUpdate` abstract, so a policy
+// that scopes cannot omit the write halves. The runtime refuses those
+// combinations too — this makes it `TS2515` at the class declaration instead of
+// an error on the first write that reaches production.
+export abstract class FeatureFlagScopedPolicy extends ScopedPolicy<
+  WhereInput<FeatureFlagTypes>,
+  CreateInput<FeatureFlagTypes>,
+  FeatureFlagScalars
+> {}
+
+export class FeatureFlagModel extends Model {
+  static $schema = schema.FeatureFlag;
+
+  // Says this class came out of the generator, so `registerModels` can prefer
+  // the application's subclass over it without having to *infer* which is which.
+  // It reads own-vs-inherited, and a subclass inherits this rather than
+  // declaring it — so the mark is on exactly one class per model. See
+  // `isGeneratedBase`.
+  //
+  // `readonly` so the initialiser keeps the literal type. `Model` declares this
+  // `?: true`, and a mutable `= true` widens to `boolean` — which is not
+  // assignable to it, so every class in this file was a TS2417 until a reviewer
+  // regenerating a 79-model schema found 79 of them. `tsconfig.generated.json`
+  // is the check that now says so here rather than in an app.
+  static readonly $generated = true;
+
+  // Narrowed from `Model`'s `PolicyEntry[]` to this model's own, so a policy
+  // written for another model is a type error here rather than a scope compiled
+  // against columns that do not exist.
+  static $policies?: readonly PolicyEntry<
+    WhereInput<FeatureFlagTypes>,
+    CreateInput<FeatureFlagTypes>,
+    FeatureFlagScalars
+  >[];
+
+  static findMany<T extends FindManyArgs<FeatureFlagTypes>>(
+    args?: Subset<T, FindManyArgs<FeatureFlagTypes>>,
+    options?: ExecOptions,
+  ): Promise<Payload<FeatureFlagTypes, T>[]> {
+    return this.$exec("findMany", args, options) as Promise<Payload<FeatureFlagTypes, T>[]>;
+  }
+
+  static findFirst<T extends FindFirstArgs<FeatureFlagTypes>>(
+    args?: Subset<T, FindFirstArgs<FeatureFlagTypes>>,
+    options?: ExecOptions,
+  ): Promise<Payload<FeatureFlagTypes, T> | null> {
+    return this.$exec("findFirst", args, options) as Promise<Payload<FeatureFlagTypes, T> | null>;
+  }
+
+  static findFirstOrThrow<T extends FindFirstOrThrowArgs<FeatureFlagTypes>>(
+    args?: Subset<T, FindFirstOrThrowArgs<FeatureFlagTypes>>,
+    options?: ExecOptions,
+  ): Promise<Payload<FeatureFlagTypes, T>> {
+    return this.$exec("findFirstOrThrow", args, options) as Promise<Payload<FeatureFlagTypes, T>>;
+  }
+
+  static findUnique<T extends FindUniqueArgs<FeatureFlagTypes>>(
+    args: Subset<T, FindUniqueArgs<FeatureFlagTypes>>,
+    options?: ExecOptions,
+  ): Promise<Payload<FeatureFlagTypes, T> | null> {
+    return this.$exec("findUnique", args, options) as Promise<Payload<FeatureFlagTypes, T> | null>;
+  }
+
+  static findUniqueOrThrow<T extends FindUniqueOrThrowArgs<FeatureFlagTypes>>(
+    args: Subset<T, FindUniqueOrThrowArgs<FeatureFlagTypes>>,
+    options?: ExecOptions,
+  ): Promise<Payload<FeatureFlagTypes, T>> {
+    return this.$exec("findUniqueOrThrow", args, options) as Promise<Payload<FeatureFlagTypes, T>>;
+  }
+
+  static count(args?: Omit<CountArgs<FeatureFlagTypes>, "select">): Promise<number>;
+  static count<T extends CountArgs<FeatureFlagTypes>>(
+    args: SelectSubset<T, CountArgs<FeatureFlagTypes>> & {
+      select: NonNullable<T["select"]>;
+    },
+  ): Promise<CountPayload<T["select"]>>;
+  static count(args?: unknown): Promise<unknown> {
+    return this.$exec("count", args as never);
+  }
+
+  static aggregate<T extends AggregateArgs<FeatureFlagTypes>>(
+    args: Subset<T, AggregateArgs<FeatureFlagTypes>>,
+  ): Promise<AggregatePayload<FeatureFlagTypes, T>> {
+    return this.$exec("aggregate", args) as Promise<
+      AggregatePayload<FeatureFlagTypes, T>
+    >;
+  }
+
+  static groupBy<T extends GroupByArgs<FeatureFlagTypes>>(
+    args: Subset<T, GroupByArgs<FeatureFlagTypes>>,
+  ): Promise<GroupByPayload<FeatureFlagTypes, T>> {
+    return this.$exec("groupBy", args) as Promise<
+      GroupByPayload<FeatureFlagTypes, T>
+    >;
+  }
+
+  static create<T extends CreateArgs<FeatureFlagTypes>>(
+    args: Subset<T, CreateArgs<FeatureFlagTypes>>,
+    options?: ExecOptions,
+  ): Promise<Payload<FeatureFlagTypes, T>> {
+    return this.$exec("create", args, options) as Promise<Payload<FeatureFlagTypes, T>>;
+  }
+
+  static update<T extends UpdateArgs<FeatureFlagTypes>>(
+    args: Subset<T, UpdateArgs<FeatureFlagTypes>>,
+    options?: ExecOptions,
+  ): Promise<Payload<FeatureFlagTypes, T>> {
+    return this.$exec("update", args, options) as Promise<Payload<FeatureFlagTypes, T>>;
+  }
+
+  static delete<T extends DeleteArgs<FeatureFlagTypes>>(
+    args: Subset<T, DeleteArgs<FeatureFlagTypes>>,
+    options?: ExecOptions,
+  ): Promise<Payload<FeatureFlagTypes, T>> {
+    return this.$exec("delete", args, options) as Promise<Payload<FeatureFlagTypes, T>>;
+  }
+
+  static upsert<T extends UpsertArgs<FeatureFlagTypes>>(
+    args: Subset<T, UpsertArgs<FeatureFlagTypes>>,
+    options?: ExecOptions,
+  ): Promise<Payload<FeatureFlagTypes, T>> {
+    return this.$exec("upsert", args, options) as Promise<Payload<FeatureFlagTypes, T>>;
+  }
+
+  static createMany(
+    args?: CreateManyArgs<FeatureFlagTypes>,
+  ): Promise<{ count: number }> {
+    return this.$exec("createMany", args) as Promise<{ count: number }>;
+  }
+
+  static updateMany(
+    args?: UpdateManyArgs<FeatureFlagTypes>,
+  ): Promise<{ count: number }> {
+    return this.$exec("updateMany", args) as Promise<{ count: number }>;
+  }
+
+  static deleteMany(
+    args?: DeleteManyArgs<FeatureFlagTypes>,
+  ): Promise<{ count: number }> {
+    return this.$exec("deleteMany", args) as Promise<{ count: number }>;
+  }
+
+  static wrap<C extends { prototype: unknown }, R extends FeatureFlagScalars>(
+    this: C,
+    row: R,
+  ): C["prototype"] & R {
+    return (Model.wrap as (row: object) => any).call(this, row);
+  }
+}
+
 export type LedgerScalars = {
   tenantId: number;
   code: string;

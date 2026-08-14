@@ -53,6 +53,7 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 
 ### Services & facades
 - **[Services](./services.md)** — your own singletons: `Service`, `boot()`, and constructor-default injection.
+- **[Feature Flags](./feature-flags.md)** — `FeatureRouter` declarations, database-controlled rules, percentage rollouts, `useFeature` and the `Features` facade.
 - **[Facades](./facades.md)** — reference for `Auth`, `Redirect`, `Lang`, `Storage`, `Query`, `Broadcast`, `Url`, `Log`, `Meta`, `Cookie`, `Redis`.
 - **[File Storage](./file-storage.md)** — the `Storage` facade, filesystem/S3 drivers, image optimization, the `Image` component.
 - **[Email](./email.md)** — the `Email` class, jsx-email templates, the Resend driver, localization and scheduling.

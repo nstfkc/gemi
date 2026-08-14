@@ -333,3 +333,55 @@ enum OrganizationPlan {
   pro
   enterprise
 }
+
+/// The control plane for the flags declared in `app/features`.
+///
+/// The declaration owns each flag's key, its value type and its default; this
+/// table owns whether it is on and who it is on for. So adding a flag is a
+/// deploy and flipping one is an `UPDATE`, which is the split that lets an
+/// on-call engineer turn something off without a release.
+///
+/// A key with no row here resolves to its declared default, so an empty table is
+/// a working state rather than a broken one.
+model FeatureFlag {
+  id       Int    @id @default(autoincrement())
+  publicId String @unique @default(cuid())
+
+  /// Must match a key declared in `app/features`. A row whose key is not
+  /// declared is ignored with a warning — there is no default or allowed set to
+  /// evaluate it against.
+  key         String  @unique
+  description String?
+
+  /// The kill switch. `false` short-circuits every rule, so nothing in `rules`
+  /// can turn a disabled flag back on.
+  enabled Boolean @default(false)
+
+  /// Served when `enabled` is false. Null falls back to the declared default.
+  offValue Json?
+  /// Served when enabled and no rule matched. Null falls back to the declared default.
+  defaultValue Json?
+
+  /// Ordered rules, first match wins. Shape is `Rule[]` from `gemi/services`.
+  /// Untyped at the database boundary, so the evaluator treats it as hostile
+  /// input: a malformed rule is logged and skipped, never thrown.
+  rules Json?
+
+  /// Bucketing salt. Per-row so two independent 50% rollouts select different
+  /// halves; changing it deliberately re-randomises this flag's assignment.
+  seed String @default(cuid())
+
+  /// Attribute path percentage rollouts bucket on, overriding the configured
+  /// default. `attributes.orgId` rolls out by organisation rather than by user.
+  bucketBy String?
+
+  /// Soft retirement. Archived rows are not loaded and not evaluated.
+  archivedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// The store's only query is `where: { archivedAt: null }`, and it runs on
+  /// every cache refresh. `key` is already indexed by `@unique`.
+  @@index([archivedAt])
+}

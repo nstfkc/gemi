@@ -37,7 +37,14 @@ export { Redirect } from "./Redirect";
 export { init, create } from "./init";
 export { createRoot } from "./createRoot";
 
-export type { RPC, ViewRPC, I18nDictionary } from "./rpc";
+export type {
+  RPC,
+  ViewRPC,
+  I18nDictionary,
+  Features,
+  FeatureKey,
+  FeatureValueOf,
+} from "./rpc";
 export type { ViewProps, LayoutProps } from "./types";
 export type { CreateI18nDictionary } from "./I18nContext";
 
@@ -51,6 +58,7 @@ export { useSignOut } from "./auth/useSignOut";
 export { useResetPassword } from "./auth/useResetPassword";
 export { useUser } from "./auth/useUser";
 
+export { useFeature, useFeatures } from "./useFeature";
 export { useTranslator } from "./useTranslator";
 export { useLocale } from "./useLocale";
 

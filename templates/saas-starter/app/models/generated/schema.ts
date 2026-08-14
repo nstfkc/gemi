@@ -146,6 +146,145 @@ export const Account = {
   }
 } satisfies ModelSchema;
 
+export const FeatureFlag = {
+  "name": "FeatureFlag",
+  "table": "FeatureFlag",
+  "fields": {
+    "id": {
+      "name": "id",
+      "column": "id",
+      "type": "Int",
+      "nullable": false,
+      "isId": true,
+      "isUpdatedAt": false,
+      "default": {
+        "kind": "autoincrement"
+      }
+    },
+    "publicId": {
+      "name": "publicId",
+      "column": "publicId",
+      "type": "String",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false,
+      "default": {
+        "kind": "cuid"
+      }
+    },
+    "key": {
+      "name": "key",
+      "column": "key",
+      "type": "String",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false
+    },
+    "description": {
+      "name": "description",
+      "column": "description",
+      "type": "String",
+      "nullable": true,
+      "isId": false,
+      "isUpdatedAt": false
+    },
+    "enabled": {
+      "name": "enabled",
+      "column": "enabled",
+      "type": "Boolean",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false,
+      "default": {
+        "kind": "value",
+        "value": false
+      }
+    },
+    "offValue": {
+      "name": "offValue",
+      "column": "offValue",
+      "type": "Json",
+      "nullable": true,
+      "isId": false,
+      "isUpdatedAt": false
+    },
+    "defaultValue": {
+      "name": "defaultValue",
+      "column": "defaultValue",
+      "type": "Json",
+      "nullable": true,
+      "isId": false,
+      "isUpdatedAt": false
+    },
+    "rules": {
+      "name": "rules",
+      "column": "rules",
+      "type": "Json",
+      "nullable": true,
+      "isId": false,
+      "isUpdatedAt": false
+    },
+    "seed": {
+      "name": "seed",
+      "column": "seed",
+      "type": "String",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false,
+      "default": {
+        "kind": "cuid"
+      }
+    },
+    "bucketBy": {
+      "name": "bucketBy",
+      "column": "bucketBy",
+      "type": "String",
+      "nullable": true,
+      "isId": false,
+      "isUpdatedAt": false
+    },
+    "archivedAt": {
+      "name": "archivedAt",
+      "column": "archivedAt",
+      "type": "DateTime",
+      "nullable": true,
+      "isId": false,
+      "isUpdatedAt": false
+    },
+    "createdAt": {
+      "name": "createdAt",
+      "column": "createdAt",
+      "type": "DateTime",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false,
+      "default": {
+        "kind": "now"
+      }
+    },
+    "updatedAt": {
+      "name": "updatedAt",
+      "column": "updatedAt",
+      "type": "DateTime",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": true
+    }
+  },
+  "primaryKey": [
+    "id"
+  ],
+  "uniques": [
+    [
+      "publicId"
+    ],
+    [
+      "key"
+    ]
+  ],
+  "relations": {}
+} satisfies ModelSchema;
+
 export const Ledger = {
   "name": "Ledger",
   "table": "Ledger",

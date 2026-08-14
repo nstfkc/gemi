@@ -12,3 +12,4 @@
 // unscoped, and nothing raises. Adding a model to this barrel is a step you can
 // notice missing; a `register` call scattered across thirteen files is not.
 export { User } from "./User";
+export { FeatureFlag } from "./FeatureFlag";

@@ -63,6 +63,32 @@ class Store {
    */
   rangeRequest: ByteRange | null = null;
 
+  /**
+   * This request's `session_id`, once read or minted.
+   *
+   * The cookie itself cannot answer for it. `setCookie` appends a *serialized*
+   * `Set-Cookie` string to `cookies`, so a value written during this request is
+   * not readable back out of it, and `req.cookies` still holds only what the
+   * browser sent. Anything needing the id in the same request that mints it —
+   * feature-flag bucketing, most obviously — has to read it from here.
+   */
+  sessionId: string | null = null;
+
+  /**
+   * This request's feature-flag evaluations, computed once.
+   *
+   * One map per request is what keeps a handler and the SSR payload from
+   * disagreeing: a percentage rollout evaluated twice would be consistent
+   * anyway — the bucketing is deterministic — but an attribute hook reading a
+   * clock, or a `now`-based rule, would not be. Anything the page renders and
+   * anything the server branched on have to be the same answer.
+   */
+  featureEvaluations: Map<string, unknown> | null = null;
+  /** The context those evaluations were made against, built at most once. */
+  featureContext: unknown = null;
+  /** Bucket memo, shared across every flag evaluated for this request. */
+  featureBuckets: Map<string, number> | null = null;
+
   constructor(public req: HttpRequest) {}
 
   setLocale(locale: string) {
@@ -101,8 +127,71 @@ class Store {
     delete this.cookies;
     delete this.headers;
     this.serverQueries = null;
+    this.sessionId = null;
+    this.featureEvaluations = null;
+    this.featureContext = null;
+    this.featureBuckets = null;
     delete this.user;
   }
+}
+
+export const SESSION_ID_COOKIE = "session_id";
+
+/**
+ * The `session_id` the browser sent, or the one minted earlier in this request.
+ * Never mints one, so it is safe on an api request, where a `Set-Cookie` nobody
+ * asked for would be a surprise.
+ *
+ * `null` outside a request, and for an anonymous visitor whose first request is
+ * not a view — both meaning "no stable subject", which callers must handle
+ * rather than paper over with a random value. A per-call random id would give
+ * every request its own bucket, which is worse than no bucketing at all: a
+ * percentage rollout would reshuffle on every page load.
+ */
+export function sessionId(): string | null {
+  const store = RequestContext.getStore();
+  if (!store) {
+    return null;
+  }
+  if (store.sessionId) {
+    return store.sessionId;
+  }
+  const sent = store.req?.cookies?.get(SESSION_ID_COOKIE);
+  if (sent) {
+    store.sessionId = sent;
+  }
+  return store.sessionId;
+}
+
+/**
+ * The same, but mints and sets the cookie when the browser sent none.
+ *
+ * Call this once per **view** request, early enough that everything downstream —
+ * flag evaluation included — sees the same id the browser is about to be given.
+ * It used to live inline in `ViewRouteDispatcher.onRequestEnd`, which ran only
+ * on the document path and only after the response was decided, so a client-side
+ * navigation minted nothing and a first-ever visitor had no id at the point
+ * flags were evaluated.
+ */
+export function ensureSessionId(): string | null {
+  const store = RequestContext.getStore();
+  if (!store) {
+    return null;
+  }
+  const existing = sessionId();
+  if (existing) {
+    return existing;
+  }
+
+  const minted = Bun.randomUUIDv7();
+  store.sessionId = minted;
+  store.setCookie(SESSION_ID_COOKIE, minted, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "Strict",
+    expires: new Date(Date.now() + 1000 * 60 * 60 * 24 * 365),
+  });
+  return minted;
 }
 
 export class RequestContext {

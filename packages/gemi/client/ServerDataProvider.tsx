@@ -28,6 +28,13 @@ export interface ServerDataContextValue {
   auth: {
     user: User;
   };
+  /**
+   * Evaluated feature flags for this request: `key -> value`, nothing else.
+   *
+   * Never the rules, the segment criteria or the bucketing seed — those stay on
+   * the server. Read through `useFeature` rather than directly.
+   */
+  features: Record<string, boolean | string | number | null>;
   __csrf: string;
   cssManifest: Record<string, string[]>;
   /** Built chunk URLs per view name, for warming a navigation's imports. */

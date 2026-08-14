@@ -8,6 +8,15 @@ export {
   type ViewHandler,
 } from "./ViewRouter";
 export {
+  FeatureFlag,
+  FeatureRouter,
+  flattenFeatures,
+  type CreateFeatures,
+  type FeatureDefinitions,
+  type FlagValue,
+} from "./FeatureRouter";
+export { toMiddlewareList, type MiddlewareInput } from "./middlewareList";
+export {
   createStreamResponse,
   createUnsatisfiableResponse,
   type StreamOutput,

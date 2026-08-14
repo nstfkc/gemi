@@ -25,6 +25,13 @@ export type FlatViewRoutes = Record<
     middleware: (string | any)[];
     viewPath: string;
     segments: ViewRouteSegment[];
+    /**
+     * Feature flags gating this route, accumulated from every router and layout
+     * above it. All must be on for the route to resolve; any one off makes the
+     * request a 404. Evaluated per request, after middleware, since the table
+     * itself is built once at boot and cannot vary by user.
+     */
+    features: string[];
   }
 >;
 
@@ -71,7 +78,7 @@ export function createFlatViewRoutes(routes: ViewRoutes) {
         const children = new route.children();
         const result = createFlatViewRoutes(children.routes);
 
-        for (const [path, { exec, middleware, segments }] of Object.entries(
+        for (const [path, { exec, middleware, segments, features }] of Object.entries(
           result,
         )) {
           const _key = joinRoutePath(routePath, path);
@@ -82,6 +89,7 @@ export function createFlatViewRoutes(routes: ViewRoutes) {
           flatRoutes[removeGroupPrefix(_key)] = {
             exec: [handler, ...exec],
             middleware: [...route.middlewares, ...middleware],
+            features: [...route.featureGates, ...features],
             viewPath: route.viewPath,
             segments: [
               {
@@ -99,6 +107,7 @@ export function createFlatViewRoutes(routes: ViewRoutes) {
         flatRoutes[removeGroupPrefix(routePath)] = {
           exec: [handler],
           middleware: route.middlewares,
+          features: route.featureGates,
           viewPath: route.viewPath,
           segments: [{ path: segmentPath(routePath), viewPath: route.viewPath }],
         };
@@ -108,12 +117,13 @@ export function createFlatViewRoutes(routes: ViewRoutes) {
       const result = createFlatViewRoutes(router.routes);
       for (const [
         path,
-        { exec, middleware, viewPath, segments },
+        { exec, middleware, viewPath, segments, features },
       ] of Object.entries(result)) {
         const _key = joinRoutePath(routePath, path);
         flatRoutes[removeGroupPrefix(_key)] = {
           exec,
           middleware: [...router.middlewares, ...middleware],
+          features: [...router.featureGates, ...features],
           viewPath,
           segments: prefixSegments(routePath, segments),
         };

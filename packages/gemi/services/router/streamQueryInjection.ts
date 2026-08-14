@@ -6,7 +6,16 @@ import type { ServerQueryEntry, ServerQueryStore } from "./ServerQueryStore";
  * tag and inject markup.
  */
 export function htmlSafeJson(value: unknown): string {
-  return JSON.stringify(value)
+  const json = JSON.stringify(value);
+  // `JSON.stringify(undefined)` is `undefined`, not `"undefined"`, so the
+  // `.replace` below would throw on it. That is unreachable for a query payload
+  // but not for the document bootstrap, which serializes `err.stack` \u2014 absent on
+  // anything thrown that is not an `Error`. Throwing there would replace the
+  // error page with a second, worse error raised inside the error handler.
+  if (json === undefined) {
+    return "undefined";
+  }
+  return json
     .replace(/</g, "\\u003c")
     .replace(/\u2028/g, "\\u2028")
     .replace(/\u2029/g, "\\u2029");
