@@ -13,11 +13,28 @@
  * never reaches the client), the tail leaks as text, and the modulepreload is
  * lost.
  *
- * This is a byte scanner, not an HTML parser: it answers one question, "is the
- * output currently in the DATA state", and it only has to be conservative in
- * one direction. Reporting "not safe" when a splice would in fact have been
- * legal just defers the payload to the next opportunity; reporting "safe" when
- * it isn't is the bug. Ambiguous constructs therefore resolve to *unsafe*.
+ * This is a byte scanner, not an HTML parser: it answers one question, "would a
+ * `<script>` spliced here be parsed as markup and executed", and it only has to
+ * be conservative in one direction. Reporting "not safe" when a splice would in
+ * fact have been legal just defers the payload to the next opportunity;
+ * reporting "safe" when it isn't is the bug. Ambiguous constructs therefore
+ * resolve to *unsafe*.
+ *
+ * Tokenizer state alone does not answer that question, because two regions are
+ * in DATA yet swallow a script at tree-construction time:
+ *
+ * - `<template>`. Its content is parsed into a `DocumentFragment`, where a
+ *   script never runs. This is not hypothetical on this code path: React emits
+ *   `<template id="B:n"></template>` for every Suspense boundary, so a view
+ *   boundary landing inside that ~19-byte start tag would put the payload
+ *   somewhere it is silently dropped — #404's outcome by another route.
+ * - Foreign content. Inside `<math>` a spliced `<script>` lands in the MathML
+ *   namespace as an unknown element and never runs. `<svg>` is the benign half
+ *   of the same divergence — an SVG script *does* execute — but it costs
+ *   nothing to sit out both.
+ *
+ * So the scanner also counts template and foreign-content nesting, and reports
+ * safe only at depth zero.
  *
  * Scanning bytes rather than decoded text is sound because every byte it keys
  * on (`<`, `>`, `"`, `'`, `/`, `!`, `-`) is ASCII, and no ASCII byte can appear
@@ -58,6 +75,12 @@ const RAW_TEXT_ELEMENTS = new Set([
   "noframes",
   "noscript",
 ]);
+
+/**
+ * Roots of a foreign-content subtree. Everything inside is built in the SVG or
+ * MathML namespace rather than the HTML one.
+ */
+const FOREIGN_ROOTS = new Set(["svg", "math"]);
 
 type State =
   | "data"
@@ -100,7 +123,10 @@ export interface HtmlInsertionScanner {
   scanToInsertionPoint(chunk: Uint8Array): number;
   /** Consume `chunk` whole, for bytes forwarded without looking for a splice. */
   write(chunk: Uint8Array): void;
-  /** Is the output, as of every byte consumed so far, between elements? */
+  /**
+   * As of every byte consumed so far, would a `<script>` appended here be
+   * parsed as an executable HTML script element?
+   */
   isSafe(): boolean;
 }
 
@@ -115,6 +141,15 @@ export function createHtmlInsertionScanner(): HtmlInsertionScanner {
   let closeMatched = 0;
   /** Consecutive `-` bytes: two after `<!` open a comment, two before `>` close one. */
   let dashes = 0;
+  /** Did the tag being read end with `/>`? Only meaningful in foreign content. */
+  let selfClosing = false;
+  /** Open `<template>` elements: their content is inert to a script. */
+  let templateDepth = 0;
+  /** Open `<svg>`/`<math>` elements: their content is not in the HTML namespace. */
+  let foreignDepth = 0;
+
+  const isSafe = () =>
+    state === "data" && templateDepth === 0 && foreignDepth === 0;
 
   const finishTag = () => {
     if (!isEndTag && RAW_TEXT_ELEMENTS.has(tagName)) {
@@ -124,8 +159,18 @@ export function createHtmlInsertionScanner(): HtmlInsertionScanner {
       state = "rawText";
       closeSequence = `</${tagName}`;
       closeMatched = 0;
-    } else {
-      state = "data";
+      tagName = "";
+      return;
+    }
+    state = "data";
+    if (tagName === "template") {
+      // `<template/>` is not self-closing in the HTML namespace, so the flag is
+      // only honoured for the foreign roots below.
+      if (isEndTag) templateDepth = Math.max(0, templateDepth - 1);
+      else templateDepth += 1;
+    } else if (FOREIGN_ROOTS.has(tagName)) {
+      if (isEndTag) foreignDepth = Math.max(0, foreignDepth - 1);
+      else if (!selfClosing) foreignDepth += 1;
     }
     tagName = "";
   };
@@ -145,6 +190,7 @@ export function createHtmlInsertionScanner(): HtmlInsertionScanner {
         } else if (isAsciiAlpha(byte)) {
           state = "tagName";
           isEndTag = false;
+          selfClosing = false;
           tagName = String.fromCharCode(toLower(byte));
         } else if (byte === QUESTION) {
           // A bogus comment: consumed to the next `>`.
@@ -162,6 +208,7 @@ export function createHtmlInsertionScanner(): HtmlInsertionScanner {
         if (isAsciiAlpha(byte)) {
           state = "tagName";
           isEndTag = true;
+          selfClosing = false;
           tagName = String.fromCharCode(toLower(byte));
         } else if (byte === GT) {
           state = "data";
@@ -173,6 +220,7 @@ export function createHtmlInsertionScanner(): HtmlInsertionScanner {
       case "tagName":
         if (isWhitespace(byte) || byte === SLASH) {
           state = "inTag";
+          selfClosing = byte === SLASH;
         } else if (byte === GT) {
           finishTag();
         } else {
@@ -181,17 +229,24 @@ export function createHtmlInsertionScanner(): HtmlInsertionScanner {
         return;
 
       case "inTag":
-        if (byte === GT) finishTag();
-        else if (byte === DQUOTE) state = "attrDouble";
+        if (byte === GT) {
+          finishTag();
+          return;
+        }
+        // Only `/` immediately before `>` self-closes; `/ >` does not.
+        selfClosing = byte === SLASH;
+        if (byte === DQUOTE) state = "attrDouble";
         else if (byte === SQUOTE) state = "attrSingle";
         return;
 
       case "attrDouble":
         if (byte === DQUOTE) state = "inTag";
+        selfClosing = false;
         return;
 
       case "attrSingle":
         if (byte === SQUOTE) state = "inTag";
+        selfClosing = false;
         return;
 
       case "bang":
@@ -255,7 +310,7 @@ export function createHtmlInsertionScanner(): HtmlInsertionScanner {
   return {
     scanToInsertionPoint(chunk) {
       for (let i = 0; i < chunk.length; i++) {
-        if (state === "data") return i;
+        if (isSafe()) return i;
         step(chunk[i]!);
       }
       return chunk.length;
@@ -265,8 +320,6 @@ export function createHtmlInsertionScanner(): HtmlInsertionScanner {
         step(chunk[i]!);
       }
     },
-    isSafe() {
-      return state === "data";
-    },
+    isSafe,
   };
 }

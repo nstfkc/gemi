@@ -78,6 +78,59 @@ describe("createHtmlInsertionScanner", () => {
     expect(safeAfter(html)).toBe(true);
   });
 
+  test.each([
+    // `<template>` content is parsed into a DocumentFragment, where a script
+    // never runs — and React emits one per Suspense boundary.
+    ["inside a template", "<main><template id='B:0'>"],
+    ["inside a template holding markup", "<template><div>x</div>"],
+    ["inside a nested template", "<template><template></template>"],
+    // Foreign content: a spliced script lands in the MathML/SVG namespace.
+    ["inside math", "<p><math>"],
+    ["inside math, past a child", "<math><mi>x</mi>"],
+    ["inside svg", "<div><svg viewBox='0 0 1 1'>"],
+    ["inside svg, past a self-closed child", "<svg><path d='M0 0'/>"],
+    ["inside nested svg", "<svg><svg>"],
+  ])("reports unsafe %s", (_label, html) => {
+    expect(safeAfter(html)).toBe(false);
+  });
+
+  test.each([
+    ["a closed template", "<main><template id='B:0'></template>"],
+    ["a closed template holding markup", "<template><div>x</div></template>"],
+    ["closed nested templates", "<template><template></template></template>"],
+    ["closed math", "<p><math><mi>x</mi></math>"],
+    ["closed svg", "<div><svg><path d='M0 0'/></svg>"],
+    // Foreign content honours `/>`, so the subtree never opens.
+    ["a self-closed svg", "<div><svg/>"],
+    ["a self-closed math", "<p><math/>"],
+  ])("reports safe after %s", (_label, html) => {
+    expect(safeAfter(html)).toBe(true);
+  });
+
+  test("`/ >` does not self-close, so the subtree still opens", () => {
+    expect(safeAfter("<div><svg / >")).toBe(false);
+    expect(safeAfter("<div><svg / ></svg>")).toBe(true);
+  });
+
+  test("a stray end tag cannot drive a depth counter negative", () => {
+    // Otherwise one unbalanced `</template>` would make every later template
+    // look closed, re-opening the hole this guards.
+    expect(safeAfter("</template></svg></math><p>x")).toBe(true);
+    expect(safeAfter("</template></svg><template>")).toBe(false);
+    expect(safeAfter("</math><svg>")).toBe(false);
+  });
+
+  test("React's Suspense boundary template is not an insertion point", () => {
+    // The exact markup react-dom 19 emits around a streamed fallback.
+    const point = insertionPoint(
+      "<main><!--$?--><template id=\"B",
+      ':0"></template><div>skeleton</div><!--/$--></main>',
+    );
+    expect(point.before).toBe(':0"></template>');
+    expect(point.after).toBe("<div>skeleton</div><!--/$--></main>");
+    expect(point.safe).toBe(true);
+  });
+
   test("state survives a split anywhere, including mid-token", () => {
     const html = '<div><!-- c --><script>a="</scriptx>"</script><p>x</p>';
     for (let split = 0; split <= html.length; split++) {

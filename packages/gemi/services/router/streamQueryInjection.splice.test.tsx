@@ -131,6 +131,59 @@ describe("payload splicing (#404)", () => {
     expect(text).toContain(`<style>${".a{color:red}".repeat(40)}</style>`);
   });
 
+  test("a boundary inside React's Suspense template does not bury the payload", async () => {
+    // A `<template>`'s content is parsed into a DocumentFragment, where a
+    // script never executes — so a splice there loses the payload exactly like
+    // #404 did, even though the tokenizer is in DATA. React emits one of these
+    // per streamed Suspense boundary, so the window is real.
+    const store = await storeWithSettledEntry("/q", { ok: true });
+    const source = createSource();
+    const html = new Response(
+      injectQueryPayloads(source.stream, store),
+    ).text();
+
+    source.write(
+      '<!doctype html><html><head><title>t</title></head><body><main><!--$?--><template id="B',
+    );
+    source.write(':0"></template><div>skeleton</div><!--/$--></main>');
+    source.write("</body></html>");
+    source.close();
+
+    const text = await html;
+    const { document } = new JSDOM(text).window;
+    // `querySelectorAll` does not descend into a template's content, so this
+    // counts only scripts the browser would actually run.
+    const executable = [...document.querySelectorAll("script")].filter((s) =>
+      s.textContent?.includes("__GEMI_STREAM__"),
+    );
+    expect(executable).toHaveLength(1);
+    expect(document.querySelector("template")?.content.childElementCount).toBe(0);
+  });
+
+  test("a boundary inside foreign content does not bury the payload", async () => {
+    // Inside `<math>` a spliced script is created in the MathML namespace,
+    // where it is an unknown element and never runs.
+    const store = await storeWithSettledEntry("/q", { ok: true });
+    const source = createSource();
+    const html = new Response(
+      injectQueryPayloads(source.stream, store),
+    ).text();
+
+    source.write("<!doctype html><html><head></head><body><math><mi");
+    source.write(">x</mi></math><p>after</p>");
+    source.write("</body></html>");
+    source.close();
+
+    const text = await html;
+    const { document } = new JSDOM(text).window;
+    const injected = [...document.querySelectorAll("script")].filter((s) =>
+      s.textContent?.includes("__GEMI_STREAM__"),
+    );
+    expect(injected).toHaveLength(1);
+    expect(injected[0]!.namespaceURI).toBe("http://www.w3.org/1999/xhtml");
+    expect(document.querySelector("math")?.querySelector("script")).toBeNull();
+  });
+
   test("a real React render keeps every injected payload parseable", async () => {
     const { fetcher, calls } = createDeferredFetcher();
     const store = new ServerQueryStore(fetcher);
