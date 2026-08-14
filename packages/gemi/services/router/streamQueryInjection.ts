@@ -1,4 +1,5 @@
 import type { DictionarySink, DictionaryUse } from "../../i18n/dictionarySink";
+import { createHtmlInsertionScanner } from "./htmlInsertionPoint";
 import type { ServerQueryEntry, ServerQueryStore } from "./ServerQueryStore";
 
 /**
@@ -77,6 +78,16 @@ export interface StreamLifecycleHooks {
  *    of the first React chunk, so a query that settles before streaming
  *    begins can't push a script in front of `<!doctype html>`. (Those are
  *    normally in the `__GEMI_DATA__` snapshot anyway and skipped here.)
+ *
+ * 3. Only ever between elements. React's chunk boundaries fall at arbitrary
+ *    byte offsets — 2048-byte views, not markup — so "flush at a chunk
+ *    boundary" used to splice scripts into the middle of a tag or into a
+ *    `<style>` body (#404). The scanner tracks the emitted bytes' parse state
+ *    and the flush moves to the first DATA-state offset *inside* the chunk
+ *    instead, which is still ahead of anything else that chunk carries. That
+ *    keeps guarantee 1: the reveal script cannot precede the payload, because
+ *    the earliest safe offset is at worst the end of the one tag straddling
+ *    the boundary.
  */
 export function injectQueryPayloads(
   source: ReadableStream<Uint8Array>,
@@ -110,6 +121,7 @@ export function injectQueryPayloads(
   });
 
   const reader = source.getReader();
+  const scanner = createHtmlInsertionScanner();
   const forward = (
     controller: ReadableStreamDefaultController<Uint8Array>,
     chunk: Uint8Array,
@@ -119,7 +131,42 @@ export function injectQueryPayloads(
   };
   const flush = (controller: ReadableStreamDefaultController<Uint8Array>) => {
     while (queue.length > 0) {
-      forward(controller, encoder.encode(queue.shift()!));
+      const script = encoder.encode(queue.shift()!);
+      // Scanned like any other output so the state stays continuous. A payload
+      // script is balanced markup, so this always lands back in DATA.
+      scanner.write(script);
+      forward(controller, script);
+    }
+  };
+
+  /**
+   * Forward one React chunk, splicing the queue in at the first offset the
+   * parser would read a `<script>` as markup — offset 0 when the previous
+   * chunk ended between elements, which is the common case.
+   */
+  const forwardWithPayloads = (
+    controller: ReadableStreamDefaultController<Uint8Array>,
+    chunk: Uint8Array,
+  ) => {
+    if (queue.length === 0) {
+      scanner.write(chunk);
+      forward(controller, chunk);
+      return;
+    }
+    const at = scanner.scanToInsertionPoint(chunk);
+    if (at > 0) {
+      forward(controller, chunk.subarray(0, at));
+    }
+    // False only when the whole chunk was consumed without ever reaching DATA
+    // (one very long tag or raw-text element), in which case the payload waits
+    // for the next chunk — or, failing that, for the stream-end flush.
+    if (scanner.isSafe()) {
+      flush(controller);
+    }
+    const rest = chunk.subarray(at);
+    if (rest.length > 0) {
+      scanner.write(rest);
+      forward(controller, rest);
     }
   };
 
@@ -146,13 +193,19 @@ export function injectQueryPayloads(
       }
       if (!sentFirstChunk) {
         sentFirstChunk = true;
+        scanner.write(value);
         forward(controller, value);
         hooks.onShell?.();
-        flush(controller);
+        // Guarantee 2 forbids splicing *into* the first chunk, so the queue
+        // goes out behind it — and only if that chunk ended cleanly. A settled
+        // (`no-stream`) document arrives with its whole backlog already queued,
+        // which is why this boundary was the one that broke deterministically.
+        if (scanner.isSafe()) {
+          flush(controller);
+        }
         return;
       }
-      flush(controller);
-      forward(controller, value);
+      forwardWithPayloads(controller, value);
     },
     cancel(reason) {
       closeOnce();
