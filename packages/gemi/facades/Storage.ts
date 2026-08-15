@@ -1,7 +1,8 @@
-//@ts-ignore
-import sharp from "sharp";
+//@ts-ignore - type-only; the module itself is loaded on first use by `metadata()`.
+import type sharp from "sharp";
 
 import { Buffer } from "node:buffer";
+import { loadSharp } from "../support/sharp";
 import type { Prettify } from "../utils/type";
 
 import { RequestContext } from "../http/requestContext";
@@ -27,6 +28,10 @@ export class Storage extends Facade {
 
   static async metadata(obj: Blob | File): Promise<Partial<Metadata>> {
     const buffer = Buffer.from(await obj.arrayBuffer());
+    // Outside the catch: the empty object below means "this blob is not an
+    // image sharp can read", and a missing `sharp` install must not be able to
+    // hide behind it.
+    const sharp = await loadSharp("Storage.metadata()");
     try {
       return await sharp(buffer).metadata();
     } catch {
