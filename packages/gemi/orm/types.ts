@@ -509,30 +509,44 @@ type JsonPath = string | readonly string[];
  * form, which is Postgres-only — so the type says the same thing rather than
  * offering a query only one dialect could answer.
  *
- * **The sentinels are absent, and their absence is the point.** `DbNull`,
- * `JsonNull` and `AnyNull` are refused at a path by `compileJsonFilter`, because
- * `#>>` yields SQL NULL for an absent key and for a JSON `null` alike — the
- * distinction the sentinels exist to draw is gone before the comparison
- * happens. They stay on `JsonFilter`, which compiles against the column, where
- * the distinction survives.
- *
- * **`null` is absent too, and the compiler now agrees — #371.** This comment
- * used to record it as the one place the type went further than the runtime:
- * `assertJsonOperand` let `null` through and `{ path: […], equals: null }`
- * compiled to `("metadata" #>> $1) = $2` bound to NULL, which is NULL rather
- * than true on both dialects — a predicate no row can satisfy. It is an
- * `InvalidArgumentError` now, so a `null` arriving dynamically is refused
- * rather than silently answered wrong.
- *
- * The refusal is a *divergence*, not a gap in the type. Prisma extracts with
- * `#>` and compares as `jsonb`, so it reads `equals: null` as the JSON value
- * `null` and returns the rows holding one — measured on 6.19.2, identical SQL
- * and identical rows to `equals: Prisma.JsonNull`. gemi extracts with `#>>`,
- * which yields SQL NULL for an absent key and a JSON null alike, so the
- * question cannot be asked at a path here at all — the same collapse that
- * keeps the sentinels off this type.
+ * **The sentinels are not here, they are on {@link JsonPathNull}** — the arm
+ * `equals` and `not` get and the other seven operators do not. They used to be
+ * on none of them, because `#>>` yields SQL NULL for an absent key and for a
+ * JSON `null` alike and the distinction the sentinels draw was gone before the
+ * comparison. `dialect.jsonValueAt` is the extraction that keeps it, so the
+ * question is answerable at a path now (#407) — under the two operators that
+ * can ask it, which is exactly where Prisma admits them too.
  */
 type JsonPathScalar = string | number | boolean;
+
+/**
+ * The null operands `equals` and `not` take at a path.
+ *
+ * The same four spellings `JsonFilter` offers on the column, and they mean the
+ * corresponding things one level down: `DbNull` is "there is no value at this
+ * path" — an absent key, or a column with nothing to index into — and
+ * `JsonNull` is "the value at this path is the JSON value `null`". `AnyNull` is
+ * either, as everywhere else.
+ *
+ * **A bare `null` is admitted here and refused on the column, and that
+ * asymmetry is Prisma's.** On a `Json` *column* the two empty states are both
+ * reachable and choosing between them is the whole reason the sentinels exist,
+ * so `null` is excluded from `JsonWriteValue` and from `JsonFilter` — guessing
+ * is the failure. At a *path* Prisma simply reads `null` as the JSON value:
+ * `{ path: […], equals: null }` and `{ path: […], equals: JsonNull }` compile
+ * to byte-identical SQL and return identical rows, measured on 6.19.2 against
+ * Postgres 16 and SQLite. So there is nothing to guess, and refusing it would
+ * be gemi diverging from the oracle rather than protecting anyone.
+ *
+ * The other seven operators keep refusing every member. `string_contains` and
+ * friends want a string; the four numeric comparisons compare a number, and
+ * Prisma's own query engine panics on `{ gt: null }` rather than answering it.
+ */
+type JsonPathNull =
+  | null
+  | DbNullValue
+  | JsonNullValue
+  | AnyNullValue;
 
 /**
  * `where: { metadata: { path: …, equals: … } }` — a filter on a value *inside*
@@ -592,12 +606,20 @@ type JsonPathFilter = { path: JsonPath } & {
  * narrows the same property on the hand-written literal this mapped type
  * replaces; the narrowing lives on the arm here so the two do not resolve to
  * whichever side of the merge is taken.)
+ *
+ * **`equals` and `not` split off from the other five scalar operators** because
+ * they are the two that can ask *which kind of null* a value is — see
+ * {@link JsonPathNull}. The arm is placed above the default rather than folded
+ * into it so the four numeric comparisons keep refusing a sentinel, which is
+ * what the compiler does and what Prisma does.
  */
 type JsonPathOperand<K extends JsonFilterName> = K extends "array_contains"
   ? Exclude<JsonValue, null>
   : K extends "string_contains" | "string_starts_with" | "string_ends_with"
     ? string
-    : JsonPathScalar;
+    : K extends "equals" | "not"
+      ? JsonPathScalar | JsonPathNull
+      : JsonPathScalar;
 
 /**
  * The bare-value half of a `Json` column's filter — **`JsonValue` with its

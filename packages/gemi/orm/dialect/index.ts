@@ -337,12 +337,44 @@ export interface SqlDialect {
    * operator whose right-hand side is a document.
    *
    * SQLite ignores the flag: `json_extract` already yields a SQL value rather
-   * than a JSON document for a scalar at the path.
+   * than a JSON document for a scalar at the path. That is why the null
+   * sentinels need {@link jsonValueAt} instead of this — see there.
    */
   jsonExtract(column: string, path: Binder, asText: boolean): Fragment;
 
   /** `<extracted> @> <value>` — Postgres only; see `jsonFilters`. */
   jsonArrayContains(column: string, path: Binder, value: Binder): Fragment;
+
+  /**
+   * The value at `path` **as JSON**, in the form two JSON values compare in.
+   *
+   * The difference from {@link jsonExtract} is the whole of #407, and it is the
+   * distinction the null sentinels are made of. Both dialects have an
+   * extraction that collapses "the key is absent" into "the key holds the JSON
+   * value `null`", and both have one that does not:
+   *
+   * |          | collapses          | keeps the distinction |
+   * | ---      | ---                | ---                   |
+   * | postgres | `#>>` (text)       | `#>` (jsonb)          |
+   * | sqlite   | `json_extract`     | `->` (JSON text)      |
+   *
+   * `jsonExtract` is the left column at `asText: true`, which is what every
+   * scalar comparison wants — a value to compare, not a document. This is the
+   * right column, and it is what lets `equals: DbNull` compile to
+   * `<value at path> is null` while `equals: JsonNull` compiles to
+   * `<value at path> = <the JSON null>`. Refusing them because `#>>` cannot
+   * tell the two apart was true of `#>>` and not of the dialect.
+   *
+   * **Postgres casts and SQLite does not**, and the cast is not decoration:
+   * `#>` on a `json` column (a `@db.Json` field) yields `json`, which has no
+   * equality operator at all — *"operator does not exist: json = jsonb"*, a
+   * raised error rather than a wrong answer, but still one Prisma does not
+   * raise. Prisma emits `(…#>…)::jsonb` for exactly this reason and so does
+   * this. SQLite's `->` already yields the JSON text form.
+   *
+   * Bound, never interpolated, for the same reason `jsonExtract` is.
+   */
+  jsonValueAt(column: string, path: Binder): Fragment;
 
   /**
    * `limit`/`offset`. Both are values and therefore parameters — this is the

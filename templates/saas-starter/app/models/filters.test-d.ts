@@ -330,39 +330,67 @@ describe("Json path filters", () => {
   });
 
   /**
-   * `compileJsonFilter` refuses the sentinels at a path, and refuses the same
-   * shape one level down — `{ equals: { not: DbNull } }` — because `#>>` yields
-   * SQL NULL for an absent key and a JSON `null` alike, so the distinction the
-   * sentinels exist to draw is gone before the comparison happens. Folio's
-   * `{ payload: { path: […], equals: AnyNull } }` is exactly this, and typing
-   * it as valid is what this pair prevents.
+   * **The sentinels type-check under `equals` and `not`, and nowhere else at a
+   * path — #407.** They used to be refused under all ten, because `#>>` yields
+   * SQL NULL for an absent key and a JSON `null` alike and the distinction the
+   * sentinels draw was gone before the comparison. `dialect.jsonValueAt` is the
+   * extraction that keeps it — `#>` on Postgres, `->` on SQLite — so the
+   * question is answerable, and the type has to admit it: folio's
+   * `{ payload: { path: […], equals: AnyNull } }` is a read that could not
+   * leave Prisma while this was a compile error.
    */
-  test("a sentinel at a path is refused, and so is one a level down", async () => {
-    // @ts-expect-error an extracted value cannot tell the two empties apart
+  test("a sentinel at a path type-checks under equals and not", async () => {
     await UserModel.findMany({ where: { metadata: { path: ["a"], equals: DbNull } } });
-    // @ts-expect-error nor can it under `not`
     await UserModel.findMany({ where: { metadata: { path: ["a"], not: JsonNull } } });
-    // @ts-expect-error and the nested operator object is refused with them
+    await UserModel.findMany({ where: { metadata: { path: ["a"], equals: AnyNull } } });
+    // The predicate #407 exists for: "the extracted value is not there".
+    await UserModel.findMany({
+      where: {
+        OR: [
+          { metadata: { path: ["operation"], equals: "video" } },
+          { name: "video", metadata: { path: ["operation"], equals: AnyNull } },
+        ],
+      },
+    });
+  });
+
+  /**
+   * ...and under the other seven it is still a compile error, which is what the
+   * compiler does and what Prisma does — *"Invalid value provided. … provided
+   * Enum."*, measured on 6.19.2. A sentinel asks which kind of null a value is;
+   * `gt` compares a number and `string_contains` builds a pattern.
+   *
+   * The nested shape goes with them: `{ equals: { not: DbNull } }` is an object
+   * operand, and an object under `equals` is refused for its own reason.
+   */
+  test("a sentinel under the other operators is refused, and so is one a level down", async () => {
+    // @ts-expect-error a sentinel is not a number
+    await UserModel.findMany({ where: { metadata: { path: ["a"], gt: DbNull } } });
+    // @ts-expect-error nor a string to build a pattern from
+    await UserModel.findMany({ where: { metadata: { path: ["a"], string_contains: JsonNull } } });
+    // @ts-expect-error nor a document to test containment against
+    await UserModel.findMany({ where: { metadata: { path: ["a"], array_contains: AnyNull } } });
+    // @ts-expect-error and the nested operator object is refused as an object
     await UserModel.findMany({ where: { metadata: { path: ["a"], equals: { not: AnyNull } } } });
   });
 
   /**
-   * **`null` is refused, and the compiler agrees now — #371.** This was the one
-   * place the type went further than the runtime: `assertJsonOperand` let it
-   * through and the query compiled to `("metadata" #>> $1) = $2` bound to NULL,
-   * which is NULL and not true on both dialects — a predicate no row can
-   * satisfy. It is an `InvalidArgumentError` there now, so a `null` arriving
-   * dynamically is refused rather than answered wrong.
+   * **A bare `null` is accepted under `equals` / `not` at a path, and refused
+   * on the column** — the asymmetry is Prisma's and it is worth stating because
+   * it looks like an inconsistency.
    *
-   * The refusal is a divergence rather than a gap in the type: Prisma extracts
-   * with `#>` and compares as `jsonb`, so it reads this as the JSON value
-   * `null` and answers it. gemi's `#>>` yields SQL NULL for an absent key and a
-   * JSON null alike, which is the same collapse that keeps the sentinels off
-   * this filter.
+   * On the column the two empty states are both reachable and choosing between
+   * them is the whole reason the sentinels exist, so `null` is a type error and
+   * `DbNull` / `JsonNull` are required. At a path Prisma simply reads `null` as
+   * the JSON value: `{ path: […], equals: null }` and
+   * `{ path: […], equals: JsonNull }` compile to byte-identical SQL and return
+   * identical rows, measured on 6.19.2 against both dialects. There is nothing
+   * to guess, so refusing it would be gemi diverging from the oracle. That was
+   * #371's second item, and #407 closed it with the same change.
    *
-   * **`array_contains` is the same refusal for a different reason**, and it is
-   * the one path operator whose operand is a whole document, so it does not
-   * come along with the scalar arm. A bare `null` there reaches
+   * **`array_contains` still refuses a bare `null`**, and for a different
+   * reason — it is the one path operator whose operand is a whole document, so
+   * it does not come along with the scalar arm. A bare `null` there reaches
    * `dialect.jsonArrayContains` and binds as SQL NULL; `x @> NULL` is NULL, not
    * false, so the filter matches no row rather than asking anything. Only the
    * top-level operand goes — a `null` *inside* the document is an ordinary JSON
@@ -371,13 +399,15 @@ describe("Json path filters", () => {
    * type; the narrowing lives on `JsonPathOperand`'s `array_contains` arm so
    * the two do not come down to which side of a merge is taken.)
    */
-  test("null at a path is refused, because gemi cannot ask Prisma's question", async () => {
-    // @ts-expect-error `= NULL` is never true; say which empty you mean, on the column
+  test("null at a path reads as JsonNull, except under array_contains", async () => {
     await UserModel.findMany({ where: { metadata: { path: ["a"], equals: null } } });
-    // @ts-expect-error `x @> NULL` is NULL too, so containment against a bare null asks nothing
+    await UserModel.findMany({ where: { metadata: { path: ["a"], not: null } } });
+    // @ts-expect-error `x @> NULL` is NULL, so containment against a bare null asks nothing
     await UserModel.findMany({ where: { metadata: { path: ["a"], array_contains: null } } });
     // ...and it is only the *top level* that goes: a null inside the document is a value.
     await UserModel.findMany({ where: { metadata: { path: ["a"], array_contains: [1, null] } } });
+    // @ts-expect-error the numeric comparisons compare a number; Prisma's engine panics on this
+    await UserModel.findMany({ where: { metadata: { path: ["a"], gt: null } } });
   });
 
   /**
