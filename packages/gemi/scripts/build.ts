@@ -1,5 +1,21 @@
 import { rmdir } from "node:fs/promises";
 
+// A note on `sideEffects`, because its absence from package.json looks like an
+// oversight and is not.
+//
+// Declaring it — `false`, or any list that leaves gemi's own modules out — makes
+// this build emit a broken `dist/services/index.js`. Under Bun 1.3.14 with
+// `splitting: true`, the barrel keeps re-exporting `filesystemConfigDefaults`
+// while the chunk that declared it drops the binding, so importing the built
+// barrel dies with `Exported binding 'Mk' needs to refer to a top-level declared
+// variable`. `SharpDriver`'s class body disappears the same way. `["**/*"]`
+// (i.e. "everything has side effects", the same as saying nothing) builds fine,
+// which is what identifies this as elimination rather than a stale artifact.
+//
+// The field is a bundler hint for *consumers*, so it earns nothing here until
+// that is fixed upstream — and the lazy imports in #403 are what actually
+// removed the weight, for test runners as well as bundlers.
+
 try {
   await rmdir("dist", { recursive: true });
 } catch (err) {}
