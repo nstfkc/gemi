@@ -1,6 +1,7 @@
 import type { PutFileParams, ReadFileParams, ReadResult } from "./types";
 
-// Type-only, so it erases. The SDK is loaded on first use instead — see `sdk()`.
+// Type-only, so it erases. The SDK itself is loaded by `connect()` below, on
+// the first call that needs it.
 import type { S3Client } from "@aws-sdk/client-s3";
 
 import { Buffer } from "node:buffer";
@@ -31,7 +32,17 @@ export class S3Driver extends FileStorageDriver {
    * import here put `@aws-sdk/client-s3` in the module graph of every app and
    * every test that touches any of them (#403). The module registry caches the
    * import, and `??=` caches the client, so this costs one resolved promise per
-   * call after the first.
+   * call after the first. `??=` also leaves the client assignable, which is how
+   * `S3Driver.test.ts` fakes one.
+   *
+   * One behaviour does move with it. The SDK validates almost nothing in its
+   * constructor — `{}`, no arguments at all, an unset region, a bad endpoint and
+   * empty credentials all construct happily and fail on the first request — but
+   * a literal empty-string `region` throws `Region is missing` synchronously.
+   * An app whose `app/config/filesystem.ts` builds an `S3Driver` at module scope
+   * used to see that at boot and now sees it on the first upload. The error is
+   * unchanged and still propagates; only its timing differs, and validating it
+   * eagerly would mean importing the SDK eagerly, which is the whole point.
    */
   private async connect(): Promise<{ sdk: S3Sdk; client: S3Client }> {
     const sdk = await import("@aws-sdk/client-s3");

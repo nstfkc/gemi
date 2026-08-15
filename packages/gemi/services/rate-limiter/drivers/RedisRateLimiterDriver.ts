@@ -1,8 +1,8 @@
-import type { ServiceToken } from "../../../container/Container";
 import { app } from "../../../foundation/app";
 import { buildResult, windowStartFor } from "../slidingWindow";
 import type { ConsumeParams, RateLimitResult } from "../types";
 import { RateLimiterDriver } from "./RateLimiterDriver";
+import { RedisManager } from "../../redis/RedisManager";
 
 /**
  * The slice of Bun's `RedisClient` this driver needs. Narrow on purpose: any
@@ -12,15 +12,6 @@ import { RateLimiterDriver } from "./RateLimiterDriver";
 export interface RateLimiterRedisClient {
   send(command: string, args: string[]): Promise<any>;
 }
-
-/**
- * Stands in for `RedisManager` — same token string, so the container hands back
- * the very same singleton — without importing the class. See `client` below for
- * why the import has to be avoided.
- */
-const REDIS_TOKEN = { token: "redis" } as unknown as ServiceToken<{
-  client: RateLimiterRedisClient;
-}>;
 
 export interface RedisRateLimiterOptions {
   /**
@@ -174,14 +165,18 @@ export class RedisRateLimiter extends RateLimiterDriver {
   private get client(): RateLimiterRedisClient {
     if (this.injectedClient) return this.injectedClient;
 
-    // Resolved through a locally declared token rather than by importing
-    // `RedisManager`: that module imports Bun's `RedisClient` as a value, and
-    // importing it here would make this driver — and anything that re-exports
-    // it — unloadable outside the Bun runtime. The container keys bindings off
-    // the token string, so this resolves the same singleton the real class does.
+    // `bound` first: an application can use this driver with an injected
+    // client and never register `RedisServiceProvider`, and `make` on an
+    // unbound token throws rather than returning undefined.
+    //
+    // This used to resolve through a hand-forged `{ token: "redis" }` cast to
+    // avoid importing `RedisManager` at all, because that module imported Bun's
+    // `RedisClient` as a *value* and would have made this driver unloadable off
+    // Bun. #403 turned that into an `import type`, so the class can be named
+    // here and the cast is gone with it.
     const container = app();
-    const client = container.bound(REDIS_TOKEN)
-      ? container.make(REDIS_TOKEN).client
+    const client = container.bound(RedisManager)
+      ? container.make(RedisManager).client
       : undefined;
 
     if (!client) {

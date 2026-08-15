@@ -41,6 +41,18 @@ export class RedisManager {
       this.config.options,
     ));
   }
+
+  /**
+   * `client` was a plain public property before it was a getter, and
+   * overwriting a manager's client is how this repo fakes one —
+   * `S3Driver.test.ts` does exactly that, and the `S3Driver` half of #403 kept
+   * that seam working on purpose. An accessor with no setter would have turned
+   * `manager.client = fake` into `TypeError: Attempted to assign to readonly
+   * property` instead, which is not a change this was meant to make.
+   */
+  set client(client: RedisClient) {
+    this.instance = client;
+  }
 }
 
 function redisClientConstructor(): RedisClientConstructor {

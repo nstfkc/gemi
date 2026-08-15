@@ -1,5 +1,15 @@
-import { existsSync, readFileSync, statSync } from "node:fs";
-import { dirname, relative, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import { dirname, join, relative, resolve } from "node:path";
 import { describe, expect, test } from "vitest";
 
 /**
@@ -15,16 +25,21 @@ import { describe, expect, test } from "vitest";
  * a database test (#403). A bundler can sometimes shake that out; a test runner
  * never can.
  *
- * The check is a walk of the *static* import graph rather than an instrumented
- * run, because Bun offers nothing that observes the second: a runtime plugin's
- * `onResolve` fires for `await import(x)` and not for `import x from "…"`, so
- * an instrumented child process reports a clean graph even when the eager
- * import is right there. Reading the imports is the thing that can tell the two
- * apart, and it names the file that introduced one.
+ * Two checks, because neither alone is enough:
+ *
+ *   1. `loadedBy()` really imports each barrel in a child Bun process, with a
+ *      plugin whose `onLoad` watches every module under the heavy packages. It
+ *      answers the question that matters — *was this evaluated* — so it catches
+ *      any eager shape, including a module-scope `await import("sharp")`, which
+ *      is awaited during the importer's own evaluation and is every bit as
+ *      eager as a static import.
+ *   2. `walk()` reads the static import graph. It cannot see that
+ *      top-level-await shape, but when something does go eager it names the
+ *      file that did it, and it runs without the heavy packages installed.
  *
  * Scope, so a passing run is not read as more than it is:
  *
- *   - It watches the packages listed in `HEAVY`. A *new* heavy dependency added
+ *   - Both watch the packages listed in `HEAVY`. A *new* heavy dependency added
  *     to a barrel is not caught until someone adds it here.
  *   - `bun` is not on the list, because it cannot be yet: `database/Connection.ts`
  *     still imports `SQL` as a value, so `gemi/facades` remains Bun-only. The
@@ -45,16 +60,103 @@ const HEAVY = [
 
 const ROOT = import.meta.dirname;
 
+/** Matches any file inside one of the `HEAVY` packages, on either separator. */
+const HEAVY_PATH_SOURCE = `[\\\\/]node_modules[\\\\/](${HEAVY.map((name) =>
+  name.replace("/", "[\\\\/]"),
+).join("|")})[\\\\/]`;
+
+// ---------------------------------------------------------------------------
+// 1. Did importing the barrel actually evaluate any of them?
+// ---------------------------------------------------------------------------
+
+/**
+ * Imports `target` in a child Bun process and returns the `HEAVY` packages that
+ * were loaded while it did.
+ *
+ * `onLoad` rather than `onResolve`: a runtime plugin's `onResolve` is not
+ * consulted for a bare specifier that Bun's module loader resolves on its own,
+ * so it never sees `import sharp from "sharp"`. `onLoad` sees every module that
+ * is actually read, which is the question being asked.
+ *
+ * The hook has to return something, so it returns an empty module. Anything it
+ * matched has already failed the test, and stubbing keeps the first heavy
+ * package from dragging in the rest before the child reports what it found.
+ */
+function loadedBy(target: string): string[] {
+  const dir = mkdtempSync(join(tmpdir(), "gemi-barrel-"));
+
+  try {
+    writeFileSync(
+      join(dir, "probe.ts"),
+      [
+        `import { plugin } from "bun";`,
+        `const HEAVY = /${HEAVY_PATH_SOURCE}/;`,
+        `const seen = new Set();`,
+        `plugin({`,
+        `  name: "gemi-barrel-probe",`,
+        `  setup(build) {`,
+        `    build.onLoad({ filter: HEAVY }, (args) => {`,
+        `      const name = args.path.match(HEAVY)[1].replace(/\\\\/g, "/");`,
+        `      if (!seen.has(name)) {`,
+        `        seen.add(name);`,
+        `        console.log("gemi-loaded:" + name);`,
+        `      }`,
+        `      return { contents: "", loader: "js" };`,
+        `    });`,
+        `  },`,
+        `});`,
+        ``,
+      ].join("\n"),
+    );
+
+    writeFileSync(
+      join(dir, "entry.ts"),
+      `await import(${JSON.stringify(target)});\nconsole.log("gemi-barrel-ok");\n`,
+    );
+
+    // `process.execPath` is the Bun binary the suite already runs under
+    // (`bun --bun vitest`), so this does not depend on `bun` being on PATH.
+    const result = spawnSync(
+      process.execPath,
+      ["--preload", join(dir, "probe.ts"), join(dir, "entry.ts")],
+      { cwd: ROOT, encoding: "utf8" },
+    );
+
+    const stdout = result.stdout ?? "";
+    const loaded = [...stdout.matchAll(/^gemi-loaded:(.+)$/gm)].map((m) => m[1]);
+
+    // A child that died for some *other* reason would otherwise look like a
+    // clean graph. Loading a heavy package is allowed to kill it — the stub
+    // above guarantees that — so this only applies when nothing was found.
+    if (loaded.length === 0 && !stdout.includes("gemi-barrel-ok")) {
+      throw new Error(
+        `Importing ${target} failed in the child process.\n` +
+          `${stdout}\n${result.stderr ?? ""}`,
+      );
+    }
+
+    return loaded.sort();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 2. Which file introduced it?
+// ---------------------------------------------------------------------------
+
 const transpilers = {
   ts: new Bun.Transpiler({ loader: "ts" }),
   tsx: new Bun.Transpiler({ loader: "tsx" }),
 };
 
 /**
- * `import x from "…"` and `require("…")` both evaluate the target as the
- * importer loads. `import("…")` does not, which is the whole distinction this
- * file exists to hold: every fix for #403 moved a specifier from the first
- * category to the second.
+ * `import x from "…"` and `require("…")` evaluate the target as the importer
+ * loads. `import("…")` *inside a function* does not, which is the distinction
+ * every fix for #403 turns on.
+ *
+ * A module-scope `await import("…")` is eager despite landing in the same
+ * bucket here as the lazy one. `loadedBy()` above is what covers that gap.
  *
  * `import type` never appears here at all — the transpiler elides it — so a
  * type-only reference to `sharp` is correctly not a cost.
@@ -79,7 +181,7 @@ function packageOf(specifier: string): string {
 }
 
 interface Graph {
-  /** Heavy package -> the files that import it eagerly, nearest first. */
+  /** Heavy package -> the files that import it eagerly. */
   heavy: Map<string, string[]>;
   /** Relative specifiers that resolved to no file, which would hide a subtree. */
   unresolved: string[];
@@ -128,29 +230,42 @@ describe.each([
   ["gemi/services", "services/index.ts"],
   ["gemi/facades", "facades/index.ts"],
 ])("%s", (_subpath, entry) => {
-  const graph = walk(entry);
-
-  test("evaluates no heavy SDK when it is imported", () => {
+  test("loads no heavy SDK when it is imported", () => {
     // `CronJob` is a 90-line dependency-free file, and `DB.connection()` is a
     // database call. Reaching either through its barrel must not cost the AWS
     // SDK, Resend, satori, or a native image binary.
-    expect(describeHeavy(graph)).toEqual([]);
+    expect(loadedBy(join(ROOT, entry))).toEqual([]);
+  }, 60_000);
+
+  test("holds no eager import of one, so none is a hoist away", () => {
+    // Redundant with the check above on today's code, and reported separately
+    // because this is the one that can say *which file*.
+    expect(describeHeavy(walk(entry))).toEqual([]);
   });
 
-  test("the walk reached the whole graph", () => {
+  test("is walked in full, so the check above cannot pass vacuously", () => {
+    const graph = walk(entry);
     // A relative specifier that resolves to nothing silently prunes everything
-    // beneath it, and the assertion above would pass because of the hole.
+    // beneath it, and `describeHeavy` would come back empty because of the hole.
     expect(graph.unresolved).toEqual([]);
-    // And a walk that stopped at the barrel itself would also pass. Pinned well
-    // under the ~110 files each entry currently reaches.
+    // And a walk that stopped at the barrel itself would also look clean. Pinned
+    // well under the ≈150 files `services` reaches today, and the ≈105 of
+    // `facades`.
     expect(graph.visited).toBeGreaterThan(50);
   });
 });
 
-describe("the import walk", () => {
-  test("counts a static import and not a dynamic one", () => {
-    // The two assertions above are only worth anything if `walk` can tell an
-    // eager import from a lazy one — every fix for #403 is exactly that edit.
+describe("the guards themselves", () => {
+  test("the child process reports a package that really is loaded", () => {
+    // Without this the assertions above pass just as happily when the plugin
+    // stops matching — a guard that cannot fail is not one. `resend` stands in
+    // for all five: one filter watches them together.
+    const resend = createRequire(import.meta.url).resolve("resend");
+
+    expect(loadedBy(resend)).toEqual(["resend"]);
+  }, 60_000);
+
+  test("the walk counts a static import and not a deferred one", () => {
     const scan = (code: string) =>
       transpilers.ts.scanImports(code).filter((i) => EAGER.has(i.kind));
 

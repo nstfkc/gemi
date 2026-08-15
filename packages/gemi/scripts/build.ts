@@ -4,13 +4,27 @@ import { rmdir } from "node:fs/promises";
 // oversight and is not.
 //
 // Declaring it — `false`, or any list that leaves gemi's own modules out — makes
-// this build emit a broken `dist/services/index.js`. Under Bun 1.3.14 with
-// `splitting: true`, the barrel keeps re-exporting `filesystemConfigDefaults`
-// while the chunk that declared it drops the binding, so importing the built
-// barrel dies with `Exported binding 'Mk' needs to refer to a top-level declared
-// variable`. `SharpDriver`'s class body disappears the same way. `["**/*"]`
-// (i.e. "everything has side effects", the same as saying nothing) builds fine,
-// which is what identifies this as elimination rather than a stale artifact.
+// this build emit a `dist/services/index.js` that cannot be imported at all.
+// Bun 1.3.14 applies the package's own `sideEffects` to the modules it is
+// bundling and eliminates the entire entry graph, while still emitting the
+// `export { … }` list, so the file re-exports 84 names that nothing in it
+// declares:
+//
+//   SyntaxError: Exported binding 'pj' needs to refer to a top-level declared
+//   variable.
+//
+// (The mangled name varies by entrypoint and build; do not grep for it.)
+// Reproduced with `splitting` both on and off — the barrel is 2.1 KB with,
+// 2.6 KB without, against 1.8 MB for the same build with the field removed —
+// so chunk splitting has nothing to do with it. `["**/*"]`, i.e. "everything
+// has side effects" and therefore equivalent to saying nothing at all, builds
+// and imports fine, which is what identifies this as elimination rather than a
+// stale artifact.
+//
+// Nothing downstream catches it: `bun run build` reports success, and
+// `build-publish.ts`'s dangling-export check only asks whether each published
+// target *exists*. That is why the same script now imports the two barrels
+// before it stages them.
 //
 // The field is a bundler hint for *consumers*, so it earns nothing here until
 // that is fixed upstream — and the lazy imports in #403 are what actually
