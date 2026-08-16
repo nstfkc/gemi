@@ -1,3 +1,5 @@
+import { AnyNull, DbNull, JsonNull, jsonNullKind } from "./json-null";
+
 /**
  * A corpus of argument shapes, shared by the invariant suites.
  *
@@ -122,9 +124,41 @@ export const READS: unknown[] = [
   { where: { metadata: { path: ["a"], gte: 1 } } },
   { where: { metadata: { path: ["a"], lt: 1 } } },
   { where: { metadata: { path: ["a"], lte: 1 } } },
-  // Two filters on one path — the `and`-grouped branch, and the only shape that
-  // extracts the same path twice in one statement.
+  // Two filters on one path — the `and`-grouped branch, and one of the two
+  // shapes that extract the same path twice in one statement. The other is
+  // `equals: AnyNull` below, which does it inside a *single* filter.
   { where: { metadata: { path: ["a"], gt: 1, lt: 9 } } },
+  // **The null sentinels at a path (#407), which are why `vary` had to learn
+  // what a sentinel is.** Three shapes that compile to three different
+  // predicates and must therefore hold three different plan keys — the #266
+  // failure class, arrived at one level down from where it was closed.
+  //
+  // `AnyNull` is the shape worth having: it is the only argument in the ORM
+  // that binds one caller value at *two* placeholder positions in one
+  // predicate, so it is where the count of bound values stops being one per
+  // operator. Measured, so the claim is bounded rather than hopeful: removing
+  // the `vary` guard below makes "varying every bound value leaves the key
+  // alone" fail on both dialects *because of these entries*, and that is the
+  // property they add.
+  //
+  // What they do **not** catch, checked by mutation rather than assumed: a
+  // refactor that hoists the path out of the binder *consistently* — both the
+  // plan compiled for one call and the plan compiled for the next capture the
+  // same wrong value, so `binding.invariants`' reuse property compares equal.
+  // The differential suite is what covers that, since it reads rows.
+  { where: { metadata: { path: ["a"], equals: DbNull } } },
+  { where: { metadata: { path: ["a"], equals: JsonNull } } },
+  { where: { metadata: { path: ["a"], equals: AnyNull } } },
+  { where: { metadata: { path: ["a"], equals: null } } },
+  { where: { metadata: { path: ["a"], not: DbNull } } },
+  { where: { metadata: { path: ["a"], not: JsonNull } } },
+  { where: { metadata: { path: ["a"], not: AnyNull } } },
+  // A sentinel beside an ordinary operator, so the `and`-grouped branch carries
+  // one — three placeholders from one key and two from the other.
+  { where: { metadata: { path: ["a"], equals: AnyNull, not: "x" } } },
+  // ...and at depth, because the path is bound rather than interpolated and a
+  // two-segment one is where a shared-placeholder mistake would show.
+  { where: { metadata: { path: ["a", "b"], equals: AnyNull } } },
 
   // The SQLite grammar, same filters minus the ones the dialect declines.
   { where: { metadata: { path: "$.a", equals: "x" } } },
@@ -134,6 +168,15 @@ export const READS: unknown[] = [
   { where: { metadata: { path: "$.a", string_starts_with: "x" } } },
   { where: { metadata: { path: "$.a", string_ends_with: "x" } } },
   { where: { metadata: { path: "$.a", equals: "x", not: "y" } } },
+  // The sentinels in this grammar too. `equals` and `not` are in SQLite's
+  // `jsonFilters`, so these compile here rather than hitting the dialect
+  // refusal — on the `->` extraction rather than Postgres's `#>`, which is a
+  // different fragment reached through the same compiler branch.
+  { where: { metadata: { path: "$.a", equals: DbNull } } },
+  { where: { metadata: { path: "$.a", equals: JsonNull } } },
+  { where: { metadata: { path: "$.a", equals: AnyNull } } },
+  { where: { metadata: { path: "$.a", equals: null } } },
+  { where: { metadata: { path: "$.a", not: AnyNull } } },
   // Refused on SQLite for the *filter* rather than for the grammar, which is a
   // different message and the one that would fall silent if `jsonFilters` were
   // ever widened there to match Postgres.
@@ -306,6 +349,32 @@ const LITERAL = new Set([
 export function vary(node: unknown, bound = false): unknown {
   if (node === null || node === undefined) return node;
   if (Array.isArray(node)) return node.map((entry) => vary(entry, bound));
+
+  // **An object that is a *value* is not a container to walk into**, and
+  // rebuilding one from `Object.entries` destroys it: every value below has no
+  // enumerable own properties, so the walk returned `{}` and silently changed
+  // the argument's *shape* rather than its bound value.
+  //
+  // That is the opposite of what this function is for. `plan-key.invariants`
+  // asks "does varying a bound value leave the key alone", so a helper that
+  // alters the shape reports a leak that is its own; `binding.invariants` asks
+  // "does the same shape compile alike", and a `{}` twin either raises inside
+  // the compiler and is swallowed by that suite's `catch { continue }` — a case
+  // that looks covered and tests nothing — or compiles to different SQL.
+  //
+  // Reached the moment the corpus gained a Json null sentinel (#407), which is
+  // the first entry whose operand is such an object. `Date` and a typed array
+  // are the same shape of mistake and are guarded here rather than left for the
+  // next person to rediscover; `isFilterObject` in the where compiler and
+  // `canonicalShape` in `plan.ts` both already draw this exact line.
+  if (
+    node instanceof Date ||
+    ArrayBuffer.isView(node) ||
+    jsonNullKind(node) !== null
+  ) {
+    return node;
+  }
+
   if (typeof node === "object") {
     const out: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(node)) {

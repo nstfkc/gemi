@@ -13,8 +13,13 @@ import type { Dialect } from "./dialect";
 // MySQL and MariaDB, so gemi does not need a driver per database — it needs to
 // know *which* one is in use, which is what `dialect` carries.
 //
-// Like `RedisManager`, this is safe to build eagerly: Bun's client connects on
-// the first query, not at construction. It is still bound as a lazy singleton,
+// Safe to build eagerly: Bun's client connects on the first query, not at
+// construction. (`RedisManager` used to be cited here as the parallel case. As
+// of #403 it builds its client in a memoizing getter instead — not because
+// eager construction was unsafe, but because naming Bun's `RedisClient` at
+// module scope is what made `gemi/services` unloadable off Bun. `Connection`
+// still imports `SQL` as a value for the same reason, which is the remaining
+// half of #396.) It is still bound as a lazy singleton,
 // so an app that never touches the database never resolves it and never has to
 // have DATABASE_URL set.
 //

@@ -1,12 +1,8 @@
 import type { PutFileParams, ReadFileParams, ReadResult } from "./types";
 
-import {
-  GetObjectCommand,
-  HeadObjectCommand,
-  ListObjectsV2Command,
-  PutObjectCommand,
-  S3Client,
-} from "@aws-sdk/client-s3";
+// Type-only, so it erases. The SDK itself is loaded by `connect()` below, on
+// the first call that needs it.
+import type { S3Client } from "@aws-sdk/client-s3";
 
 import { Buffer } from "node:buffer";
 import { FileStorageDriver } from "./FileStorageDriver";
@@ -16,12 +12,42 @@ import {
   RangeNotSatisfiableError,
 } from "../../../http/errors";
 
+type S3Sdk = typeof import("@aws-sdk/client-s3");
+
 export class S3Driver extends FileStorageDriver {
-  private client: S3Client;
+  private client: S3Client | undefined;
+  private config: ConstructorParameters<typeof S3Client>;
 
   constructor(...config: ConstructorParameters<typeof S3Client>) {
     super();
-    this.client = new S3Client(...config);
+    this.config = config;
+  }
+
+  /**
+   * The AWS SDK and this driver's client, both built on the first call that
+   * needs them rather than at module load.
+   *
+   * `S3Driver` is re-exported from the `gemi/services` barrel, which is the
+   * only door an application has to `CronJob`, `Job` or `Command` — a static
+   * import here put `@aws-sdk/client-s3` in the module graph of every app and
+   * every test that touches any of them (#403). The module registry caches the
+   * import, and `??=` caches the client, so this costs one resolved promise per
+   * call after the first. `??=` also leaves the client assignable, which is how
+   * `S3Driver.test.ts` fakes one.
+   *
+   * One behaviour does move with it. The SDK validates almost nothing in its
+   * constructor — `{}`, no arguments at all, an unset region, a bad endpoint and
+   * empty credentials all construct happily and fail on the first request — but
+   * a literal empty-string `region` throws `Region is missing` synchronously.
+   * An app whose `app/config/filesystem.ts` builds an `S3Driver` at module scope
+   * used to see that at boot and now sees it on the first upload. The error is
+   * unchanged and still propagates; only its timing differs, and validating it
+   * eagerly would mean importing the SDK eagerly, which is the whole point.
+   */
+  private async connect(): Promise<{ sdk: S3Sdk; client: S3Client }> {
+    const sdk = await import("@aws-sdk/client-s3");
+    this.client ??= new sdk.S3Client(...this.config);
+    return { sdk, client: this.client };
   }
 
   async put(params: PutFileParams | Blob) {
@@ -57,8 +83,9 @@ export class S3Driver extends FileStorageDriver {
           ? Buffer.from(await body.arrayBuffer())
           : "";
 
-    await this.client.send(
-      new PutObjectCommand({
+    const { sdk, client } = await this.connect();
+    await client.send(
+      new sdk.PutObjectCommand({
         Bucket: bucket,
         Key: name,
         Body: buffer,
@@ -70,8 +97,9 @@ export class S3Driver extends FileStorageDriver {
   }
 
   async list(folder: string) {
-    const result = await this.client.send(
-      new ListObjectsV2Command({
+    const { sdk, client } = await this.connect();
+    const result = await client.send(
+      new sdk.ListObjectsV2Command({
         Bucket: process.env.BUCKET_NAME,
         Prefix: folder,
       }),
@@ -95,8 +123,9 @@ export class S3Driver extends FileStorageDriver {
       throw new Error("Object name has to be specified");
     }
 
-    const result = await this.client.send(
-      new GetObjectCommand({
+    const { sdk, client } = await this.connect();
+    const result = await client.send(
+      new sdk.GetObjectCommand({
         Bucket: bucket,
         Key: name,
       }),
@@ -122,10 +151,12 @@ export class S3Driver extends FileStorageDriver {
       throw new Error("Object name has to be specified");
     }
 
+    const { sdk, client } = await this.connect();
+
     let result: Awaited<ReturnType<S3Client["send"]>> & Record<string, any>;
     try {
-      result = (await this.client.send(
-        new GetObjectCommand({
+      result = (await client.send(
+        new sdk.GetObjectCommand({
           Bucket: bucket,
           Key: name,
           Range: range ? toRangeHeaderValue(range) : undefined,
@@ -168,9 +199,11 @@ export class S3Driver extends FileStorageDriver {
       (typeof params === "string" ? undefined : params.bucket) ??
       process.env.BUCKET_NAME;
 
+    const { sdk, client } = await this.connect();
+
     try {
-      const result = await this.client.send(
-        new HeadObjectCommand({ Bucket: bucket, Key: name }),
+      const result = await client.send(
+        new sdk.HeadObjectCommand({ Bucket: bucket, Key: name }),
       );
       return result.ContentLength ?? 0;
     } catch (err: any) {

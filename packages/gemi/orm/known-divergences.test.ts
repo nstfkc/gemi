@@ -123,4 +123,56 @@ describe("divergences the source knows about are documented", () => {
     expect(source).toMatch(/prisma\s+bun/i);
     expect(source).toMatch(/\$1::text::jsonb/);
   });
+
+  /**
+   * The fourth, found by reviewing #407 rather than by using the ORM — which is
+   * why it needs pinning hardest.
+   *
+   * A bare `null` in a filter means `is null` on every column type, and that is
+   * Prisma's reading on every column type *but* `Json`. There Prisma reads it
+   * as the JSON value `null` — the same thing it reads at a path — so
+   * `{ metadata: { equals: null } }` returns the SQL-NULL rows here and the
+   * JSON-null rows there. Disjoint sets, identical data, nothing raised.
+   *
+   * **It was nearly documented backwards.** #407 gave a bare `null` at a *path*
+   * the `JsonNull` reading, correctly and to match the oracle, and then
+   * explained the column/path difference as Prisma's own asymmetry. It is not:
+   * Prisma has no asymmetry, gemi has the divergence, and prose asserting the
+   * opposite would have told a reader the wrong row set was the right one. That
+   * is the failure this file exists to prevent, arriving through a comment
+   * rather than through silence.
+   *
+   * Not fixed, deliberately: the column path is released behaviour for every
+   * `Json` filter and wants its own change and its own differential cases.
+   * Recorded instead, in the three places a reader might start from.
+   */
+  test("the page documents the bare-null-on-a-Json-column divergence", () => {
+    expect(DOC).toMatch(
+      /##\s+A bare `null` on a `Json` column means `DbNull` here and `JsonNull` on Prisma/,
+    );
+
+    const section = DOC.slice(DOC.indexOf("## A bare `null` on a `Json` column"));
+    // The three things a reader cannot recover from the call site: which rows
+    // each side returns, that it is silent, and the spelling that avoids it.
+    expect(section).toMatch(/SQL-NULL rows/);
+    expect(section).toMatch(/JSON-null rows/);
+    expect(section).toMatch(/equals: DbNull/);
+    // ...and that the *path* is the case that agrees, so the section cannot be
+    // read as condemning the thing #407 added.
+    expect(section).toMatch(/agrees with Prisma/);
+  });
+
+  test("the compiler still carries the note that section is derived from", () => {
+    const source = readFileSync(
+      join(ROOT, "packages/gemi/orm/compile/where.ts"),
+      "utf8",
+    );
+
+    expect(source).toMatch(/KNOWN DIVERGENCE — a bare `null` on a `Json` column/);
+    // The measurement rather than the prose, for the reason the `json-param.ts`
+    // check above gives: if the two predicates go, the page is describing
+    // behaviour nothing in the repository records.
+    expect(source).toMatch(/"payload"::jsonb = \$1/);
+    expect(source).toMatch(/"payload" is null/);
+  });
 });

@@ -1,7 +1,3 @@
-import satori from "satori";
-// @ts-ignore
-import sharp from "sharp";
-
 import { HttpRequest } from "../../http";
 import { GEMI_REQUEST_BREAKER_ERROR } from "../../http/Error";
 import { RequestContext } from "../../http/requestContext";
@@ -37,6 +33,20 @@ import { createServerQueryFetcher } from "./serverQueryFetcher";
 import { injectQueryPayloads, isBotUserAgent } from "./streamQueryInjection";
 import { createShellContentObserver, createShellContentReporter } from "./shellContentReport";
 import { createRoutePayloadStream } from "./routePayloadStream";
+import { loadSharp } from "../../support/sharp";
+
+/**
+ * `satori`, loaded on the first OG-image request rather than on import, for the
+ * same reason `sharp` is (see `support/sharp.ts`): this module is reachable
+ * from `gemi/services` through `RouteServiceProvider`, so a static import put
+ * satori — and, one hop on, a font parser and an SVG layout engine — in the
+ * module graph of every app and test that imported the barrel to reach
+ * `CronJob` (#403).
+ *
+ * Rendering an OG image is a cold path by definition: a crawler asks for it
+ * once and a CDN serves it afterwards.
+ */
+const loadSatori = async () => (await import("satori")).default;
 
 /**
  * React's server renderer, loaded on the first render rather than on import.
@@ -489,6 +499,10 @@ export class ViewRouteDispatcher {
 
           const ogHeaders = new Headers(headers);
           ogHeaders.set("Content-Type", "image/png");
+          const [satori, sharp] = await Promise.all([
+            loadSatori(),
+            loadSharp("Rendering an OG image"),
+          ]);
           const svg = await satori(err.jsx, { ...options, fonts: _fonts });
           const png = await sharp(Buffer.from(svg))
             .png({

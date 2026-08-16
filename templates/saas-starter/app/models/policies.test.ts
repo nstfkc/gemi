@@ -699,6 +699,83 @@ function suite(label: string, url?: string) {
     });
 
     /**
+     * The headline test again, with the root model policied too — the case the
+     * note above excludes on purpose, and the one that leaked.
+     *
+     * `$execute` builds `effective` by running `applyNestedPolicies` over the
+     * arguments, which is what pushes each counted or included relation's scope
+     * down into the tree. It then reached for `applyPolicies` and passed the
+     * *original* `args`, so the moment the root model carried any policy at all
+     * the whole nested rewrite was overwritten and thrown away. An unpolicied
+     * root skipped that branch entirely, which is why every nested-policy test
+     * in this file passed while the composition leaked.
+     *
+     * **The seed cannot discriminate on its own.** Alice owns one account and it
+     * is already in her organisation, so an unscoped include returns the right
+     * rows by accident. The second account below is what makes the assertion
+     * mean anything: it is Alice's, and it is in Bob's organisation, so it comes
+     * back if and only if the nested scope was discarded.
+     *
+     * A `redact`-only policy reproduces it identically — the trigger is
+     * `policies.length > 0`, not anything the scope does — which is why the
+     * third case carries no `scope` at all.
+     */
+    describe("with the root model policied too", () => {
+      beforeEach(async () => {
+        await Model.asSystem(() =>
+          AccountModel.create({
+            data: { userId: ALICE.id, organizationId: BOB.organizationId },
+          }),
+        );
+      });
+
+      test("a nested include is still scoped", async () => {
+        (ScopedAccount as any).$policies = [tenantScoped];
+        (ScopedUser as any).$policies = [tenantScoped];
+
+        const rows = await Model.asUser(ALICE, () =>
+          ScopedUser.findMany({ include: { accounts: true } }),
+        );
+
+        // The root scope leaves Alice alone, and her cross-organisation account
+        // is not attached to her.
+        expect(rows).toHaveLength(1);
+        const accounts = rows.flatMap((row: any) => row.accounts);
+        expect(accounts.map((a: any) => a.organizationId)).toEqual([
+          ALICE.organizationId,
+        ]);
+      });
+
+      test("a nested _count is still scoped", async () => {
+        (ScopedAccount as any).$policies = [tenantScoped];
+        (ScopedUser as any).$policies = [tenantScoped];
+
+        const rows = await Model.asUser(ALICE, () =>
+          ScopedUser.findMany({
+            include: { _count: { select: { accounts: true } } },
+          }),
+        );
+
+        // 2 is the leak: it counts the account in Bob's organisation.
+        expect(rows.map((row: any) => row._count.accounts)).toEqual([1]);
+      });
+
+      test("a root policy with no scope at all still keeps the nested scope", async () => {
+        (ScopedAccount as any).$policies = [tenantScoped];
+        (ScopedUser as any).$policies = [{ redact: (_c: any, row: any) => row }];
+
+        const rows = await Model.asUser(ALICE, () =>
+          ScopedUser.findMany({ include: { accounts: true } }),
+        );
+
+        const accounts = rows.flatMap((row: any) => row.accounts);
+        expect(accounts.map((a: any) => a.organizationId)).toEqual([
+          ALICE.organizationId,
+        ]);
+      });
+    });
+
+    /**
      * The regression guard for the wiring itself, not for the mechanism.
      *
      * The headline test above was green while the *documented* pattern leaked:

@@ -1448,6 +1448,207 @@ function suite(label: string, url?: string) {
     );
 
     /**
+     * The same three sentinels **one level down**, at a JSON path — #407.
+     *
+     * They were refused here until now, and the refusal was right about the
+     * extraction it named: `#>>` yields SQL NULL for an absent key and for a
+     * JSON `null` alike, so there was nothing left to compare. `#>` keeps the
+     * distinction and so does SQLite's `->`, which is what `dialect.jsonValueAt`
+     * is, so the question is answerable on both dialects.
+     *
+     * **This suite is the reason the SQLite half went the way it did.** The
+     * issue offered two defensible answers — keep refusing on SQLite the way
+     * `array_contains` is dialect-gated, or implement `json_type` — and left the
+     * choice open. Measuring the oracle first, which is this repo's convention
+     * and what the issue asked for, settled it: Prisma answers all three at a
+     * path on SQLite too, and returns the *same rows* it returns on Postgres.
+     * Refusing there would have been a divergence from the oracle rather than a
+     * difference between the databases, which is the one thing the dialect gate
+     * is not for.
+     *
+     * ### The rows, and why four more of them
+     *
+     * Every case here compares gemi against Prisma, so **both agreeing on the
+     * empty set is a pass** — the trap the sentinel block above names, and it
+     * bites harder at a path because a path has three states rather than two.
+     * The seed discriminates two of them (`p1` holds a scalar at `plan`, `p2`
+     * holds `{}` so the key is absent, `p4` leaves the column SQL NULL) and not
+     * the third: no seeded row has a JSON `null` *at* a key, which is precisely
+     * what `JsonNull` asks for and precisely what separates it from `DbNull`.
+     * Without `p6` below, `equals: JsonNull` returns nothing from either client
+     * and an implementation that answered `DbNull`'s question instead would
+     * pass.
+     *
+     * `p7` covers the other half of that: a column holding a JSON `null` has
+     * nothing to index into, so the extraction is SQL NULL and the row is a
+     * `DbNull` match rather than a `JsonNull` one. It reads as a surprise and
+     * is what both databases do.
+     *
+     * `p8` is the JSON string `"null"`, and it is the case that catches an
+     * implementation reaching for the text extraction after all: under `#>>`
+     * and under SQLite's `json_extract` this row is indistinguishable from a
+     * JSON null, and under `#>` and `->` it is not.
+     *
+     * Added in a `beforeAll` rather than in `seed`, and taken back out in an
+     * `afterAll`, because the shared seed's row count and ordering are asserted
+     * by cases throughout this file.
+     */
+    describe("a Json null sentinel at a path", () => {
+      /** Postgres takes an array of keys, SQLite a JSONPath string. */
+      const path = url ? ["plan"] : "$.plan";
+
+      beforeAll(async () => {
+        await differential.prisma.user.createMany({
+          data: [
+            {
+              publicId: "p6",
+              email: "p6@example.dev",
+              globalRole: 2,
+              createdAt: new Date(EPOCH + 5000),
+              updatedAt: new Date(EPOCH + 5000),
+              // The JSON value `null` *at* the key — the state the seed had
+              // none of, and the only thing `JsonNull` matches here.
+              metadata: { plan: null },
+            },
+            {
+              publicId: "p7",
+              email: "p7@example.dev",
+              globalRole: 2,
+              createdAt: new Date(EPOCH + 6000),
+              updatedAt: new Date(EPOCH + 6000),
+              // The *column* is a JSON null, so there is nothing to index into
+              // and the extraction is SQL NULL — a `DbNull` row, not a
+              // `JsonNull` one.
+              metadata: PrismaNS.JsonNull,
+            },
+            {
+              publicId: "p8",
+              email: "p8@example.dev",
+              globalRole: 2,
+              createdAt: new Date(EPOCH + 7000),
+              updatedAt: new Date(EPOCH + 7000),
+              // The JSON *string* "null", which the text extraction cannot tell
+              // from a JSON null and the JSON one can.
+              metadata: { plan: "null" },
+            },
+          ],
+        });
+      });
+
+      afterAll(async () => {
+        await differential.reset();
+      });
+
+      test.each([
+        ["equals DbNull", { equals: PrismaNS.DbNull }],
+        ["equals JsonNull", { equals: PrismaNS.JsonNull }],
+        ["equals AnyNull", { equals: PrismaNS.AnyNull }],
+        ["not DbNull", { not: PrismaNS.DbNull }],
+        ["not JsonNull", { not: PrismaNS.JsonNull }],
+        ["not AnyNull", { not: PrismaNS.AnyNull }],
+        // A bare `null` reads as `JsonNull` at a path, which is Prisma's
+        // reading — so these two rows are the same query as the JsonNull ones
+        // above. #371's second item, closed by the same change. (On the
+        // *column* gemi reads a bare `null` as `DbNull` and Prisma does not;
+        // that divergence is recorded in `known-divergences.test.ts`.)
+        ["equals null", { equals: null }],
+        ["not null", { not: null }],
+      ] as [string, object][])("%s", async (_label, filter) => {
+        await differential.expectSame("User", "findMany", {
+          where: { metadata: { path, ...filter } },
+          orderBy: { id: "asc" },
+        });
+      });
+
+      /**
+       * The folio predicate from #407 — `COALESCE(payload->>'x', name) = v`
+       * spelled in the grammar, and the read that could not leave Prisma.
+       *
+       * The second branch is the one that needed `AnyNull`: "the extracted
+       * value is not there, so fall back to the column". It is here rather than
+       * only in the compiler tests because the whole claim is about *rows*, and
+       * because it is the shape that exercises a sentinel inside an `OR` beside
+       * an ordinary column filter.
+       */
+      test("the fallback predicate the issue could not write", async () => {
+        // Both branches contribute: `p1` carries `plan: "pro"` in the payload,
+        // and `p3` is an "Ada" whose payload has no `plan` at all — which is
+        // the row the second branch exists for. A predicate that answered only
+        // the first branch would still return rows, so this discriminates.
+        const rows = (await differential.expectSame("User", "findMany", {
+          where: {
+            OR: [
+              { metadata: { path, equals: "pro" } },
+              { name: "Ada", metadata: { path, equals: PrismaNS.AnyNull } },
+            ],
+          },
+          orderBy: { id: "asc" },
+        })) as { publicId: string }[];
+
+        expect(rows.map((row) => row.publicId)).toEqual(["p1", "p3"]);
+      });
+
+      /**
+       * ...and the rows those cases run against discriminate.
+       *
+       * Asserted on what the comparison actually saw, for the reason the enum
+       * block below gives: every case above passes if both clients return
+       * nothing, so a seed that drifted would leave eight green tests checking
+       * nothing. These four numbers are the ones that make the eight
+       * meaningful — each sentinel has to select a *different*, non-empty set,
+       * and `JsonNull` in particular has to find exactly `p6` rather than
+       * agreeing with `DbNull`.
+       */
+      test("the three sentinels select three different non-empty sets", async () => {
+        const ids = async (filter: object) =>
+          (
+            (await differential.expectSame("User", "findMany", {
+              where: { metadata: { path, ...filter } },
+              orderBy: { id: "asc" },
+            })) as { publicId: string }[]
+          ).map((row) => row.publicId);
+
+        const db = await ids({ equals: PrismaNS.DbNull });
+        const json = await ids({ equals: PrismaNS.JsonNull });
+        const any = await ids({ equals: PrismaNS.AnyNull });
+
+        // Exactly the row holding a JSON null *at* the key — the assertion that
+        // does the work. Not `p8`, whose value is the JSON *string* `"null"`,
+        // and not any of `DbNull`'s rows.
+        expect(json).toEqual(["p6"]);
+
+        // "Nothing at this path": the key is absent on `p2` and `p3`, the
+        // column is a JSON scalar with no key to reach on `p5`, SQL NULL on
+        // `p4`, and a JSON null on `p7`.
+        expect(db.length).toBeGreaterThan(1);
+        expect(db).not.toContain("p6");
+        expect(db).not.toContain("p8");
+
+        // ...and `AnyNull` is exactly the two together, which is what makes it
+        // a third question rather than a spelling of one of the other two.
+        expect(any).toEqual([...db, ...json].sort());
+      });
+
+      /**
+       * The row that separates the JSON-preserving extraction from the text
+       * one, asserted on its own so a regression to `#>>` / `json_extract`
+       * names itself here instead of arriving as an off-by-one row count.
+       *
+       * `p8` holds the JSON string `"null"`. Under the text extraction it is
+       * the four characters `null`, indistinguishable from a JSON null; under
+       * `#>` and `->` it is `"null"` with its quotes and is an ordinary string.
+       */
+      test("the JSON string \"null\" is not a JSON null", async () => {
+        const rows = (await differential.expectSame("User", "findMany", {
+          where: { metadata: { path, equals: "null" } },
+          orderBy: { id: "asc" },
+        })) as { publicId: string }[];
+
+        expect(rows.map((row) => row.publicId)).toEqual(["p8"]);
+      });
+    });
+
+    /**
      * ...and the data those cases run against discriminates.
      *
      * Every case above compares gemi to Prisma, so both agreeing on nothing is
