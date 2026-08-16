@@ -1,7 +1,3 @@
-//@ts-ignore
-import sharp from "sharp";
-
-import { Buffer } from "node:buffer";
 import type { Prettify } from "../utils/type";
 
 import { RequestContext } from "../http/requestContext";
@@ -14,7 +10,10 @@ import type {
 import { FilesystemManager } from "../services/file-storage/FilesystemManager";
 import { Facade } from "./Facade";
 
-type Metadata = Prettify<sharp.Metadata>;
+// `Bun.Image` reports only the header fields — `width`, `height` and `format`.
+// The richer `sharp.Metadata` shape this used to return (`size`, `space`,
+// `channels`, `density`, `hasAlpha`, `exif`, …) is no longer available.
+type Metadata = Prettify<Bun.Image.Metadata>;
 
 export class Storage extends Facade {
   static getFacadeAccessor() {
@@ -26,9 +25,8 @@ export class Storage extends Facade {
   }
 
   static async metadata(obj: Blob | File): Promise<Partial<Metadata>> {
-    const buffer = Buffer.from(await obj.arrayBuffer());
     try {
-      return await sharp(buffer).metadata();
+      return await new Bun.Image(obj).metadata();
     } catch {
       return {};
     }

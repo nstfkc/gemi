@@ -113,7 +113,7 @@ const files = await Storage.list("avatars/");
 
 ### `metadata(blob | file)`
 
-Reads image metadata (width, height, format, etc.) from a `Blob`/`File` using Sharp. Returns a partial metadata object, or `{}` if the bytes aren't a decodable image — useful for validating an upload before storing it.
+Reads image metadata from a `Blob`/`File` using `Bun.Image`. Returns a partial `{ width, height, format }`, or `{}` if the bytes aren't a decodable image — useful for validating an upload before storing it.
 
 ```typescript
 const meta = await Storage.metadata(uploadedFile);
@@ -340,16 +340,26 @@ export default class extends Kernel {
 
 ## Image optimization
 
-gemi optimizes images on demand — resizing and re-encoding to WebP — through the `ImageManager`, which uses a Sharp-backed driver by default. It needs no configuration at all; supply an `image` slice only to swap the driver:
+gemi optimizes images on demand — resizing and re-encoding to WebP — through the `ImageManager`, which uses a `Bun.Image`-backed driver by default. `Bun.Image` is built into Bun, so this needs no native module and no install step. Supply an `image` slice only to swap the driver:
 
 ```typescript
 // app/config/image.ts
 import { defineImageConfig } from "gemi/services";
-import { MySharpVariant } from "../images/MySharpVariant";
+import { MyDriver } from "../images/MyDriver";
 
 export default defineImageConfig({
-  driver: new MySharpVariant(),
+  driver: new MyDriver(),
 });
+```
+
+A `Sharp` driver is still exported from `gemi/services` for apps that want Sharp's
+full fit behaviour (see the note on `fit` below). It requires `sharp` to be
+installed:
+
+```typescript
+import { defineImageConfig, Sharp } from "gemi/services";
+
+export default defineImageConfig({ driver: new Sharp() });
 ```
 
 ```typescript
@@ -366,7 +376,7 @@ export default class extends Kernel {
 
 A custom driver subclasses `ImageOptimizationDriver` (from `gemi/services`) and implements `resize(buffer, params)`.
 
-The `Sharp` driver's `resize` accepts `ResizeParameters`:
+`resize` accepts `ResizeParameters`:
 
 ```typescript
 type ResizeParameters = {
@@ -378,6 +388,18 @@ type ResizeParameters = {
 ```
 
 Zero or missing `width`/`height` is treated as "unconstrained" for that dimension, and the output is always encoded as WebP.
+
+> **`fit` on the default driver.** `Bun.Image` resizes with `fill` (stretch to
+> exactly `width`×`height`) or `inside` (shrink to fit inside the box, aspect
+> preserved). It has no crop primitive, so `cover` and `outside` — which fill the
+> box and discard the overflow — map to `fill`, honouring the requested
+> dimensions but distorting the aspect ratio. `contain` maps to `inside`, the
+> same fit without letterbox padding.
+>
+> This only applies when **both** `width` and `height` are given; with one
+> dimension the aspect ratio is preserved either way and `fit` is ignored. The
+> `Image` component only ever sends `w`, so it is unaffected. Use the `Sharp`
+> driver if you need true `cover` cropping.
 
 ### How images are served
 

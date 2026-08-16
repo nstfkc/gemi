@@ -78,6 +78,7 @@ export type {
   ResizeParameters,
 } from "./image-optimization/drivers/types";
 export { ImageOptimizationDriver } from "./image-optimization/drivers/ImageOptimizationDriver";
+export { BunImage } from "./image-optimization/drivers/BunImageDriver";
 export { Sharp } from "./image-optimization/drivers/SharpDriver";
 
 // Auth

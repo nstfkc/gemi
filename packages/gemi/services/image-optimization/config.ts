@@ -1,5 +1,5 @@
+import { BunImage } from "./drivers/BunImageDriver";
 import type { ImageOptimizationDriver } from "./drivers/ImageOptimizationDriver";
-import { Sharp } from "./drivers/SharpDriver";
 
 // Config key: `image`.
 export interface ImageConfig {
@@ -12,6 +12,6 @@ export function defineImageConfig(config: ImageConfig): ImageConfig {
 
 export function imageConfigDefaults(): Required<ImageConfig> {
   return {
-    driver: new Sharp(),
+    driver: new BunImage(),
   };
 }
