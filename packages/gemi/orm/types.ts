@@ -413,23 +413,29 @@ type ListFilter<E> = {
  * `Json` filters, which are a comparison against one of the column's empty
  * states as often as against a value.
  *
- * `AnyNull` is accepted here and nowhere else: it asks "either kind of empty",
- * which is a question rather than a value, and the write paths refuse it.
+ * `AnyNull` is accepted here and under `equals` / `not` at a path
+ * ({@link JsonPathNull}) and nowhere else: it asks "either kind of empty", which
+ * is a question rather than a value, and the write paths refuse it.
  *
- * **`equals: null` is refused at runtime and cannot be refused here.** A `Json`
- * column has two empty states and the filter has to say which, so the compiler
- * raises `InvalidArgumentError` naming the explicit form — but the type cannot
- * express it, because `JsonValue` minus `null` still contains
- * `{ [key: string]: JsonValue }`, and `{ equals: null }` is itself a valid JSON
- * object. Prisma has the same gap. Stated rather than papered over: a comment
- * claiming the type rejects it would be read as a guarantee.
+ * **`equals: null` is not refused, here or at run time, and it is read as
+ * `DbNull`.** The type cannot exclude it — `JsonValue` minus `null` still
+ * contains `{ [key: string]: JsonValue }`, and `{ equals: null }` is itself a
+ * valid JSON object — and the compiler does not either: `equals` takes the
+ * `operand === null` branch and compiles `"metadata" is null`, which is the
+ * same predicate `equals: DbNull` gives. Measured against `compileRead` on both
+ * dialects. So the column's two empty states are *not* forced apart by anything
+ * except the convention of writing the sentinel, and Prisma has the same gap.
+ * Stated rather than papered over: a comment claiming either layer rejects it
+ * would be read as a guarantee, and this one used to.
  *
  * **This is the filter on the *column*, which is why `path` is excluded.** A
- * `path` sends the whole operand to `compileJsonFilter`, where the sentinels are
- * refused — `#>>` cannot tell an absent key from a JSON `null`. Without the
- * `path?: never`, `{ path: […], equals: DbNull }` landed here instead of on
- * `JsonPathFilter`, because a union ignores a property one member declares and
- * excess-property checking counts it known if *any* member has it.
+ * `path` sends the whole operand to `compileJsonFilter`, which answers the
+ * sentinels under `equals` and `not` and refuses them under the other eight
+ * (#407) — a different grammar, reached through `dialect.jsonValueAt` rather
+ * than through the column. Without the `path?: never`,
+ * `{ path: […], equals: DbNull }` landed here instead of on `JsonPathFilter`,
+ * because a union ignores a property one member declares and excess-property
+ * checking counts it known if *any* member has it.
  *
  * **`equals` and `not` are asymmetric, and the compiler is what makes them so.**
  * `equals` binds its operand as a *value*, so an object under it is a document
@@ -528,15 +534,17 @@ type JsonPathScalar = string | number | boolean;
  * `JsonNull` is "the value at this path is the JSON value `null`". `AnyNull` is
  * either, as everywhere else.
  *
- * **A bare `null` is admitted here and refused on the column, and that
- * asymmetry is Prisma's.** On a `Json` *column* the two empty states are both
- * reachable and choosing between them is the whole reason the sentinels exist,
- * so `null` is excluded from `JsonWriteValue` and from `JsonFilter` — guessing
- * is the failure. At a *path* Prisma simply reads `null` as the JSON value:
- * `{ path: […], equals: null }` and `{ path: […], equals: JsonNull }` compile
- * to byte-identical SQL and return identical rows, measured on 6.19.2 against
- * Postgres 16 and SQLite. So there is nothing to guess, and refusing it would
- * be gemi diverging from the oracle rather than protecting anyone.
+ * **A bare `null` means different things here and on the column, and the split
+ * is Prisma's.** On a `Json` *column* it is read as `DbNull` — the column is
+ * SQL NULL — which is why {@link JsonInput} excludes it on the write side,
+ * where the two empty states are both storable and guessing between them is the
+ * failure the sentinels exist to prevent. (On the *read* side neither the type
+ * nor the compiler excludes it; see {@link JsonFilter}.) At a *path* Prisma
+ * reads it as the JSON value instead: `{ path: […], equals: null }` and
+ * `{ path: […], equals: JsonNull }` compile to byte-identical SQL and return
+ * identical rows, measured on 6.19.2 against Postgres 16 and SQLite. So the
+ * two spellings are one query here, and refusing it would be gemi diverging
+ * from the oracle rather than protecting anyone.
  *
  * The other seven operators keep refusing every member. `string_contains` and
  * friends want a string; the four numeric comparisons compare a number, and

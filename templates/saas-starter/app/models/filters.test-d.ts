@@ -375,18 +375,26 @@ describe("Json path filters", () => {
   });
 
   /**
-   * **A bare `null` is accepted under `equals` / `not` at a path, and refused
-   * on the column** — the asymmetry is Prisma's and it is worth stating because
-   * it looks like an inconsistency.
-   *
-   * On the column the two empty states are both reachable and choosing between
-   * them is the whole reason the sentinels exist, so `null` is a type error and
-   * `DbNull` / `JsonNull` are required. At a path Prisma simply reads `null` as
-   * the JSON value: `{ path: […], equals: null }` and
+   * **A bare `null` is accepted under `equals` / `not` at a path, and it means
+   * `JsonNull` there** — `{ path: […], equals: null }` and
    * `{ path: […], equals: JsonNull }` compile to byte-identical SQL and return
    * identical rows, measured on 6.19.2 against both dialects. There is nothing
    * to guess, so refusing it would be gemi diverging from the oracle. That was
    * #371's second item, and #407 closed it with the same change.
+   *
+   * On the *column* a bare `null` is accepted too and means the other thing —
+   * `DbNull`, compiling to `is null`. Neither the type nor the compiler refuses
+   * it there; `JsonFilter`'s docblock says why the type cannot. The two lines
+   * below pin that, because an earlier draft of this comment asserted the
+   * column form was a type error and nothing here would have caught it.
+   */
+  test("a bare null on the column is accepted, and reads as DbNull", async () => {
+    await UserModel.findMany({ where: { metadata: { equals: null } } });
+    await UserModel.findMany({ where: { metadata: { not: null } } });
+  });
+
+  /**
+   * ...and at a path it is the other empty — see the test above for the column.
    *
    * **`array_contains` still refuses a bare `null`**, and for a different
    * reason — it is the one path operator whose operand is a whole document, so

@@ -3786,10 +3786,10 @@ await AsyncJob.findMany({
 ```
 
 A bare `null` is accepted under these two operators and reads as `JsonNull`, which is Prisma's own
-reading — the two spellings compile to identical SQL. That is the opposite of the rule on the
-*column*, where `null` is a type error and the sentinel is required. The difference is real: a
-column has two empty states and guessing between them is the whole reason the sentinels exist,
-while at a path Prisma simply reads `null` as the JSON value.
+reading — the two spellings compile to identical SQL. Note it means something *different* on the
+column, where `null` reads as `DbNull` and compiles to `is null`. The asymmetry is Prisma's, and
+it is why writing the sentinel you mean is worth the keystrokes even where a bare `null` is
+accepted: a column has two empty states, and at a path the JSON value is the one Prisma picks.
 
 **Under the other seven operators a sentinel is refused, and so is a bare `null`.** They compare an
 extracted value against a scalar, and "which kind of null is this" is not a scalar question. Prisma
