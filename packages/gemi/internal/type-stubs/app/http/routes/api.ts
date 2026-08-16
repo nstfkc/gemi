@@ -12,6 +12,12 @@ import { ApiRouter } from "../../../../../http/ApiRouter";
  * So the package maps the alias at an empty router. The augmentation still
  * applies here, it just contributes nothing, which is the correct answer for a
  * compilation that has no application in it.
+ *
+ * These three files are emitted into `dist/` and ship, six dead declarations
+ * that nothing can reach: a consumer resolves `@/app/*` against its own config,
+ * never gemi's. Moving them out of the package root to avoid that is not
+ * available — `rootDir` is `.`, so everything in the program has to live under
+ * it.
  */
 export default class extends ApiRouter {
   routes = {};

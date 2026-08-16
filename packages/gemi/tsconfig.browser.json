@@ -22,6 +22,22 @@
     "noUnusedParameters": false,
     "noPropertyAccessFromIndexSignature": false,
     "types": ["vite/client", "bun"],
+    // `client/index.ts` references `../gemi.d.ts`, which is written for an
+    // application: it reaches the app through `@/app/*` and reaches gemi by
+    // package name. Neither resolves here — the stub mapping is the same one
+    // `tsconfig.json` uses, and the two package specifiers need pointing at
+    // source because this config is on `moduleResolution: "node"`, which
+    // predates `exports` and so cannot see into the package's own map.
+    //
+    // Without these, the compilation passes only because `skipLibCheck` hides
+    // six unresolved imports in `gemi.d.ts`, and it would start failing the
+    // moment that was turned off. `tsconfig.generated.json` maps `gemi/orm` for
+    // the same reason.
+    "paths": {
+      "@/app/*": ["./internal/type-stubs/app/*"],
+      "gemi/http": ["./http/index.ts"],
+      "gemi/client": ["./client/index.ts"]
+    },
     "outDir": "dist"
   },
   "include": ["client", "testing"],

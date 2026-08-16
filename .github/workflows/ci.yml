@@ -269,6 +269,24 @@ jobs:
         run: bunx oxlint orm --deny-warnings
         working-directory: packages/gemi
 
+      # The published package, installed into an application and typechecked —
+      # the only check here that compiles against a tarball rather than against
+      # the source tree. `exports-map.test.ts` reads source paths and says in
+      # its own comment that it cannot see `dist/`; `build-publish.ts` checks
+      # that files exist in the staging directory. Both were green for every
+      # release that shipped a scaffold pointing at a `gemi.d.ts` the tarball
+      # did not contain, because neither installs anything.
+      #
+      # **Last, and on its own.** It runs `bun run build:publish`, which deletes
+      # and recreates `dist/` — so anything after it that shells out to
+      # `dist/bin/gemi.js` would report a missing module if the build failed,
+      # burying the real cause. Held out of the `Unit tests` step by
+      # `vitest.config.ts` for the same reason, plus not putting a full
+      # framework build in parallel with the timing-sensitive ORM suites.
+      - name: Packaging test
+        run: bun run test:packaging
+        working-directory: packages/gemi
+
   # The other half of the differential harness, which is the repository's actual
   # correctness claim: every query run through Prisma *and* through gemi against
   # one database, compared on rows and on table contents.
