@@ -9,6 +9,7 @@ import {
 import type { Operation } from "./plan";
 import {
   COUNT_KEY,
+  countableRelations,
   isOperatorForm,
   relationFilterOperators,
 } from "./relation-filters";
@@ -1822,11 +1823,36 @@ function scopeCounts(
   lookup: PolicyLookup,
 ): unknown {
   if (system) return node;
-  if (typeof node !== "object" || node === null || Array.isArray(node)) {
+
+  // `_count: true` — Prisma's shorthand for "every to-many relation". It names
+  // no relation, so there is nothing here to hang a scope on until it is
+  // expanded, and an unexpanded shorthand walked past this point reaches the
+  // compiler, which expands it *there* and counts every relation unscoped.
+  //
+  // That is the leak the shorthand was refused over until #394, and it is the
+  // reason the expansion is shared rather than living in `compile/`: both sides
+  // derive the same relation list from `countableRelations`, so the set this
+  // scopes is exactly the set the compiler projects.
+  //
+  // Expanded into the explicit form only when a policy actually applies —
+  // `rewritten` below stays undefined otherwise and the shorthand goes on
+  // untouched. The alternative, rewriting unconditionally, moves the plan key
+  // for every `_count: true` on an unpolicied model: a cache invalidation and a
+  // canonical-shape change in exchange for nothing, which is the same trade the
+  // `node === true` branch in `applyNestedPolicies` declines a few lines up.
+  const shorthand = node === true;
+
+  if (
+    !shorthand &&
+    (typeof node !== "object" || node === null || Array.isArray(node))
+  ) {
     return node;
   }
 
-  const selection = (node as Record<string, unknown>).select;
+  const selection = shorthand
+    ? Object.fromEntries(countableRelations(schema).map((name) => [name, true]))
+    : (node as Record<string, unknown>).select;
+
   if (
     typeof selection !== "object" ||
     selection === null ||
@@ -1864,9 +1890,14 @@ function scopeCounts(
     }
   }
 
-  return rewritten
-    ? { ...(node as Record<string, unknown>), select: rewritten }
-    : node;
+  if (!rewritten) return node;
+
+  // The shorthand has no object to preserve keys from — it *was* `true` — so the
+  // scoped form is written out whole. The explicit form keeps whatever else sat
+  // beside `select`, which is nothing today and is not this walk's to discard.
+  return shorthand
+    ? { select: rewritten }
+    : { ...(node as Record<string, unknown>), select: rewritten };
 }
 
 /**

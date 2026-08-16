@@ -746,18 +746,28 @@ function suite(label: string, url?: string) {
         ]);
       });
 
-      test("a nested _count is still scoped", async () => {
+      /**
+       * Both spellings, because they carry their scope by different routes. The
+       * explicit form is scoped where it is written; the shorthand names no
+       * relation at all, so `scopeCounts` has to expand it first and then scope
+       * what the expansion produced. Only the second is new here — but both land
+       * in the same `effective` that was being discarded, so the shorthand had
+       * two ways to leak and this pins the one the other test cannot reach.
+       */
+      test("a nested _count is still scoped, in both spellings", async () => {
         (ScopedAccount as any).$policies = [tenantScoped];
         (ScopedUser as any).$policies = [tenantScoped];
 
-        const rows = await Model.asUser(ALICE, () =>
-          ScopedUser.findMany({
+        const [explicit, shorthand] = await Model.asUser(ALICE, async () => [
+          await ScopedUser.findMany({
             include: { _count: { select: { accounts: true } } },
           }),
-        );
+          await ScopedUser.findMany({ include: { _count: true } }),
+        ]);
 
         // 2 is the leak: it counts the account in Bob's organisation.
-        expect(rows.map((row: any) => row._count.accounts)).toEqual([1]);
+        expect(explicit.map((row: any) => row._count.accounts)).toEqual([1]);
+        expect(shorthand.map((row: any) => row._count.accounts)).toEqual([1]);
       });
 
       test("a root policy with no scope at all still keeps the nested scope", async () => {
