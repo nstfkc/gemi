@@ -188,7 +188,14 @@ export function ensureSessionId(): string | null {
   store.setCookie(SESSION_ID_COOKIE, minted, {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
-    sameSite: "Strict",
+    // `Lax`, not `Strict`, and the difference is load-bearing. `Strict`
+    // withholds the cookie on cross-site *top-level navigation*, so a visitor
+    // arriving from a search result or a shared link would arrive without it,
+    // be minted a new id, and overwrite the old one — re-bucketing on every
+    // external entry, which is how most anonymous traffic arrives. This is not
+    // a credential (`access_token` stays `Strict`); it is an opaque bucketing
+    // id, and `Lax` still blocks cross-site POST.
+    sameSite: "Lax",
     expires: new Date(Date.now() + 1000 * 60 * 60 * 24 * 365),
   });
   return minted;

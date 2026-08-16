@@ -8,11 +8,11 @@ function state(features?: Record<string, unknown>): RouteState & PageData {
   return { features, data: {}, prefetchedData: {} } as any;
 }
 
-function Show({ flag }: { flag: string }) {
-  return <span data-testid="value">{JSON.stringify(useFeature(flag as never))}</span>;
+function Show({ feature }: { feature: string }) {
+  return <span data-testid="value">{JSON.stringify(useFeature(feature as never))}</span>;
 }
 
-function renderWith(value: RouteState & PageData, ui = <Show flag="new-checkout" />) {
+function renderWith(value: RouteState & PageData, ui = <Show feature="new-checkout" />) {
   return render(<RouteStateProvider state={value}>{ui}</RouteStateProvider>);
 }
 
@@ -29,16 +29,18 @@ describe("useFeature", () => {
     expect(screen.getByTestId("value").textContent).toBe("true");
   });
 
-  test("carries multivariate values through", () => {
-    renderWith(state({ "pricing-page": "b" }), <Show flag="pricing-page" />);
+  test("is always a boolean", () => {
+    renderWith(state({ "new-checkout": false }));
 
-    expect(screen.getByTestId("value").textContent).toBe('"b"');
+    expect(screen.getByTestId("value").textContent).toBe("false");
   });
 
-  test("numeric flags survive", () => {
-    renderWith(state({ "seat-limit": 12 }), <Show flag="seat-limit" />);
+  test("a non-boolean in the payload does not leak through", () => {
+    // Nothing should ever put one there, but `useFeature`'s contract is a
+    // boolean and a component branching on it must not receive a string.
+    renderWith(state({ "new-checkout": "yes" }));
 
-    expect(screen.getByTestId("value").textContent).toBe("12");
+    expect(screen.getByTestId("value").textContent).toBe("false");
   });
 
   test("an unknown key is false rather than a crash", () => {
@@ -56,7 +58,7 @@ describe("useFeature", () => {
     expect(screen.getByTestId("value").textContent).toBe("false");
   });
 
-  test("a false flag does not warn", () => {
+  test("a feature that is off does not warn", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     renderWith(state({ "new-checkout": false }));
 
@@ -68,18 +70,18 @@ describe("useFeature", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     renderWith(state({}));
 
-    expect(warn.mock.calls.flat().join(" ")).toMatch(/Unknown feature flag "new-checkout"/);
+    expect(warn.mock.calls.flat().join(" ")).toMatch(/Unknown feature "new-checkout"/);
   });
 
   test("a new navigation's values replace the old ones", () => {
     // The per-navigation refresh contract: re-rendering the provider with the
-    // envelope's flags must change what components see, with no refetch.
+    // envelope's features must change what components see, with no refetch.
     const { rerender } = renderWith(state({ "new-checkout": false }));
     expect(screen.getByTestId("value").textContent).toBe("false");
 
     rerender(
       <RouteStateProvider state={state({ "new-checkout": true })}>
-        <Show flag="new-checkout" />
+        <Show feature="new-checkout" />
       </RouteStateProvider>,
     );
 
@@ -92,9 +94,12 @@ describe("useFeatures", () => {
     function All() {
       return <span data-testid="value">{JSON.stringify(useFeatures())}</span>;
     }
-    renderWith(state({ a: true, b: "x" }), <All />);
+    renderWith(state({ a: true, b: false }), <All />);
 
-    expect(JSON.parse(screen.getByTestId("value").textContent!)).toEqual({ a: true, b: "x" });
+    expect(JSON.parse(screen.getByTestId("value").textContent!)).toEqual({
+      a: true,
+      b: false,
+    });
   });
 
   test("is an empty object when the server sent nothing", () => {

@@ -29,7 +29,6 @@ import { Lang } from "../../facades/Lang";
 import { AuthViewRouter } from "../../auth/routes";
 import { KernelId } from "../kernel-id/KernelId";
 import { FeatureManager } from "../features/FeatureManager";
-import type { FlagValue } from "../../http/FeatureRouter";
 import { app } from "../../foundation/app";
 import { kernelContext } from "../../kernel/context";
 import { ServerQueryStore, type StreamSummary } from "./ServerQueryStore";
@@ -341,7 +340,7 @@ export class ViewRouteDispatcher {
     meta: any;
     isOgRequest?: boolean;
     appId: string;
-    features: Record<string, FlagValue>;
+    features: Record<string, boolean>;
   }) {
     const {
       req,
@@ -797,7 +796,7 @@ export class ViewRouteDispatcher {
         urlLocaleSegment: string | null;
         meta: any;
         appId: string;
-        features: Record<string, FlagValue>;
+        features: Record<string, boolean>;
       } | null = null;
       const ctx = RequestContext.getStore();
       // The HTTP server drives the response body — and therefore every stream

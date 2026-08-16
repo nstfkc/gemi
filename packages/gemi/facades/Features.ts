@@ -1,22 +1,17 @@
-import type { FeatureKey, FeatureValueOf } from "../client/rpc";
-import type { FlagValue } from "../http/FeatureRouter";
-import { FeatureManager, type FeatureScope } from "../services/features/FeatureManager";
+import type { FeatureKey } from "../client/rpc";
 import type { FeatureSubject } from "../services/features/context";
-import type { FlagEvaluation } from "../services/features/types";
+import { FeatureManager, type FeatureScope } from "../services/features/FeatureManager";
+import type { FeatureEvaluation } from "../services/features/types";
 import { Facade } from "./Facade";
 
 /**
- * Feature flags on the server.
+ * Features on the server.
  *
  * Keys are typed against the application's `app/features` declarations, so a
- * typo is a compile error rather than a flag that is silently always off.
+ * typo is a compile error rather than a feature that is silently always off.
  *
  * ```ts
  * if (await Features.enabled("new-checkout")) { ... }
- *
- * switch (await Features.value("pricing-page")) {
- *   case "a": ...
- * }
  *
  * // In a job or cron tick, where there is no request to read a user from:
  * if (await Features.for({ user }).enabled("digest-v2")) { ... }
@@ -28,46 +23,42 @@ import { Facade } from "./Facade";
  * the snapshot is in memory and refreshes behind the request. The promise is
  * kept anyway because the *first* call in a cold process does hit the database,
  * and because a source that is not the local table will too. A sync variant
- * would have to answer that case with the default, which is a flag silently
- * reading "off" during exactly the window a deploy is rolling.
+ * would have to answer that case with "off", which is a feature silently
+ * disappearing during exactly the window a deploy is rolling.
  *
  * ## The ambient user
  *
- * Read from the request store, not `Auth.user()` — flags must be evaluable on an
- * anonymous page without throwing. On a route with no `auth` middleware, where
- * nothing has resolved a session, user-targeted rules will not match.
+ * Read from the request store, not `Auth.user()` — features must be evaluable on
+ * an anonymous page without throwing. On a route with no `auth` middleware,
+ * where nothing has resolved a session, a `when` that reads `ctx.user` sees
+ * `null`.
  */
 export class Features extends Facade {
   static getFacadeAccessor() {
     return FeatureManager;
   }
 
-  /** Whether the flag is on. `false`, `null` and `undefined` are all off. */
+  /** Whether the feature is on for this request. */
   static enabled(key: FeatureKey): Promise<boolean> {
     return this.getFacadeRoot().enabled(key as string);
   }
 
-  /** The resolved value, typed by the declaration. */
-  static value<K extends FeatureKey>(key: K): Promise<FeatureValueOf<K>> {
-    return this.getFacadeRoot().value(key as string) as Promise<FeatureValueOf<K>>;
-  }
-
   /**
-   * Every client-visible flag for this request, as `key -> value`. This is what
-   * the SSR payload carries.
+   * Every client-visible feature for this request. This is what the SSR payload
+   * carries.
    */
-  static all(): Promise<Record<string, FlagValue>> {
+  static all(): Promise<Record<string, boolean>> {
     return this.getFacadeRoot().forClient();
   }
 
   /**
-   * Value plus the rule that produced it.
+   * Value plus why.
    *
-   * **Server-side only.** `reason` and `ruleId` identify which rule matched,
-   * which is to say which segment the viewer is in — never serialize this into
+   * **Server-side only.** `reason` distinguishes "targeted by name" from "landed
+   * in the rollout", which is a fact about the viewer — never serialize it into
    * a response.
    */
-  static explain(key: FeatureKey): Promise<FlagEvaluation> {
+  static explain(key: FeatureKey): Promise<FeatureEvaluation> {
     return this.getFacadeRoot().explain(key as string);
   }
 

@@ -1,28 +1,36 @@
-# Feature Flags
+# Features
 
-A feature flag in gemi is **declared in code and controlled from the database**. You write the flag's key, its value type and its default in `app/features`; whether it is on, and who it is on for, lives in a `FeatureFlag` row you can change without a deploy.
+A feature in gemi is **declared in code and switched on from the database**. You write the key, who it applies to, and how far it has rolled out in `app/features`. The database holds one thing: whether it is switched on at all.
 
-Flags are evaluated **on the server**, once per request, and the answers ride the page payload the server was already sending. The browser never fetches them — so a flag cannot cause a flash of the wrong variant, and your targeting rules never leave the server.
+That split is the whole design. **Shipping a feature is a deploy; turning it on is not.** You can merge a feature dark, watch it sit inert in production, and switch it on — or off, during an incident — with an `UPDATE`.
+
+Features are evaluated **on the server**, once per request, and the answers ride the page payload the server was already sending. The browser never fetches them, so a feature cannot cause a flash of the wrong branch, and your targeting never leaves the server.
 
 ```typescript
 // app/features/index.ts
-import { FeatureRouter } from "gemi/http";
+import { defineFeature } from "gemi/services";
 
-export default class extends FeatureRouter {
-  features = {
-    "new-checkout": this.boolean(false).describe("Rebuilt checkout flow"),
-    "pricing-page": this.variant(["a", "b", "control"], "control"),
-    "seat-limit": this.number(5),
-  };
-}
+export default {
+  "new-checkout": defineFeature({
+    describe: "Rebuilt checkout flow",
+  }),
+
+  "pricing-redesign": defineFeature({
+    rollout: 50,
+    when: (ctx) => {
+      if (ctx.user?.email.endsWith("@acme.com")) return true; // staff, always
+      if (ctx.user?.plan === "free") return false; // never
+      // return nothing → the rollout decides
+    },
+  }),
+};
 ```
 
 ```tsx
 import { useFeature } from "gemi/client";
 
 export default function Pricing() {
-  const variant = useFeature("pricing-page"); // "a" | "b" | "control"
-  return variant === "a" ? <PricingA /> : <PricingControl />;
+  return useFeature("pricing-redesign") ? <PricingNext /> : <Pricing />;
 }
 ```
 
@@ -34,13 +42,72 @@ if (await Features.enabled("new-checkout")) {
 }
 ```
 
-Keys are typed from your declarations, so `useFeature("pricign-page")` is a compile error rather than a flag that silently reads as off.
+Keys are typed from your declarations, so `useFeature("pricing-redesgin")` is a compile error rather than a feature that silently reads as off.
 
-## Why the split
+## Every feature is a boolean
 
-The database cannot type anything — TypeScript has never seen your rows. So the parts that need to be typed (the key, the value type) live in code, and the parts that need to change at 2am (on/off, targeting) live in a row.
+`useFeature` returns `true` or `false`. There is no multivariate value, no string, no number.
 
-The practical consequence: **adding a flag is a deploy, flipping one is not.**
+This is a deliberate floor rather than an oversight. A feature is a thing you turn on; a config value with three settings wants a different lifecycle — versioned, reviewed, deployed — than something you flip at 2am. If you need a three-arm experiment, that is an experimentation system, and it should not be built out of two booleans that can both be true.
+
+## Keys are flat
+
+There is no nesting and no prefix joining. `"billing/new-invoices"` is one key, written exactly as you will look it up.
+
+The reason is grep. The most common thing anyone ever does with a feature is ask "is this still referenced, can I delete it?", and that question should be answerable with a text search. A nested registry breaks it: the key you search for exists nowhere in the source, only as a concatenation at runtime.
+
+## How a feature resolves
+
+In order, stopping at the first that applies:
+
+1. **The store has never loaded** → off. An unreachable database fails closed.
+2. **No row, or `active = false`** → off. `when` and `rollout` are not consulted.
+3. **`when(ctx)` returned `true` or `false`** → that.
+4. **A crawler** → off.
+5. **No `rollout`** → on.
+6. **Inside the rollout bucket** → on, otherwise off.
+
+Two of these are worth dwelling on.
+
+**`active` short-circuits everything.** It is the kill switch, and a kill switch that application code could defeat is not one. Nothing in `when` or `rollout` can turn a switched-off feature back on.
+
+**`when` outranks `rollout`.** A rollout is a statement about strangers; `when` is a statement about someone you can name. Staff overrides and plan exclusions have to beat the dice, or they are not overrides. Returning nothing from `when` is how you say "no opinion about this one" and let the dice decide.
+
+## Rollouts are computed, not stored
+
+A subject's position in a rollout is `sha1(salt:subject)`, reduced to a bucket in `[0, 10000)`. It is on if the bucket is below the threshold.
+
+Nothing is written anywhere. That buys four things:
+
+- **Stability.** The same subject gets the same answer on every device, in every process, forever — with no row, no cookie holding assignments, and nothing to migrate.
+- **Monotonicity.** Going 10% → 25% only ever _adds_ people. Nobody who had the feature loses it, because their bucket number never moves; only the threshold does.
+- **Independence.** The salt is the feature's key, so two 20% rollouts pick two different 20% slices. Without that, a subject unlucky once would be unlucky in everything.
+- **No growth.** One row per feature, not one row per feature per user.
+
+### The subject
+
+The signed-in user (`publicId`, falling back to `id`), or the `session_id` cookie for a logged-out visitor.
+
+Preferring the user is what makes an assignment follow someone between their laptop and their phone. The cost is that **signing up can move a visitor across a rollout boundary**, because the subject changes from the cookie to the account. There is no id that is both stable per person and known before they have an account, so this is a trade rather than a bug — just don't run an experiment that spans registration.
+
+Outside a request — a job, a cron tick — there is no subject and every context shares one bucket. Use `Features.for({ subjectId })` when a background task needs to evaluate as somebody.
+
+### Anonymous visitors
+
+The `session_id` cookie is minted at the top of every view request, before anything is evaluated, so the id used to bucket is the id the browser is about to be given. It is `httpOnly`, `SameSite=Lax`, and lasts a year.
+
+`Lax` rather than `Strict` is load-bearing. `Strict` withholds the cookie on cross-site _top-level navigation_, so a visitor arriving from a search result or a shared link would arrive without it, be minted a new id, and overwrite the old one — re-bucketing on every external entry, which is how most anonymous traffic arrives.
+
+Two operational consequences:
+
+- **A shared cache must never store a response carrying `Set-Cookie: session_id`.** One visitor's id would be handed to everybody, collapsing the whole anonymous population into a single bucket. If you put a CDN in front of view routes, that response needs `Cache-Control: private`.
+- **Crawlers are pinned off** for any feature with a rollout. Bots discard cookies, so each crawl would otherwise land in a fresh bucket and index a different branch than the last one. A feature with no rollout is served to bots normally — there is nothing to be inconsistent about.
+
+## Changing a rollout needs a deploy
+
+`rollout` lives in code, so ramping 10% → 50% is a code change and a release. That is the deliberate cost of keeping all the reasoning in reviewed source.
+
+If it becomes painful, the fix is one nullable column on the row overriding the declared value, and nothing else in this design moves.
 
 ## Setup
 
@@ -51,26 +118,15 @@ model FeatureFlag {
   id       Int    @id @default(autoincrement())
   publicId String @unique @default(cuid())
 
-  key         String  @unique
-  description String?
-  enabled     Boolean @default(false)
+  key    String  @unique
+  active Boolean @default(false)
 
-  offValue     Json?
-  defaultValue Json?
-  rules        Json?
-
-  seed     String  @default(cuid())
-  bucketBy String?
-
-  archivedAt DateTime?
-  createdAt  DateTime  @default(now())
-  updatedAt  DateTime  @updatedAt
-
-  @@index([archivedAt])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 ```
 
-Then `bunx prisma migrate dev`, `bunx prisma generate`, and export the subclass from your models barrel:
+Export it from `app/models` so the ORM registry can resolve it by name:
 
 ```typescript
 // app/models/FeatureFlag.ts
@@ -78,331 +134,126 @@ import { FeatureFlagModel } from "./generated";
 export class FeatureFlag extends FeatureFlagModel {}
 ```
 
-```typescript
-// app/models/index.ts
-export { FeatureFlag } from "./FeatureFlag";
-```
+No tenant policy on this model. These rows are global application configuration, not customer data, and the store loads the whole table from a background refresh with no user attached — a `scope` would make that load return nothing.
 
-Do **not** put a tenant policy on this model. The flag store loads the whole table from a background refresh, outside any request and with no user; a `scope` would make that load return nothing. The evaluator is what decides who a flag applies to.
+### 2. Declare your features
 
-### 2. Declare your flags
+`app/features/index.ts`, default-exporting a plain object. Do not annotate it: a type annotation widens the keys and every one of them silently becomes an untyped `string`.
 
-`app/features/index.ts`, as above. Five factories are available:
-
-| Factory | Value type |
-| --- | --- |
-| `this.boolean(default?)` | `boolean` |
-| `this.number(default)` | `number` |
-| `this.string(default)` | `string` |
-| `this.variant([...values], default)` | the literal union of `values` |
-
-Two modifiers, both chainable: `.describe(text)` and `.serverOnly()`.
-
-Flags namespace like routers do:
-
-```typescript
-class BillingFeatures extends FeatureRouter {
-  features = { "new-invoice": this.boolean(false) };
-}
-
-export default class extends FeatureRouter {
-  features = { "billing/": BillingFeatures }; // -> "billing/new-invoice"
-}
-```
-
-> **Never annotate `features`.** Write `features = { ... }`, not `features: FeatureDefinitions = { ... }`. The annotation widens the literal keys, inference collapses, and every flag key silently becomes an untyped `string`. Nothing errors. `ViewRouter.routes` has the same property for the same reason.
-
-### 3. Wire the config
+### 3. Point the config at it
 
 ```typescript
 // app/config/features.ts
 import { defineFeaturesConfig } from "gemi/services";
 import AppFeatures from "@/app/features";
 
-export default defineFeaturesConfig({ router: AppFeatures });
-```
-
-Add `features` to your Kernel's `config` object. That is the whole setup — an empty `FeatureFlag` table is a working state, and every flag resolves to its declared default until you add rows.
-
-## Turning a flag on
-
-```sql
-insert into "FeatureFlag" (key, enabled, "defaultValue", seed, "updatedAt")
-values ('new-checkout', true, 'true', 'anything-stable', now());
-```
-
-- **`enabled`** is the kill switch. `false` short-circuits every rule — nothing in `rules` can turn a disabled flag back on. That is the point: turning something off during an incident is one column, and no rule anybody forgot about can defeat it.
-- **`offValue`** is served when `enabled` is false.
-- **`defaultValue`** is served when the flag is on and no rule matched.
-
-Both value columns fall back to the declared default when null, so you only set them when you want something other than what the code says.
-
-Keeping them separate matters for multivariate flags: `offValue` answers "what does the app do when this is killed", `defaultValue` answers "what does an untargeted user see". Collapsing them would make killing an experiment serve the control arm rather than the pre-experiment behaviour.
-
-## Rules
-
-`rules` is an ordered array. The first rule that matches wins, and its value is served.
-
-```json
-[
-  {
-    "id": "enterprise-early-access",
-    "conditions": [{ "attribute": "plan", "operator": "eq", "value": "enterprise" }],
-    "value": true
-  },
-  { "id": "gradual", "rollout": 10, "value": true }
-]
-```
-
-A rule matches when **all** of its segments hold, **all** of its conditions hold, and its rollout bucket passes. A rule that does not match falls through to the next one — so the example above reads exactly as it looks: enterprise accounts get it, then 10% of everyone else.
-
-There is no `OR`. Two rules serving the same value express it, which keeps each rule independently readable.
-
-### Conditions
-
-`attribute` is a dot path. Paths starting with `user`, `attributes`, `request`, `anonymousId` or `now` resolve against the evaluation context; anything else resolves against your attributes, so `plan` and `attributes.plan` are the same thing. Array indices work: `user.accounts.0.organizationRole`.
-
-| Operator | Holds when |
-| --- | --- |
-| `eq`, `neq` | strictly equal / not equal |
-| `in`, `nin` | the value is in the given array (an array attribute intersects it) |
-| `contains`, `ncontains` | string substring, or array membership |
-| `startsWith`, `endsWith` | string prefix / suffix |
-| `gt`, `gte`, `lt`, `lte` | both sides are finite numbers and compare |
-| `before`, `after` | both sides parse as dates and compare |
-| `exists`, `nexists` | the attribute is (not) null or undefined |
-
-Every comparison is strict. A rule targeting `seats > 10` does not match a user whose `seats` is the string `"12"` — no coercion, and no error either.
-
-There is deliberately **no regex operator**. A pattern edited in an admin UI and run against user input on the render path is a denial-of-service surface that `startsWith` and `in` already cover.
-
-### Segments
-
-Reusable condition sets, declared in config because "who counts as an enterprise account" is business logic worth reviewing:
-
-```typescript
 export default defineFeaturesConfig({
-  router: AppFeatures,
-  segments: {
-    internal: [{ attribute: "user.email", operator: "endsWith", value: "@example.com" }],
-  },
+  features: AppFeatures,
+  ttl: 30,
 });
 ```
 
-```json
-[{ "id": "internal-only", "segments": ["internal"], "value": true }]
-```
+`ttl` is the propagation delay in seconds — how long a loaded snapshot is reused before the next refresh. It is how long switching something off takes to reach every instance, since there is no cross-instance invalidation. Lower it if thirty seconds is too long during an incident; the cost is one query per instance per window.
 
-A rule naming a segment that no longer exists does **not** become a catch-all — it simply never matches. Deleting a segment must not widen every rule that used it to your whole audience.
+## Reading a feature
 
-### Attributes
-
-Anything else you want to target on:
-
-```typescript
-export default defineFeaturesConfig({
-  router: AppFeatures,
-  context: (req) => ({ plan: currentPlan(req), country: geoOf(req) }),
-});
-```
-
-This runs on every request inside the render path, so keep it cheap and free of I/O. If it throws, evaluation degrades to no attributes rather than failing the page.
-
-## Percentage rollouts
-
-`rollout` is a number from 0 to 100. Assignment is deterministic: the same user gets the same answer on every request, on every server, across deploys.
-
-```json
-[{ "id": "ramp", "rollout": 25, "value": true }]
-```
-
-**Raising a rollout only ever adds people.** Someone in the 10% is still in the 20%, so ramping up never takes the feature away from a user who already had it, and never invalidates a measurement taken across the change.
-
-By default users are bucketed on `user.publicId`, falling back to the `session_id` cookie for signed-out visitors. Bucket on something else with `bucketBy`, on the flag or on a single rule:
-
-```json
-[{ "id": "by-org", "rollout": 50, "bucketBy": "attributes.orgId", "value": true }]
-```
-
-That rolls out by organisation, so everyone in a company sees the same thing.
-
-### What changes an assignment
-
-Assignment is a hash of the flag key, the row's `seed`, the rule's `id` and the subject. So it is stable across servers and deploys, and two independent 50% flags select *different* halves rather than the same one.
-
-Four things re-bucket everybody, all of them deliberate:
-
-- changing `seed` — this is how you intentionally re-randomise a flag
-- changing `bucketBy`
-- renaming the flag key
-- a rule losing or changing its `id`
-
-Give every rule with a `rollout` a stable `id`. Without one it falls back to its array position, and inserting a rule above it silently reshuffles the audience — gemi logs a warning when it sees this.
-
-## Variants
-
-For splitting traffic across a closed set:
-
-```json
-[
-  {
-    "id": "experiment",
-    "variants": [
-      { "value": "a", "weight": 50 },
-      { "value": "b", "weight": 50 }
-    ]
-  }
-]
-```
-
-Weights are relative, so `1`/`1` and `50`/`50` mean the same thing. A variant whose value is not in the declared set causes the **whole rule** to be skipped — dropping just the bad arm would silently redistribute its share and change the experiment for everyone.
-
-Declare the set with `variant()` and your `switch` is exhaustively checked:
+### In a component
 
 ```tsx
-switch (useFeature("pricing-page")) {
-  case "a": return <A />;
-  case "b": return <B />;
-  case "control": return <Control />;
-}
+const on = useFeature("new-checkout");
+const all = useFeatures(); // the whole map
 ```
 
-## On the server
+This is a context read — no request, no suspense, no loading state. The corollary is that switching a feature on reaches an already-open page on its next navigation, not instantly.
+
+### On the server
 
 ```typescript
-import { Features } from "gemi/facades";
+await Features.enabled("new-checkout");
+await Features.explain("new-checkout"); // { value, reason } — server only
+await Features.all(); // the client-visible map
+await Features.for({ user }).enabled("digest-v2");
+await Features.refresh(); // reload this process now
 ```
 
-| Member | Does |
-| --- | --- |
-| `Features.enabled(key)` | `true` unless the value is `false`, `null` or `undefined` |
-| `Features.value(key)` | the resolved value, typed by the declaration |
-| `Features.all()` | every client-visible flag as `key -> value` |
-| `Features.explain(key)` | value plus the rule that produced it — **server-side only** |
-| `Features.for(subject)` | evaluation against an explicit subject |
-| `Features.refresh()` | reload this process's snapshot now |
+Everything is async. After the boot-time warm-up each call settles in a microtask with no I/O, but the promise is kept because the first call in a cold process does hit the database — and a sync variant would have to answer that window with "off", which is a feature silently vanishing while a deploy rolls.
 
-Everything is async. After the boot-time warm-up there is no I/O and calls settle in a microtask, but the first call in a cold process does hit the database — a sync API would have to answer that window with the default, which is a flag silently reading "off" while a deploy rolls.
+`explain` is **server-only**. `reason` distinguishes "targeted by name" from "landed in the rollout", which is a fact about the viewer; never serialize it into a response.
 
-The user comes from the request context, not `Auth.user()`, so flags are evaluable on an anonymous page without throwing. On a route with no `auth` middleware, where nothing has resolved a session, user-targeted rules will not match.
+## Hiding a feature's existence
 
-In a job, a cron tick or a console command there is no request, so bare calls evaluate anonymously. Name the subject explicitly instead:
+Feature _keys_ are public — every client-visible key is embedded in the HTML of every page. A key named after an unannounced product announces it.
 
 ```typescript
-if (await Features.for({ user }).enabled("digest-v2")) { ... }
-await Features.for({ subjectId: organization.publicId }).value("seat-limit");
+"project-nightingale": defineFeature({ serverOnly: true }),
 ```
 
-## On the client
+Still evaluated on the server, never in the payload, and `useFeature` cannot see it.
+
+## Gating a route
 
 ```typescript
-import { useFeature, useFeatures } from "gemi/client";
+"/beta": this.view("Beta").feature("beta-access"),
 ```
 
-`useFeature(key)` returns the value the server already evaluated. It is a context read — no request, no suspense, no loading state. `useFeatures()` returns the whole map.
+A gated route renders a real 404 when the feature is off, rather than a 403 — a 403 confirms the route exists, which for an unannounced feature is the thing you were hiding.
 
-Values refresh on every navigation, because each navigation is a server request that re-evaluates them. A flag flipped in the database reaches an open page on its next navigation, not instantly.
-
-An unknown key returns `false` and warns in development; it never throws, so a flag removed from your declarations cannot white-screen a page.
-
-## Gating routes
+## Extra context for targeting
 
 ```typescript
-class AppRouter extends ViewRouter {
-  routes = {
-    "/beta": this.view("Beta").feature("beta-area"),
-  };
-}
+// app/config/features.ts
+export default defineFeaturesConfig({
+  features: AppFeatures,
+  context: (req) => ({ country: req?.headers.get("cf-ipcountry") }),
+});
 ```
 
-When the flag is off the route renders your application's own `404` view with a 404 status, rather than an error page that confirms something is there. Gates accumulate: a router's, then a layout's, then the route's, and all must pass.
+Readable in any `when` as `ctx.attributes.country`. This runs on every request inside the render path, so keep it cheap and free of I/O. If it throws, evaluation degrades to no attributes rather than failing the page.
 
-Gating runs after middleware, so a flag targeting signed-in users works if `auth` is in the chain.
+`when` itself is synchronous for the same reason — an `async` signature is an invitation to put a query on the render path, where every page load would pay for every declared feature.
 
-**This gates the response, not the route's existence.** The path and view name are still in the route manifest the browser receives, so a `<Link>` to a gated route renders and only 404s when followed. If the route's *name* is the secret, that is not enough on its own.
-
-## Configuration
-
-`app/config/features.ts`:
-
-| Option | Default | Does |
-| --- | --- | --- |
-| `router` | — | your `app/features` class. Required for flags to do anything |
-| `enabled` | `true` | `false` serves every declared default and issues no queries |
-| `source` | database | where rows come from |
-| `model` | `"FeatureFlag"` | the ORM registry name of the model |
-| `ttl` | `30` | snapshot lifetime, in seconds |
-| `bucketBy` | `"user.publicId"` | default bucketing attribute |
-| `segments` | `{}` | reusable condition sets |
-| `context` | — | extra attributes per request |
-| `onEvaluate` | — | fires once per flag per request, for exposure logging |
-| `maxClientFlags` | `200` | warn above this many flags in the payload |
-
-## Caching and staleness
-
-Flags are cached per process and refreshed in the background, so no request ever waits on the database for a flag. After the first load, a read returns immediately and the refresh happens behind it.
-
-**`ttl` is your propagation delay, plus one request.** Because the refresh happens *behind* a request rather than blocking it, the first request after the TTL expires still serves the old values and triggers the reload; the next one sees the new values. On a busy instance that gap is milliseconds. On an idle one, nothing changes until something asks — a flag flipped against an instance receiving no traffic is still stale when the next visitor arrives, and then correct on their second page.
-
-There is no cross-instance invalidation, so if that is too slow during an incident, lower `ttl`; the cost is one query per instance per window. `Features.refresh()` bypasses it entirely for the process that calls it.
-
-A failed refresh keeps the last good data rather than reverting every flag to its default, which would be a config change nobody made, applied to production, at the moment something else is already broken.
-
-## Security
-
-Only evaluated `key -> value` pairs reach the browser. Never sent: your rules, conditions, segment criteria, the bucketing `seed`, the off/default values, or which rule matched.
-
-The seed matters most — with it and a user id, anyone could compute another user's bucket for every flag, including unreleased ones.
-
-Two things to keep in mind:
-
-**Flag keys are public.** Every client-visible key appears in the HTML of every page, so a flag named for an unannounced feature announces it. Use `.serverOnly()` for anything where the name is the secret:
+## Recording exposures
 
 ```typescript
-"acquisition-banner": this.boolean(false).serverOnly(),
+onEvaluate: (key, evaluation) => analytics.track("feature", { key, on: evaluation.value }),
 ```
 
-A server-only flag is still evaluated and still readable through `Features.enabled()`; it just never enters the payload, and `useFeature` cannot see it.
-
-**Flags are not authorization.** A client-visible flag is a hint. Anything that must not happen is enforced by a policy or middleware — `Features.enabled()` in a controller is the server-side half of that, not a substitute for it.
+Fires once per key per request. Errors are caught and logged — an analytics hook must not break the render it observes.
 
 ## Testing
 
-`StaticFeatureFlagSource` replaces the database with a plain object:
-
 ```typescript
-import { defineFeaturesConfig } from "gemi/services";
 import { StaticFeatureFlagSource } from "gemi/services";
 
-export default defineFeaturesConfig({
-  router: AppFeatures,
-  source: new StaticFeatureFlagSource({
-    "new-checkout": true,
-    "pricing-page": {
-      defaultValue: "control",
-      rules: [{ id: "r", rollout: 50, value: "a" }],
-    },
-  }),
+defineFeaturesConfig({
+  features: AppFeatures,
+  source: new StaticFeatureFlagSource({ "new-checkout": true }),
 });
 ```
 
-A bare value means "on, serving this". The rows go through the same normalization and the same evaluator the database source feeds, so a test written against it exercises rule precedence, bucketing and the kill switch for real.
+This replaces the _switch_, not the answer: rows still go through the same store and the same evaluator production runs, so a test that turns a feature on still exercises its `when` and its `rollout`. Pinning the final value instead would assert about a code path that never runs.
 
-## Failure modes, and what happens
+## Operating
 
-| Situation | Behaviour |
-| --- | --- |
-| No `FeatureFlag` model registered | every flag resolves to its declared default; logged once |
-| Database unreachable | last good snapshot is kept; declared defaults if nothing ever loaded |
-| Row for a key you never declared | ignored with a warning — there is no default to evaluate it against |
-| Malformed `rules` JSON | that rule is skipped and logged; the flag still resolves |
-| Rule with an unknown operator | the whole rule is skipped, never partially applied |
-| Variant weights that sum to zero | the flag's default is served, reported as `reason: "error"` |
+**An empty table is a working state.** Every feature is off until somebody turns it on, which is exactly what you want for a feature you just deployed.
 
-The rule throughout is to drop the smallest broken thing and keep serving — except where dropping would *widen* a flag's audience, in which case the whole rule goes.
+**A row for a key nobody declares is ignored with a warning.** That is usually a feature deleted from the code and left in the table — harmless, and the warning is how you find the litter.
+
+**A failed refresh keeps the last good snapshot.** An outage must not read as "every feature switched itself off"; that would be a config change nobody made, applied to production, at the moment something else is already broken. Only a cold process that has _never_ loaded fails closed.
+
+### Failure modes
+
+| Situation                                    | Behaviour                                         |
+| -------------------------------------------- | ------------------------------------------------- |
+| No `FeatureFlag` model registered            | every feature stays off; logged once              |
+| Database unreachable, snapshot loaded before | last good snapshot is kept                        |
+| Database unreachable, never loaded           | every feature off, `reason: "unavailable"`        |
+| Row for a key you never declared             | ignored with a warning                            |
+| Row with a non-boolean `active`              | read as off                                       |
+| A `when` that throws                         | the feature reads off, logged once per evaluation |
 
 ## Related
 
 - [Services](./services.md) — the container and configuration this plugs into
-- [Authorization](./authorization.md) — for the things flags are not
+- [Authorization](./authorization.md) — for the things features are not
 - [ORM](./orm.md) — the model and migration workflow

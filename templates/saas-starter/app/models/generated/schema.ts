@@ -180,17 +180,9 @@ export const FeatureFlag = {
       "isId": false,
       "isUpdatedAt": false
     },
-    "description": {
-      "name": "description",
-      "column": "description",
-      "type": "String",
-      "nullable": true,
-      "isId": false,
-      "isUpdatedAt": false
-    },
-    "enabled": {
-      "name": "enabled",
-      "column": "enabled",
+    "active": {
+      "name": "active",
+      "column": "active",
       "type": "Boolean",
       "nullable": false,
       "isId": false,
@@ -199,57 +191,6 @@ export const FeatureFlag = {
         "kind": "value",
         "value": false
       }
-    },
-    "offValue": {
-      "name": "offValue",
-      "column": "offValue",
-      "type": "Json",
-      "nullable": true,
-      "isId": false,
-      "isUpdatedAt": false
-    },
-    "defaultValue": {
-      "name": "defaultValue",
-      "column": "defaultValue",
-      "type": "Json",
-      "nullable": true,
-      "isId": false,
-      "isUpdatedAt": false
-    },
-    "rules": {
-      "name": "rules",
-      "column": "rules",
-      "type": "Json",
-      "nullable": true,
-      "isId": false,
-      "isUpdatedAt": false
-    },
-    "seed": {
-      "name": "seed",
-      "column": "seed",
-      "type": "String",
-      "nullable": false,
-      "isId": false,
-      "isUpdatedAt": false,
-      "default": {
-        "kind": "cuid"
-      }
-    },
-    "bucketBy": {
-      "name": "bucketBy",
-      "column": "bucketBy",
-      "type": "String",
-      "nullable": true,
-      "isId": false,
-      "isUpdatedAt": false
-    },
-    "archivedAt": {
-      "name": "archivedAt",
-      "column": "archivedAt",
-      "type": "DateTime",
-      "nullable": true,
-      "isId": false,
-      "isUpdatedAt": false
     },
     "createdAt": {
       "name": "createdAt",

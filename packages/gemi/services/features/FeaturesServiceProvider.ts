@@ -17,7 +17,10 @@ export class FeaturesServiceProvider extends ServiceProvider {
       // default model name, so a `model` override would otherwise be ignored
       // unless the app also replaced the source. Rebuild it here instead of
       // making every app that renames the table also know about the source.
-      if (config.source instanceof DatabaseFeatureFlagSource && config.model !== config.source.modelName) {
+      if (
+        config.source instanceof DatabaseFeatureFlagSource &&
+        config.model !== config.source.modelName
+      ) {
         config.source = new DatabaseFeatureFlagSource(config.model);
       }
 
@@ -31,8 +34,8 @@ export class FeaturesServiceProvider extends ServiceProvider {
 
     // Warmed at boot so the first request is served from memory rather than
     // paying for the cold load. Wrapped because a database that is not up yet
-    // must not fail the boot — the store degrades to declared defaults and
-    // recovers on its own once the next TTL elapses.
+    // must not fail the boot — the store fails closed, every feature reads off,
+    // and it recovers on its own once the next TTL elapses.
     try {
       await features.refresh();
     } catch (error) {

@@ -1,22 +1,16 @@
 import { describe, expect, test, vi } from "vitest";
-import { FeatureRouter, flattenFeatures } from "../../http/FeatureRouter";
+import { defineFeature } from "./defineFeature";
 import { FeatureFlagStore } from "./FeatureFlagStore";
 import { FeatureFlagSource } from "./sources/FeatureFlagSource";
 
-class Declared extends FeatureRouter {
-  features = {
-    alpha: this.boolean(false),
-    beta: this.boolean(true),
-  };
-}
-
-const declared = flattenFeatures(new Declared());
+const declared = {
+  alpha: defineFeature(),
+  beta: defineFeature(),
+};
 
 class ScriptedSource extends FeatureFlagSource {
   calls = 0;
-  constructor(
-    private readonly script: () => Promise<Record<string, unknown>[]>,
-  ) {
+  constructor(private readonly script: () => Promise<Record<string, unknown>[]>) {
     super();
   }
   async load() {
@@ -25,10 +19,10 @@ class ScriptedSource extends FeatureFlagSource {
   }
 }
 
-const rows = (...keys: string[]) => keys.map((key) => ({ key, enabled: true, seed: key }));
+const rows = (...keys: string[]) => keys.map((key) => ({ key, active: true }));
 
 describe("loading", () => {
-  test("normalizes rows against the declarations", async () => {
+  test("reads switches for declared keys", async () => {
     const store = new FeatureFlagStore(
       new ScriptedSource(async () => rows("alpha")),
       declared,
@@ -37,10 +31,27 @@ describe("loading", () => {
     const snapshot = await store.get();
 
     expect(snapshot.unavailable).toBe(false);
-    expect(snapshot.flags.get("alpha")!.enabled).toBe(true);
+    expect(snapshot.active.get("alpha")).toBe(true);
   });
 
-  test("a row for an undeclared flag is ignored with a warning", async () => {
+  test("anything other than true is off", async () => {
+    const store = new FeatureFlagStore(
+      new ScriptedSource(async () => [
+        { key: "alpha", active: false },
+        { key: "beta", active: "yes" },
+      ]),
+      declared,
+      1000,
+    );
+    const snapshot = await store.get();
+
+    expect(snapshot.active.get("alpha")).toBe(false);
+    // A row is the one part of this system nobody reviews, so a non-boolean is
+    // coerced to off rather than trusted for its truthiness.
+    expect(snapshot.active.get("beta")).toBe(false);
+  });
+
+  test("a row for an undeclared feature is ignored with a warning", async () => {
     const warn = vi.fn();
     const store = new FeatureFlagStore(
       new ScriptedSource(async () => rows("alpha", "ghost")),
@@ -50,8 +61,21 @@ describe("loading", () => {
     );
     const snapshot = await store.get();
 
-    expect([...snapshot.flags.keys()]).toEqual(["alpha"]);
+    expect([...snapshot.active.keys()]).toEqual(["alpha"]);
     expect(warn.mock.calls.flat().join(" ")).toMatch(/"ghost"/);
+  });
+
+  test("a row with no key is ignored with a warning", async () => {
+    const warn = vi.fn();
+    const store = new FeatureFlagStore(
+      new ScriptedSource(async () => [{ active: true }]),
+      declared,
+      1000,
+      warn,
+    );
+
+    expect((await store.get()).active.size).toBe(0);
+    expect(warn).toHaveBeenCalled();
   });
 
   test("an empty table is a normal, available state", async () => {
@@ -59,7 +83,7 @@ describe("loading", () => {
     const snapshot = await store.get();
 
     expect(snapshot.unavailable).toBe(false);
-    expect(snapshot.flags.size).toBe(0);
+    expect(snapshot.active.size).toBe(0);
   });
 });
 
@@ -85,11 +109,11 @@ describe("caching", () => {
 
     // Stale: returns the old snapshot immediately rather than awaiting the load.
     const stale = await store.get();
-    expect([...stale.flags.keys()]).toEqual(["alpha"]);
+    expect([...stale.active.keys()]).toEqual(["alpha"]);
 
     // The background refresh lands, and the next read sees it.
     await store.refresh();
-    expect([...(await store.get()).flags.keys()].sort()).toEqual(["alpha", "beta"]);
+    expect([...(await store.get()).active.keys()].sort()).toEqual(["alpha", "beta"]);
   });
 
   test("concurrent cold reads issue one query", async () => {
@@ -133,7 +157,7 @@ describe("failure handling", () => {
     const snapshot = await store.get();
 
     expect(snapshot.unavailable).toBe(true);
-    expect(snapshot.flags.size).toBe(0);
+    expect(snapshot.active.size).toBe(0);
     expect(warn).toHaveBeenCalled();
   });
 
@@ -149,9 +173,9 @@ describe("failure handling", () => {
     fail = true;
     const after = await store.refresh();
 
-    // An outage must not read as "every flag reverted to its default".
+    // An outage must not read as "every feature switched itself off".
     expect(after.unavailable).toBe(false);
-    expect([...after.flags.keys()]).toEqual(["alpha"]);
+    expect([...after.active.keys()]).toEqual(["alpha"]);
   });
 
   test("a failed refresh backs off for a TTL instead of retrying every read", async () => {
@@ -217,6 +241,6 @@ describe("peek", () => {
     expect(source.calls).toBe(0);
 
     await store.get();
-    expect(store.peek()!.flags.size).toBe(1);
+    expect(store.peek()!.active.size).toBe(1);
   });
 });

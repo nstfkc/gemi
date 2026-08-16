@@ -1,34 +1,35 @@
-import type { FeatureFlag } from "../../http/FeatureRouter";
-import { normalizeFlag, type Warn } from "./normalize";
+import type { FeatureRegistry } from "./defineFeature";
 import type { FeatureFlagSource } from "./sources/FeatureFlagSource";
-import type { FeatureFlagDefinition, FlagValue } from "./types";
+
+export type Warn = (message: string) => void;
 
 export interface FlagSnapshot {
-  flags: Map<string, FeatureFlagDefinition>;
+  /** `key -> active`. A key absent from the map has no row, and is off. */
+  active: Map<string, boolean>;
   loadedAt: number;
   /** True only while nothing has *ever* loaded successfully. */
   unavailable: boolean;
 }
 
 /**
- * The process-local cache of flag definitions.
+ * The process-local cache of on/off switches.
  *
  * gemi has no `Cache` facade, and this does not add one — a general cache
- * abstraction is a much larger design, and coupling flags to a hypothetical
+ * abstraction is a much larger design, and coupling features to a hypothetical
  * version of it would block both.
  *
  * Three properties, each load-bearing:
  *
  * **Stale-while-revalidate.** After the first load, `get()` returns an
  * already-resolved snapshot and refreshes in the background. No request ever
- * waits on the database for a flag. This is what makes evaluating every flag on
- * every request affordable, and it is why the manager can be eager.
+ * waits on the database for a feature. This is what makes evaluating every
+ * feature on every request affordable, and it is why the manager can be eager.
  *
  * **Single-flight.** A cold start under load must not issue one query per
  * in-flight request, so concurrent refreshes share one promise.
  *
  * **A failed refresh keeps the last good data.** An outage must not read as
- * "every flag reverted to its default" — that is a config change nobody made,
+ * "every feature switched itself off" — that is a config change nobody made,
  * applied to production, at the exact moment something else is already broken.
  */
 export class FeatureFlagStore {
@@ -39,7 +40,7 @@ export class FeatureFlagStore {
 
   constructor(
     private readonly source: FeatureFlagSource,
-    private readonly declared: Map<string, FeatureFlag<FlagValue>>,
+    private readonly declared: FeatureRegistry,
     private readonly ttlMs: number,
     private readonly warn: Warn = () => {},
   ) {}
@@ -79,7 +80,7 @@ export class FeatureFlagStore {
     try {
       const rows = await this.source.load();
       this.snapshot = {
-        flags: this.buildDefinitions(rows),
+        active: this.readSwitches(rows),
         loadedAt: Date.now(),
         unavailable: false,
       };
@@ -89,35 +90,38 @@ export class FeatureFlagStore {
     }
   }
 
-  private buildDefinitions(
-    rows: Record<string, unknown>[],
-  ): Map<string, FeatureFlagDefinition> {
-    const flags = new Map<string, FeatureFlagDefinition>();
+  /**
+   * Rows in, `key -> active` out.
+   *
+   * The row is treated as hostile input — not because anyone expects it to be
+   * malformed, but because it is the one part of this system nobody reviews
+   * before it reaches production. A bad row is logged and skipped, never thrown:
+   * a typo in a column must not take the process down at boot.
+   */
+  private readSwitches(rows: Record<string, unknown>[]): Map<string, boolean> {
+    const active = new Map<string, boolean>();
 
     for (const row of rows ?? []) {
       const key = typeof row?.key === "string" ? row.key : null;
       if (!key) {
-        this.warn("Ignoring a feature flag row with no `key`.");
+        this.warn("Ignoring a feature row with no `key`.");
         continue;
       }
 
-      const declaration = this.declared.get(key);
-      if (!declaration) {
-        // A row for a flag nobody declares cannot be evaluated — there is no
-        // default and no allowed set to check it against. Usually a flag that
-        // was removed from the code and left in the table, which is harmless,
-        // so this warns rather than throws.
+      if (!(key in this.declared)) {
+        // A row for a feature nobody declares is usually one that was removed
+        // from the code and left in the table, which is harmless — so this warns
+        // rather than throws. It is also the signal that the row is now litter.
         this.warn(
-          `Feature flag row "${key}" is not declared in app/features, so it is ignored. Remove the row, or declare the flag.`,
+          `Feature row "${key}" is not declared in app/features, so it is ignored. Delete the row, or declare the feature.`,
         );
         continue;
       }
 
-      const definition = normalizeFlag(row, declaration, this.warn);
-      if (definition) flags.set(definition.key, definition);
+      active.set(key, row.active === true);
     }
 
-    return flags;
+    return active;
   }
 
   private handleFailure(error: unknown): FlagSnapshot {
@@ -125,7 +129,7 @@ export class FeatureFlagStore {
     const now = Date.now();
     if (now - this.lastFailureLoggedAt >= this.ttlMs) {
       this.lastFailureLoggedAt = now;
-      this.warn(`Could not load feature flags: ${message}`);
+      this.warn(`Could not load feature switches: ${message}`);
     }
 
     if (this.snapshot) {
@@ -135,7 +139,7 @@ export class FeatureFlagStore {
       return this.snapshot;
     }
 
-    this.snapshot = { flags: new Map(), loadedAt: now, unavailable: true };
+    this.snapshot = { active: new Map(), loadedAt: now, unavailable: true };
     return this.snapshot;
   }
 }

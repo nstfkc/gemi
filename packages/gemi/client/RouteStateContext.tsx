@@ -24,13 +24,14 @@ export type PageData = {
   breadcrumbs: any;
   appId: string;
   /**
-   * Evaluated feature flags, replaced on every navigation.
+   * Evaluated features, replaced on every navigation.
    *
    * Lives here rather than only on `ServerDataContext` for the same reason
    * `i18n` does: the server re-evaluates on each navigation payload, so reading
-   * from route state is what makes a flag change land without a hard reload.
+   * from route state is what makes switching a feature on land without a hard
+   * reload.
    */
-  features: Record<string, boolean | string | number | null>;
+  features: Record<string, boolean>;
 };
 
 export const RouteStateContext = createContext({} as RouteState & PageData);

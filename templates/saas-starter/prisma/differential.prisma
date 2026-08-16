@@ -332,54 +332,33 @@ enum OrganizationPlan {
   enterprise
 }
 
-/// The control plane for the flags declared in `app/features`.
+/// The on/off switches for the features declared in `app/features`.
 ///
-/// The declaration owns each flag's key, its value type and its default; this
-/// table owns whether it is on and who it is on for. So adding a flag is a
-/// deploy and flipping one is an `UPDATE`, which is the split that lets an
-/// on-call engineer turn something off without a release.
+/// The declaration owns each feature's key, its targeting and its rollout
+/// percentage; this table owns one thing only — whether the feature is switched
+/// on at all. So shipping a feature is a deploy and turning it on is an
+/// `UPDATE`, which is the split that lets a feature be deployed dark and lets an
+/// on-call engineer switch it off without a release.
 ///
-/// A key with no row here resolves to its declared default, so an empty table is
-/// a working state rather than a broken one.
+/// A key with no row here is off, so an empty table is a working state: every
+/// feature is dark until somebody turns it on.
+///
+/// Nothing per-subject is stored. Who lands inside a percentage rollout is a
+/// pure function of the feature and the subject, so this table holds one row per
+/// feature rather than one row per feature per user.
 model FeatureFlag {
   id       Int    @id @default(autoincrement())
   publicId String @unique @default(cuid())
 
   /// Must match a key declared in `app/features`. A row whose key is not
-  /// declared is ignored with a warning — there is no default or allowed set to
-  /// evaluate it against.
-  key         String  @unique
-  description String?
+  /// declared is ignored with a warning.
+  key String @unique
 
-  /// The kill switch. `false` short-circuits every rule, so nothing in `rules`
-  /// can turn a disabled flag back on.
-  enabled Boolean @default(false)
-
-  /// Served when `enabled` is false. Null falls back to the declared default.
-  offValue Json?
-  /// Served when enabled and no rule matched. Null falls back to the declared default.
-  defaultValue Json?
-
-  /// Ordered rules, first match wins. Shape is `Rule[]` from `gemi/services`.
-  /// Untyped at the database boundary, so the evaluator treats it as hostile
-  /// input: a malformed rule is logged and skipped, never thrown.
-  rules Json?
-
-  /// Bucketing salt. Per-row so two independent 50% rollouts select different
-  /// halves; changing it deliberately re-randomises this flag's assignment.
-  seed String @default(cuid())
-
-  /// Attribute path percentage rollouts bucket on, overriding the configured
-  /// default. `attributes.orgId` rolls out by organisation rather than by user.
-  bucketBy String?
-
-  /// Soft retirement. Archived rows are not loaded and not evaluated.
-  archivedAt DateTime?
+  /// The switch, and the kill switch. `false` short-circuits the feature's
+  /// `when` and `rollout` alike, so nothing in application code can turn a
+  /// switched-off feature back on.
+  active Boolean @default(false)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
-
-  /// The store's only query is `where: { archivedAt: null }`, and it runs on
-  /// every cache refresh. `key` is already indexed by `@unique`.
-  @@index([archivedAt])
 }

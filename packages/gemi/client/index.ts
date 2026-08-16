@@ -43,7 +43,6 @@ export type {
   I18nDictionary,
   Features,
   FeatureKey,
-  FeatureValueOf,
 } from "./rpc";
 export type { ViewProps, LayoutProps } from "./types";
 export type { CreateI18nDictionary } from "./I18nContext";

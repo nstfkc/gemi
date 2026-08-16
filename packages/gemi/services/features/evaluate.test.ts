@@ -1,364 +1,348 @@
-import { describe, expect, test } from "vitest";
-import { evaluateFlag } from "./evaluate";
-import type { EvaluationContext, FeatureFlagDefinition, Rule } from "./types";
+import { describe, expect, test, vi } from "vitest";
+import { bucketKey, bucketOf, inRollout } from "./bucket";
+import { defineFeature } from "./defineFeature";
+import { evaluateFeature, subjectFor } from "./evaluate";
+import type { FeatureContext } from "./types";
 
-function context(overrides: Partial<EvaluationContext> = {}): EvaluationContext {
+function context(overrides: Partial<FeatureContext> = {}): FeatureContext {
   return {
-    user: { publicId: "usr_1", email: "a@example.com", globalRole: 1 },
-    attributes: { plan: "pro" },
-    request: { path: "/", routePath: "/", locale: "en-US" },
-    anonymousId: "anon-1",
-    now: new Date("2026-06-01T00:00:00.000Z"),
+    user: null,
+    attributes: {},
+    request: { path: null, routePath: null, locale: null },
+    anonymousId: null,
+    isBot: false,
+    now: new Date("2026-01-01T00:00:00Z"),
     ...overrides,
   };
 }
 
-function flag(overrides: Partial<FeatureFlagDefinition> = {}): FeatureFlagDefinition {
-  return {
-    key: "new-checkout",
-    enabled: true,
-    offValue: false,
-    defaultValue: false,
-    rules: [],
-    seed: "seed-a",
-    bucketBy: null,
-    serverOnly: false,
-    ...overrides,
-  };
+/** The exact bucket a subject lands in, so a test can pick one either side. */
+function bucketFor(key: string, subject: string) {
+  return bucketOf(bucketKey(key, subject));
 }
 
-const opts = { declaredDefault: false as const };
+/** A rollout percentage that definitely includes / excludes this subject. */
+function rolloutIncluding(key: string, subject: string) {
+  return bucketFor(key, subject) / 100 + 0.01;
+}
+function rolloutExcluding(key: string, subject: string) {
+  return bucketFor(key, subject) / 100;
+}
 
-describe("fallbacks", () => {
-  test("an unknown key resolves to the declared default", () => {
-    const result = evaluateFlag(undefined, context(), { declaredDefault: "control" });
-
-    expect(result).toEqual({ value: "control", reason: "unknown", ruleId: null });
-  });
-
-  test("an unavailable store resolves to the declared default", () => {
-    const result = evaluateFlag(flag({ enabled: true, defaultValue: true }), context(), {
-      declaredDefault: "control",
-      unavailable: true,
+describe("the switch short-circuits everything", () => {
+  test("no row is off", () => {
+    const feature = defineFeature();
+    expect(evaluateFeature("f", feature, context(), { active: undefined })).toEqual({
+      value: false,
+      reason: "inactive",
     });
+  });
 
-    // Not the row's value: when the store never loaded, the row in hand may be
-    // arbitrarily stale or absent, so code is the only trustworthy source.
-    expect(result).toEqual({ value: "control", reason: "unavailable", ruleId: null });
+  test("active: false is off", () => {
+    const feature = defineFeature();
+    expect(evaluateFeature("f", feature, context(), { active: false })).toEqual({
+      value: false,
+      reason: "inactive",
+    });
+  });
+
+  test("a `when` that would say yes cannot defeat the kill switch", () => {
+    const feature = defineFeature({ when: () => true });
+    expect(evaluateFeature("f", feature, context(), { active: false }).value).toBe(false);
+  });
+
+  test("a 100% rollout cannot defeat the kill switch", () => {
+    const feature = defineFeature({ rollout: 100 });
+    expect(evaluateFeature("f", feature, context(), { active: false }).value).toBe(false);
   });
 });
 
-describe("the kill switch", () => {
-  test("enabled:false serves offValue", () => {
-    const result = evaluateFlag(flag({ enabled: false, offValue: "off" }), context(), opts);
-
-    expect(result).toEqual({ value: "off", reason: "disabled", ruleId: null });
-  });
-
-  test("enabled:false beats a rule that would otherwise match everyone", () => {
-    const result = evaluateFlag(
-      flag({
-        enabled: false,
-        offValue: false,
-        rules: [{ id: "r1", conditions: [], value: true }],
-      }),
-      context(),
-      opts,
-    );
-
-    expect(result.value).toBe(false);
-    expect(result.reason).toBe("disabled");
-  });
-});
-
-describe("rule precedence", () => {
-  test("the first matching rule wins and later ones are not consulted", () => {
-    const result = evaluateFlag(
-      flag({
-        rules: [
-          { id: "r1", conditions: [{ attribute: "plan", operator: "eq", value: "pro" }], value: "first" },
-          { id: "r2", conditions: [], value: "second" },
-        ],
-      }),
-      context(),
-      opts,
-    );
-
-    expect(result).toEqual({ value: "first", reason: "rule", ruleId: "r1" });
-  });
-
-  test("a non-matching rule falls through to the next", () => {
-    const result = evaluateFlag(
-      flag({
-        rules: [
-          { id: "r1", conditions: [{ attribute: "plan", operator: "eq", value: "free" }], value: "first" },
-          { id: "r2", conditions: [], value: "second" },
-        ],
-      }),
-      context(),
-      opts,
-    );
-
-    expect(result).toEqual({ value: "second", reason: "rule", ruleId: "r2" });
-  });
-
-  test("no matching rule serves defaultValue", () => {
-    const result = evaluateFlag(
-      flag({
-        defaultValue: "fallback",
-        rules: [
-          { id: "r1", conditions: [{ attribute: "plan", operator: "eq", value: "free" }], value: "x" },
-        ],
-      }),
-      context(),
-      opts,
-    );
-
-    expect(result).toEqual({ value: "fallback", reason: "default", ruleId: null });
-  });
-
-  test("an empty condition list is a catch-all", () => {
-    const result = evaluateFlag(
-      flag({ rules: [{ id: "r1", value: "everyone" }] }),
-      context(),
-      opts,
-    );
-
-    expect(result.value).toBe("everyone");
-  });
-});
-
-describe("segments", () => {
-  const segments = { enterprise: [{ attribute: "plan", operator: "eq" as const, value: "pro" }] };
-
-  test("a rule matches when its segment does", () => {
-    const result = evaluateFlag(
-      flag({ rules: [{ id: "r1", segments: ["enterprise"], value: "yes" }] }),
-      context(),
-      { ...opts, segments },
-    );
-
-    expect(result.value).toBe("yes");
-  });
-
-  test("a rule is skipped when its segment does not match", () => {
-    const result = evaluateFlag(
-      flag({ defaultValue: "no", rules: [{ id: "r1", segments: ["enterprise"], value: "yes" }] }),
-      context({ attributes: { plan: "free" } }),
-      { ...opts, segments },
-    );
-
-    expect(result.value).toBe("no");
-  });
-
-  test("a rule naming an undefined segment does not become a catch-all", () => {
-    // Deleting a segment definition must not widen every rule that used it to
-    // the whole audience.
-    const result = evaluateFlag(
-      flag({ defaultValue: "no", rules: [{ id: "r1", segments: ["gone"], value: "yes" }] }),
-      context(),
-      { ...opts, segments: {} },
-    );
-
-    expect(result.value).toBe("no");
-  });
-});
-
-describe("rollout", () => {
-  const rolloutRule = (rollout: number): Rule => ({ id: "r1", rollout, value: true });
-
-  test("100 and an absent rollout always match", () => {
-    expect(evaluateFlag(flag({ rules: [rolloutRule(100)] }), context(), opts).value).toBe(true);
+describe("an unreachable store fails closed", () => {
+  test("unavailable is off even when the feature would be on for everyone", () => {
+    const feature = defineFeature();
     expect(
-      evaluateFlag(flag({ rules: [{ id: "r1", value: true }] }), context(), opts).value,
-    ).toBe(true);
-  });
-
-  test("0 never matches and falls through", () => {
-    const result = evaluateFlag(
-      flag({ defaultValue: "fell-through", rules: [rolloutRule(0)] }),
-      context(),
-      opts,
-    );
-
-    expect(result.value).toBe("fell-through");
-  });
-
-  test("a rule failing its rollout falls through to the next rule", () => {
-    // The composability property: rule 2 is reachable by the users rule 1's
-    // bucket excluded, rather than being dead code below a terminal rule.
-    const results = new Set<unknown>();
-    for (let i = 0; i < 200; i++) {
-      results.add(
-        evaluateFlag(
-          flag({
-            rules: [
-              { id: "r1", rollout: 50, value: "beta" },
-              { id: "r2", value: "stable" },
-            ],
-          }),
-          context({ user: { publicId: `usr_${i}` } }),
-          opts,
-        ).value,
-      );
-    }
-
-    expect(results).toEqual(new Set(["beta", "stable"]));
-  });
-
-  test("the same subject gets the same answer every time", () => {
-    const definition = flag({ rules: [rolloutRule(50)] });
-    const ctx = context();
-    const first = evaluateFlag(definition, ctx, opts).value;
-
-    for (let i = 0; i < 50; i++) {
-      expect(evaluateFlag(definition, context(), opts).value).toBe(first);
-    }
-  });
-});
-
-describe("variants", () => {
-  const variantRule: Rule = {
-    id: "r1",
-    variants: [
-      { value: "a", weight: 50 },
-      { value: "b", weight: 50 },
-    ],
-  };
-
-  test("serves one of the declared variants", () => {
-    const result = evaluateFlag(flag({ rules: [variantRule] }), context(), opts);
-
-    expect(["a", "b"]).toContain(result.value);
-    expect(result.reason).toBe("rule");
-    expect(result.ruleId).toBe("r1");
-  });
-
-  test("both variants are reachable across subjects", () => {
-    const seen = new Set<unknown>();
-    for (let i = 0; i < 200; i++) {
-      seen.add(
-        evaluateFlag(
-          flag({ rules: [variantRule] }),
-          context({ user: { publicId: `usr_${i}` } }),
-          opts,
-        ).value,
-      );
-    }
-
-    expect(seen).toEqual(new Set(["a", "b"]));
-  });
-
-  test("unusable weights fall back to the flag default and report an error", () => {
-    const result = evaluateFlag(
-      flag({
-        defaultValue: "safe",
-        rules: [{ id: "r1", variants: [{ value: "a", weight: 0 }] }],
+      evaluateFeature("f", feature, context(), {
+        active: true,
+        unavailable: true,
       }),
-      context(),
-      opts,
-    );
-
-    expect(result).toEqual({ value: "safe", reason: "error", ruleId: "r1" });
+    ).toEqual({ value: false, reason: "unavailable" });
   });
 });
 
-describe("bucketing subject", () => {
-  test("falls back to the anonymous id when there is no user", () => {
-    const anon = context({ user: null, anonymousId: "anon-42" });
-    const definition = flag({ rules: [{ id: "r1", rollout: 50, value: true }] });
-    const first = evaluateFlag(definition, anon, opts).value;
-
-    // Stable for that visitor rather than reshuffling per call.
-    expect(evaluateFlag(definition, context({ user: null, anonymousId: "anon-42" }), opts).value).toBe(
-      first,
-    );
+describe("switched on", () => {
+  test("no `when` and no `rollout` is on for everyone", () => {
+    expect(evaluateFeature("f", defineFeature(), context(), { active: true })).toEqual({
+      value: true,
+      reason: "on",
+    });
   });
 
-  test("anonymous visitors do not all share one bucket", () => {
-    const definition = flag({ rules: [{ id: "r1", rollout: 50, value: "in" }] });
-    const seen = new Set<unknown>();
-    for (let i = 0; i < 200; i++) {
-      seen.add(
-        evaluateFlag(definition, context({ user: null, anonymousId: `anon-${i}` }), opts).value,
+  test("`when` returning true wins", () => {
+    const feature = defineFeature({ when: () => true, rollout: 0 });
+    expect(evaluateFeature("f", feature, context(), { active: true })).toEqual({
+      value: true,
+      reason: "attributed",
+    });
+  });
+
+  test("`when` returning false wins over a 100% rollout", () => {
+    const feature = defineFeature({ when: () => false, rollout: 100 });
+    expect(evaluateFeature("f", feature, context(), { active: true })).toEqual({
+      value: false,
+      reason: "attributed",
+    });
+  });
+
+  test("`when` returning nothing abstains and the rollout decides", () => {
+    const feature = defineFeature({ when: () => undefined, rollout: 100 });
+    expect(evaluateFeature("f", feature, context(), { active: true })).toEqual({
+      value: true,
+      reason: "rollout",
+    });
+  });
+
+  test("`when` reads the context", () => {
+    const feature = defineFeature({
+      when: (ctx) => ctx.user?.plan === "enterprise",
+    });
+    const enterprise = context({ user: { plan: "enterprise" } });
+    const free = context({ user: { plan: "free" } });
+
+    expect(evaluateFeature("f", feature, enterprise, { active: true }).value).toBe(true);
+    expect(evaluateFeature("f", feature, free, { active: true }).value).toBe(false);
+  });
+
+  test("rollout 0 excludes everyone", () => {
+    const feature = defineFeature({ rollout: 0 });
+    const ctx = context({ anonymousId: "visitor-1" });
+    expect(evaluateFeature("f", feature, ctx, { active: true })).toEqual({
+      value: false,
+      reason: "excluded",
+    });
+  });
+});
+
+describe("bucketing", () => {
+  test("the same subject gets the same answer every time", () => {
+    const feature = defineFeature({ rollout: 50 });
+    const ctx = context({ anonymousId: "visitor-1" });
+
+    const first = evaluateFeature("f", feature, ctx, { active: true }).value;
+    for (let i = 0; i < 20; i++) {
+      expect(evaluateFeature("f", feature, ctx, { active: true }).value).toBe(first);
+    }
+  });
+
+  test("raising a rollout only ever adds subjects", () => {
+    // The property that makes ramping safe: nobody who had the feature loses it.
+    const subjects = Array.from({ length: 300 }, (_, i) => `visitor-${i}`);
+    let previous = new Set<string>();
+
+    for (const percent of [0, 5, 10, 25, 50, 75, 100]) {
+      const feature = defineFeature({ rollout: percent });
+      const included = new Set(
+        subjects.filter(
+          (id) =>
+            evaluateFeature("f", feature, context({ anonymousId: id }), {
+              active: true,
+            }).value,
+        ),
       );
+
+      for (const id of previous) {
+        expect(included.has(id), `${id} lost the feature at ${percent}%`).toBe(true);
+      }
+      previous = included;
     }
 
-    expect(seen.size).toBe(2);
+    expect(previous.size).toBe(subjects.length);
   });
 
-  test("a flag can bucket on something other than the user", () => {
-    const definition = flag({
-      bucketBy: "attributes.orgId",
-      rules: [{ id: "r1", rollout: 50, value: "in" }],
-    });
+  test("two features at the same percentage select different subjects", () => {
+    // Salting by key is what decorrelates them. Without it, a subject unlucky in
+    // one 20% rollout would be unlucky in every other 20% rollout.
+    const subjects = Array.from({ length: 500 }, (_, i) => `visitor-${i}`);
+    const feature = defineFeature({ rollout: 20 });
 
-    // Everyone in one org lands together, which is the point of org-level rollout.
-    const a = evaluateFlag(
-      definition,
-      context({ user: { publicId: "usr_1" }, attributes: { orgId: "org_1" } }),
-      opts,
-    ).value;
-    const b = evaluateFlag(
-      definition,
-      context({ user: { publicId: "usr_2" }, attributes: { orgId: "org_1" } }),
-      opts,
-    ).value;
-
-    expect(a).toBe(b);
-  });
-
-  test("a rule can override the flag's bucketBy", () => {
-    const shared = context({ user: { publicId: "usr_1" }, attributes: { orgId: "org_1" } });
-    const byUser = evaluateFlag(
-      flag({ rules: [{ id: "r1", rollout: 50, value: "in", bucketBy: "user.publicId" }] }),
-      shared,
-      opts,
+    const inA = subjects.filter(
+      (id) =>
+        evaluateFeature("a", feature, context({ anonymousId: id }), {
+          active: true,
+        }).value,
     );
-    const byOrg = evaluateFlag(
-      flag({ rules: [{ id: "r1", rollout: 50, value: "in", bucketBy: "attributes.orgId" }] }),
-      shared,
-      opts,
+    const inB = subjects.filter(
+      (id) =>
+        evaluateFeature("b", feature, context({ anonymousId: id }), {
+          active: true,
+        }).value,
     );
 
-    // Not asserting they differ — they may coincide — only that both resolve.
-    expect([byUser.value, byOrg.value].every((v) => v === "in" || v === false)).toBe(true);
+    expect(inA).not.toEqual(inB);
+    // Overlap should be about 20% of 20% — nowhere near identical.
+    const overlap = inA.filter((id) => inB.includes(id)).length;
+    expect(overlap).toBeLessThan(inA.length * 0.6);
   });
-});
 
-describe("bucket memoization", () => {
-  test("reuses a computed bucket within a request", () => {
+  test("a shared salt holds two features on the same population", () => {
+    const subjects = Array.from({ length: 200 }, (_, i) => `visitor-${i}`);
+    const a = defineFeature({ rollout: 30, salt: "shared" });
+    const b = defineFeature({ rollout: 30, salt: "shared" });
+
+    for (const id of subjects) {
+      const ctx = context({ anonymousId: id });
+      expect(evaluateFeature("a", a, ctx, { active: true }).value).toBe(
+        evaluateFeature("b", b, ctx, { active: true }).value,
+      );
+    }
+  });
+
+  test("the rollout lands within a percent or so of the target", () => {
+    const subjects = Array.from({ length: 4000 }, (_, i) => `visitor-${i}`);
+    const feature = defineFeature({ rollout: 25 });
+
+    const included = subjects.filter(
+      (id) =>
+        evaluateFeature("f", feature, context({ anonymousId: id }), {
+          active: true,
+        }).value,
+    ).length;
+
+    expect(included / subjects.length).toBeGreaterThan(0.22);
+    expect(included / subjects.length).toBeLessThan(0.28);
+  });
+
+  test("memoises the bucket across reads", () => {
     const buckets = new Map<string, number>();
-    const definition = flag({
-      rules: [
-        {
-          id: "r1",
-          rollout: 50,
-          variants: [
-            { value: "a", weight: 50 },
-            { value: "b", weight: 50 },
-          ],
-        },
-      ],
-    });
+    const feature = defineFeature({ rollout: 50 });
+    const ctx = context({ anonymousId: "visitor-1" });
 
-    evaluateFlag(definition, context(), { ...opts, buckets });
-    const afterFirst = new Map(buckets);
-    evaluateFlag(definition, context(), { ...opts, buckets });
+    evaluateFeature("f", feature, ctx, { active: true, buckets });
+    evaluateFeature("f", feature, ctx, { active: true, buckets });
 
-    expect(buckets).toEqual(afterFirst);
-    // A rollout gate and a variant split are two distinct namespaces.
-    expect(buckets.size).toBeLessThanOrEqual(2);
+    expect(buckets.size).toBe(1);
+    expect(buckets.get(bucketKey("f", "visitor-1"))).toBe(bucketFor("f", "visitor-1"));
+  });
+});
+
+describe("the subject", () => {
+  test("prefers the user over the anonymous id", () => {
+    expect(subjectFor(context({ user: { publicId: "u1" }, anonymousId: "a1" }))).toBe("u1");
   });
 
-  test("memoized and unmemoized evaluation agree", () => {
-    const definition = flag({ rules: [{ id: "r1", rollout: 50, value: "in" }] });
+  test("falls back to id when there is no publicId", () => {
+    expect(subjectFor(context({ user: { id: 7 } }))).toBe("7");
+  });
 
-    for (let i = 0; i < 50; i++) {
-      const ctx = context({ user: { publicId: `usr_${i}` } });
-      expect(evaluateFlag(definition, ctx, { ...opts, buckets: new Map() }).value).toBe(
-        evaluateFlag(definition, ctx, opts).value,
-      );
-    }
+  test("falls back to the session cookie for a logged-out visitor", () => {
+    expect(subjectFor(context({ anonymousId: "a1" }))).toBe("a1");
+  });
+
+  test("is the empty string outside a request", () => {
+    expect(subjectFor(context())).toBe("");
+  });
+
+  test("a user is bucketed the same on every device", () => {
+    const feature = defineFeature({ rollout: 50 });
+    const laptop = context({
+      user: { publicId: "u1" },
+      anonymousId: "device-a",
+    });
+    const phone = context({
+      user: { publicId: "u1" },
+      anonymousId: "device-b",
+    });
+
+    expect(evaluateFeature("f", feature, laptop, { active: true }).value).toBe(
+      evaluateFeature("f", feature, phone, { active: true }).value,
+    );
+  });
+});
+
+describe("crawlers", () => {
+  test("are pinned off for a rollout", () => {
+    const feature = defineFeature({ rollout: 100 });
+    const ctx = context({ isBot: true, anonymousId: "crawler" });
+    expect(evaluateFeature("f", feature, ctx, { active: true })).toEqual({
+      value: false,
+      reason: "bot",
+    });
+  });
+
+  test("still see a feature that is on for everyone", () => {
+    // No rollout means no sampling, so there is nothing to be inconsistent
+    // about across crawls — a bot should see what every visitor sees.
+    const feature = defineFeature();
+    const ctx = context({ isBot: true });
+    expect(evaluateFeature("f", feature, ctx, { active: true }).value).toBe(true);
+  });
+
+  test("a `when` still wins over the bot guard", () => {
+    const feature = defineFeature({ when: () => true, rollout: 10 });
+    const ctx = context({ isBot: true });
+    expect(evaluateFeature("f", feature, ctx, { active: true }).value).toBe(true);
+  });
+});
+
+describe("rollout boundaries", () => {
+  test("a subject just inside is on, just outside is off", () => {
+    const subject = "visitor-42";
+    const ctx = context({ anonymousId: subject });
+
+    const on = defineFeature({ rollout: rolloutIncluding("f", subject) });
+    const off = defineFeature({ rollout: rolloutExcluding("f", subject) });
+
+    expect(evaluateFeature("f", on, ctx, { active: true }).value).toBe(true);
+    expect(evaluateFeature("f", off, ctx, { active: true }).value).toBe(false);
+  });
+
+  test("inRollout is a `<` test", () => {
+    expect(inRollout(0, 0)).toBe(false);
+    expect(inRollout(0, 100)).toBe(true);
+    expect(inRollout(9999, 100)).toBe(true);
+    expect(inRollout(5000, 50)).toBe(false);
+    expect(inRollout(4999, 50)).toBe(true);
+  });
+});
+
+describe("a throwing `when`", () => {
+  test("reads off rather than escaping into the render", () => {
+    // The overwhelmingly common shape of this bug: no `?.`, and every anonymous
+    // page load throws.
+    const feature = defineFeature({
+      when: (ctx) => (ctx.user as any).plan === "pro",
+      rollout: 100,
+    });
+    const warn = vi.fn();
+
+    expect(evaluateFeature("f", feature, context(), { active: true, warn })).toEqual({
+      value: false,
+      reason: "error",
+    });
+    expect(warn.mock.calls.flat().join(" ")).toMatch(/"f"/);
+  });
+
+  test("does not fall through to the rollout", () => {
+    // Abstaining would ship the feature to a slice of users nobody approved.
+    const feature = defineFeature({
+      when: () => {
+        throw new Error("boom");
+      },
+      rollout: 100,
+    });
+
+    expect(evaluateFeature("f", feature, context(), { active: true }).value).toBe(false);
+  });
+});
+
+describe("declaration validation", () => {
+  test("rejects a rollout outside 0-100", () => {
+    expect(() => defineFeature({ rollout: -1 })).toThrow(/between 0 and 100/);
+    expect(() => defineFeature({ rollout: 101 })).toThrow(/between 0 and 100/);
+    expect(() => defineFeature({ rollout: Number.NaN })).toThrow(/between 0 and 100/);
+  });
+
+  test("accepts the boundaries", () => {
+    expect(defineFeature({ rollout: 0 }).rollout).toBe(0);
+    expect(defineFeature({ rollout: 100 }).rollout).toBe(100);
   });
 });

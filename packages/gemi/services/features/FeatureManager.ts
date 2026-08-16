@@ -1,15 +1,10 @@
-import {
-  FeatureRouter,
-  flattenFeatures,
-  type FeatureFlag,
-  type FlagValue,
-} from "../../http/FeatureRouter";
 import { RequestContext } from "../../http/requestContext";
 import type { ResolvedFeaturesConfig } from "./config";
 import { contextFromRequest, contextFromSubject, type FeatureSubject } from "./context";
-import { evaluateFlag } from "./evaluate";
+import type { Feature, FeatureRegistry } from "./defineFeature";
+import { evaluateFeature } from "./evaluate";
 import { FeatureFlagStore } from "./FeatureFlagStore";
-import type { EvaluationContext, FeatureFlagDefinition, FlagEvaluation } from "./types";
+import type { FeatureContext, FeatureEvaluation } from "./types";
 
 /**
  * Evaluation bound to one explicit context — what `Features.for(...)` returns.
@@ -20,43 +15,40 @@ import type { EvaluationContext, FeatureFlagDefinition, FlagEvaluation } from ".
 export class FeatureScope {
   constructor(
     private readonly manager: FeatureManager,
-    private readonly ctx: EvaluationContext,
+    private readonly ctx: FeatureContext,
   ) {}
 
   async enabled(key: string): Promise<boolean> {
-    return isOn((await this.explain(key)).value);
+    return (await this.explain(key)).value;
   }
 
-  async value<T extends FlagValue = FlagValue>(key: string): Promise<T> {
-    return (await this.explain(key)).value as T;
-  }
-
-  async explain(key: string): Promise<FlagEvaluation> {
+  async explain(key: string): Promise<FeatureEvaluation> {
     return await this.manager.evaluateIn(key, this.ctx, new Map());
   }
 
-  async all(): Promise<Record<string, FlagValue>> {
-    return await this.manager.evaluateAllIn(this.ctx, new Map(), { clientOnly: false });
+  async all(): Promise<Record<string, boolean>> {
+    return await this.manager.evaluateAllIn(this.ctx, new Map(), {
+      clientOnly: false,
+    });
   }
-}
-
-/** `false`, `null` and `undefined` are off; everything else is on. */
-function isOn(value: FlagValue | undefined): boolean {
-  return value !== false && value !== null && value !== undefined;
 }
 
 export class FeatureManager {
   static token = "features";
 
   readonly store: FeatureFlagStore;
-  private readonly declared: Map<string, FeatureFlag<FlagValue>>;
+  private readonly declared: FeatureRegistry;
   private warnedAboutSize = false;
 
   constructor(
     readonly config: ResolvedFeaturesConfig,
     private readonly log: (message: string) => void = () => {},
   ) {
-    this.declared = collectDeclarations(config.router, this.log);
+    // Silent when nothing is configured. Features are opt-in, so an application
+    // that never declared any has not made a mistake — and this runs on every
+    // boot, including every `gemi run` and every test that boots a kernel, where
+    // a line on stderr about a feature nobody asked for is pure noise.
+    this.declared = config.features ?? {};
     this.store = new FeatureFlagStore(
       config.source,
       this.declared,
@@ -65,42 +57,37 @@ export class FeatureManager {
     );
   }
 
-  /** The declared flags, for a CLI or admin surface. Server-side only. */
-  declarations(): Map<string, FeatureFlag<FlagValue>> {
+  /** The declarations, for a CLI or an admin surface. Server-side only. */
+  declarations(): FeatureRegistry {
     return this.declared;
   }
 
   /** Reloads the snapshot in this process now. */
   async refresh(): Promise<void> {
     if (!this.config.enabled) return;
-    // Nothing is declared, so there is nothing a row could resolve to. Skipping
-    // the query keeps an app that never adopted flags from touching the
-    // database — and from logging that it has no `FeatureFlag` model, which
-    // would be a boot-time complaint about an unused feature.
-    if (this.declared.size === 0) return;
+    // Nothing is declared, so no row could resolve to anything. Skipping the
+    // query keeps an app that never adopted features from touching the database
+    // — and from logging that it has no `FeatureFlag` model, which would be a
+    // boot-time complaint about an unused feature.
+    if (Object.keys(this.declared).length === 0) return;
     await this.store.refresh();
   }
 
   async enabled(key: string): Promise<boolean> {
-    return isOn((await this.explain(key)).value);
-  }
-
-  async value<T extends FlagValue = FlagValue>(key: string): Promise<T> {
-    return (await this.explain(key)).value as T;
+    return (await this.explain(key)).value;
   }
 
   /**
-   * Value plus why. Server-side only — `reason` and `ruleId` say which rule
-   * matched, i.e. which segment the viewer is in, and must never be serialized.
+   * Value plus why. Server-side only — `reason` says whether the viewer landed
+   * in a rollout or was targeted by name, and must never be serialized.
    */
-  async explain(key: string): Promise<FlagEvaluation> {
+  async explain(key: string): Promise<FeatureEvaluation> {
     const store = RequestContext.getStore();
-    const cached = store?.featureEvaluations?.get(key) as FlagEvaluation | undefined;
+    const cached = store?.featureEvaluations?.get(key) as FeatureEvaluation | undefined;
     if (cached) return cached;
 
     const ctx = await this.requestContext();
-    const buckets = this.requestBuckets();
-    const evaluation = await this.evaluateIn(key, ctx, buckets);
+    const evaluation = await this.evaluateIn(key, ctx, this.requestBuckets());
 
     if (store) {
       store.featureEvaluations ??= new Map();
@@ -109,24 +96,28 @@ export class FeatureManager {
     return evaluation;
   }
 
-  /** Every declared flag for the ambient request, as `key -> value`. */
-  async all(): Promise<Record<string, FlagValue>> {
+  /** Every declared feature for the ambient request, as `key -> boolean`. */
+  async all(): Promise<Record<string, boolean>> {
     const ctx = await this.requestContext();
-    return await this.evaluateAllIn(ctx, this.requestBuckets(), { clientOnly: false });
+    return await this.evaluateAllIn(ctx, this.requestBuckets(), {
+      clientOnly: false,
+    });
   }
 
   /**
-   * What the SSR payload carries: client-visible flags only, values only.
+   * What the SSR payload carries: client-visible features only.
    *
-   * The single function the dispatcher calls, and the only place the
-   * server-only exclusion is applied — so "what reaches the browser" has one
-   * answer in one place rather than a rule each caller has to remember.
+   * The single function the dispatcher calls, and the only place the server-only
+   * exclusion is applied — so "what reaches the browser" has one answer in one
+   * place rather than a rule each caller has to remember.
    */
-  async forClient(): Promise<Record<string, FlagValue>> {
+  async forClient(): Promise<Record<string, boolean>> {
     if (!this.config.enabled) return {};
 
     const ctx = await this.requestContext();
-    const values = await this.evaluateAllIn(ctx, this.requestBuckets(), { clientOnly: true });
+    const values = await this.evaluateAllIn(ctx, this.requestBuckets(), {
+      clientOnly: true,
+    });
     this.warnIfOversized(Object.keys(values).length);
     return values;
   }
@@ -139,23 +130,22 @@ export class FeatureManager {
   /** @internal — shared by the ambient path and `FeatureScope`. */
   async evaluateIn(
     key: string,
-    ctx: EvaluationContext,
+    ctx: FeatureContext,
     buckets: Map<string, number>,
-  ): Promise<FlagEvaluation> {
-    const declaration = this.declared.get(key);
-    if (!declaration) {
-      // Typed callers cannot reach this; an untyped one (a string from a
-      // console command, an app whose `gemi.d.ts` did not resolve) can.
-      return { value: null, reason: "unknown", ruleId: null };
+  ): Promise<FeatureEvaluation> {
+    const feature: Feature | undefined = this.declared[key];
+    if (!feature) {
+      // Typed callers cannot reach this; an untyped one — a string from a
+      // console command, an app whose `gemi.d.ts` did not resolve — can.
+      return { value: false, reason: "undeclared" };
     }
 
-    const definition = await this.definitionFor(key);
-    const evaluation = evaluateFlag(definition.flag, ctx, {
-      declaredDefault: declaration.defaultValue,
-      segments: this.config.segments,
-      bucketBy: this.config.bucketBy,
-      unavailable: definition.unavailable,
+    const { active, unavailable } = await this.switchFor(key);
+    const evaluation = evaluateFeature(key, feature, ctx, {
+      active,
+      unavailable,
       buckets,
+      warn: this.log,
     });
 
     this.notify(key, evaluation, ctx);
@@ -164,36 +154,39 @@ export class FeatureManager {
 
   /** @internal */
   async evaluateAllIn(
-    ctx: EvaluationContext,
+    ctx: FeatureContext,
     buckets: Map<string, number>,
     options: { clientOnly: boolean },
-  ): Promise<Record<string, FlagValue>> {
-    const values: Record<string, FlagValue> = {};
+  ): Promise<Record<string, boolean>> {
+    const values: Record<string, boolean> = {};
 
-    for (const [key, declaration] of this.declared) {
-      if (options.clientOnly && declaration.isServerOnly) continue;
+    for (const [key, feature] of Object.entries(this.declared)) {
+      if (options.clientOnly && feature.serverOnly) continue;
       values[key] = (await this.evaluateIn(key, ctx, buckets)).value;
     }
 
     return values;
   }
 
-  private async definitionFor(
+  private async switchFor(
     key: string,
-  ): Promise<{ flag: FeatureFlagDefinition | undefined; unavailable: boolean }> {
+  ): Promise<{ active: boolean | undefined; unavailable: boolean }> {
     if (!this.config.enabled) {
-      // Not "unavailable": the application turned flags off deliberately, and
-      // the right answer is every declared default, not an error state.
-      return { flag: undefined, unavailable: false };
+      // Not "unavailable": the application turned features off deliberately, and
+      // the right answer is off everywhere, not an error state.
+      return { active: false, unavailable: false };
     }
 
     const snapshot = await this.store.get();
-    return { flag: snapshot.flags.get(key), unavailable: snapshot.unavailable };
+    return {
+      active: snapshot.active.get(key),
+      unavailable: snapshot.unavailable,
+    };
   }
 
-  private async requestContext(): Promise<EvaluationContext> {
+  private async requestContext(): Promise<FeatureContext> {
     const store = RequestContext.getStore();
-    if (store?.featureContext) return store.featureContext as EvaluationContext;
+    if (store?.featureContext) return store.featureContext as FeatureContext;
 
     const ctx = await contextFromRequest(this.config, this.log);
     if (store) store.featureContext = ctx;
@@ -207,7 +200,7 @@ export class FeatureManager {
     return store.featureBuckets;
   }
 
-  private notify(key: string, evaluation: FlagEvaluation, ctx: EvaluationContext) {
+  private notify(key: string, evaluation: FeatureEvaluation, ctx: FeatureContext) {
     if (!this.config.onEvaluate) return;
     try {
       this.config.onEvaluate(key, evaluation, ctx);
@@ -225,23 +218,7 @@ export class FeatureManager {
     if (this.warnedAboutSize || count <= this.config.maxClientFlags) return;
     this.warnedAboutSize = true;
     this.log(
-      `${count} client-visible feature flags are embedded in every document. Mark the ones only the server reads with \`.serverOnly()\` to keep them out of the payload.`,
+      `${count} client-visible features are embedded in every document. Mark the ones only the server reads with \`serverOnly: true\` to keep them out of the payload.`,
     );
   }
-}
-
-function collectDeclarations(
-  router: ResolvedFeaturesConfig["router"],
-  log: (message: string) => void,
-): Map<string, FeatureFlag<FlagValue>> {
-  if (!router) {
-    // Silent on purpose. Feature flags are opt-in, so an application that never
-    // configured them has not made a mistake — and this runs on every boot,
-    // including every `gemi run` and every test that boots a kernel, where a
-    // line on stderr about a feature nobody asked for is pure noise.
-    return new Map();
-  }
-
-  const instance = router instanceof FeatureRouter ? router : new router();
-  return flattenFeatures(instance);
 }

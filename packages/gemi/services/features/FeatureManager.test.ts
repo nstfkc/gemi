@@ -1,29 +1,27 @@
 import { describe, expect, test, vi } from "vitest";
-import { FeatureRouter } from "../../http/FeatureRouter";
 import { RequestContext } from "../../http/requestContext";
 import { featuresConfigDefaults, type FeaturesConfig } from "./config";
+import { defineFeature } from "./defineFeature";
 import { FeatureManager } from "./FeatureManager";
-import { StaticFeatureFlagSource, type StaticFlag } from "./sources/StaticFeatureFlagSource";
+import { StaticFeatureFlagSource } from "./sources/StaticFeatureFlagSource";
 
-class AppFeatures extends FeatureRouter {
-  features = {
-    "new-checkout": this.boolean(false),
-    "pricing-page": this.variant(["a", "b", "control"], "control"),
-    "internal-tools": this.boolean(false).serverOnly(),
-    "seat-limit": this.number(5),
-  };
-}
+const AppFeatures = {
+  "new-checkout": defineFeature(),
+  "pricing-redesign": defineFeature({ rollout: 50 }),
+  "internal-tools": defineFeature({ serverOnly: true }),
+  "admin-only": defineFeature({ when: (ctx) => ctx.user?.globalRole === 0 }),
+};
 
 function manager(
-  flags: Record<string, StaticFlag> = {},
+  active: Record<string, boolean> = {},
   overrides: Partial<FeaturesConfig> = {},
   log = () => {},
 ) {
   return new FeatureManager(
     {
       ...featuresConfigDefaults(),
-      router: AppFeatures,
-      source: new StaticFeatureFlagSource(flags),
+      features: AppFeatures,
+      source: new StaticFeatureFlagSource(active),
       ...overrides,
     } as any,
     log,
@@ -34,36 +32,49 @@ function fakeRequest(cookies: Record<string, string> = { session_id: "anon-1" })
   return {
     routePath: "/pricing",
     rawRequest: { url: "https://example.test/pricing", headers: new Headers() },
-    cookies: { get: (n: string) => cookies[n], has: (n: string) => n in cookies },
+    cookies: {
+      get: (n: string) => cookies[n],
+      has: (n: string) => n in cookies,
+    },
   } as any;
 }
 
-const inRequest = <T,>(fn: () => Promise<T>, req = fakeRequest()) =>
+const inRequest = <T>(fn: () => Promise<T>, req = fakeRequest()) =>
   RequestContext.run(req, fn) as Promise<T>;
 
-describe("defaults", () => {
-  test("an unconfigured flag resolves to its declared default", async () => {
-    const features = manager();
-
-    expect(await features.value("pricing-page")).toBe("control");
-    expect(await features.enabled("new-checkout")).toBe(false);
-    expect(await features.value("seat-limit")).toBe(5);
+describe("the switch", () => {
+  test("a feature with no row is off", async () => {
+    expect(await manager().enabled("new-checkout")).toBe(false);
   });
 
-  test("an undeclared key resolves to null rather than throwing", async () => {
-    const result = await manager().explain("never-declared");
+  test("a row turns it on", async () => {
+    expect(await manager({ "new-checkout": true }).enabled("new-checkout")).toBe(true);
+  });
 
-    expect(result).toEqual({ value: null, reason: "unknown", ruleId: null });
+  test("active:false is the kill switch, even against a `when` that says yes", async () => {
+    const features = manager({ "admin-only": false });
+
+    const result = await inRequest(async () => {
+      RequestContext.getStore().setUser({ publicId: "u1", globalRole: 0 });
+      return features.enabled("admin-only");
+    });
+
+    expect(result).toBe(false);
+  });
+
+  test("an undeclared key reads off rather than throwing", async () => {
+    expect(await manager().explain("never-declared")).toEqual({
+      value: false,
+      reason: "undeclared",
+    });
   });
 
   test("evaluating outside a request works", async () => {
     // A job or a cron tick has no request store.
-    const features = manager({ "new-checkout": true });
-
-    expect(await features.enabled("new-checkout")).toBe(true);
+    expect(await manager({ "new-checkout": true }).enabled("new-checkout")).toBe(true);
   });
 
-  test("config.enabled false serves declared defaults and queries nothing", async () => {
+  test("config.enabled false reads off everywhere and queries nothing", async () => {
     const source = new StaticFeatureFlagSource({ "new-checkout": true });
     const load = vi.spyOn(source, "load");
     const features = manager({}, { enabled: false, source });
@@ -74,60 +85,37 @@ describe("defaults", () => {
   });
 });
 
-describe("evaluation", () => {
-  test("a row turns a flag on", async () => {
-    const features = manager({ "new-checkout": true });
-
-    expect(await features.enabled("new-checkout")).toBe(true);
-  });
-
-  test("enabled:false is the kill switch", async () => {
-    const features = manager({
-      "new-checkout": { enabled: false, rules: [{ id: "r", value: true }] },
-    });
-
-    expect(await features.enabled("new-checkout")).toBe(false);
-  });
-
-  test("rules are evaluated against the request user", async () => {
-    const features = manager({
-      "new-checkout": {
-        rules: [
-          {
-            id: "r1",
-            conditions: [{ attribute: "user.globalRole", operator: "eq", value: 0 }],
-            value: true,
-          },
-        ],
-      },
-    });
+describe("attribution", () => {
+  test("`when` is evaluated against the request user", async () => {
+    const features = manager({ "admin-only": true });
 
     const asAdmin = await inRequest(async () => {
       RequestContext.getStore().setUser({ publicId: "u1", globalRole: 0 });
-      return features.enabled("new-checkout");
+      return features.enabled("admin-only");
     });
     const asUser = await inRequest(async () => {
       RequestContext.getStore().setUser({ publicId: "u2", globalRole: 2 });
-      return features.enabled("new-checkout");
+      return features.enabled("admin-only");
     });
 
     expect(asAdmin).toBe(true);
     expect(asUser).toBe(false);
   });
 
-  test("attributes from the context hook are targetable", async () => {
-    const features = manager(
+  test("attributes from the context hook are readable in `when`", async () => {
+    const features = new FeatureManager(
       {
-        "new-checkout": {
-          rules: [
-            { id: "r1", conditions: [{ attribute: "plan", operator: "eq", value: "pro" }], value: true },
-          ],
+        ...featuresConfigDefaults(),
+        features: {
+          pro: defineFeature({ when: (ctx) => ctx.attributes.plan === "pro" }),
         },
-      },
-      { context: () => ({ plan: "pro" }) },
+        source: new StaticFeatureFlagSource({ pro: true }),
+        context: () => ({ plan: "pro" }),
+      } as any,
+      () => {},
     );
 
-    expect(await inRequest(() => features.enabled("new-checkout"))).toBe(true);
+    expect(await inRequest(() => features.enabled("pro"))).toBe(true);
   });
 
   test("a throwing context hook degrades instead of breaking the request", async () => {
@@ -145,6 +133,15 @@ describe("evaluation", () => {
     expect(await inRequest(() => features.enabled("new-checkout"))).toBe(true);
     expect(log.mock.calls.flat().join(" ")).toMatch(/context/i);
   });
+
+  test("a rollout is stable across requests for one visitor", async () => {
+    const features = manager({ "pricing-redesign": true });
+
+    const first = await inRequest(() => features.enabled("pricing-redesign"));
+    const second = await inRequest(() => features.enabled("pricing-redesign"));
+
+    expect(second).toBe(first);
+  });
 });
 
 describe("per-request memoization", () => {
@@ -156,7 +153,7 @@ describe("per-request memoization", () => {
     await inRequest(async () => {
       await features.enabled("new-checkout");
       await features.enabled("new-checkout");
-      await features.value("new-checkout");
+      await features.explain("new-checkout");
     });
 
     expect(onEvaluate).toHaveBeenCalledTimes(1);
@@ -186,18 +183,15 @@ describe("per-request memoization", () => {
 });
 
 describe("forClient", () => {
-  test("carries every client-visible flag as key to value", async () => {
+  test("carries every client-visible feature as key to boolean", async () => {
     const features = manager({ "new-checkout": true });
     const payload = await inRequest(() => features.forClient());
 
-    expect(payload).toEqual({
-      "new-checkout": true,
-      "pricing-page": "control",
-      "seat-limit": 5,
-    });
+    expect(Object.keys(payload).sort()).toEqual(["admin-only", "new-checkout", "pricing-redesign"]);
+    expect(payload["new-checkout"]).toBe(true);
   });
 
-  test("omits server-only flags", async () => {
+  test("omits server-only features", async () => {
     const features = manager({ "internal-tools": true });
     const payload = await inRequest(() => features.forClient());
 
@@ -206,26 +200,22 @@ describe("forClient", () => {
     expect(await inRequest(() => features.enabled("internal-tools"))).toBe(true);
   });
 
-  test("carries no rule metadata, seeds or reasons", async () => {
+  test("carries no reasons — only booleans", async () => {
     const features = manager({
-      "new-checkout": { seed: "secret-seed", rules: [{ id: "secret-rule", value: true }] },
+      "new-checkout": true,
+      "pricing-redesign": true,
     });
-    const serialized = JSON.stringify(await inRequest(() => features.forClient()));
-
-    for (const leak of ["secret-seed", "secret-rule", "reason", "ruleId", "rules", "conditions"]) {
-      expect(serialized, `payload leaked ${leak}`).not.toContain(leak);
-    }
-  });
-
-  test("the payload is flat scalars only", async () => {
-    const payload = await inRequest(() => manager({ "new-checkout": true }).forClient());
+    const payload = await inRequest(() => features.forClient());
 
     for (const value of Object.values(payload)) {
-      expect(["boolean", "string", "number"]).toContain(typeof value);
+      expect(typeof value).toBe("boolean");
     }
+    // `reason` distinguishes "targeted by name" from "landed in the rollout",
+    // which is a fact about the viewer.
+    expect(JSON.stringify(payload)).not.toMatch(/reason|rollout|attributed/);
   });
 
-  test("warns once above the client flag threshold", async () => {
+  test("warns once above the client feature threshold", async () => {
     const log = vi.fn();
     const features = manager({}, { maxClientFlags: 1 }, log);
 
@@ -239,65 +229,62 @@ describe("forClient", () => {
 
 describe("explicit subjects", () => {
   test("for() ignores the ambient request", async () => {
-    const features = manager({
-      "new-checkout": {
-        rules: [
-          {
-            id: "r1",
-            conditions: [{ attribute: "user.globalRole", operator: "eq", value: 0 }],
-            value: true,
-          },
-        ],
-      },
-    });
+    const features = manager({ "admin-only": true });
 
     const result = await inRequest(async () => {
       RequestContext.getStore().setUser({ publicId: "u1", globalRole: 2 });
-      return features.for({ user: { publicId: "admin", globalRole: 0 } }).enabled("new-checkout");
+      return features.for({ user: { publicId: "admin", globalRole: 0 } }).enabled("admin-only");
     });
 
     expect(result).toBe(true);
   });
 
-  test("for().all() includes server-only flags", async () => {
+  test("for().all() includes server-only features", async () => {
     const features = manager({ "internal-tools": true });
 
     expect(await features.for({ user: null }).all()).toHaveProperty("internal-tools", true);
   });
 
   test("subjectId drives bucketing when there is no user", async () => {
-    const features = manager({
-      "new-checkout": { rules: [{ id: "r1", rollout: 50, value: true }] },
-    });
+    const features = manager({ "pricing-redesign": true });
 
-    const first = await features.for({ subjectId: "org_1" }).enabled("new-checkout");
-    const again = await features.for({ subjectId: "org_1" }).enabled("new-checkout");
+    const first = await features.for({ subjectId: "org_1" }).enabled("pricing-redesign");
+    const again = await features.for({ subjectId: "org_1" }).enabled("pricing-redesign");
 
     expect(again).toBe(first);
+  });
+
+  test("explain reports why", async () => {
+    const features = manager({ "new-checkout": true });
+
+    expect(await features.for({ user: null }).explain("new-checkout")).toEqual({
+      value: true,
+      reason: "on",
+    });
   });
 });
 
 describe("declarations", () => {
-  test("exposes the declared flags for tooling", () => {
-    expect([...manager().declarations().keys()].sort()).toEqual([
+  test("exposes the declared features for tooling", () => {
+    expect(Object.keys(manager().declarations()).sort()).toEqual([
+      "admin-only",
       "internal-tools",
       "new-checkout",
-      "pricing-page",
-      "seat-limit",
+      "pricing-redesign",
     ]);
   });
 
-  test("no router means no flags and no queries", async () => {
+  test("no declarations means no queries", async () => {
     const source = new StaticFeatureFlagSource({ "new-checkout": true });
     const load = vi.spyOn(source, "load");
     const features = new FeatureManager(
-      { ...featuresConfigDefaults(), router: undefined, source } as any,
+      { ...featuresConfigDefaults(), features: undefined, source } as any,
       () => {},
     );
 
     await features.refresh();
 
-    expect(features.declarations().size).toBe(0);
+    expect(Object.keys(features.declarations()).length).toBe(0);
     expect(load).not.toHaveBeenCalled();
     expect(await features.forClient()).toEqual({});
   });

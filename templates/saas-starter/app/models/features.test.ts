@@ -5,10 +5,10 @@ import { join } from "node:path";
 
 import { DatabaseManager } from "gemi/database";
 import { Application } from "gemi/foundation";
-import { FeatureRouter } from "gemi/http";
 import { register } from "gemi/orm";
 import {
   DatabaseFeatureFlagSource,
+  defineFeature,
   FeatureManager,
   featuresConfigDefaults,
 } from "gemi/services";
@@ -18,28 +18,25 @@ import { POSTGRES_URL, applyMigrations } from "./scratch";
 import { FeatureFlagModel } from "./generated";
 
 /**
- * The feature flag chain against a real database: a row goes in, and the value a
+ * The feature chain against a real database: a row goes in, and the answer a
  * page would render comes out.
  *
- * `packages/gemi` covers evaluation, bucketing and normalization as pure
- * functions. What needs a database is the part those cannot reach — that the
- * `Json` columns round-trip through the ORM on both dialects, and that the
- * source's `where: { archivedAt: null }` matches the schema the migration
- * actually created.
+ * `packages/gemi` covers evaluation and bucketing as pure functions. What needs
+ * a database is the part those cannot reach — that the columns round-trip
+ * through the ORM on both dialects, and that the source's query matches the
+ * schema the migration actually created.
  */
-class AppFeatures extends FeatureRouter {
-  features = {
-    "new-checkout": this.boolean(false),
-    "pricing-page": this.variant(["a", "b", "control"], "control"),
-    "seat-limit": this.number(5),
-  };
-}
+const AppFeatures = {
+  "new-checkout": defineFeature(),
+  "pricing-redesign": defineFeature({ rollout: 50 }),
+  "internal-tools": defineFeature({ serverOnly: true }),
+};
 
 function manager() {
   return new FeatureManager(
     {
       ...featuresConfigDefaults(),
-      router: AppFeatures,
+      features: AppFeatures,
       source: new DatabaseFeatureFlagSource("FeatureFlag"),
       ttl: 0,
     } as never,
@@ -50,7 +47,7 @@ function manager() {
 describe.each([
   ["sqlite", undefined],
   ["postgres", POSTGRES_URL],
-])("feature flags on %s", (dialect, url) => {
+])("features on %s", (dialect, url) => {
   const enabled = dialect === "sqlite" || Boolean(url);
 
   describe.skipIf(!enabled)("", () => {
@@ -90,133 +87,85 @@ describe.each([
       await raw`delete from "FeatureFlag"`;
     });
 
-    async function seed(row: Record<string, unknown>) {
+    async function seed(key: string, active: boolean) {
       await FeatureFlagModel.asSystem(() =>
         FeatureFlagModel.create({
-          // `seed` is named per key rather than left to `@default(cuid())` so
-          // the bucketing assertions below are reproducible run to run.
-          data: { seed: `seed-${row.key}`, updatedAt: new Date(), ...row } as never,
+          data: { key, active, updatedAt: new Date() } as never,
         }),
       );
     }
 
-    test("an empty table serves every declared default", async () => {
+    test("an empty table leaves every feature off", async () => {
       const features = manager();
 
-      expect(await features.value("pricing-page")).toBe("control");
       expect(await features.enabled("new-checkout")).toBe(false);
-      expect(await features.value("seat-limit")).toBe(5);
+      expect(await features.enabled("pricing-redesign")).toBe(false);
     });
 
-    test("a row turns a flag on", async () => {
-      await seed({ key: "new-checkout", enabled: true, defaultValue: true });
+    test("a row switches a feature on", async () => {
+      await seed("new-checkout", true);
 
       expect(await manager().enabled("new-checkout")).toBe(true);
     });
 
-    test("enabled false is the kill switch", async () => {
-      await seed({
-        key: "new-checkout",
-        enabled: false,
-        rules: [{ id: "r1", value: true }],
-      });
+    test("active false is the kill switch", async () => {
+      await seed("new-checkout", false);
 
       expect(await manager().enabled("new-checkout")).toBe(false);
     });
 
-    test("Json rule columns round-trip", async () => {
-      await seed({
-        key: "pricing-page",
-        enabled: true,
-        defaultValue: "control",
-        rules: [
-          {
-            id: "r1",
-            conditions: [{ attribute: "plan", operator: "eq", value: "pro" }],
-            value: "a",
-          },
-        ],
-      });
+    test("the boolean column round-trips on this dialect", async () => {
+      await seed("new-checkout", true);
+      await seed("pricing-redesign", false);
 
       const features = manager();
 
-      expect(await features.for({ attributes: { plan: "pro" } }).value("pricing-page")).toBe("a");
-      expect(await features.for({ attributes: { plan: "free" } }).value("pricing-page")).toBe(
-        "control",
-      );
+      expect(await features.explain("new-checkout")).toMatchObject({ value: true });
+      expect(await features.explain("pricing-redesign")).toMatchObject({
+        reason: "inactive",
+      });
     });
 
-    test("weighted variants round-trip and split the audience", async () => {
-      await seed({
-        key: "pricing-page",
-        enabled: true,
-        defaultValue: "control",
-        rules: [
-          {
-            id: "r1",
-            variants: [
-              { value: "a", weight: 50 },
-              { value: "b", weight: 50 },
-            ],
-          },
-        ],
-      });
-
+    test("a switched-on rollout splits the audience deterministically", async () => {
+      await seed("pricing-redesign", true);
       const features = manager();
-      const seen = new Set<unknown>();
+
+      const first = new Map<string, boolean>();
       for (let i = 0; i < 100; i++) {
-        seen.add(await features.for({ subjectId: `user-${i}` }).value("pricing-page"));
+        const id = `user-${i}`;
+        first.set(id, await features.for({ subjectId: id }).enabled("pricing-redesign"));
       }
 
-      expect(seen).toEqual(new Set(["a", "b"]));
-    });
+      // Both sides are represented...
+      expect(new Set(first.values())).toEqual(new Set([true, false]));
 
-    test("archived rows are not loaded", async () => {
-      await seed({
-        key: "new-checkout",
-        enabled: true,
-        defaultValue: true,
-        archivedAt: new Date(),
-      });
-
-      // Falls back to the declared default, as though the row were absent.
-      expect(await manager().enabled("new-checkout")).toBe(false);
+      // ...and the assignment does not move on a re-read.
+      for (const [id, value] of first) {
+        expect(await features.for({ subjectId: id }).enabled("pricing-redesign")).toBe(value);
+      }
     });
 
     test("a row for an undeclared key is ignored rather than fatal", async () => {
-      await seed({ key: "not-declared", enabled: true, defaultValue: true });
-      await seed({ key: "new-checkout", enabled: true, defaultValue: true });
+      await seed("not-declared", true);
+      await seed("new-checkout", true);
 
       const features = manager();
 
       expect(await features.enabled("new-checkout")).toBe(true);
-      expect(await features.explain("not-declared")).toMatchObject({ reason: "unknown" });
+      expect(await features.explain("not-declared")).toMatchObject({ reason: "undeclared" });
     });
 
-    test("a malformed rules column degrades instead of throwing", async () => {
-      // Writing raw, because the ORM would reject this shape.
-      await seed({ key: "new-checkout", enabled: true, defaultValue: true });
-      await raw`update "FeatureFlag" set "rules" = '"not an array"' where "key" = 'new-checkout'`;
+    test("the client payload carries booleans only", async () => {
+      await seed("new-checkout", true);
+      await seed("internal-tools", true);
 
-      const features = manager();
+      const payload = await manager().forClient();
 
-      // The flag still resolves — from `defaultValue`, with the rules ignored.
-      expect(await features.enabled("new-checkout")).toBe(true);
-    });
-
-    test("the client payload carries values only", async () => {
-      await seed({
-        key: "new-checkout",
-        enabled: true,
-        defaultValue: true,
-        rules: [{ id: "secret-rule", value: true }],
-      });
-
-      const serialized = JSON.stringify(await manager().forClient());
-
-      for (const leak of ["secret-rule", "seed-new-checkout", "reason", "ruleId", "rules"]) {
-        expect(serialized, `payload leaked ${leak}`).not.toContain(leak);
+      expect(payload).not.toHaveProperty("internal-tools");
+      for (const value of Object.values(payload)) {
+        expect(typeof value).toBe("boolean");
       }
+      expect(JSON.stringify(payload)).not.toMatch(/reason|publicId|updatedAt/);
     });
   });
 });
