@@ -73,8 +73,50 @@ export function planRelationCounts(
       );
     }
 
+    // A malformed operand is refused rather than counted, and the reason is the
+    // policy walk rather than tidiness. `scopeCounts` reaches for `value.where`
+    // through the same `typeof value !== "object"` test and `continue`s past
+    // anything that fails it, so an operand like `1` or `"true"` carries no
+    // scope — while `countPlan` reads `node?.where` as `undefined` and emits a
+    // perfectly good unscoped `count(*)`. That is the one disagreement between
+    // the two walks that this file's arrangement is supposed to make impossible,
+    // and what it leaks is a number over rows the caller cannot read.
+    //
+    // Refused *here* rather than taught to `scopeCounts`, because this is where
+    // the same malformation on a relation node is already refused — `include:
+    // { accounts: 1 }` raises rather than compiling — which is what makes the
+    // identical `continue` in `applyNestedPolicies` safe.
+    if (value !== true && (typeof value !== "object" || Array.isArray(value))) {
+      throw new InvalidArgumentError(
+        `_count.select.${key}`,
+        schema.name,
+        operation,
+        "Expected true or an object holding 'where'.",
+      );
+    }
+
     plans.push(
       countPlan(schema, relation, value, dialect, operation, plans.length, args),
+    );
+  }
+
+  // A `_count` that names no relation it will actually count — `select: {}`, or
+  // every relation switched off with a flag. Refused for the same mechanical
+  // reason the `_count: true` shorthand is refused on a model with nothing to
+  // count, and this is the other route to that state: `resolveSelection` counts
+  // `_count` as *something selected*, so an empty plan list still clears its "at
+  // least one field" check and then projects no columns, emitting
+  // `select  from "User"` for the driver to reject with a syntax error.
+  //
+  // Only under `select`. An `include` carries the model's default columns, so
+  // the statement stays valid and a count of nothing is merely nothing.
+  if (plans.length === 0 && args?.select) {
+    throw new InvalidArgumentError(
+      "_count.select",
+      schema.name,
+      operation,
+      "No relations to count, and '_count' is the only thing selected. " +
+        "Name at least one relation, or select a column beside it.",
     );
   }
 

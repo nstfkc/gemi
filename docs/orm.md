@@ -1366,9 +1366,20 @@ await User.findMany({ include: { _count: true } })
 ```
 
 To-many only. The explicit form refuses a to-one by name, because counting one answers 0 or 1; the
-shorthand named nothing, so there is no argument to refuse and the to-one is simply skipped. On a
-model with no to-many relations at all it raises rather than returning `{}` — there is nothing for
-it to mean, and inside a bare `select: { _count: true }` it would otherwise select no columns.
+shorthand named nothing, so there is no argument to refuse and the to-one is simply skipped.
+
+On a model with **no** to-many relations the shorthand is a compile error, not a runtime one. There
+is nothing for it to mean, and a query that type-checks and then throws on every call is the whole
+of what #394 reported — closing that for models which do have a to-many while leaving it open on
+models which do not would move the trap rather than remove it. `_count: false` stays legal
+everywhere, because the compiler short-circuits it before reaching any of this: a count switched off
+by a flag is a thing you can write on any model.
+
+A `_count` that ends up counting *nothing* is refused too, but only when it is the sole thing in a
+`select` — `select: { _count: { select: {} } }`, or every relation in it switched off. `_count`
+counts as something selected, so an empty one satisfies the "at least one field" check and then
+projects no columns at all. Under an `include` the model's own columns keep the statement valid, so
+counting nothing is simply nothing.
 
 The counted relations carry their policies exactly as the explicit form's do. That is worth stating
 because it is the part that is easy to get wrong: the shorthand names no relation, so the scope has

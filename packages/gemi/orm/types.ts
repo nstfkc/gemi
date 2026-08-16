@@ -796,6 +796,48 @@ type CountSelection<M extends ModelTypeInfo> = {
 };
 
 /**
+ * The relation names `_count: true` expands to — the type-level statement of
+ * `countableRelations`, which the compiler and the policy walk derive at runtime.
+ */
+type CountableRelationNames<M extends ModelTypeInfo> = {
+  [K in keyof Relations<M>]: Relations<M>[K]["kind"] extends "many" ? K : never;
+}[keyof Relations<M>];
+
+/**
+ * The same device as {@link ToOneRelationsCannotBeCounted}, for the model that
+ * has nothing to count at all rather than the relation that cannot be counted.
+ */
+type ThereIsNothingToCount = {
+  "this model has no to-many relations, so there is nothing to count": never;
+};
+
+/**
+ * What the `_count: true` shorthand accepts, per model.
+ *
+ * `readCountSelection` throws when the model has no to-many relation, so the key
+ * has to be refused here or the shorthand becomes exactly the defect it was
+ * implemented to close: valid TypeScript that raises on every call. #394 is a
+ * report of that shape — a controller ported from Prisma type-checked, passed
+ * review and 500'd on every request — and closing it only for models that do
+ * have a to-many would have moved the trap rather than removed it. Prisma refuses
+ * the same call structurally: it emits no `_count` key in the input type for such
+ * a model.
+ *
+ * `false` stays legal either way. `planRelationCounts` short-circuits on it
+ * before ever reaching the throw, so a caller toggling a count off with a flag is
+ * writing something that works, on every model.
+ *
+ * `[…] extends […]` rather than a bare conditional, because a naked type
+ * parameter distributes over the union of relation names and would answer per
+ * relation instead of once per model.
+ */
+type CountShorthand<M extends ModelTypeInfo> = [
+  CountableRelationNames<M>,
+] extends [never]
+  ? false | ThereIsNothingToCount
+  : boolean;
+
+/**
  * `select`, one level. Relations carry their own nested arguments, so the type
  * is mutually recursive with the operation args — bounded, as ever, by what the
  * caller wrote.
@@ -805,13 +847,13 @@ export type SelectInput<M extends ModelTypeInfo> = {
 } & {
   [K in keyof Relations<M>]?: boolean | RelationArgs<Relations<M>[K]>;
 } & {
-  _count?: boolean | { select?: CountSelection<M> };
+  _count?: CountShorthand<M> | { select?: CountSelection<M> };
 };
 
 export type IncludeInput<M extends ModelTypeInfo> = {
   [K in keyof Relations<M>]?: boolean | RelationArgs<Relations<M>[K]>;
 } & {
-  _count?: boolean | { select?: CountSelection<M> };
+  _count?: CountShorthand<M> | { select?: CountSelection<M> };
 };
 
 export type OmitInput<M extends ModelTypeInfo> = {

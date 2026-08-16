@@ -232,6 +232,69 @@ describe("what it refuses", () => {
       /_count\.select/,
     );
   });
+
+  /**
+   * A malformed *operand*, which is the one the policy walk cannot survive.
+   *
+   * `scopeCounts` reads the operand through `typeof value !== "object"` and
+   * `continue`s past anything that fails it, so `1` carries no scope — while
+   * `countPlan` reads `node?.where` as `undefined` and emits a well-formed
+   * *unscoped* `count(*)`. Two walks, one argument, opposite readings: exactly
+   * the disagreement `countableRelations` exists to prevent one level up, and
+   * what it leaks is a number rather than a row.
+   *
+   * The type already forbids it — `CountSelection` says `boolean | { where }` —
+   * so this is the untyped caller's path, which is the only kind a policy has to
+   * survive anyway.
+   */
+  test("a relation operand that is neither true nor an object", () => {
+    expect(() =>
+      plan({ include: { _count: { select: { accounts: 1 } } } }),
+    ).toThrow(/_count\.select\.accounts/);
+
+    expect(() =>
+      plan({ include: { _count: { select: { accounts: [] } } } }),
+    ).toThrow(/_count\.select\.accounts/);
+  });
+
+  /**
+   * The empty explicit form, which reaches the same dead end the shorthand's
+   * guard above covers — `_count` clears `resolveSelection`'s "at least one
+   * field" check and then projects nothing.
+   *
+   * `select: { accounts: false }` is the shape that gets there without anyone
+   * writing an empty object: a caller toggling the count off with a flag.
+   */
+  test("a _count that counts nothing, as the only thing selected", () => {
+    expect(() =>
+      compileRead(user, "findMany", { select: { _count: { select: {} } } }, sqlite),
+    ).toThrow(/No relations to count/);
+
+    expect(() =>
+      compileRead(
+        user,
+        "findMany",
+        { select: { _count: { select: { accounts: false } } } },
+        sqlite,
+      ),
+    ).toThrow(/No relations to count/);
+  });
+
+  /**
+   * ...and not under an `include`, where the model's own columns keep the
+   * statement valid. A count of nothing is then merely nothing, which is what
+   * the caller's flag asked for.
+   */
+  test("but the same under an include is allowed", () => {
+    expect(() =>
+      compileRead(
+        user,
+        "findMany",
+        { include: { _count: { select: { accounts: false } } } },
+        sqlite,
+      ),
+    ).not.toThrow();
+  });
 });
 
 /**
