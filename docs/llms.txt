@@ -22,7 +22,7 @@ Each link below points to a self-contained Markdown page. For a single file cont
 ## Views & client
 
 - [Views & Layouts](https://nstfkc.github.io/gemi/views-and-layouts.md): view components, server data binding, nested layouts, Head, breadcrumbs.
-- [Data Fetching](https://nstfkc.github.io/gemi/data-fetching.md): the useQuery hook, mutation hooks, the Query prefetch facade, and the generated gemi.d.ts type layer.
+- [Data Fetching](https://nstfkc.github.io/gemi/data-fetching.md): the useQuery hook, mutation hooks, the Query prefetch facade, the gemi.d.ts type layer, and the TypeScript plugin that makes go-to-definition work on a route path.
 - [Forms](https://nstfkc.github.io/gemi/forms.md): the Form component, surfacing validation errors, form-status hooks.
 - [Navigation](https://nstfkc.github.io/gemi/navigation.md): Link, useNavigate, useParams, useSearchParams, and the Redirect component vs facade.
 - [Testing Views](https://nstfkc.github.io/gemi/testing.md): the Page component from gemi/testing — mounting a view with seeded route params, dictionaries, prefetched useQuery data and a signed-in user.

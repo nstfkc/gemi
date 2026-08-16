@@ -56,6 +56,15 @@ delete publishPkg.devDependencies;
 await rm(STAGING, { recursive: true, force: true });
 await mkdir(STAGING, { recursive: true });
 await cp("dist", join(STAGING, "dist"), { recursive: true });
+// The one shipped file that is not build output. tsserver resolves a language
+// service plugin by Node directory rules and never reads `exports`, so
+// `gemi/ide/typescript-plugin` only resolves if this `package.json` is in the
+// tarball to point `main` at the built file. See the note beside it.
+await mkdir(join(STAGING, "ide", "typescript-plugin"), { recursive: true });
+await cp(
+  join("ide", "typescript-plugin", "package.json"),
+  join(STAGING, "ide", "typescript-plugin", "package.json"),
+);
 await Bun.write(
   join(STAGING, "package.json"),
   `${JSON.stringify(publishPkg, null, 2)}\n`,
@@ -133,6 +142,26 @@ for (const subpath of BARRELS) {
     );
     process.exit(1);
   }
+}
+
+// The plugin is the one entry whose loader ignores `exports`, so the check
+// above cannot speak for it: tsserver reaches it through
+// `ide/typescript-plugin/package.json`'s `main`. A tarball where that path
+// dangles installs fine and produces an editor that quietly has no route jumps,
+// with the reason buried in the tsserver log.
+const pluginShim = join(STAGING, "ide", "typescript-plugin", "package.json");
+const pluginMain = join(
+  STAGING,
+  "ide",
+  "typescript-plugin",
+  (await Bun.file(pluginShim).json()).main,
+);
+if (!(await Bun.file(pluginMain).exists())) {
+  console.error(
+    `Refusing to stage gemi@${pkg.version}: the TypeScript plugin's package.json ` +
+      `points main at ${pluginMain}, which was not built. Run \`bun run build:ts-plugin\`.`,
+  );
+  process.exit(1);
 }
 
 console.log(
