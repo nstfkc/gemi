@@ -25,6 +25,11 @@
   "compilerOptions": {
     "noEmit": true,
     "emitDeclarationOnly": false,
+    // `tsconfig.json` sets `rootDir` to this package, and the artifact being
+    // checked lives in the template — two directories up. Nothing is emitted
+    // here, so `rootDir` only decides which files are allowed in the program,
+    // and the answer has to be a directory containing both.
+    "rootDir": "../..",
     // The artifact imports `gemi/orm` by package name, the way an application's
     // does. Nothing resolves that from inside the package itself, so it is
     // pointed at the source the template's `node_modules/gemi` symlink reaches.
