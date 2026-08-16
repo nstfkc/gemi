@@ -741,20 +741,61 @@ element; Prisma's generated `path` is `string[]` and its client refuses a number
 one too rather than answering a query the differential harness has no oracle for. On SQLite the
 index lives inside the JSONPath string, `"$.items[0]"`.
 
-Four things a path filter refuses, each because answering would be silently wrong rather than
-merely unsupported:
+#### The null sentinels at a path
 
-- **The null sentinels.** `{ path: […], equals: DbNull }` is refused. An extracted value
-  cannot tell an absent key from a JSON `null` — `#>>` yields SQL NULL for both — so the
-  distinction the sentinels exist to make is already gone by the time the comparison happens.
-  Filter the column itself: `{ metadata: { equals: DbNull } }`.
-- **A bare `null`, under every operator**, for the same reason and one more. `= NULL` is NULL
-  rather than true, so `{ path: […], equals: null }` would run and match nothing; and under
-  `array_contains`, `x @> NULL` is NULL as well. Prisma *does* answer this one — it extracts with
-  `#>` and compares as `jsonb`, so it reads `null` as the JSON value and returns the rows holding
-  one, the same answer as `equals: JsonNull`. gemi cannot follow it there without a second,
-  Postgres-only implementation of every operator, so it names the limitation instead. A `null`
-  *inside* an `array_contains` document is an ordinary value and still compiles.
+`equals` and `not` answer the three sentinels one level down, and they mean what they mean on the
+column — with one adjustment, because a *key* has a third way of being empty that a column does not:
+
+```ts
+// the value at metadata.plan is missing: an absent key, or a column with
+// nothing to index into (SQL NULL, or a JSON null)
+await User.findMany({ where: { metadata: { path: ["plan"], equals: DbNull } } })
+
+// the value at metadata.plan is the JSON value null
+await User.findMany({ where: { metadata: { path: ["plan"], equals: JsonNull } } })
+
+// either, which is usually what you want
+await User.findMany({ where: { metadata: { path: ["plan"], equals: AnyNull } } })
+```
+
+`not` negates each: `not: DbNull` is "there is something there", `not: AnyNull` is "there is
+something there and it is not a JSON null".
+
+This is what makes a `COALESCE`-style fallback expressible — a column read where the value moved
+into the payload and old rows still carry it beside:
+
+```ts
+await AsyncJob.findMany({
+  where: {
+    OR: [
+      { payload: { path: ["operation"], equals: op } },
+      { name: op, payload: { path: ["operation"], equals: AnyNull } },
+    ],
+  },
+})
+```
+
+A bare `null` is accepted under these two operators and reads as `JsonNull`, which is Prisma's own
+reading — the two spellings compile to identical SQL. It does *not* mean that on the column, where
+gemi reads a bare `null` as `DbNull`; see
+[A bare `null` on a `Json` column](#a-bare-null-on-a-json-column-means-dbnull-here-and-jsonnull-on-prisma)
+below, which is a divergence rather than a rule. Writing the sentinel you mean is what makes a
+filter say the same thing in both positions.
+
+**Under the other eight operators a sentinel is refused**, and so is a bare `null`. The string
+filters want a string, the numeric comparisons want a number, and `array_contains` wants a
+document; "which kind of null is this" is none of those. Prisma refuses a sentinel under all eight
+too, on both dialects.
+
+Three things a path filter still refuses, each because answering would be silently wrong rather
+than merely unsupported:
+
+- **A bare `null` under `array_contains`.** The operand binds as SQL NULL rather than as the JSON
+  value, and `x @> NULL` is NULL rather than true — the query would run and match nothing. Prisma
+  does compile this one, to a containment test guarded by `jsonb_typeof(…) = 'array'`, and it
+  matches nothing there too — so this is gemi refusing where the oracle answers, which is the one
+  direction of divergence this ORM prefers to be loud about. A `null` *inside* the document is an
+  ordinary value and still compiles.
 - **A non-string operand to `string_contains` / `string_starts_with` / `string_ends_with`**, for
   the same reason the scalar `contains` refuses one: the pattern would become `%null%`, which runs
   and returns the wrong rows.
@@ -774,8 +815,8 @@ compiling to a predicate no row can satisfy.
 **What the type checks, and what it leaves to run time.** The path filter is typed: `path` takes
 either dialect's grammar, the ten operators are the ones above, and their operand types are the
 ones the compiler will compile. A misspelled operator, a `path` that is not one, a numeric path
-segment, a non-string under `string_contains`, a sentinel at a path and a `null` at a path are all
-compile errors. The type carries no dialect — the generated artifact does not know which database
+segment, a non-string under `string_contains`, and a sentinel or a `null` under any operator but
+`equals` and `not` are all compile errors. The type carries no dialect — the generated artifact does not know which database
 it will be pointed at — so the table above is offered in full on both and the wrong half is refused
 at run time, naming the dialect. The empty path is refused at run time too.
 
@@ -2304,6 +2345,9 @@ Two things are worth knowing:
   raises `InvalidArgumentError`, and so does using it under any operator other than `equals` and
   `not`. Prisma refuses all three of those too.
 
+  All three also work one level down, on a value inside the document — see
+  [The null sentinels at a path](#the-null-sentinels-at-a-path).
+
 On Postgres the parameter is cast — `$1::text::jsonb` — and the value serialised to match, which
 is what lets a bare number or boolean through. Binding it raw makes the driver send an `integer` to
 a `jsonb` column, and serialising *without* the cast stores the jsonb string `"42"` instead of the
@@ -2319,6 +2363,32 @@ JS string is JSON *text* rather than a JSON string value.
 > so nothing looked wrong from inside the ORM, but the column was wrong for anything else that read
 > it. Those rows now read back as strings. Re-seed development databases; there is no released
 > version affected.
+
+## A bare `null` on a `Json` column means `DbNull` here and `JsonNull` on Prisma
+
+**A known divergence, and it returns disjoint row sets rather than raising.** On every other column
+type a bare `null` in a filter means `is null`, and that is Prisma's reading too. On a `Json`
+column it is not: Prisma reads a bare `null` as the JSON *value* `null`, the same thing it reads at
+a path.
+
+Measured on a generated 6.19.2 client against Postgres 16 and SQLite, on a table holding both empty
+states:
+
+| filter | gemi | Prisma |
+| --- | --- | --- |
+| `{ metadata: { equals: null } }` | `"metadata" is null` — the SQL-NULL rows | `"metadata"::jsonb = 'null'` — the JSON-null rows |
+| `{ metadata: { not: null } }` | `is not null` | `<> 'null'`, which also excludes the JSON-null rows |
+
+**Write the sentinel and there is no divergence.** `{ equals: DbNull }` and `{ equals: JsonNull }`
+compile to the same predicate on both libraries, which is what the sentinels are for:
+
+```ts
+await User.findMany({ where: { metadata: { equals: DbNull } } })   // the SQL NULLs, both libraries
+await User.findMany({ where: { metadata: { equals: JsonNull } } }) // the JSON nulls, both libraries
+```
+
+This is the *column*. At a **path** a bare `null` reads as `JsonNull` and agrees with Prisma
+exactly — see [The null sentinels at a path](#the-null-sentinels-at-a-path).
 
 ## Run Postgres deployments with `TZ=UTC`
 
