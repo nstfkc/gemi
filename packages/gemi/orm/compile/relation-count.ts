@@ -5,7 +5,7 @@ import {
   UnsupportedQueryError,
 } from "../errors";
 import type { ModelSchema, RelationSchema } from "../schema";
-import { COUNT_KEY } from "../relation-filters";
+import { COUNT_KEY, countableRelations } from "../relation-filters";
 import { type Fragment, concat, sql } from "./fragment";
 import { correlate } from "./correlate";
 import { compileWhere } from "./where";
@@ -141,24 +141,48 @@ function countPlan(
   };
 }
 
-/** `_count: { select: { … } }`, which is the only form that carries a policy. */
+/**
+ * `_count: { select: { … } }`, or the `_count: true` shorthand expanded into it.
+ *
+ * The shorthand was refused until #394, and the refusal gave two reasons. The
+ * first — "it names no relation, so a policy has nowhere to attach" — was about
+ * *where* the expansion happens rather than whether it can: expanded here and
+ * nowhere else, the policy walk would still see `true`, `scopeCounts` would
+ * return it untouched, and every count would be unscoped. So `policy.ts` expands
+ * it too, through the same `countableRelations`, and this stays the compiler's
+ * own total-function copy for the same reason `include: { accounts: true }`
+ * compiles when the compiler is called directly: scoping is `$exec`'s job,
+ * uniformly, and the compiler compiles what it is handed.
+ *
+ * The second reason — what it returns changes when the schema grows a relation —
+ * is true, and is Prisma's semantics rather than a defect this could fix. It is
+ * documented at the shorthand in `docs/orm.md` instead of being answered with a
+ * refusal.
+ */
 function readCountSelection(
   schema: ModelSchema,
   node: unknown,
   operation: string,
 ): Record<string, unknown> {
   if (node === true) {
-    // Prisma's shorthand counts *every* to-many relation. Not implemented, and
-    // the reason is worth stating rather than leaving as a gap: it names no
-    // relation, so a policy has nowhere to attach per-relation — and what it
-    // returns changes silently when the schema grows a relation.
-    throw new UnsupportedQueryError(
-      "_count",
-      schema.name,
-      operation,
-      `'_count: true' is not implemented. Name the relations: ` +
-        `_count: { select: { <relation>: true } }.`,
-    );
+    const countable = countableRelations(schema);
+
+    // A model with nothing to count. Refused rather than answered with `{}`,
+    // and not only for tidiness: `select: { _count: true }` alone would then
+    // project no columns at all — `resolveSelection` counts `_count` as
+    // something selected, so an empty expansion passes its "at least one field"
+    // check and emits `select  from "User"`, which is not valid SQL.
+    if (countable.length === 0) {
+      throw new UnsupportedQueryError(
+        "_count",
+        schema.name,
+        operation,
+        `${schema.name} has no to-many relations, so there is nothing for ` +
+          `'_count: true' to count.`,
+      );
+    }
+
+    return Object.fromEntries(countable.map((name) => [name, true]));
   }
 
   if (typeof node !== "object" || node === null || Array.isArray(node)) {

@@ -913,7 +913,7 @@ back to batching for that node alone. It declines:
 A declined node still runs under this strategy one level down, so a decline costs one statement, not
 the subtree. A mixed include tree therefore uses both, which is fine — the results are the same
 either way, and there are tests asserting exactly that against Prisma across every relation shape
-in the differential corpus — **48** of them today, and the suite fails if this number stops
+in the differential corpus — **49** of them today, and the suite fails if this number stops
 matching the corpus.
 
 Override per call when you need to:
@@ -1357,9 +1357,29 @@ times inside that report before its own sentences were derived rather than writt
 The starter template indexes every foreign key for this reason, so a new application starts on the
 right side of it.
 
-`_count: true` (Prisma's "count every to-many relation") is **not** implemented. Name the relations
-instead — the shorthand names none, so a policy has nowhere to attach, and what it returns changes
-silently when the schema grows a relation.
+`_count: true` — Prisma's "count every to-many relation" — is the shorthand for naming them all:
+
+```ts
+await User.findMany({ include: { _count: true } })
+// _count carries one key per to-many relation on User:
+// { accounts: 3, passwordResetToken: 0, session: 1, socialAccount: 2 }
+```
+
+To-many only. The explicit form refuses a to-one by name, because counting one answers 0 or 1; the
+shorthand named nothing, so there is no argument to refuse and the to-one is simply skipped. On a
+model with no to-many relations at all it raises rather than returning `{}` — there is nothing for
+it to mean, and inside a bare `select: { _count: true }` it would otherwise select no columns.
+
+The counted relations carry their policies exactly as the explicit form's do. That is worth stating
+because it is the part that is easy to get wrong: the shorthand names no relation, so the scope has
+nowhere to attach until the shorthand is expanded, and expanding it in the compiler alone would
+count every relation unscoped. The expansion is shared with the policy walk instead, so the set that
+reaches SQL is the set that carried a scope.
+
+**What it returns changes when the schema grows a to-many relation.** That is Prisma's semantics
+rather than a wrinkle here, and it is the reason to prefer naming the relations in code you intend to
+keep: a response body that silently gains a key is a change no test asked for. The shorthand is for
+the exploratory case.
 
 ### Saying where nulls go
 
@@ -1808,6 +1828,7 @@ it looks. A model's policies apply when its rows are reached through:
 | a folded relation (the `lateral` strategy) | the scope lands *inside* the subquery |
 | `where: { rel: { some: … } }` | the `exists` subquery is scoped |
 | `_count: { select: { rel: … } }` | you can only count rows you could read |
+| `_count: true` | expanded to the relations above it, then each one scoped |
 | `orderBy: { rel: … }` | you can only sort by rows you could read |
 | `data: { rel: { create / connect: … } }` | the child's `onCreate` runs; a `connect` cannot reach a row you cannot read |
 

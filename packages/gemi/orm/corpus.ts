@@ -52,6 +52,13 @@ export const READS: unknown[] = [
   { include: { accounts: { orderBy: { id: "asc" } } } },
   { include: { accounts: { orderBy: { id: "desc" } } } },
   { include: { _count: { select: { accounts: true } } } },
+  // The shorthand, which expands to the entry above on this schema —
+  // `userWithProfile` has exactly one to-many. Two shapes, one statement, and
+  // two keys: that direction is allowed, and the entry is here so the *other*
+  // direction stays measured. If the expansion ever picked up the to-one, this
+  // and the line above would compile differently and the discrimination suite
+  // would say so.
+  { include: { _count: true } },
   { orderBy: { id: "asc" } },
   { orderBy: { id: "desc" } },
   { orderBy: { name: { sort: "asc", nulls: "first" } } },

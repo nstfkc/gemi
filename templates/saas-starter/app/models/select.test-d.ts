@@ -393,3 +393,44 @@ describe("_count takes a filter over the rows it counts", () => {
     });
   });
 });
+
+/**
+ * **The `_count: true` shorthand** — #394.
+ *
+ * `toEqualTypeOf` on the whole object rather than key-by-key, deliberately. The
+ * assertion that matters is the one a per-key check cannot make: that
+ * `organization` and `profile` are **absent**. The payload's shorthand branch
+ * said `keyof Relations<M>` while the shorthand was refused at runtime — every
+ * relation, to-one included — which was unreachable and therefore untested, and
+ * would have typed two keys that are never on the row the moment the refusal
+ * lifted.
+ *
+ * `runtime` here is `countableRelations`: the compiler projects one subquery per
+ * to-many and the policy walk scopes that same set, so this type is the third
+ * statement of the same list and the one a caller reads.
+ */
+describe("_count: true is every to-many relation, and only those", () => {
+  test("include", async () => {
+    const user = await UserModel.findFirst({ include: { _count: true } });
+
+    expectTypeOf(user!._count).toEqualTypeOf<{
+      accounts: number;
+      session: number;
+      passwordResetToken: number;
+      socialAccount: number;
+    }>();
+  });
+
+  test("select spells it identically", async () => {
+    const user = await UserModel.findFirst({
+      select: { name: true, _count: true },
+    });
+
+    expectTypeOf(user!._count).toEqualTypeOf<{
+      accounts: number;
+      session: number;
+      passwordResetToken: number;
+      socialAccount: number;
+    }>();
+  });
+});

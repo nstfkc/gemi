@@ -528,6 +528,18 @@ const CASES: [string, string, unknown][] = [
     include: { _count: { select: { accounts: true } } },
     orderBy: { id: "asc" },
   }],
+  // The `_count: true` shorthand (#394), and the only place its semantics are
+  // actually *checked* rather than reasoned about. `countableRelations` derives
+  // "every to-many" from gemi's schema and Prisma derives it from its own, so
+  // this compares the two derivations on the real model — a relation missing
+  // from one side, or a to-one counted by either, shows up as a key difference
+  // in the row rather than as a compile error.
+  ["the _count shorthand", "findMany", {
+    include: { _count: true }, orderBy: { id: "asc" },
+  }],
+  ["the _count shorthand inside a select", "findMany", {
+    select: { name: true, _count: true }, orderBy: { id: "asc" },
+  }],
 
   // --- ordering by a relation ---------------------------------------------
   //

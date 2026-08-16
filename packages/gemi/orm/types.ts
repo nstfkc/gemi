@@ -237,10 +237,22 @@ type RelationPayload<R extends RelationInfo, A> = R["kind"] extends "many"
 /**
  * `_count` inside a `select` or an `include`: the number of related rows, per
  * relation named.
+ *
+ * The second branch is the `_count: true` shorthand, which names none and
+ * therefore returns every **to-many** relation — the set `countableRelations`
+ * hands the compiler and the policy walk. It said `keyof Relations<M>` while the
+ * shorthand was refused, which was unreachable and wrong in the same breath: a
+ * to-one is skipped by the expansion, so promising `number` for one would have
+ * typed a key that is never on the row the moment #394 made the shorthand
+ * reachable.
  */
 type RelationCountPayload<M extends ModelTypeInfo, A> = "select" extends keyof A
   ? { [K in Requested<NonNullable<A["select"]>> & keyof Relations<M>]: number }
-  : { [K in keyof Relations<M>]: number };
+  : {
+      [K in keyof Relations<M> as Relations<M>[K]["kind"] extends "many"
+        ? K
+        : never]: number;
+    };
 
 type SelectPayload<M extends ModelTypeInfo, S> = {
   [K in Requested<S>]: K extends keyof Scalars<M>
