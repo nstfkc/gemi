@@ -857,7 +857,7 @@ export abstract class Model {
         effective = applyPolicies(
           policies,
           policy,
-          args,
+          effective,
           ormAuthoredFields(options),
         );
       }
