@@ -1535,8 +1535,10 @@ function suite(label: string, url?: string) {
         ["not JsonNull", { not: PrismaNS.JsonNull }],
         ["not AnyNull", { not: PrismaNS.AnyNull }],
         // A bare `null` reads as `JsonNull` at a path, which is Prisma's
-        // reading and the opposite of the rule on the column. #371's second
-        // item, closed by the same change.
+        // reading — so these two rows are the same query as the JsonNull ones
+        // above. #371's second item, closed by the same change. (On the
+        // *column* gemi reads a bare `null` as `DbNull` and Prisma does not;
+        // that divergence is recorded in `known-divergences.test.ts`.)
         ["equals null", { equals: null }],
         ["not null", { not: null }],
       ] as [string, object][])("%s", async (_label, filter) => {

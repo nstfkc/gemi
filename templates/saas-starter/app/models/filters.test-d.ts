@@ -355,7 +355,7 @@ describe("Json path filters", () => {
   });
 
   /**
-   * ...and under the other seven it is still a compile error, which is what the
+   * ...and under the other eight it is still a compile error, which is what the
    * compiler does and what Prisma does — *"Invalid value provided. … provided
    * Enum."*, measured on 6.19.2. A sentinel asks which kind of null a value is;
    * `gt` compares a number and `string_contains` builds a pattern.
@@ -384,11 +384,22 @@ describe("Json path filters", () => {
    *
    * On the *column* a bare `null` is accepted too and means the other thing —
    * `DbNull`, compiling to `is null`. Neither the type nor the compiler refuses
-   * it there; `JsonFilter`'s docblock says why the type cannot. The two lines
-   * below pin that, because an earlier draft of this comment asserted the
-   * column form was a type error and nothing here would have caught it.
+   * it there; `JsonFilter`'s docblock says why the type cannot.
+   *
+   * **And that one is a known divergence rather than a rule.** Prisma reads a
+   * bare `null` as the JSON value on the column as well, so the two libraries
+   * return disjoint row sets for the same filter — measured, and recorded in
+   * `known-divergences.test.ts` and `docs/orm.md`. It is pre-existing and not
+   * #407's to fix; what #407 changed is the *path*, where the two now agree.
+   *
+   * The lines below pin only that the column form compiles, which is all a type
+   * test can see. Two earlier drafts of this comment got the surrounding claim
+   * wrong in opposite directions — first that the column form was a type error,
+   * then that Prisma agreed with it — and nothing here would have caught
+   * either, so the sentence is kept short and the row-level claim is left to
+   * the file that can measure it.
    */
-  test("a bare null on the column is accepted, and reads as DbNull", async () => {
+  test("a bare null on the column is accepted, and diverges from Prisma", async () => {
     await UserModel.findMany({ where: { metadata: { equals: null } } });
     await UserModel.findMany({ where: { metadata: { not: null } } });
   });

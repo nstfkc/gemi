@@ -1105,13 +1105,26 @@ function compileJsonFilter(
     }
 
     if (sentinel && operand !== null) {
+      // **The clause naming the mechanism branches for `array_contains`**, for
+      // the same reason `assertJsonOperand`'s `null` guard branches below: that
+      // operator does not compare an extracted scalar at all — it compiles to
+      // `#>` + `@>`, containment against a jsonb document — so telling its
+      // caller about a scalar comparison names a mechanism it does not have.
+      // Everything else here does compare one bound scalar against one
+      // extracted value.
+      const because =
+        key === "array_contains"
+          ? `'array_contains' tests containment against a document, and a ` +
+            `sentinel is not one`
+          : `'${key}' compares an extracted value against a scalar, and a ` +
+            `sentinel is not one`;
+
       throw new InvalidArgumentError(
         `where.${field.name}.${key}`,
         schema.name,
         context.operation,
         `${sentinelName(sentinel)} asks which kind of null a value is, which ` +
-          `only 'equals' and 'not' can express — '${key}' compares an ` +
-          `extracted value against a scalar, and a sentinel is not one. ` +
+          `only 'equals' and 'not' can express — ${because}. ` +
           `Prisma refuses it under this operator too. Write ` +
           `{ ${field.name}: { path: […], equals: ${sentinelName(sentinel)} } }, ` +
           `or filter the column itself — ` +
@@ -1281,8 +1294,8 @@ function assertJsonOperand(
     );
   }
 
-  // **`null` is refused under the operators that are left, and the oracle
-  // refuses it there too.**
+  // **`null` is refused under the operators that are left**, and the oracle
+  // agrees about the numeric four and not about `array_contains`.
   //
   // `equals` and `not` do not reach this — `compileJsonFilter` compiles them
   // as `JsonNull` before calling here, because Prisma reads a bare `null` at a
@@ -1300,14 +1313,22 @@ function assertJsonOperand(
   // and compiled to `cast(("metadata" #>> $1) as real) > $2` bound to NULL,
   // which is NULL rather than true: a query that runs and matches nothing.
   //
-  // `array_contains` is included rather than exempt, **and its mechanism is a
-  // different one**. It takes the `#>` form, so the text collapse above does
-  // not apply to it — but `jsonArrayContains` binds the operand raw, so `null`
-  // arrives as SQL NULL and `x @> NULL` is NULL too. The message below branches
-  // for that reason: telling an `array_contains` caller about an extracted
-  // scalar would name a mechanism this operator does not have, and pointing
-  // them at `{ equals: Prisma.JsonNull }` would answer a containment question
-  // with an equality.
+  // `array_contains` is included rather than exempt, **and it is the one place
+  // here that refuses something the oracle answers**. Its mechanism is its own:
+  // it takes the `#>` form, so the text collapse never applied to it, but
+  // `jsonArrayContains` binds the operand raw, so `null` arrives as SQL NULL
+  // and `x @> NULL` is NULL too — a query that runs and matches nothing.
+  //
+  // Prisma compiles it, measured: `(payload #> $1)::jsonb @> $2 AND
+  // JSONB_TYPEOF((payload #> $3)::jsonb) = 'array'`, which also returns no rows
+  // — so the refusal costs a caller nothing but an error where the oracle gave
+  // an empty set, and this comment says so rather than claiming parity it does
+  // not have. `docs/orm.md` records it in the same terms.
+  //
+  // The message below branches for the mechanism: telling an `array_contains`
+  // caller about an extracted scalar would name something this operator does
+  // not have, and pointing them at `{ equals: Prisma.JsonNull }` would answer a
+  // containment question with an equality.
   if (operand === null) {
     throw new InvalidArgumentError(
       `where.${field.name}.${key}`,
@@ -1784,6 +1805,29 @@ function equals(
   // below and compiled to `= ?` — matching nothing, whatever the table held.
   // Its sibling `JsonNull` is a genuine *value* comparison and belongs there:
   // the column holds the JSON `null`, and `= 'null'` is how you find it.
+  //
+  // **KNOWN DIVERGENCE — a bare `null` on a `Json` column.** For every other
+  // column type `operand === null` meaning `is null` *is* Prisma's reading. On
+  // a `Json` column it is not: Prisma reads a bare `null` as the JSON value
+  // `null` there, exactly as it does at a path. Measured on 6.19.2 against
+  // Postgres 16 and SQLite, over a table holding both empty states:
+  //
+  //   { equals: null }      prisma  "payload"::jsonb = $1   the JSON-null rows
+  //                         gemi    "payload" is null       the SQL-NULL rows
+  //   { not: null }         prisma  "payload"::jsonb <> $1
+  //                         gemi    "payload" is not null   (one row more)
+  //
+  // Disjoint row sets on identical data, and nothing raises. Left alone rather
+  // than fixed here: this is the *column* path, and #407 is about a value at a
+  // path — where a bare `null` now agrees with Prisma exactly, because
+  // `compileJsonFilter` reads it as `JsonNull`. Changing the column would be a
+  // behaviour change to released semantics for every `Json` filter, which wants
+  // its own change and its own differential cases.
+  //
+  // `{ equals: Prisma.DbNull }` is unambiguous and compiles to this same
+  // predicate on both libraries, so the divergence has a spelling that avoids
+  // it. `docs/orm.md` says so where a reader will look, and
+  // `known-divergences.test.ts` pins that it keeps saying so.
   if (operand === null || jsonNullKind(operand) === "db") {
     return sql(`${column} is null`);
   }

@@ -1459,7 +1459,7 @@ describe("json path filters", () => {
     });
 
     /**
-     * The other seven operators still refuse all three, and so does Prisma —
+     * The other eight operators still refuse all three, and so does Prisma —
      * *"Invalid value provided. … provided Enum."*, measured. A sentinel asks
      * which kind of null a value is, and `gt` compares a number.
      */

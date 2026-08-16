@@ -776,21 +776,26 @@ await AsyncJob.findMany({
 ```
 
 A bare `null` is accepted under these two operators and reads as `JsonNull`, which is Prisma's own
-reading — the two spellings compile to identical SQL. Note it means something *different* on the
-column, where `null` reads as `DbNull` and compiles to `is null`. The asymmetry is Prisma's, and
-it is why writing the sentinel you mean is worth the keystrokes even where a bare `null` is
-accepted: a column has two empty states, and at a path the JSON value is the one Prisma picks.
+reading — the two spellings compile to identical SQL. It does *not* mean that on the column, where
+gemi reads a bare `null` as `DbNull`; see
+[A bare `null` on a `Json` column](#a-bare-null-on-a-json-column-means-dbnull-here-and-jsonnull-on-prisma)
+below, which is a divergence rather than a rule. Writing the sentinel you mean is what makes a
+filter say the same thing in both positions.
 
-**Under the other seven operators a sentinel is refused, and so is a bare `null`.** They compare an
-extracted value against a scalar, and "which kind of null is this" is not a scalar question. Prisma
-refuses them there too.
+**Under the other eight operators a sentinel is refused**, and so is a bare `null`. The string
+filters want a string, the numeric comparisons want a number, and `array_contains` wants a
+document; "which kind of null is this" is none of those. Prisma refuses a sentinel under all eight
+too, on both dialects.
 
 Three things a path filter still refuses, each because answering would be silently wrong rather
 than merely unsupported:
 
 - **A bare `null` under `array_contains`.** The operand binds as SQL NULL rather than as the JSON
-  value, and `x @> NULL` is NULL rather than true — the query would run and match nothing. A `null`
-  *inside* the document is an ordinary value and still compiles.
+  value, and `x @> NULL` is NULL rather than true — the query would run and match nothing. Prisma
+  does compile this one, to a containment test guarded by `jsonb_typeof(…) = 'array'`, and it
+  matches nothing there too — so this is gemi refusing where the oracle answers, which is the one
+  direction of divergence this ORM prefers to be loud about. A `null` *inside* the document is an
+  ordinary value and still compiles.
 - **A non-string operand to `string_contains` / `string_starts_with` / `string_ends_with`**, for
   the same reason the scalar `contains` refuses one: the pattern would become `%null%`, which runs
   and returns the wrong rows.
@@ -2358,6 +2363,32 @@ JS string is JSON *text* rather than a JSON string value.
 > so nothing looked wrong from inside the ORM, but the column was wrong for anything else that read
 > it. Those rows now read back as strings. Re-seed development databases; there is no released
 > version affected.
+
+## A bare `null` on a `Json` column means `DbNull` here and `JsonNull` on Prisma
+
+**A known divergence, and it returns disjoint row sets rather than raising.** On every other column
+type a bare `null` in a filter means `is null`, and that is Prisma's reading too. On a `Json`
+column it is not: Prisma reads a bare `null` as the JSON *value* `null`, the same thing it reads at
+a path.
+
+Measured on a generated 6.19.2 client against Postgres 16 and SQLite, on a table holding both empty
+states:
+
+| filter | gemi | Prisma |
+| --- | --- | --- |
+| `{ metadata: { equals: null } }` | `"metadata" is null` — the SQL-NULL rows | `"metadata"::jsonb = 'null'` — the JSON-null rows |
+| `{ metadata: { not: null } }` | `is not null` | `<> 'null'`, which also excludes the JSON-null rows |
+
+**Write the sentinel and there is no divergence.** `{ equals: DbNull }` and `{ equals: JsonNull }`
+compile to the same predicate on both libraries, which is what the sentinels are for:
+
+```ts
+await User.findMany({ where: { metadata: { equals: DbNull } } })   // the SQL NULLs, both libraries
+await User.findMany({ where: { metadata: { equals: JsonNull } } }) // the JSON nulls, both libraries
+```
+
+This is the *column*. At a **path** a bare `null` reads as `JsonNull` and agrees with Prisma
+exactly — see [The null sentinels at a path](#the-null-sentinels-at-a-path).
 
 ## Run Postgres deployments with `TZ=UTC`
 
