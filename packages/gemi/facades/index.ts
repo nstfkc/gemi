@@ -1,3 +1,8 @@
+/// <reference path="../gemi.d.ts" />
+// Same reason as `client/index.ts`: `Query` and `Prefetch` are typed against
+// the application's routes, and a server-only file must not have to depend on
+// something in the client barrel having been imported first.
+
 export { Facade } from "./Facade";
 export { Auth } from "./Auth";
 export { Redirect } from "./Redirect";

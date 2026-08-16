@@ -44,7 +44,7 @@
   "scripts": {
     "lint": "oxlint",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "build": "NODE_ENV=production bun run build:core && bun run build:bin && bun run build:types && bun run build:client && bun run build:plugin && bun run build:client-types",
+    "build": "NODE_ENV=production bun run build:core && bun run build:bin && bun run build:types && bun run build:client && bun run build:plugin && bun run build:client-types && bun run build:augmentation",
     "build:core": "bun ./scripts/build.ts",
     "build:bin": "bun build --outdir=./dist/bin --target=bun --external=vite --external=react-dom --external=react/jsx-runtime --external=bun --external=sharp --external=@azure/storage-blob --sourcemap ./bin/gemi.ts ./bin/orm-generator.ts && bun ./scripts/prepare-bin.ts",
     "build:client": "rm -rf dist/client dist/testing dist/chunks && vite build -c vite.client.config.mts",
@@ -53,8 +53,10 @@
     "build:client-types": "tsc -p tsconfig.browser.json",
     "test": "bun --bun vitest",
     "test:types": "vitest run --typecheck.only",
+    "test:packaging": "bun --bun vitest run --config vitest.packaging.config.ts",
     "build:publish": "bun scripts/build-publish.ts",
-    "prepublishOnly": "echo 'Do not publish from this directory — its exports point at TS source. Run: bun run build:publish, then publish from .publish/' && exit 1"
+    "prepublishOnly": "echo 'Do not publish from this directory \u2014 its exports point at TS source. Run: bun run build:publish, then publish from .publish/' && exit 1",
+    "build:augmentation": "bun ./scripts/wire-augmentation.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.629.0",
