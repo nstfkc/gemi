@@ -2,6 +2,8 @@
   "extends": "@repo/typescript-config/react-library.json",
   "compilerOptions": {
     "outDir": "dist",
+    "rootDir": ".",
+    "paths": { "@/app/*": ["./internal/type-stubs/app/*"] },
     "emitDeclarationOnly": true,
     "downlevelIteration": true
   },
