@@ -49,9 +49,13 @@ describe("the route table against the RPC types", () => {
   const project = createFixture();
   const table = tableFor(project);
 
-  test("reaches the app's routers through the gemi.d.ts augmentation", () => {
+  test("reaches the app's routers through the augmentation the package ships", () => {
+    // The fixture has no `gemi.d.ts` of its own, exactly like a 0.56 app: the
+    // augmentation arrives with the package and names `Api` through `AppRPC`,
+    // an alias rather than `CreateRPC` itself. Reaching the app's routers from
+    // there is what the discovery in `entryPoints.ts` exists to do.
     expect(table.diagnostics).toEqual([]);
-    expect(table.dependencies).toContain("/project/gemi.d.ts");
+    expect(table.dependencies.some((file) => file.endsWith("/gemi/gemi.d.ts"))).toBe(true);
     expect(table.dependencies).toContain("/project/app/http/routes/api.ts");
     expect(table.dependencies).toContain("/project/app/http/routes/view.ts");
   });

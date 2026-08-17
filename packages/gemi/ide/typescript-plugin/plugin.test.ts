@@ -27,7 +27,10 @@ export default function Page() {
   useQuery("/org/:orgId/products");
   useQuery("/auth/me");
   useMutation("POST", "/thing");
-  useMutate()("/reports");
+  const mutate = useMutate();
+  mutate({ path: "/reports" });
+  mutate({ path: "/thing" });
+  mutate({ path: "/org/:orgId" });
   const loose = "/reports";
   const read = table["/home"];
   return (
@@ -143,8 +146,26 @@ describe("go to definition on an API route", () => {
   test("a path given to a hook that returns a function resolves too", () => {
     // The callee is the *result* of a call, and the constraint still comes
     // through the resolved signature.
-    expect(harness.definitionsAt('useMutate()("/reports")')).toEqual([
+    expect(harness.definitionsAt('mutate({ path: "/reports" })')).toEqual([
       "app/http/routes/api.ts shared",
+    ]);
+  });
+
+  test("a path held in an options object narrows the same way an argument does", () => {
+    // `mutate({ path, params?, search? })` is the real `useMutate` signature —
+    // the path is a property, not an argument. Its `T extends keyof GetRPC` is
+    // the same constraint every other hook carries, so `/thing`'s POST handler
+    // has to be ruled out here exactly as it is for `useQuery`.
+    expect(harness.definitionsAt('mutate({ path: "/thing" })')).toEqual([
+      "app/http/routes/api.ts index",
+    ]);
+  });
+
+  test("an options-object path cannot mean a view route", () => {
+    // `/org/:orgId` is a layout, a view and a GET endpoint. `keyof GetRPC`
+    // admits only the last, so the two view components are not offered.
+    expect(harness.definitionsAt('mutate({ path: "/org/:orgId" })')).toEqual([
+      "app/http/routes/api.ts index",
     ]);
   });
 

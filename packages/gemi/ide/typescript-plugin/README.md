@@ -83,7 +83,10 @@ when narrowing leaves something:
    `T extends keyof GetRPC`, so the constraint of the parameter this argument
    fills _is_ the GET route set. Comparing that set against each verb's paths
    identifies the verb — with no hook name hardcoded anywhere, which is why a
-   wrapper an app writes over `useQuery` works for free.
+   wrapper an app writes over `useQuery` works for free. A path that arrives as a
+   property of an options object rather than as an argument —
+   `mutate({ path: "/reports" })`, `useMutate`'s real signature — is read the
+   same way, through the property's own constraint.
 2. **A verb named outright.** `useMutation("PUT", …)` and
    `<Form action=… method="PUT">`. Keyed off the shape — a verb in the preceding
    argument, a sibling `method` attribute — not off the callee's name.
@@ -95,9 +98,16 @@ choice. That is the honest answer for a path that genuinely carries two handlers
 ## What it cannot see
 
 Routes assembled anywhere but a `routes` property initializer — built in a
-constructor, spread in from elsewhere, returned by a helper. This is a floor
-rather than a gap: `CreateRPC` cannot see those either, so a route declared that
-way has no typed call site to jump _from_.
+constructor, returned by a helper. This is a floor rather than a gap:
+`CreateRPC` cannot see those either, so a route declared that way has no typed
+call site to jump _from_.
+
+A spread _inside_ the initializer — `...sharedRoutes` — is the one shape where
+the two disagree. `CreateRPC` works from the declared type of `routes` and keeps
+it; the walk reads syntax and drops it, so the path autocompletes and does not
+jump. Each one is named in the tsserver log, and it costs only itself: a path the
+walk never saw is left out of the constraint comparison rather than breaking it,
+so verb narrowing keeps working everywhere else.
 
 ## Layout
 
@@ -107,7 +117,7 @@ way has no typed call site to jump _from_.
 | `plugin.ts`      | the language service proxy: `getDefinitionAndBoundSpan`, `getDefinitionAtPosition`, `getQuickInfoAtPosition`, and the route table cache |
 | `routeTable.ts`  | walks the router tree into `path → handler location`                                                                                    |
 | `routePath.ts`   | value-level mirrors of the template literal types that build RPC keys                                                                   |
-| `entryPoints.ts` | finds the routers, by reading the `RPC` / `ViewRPC` interfaces                                                                          |
+| `entryPoints.ts` | finds the routers, by asking the checker for `gemi/client`'s `RPC` / `ViewRPC`                                                          |
 | `callSite.ts`    | decides whether a string literal is naming a route, and what narrows it                                                                 |
 | `lookup.ts`      | matches a call site against the table                                                                                                   |
 
@@ -122,7 +132,7 @@ files, in about 2ms.
 bun --bun vitest run ide/typescript-plugin
 ```
 
-Four files, in rough order of how much they would catch:
+Five files, in rough order of how much they would catch:
 
 - **`rpcParity.test.ts`** is the one that matters. The walker's key set has to be
   character-identical to `keyof RPC`, because the string being looked up was
@@ -134,13 +144,21 @@ Four files, in rough order of how much they would catch:
 - **`plugin.test.ts`** drives a real `LanguageService` through
   `decorateLanguageService`: spans, definitions, hover, delegation, cache reuse.
 - **`routeTable.test.ts`** pins where each jump lands, down to the line.
+- **`entryPoints.test.ts`** covers discovery, where a failure is silent by
+  nature: `client/rpc.ts` mounts `/auth/*` in every project, so "we found
+  something" is always true and cannot stand in for "we found the app". It pins
+  the augmentation shapes an app can be in — the package's own, an installed
+  app's under `node_modules`, a leftover pre-0.56 `gemi.d.ts` — and what is
+  logged when none of them names a router.
 - **`routePath.test.ts`** pins the path-composition transcription, quirks
   included — `/(app)/` joined to `/(admin)/users` really does produce
   `///users`, and matching the type matters more than being right.
 
 `fixture.ts` and `testProject.ts` are the shared harness: an in-memory project
 with `gemi/*` mapped at the package source, so the tests run against the real
-`ApiRouter` and the real `useQuery`.
+`ApiRouter` and the real `useQuery`. The fixture app has no `gemi.d.ts` of its
+own — since 0.56 the augmentation ships with the package, and mapping `gemi/*`
+at the source is what puts the fixture in the same shape as an installed app.
 
 Typecheck with `bun run typecheck`, which covers this directory through its own
 `tsconfig.json` — see the comment in it for why it is not part of the package's.

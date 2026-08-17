@@ -1,3 +1,4 @@
+import type ts from "typescript";
 import { dirname, join } from "node:path";
 
 import { buildRouteTable } from "./routeTable";
@@ -99,8 +100,17 @@ export default class RootView extends ViewRouter {
 }
 `;
 
-/** What `gemi.d.ts` looks like in a real app. */
-const GEMI_ENV = `
+/**
+ * The augmentation an app carried before 0.56, when `gemi.d.ts` lived at its root.
+ *
+ * Not part of the fixture: since 0.56 the package ships the augmentation itself,
+ * and `paths` above maps `gemi/*` at the package source, so the fixture app is
+ * already wired the way a `bun add gemi` app is — through
+ * `packages/gemi/gemi.d.ts`, whose `AppRPC<Api>` resolves `@/app/*` against this
+ * project. Tests that need the old shape, or a second declaration alongside the
+ * package's, pass this in explicitly.
+ */
+export const LEGACY_GEMI_ENV = `
 import type Api from "@/app/http/routes/api";
 import type View from "@/app/http/routes/view";
 import type { CreateRPC, CreateViewRPC } from "gemi/http";
@@ -117,7 +127,13 @@ export type ApiKeys = keyof RPC;
 export type ViewKeys = keyof ViewRPC;
 `;
 
-export function createFixture(extraFiles: Record<string, string> = {}): TestProject {
+/** Maps `gemi/*` at the package source, so the fixture compiles against the real types. */
+export const GEMI_PATHS = { "gemi/*": [join(GEMI_ROOT, "*")] };
+
+export function createFixture(
+  extraFiles: Record<string, string> = {},
+  extraCompilerOptions: ts.CompilerOptions = {},
+): TestProject {
   return createTestProject(
     {
       "app/http/routes/api.ts": API_ROUTER,
@@ -128,11 +144,10 @@ export function createFixture(extraFiles: Record<string, string> = {}): TestProj
       "app/views/OrgOverview.tsx": "export default function OrgOverview() { return null; }",
       "app/views/OrgSettings.tsx": "export default function OrgSettings() { return null; }",
       "app/views/auth/SignIn.tsx": "export default function SignIn() { return null; }",
-      "gemi.d.ts": GEMI_ENV,
       "keys.ts": KEYS,
       ...extraFiles,
     },
-    { paths: { "gemi/*": [join(GEMI_ROOT, "*")] } },
+    { paths: GEMI_PATHS, ...extraCompilerOptions },
   );
 }
 

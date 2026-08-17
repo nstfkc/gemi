@@ -3,8 +3,8 @@
 gemi ships a small set of typed hooks for talking to your API routes from the
 client, plus a server-side facade for priming that data during SSR. Every hook is
 fully type-safe: the endpoint path, its params, its search input, and its response
-shape are all inferred from your API routes through the generated `gemi.d.ts` network
-layer. You never write a raw `fetch` or hand-annotate a response type.
+shape are all inferred from your API routes through the type augmentation `gemi/client`
+ships. You never write a raw `fetch` or hand-annotate a response type.
 
 All hooks and components below come from `gemi/client`:
 
@@ -436,10 +436,15 @@ response types from your `api.ts` / `view.ts` routers and applies them to `useQu
 the mutation hooks, `Form`, and `ViewProps` / `LayoutProps` automatically. You get
 autocomplete for valid paths and params and typed response data, with no manual wiring.
 
-This is backed by a `gemi.d.ts` that augments the `RPC` and `ViewRPC` interfaces with
-`CreateRPC<Api>` and `CreateViewRPC<View>`. It is wired up for you in the template and
-needs no regeneration — the types are derived from your routers by the compiler, so they
-follow a route the moment you add one.
+This is backed by an augmentation of the `RPC` and `ViewRPC` interfaces that reads your
+`api.ts` and `view.ts` routers. Since 0.56 it ships inside the package and is referenced
+by `gemi/client` and `gemi/facades`, so importing from either is the whole of the wiring
+— there is nothing to install and nothing to regenerate. The types are derived from your
+routers by the compiler, so they follow a route the moment you add one.
+
+> Upgrading from 0.55 or earlier? Delete your app's root `gemi.d.ts` and its
+> `"./node_modules/gemi/gemi.d.ts"` entry in `tsconfig.json`'s `types` — leaving them is
+> not a no-op. See [UPGRADE.md](../UPGRADE.md).
 
 ### Jumping from a path to its handler
 

@@ -113,7 +113,10 @@ class RouteTableBuilder {
     this.dependencies.add(classDeclaration.getSourceFile().fileName);
 
     for (const property of routes.properties) {
-      if (!ts.isPropertyAssignment(property)) continue;
+      if (!ts.isPropertyAssignment(property)) {
+        this.noteUnreadableEntry(property, prefix, classDeclaration);
+        continue;
+      }
       const key = getPropertyKeyText(ts, this.checker, property.name);
       if (key === undefined) continue;
       const value = unwrapExpression(ts, property.initializer);
@@ -223,7 +226,10 @@ class RouteTableBuilder {
   ): void {
     const ts = this.ts;
     for (const property of routes.properties) {
-      if (!ts.isPropertyAssignment(property)) continue;
+      if (!ts.isPropertyAssignment(property)) {
+        this.noteUnreadableEntry(property, prefix, router);
+        continue;
+      }
       const key = getPropertyKeyText(ts, this.checker, property.name);
       if (key === undefined) continue;
       const value = unwrapExpression(ts, property.initializer);
@@ -448,6 +454,33 @@ class RouteTableBuilder {
       methodName,
       displayNameOfClass(this.ts, this.checker, controller),
       "controller-method",
+    );
+  }
+
+  /**
+   * A `routes` entry the walk cannot read, recorded rather than dropped in silence.
+   *
+   * `RouteParser` works from the *declared type* of `routes`, so a spread —
+   * `...sharedRoutes` — contributes its paths to `keyof RPC` and to autocomplete
+   * while the walk, which reads syntax, has no row for any of them. The result is
+   * a path that typechecks and offers no jump, and (see `intersect` in
+   * `lookup.ts`) a hole that used to cost verb narrowing project-wide. The
+   * tsserver log is the only place that can say which route went missing.
+   */
+  private noteUnreadableEntry(
+    property: ts.ObjectLiteralElementLike,
+    prefix: string,
+    router: ts.ClassLikeDeclaration,
+  ): void {
+    const ts = this.ts;
+    const what = ts.isSpreadAssignment(property)
+      ? `the spread \`...${property.expression.getText()}\``
+      : ts.isShorthandPropertyAssignment(property)
+        ? `the shorthand entry \`${property.name.text}\``
+        : "an entry";
+    this.diagnostics.push(
+      `${router.name?.text ?? "router"} mounted at ${prefix || "/"}: ${what} in \`routes\` ` +
+        `cannot be read statically — the routes it holds are typed but not jumpable`,
     );
   }
 

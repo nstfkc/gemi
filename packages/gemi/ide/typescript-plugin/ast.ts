@@ -107,10 +107,16 @@ export function resolveClassDeclaration(
 /**
  * The object literal assigned to a class's `routes` property.
  *
- * A router that builds `routes` anywhere but its own initializer — in a
- * constructor, from a spread, behind a helper — is invisible here. That is a
- * deliberate floor rather than a gap to close: the same shapes are invisible to
- * `CreateRPC`, so a route declared that way has no typed call site to jump from.
+ * A router that assigns `routes` anywhere but its own initializer — in a
+ * constructor, behind a helper — is invisible here, and that is a deliberate
+ * floor rather than a gap to close: those shapes are invisible to `CreateRPC`
+ * too, so a route declared that way has no typed call site to jump from.
+ *
+ * A spread *inside* the initializer is the one case where the two disagree.
+ * `RouteParser` reads the declared type of `routes` and so keeps it; the walk
+ * reads syntax and drops it. `RouteTableBuilder.noteUnreadableEntry` logs each
+ * one it meets, because a route that autocompletes and does not jump is
+ * otherwise indistinguishable from a bug in this plugin.
  */
 export function getRoutesObjectLiteral(
   ts: TS,

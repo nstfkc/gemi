@@ -17,12 +17,14 @@ export interface RootRouters {
 }
 
 const RPC_INTERFACES = {
-  api: { interfaceName: "RPC", helperName: "CreateRPC" },
-  view: { interfaceName: "ViewRPC", helperName: "CreateViewRPC" },
+  api: { interfaceName: "RPC" },
+  view: { interfaceName: "ViewRPC" },
 } as const;
 
 const CONFIG_HELPER = "defineRouteConfig";
 const CONFIG_MODULE = "gemi/services";
+/** The module `RPC` and `ViewRPC` are declared in and augmented into. */
+const CLIENT_MODULE = "gemi/client";
 
 /** Conventional locations, tried only when nothing more authoritative is readable. */
 const FALLBACK_API_ROUTER = "app/http/routes/api";
@@ -48,29 +50,46 @@ const FALLBACK_VIEW_ROUTER = "app/http/routes/view";
  * will accept. Reading the app's route config instead would find the app's
  * routers and miss `/auth/me`, which is as jumpable as any other route.
  *
- * The route config and then convention are the fallbacks, for a project that has
- * routers but no `gemi.d.ts` yet.
+ * The route config and then convention are the fallbacks, for a project whose
+ * routers the augmentation does not name. They are chosen on whether the app's
+ * *own* routers were found, not on whether anything was: `client/rpc.ts` mounts
+ * `/auth/*` unconditionally, so "some mount exists" is true of every gemi
+ * project and would make total discovery failure silent.
  */
 export function findRootRouters(ts: TS, program: ts.Program, projectRoot: string): RootRouters {
   const checker = program.getTypeChecker();
   const result: RootRouters = { api: [], view: [], dependencies: [], diagnostics: [] };
+  // One router can be reached through more than one declaration in the merge
+  // group — the package's own augmentation and an app's leftover `gemi.d.ts`
+  // name the same `Api`. Walking it twice would double every route it holds.
+  const seen = new Set<string>();
 
   for (const kind of ["api", "view"] as const) {
-    const { interfaceName, helperName } = RPC_INTERFACES[kind];
+    const { interfaceName } = RPC_INTERFACES[kind];
     for (const declaration of findInterfaceDeclarations(ts, checker, program, interfaceName)) {
       result.dependencies.push(declaration.getSourceFile().fileName);
-      for (const mount of readMounts(ts, checker, declaration, helperName)) {
+      for (const mount of readMounts(ts, checker, declaration)) {
+        const fileName = mount.declaration.getSourceFile().fileName;
+        const key = `${kind}\0${mount.prefix}\0${fileName}\0${mount.declaration.pos}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
         result[kind].push(mount);
-        result.dependencies.push(mount.declaration.getSourceFile().fileName);
+        result.dependencies.push(fileName);
       }
     }
   }
 
-  if (result.api.length > 0 || result.view.length > 0) return result;
+  const hasAppMount = (kind: "api" | "view") =>
+    result[kind].some((mount) =>
+      isApplicationFile(mount.declaration.getSourceFile().fileName, projectRoot),
+    );
+
+  if (hasAppMount("api") || hasAppMount("view")) return result;
 
   result.diagnostics.push(
-    "no RPC / ViewRPC augmentation found — falling back to the app's route config. " +
-      "Add one to gemi.d.ts so route types and route jumps agree.",
+    "the RPC / ViewRPC augmentation names none of this project's routers — falling back " +
+      "to the app's route config. Check that gemi/client is imported and that " +
+      `${projectRoot}/${FALLBACK_API_ROUTER}.ts typechecks, so route types and route jumps agree.`,
   );
 
   const config = findRouteConfigCall(ts, program);
@@ -87,14 +106,14 @@ export function findRootRouters(ts: TS, program: ts.Program, projectRoot: string
     }
   }
 
-  if (result.api.length === 0) {
+  if (!hasAppMount("api")) {
     const declaration = findConventionalRouter(ts, program, projectRoot, FALLBACK_API_ROUTER);
     if (declaration) {
       result.api.push({ declaration, prefix: "" });
       result.dependencies.push(declaration.getSourceFile().fileName);
     }
   }
-  if (result.view.length === 0) {
+  if (!hasAppMount("view")) {
     const declaration = findConventionalRouter(ts, program, projectRoot, FALLBACK_VIEW_ROUTER);
     if (declaration) {
       result.view.push({ declaration, prefix: "" });
@@ -102,21 +121,31 @@ export function findRootRouters(ts: TS, program: ts.Program, projectRoot: string
     }
   }
 
-  if (result.api.length === 0 && result.view.length === 0) {
+  if (!hasAppMount("api") && !hasAppMount("view")) {
     result.diagnostics.push(
-      `no routers found: no ${CONFIG_HELPER}() call and nothing at ${projectRoot}/${FALLBACK_API_ROUTER}`,
+      `no application routers found: no ${CONFIG_HELPER}() call and nothing at ${projectRoot}/${FALLBACK_API_ROUTER}`,
     );
   }
   return result;
 }
 
+/** Whether a file belongs to the application rather than to a package it installs. */
+function isApplicationFile(fileName: string, projectRoot: string): boolean {
+  return fileName.startsWith(`${projectRoot}/`) && !fileName.includes("/node_modules/");
+}
+
 /**
  * Every declaration of an interface by this name, merged ones included.
  *
- * Only the app's own files are searched, which is enough to find one
- * declaration — the augmentation. From there the checker supplies the rest of
- * the merge group, including the framework's declaration inside `node_modules`,
- * without walking a single file in it.
+ * The interfaces are asked for through the `gemi/client` module symbol rather
+ * than found by walking files, because since 0.56 the augmentation ships inside
+ * the package: in an installed app the only file declaring `RPC` is
+ * `node_modules/gemi/dist/gemi.d.ts`, which a file walk that skips
+ * `node_modules` — as it must, to stay cheap — will never see. The module symbol
+ * has no such blind spot. Reaching it costs one scan of the top-level statements
+ * of the app's own files, looking for an `import … from "gemi/client"` or a
+ * `declare module "gemi/client"`; from there the checker supplies the whole
+ * merge group, package and application declarations alike.
  */
 function findInterfaceDeclarations(
   ts: TS,
@@ -124,6 +153,21 @@ function findInterfaceDeclarations(
   program: ts.Program,
   name: string,
 ): ts.InterfaceDeclaration[] {
+  const fromModule = findClientModuleSymbol(ts, checker, program);
+  if (fromModule) {
+    const exported = checker.getExportsOfModule(fromModule).find((symbol) => symbol.name === name);
+    const resolved =
+      exported && exported.flags & ts.SymbolFlags.Alias
+        ? checker.getAliasedSymbol(exported)
+        : exported;
+    const declarations = resolved?.declarations?.filter((declaration) =>
+      ts.isInterfaceDeclaration(declaration),
+    );
+    if (declarations && declarations.length > 0) return declarations;
+  }
+
+  // No file names `gemi/client` — a project that has not imported it yet. Fall
+  // back to finding one declaration by hand and letting the checker merge.
   for (const sourceFile of program.getSourceFiles()) {
     if (sourceFile.fileName.includes("/node_modules/")) continue;
 
@@ -137,6 +181,44 @@ function findInterfaceDeclarations(
     return declarations && declarations.length > 0 ? declarations : [local];
   }
   return [];
+}
+
+/** The symbol for the `gemi/client` module, reached through any reference to it. */
+function findClientModuleSymbol(
+  ts: TS,
+  checker: ts.TypeChecker,
+  program: ts.Program,
+): ts.Symbol | undefined {
+  for (const sourceFile of program.getSourceFiles()) {
+    if (sourceFile.fileName.includes("/node_modules/")) continue;
+
+    for (const statement of sourceFile.statements) {
+      const reference = clientModuleReference(ts, statement);
+      if (!reference) continue;
+      const symbol = checker.getSymbolAtLocation(reference);
+      if (symbol) return symbol;
+    }
+  }
+  return undefined;
+}
+
+/** The node naming `gemi/client` in a statement, if the statement names it. */
+function clientModuleReference(ts: TS, statement: ts.Statement): ts.Node | undefined {
+  if (ts.isImportDeclaration(statement) || ts.isExportDeclaration(statement)) {
+    const specifier = statement.moduleSpecifier;
+    if (specifier && ts.isStringLiteralLike(specifier) && specifier.text === CLIENT_MODULE) {
+      return specifier;
+    }
+    return undefined;
+  }
+  if (
+    ts.isModuleDeclaration(statement) &&
+    ts.isStringLiteralLike(statement.name) &&
+    statement.name.text === CLIENT_MODULE
+  ) {
+    return statement.name;
+  }
+  return undefined;
 }
 
 function findInterfaceIn(
@@ -161,24 +243,39 @@ function findInterfaceIn(
   return found;
 }
 
-/** Reads `extends CreateRPC<Router, "/prefix">` off an interface declaration. */
+/**
+ * Reads `extends CreateRPC<Router, "/prefix">` off an interface declaration.
+ *
+ * The helper's name is deliberately not read. `CreateRPC` is only the direct
+ * spelling; the package's own augmentation goes through an alias —
+ * `extends AppRPC<Api>`, where `AppRPC` guards an unresolved `@/app/*` before it
+ * can instantiate `CreateRPC` and blow the instantiation depth. Matching the
+ * name `CreateRPC` rejected that, which since 0.56 is every application's own
+ * routers. So the type arguments are what is read: whichever resolves to a class
+ * is the router, and a string literal beside it is its prefix. Any wrapper —
+ * the package's, or one an application writes — is understood the same way.
+ */
 function readMounts(
   ts: TS,
   checker: ts.TypeChecker,
   declaration: ts.InterfaceDeclaration,
-  helperName: string,
 ): RouterMount[] {
   const mounts: RouterMount[] = [];
   for (const clause of declaration.heritageClauses ?? []) {
     for (const type of clause.types) {
-      if (!ts.isIdentifier(type.expression) || type.expression.text !== helperName) continue;
-      const [routerArgument, prefixArgument] = type.typeArguments ?? [];
-      if (!routerArgument) continue;
-
-      const router = resolveClassFromTypeNode(ts, checker, routerArgument);
-      if (!router) continue;
-
-      mounts.push({ declaration: router, prefix: readPrefix(ts, checker, prefixArgument) });
+      let router: ts.ClassLikeDeclaration | undefined;
+      let prefix = "";
+      for (const argument of type.typeArguments ?? []) {
+        if (!router) {
+          const resolved = resolveClassFromTypeNode(ts, checker, argument);
+          if (resolved) {
+            router = resolved;
+            continue;
+          }
+        }
+        if (!prefix) prefix = readPrefix(ts, checker, argument);
+      }
+      if (router) mounts.push({ declaration: router, prefix });
     }
   }
   return mounts;

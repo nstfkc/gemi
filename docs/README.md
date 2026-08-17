@@ -39,7 +39,7 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 
 ### Views & client
 - **[Views & Layouts](./views-and-layouts.md)** — view components, server data binding, nested layouts, `Head`, breadcrumbs.
-- **[Data Fetching](./data-fetching.md)** — `useQuery`, the mutation hooks, the `Query` prefetch facade, the type-safe `gemi.d.ts` layer, and the TypeScript plugin that makes go-to-definition work on a route path.
+- **[Data Fetching](./data-fetching.md)** — `useQuery`, the mutation hooks, the `Query` prefetch facade, the type-safe RPC layer, and the TypeScript plugin that makes go-to-definition work on a route path.
 - **[Forms](./forms.md)** — the `Form` component, surfacing validation errors, form status hooks.
 - **[Navigation](./navigation.md)** — `Link`, `useNavigate`, `useParams`, `useSearchParams`, and the `Redirect` component vs. facade.
 - **[Testing Views](./testing.md)** — `<Page>` from `gemi/testing`: mounting a view with route params, dictionaries, prefetched query data and a signed-in user.
@@ -76,7 +76,7 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 | **Controller** | Server logic behind a route; receives `HttpRequest` | [controllers](./controllers.md) |
 | **Facade** | Static proxy to a container-resolved service | [facades](./facades.md) |
 | **View** | Default-export React component rendered for a URL | [views-and-layouts](./views-and-layouts.md) |
-| **`gemi.d.ts`** | Generated types binding client hooks to your routes | [data-fetching](./data-fetching.md) |
+| **RPC types** | The `RPC` / `ViewRPC` augmentation binding client hooks to your routes; ships with the package | [data-fetching](./data-fetching.md) |
 
 ## A few things that will bite you
 
@@ -90,4 +90,4 @@ These are the counter-intuitive rules worth knowing up front — each is covered
 - **Middleware is a string DSL.** `auth`, `cache:...`, `rate-limit:N`, etc., and `-auth` *cancels* an inherited middleware. Most names (`admin`, `role:...`) are **app-registered aliases**, not built-ins. See [Middleware](./middleware.md).
 - **The query hook is `useQuery`, not `useGet`.** Some app-level notes mention `useGet`; it does not exist in gemi. See [Data Fetching](./data-fetching.md).
 - **Routing is explicit.** A view/controller file name has no relation to its URL — the mapping lives in a router. See [Routing](./routing.md).
-- **`gemi.d.ts` is generated — never edit it by hand.** Regenerate the API surface with `gemi ide:generate-api-manifest`. See [CLI](./cli.md).
+- **There is nothing to generate for the typed network layer.** The `RPC` / `ViewRPC` augmentation ships inside the package and is derived from your routers by the compiler. Apps upgrading from 0.55 or earlier must delete their root `gemi.d.ts` and its `types` entry — see [UPGRADE.md](../UPGRADE.md). See [Data Fetching](./data-fetching.md).

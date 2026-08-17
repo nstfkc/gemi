@@ -42,7 +42,7 @@ app/
     prisma.ts            # the Prisma client instance
 ```
 
-Root-level files support the app: [`gemi.config.ts`](./configuration.md) (Vite/Bun plugin config), `gemi.d.ts` (type augmentation for the type-safe RPC layer), `vite.config.mjs`, `tsconfig.json`, the `prisma/` schema, and a `Dockerfile`.
+Root-level files support the app: [`gemi.config.ts`](./configuration.md) (Vite/Bun plugin config), `vite.config.mjs`, `tsconfig.json`, the `prisma/` schema, and a `Dockerfile`. The type augmentation behind the type-safe RPC layer ships inside the package as of 0.56 — an app that still has a root `gemi.d.ts` should delete it, see [UPGRADE.md](../UPGRADE.md).
 
 > **`gemi.config.ts` and `app/config/` are different things.** `gemi.config.ts` is *build* config (Vite/Bun plugins), imported from `gemi/config`. `app/config/*.ts` is *runtime* config for framework services, consumed by the container. They never overlap.
 

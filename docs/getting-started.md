@@ -47,7 +47,7 @@ bunx prisma migrate deploy    # initialize the database and generate the Prisma 
 bun dev                       # start the development server
 ```
 
-The generated project is the canonical gemi layout: an `app/` directory (server entry, client entry, kernel, `config/`, `providers/`, routes, controllers, views, email, i18n, database), plus `gemi.config.ts`, `gemi.d.ts`, `vite.config.mjs`, `tsconfig.json`, a `prisma/` schema, and a `Dockerfile`. See [Project Structure](./project-structure.md) for a full tour.
+The generated project is the canonical gemi layout: an `app/` directory (server entry, client entry, kernel, `config/`, `providers/`, routes, controllers, views, email, i18n, database), plus `gemi.config.ts`, `vite.config.mjs`, `tsconfig.json`, a `prisma/` schema, and a `Dockerfile`. See [Project Structure](./project-structure.md) for a full tour.
 
 ## Commands
 

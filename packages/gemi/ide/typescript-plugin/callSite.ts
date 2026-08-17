@@ -115,24 +115,70 @@ function allowedPathsAt(
   checker: ts.TypeChecker,
   node: ts.StringLiteralLike,
 ): ReadonlySet<string> | undefined {
-  const call = node.parent;
-  if (!call || (!ts.isCallExpression(call) && !ts.isNewExpression(call))) return undefined;
+  const site = argumentSite(ts, node);
+  if (!site) return undefined;
 
-  const args = call.arguments ?? ts.factory.createNodeArray<ts.Expression>();
-  const index = args.indexOf(node);
-  if (index < 0) return undefined;
-
-  const declaration = checker.getResolvedSignature(call)?.getDeclaration();
+  const declaration = checker.getResolvedSignature(site.call)?.getDeclaration();
   if (!declaration || !ts.isFunctionLike(declaration)) return undefined;
 
-  const parameter = declaration.parameters[index];
+  const parameter = declaration.parameters[site.index];
   // A rest parameter's elements are not this simple to index into, and no route
   // argument is declared that way.
   if (!parameter || parameter.dotDotDotToken) return undefined;
 
-  const parameterType = checker.getTypeAtLocation(parameter);
-  const constraint = checker.getBaseConstraintOfType(parameterType) ?? parameterType;
+  // The *declared* type, not the contextual one: by the time inference has run,
+  // the contextual type of `"/reports"` is `"/reports"`, which says nothing
+  // about what else was allowed there.
+  let type = checker.getTypeAtLocation(parameter);
+  if (site.property !== undefined) {
+    const symbol = type.getProperty(site.property);
+    if (!symbol) return undefined;
+    type = checker.getTypeOfSymbolAtLocation(symbol, parameter);
+  }
+
+  const constraint = checker.getBaseConstraintOfType(type) ?? type;
   return stringLiteralSet(constraint);
+}
+
+interface ArgumentSite {
+  call: ts.CallExpression | ts.NewExpression;
+  index: number;
+  /** Set when the path is a property of an options object rather than the argument. */
+  property?: string;
+}
+
+/**
+ * The call an argument belongs to, and where in it.
+ *
+ * A path is usually an argument outright — `useQuery("/reports")` — but
+ * `useMutate`'s is a property of an options object: `mutate({ path: "/reports" })`
+ * (`client/useMutate.ts`). Both are declared the same way, `T extends keyof
+ * GetRPC`, one on the parameter and one on a property of it, so both are located
+ * here and read through the same constraint afterwards. Any other hook that
+ * takes its path in an options object is covered by the same rule.
+ */
+function argumentSite(ts: TS, node: ts.StringLiteralLike): ArgumentSite | undefined {
+  const parent = node.parent;
+  if (!parent) return undefined;
+
+  if (ts.isCallExpression(parent) || ts.isNewExpression(parent)) {
+    const index = [...(parent.arguments ?? [])].indexOf(node);
+    return index < 0 ? undefined : { call: parent, index };
+  }
+
+  if (!ts.isPropertyAssignment(parent) || parent.initializer !== node) return undefined;
+  const property =
+    ts.isIdentifier(parent.name) || ts.isStringLiteralLike(parent.name)
+      ? parent.name.text
+      : undefined;
+  if (property === undefined) return undefined;
+
+  const object = parent.parent;
+  if (!ts.isObjectLiteralExpression(object)) return undefined;
+  const call = object.parent;
+  if (!call || (!ts.isCallExpression(call) && !ts.isNewExpression(call))) return undefined;
+  const index = [...(call.arguments ?? [])].indexOf(object);
+  return index < 0 ? undefined : { call, index, property };
 }
 
 /** The set a type denotes, or `undefined` if it is anything but string literals. */
