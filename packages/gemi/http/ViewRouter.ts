@@ -109,9 +109,23 @@ export class RedirectRoute<Input, Output, Params> {
    * Returns `this`, so the route's type is unchanged and the path keeps its
    * entry in `ViewPaths`: `<Link>` and `Redirect.to` stay typed. That also means
    * the path is still in the route manifest the browser receives, so this gates
-   * the *response*, not the route's existence. Use `.serverOnly()` on the flag
-   * and keep unreleased routes out of the client tree if the name itself is the
-   * secret.
+   * the *response*, not the route's existence. Declare the feature
+   * `defineFeature({ serverOnly: true })` and keep unreleased routes out of the
+   * client tree if the name itself is the secret.
+   *
+   * ## A `rollout` is not access control
+   *
+   * Gate on `active` — a feature nobody has switched on is unreachable, which is
+   * the case this is for — or on a `when` that reads something the visitor
+   * cannot choose, like the signed-in user.
+   *
+   * A `rollout` is neither, for an anonymous visitor. The subject is their
+   * `session_id` cookie, which they supply; bucketing is a published pure
+   * function of it, so they can compute one that lands inside any percentage and
+   * send it. Signing the cookie would not fix this — they can equally well
+   * discard it and ask for a fresh one until a signed id happens to land inside,
+   * which for a 5% rollout is a couple of dozen requests. Nothing that hands out
+   * identities on demand can restrict anything to a fraction of them.
    */
   feature(key: FeatureKey): this {
     this.featureGates = [...this.featureGates, key as string];
@@ -228,9 +242,23 @@ export class FileRoute<Input, Params> {
    * Returns `this`, so the route's type is unchanged and the path keeps its
    * entry in `ViewPaths`: `<Link>` and `Redirect.to` stay typed. That also means
    * the path is still in the route manifest the browser receives, so this gates
-   * the *response*, not the route's existence. Use `.serverOnly()` on the flag
-   * and keep unreleased routes out of the client tree if the name itself is the
-   * secret.
+   * the *response*, not the route's existence. Declare the feature
+   * `defineFeature({ serverOnly: true })` and keep unreleased routes out of the
+   * client tree if the name itself is the secret.
+   *
+   * ## A `rollout` is not access control
+   *
+   * Gate on `active` — a feature nobody has switched on is unreachable, which is
+   * the case this is for — or on a `when` that reads something the visitor
+   * cannot choose, like the signed-in user.
+   *
+   * A `rollout` is neither, for an anonymous visitor. The subject is their
+   * `session_id` cookie, which they supply; bucketing is a published pure
+   * function of it, so they can compute one that lands inside any percentage and
+   * send it. Signing the cookie would not fix this — they can equally well
+   * discard it and ask for a fresh one until a signed id happens to land inside,
+   * which for a 5% rollout is a couple of dozen requests. Nothing that hands out
+   * identities on demand can restrict anything to a fraction of them.
    */
   feature(key: FeatureKey): this {
     this.featureGates = [...this.featureGates, key as string];
@@ -290,9 +318,23 @@ export class ViewRoute<Input, Output, Params> {
    * Returns `this`, so the route's type is unchanged and the path keeps its
    * entry in `ViewPaths`: `<Link>` and `Redirect.to` stay typed. That also means
    * the path is still in the route manifest the browser receives, so this gates
-   * the *response*, not the route's existence. Use `.serverOnly()` on the flag
-   * and keep unreleased routes out of the client tree if the name itself is the
-   * secret.
+   * the *response*, not the route's existence. Declare the feature
+   * `defineFeature({ serverOnly: true })` and keep unreleased routes out of the
+   * client tree if the name itself is the secret.
+   *
+   * ## A `rollout` is not access control
+   *
+   * Gate on `active` — a feature nobody has switched on is unreachable, which is
+   * the case this is for — or on a `when` that reads something the visitor
+   * cannot choose, like the signed-in user.
+   *
+   * A `rollout` is neither, for an anonymous visitor. The subject is their
+   * `session_id` cookie, which they supply; bucketing is a published pure
+   * function of it, so they can compute one that lands inside any percentage and
+   * send it. Signing the cookie would not fix this — they can equally well
+   * discard it and ask for a fresh one until a signed id happens to land inside,
+   * which for a 5% rollout is a couple of dozen requests. Nothing that hands out
+   * identities on demand can restrict anything to a fraction of them.
    */
   feature(key: FeatureKey): this {
     this.featureGates = [...this.featureGates, key as string];
@@ -380,9 +422,23 @@ export class LayoutRoute<T extends ViewRoutes, Input, Output, Params> {
    * Returns `this`, so the route's type is unchanged and the path keeps its
    * entry in `ViewPaths`: `<Link>` and `Redirect.to` stay typed. That also means
    * the path is still in the route manifest the browser receives, so this gates
-   * the *response*, not the route's existence. Use `.serverOnly()` on the flag
-   * and keep unreleased routes out of the client tree if the name itself is the
-   * secret.
+   * the *response*, not the route's existence. Declare the feature
+   * `defineFeature({ serverOnly: true })` and keep unreleased routes out of the
+   * client tree if the name itself is the secret.
+   *
+   * ## A `rollout` is not access control
+   *
+   * Gate on `active` — a feature nobody has switched on is unreachable, which is
+   * the case this is for — or on a `when` that reads something the visitor
+   * cannot choose, like the signed-in user.
+   *
+   * A `rollout` is neither, for an anonymous visitor. The subject is their
+   * `session_id` cookie, which they supply; bucketing is a published pure
+   * function of it, so they can compute one that lands inside any percentage and
+   * send it. Signing the cookie would not fix this — they can equally well
+   * discard it and ask for a fresh one until a signed id happens to land inside,
+   * which for a 5% rollout is a couple of dozen requests. Nothing that hands out
+   * identities on demand can restrict anything to a fraction of them.
    */
   feature(key: FeatureKey): this {
     this.featureGates = [...this.featureGates, key as string];

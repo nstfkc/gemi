@@ -47,4 +47,18 @@ export default {
       }
     },
   }),
+
+  /**
+   * Never sent to the browser.
+   *
+   * Every client-visible key is embedded in the HTML of every page, so a key
+   * named after something unannounced announces it. This one is still evaluated
+   * on the server — `Features.enabled("project-nightingale")` works — but
+   * `useFeature` will not accept the key, because the value there could only
+   * ever be `false`.
+   */
+  "project-nightingale": defineFeature({
+    describe: "Unannounced. The name is the secret.",
+    serverOnly: true,
+  }),
 };

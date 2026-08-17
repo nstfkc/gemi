@@ -70,7 +70,12 @@ describe("useFeature", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     renderWith(state({}));
 
-    expect(warn.mock.calls.flat().join(" ")).toMatch(/Unknown feature "new-checkout"/);
+    expect(warn.mock.calls.flat().join(" ")).toMatch(
+      /Feature "new-checkout" is not in the payload/,
+    );
+    // Both causes named. "Declare it in app/features" alone is wrong advice for
+    // the app that already did, then marked the feature `serverOnly`.
+    expect(warn.mock.calls.flat().join(" ")).toMatch(/serverOnly/);
   });
 
   test("a new navigation's values replace the old ones", () => {

@@ -63,8 +63,8 @@ In order, stopping at the first that applies:
 1. **The store has never loaded** → off. An unreachable database fails closed.
 2. **No row, or `active = false`** → off. `when` and `rollout` are not consulted.
 3. **`when(ctx)` returned `true` or `false`** → that.
-4. **A crawler** → off.
-5. **No `rollout`** → on.
+4. **No `rollout`** → on, crawlers included. There is nothing to sample, so every visit already resolves the same way.
+5. **A crawler**, on a feature that _has_ a rollout → off.
 6. **Inside the rollout bucket** → on, otherwise off.
 
 Two of these are worth dwelling on.
@@ -188,7 +188,7 @@ Feature _keys_ are public — every client-visible key is embedded in the HTML o
 "project-nightingale": defineFeature({ serverOnly: true }),
 ```
 
-Still evaluated on the server, never in the payload, and `useFeature` cannot see it.
+Still evaluated on the server and never in the payload. `useFeature("project-nightingale")` is a compile error — the key is excluded from the client's key type, because the value there could only ever be `false`. Read it with `Features.enabled` instead.
 
 ## Gating a route
 
@@ -197,6 +197,16 @@ Still evaluated on the server, never in the payload, and `useFeature` cannot see
 ```
 
 A gated route renders a real 404 when the feature is off, rather than a 403 — a 403 confirms the route exists, which for an unannounced feature is the thing you were hiding.
+
+The path does stay in the route manifest the browser downloads, so this gates the response, not the route's existence. Pair it with `serverOnly: true` when the name is the secret.
+
+### A rollout is not access control
+
+Gate on `active`, or on a `when` that reads something the visitor cannot choose — the signed-in user, most obviously. Not on a `rollout`.
+
+For an anonymous visitor the bucketing subject is their own `session_id` cookie, and bucketing is a published pure function of it: they can compute a value that lands inside any percentage and send it. Signing the cookie would not close this. They could equally well throw it away and ask for a fresh one until a signed id happens to land inside — a couple of dozen requests for a 5% rollout. Nothing that hands out identities on demand can restrict anything to a fraction of them.
+
+A rollout answers "how many people should see this yet". Use `when` for "who is allowed to".
 
 ## Extra context for targeting
 

@@ -65,11 +65,16 @@ export interface FeatureOptions {
  * one thing only — whether the feature is switched on at all — which is what
  * makes shipping a feature a deploy and turning it on an `UPDATE`.
  */
-export class Feature {
+export class Feature<ServerOnly extends boolean = boolean> {
   readonly describe?: string;
   readonly rollout?: number;
   readonly when?: FeatureAttribution;
-  readonly serverOnly: boolean;
+  /**
+   * Carried in the type as well as the value, so `CreateFeatures` can tell a
+   * server-only declaration from a client-visible one and `useFeature` can
+   * reject the keys that never reach the browser.
+   */
+  readonly serverOnly: ServerOnly;
   readonly salt?: string;
 
   constructor(options: FeatureOptions = {}) {
@@ -89,7 +94,7 @@ export class Feature {
     this.describe = options.describe;
     this.rollout = options.rollout;
     this.when = options.when;
-    this.serverOnly = options.serverOnly ?? false;
+    this.serverOnly = (options.serverOnly ?? false) as ServerOnly;
     this.salt = options.salt;
   }
 }
@@ -129,7 +134,9 @@ export class Feature {
  * "is this feature still referenced?" — the one chore every feature eventually
  * needs — stays a grep.
  */
-export function defineFeature(options: FeatureOptions = {}): Feature {
+export function defineFeature(options: FeatureOptions & { serverOnly: true }): Feature<true>;
+export function defineFeature(options?: FeatureOptions): Feature<false>;
+export function defineFeature(options: FeatureOptions = {}): Feature<boolean> {
   return new Feature(options);
 }
 
@@ -137,9 +144,23 @@ export function defineFeature(options: FeatureOptions = {}): Feature {
 export type FeatureRegistry = Record<string, Feature>;
 
 /**
- * The `{ key: boolean }` map a registry describes, consumed through module
- * augmentation so `useFeature` and the `Features` facade are typed against the
- * application's own keys:
+ * What a `serverOnly: true` feature occupies in `Features`.
+ *
+ * Deliberately not `boolean`. The key still has to be a `keyof Features` — the
+ * `Features` facade evaluates it server-side, which is the entire point of the
+ * option — but `useFeature` must reject it, because `forClient()` omits those
+ * keys from the payload and a client read would be `false` forever with no
+ * indication why. Being a distinct type is what lets `ClientFeatureKey` filter
+ * the one set out of the other without a second augmentation in `gemi.d.ts`.
+ */
+export interface ServerOnlyFeature {
+  readonly __gemiServerOnly: true;
+}
+
+/**
+ * The map a registry describes, consumed through module augmentation so
+ * `useFeature` and the `Features` facade are typed against the application's own
+ * keys:
  *
  * ```ts
  * declare module "gemi/client" {
@@ -147,9 +168,9 @@ export type FeatureRegistry = Record<string, Feature>;
  * }
  * ```
  *
- * Every feature is a boolean, so this is key extraction and nothing else — no
- * per-key value type to infer, and no tree to walk.
+ * Key extraction and nothing else — no tree to walk — except for the one bit
+ * that has to survive: whether the feature reaches the browser at all.
  */
 export type CreateFeatures<T extends FeatureRegistry> = {
-  [K in keyof T]: boolean;
+  [K in keyof T]: T[K] extends Feature<true> ? ServerOnlyFeature : boolean;
 };

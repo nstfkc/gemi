@@ -870,6 +870,17 @@ export class ViewRouteDispatcher {
         if (featureGates.length > 0 && !(await this.passesFeatureGates(featureGates))) {
           currentPathName = null;
           handlers = [];
+          // `routePath` too, and not only for tidiness: it is what selects this
+          // request's translation namespace below, so leaving it would serve the
+          // gated route's dictionary alongside its 404 while a genuinely
+          // unmatched path carries none. For an unannounced feature the
+          // translation keys are usually the most descriptive thing about it,
+          // which makes that difference the leak this block exists to prevent.
+          //
+          // Safe this late: the feature context was built and memoized by the
+          // gate check above, so a `when` reading `ctx.request.routePath` has
+          // already seen the real value.
+          httpRequest.routePath = "";
         }
 
         const translator = app(Translator);

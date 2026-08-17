@@ -29,8 +29,9 @@ export interface EvaluateOptions {
  * 2. No row, or `active === false` → **off**. `when` and `rollout` are not
  *    consulted.
  * 3. `when(ctx)` returned a boolean → that.
- * 4. A crawler → **off**.
- * 5. No `rollout` → **on**.
+ * 4. No `rollout` → **on**, crawlers included. There is nothing to sample, so
+ *    every visit already resolves the same way.
+ * 5. A crawler, on a feature that *has* a rollout → **off**.
  * 6. Inside the rollout bucket → on, otherwise off.
  *
  * ## Why an unreachable database means off

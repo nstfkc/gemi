@@ -9012,7 +9012,7 @@ export default {
     rollout: 50,
     when: (ctx) => {
       if (ctx.user?.email.endsWith("@acme.com")) return true; // staff, always
-      if (ctx.user?.plan === "free") return false;            // never
+      if (ctx.user?.plan === "free") return false; // never
       // return nothing → the rollout decides
     },
   }),
@@ -9056,8 +9056,8 @@ In order, stopping at the first that applies:
 1. **The store has never loaded** → off. An unreachable database fails closed.
 2. **No row, or `active = false`** → off. `when` and `rollout` are not consulted.
 3. **`when(ctx)` returned `true` or `false`** → that.
-4. **A crawler** → off.
-5. **No `rollout`** → on.
+4. **No `rollout`** → on, crawlers included. There is nothing to sample, so every visit already resolves the same way.
+5. **A crawler**, on a feature that _has_ a rollout → off.
 6. **Inside the rollout bucket** → on, otherwise off.
 
 Two of these are worth dwelling on.
@@ -9073,7 +9073,7 @@ A subject's position in a rollout is `sha1(salt:subject)`, reduced to a bucket i
 Nothing is written anywhere. That buys four things:
 
 - **Stability.** The same subject gets the same answer on every device, in every process, forever — with no row, no cookie holding assignments, and nothing to migrate.
-- **Monotonicity.** Going 10% → 25% only ever *adds* people. Nobody who had the feature loses it, because their bucket number never moves; only the threshold does.
+- **Monotonicity.** Going 10% → 25% only ever _adds_ people. Nobody who had the feature loses it, because their bucket number never moves; only the threshold does.
 - **Independence.** The salt is the feature's key, so two 20% rollouts pick two different 20% slices. Without that, a subject unlucky once would be unlucky in everything.
 - **No growth.** One row per feature, not one row per feature per user.
 
@@ -9089,7 +9089,7 @@ Outside a request — a job, a cron tick — there is no subject and every conte
 
 The `session_id` cookie is minted at the top of every view request, before anything is evaluated, so the id used to bucket is the id the browser is about to be given. It is `httpOnly`, `SameSite=Lax`, and lasts a year.
 
-`Lax` rather than `Strict` is load-bearing. `Strict` withholds the cookie on cross-site *top-level navigation*, so a visitor arriving from a search result or a shared link would arrive without it, be minted a new id, and overwrite the old one — re-bucketing on every external entry, which is how most anonymous traffic arrives.
+`Lax` rather than `Strict` is load-bearing. `Strict` withholds the cookie on cross-site _top-level navigation_, so a visitor arriving from a search result or a shared link would arrive without it, be minted a new id, and overwrite the old one — re-bucketing on every external entry, which is how most anonymous traffic arrives.
 
 Two operational consequences:
 
@@ -9163,10 +9163,10 @@ This is a context read — no request, no suspense, no loading state. The coroll
 
 ```typescript
 await Features.enabled("new-checkout");
-await Features.explain("new-checkout");     // { value, reason } — server only
-await Features.all();                        // the client-visible map
+await Features.explain("new-checkout"); // { value, reason } — server only
+await Features.all(); // the client-visible map
 await Features.for({ user }).enabled("digest-v2");
-await Features.refresh();                    // reload this process now
+await Features.refresh(); // reload this process now
 ```
 
 Everything is async. After the boot-time warm-up each call settles in a microtask with no I/O, but the promise is kept because the first call in a cold process does hit the database — and a sync variant would have to answer that window with "off", which is a feature silently vanishing while a deploy rolls.
@@ -9175,13 +9175,13 @@ Everything is async. After the boot-time warm-up each call settles in a microtas
 
 ## Hiding a feature's existence
 
-Feature *keys* are public — every client-visible key is embedded in the HTML of every page. A key named after an unannounced product announces it.
+Feature _keys_ are public — every client-visible key is embedded in the HTML of every page. A key named after an unannounced product announces it.
 
 ```typescript
 "project-nightingale": defineFeature({ serverOnly: true }),
 ```
 
-Still evaluated on the server, never in the payload, and `useFeature` cannot see it.
+Still evaluated on the server and never in the payload. `useFeature("project-nightingale")` is a compile error — the key is excluded from the client's key type, because the value there could only ever be `false`. Read it with `Features.enabled` instead.
 
 ## Gating a route
 
@@ -9190,6 +9190,16 @@ Still evaluated on the server, never in the payload, and `useFeature` cannot see
 ```
 
 A gated route renders a real 404 when the feature is off, rather than a 403 — a 403 confirms the route exists, which for an unannounced feature is the thing you were hiding.
+
+The path does stay in the route manifest the browser downloads, so this gates the response, not the route's existence. Pair it with `serverOnly: true` when the name is the secret.
+
+### A rollout is not access control
+
+Gate on `active`, or on a `when` that reads something the visitor cannot choose — the signed-in user, most obviously. Not on a `rollout`.
+
+For an anonymous visitor the bucketing subject is their own `session_id` cookie, and bucketing is a published pure function of it: they can compute a value that lands inside any percentage and send it. Signing the cookie would not close this. They could equally well throw it away and ask for a fresh one until a signed id happens to land inside — a couple of dozen requests for a 5% rollout. Nothing that hands out identities on demand can restrict anything to a fraction of them.
+
+A rollout answers "how many people should see this yet". Use `when` for "who is allowed to".
 
 ## Extra context for targeting
 
@@ -9224,7 +9234,7 @@ defineFeaturesConfig({
 });
 ```
 
-This replaces the *switch*, not the answer: rows still go through the same store and the same evaluator production runs, so a test that turns a feature on still exercises its `when` and its `rollout`. Pinning the final value instead would assert about a code path that never runs.
+This replaces the _switch_, not the answer: rows still go through the same store and the same evaluator production runs, so a test that turns a feature on still exercises its `when` and its `rollout`. Pinning the final value instead would assert about a code path that never runs.
 
 ## Operating
 
@@ -9232,18 +9242,18 @@ This replaces the *switch*, not the answer: rows still go through the same store
 
 **A row for a key nobody declares is ignored with a warning.** That is usually a feature deleted from the code and left in the table — harmless, and the warning is how you find the litter.
 
-**A failed refresh keeps the last good snapshot.** An outage must not read as "every feature switched itself off"; that would be a config change nobody made, applied to production, at the moment something else is already broken. Only a cold process that has *never* loaded fails closed.
+**A failed refresh keeps the last good snapshot.** An outage must not read as "every feature switched itself off"; that would be a config change nobody made, applied to production, at the moment something else is already broken. Only a cold process that has _never_ loaded fails closed.
 
 ### Failure modes
 
-| Situation | Behaviour |
-| --- | --- |
-| No `FeatureFlag` model registered | every feature stays off; logged once |
-| Database unreachable, snapshot loaded before | last good snapshot is kept |
-| Database unreachable, never loaded | every feature off, `reason: "unavailable"` |
-| Row for a key you never declared | ignored with a warning |
-| Row with a non-boolean `active` | read as off |
-| A `when` that throws | the feature reads off, logged once per evaluation |
+| Situation                                    | Behaviour                                         |
+| -------------------------------------------- | ------------------------------------------------- |
+| No `FeatureFlag` model registered            | every feature stays off; logged once              |
+| Database unreachable, snapshot loaded before | last good snapshot is kept                        |
+| Database unreachable, never loaded           | every feature off, `reason: "unavailable"`        |
+| Row for a key you never declared             | ignored with a warning                            |
+| Row with a non-boolean `active`              | read as off                                       |
+| A `when` that throws                         | the feature reads off, logged once per evaluation |
 
 ## Related
 

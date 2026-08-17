@@ -147,6 +147,15 @@ export const SESSION_ID_COOKIE = "session_id";
  * rather than paper over with a random value. A per-call random id would give
  * every request its own bucket, which is worse than no bucketing at all: a
  * percentage rollout would reshuffle on every page load.
+ *
+ * ## It is client-supplied, and unauthenticated
+ *
+ * Whatever the browser sent, unvalidated. It is a bucketing subject, not a
+ * credential — never authenticate or authorize on it. A visitor can pick a value
+ * that lands them in any percentage rollout, and signing it would not change
+ * that: they can discard the cookie and collect fresh ones until one does. Load
+ * bearing enough to state, because `.feature()` route gating is built on top of
+ * evaluation — see its documentation for what may safely gate a route.
  */
 export function sessionId(): string | null {
   const store = RequestContext.getStore();

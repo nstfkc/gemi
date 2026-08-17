@@ -140,6 +140,7 @@ export {
   type FeatureAttribution,
   type FeatureOptions,
   type FeatureRegistry,
+  type ServerOnlyFeature,
 } from "./features/defineFeature";
 export { FeaturesServiceProvider } from "./features/FeaturesServiceProvider";
 export { FeatureManager, FeatureScope } from "./features/FeatureManager";

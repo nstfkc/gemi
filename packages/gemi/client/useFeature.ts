@@ -1,6 +1,6 @@
 import { useContext } from "react";
 import { RouteStateContext } from "./RouteStateContext";
-import type { FeatureKey } from "./rpc";
+import type { ClientFeatureKey } from "./rpc";
 
 /**
  * Reads a feature evaluated by the server for this request.
@@ -12,7 +12,10 @@ import type { FeatureKey } from "./rpc";
  * ```
  *
  * Keys are typed against `app/features`, so a typo is a compile error rather
- * than a feature that silently reads as off.
+ * than a feature that silently reads as off. Features declared
+ * `serverOnly: true` are excluded from that set: they are withheld from the
+ * payload on purpose, so reading one here could only ever answer `false`. Use
+ * the `Features` facade for those.
  *
  * ## It never fetches
  *
@@ -31,14 +34,17 @@ import type { FeatureKey } from "./rpc";
  * `useLocale` reads it. Reading `ServerDataContext` instead would pin every
  * feature to the values from the initial document for the life of the session.
  */
-export function useFeature(key: FeatureKey): boolean {
+export function useFeature(key: ClientFeatureKey): boolean {
   // `= {}` because several existing tests provide a bare object as page data,
   // and an error-path envelope may carry no features at all.
   const { features = {} } = useContext(RouteStateContext);
 
   if (process.env.NODE_ENV !== "production" && !(key in features)) {
+    // Both reasons, because the type system only rules out the second one for a
+    // caller whose `gemi.d.ts` resolved — and "declare it" is actively wrong
+    // advice for the app that already did, then marked it `serverOnly`.
     console.warn(
-      `[gemi] Unknown feature "${String(key)}". Declare it in app/features, or check the key.`,
+      `[gemi] Feature "${String(key)}" is not in the payload the server sent. Either it is not declared in app/features, or it is declared \`serverOnly: true\` and never reaches the browser.`,
     );
   }
 

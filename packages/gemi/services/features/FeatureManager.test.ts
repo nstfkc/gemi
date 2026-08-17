@@ -159,6 +159,38 @@ describe("per-request memoization", () => {
     expect(onEvaluate).toHaveBeenCalledTimes(1);
   });
 
+  test("forClient does not re-notify a key a handler already read", async () => {
+    // The real request shape: a handler branches on a feature, then the
+    // dispatcher builds the SSR payload. `forClient` used to bypass the memo
+    // entirely, so every such request emitted two exposures for one viewer.
+    const features = manager({ "new-checkout": true });
+    const onEvaluate = vi.fn();
+    (features.config as any).onEvaluate = onEvaluate;
+
+    await inRequest(async () => {
+      await features.enabled("new-checkout");
+      await features.forClient();
+    });
+
+    expect(onEvaluate.mock.calls.filter(([key]) => key === "new-checkout")).toHaveLength(1);
+  });
+
+  test("an explicit subject is neither served from nor written to the request memo", async () => {
+    // `Features.for(...)` asks what somebody *else* would see. Sharing the
+    // ambient memo would cross the two answers in both directions.
+    const features = manager({ "pricing-redesign": true });
+    const onEvaluate = vi.fn();
+    (features.config as any).onEvaluate = onEvaluate;
+
+    await inRequest(async () => {
+      await features.enabled("pricing-redesign");
+      await features.for({ user: { id: "someone-else" } }).enabled("pricing-redesign");
+      await features.enabled("pricing-redesign");
+    });
+
+    expect(onEvaluate).toHaveBeenCalledTimes(2);
+  });
+
   test("a different request evaluates again", async () => {
     const features = manager({ "new-checkout": true });
     const onEvaluate = vi.fn();

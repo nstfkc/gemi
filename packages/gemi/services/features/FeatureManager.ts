@@ -82,18 +82,8 @@ export class FeatureManager {
    * in a rollout or was targeted by name, and must never be serialized.
    */
   async explain(key: string): Promise<FeatureEvaluation> {
-    const store = RequestContext.getStore();
-    const cached = store?.featureEvaluations?.get(key) as FeatureEvaluation | undefined;
-    if (cached) return cached;
-
     const ctx = await this.requestContext();
-    const evaluation = await this.evaluateIn(key, ctx, this.requestBuckets());
-
-    if (store) {
-      store.featureEvaluations ??= new Map();
-      store.featureEvaluations.set(key, evaluation);
-    }
-    return evaluation;
+    return await this.evaluateIn(key, ctx, this.requestBuckets());
   }
 
   /** Every declared feature for the ambient request, as `key -> boolean`. */
@@ -127,12 +117,26 @@ export class FeatureManager {
     return new FeatureScope(this, contextFromSubject(subject));
   }
 
-  /** @internal — shared by the ambient path and `FeatureScope`. */
+  /**
+   * @internal — shared by the ambient path and `FeatureScope`. The single place
+   * a feature is evaluated, and therefore the single place the per-request memo
+   * is consulted and `onEvaluate` fires.
+   *
+   * Both of those used to live in `explain()`, one level up, which meant every
+   * caller that did not go through it — `forClient()` building the SSR payload,
+   * `passesFeatureGates` checking a route — evaluated afresh and notified again.
+   * A request that read a feature in a handler and then rendered it emitted two
+   * exposures for one viewer, quietly doubling whatever counted them.
+   */
   async evaluateIn(
     key: string,
     ctx: FeatureContext,
     buckets: Map<string, number>,
   ): Promise<FeatureEvaluation> {
+    const memo = this.memoFor(ctx);
+    const cached = memo?.get(key) as FeatureEvaluation | undefined;
+    if (cached) return cached;
+
     const feature: Feature | undefined = this.declared[key];
     if (!feature) {
       // Typed callers cannot reach this; an untyped one — a string from a
@@ -148,6 +152,7 @@ export class FeatureManager {
       warn: this.log,
     });
 
+    memo?.set(key, evaluation);
     this.notify(key, evaluation, ctx);
     return evaluation;
   }
@@ -191,6 +196,22 @@ export class FeatureManager {
     const ctx = await contextFromRequest(this.config, this.log);
     if (store) store.featureContext = ctx;
     return ctx;
+  }
+
+  /**
+   * The request's evaluation memo, or `null` when there is none to use.
+   *
+   * Gated on the context being the ambient request's *own*, by identity. A
+   * `Features.for({ user })` inside a request is asking what somebody else would
+   * see, and answering it from — or writing it into — the current viewer's memo
+   * would cross the two: an admin previewing a customer would poison every
+   * subsequent read on that request with the customer's values.
+   */
+  private memoFor(ctx: FeatureContext): Map<string, unknown> | null {
+    const store = RequestContext.getStore();
+    if (!store || store.featureContext !== ctx) return null;
+    store.featureEvaluations ??= new Map();
+    return store.featureEvaluations;
   }
 
   private requestBuckets(): Map<string, number> {

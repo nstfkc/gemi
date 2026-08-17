@@ -271,6 +271,10 @@ const Routes = (props: { componentTree: ComponentTree }) => {
         return [prevTarget, pathname];
       });
       if (routerState.views.length === 0) {
+        // Same reason as the `is404` branch below: the tree about to be mounted
+        // carries none of the segments the stale `from` would have the server
+        // skip.
+        renderedRouteRef.current = "";
         setRouteState((routerState) => ({
           ...routerState,
           views: ["404"],
@@ -340,14 +344,36 @@ const Routes = (props: { componentTree: ComponentTree }) => {
           return;
         }
 
+        // Returns, rather than falling through. The commit below spreads
+        // `routerState`, which carries the *matched* route's views — so without
+        // the return this updater's `["404"]` is queued and then overwritten in
+        // the same batch, and the route renders its real views with no data.
+        //
+        // Reachable only since `.feature()`: a path the client cannot match is
+        // caught by the `views.length === 0` guard above and never fetched, so
+        // `is404` from the server used to imply an empty client `views`. A gated
+        // route keeps its manifest entry, which is exactly the case where the
+        // server says 404 and the client still knows how to render the page.
         if (is404) {
+          // Not `${pathname}${search}`. `x-gemi-from` tells the server which
+          // segments are already mounted so it can skip their handlers, and
+          // after this commit the mounted tree is `["404"]` — none of the target
+          // route's layouts, and none of the previous route's either. The empty
+          // string is what the server reads as "carry nothing".
+          renderedRouteRef.current = "";
           startTransition(() => {
             setRouteState((state) => ({
               ...state,
+              ...routerState,
               appId,
+              i18n,
+              features: features ?? state.features,
+              // After the spread, deliberately.
               views: ["404"],
             }));
           });
+          setIsFetching(false);
+          return;
         }
 
         const carriedViews: string[] = payload.partial?.carriedViews ?? [];
