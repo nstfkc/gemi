@@ -63,6 +63,14 @@ export abstract class Listener {
    * declaration always shadows it with its own implicit binding, which is the
    * one a minifier renames. `discoverListeners` reads the property descriptor
    * to tell a declared name from an implicit one.
+   *
+   * For a **queued** listener it is more than a label: the queue is keyed by
+   * name, the listener is registered under `listener:<name>`, and that string
+   * is what a queued dispatch carries. So a queued listener whose name is the
+   * implicit class binding is refused at registration rather than warned about
+   * — the two ends of the queue can be two different module graphs, and a name
+   * only one of them minified is a side effect that stops happening in
+   * production and reports success.
    */
   static name = "unset";
 
@@ -89,9 +97,61 @@ export abstract class Listener {
   static event: EventClass;
 
   /**
-   * The side effect. Runs inside the dispatcher's context: a sync listener has
-   * the request's `app()`, its authenticated user, and its ambient
+   * Where this listener runs. **A context boundary, not a performance dial.**
+   *
+   * Left `false`, the listener runs inline, inside the dispatcher's
+   * `kernelContext` and `ormContext`: it has the request's `app()`, the
+   * authenticated user through `currentActor()`, and it joins the ambient
    * transaction.
+   *
+   * Set `true`, it is handed to the `QueueManager` instead and run from a
+   * drain, on the queue's terms. What crosses is the event's name and its
+   * constructor arguments as JSON, and nothing else — not the instance the sync
+   * listeners share, and not a line of the request. With `worker = true` it is
+   * a different thread with a cloned application.
+   *
+   * The part that catches people is that the context is not reliably *gone*
+   * either: the queue is in-process, so a drain that happens to start from
+   * `push` is still standing in the dispatcher's context and `app()` there
+   * resolves the request's application. Nothing about that is promised. A
+   * queued listener that reads the current actor, or writes expecting to join
+   * the ambient transaction, works until the day the queue was already busy —
+   * and then reads different rows, or commits separately, with no error either
+   * way. So: a listener that needs the request's context has to stay sync, and
+   * a listener that only needs the payload is free to queue.
+   *
+   * What it buys, in exchange, is the queue's whole retry path: `maxAttempts`,
+   * `onFail`-style re-queueing and dead-lettering, none of which a sync
+   * listener has. `dispatchAndWait` does **not** wait for it.
+   */
+  queued = false;
+
+  /**
+   * Attempts before the queue gives up, counting the first. `Job`'s field and
+   * `Job`'s meaning, because it is forwarded to one.
+   *
+   * **Ignored unless `queued` is true.** A sync listener has no retry path at
+   * all — its throw is logged and the next listener runs — so a `maxAttempts`
+   * beside `queued = false` is a line that does nothing, which is why it is
+   * said here rather than in a note somewhere else.
+   */
+  maxAttempts = 3;
+
+  /**
+   * Runs `handle` in a Worker thread with its own cloned application, for a
+   * queued listener whose work is CPU-bound. `Job`'s field and `Job`'s
+   * meaning, because it is forwarded to one.
+   *
+   * **Ignored unless `queued` is true.** A sync listener runs on the
+   * dispatcher's stack by definition; there is no thread to move it to.
+   */
+  worker = false;
+
+  /**
+   * The side effect. Runs inside the dispatcher's context when `queued` is
+   * false: a sync listener has the request's `app()`, its authenticated user,
+   * and its ambient transaction. A queued one can rely on none of them — see
+   * `queued`.
    *
    * Annotate the parameter with the event named in `static event` — narrowing
    * the base's `Event` here is legal because method parameters are bivariant,

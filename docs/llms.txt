@@ -46,7 +46,7 @@ Each link below points to a self-contained Markdown page. For a single file cont
 - [Jobs & Queues](https://nstfkc.github.io/gemi/jobs-and-queues.md): defining and dispatching background Jobs through the in-process queue.
 - [Cron](https://nstfkc.github.io/gemi/cron.md): scheduling recurring CronJobs with Bun.cron.
 - [Commands](https://nstfkc.github.io/gemi/commands.md): one-off application commands written with defineCommand and run with `gemi run <name>`.
-- [Events & Listeners](https://nstfkc.github.io/gemi/events.md): Event subclasses dispatched with Event.dispatch/dispatchAndWait, Listener subclasses under app/listeners bound with `static event`, sync fan-out that no listener can cancel.
+- [Events & Listeners](https://nstfkc.github.io/gemi/events.md): Event subclasses dispatched with Event.dispatch/dispatchAndWait, Listener subclasses under app/listeners bound with `static event`, sync fan-out that no listener can cancel, and `queued = true` to run one on the queue instead.
 - [Broadcasting](https://nstfkc.github.io/gemi/broadcasting.md): websocket channels, the Broadcast facade, useSubscription/useBroadcast.
 - [Internationalization](https://nstfkc.github.io/gemi/i18n.md): component-scoped dictionaries, useTranslator, useLocale, locale detection.
 

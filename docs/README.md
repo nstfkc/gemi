@@ -60,7 +60,7 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 - **[Jobs & Queues](./jobs-and-queues.md)** — defining and dispatching background `Job`s.
 - **[Cron](./cron.md)** — scheduling recurring `CronJob`s.
 - **[Commands](./commands.md)** — one-off application commands run with `gemi run`.
-- **[Events & Listeners](./events.md)** — `Event.dispatch(...)` fanning out to the listeners under `app/listeners`.
+- **[Events & Listeners](./events.md)** — `Event.dispatch(...)` fanning out to the listeners under `app/listeners`, inline or on the queue.
 - **[Broadcasting](./broadcasting.md)** — websocket channels, the `Broadcast` facade, `useSubscription` / `useBroadcast`.
 - **[Internationalization](./i18n.md)** — component-scoped dictionaries, `useTranslator`, `useLocale`, locale detection.
 
