@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { SLOW_TRANSACTION_THRESHOLD } from "../database/config";
 import { CrossConnectionTransactionError } from "../database/Connection";
@@ -6,6 +6,7 @@ import {
   assertConnectionUsable,
   currentConnectionName,
   currentTransaction,
+  deferUntilCommit,
   isSystemScope,
   ormContext,
   runAsSystem,
@@ -214,7 +215,330 @@ describe("the ambient transaction scope", () => {
     const pool = fakePool("a");
 
     await withTransaction(pool, async () => {
-      expect(ormContext.getStore()).toEqual({ tx: pool.handle, depth: 0 });
+      // The after-commit list is created empty by every outermost transaction
+      // rather than on first use: a savepoint's scope is a spread of this one,
+      // so a list that appeared later would appear on the savepoint's copy and
+      // not on the parent that has to drain it.
+      expect(ormContext.getStore()).toEqual({
+        tx: pool.handle,
+        depth: 0,
+        afterCommit: [],
+      });
+    });
+  });
+});
+
+/**
+ * `afterCommit`: work registered inside a transaction that must not happen
+ * unless it commits.
+ *
+ * The failure is one an application cannot see. A welcome email sent from
+ * inside a transaction that then rolls back leaves a user who does not exist
+ * and has been welcomed — nothing errored, and the two halves are in different
+ * subsystems by the time anyone looks.
+ *
+ * Every test here drives `withTransaction` rather than the store, because the
+ * property is about *where the list lives*: an implementation on a module-level
+ * array passes anything written against a single transaction and is wrong the
+ * moment two of them overlap.
+ */
+describe("work deferred to the commit", () => {
+  // One test below spies on `console.error`; without this it stays spied for
+  // every test after it in the file, which would swallow output the next
+  // failure needs.
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  test("runs after the transaction settles, in registration order", async () => {
+    const pool = fakePool("a");
+    const ran: string[] = [];
+
+    await withTransaction(pool, async () => {
+      expect(deferUntilCommit(() => void ran.push("first"))).toBe(true);
+      expect(deferUntilCommit(() => void ran.push("second"))).toBe(true);
+      // Still nothing: the whole point is that this is not "run it later on the
+      // microtask queue", it is "run it if the database keeps the write".
+      expect(ran).toEqual([]);
+    });
+
+    expect(ran).toEqual(["first", "second"]);
+  });
+
+  test("the transaction does not resolve until the callbacks have", async () => {
+    const pool = fakePool("a");
+    const order: string[] = [];
+
+    await withTransaction(pool, async () => {
+      deferUntilCommit(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        order.push("callback");
+      });
+    });
+    order.push("caller");
+
+    // Deliberate, and the one thing about `afterCommit` a caller can feel: a
+    // floating drain would be a rejection nobody sees and work a short-lived
+    // process can exit out from under.
+    expect(order).toEqual(["callback", "caller"]);
+  });
+
+  test("nothing runs when the transaction rolls back", async () => {
+    const pool = fakePool("a");
+    const ran: string[] = [];
+
+    await expect(
+      withTransaction(pool, async () => {
+        deferUntilCommit(() => void ran.push("welcome email"));
+        throw new Error("billing declined");
+      }),
+    ).rejects.toThrow("billing declined");
+
+    expect(ran).toEqual([]);
+  });
+
+  /**
+   * A savepoint has committed nothing durable, so draining at its close would
+   * run work that a rollback of the enclosing transaction was meant to prevent
+   * — the same failure, one level in and harder to see.
+   */
+  test("a savepoint's callbacks wait for the outer transaction, not for it", async () => {
+    const pool = fakePool("a");
+    const ran: string[] = [];
+
+    await withTransaction(pool, async () => {
+      await withTransaction(pool, async () => {
+        deferUntilCommit(() => void ran.push("inside the savepoint"));
+      });
+
+      // The savepoint has closed and nothing has run.
+      expect(ran).toEqual([]);
+    });
+
+    expect(ran).toEqual(["inside the savepoint"]);
+  });
+
+  test("a savepoint's callbacks are discarded with the outer rollback", async () => {
+    const pool = fakePool("a");
+    const ran: string[] = [];
+
+    await expect(
+      withTransaction(pool, async () => {
+        await withTransaction(pool, async () => {
+          deferUntilCommit(() => void ran.push("inside the savepoint"));
+        });
+        throw new Error("boom");
+      }),
+    ).rejects.toThrow("boom");
+
+    expect(ran).toEqual([]);
+  });
+
+  /**
+   * The case a shared array gets wrong on its own, and the reason the savepoint
+   * branch marks and truncates: the savepoint rolled back, the transaction went
+   * on to commit, and what was registered inside the discarded block must go
+   * with it while everything around it stays.
+   */
+  test("a savepoint that rolls back drops what was deferred inside it", async () => {
+    const pool = fakePool("a");
+    const ran: string[] = [];
+
+    await withTransaction(pool, async () => {
+      deferUntilCommit(() => void ran.push("before"));
+
+      await expect(
+        withTransaction(pool, async () => {
+          deferUntilCommit(() => void ran.push("inside"));
+          throw new Error("savepoint failed");
+        }),
+      ).rejects.toThrow("savepoint failed");
+
+      deferUntilCommit(() => void ran.push("after"));
+    });
+
+    expect(ran).toEqual(["before", "after"]);
+  });
+
+  /**
+   * Depth alone cannot tell two siblings apart — they leave entries at the same
+   * depth, adjacent in one list — so a "drop everything at or below the failing
+   * depth" implementation discards the committed sibling's work too. That
+   * implementation passes every other test in this file.
+   */
+  test("a sibling savepoint that committed keeps its callbacks", async () => {
+    const pool = fakePool("a");
+    const ran: string[] = [];
+
+    await withTransaction(pool, async () => {
+      await withTransaction(pool, async () => {
+        deferUntilCommit(() => void ran.push("committed sibling"));
+      });
+
+      await expect(
+        withTransaction(pool, async () => {
+          deferUntilCommit(() => void ran.push("rolled back sibling"));
+          throw new Error("savepoint failed");
+        }),
+      ).rejects.toThrow("savepoint failed");
+    });
+
+    expect(ran).toEqual(["committed sibling"]);
+  });
+
+  /**
+   * The reason draining re-enters the pre-transaction scope explicitly rather
+   * than trusting where a `.then` captured its context.
+   *
+   * Bun's handle stays callable after `begin` resolves — queries on it run on
+   * the pool, outside any transaction, and succeed — so a callback that still
+   * saw the handle would not fail. It would join nothing, silently, and a
+   * listener opening its own transaction would `savepoint` on a transaction
+   * that is over.
+   */
+  test("a callback runs outside the transaction it was deferred by", async () => {
+    const pool = fakePool("a");
+    let handle: unknown = "unset";
+    let depth: number | null = -1;
+
+    await withTransaction(pool, async () => {
+      deferUntilCommit(() => {
+        handle = currentTransaction();
+        depth = transactionDepth();
+      });
+    });
+
+    expect(handle).toBeUndefined();
+    expect(depth).toBeNull();
+  });
+
+  test("the scope around the transaction is still there for the callbacks", async () => {
+    const pool = fakePool("a");
+    let system: boolean | null = null;
+
+    await runAsSystem(() =>
+      withTransaction(pool, async () => {
+        deferUntilCommit(() => void (system = isSystemScope()));
+      }),
+    );
+
+    // Restored, not dropped: the transaction nested inside `asSystem`, so the
+    // work it deferred belongs to that block too.
+    expect(system).toBe(true);
+  });
+
+  test("a callback opening its own transaction gets a real one", async () => {
+    const outer = fakePool("outer");
+    const inner = fakePool("inner");
+    let depth: number | null = null;
+
+    await withTransaction(outer, async () => {
+      deferUntilCommit(() =>
+        withTransaction(inner, async () => {
+          depth = transactionDepth();
+        }),
+      );
+    });
+
+    // 0, not 1: a savepoint on the closed transaction would have reported 1,
+    // and would have been taken on a handle that is back in the pool.
+    expect(depth).toBe(0);
+  });
+
+  test("a throwing callback neither rejects the transaction nor stops the next", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const pool = fakePool("a");
+    const ran: string[] = [];
+
+    // Rejecting here would have the caller roll back or retry work the database
+    // has already kept — the transaction succeeded, and the callback is a side
+    // effect it was never waiting on.
+    await expect(
+      withTransaction(pool, async () => {
+        deferUntilCommit(() => {
+          throw new Error("smtp is down");
+        });
+        deferUntilCommit(() => void ran.push("second"));
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(ran).toEqual(["second"]);
+    expect(String(vi.mocked(error).mock.calls[0]![0])).toContain(
+      "after-commit",
+    );
+  });
+
+  /**
+   * The concurrency property of the file, extended to the new field. An
+   * implementation holding the callbacks anywhere shared — a module-level
+   * array, a field on the manager — runs A's deferred work when B commits, and
+   * runs it twice.
+   */
+  test("two concurrent transactions never see each other's deferred work", async () => {
+    const first = fakePool("first");
+    const second = fakePool("second");
+    const ran: string[] = [];
+
+    async function run(pool: any, label: string, delays: number[]) {
+      await withTransaction(pool, async () => {
+        for (const delay of delays) {
+          await new Promise((resolve) => setTimeout(resolve, delay));
+          deferUntilCommit(() => void ran.push(label));
+        }
+      });
+    }
+
+    await Promise.all([
+      run(first, "A", [0, 4, 0, 6]),
+      run(second, "B", [2, 0, 5, 0]),
+    ]);
+
+    expect(ran.filter((entry) => entry === "A")).toHaveLength(4);
+    expect(ran.filter((entry) => entry === "B")).toHaveLength(4);
+  });
+
+  test("a rollback discards only its own transaction's callbacks", async () => {
+    const committing = fakePool("committing");
+    const failing = fakePool("failing");
+    const ran: string[] = [];
+
+    await Promise.all([
+      withTransaction(committing, async () => {
+        deferUntilCommit(() => void ran.push("committed"));
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }),
+      expect(
+        withTransaction(failing, async () => {
+          deferUntilCommit(() => void ran.push("rolled back"));
+          await new Promise((resolve) => setTimeout(resolve, 2));
+          throw new Error("boom");
+        }),
+      ).rejects.toThrow("boom"),
+    ]);
+
+    expect(ran).toEqual(["committed"]);
+  });
+
+  /**
+   * The return value is the contract, and ignoring it is how a dispatch
+   * disappears: there is nothing here that will ever drain, so a caller that
+   * queued and returned would have queued into a leak.
+   */
+  test("outside a transaction there is nothing to defer to", () => {
+    const ran: string[] = [];
+
+    expect(deferUntilCommit(() => void ran.push("now"))).toBe(false);
+    expect(ran).toEqual([]);
+  });
+
+  test("a hand-built scope carrying a handle defers nothing either", async () => {
+    const pool = fakePool("a");
+
+    // No list, because nothing opened this scope through `withTransaction` —
+    // so there is no commit to hook and `false` is the only honest answer.
+    await ormContext.run({ tx: pool.handle, depth: 0 }, async () => {
+      expect(currentTransaction()).toBe(pool.handle);
+      expect(deferUntilCommit(() => {})).toBe(false);
     });
   });
 });
