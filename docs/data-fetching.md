@@ -3,8 +3,8 @@
 gemi ships a small set of typed hooks for talking to your API routes from the
 client, plus a server-side facade for priming that data during SSR. Every hook is
 fully type-safe: the endpoint path, its params, its search input, and its response
-shape are all inferred from your API routes through the generated `gemi.d.ts` network
-layer. You never write a raw `fetch` or hand-annotate a response type.
+shape are all inferred from your API routes through the type augmentation `gemi/client`
+ships. You never write a raw `fetch` or hand-annotate a response type.
 
 All hooks and components below come from `gemi/client`:
 
@@ -436,9 +436,42 @@ response types from your `api.ts` / `view.ts` routers and applies them to `useQu
 the mutation hooks, `Form`, and `ViewProps` / `LayoutProps` automatically. You get
 autocomplete for valid paths and params and typed response data, with no manual wiring.
 
-> **Note:** This is backed by a generated `gemi.d.ts` at your app root — don't edit it by
-> hand. Regenerate it after changing API routes with `gemi ide:generate-api-manifest`
-> (see the [CLI reference](./cli.md)).
+This is backed by an augmentation of the `RPC` and `ViewRPC` interfaces that reads your
+`api.ts` and `view.ts` routers. Since 0.56 it ships inside the package and is referenced
+by `gemi/client` and `gemi/facades`, so importing from either is the whole of the wiring
+— there is nothing to install and nothing to regenerate. The types are derived from your
+routers by the compiler, so they follow a route the moment you add one.
+
+> Upgrading from 0.55 or earlier? Delete your app's root `gemi.d.ts` and its
+> `"./node_modules/gemi/gemi.d.ts"` entry in `tsconfig.json`'s `types` — leaving them is
+> not a no-op. See [UPGRADE.md](../UPGRADE.md).
+
+### Jumping from a path to its handler
+
+The path in `useQuery("/reports")` names a handler as precisely as a call names a
+function, but the connection is made by conditional types rather than by a symbol, so
+go-to-definition has nothing to follow and stops at the string. gemi ships a TypeScript
+language service plugin that closes that gap. Add it to your `tsconfig.json`:
+
+```json
+{
+  "compilerOptions": {
+    "plugins": [{ "name": "gemi/ide/typescript-plugin" }]
+  }
+}
+```
+
+Go to definition on a route path then jumps to the code behind it — the controller
+method for `this.get(HomeController, "index")`, the callback for an inline handler, the
+right method of a `resource()` for the verb you are using, and for a view path both the
+component and the handler feeding it. Hovering a path names the route and its handler.
+It works on any typed path: `useQuery`, `useMutation`, `useMutate`, `Form`'s `action`,
+`Link`'s `href`, and on wrappers you write over them.
+
+> **VS Code** ships its own copy of TypeScript and ignores `plugins` unless told to use
+> the workspace's: run **TypeScript: Select TypeScript Version → Use Workspace Version**
+> once per project. Editors that drive `tsserver` over LSP — Neovim, Emacs, Helix,
+> JetBrains — read `tsconfig.json` directly and need nothing extra.
 
 ## Related
 
@@ -446,4 +479,3 @@ autocomplete for valid paths and params and typed response data, with no manual 
 - [Views and Layouts](./views-and-layouts.md) — server props vs. client queries.
 - [Controllers](./controllers.md) — writing the endpoints these hooks call.
 - [File Storage](./file-storage.md) — handling `useUpload` on the server.
-- [CLI](./cli.md) — regenerating `gemi.d.ts`.

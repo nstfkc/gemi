@@ -19,6 +19,13 @@
     "paths": {
       "@/app/*": ["./app/*"]
     },
+    // Makes go-to-definition on a route path — `useQuery("/suspense-demo/metrics")`,
+    // `<Link href="/dashboard">` — jump to the handler or view behind it.
+    //
+    // VS Code ships its own TypeScript and ignores this unless told to use the
+    // workspace's: run "TypeScript: Select TypeScript Version → Use Workspace
+    // Version" once. Editors that drive tsserver over LSP need nothing extra.
+    "plugins": [{ "name": "gemi/ide/typescript-plugin" }],
     "types": ["vite/client", "bun"]
   }
 }

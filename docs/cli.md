@@ -142,13 +142,15 @@ It reports one thing: a class carrying policies the registered class does not. A
 
 ## `gemi ide:generate-api-manifest`
 
-Generates the API route manifest used for editor integration (jump-to-definition from a route path to its controller method).
+Generates the API route manifest behind the Emacs integration in `packages/gemi/ide/emacs`, which lists your routes and jumps to the handler you pick.
 
 ```bash
 gemi ide:generate-api-manifest
 ```
 
 It statically parses your API routes starting from `app/http/routes/api.ts`, resolves each route + HTTP method to the source position of its handler (the controller method when the route is `this.get(Controller, "method")`, otherwise the router callback), and writes a manifest under `.gemi/cache/api-routes-manifest`. This is meant to be run by tooling rather than by hand.
+
+For go-to-definition *from a route path you have already written* — `useQuery("/reports")`, `<Link href="/about">` — use the TypeScript language service plugin instead, which works in any editor that runs `tsserver`. See [Data Fetching → Jumping from a path to its handler](./data-fetching.md#jumping-from-a-path-to-its-handler).
 
 ## `gemi app:component-tree`
 

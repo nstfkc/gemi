@@ -14,7 +14,13 @@
   // shipped, none of them checked. (A sixth, `runtime`, was in that list until
   // it was deleted as dead.)
   //
-  // `client` is covered by tsconfig.browser.json instead.
+  // `client` is covered by tsconfig.browser.json instead, and
+  // `ide/typescript-plugin` by its own — see below.
+  //
+  // `ide/typescript-plugin` is excluded from *this* config but is not
+  // unchecked: it has its own `tsconfig.json`, which `bun run typecheck` also
+  // runs. It stays out of here because this config emits declarations into
+  // `dist/`, and the plugin needs none — tsserver `require()`s the built JS.
   //
   // KNOWINGLY EXCLUDED, and not for the reason it looks like: `bun/` holds two
   // public exports of its own — `./bun/preload` and `./bun/plugin` — so the
