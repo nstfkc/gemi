@@ -2,6 +2,26 @@ import { Job } from "./Job";
 import { queueConfigDefaults, type QueueConfig } from "./config";
 import { withDefaults } from "../../support/withDefaults";
 
+/**
+ * The thread a `worker = true` job runs in.
+ *
+ * The `await` on `dispatchJob` is load-bearing and its absence was a hang.
+ * `postMessage` structured-clones its argument and a Promise is not cloneable,
+ * so an un-awaited `dispatchJob` posted the pending promise, threw
+ * `DataCloneError` inside this handler, and posted nothing at all. `runInWorker`
+ * then never settled: `run` below never returned, `activeRunningJobsCount` was
+ * never decremented, and neither the retry path nor `onDeadletter` ever fired —
+ * after `concurrency` such jobs the queue sits in `next()`'s one-second poll
+ * forever, with no error anywhere. Any job whose `run` is `async` hit it, which
+ * is every job that touches IO; a queued listener hits it unconditionally,
+ * because the synthetic job's `run` awaits `handle`.
+ *
+ * The await earns two more things. A rejecting job now reaches the `catch` and
+ * comes back as `{error}`, where the queue's ordinary retry-then-dead-letter
+ * path can have it, instead of being lost with the promise. And `destroy()` now
+ * runs after the job rather than under it, so the cloned kernel — its database
+ * connections included — outlives the work it was cloned for.
+ */
 function createWorker() {
   const APP_DIR = process.env.APP_DIR;
   const ROOT_DIR = process.env.ROOT_DIR;
@@ -20,7 +40,7 @@ function createWorker() {
         let result = null;
         let error = null;
         try {
-          result = clone.dispatchJob(event.data.jobName, event.data.args)
+          result = await clone.dispatchJob(event.data.jobName, event.data.args)
         } catch (err) {
           error = err
         }

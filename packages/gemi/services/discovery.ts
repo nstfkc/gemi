@@ -338,7 +338,11 @@ function warnIfListenerNameWillNotSurviveTheBuild(listeners: ListenerClass[]) {
     console.warn(
       `Event listener ${listener.name} does not declare \`static name\`, so ` +
         `it is registered under its class name, which a production build ` +
-        `renames. Add: static name = "${listener.name}";`,
+        `renames. Nothing reads that name across a build boundary while the ` +
+        `listener is sync, which is why this is a warning — but adding ` +
+        `\`queued = true\` to it is refused at boot for the same reason, ` +
+        `because the queue's key is that string. Add: static name = ` +
+        `"${listener.name}";`,
     );
   }
 }
