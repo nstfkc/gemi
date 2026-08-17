@@ -3,7 +3,6 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { Application } from "../../foundation/Application";
 import { kernelContext } from "../../kernel/context";
 import { Repository } from "../../support/Repository";
-import { Job } from "../queue/Job";
 import { QueueManager } from "../queue/QueueManager";
 import { QueueServiceProvider } from "../queue/QueueServiceProvider";
 import { Event } from "./Event";
@@ -89,6 +88,21 @@ async function makeApp(listeners: ListenerClass[]) {
 }
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+/**
+ * Everything a `console.error` spy saw, one string per call.
+ *
+ * Assertions about a queued listener's failure go through this rather than
+ * through a spy on `Job.prototype.onDeadletter`, and the difference is the
+ * point: the hooks are overridden on the synthetic job, so a prototype spy
+ * would not fire, and stderr is the only thing an operator gets. A test that
+ * watched the hook would pass over an implementation that writes nothing.
+ */
+const consoleLines = (spy: { mock: { calls: unknown[][] } }) =>
+  spy.mock.calls.map((call) => call.map(String).join(" "));
+
+const deadletterLine = (spy: { mock: { calls: unknown[][] } }) =>
+  consoleLines(spy).find((line) => line.includes("dead-lettered"));
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -221,7 +235,7 @@ describe("what crosses the queue", () => {
 
 describe("a queued listener that always throws", () => {
   test("is retried and dead-lettered by the queue, on its own maxAttempts", async () => {
-    const deadlettered = vi.spyOn(Job.prototype, "onDeadletter");
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
     let attempts = 0;
 
     const application = await makeApp([
@@ -238,15 +252,47 @@ describe("a queued listener that always throws", () => {
     await kernelContext.run(application, () =>
       UserRegistered.dispatchAndWait(7, "ada@example.com"),
     );
-    await vi.waitFor(() => expect(deadlettered).toHaveBeenCalled());
+    await vi.waitFor(() => expect(deadletterLine(error)).toBeDefined());
 
     // Two, not the queue's default of three: `maxAttempts` is read off the
     // listener and forwarded to the job it is registered as.
     expect(attempts).toBe(2);
-    expect((deadlettered.mock.calls[0]![0] as Error).message).toBe(
-      "smtp is down",
-    );
     expect(application.make(QueueManager).queue.size).toBe(0);
+
+    // `dispatchAndWait` resolved before the first attempt failed, so this line
+    // is the entire signal that a side effect stopped happening. It names the
+    // listener, the event it was bound to, and the error, the way the sync
+    // path's own catch does.
+    expect(deadletterLine(error)).toContain("SendWelcomeEmail");
+    expect(deadletterLine(error)).toContain("UserRegistered");
+    expect(deadletterLine(error)).toContain("smtp is down");
+  });
+});
+
+describe("a payload naming an event this process does not know", () => {
+  test("dead-letters with the name in the message, off the queue", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const application = await makeApp([
+      listener("SendWelcomeEmail", () => {}, { maxAttempts: 1 }),
+    ]);
+    const queue = application.make(QueueManager);
+    const [job] = queue.registeredJobs;
+
+    // Pushed rather than calling `rehydrate` directly, because the path is the
+    // point: a payload already off the queue, reaching the synthetic job's
+    // `run` in a process whose event registry has no `OrderPaid`. That is the
+    // `worker = true` shape — a thread that booted a different build of the
+    // application and discovered different listeners — and nothing above `run`
+    // is still waiting to be told about it.
+    await kernelContext.run(application, () =>
+      queue.push(job!, JSON.stringify(["OrderPaid", []])),
+    );
+    await vi.waitFor(() => expect(deadletterLine(error)).toBeDefined());
+
+    expect(deadletterLine(error)).toContain("SendWelcomeEmail");
+    expect(deadletterLine(error)).toContain(
+      'Cannot rebuild the event "OrderPaid"',
+    );
   });
 });
 
@@ -288,10 +334,14 @@ describe("the synthetic job", () => {
     const name = Object.getOwnPropertyDescriptor(job, "name");
 
     expect(name?.value).toBe("listener:SendWelcomeEmail");
-    // Writable is the whole point of the redefinition, not a detail of it:
-    // discovery tells a declared `static name` from an implicit class binding
-    // by exactly this descriptor, so a non-writable one would be reported at
-    // every boot as a job the author never wrote and cannot fix.
+    // Pinned because it is easy to drop and nothing would fail if it were:
+    // `Object.defineProperty` keeps the attributes it is not given, and a
+    // class's own `name` is non-writable, so leaving the flag out produces a
+    // descriptor that every "was this name declared?" check in the framework
+    // reads as an implicit class binding. No such check is pointed at a
+    // registered job today — they all walk a directory — and one moved to the
+    // queue's registry would start reporting these as jobs the author never
+    // wrote and cannot fix.
     expect(name?.writable).toBe(true);
   });
 

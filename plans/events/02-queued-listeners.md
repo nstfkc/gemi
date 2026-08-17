@@ -74,10 +74,20 @@ dead-lettering, `concurrency` and worker-thread execution are four features that
 already exist, are already documented for apps, and are already tested. A
 parallel implementation would be four features that are almost the same.
 
-`writable: true` on the redefined `name` is not cosmetic — it is what
-`warnIfNameWillNotSurviveTheBuild` reads to decide a name was *declared*. A
-synthetic class whose name is a non-writable own property would be reported to
-the author as a job they never wrote and cannot fix.
+`writable: true` on the redefined `name` is what makes the descriptor match the
+one a declared `static name = "..."` field produces, which is what every "was
+this name declared?" check in the framework reads — they compare descriptors,
+not strings, because the two spellings read the same string in development.
+
+**Correction, from the implementation.** This was written as
+`warnIfNameWillNotSurviveTheBuild` reading it, and that check cannot see a
+synthetic job: it is module-private to `discovery.ts` and runs only over the
+classes `discoverJobs()` found on disk, while these are built in memory and
+handed straight to `registerJob`. So nothing reads the flag today. It is kept
+because the check that would report a synthetic entry as "a job you never wrote
+and cannot fix" is one registry away — the queue's own — and because
+`Object.defineProperty` keeps the attributes it is not given, so dropping the
+flag silently leaves the class's non-writable `name` behind.
 
 ## Deliverables
 
@@ -106,16 +116,26 @@ Both are ignored when `queued` is false, and that is worth a doc comment on each
 rather than a note somewhere else: a `maxAttempts = 5` on a sync listener is a
 line an author wrote that does nothing.
 
-### 3. `static name` on `Listener` becomes required
+### 3. `static name` on a **queued** `Listener` becomes required
 
-In iteration 1 the listener's own name was internal. Here it is the queue's key
-and it crosses a JSON boundary, so it inherits the whole minification story from
-invariant 1 — and `discoverListeners` already has the check written for the
-event class; point it at the listener class too.
+In iteration 1 the listener's own name was internal. Once it is queued the name
+is the queue's key and it crosses a JSON boundary, so it inherits the whole
+minification story from invariant 1 — and `discoverListeners` already has the
+check written for the event class; point it at the listener class too.
 
-Upgrade the iteration-1 `warnIfListenerNameWillNotSurviveTheBuild` from advisory
-to something an author cannot miss: a queued listener whose name is implicit is
-a side effect that stops happening in production only.
+Upgrade the iteration-1 advisory to something an author cannot miss: a queued
+listener whose name is implicit is a side effect that stops happening in
+production only.
+
+**Narrowed, from the implementation.** This was written as "required on
+`Listener`", meaning every listener, and the refusal belongs only where the
+hazard is. The refusal is `jobForListener`'s and it throws at registration for a
+queued listener; `warnIfListenerNameWillNotSurviveTheBuild` stays a warning for
+a sync one, because a sync listener's name has no second reader for a minified
+build to disagree with — every reader of it comes from the same source-side
+walk. Refusing it would stop a boot over a failure that cannot occur, and the
+warning names the upgrade path so an author adding `queued = true` later is not
+surprised by it.
 
 ### 4. `EventManager.rehydrate(eventName, args)`
 
@@ -149,8 +169,15 @@ as its own subsection rather than a parenthesis:
 - A sync listener runs inside the dispatcher's `kernelContext` and `ormContext`.
   It sees the request's `app()`, the authenticated user via `currentActor()`,
   and joins the ambient transaction.
-- A queued listener runs later, from `QueueManager.next()`, outside all of it —
+- A queued listener runs from `QueueManager.next()` and may rely on none of it —
   and with `worker = true`, in a different thread with a cloned app.
+
+The second bullet said "outside all of it" and the docs must not: the queue is
+in-process and `push` starts the drain, so a queued listener frequently runs
+*inside* the dispatching request's context, and whether it does depends on
+whether the queue was already busy. Write it as what may be relied on, and see
+the correction under invariant 4 — an intermittently present context is the
+worse hazard of the two, not the milder one.
 
 The failure this prevents is a policied `Model` read inside a listener returning
 different rows depending on a flag the author set for latency reasons.

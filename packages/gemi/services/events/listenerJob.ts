@@ -54,6 +54,7 @@ export function jobForListener(
 
   const attempts = instance.maxAttempts;
   const inWorker = instance.worker;
+  const boundTo = listener.event.name;
 
   const job = class extends Job {
     maxAttempts = attempts;
@@ -64,15 +65,65 @@ export function jobForListener(
       const event = app(EventManager).rehydrate(eventName, args);
       await new listener().handle(event);
     }
+
+    // The queue's failure path is silent unless a job writes to it: `onFail`
+    // and `onDeadletter` on `Job` are empty bodies, and `QueueManager.run`
+    // routes every rejection into exactly those two. Without these overrides a
+    // queued listener that throws produces no output anywhere — `dispatch`
+    // returned long ago, the sync path's "the listener X threw while handling
+    // Y" line is on a branch this listener never takes, and the last thing that
+    // happens is the entry leaving the queue. A welcome email that stopped
+    // being sent in production would look exactly like one that was never
+    // dispatched.
+    //
+    // That is also what makes `rehydrate`'s throw the informative failure it is
+    // documented as: a payload naming an event this process does not know is
+    // the shape a `worker = true` listener hits when its thread booted a
+    // different build of the application, and it is unreachable from the
+    // dispatcher's stack.
+    //
+    // Both hooks, not one. `onFail` carries the error and fires per attempt, so
+    // a listener failing differently on each is visible; `onDeadletter` fires
+    // once and reports the fact no attempt is left, which is a different thing
+    // to know and the only line that means the work is gone. The final attempt
+    // logs both, deliberately.
+    //
+    // The event is named from `static event` rather than from the payload:
+    // reading the payload here means parsing it, and a throw out of either hook
+    // would escape through `QueueManager.run`'s `catch` into a `run()` nobody
+    // awaits.
+    onFail(error: Error) {
+      console.error(
+        `The listener ${listener.name} threw while handling ${boundTo} off ` +
+          `the queue. The queue will retry it up to ${attempts} times in ` +
+          `total; nothing the dispatcher did is waiting on it.`,
+        error,
+      );
+    }
+
+    onDeadletter(error: Error) {
+      console.error(
+        `The listener ${listener.name} failed every one of its ${attempts} ` +
+          `attempts at ${boundTo} and has been dead-lettered, so this side ` +
+          `effect did not happen and will not be retried.`,
+        error,
+      );
+    }
   };
 
-  // Not cosmetic, either half of it. The queue keys its registry off
-  // `job.name`, so without this the entry would be named after whatever
-  // binding this class expression picked up. And `writable: true` is what
-  // `warnIfNameWillNotSurviveTheBuild` reads to decide a name was *declared*:
-  // a synthetic class whose `name` was a non-writable own property would be
-  // reported to the author at every boot as a job they never wrote, under a
-  // fix they cannot apply.
+  // The `value` is load-bearing: the queue keys its registry off `job.name`,
+  // so without it the entry would be named after whatever binding this class
+  // expression picked up. `writable: true` is the other half, and nothing
+  // reads it today — it is here so the descriptor matches the one a declared
+  // `static name = "..."` field produces. Every "was this name declared?"
+  // check in the framework is a descriptor read rather than a value read
+  // (`discovery.ts`, and `refuseImplicitName` below), because in development
+  // the declared and the implicit spelling read the same string; and
+  // redefining `name` without the flag leaves the class's own non-writable
+  // descriptor in place. So a check later pointed at a *registered* job rather
+  // than a discovered one — the queue's registry is the obvious place to move
+  // one — would report every synthetic entry as a job the author never wrote,
+  // under a fix they cannot apply. Cheap to keep, wrong to drop.
   Object.defineProperty(job, "name", {
     value: listenerJobName(listener.name),
     writable: true,

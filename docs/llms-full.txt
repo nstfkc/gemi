@@ -8892,6 +8892,8 @@ If the name on the payload resolves to no registered event, the job throws with 
 
 These are the queue's, exactly as [Jobs & Queues](./jobs-and-queues.md) documents them: when `handle` throws, the listener is re-queued until it has been attempted `maxAttempts` times, and the last failure dead-letters it. A sync listener has none of this — its throw is logged once and the next listener runs.
 
+Every attempt that throws is written to stderr with the listener's name, the event it is bound to and the error, and the dead-letter is written separately, because "it failed again" and "it will not be tried again" are different things to know. By then `dispatchAndWait` has long since resolved and no caller is left to tell, so those lines are the whole of what says a side effect stopped happening.
+
 > **Note:** The queue is **in-memory and in-process**. A queued listener that has not run when the process exits does not run. That is true of every job today, but an event system invites "dispatch it and it will happen", so it is worth saying plainly: a dispatch is not a durability guarantee. Work that must survive a restart wants a row somewhere that a later pass can pick up.
 
 `dispatchAndWait` does **not** wait for a queued listener. When it resolves, every sync listener has settled and the queued ones have been handed to the queue — which may mean not started, or already failed once and re-queued.
