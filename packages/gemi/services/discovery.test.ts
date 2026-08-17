@@ -17,7 +17,16 @@ import type { ConfigItems } from "../support/Repository";
 import { Scheduler } from "./cron/Scheduler";
 import { ScheduleServiceProvider } from "./cron/ScheduleServiceProvider";
 import { CronJob } from "./cron/CronJob";
-import { discoverCommands, discoverCronJobs, discoverJobs } from "./discovery";
+import {
+  discoverCommands,
+  discoverCronJobs,
+  discoverJobs,
+  discoverListeners,
+} from "./discovery";
+import { EventManager } from "./events/EventManager";
+import { EventServiceProvider } from "./events/EventServiceProvider";
+import { Event } from "./events/Event";
+import { Listener } from "./events/Listener";
 import { Job } from "./queue/Job";
 import { QueueManager } from "./queue/QueueManager";
 import { QueueServiceProvider } from "./queue/QueueServiceProvider";
@@ -78,6 +87,38 @@ export class ${name} extends CronJob {
   cron = ${JSON.stringify(expression)};
 }`;
 
+const EVENT = JSON.stringify(resolve(import.meta.dirname, "events/Event.ts"));
+const LISTENER = JSON.stringify(
+  resolve(import.meta.dirname, "events/Listener.ts"),
+);
+
+/**
+ * An `Event` subclass. `declared` picks which of the two spellings of a name it
+ * gets — the string literal that survives a production build, or the implicit
+ * class binding that does not. Both read the same in development, which is the
+ * whole reason the check on them is on the property descriptor.
+ */
+const event = (name: string, declared = true) => `import { Event } from ${EVENT};
+export class ${name} extends Event {
+  ${declared ? `static name = ${JSON.stringify(name)};` : ""}
+}`;
+
+/**
+ * A `Listener` bound to an event it imports the way an app would — from
+ * `app/events`, a directory nothing walks.
+ */
+const listener = (
+  name: string,
+  eventName: string,
+  { from = "../events", declared = true } = {},
+) => `import { Listener } from ${LISTENER};
+import { ${eventName} } from "${from}/${eventName}";
+export class ${name} extends Listener {
+  ${declared ? `static name = ${JSON.stringify(name)};` : ""}
+  static event = ${eventName};
+  handle() {}
+}`;
+
 /**
  * Boots an application holding nothing but the provider under test, the way
  * `RateLimitMiddleware.test.ts` does — a real container, so the register/boot
@@ -85,7 +126,10 @@ export class ${name} extends CronJob {
  */
 async function boot(
   config: ConfigItems,
-  Provider: typeof QueueServiceProvider | typeof ScheduleServiceProvider,
+  Provider:
+    | typeof QueueServiceProvider
+    | typeof ScheduleServiceProvider
+    | typeof EventServiceProvider,
 ) {
   const application = new Application(new Repository(config));
   applications.push(application);
@@ -503,6 +547,368 @@ export const config = { retries: 3 };`,
         (command) => command.commandName,
       ),
     ).toEqual(["db:seed"]);
+  });
+});
+
+/**
+ * Listeners, the fourth directory discovery reads.
+ *
+ * The walk is the same one, so the skip rules are covered above. What is
+ * specific here is that a listener carries a *second* class — the event it
+ * binds to — and the registry is keyed by that event's name. So there are two
+ * name checks rather than one, and the second is the one that matters from the
+ * first dispatch: an event whose name is the implicit class binding is renamed
+ * by a production build on the dispatching side while discovery reads the
+ * listener's copy from source, and the dispatch then reaches nobody, silently
+ * and in production only.
+ */
+describe("asking an application what listeners it has", () => {
+  test("finds every Listener subclass under the directory, nested included", async () => {
+    const root = project({
+      "app/events/UserRegistered.ts": event("UserRegistered"),
+      "app/events/OrderPaid.ts": event("OrderPaid"),
+      "app/listeners/SendWelcomeEmail.ts": listener(
+        "SendWelcomeEmail",
+        "UserRegistered",
+      ),
+      "app/listeners/billing/IssueReceipt.ts": listener(
+        "IssueReceipt",
+        "OrderPaid",
+        { from: "../../events" },
+      ),
+    });
+
+    // The walk's order: entries are sorted per directory, and capitals sort
+    // before lowercase, so the file beats the directory beside it. Reproducible
+    // — which is all it is. Nothing may depend on one listener running before
+    // another, because nothing about a filesystem layout was chosen to say so.
+    expect(names(await discoverListeners(join(root, "app/listeners")))).toEqual([
+      "SendWelcomeEmail",
+      "IssueReceipt",
+    ]);
+  });
+
+  test("never returns the base class, however it got re-exported", async () => {
+    const root = project({
+      "app/events/UserRegistered.ts": event("UserRegistered"),
+      "app/listeners/SendWelcomeEmail.ts": listener(
+        "SendWelcomeEmail",
+        "UserRegistered",
+      ),
+      "app/listeners/base.ts": `export { Listener } from ${LISTENER};`,
+    });
+
+    expect(names(await discoverListeners(join(root, "app/listeners")))).toEqual([
+      "SendWelcomeEmail",
+    ]);
+  });
+
+  test("a directory that does not exist is an empty list, not a throw", async () => {
+    const root = project({ "app/config/events.ts": "" });
+
+    expect(await discoverListeners(join(root, "app/listeners"))).toEqual([]);
+  });
+
+  test("a file that will not import stops the walk and names it", async () => {
+    const root = project({
+      "app/events/UserRegistered.ts": event("UserRegistered"),
+      "app/listeners/Broken.ts": `import "./styles.css?raw";
+export class Broken {}`,
+    });
+
+    // Not a skip. Four listeners found out of five looks exactly like five out
+    // of five, and the one that vanished is a side effect nobody is waiting on.
+    await expect(
+      discoverListeners(join(root, "app/listeners")),
+    ).rejects.toThrow(/Broken\.ts could not be imported/);
+  });
+
+  /**
+   * A listener that binds to nothing is refused rather than warned about: it
+   * can be registered under no name, so it is a file the author wrote that will
+   * never run — and the compiler cannot see it, because `static event` is
+   * declared on the base and every subclass inherits the declaration whether or
+   * not it assigns one.
+   */
+  test("a listener with no `static event` stops the walk, by name", async () => {
+    const root = project({
+      "app/listeners/Unbound.ts": `import { Listener } from ${LISTENER};
+export class Unbound extends Listener {
+  static name = "Unbound";
+  handle() {}
+}`,
+    });
+
+    await expect(
+      discoverListeners(join(root, "app/listeners")),
+    ).rejects.toThrow(/Unbound declare no `static event`/);
+  });
+});
+
+/**
+ * The hazard discovery adds rather than removes, in its events form — and here
+ * it is worse than the queue's, because a dropped job at least says so on
+ * stderr while a dispatch that reaches no listener says nothing at all outside
+ * development.
+ */
+describe("a name that will not survive a production build", () => {
+  test("the event's is warned about, with the line that fixes it", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const root = project({
+      "app/events/UserRegistered.ts": event("UserRegistered", false),
+      "app/listeners/SendWelcomeEmail.ts": listener(
+        "SendWelcomeEmail",
+        "UserRegistered",
+      ),
+    });
+
+    await discoverListeners(join(root, "app/listeners"));
+
+    const message = vi.mocked(warn).mock.calls.at(-1)![0] as string;
+    expect(message).toContain("Event UserRegistered");
+    expect(message).toContain('static name = "UserRegistered"');
+  });
+
+  test("the listener's own is warned about too", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const root = project({
+      "app/events/UserRegistered.ts": event("UserRegistered"),
+      "app/listeners/SendWelcomeEmail.ts": listener(
+        "SendWelcomeEmail",
+        "UserRegistered",
+        { declared: false },
+      ),
+    });
+
+    await discoverListeners(join(root, "app/listeners"));
+
+    expect(vi.mocked(warn).mock.calls.at(-1)![0]).toContain(
+      'Event listener SendWelcomeEmail does not declare `static name`',
+    );
+  });
+
+  test("a listener and an event that both declare one are left alone", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const root = project({
+      "app/events/UserRegistered.ts": event("UserRegistered"),
+      "app/listeners/SendWelcomeEmail.ts": listener(
+        "SendWelcomeEmail",
+        "UserRegistered",
+      ),
+    });
+
+    await discoverListeners(join(root, "app/listeners"));
+
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The check reads the property descriptor, and this is what stops it
+   * degrading into a tautology on the next refactor: both classes below report
+   * the same `.name`, and only one of them will still report it after a
+   * minifier has been over the file that dispatches it.
+   */
+  test("the two spellings are told apart exactly, not guessed at", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const root = project({
+      // Same string on both sides. `Implicit` gets it from the class binding.
+      "app/events/Declared.ts": event("Declared"),
+      "app/events/Implicit.ts": event("Implicit", false),
+      "app/listeners/OnDeclared.ts": listener("OnDeclared", "Declared"),
+      "app/listeners/OnImplicit.ts": listener("OnImplicit", "Implicit"),
+    });
+
+    await discoverListeners(join(root, "app/listeners"));
+
+    expect(warn).toHaveBeenCalledOnce();
+    expect(vi.mocked(warn).mock.calls[0]![0]).toContain("Event Implicit");
+  });
+
+  test("and the descriptor is what separates them", () => {
+    class Implicit extends Event {}
+    class Explicit extends Event {
+      static name = "Explicit";
+    }
+
+    expect(Implicit.name).toBe("Implicit");
+    expect(Object.getOwnPropertyDescriptor(Implicit, "name")?.writable).toBe(
+      false,
+    );
+    expect(Object.getOwnPropertyDescriptor(Explicit, "name")?.writable).toBe(
+      true,
+    );
+  });
+});
+
+describe("the listener registry", () => {
+  test("is filled from app/listeners when the slice leaves `listeners` out", async () => {
+    const root = project({
+      "app/events/UserRegistered.ts": event("UserRegistered"),
+      "app/listeners/SendWelcomeEmail.ts": listener(
+        "SendWelcomeEmail",
+        "UserRegistered",
+      ),
+      "app/listeners/NotifyAdmins.ts": listener(
+        "NotifyAdmins",
+        "UserRegistered",
+      ),
+    });
+
+    const application = await boot(
+      { events: { listenersDir: join(root, "app/listeners") } },
+      EventServiceProvider,
+    );
+
+    // Two listeners on one event is the normal case here, where two jobs on one
+    // name is the pathological one.
+    expect(names(application.make(EventManager).registeredListeners)).toEqual([
+      "NotifyAdmins",
+      "SendWelcomeEmail",
+    ]);
+  });
+
+  test("an app with no `events` slice at all discovers, from the default app/listeners", async () => {
+    const root = project({
+      "app/events/UserRegistered.ts": event("UserRegistered"),
+      "app/listeners/SendWelcomeEmail.ts": listener(
+        "SendWelcomeEmail",
+        "UserRegistered",
+      ),
+    });
+
+    await withProjectRoot(root, async () => {
+      const application = await boot({}, EventServiceProvider);
+
+      expect(names(application.make(EventManager).registeredListeners)).toEqual(
+        ["SendWelcomeEmail"],
+      );
+    });
+  });
+
+  test("an explicit list wins and the directory is never read", async () => {
+    const root = project({
+      "app/events/UserRegistered.ts": event("UserRegistered"),
+      "app/listeners/SendWelcomeEmail.ts": listener(
+        "SendWelcomeEmail",
+        "UserRegistered",
+      ),
+    });
+
+    class Ping extends Event {
+      static name = "Ping";
+    }
+    class LogThePing extends Listener {
+      static name = "LogThePing";
+      static event = Ping;
+      handle() {}
+    }
+
+    const application = await boot(
+      {
+        events: {
+          listeners: [LogThePing],
+          listenersDir: join(root, "app/listeners"),
+        },
+      },
+      EventServiceProvider,
+    );
+
+    expect(names(application.make(EventManager).registeredListeners)).toEqual([
+      "LogThePing",
+    ]);
+  });
+
+  test("`listeners: []` means an app with no listeners, not one that wants them found", async () => {
+    const root = project({
+      "app/events/UserRegistered.ts": event("UserRegistered"),
+      "app/listeners/SendWelcomeEmail.ts": listener(
+        "SendWelcomeEmail",
+        "UserRegistered",
+      ),
+    });
+
+    const application = await boot(
+      { events: { listeners: [], listenersDir: join(root, "app/listeners") } },
+      EventServiceProvider,
+    );
+
+    expect(application.make(EventManager).registeredListeners).toEqual([]);
+  });
+
+  test("`listeners: undefined` counts as absent and discovers", async () => {
+    const root = project({
+      "app/events/UserRegistered.ts": event("UserRegistered"),
+      "app/listeners/SendWelcomeEmail.ts": listener(
+        "SendWelcomeEmail",
+        "UserRegistered",
+      ),
+    });
+
+    const application = await boot(
+      {
+        events: {
+          listeners: undefined,
+          listenersDir: join(root, "app/listeners"),
+        },
+      },
+      EventServiceProvider,
+    );
+
+    expect(names(application.make(EventManager).registeredListeners)).toEqual([
+      "SendWelcomeEmail",
+    ]);
+  });
+
+  test("a missing app/listeners leaves the registry empty rather than failing to boot", async () => {
+    const root = project({ "app/config/events.ts": "" });
+
+    const application = await boot(
+      { events: { listenersDir: join(root, "app/listeners") } },
+      EventServiceProvider,
+    );
+
+    expect(application.make(EventManager).registeredListeners).toEqual([]);
+  });
+
+  /**
+   * End to end, through a real container: the file on disk is what runs.
+   * Everything else here asserts on the registry, which cannot tell a listener
+   * that was registered from one that was registered *and dispatched to*.
+   */
+  test("and a dispatch reaches what was discovered", async () => {
+    const root = project({
+      "app/events/UserRegistered.ts": `import { Event } from ${EVENT};
+export class UserRegistered extends Event {
+  static name = "UserRegistered";
+  constructor(email) { super(); this.email = email; }
+}`,
+      "app/listeners/SendWelcomeEmail.ts": `import { Listener } from ${LISTENER};
+import { UserRegistered } from "../events/UserRegistered";
+export const seen = [];
+export class SendWelcomeEmail extends Listener {
+  static name = "SendWelcomeEmail";
+  static event = UserRegistered;
+  handle(event) { seen.push(event.email); }
+}`,
+    });
+
+    const application = await boot(
+      { events: { listenersDir: join(root, "app/listeners") } },
+      EventServiceProvider,
+    );
+
+    const { UserRegistered } = await import(
+      join(root, "app/events/UserRegistered.ts")
+    );
+    const { seen } = await import(
+      join(root, "app/listeners/SendWelcomeEmail.ts")
+    );
+
+    await application
+      .make(EventManager)
+      .dispatchAndWait(new UserRegistered("ada@example.com"));
+
+    expect(seen).toEqual(["ada@example.com"]);
   });
 });
 
