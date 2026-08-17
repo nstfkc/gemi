@@ -1,7 +1,27 @@
+import { app } from "../../foundation/app";
 import { withDefaults } from "../../support/withDefaults";
+import type { Job } from "../queue/Job";
+import { QueueManager } from "../queue/QueueManager";
 import { eventConfigDefaults, type EventConfig } from "./config";
-import type { Event } from "./Event";
+import type { Event, EventClass } from "./Event";
+import { jobForListener } from "./listenerJob";
 import type { ListenerClass } from "./Listener";
+
+/**
+ * One listener, and where it runs.
+ *
+ * `queued` is an instance field, so answering "does this one go on the queue?"
+ * means constructing the listener — done once here, at registration, rather
+ * than once per dispatch. The synthetic job is built at the same moment for the
+ * same reason: `EventServiceProvider.boot()` has to hand it to the queue before
+ * the first dispatch, and a job built per dispatch would be a different class
+ * object each time under the same registry key.
+ */
+type Registration = {
+  listener: ListenerClass;
+  /** The job a queued listener is pushed as, or `null` when it runs inline. */
+  job: (new () => Job) | null;
+};
 
 /**
  * The registry a dispatch fans out through: event name -> the listeners bound
@@ -30,12 +50,30 @@ import type { ListenerClass } from "./Listener";
  *
  * **A dispatch nobody handles warns.** That is the entire early-warning system
  * for the subsystem, and it is why it is not optional; see `dispatchAndWait`.
+ *
+ * A `queued` listener is not run here at all. It is registered with the
+ * `QueueManager` as a synthetic job and pushed to it on dispatch, so retries,
+ * `maxAttempts`, dead-lettering and worker threads are the queue's rather than
+ * a second implementation of the queue's — and nothing the request had (the
+ * current actor, the ambient transaction) is still promised by the time it
+ * runs. See `Listener.queued`.
  */
 export class EventManager {
   static token = "events";
 
   /** Event name -> every listener bound to it, in registration order. */
-  private listeners: Record<string, ListenerClass[]> = {};
+  private listeners: Record<string, Registration[]> = {};
+
+  /**
+   * Event name -> the class to rebuild it from, for a listener coming back off
+   * the queue.
+   *
+   * Read from each listener's `static event` at registration, which is the one
+   * place in the subsystem an event class is dereferenced. An event nobody
+   * listens for is never in here, and that is exactly right: nothing can have
+   * been queued for it.
+   */
+  private events: Record<string, EventClass> = {};
 
   /**
    * Event names already warned about. Per-manager, and the manager is per
@@ -64,11 +102,20 @@ export class EventManager {
    * skips phase two dispatches into an empty registry, and an empty registry is
    * a legal steady state rather than an error. The development-only warning
    * below is the only thing that says so.
+   *
+   * Every listener is **constructed once here**, to read the fields that decide
+   * where it runs — `queued`, and through it `maxAttempts` and `worker`. A
+   * listener's constructor therefore runs at boot as well as on every dispatch,
+   * so it wants to assign fields and nothing else. A queued one also has its
+   * synthetic job built here; `EventServiceProvider` hands those to the queue
+   * once boot reaches it, so calling this again *after* boot would leave the
+   * queue holding jobs for listeners this registry no longer has.
    */
   useListeners(listeners: ListenerClass[]) {
     this.config.listeners = listeners;
 
     this.listeners = {};
+    this.events = {};
     const claimed = new Set<string>();
 
     for (const listener of listeners) {
@@ -87,11 +134,12 @@ export class EventManager {
         continue;
       }
 
-      // Two classes with one name. It only reaches the wire once a listener can
-      // be queued, but it is refused from the start so the rule does not appear
-      // to change under applications later — and a directory walk is what makes
-      // the clash ordinary, since nothing forces the import alias a
-      // hand-written list would have demanded.
+      // Two classes with one name, refused here and nowhere else — which is
+      // what keeps the queue from being handed two jobs called
+      // `listener:NotifyAdmins` and having to decide between them one layer
+      // down, where the loser is a side effect that reports success. A
+      // directory walk is what makes the clash ordinary, since nothing forces
+      // the import alias a hand-written list would have demanded.
       if (claimed.has(listener.name)) {
         console.error(
           `Two event listeners are named "${listener.name}" — the first is ` +
@@ -105,10 +153,36 @@ export class EventManager {
       // The one place the event class is dereferenced, and deliberately the
       // only one: this runs in the module graph that declared the class, so the
       // name it yields is the source-side one that discovery and a minified
-      // dispatcher both agree on. Nothing downstream keeps the class object.
+      // dispatcher both agree on. Nothing downstream keeps the class object —
+      // except `this.events`, which keeps it under that same string so a
+      // listener coming back off the queue has something to rebuild from. First
+      // claim wins there too: a name is what identifies an event to everything
+      // downstream, so two classes declaring one are one event already.
       const name = listener.event.name;
-      (this.listeners[name] ??= []).push(listener);
+      const instance = new listener();
+
+      this.events[name] ??= listener.event;
+      (this.listeners[name] ??= []).push({
+        listener,
+        job: instance.queued ? jobForListener(listener, instance) : null,
+      });
     }
+  }
+
+  /**
+   * The synthetic jobs the queue has to be told about — one per queued
+   * listener, named `listener:<name>`.
+   *
+   * `EventServiceProvider.boot()` is the only caller. It reads this rather than
+   * having the manager reach for the `QueueManager` itself, because
+   * registration happens in `register()`, where resolving another service is
+   * exactly what a provider must not do. A copy, so the caller cannot edit what
+   * a dispatch pushes.
+   */
+  get queuedListenerJobs(): ReadonlyArray<new () => Job> {
+    return Object.values(this.listeners)
+      .flat()
+      .flatMap(({ job }) => (job ? [job] : []));
   }
 
   /**
@@ -133,14 +207,35 @@ export class EventManager {
    * Nothing is awaited and nothing can reject: `dispatchAndWait` catches every
    * listener's failure itself, so the floating promise here has no rejection to
    * float.
+   *
+   * `args` is the event's constructor arguments; see `dispatchAndWait`.
    */
-  dispatch(event: Event): void {
-    void this.dispatchAndWait(event);
+  dispatch(event: Event, args?: readonly unknown[]): void {
+    void this.dispatchAndWait(event, args);
   }
 
   /**
-   * Runs every listener bound to this event, in registration order, and
-   * resolves when the last of them has settled.
+   * Runs every **sync** listener bound to this event, in registration order,
+   * and resolves when the last of them has settled. Every queued one is handed
+   * to the `QueueManager` on the way past and is not waited for.
+   *
+   * ### Sync and queued in one pass
+   *
+   * A queued listener is pushed at the point in the order it occupies, so its
+   * *dispatch* is ordered with the rest and its *execution* is not: the queue
+   * decides when. What that costs is worth knowing — `dispatchAndWait`
+   * resolving says every sync listener has finished and says nothing at all
+   * about a queued one, which may not have started or may already have failed
+   * twice. Whether a listener is queued is therefore a decision about what the
+   * caller can rely on having happened, not only about latency.
+   *
+   * @param args the arguments the event's constructor was called with, which
+   * `Event.dispatch` forwards. Only a queued listener needs them: the event
+   * instance itself never crosses the queue, and what is rebuilt on the other
+   * side is `new EventClass(...args)`. Dispatching a hand-built instance
+   * straight at the manager therefore cannot queue, and says so on stderr
+   * rather than pushing a payload that would rehydrate into an event with
+   * `undefined` fields.
    *
    * ### One at a time, deliberately
    *
@@ -177,7 +272,10 @@ export class EventManager {
    * fires once per event name — a dispatch in a loop would otherwise bury the
    * terminal.
    */
-  async dispatchAndWait(event: Event): Promise<void> {
+  async dispatchAndWait(
+    event: Event,
+    args?: readonly unknown[],
+  ): Promise<void> {
     const name = (event.constructor as { name: string }).name;
     const handlers = this.listeners[name];
 
@@ -186,7 +284,12 @@ export class EventManager {
       return;
     }
 
-    for (const Listener of handlers) {
+    for (const { listener: Listener, job } of handlers) {
+      if (job) {
+        this.enqueue(job, Listener, name, args);
+        continue;
+      }
+
       try {
         await new Listener().handle(event);
       } catch (error) {
@@ -196,6 +299,84 @@ export class EventManager {
           error,
         );
       }
+    }
+  }
+
+  /**
+   * Rebuilds an event from what crossed the queue.
+   *
+   * The queue carries a name and an argument array, because that is all JSON
+   * can carry: **the constructor arguments are what is serialized, not the
+   * instance** — the same bargain `Job.dispatch` makes. So an event whose
+   * constructor does work beyond assigning fields does that work a second time
+   * here, in the worker, with none of the dispatching request around it.
+   *
+   * A name that resolves to nothing throws, and is the one place in this file
+   * that does. The payload is already off the queue by the time this runs and
+   * the listener is one line away from being handed `undefined`, so the
+   * alternative is a `handle` reading `event.email` off nothing, several frames
+   * further on, with the name that would have explained it no longer in scope.
+   * A throw here is caught by `QueueManager.run` and takes the queue's ordinary
+   * retry-then-dead-letter path.
+   */
+  rehydrate(eventName: string, args: readonly unknown[] = []): Event {
+    const EventClass = this.events[eventName];
+
+    if (!EventClass) {
+      throw new Error(
+        `Cannot rebuild the event "${eventName}" that came off the queue: no ` +
+          `registered listener binds to an event of that name, so there is no ` +
+          `class to construct. A queued listener runs in an application that ` +
+          `discovered its own listeners — check that this process sees the ` +
+          `same app/listeners as the one that dispatched, and that the event ` +
+          `declares \`static name = "${eventName}"\`.`,
+      );
+    }
+
+    return new EventClass(...args);
+  }
+
+  /**
+   * Hands one queued listener to the queue, as `[eventName, args]`.
+   *
+   * Nothing is awaited: `push` returns as soon as the entry is on the queue,
+   * which is the whole of what `queued = true` buys. The event instance the
+   * sync listeners share does not go with it — only the name and the arguments
+   * do, so nothing that was resolved from the request's context can be smuggled
+   * across into an application that does not have it.
+   *
+   * Failing to queue is caught for the same reason a listener's throw is: it is
+   * one listener's problem, and the listeners after it in the walk did not do
+   * anything to deserve it. Two things reach that catch — an argument JSON
+   * cannot serialise, and an application with no queue bound — and both would
+   * otherwise reject `dispatchAndWait`, which is documented never to.
+   */
+  private enqueue(
+    job: new () => Job,
+    listener: ListenerClass,
+    eventName: string,
+    args?: readonly unknown[],
+  ) {
+    if (args === undefined) {
+      console.error(
+        `The listener ${listener.name} is queued, but ${eventName} reached ` +
+          `the dispatcher without its constructor arguments, so there is ` +
+          `nothing for the queue to rebuild it from and the listener was ` +
+          `skipped. Dispatch through ${eventName}.dispatch(...) or ` +
+          `${eventName}.dispatchAndWait(...), which carry them.`,
+      );
+      return;
+    }
+
+    try {
+      app(QueueManager).push(job, JSON.stringify([eventName, args]));
+    } catch (error) {
+      console.error(
+        `The listener ${listener.name} could not be queued for ${eventName}, ` +
+          `so it did not run and will not be retried. The listeners after it ` +
+          `still ran.`,
+        error,
+      );
     }
   }
 

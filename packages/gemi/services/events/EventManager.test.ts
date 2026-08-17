@@ -288,6 +288,44 @@ describe("what useListeners refuses", () => {
   });
 });
 
+/**
+ * The far side of the queue, where a name and an argument array have to become
+ * an event again.
+ *
+ * This is invariant 1 at its second boundary and the first place the manager
+ * has to resolve an *event* class by name. The registry it reads is built from
+ * the listeners' `static event`, which is why an event nobody listens for is
+ * not in it — nothing could have been queued for one.
+ */
+describe("rehydrating an event off the queue", () => {
+  test("round-trips the constructor's arguments", () => {
+    const manager = new EventManager({
+      listeners: [listener("SendWelcomeEmail", () => {})],
+    });
+
+    const event = manager.rehydrate("UserRegistered", [
+      7,
+      "ada@example.com",
+    ]) as UserRegistered;
+
+    expect(event).toBeInstanceOf(UserRegistered);
+    expect(event.userId).toBe(7);
+    expect(event.email).toBe("ada@example.com");
+  });
+
+  test("throws on a name nothing is registered for, and names it", () => {
+    const manager = new EventManager({
+      listeners: [listener("SendWelcomeEmail", () => {})],
+    });
+
+    // The one failure in this file that is not swallowed. The payload is
+    // already off the queue and the listener is a line away from being handed
+    // `undefined`, so the alternative is `event.email` failing several frames
+    // later with nothing left in scope to explain it.
+    expect(() => manager.rehydrate("OrderPaid", [])).toThrow("OrderPaid");
+  });
+});
+
 describe("the readable view", () => {
   test("is a copy, so walking it cannot edit what a dispatch runs", () => {
     const manager = new EventManager({

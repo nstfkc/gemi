@@ -89,22 +89,30 @@ export abstract class Event {
    * A listener that throws is logged and the next one still runs, so nothing
    * here can fail on a listener's behalf. A dispatch that nothing is listening
    * for is legal and warns once, in development only.
+   *
+   * The arguments are forwarded to the manager *as well as* being used to build
+   * the instance: a queued listener receives an event rebuilt from them in
+   * another application, and an instance cannot be asked what it was
+   * constructed with.
    */
   static dispatch<T extends EventClass>(
     this: T,
     ...args: ConstructorParameters<T>
   ): void {
     refuseUnnamed(this);
-    app(EventManager).dispatch(new this(...args));
+    app(EventManager).dispatch(new this(...args), args);
   }
 
   /**
    * Fires the event and resolves once every **sync** listener has settled.
    *
-   * It does not wait for a queued listener, which by construction runs in a
-   * cloned application after this promise has resolved — "and wait" invites
+   * It does not wait for a queued listener, which the queue runs on its own
+   * terms after this promise has resolved — "and wait" invites
    * exactly that reading, so it is written down here rather than left to be
-   * discovered by a test that passes locally.
+   * discovered by a test that passes locally. A queued listener has been handed
+   * to the queue by the time this resolves and nothing more than that is true
+   * of it: it may not have started, and it may already have failed and been
+   * re-queued.
    *
    * Two methods rather than one `dispatch` that is sometimes worth awaiting,
    * because "is this worth awaiting" is a question the call site should not
@@ -122,7 +130,7 @@ export abstract class Event {
     ...args: ConstructorParameters<T>
   ): Promise<void> {
     refuseUnnamed(this);
-    return app(EventManager).dispatchAndWait(new this(...args));
+    return app(EventManager).dispatchAndWait(new this(...args), args);
   }
 }
 
