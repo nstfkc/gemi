@@ -104,6 +104,8 @@ await UserRegistered.dispatchAndWait(user.id, user.email);
 
 It resolves once every listener has settled. Two methods rather than one that is sometimes worth awaiting, because "should I await this?" is a question the call site should not have to guess at.
 
+Listeners run **one at a time**, each awaited before the next one starts, so registration order is the order they run in and not merely the order they start. The cost is worth knowing: a listener that *hangs* — an un-timed-out request to a host that never answers — holds up every listener after it for as long as it hangs, and under `dispatch` the caller has already moved on, so the row a later listener writes is simply not there yet. A listener that can block indefinitely wants its own timeout, or a [job](./jobs-and-queues.md). A listener that *throws* is not this case — see below.
+
 Neither method ever rejects. See below.
 
 ## When a listener throws

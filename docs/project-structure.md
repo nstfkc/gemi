@@ -85,15 +85,17 @@ If present, `app/preload.ts` runs once, before the server starts, for both `gemi
 - **`i18n/`** — translation dictionaries created with `Dictionary.create` from `gemi/i18n`, exported as a single default object.
 - **`database/prisma.ts`** — your Prisma client instance, imported wherever you query the database.
 
-### `cron/`, `jobs/` and `commands/` — the three discovered directories
+### `cron/`, `jobs/`, `listeners/` and `commands/` — the four discovered directories
 
-These directories are read, not listed. Every class under `app/cron` extending `CronJob` is scheduled at boot, every class under `app/jobs` extending `Job` is registered at boot, and every command under `app/commands` is available to `gemi run` — with nothing anywhere naming them. Writing the file is the registration. The `schedule`, `queue` and `command` slices can still declare their list explicitly, which turns the walk off and uses the declared list verbatim; an empty array is a declaration too, and means an app with none.
+These directories are read, not listed. Every class under `app/cron` extending `CronJob` is scheduled at boot, every class under `app/jobs` extending `Job` is registered at boot, every class under `app/listeners` extending `Listener` is bound to the event it declares at boot, and every command under `app/commands` is available to `gemi run` — with nothing anywhere naming them. Writing the file is the registration. The `schedule`, `queue`, `events` and `command` slices can still declare their list explicitly, which turns the walk off and uses the declared list verbatim; an empty array is a declaration too, and means an app with none.
+
+`app/listeners` is the one the scaffold does not create — the template ships no listeners, and the directory is simply absent until you write the first one, which is not an error.
 
 Discovery imports every `.ts`/`.tsx` file it walks, because a class does not exist until its module has run — so a file in one of these directories that does work when imported does that work when the directory is read. Keep them to declarations.
 
-`app/commands` differs in **when** it is read: cron and queue discovery happen during boot, because a tick or a dispatch can arrive at any moment afterwards, while commands are walked only by `gemi run`. A registry no request consults has no reason to cost every production process an import of every file under it.
+`app/commands` differs in **when** it is read: cron, queue and listener discovery happen during boot, because a tick or a dispatch can arrive at any moment afterwards, while commands are walked only by `gemi run`. A registry no request consults has no reason to cost every production process an import of every file under it.
 
-See [Cron](./cron.md), [Jobs & Queues](./jobs-and-queues.md) and [Commands](./commands.md) for the walk's skip rules and the reasons for reading a directory at all.
+See [Cron](./cron.md), [Jobs & Queues](./jobs-and-queues.md), [Events & Listeners](./events.md) and [Commands](./commands.md) for the walk's skip rules and the reasons for reading a directory at all.
 
 ## The Kernel
 
@@ -273,6 +275,8 @@ export default defineMiddlewareConfig({
 | `image` | `defineImageConfig` | `gemi/services` |
 | `ratelimiter` | `defineRateLimiterConfig` | `gemi/services` |
 | `schedule` | `defineScheduleConfig` | `gemi/services` |
+| `events` | `defineEventConfig` | `gemi/services` |
+| `command` | `defineCommandConfig` | `gemi/services` |
 | `route` | `defineRouteConfig` | `gemi/services` |
 | `translation` | `defineTranslationConfig` | `gemi/i18n` (also re-exported from `gemi/services`) |
 | `middleware` | `defineMiddlewareConfig` | `gemi/http` |

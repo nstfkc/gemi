@@ -129,14 +129,23 @@ export abstract class Event {
 /**
  * Stops a dispatch that could not be routed anywhere.
  *
- * Only reachable from a class that inherited the `"unset"` default without
- * shadowing it — the base itself, or an anonymous class expression that never
- * got a binding to take a name from. A throw rather than a warning because
- * there is no listener that could be registered under `"unset"`, so the
- * alternative is a dispatch that silently does nothing.
+ * Two values reach it and neither is a name a listener could have registered
+ * under. `"unset"` is the inherited default, which only the base itself still
+ * has — a class *declaration* always shadows it with its own binding. `""` is
+ * what an anonymous class expression with no binding to take a name from gets:
+ * an own, non-writable `name` of the empty string rather than the inherited
+ * default, so checking `"unset"` alone would let `(class extends Event {})`
+ * through to dispatch under the key `""` and surface as the generic
+ * zero-listener warning instead of the message that names the fix.
+ *
+ * A throw rather than a warning because there is no listener that could be
+ * registered under either, so the alternative is a dispatch that silently does
+ * nothing. This is only the floor: a declared `static name` and the implicit
+ * class binding are indistinguishable by value here, and `discoverListeners`
+ * reading the property descriptor is what tells those two apart.
  */
 function refuseUnnamed(event: EventClass): void {
-  if (event.name !== "unset") return;
+  if (event.name !== "unset" && event.name !== "") return;
 
   throw new Error(
     `Cannot dispatch an event with no name. Add \`static name\` to this Event ` +

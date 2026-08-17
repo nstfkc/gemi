@@ -229,10 +229,13 @@ production build.
 
 **Known residual, matching jobs and cron.** `discoverClasses` excludes the
 `base` it is handed but not intermediates, so an abstract listener base written
-in `app/listeners` and extended by its siblings is itself discovered and
-registered. It will be constructed and its `handle` called on every matching
-dispatch. `discoverClasses`'s own doc comment describes this shape as the one
-"an app reaches for when several jobs share a gate", so it is not hypothetical.
+in `app/listeners` and extended by its siblings is itself discovered. If it
+declares a `static event` of its own it is also registered, constructed, and
+its `handle` called on every matching dispatch; if it does not, the refusal
+above stops the boot instead — which is the more common shape of this mistake,
+and the one that message is written for. `discoverClasses`'s own doc comment
+describes this shape as the one "an app reaches for when several jobs share a
+gate", so it is not hypothetical.
 Document it in `docs/events.md`; keep shared bases outside `listenersDir`. A
 `static abstract = true` opt-out is the fix if it bites, and is deliberately not
 built now.

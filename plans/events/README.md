@@ -230,10 +230,15 @@ Flagged where they land, not settled here.
   (iteration 2). They will, under a `listener:` prefix, unless deliberately
   filtered. Visible is probably right; noisy is the counter-argument.
 - **What happens to an abstract listener base that lives in `app/listeners`?**
-  It gets discovered and registered, because `discoverClasses` excludes only the
-  `base` it was handed, not intermediates. Jobs and cron have the same residual
-  today. Iteration 1 documents it; a `static abstract = true` opt-out is
-  available if it turns out to bite.
+  It gets discovered either way, because `discoverClasses` excludes only the
+  `base` it was handed, not intermediates. What happens next depends on whether
+  it declares `static event`. **Without one it stops the boot** — iteration 1 §4
+  refuses a listener that binds to nothing rather than warning about it, and the
+  message names the class and says to move a shared base out of the directory.
+  That is the shared-gate case, and it is the narrower answer of the two. **With
+  one** it is registered and run like any other listener, which is the residual
+  jobs and cron have today. Iteration 1 documents both; a
+  `static abstract = true` opt-out is available if it turns out to bite.
 - **Should `afterCommit` be the default in a later major?** Iteration 3 ships it
   opt-in and revisits with usage.
 

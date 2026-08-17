@@ -142,6 +142,22 @@ export class EventManager {
    * Runs every listener bound to this event, in registration order, and
    * resolves when the last of them has settled.
    *
+   * ### One at a time, deliberately
+   *
+   * Each listener is awaited before the next one starts, rather than started
+   * together under a `Promise.allSettled`. Concurrency would make "registration
+   * order" a claim about start order only, and the order it is a claim about is
+   * the one `registeredListeners` reports and the discovery tests assert on.
+   *
+   * What it costs is worth knowing, because it is the one way listener
+   * independence is not total: a listener that *hangs* — an un-timed-out
+   * `fetch` to a host that never answers — delays every listener after it for
+   * as long as it hangs, and under `dispatch` the caller has already moved on,
+   * so an audit row a later listener writes simply is not there yet. A throw is
+   * not this: that is caught below and the next listener runs immediately. A
+   * listener that can block indefinitely is a listener that wants its own
+   * timeout, or a `Job`.
+   *
    * ### Errors
    *
    * Each listener runs inside its own `try`. A throw is logged with the event
