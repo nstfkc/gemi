@@ -1,4 +1,5 @@
 import { app } from "../../foundation/app";
+import { deferUntilCommit } from "../../orm/context";
 import { withDefaults } from "../../support/withDefaults";
 import type { Job } from "../queue/Job";
 import { QueueManager } from "../queue/QueueManager";
@@ -57,6 +58,12 @@ type Registration = {
  * a second implementation of the queue's — and nothing the request had (the
  * current actor, the ambient transaction) is still promised by the time it
  * runs. See `Listener.queued`.
+ *
+ * **A dispatch does not always fan out at the dispatch.** An event declaring
+ * `static afterCommit` has the whole of it — queued listeners included — held
+ * on the ORM's transaction scope and drained when that transaction commits, or
+ * dropped when it rolls back. That is the only thing in this file that reads
+ * ambient state, and `deferToCommit` is where it happens.
  */
 export class EventManager {
   static token = "events";
@@ -80,6 +87,15 @@ export class EventManager {
    * application, so a test that builds a fresh kernel gets a fresh set.
    */
   private warnedFor = new Set<string>();
+
+  /**
+   * Event names already warned about for the `dispatchAndWait` + `afterCommit`
+   * pairing. A second set rather than a second entry in the one above: the two
+   * warnings are about different mistakes, and sharing the set would mean a
+   * dispatch that legitimately has no listeners silences the one that says a
+   * caller is awaiting nothing.
+   */
+  private warnedAboutWaiting = new Set<string>();
 
   readonly config: Required<EventConfig>;
 
@@ -204,20 +220,88 @@ export class EventManager {
    * Fires the event and returns. The sync listeners run to completion after the
    * caller has moved on.
    *
-   * Nothing is awaited and nothing can reject: `dispatchAndWait` catches every
+   * Nothing is awaited and nothing can reject: `runListeners` catches every
    * listener's failure itself, so the floating promise here has no rejection to
    * float.
    *
    * `args` is the event's constructor arguments; see `dispatchAndWait`.
+   *
+   * On an `afterCommit` event inside a transaction, "after the caller has moved
+   * on" becomes "after that transaction commits" — see `deferToCommit`.
    */
   dispatch(event: Event, args?: readonly unknown[]): void {
-    void this.dispatchAndWait(event, args);
+    if (this.deferToCommit(event, args, false)) return;
+    void this.runListeners(event, args);
+  }
+
+  /**
+   * Fires the event and resolves once every **sync** listener has settled.
+   *
+   * On an `afterCommit` event inside an open transaction it resolves
+   * **immediately, having run nothing** — there is no listener to wait for yet,
+   * and the transaction it would be waiting on is the caller's own. That is the
+   * sharp edge `Event.afterCommit` documents and the reason the flag ships
+   * opt-in; it warns once per event name in development, because nothing else
+   * about the call site can show it.
+   */
+  async dispatchAndWait(
+    event: Event,
+    args?: readonly unknown[],
+  ): Promise<void> {
+    if (this.deferToCommit(event, args, true)) return;
+    return this.runListeners(event, args);
+  }
+
+  /**
+   * Queues the fan-out on the open transaction when the event asked for that,
+   * and reports whether it did — `false` means the caller runs it now.
+   *
+   * Three cases, and only the third defers: an event without
+   * `static afterCommit` behaves exactly as it did before this existed; one
+   * with it, dispatched outside a transaction, has nothing to wait for; one
+   * with it, inside a transaction, runs when that transaction commits and not
+   * at all if it rolls back.
+   *
+   * `currentTransaction()` is not consulted directly, and the difference
+   * matters: `deferUntilCommit` also answers `false` for a scope carrying a
+   * handle that `withTransaction` did not open, which has no commit hook and
+   * therefore no list that will ever be drained. Reading the handle alone would
+   * queue the dispatch onto nothing and lose it silently.
+   *
+   * The whole fan-out is deferred, sync listeners and queued ones alike. A
+   * queued listener is *pushed* at commit rather than at dispatch, which is the
+   * only correct reading of `afterCommit`: the queue drains in-process and
+   * often synchronously from `push`, so pushing early is running early.
+   */
+  private deferToCommit(
+    event: Event,
+    args: readonly unknown[] | undefined,
+    awaited: boolean,
+  ): boolean {
+    // Read off the constructor, the same way the registry key is, and typed
+    // structurally for the same reason: `Event` arrives here as a type-only
+    // import, and the class object an application dispatches may have come from
+    // a different module graph than the one this file was compiled against.
+    const { name, afterCommit } = event.constructor as {
+      name: string;
+      afterCommit?: boolean;
+    };
+    if (!afterCommit) return false;
+
+    const deferred = deferUntilCommit(() => this.runListeners(event, args));
+    if (deferred && awaited) this.warnNothingIsWaitedFor(name);
+    return deferred;
   }
 
   /**
    * Runs every **sync** listener bound to this event, in registration order,
    * and resolves when the last of them has settled. Every queued one is handed
    * to the `QueueManager` on the way past and is not waited for.
+   *
+   * The dispatch itself is `dispatch` and `dispatchAndWait` above; this is what
+   * they run, and what an `afterCommit` event's transaction runs later. Split
+   * out so that "when does the fan-out happen" is decided in exactly one place
+   * rather than in each entry point.
    *
    * ### Sync and queued in one pass
    *
@@ -272,7 +356,7 @@ export class EventManager {
    * fires once per event name — a dispatch in a loop would otherwise bury the
    * terminal.
    */
-  async dispatchAndWait(
+  protected async runListeners(
     event: Event,
     args?: readonly unknown[],
   ): Promise<void> {
@@ -378,6 +462,36 @@ export class EventManager {
         error,
       );
     }
+  }
+
+  /**
+   * The one warning for the pairing that reads as doing something and does not.
+   *
+   * `await UserRegistered.dispatchAndWait(...)` inside a transaction, on an
+   * event that defers to commit, resolves with nothing having run — the
+   * listeners are queued on a transaction the caller has not finished. There is
+   * no other symptom: the promise resolves, the listeners do run later, and the
+   * only thing that is wrong is that the caller's `await` bought it nothing.
+   * Code that reads what a listener wrote on the next line finds it missing,
+   * and nothing connects the two.
+   *
+   * Development only and once per event name, on the same terms as the
+   * zero-listener warning: both are legal steady states that are usually a
+   * mistake, and a dispatch in a loop must not bury the terminal.
+   */
+  private warnNothingIsWaitedFor(name: string) {
+    if (process.env.NODE_ENV === "production") return;
+    if (this.warnedAboutWaiting.has(name)) return;
+    this.warnedAboutWaiting.add(name);
+
+    console.warn(
+      `[gemi] ${name}.dispatchAndWait() was called inside a transaction and ` +
+        `${name} declares \`static afterCommit = true\`, so it resolved ` +
+        `immediately with no listener having run — they run when the ` +
+        `transaction commits. Await the transaction instead, or drop ` +
+        `afterCommit if the caller needs the side effects first. Development ` +
+        `only.`,
+    );
   }
 
   private warnNothingIsListening(name: string) {

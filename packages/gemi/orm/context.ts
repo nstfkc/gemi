@@ -71,7 +71,46 @@ export interface OrmScope {
    * mean different things under deny-by-default.
    */
   actor?: { user: unknown };
+  /**
+   * Work that must not happen unless this transaction commits — an event whose
+   * `static afterCommit` is set, today, and nothing else.
+   *
+   * **Created by the outermost `withTransaction` and never by a savepoint.** A
+   * savepoint's scope is a spread of its parent's (`{ ...current, tx: nested }`),
+   * so the array arrives here already shared by reference with the transaction
+   * that opened it — which is the behaviour wanted rather than a leak. A
+   * dispatch made inside a savepoint that commits, in a transaction that then
+   * rolls back, must not run: rolling back the outermost transaction discards
+   * the list whole, savepoint entries included, because nothing ever drains it.
+   *
+   * The inverse — a savepoint that rolls back under a transaction that commits
+   * — is the case sharing gets wrong on its own, and `withTransaction`'s
+   * savepoint branch is where it is put right.
+   *
+   * Absent, rather than an empty array, on every scope that is not a
+   * transaction: `runAsSystem`, `runAsUser` and `runOnConnection` spread
+   * whatever they are given, so "there is a list here" and "there is an open
+   * transaction here" have to stay the same question. `deferUntilCommit`
+   * answers `false` when either half is missing and the caller runs the work
+   * now, which is what keeps a hand-built scope carrying a `tx` — the shape
+   * tests write — from swallowing a dispatch into a list nothing drains.
+   */
+  afterCommit?: AfterCommitCallback[];
 }
+
+/**
+ * Work deferred to a transaction's commit.
+ *
+ * Awaited when it is drained, and its rejection is caught there: a callback is
+ * a side effect that the transaction is not waiting on and cannot be told
+ * about, so the only thing left to do with a failure is report it.
+ *
+ * Not exported: a caller passes a lambda and never names this, and an export
+ * nothing outside this file uses is what `orm/architecture.test.ts` is pointed
+ * at. The declaration emit carries it along regardless, so `OrmScope` stays
+ * readable from a `.d.ts`.
+ */
+type AfterCommitCallback = () => void | Promise<void>;
 
 /**
  * One ambient scope for the ORM, not one per feature.
@@ -175,6 +214,33 @@ export function assertConnectionUsable(name: string): void {
   if (open === name) return;
 
   throw new CrossConnectionTransactionError(open, name);
+}
+
+/**
+ * Hold `callback` until the open transaction commits, and say whether that
+ * happened.
+ *
+ * `false` means there was nothing to wait for — no transaction is open, or the
+ * scope was entered by hand rather than by `withTransaction` — and the caller
+ * must run the work itself, now. That return value is the whole contract: a
+ * caller that ignores it turns "no transaction here" into a side effect queued
+ * on a list nothing will ever drain, which is a dispatch that silently never
+ * happens.
+ *
+ * `true` means the callback is on the outermost scope's list and will run after
+ * `begin` resolves, outside the transaction, whatever the caller does next. It
+ * will not run at all if the transaction rolls back, or if a savepoint it was
+ * registered inside rolls back — both of which are the point.
+ *
+ * Nothing here is ordered against anything but the other deferred callbacks:
+ * they run in registration order, one at a time, after the commit round-trip.
+ */
+export function deferUntilCommit(callback: AfterCommitCallback): boolean {
+  const store = ormContext.getStore();
+  if (store?.tx === undefined || store.afterCommit === undefined) return false;
+
+  store.afterCommit.push(callback);
+  return true;
 }
 
 /** How deeply nested the current transaction is; `null` outside one. */
@@ -340,6 +406,63 @@ function watchForSlowTransaction(configured?: number | false): () => void {
 }
 
 /**
+ * Runs what a committed transaction deferred, outside the transaction it was
+ * deferred by.
+ *
+ * `outside` is the scope that was ambient before `begin` — an `asSystem` block,
+ * a named connection, or nothing at all — and re-entering it explicitly is the
+ * guarantee rather than a tidy-up. The alternative is relying on where a `.then`
+ * happens to have captured its context, and the failure that produces is the
+ * one the whole feature is about: a listener that runs "after commit" while
+ * still holding the closed transaction's handle joins nothing, because Bun's
+ * handle stays callable and simply runs on the pool. So the scope is rebuilt
+ * with `tx` and the drained list cleared, and a listener that opens its own
+ * transaction gets a real one.
+ *
+ * Errors are caught per callback and the next one still runs, for the reason
+ * the event subsystem catches per listener: these are independent side effects
+ * whose order came from a filesystem walk. And the transaction is not failed by
+ * one — it committed, the database kept the rows, and reporting a rejection to
+ * the caller would have it roll back or retry work that is already durable.
+ * stderr is all that is left, and it is enough: the caller has no decision to
+ * make here.
+ *
+ * The transaction's own promise does not resolve until this has finished, which
+ * is the one thing about `afterCommit` that a caller can feel. Deliberate: the
+ * alternative is a floating promise whose rejection nobody sees and whose work
+ * a short-lived process — a command, a seed — exits out from under.
+ */
+async function drainAfterCommit(
+  callbacks: AfterCommitCallback[],
+  outside: OrmScope | undefined,
+): Promise<void> {
+  if (callbacks.length === 0) return;
+
+  await ormContext.run(
+    {
+      ...outside,
+      tx: undefined,
+      afterCommit: undefined,
+      depth: outside?.depth ?? 0,
+    },
+    async () => {
+      for (const callback of callbacks) {
+        try {
+          await callback();
+        } catch (error) {
+          console.error(
+            `An after-commit callback threw. The transaction it was waiting ` +
+              `on had already committed and stays committed, and the ` +
+              `callbacks after it still ran.`,
+            error,
+          );
+        }
+      }
+    },
+  );
+}
+
+/**
  * Run `fn` inside a transaction, entering the ambient scope for its whole async
  * subtree.
  *
@@ -362,6 +485,12 @@ function watchForSlowTransaction(configured?: number | false): () => void {
  * because Bun types a savepoint handle as plain `SQL` — without `savepoint` on
  * it — while the runtime object does carry the method, which is what makes
  * three levels of nesting work.
+ *
+ * Anything `deferUntilCommit` queued is drained once `begin` resolves, outside
+ * the transaction and only on the outermost call — a savepoint has committed
+ * nothing durable, so draining there would run work that a later rollback of
+ * the enclosing transaction was meant to have prevented. See `drainAfterCommit`
+ * for what that costs the caller.
  *
  * In development, an outermost transaction that stays open past
  * `options.slowTransactionThreshold` (2s by default, `false` to disable) warns
@@ -418,13 +547,39 @@ export function withTransaction<T>(
   // with no open transaction — `Model.asSystem` enters one — and a savepoint
   // needs an actual handle, not merely a store.
   if (current?.tx) {
-    return current.tx.savepoint((sp) => {
-      const nested = sp as TransactionSQL;
-      return ormContext.run(
-        { ...current, tx: nested, depth: current.depth + 1 },
-        () => fn(nested),
-      );
-    }) as Promise<T>;
+    // WHERE THE SHARED AFTER-COMMIT LIST IS PUT RIGHT.
+    //
+    // The savepoint's scope is a spread of this one, so it appends to the
+    // transaction's list rather than to a list of its own — which is what makes
+    // "the outer transaction rolled back, so nothing runs" free. The case that
+    // is not free is this one: the savepoint rolls back and the transaction
+    // goes on to commit. Its entries have to go, or a dispatch made inside a
+    // block the database threw away runs anyway, which is the same wrong answer
+    // as before with an extra step.
+    //
+    // A mark on the way in and a truncate on the way out, rather than tagging
+    // each entry with its depth and dropping everything at or below the failing
+    // one. Depth cannot tell two *siblings* apart: a savepoint that committed
+    // and one that rolled back both left entries at the same depth, adjacent in
+    // the list, and dropping by depth would discard the committed sibling's
+    // work as well. The index is exact because the ORM issues one statement at
+    // a time on a transaction handle — see `OrmScope.tx` — so nothing appends
+    // between the mark and the failure but this savepoint's own subtree.
+    const deferred = current.afterCommit;
+    const mark = deferred?.length ?? 0;
+
+    return current.tx
+      .savepoint((sp) => {
+        const nested = sp as TransactionSQL;
+        return ormContext.run(
+          { ...current, tx: nested, depth: current.depth + 1 },
+          () => fn(nested),
+        );
+      })
+      .catch((error: unknown) => {
+        if (deferred) deferred.length = mark;
+        throw error;
+      }) as Promise<T>;
   }
 
   // Only the outermost scope is watched. A savepoint reserves no connection of
@@ -435,6 +590,11 @@ export function withTransaction<T>(
   const stopWatching = watchForSlowTransaction(
     options?.slowTransactionThreshold,
   );
+
+  // Built out here rather than inside the `begin` callback, because the drain
+  // below needs it *after* that callback's scope is gone, and reading it off
+  // the store then is exactly what is no longer possible.
+  const deferred: AfterCommitCallback[] = [];
 
   // The `try` covers a *synchronous* throw from `begin` — a closed pool, say.
   // `.finally` alone would not: it is only attached once `begin` has returned a
@@ -462,6 +622,13 @@ export function withTransaction<T>(
               tx,
               depth: 0,
               connection: name === DEFAULT_CONNECTION ? undefined : name,
+              // A fresh list per outermost transaction, assigned rather than
+              // left to the spread. `current` holds no list today — the drain
+              // clears the field before it runs anything — and assigning is
+              // what keeps that from being load-bearing: a transaction opened
+              // by a callback during a drain gets its own list either way,
+              // rather than appending to the array it is being run out of.
+              afterCommit: deferred,
             },
             () => fn(tx),
           ),
@@ -470,7 +637,18 @@ export function withTransaction<T>(
         // rollback exactly as it is on commit, so a throwing callback must clear
         // the timer too or every failed transaction leaves a warning armed
         // against a connection that has already gone back to the pool.
-        .finally(stopWatching) as Promise<T>
+        //
+        // Before the drain, so that a slow after-commit listener is not
+        // reported as a transaction that will not settle. The connection went
+        // back to the pool at the commit; the warning is about holding it.
+        .finally(stopWatching)
+        // Only here, on the fulfilled path. A rejected `begin` rolled back, so
+        // the scope and everything queued on it are discarded unread — which is
+        // the whole of what `afterCommit` promises.
+        .then(async (result) => {
+          await drainAfterCommit(deferred, current);
+          return result;
+        }) as Promise<T>
     );
   } catch (error) {
     stopWatching();

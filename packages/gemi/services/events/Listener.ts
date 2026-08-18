@@ -104,6 +104,15 @@ export abstract class Listener {
    * authenticated user through `currentActor()`, and it joins the ambient
    * transaction.
    *
+   * **Unless the event declares `static afterCommit`.** That flag releases its
+   * listeners after the commit and outside the transaction's scope, so a sync
+   * listener bound to one runs with `currentTransaction()` undefined and
+   * commits on its own. The listener kept sync *because* it writes a row that
+   * has to roll back with the write it describes — an audit trail, a ledger
+   * entry — starts committing separately the day someone sets that flag in the
+   * event's file, and nothing on this side says so: no error, no warning, and
+   * a `queued = false` that still reads as "inside the transaction".
+   *
    * Set `true`, it is handed to the `QueueManager` instead and run from a
    * drain, on the queue's terms. What crosses is the event's name and its
    * constructor arguments as JSON, and nothing else — not the instance the sync
@@ -150,8 +159,8 @@ export abstract class Listener {
   /**
    * The side effect. Runs inside the dispatcher's context when `queued` is
    * false: a sync listener has the request's `app()`, its authenticated user,
-   * and its ambient transaction. A queued one can rely on none of them — see
-   * `queued`.
+   * and — unless the event declares `static afterCommit` — its ambient
+   * transaction. A queued one can rely on none of them — see `queued`.
    *
    * Annotate the parameter with the event named in `static event` — narrowing
    * the base's `Event` here is legal because method parameters are bivariant,

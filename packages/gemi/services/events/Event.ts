@@ -1,5 +1,6 @@
 import { app } from "../../foundation/app";
 import { EventManager } from "./EventManager";
+import { FakeEventManager } from "./FakeEventManager";
 
 /**
  * Something the application did, addressed to nobody in particular.
@@ -58,6 +59,52 @@ export abstract class Event {
    * spellings produce the same string right up until the build.
    */
   static name = "unset";
+
+  /**
+   * Hold this event's listeners until the transaction it was dispatched inside
+   * commits, and drop them if it rolls back. Off by default.
+   *
+   * ```typescript
+   * export class UserRegistered extends Event {
+   *   static name = "UserRegistered";
+   *   static afterCommit = true;
+   * }
+   * ```
+   *
+   * The failure it exists for:
+   *
+   * ```typescript
+   * await DB.transaction(async () => {
+   *   const user = await User.create(input);
+   *   UserRegistered.dispatch(user.id, user.email);   // welcome email sent
+   *   await Billing.provision(user);                  // throws
+   * });                                               // rolled back
+   * ```
+   *
+   * The user does not exist and has been welcomed. A sync listener has already
+   * run; a queued one is on a queue that has never heard of a transaction.
+   *
+   * Outside a transaction the flag changes nothing — there is nothing to wait
+   * for, so the dispatch happens immediately. Inside one, the listeners run
+   * after the commit and outside the transaction's scope, so a listener that
+   * opens its own transaction opens a real one rather than joining a handle
+   * that has already closed.
+   *
+   * ### The sharp edge, which is why this is opt-in
+   *
+   * **`dispatchAndWait` on a deferred event resolves immediately, having run
+   * nothing.** The two features compose into something neither name suggests,
+   * and no amount of care at the call site can see it: whether a dispatch is
+   * deferred depends on whether some caller further up opened a transaction.
+   * The pairing warns in development, once per event name, and that warning is
+   * the only thing that says so.
+   *
+   * Defaulting this on would put the same surprise under every dispatch — a
+   * fire-and-forget call that silently has not happened yet, decided by ambient
+   * state the call site cannot read. The one being fixed here is at least a
+   * failure; that one is a success that arrives later than the code says.
+   */
+  static afterCommit = false;
 
   /**
    * Makes `Event` nominal, and exists for nothing else.
@@ -131,6 +178,44 @@ export abstract class Event {
   ): Promise<void> {
     refuseUnnamed(this);
     return app(EventManager).dispatchAndWait(new this(...args), args);
+  }
+
+  /**
+   * Swaps the container's `EventManager` for one that records dispatches and
+   * runs nothing, and hands it back for a test to assert against.
+   *
+   * ```typescript
+   * const events = Event.fake();
+   *
+   * await post("/register", { email: "ada@example.com" });
+   *
+   * events.assertDispatched(UserRegistered, (e) => e.email === "ada@example.com");
+   * events.restore();
+   * ```
+   *
+   * The point is what the assertion is *about*. A controller test that asserts
+   * the event fired is testing the controller; one that asserts a welcome email
+   * was sent is testing three things and breaks when the fourth listener is
+   * added. Making that separation possible is most of why events are worth
+   * having, and the fake is what makes it convenient.
+   *
+   * Called twice, it returns the same recorder rather than a second one — a
+   * fake set up in a test helper and a `Event.fake()` in the body of the test
+   * would otherwise be two recorders, one of which sees every dispatch and the
+   * other of which is the one being asserted on.
+   *
+   * **`restore()` is not optional**, and there is no global teardown that will
+   * do it: `gemi/testing` has no `afterEach` hook of its own, and a fake that
+   * outlives its test is a later test whose listeners silently never run. That
+   * failure has no warning to catch it, because a fake legitimately has no
+   * listeners and so never trips the zero-listener line.
+   *
+   * The recorder is the framework's, not the app's — it is not exported from
+   * `gemi/services`, and `gemi/testing` publishes its type. There is nothing to
+   * construct: this is the only thing that makes one.
+   */
+  static fake(): FakeEventManager {
+    return FakeEventManager.install(app());
   }
 }
 
