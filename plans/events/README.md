@@ -158,10 +158,14 @@ leaves string literals alone, so both halves agree. This is the same hazard
 jobs, one subsystem over, and it is worse here because a job at least logs when
 its name resolves to nothing.
 
-Consequence: `static name` is **required on `Event`**, and required on
-`Listener` from iteration 2 (where the listener name crosses the queue's JSON
-boundary). Both get the writable-own-property check that discovery already
-applies to jobs.
+Consequence: `static name` is **required on `Event`**, and required on a
+**queued** `Listener` from iteration 2 — that is where the listener's name
+becomes the queue's key and crosses its JSON boundary. A sync listener's name is
+only ever read inside the one module graph that discovered it, so there it stays
+a warning: there is no second reader for a minified build to disagree with.
+Both get the writable-own-property check that discovery already applies to jobs;
+the refusal sits where the boundary is, at the point a listener is registered
+with the queue.
 
 **Corollary, for application code: never `instanceof` an event.** The same two
 class objects make `event instanceof UserRegistered` inside a listener `true` in
@@ -196,7 +200,22 @@ dead-letter path instead.
 
 A sync listener runs inside the dispatcher's `kernelContext` and `ormContext`:
 it has the request's `app()`, the authenticated user, and the ambient
-transaction. A queued listener runs in a cloned app with none of that.
+transaction. A queued listener may rely on none of it.
+
+**"May rely on none of it", not "has none of it"** — the second is what
+iteration 2 was written to say and it is not true of the runtime it shipped
+against. The queue is in-process and `push` starts the drain itself, so a
+queued listener frequently runs *inside* the dispatching request's context and
+`app()` there resolves the request's application. With `worker = true` it is a
+different thread with a cloned app and genuinely has nothing. Which of the two
+happens depends on whether the queue was already busy, which is not a thing an
+author decides.
+
+That makes the boundary worse than a plainly absent context, not better, and it
+is why the invariant is normative rather than descriptive: a listener that reads
+the current actor or expects the ambient transaction works until the day
+something else was already draining, and then reads different rows or commits
+separately, with no error either way.
 
 `queued = true` is therefore not a performance toggle, and must not be
 documented as one. It is a context boundary that happens to be spelled as one

@@ -322,13 +322,14 @@ function refuseListenersWithNoEvent(listeners: ListenerClass[]): void {
  * the only thing that tells them apart, and the difference only becomes visible
  * in a production build.
  *
- * Unlike a job's, a listener's own name has no second half to disagree with
- * *yet*: every reader of it today comes from this same source-side walk, so a
- * minified build and this walk cannot currently produce two different strings
- * for it. It is asked for from the start anyway, because the moment a listener
- * name is carried anywhere the server bundle can also produce — a queue
- * payload, a stored retry — the disagreement is silent and the fix would be a
- * rule changing under applications that had already shipped.
+ * A warning rather than a refusal, because a *sync* listener's name has no
+ * second half to disagree with: every reader of it comes from this same
+ * source-side walk, so a minified build and this walk cannot produce two
+ * different strings for it. A **queued** listener does have one — the name is
+ * the queue's key and it crosses a JSON boundary — and that case is refused
+ * outright, by `jobForListener`, at the point the listener is registered with
+ * the queue rather than here. This walk cannot tell the two apart without
+ * constructing every listener it found; the registry constructs them anyway.
  */
 function warnIfListenerNameWillNotSurviveTheBuild(listeners: ListenerClass[]) {
   for (const listener of listeners) {
@@ -337,7 +338,11 @@ function warnIfListenerNameWillNotSurviveTheBuild(listeners: ListenerClass[]) {
     console.warn(
       `Event listener ${listener.name} does not declare \`static name\`, so ` +
         `it is registered under its class name, which a production build ` +
-        `renames. Add: static name = "${listener.name}";`,
+        `renames. Nothing reads that name across a build boundary while the ` +
+        `listener is sync, which is why this is a warning — but adding ` +
+        `\`queued = true\` to it is refused at boot for the same reason, ` +
+        `because the queue's key is that string. Add: static name = ` +
+        `"${listener.name}";`,
     );
   }
 }

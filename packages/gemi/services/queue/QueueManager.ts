@@ -2,6 +2,26 @@ import { Job } from "./Job";
 import { queueConfigDefaults, type QueueConfig } from "./config";
 import { withDefaults } from "../../support/withDefaults";
 
+/**
+ * The thread a `worker = true` job runs in.
+ *
+ * The `await` on `dispatchJob` is load-bearing and its absence was a hang.
+ * `postMessage` structured-clones its argument and a Promise is not cloneable,
+ * so an un-awaited `dispatchJob` posted the pending promise, threw
+ * `DataCloneError` inside this handler, and posted nothing at all. `runInWorker`
+ * then never settled: `run` below never returned, `activeRunningJobsCount` was
+ * never decremented, and neither the retry path nor `onDeadletter` ever fired —
+ * after `concurrency` such jobs the queue sits in `next()`'s one-second poll
+ * forever, with no error anywhere. Any job whose `run` is `async` hit it, which
+ * is every job that touches IO; a queued listener hits it unconditionally,
+ * because the synthetic job's `run` awaits `handle`.
+ *
+ * The await earns two more things. A rejecting job now reaches the `catch` and
+ * comes back as `{error}`, where the queue's ordinary retry-then-dead-letter
+ * path can have it, instead of being lost with the promise. And `destroy()` now
+ * runs after the job rather than under it, so the cloned kernel — its database
+ * connections included — outlives the work it was cloned for.
+ */
 function createWorker() {
   const APP_DIR = process.env.APP_DIR;
   const ROOT_DIR = process.env.ROOT_DIR;
@@ -20,7 +40,7 @@ function createWorker() {
         let result = null;
         let error = null;
         try {
-          result = clone.dispatchJob(event.data.jobName, event.data.args)
+          result = await clone.dispatchJob(event.data.jobName, event.data.args)
         } catch (err) {
           error = err
         }
@@ -115,18 +135,55 @@ export class QueueManager {
     // name, and the reverse of the silent last-wins this replaces.
     this.jobs = {};
     for (const job of jobs) {
-      const taken = this.jobs[job.name];
-      if (taken) {
-        console.error(
-          `Two queued jobs are named "${job.name}" — the first is registered ` +
-            `and this one is not, so dispatching either would have run one of ` +
-            `them. A class name is the queue's key, so only one job can hold ` +
-            `it. Rename one.`,
-        );
-        continue;
-      }
-      this.jobs[job.name] = job;
+      this.claim(job);
     }
+  }
+
+  /**
+   * Registers one more job beside whatever `useJobs` already took.
+   *
+   * This exists for the queued-listener adapter, which registers a synthetic
+   * job per queued listener from `EventServiceProvider.boot()` — after the
+   * queue's own `boot()` has filled the registry. `useJobs` cannot serve that
+   * caller: it *replaces* the registry, so a second call would discard every
+   * job the app wrote and leave the queue holding listeners alone. Reading
+   * `registeredJobs` back, concatenating and calling `useJobs` again avoids
+   * that and is still the wrong shape — it re-runs the collision check over
+   * jobs that already passed it, so a duplicate the author has already been
+   * told about is reported a second time on every boot.
+   *
+   * Same rule as `useJobs`, deliberately: the first claim on a name wins and
+   * the second is refused out loud. And recorded in `config.jobs` either way,
+   * so `registeredJobs` keeps reporting everything the manager was handed
+   * rather than what it accepted — a refused job is visible to a test there.
+   *
+   * A new array rather than a `push`, because `useJobs` keeps the caller's
+   * array by reference and appending to it would edit the config slice or the
+   * discovered list under whoever else is holding it.
+   */
+  registerJob(job: new () => Job) {
+    this.config.jobs = [...this.config.jobs, job];
+    this.claim(job);
+  }
+
+  /**
+   * Puts one job in the registry, or refuses it because the name is taken.
+   *
+   * The rule and the reason are in `useJobs` above; this is only the shape both
+   * entry points share, so that a job arriving one at a time cannot be admitted
+   * on terms the batch would have refused.
+   */
+  private claim(job: new () => Job) {
+    if (this.jobs[job.name]) {
+      console.error(
+        `Two queued jobs are named "${job.name}" — the first is registered ` +
+          `and this one is not, so dispatching either would have run one of ` +
+          `them. A class name is the queue's key, so only one job can hold ` +
+          `it. Rename one.`,
+      );
+      return;
+    }
+    this.jobs[job.name] = job;
   }
 
   /**

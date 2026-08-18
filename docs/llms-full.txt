@@ -63,7 +63,7 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 - **[Jobs & Queues](./jobs-and-queues.md)** — defining and dispatching background `Job`s.
 - **[Cron](./cron.md)** — scheduling recurring `CronJob`s.
 - **[Commands](./commands.md)** — one-off application commands run with `gemi run`.
-- **[Events & Listeners](./events.md)** — `Event.dispatch(...)` fanning out to the listeners under `app/listeners`.
+- **[Events & Listeners](./events.md)** — `Event.dispatch(...)` fanning out to the listeners under `app/listeners`, inline or on the queue.
 - **[Broadcasting](./broadcasting.md)** — websocket channels, the `Broadcast` facade, `useSubscription` / `useBroadcast`.
 - **[Internationalization](./i18n.md)** — component-scoped dictionaries, `useTranslator`, `useLocale`, locale detection.
 
@@ -8049,6 +8049,8 @@ for (const Registered of app(QueueManager).registeredJobs) {
 }
 ```
 
+It may hold jobs you never wrote, named `listener:SendWelcomeEmail`. Those are [queued listeners](./events.md#queued-listeners) — a listener with `queued = true` is registered here as a job, so everything on this page applies to it, and the prefix is what tells you there is no job file to go and find.
+
 `discoverJobs()` answers the same question without an application around it — it walks `app/jobs` (or a directory you name) and returns the classes it finds. Every file it walks is imported, as above:
 
 ```typescript
@@ -8723,7 +8725,7 @@ UserRegistered.dispatch(user.id, user.email);
 
 That is the whole of what this buys: adding a fourth side effect to a registration becomes **adding a file**, rather than editing the controller that already has three.
 
-Listeners run **in-process and synchronously** inside the dispatching request — see [When to reach for a job instead](#when-to-reach-for-a-job-instead).
+Listeners run **in-process and synchronously** inside the dispatching request by default. One line moves a listener onto the queue instead — see [Queued listeners](#queued-listeners), and read it before you write it: `queued = true` changes what the listener can see, not only when it runs.
 
 ## Defining an event
 
@@ -8796,6 +8798,9 @@ There is no `static events = [A, B]`, deliberately. A listener bound to two even
 | `static name` | `string` | `"unset"` | Unique listener identifier. Required. |
 | `static event` | `Event` subclass | — | The one event this listener handles. Required. |
 | `handle` | method | — | The side effect. May be `async`. Required. |
+| `queued` | `boolean` | `false` | Run on the queue instead of inline. A [context boundary](#queued-listeners), not a performance dial. |
+| `maxAttempts` | `number` | `3` | Attempts before dead-lettering, counting the first. Ignored unless `queued`. |
+| `worker` | `boolean` | `false` | Run `handle` in a Worker thread with its own cloned app. Ignored unless `queued`. |
 
 ## Dispatching
 
@@ -8815,9 +8820,9 @@ When the caller genuinely needs the side effects to have happened first — a re
 await UserRegistered.dispatchAndWait(user.id, user.email);
 ```
 
-It resolves once every listener has settled. Two methods rather than one that is sometimes worth awaiting, because "should I await this?" is a question the call site should not have to guess at.
+It resolves once every **sync** listener has settled — not the [queued](#queued-listeners) ones, whatever the name suggests. Two methods rather than one that is sometimes worth awaiting, because "should I await this?" is a question the call site should not have to guess at.
 
-Listeners run **one at a time**, each awaited before the next one starts, so registration order is the order they run in and not merely the order they start. The cost is worth knowing: a listener that *hangs* — an un-timed-out request to a host that never answers — holds up every listener after it for as long as it hangs, and under `dispatch` the caller has already moved on, so the row a later listener writes is simply not there yet. A listener that can block indefinitely wants its own timeout, or a [job](./jobs-and-queues.md). A listener that *throws* is not this case — see below.
+Sync listeners run **one at a time**, each awaited before the next one starts, so registration order is the order they run in and not merely the order they start. A [queued](#queued-listeners) listener is pushed at the place it occupies in that order and not waited for, so its *dispatch* is ordered with the rest and its execution is the queue's business. The cost is worth knowing: a listener that *hangs* — an un-timed-out request to a host that never answers — holds up every listener after it for as long as it hangs, and under `dispatch` the caller has already moved on, so the row a later listener writes is simply not there yet. A listener that can block indefinitely wants its own timeout, or a [job](./jobs-and-queues.md). A listener that *throws* is not this case — see below.
 
 Neither method ever rejects. See below.
 
@@ -8829,6 +8834,8 @@ That is not politeness, it is the point. Listeners are independent side effects,
 
 A listener that must not fail silently should handle its own errors — retry, log to your own sink, or dispatch a [job](./jobs-and-queues.md) that can be retried and dead-lettered.
 
+All of this is the **sync** path. A [queued](#queued-listeners) listener's throw never reaches the dispatcher at all: it is the queue's, and it is retried up to `maxAttempts` and then dead-lettered.
+
 ## When nothing is listening
 
 A dispatch with no listeners is legal and does nothing. In development it warns **once per event name**:
@@ -8838,6 +8845,72 @@ A dispatch with no listeners is legal and does nothing. In development it warns 
 ```
 
 That single line is the whole early-warning system here, because four different mistakes produce the same symptom: an event that never declared `static name`, a typo, a listener that was never discovered, and a listener directory that was never walked. It fires once per name so that a dispatch in a loop does not bury the terminal, and never in production, where "no listeners" is an ordinary answer.
+
+## Queued listeners
+
+`queued = true` moves a listener off the request and onto the [queue](./jobs-and-queues.md), with retries, `maxAttempts`, dead-lettering and worker threads coming from there rather than from anything events add:
+
+```typescript
+// app/listeners/SendWelcomeEmail.ts
+export class SendWelcomeEmail extends Listener {
+  static name = "SendWelcomeEmail";
+  static event = UserRegistered;
+
+  queued = true;
+  maxAttempts = 5;
+
+  async handle(event: UserRegistered) {
+    await sendWelcome(event.email);
+  }
+}
+```
+
+That is the whole of the opt-in. Behind it, the listener is registered with the `QueueManager` as a job named `listener:SendWelcomeEmail`, and a dispatch pushes `["UserRegistered", [7, "ada@example.com"]]` onto the queue instead of calling `handle`.
+
+`static name` stops being a label here and becomes the queue's key, so a queued listener that does not declare one is **refused at boot** rather than warned about — see [Two listeners, one name](#two-listeners-one-name) for what the name is doing, and the note under [Defining an event](#defining-an-event) for why an implicit class name is not the same string after a production build.
+
+### What `queued = true` changes — read this part
+
+It is a **context boundary spelled as one line**, not a latency setting.
+
+- A **sync** listener runs inside the dispatching request: it has that request's `app()`, its authenticated user through `currentActor()`, and it joins the ambient transaction.
+- A **queued** listener is handed to the queue and run from a drain, on the queue's terms. With `worker = true` that is a different thread with a cloned application. Only the event's name and constructor arguments cross; nothing else does.
+
+The part that catches people is that the request's context is not reliably *gone* either. gemi's queue is in-process, so a drain that happens to start from the push is still standing inside the dispatching request, and `app()` there resolves the request's application. **None of that is promised.** A queued listener that reads the current actor, or writes expecting to join the transaction the controller opened, works right up until the day the queue was already busy — and then reads different rows, or commits separately, with no error either way.
+
+So the rule is simple: a listener that needs anything from the request stays sync; a listener that needs only the payload is free to queue.
+
+### What crosses the queue
+
+The **constructor arguments** are what is serialized, not the instance — the same bargain [`Job.dispatch`](./jobs-and-queues.md) makes. The payload is JSON, so pass plain, serializable data: numbers, strings, plain objects. A model instance, a `Date`, a function or anything holding a database handle does not survive it.
+
+On the far side the event is rebuilt with `new UserRegistered(...args)`, which means **an event constructor that does work does it again**, in whatever process runs the listener and without the request around it. Keep event constructors to assigning fields.
+
+If the name on the payload resolves to no registered event, the job throws with that name in the message rather than handing the listener `undefined` — the failure surfaces where it can still be explained, and takes the queue's ordinary retry path.
+
+### Retries, dead-lettering and durability
+
+These are the queue's, exactly as [Jobs & Queues](./jobs-and-queues.md) documents them: when `handle` throws, the listener is re-queued until it has been attempted `maxAttempts` times, and the last failure dead-letters it. A sync listener has none of this — its throw is logged once and the next listener runs.
+
+Every attempt that throws is written to stderr with the listener's name, the event it is bound to and the error, and the dead-letter is written separately, because "it failed again" and "it will not be tried again" are different things to know. By then `dispatchAndWait` has long since resolved and no caller is left to tell, so those lines are the whole of what says a side effect stopped happening.
+
+> **Note:** The queue is **in-memory and in-process**. A queued listener that has not run when the process exits does not run. That is true of every job today, but an event system invites "dispatch it and it will happen", so it is worth saying plainly: a dispatch is not a durability guarantee. Work that must survive a restart wants a row somewhere that a later pass can pick up.
+
+`dispatchAndWait` does **not** wait for a queued listener. When it resolves, every sync listener has settled and the queued ones have been handed to the queue — which may mean not started, or already failed once and re-queued.
+
+### Queued listeners in `registeredJobs`
+
+They are visible, under the prefix:
+
+```typescript
+import { app } from "gemi/foundation";
+import { QueueManager } from "gemi/services";
+
+app(QueueManager).registeredJobs.map((job) => job.name);
+// ["SendInvoiceEmail", "listener:SendWelcomeEmail"]
+```
+
+`registeredJobs` reports what the queue will run, and a queued listener genuinely is something it will run — hiding them would make a queue introspection tool lie. The `listener:` prefix is what keeps you from going to look for a job file you never wrote.
 
 ## Registering listeners — `app/listeners/`
 
@@ -8934,16 +9007,19 @@ const listeners = await discoverListeners(); // every Listener under app/listene
 
 ## When to reach for a job instead
 
-Listeners run **inside the dispatching request**, in the same process, in the same context: a listener has the request's `app()`, its authenticated user, and its ambient transaction. That makes them right for fast in-request side effects — writing an audit row, warming a cache, updating a counter — and wrong for slow ones, because the request waits for `dispatchAndWait` and the process still does the work either way.
+A **sync** listener runs inside the dispatching request, in the same process and the same context. That makes it right for fast in-request side effects — writing an audit row, warming a cache, updating a counter — and wrong for slow ones, because the request waits for `dispatchAndWait` and the process does the work either way.
 
-For anything slow or retryable, dispatch a [`Job`](./jobs-and-queues.md) from the listener. The queue is where retries, `maxAttempts`, dead-lettering and worker threads already live.
+A **queued** listener is the answer to that, and it is a listener rather than a job because the dispatcher still does not hold the list: adding a fifth queued side effect is still adding a file.
 
-Four mechanisms, one row each:
+Reach for a [`Job`](./jobs-and-queues.md) directly when the work is not a reaction to something that happened but a thing the caller wants done — one named unit of work, dispatched by the code that wants it, often with its own arguments that are nobody's event payload. A listener that only dispatches a job is a listener you did not need.
+
+Five mechanisms, one row each:
 
 | Mechanism | Fan-out | Where the handler runs |
 | --- | --- | --- |
 | a direct call in a controller | 1 → N | inline, and the caller names each one |
-| `Event.dispatch()` | 1 → N | inline, and the caller names none of them |
+| `Event.dispatch()`, sync listener | 1 → N | inline, and the caller names none of them |
+| `Event.dispatch()`, `queued = true` | 1 → N | the queue: retried, dead-lettered |
 | `Job.dispatch()` | 1 → 1 | the queue: retried, dead-lettered |
 | `Broadcast.publish()` | 1 → N | *clients*, over websockets |
 
@@ -8955,7 +9031,6 @@ gemi has no ORM lifecycle events (`User.created` and friends) — a model write 
 - [Broadcasting](./broadcasting.md) — fan-out to browsers rather than to server-side handlers.
 - [Controllers](./controllers.md) — dispatching from request handlers.
 - [Project Structure](./project-structure.md) — the kernel, `app/config/*.ts`, and service providers.
-
 
 ---
 

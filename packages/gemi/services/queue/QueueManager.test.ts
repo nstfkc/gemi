@@ -114,6 +114,59 @@ describe("two jobs claiming one class name", () => {
   });
 });
 
+/**
+ * Adding one job to a registry that is already full.
+ *
+ * `useJobs` cannot do this — it replaces the registry — and the events provider
+ * needs it, because a queued listener is registered as a job after the queue's
+ * own `boot()` has run. The failure being guarded is the one `useJobs` would
+ * have had: an app's own jobs quietly gone, in a process that boots cleanly and
+ * drops every dispatch afterwards.
+ */
+describe("registerJob", () => {
+  test("adds to the registry without disturbing what is already in it", () => {
+    const queue = new QueueManager({ jobs: [ChargeCard] });
+
+    queue.registerJob(SendWelcomeEmail);
+
+    expect(queue.dispatchJob("ChargeCard", "[]")).toBe("charged");
+    expect(queue.dispatchJob("SendWelcomeEmail", "[]")).toBe("sent");
+    expect(queue.registeredJobs).toHaveLength(2);
+  });
+
+  test("refuses a name that is taken, and keeps the job that took it", () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const queue = new QueueManager({ jobs: [ChargeCard] });
+
+    const impostor = {
+      ChargeCard: class ChargeCard extends Job {
+        run() {
+          return "impostor";
+        }
+      },
+    }.ChargeCard;
+
+    queue.registerJob(impostor);
+
+    expect(queue.dispatchJob("ChargeCard", "[]")).toBe("charged");
+    expect(vi.mocked(error).mock.calls[0]![0]).toContain(
+      'Two queued jobs are named "ChargeCard"',
+    );
+    // Reported anyway, the same as a duplicate handed to `useJobs`: the getter
+    // says what the manager was given, so a test can see the clash.
+    expect(queue.registeredJobs).toHaveLength(2);
+  });
+
+  test("does not edit the array `useJobs` was handed", () => {
+    const declared = [ChargeCard];
+    const queue = new QueueManager({ jobs: declared });
+
+    queue.registerJob(SendWelcomeEmail);
+
+    expect(declared).toEqual([ChargeCard]);
+  });
+});
+
 describe("the readable view", () => {
   test("is a copy, so walking it cannot edit what the queue runs from", () => {
     const queue = new QueueManager({ jobs: [ChargeCard] });
