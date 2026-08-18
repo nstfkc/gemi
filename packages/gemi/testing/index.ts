@@ -9,6 +9,12 @@ export type { PageProps, PageDictionary } from "./Page";
  * same class it is asserting about. This export exists for the signature: a
  * helper that takes or returns the recorder needs to be able to name it.
  *
+ * `DispatchedEvent` comes with it because it is the element type of the one
+ * public field, `dispatched`. Published apart from it, a helper taking the
+ * escape hatch as a parameter would have to spell it
+ * `FakeEventManager["dispatched"][number]` — a public field whose type has no
+ * public name.
+ *
  * Why not the class itself. This entrypoint is bundled for the **browser** —
  * `vite.client.config.mts` builds `client/index.ts` and `testing/index.ts`
  * together so a `<Page>` and the components under it share one copy of every
@@ -18,4 +24,4 @@ export type { PageProps, PageDictionary } from "./Page";
  * than imported from `gemi/i18n` to keep a server entry out of a component
  * test's module graph.
  */
-export type { FakeEventManager } from "../services/events/FakeEventManager";
+export type { DispatchedEvent, FakeEventManager } from "../services/events/FakeEventManager";

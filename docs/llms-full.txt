@@ -8878,7 +8878,7 @@ That is the whole of the opt-in. Behind it, the listener is registered with the 
 
 It is a **context boundary spelled as one line**, not a latency setting.
 
-- A **sync** listener runs inside the dispatching request: it has that request's `app()`, its authenticated user through `currentActor()`, and it joins the ambient transaction.
+- A **sync** listener runs inside the dispatching request: it has that request's `app()`, its authenticated user through `currentActor()`, and it joins the ambient transaction — unless the event declares [`static afterCommit`](#deferring-until-the-transaction-commits), which releases the listeners after the commit and so outside it.
 - A **queued** listener is handed to the queue and run from a drain, on the queue's terms. With `worker = true` that is a different thread with a cloned application. Only the event's name and constructor arguments cross; nothing else does.
 
 The part that catches people is that the request's context is not reliably *gone* either. gemi's queue is in-process, so a drain that happens to start from the push is still standing inside the dispatching request, and `app()` there resolves the request's application. **None of that is promised.** A queued listener that reads the current actor, or writes expecting to join the transaction the controller opened, works right up until the day the queue was already busy — and then reads different rows, or commits separately, with no error either way.
