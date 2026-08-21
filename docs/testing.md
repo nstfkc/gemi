@@ -197,6 +197,7 @@ Under `bun test`, preload `happy-dom` — no gemi-specific configuration is requ
 ## Related
 
 - [Events & Listeners](./events.md#testing-with-eventfake) — `Event.fake()`, for asserting what a *server* test dispatched.
+- [Features](./feature-flags.md) — what `features` seeds, and where the targeting behind it is covered instead.
 - [Views & Layouts](./views-and-layouts.md) — what a view receives from its route.
 - [Data Fetching](./data-fetching.md) — `useQuery`, prefetching, and the variant keys `queryData` mirrors.
 - [Internationalization](./i18n.md) — dictionaries and `useTranslator`.

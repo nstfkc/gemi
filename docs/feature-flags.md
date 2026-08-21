@@ -267,3 +267,4 @@ This replaces the _switch_, not the answer: rows still go through the same store
 - [Services](./services.md) — the container and configuration this plugs into
 - [Authorization](./authorization.md) — for the things features are not
 - [ORM](./orm.md) — the model and migration workflow
+- [Testing Views](./testing.md) — `<Page features={{ ... }}>`, for a component test that branches on one

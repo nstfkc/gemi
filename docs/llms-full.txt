@@ -7132,6 +7132,7 @@ This replaces the _switch_, not the answer: rows still go through the same store
 - [Services](./services.md) — the container and configuration this plugs into
 - [Authorization](./authorization.md) — for the things features are not
 - [ORM](./orm.md) — the model and migration workflow
+- [Testing Views](./testing.md) — `<Page features={{ ... }}>`, for a component test that branches on one
 
 ---
 
@@ -10036,3 +10037,4 @@ Under `bun test`, preload `happy-dom` — no gemi-specific configuration is requ
 - [Data Fetching](./data-fetching.md) — `useQuery`, prefetching, and the variant keys `queryData` mirrors.
 - [Internationalization](./i18n.md) — dictionaries and `useTranslator`.
 - [Navigation](./navigation.md) — `Link`, `useNavigate`, `useParams`.
+- [Features](./feature-flags.md) — what `features` seeds, and where the targeting behind it is covered instead.
