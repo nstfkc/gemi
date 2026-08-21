@@ -44,9 +44,26 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
         with:
+          # Pinned, and pinned to the same version `publish.yml` builds the
+          # package with — so what CI proves is what ships, rather than two
+          # runtimes that happen to agree today.
+          #
+          # It was `latest`, which is how 1.4.0 arrived on 2026-08-21 and turned
+          # this job red on a commit nobody had touched. Bun's SQLite driver
+          # started **throwing** on an object binding where it used to bind it,
+          # and `raw-sql.test.ts` asserts a forged fragment binds and matches
+          # nothing. The guard it covers still holds — 1.4.0 arguably holds it
+          # harder, by refusing rather than binding something meaningless — but
+          # the assertion is written for the old behaviour.
+          #
           # Not pinned to `packageManager` (bun@1.1.3), which is behind what the
           # repo is actually developed against.
-          bun-version: latest
+          #
+          # **Moving this is a deliberate act.** Raise it and run the suite
+          # rather than letting a runtime release do it on a Saturday; the two
+          # `raw-sql.test.ts` assertions are the known thing to fix when this
+          # goes to 1.4.
+          bun-version: 1.3.14
 
       - name: Install
         run: bun install --frozen-lockfile
@@ -334,7 +351,8 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          # Same version as the sqlite job and `publish.yml`; see the note there.
+          bun-version: 1.3.14
 
       - name: Install
         run: bun install --frozen-lockfile
