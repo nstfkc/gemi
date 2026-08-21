@@ -3,6 +3,7 @@ import { isConstructor } from "../internal/isConstructor";
 import type { KeyAndValue, KeyAndValueToObject } from "../internal/type-utils";
 import { Controller, ResourceController, type ControllerMethods } from "./Controller";
 import { HttpRequest } from "./HttpRequest";
+import { type MiddlewareInput, toMiddlewareList } from "./middlewareList";
 import type { MiddlewareReturnType } from "./Router";
 import {
   createStreamResponse,
@@ -67,8 +68,8 @@ export class RouteHandler<M extends HttpMethod, Input, Output, Params> {
     return this.handler();
   }
 
-  middleware(middlewareList: string[]) {
-    this.middlewares = middlewareList;
+  middleware(middlewareList: MiddlewareInput) {
+    this.middlewares = toMiddlewareList(middlewareList);
     return this;
   }
 }
@@ -205,7 +206,7 @@ export type ResourceRoutes<T extends new () => ResourceController> = {
 
 export type ResourceMethod = "list" | "store" | "show" | "update" | "delete";
 
-export type ResourceMiddlewareConfig = Partial<Record<ResourceMethod, string[]>>;
+export type ResourceMiddlewareConfig = Partial<Record<ResourceMethod, MiddlewareInput>>;
 
 // The value stored in `routes` for a resource. It carries the plain
 // `ResourceRoutes<T>` shape (so RouteParser keeps matching it exactly as

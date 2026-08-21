@@ -146,6 +146,86 @@ export const Account = {
   }
 } satisfies ModelSchema;
 
+export const FeatureFlag = {
+  "name": "FeatureFlag",
+  "table": "FeatureFlag",
+  "fields": {
+    "id": {
+      "name": "id",
+      "column": "id",
+      "type": "Int",
+      "nullable": false,
+      "isId": true,
+      "isUpdatedAt": false,
+      "default": {
+        "kind": "autoincrement"
+      }
+    },
+    "publicId": {
+      "name": "publicId",
+      "column": "publicId",
+      "type": "String",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false,
+      "default": {
+        "kind": "cuid"
+      }
+    },
+    "key": {
+      "name": "key",
+      "column": "key",
+      "type": "String",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false
+    },
+    "active": {
+      "name": "active",
+      "column": "active",
+      "type": "Boolean",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false,
+      "default": {
+        "kind": "value",
+        "value": false
+      }
+    },
+    "createdAt": {
+      "name": "createdAt",
+      "column": "createdAt",
+      "type": "DateTime",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": false,
+      "default": {
+        "kind": "now"
+      }
+    },
+    "updatedAt": {
+      "name": "updatedAt",
+      "column": "updatedAt",
+      "type": "DateTime",
+      "nullable": false,
+      "isId": false,
+      "isUpdatedAt": true
+    }
+  },
+  "primaryKey": [
+    "id"
+  ],
+  "uniques": [
+    [
+      "publicId"
+    ],
+    [
+      "key"
+    ]
+  ],
+  "relations": {}
+} satisfies ModelSchema;
+
 export const Ledger = {
   "name": "Ledger",
   "table": "Ledger",

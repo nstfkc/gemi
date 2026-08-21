@@ -28,6 +28,13 @@ export interface ServerDataContextValue {
   auth: {
     user: User;
   };
+  /**
+   * Evaluated features for this request: `key -> boolean`, nothing else.
+   *
+   * Never the targeting or the reason a feature resolved the way it did — those
+   * stay on the server. Read through `useFeature` rather than directly.
+   */
+  features: Record<string, boolean>;
   __csrf: string;
   cssManifest: Record<string, string[]>;
   /** Built chunk URLs per view name, for warming a navigation's imports. */

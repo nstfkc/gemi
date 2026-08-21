@@ -31,6 +31,7 @@ import {
   type ServerDataContextValue,
 } from "../client/ServerDataProvider";
 import { ThemeProvider } from "../client/ThemeProvider";
+import type { ClientFeatureKey } from "../client/rpc";
 import type { Breadcrumb } from "../client/useBreadcrumbs";
 import { WebSocketContext } from "../client/WebsocketContext";
 import { applyParams } from "../utils/applyParams";
@@ -128,6 +129,17 @@ export interface PageProps {
   user?: Partial<User> | null;
   /** What `useBreadcrumbs()` returns, in order. */
   breadcrumbs?: Breadcrumb[];
+  /**
+   * What `useFeature()` reports, keyed by feature key. Anything left out reads
+   * as off, exactly as an undeclared key does in a real request.
+   *
+   * A test seeds the *outcome*, not the declaration: `app/features` owns the
+   * targeting and the rollout, and re-deriving those here would mean building a
+   * request context — a user, a `session_id`, a bot verdict — to assert a
+   * branch that only cares which way the feature came out. Cover the targeting
+   * where it lives, with a server test.
+   */
+  features?: Partial<Record<ClientFeatureKey, boolean>>;
   /**
    * The theme `useTheme()` starts on. The app reads a visitor's stored choice
    * out of `localStorage`; a test has no session to have made one in, so this
@@ -352,6 +364,7 @@ export const Page = (props: PropsWithChildren<PageProps>) => {
     queryConfig,
     user = null,
     breadcrumbs = [],
+    features = {},
     theme,
     fallback = null,
     errorFallback,
@@ -431,6 +444,7 @@ export const Page = (props: PropsWithChildren<PageProps>) => {
       i18n: { currentLocale: locale, dictionary, supportedLocales },
       prefetchedData,
       breadcrumbs: breadcrumbsRecord,
+      features: features as Record<string, boolean>,
       appId: "test",
     }),
     [
@@ -445,6 +459,7 @@ export const Page = (props: PropsWithChildren<PageProps>) => {
       supportedLocales,
       prefetchedData,
       breadcrumbsRecord,
+      features,
     ],
   );
 
@@ -495,6 +510,7 @@ export const Page = (props: PropsWithChildren<PageProps>) => {
       },
       componentTree: [],
       auth: { user: user as User },
+      features: features as Record<string, boolean>,
       __csrf: "test-csrf-token",
       cssManifest: {},
       modulePreloadManifest: {},
@@ -514,6 +530,7 @@ export const Page = (props: PropsWithChildren<PageProps>) => {
       supportedLocales,
       defaultLocale,
       user,
+      features,
     ],
   );
 

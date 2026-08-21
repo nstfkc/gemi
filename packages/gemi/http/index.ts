@@ -7,6 +7,7 @@ export {
   type FileOutput,
   type ViewHandler,
 } from "./ViewRouter";
+export { toMiddlewareList, type MiddlewareInput } from "./middlewareList";
 export {
   createStreamResponse,
   createUnsatisfiableResponse,

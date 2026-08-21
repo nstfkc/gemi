@@ -331,3 +331,34 @@ enum OrganizationPlan {
   pro
   enterprise
 }
+
+/// The on/off switches for the features declared in `app/features`.
+///
+/// The declaration owns each feature's key, its targeting and its rollout
+/// percentage; this table owns one thing only — whether the feature is switched
+/// on at all. So shipping a feature is a deploy and turning it on is an
+/// `UPDATE`, which is the split that lets a feature be deployed dark and lets an
+/// on-call engineer switch it off without a release.
+///
+/// A key with no row here is off, so an empty table is a working state: every
+/// feature is dark until somebody turns it on.
+///
+/// Nothing per-subject is stored. Who lands inside a percentage rollout is a
+/// pure function of the feature and the subject, so this table holds one row per
+/// feature rather than one row per feature per user.
+model FeatureFlag {
+  id       Int    @id @default(autoincrement())
+  publicId String @unique @default(cuid())
+
+  /// Must match a key declared in `app/features`. A row whose key is not
+  /// declared is ignored with a warning.
+  key String @unique
+
+  /// The switch, and the kill switch. `false` short-circuits the feature's
+  /// `when` and `rollout` alike, so nothing in application code can turn a
+  /// switched-off feature back on.
+  active Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}

@@ -146,6 +146,31 @@ export {
 export { RedisServiceProvider } from "./redis/RedisServiceProvider";
 export { RedisManager } from "./redis/RedisManager";
 
+// Features
+export {
+  defineFeature,
+  Feature,
+  type CreateFeatures,
+  type FeatureAttribution,
+  type FeatureOptions,
+  type FeatureRegistry,
+  type ServerOnlyFeature,
+} from "./features/defineFeature";
+export { FeaturesServiceProvider } from "./features/FeaturesServiceProvider";
+export { FeatureManager, FeatureScope } from "./features/FeatureManager";
+export { FeatureFlagStore, type FlagSnapshot } from "./features/FeatureFlagStore";
+export { FeatureFlagSource, FeatureModelMissingError } from "./features/sources/FeatureFlagSource";
+export { DatabaseFeatureFlagSource } from "./features/sources/DatabaseFeatureFlagSource";
+export { StaticFeatureFlagSource } from "./features/sources/StaticFeatureFlagSource";
+export { evaluateFeature, subjectFor } from "./features/evaluate";
+export { bucketKey, bucketOf, inRollout } from "./features/bucket";
+export type { FeatureSubject } from "./features/context";
+export type {
+  EvaluationReason,
+  FeatureContext,
+  FeatureEvaluation,
+} from "./features/types";
+
 // Runtime config (`app/config/*.ts`)
 export {
   defineFilesystemConfig,
@@ -210,6 +235,11 @@ export {
   redisConfigDefaults,
   type RedisConfig,
 } from "./redis/config";
+export {
+  defineFeaturesConfig,
+  featuresConfigDefaults,
+  type FeaturesConfig,
+} from "./features/config";
 export {
   defineAuthConfig,
   authConfigDefaults,

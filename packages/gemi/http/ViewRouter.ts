@@ -4,6 +4,8 @@ import type { KeyAndValue, KeyAndValueToObject } from "../internal/type-utils";
 import { contentDisposition } from "./contentDisposition";
 import type { Controller } from "./Controller";
 import type { HttpRequest } from "./HttpRequest";
+import type { FeatureKey } from "../client/rpc";
+import { type MiddlewareInput, toMiddlewareList } from "./middlewareList";
 
 type ControllerMethods<T extends new () => Controller> = {
   [K in keyof InstanceType<T>]: InstanceType<T>[K] extends Function ? K : never;
@@ -60,6 +62,7 @@ export class RedirectRoute<Input, Output, Params> {
 
   // @internal
   middlewares: string[] = [];
+  featureGates: string[] = [];
   private handler: (req: HttpRequest<Input, Params>) => Promise<RedirectOutput>;
   constructor(
     handler?:
@@ -91,8 +94,41 @@ export class RedirectRoute<Input, Output, Params> {
     return {};
   }
 
-  middleware(middlewares: string[]) {
-    this.middlewares = middlewares;
+  middleware(middlewares: MiddlewareInput) {
+    this.middlewares = toMiddlewareList(middlewares);
+    return this;
+  }
+
+  /**
+   * Hides this route behind a feature flag.
+   *
+   * When the flag is off the route behaves as though it does not exist — the
+   * application's own `404` view, with a 404 status — rather than returning an
+   * error page that confirms something is there.
+   *
+   * Returns `this`, so the route's type is unchanged and the path keeps its
+   * entry in `ViewPaths`: `<Link>` and `Redirect.to` stay typed. That also means
+   * the path is still in the route manifest the browser receives, so this gates
+   * the *response*, not the route's existence. Declare the feature
+   * `defineFeature({ serverOnly: true })` and keep unreleased routes out of the
+   * client tree if the name itself is the secret.
+   *
+   * ## A `rollout` is not access control
+   *
+   * Gate on `active` — a feature nobody has switched on is unreachable, which is
+   * the case this is for — or on a `when` that reads something the visitor
+   * cannot choose, like the signed-in user.
+   *
+   * A `rollout` is neither, for an anonymous visitor. The subject is their
+   * `session_id` cookie, which they supply; bucketing is a published pure
+   * function of it, so they can compute one that lands inside any percentage and
+   * send it. Signing the cookie would not fix this — they can equally well
+   * discard it and ask for a fresh one until a signed id happens to land inside,
+   * which for a 5% rollout is a couple of dozen requests. Nothing that hands out
+   * identities on demand can restrict anything to a fraction of them.
+   */
+  feature(key: FeatureKey): this {
+    this.featureGates = [...this.featureGates, key as string];
     return this;
   }
 }
@@ -161,6 +197,7 @@ export class FileRoute<Input, Params> {
 
   // @internal
   middlewares: string[] = [];
+  featureGates: string[] = [];
   private handler: (req: HttpRequest<Input, Params>) => Promise<FileOutput> | FileOutput;
   constructor(
     handler?:
@@ -190,14 +227,48 @@ export class FileRoute<Input, Params> {
     return { FILE: file };
   }
 
-  middleware(middlewares: string[]) {
-    this.middlewares = middlewares;
+  middleware(middlewares: MiddlewareInput) {
+    this.middlewares = toMiddlewareList(middlewares);
+    return this;
+  }
+
+  /**
+   * Hides this route behind a feature flag.
+   *
+   * When the flag is off the route behaves as though it does not exist — the
+   * application's own `404` view, with a 404 status — rather than returning an
+   * error page that confirms something is there.
+   *
+   * Returns `this`, so the route's type is unchanged and the path keeps its
+   * entry in `ViewPaths`: `<Link>` and `Redirect.to` stay typed. That also means
+   * the path is still in the route manifest the browser receives, so this gates
+   * the *response*, not the route's existence. Declare the feature
+   * `defineFeature({ serverOnly: true })` and keep unreleased routes out of the
+   * client tree if the name itself is the secret.
+   *
+   * ## A `rollout` is not access control
+   *
+   * Gate on `active` — a feature nobody has switched on is unreachable, which is
+   * the case this is for — or on a `when` that reads something the visitor
+   * cannot choose, like the signed-in user.
+   *
+   * A `rollout` is neither, for an anonymous visitor. The subject is their
+   * `session_id` cookie, which they supply; bucketing is a published pure
+   * function of it, so they can compute one that lands inside any percentage and
+   * send it. Signing the cookie would not fix this — they can equally well
+   * discard it and ask for a fresh one until a signed id happens to land inside,
+   * which for a 5% rollout is a couple of dozen requests. Nothing that hands out
+   * identities on demand can restrict anything to a fraction of them.
+   */
+  feature(key: FeatureKey): this {
+    this.featureGates = [...this.featureGates, key as string];
     return this;
   }
 }
 
 export class ViewRoute<Input, Output, Params> {
   middlewares: string[] = [];
+  featureGates: string[] = [];
   private handler: (req: HttpRequest<Input, Params>) => Output;
   constructor(
     public viewPath: string,
@@ -232,8 +303,41 @@ export class ViewRoute<Input, Output, Params> {
     };
   }
 
-  middleware(middlewares: string[]) {
-    this.middlewares = middlewares;
+  middleware(middlewares: MiddlewareInput) {
+    this.middlewares = toMiddlewareList(middlewares);
+    return this;
+  }
+
+  /**
+   * Hides this route behind a feature flag.
+   *
+   * When the flag is off the route behaves as though it does not exist — the
+   * application's own `404` view, with a 404 status — rather than returning an
+   * error page that confirms something is there.
+   *
+   * Returns `this`, so the route's type is unchanged and the path keeps its
+   * entry in `ViewPaths`: `<Link>` and `Redirect.to` stay typed. That also means
+   * the path is still in the route manifest the browser receives, so this gates
+   * the *response*, not the route's existence. Declare the feature
+   * `defineFeature({ serverOnly: true })` and keep unreleased routes out of the
+   * client tree if the name itself is the secret.
+   *
+   * ## A `rollout` is not access control
+   *
+   * Gate on `active` — a feature nobody has switched on is unreachable, which is
+   * the case this is for — or on a `when` that reads something the visitor
+   * cannot choose, like the signed-in user.
+   *
+   * A `rollout` is neither, for an anonymous visitor. The subject is their
+   * `session_id` cookie, which they supply; bucketing is a published pure
+   * function of it, so they can compute one that lands inside any percentage and
+   * send it. Signing the cookie would not fix this — they can equally well
+   * discard it and ask for a fresh one until a signed id happens to land inside,
+   * which for a 5% rollout is a couple of dozen requests. Nothing that hands out
+   * identities on demand can restrict anything to a fraction of them.
+   */
+  feature(key: FeatureKey): this {
+    this.featureGates = [...this.featureGates, key as string];
     return this;
   }
 }
@@ -241,6 +345,7 @@ export class ViewRoute<Input, Output, Params> {
 export class LayoutRoute<T extends ViewRoutes, Input, Output, Params> {
   children: new () => ViewRouter;
   middlewares: string[] = [];
+  featureGates: string[] = [];
   /** @internal Set by `alwaysRun()`. */
   alwaysRuns = false;
   private handler: (req: HttpRequest<Input, Params>) => Output = (() => ({})) as any;
@@ -302,14 +407,48 @@ export class LayoutRoute<T extends ViewRoutes, Input, Output, Params> {
     return this;
   }
 
-  middleware(middlewares: string[]) {
-    this.middlewares = middlewares;
+  middleware(middlewares: MiddlewareInput) {
+    this.middlewares = toMiddlewareList(middlewares);
+    return this;
+  }
+
+  /**
+   * Hides this route behind a feature flag.
+   *
+   * When the flag is off the route behaves as though it does not exist — the
+   * application's own `404` view, with a 404 status — rather than returning an
+   * error page that confirms something is there.
+   *
+   * Returns `this`, so the route's type is unchanged and the path keeps its
+   * entry in `ViewPaths`: `<Link>` and `Redirect.to` stay typed. That also means
+   * the path is still in the route manifest the browser receives, so this gates
+   * the *response*, not the route's existence. Declare the feature
+   * `defineFeature({ serverOnly: true })` and keep unreleased routes out of the
+   * client tree if the name itself is the secret.
+   *
+   * ## A `rollout` is not access control
+   *
+   * Gate on `active` — a feature nobody has switched on is unreachable, which is
+   * the case this is for — or on a `when` that reads something the visitor
+   * cannot choose, like the signed-in user.
+   *
+   * A `rollout` is neither, for an anonymous visitor. The subject is their
+   * `session_id` cookie, which they supply; bucketing is a published pure
+   * function of it, so they can compute one that lands inside any percentage and
+   * send it. Signing the cookie would not fix this — they can equally well
+   * discard it and ask for a fresh one until a signed id happens to land inside,
+   * which for a 5% rollout is a couple of dozen requests. Nothing that hands out
+   * identities on demand can restrict anything to a fraction of them.
+   */
+  feature(key: FeatureKey): this {
+    this.featureGates = [...this.featureGates, key as string];
     return this;
   }
 }
 
 export class ViewRouter {
   middlewares: string[] = [];
+  featureGates: string[] = [];
   routes: ViewRoutes = {};
 
   public view<C extends new () => Controller, M extends ControllerMethods<C>>(

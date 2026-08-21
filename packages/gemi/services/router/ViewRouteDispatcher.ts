@@ -1,6 +1,6 @@
 import { HttpRequest } from "../../http";
 import { GEMI_REQUEST_BREAKER_ERROR } from "../../http/Error";
-import { RequestContext } from "../../http/requestContext";
+import { ensureSessionId, RequestContext } from "../../http/requestContext";
 import type { RouterMiddleware } from "../../http/Router";
 import {
   createFlatViewRoutes,
@@ -26,11 +26,12 @@ import { Log } from "../../facades/Log";
 import { Lang } from "../../facades/Lang";
 import { AuthViewRouter } from "../../auth/routes";
 import { KernelId } from "../kernel-id/KernelId";
+import { FeatureManager } from "../features/FeatureManager";
 import { app } from "../../foundation/app";
 import { kernelContext } from "../../kernel/context";
 import { ServerQueryStore, type StreamSummary } from "./ServerQueryStore";
 import { createServerQueryFetcher } from "./serverQueryFetcher";
-import { injectQueryPayloads, isBotUserAgent } from "./streamQueryInjection";
+import { htmlSafeJson, injectQueryPayloads, isBotUserAgent } from "./streamQueryInjection";
 import { createShellContentObserver, createShellContentReporter } from "./shellContentReport";
 import { createRoutePayloadStream } from "./routePayloadStream";
 import { loadSharp } from "../../support/sharp";
@@ -233,15 +234,27 @@ export class ViewRouteDispatcher {
     this.root = config.root;
   }
 
-  async onRequestEnd(req: HttpRequest) {
-    if (!req.cookies.has("session_id")) {
-      req.ctx().setCookie("session_id", Bun.randomUUIDv7(), {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === "production",
-        sameSite: "Strict",
-        expires: new Date(Date.now() + 1000 * 60 * 60 * 24 * 365),
-      });
+  /**
+   * Whether every flag gating a route is on for this request.
+   *
+   * All must pass. Gates accumulate down the tree — a router's, then a layout's,
+   * then the route's — and the intersection is the only reading that composes:
+   * a route inside a gated section cannot be more reachable than the section.
+   */
+  private async passesFeatureGates(keys: string[]): Promise<boolean> {
+    const features = app(FeatureManager);
+    for (const key of keys) {
+      if (!(await features.enabled(key))) return false;
     }
+    return true;
+  }
+
+  async onRequestEnd(req: HttpRequest) {
+    // Idempotent, and normally a no-op by the time it gets here: the request
+    // already minted the id up front so that everything which ran in between
+    // saw it. Kept as a backstop for any path that reaches the end without
+    // having asked.
+    ensureSessionId();
 
     return await this.hooks.onRequestEnd(req);
   }
@@ -339,6 +352,7 @@ export class ViewRouteDispatcher {
     meta: any;
     isOgRequest?: boolean;
     appId: string;
+    features: Record<string, boolean>;
   }) {
     const {
       req,
@@ -360,6 +374,7 @@ export class ViewRouteDispatcher {
       meta,
       isOgRequest,
       appId,
+      features,
     } = props;
 
     const pageDataKey = pathname.replace(`/${urlLocaleSegment}`, "");
@@ -389,6 +404,11 @@ export class ViewRouteDispatcher {
           is404: !currentPathName ? true : false,
         },
         appId,
+        // Evaluated key -> value only. Rules, conditions, segment criteria and
+        // the bucketing seed stay on the server: with the seed and a subject id
+        // anyone could compute another user's bucket for every flag, including
+        // unreleased ones.
+        features,
         componentTree: [["404", []], ...this.componentTree],
       },
       head: {},
@@ -613,7 +633,7 @@ export class ViewRouteDispatcher {
           }),
           {
             bootstrapScriptContent: bootstrapScriptContent(
-              `window.__GEMI_DATA__ = ${JSON.stringify(result.data)}`,
+              `window.__GEMI_DATA__ = ${htmlSafeJson(result.data)}`,
             ),
             bootstrapModules: reactBootstrapModules,
             signal: deadline.signal,
@@ -671,7 +691,7 @@ export class ViewRouteDispatcher {
         clearTimeout(deadlineTimer);
         const stream = await renderToReadableStream(createElement("div"), {
           bootstrapScriptContent: bootstrapScriptContent(
-            `window.error= ${JSON.stringify(err.message)}; window.stack_trace=${JSON.stringify(err.stack)};window.__GEMI_DATA__ = ${JSON.stringify(result.data)}`,
+            `window.error= ${htmlSafeJson(err.message)}; window.stack_trace=${htmlSafeJson(err.stack)};window.__GEMI_DATA__ = ${htmlSafeJson(result.data)}`,
           ),
           bootstrapModules:
             process.env.NODE_ENV === "development"
@@ -749,6 +769,9 @@ export class ViewRouteDispatcher {
     // document a bot UA would (#289). It is a directive read here, not real
     // middleware — the middleware runner ignores unknown aliases.
     let noStream = false;
+    // Flags gating the matched route, checked once the request scope is open
+    // and middleware has run.
+    let featureGates: string[] = [];
 
     try {
       const match = matchViewRoute(this.flatViewRoutes, urlPathname);
@@ -757,6 +780,7 @@ export class ViewRouteDispatcher {
         params = match.params;
         handlers = match.route.exec;
         middlewares = match.route.middleware;
+        featureGates = match.route.features;
         noStream = middlewares.includes("no-stream");
 
         // Only navigations skip work. A document request renders the whole
@@ -788,7 +812,7 @@ export class ViewRouteDispatcher {
       let pageData: {
         cookies: Set<string>;
         headers: Headers;
-        currentPathName: string;
+        currentPathName: string | null;
         data: Record<string, any>;
         prefetchedData: Record<string, any>;
         user: any; // TODO: fix type
@@ -796,6 +820,7 @@ export class ViewRouteDispatcher {
         urlLocaleSegment: string | null;
         meta: any;
         appId: string;
+        features: Record<string, boolean>;
       } | null = null;
       const ctx = RequestContext.getStore();
       // The HTTP server drives the response body — and therefore every stream
@@ -844,8 +869,43 @@ export class ViewRouteDispatcher {
 
       const httpRequest = ctx.req;
 
+      // Before middleware, so that everything downstream — middleware, handlers,
+      // feature-flag bucketing — reads one id, and the same one the browser is
+      // about to be given. Both the document and the `.json` navigation path
+      // come through here, which is the point: minting only on the document path
+      // left a client-side navigation with no subject to bucket on.
+      ensureSessionId();
+
       try {
         await app(MiddlewareRegistry).runMiddleware(middlewares);
+
+        // After middleware, not at match time: `auth` is what puts the user on
+        // the request context, and a route gated on a flag that targets signed-in
+        // users has to see them. The route table is built once at boot and is
+        // shared by every visitor, so this is the only place a per-user decision
+        // about a route can be made.
+        //
+        // Clearing the match rather than throwing is what produces the real 404:
+        // the framework renders the application's `404` view exactly when
+        // `currentPathName` is null, so a gated route becomes indistinguishable
+        // from one that was never defined — status, view and component tree
+        // included. A `RequestBreakerError` here would instead return a bare
+        // text body, which both looks broken and confirms the route exists.
+        if (featureGates.length > 0 && !(await this.passesFeatureGates(featureGates))) {
+          currentPathName = null;
+          handlers = [];
+          // `routePath` too, and not only for tidiness: it is what selects this
+          // request's translation namespace below, so leaving it would serve the
+          // gated route's dictionary alongside its 404 while a genuinely
+          // unmatched path carries none. For an unannounced feature the
+          // translation keys are usually the most descriptive thing about it,
+          // which makes that difference the leak this block exists to prevent.
+          //
+          // Safe this late: the feature context was built and memoized by the
+          // gate check above, so a `when` reading `ctx.request.routePath` has
+          // already seen the real value.
+          httpRequest.routePath = "";
+        }
 
         const translator = app(Translator);
         // Two ways to be an i18n app now. `isEnabled` means the legacy
@@ -916,14 +976,20 @@ export class ViewRouteDispatcher {
           headers,
           user: ctx.user,
           prefetchedData: ctx.serverQueries.snapshotResolved(),
-          currentPathName: httpRequest.routePath,
+          currentPathName,
           params: httpRequest.params,
           urlLocaleSegment,
           meta: ctx.renderMeta(),
           appId: app(KernelId).id,
+          // After the handlers, deliberately: middleware and handlers are what
+          // populate `ctx.user`, and a flag targeted at a signed-in user has to
+          // see them. Before the render, necessarily: the document payload is
+          // written as `bootstrapScriptContent` at the top of the body, so a
+          // flag discovered mid-render could not be added to it.
+          features: await app(FeatureManager).forClient(),
         };
 
-        const { params, currentPathName, user } = pageData;
+        const { params, user } = pageData;
 
         const viewData = {};
         const breadcrumbs = {};
@@ -978,6 +1044,11 @@ export class ViewRouteDispatcher {
             // snapshot marks its entries shipped so they aren't sent twice.
             prefetchedData: ctx.serverQueries.snapshotResolved(),
             i18n,
+            // Sent on every navigation, **including a partial render**. Unlike
+            // `meta`, flags are a property of the request rather than of the
+            // segments that re-ran — omitting them on a partial would leave the
+            // client showing the previous route's flag values.
+            features: pageData.features,
             is404: !currentPathName,
             appId: pageData.appId,
             partial,
@@ -1049,6 +1120,7 @@ export class ViewRouteDispatcher {
           urlLocaleSegment,
           meta: pageData.meta,
           appId: pageData.appId,
+          features: pageData.features,
           isOgRequest,
         });
       } catch (err) {

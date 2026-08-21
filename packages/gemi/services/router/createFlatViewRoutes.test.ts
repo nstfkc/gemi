@@ -81,6 +81,7 @@ describe("createFlatViewRoutes()", () => {
     expect(result["/"]).toEqual({
       exec: [expect.any(Function)],
       middleware: ["auth", "homeMiddleware"],
+      features: [],
       viewPath: "Home",
       segments: [{ path: "/", viewPath: "Home" }],
     });
@@ -88,6 +89,7 @@ describe("createFlatViewRoutes()", () => {
     expect(result["/about"]).toEqual({
       exec: [expect.any(Function)],
       middleware: ["auth"],
+      features: [],
       viewPath: "About",
       segments: [{ path: "/about", viewPath: "About" }],
     });
@@ -95,6 +97,7 @@ describe("createFlatViewRoutes()", () => {
     expect(result["/app"]).toEqual({
       exec: [expect.any(Function), expect.any(Function)],
       middleware: ["auth"],
+      features: [],
       viewPath: "PrivateLayout",
       segments: [
         { path: "/app", viewPath: "PrivateLayout" },
@@ -105,6 +108,7 @@ describe("createFlatViewRoutes()", () => {
     expect(result["/app/settings"]).toEqual({
       exec: [expect.any(Function), expect.any(Function)],
       middleware: ["auth"],
+      features: [],
       viewPath: "PrivateLayout",
       segments: [
         { path: "/app", viewPath: "PrivateLayout" },

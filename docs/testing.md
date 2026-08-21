@@ -47,6 +47,7 @@ test("renders the organisation's messages", () => {
 | `queryConfig` | — | App-wide `useQuery` defaults, as `createRoot` threads them. |
 | `user` | `null` | `useUser()`. |
 | `breadcrumbs` | `[]` | `useBreadcrumbs()`, in order. |
+| `features` | `{}` | `useFeature("key")`. Seeds the outcome, not the declaration: anything left out reads as off, exactly as it does for a key the server never sent. Cover `when` targeting and rollouts with a server test. |
 | `theme` | stored, else `"light"` | `useTheme()`. A test has no browser session to have chosen one in; `setTheme` still works from whatever this seeds. |
 | `fallback` | `null` | The `Suspense` fallback wrapped around the children, standing in for the view's own `Loading` export. |
 | `errorFallback` | — | Rendered in place of the children when one throws, standing in for the view's `Error` export. Its `resetErrorBoundary` clears query errors, so the retry path works as it does in the app. |
@@ -196,6 +197,7 @@ Under `bun test`, preload `happy-dom` — no gemi-specific configuration is requ
 ## Related
 
 - [Events & Listeners](./events.md#testing-with-eventfake) — `Event.fake()`, for asserting what a *server* test dispatched.
+- [Features](./feature-flags.md) — what `features` seeds, and where the targeting behind it is covered instead.
 - [Views & Layouts](./views-and-layouts.md) — what a view receives from its route.
 - [Data Fetching](./data-fetching.md) — `useQuery`, prefetching, and the variant keys `queryData` mirrors.
 - [Internationalization](./i18n.md) — dictionaries and `useTranslator`.

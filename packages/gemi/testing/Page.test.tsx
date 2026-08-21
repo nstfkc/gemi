@@ -17,6 +17,7 @@ import { Link } from "../client/Link";
 import { Redirect } from "../client/Redirect";
 import { useTheme } from "../client/ThemeProvider";
 import { useBreadcrumbs } from "../client/useBreadcrumbs";
+import { useFeature } from "../client/useFeature";
 import { useIsNavigationPending } from "../client/useIsNavigationPending";
 import { useLocation } from "../client/useLocation";
 import { useNavigationProgress } from "../client/useNavigationProgress";
@@ -237,6 +238,28 @@ describe("<Page> route state", () => {
     );
 
     expect(screen.getByText("App > Chat")).toBeDefined();
+  });
+
+  test("seeds features, and anything unseeded reads as off", () => {
+    // The warning `useFeature` emits for a key the payload does not carry is
+    // correct here — an unseeded key really is absent — and asserting the two
+    // reads is the point, so it is silenced rather than left to clutter the run.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    function View() {
+      return (
+        <div>{`${useFeature("new-checkout")}:${useFeature("not-seeded")}`}</div>
+      );
+    }
+
+    render(
+      <Page features={{ "new-checkout": true }}>
+        <View />
+      </Page>,
+    );
+
+    expect(screen.getByText("true:false")).toBeDefined();
+    warn.mockRestore();
   });
 });
 

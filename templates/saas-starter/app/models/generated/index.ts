@@ -8,6 +8,7 @@ import { assertSchemaArtifactVersion, register } from "gemi/orm";
 import { ARTIFACT_VERSION } from "./schema";
 import {
   AccountModel,
+  FeatureFlagModel,
   LedgerModel,
   LedgerEntryModel,
   LedgerNoteModel,
@@ -31,6 +32,7 @@ assertSchemaArtifactVersion(ARTIFACT_VERSION);
 // lets two models reference each other without the generated files forming an
 // import cycle.
 register("Account", AccountModel);
+register("FeatureFlag", FeatureFlagModel);
 register("Ledger", LedgerModel);
 register("LedgerEntry", LedgerEntryModel);
 register("LedgerNote", LedgerNoteModel);
