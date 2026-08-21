@@ -57,6 +57,7 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 
 ### Services & facades
 - **[Services](./services.md)** — your own singletons: `Service`, `boot()`, and constructor-default injection.
+- **[Features](./feature-flags.md)** — features declared in `app/features` and switched on from the database: `defineFeature`, `when` targeting, deterministic rollouts, `useFeature`, the `Features` facade, and route gating.
 - **[Facades](./facades.md)** — reference for `Auth`, `Redirect`, `Lang`, `Storage`, `Query`, `Broadcast`, `Url`, `Log`, `Meta`, `Cookie`, `Redis`.
 - **[File Storage](./file-storage.md)** — the `Storage` facade, filesystem/S3 drivers, image optimization, the `Image` component.
 - **[Email](./email.md)** — the `Email` class, jsx-email templates, the Resend driver, localization and scheduling.
@@ -75,6 +76,7 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 | **Container** | The `Application` every service is resolved from — `app(MailManager)` | [project-structure](./project-structure.md) |
 | **Config slice** | `app/config/<name>.ts` — runtime settings and hooks for one subsystem | [project-structure](./project-structure.md) |
 | **Service provider** | Registers bindings into the container (`register()` / `boot()`) | [project-structure](./project-structure.md) |
+| **Service** | Your own singleton — async `boot()`, injected as a constructor default | [services](./services.md) |
 | **Router** | Class declaring a `routes` object; routers nest | [routing](./routing.md) |
 | **Controller** | Server logic behind a route; receives `HttpRequest` | [controllers](./controllers.md) |
 | **Facade** | Static proxy to a container-resolved service | [facades](./facades.md) |
@@ -94,7 +96,6 @@ These are the counter-intuitive rules worth knowing up front — each is covered
 - **The query hook is `useQuery`, not `useGet`.** Some app-level notes mention `useGet`; it does not exist in gemi. See [Data Fetching](./data-fetching.md).
 - **Routing is explicit.** A view/controller file name has no relation to its URL — the mapping lives in a router. See [Routing](./routing.md).
 - **There is nothing to generate for the typed network layer.** The `RPC` / `ViewRPC` augmentation ships inside the package and is derived from your routers by the compiler. Apps upgrading from 0.55 or earlier must delete their root `gemi.d.ts` and its `types` entry — see [UPGRADE.md](../UPGRADE.md). See [Data Fetching](./data-fetching.md).
-
 
 ---
 
@@ -237,7 +238,6 @@ Run `bun dev` and open the printed URL. From here, dig into:
 - [Configuration](./configuration.md)
 - [Routing](./routing.md)
 - [Controllers](./controllers.md)
-
 
 ---
 
@@ -661,12 +661,34 @@ register() {
 - **`register()`** — bind factories. Runs synchronously for every provider, in order, at `Kernel.boot()`. **Never resolve anything here** — the providers after you have not registered yet.
 - **`boot()`** — may be `async`. Runs after *every* provider has registered, so resolving is safe. This is where cross-cutting wiring belongs.
 
+### Your own services need neither
+
+A provider plus a config slice is the shape for rebinding something the *framework* owns. For your app's own singletons there is a shorter path — a `Service` subclass listed in the Kernel's `services` array, with its settings as fields and an `async boot()`:
+
+```typescript
+export class Billing extends Service {
+  static token = "billing";
+  apiKey = process.env.BILLING_API_KEY;
+  async boot() { /* ... */ }
+}
+```
+
+```typescript
+export class CheckoutController extends Controller {
+  constructor(private billing = Billing.inject()) {
+    super();
+  }
+}
+```
+
+See [Services](./services.md). Reach for a provider when the class is not yours, when you need a new instance per resolve, or when you are replacing a framework token.
+
 ## Boot phases
 
 The boot is split in two because `new App({ kernel })` is a synchronous constructor while providers may need to `await` during startup:
 
-1. **`kernel.boot()` — synchronous.** Merges the Kernel's `config` into the `Repository`, sets the current `Application` instance, and runs every provider's `register()`. Only bindings are recorded; no service is constructed.
-2. **`kernel.waitForBoot()` — asynchronous.** Runs every provider's `boot()` in registration order. Idempotent.
+1. **`kernel.boot()` — synchronous.** Merges the Kernel's `config` into the `Repository`, sets the current `Application` instance, runs every provider's `register()`, then constructs every service in `services` and binds it into the container. Only bindings are recorded for providers; no *framework* service is constructed.
+2. **`kernel.waitForBoot()` — asynchronous.** Runs every provider's `boot()` in registration order, then every service's `boot()` in `services` order. Idempotent.
 
 `new App({ kernel })` performs phase one for you; `Server.start()` awaits phase two before binding the port. If you drive `App` yourself, `await app.waitForBoot()` before serving.
 
@@ -767,7 +789,6 @@ const server = new Server({
 - [Controllers](./controllers.md) — controller and resource controller classes.
 - [CLI](./cli.md) — `dev`, `build`, `start`, and tooling commands.
 
-
 ---
 
 ## Configuration
@@ -832,19 +853,19 @@ A typical `.env` from the template:
 HOST_NAME=http://localhost:5173
 DATABASE_URL=file:./dev.db
 
-## openssl rand -base64 32 | head -c 32
+# openssl rand -base64 32 | head -c 32
 SECRET=SECRET
 
 ### Email
 EMAIL_DEBUG=true
-## RESEND_API_KEY=
+# RESEND_API_KEY=
 
 ### S3 Storage
-## AWS_ACCESS_KEY_ID=
-## AWS_ENDPOINT_URL_S3=
-## AWS_REGION=auto
-## AWS_SECRET_ACCESS_KEY=
-## BUCKET_NAME=
+# AWS_ACCESS_KEY_ID=
+# AWS_ENDPOINT_URL_S3=
+# AWS_REGION=auto
+# AWS_SECRET_ACCESS_KEY=
+# BUCKET_NAME=
 ```
 
 ### `.env` file precedence
@@ -952,7 +973,6 @@ To add app-specific Vite configuration, prefer `gemi.config.ts`'s `vite` field (
 
 - [CLI](./cli.md) — the commands that consume this configuration.
 - [Project Structure & the Kernel](./project-structure.md) — where `server.ts`, `preload.ts`, and the kernel fit.
-
 
 ---
 
@@ -1136,6 +1156,7 @@ Like `app:component-tree`, it loads the app from the kernel and prints the resol
 - [Getting Started](./getting-started.md) — installing gemi and running your first commands.
 - [Configuration](./configuration.md) — `.env`, `preload.ts`, and `gemi.config.ts` that these commands consume.
 - [Project Structure & the Kernel](./project-structure.md) — `server.ts`, the kernel, and how the app boots.
+
 ---
 
 ## Routing
@@ -1489,7 +1510,6 @@ export default class extends ViewRouter {
 - [Views & Layouts](./views-and-layouts.md) — authoring the React components that routes render.
 - [Data Fetching](./data-fetching.md) — consuming these routes from the client.
 
-
 ---
 
 ## Controllers
@@ -1682,7 +1702,6 @@ The following are exported from `gemi/http` and thrown by [middleware](./middlew
 - [Forms](./forms.md) — client-side forms that consume these validation errors.
 - [Authentication](./authentication.md) — sessions and the current user.
 
-
 ---
 
 ## Middleware
@@ -1753,9 +1772,19 @@ Sets a `Cache-Control` header on `GET` responses. Parameters are `scope`, `maxAg
 | `cache:private,0,no-store` | `private, max-age=0, no-store` |
 | `cache:public,12840,must-revalidate` | `public, max-age=12840, must-revalidate` |
 
-### `rate-limit:N` → `RateLimitMiddleware`
+### `rate-limit:N,W` → `RateLimitMiddleware`
 
-Limits requests per client (keyed by `x-forwarded-for` and route path) using the rate-limiter service. `N` is the max count (default `1000`); over the limit throws a **429**. Example: `rate-limit:100`.
+Limits how often one client may hit a route. `N` is the number of requests, `W` the window in **seconds**; both fall back to the rate-limiter service defaults (`1000` per `60`s). Over the limit the middleware throws a **429**.
+
+| DSL | Meaning |
+| --- | --- |
+| `rate-limit` | provider defaults — 1000 requests per 60s |
+| `rate-limit:100` | 100 requests per 60s |
+| `rate-limit:10,30` | 10 requests per 30s |
+
+The default bucket is the client's IP (left-most `x-forwarded-for` entry, then `x-real-ip`) **plus the route path**, so a client's budget for `/api/search` is separate from its budget for `/api/upload`. Every response carries `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset`; a rejected one also carries `Retry-After`.
+
+Counting uses a **sliding window**, so a client cannot spend a full budget at the end of one window and another at the start of the next. See [Rate limiting](#rate-limiting) below for drivers, Redis, and limiting by something other than an IP.
 
 ### `cors` → `CorsMiddleware`
 
@@ -1764,6 +1793,26 @@ Sets CORS headers for requests whose `Origin` is in the configured `origins` map
 ### `csrf` → `CSRFMiddleware`
 
 Verifies the `csrf_token` cookie against Bun's CSRF verifier for `POST`/`PUT`/`PATCH`/`DELETE`. Missing or invalid tokens throw a **403**.
+
+### `no-stream` (view routes only)
+
+Opts the route out of streaming SSR: the document response waits for every
+query and renders fully settled, inline HTML — the same treatment crawler
+user-agents get automatically. Use it on public marketing/content routes that
+must render for JS-disabled visitors, text browsers, and failed script loads:
+React parks any HTML chunk over ~12.8&nbsp;kB behind a reveal script when
+streaming, so without this a large static page renders blank until JS runs.
+
+```ts
+class MarketingRouter extends ViewRouter {
+  middlewares = ["cache:public", "no-stream"];
+  // ...
+}
+```
+
+Streaming stays the right default for the authenticated app, where JS is a
+given and time-to-shell matters. `no-stream` is a routing directive rather
+than a middleware class — it has no alias to register.
 
 ## Registering middleware
 
@@ -1932,13 +1981,90 @@ App providers run after the framework's, so they can rebind anything the framewo
 
 > **Gotcha:** Authorization middleware (like `admin` above) throws to reject. Follow the built-in pattern — throw a `RequestBreakerError` subclass with the right `api`/`view` payload so API callers get a JSON error and browser navigations get a redirect. See [Authorization](./authorization.md).
 
+## Rate limiting
+
+`rate-limit` is a thin wrapper around the rate-limiter service, so the same DSL runs against an in-process counter locally and a shared one in production.
+
+### Drivers
+
+| Driver | Use it when |
+| --- | --- |
+| `InMemoryRateLimiter` (default) | one instance, or local development |
+| `RedisRateLimiter` | more than one instance — counters are shared, so the limit is the limit |
+
+The in-memory driver keeps counters in the process that served the request. With N instances behind a load balancer the effective limit is N × the configured limit, and it resets on every deploy. Switch to Redis as soon as you scale past one:
+
+```typescript
+// app/config/ratelimiter.ts
+import { defineRateLimiterConfig, RedisRateLimiter } from "gemi/services";
+
+export default defineRateLimiterConfig({
+  driver: new RedisRateLimiter(),
+
+  // Defaults for a bare "rate-limit" with no DSL parameters.
+  limit: 1000,
+  window: 60, // seconds
+});
+```
+
+`RedisRateLimiter` uses the connection from your `redis` config slice — no extra configuration — and runs the whole count-and-decide step as one Lua script, so concurrent requests across instances cannot overspend the budget. It accepts:
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `client` | the app's Redis client | run against a different connection |
+| `prefix` | `gemi:rl` | key namespace |
+| `failOpen` | `true` | admit requests while Redis is unreachable |
+| `onError` | `console.error` | where Redis failures are reported |
+
+`failOpen` is the interesting one: by default a Redis outage lets traffic through rather than taking the site down with it. Set it to `false` on endpoints where an unmetered request is worse than a rejected one — anything that sends email or costs money per call.
+
+### Limiting by something other than an IP
+
+`x-forwarded-for` is trivially spoofed unless a proxy overwrites it, and it does not distinguish two users behind one NAT. `configure()` replaces the key with anything you can read off the request:
+
+```typescript
+import { RateLimitMiddleware, clientIp } from "gemi/http";
+
+export default class extends MiddlewareServiceProvider {
+  aliases = {
+    "rate-limit": RateLimitMiddleware,
+    // Signed-in users get a per-user budget; anonymous ones fall back to IP.
+    "user-rate-limit": RateLimitMiddleware.configure({
+      limit: 60,
+      window: 60,
+      key: (req) => `user:${req.ctx().user?.id ?? clientIp(req)}`,
+    }),
+  };
+}
+```
+
+`configure()` also takes `headers: false` to suppress the `X-RateLimit-*` response headers.
+
+### Limiting outside of middleware
+
+Some budgets do not belong to a route — a cooldown on password-reset emails, a quota on a paid third-party API. The `RateLimiter` facade is the same limiter, callable from anywhere:
+
+```typescript
+import { RateLimiter } from "gemi/facades";
+
+const { allowed, retryAfter } = await RateLimiter.consume(`reset:${email}`, {
+  limit: 3,
+  window: 3600, // seconds
+});
+
+if (!allowed) {
+  return { error: `Try again in ${Math.ceil(retryAfter / 1000)}s` };
+}
+```
+
+Pass `cost` to charge a request more than one unit — useful when a single call does far more work than the others sharing its budget.
+
 ## See also
 
 - [Authentication](./authentication.md) — how `auth` establishes the session and current user.
 - [Authorization](./authorization.md) — role/permission checks.
 - [Controllers](./controllers.md) — the handlers middleware runs before.
 - [Routing](./routing.md) — where `middlewares` and `.middleware(...)` are declared.
-
 
 ---
 
@@ -2028,7 +2154,9 @@ reaches the component.
 3. The HTML — plus the serialized server data and any prefetched query data — is
    sent to the browser.
 4. The client hydrates the same tree. Subsequent in-app navigations fetch just the
-   new view's data as JSON instead of a full page load.
+   new view's data as JSON instead of a full page load — and only for the segments
+   that changed, see [layout handlers do not re-run on every
+   navigation](#layout-handlers-do-not-re-run-on-every-navigation).
 
 ## Layouts
 
@@ -2094,6 +2222,61 @@ export default function PublicLayout(props: LayoutProps<"/">) {
   return <div data-plan={props.plan}>{props.children}</div>;
 }
 ```
+
+### Layout handlers do not re-run on every navigation
+
+A layout handler runs when the client *enters* the layout, not on every navigation
+underneath it. Moving between two routes inside the same layout sends only the
+segments that actually changed, and the layout keeps the props it already has:
+
+| Navigation | `PublicLayout` handler |
+| --- | --- |
+| `/about` → `/pricing` | skipped — same layout, same path |
+| `/app/A/chat` → `/app/A/lists` | skipped |
+| `/app/A/chat` → `/app/B/chat` | re-runs — `:orgId` changed |
+| `/pricing` → `/auth/sign-in` → back | re-runs — the layout was left |
+| any navigation that changes the query string | re-runs |
+
+A full page load always runs every handler, so a refresh re-runs the layout too.
+
+A layout whose data really does change as the routes below it change can opt out
+with `alwaysRun()`, at the cost of a handler run per navigation:
+
+```typescript
+"/app/:orgId": this.layout("AppLayout", [AppController, "layout"], {
+  "/chat": this.view("Chat"),
+}).alwaysRun(),
+```
+
+Segments are skipped as a prefix, so `alwaysRun()` on a layout also re-runs every
+layout and view nested inside it. To turn the whole mechanism off for an app, set
+`view.partialRendering` to `false` in `app/config/route.ts`:
+
+```typescript
+export default defineRouteConfig({
+  view: {
+    rootRouter: RootViewRouter,
+    root: createRoot(RootLayout),
+    partialRendering: false,
+  },
+});
+```
+
+This makes layout handlers the wrong place for an access check. A handler that
+redirects when there is no session stops running once the client is inside the
+layout, and the header the client sends to say where it is is client-controlled.
+**Guard with middleware** — middleware runs on every request, whole chain, before
+any handler:
+
+```typescript
+"/app": this.layout("AppLayout", [AppController, "layout"], {
+  "/chat": this.view("Chat"),
+}).middleware(["auth"]),
+```
+
+Metadata follows the same rule. If a partially rendered navigation sets no
+metadata at all, the response carries none and the page keeps the title and
+description the skipped layout set.
 
 ### RootLayout
 
@@ -2206,7 +2389,6 @@ when its handler supplies one.
 - [Controllers](./controllers.md) — binding controller methods to routes.
 - [i18n](./i18n.md) — locales and translation.
 
-
 ---
 
 ## Data Fetching
@@ -2236,10 +2418,7 @@ against your `GET:` routes); the optional second argument carries `params` and
 import { useQuery } from "gemi/client";
 
 export default function Todos() {
-  const { data, loading, error, refetch } = useQuery("/todos");
-
-  if (loading) return <p>Loading…</p>;
-  if (error) return <p>Something went wrong.</p>;
+  const { data } = useQuery("/todos");
 
   return (
     <ul>
@@ -2250,6 +2429,96 @@ export default function Todos() {
   );
 }
 ```
+
+### Suspense (the default)
+
+By default a query with no cached data **suspends** the route segment it renders
+in: the component doesn't render until the data is there, so `data` is
+non-nullable and there is no loading branch to write. Every route segment is
+wrapped in a `Suspense` + error boundary by the router, and a view module can
+export its own UI for both:
+
+```tsx
+// app/views/Todos.tsx
+export default function Todos() {
+  const { data } = useQuery("/todos"); // suspends until resolved
+  return <ul>…</ul>;
+}
+
+// Shown while the segment's queries (or its chunk) load.
+export function Loading() {
+  return <TodosSkeleton />;
+}
+
+// Shown when a query throws — receives { error, resetErrorBoundary }.
+export function Error({ error, resetErrorBoundary }) {
+  return <button onClick={resetErrorBoundary}>Retry</button>;
+}
+```
+
+Treat `Loading` as effectively required for any view whose queries can
+suspend: without it the fallback is `null`, which on a streamed hard load
+means a blank region until the segment's data arrives.
+
+How it composes with the rest of the framework:
+
+- **Initial page load streams.** The server sends the shell — layout chrome,
+  every segment's `Loading` export in place — as soon as the route handlers
+  finish, then resolves each query's api handler in-process and streams the
+  finished segments (data included) into the document as they land. The page
+  completes at the speed of the *slowest* query, not the sum: every query the
+  first render pass reaches starts immediately and in parallel, wherever it
+  sits in the tree. Crawlers are served the fully settled document instead,
+  and a route can request that treatment for *everyone* — JS-disabled
+  visitors included — with the `"no-stream"` middleware directive (see the
+  middleware docs). `Query.prefetch` is **not required** for streaming — see
+  "Avoiding server waterfalls" below for when it still earns its keep.
+- **Hydration doesn't flash the fallback.** A production shell announces every
+  chunk the current route's views will import with `<link rel="modulepreload">`,
+  so the browser fetches the whole layout → view → component chain in parallel
+  with the client entry. Without those hints it discovers them one `import()`
+  at a time, and on a real network each boundary shows its `Loading` export in
+  place of content the server already rendered — collapsing the page height and
+  restoring it a round trip later. Client-side navigation announces the target
+  route's chunks the same way, so a transition doesn't re-pay that chain either.
+- **Navigation** — the router commits navigations inside a transition, so when
+  the next page's queries suspend, the previous page stays on screen
+  (`Link[data-pending]` / `useRouteTransition()` report it) until they resolve.
+  Entering a freshly mounted layout commits the layout and shows the suspended
+  leaf's `Loading` export instead.
+- **Prefetching** — data that arrives any other way — `Query.prefetch` on the
+  server, a `<Link prefetch>` route payload — lands in the same cache and wakes
+  a suspended query immediately, without waiting on its own request.
+- **Stale data never suspends.** A query with cached data always renders it and
+  revalidates in the background (`staleTime` semantics are unchanged).
+- **Variant changes don't re-suspend.** With `keepPreviousData` (the default),
+  changing a query's `search` or `params` keeps the previous variant's rows
+  rendered while the new one loads in the background — no fallback flash, no
+  `startTransition` at the call site — and the pending window is reported as
+  `loading: true` for pager UI. Set `keepPreviousData: false` to restore
+  suspend-into-the-fallback on variant change (e.g. tab-like switches where
+  stale rows would mislead). If the new variant's fetch *fails* during the
+  window, the failure throws into the segment's error boundary as usual — the
+  previous rows don't mask it.
+- **Errors throw.** With suspense on, an HTTP failure throws a `QueryError`
+  (with `status`, `body`, `path`) into the segment's error boundary instead of
+  being returned. Resetting the boundary clears the stored errors and retries.
+
+Opting out restores the `loading`/`error` flags — per query, with
+`{ suspense: false }` (and `lazy: true` implies it):
+
+```tsx
+const { data, loading, error } = useQuery("/todos", {}, { suspense: false });
+
+if (loading) return <p>Loading…</p>;
+if (error) return <p>Something went wrong.</p>;
+```
+
+Use the opt-out when the loading state itself is UI you want to control inline,
+or when the data legitimately may never exist (an anonymous visitor's
+`/auth/me`). Pagination, search, and filters do **not** need it: a variant
+change under suspense keeps the previous rows on screen and reports
+`loading: true` (see "Variant changes don't re-suspend" above).
 
 ### Params and search
 
@@ -2279,14 +2548,14 @@ so a typo in a param or a wrong field type is a compile error.
 
 | field | description |
 | --- | --- |
-| `data` | The response body, typed from the endpoint. `null`/undefined until first load. |
-| `loading` | `true` while a request is in flight (defaults to `true` before the first fetch). |
-| `error` | Error record if the request failed, otherwise `null`. |
+| `data` | The response body, typed from the endpoint. Non-nullable under suspense (the default); `undefined` until first load with `suspense: false` / `lazy: true`. |
+| `loading` | `true` while a request is in flight. Under suspense (the default) a query never renders without data, so this is `false` in steady state — it flips to `true` during a variant change's pending window: with `keepPreviousData` on, changing `search`/`params` keeps the previous variant's rows rendered and reports the new variant's in-flight fetch here. This is the flag pager UI consumes. With `suspense: false` it is the plain in-flight flag, `true` from the first render until the first load settles. |
+| `error` | Error record if the request failed, otherwise `null`. Under suspense a failure only *throws* (a `QueryError`, into the segment's error boundary) when there is no data to show for the requested variant — a background revalidation that fails while that variant's data is on screen keeps rendering the data and returns the `error` here instead. A variant change whose fetch fails still throws, even though the *previous* variant's rows are on screen during the pending window. With `suspense: false` it is always returned, never thrown. |
 | `refetch()` | Force a fresh fetch of the current variant. |
 | `mutate(fn?)` | Optimistically update the cached data (see below), or refetch when called with no argument. |
 | `trigger()` | Kick off the fetch for a `lazy` query. |
-| `prefetch()` | Fetch once, eagerly, without subscribing to loading state (e.g. on hover). |
-| `version` | Monotonic counter that increments on each successful update. |
+| `prefetch()` | Fetch once, eagerly, without subscribing to loading state (e.g. on hover). Joins the in-flight request a suspending read would otherwise start. |
+| `version` | Timestamp that changes every time the cache receives data from the server, including a refetch that returns an identical payload and prefetched data adopted on navigation. |
 
 > The exported `QueryResult<T>` type is the inferred **data** type for endpoint
 > `T` (i.e. the type of `data`), not the whole hook return.
@@ -2295,13 +2564,56 @@ so a typo in a param or a wrong field type is a compile error.
 
 ```tsx
 const { data } = useQuery("/feed", {}, {
+  suspense: true,          // default; false restores the loading/error flags
   fallbackData: [],        // initial data before the first fetch
-  keepPreviousData: true,  // keep old data visible while refetching (default true)
+  keepPreviousData: true,  // keep the previous variant's data on screen while a new one loads (default true)
   refreshInterval: 5000,   // poll every 5s
-  retryIntervalOnError: 10000,
-  lazy: false,             // when true, no fetch until trigger()/refetch()
+  retryIntervalOnError: 10000, // background retry — suspense: false only
+  revalidateOnFocus: false, // revalidate when the tab comes back to the foreground
+  focusThrottleInterval: 5000, // minimum gap between two focus revalidations
+  staleTime: 5000,         // how long cached data stays fresh (default 5000ms)
+  lazy: false,             // when true, no fetch until trigger()/refetch(); implies suspense: false
 });
 ```
+
+`keepPreviousData` governs what a variant change (a new `search`/`params`
+combination) renders while the new variant loads. Under suspense it keeps the
+previous variant's rows on screen and reports the window as `loading: true` —
+no `startTransition` needed at the call site (see "Variant changes don't
+re-suspend"). With `suspense: false` it substitutes the previous variant's
+`data` while `loading` is `true` instead of handing you `undefined`. Either
+way, set it to `false` to drop the previous data the moment the variant
+changes.
+
+`staleTime` controls when reading the cache triggers a background revalidation.
+Once cached data is older than `staleTime`, the next component that mounts and
+reads it kicks off a silent refetch. Raise it for data that rarely changes
+(`staleTime: 60_000`) to stop it being re-requested on every navigation, or set
+`staleTime: 0` to always revalidate. `Infinity` disables age-based revalidation
+entirely — `mutate()` and `refetch()` still fetch, since those are explicit.
+
+`revalidateOnFocus` refetches when the tab comes back to the foreground — the
+user switching windows, returning from another tab, or unlocking the device.
+It is off by default, and the refetch is always silent: what's on screen keeps
+rendering (no `loading` flip, no fallback) until the new data lands.
+
+Three things keep it from firing more than it should:
+
+- **`staleTime`** — a quick tab-out-and-back costs nothing; only data older
+  than its freshness window goes back to the wire.
+- **A return actually has to have happened.** `focus` also fires for things
+  that never left the page (dismissing an `alert` or a file picker, closing
+  devtools), so a revalidation is only owed when the window lost focus or the
+  tab was hidden first.
+- **`focusThrottleInterval`** (default 5000ms) — the minimum gap between two
+  focus revalidations of the same query. Clicking in and out of an embedded
+  iframe (a payment form, a video) blurs and focuses the window every time, and
+  the handler runs for *every* mounted query, so without this a dashboard under
+  `staleTime: 0` would fire a request per query per click.
+
+A `lazy` query only becomes eligible once something has explicitly fetched it —
+`trigger()`, `refetch()` or `mutate()`. `prefetch()` deliberately does not
+count: it is "fetch once" for data the user may never look at.
 
 ### Optimistic updates with `mutate`
 
@@ -2352,16 +2664,69 @@ import { Query } from "gemi/facades";
 }),
 ```
 
-- `Query.instant(path, options?)` runs the endpoint immediately and **returns the
-  data** — use its return value in the handler. It also stores the result for the client.
-- `Query.prefetch(path, options?)` only primes the client cache: it queues the endpoint
-  to resolve alongside the rest of the page, without returning the data for use here.
+- `Query.instant(path, options?)` runs the endpoint, **waits for it**, and returns
+  the data — use its return value in the handler. The response cannot start until
+  it resolves, so its data is always part of the first paint. It also stores the
+  result for the client.
+- `Query.prefetch(path, options?)` starts the endpoint immediately — in parallel
+  with the handlers and every other prefetch — without blocking the response on
+  it. If it resolves before the render needs it, the data ships in the document
+  payload; otherwise it streams in behind the shell.
+
+#### Avoiding server waterfalls
+
+`Query.prefetch` is a performance tool, not a requirement. The streaming render
+starts every query it can *reach* in its first pass — a `useQuery` in the page
+component, or ten components deep, all start immediately and in parallel. The
+render can't reach a query in two cases, and those are where a prefetch turns a
+sequential waterfall back into a parallel fetch:
+
+1. **Nested under another suspending query.** A layout's query suspends its
+   children, so a child's query is only discovered — and only *started* — once
+   the layout resolves. Prefetching the child's query starts it at request time
+   instead.
+2. **Conditionally rendered on fetched data.** `{data.hasReports && <Reports />}`
+   can't be seen until `data` arrives.
+
+You don't have to spot these yourself: in dev, a query that started late logs a
+hint once it resolves, with the delay it paid and the payload size. But
+"discovered late" does not automatically mean "should be prefetched" — weigh
+the hint against two things:
+
+- **Priming still costs bandwidth on client navigation.** The navigation
+  payload streams (the envelope commits at handler speed, so priming no longer
+  *delays* anything), but every prefetched query is still re-run and streamed
+  into every navigation payload for the route — including navigations where
+  the client already holds the data and would have served it from cache.
+  Prime small reads; leave a heavy collection to `useQuery`'s
+  cache-then-revalidate. The hint reports the resolved size so you can judge
+  the trade directly.
+- **The query may not belong on the route at all.** A query behind a closed
+  popover or hidden tab that mounts unconditionally runs on every page load —
+  the fix is `{ lazy: true }` + `trigger()` when it opens, not an earlier
+  fetch of data nobody sees.
+
+A handler that deliberately primes nothing can declare it with
+`Query.noPrefetch()`, which silences the hints for that route. (A query whose
+*params* depend on another query's *result* is inherently sequential — compose
+the two in one api handler instead.)
 
 Both take the same `{ params, search }` options as `useQuery`, and the stored data
-is matched to the client query by path + search key.
+is matched to the client query by path + search key. The stored data is adopted on
+every client-side navigation, not just the initial server render, so a layout that
+prefetches its endpoints keeps serving them from the payload without the browser
+re-requesting them over `/api`. Data currently being fetched — including the
+refetch behind an optimistic `mutate()` — is left alone rather than overwritten.
 
 > **Gotcha:** The `Query` facade can only be used from a **view/page request**, not
 > from an API request — calling it during an API request throws.
+
+A prefetch belongs to the handler that queues it, so a prefetch in a layout handler
+runs when the client enters that layout and not on every navigation inside it — see
+[layout handlers do not re-run on every
+navigation](./views-and-layouts.md#layout-handlers-do-not-re-run-on-every-navigation).
+Prefetch from the view handler when a route needs the data fetched every time it is
+navigated to.
 
 ## Writing data: mutations
 
@@ -2507,7 +2872,6 @@ It works on any typed path: `useQuery`, `useMutation`, `useMutate`, `Form`'s `ac
 - [Views and Layouts](./views-and-layouts.md) — server props vs. client queries.
 - [Controllers](./controllers.md) — writing the endpoints these hooks call.
 - [File Storage](./file-storage.md) — handling `useUpload` on the server.
-
 
 ---
 
@@ -2709,7 +3073,6 @@ call `usePost` / `usePut` directly and manage the request yourself — see
 - [Data Fetching](./data-fetching.md) — the mutation hooks `Form` is built on.
 - [Navigation](./navigation.md) — redirecting after a successful submit.
 - [Authentication](./authentication.md) — sign-in/up forms use these components.
-
 
 ---
 
@@ -3046,6 +3409,212 @@ off-site URLs.
 - [Data Fetching](./data-fetching.md) — pairing `useSearchParams` with `useQuery`.
 - [Authentication](./authentication.md) — guarding routes with the `Redirect` facade.
 
+---
+
+## Testing Views
+
+A view is a plain React component, so any renderer can mount one — but what it renders comes from inputs the framework normally supplies: route params, the current locale and its dictionaries, data `Query.prefetch` put on the page, the signed-in user. Without those a component test can only assert the empty state.
+
+`gemi/testing` exports one component, `<Page>`, that supplies them.
+
+```tsx
+import { render, screen } from "@testing-library/react";
+import { Page } from "gemi/testing";
+
+import OrgChat from "@/app/views/OrgChat";
+import dictionaries from "@/app/i18n";
+
+test("renders the organisation's messages", () => {
+  render(
+    <Page
+      pathname="/app/:orgId/chat"
+      params={{ orgId: "abc" }}
+      queryData={{ "/organizations/:orgId/messages": [{ id: 1, body: "hi" }] }}
+      dictionaries={[dictionaries.Chat]}
+      user={{ id: 1, name: "Ada" }}
+    >
+      <OrgChat />
+    </Page>,
+  );
+
+  expect(screen.getByText("hi")).toBeDefined();
+});
+```
+
+`<Page>` is a plain component and imports no test runner, so it works with `@testing-library/react`, `react-test-renderer`, or `renderToString` (with [one caveat](#server-rendering)).
+
+## Props
+
+| Prop | Default | What it seeds |
+| --- | --- | --- |
+| `pathname` | `"/"` | The URL the component is mounted at — `useLocation()`, `useRoute()`, and a `Link`'s `data-active`. A template (`/app/:orgId/chat`) is resolved against `params`. |
+| `params` | `{}` | `useParams()`, and the params `useQuery` / `Form` / `Link` apply when a call site omits its own. |
+| `searchParams` | `""` | `useSearchParams()`. Accepts `"?tab=recent"`, `"tab=recent"` or `{ tab: "recent" }`. |
+| `hash` | `""` | `useLocation().hash`. |
+| `locale` | `"en-US"` | `useLocale()`, and which locale `useTranslator` and `useDictionary` read from. |
+| `defaultLocale` | same as `locale` | The locale that gets no URL segment. Set it to render a page being viewed in a non-default locale — links then carry the `/tr-TR` prefix. |
+| `supportedLocales` | the two above | The app's locale list, verbatim — a switcher maps over it, so the order is yours. `defaultLocale` and `locale` are appended if absent. |
+| `dictionaries` | `[]` | `useTranslator("Name")`. Pass the app's real dictionaries, or literals of the same `{ name, dictionary }` shape. |
+| `translations` | `{}` | The same thing already resolved for `locale` — `{ Chat: { greeting: "Hello" } }`. Merged over `dictionaries`. |
+| `queryData` | `{}` | The query cache — see below. |
+| `queryConfig` | — | App-wide `useQuery` defaults, as `createRoot` threads them. |
+| `user` | `null` | `useUser()`. |
+| `breadcrumbs` | `[]` | `useBreadcrumbs()`, in order. |
+| `features` | `{}` | `useFeature("key")`. Seeds the outcome, not the declaration: anything left out reads as off, exactly as it does for a key the server never sent. Cover `when` targeting and rollouts with a server test. |
+| `theme` | stored, else `"light"` | `useTheme()`. A test has no browser session to have chosen one in; `setTheme` still works from whatever this seeds. |
+| `fallback` | `null` | The `Suspense` fallback wrapped around the children, standing in for the view's own `Loading` export. |
+| `errorFallback` | — | Rendered in place of the children when one throws, standing in for the view's `Error` export. Its `resetErrorBoundary` clears query errors, so the retry path works as it does in the app. |
+| `onNavigate` | — | Called with `(href, "push" \| "replace")` when something navigates. |
+
+## Seeding queries
+
+`queryData` is keyed by the path passed to `useQuery` — **without** the `/api` prefix, which the client adds only when it fetches:
+
+```tsx
+<Page queryData={{ "/todos": [{ id: 1 }, { id: 2 }] }}>
+```
+
+A key may carry a query string, which seeds one search variant, and `:params`, which resolve against the page's:
+
+```tsx
+<Page
+  pathname="/orgs/:orgId/lists"
+  params={{ orgId: "abc" }}
+  queryData={{
+    // Read by useQuery("/orgs/:orgId/lists") — the route's params apply.
+    "/orgs/:orgId/lists": [{ id: 1 }],
+    // Read by useQuery("/lists", { search: { page: "2" } }).
+    "/lists?page=2": [{ id: 9 }],
+  }}
+>
+```
+
+The cache is keyed by the **resolved** path, so a `:param` the page does not carry fails the render with an error naming the key. That is deliberate: a query's params often come from the call site rather than the route —
+
+```tsx
+const { data } = useQuery("/orgs/:orgId/lists", { params: { orgId } }); // orgId is state
+```
+
+— and the seed for that is the resolved path, `"/orgs/abc/lists"`, not the template.
+
+A seeded query renders its data on the first pass and issues no request. A query with no seed behaves exactly as it does in the browser: under the default `suspense: true` it suspends into `fallback` and fetches, so intercepting `fetch` (MSW, `vi.stubGlobal`) covers the loading-to-loaded path.
+
+> **Seeded at mount only.** A component that calls `mutate()` or `refetch()` owns the cache from then on, and re-rendering `<Page>` with a different `queryData` deliberately does not overwrite it. To assert a second state, render a second `<Page>`.
+
+`useUser()` resolves from `user` — `null` by default, an anonymous visitor — and never reaches `/auth/me`, so a layout that greets the current user does not have to be mocked out of a test that is about something else.
+
+## Translations
+
+Pass the dictionaries the components under test translate against, exactly as `app/config/translation.ts` prefetches them per route:
+
+```tsx
+import dictionaries from "@/app/i18n";
+
+render(
+  <Page dictionaries={[dictionaries.About]} locale="tr-TR" defaultLocale="en-US">
+    <About />
+  </Page>,
+);
+```
+
+`useTranslator("About")` then resolves keys against `tr-TR`, interpolation and `t.jsx` included. Without a matching dictionary the hook returns the key itself and logs `Unresolved translation` — which is the signal that the dictionary name in the test does not match the one the component asks for.
+
+### Dictionaries are server-side; `translations` is not
+
+A `Dictionary` is a server artifact. The browser never sees one: the server resolves the route's dictionaries for the active locale and serializes them onto the page, and `useTranslator` reads *that*. `<Page>` mirrors it — it takes the `name` and `dictionary` data off whatever you pass and builds the same payload. It never calls `Dictionary`'s server-only methods (`render` and `reference` throw once `window` is defined, as they do in a real browser), and `gemi/testing` does not import `gemi/i18n` at all.
+
+What is server-side is the *import*. `app/i18n/index.ts` imports `gemi/i18n`, so a test file that reads the app's dictionaries pulls the container and `node:async_hooks` into its module graph. Nothing there executes, so it is fine under any runner with Node builtins available — vitest, `bun test` — and not under one that renders in a real browser (vitest browser mode, Playwright component tests).
+
+For those, seed the client's own shape directly. It imports nothing:
+
+```tsx
+<Page translations={{ About: { title: "About {{version:[hi]}}" } }}>
+  <About />
+</Page>
+```
+
+`translations` is `{ dictionary name: { key: string } }` for the current locale — exactly what the server puts on the page. It is merged over `dictionaries`, so the two compose: seed from the app's real dictionary and override the one key a test is about.
+
+### `useDictionary` needs no seeding at all
+
+Everything above is about `useTranslator`, where the strings have to be handed to `<Page>` because the browser only ever sees what the server serialized. A component on the newer [`defineDictionary`](./i18n.md) API carries its own: the dictionary is a module the component imports, and outside the bundler it holds every locale and resolves synchronously.
+
+So a test seeds `locale` and nothing else:
+
+```tsx
+import { Page } from "gemi/testing";
+import Greeter from "@/app/views/Greeter";
+
+test("greets in Turkish", () => {
+  render(
+    <Page locale="tr-TR">
+      <Greeter />
+    </Page>,
+  );
+  expect(screen.getByRole("heading").textContent).toBe("Merhaba Enes");
+});
+```
+
+No `dictionaries`, no `translations`, and no dictionary name that can drift out of sync with the component. The import cost described above does not apply either — a `defineDictionary` module imports `gemi/client`, not `gemi/i18n`, so it never pulls the container in and works under a real-browser runner.
+
+Both APIs compose on one page, which is what a half-migrated app needs:
+
+```tsx
+<Page locale="tr-TR" dictionaries={[dictionaries.Legacy]}>
+  <Greeter />      {/* useDictionary — brings its own */}
+  <LegacyPanel />  {/* useTranslator — reads the seeded payload */}
+</Page>
+```
+
+## Navigation
+
+`<Page>` renders one route. It has no view tree and no route manifest behind it, so a navigation is *reported* rather than performed:
+
+```tsx
+const onNavigate = vi.fn();
+
+render(
+  <Page pathname="/app/abc/chat" onNavigate={onNavigate}>
+    <Nav />
+  </Page>,
+);
+
+screen.getByText("Settings").click();
+expect(onNavigate).toHaveBeenCalledWith("/app/abc/settings", "push");
+```
+
+`useLocation()` keeps reporting the pathname the page was given. To assert what the destination renders, render it in its own `<Page>`.
+
+A navigation issued from a mount effect — `<Redirect>`, or an auth guard that pushes on render — is reported too.
+
+## Server rendering
+
+`renderToString(<Page …>…</Page>)` works, and a **seeded** query renders its data there exactly as it does in the browser. An **unseeded** one does not suspend: it renders the server's no-data branch and logs the framework's "rendered on the server without data … add `Query.prefetch(…)`" warning.
+
+That is the real SSR contract rather than a gap in the harness. Suspending on the server is the streaming renderer's job: `createRoot` threads the request's query store through `ServerQueryContext`, and that store is what runs the route handler and produces the data to wait on. A harness has no request and no handler, so there is nothing to suspend on — the same thing happens to a real route whose view handler declares no `Query.prefetch`.
+
+So: assert seeded output under `renderToString`, and use a DOM renderer for the suspend-then-resolve path.
+
+## Runner setup
+
+The components need a DOM. Under vitest that is a per-file pragma (or `environment: "jsdom"` in `vitest.config.ts`):
+
+```tsx
+/** @vitest-environment jsdom */
+```
+
+Under `bun test`, preload `happy-dom` — no gemi-specific configuration is required either way. React 19 lifecycles, `@testing-library/user-event` and MSW's fetch interception all work against `gemi/client` components as they do against any other React tree.
+
+> **Gotcha:** the environment is browser-*shaped*, but it is still Node or Bun — a test file can import a server module and it will load. What it must not do is *run* one: a controller reaches the container, a model reaches the database, and neither has been booted. Import views, components and dictionaries (see [above](#dictionaries-are-server-side-translations-is-not) for what a dictionary import costs); leave the rest to server tests.
+
+## Related
+
+- [Events & Listeners](./events.md#testing-with-eventfake) — `Event.fake()`, for asserting what a *server* test dispatched.
+- [Features](./feature-flags.md) — what `features` seeds, and where the targeting behind it is covered instead.
+- [Views & Layouts](./views-and-layouts.md) — what a view receives from its route.
+- [Data Fetching](./data-fetching.md) — `useQuery`, prefetching, and the variant keys `queryData` mirrors.
+- [Internationalization](./i18n.md) — dictionaries and `useTranslator`.
+- [Navigation](./navigation.md) — `Link`, `useNavigate`, `useParams`.
 
 ---
 
@@ -5565,6 +6134,7 @@ might lift next release.
   registry by name, so registering them at boot is what makes sign-in work.
 - **[Authorization](./authorization.md)** — route-level authorization, which policies complement
   rather than replace.
+
 ---
 
 ## Rows and entities
@@ -5774,6 +6344,7 @@ await Model.transaction(async () => {
 If this tier is ever pursued properly it gets its own plan and its own decision about whether
 the ORM is the product rather than one part of the framework. Until then, the levels above are
 what there is, and they are complete as described.
+
 ---
 
 ## Authentication
@@ -6452,6 +7023,7 @@ Requests without a valid `access_token` are rejected with an `AuthenticationErro
 (401 for API routes, a redirect to `/auth/sign-in` for views). See
 [Middleware](./middleware.md) for the full DSL (`-auth` to cancel, router vs per-route, etc.)
 and [Authorization](./authorization.md) for role enforcement.
+
 ---
 
 ## Authorization
@@ -6667,7 +7239,6 @@ async function update() {
 - [Middleware](./middleware.md) — the `auth` / `admin` / `role:` DSL in full.
 - [Controllers](./controllers.md) — where inline `Auth.guard(...)` checks usually live.
 
-
 ---
 
 ## Services
@@ -6859,7 +7430,6 @@ A provider is still the right tool when the thing you are binding is not yours, 
 - [Controllers](./controllers.md) — where injection usually happens.
 - [Jobs & Queues](./jobs-and-queues.md) — background work, and the worker-thread boot cost mentioned above.
 - [CLI](./cli.md) — the commands that load the application, and so boot every service.
-
 
 ---
 
@@ -7164,6 +7734,7 @@ import {
   Meta,
   Cookie,
   Redis,
+  RateLimiter,
 } from "gemi/facades";
 ```
 
@@ -7527,6 +8098,29 @@ export class BillingFacade extends Facade {
 }
 ```
 
+## RateLimiter
+
+`RateLimiter` is the rate limiter behind the `rate-limit` middleware, callable directly — for budgets that do not belong to a route.
+
+- `RateLimiter.consume(key, { limit, window, cost })` — records one hit against `key` and reports whether it fits. `window` is in **seconds**; `limit` and `window` default to the values in your `ratelimiter` config slice, and `cost` defaults to `1`.
+
+```typescript
+import { RateLimiter } from "gemi/facades";
+
+const result = await RateLimiter.consume(`reset-password:${email}`, {
+  limit: 3,
+  window: 3600,
+});
+
+if (!result.allowed) {
+  return { error: `Try again in ${Math.ceil(result.retryAfter / 1000)}s` };
+}
+```
+
+The result carries `allowed`, `limit`, `remaining`, `resetAt` (epoch ms) and `retryAfter` (ms) — enough to build `X-RateLimit-*` headers or a user-facing message. Counting happens in whichever driver the provider is configured with (in-memory by default, Redis when you run more than one instance), so the same call is process-local in development and shared in production.
+
+See [Rate limiting](./middleware.md#rate-limiting) for drivers and configuration.
+
 ## Related
 
 - [Authentication](./authentication.md)
@@ -7537,7 +8131,6 @@ export class BillingFacade extends Facade {
 - [Internationalization](./i18n.md)
 - [Views & Layouts](./views-and-layouts.md)
 - [Configuration](./configuration.md)
-
 
 ---
 
@@ -7607,10 +8200,44 @@ return Storage.fetch({ name: record.imageName, bucket: "private" });
 interface ReadFileParams {
   name: string;
   bucket?: string;
+  range?: ByteRange | null;
 }
 ```
 
 Because `fetch` returns a `Response`, a controller can return it directly. See [Controllers](./controllers.md).
+
+### `read(params | string, options?)`
+
+Reads a file as bytes plus metadata, rather than as a finished `Response`. Use it with [`this.stream(...)`](./routing.md#streaming-and-range-requests) to serve range requests:
+
+```typescript
+"/assets/:src*": this.stream(async (req) => FileStorage.read(req.params.src)),
+```
+
+Inside a `this.stream(...)` route the in-flight request's `Range` is picked up automatically and pushed down to the storage backend, so a seek reads one window instead of the whole object. Pass a range explicitly — or `null` to force a full read — when you need to override that:
+
+```typescript
+await FileStorage.read(name, { range: req.range() });
+await FileStorage.read(name, { range: null });
+```
+
+```typescript
+interface ReadResult {
+  body: ReadableStream<Uint8Array> | Blob | null;
+  start: number; // absolute inclusive offsets of `body` within the object
+  end: number;
+  total: number; // authoritative size of the complete object
+  partial: boolean; // whether the driver actually applied the range
+  type: string;
+  etag?: string;
+  lastModified?: Date;
+  name?: string;
+}
+```
+
+An unsatisfiable range throws `RangeNotSatisfiableError`, and a missing object throws `FileNotFoundError`. Both extend `RequestBreakerError`, so they turn into a `416` and a `404` on their own.
+
+See [Writing a custom driver](#writing-a-custom-driver) for how a driver implements `read()`.
 
 ### `list(folder)`
 
@@ -7672,7 +8299,7 @@ If you omit the slice entirely, the default driver is used.
 
 ## Drivers
 
-gemi ships two drivers; the default is `FileSystemDriver`.
+gemi ships three drivers; the default is `FileSystemDriver`.
 
 ### `FileSystemDriver` (local disk)
 
@@ -7712,11 +8339,56 @@ export default defineFilesystemConfig({
 
 The bucket comes from `params.bucket` when provided, otherwise from `process.env.BUCKET_NAME`. See [Configuration](./configuration.md) for where to define these environment variables.
 
-> **Note:** Both drivers fall back to `process.env.BUCKET_NAME` as the default bucket. For `put`, the S3 driver derives `contentType` from the blob/file when the body is a `Blob`/`File`.
+> **Note:** All drivers fall back to `process.env.BUCKET_NAME` as the default bucket. For `put`, an explicitly passed `contentType` is used as-is; without one, the S3 driver falls back to the type of the `Blob`/`File` body. A `Buffer` body has no type of its own, so pass `contentType` alongside it or the object is stored without one.
+
+### `AzureBlobDriver` (Azure Blob Storage)
+
+`@azure/storage-blob` is an **optional peer dependency** — install it only if you use this driver:
+
+```bash
+bun add @azure/storage-blob
+```
+
+```typescript
+// app/config/filesystem.ts
+import { defineFilesystemConfig, AzureBlobDriver } from "gemi/services";
+
+export default defineFilesystemConfig({
+  driver: new AzureBlobDriver({
+    // defaults to process.env.AZURE_STORAGE_CONNECTION_STRING
+    connectionString: process.env.AZURE_STORAGE_CONNECTION_STRING,
+    container: process.env.BUCKET_NAME,
+  }),
+});
+```
+
+The SDK is loaded lazily on first use, so importing `gemi/services` costs nothing when the driver is unused. Using it without the package installed throws an error telling you to install it.
+
+Instead of a connection string you can pass an account `url` (optionally carrying a SAS token) with a `credential`, or hand over a fully built client — useful for a custom credential chain, retry policy or proxy. With `serviceClient` the driver never imports the SDK at all:
+
+```typescript
+import { BlobServiceClient } from "@azure/storage-blob";
+import { DefaultAzureCredential } from "@azure/identity";
+
+new AzureBlobDriver({
+  url: "https://myaccount.blob.core.windows.net",
+  credential: new DefaultAzureCredential(),
+});
+
+// or fully pre-built
+new AzureBlobDriver({
+  serviceClient: BlobServiceClient.fromConnectionString(conn),
+  container: "media",
+});
+```
+
+The container comes from `params.bucket`, then the `container` config, then `process.env.BUCKET_NAME`. `list(folder)` returns a `string[]` of blob names under the prefix.
+
+**On range requests:** Azure's `download(offset, count)` takes an absolute offset and has no suffix form, so the driver handles the two cases differently. `bytes=S-E` and `bytes=S-` — everything a media player actually sends — go straight to the download and read the authoritative total back off Azure's own `Content-Range`, costing no extra round trip. A suffix range (`bytes=-N`) needs one `getProperties()` first to resolve it into absolute offsets.
 
 ### Writing a custom driver
 
-Any storage backend works by subclassing `FileStorageDriver` (exported from `gemi/services`) and implementing `put`, `fetch`, and `list`:
+Subclass `FileStorageDriver` (exported from `gemi/services`) and implement `put`, `fetch` and `list`:
 
 ```typescript
 import {
@@ -7737,6 +8409,34 @@ class MyDriver extends FileStorageDriver {
   }
 }
 ```
+
+`read()` and `size()` already have working defaults, so a driver that implements only the three methods above still compiles and gains range support — but the default `read()` buffers the whole object to serve a range, which saves no bandwidth from the backend.
+
+Override `read()` whenever the backend can range natively. Report the *authoritative* total, which most backends hand back in their own `Content-Range` on a ranged read — that is what keeps a range down to a single round trip:
+
+```typescript
+import { parseContentRange, resolveRange, toRangeHeaderValue } from "gemi/services";
+
+async read({ name, range }) {
+  const res = await backend.get(name, range ? toRangeHeaderValue(range) : undefined);
+  const cr = parseContentRange(res.headers["content-range"]);
+  return {
+    body: res.stream,
+    start: cr?.start ?? 0,
+    end: cr?.end ?? (res.size - 1),
+    total: cr?.total ?? res.size,
+    partial: Boolean(cr),
+    type: res.contentType,
+  };
+}
+```
+
+Two things to get right:
+
+- `partial` says whether *you* applied the range, and cannot be derived from the offsets: `bytes=0-` over a whole object is a `206` whose window spans the entire file. A driver that ignored the range must report `false`, or the response will carry a `Content-Range` that does not describe the body it sent.
+- Backends without a native suffix range (`bytes=-N`) need one size lookup first — see `AzureBlobDriver` for a worked example. Use `resolveRange(range, total)` to turn it into absolute offsets, and throw `RangeNotSatisfiableError(total)` when it returns `null`.
+
+Prefer returning a `Blob` over a `ReadableStream` when the backend gives you a sized handle: Bun drops an explicitly set `Content-Length` and falls back to chunked encoding for any stream body, but keeps it for a sized blob.
 
 Then point `app/config/filesystem.ts` at it:
 
@@ -7869,7 +8569,6 @@ This pairs with the `OpenGraph` metadata helpers — see [`Meta`/facades](./faca
 - [Kernel & Service Providers](./project-structure.md) — the `config` and `providers` fields on the kernel.
 - [Controllers](./controllers.md) — returning a `Storage.fetch` `Response` from a route.
 - [Configuration](./configuration.md) — the `BUCKET_NAME`, `ROOT_DIR`, and S3 credential environment variables.
-
 
 ---
 
@@ -8161,7 +8860,6 @@ You can also set default `attachments` on the class if every send should carry t
 - [Configuration](./configuration.md) — `RESEND_API_KEY`, `EMAIL_DEBUG`, `HOST_NAME`.
 - [Authentication](./authentication.md) — auth flows send welcome, PIN, and password-reset emails.
 
-
 ---
 
 ## Jobs & Queues
@@ -8350,11 +9048,11 @@ For work that must happen on a **schedule** (nightly reports, hourly cleanups) r
 
 ## Related
 
+- [Commands](./commands.md) — one-off work a person starts by hand, which often dispatches jobs.
 - [Cron](./cron.md) — scheduled, recurring background work.
 - [Controllers](./controllers.md) — dispatching jobs from request handlers.
 - [Project Structure](./project-structure.md) — the kernel, `app/config/*.ts`, and service providers.
 - [Configuration](./configuration.md) — environment setup.
-
 
 ---
 
@@ -8665,7 +9363,6 @@ Use a **cron job** for time-based, recurring work that runs on its own schedule.
 - [Jobs & Queues](./jobs-and-queues.md) — background work triggered on demand.
 - [Project Structure](./project-structure.md) — the kernel, `app/config/*.ts`, and service providers.
 - [Configuration](./configuration.md) — environment setup.
-
 
 ---
 
@@ -8982,7 +9679,6 @@ Use a **command** for work a person starts, by hand, once. Use a [**cron job**](
 - [Cron](./cron.md) — recurring scheduled work.
 - [Jobs & Queues](./jobs-and-queues.md) — background work triggered on demand.
 - [Project Structure](./project-structure.md) — the kernel, `app/config/*.ts`, and service providers.
-
 
 ---
 
@@ -9593,22 +10289,21 @@ function Typing({ roomId }: { roomId: string }) {
 - [Data Fetching](./data-fetching.md) — `useQuery` for request/response data.
 - [Project Structure](./project-structure.md#configuration-appconfig) — `app/config/*.ts` slices and how the Kernel assembles them.
 
-
 ---
 
 ## Internationalization (i18n)
 
-gemi's i18n is built around **component-scoped dictionaries**. Instead of one giant global namespace, each component (page, panel, form, email) gets its own `Dictionary` of keyed strings, and gemi prefetches only the dictionaries a route actually needs. Locale detection, translation, and the client hooks all build on these dictionaries.
+gemi's i18n is built around **component-scoped dictionaries**: a component declares the strings it needs, right next to itself, and a visitor downloads only the locale they are reading in.
 
 ## Dictionaries
 
-Create a dictionary with `Dictionary.create` from `gemi/i18n`. Each entry is a key mapping to a per-locale string:
+Declare a dictionary with `defineDictionary`, in the component file or in a sibling file beside it. Each entry is a key mapping to a per-locale string:
 
 ```typescript
-// app/i18n/HomePage.ts
-import { Dictionary } from "gemi/i18n";
+// app/views/Home.i18n.ts
+import { defineDictionary } from "gemi/client";
 
-export const HomePage = Dictionary.create("HomePage", {
+export const homeDict = defineDictionary({
   title: {
     "en-US": "Welcome to Gemi {{version}}",
     "tr-TR": "Gemi'ye Hoş Geldiniz {{version}}",
@@ -9620,10 +10315,74 @@ export const HomePage = Dictionary.create("HomePage", {
 });
 ```
 
-`Dictionary.create(name, translations)`:
+```tsx
+// app/views/Home.tsx
+import { useDictionary } from "gemi/client";
+import { homeDict } from "./Home.i18n";
 
-- `name` — a unique dictionary name (matches the component it serves). It becomes the key you pass to `useTranslator` on the client.
-- `translations` — `{ [key]: { [locale]: string } }`. Every key holds a map from locale code (e.g. `"en-US"`) to the translated string.
+export default function Home() {
+  const t = useDictionary(homeDict);
+
+  return (
+    <div>
+      <h1>{t("title", { version: "1.0" })}</h1>
+      <p>{t("description")}</p>
+    </div>
+  );
+}
+```
+
+That is the whole setup. There is no name string, no central `app/i18n/index.ts` to register in, no route-to-dictionary map to maintain, and no `gemi.d.ts` declaration — keys and interpolation params are inferred from the literal itself.
+
+The **first locale is the source language**. A key missing from another locale falls back to it, so a half-translated dictionary degrades one string at a time rather than rendering the component as raw keys.
+
+Inferred, but only where the inference is safe. The source language is the locale the first key lists first — which cannot move as long as **every key lists the same locale first**. Write your dictionaries `en-US` first and there is nothing to think about.
+
+Where keys disagree, the build stops:
+
+```
+defineDictionary() cannot infer a source language. Key "onlyTurkish" lists
+"tr-TR" first but "both" lists "en-US" first, so the locale every key falls
+back to depends on the order they are written in — moving one key would
+change what language a reader sees. Pass { sourceLocale: "<locale>" } as the
+second argument to pin it.
+```
+
+Because that is exactly the case where a key added at the top re-points every other key's fallback, and nothing at runtime would notice. Pin it:
+
+```ts
+export const homeDict = defineDictionary(
+  {
+    onlyTurkish: { "tr-TR": "Merhaba" },
+    both: { "en-US": "Hello", "tr-TR": "Merhaba" },
+  },
+  { sourceLocale: "en-US" },
+);
+```
+
+`sourceLocale` is read at build time as well as at runtime, so it must be a string literal.
+
+> **Why not take this from `defaultLocale`?** `translation.defaultLocale` answers a different question — which locale a visitor gets when detection fails, and which one has no URL prefix. A dictionary's source language is a property of how that file was authored, and the two can legitimately differ. More practically: the plugin bakes fallback order into each locale chunk at build time, while server code, jobs and tests read the same literal without ever meeting the bundler. A build-time-only default would make those two disagree, and `defineDictionary` is meant to behave identically either way.
+
+### Only one locale ships
+
+Every locale is written in one file, but gemi's Vite plugin rewrites the `defineDictionary` call at build time so each locale becomes its own chunk:
+
+```js
+// what the bundler actually emits
+const homeDict = __gemi_dict__("d_f3cc5a4461dfa4b2", {
+  "en-US": () => import("./en-US-BSyWTQsL.js"),
+  "tr-TR": () => import("./tr-TR-o52Tzo3M.js"),
+});
+```
+
+The strings leave the component's chunk entirely, and a visitor fetches one locale. In practice they rarely fetch anything: the server streams the strings it rendered with into the document, and the client router warms a view's dictionaries while it is already loading that view's chunks. The lazy `import()` is the fallback — it kicks in for a dictionary inside a `lazy()` subtree, or on the first render after a locale switch, where the component suspends until its strings arrive.
+
+Because the literal is read at build time, it has to be **statically analysable**: an inline object of plain keys and string literals. A variable, a spread, a computed key, a template literal or a function value fails the build with the offending key named. (Use `{{param}}` interpolation instead of a template literal.)
+
+`defineDictionary` also has to be **imported by name** — `import { defineDictionary } from "gemi/client"`. A namespace import (`gemi.defineDictionary(...)`) or a re-export through an app-local barrel cannot be traced back to gemi, so the plugin leaves that dictionary inline and warns at build time; every locale then ships to every visitor.
+
+Nothing depends on the plugin for correctness. Untransformed — in `bun test`, or in server code that never meets the bundler — `defineDictionary` holds every locale and resolves synchronously. The plugin is purely the optimization.
 
 ### Interpolation
 
@@ -9656,40 +10415,18 @@ t.jsx("notice", {
 
 > **Note:** gemi has no dedicated pluralization API. Handle plurals with a `{{count:number}}` placeholder plus wording, a function param, or separate keys per plural form.
 
-## Collecting dictionaries
+## Locale configuration
 
-Gather every dictionary in `app/i18n/index.ts` and export them as a single object:
-
-```typescript
-// app/i18n/index.ts
-import { HomePage } from "./HomePage";
-import { About } from "./About";
-import { Footer } from "./Footer";
-import { Header } from "./Header";
-
-export default { HomePage, About, Footer, Header };
-```
-
-Small apps can define the dictionaries inline in `index.ts`; larger apps (like production `folio`, with 7 locales — en/tr/de/it/fr/es/ru) keep one file per component (`app/i18n/<Component>.ts`) and collect them here.
-
-## Prefetching per route
-
-Dictionaries and locale settings live in the `translation` config slice — `app/config/translation.ts`. This is where you tell gemi which dictionaries each route needs so they can be sent with the initial render:
+Locale settings live in the `translation` config slice — `app/config/translation.ts`:
 
 ```typescript
 // app/config/translation.ts
 import { defineTranslationConfig } from "gemi/i18n";
 import type { HttpRequest } from "gemi/http";
-import components from "@/app/i18n";
 
 export default defineTranslationConfig({
   defaultLocale: "en-US",
   supportedLocales: ["en-US", "tr-TR"],
-
-  prefetch: {
-    "/": [components.HomePage],
-    "/about": [components.About],
-  },
 
   detectLocale(req: HttpRequest) {
     return req.cookies.get("i18n-locale") ?? null;
@@ -9700,6 +10437,8 @@ export default defineTranslationConfig({
   },
 });
 ```
+
+Dictionaries are not listed here. `supportedLocales` is what switches locale detection on.
 
 Register the slice on your kernel under the `translation` key:
 
@@ -9718,39 +10457,33 @@ export default class extends Kernel {
 Configuration fields:
 
 - **`defaultLocale`** — fallback locale (default `"en-US"`).
-- **`supportedLocales`** — `string[]` of accepted locale codes (default `[]`). A requested locale outside this list falls back to `defaultLocale`.
-- **`prefetch`** — `Record<routePattern, Dictionary[]>`. Maps each route pattern to the dictionaries needed to render it; only these are shipped for that route. A route commonly lists shared dictionaries (`Header`, `Footer`) plus its own.
-- **`components`** — `Record<string, Dictionary>` of dictionaries available regardless of route.
+- **`supportedLocales`** — `string[]` of accepted locale codes (default `[]`). A requested locale outside this list falls back to `defaultLocale`. Leaving it empty switches locale detection off entirely.
 - **`detectLocale(req)`** — resolve the locale for a request. Return a locale string or `null` to fall back to gemi's own detection. A typical implementation reads the `i18n-locale` cookie, then the `x-locale`/`accept-language` headers.
 - **`onLocaleChange(locale)`** — hook called when the active locale changes.
+- **`prefetch`**, **`components`** — deprecated; see [Legacy dictionaries](#legacy-dictionaries).
 
 > **Note:** `detectLocale` and `onLocaleChange` are **config callbacks**, not provider methods. This is a deliberate divergence from Laravel, where such hooks are often wired inside a provider's `boot()`. In gemi every subsystem hook (`detectLocale`, `onLocaleChange`, `filterRecipients`, `onLogCreated`, …) is a plain function on its config slice, so the whole behaviour of a subsystem is readable in one file and a provider is only ever needed to bind a *new* service.
 
 ## Client usage
 
-### `useTranslator`
+### `useDictionary`
 
-`useTranslator(componentName)` returns a translator `t` bound to that component's dictionary and the current locale:
+`useDictionary(dictionary)` returns a translator `t` bound to that dictionary and the current locale:
 
 ```tsx
-import { useTranslator } from "gemi/client";
+import { useDictionary } from "gemi/client";
+import { homeDict } from "./Home.i18n";
 
-function HomePage() {
-  const t = useTranslator("HomePage");
-
-  return (
-    <div>
-      <h1>{t("title", { version: "1.0" })}</h1>
-      <p>{t("description")}</p>
-    </div>
-  );
+function Home() {
+  const t = useDictionary(homeDict);
+  return <h1>{t("title", { version: "1.0" })}</h1>;
 }
 ```
 
-- `t(key, params?)` — returns the translated string for `key` in the current locale, with `params` interpolated. Params are required only when the string has placeholders.
+- `t(key, params?)` — the translated string for `key` in the current locale, with `params` interpolated. Params are required only when the string has placeholders.
 - `t.jsx(key, params?)` — same, but typed to return a JSX element (use it when a param renders JSX, e.g. an embedded link).
 
-If a translation can't be resolved, `t` logs a warning and returns the key itself, so the UI degrades gracefully rather than crashing.
+If a key can't be resolved, `t` logs a warning and returns the key itself, so the UI degrades rather than crashing.
 
 ### `useLocale`
 
@@ -9796,6 +10529,23 @@ import { Translator } from "gemi/i18n";
 
 const translator = app(Translator); // typed Translator, no cast
 ```
+
+### `translate`
+
+To read a `defineDictionary` dictionary outside React — a controller, a job, an email template — use `translate`:
+
+```typescript
+import { translate } from "gemi/i18n";
+import { homeDict } from "@/app/views/Home.i18n";
+
+const title = await translate(homeDict, "title", { params: { version: "1.0" } });
+const turkish = await translate(homeDict, "title", {
+  locale: "tr-TR",
+  params: { version: "1.0" },
+});
+```
+
+It is `async` because a bundled dictionary loads its locale on demand. Server code does not go through the bundler, so in practice it resolves without ever yielding — the `await` is what makes the same call work either way. The locale defaults to `Lang.locale()`.
 
 ### `Dictionary.text` and `Dictionary` render helpers
 
@@ -9856,185 +10606,58 @@ function PinEmail({ locale, pin }: { locale: string; pin: string }) {
 
 See [Email](./email.md) for building and sending emails.
 
+## Legacy dictionaries
+
+`Dictionary.create` and `useTranslator` are **deprecated** but still fully supported — both APIs work side by side, so an app migrates one dictionary at a time. New code should use `defineDictionary` and `useDictionary`.
+
+The old shape has three moving parts per dictionary instead of one:
+
+```typescript
+// 1. app/i18n/HomePage.ts — the dictionary, with a name string
+import { Dictionary } from "gemi/i18n";
+
+export const HomePage = Dictionary.create("HomePage", {
+  title: { "en-US": "Welcome", "tr-TR": "Hoş geldiniz" },
+});
+```
+
+```typescript
+// 2. app/i18n/index.ts — every dictionary re-exported
+export default { HomePage, About, Footer, Header };
+```
+
+```typescript
+// 3. app/config/translation.ts — which route needs which dictionary
+prefetch: {
+  "/": [components.HomePage, components.Header, components.Footer],
+},
+```
+
+```tsx
+// and the name string again at the call site
+const t = useTranslator("HomePage");
+```
+
+Plus a `gemi.d.ts` declaration to give `useTranslator` its types:
+
+```typescript
+declare module "gemi/client" {
+  export interface I18nDictionary extends CreateI18nDictionary<typeof I18nComponents> {}
+}
+```
+
+Why it is being replaced:
+
+- **The `prefetch` map is written by hand and drifts.** Nothing checks it, and the only symptom of getting it wrong is a missing string at runtime.
+- **The dictionaries are far from the components.** `app/i18n/` grows into thousands of lines that no longer resemble the UI they serve.
+- **Everything is held in memory.** `Translator` materializes the full locale × route × dictionary × key cross-product at boot, for the life of the process.
+- **The name string can drift from the identifier** in either direction, with no type error.
+
+To migrate a dictionary: move it next to its component as `defineDictionary({...})` (dropping the name argument), swap `useTranslator("Name")` for `useDictionary(dict)`, and delete its entries from `app/i18n/index.ts` and the `prefetch` map. The interpolation syntax is unchanged, so the strings themselves move verbatim.
+
 ## Related
 
 - [Facades](./facades.md) — the `Lang` facade.
 - [Views & Layouts](./views-and-layouts.md) — rendering translated views.
 - [Configuration](./configuration.md) — the `translation` config slice.
 - [Email](./email.md) — localized emails.
-
-
----
-
-## Testing Views
-
-A view is a plain React component, so any renderer can mount one — but what it renders comes from inputs the framework normally supplies: route params, the current locale and its dictionaries, data `Query.prefetch` put on the page, the signed-in user. Without those a component test can only assert the empty state.
-
-`gemi/testing` exports one component, `<Page>`, that supplies them.
-
-```tsx
-import { render, screen } from "@testing-library/react";
-import { Page } from "gemi/testing";
-
-import OrgChat from "@/app/views/OrgChat";
-import dictionaries from "@/app/i18n";
-
-test("renders the organisation's messages", () => {
-  render(
-    <Page
-      pathname="/app/:orgId/chat"
-      params={{ orgId: "abc" }}
-      queryData={{ "/organizations/:orgId/messages": [{ id: 1, body: "hi" }] }}
-      dictionaries={[dictionaries.Chat]}
-      user={{ id: 1, name: "Ada" }}
-    >
-      <OrgChat />
-    </Page>,
-  );
-
-  expect(screen.getByText("hi")).toBeDefined();
-});
-```
-
-`<Page>` is a plain component and imports no test runner, so it works with `@testing-library/react`, `react-test-renderer`, or `renderToString` (with [one caveat](#server-rendering)).
-
-## Props
-
-| Prop | Default | What it seeds |
-| --- | --- | --- |
-| `pathname` | `"/"` | The URL the component is mounted at — `useLocation()`, `useRoute()`, and a `Link`'s `data-active`. A template (`/app/:orgId/chat`) is resolved against `params`. |
-| `params` | `{}` | `useParams()`, and the params `useQuery` / `Form` / `Link` apply when a call site omits its own. |
-| `searchParams` | `""` | `useSearchParams()`. Accepts `"?tab=recent"`, `"tab=recent"` or `{ tab: "recent" }`. |
-| `hash` | `""` | `useLocation().hash`. |
-| `locale` | `"en-US"` | `useLocale()`, and which locale `useTranslator` reads translations from. |
-| `defaultLocale` | same as `locale` | The locale that gets no URL segment. Set it to render a page being viewed in a non-default locale — links then carry the `/tr-TR` prefix. |
-| `supportedLocales` | the two above | The app's locale list, verbatim — a switcher maps over it, so the order is yours. `defaultLocale` and `locale` are appended if absent. |
-| `dictionaries` | `[]` | `useTranslator("Name")`. Pass the app's real dictionaries, or literals of the same `{ name, dictionary }` shape. |
-| `translations` | `{}` | The same thing already resolved for `locale` — `{ Chat: { greeting: "Hello" } }`. Merged over `dictionaries`. |
-| `queryData` | `{}` | The query cache — see below. |
-| `queryConfig` | — | App-wide `useQuery` defaults, as `createRoot` threads them. |
-| `user` | `null` | `useUser()`. |
-| `breadcrumbs` | `[]` | `useBreadcrumbs()`, in order. |
-| `features` | `{}` | `useFeature("key")`. Seeds the outcome, not the declaration: anything left out reads as off, exactly as it does for a key the server never sent. Cover `when` targeting and rollouts with a server test. |
-| `theme` | stored, else `"light"` | `useTheme()`. A test has no browser session to have chosen one in; `setTheme` still works from whatever this seeds. |
-| `fallback` | `null` | The `Suspense` fallback wrapped around the children, standing in for the view's own `Loading` export. |
-| `errorFallback` | — | Rendered in place of the children when one throws, standing in for the view's `Error` export. Its `resetErrorBoundary` clears query errors, so the retry path works as it does in the app. |
-| `onNavigate` | — | Called with `(href, "push" \| "replace")` when something navigates. |
-
-## Seeding queries
-
-`queryData` is keyed by the path passed to `useQuery` — **without** the `/api` prefix, which the client adds only when it fetches:
-
-```tsx
-<Page queryData={{ "/todos": [{ id: 1 }, { id: 2 }] }}>
-```
-
-A key may carry a query string, which seeds one search variant, and `:params`, which resolve against the page's:
-
-```tsx
-<Page
-  pathname="/orgs/:orgId/lists"
-  params={{ orgId: "abc" }}
-  queryData={{
-    // Read by useQuery("/orgs/:orgId/lists") — the route's params apply.
-    "/orgs/:orgId/lists": [{ id: 1 }],
-    // Read by useQuery("/lists", { search: { page: "2" } }).
-    "/lists?page=2": [{ id: 9 }],
-  }}
->
-```
-
-The cache is keyed by the **resolved** path, so a `:param` the page does not carry fails the render with an error naming the key. That is deliberate: a query's params often come from the call site rather than the route —
-
-```tsx
-const { data } = useQuery("/orgs/:orgId/lists", { params: { orgId } }); // orgId is state
-```
-
-— and the seed for that is the resolved path, `"/orgs/abc/lists"`, not the template.
-
-A seeded query renders its data on the first pass and issues no request. A query with no seed behaves exactly as it does in the browser: under the default `suspense: true` it suspends into `fallback` and fetches, so intercepting `fetch` (MSW, `vi.stubGlobal`) covers the loading-to-loaded path.
-
-> **Seeded at mount only.** A component that calls `mutate()` or `refetch()` owns the cache from then on, and re-rendering `<Page>` with a different `queryData` deliberately does not overwrite it. To assert a second state, render a second `<Page>`.
-
-`useUser()` resolves from `user` — `null` by default, an anonymous visitor — and never reaches `/auth/me`, so a layout that greets the current user does not have to be mocked out of a test that is about something else.
-
-## Translations
-
-Pass the dictionaries the components under test translate against, exactly as `app/config/translation.ts` prefetches them per route:
-
-```tsx
-import dictionaries from "@/app/i18n";
-
-render(
-  <Page dictionaries={[dictionaries.About]} locale="tr-TR" defaultLocale="en-US">
-    <About />
-  </Page>,
-);
-```
-
-`useTranslator("About")` then resolves keys against `tr-TR`, interpolation and `t.jsx` included. Without a matching dictionary the hook returns the key itself and logs `Unresolved translation` — which is the signal that the dictionary name in the test does not match the one the component asks for.
-
-### Dictionaries are server-side; `translations` is not
-
-A `Dictionary` is a server artifact. The browser never sees one: the server resolves the route's dictionaries for the active locale and serializes them onto the page, and `useTranslator` reads *that*. `<Page>` mirrors it — it takes the `name` and `dictionary` data off whatever you pass and builds the same payload. It never calls `Dictionary`'s server-only methods (`render` and `reference` throw once `window` is defined, as they do in a real browser), and `gemi/testing` does not import `gemi/i18n` at all.
-
-What is server-side is the *import*. `app/i18n/index.ts` imports `gemi/i18n`, so a test file that reads the app's dictionaries pulls the container and `node:async_hooks` into its module graph. Nothing there executes, so it is fine under any runner with Node builtins available — vitest, `bun test` — and not under one that renders in a real browser (vitest browser mode, Playwright component tests).
-
-For those, seed the client's own shape directly. It imports nothing:
-
-```tsx
-<Page translations={{ About: { title: "About {{version:[hi]}}" } }}>
-  <About />
-</Page>
-```
-
-`translations` is `{ dictionary name: { key: string } }` for the current locale — exactly what the server puts on the page. It is merged over `dictionaries`, so the two compose: seed from the app's real dictionary and override the one key a test is about.
-
-## Navigation
-
-`<Page>` renders one route. It has no view tree and no route manifest behind it, so a navigation is *reported* rather than performed:
-
-```tsx
-const onNavigate = vi.fn();
-
-render(
-  <Page pathname="/app/abc/chat" onNavigate={onNavigate}>
-    <Nav />
-  </Page>,
-);
-
-screen.getByText("Settings").click();
-expect(onNavigate).toHaveBeenCalledWith("/app/abc/settings", "push");
-```
-
-`useLocation()` keeps reporting the pathname the page was given. To assert what the destination renders, render it in its own `<Page>`.
-
-A navigation issued from a mount effect — `<Redirect>`, or an auth guard that pushes on render — is reported too.
-
-## Server rendering
-
-`renderToString(<Page …>…</Page>)` works, and a **seeded** query renders its data there exactly as it does in the browser. An **unseeded** one does not suspend: it renders the server's no-data branch and logs the framework's "rendered on the server without data … add `Query.prefetch(…)`" warning.
-
-That is the real SSR contract rather than a gap in the harness. Suspending on the server is the streaming renderer's job: `createRoot` threads the request's query store through `ServerQueryContext`, and that store is what runs the route handler and produces the data to wait on. A harness has no request and no handler, so there is nothing to suspend on — the same thing happens to a real route whose view handler declares no `Query.prefetch`.
-
-So: assert seeded output under `renderToString`, and use a DOM renderer for the suspend-then-resolve path.
-
-## Runner setup
-
-The components need a DOM. Under vitest that is a per-file pragma (or `environment: "jsdom"` in `vitest.config.ts`):
-
-```tsx
-/** @vitest-environment jsdom */
-```
-
-Under `bun test`, preload `happy-dom` — no gemi-specific configuration is required either way. React 19 lifecycles, `@testing-library/user-event` and MSW's fetch interception all work against `gemi/client` components as they do against any other React tree.
-
-> **Gotcha:** the environment is browser-*shaped*, but it is still Node or Bun — a test file can import a server module and it will load. What it must not do is *run* one: a controller reaches the container, a model reaches the database, and neither has been booted. Import views, components and dictionaries (see [above](#dictionaries-are-server-side-translations-is-not) for what a dictionary import costs); leave the rest to server tests.
-
-## Related
-
-- [Views & Layouts](./views-and-layouts.md) — what a view receives from its route.
-- [Data Fetching](./data-fetching.md) — `useQuery`, prefetching, and the variant keys `queryData` mirrors.
-- [Internationalization](./i18n.md) — dictionaries and `useTranslator`.
-- [Navigation](./navigation.md) — `Link`, `useNavigate`, `useParams`.
-- [Features](./feature-flags.md) — what `features` seeds, and where the targeting behind it is covered instead.
