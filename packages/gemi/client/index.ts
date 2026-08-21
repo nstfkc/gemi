@@ -1,14 +1,13 @@
+/// <reference path="../gemi.d.ts" />
+// The augmentation that gives an application its own route, view and dictionary
+// types. Referenced from here — rather than left for the application to wire up
+// — so that importing anything from `gemi/client` is all it takes. See
+// `../gemi.d.ts`.
+
 export { useQuery } from "./useQuery";
 export type { QueryResult, GemiQueryDefaults } from "./useQuery";
 export { QueryError } from "./QueryError";
-export {
-  useMutation,
-  useDelete,
-  usePatch,
-  usePost,
-  usePut,
-  useUpload,
-} from "./useMutation";
+export { useMutation, useDelete, usePatch, usePost, usePut, useUpload } from "./useMutation";
 export { useMutate } from "./useMutate";
 export {
   Form,
@@ -60,6 +59,10 @@ export { useUser } from "./auth/useUser";
 
 export { useFeature, useFeatures } from "./useFeature";
 export { useTranslator } from "./useTranslator";
+export { useDictionary } from "./useDictionary";
+// Re-exported here as well as from `gemi/dictionary`: a dictionary lives next
+// to the component that reads it, so both halves come from one import.
+export { defineDictionary, type DictionaryHandle } from "../i18n/defineDictionary";
 export { useLocale } from "./useLocale";
 
 // Websocket

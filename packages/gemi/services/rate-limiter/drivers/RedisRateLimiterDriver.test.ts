@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
+import { Application } from "../../../foundation/Application";
+import { kernelContext } from "../../../kernel/context";
+import { RedisManager } from "../../redis/RedisManager";
 import { RedisRateLimiter } from "./RedisRateLimiterDriver";
 
 type Reply = any | Error | ((args: string[]) => any);
@@ -223,5 +226,39 @@ describe("when redis is unreachable", () => {
     expect(first.allowed).toBe(true);
     expect(client.evalshaCalls()).toHaveLength(1);
     expect(second.allowed).toBe(true);
+  });
+});
+
+describe("resolving the app's shared client", () => {
+  // This used to go through a hand-forged `{ token: "redis" }` cast, because
+  // `RedisManager` could not be imported without dragging Bun's `RedisClient`
+  // into the module graph. #403 removed that constraint and the cast with it,
+  // so the resolution now depends on `RedisManager` being the same token the
+  // provider binds — which is the part worth pinning.
+  test("uses the RedisManager bound on the application", async () => {
+    const client = fakeRedis();
+    const application = new Application();
+    application.singleton(RedisManager, () => {
+      const manager = new RedisManager();
+      manager.client = client as any;
+      return manager;
+    });
+
+    const limiter = new RedisRateLimiter();
+    await kernelContext.run(application, () =>
+      limiter.consume({ key: "k", limit: 10, window: 1000 }),
+    );
+
+    expect(client.evalshaCalls()).toHaveLength(1);
+  });
+
+  test("says what to do when nothing is bound", async () => {
+    const limiter = new RedisRateLimiter({ onError: (error) => { throw error; } });
+
+    await expect(
+      kernelContext.run(new Application(), () =>
+        limiter.consume({ key: "k", limit: 10, window: 1000 }),
+      ),
+    ).rejects.toThrow(/RedisServiceProvider/);
   });
 });

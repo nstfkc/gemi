@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { PostgresDialect } from "../dialect/postgres";
 import { SqliteDialect } from "../dialect/sqlite";
 import { UnsupportedQueryError } from "../errors";
-import { account, organization, user } from "../fixtures";
+import { account, membership, organization, user } from "../fixtures";
 import { applyNestedPolicies, type ModelPolicy } from "../policy";
 import * as registry from "../registry";
 import { compileRead } from "./read";
@@ -209,14 +209,18 @@ describe("what it refuses", () => {
   });
 
   /**
-   * Prisma's `_count: true` counts every to-many relation. Refused rather than
-   * approximated: it names no relation, so a policy has nowhere to attach, and
-   * what it returns changes when the schema grows a relation.
+   * The shorthand on a model with nothing to count.
+   *
+   * Refused rather than answered with `{}`, and the reason is mechanical rather
+   * than stylistic: `resolveSelection` counts `_count` as *something selected*,
+   * so `select: { _count: true }` alone would clear its "at least one field"
+   * check and then project no columns — `select  from "Membership"`, which the
+   * database rejects with a message about neither `_count` nor the model.
    */
-  test("the bare shorthand, naming the form that works", () => {
-    expect(() => plan({ include: { _count: true } })).toThrow(
-      /_count: \{ select: \{ <relation>: true \} \}/,
-    );
+  test("the shorthand on a model with no to-many relations", () => {
+    expect(() =>
+      compileRead(membership, "findMany", { include: { _count: true } }, sqlite),
+    ).toThrow(/no to-many relations/);
   });
 
   test("a _count that is not an object", () => {
@@ -226,6 +230,125 @@ describe("what it refuses", () => {
   test("a _count with no select", () => {
     expect(() => plan({ include: { _count: { accounts: true } } })).toThrow(
       /_count\.select/,
+    );
+  });
+
+  /**
+   * A malformed *operand*, which is the one the policy walk cannot survive.
+   *
+   * `scopeCounts` reads the operand through `typeof value !== "object"` and
+   * `continue`s past anything that fails it, so `1` carries no scope — while
+   * `countPlan` reads `node?.where` as `undefined` and emits a well-formed
+   * *unscoped* `count(*)`. Two walks, one argument, opposite readings: exactly
+   * the disagreement `countableRelations` exists to prevent one level up, and
+   * what it leaks is a number rather than a row.
+   *
+   * The type already forbids it — `CountSelection` says `boolean | { where }` —
+   * so this is the untyped caller's path, which is the only kind a policy has to
+   * survive anyway.
+   */
+  test("a relation operand that is neither true nor an object", () => {
+    expect(() =>
+      plan({ include: { _count: { select: { accounts: 1 } } } }),
+    ).toThrow(/_count\.select\.accounts/);
+
+    expect(() =>
+      plan({ include: { _count: { select: { accounts: [] } } } }),
+    ).toThrow(/_count\.select\.accounts/);
+  });
+
+  /**
+   * The empty explicit form, which reaches the same dead end the shorthand's
+   * guard above covers — `_count` clears `resolveSelection`'s "at least one
+   * field" check and then projects nothing.
+   *
+   * `select: { accounts: false }` is the shape that gets there without anyone
+   * writing an empty object: a caller toggling the count off with a flag.
+   */
+  test("a _count that counts nothing, as the only thing selected", () => {
+    expect(() =>
+      compileRead(user, "findMany", { select: { _count: { select: {} } } }, sqlite),
+    ).toThrow(/No relations to count/);
+
+    expect(() =>
+      compileRead(
+        user,
+        "findMany",
+        { select: { _count: { select: { accounts: false } } } },
+        sqlite,
+      ),
+    ).toThrow(/No relations to count/);
+  });
+
+  /**
+   * ...and not under an `include`, where the model's own columns keep the
+   * statement valid. A count of nothing is then merely nothing, which is what
+   * the caller's flag asked for.
+   */
+  test("but the same under an include is allowed", () => {
+    expect(() =>
+      compileRead(
+        user,
+        "findMany",
+        { include: { _count: { select: { accounts: false } } } },
+        sqlite,
+      ),
+    ).not.toThrow();
+  });
+});
+
+/**
+ * `_count: true` — Prisma's "count every to-many relation" (#394).
+ *
+ * Expanded rather than special-cased, and in two places that must agree:
+ * `countableRelations` is what the compiler projects from and what the policy
+ * walk scopes, so the set that reaches SQL is the set that carried a scope. The
+ * tests below pin both halves of that, because the failure when they drift is a
+ * count the reader cannot tell is unscoped — it is a number, not a row.
+ */
+describe("the bare shorthand", () => {
+  test("expands to the explicit form's SQL, exactly", () => {
+    expect(projection({ include: { _count: true } })).toBe(
+      projection({ include: { _count: { select: { accounts: true } } } }),
+    );
+  });
+
+  /**
+   * The to-one is skipped rather than refused. The explicit form *does* refuse
+   * `organization` by name — counting it answers 0 or 1 — but the shorthand
+   * named nothing, so there is no argument to report and skipping it is the
+   * whole of what Prisma's shorthand means. `user` carries one of each, which is
+   * why it is the fixture here.
+   */
+  test("counts the to-many and skips the to-one", () => {
+    const text = plan({ include: { _count: true } }).text;
+
+    expect(text).toContain(`as "_count.accounts"`);
+    expect(text).not.toContain(`_count.organization`);
+  });
+
+  /**
+   * Two to-many relations, declared `users` then `accounts` and projected the
+   * other way round. Not cosmetic: the plan cache canonicalises key order, so an
+   * expansion that followed declaration order would mint one entry per ordering
+   * the schema happens to have.
+   */
+  test("projects them sorted, not in declaration order", () => {
+    const text = compileRead(
+      organization,
+      "findMany",
+      { include: { _count: true } },
+      sqlite,
+    ).text;
+
+    expect(text.indexOf(`"_count.accounts"`)).toBeLessThan(
+      text.indexOf(`"_count.users"`),
+    );
+  });
+
+  test("select carries it as well as include", () => {
+    expect(plan({ select: { id: true, _count: true } }).text).toContain(
+      `as "_count.accounts"`,
     );
   });
 });
@@ -309,6 +432,86 @@ describe("policies", () => {
       {},
       false,
       lookup([]),
+    );
+
+    expect(out).toBe(args);
+  });
+
+  /**
+   * **The shorthand carries the scope too**, and this is the assertion #394
+   * turns on. `_count: true` names no relation, so nothing here has a node to
+   * hang a scope on until it is expanded — and an unexpanded shorthand reaching
+   * the compiler is expanded *there*, where policies are not, so every count
+   * would be over rows the caller cannot read. That is the leak the shorthand
+   * was refused over, and it returns a number rather than a row: nothing in the
+   * response looks wrong.
+   */
+  test("the shorthand is expanded, then scoped", () => {
+    const out = applyNestedPolicies(
+      root,
+      { include: { _count: true } },
+      { organizationId: 7 },
+      false,
+      lookup([tenant]),
+    );
+
+    expect(out.include._count).toEqual({
+      select: { accounts: { where: { organizationId: 7 } } },
+    });
+  });
+
+  /**
+   * ...and only then. An unpolicied shorthand stays `true`, so the plan key does
+   * not move for the queries this walk has nothing to say about — the same trade
+   * the explicit form's test above pins. The compiler expands it either way, so
+   * the SQL is identical; what differs is one cache entry versus two.
+   */
+  test("an unpolicied shorthand is returned unchanged, identically", () => {
+    const args = { include: { _count: true } };
+    const out = applyNestedPolicies(root, args, {}, false, lookup([]));
+
+    expect(out).toBe(args);
+  });
+
+  /**
+   * A model with a *mix*: `users` is policied and `accounts` is not. The
+   * unpolicied half has to survive the expansion as `true` rather than being
+   * dropped, or the shorthand would quietly count fewer relations under a policy
+   * than without one.
+   */
+  test("expanding for one policied relation keeps the others", () => {
+    const mixed = {
+      relations: {
+        users: { model: "User", kind: "many" as const },
+        accounts: { model: "Account", kind: "many" as const },
+      },
+    };
+
+    const out = applyNestedPolicies(
+      mixed,
+      { include: { _count: true } },
+      { organizationId: 7 },
+      false,
+      (model: string) =>
+        model === "User"
+          ? { policies: [tenant], schema: { name: "User", relations: {} } }
+          : { policies: [], schema: { name: "Account", relations: {} } },
+    );
+
+    expect(out.include._count.select).toEqual({
+      accounts: true,
+      users: { where: { organizationId: 7 } },
+    });
+  });
+
+  test("asSystem suspends the shorthand as well", () => {
+    const args = { include: { _count: true } };
+    const out = applyNestedPolicies(
+      root,
+      args,
+      { organizationId: 7 },
+      true,
+      lookup([tenant]),
     );
 
     expect(out).toBe(args);

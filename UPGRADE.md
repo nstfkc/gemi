@@ -1,3 +1,54 @@
+# Upgrading from 0.55 to 0.56
+
+One change, and it is a deletion. **Do it as part of the upgrade** — leaving the
+old wiring in place is not a no-op, it stops your project typechecking.
+
+## Delete `gemi.d.ts` and its `tsconfig.json` entry
+
+Your app root has a `gemi.d.ts`, and your `tsconfig.json` has a `types` entry
+naming it:
+
+```jsonc
+// tsconfig.json
+"types": ["vite/client", "bun", "./node_modules/gemi/gemi.d.ts"]
+```
+
+Delete both. The file:
+
+```bash
+rm gemi.d.ts
+```
+
+and the entry, leaving your own toolchain behind:
+
+```jsonc
+"types": ["vite/client", "bun"]
+```
+
+That is the whole migration. `gemi/client` and `gemi/facades` now reference the
+augmentation themselves, so importing from either is all it takes to get
+`useQuery`, `Link`, `Form`, `Query` and the rest typed against your routes.
+Nothing replaces the deleted file.
+
+**Why it is not optional.** Both of those named
+`./node_modules/gemi/gemi.d.ts`, and the augmentation now ships at
+`node_modules/gemi/dist/gemi.d.ts` instead. An unresolvable `types` entry is a
+configuration error that `tsc` reports *instead of* compiling:
+
+```
+error TS2688: Cannot find type definition file for './node_modules/gemi/gemi.d.ts'.
+```
+
+and you get that one line and no other diagnostics, on 0.56 exactly as on 0.55.
+
+**If it was already broken, this is the fix.** That path never resolved in a
+published install — `gemi.d.ts` was not in any tarball before 0.56 — so if
+`useQuery("/your/route")` has never typechecked outside this repository, or your
+CI typecheck has been failing on TS2688, deleting these two things is what
+repairs it rather than what breaks it.
+
+---
+
 # Upgrading from 0.50 to 0.51
 
 Three changes need a hand, and the third is a look rather than an edit — it only

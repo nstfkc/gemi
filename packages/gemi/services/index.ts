@@ -70,6 +70,14 @@ export { QueueServiceProvider } from "./queue/QueueServiceProvider";
 export { QueueManager } from "./queue/QueueManager";
 export { Job } from "./queue/Job";
 
+// Events. `Event` shadows the DOM's global of the same name inside a module
+// that imports it, which is what you want in server code and worth knowing in a
+// file that also touches the browser one.
+export { EventServiceProvider } from "./events/EventServiceProvider";
+export { EventManager } from "./events/EventManager";
+export { Event, type EventClass } from "./events/Event";
+export { Listener, type ListenerClass } from "./events/Listener";
+
 // Image optimization
 export { ImageServiceProvider } from "./image-optimization/ImageServiceProvider";
 export { ImageManager } from "./image-optimization/ImageManager";
@@ -123,10 +131,16 @@ export type {
 export type { CommandContext } from "../console/context";
 export { CommandRegistry } from "../console/CommandRegistry";
 
-// Discovery. What a `jobs`-less `queue` or `schedule` slice resolves to, and
-// the only way left to ask an application what it has: the config array a test
-// used to import may not exist any more.
-export { discoverJobs, discoverCronJobs, discoverCommands } from "./discovery";
+// Discovery. What a `jobs`-less `queue` or `schedule` slice resolves to, what a
+// `listeners`-less `events` slice resolves to, and the only way left to ask an
+// application what it has: the config array a test used to import may not exist
+// any more.
+export {
+  discoverJobs,
+  discoverCronJobs,
+  discoverCommands,
+  discoverListeners,
+} from "./discovery";
 
 // Redis
 export { RedisServiceProvider } from "./redis/RedisServiceProvider";
@@ -196,6 +210,11 @@ export {
   queueConfigDefaults,
   type QueueConfig,
 } from "./queue/config";
+export {
+  defineEventConfig,
+  eventConfigDefaults,
+  type EventConfig,
+} from "./events/config";
 export {
   defineImageConfig,
   imageConfigDefaults,

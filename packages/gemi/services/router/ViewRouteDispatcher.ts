@@ -1,7 +1,3 @@
-import satori from "satori";
-// @ts-ignore
-import sharp from "sharp";
-
 import { HttpRequest } from "../../http";
 import { GEMI_REQUEST_BREAKER_ERROR } from "../../http/Error";
 import { ensureSessionId, RequestContext } from "../../http/requestContext";
@@ -23,6 +19,8 @@ import { createComponentTree } from "./createComponentTree";
 import { flattenComponentTree } from "../../client/helpers/flattenComponentTree";
 import type { ComponentTree } from "../../client/types";
 import { Translator } from "../../i18n/Translator";
+import { preloadDictionaries } from "../../i18n/dictionaryRegistry";
+import { createDictionarySink } from "../../i18n/dictionarySink";
 import { MiddlewareRegistry } from "../middleware/MiddlewareRegistry";
 import { Log } from "../../facades/Log";
 import { Lang } from "../../facades/Lang";
@@ -36,6 +34,20 @@ import { createServerQueryFetcher } from "./serverQueryFetcher";
 import { htmlSafeJson, injectQueryPayloads, isBotUserAgent } from "./streamQueryInjection";
 import { createShellContentObserver, createShellContentReporter } from "./shellContentReport";
 import { createRoutePayloadStream } from "./routePayloadStream";
+import { loadSharp } from "../../support/sharp";
+
+/**
+ * `satori`, loaded on the first OG-image request rather than on import, for the
+ * same reason `sharp` is (see `support/sharp.ts`): this module is reachable
+ * from `gemi/services` through `RouteServiceProvider`, so a static import put
+ * satori — and, one hop on, a font parser and an SVG layout engine — in the
+ * module graph of every app and test that imported the barrel to reach
+ * `CronJob` (#403).
+ *
+ * Rendering an OG image is a cold path by definition: a crawler asks for it
+ * once and a CDN serves it afterwards.
+ */
+const loadSatori = async () => (await import("satori")).default;
 
 /**
  * React's server renderer, loaded on the first render rather than on import.
@@ -507,6 +519,10 @@ export class ViewRouteDispatcher {
 
           const ogHeaders = new Headers(headers);
           ogHeaders.set("Content-Type", "image/png");
+          const [satori, sharp] = await Promise.all([
+            loadSatori(),
+            loadSharp("Rendering an OG image"),
+          ]);
           const svg = await satori(err.jsx, { ...options, fonts: _fonts });
           const png = await sharp(Buffer.from(svg))
             .png({
@@ -584,6 +600,12 @@ export class ViewRouteDispatcher {
           ? createShellContentObserver()
           : null;
 
+      // Which dictionaries a page reads is only knowable once it has rendered,
+      // so they cannot ride the `__GEMI_DATA__` snapshot (serialized below,
+      // before the render starts). The sink collects them during the render and
+      // the injector streams each one into the document.
+      const dictionarySink = createDictionarySink();
+
       try {
         const stream = await renderToReadableStream(
           createElement(Fragment, {
@@ -604,6 +626,7 @@ export class ViewRouteDispatcher {
                 viewImportMap,
                 viewModules,
                 serverQueries,
+                dictionarySink,
                 key: "root",
               }),
             ],
@@ -657,7 +680,8 @@ export class ViewRouteDispatcher {
                   this.shellReporter.report(currentPathName, shellObserver.measure());
                 }
               }),
-          }),
+          },
+          dictionarySink),
           {
             status: !currentPathName ? 404 : 200,
             headers,
@@ -717,7 +741,7 @@ export class ViewRouteDispatcher {
       urlLocale = maybeLocale;
     }
 
-    if (translator.isEnabled && !isOgRequest) {
+    if (translator.isLocaleAware && !isOgRequest) {
       const locale = app(Translator).detectLocale(
         new HttpRequest(req, {}, "view", urlPathname),
       );
@@ -884,7 +908,14 @@ export class ViewRouteDispatcher {
         }
 
         const translator = app(Translator);
-        const isI18nEnabled = translator.isEnabled;
+        // Two ways to be an i18n app now. `isEnabled` means the legacy
+        // `prefetch` config has dictionaries to serve; configured
+        // `supportedLocales` alone means the app uses `defineDictionary` and
+        // still needs its locale detected, or every `useDictionary` would fall
+        // back to its source language. `isLocaleAware` is the same predicate
+        // the locale-prefix redirect above uses — they have to agree.
+        const hasLegacyDictionaries = translator.isEnabled;
+        const isI18nEnabled = translator.isLocaleAware;
         let i18n: Record<string, any> = {};
         if (isI18nEnabled) {
           let locale = null;
@@ -898,10 +929,9 @@ export class ViewRouteDispatcher {
             ctx.setLocale(locale);
           }
 
-          const translations = translator.getPageTranslations(
-            locale,
-            httpRequest.routePath,
-          );
+          const translations = hasLegacyDictionaries
+            ? translator.getPageTranslations(locale, httpRequest.routePath)
+            : {};
 
           i18n = {
             supportedLocales: translator.supportedLocales,
@@ -912,6 +942,21 @@ export class ViewRouteDispatcher {
             defaultLocale: translator.defaultLocale,
           };
         }
+
+        // Outside the `isI18nEnabled` branch on purpose. `defineDictionary`
+        // needs no `translation` config at all — that is what `docs/i18n.md`
+        // presents as the whole setup — so gating the preload on it left the
+        // documented minimal app taking the unwarmed path: every
+        // `useDictionary` suspends, and on a streamed route each component's
+        // markup lands in `<div hidden>` behind a `$RC()` reveal instead of
+        // inline in the shell (#286/#289). A reader without JS would see the
+        // Suspense fallback where the page text belongs.
+        //
+        // An empty locale means the app configured none; `preloadDictionaries`
+        // then warms each dictionary under its own source language, which is
+        // the key `useDictionary` will ask for. It returns immediately when
+        // nothing is registered, so an app with no dictionaries pays nothing.
+        await preloadDictionaries(i18n.currentLocale ?? "");
 
         // Handlers gate the response — they decide redirects, status codes,
         // cookies — so they are awaited. Queries do not: `Query.prefetch`

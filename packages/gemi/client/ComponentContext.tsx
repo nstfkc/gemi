@@ -1,4 +1,9 @@
 import { createContext, lazy, useMemo, type PropsWithChildren } from "react";
+import {
+  dictionaryRegistrationMark,
+  getActiveLocale,
+  preloadDictionaries,
+} from "../i18n/dictionaryRegistry";
 import { flattenComponentTree } from "./helpers/flattenComponentTree";
 import type { ServerDataContextValue } from "./ServerDataProvider";
 
@@ -27,17 +32,46 @@ export function loadViewModule(name: string): Promise<any> {
   const loader =
     typeof window !== "undefined" ? window.loaders?.[name] : undefined;
   if (!loader) return Promise.resolve(null);
-  return Promise.resolve(loader()).then((mod) => {
+  // Taken before the import starts: a `defineDictionary` handle registers when
+  // its module evaluates, so everything past this mark once the chunk lands is
+  // exactly what this view brought with it.
+  const mark = dictionaryRegistrationMark();
+  return Promise.resolve(loader()).then(async (mod) => {
     const isNew = !viewModules.has(name);
     viewModules.set(name, mod);
+
     // Notify on first registration so a `Route` that rendered before its
     // module arrived re-reads it — otherwise a hard load could suspend into
     // a `null` fallback while the view's `Loading` export sits in the module.
+    //
+    // Before the dictionary await, not after: this exists to surface the view's
+    // `Loading` export the moment it lands, and holding it behind a network
+    // fetch would put back the very `null` flash it removes.
     if (isNew) {
       for (const listener of viewModuleListeners) listener();
     }
+
+    // The single choke point every view chunk passes through — prefetch,
+    // navigation and hydration alike — so it is where a view's dictionaries get
+    // warmed. Awaited before the module is handed back, which folds the
+    // dictionary fetch into the loading state the route already shows instead
+    // of letting the view render and suspend a beat later.
+    await preloadDictionaries(currentLocale(), mark);
+
     return mod;
   });
+}
+
+function currentLocale(): string {
+  // `getActiveLocale` is whatever the last render used, which survives a locale
+  // switch; `__GEMI_DATA__` covers the first navigation, before any
+  // `useDictionary` has run.
+  return (
+    getActiveLocale() ??
+    (typeof window !== "undefined"
+      ? (window.__GEMI_DATA__?.i18n?.currentLocale ?? "")
+      : "")
+  );
 }
 
 export function subscribeViewModules(listener: () => void) {

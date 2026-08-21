@@ -3,15 +3,62 @@ import { useNavigate } from "./useNavigate";
 import { useParams } from "./useParams";
 import { useRouteData } from "./useRouteData";
 
-const setCookie = async (locale: string) => {
-  try {
-    return await globalThis.cookieStore.set("i18n-locale", locale);
-  } catch (err) {
-    return await fetch(`/api/__gemi__/services/i18n/set-locale/${locale}`);
-    // TODO: show unsuported browser error
-    // console.log(err);
+const LOCALE_COOKIE = "i18n-locale";
+const LOCALE_COOKIE_MAX_AGE = 60 * 60 * 24 * 365;
+
+/**
+ * The active locale lives in two places: the URL segment `setLocale` navigates
+ * to, and the `i18n-locale` cookie the server falls back to when the URL has no
+ * segment — which is exactly the case for the default locale. Both have to be in
+ * place *before* the navigation asks for route data, or `Translator.detectLocale`
+ * answers the request with a redirect back to the locale the cookie still names.
+ *
+ * Hence a synchronous `document.cookie` write rather than an awaited one. The
+ * previous implementation awaited `cookieStore.set()` and hung the navigation off
+ * its `.then()`; that promise is reported to never settle on iOS Safari, so the
+ * `.then()` never ran and changing the language became a silent no-op — no
+ * rejection, nothing for an error reporter to pick up. A synchronous write cannot
+ * hang and cannot fail asynchronously, so nothing is left to gate navigation on.
+ */
+function persistLocale(locale: string) {
+  if (typeof document === "undefined") {
+    return;
   }
-};
+  try {
+    document.cookie = [
+      // Encoded, not interpolated: `cookieStore.set()` rejected malformed
+      // values, a raw string write does not. A locale carrying `;` would
+      // otherwise write cookie *attributes* — `Domain`, `Path` — from whatever
+      // the app happens to feed the switcher.
+      `${LOCALE_COOKIE}=${encodeURIComponent(locale)}`,
+      `Max-Age=${LOCALE_COOKIE_MAX_AGE}`,
+      "SameSite=Strict",
+      "Path=/",
+    ].join("; ");
+  } catch {
+    // A sandboxed iframe with no storage access throws here. The navigation
+    // still carries the locale in its URL, so it is better to switch without
+    // remembering the choice than to not switch at all.
+  }
+}
+
+/**
+ * `onLocaleChange` is a server-side hook, so it takes a request to fire it. The
+ * switch must not wait on that round trip, nor be cancelled by one that fails —
+ * including one that fails *synchronously*: `fetch` is absent in some old
+ * WebViews, and an unguarded call would throw before the navigation ran, which
+ * is the same silent no-op this hook exists to prevent through another door.
+ */
+function notifyLocaleChange(locale: string) {
+  try {
+    void fetch(
+      `/api/__gemi__/services/i18n/set-locale/${encodeURIComponent(locale)}`,
+    ).catch(() => {});
+  } catch {
+    // `fetch` itself is unavailable. The locale is already persisted and the
+    // navigation still runs; only the server-side hook misses this switch.
+  }
+}
 
 export function useLocale() {
   const { i18n } = useRouteData();
@@ -20,16 +67,17 @@ export function useLocale() {
   const params = useParams();
 
   const setLocale = async (locale: string) => {
+    persistLocale(locale);
+    notifyLocaleChange(locale);
+
     const urlSearchParams = new URLSearchParams(search);
-    setCookie(locale).then(() => {
-      replace(pathname, {
-        locale,
-        // TODO: fix: this conversion is wrong, because there can be multiple
-        // search params with the same name
-        search: Object.fromEntries(urlSearchParams.entries()),
-        params,
-      } as any);
-    });
+    await replace(pathname, {
+      locale,
+      // TODO: fix: this conversion is wrong, because there can be multiple
+      // search params with the same name
+      search: Object.fromEntries(urlSearchParams.entries()),
+      params,
+    } as any);
   };
 
   return [i18n.currentLocale, setLocale] as const;

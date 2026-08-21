@@ -22,9 +22,10 @@ Each link below points to a self-contained Markdown page. For a single file cont
 ## Views & client
 
 - [Views & Layouts](https://nstfkc.github.io/gemi/views-and-layouts.md): view components, server data binding, nested layouts, Head, breadcrumbs.
-- [Data Fetching](https://nstfkc.github.io/gemi/data-fetching.md): the useQuery hook, mutation hooks, the Query prefetch facade, and the generated gemi.d.ts type layer.
+- [Data Fetching](https://nstfkc.github.io/gemi/data-fetching.md): the useQuery hook, mutation hooks, the Query prefetch facade, the RPC type layer, and the TypeScript plugin that makes go-to-definition work on a route path.
 - [Forms](https://nstfkc.github.io/gemi/forms.md): the Form component, surfacing validation errors, form-status hooks.
 - [Navigation](https://nstfkc.github.io/gemi/navigation.md): Link, useNavigate, useParams, useSearchParams, and the Redirect component vs facade.
+- [Testing Views](https://nstfkc.github.io/gemi/testing.md): the Page component from gemi/testing — mounting a view with seeded route params, dictionaries, prefetched useQuery data and a signed-in user.
 
 ## Data
 
@@ -46,6 +47,7 @@ Each link below points to a self-contained Markdown page. For a single file cont
 - [Jobs & Queues](https://nstfkc.github.io/gemi/jobs-and-queues.md): defining and dispatching background Jobs through the in-process queue.
 - [Cron](https://nstfkc.github.io/gemi/cron.md): scheduling recurring CronJobs with Bun.cron.
 - [Commands](https://nstfkc.github.io/gemi/commands.md): one-off application commands written with defineCommand and run with `gemi run <name>`.
+- [Events & Listeners](https://nstfkc.github.io/gemi/events.md): Event subclasses dispatched with Event.dispatch/dispatchAndWait, Listener subclasses under app/listeners bound with `static event`, sync fan-out that no listener can cancel, `queued = true` to run one on the queue instead, `static afterCommit` to hold a dispatch until the surrounding transaction commits, and `Event.fake()` for asserting what a request dispatched.
 - [Broadcasting](https://nstfkc.github.io/gemi/broadcasting.md): websocket channels, the Broadcast facade, useSubscription/useBroadcast.
 - [Internationalization](https://nstfkc.github.io/gemi/i18n.md): component-scoped dictionaries, useTranslator, useLocale, locale detection.
 
@@ -54,8 +56,9 @@ Each link below points to a self-contained Markdown page. For a single file cont
 - Application commands are `defineCommand(...).handle(...)` chains under `app/commands`, run with `gemi run <name>` — a chain, not a class, because a class body cannot type its own handler.
 - The client query hook is `useQuery` (not `useGet`).
 - The server-side `Redirect` facade works by throwing — never wrap it in try/catch.
+- An event declares `static name` and a listener binds to it with `static event`; never `instanceof` an event in application code, because a production build and the listener walk hold two different class objects for it.
 - Middleware is a string DSL (`auth`, `cache:...`, `rate-limit:N`); `-name` cancels an inherited middleware.
-- `gemi.d.ts` is generated (`gemi ide:generate-api-manifest`) — do not edit it by hand.
+- The typed network layer needs no codegen: the `RPC` / `ViewRPC` augmentation ships inside the package. An app upgrading from 0.55 or earlier must delete its root `gemi.d.ts` and its `types` entry.
 - Runtime config lives in `app/config/*.ts` (`defineMailConfig`, `defineAuthConfig`, …) and is read through `Repository` from `gemi/support`. `gemi.config.ts` / `gemi/config` is the unrelated BUILD config.
 - Subsystem hooks (`filterRecipients`, `onLogCreated`, `onSignUp`, `detectLocale`, `extendSession`, …) are plain properties on a config slice, not methods to override on a provider.
 - A `ServiceProvider` (from `gemi/support`) registers bindings: `register()` binds and must not resolve; `boot()` runs after every provider registered and may resolve.

@@ -234,6 +234,40 @@ export class SqliteDialect implements SqlDialect {
     return concat(sql(`json_extract(${column}, `), param(path), sql(")"));
   }
 
+  /**
+   * `("col" -> ?)` — the JSON value at the path, as JSON text.
+   *
+   * **`->` rather than `json_extract`, and the difference is the whole point.**
+   * `json_extract` returns a *native* SQL value, so a JSON `null` comes back as
+   * SQL NULL and is then indistinguishable from an absent key — the collapse
+   * that had the sentinels refused here. `->` returns the JSON *text* of the
+   * subcomponent, which keeps them apart. Measured on SQLite 3.51 against
+   * `'$.operation'`:
+   *
+   *   {"operation":null}        ->: 'null'        json_extract: NULL
+   *   {"other":1}               ->: NULL          json_extract: NULL
+   *   {"operation":"sync"}      ->: '"sync"'      json_extract: 'sync'
+   *   {"operation":"null"}      ->: '"null"'      json_extract: 'null'
+   *
+   * The last row is why this is a real distinction rather than a spelling one:
+   * a JSON string `"null"` and a JSON null differ under `->` (the quotes are
+   * part of the text) and are the same under `json_extract`. So
+   * `equals: JsonNull` does not accidentally match a document holding the
+   * string.
+   *
+   * `json_type` would answer the same question and is the form #407 proposed;
+   * `->` is what Prisma emits here — `` `Doc`.`payload`->? IS NULL `` — and
+   * matching the oracle's operator costs nothing over inventing a second one.
+   * It needs SQLite 3.38 (2022); Bun ships 3.51.
+   *
+   * No cast, unlike Postgres: `->` already yields the text form both sides of
+   * the comparison are in, and `encode` spells a JSON null `'null'` for the
+   * bound side.
+   */
+  jsonValueAt(column: string, path: Binder): Fragment {
+    return concat(sql(`(${column} -> `), param(path), sql(")"));
+  }
+
   jsonArrayContains(): Fragment {
     // Unreachable: `jsonFilters` does not list it, so `where.ts` refuses first
     // with a message naming the dialect. Throwing here rather than returning

@@ -42,9 +42,10 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 
 ### Views & client
 - **[Views & Layouts](./views-and-layouts.md)** — view components, server data binding, nested layouts, `Head`, breadcrumbs.
-- **[Data Fetching](./data-fetching.md)** — `useQuery`, the mutation hooks, the `Query` prefetch facade, and the type-safe `gemi.d.ts` layer.
+- **[Data Fetching](./data-fetching.md)** — `useQuery`, the mutation hooks, the `Query` prefetch facade, the type-safe RPC layer, and the TypeScript plugin that makes go-to-definition work on a route path.
 - **[Forms](./forms.md)** — the `Form` component, surfacing validation errors, form status hooks.
 - **[Navigation](./navigation.md)** — `Link`, `useNavigate`, `useParams`, `useSearchParams`, and the `Redirect` component vs. facade.
+- **[Testing Views](./testing.md)** — `<Page>` from `gemi/testing`: mounting a view with route params, dictionaries, prefetched query data and a signed-in user.
 
 ### Data
 - **[ORM](./orm.md)** — the Prisma-typed, gemi-executed query layer: models, relations, ambient transactions, named connections, policies, soft deletes.
@@ -55,11 +56,14 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 - **[Authorization](./authorization.md)** — role-based middleware and authorization errors.
 
 ### Services & facades
+- **[Services](./services.md)** — your own singletons: `Service`, `boot()`, and constructor-default injection.
 - **[Facades](./facades.md)** — reference for `Auth`, `Redirect`, `Lang`, `Storage`, `Query`, `Broadcast`, `Url`, `Log`, `Meta`, `Cookie`, `Redis`.
 - **[File Storage](./file-storage.md)** — the `Storage` facade, filesystem/S3 drivers, image optimization, the `Image` component.
 - **[Email](./email.md)** — the `Email` class, jsx-email templates, the Resend driver, localization and scheduling.
 - **[Jobs & Queues](./jobs-and-queues.md)** — defining and dispatching background `Job`s.
 - **[Cron](./cron.md)** — scheduling recurring `CronJob`s.
+- **[Commands](./commands.md)** — one-off application commands run with `gemi run`.
+- **[Events & Listeners](./events.md)** — `Event.dispatch(...)` fanning out to the listeners under `app/listeners`, inline or on the queue.
 - **[Broadcasting](./broadcasting.md)** — websocket channels, the `Broadcast` facade, `useSubscription` / `useBroadcast`.
 - **[Internationalization](./i18n.md)** — component-scoped dictionaries, `useTranslator`, `useLocale`, locale detection.
 
@@ -75,7 +79,7 @@ See **[Getting Started](./getting-started.md)** for requirements and a first rou
 | **Controller** | Server logic behind a route; receives `HttpRequest` | [controllers](./controllers.md) |
 | **Facade** | Static proxy to a container-resolved service | [facades](./facades.md) |
 | **View** | Default-export React component rendered for a URL | [views-and-layouts](./views-and-layouts.md) |
-| **`gemi.d.ts`** | Generated types binding client hooks to your routes | [data-fetching](./data-fetching.md) |
+| **RPC types** | The `RPC` / `ViewRPC` augmentation binding client hooks to your routes; ships with the package | [data-fetching](./data-fetching.md) |
 
 ## A few things that will bite you
 
@@ -89,7 +93,7 @@ These are the counter-intuitive rules worth knowing up front — each is covered
 - **Middleware is a string DSL.** `auth`, `cache:...`, `rate-limit:N`, etc., and `-auth` *cancels* an inherited middleware. Most names (`admin`, `role:...`) are **app-registered aliases**, not built-ins. See [Middleware](./middleware.md).
 - **The query hook is `useQuery`, not `useGet`.** Some app-level notes mention `useGet`; it does not exist in gemi. See [Data Fetching](./data-fetching.md).
 - **Routing is explicit.** A view/controller file name has no relation to its URL — the mapping lives in a router. See [Routing](./routing.md).
-- **`gemi.d.ts` is generated — never edit it by hand.** Regenerate the API surface with `gemi ide:generate-api-manifest`. See [CLI](./cli.md).
+- **There is nothing to generate for the typed network layer.** The `RPC` / `ViewRPC` augmentation ships inside the package and is derived from your routers by the compiler. Apps upgrading from 0.55 or earlier must delete their root `gemi.d.ts` and its `types` entry — see [UPGRADE.md](../UPGRADE.md). See [Data Fetching](./data-fetching.md).
 
 
 ---
@@ -143,7 +147,7 @@ bunx prisma migrate deploy    # initialize the database and generate the Prisma 
 bun dev                       # start the development server
 ```
 
-The generated project is the canonical gemi layout: an `app/` directory (server entry, client entry, kernel, `config/`, `providers/`, routes, controllers, views, email, i18n, database), plus `gemi.config.ts`, `gemi.d.ts`, `vite.config.mjs`, `tsconfig.json`, a `prisma/` schema, and a `Dockerfile`. See [Project Structure](./project-structure.md) for a full tour.
+The generated project is the canonical gemi layout: an `app/` directory (server entry, client entry, kernel, `config/`, `providers/`, routes, controllers, views, email, i18n, database), plus `gemi.config.ts`, `vite.config.mjs`, `tsconfig.json`, a `prisma/` schema, and a `Dockerfile`. See [Project Structure](./project-structure.md) for a full tour.
 
 ## Commands
 
@@ -281,7 +285,7 @@ app/
     prisma.ts            # the Prisma client instance
 ```
 
-Root-level files support the app: [`gemi.config.ts`](./configuration.md) (Vite/Bun plugin config), `gemi.d.ts` (type augmentation for the type-safe RPC layer), `vite.config.mjs`, `tsconfig.json`, the `prisma/` schema, and a `Dockerfile`.
+Root-level files support the app: [`gemi.config.ts`](./configuration.md) (Vite/Bun plugin config), `vite.config.mjs`, `tsconfig.json`, the `prisma/` schema, and a `Dockerfile`. The type augmentation behind the type-safe RPC layer ships inside the package as of 0.56 — an app that still has a root `gemi.d.ts` should delete it, see [UPGRADE.md](../UPGRADE.md).
 
 > **`gemi.config.ts` and `app/config/` are different things.** `gemi.config.ts` is *build* config (Vite/Bun plugins), imported from `gemi/config`. `app/config/*.ts` is *runtime* config for framework services, consumed by the container. They never overlap.
 
@@ -324,15 +328,17 @@ If present, `app/preload.ts` runs once, before the server starts, for both `gemi
 - **`i18n/`** — translation dictionaries created with `Dictionary.create` from `gemi/i18n`, exported as a single default object.
 - **`database/prisma.ts`** — your Prisma client instance, imported wherever you query the database.
 
-### `cron/`, `jobs/` and `commands/` — the three discovered directories
+### `cron/`, `jobs/`, `listeners/` and `commands/` — the four discovered directories
 
-These directories are read, not listed. Every class under `app/cron` extending `CronJob` is scheduled at boot, every class under `app/jobs` extending `Job` is registered at boot, and every command under `app/commands` is available to `gemi run` — with nothing anywhere naming them. Writing the file is the registration. The `schedule`, `queue` and `command` slices can still declare their list explicitly, which turns the walk off and uses the declared list verbatim; an empty array is a declaration too, and means an app with none.
+These directories are read, not listed. Every class under `app/cron` extending `CronJob` is scheduled at boot, every class under `app/jobs` extending `Job` is registered at boot, every class under `app/listeners` extending `Listener` is bound to the event it declares at boot, and every command under `app/commands` is available to `gemi run` — with nothing anywhere naming them. Writing the file is the registration. The `schedule`, `queue`, `events` and `command` slices can still declare their list explicitly, which turns the walk off and uses the declared list verbatim; an empty array is a declaration too, and means an app with none.
+
+`app/listeners` is the one the scaffold does not create — the template ships no listeners, and the directory is simply absent until you write the first one, which is not an error.
 
 Discovery imports every `.ts`/`.tsx` file it walks, because a class does not exist until its module has run — so a file in one of these directories that does work when imported does that work when the directory is read. Keep them to declarations.
 
-`app/commands` differs in **when** it is read: cron and queue discovery happen during boot, because a tick or a dispatch can arrive at any moment afterwards, while commands are walked only by `gemi run`. A registry no request consults has no reason to cost every production process an import of every file under it.
+`app/commands` differs in **when** it is read: cron, queue and listener discovery happen during boot, because a tick or a dispatch can arrive at any moment afterwards, while commands are walked only by `gemi run`. A registry no request consults has no reason to cost every production process an import of every file under it.
 
-See [Cron](./cron.md), [Jobs & Queues](./jobs-and-queues.md) and [Commands](./commands.md) for the walk's skip rules and the reasons for reading a directory at all.
+See [Cron](./cron.md), [Jobs & Queues](./jobs-and-queues.md), [Events & Listeners](./events.md) and [Commands](./commands.md) for the walk's skip rules and the reasons for reading a directory at all.
 
 ## The Kernel
 
@@ -512,6 +518,8 @@ export default defineMiddlewareConfig({
 | `image` | `defineImageConfig` | `gemi/services` |
 | `ratelimiter` | `defineRateLimiterConfig` | `gemi/services` |
 | `schedule` | `defineScheduleConfig` | `gemi/services` |
+| `events` | `defineEventConfig` | `gemi/services` |
+| `command` | `defineCommandConfig` | `gemi/services` |
 | `route` | `defineRouteConfig` | `gemi/services` |
 | `translation` | `defineTranslationConfig` | `gemi/i18n` (also re-exported from `gemi/services`) |
 | `middleware` | `defineMiddlewareConfig` | `gemi/http` |
@@ -1092,13 +1100,15 @@ It reports one thing: a class carrying policies the registered class does not. A
 
 ## `gemi ide:generate-api-manifest`
 
-Generates the API route manifest used for editor integration (jump-to-definition from a route path to its controller method).
+Generates the API route manifest behind the Emacs integration in `packages/gemi/ide/emacs`, which lists your routes and jumps to the handler you pick.
 
 ```bash
 gemi ide:generate-api-manifest
 ```
 
 It statically parses your API routes starting from `app/http/routes/api.ts`, resolves each route + HTTP method to the source position of its handler (the controller method when the route is `this.get(Controller, "method")`, otherwise the router callback), and writes a manifest under `.gemi/cache/api-routes-manifest`. This is meant to be run by tooling rather than by hand.
+
+For go-to-definition *from a route path you have already written* — `useQuery("/reports")`, `<Link href="/about">` — use the TypeScript language service plugin instead, which works in any editor that runs `tsserver`. See [Data Fetching → Jumping from a path to its handler](./data-fetching.md#jumping-from-a-path-to-its-handler).
 
 ## `gemi app:component-tree`
 
@@ -2204,8 +2214,8 @@ when its handler supplies one.
 gemi ships a small set of typed hooks for talking to your API routes from the
 client, plus a server-side facade for priming that data during SSR. Every hook is
 fully type-safe: the endpoint path, its params, its search input, and its response
-shape are all inferred from your API routes through the generated `gemi.d.ts` network
-layer. You never write a raw `fetch` or hand-annotate a response type.
+shape are all inferred from your API routes through the type augmentation `gemi/client`
+ships. You never write a raw `fetch` or hand-annotate a response type.
 
 All hooks and components below come from `gemi/client`:
 
@@ -2454,9 +2464,42 @@ response types from your `api.ts` / `view.ts` routers and applies them to `useQu
 the mutation hooks, `Form`, and `ViewProps` / `LayoutProps` automatically. You get
 autocomplete for valid paths and params and typed response data, with no manual wiring.
 
-> **Note:** This is backed by a generated `gemi.d.ts` at your app root — don't edit it by
-> hand. Regenerate it after changing API routes with `gemi ide:generate-api-manifest`
-> (see the [CLI reference](./cli.md)).
+This is backed by an augmentation of the `RPC` and `ViewRPC` interfaces that reads your
+`api.ts` and `view.ts` routers. Since 0.56 it ships inside the package and is referenced
+by `gemi/client` and `gemi/facades`, so importing from either is the whole of the wiring
+— there is nothing to install and nothing to regenerate. The types are derived from your
+routers by the compiler, so they follow a route the moment you add one.
+
+> Upgrading from 0.55 or earlier? Delete your app's root `gemi.d.ts` and its
+> `"./node_modules/gemi/gemi.d.ts"` entry in `tsconfig.json`'s `types` — leaving them is
+> not a no-op. See [UPGRADE.md](../UPGRADE.md).
+
+### Jumping from a path to its handler
+
+The path in `useQuery("/reports")` names a handler as precisely as a call names a
+function, but the connection is made by conditional types rather than by a symbol, so
+go-to-definition has nothing to follow and stops at the string. gemi ships a TypeScript
+language service plugin that closes that gap. Add it to your `tsconfig.json`:
+
+```json
+{
+  "compilerOptions": {
+    "plugins": [{ "name": "gemi/ide/typescript-plugin" }]
+  }
+}
+```
+
+Go to definition on a route path then jumps to the code behind it — the controller
+method for `this.get(HomeController, "index")`, the callback for an inline handler, the
+right method of a `resource()` for the verb you are using, and for a view path both the
+component and the handler feeding it. Hovering a path names the route and its handler.
+It works on any typed path: `useQuery`, `useMutation`, `useMutate`, `Form`'s `action`,
+`Link`'s `href`, and on wrappers you write over them.
+
+> **VS Code** ships its own copy of TypeScript and ignores `plugins` unless told to use
+> the workspace's: run **TypeScript: Select TypeScript Version → Use Workspace Version**
+> once per project. Editors that drive `tsserver` over LSP — Neovim, Emacs, Helix,
+> JetBrains — read `tsconfig.json` directly and need nothing extra.
 
 ## Related
 
@@ -2464,7 +2507,6 @@ autocomplete for valid paths and params and typed response data, with no manual 
 - [Views and Layouts](./views-and-layouts.md) — server props vs. client queries.
 - [Controllers](./controllers.md) — writing the endpoints these hooks call.
 - [File Storage](./file-storage.md) — handling `useUpload` on the server.
-- [CLI](./cli.md) — regenerating `gemi.d.ts`.
 
 
 ---
@@ -3750,20 +3792,61 @@ element; Prisma's generated `path` is `string[]` and its client refuses a number
 one too rather than answering a query the differential harness has no oracle for. On SQLite the
 index lives inside the JSONPath string, `"$.items[0]"`.
 
-Four things a path filter refuses, each because answering would be silently wrong rather than
-merely unsupported:
+#### The null sentinels at a path
 
-- **The null sentinels.** `{ path: […], equals: DbNull }` is refused. An extracted value
-  cannot tell an absent key from a JSON `null` — `#>>` yields SQL NULL for both — so the
-  distinction the sentinels exist to make is already gone by the time the comparison happens.
-  Filter the column itself: `{ metadata: { equals: DbNull } }`.
-- **A bare `null`, under every operator**, for the same reason and one more. `= NULL` is NULL
-  rather than true, so `{ path: […], equals: null }` would run and match nothing; and under
-  `array_contains`, `x @> NULL` is NULL as well. Prisma *does* answer this one — it extracts with
-  `#>` and compares as `jsonb`, so it reads `null` as the JSON value and returns the rows holding
-  one, the same answer as `equals: JsonNull`. gemi cannot follow it there without a second,
-  Postgres-only implementation of every operator, so it names the limitation instead. A `null`
-  *inside* an `array_contains` document is an ordinary value and still compiles.
+`equals` and `not` answer the three sentinels one level down, and they mean what they mean on the
+column — with one adjustment, because a *key* has a third way of being empty that a column does not:
+
+```ts
+// the value at metadata.plan is missing: an absent key, or a column with
+// nothing to index into (SQL NULL, or a JSON null)
+await User.findMany({ where: { metadata: { path: ["plan"], equals: DbNull } } })
+
+// the value at metadata.plan is the JSON value null
+await User.findMany({ where: { metadata: { path: ["plan"], equals: JsonNull } } })
+
+// either, which is usually what you want
+await User.findMany({ where: { metadata: { path: ["plan"], equals: AnyNull } } })
+```
+
+`not` negates each: `not: DbNull` is "there is something there", `not: AnyNull` is "there is
+something there and it is not a JSON null".
+
+This is what makes a `COALESCE`-style fallback expressible — a column read where the value moved
+into the payload and old rows still carry it beside:
+
+```ts
+await AsyncJob.findMany({
+  where: {
+    OR: [
+      { payload: { path: ["operation"], equals: op } },
+      { name: op, payload: { path: ["operation"], equals: AnyNull } },
+    ],
+  },
+})
+```
+
+A bare `null` is accepted under these two operators and reads as `JsonNull`, which is Prisma's own
+reading — the two spellings compile to identical SQL. It does *not* mean that on the column, where
+gemi reads a bare `null` as `DbNull`; see
+[A bare `null` on a `Json` column](#a-bare-null-on-a-json-column-means-dbnull-here-and-jsonnull-on-prisma)
+below, which is a divergence rather than a rule. Writing the sentinel you mean is what makes a
+filter say the same thing in both positions.
+
+**Under the other eight operators a sentinel is refused**, and so is a bare `null`. The string
+filters want a string, the numeric comparisons want a number, and `array_contains` wants a
+document; "which kind of null is this" is none of those. Prisma refuses a sentinel under all eight
+too, on both dialects.
+
+Three things a path filter still refuses, each because answering would be silently wrong rather
+than merely unsupported:
+
+- **A bare `null` under `array_contains`.** The operand binds as SQL NULL rather than as the JSON
+  value, and `x @> NULL` is NULL rather than true — the query would run and match nothing. Prisma
+  does compile this one, to a containment test guarded by `jsonb_typeof(…) = 'array'`, and it
+  matches nothing there too — so this is gemi refusing where the oracle answers, which is the one
+  direction of divergence this ORM prefers to be loud about. A `null` *inside* the document is an
+  ordinary value and still compiles.
 - **A non-string operand to `string_contains` / `string_starts_with` / `string_ends_with`**, for
   the same reason the scalar `contains` refuses one: the pattern would become `%null%`, which runs
   and returns the wrong rows.
@@ -3783,8 +3866,8 @@ compiling to a predicate no row can satisfy.
 **What the type checks, and what it leaves to run time.** The path filter is typed: `path` takes
 either dialect's grammar, the ten operators are the ones above, and their operand types are the
 ones the compiler will compile. A misspelled operator, a `path` that is not one, a numeric path
-segment, a non-string under `string_contains`, a sentinel at a path and a `null` at a path are all
-compile errors. The type carries no dialect — the generated artifact does not know which database
+segment, a non-string under `string_contains`, and a sentinel or a `null` under any operator but
+`equals` and `not` are all compile errors. The type carries no dialect — the generated artifact does not know which database
 it will be pointed at — so the table above is offered in full on both and the wrong half is refused
 at run time, naming the dialect. The empty path is refused at run time too.
 
@@ -3922,7 +4005,7 @@ back to batching for that node alone. It declines:
 A declined node still runs under this strategy one level down, so a decline costs one statement, not
 the subtree. A mixed include tree therefore uses both, which is fine — the results are the same
 either way, and there are tests asserting exactly that against Prisma across every relation shape
-in the differential corpus — **48** of them today, and the suite fails if this number stops
+in the differential corpus — **49** of them today, and the suite fails if this number stops
 matching the corpus.
 
 Override per call when you need to:
@@ -4366,9 +4449,40 @@ times inside that report before its own sentences were derived rather than writt
 The starter template indexes every foreign key for this reason, so a new application starts on the
 right side of it.
 
-`_count: true` (Prisma's "count every to-many relation") is **not** implemented. Name the relations
-instead — the shorthand names none, so a policy has nowhere to attach, and what it returns changes
-silently when the schema grows a relation.
+`_count: true` — Prisma's "count every to-many relation" — is the shorthand for naming them all:
+
+```ts
+await User.findMany({ include: { _count: true } })
+// _count carries one key per to-many relation on User:
+// { accounts: 3, passwordResetToken: 0, session: 1, socialAccount: 2 }
+```
+
+To-many only. The explicit form refuses a to-one by name, because counting one answers 0 or 1; the
+shorthand named nothing, so there is no argument to refuse and the to-one is simply skipped.
+
+On a model with **no** to-many relations the shorthand is a compile error, not a runtime one. There
+is nothing for it to mean, and a query that type-checks and then throws on every call is the whole
+of what #394 reported — closing that for models which do have a to-many while leaving it open on
+models which do not would move the trap rather than remove it. `_count: false` stays legal
+everywhere, because the compiler short-circuits it before reaching any of this: a count switched off
+by a flag is a thing you can write on any model.
+
+A `_count` that ends up counting *nothing* is refused too, but only when it is the sole thing in a
+`select` — `select: { _count: { select: {} } }`, or every relation in it switched off. `_count`
+counts as something selected, so an empty one satisfies the "at least one field" check and then
+projects no columns at all. Under an `include` the model's own columns keep the statement valid, so
+counting nothing is simply nothing.
+
+The counted relations carry their policies exactly as the explicit form's do. That is worth stating
+because it is the part that is easy to get wrong: the shorthand names no relation, so the scope has
+nowhere to attach until the shorthand is expanded, and expanding it in the compiler alone would
+count every relation unscoped. The expansion is shared with the policy walk instead, so the set that
+reaches SQL is the set that carried a scope.
+
+**What it returns changes when the schema grows a to-many relation.** That is Prisma's semantics
+rather than a wrinkle here, and it is the reason to prefer naming the relations in code you intend to
+keep: a response body that silently gains a key is a change no test asked for. The shorthand is for
+the exploratory case.
 
 ### Saying where nulls go
 
@@ -4817,6 +4931,7 @@ it looks. A model's policies apply when its rows are reached through:
 | a folded relation (the `lateral` strategy) | the scope lands *inside* the subquery |
 | `where: { rel: { some: … } }` | the `exists` subquery is scoped |
 | `_count: { select: { rel: … } }` | you can only count rows you could read |
+| `_count: true` | expanded to the relations above it, then each one scoped |
 | `orderBy: { rel: … }` | you can only sort by rows you could read |
 | `data: { rel: { create / connect: … } }` | the child's `onCreate` runs; a `connect` cannot reach a row you cannot read |
 
@@ -5313,6 +5428,9 @@ Two things are worth knowing:
   raises `InvalidArgumentError`, and so does using it under any operator other than `equals` and
   `not`. Prisma refuses all three of those too.
 
+  All three also work one level down, on a value inside the document — see
+  [The null sentinels at a path](#the-null-sentinels-at-a-path).
+
 On Postgres the parameter is cast — `$1::text::jsonb` — and the value serialised to match, which
 is what lets a bare number or boolean through. Binding it raw makes the driver send an `integer` to
 a `jsonb` column, and serialising *without* the cast stores the jsonb string `"42"` instead of the
@@ -5328,6 +5446,32 @@ JS string is JSON *text* rather than a JSON string value.
 > so nothing looked wrong from inside the ORM, but the column was wrong for anything else that read
 > it. Those rows now read back as strings. Re-seed development databases; there is no released
 > version affected.
+
+## A bare `null` on a `Json` column means `DbNull` here and `JsonNull` on Prisma
+
+**A known divergence, and it returns disjoint row sets rather than raising.** On every other column
+type a bare `null` in a filter means `is null`, and that is Prisma's reading too. On a `Json`
+column it is not: Prisma reads a bare `null` as the JSON *value* `null`, the same thing it reads at
+a path.
+
+Measured on a generated 6.19.2 client against Postgres 16 and SQLite, on a table holding both empty
+states:
+
+| filter | gemi | Prisma |
+| --- | --- | --- |
+| `{ metadata: { equals: null } }` | `"metadata" is null` — the SQL-NULL rows | `"metadata"::jsonb = 'null'` — the JSON-null rows |
+| `{ metadata: { not: null } }` | `is not null` | `<> 'null'`, which also excludes the JSON-null rows |
+
+**Write the sentinel and there is no divergence.** `{ equals: DbNull }` and `{ equals: JsonNull }`
+compile to the same predicate on both libraries, which is what the sentinels are for:
+
+```ts
+await User.findMany({ where: { metadata: { equals: DbNull } } })   // the SQL NULLs, both libraries
+await User.findMany({ where: { metadata: { equals: JsonNull } } }) // the JSON nulls, both libraries
+```
+
+This is the *column*. At a **path** a bare `null` reads as `JsonNull` and agrees with Prisma
+exactly — see [The null sentinels at a path](#the-null-sentinels-at-a-path).
 
 ## Run Postgres deployments with `TZ=UTC`
 
@@ -6719,6 +6863,278 @@ A provider is still the right tool when the thing you are binding is not yours, 
 
 ---
 
+## Features
+
+A feature in gemi is **declared in code and switched on from the database**. You write the key, who it applies to, and how far it has rolled out in `app/features`. The database holds one thing: whether it is switched on at all.
+
+That split is the whole design. **Shipping a feature is a deploy; turning it on is not.** You can merge a feature dark, watch it sit inert in production, and switch it on — or off, during an incident — with an `UPDATE`.
+
+Features are evaluated **on the server**, once per request, and the answers ride the page payload the server was already sending. The browser never fetches them, so a feature cannot cause a flash of the wrong branch, and your targeting never leaves the server.
+
+```typescript
+// app/features/index.ts
+import { defineFeature } from "gemi/services";
+
+export default {
+  "new-checkout": defineFeature({
+    describe: "Rebuilt checkout flow",
+  }),
+
+  "pricing-redesign": defineFeature({
+    rollout: 50,
+    when: (ctx) => {
+      if (ctx.user?.email.endsWith("@acme.com")) return true; // staff, always
+      if (ctx.user?.plan === "free") return false; // never
+      // return nothing → the rollout decides
+    },
+  }),
+};
+```
+
+```tsx
+import { useFeature } from "gemi/client";
+
+export default function Pricing() {
+  return useFeature("pricing-redesign") ? <PricingNext /> : <Pricing />;
+}
+```
+
+```typescript
+import { Features } from "gemi/facades";
+
+if (await Features.enabled("new-checkout")) {
+  // ...
+}
+```
+
+Keys are typed from your declarations, so `useFeature("pricing-redesgin")` is a compile error rather than a feature that silently reads as off.
+
+## Every feature is a boolean
+
+`useFeature` returns `true` or `false`. There is no multivariate value, no string, no number.
+
+This is a deliberate floor rather than an oversight. A feature is a thing you turn on; a config value with three settings wants a different lifecycle — versioned, reviewed, deployed — than something you flip at 2am. If you need a three-arm experiment, that is an experimentation system, and it should not be built out of two booleans that can both be true.
+
+## Keys are flat
+
+There is no nesting and no prefix joining. `"billing/new-invoices"` is one key, written exactly as you will look it up.
+
+The reason is grep. The most common thing anyone ever does with a feature is ask "is this still referenced, can I delete it?", and that question should be answerable with a text search. A nested registry breaks it: the key you search for exists nowhere in the source, only as a concatenation at runtime.
+
+## How a feature resolves
+
+In order, stopping at the first that applies:
+
+1. **The store has never loaded** → off. An unreachable database fails closed.
+2. **No row, or `active = false`** → off. `when` and `rollout` are not consulted.
+3. **`when(ctx)` returned `true` or `false`** → that.
+4. **No `rollout`** → on, crawlers included. There is nothing to sample, so every visit already resolves the same way.
+5. **A crawler**, on a feature that _has_ a rollout → off.
+6. **Inside the rollout bucket** → on, otherwise off.
+
+Two of these are worth dwelling on.
+
+**`active` short-circuits everything.** It is the kill switch, and a kill switch that application code could defeat is not one. Nothing in `when` or `rollout` can turn a switched-off feature back on.
+
+**`when` outranks `rollout`.** A rollout is a statement about strangers; `when` is a statement about someone you can name. Staff overrides and plan exclusions have to beat the dice, or they are not overrides. Returning nothing from `when` is how you say "no opinion about this one" and let the dice decide.
+
+## Rollouts are computed, not stored
+
+A subject's position in a rollout is `sha1(salt:subject)`, reduced to a bucket in `[0, 10000)`. It is on if the bucket is below the threshold.
+
+Nothing is written anywhere. That buys four things:
+
+- **Stability.** The same subject gets the same answer on every device, in every process, forever — with no row, no cookie holding assignments, and nothing to migrate.
+- **Monotonicity.** Going 10% → 25% only ever _adds_ people. Nobody who had the feature loses it, because their bucket number never moves; only the threshold does.
+- **Independence.** The salt is the feature's key, so two 20% rollouts pick two different 20% slices. Without that, a subject unlucky once would be unlucky in everything.
+- **No growth.** One row per feature, not one row per feature per user.
+
+### The subject
+
+The signed-in user (`publicId`, falling back to `id`), or the `session_id` cookie for a logged-out visitor.
+
+Preferring the user is what makes an assignment follow someone between their laptop and their phone. The cost is that **signing up can move a visitor across a rollout boundary**, because the subject changes from the cookie to the account. There is no id that is both stable per person and known before they have an account, so this is a trade rather than a bug — just don't run an experiment that spans registration.
+
+Outside a request — a job, a cron tick — there is no subject and every context shares one bucket. Use `Features.for({ subjectId })` when a background task needs to evaluate as somebody.
+
+### Anonymous visitors
+
+The `session_id` cookie is minted at the top of every view request, before anything is evaluated, so the id used to bucket is the id the browser is about to be given. It is `httpOnly`, `SameSite=Lax`, and lasts a year.
+
+`Lax` rather than `Strict` is load-bearing. `Strict` withholds the cookie on cross-site _top-level navigation_, so a visitor arriving from a search result or a shared link would arrive without it, be minted a new id, and overwrite the old one — re-bucketing on every external entry, which is how most anonymous traffic arrives.
+
+Two operational consequences:
+
+- **A shared cache must never store a response carrying `Set-Cookie: session_id`.** One visitor's id would be handed to everybody, collapsing the whole anonymous population into a single bucket. If you put a CDN in front of view routes, that response needs `Cache-Control: private`.
+- **Crawlers are pinned off** for any feature with a rollout. Bots discard cookies, so each crawl would otherwise land in a fresh bucket and index a different branch than the last one. A feature with no rollout is served to bots normally — there is nothing to be inconsistent about.
+
+## Changing a rollout needs a deploy
+
+`rollout` lives in code, so ramping 10% → 50% is a code change and a release. That is the deliberate cost of keeping all the reasoning in reviewed source.
+
+If it becomes painful, the fix is one nullable column on the row overriding the declared value, and nothing else in this design moves.
+
+## Setup
+
+### 1. Add the model
+
+```prisma
+model FeatureFlag {
+  id       Int    @id @default(autoincrement())
+  publicId String @unique @default(cuid())
+
+  key    String  @unique
+  active Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+```
+
+Export it from `app/models` so the ORM registry can resolve it by name:
+
+```typescript
+// app/models/FeatureFlag.ts
+import { FeatureFlagModel } from "./generated";
+export class FeatureFlag extends FeatureFlagModel {}
+```
+
+No tenant policy on this model. These rows are global application configuration, not customer data, and the store loads the whole table from a background refresh with no user attached — a `scope` would make that load return nothing.
+
+### 2. Declare your features
+
+`app/features/index.ts`, default-exporting a plain object. Do not annotate it: a type annotation widens the keys and every one of them silently becomes an untyped `string`.
+
+### 3. Point the config at it
+
+```typescript
+// app/config/features.ts
+import { defineFeaturesConfig } from "gemi/services";
+import AppFeatures from "@/app/features";
+
+export default defineFeaturesConfig({
+  features: AppFeatures,
+  ttl: 30,
+});
+```
+
+`ttl` is the propagation delay in seconds — how long a loaded snapshot is reused before the next refresh. It is how long switching something off takes to reach every instance, since there is no cross-instance invalidation. Lower it if thirty seconds is too long during an incident; the cost is one query per instance per window.
+
+## Reading a feature
+
+### In a component
+
+```tsx
+const on = useFeature("new-checkout");
+const all = useFeatures(); // the whole map
+```
+
+This is a context read — no request, no suspense, no loading state. The corollary is that switching a feature on reaches an already-open page on its next navigation, not instantly.
+
+### On the server
+
+```typescript
+await Features.enabled("new-checkout");
+await Features.explain("new-checkout"); // { value, reason } — server only
+await Features.all(); // the client-visible map
+await Features.for({ user }).enabled("digest-v2");
+await Features.refresh(); // reload this process now
+```
+
+Everything is async. After the boot-time warm-up each call settles in a microtask with no I/O, but the promise is kept because the first call in a cold process does hit the database — and a sync variant would have to answer that window with "off", which is a feature silently vanishing while a deploy rolls.
+
+`explain` is **server-only**. `reason` distinguishes "targeted by name" from "landed in the rollout", which is a fact about the viewer; never serialize it into a response.
+
+## Hiding a feature's existence
+
+Feature _keys_ are public — every client-visible key is embedded in the HTML of every page. A key named after an unannounced product announces it.
+
+```typescript
+"project-nightingale": defineFeature({ serverOnly: true }),
+```
+
+Still evaluated on the server and never in the payload. `useFeature("project-nightingale")` is a compile error — the key is excluded from the client's key type, because the value there could only ever be `false`. Read it with `Features.enabled` instead.
+
+## Gating a route
+
+```typescript
+"/beta": this.view("Beta").feature("beta-access"),
+```
+
+A gated route renders a real 404 when the feature is off, rather than a 403 — a 403 confirms the route exists, which for an unannounced feature is the thing you were hiding.
+
+The path does stay in the route manifest the browser downloads, so this gates the response, not the route's existence. Pair it with `serverOnly: true` when the name is the secret.
+
+### A rollout is not access control
+
+Gate on `active`, or on a `when` that reads something the visitor cannot choose — the signed-in user, most obviously. Not on a `rollout`.
+
+For an anonymous visitor the bucketing subject is their own `session_id` cookie, and bucketing is a published pure function of it: they can compute a value that lands inside any percentage and send it. Signing the cookie would not close this. They could equally well throw it away and ask for a fresh one until a signed id happens to land inside — a couple of dozen requests for a 5% rollout. Nothing that hands out identities on demand can restrict anything to a fraction of them.
+
+A rollout answers "how many people should see this yet". Use `when` for "who is allowed to".
+
+## Extra context for targeting
+
+```typescript
+// app/config/features.ts
+export default defineFeaturesConfig({
+  features: AppFeatures,
+  context: (req) => ({ country: req?.headers.get("cf-ipcountry") }),
+});
+```
+
+Readable in any `when` as `ctx.attributes.country`. This runs on every request inside the render path, so keep it cheap and free of I/O. If it throws, evaluation degrades to no attributes rather than failing the page.
+
+`when` itself is synchronous for the same reason — an `async` signature is an invitation to put a query on the render path, where every page load would pay for every declared feature.
+
+## Recording exposures
+
+```typescript
+onEvaluate: (key, evaluation) => analytics.track("feature", { key, on: evaluation.value }),
+```
+
+Fires once per key per request. Errors are caught and logged — an analytics hook must not break the render it observes.
+
+## Testing
+
+```typescript
+import { StaticFeatureFlagSource } from "gemi/services";
+
+defineFeaturesConfig({
+  features: AppFeatures,
+  source: new StaticFeatureFlagSource({ "new-checkout": true }),
+});
+```
+
+This replaces the _switch_, not the answer: rows still go through the same store and the same evaluator production runs, so a test that turns a feature on still exercises its `when` and its `rollout`. Pinning the final value instead would assert about a code path that never runs.
+
+## Operating
+
+**An empty table is a working state.** Every feature is off until somebody turns it on, which is exactly what you want for a feature you just deployed.
+
+**A row for a key nobody declares is ignored with a warning.** That is usually a feature deleted from the code and left in the table — harmless, and the warning is how you find the litter.
+
+**A failed refresh keeps the last good snapshot.** An outage must not read as "every feature switched itself off"; that would be a config change nobody made, applied to production, at the moment something else is already broken. Only a cold process that has _never_ loaded fails closed.
+
+### Failure modes
+
+| Situation                                    | Behaviour                                         |
+| -------------------------------------------- | ------------------------------------------------- |
+| No `FeatureFlag` model registered            | every feature stays off; logged once              |
+| Database unreachable, snapshot loaded before | last good snapshot is kept                        |
+| Database unreachable, never loaded           | every feature off, `reason: "unavailable"`        |
+| Row for a key you never declared             | ignored with a warning                            |
+| Row with a non-boolean `active`              | read as off                                       |
+| A `when` that throws                         | the feature reads off, logged once per evaluation |
+
+## Related
+
+- [Services](./services.md) — the container and configuration this plugs into
+- [Authorization](./authorization.md) — for the things features are not
+- [ORM](./orm.md) — the model and migration workflow
+
+---
+
 ## Facades
 
 A facade is a static proxy to a service resolved from the container. Instead of resolving a binding by hand, you import a class from `gemi/facades` and call its static methods:
@@ -7905,6 +8321,8 @@ for (const Registered of app(QueueManager).registeredJobs) {
 }
 ```
 
+It may hold jobs you never wrote, named `listener:SendWelcomeEmail`. Those are [queued listeners](./events.md#queued-listeners) — a listener with `queued = true` is registered here as a job, so everything on this page applies to it, and the prefix is what tells you there is no job file to go and find.
+
 `discoverJobs()` answers the same question without an application around it — it walks `app/jobs` (or a directory you name) and returns the classes it finds. Every file it walks is imported, as above:
 
 ```typescript
@@ -8567,6 +8985,462 @@ Use a **command** for work a person starts, by hand, once. Use a [**cron job**](
 
 ---
 
+## Events & Listeners
+
+An event is something your application did, announced to nobody in particular. A **listener** is one side effect of it, in its own file. One dispatch fans out to every listener bound to that event, and the code that dispatched it does not hold the list.
+
+```typescript
+// The controller stops knowing what happens next.
+const user = await User.create(input);
+UserRegistered.dispatch(user.id, user.email);
+```
+
+That is the whole of what this buys: adding a fourth side effect to a registration becomes **adding a file**, rather than editing the controller that already has three.
+
+Listeners run **in-process and synchronously** inside the dispatching request by default. One line moves a listener onto the queue instead — see [Queued listeners](#queued-listeners), and read it before you write it: `queued = true` changes what the listener can see, not only when it runs.
+
+## Defining an event
+
+An event is a class extending `Event` (from `gemi/services`) with a **static `name`** and a constructor holding the payload. Events live wherever you like; `app/events/` is the convention.
+
+```typescript
+// app/events/UserRegistered.ts
+import { Event } from "gemi/services";
+
+export class UserRegistered extends Event {
+  static name = "UserRegistered";
+
+  constructor(
+    public userId: number,
+    public email: string,
+  ) {
+    super();
+  }
+}
+```
+
+An event is the payload plus a name. It carries no framework state — no timestamp, no id, no "stop propagation" — because each of those is a field you can add yourself if you want one, and a listener that could cancel the listeners after it would make registration order matter (see [When a listener throws](#when-a-listener-throws)).
+
+> **Note:** The static `name` is **required**, and omitting it does not fall back harmlessly to the class name. The listener registry is keyed by this string. `gemi build` minifies the server entry, and the app code reachable from it — your controller, and every event class it imports in order to dispatch — is bundled and minified with it, which renames the class binding; a class's implicit `.name` *is* that binding, so `UserRegistered` becomes something like `D`. Discovery, meanwhile, imports `app/listeners/*.ts` from source at runtime, and those files import `app/events/*.ts` from source too. Two module graphs, two class objects, two different names — and the dispatch reaches nobody, in production and nowhere else. A declared `static name` is a string literal, which survives minification intact. Discovery warns at boot about any event a listener binds to that leaves it out.
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `static name` | `string` | `"unset"` | The name the registry is keyed by. Required. |
+| `static afterCommit` | `boolean` | `false` | Hold the listeners until the surrounding transaction commits, and drop them if it rolls back. See [Deferring until the transaction commits](#deferring-until-the-transaction-commits). |
+
+### Never `instanceof` an event
+
+The same two class objects are why this is unsafe **in your own code**:
+
+```typescript
+// Don't. `true` in development and in every test, `false` in a production build.
+if (event instanceof UserRegistered) { /* ... */ }
+```
+
+Your listener's `UserRegistered` came from source; the instance it was handed was built from the bundled one. Nothing the framework does can fix that, so the framework's job is to never need it — which is why a listener binds to exactly one event and always knows what it received.
+
+## Writing a listener
+
+A listener is a class extending `Listener` (from `gemi/services`) under `app/listeners/`, with a static `name`, a static `event`, and a `handle` method.
+
+```typescript
+// app/listeners/SendWelcomeEmail.ts
+import { Listener } from "gemi/services";
+import { UserRegistered } from "@/app/events/UserRegistered";
+
+export class SendWelcomeEmail extends Listener {
+  static name = "SendWelcomeEmail";
+  static event = UserRegistered;
+
+  async handle(event: UserRegistered) {
+    await sendWelcome(event.email);
+  }
+}
+```
+
+The directory is read at boot, so writing the file is all it takes — there is no list to keep alongside it.
+
+**The binding lives on the listener, not on the event.** The listener is the thing with an opinion about what it cares about; an event has no business knowing who is watching. An event listing its listeners would also put the property back the way it was: adding a side effect would mean editing an existing file.
+
+**Annotate `handle` with the event you bound to.** Narrowing the base class's `Event` parameter is legal and is how the payload gets typed without a generic to carry around. What the compiler *cannot* check is that the annotation and `static event` agree — a static and an instance member cannot reference each other's types. Copy a listener, change the static, forget the annotation, and TypeScript is satisfied while the listener receives something else. The failure is local and immediate (that one listener reads a field that is not there, in its own stack), which is why it is an accepted seam rather than a reason to complicate the API.
+
+### One event per listener
+
+There is no `static events = [A, B]`, deliberately. A listener bound to two events has to discriminate inside `handle`, and the natural way to write that is `event instanceof UserRegistered` — which is exactly the line that is `true` in every test and `false` in production. Two events wanting the same side effect are two small listeners calling one shared function.
+
+### Configurable fields
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `static name` | `string` | `"unset"` | Unique listener identifier. Required. |
+| `static event` | `Event` subclass | — | The one event this listener handles. Required. |
+| `handle` | method | — | The side effect. May be `async`. Required. |
+| `queued` | `boolean` | `false` | Run on the queue instead of inline. A [context boundary](#queued-listeners), not a performance dial. |
+| `maxAttempts` | `number` | `3` | Attempts before dead-lettering, counting the first. Ignored unless `queued`. |
+| `worker` | `boolean` | `false` | Run `handle` in a Worker thread with its own cloned app. Ignored unless `queued`. |
+
+## Dispatching
+
+Call `dispatch` with exactly the arguments your event's constructor takes — the call is typed against it, the same way `Job.dispatch` is typed against `run`.
+
+```typescript
+import { UserRegistered } from "@/app/events/UserRegistered";
+
+UserRegistered.dispatch(user.id, user.email);
+```
+
+`dispatch` returns `void`. It fires the listeners and moves on; nothing they do can be reported back to the call site.
+
+When the caller genuinely needs the side effects to have happened first — a request that renders what a listener wrote, or a test asserting on the result — use `dispatchAndWait`:
+
+```typescript
+await UserRegistered.dispatchAndWait(user.id, user.email);
+```
+
+It resolves once every **sync** listener has settled — not the [queued](#queued-listeners) ones, whatever the name suggests. Two methods rather than one that is sometimes worth awaiting, because "should I await this?" is a question the call site should not have to guess at.
+
+Sync listeners run **one at a time**, each awaited before the next one starts, so registration order is the order they run in and not merely the order they start. A [queued](#queued-listeners) listener is pushed at the place it occupies in that order and not waited for, so its *dispatch* is ordered with the rest and its execution is the queue's business. The cost is worth knowing: a listener that *hangs* — an un-timed-out request to a host that never answers — holds up every listener after it for as long as it hangs, and under `dispatch` the caller has already moved on, so the row a later listener writes is simply not there yet. A listener that can block indefinitely wants its own timeout, or a [job](./jobs-and-queues.md). A listener that *throws* is not this case — see below.
+
+Neither method ever rejects. See below.
+
+## When a listener throws
+
+Each listener runs inside its own `try`. A throw is logged with the event name, the listener name and the error, and **the next listener still runs**.
+
+That is not politeness, it is the point. Listeners are independent side effects, and their order comes from a filesystem walk rather than from anything you chose — so letting listener 2 cancel 3 through 5 would make that walk load-bearing, which is the exact coupling events exist to remove. For the same reason neither `dispatch` nor `dispatchAndWait` rejects: a rejection would make listener 1's failure the dispatcher's problem while listener 5's silently was not, depending only on where in the walk the throw landed.
+
+A listener that must not fail silently should handle its own errors — retry, log to your own sink, or dispatch a [job](./jobs-and-queues.md) that can be retried and dead-lettered.
+
+All of this is the **sync** path. A [queued](#queued-listeners) listener's throw never reaches the dispatcher at all: it is the queue's, and it is retried up to `maxAttempts` and then dead-lettered.
+
+## When nothing is listening
+
+A dispatch with no listeners is legal and does nothing. In development it warns **once per event name**:
+
+```
+[gemi] UserRegistered was dispatched and nothing is listening for it. ...
+```
+
+That single line is the whole early-warning system here, because four different mistakes produce the same symptom: an event that never declared `static name`, a typo, a listener that was never discovered, and a listener directory that was never walked. It fires once per name so that a dispatch in a loop does not bury the terminal, and never in production, where "no listeners" is an ordinary answer.
+
+## Queued listeners
+
+`queued = true` moves a listener off the request and onto the [queue](./jobs-and-queues.md), with retries, `maxAttempts`, dead-lettering and worker threads coming from there rather than from anything events add:
+
+```typescript
+// app/listeners/SendWelcomeEmail.ts
+export class SendWelcomeEmail extends Listener {
+  static name = "SendWelcomeEmail";
+  static event = UserRegistered;
+
+  queued = true;
+  maxAttempts = 5;
+
+  async handle(event: UserRegistered) {
+    await sendWelcome(event.email);
+  }
+}
+```
+
+That is the whole of the opt-in. Behind it, the listener is registered with the `QueueManager` as a job named `listener:SendWelcomeEmail`, and a dispatch pushes `["UserRegistered", [7, "ada@example.com"]]` onto the queue instead of calling `handle`.
+
+`static name` stops being a label here and becomes the queue's key, so a queued listener that does not declare one is **refused at boot** rather than warned about — see [Two listeners, one name](#two-listeners-one-name) for what the name is doing, and the note under [Defining an event](#defining-an-event) for why an implicit class name is not the same string after a production build.
+
+### What `queued = true` changes — read this part
+
+It is a **context boundary spelled as one line**, not a latency setting.
+
+- A **sync** listener runs inside the dispatching request: it has that request's `app()`, its authenticated user through `currentActor()`, and it joins the ambient transaction — unless the event declares [`static afterCommit`](#deferring-until-the-transaction-commits), which releases the listeners after the commit and so outside it.
+- A **queued** listener is handed to the queue and run from a drain, on the queue's terms. With `worker = true` that is a different thread with a cloned application. Only the event's name and constructor arguments cross; nothing else does.
+
+The part that catches people is that the request's context is not reliably *gone* either. gemi's queue is in-process, so a drain that happens to start from the push is still standing inside the dispatching request, and `app()` there resolves the request's application. **None of that is promised.** A queued listener that reads the current actor, or writes expecting to join the transaction the controller opened, works right up until the day the queue was already busy — and then reads different rows, or commits separately, with no error either way.
+
+So the rule is simple: a listener that needs anything from the request stays sync; a listener that needs only the payload is free to queue.
+
+### What crosses the queue
+
+The **constructor arguments** are what is serialized, not the instance — the same bargain [`Job.dispatch`](./jobs-and-queues.md) makes. The payload is JSON, so pass plain, serializable data: numbers, strings, plain objects. A model instance, a `Date`, a function or anything holding a database handle does not survive it.
+
+On the far side the event is rebuilt with `new UserRegistered(...args)`, which means **an event constructor that does work does it again**, in whatever process runs the listener and without the request around it. Keep event constructors to assigning fields.
+
+If the name on the payload resolves to no registered event, the job throws with that name in the message rather than handing the listener `undefined` — the failure surfaces where it can still be explained, and takes the queue's ordinary retry path.
+
+### Retries, dead-lettering and durability
+
+These are the queue's, exactly as [Jobs & Queues](./jobs-and-queues.md) documents them: when `handle` throws, the listener is re-queued until it has been attempted `maxAttempts` times, and the last failure dead-letters it. A sync listener has none of this — its throw is logged once and the next listener runs.
+
+Every attempt that throws is written to stderr with the listener's name, the event it is bound to and the error, and the dead-letter is written separately, because "it failed again" and "it will not be tried again" are different things to know. By then `dispatchAndWait` has long since resolved and no caller is left to tell, so those lines are the whole of what says a side effect stopped happening.
+
+> **Note:** The queue is **in-memory and in-process**. A queued listener that has not run when the process exits does not run. That is true of every job today, but an event system invites "dispatch it and it will happen", so it is worth saying plainly: a dispatch is not a durability guarantee. Work that must survive a restart wants a row somewhere that a later pass can pick up.
+
+`dispatchAndWait` does **not** wait for a queued listener. When it resolves, every sync listener has settled and the queued ones have been handed to the queue — which may mean not started, or already failed once and re-queued.
+
+### Queued listeners in `registeredJobs`
+
+They are visible, under the prefix:
+
+```typescript
+import { app } from "gemi/foundation";
+import { QueueManager } from "gemi/services";
+
+app(QueueManager).registeredJobs.map((job) => job.name);
+// ["SendInvoiceEmail", "listener:SendWelcomeEmail"]
+```
+
+`registeredJobs` reports what the queue will run, and a queued listener genuinely is something it will run — hiding them would make a queue introspection tool lie. The `listener:` prefix is what keeps you from going to look for a job file you never wrote.
+
+## Deferring until the transaction commits
+
+A dispatch inside a transaction happens immediately. The transaction may not:
+
+```typescript
+await DB.transaction(async () => {
+  const user = await User.create(input);
+  UserRegistered.dispatch(user.id, user.email);   // welcome email sent
+  await Billing.provision(user);                  // throws
+});                                               // rolled back
+```
+
+The user does not exist and has been welcomed. Nothing errored — the email succeeded and the transaction failed, in two subsystems that never meet — so nothing anywhere reports it.
+
+`static afterCommit = true` on the **event** moves its listeners to the commit:
+
+```typescript
+// app/events/UserRegistered.ts
+export class UserRegistered extends Event {
+  static name = "UserRegistered";
+  static afterCommit = true;
+
+  constructor(
+    public userId: number,
+    public email: string,
+  ) {
+    super();
+  }
+}
+```
+
+| `afterCommit` | Inside a transaction | What happens |
+| --- | --- | --- |
+| `false` (default) | either | The listeners run now. |
+| `true` | no | The listeners run now — there is nothing to wait for. |
+| `true` | yes | The listeners run when that transaction commits, and not at all if it rolls back. |
+
+It is a property of the **event**, not of the listener: whether a side effect is allowed to happen before the write is durable is a fact about what happened, and every listener bound to it agrees. Both kinds are deferred together — a sync listener runs after the commit, and a queued one is *pushed* after the commit. Pushing early would be running early, because the queue drains in-process and often starts from the push itself.
+
+The listeners run **outside** the transaction that deferred them. A listener that opens its own transaction gets a real one rather than a savepoint on a handle that has already closed — which matters more than it looks: Bun's transaction handle stays callable after the commit and simply runs on the pool, so the wrong answer here would be silent.
+
+### The two things to know before using it
+
+**`dispatchAndWait` on a deferred event resolves immediately, having run nothing.** The listeners are queued on a transaction the caller has not finished, so the `await` buys nothing and code on the next line reading what a listener wrote finds it missing. Development warns once per event name; there is no other symptom. Await the transaction instead.
+
+**The transaction does not resolve until the deferred listeners have.** `await DB.transaction(...)` covers the commit *and* the listeners it released. That is deliberate — the alternative is work floating after the transaction returns, which a short-lived process (a command, a seed) exits out from under, and a failure nobody is left to report.
+
+A listener that throws after the commit is logged and the next one still runs, exactly as on the inline path. It does **not** fail the transaction: the database kept the rows, and reporting a rejection would have the caller roll back or retry work that is already durable.
+
+### Savepoints
+
+Nesting `DB.transaction` takes a savepoint, and deferred dispatches follow the transaction rather than the block:
+
+- A dispatch inside a savepoint that commits runs when the **outer** transaction commits — not when the savepoint closes.
+- A dispatch inside a savepoint that **rolls back** does not run, even if the outer transaction commits.
+- An outer rollback discards everything, savepoint dispatches included.
+
+### Why it is opt-in
+
+Defaulting it on would mean a `dispatch` inside a transaction silently has not happened yet — a fire-and-forget call turned into a deferred one by ambient state the call site cannot see. That is a surprise of the same size as the one being fixed, and the harder one to debug, because nothing went wrong. Turn it on for the events where a rollback must take the side effect with it: a welcome email, a webhook, an invoice.
+
+## Registering listeners — `app/listeners/`
+
+Every class under `app/listeners` that extends `Listener` is registered when the kernel boots.
+
+Event classes are **not** discovered, and there is no `eventsDir`. Each event is already in the module graph — imported by the listener that binds to it, and by the code that dispatches it — so a walk over them would only be a boot cost.
+
+### Two listeners, one name
+
+A listener's `static name` identifies it, and two classes cannot claim the same one. The first is registered, the second is refused with a line on stderr. A directory walk is what makes that ordinary: `auth/NotifyAdmins.ts` beside `billing/NotifyAdmins.ts` is a natural thing to write, and nothing forces the import alias a hand-written list would have demanded. Rename one.
+
+Both still appear in `registeredListeners`, which reports what the manager was handed rather than what it accepted, so a test walking it sees the clash.
+
+### A listener that binds to nothing stops the boot
+
+A `Listener` subclass with no `static event` cannot be registered under any name, so it would be a file you wrote that never runs. Discovery refuses it by name rather than warning, because there is no reading of it under which you meant it.
+
+The usual cause is a **shared abstract base living in `app/listeners`**. The walk excludes gemi's own `Listener` and nothing else, so a base beside its subclasses is discovered like one of them — and if it does declare a `static event`, it is *registered* like one of them too, constructed with its `handle` called on every dispatch of that event. Keep shared bases outside the listeners directory.
+
+### What the walk costs
+
+A class does not exist until its module has run, so there is no way to read a directory of classes without importing it. **Every `.ts`/`.tsx` file under `app/listeners` is imported at boot** — in development and in production, on every start — and a file that *does something* when it is imported does that thing at boot.
+
+So `app/listeners` wants to hold listener declarations rather than merely contain some. A file that cannot be imported at all fails the boot naming itself, rather than being quietly left out of the registry.
+
+The walk skips what certainly is not a declaration: `.d.ts` files, tests, type tests and benchmarks by their filename suffix, dot-directories, `node_modules`, and anything under a directory carrying its own `package.json`.
+
+Registration order is the walk's order — sorted per directory, and by name within a file. It is reproducible, and it is not meaningful: nothing about a directory layout was chosen to express "run this listener first", so no listener may depend on running before another.
+
+## Configuring — `app/config/events.ts`
+
+The `events` slice is where you can take over registration yourself. Declaring `listeners` turns discovery off and uses your list verbatim — reach for it when the listeners live somewhere the walk cannot reach, when you want a deliberate subset, or when the deploy ships only the build output and there is no `app/listeners` on disk to read.
+
+```typescript
+// app/config/events.ts
+import { defineEventConfig } from "gemi/services";
+import { SendWelcomeEmail } from "@/app/listeners/SendWelcomeEmail";
+
+export default defineEventConfig({
+  listeners: [SendWelcomeEmail], // omit to discover them from app/listeners
+});
+```
+
+`defineEventConfig` is an identity helper — it exists only to type the object.
+
+**A present `listeners` wins, and `listeners: []` is present.** An empty array means an application with no listeners and is honoured as such; it does not mean "go and find some". Leaving the key out — or leaving the slice out entirely — is what asks for discovery.
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `listeners` | `Listener` subclasses | *discovered* | Every listener to register. Omit to discover them from `listenersDir`. |
+| `listenersDir` | `string` | `"app/listeners"` | Where to discover them. Relative to the project root, or absolute. |
+
+The slice is wired into the kernel by name:
+
+```typescript
+// app/kernel/Kernel.ts
+import { Kernel } from "gemi/kernel";
+import events from "../config/events";
+
+export default class extends Kernel {
+  config = { events /* , ...other slices */ };
+}
+```
+
+Behind the scenes the framework's `EventServiceProvider` reads that slice in its `register()` and binds an `EventManager` singleton into the container under the token `"events"`, then fills in the discovered listeners in its `boot()`.
+
+## Resolving the manager
+
+`EventManager` is a normal container binding:
+
+```typescript
+import { app } from "gemi/foundation";
+import { EventManager } from "gemi/services";
+
+app(EventManager); // typed EventManager, no cast
+```
+
+`registeredListeners` is the set it ended up with, discovered or declared — that is what a test asserts against:
+
+```typescript
+import { app } from "gemi/foundation";
+import { EventManager } from "gemi/services";
+
+expect(app(EventManager).registeredListeners).toHaveLength(3);
+```
+
+`discoverListeners()` answers the same question without an application around it. Every file it walks is imported, as above:
+
+```typescript
+import { discoverListeners } from "gemi/services";
+
+const listeners = await discoverListeners(); // every Listener under app/listeners
+```
+
+## Testing with `Event.fake()`
+
+`Event.fake()` swaps the container's `EventManager` for one that records dispatches and runs nothing:
+
+```typescript
+import { Event } from "gemi/services";
+import { UserRegistered } from "@/app/events/UserRegistered";
+
+test("registering announces the new user", async () => {
+  const events = Event.fake();
+
+  await post("/register", { email: "ada@example.com" });
+
+  events.assertDispatched(UserRegistered);
+  events.assertDispatched(UserRegistered, (e) => e.email === "ada@example.com");
+});
+```
+
+The second assertion is the point of the whole subsystem, in a test. A controller test that asserts *the event fired* is testing the controller. One that asserts *a welcome email was sent* is testing the controller, the listener and the mailer at once, and it breaks the day a fourth listener is added to an event it was never about.
+
+While a fake is installed, no listener is constructed, no `handle` runs, nothing is pushed to the queue, and an [`afterCommit`](#deferring-until-the-transaction-commits) event is recorded at the dispatch rather than held for a commit — so a controller test does not have to commit a transaction to see what the controller dispatched.
+
+### Restore it
+
+```typescript
+let events: FakeEventManager;
+
+beforeEach(() => { events = Event.fake(); });
+afterEach(() => { events.restore(); });
+```
+
+**There is no automatic teardown.** A fake that outlives its test is a later test whose listeners silently never run — and nothing catches that, because a fake legitimately has no listeners and so never trips the "nothing is listening" warning.
+
+Calling `Event.fake()` twice returns the **same** recorder, so a fake set up in a helper and one in the body of a test do not disagree; `restore()` twice is harmless. The type is importable for a signature:
+
+```typescript
+import type { FakeEventManager } from "gemi/testing";
+```
+
+### The assertions
+
+| Assertion | Passes when |
+| --- | --- |
+| `assertDispatched(Event, predicate?)` | The event was dispatched at least once — matching `predicate`, if given. |
+| `assertNotDispatched(Event, predicate?)` | It was never dispatched; with a predicate, no dispatch of it matched. |
+| `assertDispatchedTimes(Event, times, predicate?)` | It was dispatched exactly `times` times. |
+| `assertNothingDispatched()` | Nothing at all was dispatched. |
+
+The predicate takes the event instance and is typed off the class you passed, so `(e) => e.email` is checked without a cast. Matching is by the event's declared `static name`, never by class identity — the same rule the registry follows, and for the same reason.
+
+A failure names **what was dispatched**:
+
+```
+Expected OrderPaid to have been dispatched. Dispatched: UserRegistered(2, "b@c.d").
+```
+
+The common failure is not "nothing fired" but "that fired with a different payload", and printing the recorded dispatches usually ends the investigation on the spot.
+
+### What there is no assertion for
+
+**That a listener ran.** A test asserting that is a test *of the listener*, and it can be written with no framework around it at all:
+
+```typescript
+await new SendWelcomeEmail().handle(new UserRegistered(7, "ada@example.com"));
+```
+
+That is the separation the fake exists to make possible, so re-coupling the two through an assertion would give it back.
+
+## When to reach for a job instead
+
+A **sync** listener runs inside the dispatching request, in the same process and the same context. That makes it right for fast in-request side effects — writing an audit row, warming a cache, updating a counter — and wrong for slow ones, because the request waits for `dispatchAndWait` and the process does the work either way.
+
+A **queued** listener is the answer to that, and it is a listener rather than a job because the dispatcher still does not hold the list: adding a fifth queued side effect is still adding a file.
+
+Reach for a [`Job`](./jobs-and-queues.md) directly when the work is not a reaction to something that happened but a thing the caller wants done — one named unit of work, dispatched by the code that wants it, often with its own arguments that are nobody's event payload. A listener that only dispatches a job is a listener you did not need.
+
+Five mechanisms, one row each:
+
+| Mechanism | Fan-out | Where the handler runs |
+| --- | --- | --- |
+| a direct call in a controller | 1 → N | inline, and the caller names each one |
+| `Event.dispatch()`, sync listener | 1 → N | inline, and the caller names none of them |
+| `Event.dispatch()`, `queued = true` | 1 → N | the queue: retried, dead-lettered |
+| `Job.dispatch()` | 1 → 1 | the queue: retried, dead-lettered |
+| `Broadcast.publish()` | 1 → N | *clients*, over websockets |
+
+gemi has no ORM lifecycle events (`User.created` and friends) — a model write does not emit anything. Dispatch explicitly from the code that did the write.
+
+## Related
+
+- [Jobs & Queues](./jobs-and-queues.md) — background work with retries, which a listener often dispatches.
+- [ORM](./orm.md) — `DB.transaction`, which `static afterCommit` hooks.
+- [Broadcasting](./broadcasting.md) — fan-out to browsers rather than to server-side handlers.
+- [Controllers](./controllers.md) — dispatching from request handlers.
+- [Project Structure](./project-structure.md) — the kernel, `app/config/*.ts`, and service providers.
+
+---
+
 ## Broadcasting
 
 gemi ships real-time messaging over websockets. You define **channels** on the server (route patterns with authorization logic), publish messages to them with the [`Broadcast`](./facades.md) facade, and subscribe to them from React components with `useSubscription`. A channel's topic is a route pattern — the same `:param` syntax used elsewhere in gemi — so a single channel definition can serve many concrete topics (one per room, per user, per order, …).
@@ -8989,274 +9863,176 @@ See [Email](./email.md) for building and sending emails.
 - [Email](./email.md) — localized emails.
 
 
-
 ---
-# Features
 
-A feature in gemi is **declared in code and switched on from the database**. You write the key, who it applies to, and how far it has rolled out in `app/features`. The database holds one thing: whether it is switched on at all.
+## Testing Views
 
-That split is the whole design. **Shipping a feature is a deploy; turning it on is not.** You can merge a feature dark, watch it sit inert in production, and switch it on — or off, during an incident — with an `UPDATE`.
+A view is a plain React component, so any renderer can mount one — but what it renders comes from inputs the framework normally supplies: route params, the current locale and its dictionaries, data `Query.prefetch` put on the page, the signed-in user. Without those a component test can only assert the empty state.
 
-Features are evaluated **on the server**, once per request, and the answers ride the page payload the server was already sending. The browser never fetches them, so a feature cannot cause a flash of the wrong branch, and your targeting never leaves the server.
-
-```typescript
-// app/features/index.ts
-import { defineFeature } from "gemi/services";
-
-export default {
-  "new-checkout": defineFeature({
-    describe: "Rebuilt checkout flow",
-  }),
-
-  "pricing-redesign": defineFeature({
-    rollout: 50,
-    when: (ctx) => {
-      if (ctx.user?.email.endsWith("@acme.com")) return true; // staff, always
-      if (ctx.user?.plan === "free") return false; // never
-      // return nothing → the rollout decides
-    },
-  }),
-};
-```
+`gemi/testing` exports one component, `<Page>`, that supplies them.
 
 ```tsx
-import { useFeature } from "gemi/client";
+import { render, screen } from "@testing-library/react";
+import { Page } from "gemi/testing";
 
-export default function Pricing() {
-  return useFeature("pricing-redesign") ? <PricingNext /> : <Pricing />;
-}
-```
+import OrgChat from "@/app/views/OrgChat";
+import dictionaries from "@/app/i18n";
 
-```typescript
-import { Features } from "gemi/facades";
+test("renders the organisation's messages", () => {
+  render(
+    <Page
+      pathname="/app/:orgId/chat"
+      params={{ orgId: "abc" }}
+      queryData={{ "/organizations/:orgId/messages": [{ id: 1, body: "hi" }] }}
+      dictionaries={[dictionaries.Chat]}
+      user={{ id: 1, name: "Ada" }}
+    >
+      <OrgChat />
+    </Page>,
+  );
 
-if (await Features.enabled("new-checkout")) {
-  // ...
-}
-```
-
-Keys are typed from your declarations, so `useFeature("pricing-redesgin")` is a compile error rather than a feature that silently reads as off.
-
-## Every feature is a boolean
-
-`useFeature` returns `true` or `false`. There is no multivariate value, no string, no number.
-
-This is a deliberate floor rather than an oversight. A feature is a thing you turn on; a config value with three settings wants a different lifecycle — versioned, reviewed, deployed — than something you flip at 2am. If you need a three-arm experiment, that is an experimentation system, and it should not be built out of two booleans that can both be true.
-
-## Keys are flat
-
-There is no nesting and no prefix joining. `"billing/new-invoices"` is one key, written exactly as you will look it up.
-
-The reason is grep. The most common thing anyone ever does with a feature is ask "is this still referenced, can I delete it?", and that question should be answerable with a text search. A nested registry breaks it: the key you search for exists nowhere in the source, only as a concatenation at runtime.
-
-## How a feature resolves
-
-In order, stopping at the first that applies:
-
-1. **The store has never loaded** → off. An unreachable database fails closed.
-2. **No row, or `active = false`** → off. `when` and `rollout` are not consulted.
-3. **`when(ctx)` returned `true` or `false`** → that.
-4. **No `rollout`** → on, crawlers included. There is nothing to sample, so every visit already resolves the same way.
-5. **A crawler**, on a feature that _has_ a rollout → off.
-6. **Inside the rollout bucket** → on, otherwise off.
-
-Two of these are worth dwelling on.
-
-**`active` short-circuits everything.** It is the kill switch, and a kill switch that application code could defeat is not one. Nothing in `when` or `rollout` can turn a switched-off feature back on.
-
-**`when` outranks `rollout`.** A rollout is a statement about strangers; `when` is a statement about someone you can name. Staff overrides and plan exclusions have to beat the dice, or they are not overrides. Returning nothing from `when` is how you say "no opinion about this one" and let the dice decide.
-
-## Rollouts are computed, not stored
-
-A subject's position in a rollout is `sha1(salt:subject)`, reduced to a bucket in `[0, 10000)`. It is on if the bucket is below the threshold.
-
-Nothing is written anywhere. That buys four things:
-
-- **Stability.** The same subject gets the same answer on every device, in every process, forever — with no row, no cookie holding assignments, and nothing to migrate.
-- **Monotonicity.** Going 10% → 25% only ever _adds_ people. Nobody who had the feature loses it, because their bucket number never moves; only the threshold does.
-- **Independence.** The salt is the feature's key, so two 20% rollouts pick two different 20% slices. Without that, a subject unlucky once would be unlucky in everything.
-- **No growth.** One row per feature, not one row per feature per user.
-
-### The subject
-
-The signed-in user (`publicId`, falling back to `id`), or the `session_id` cookie for a logged-out visitor.
-
-Preferring the user is what makes an assignment follow someone between their laptop and their phone. The cost is that **signing up can move a visitor across a rollout boundary**, because the subject changes from the cookie to the account. There is no id that is both stable per person and known before they have an account, so this is a trade rather than a bug — just don't run an experiment that spans registration.
-
-Outside a request — a job, a cron tick — there is no subject and every context shares one bucket. Use `Features.for({ subjectId })` when a background task needs to evaluate as somebody.
-
-### Anonymous visitors
-
-The `session_id` cookie is minted at the top of every view request, before anything is evaluated, so the id used to bucket is the id the browser is about to be given. It is `httpOnly`, `SameSite=Lax`, and lasts a year.
-
-`Lax` rather than `Strict` is load-bearing. `Strict` withholds the cookie on cross-site _top-level navigation_, so a visitor arriving from a search result or a shared link would arrive without it, be minted a new id, and overwrite the old one — re-bucketing on every external entry, which is how most anonymous traffic arrives.
-
-Two operational consequences:
-
-- **A shared cache must never store a response carrying `Set-Cookie: session_id`.** One visitor's id would be handed to everybody, collapsing the whole anonymous population into a single bucket. If you put a CDN in front of view routes, that response needs `Cache-Control: private`.
-- **Crawlers are pinned off** for any feature with a rollout. Bots discard cookies, so each crawl would otherwise land in a fresh bucket and index a different branch than the last one. A feature with no rollout is served to bots normally — there is nothing to be inconsistent about.
-
-## Changing a rollout needs a deploy
-
-`rollout` lives in code, so ramping 10% → 50% is a code change and a release. That is the deliberate cost of keeping all the reasoning in reviewed source.
-
-If it becomes painful, the fix is one nullable column on the row overriding the declared value, and nothing else in this design moves.
-
-## Setup
-
-### 1. Add the model
-
-```prisma
-model FeatureFlag {
-  id       Int    @id @default(autoincrement())
-  publicId String @unique @default(cuid())
-
-  key    String  @unique
-  active Boolean @default(false)
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-}
-```
-
-Export it from `app/models` so the ORM registry can resolve it by name:
-
-```typescript
-// app/models/FeatureFlag.ts
-import { FeatureFlagModel } from "./generated";
-export class FeatureFlag extends FeatureFlagModel {}
-```
-
-No tenant policy on this model. These rows are global application configuration, not customer data, and the store loads the whole table from a background refresh with no user attached — a `scope` would make that load return nothing.
-
-### 2. Declare your features
-
-`app/features/index.ts`, default-exporting a plain object. Do not annotate it: a type annotation widens the keys and every one of them silently becomes an untyped `string`.
-
-### 3. Point the config at it
-
-```typescript
-// app/config/features.ts
-import { defineFeaturesConfig } from "gemi/services";
-import AppFeatures from "@/app/features";
-
-export default defineFeaturesConfig({
-  features: AppFeatures,
-  ttl: 30,
+  expect(screen.getByText("hi")).toBeDefined();
 });
 ```
 
-`ttl` is the propagation delay in seconds — how long a loaded snapshot is reused before the next refresh. It is how long switching something off takes to reach every instance, since there is no cross-instance invalidation. Lower it if thirty seconds is too long during an incident; the cost is one query per instance per window.
+`<Page>` is a plain component and imports no test runner, so it works with `@testing-library/react`, `react-test-renderer`, or `renderToString` (with [one caveat](#server-rendering)).
 
-## Reading a feature
+## Props
 
-### In a component
+| Prop | Default | What it seeds |
+| --- | --- | --- |
+| `pathname` | `"/"` | The URL the component is mounted at — `useLocation()`, `useRoute()`, and a `Link`'s `data-active`. A template (`/app/:orgId/chat`) is resolved against `params`. |
+| `params` | `{}` | `useParams()`, and the params `useQuery` / `Form` / `Link` apply when a call site omits its own. |
+| `searchParams` | `""` | `useSearchParams()`. Accepts `"?tab=recent"`, `"tab=recent"` or `{ tab: "recent" }`. |
+| `hash` | `""` | `useLocation().hash`. |
+| `locale` | `"en-US"` | `useLocale()`, and which locale `useTranslator` reads translations from. |
+| `defaultLocale` | same as `locale` | The locale that gets no URL segment. Set it to render a page being viewed in a non-default locale — links then carry the `/tr-TR` prefix. |
+| `supportedLocales` | the two above | The app's locale list, verbatim — a switcher maps over it, so the order is yours. `defaultLocale` and `locale` are appended if absent. |
+| `dictionaries` | `[]` | `useTranslator("Name")`. Pass the app's real dictionaries, or literals of the same `{ name, dictionary }` shape. |
+| `translations` | `{}` | The same thing already resolved for `locale` — `{ Chat: { greeting: "Hello" } }`. Merged over `dictionaries`. |
+| `queryData` | `{}` | The query cache — see below. |
+| `queryConfig` | — | App-wide `useQuery` defaults, as `createRoot` threads them. |
+| `user` | `null` | `useUser()`. |
+| `breadcrumbs` | `[]` | `useBreadcrumbs()`, in order. |
+| `features` | `{}` | `useFeature("key")`. Seeds the outcome, not the declaration: anything left out reads as off, exactly as it does for a key the server never sent. Cover `when` targeting and rollouts with a server test. |
+| `theme` | stored, else `"light"` | `useTheme()`. A test has no browser session to have chosen one in; `setTheme` still works from whatever this seeds. |
+| `fallback` | `null` | The `Suspense` fallback wrapped around the children, standing in for the view's own `Loading` export. |
+| `errorFallback` | — | Rendered in place of the children when one throws, standing in for the view's `Error` export. Its `resetErrorBoundary` clears query errors, so the retry path works as it does in the app. |
+| `onNavigate` | — | Called with `(href, "push" \| "replace")` when something navigates. |
+
+## Seeding queries
+
+`queryData` is keyed by the path passed to `useQuery` — **without** the `/api` prefix, which the client adds only when it fetches:
 
 ```tsx
-const on = useFeature("new-checkout");
-const all = useFeatures(); // the whole map
+<Page queryData={{ "/todos": [{ id: 1 }, { id: 2 }] }}>
 ```
 
-This is a context read — no request, no suspense, no loading state. The corollary is that switching a feature on reaches an already-open page on its next navigation, not instantly.
+A key may carry a query string, which seeds one search variant, and `:params`, which resolve against the page's:
 
-### On the server
-
-```typescript
-await Features.enabled("new-checkout");
-await Features.explain("new-checkout"); // { value, reason } — server only
-await Features.all(); // the client-visible map
-await Features.for({ user }).enabled("digest-v2");
-await Features.refresh(); // reload this process now
+```tsx
+<Page
+  pathname="/orgs/:orgId/lists"
+  params={{ orgId: "abc" }}
+  queryData={{
+    // Read by useQuery("/orgs/:orgId/lists") — the route's params apply.
+    "/orgs/:orgId/lists": [{ id: 1 }],
+    // Read by useQuery("/lists", { search: { page: "2" } }).
+    "/lists?page=2": [{ id: 9 }],
+  }}
+>
 ```
 
-Everything is async. After the boot-time warm-up each call settles in a microtask with no I/O, but the promise is kept because the first call in a cold process does hit the database — and a sync variant would have to answer that window with "off", which is a feature silently vanishing while a deploy rolls.
+The cache is keyed by the **resolved** path, so a `:param` the page does not carry fails the render with an error naming the key. That is deliberate: a query's params often come from the call site rather than the route —
 
-`explain` is **server-only**. `reason` distinguishes "targeted by name" from "landed in the rollout", which is a fact about the viewer; never serialize it into a response.
-
-## Hiding a feature's existence
-
-Feature _keys_ are public — every client-visible key is embedded in the HTML of every page. A key named after an unannounced product announces it.
-
-```typescript
-"project-nightingale": defineFeature({ serverOnly: true }),
+```tsx
+const { data } = useQuery("/orgs/:orgId/lists", { params: { orgId } }); // orgId is state
 ```
 
-Still evaluated on the server and never in the payload. `useFeature("project-nightingale")` is a compile error — the key is excluded from the client's key type, because the value there could only ever be `false`. Read it with `Features.enabled` instead.
+— and the seed for that is the resolved path, `"/orgs/abc/lists"`, not the template.
 
-## Gating a route
+A seeded query renders its data on the first pass and issues no request. A query with no seed behaves exactly as it does in the browser: under the default `suspense: true` it suspends into `fallback` and fetches, so intercepting `fetch` (MSW, `vi.stubGlobal`) covers the loading-to-loaded path.
 
-```typescript
-"/beta": this.view("Beta").feature("beta-access"),
+> **Seeded at mount only.** A component that calls `mutate()` or `refetch()` owns the cache from then on, and re-rendering `<Page>` with a different `queryData` deliberately does not overwrite it. To assert a second state, render a second `<Page>`.
+
+`useUser()` resolves from `user` — `null` by default, an anonymous visitor — and never reaches `/auth/me`, so a layout that greets the current user does not have to be mocked out of a test that is about something else.
+
+## Translations
+
+Pass the dictionaries the components under test translate against, exactly as `app/config/translation.ts` prefetches them per route:
+
+```tsx
+import dictionaries from "@/app/i18n";
+
+render(
+  <Page dictionaries={[dictionaries.About]} locale="tr-TR" defaultLocale="en-US">
+    <About />
+  </Page>,
+);
 ```
 
-A gated route renders a real 404 when the feature is off, rather than a 403 — a 403 confirms the route exists, which for an unannounced feature is the thing you were hiding.
+`useTranslator("About")` then resolves keys against `tr-TR`, interpolation and `t.jsx` included. Without a matching dictionary the hook returns the key itself and logs `Unresolved translation` — which is the signal that the dictionary name in the test does not match the one the component asks for.
 
-The path does stay in the route manifest the browser downloads, so this gates the response, not the route's existence. Pair it with `serverOnly: true` when the name is the secret.
+### Dictionaries are server-side; `translations` is not
 
-### A rollout is not access control
+A `Dictionary` is a server artifact. The browser never sees one: the server resolves the route's dictionaries for the active locale and serializes them onto the page, and `useTranslator` reads *that*. `<Page>` mirrors it — it takes the `name` and `dictionary` data off whatever you pass and builds the same payload. It never calls `Dictionary`'s server-only methods (`render` and `reference` throw once `window` is defined, as they do in a real browser), and `gemi/testing` does not import `gemi/i18n` at all.
 
-Gate on `active`, or on a `when` that reads something the visitor cannot choose — the signed-in user, most obviously. Not on a `rollout`.
+What is server-side is the *import*. `app/i18n/index.ts` imports `gemi/i18n`, so a test file that reads the app's dictionaries pulls the container and `node:async_hooks` into its module graph. Nothing there executes, so it is fine under any runner with Node builtins available — vitest, `bun test` — and not under one that renders in a real browser (vitest browser mode, Playwright component tests).
 
-For an anonymous visitor the bucketing subject is their own `session_id` cookie, and bucketing is a published pure function of it: they can compute a value that lands inside any percentage and send it. Signing the cookie would not close this. They could equally well throw it away and ask for a fresh one until a signed id happens to land inside — a couple of dozen requests for a 5% rollout. Nothing that hands out identities on demand can restrict anything to a fraction of them.
+For those, seed the client's own shape directly. It imports nothing:
 
-A rollout answers "how many people should see this yet". Use `when` for "who is allowed to".
-
-## Extra context for targeting
-
-```typescript
-// app/config/features.ts
-export default defineFeaturesConfig({
-  features: AppFeatures,
-  context: (req) => ({ country: req?.headers.get("cf-ipcountry") }),
-});
+```tsx
+<Page translations={{ About: { title: "About {{version:[hi]}}" } }}>
+  <About />
+</Page>
 ```
 
-Readable in any `when` as `ctx.attributes.country`. This runs on every request inside the render path, so keep it cheap and free of I/O. If it throws, evaluation degrades to no attributes rather than failing the page.
+`translations` is `{ dictionary name: { key: string } }` for the current locale — exactly what the server puts on the page. It is merged over `dictionaries`, so the two compose: seed from the app's real dictionary and override the one key a test is about.
 
-`when` itself is synchronous for the same reason — an `async` signature is an invitation to put a query on the render path, where every page load would pay for every declared feature.
+## Navigation
 
-## Recording exposures
+`<Page>` renders one route. It has no view tree and no route manifest behind it, so a navigation is *reported* rather than performed:
 
-```typescript
-onEvaluate: (key, evaluation) => analytics.track("feature", { key, on: evaluation.value }),
+```tsx
+const onNavigate = vi.fn();
+
+render(
+  <Page pathname="/app/abc/chat" onNavigate={onNavigate}>
+    <Nav />
+  </Page>,
+);
+
+screen.getByText("Settings").click();
+expect(onNavigate).toHaveBeenCalledWith("/app/abc/settings", "push");
 ```
 
-Fires once per key per request. Errors are caught and logged — an analytics hook must not break the render it observes.
+`useLocation()` keeps reporting the pathname the page was given. To assert what the destination renders, render it in its own `<Page>`.
 
-## Testing
+A navigation issued from a mount effect — `<Redirect>`, or an auth guard that pushes on render — is reported too.
 
-```typescript
-import { StaticFeatureFlagSource } from "gemi/services";
+## Server rendering
 
-defineFeaturesConfig({
-  features: AppFeatures,
-  source: new StaticFeatureFlagSource({ "new-checkout": true }),
-});
+`renderToString(<Page …>…</Page>)` works, and a **seeded** query renders its data there exactly as it does in the browser. An **unseeded** one does not suspend: it renders the server's no-data branch and logs the framework's "rendered on the server without data … add `Query.prefetch(…)`" warning.
+
+That is the real SSR contract rather than a gap in the harness. Suspending on the server is the streaming renderer's job: `createRoot` threads the request's query store through `ServerQueryContext`, and that store is what runs the route handler and produces the data to wait on. A harness has no request and no handler, so there is nothing to suspend on — the same thing happens to a real route whose view handler declares no `Query.prefetch`.
+
+So: assert seeded output under `renderToString`, and use a DOM renderer for the suspend-then-resolve path.
+
+## Runner setup
+
+The components need a DOM. Under vitest that is a per-file pragma (or `environment: "jsdom"` in `vitest.config.ts`):
+
+```tsx
+/** @vitest-environment jsdom */
 ```
 
-This replaces the _switch_, not the answer: rows still go through the same store and the same evaluator production runs, so a test that turns a feature on still exercises its `when` and its `rollout`. Pinning the final value instead would assert about a code path that never runs.
+Under `bun test`, preload `happy-dom` — no gemi-specific configuration is required either way. React 19 lifecycles, `@testing-library/user-event` and MSW's fetch interception all work against `gemi/client` components as they do against any other React tree.
 
-## Operating
-
-**An empty table is a working state.** Every feature is off until somebody turns it on, which is exactly what you want for a feature you just deployed.
-
-**A row for a key nobody declares is ignored with a warning.** That is usually a feature deleted from the code and left in the table — harmless, and the warning is how you find the litter.
-
-**A failed refresh keeps the last good snapshot.** An outage must not read as "every feature switched itself off"; that would be a config change nobody made, applied to production, at the moment something else is already broken. Only a cold process that has _never_ loaded fails closed.
-
-### Failure modes
-
-| Situation                                    | Behaviour                                         |
-| -------------------------------------------- | ------------------------------------------------- |
-| No `FeatureFlag` model registered            | every feature stays off; logged once              |
-| Database unreachable, snapshot loaded before | last good snapshot is kept                        |
-| Database unreachable, never loaded           | every feature off, `reason: "unavailable"`        |
-| Row for a key you never declared             | ignored with a warning                            |
-| Row with a non-boolean `active`              | read as off                                       |
-| A `when` that throws                         | the feature reads off, logged once per evaluation |
+> **Gotcha:** the environment is browser-*shaped*, but it is still Node or Bun — a test file can import a server module and it will load. What it must not do is *run* one: a controller reaches the container, a model reaches the database, and neither has been booted. Import views, components and dictionaries (see [above](#dictionaries-are-server-side-translations-is-not) for what a dictionary import costs); leave the rest to server tests.
 
 ## Related
 
-- [Services](./services.md) — the container and configuration this plugs into
-- [Authorization](./authorization.md) — for the things features are not
-- [ORM](./orm.md) — the model and migration workflow
+- [Views & Layouts](./views-and-layouts.md) — what a view receives from its route.
+- [Data Fetching](./data-fetching.md) — `useQuery`, prefetching, and the variant keys `queryData` mirrors.
+- [Internationalization](./i18n.md) — dictionaries and `useTranslator`.
+- [Navigation](./navigation.md) — `Link`, `useNavigate`, `useParams`.

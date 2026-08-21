@@ -1,0 +1,5 @@
+{
+  "name": "gemi-typescript-plugin",
+  "private": true,
+  "main": "../../dist/ide/typescript-plugin/index.js"
+}

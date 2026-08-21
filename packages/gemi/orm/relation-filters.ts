@@ -83,3 +83,30 @@ export function isOperatorForm(
  * to skip it.
  */
 export const COUNT_KEY = "_count";
+
+/**
+ * The relations `_count: true` expands to: every to-many, sorted.
+ *
+ * Prisma's shorthand names no relation, so both sides of the arrangement above
+ * have to derive the same list from the schema — the compiler to project one
+ * subquery per relation, the policy walk to attach each counted model's scope.
+ * A list they derived separately is the failure `COUNT_KEY` exists to prevent,
+ * one level up: the compiler would count a relation the walk never scoped, and
+ * what leaks is a *number* over rows the caller cannot read.
+ *
+ * To-many only, because that is what the shorthand means. The explicit form
+ * refuses a to-one by name — counting one answers 0 or 1, which its nullability
+ * already says — but the shorthand named nothing, so there is no argument to
+ * refuse and skipping it is the whole of Prisma's semantics.
+ *
+ * Sorted for the reason every walk in the compiler is: the plan cache
+ * canonicalises key order, so the expansion has to be stable or one shorthand
+ * mints an entry per key ordering the schema happens to have.
+ */
+export function countableRelations(schema: {
+  relations: Record<string, { kind: "one" | "many" }>;
+}): string[] {
+  return Object.keys(schema.relations)
+    .filter((name) => schema.relations[name]?.kind === "many")
+    .sort();
+}

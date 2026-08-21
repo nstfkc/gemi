@@ -285,6 +285,27 @@ export class PostgresDialect implements SqlDialect {
   }
 
   /**
+   * `("col" #> $1)::jsonb` — the JSON value at the path, comparable.
+   *
+   * The cast is load-bearing on a `@db.Json` column and a no-op on the `jsonb`
+   * one Prisma maps `Json` to by default. Measured against Postgres 16, on a
+   * `json` column:
+   *
+   *   (payload #> '{operation}')            = 'null'::jsonb   operator does not exist: json = jsonb
+   *   ((payload #> '{operation}')::jsonb)   = 'null'::jsonb   the row whose key holds a JSON null
+   *
+   * Prisma emits the same cast — `("Doc"."payload"#>ARRAY[$1]::text[])::jsonb`
+   * — which is where this one comes from rather than from the manual.
+   */
+  jsonValueAt(column: string, path: Binder): Fragment {
+    return concat(
+      sql("("),
+      this.jsonExtract(column, path, false),
+      sql(")::jsonb"),
+    );
+  }
+
+  /**
    * `("col" #> $1) @> $2` — containment, which is what Prisma's
    * `array_contains` compiles to and why it accepts both a scalar and a list:
    * `@>` asks whether the left document contains the right one, and a bare

@@ -1,4 +1,12 @@
-import { Lang } from "../facades";
+// The module, not the `../facades` barrel. A dictionary is the one server-side
+// artifact a *component* test has to import — `<Page dictionaries={[…]}>` takes
+// the app's real `app/i18n/index.ts` — and the barrel drags the whole facade
+// set in behind it, including `Redis` and its `import { RedisClient } from
+// "bun"`. Under a browser-targeted runner (vitest/jsdom) that specifier does
+// not resolve, so importing the app's dictionaries failed to collect before it
+// rendered anything. `Lang` itself only needs the translator and the request
+// context.
+import { Lang } from "../facades/Lang";
 import { parseTranslation } from "../utils/parseTranslation";
 import type {
   ParseTranslationParams,
@@ -51,6 +59,13 @@ export class Dictionary<T extends Translations> {
     return parseTranslation(this.dictionary[key][locale], params ?? {});
   }
 
+  /**
+   * @deprecated Use `defineDictionary` from `gemi/client`, declared next to the
+   * component that reads it. A dictionary made here has to be re-exported from
+   * `app/i18n/index.ts` and listed against a route in the `prefetch` config,
+   * and every locale of it stays resident whether a page uses it or not. Still
+   * supported; see `docs/i18n.md`.
+   */
   static create<const T extends Translations>(name: string, translations: T) {
     return new Dictionary<T>(name, translations);
   }

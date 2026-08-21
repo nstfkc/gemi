@@ -1075,47 +1075,77 @@ function compileJsonFilter(
 
     const operand = filter[key];
 
-    // **The sentinels have to be refused here, and only here.**
+    // **`equals` and `not` answer the three sentinels; the other eight refuse
+    // them.** That split is Prisma's, measured on a generated 6.19.2 client
+    // against both databases rather than derived from the operators:
     //
-    // `compileFieldFilter` refuses a bare sentinel above this branch, and
-    // refuses `AnyNull` under a non-`equals`/`not` operator in the scalar key
-    // loop below it. A `path` filter sits between the two and reaches neither,
-    // so before this check a sentinel inside a JSON filter went straight to the
-    // binder: Postgres compared against the literal text `Prisma.DbNull` and
-    // SQLite bound the sentinel object. Zero rows, no error — the failure class
-    // #259 and #266 exist to close, arrived at from the one direction nothing
-    // was watching.
+    //   equals / not              compiled, and the SQL is in `jsonNullAtPath`
+    //   the other eight           "Invalid value provided. … provided Enum."
     //
-    // Refused rather than mapped. The scalar path *can* answer these because it
-    // compiles them against the column, where SQL NULL and the JSON value
-    // `null` are distinguishable. An extracted value has already lost that
-    // distinction — `#>>` yields NULL both for an absent key and for a JSON
-    // null — so answering here would mean picking one meaning and being
-    // silently wrong about the other.
-    const sentinel = jsonNullKind(operand);
-    if (sentinel) {
+    // The refusal below used to cover all ten, and its reason was true of the
+    // extraction it named rather than of the dialect: `#>>` does yield NULL for
+    // an absent key and for a JSON `null` alike, but `#>` does not, and neither
+    // does SQLite's `->`. `dialect.jsonValueAt` is that second extraction, so
+    // the distinction the sentinels exist to draw survives to the comparison
+    // and there is nothing left to refuse — #407.
+    //
+    // A bare `null` takes the same branch, as `JsonNull`. It is not a third
+    // reading: Prisma compiles `{ path: […], equals: null }` and
+    // `{ path: […], equals: Prisma.JsonNull }` to byte-identical SQL and
+    // returns identical rows on both dialects, measured. It was refused for the
+    // same `#>>` reason (#371's second item), and the same fix reaches it.
+    const sentinel: JsonNullKind | null =
+      operand === null ? "json" : jsonNullKind(operand);
+
+    if (sentinel && (key === "equals" || key === "not")) {
+      parts.push(
+        jsonNullAtPath(sentinel, column, path, field, dialect, key === "not"),
+      );
+      continue;
+    }
+
+    if (sentinel && operand !== null) {
+      // **The clause naming the mechanism branches for `array_contains`**, for
+      // the same reason `assertJsonOperand`'s `null` guard branches below: that
+      // operator does not compare an extracted scalar at all — it compiles to
+      // `#>` + `@>`, containment against a jsonb document — so telling its
+      // caller about a scalar comparison names a mechanism it does not have.
+      // Everything else here does compare one bound scalar against one
+      // extracted value.
+      const because =
+        key === "array_contains"
+          ? `'array_contains' tests containment against a document, and a ` +
+            `sentinel is not one`
+          : `'${key}' compares an extracted value against a scalar, and a ` +
+            `sentinel is not one`;
+
       throw new InvalidArgumentError(
         `where.${field.name}.${key}`,
         schema.name,
         context.operation,
-        `${sentinelName(sentinel)} is not a filter on an extracted JSON ` +
-          `value: the extraction yields NULL for an absent key and for a JSON ` +
-          `null alike, so the distinction the sentinel exists to make is ` +
-          `already gone. Filter the column itself — ` +
-          `{ ${field.name}: { equals: ${sentinelName(sentinel)} } } — or test ` +
-          `the path against the value you mean.`,
+        `${sentinelName(sentinel)} asks which kind of null a value is, which ` +
+          `only 'equals' and 'not' can express — ${because}. ` +
+          `Prisma refuses it under this operator too. Write ` +
+          `{ ${field.name}: { path: […], equals: ${sentinelName(sentinel)} } }, ` +
+          `or filter the column itself — ` +
+          `{ ${field.name}: { equals: ${sentinelName(sentinel)} } }.`,
       );
     }
 
-    // The same shape one level down: `{ path: …, equals: { not: DbNull } }`.
+    // The same shape one level down — `{ path: …, array_contains: [AnyNull] }`.
+    // Still refused, and now for its own reason rather than by inheriting the
+    // extraction's: `AnyNull` is a *question*, not a value, so there is nothing
+    // to put inside a document. (`equals` and `not` never reach here with an
+    // object operand — `assertJsonOperand` refuses one below — so this is
+    // `array_contains`'s case in practice.)
     if (carriesAnyNull(operand)) {
       throw new InvalidArgumentError(
         `where.${field.name}.${key}`,
         schema.name,
         context.operation,
-        `Prisma.AnyNull cannot be reached through a JSON path, for the same ` +
-          `reason the other two cannot: the extracted value does not ` +
-          `distinguish an absent key from a JSON null.`,
+        `Prisma.AnyNull is a question rather than a value — 'either kind of ` +
+          `null' — so it cannot appear inside a document. Ask it directly: ` +
+          `{ ${field.name}: { path: […], equals: Prisma.AnyNull } }.`,
       );
     }
 
@@ -1131,6 +1161,75 @@ function compileJsonFilter(
   return parts.length === 1
     ? parts[0]
     : group(parts, " and ");
+}
+
+/**
+ * A null sentinel at a JSON path — `{ path: ["operation"], equals: AnyNull }`.
+ *
+ * **The two halves, and why neither is the other.** A `Json` column has two
+ * empty states and so does a *key inside* one, except the key's second state is
+ * "not there at all":
+ *
+ *   DbNull     the value at the path is missing — an absent key, or a column
+ *              that is SQL NULL, or one holding a JSON null (nothing to index)
+ *   JsonNull   the value at the path is the JSON value `null`
+ *   AnyNull    either, which is what `AnyNull` means everywhere else
+ *
+ * `dialect.jsonValueAt` is what keeps them apart; `jsonExtract` at `asText:
+ * true` does not, which is the collapse that had all three refused here before
+ * #407. So `DbNull` is `is null` on the extraction itself and `JsonNull` is an
+ * equality against the JSON null, bound the way {@link jsonNullComparison}
+ * binds it on the column path — through the dialect's own encoder, so `'null'`
+ * on SQLite and `'null'::text::jsonb` on Postgres stay that encoder's business.
+ *
+ * **`negated` is the direct form, not `not (…)`.** Prisma emits `IS NOT NULL`,
+ * `<>` and `(<> … AND IS NOT NULL)`, and the negation of the positive form
+ * agrees with all three under three-valued logic — `equals`'s own comment makes
+ * the same argument on the column path. The direct spelling is emitted because
+ * it is the one the oracle emits and it reads as what it means; the contract is
+ * equal results either way.
+ *
+ * Measured on 6.19.2 against Postgres 16 and SQLite, over rows covering an
+ * absent key, a JSON null at the key, a scalar at the key, a SQL-NULL column
+ * and a JSON-null column. Both dialects return the same five row sets, and this
+ * compiles to the same predicates:
+ *
+ *   equals: DbNull      absent key, SQL-NULL column, JSON-null column
+ *   equals: JsonNull    the key holding a JSON null
+ *   equals: AnyNull     all four of those
+ *   not: DbNull         the key holding a JSON null, and the key holding a scalar
+ *   not: JsonNull       the key holding a scalar
+ *   not: AnyNull        the key holding a scalar
+ */
+function jsonNullAtPath(
+  kind: JsonNullKind,
+  column: string,
+  path: Binder,
+  field: FieldSchema,
+  dialect: SqlDialect,
+  negated: boolean,
+): Fragment {
+  // `is null` on the extraction: nothing is there to compare.
+  const missing = (): Fragment =>
+    concat(
+      dialect.jsonValueAt(column, path),
+      sql(negated ? " is not null" : " is null"),
+    );
+
+  // ...and the JSON value `null`, which is a value and compares as one.
+  const jsonNull = (): Fragment =>
+    concat(
+      dialect.jsonValueAt(column, path),
+      sql(negated ? " <> " : " = "),
+      fieldParam(field, dialect, () => dialect.encode(JSON_NULL, field)),
+    );
+
+  if (kind === "db") return missing();
+  if (kind === "json") return jsonNull();
+
+  // The path is bound twice, once per half, which is what Prisma does too —
+  // it is a parameter, so there is nothing to share and nothing in the text.
+  return group([jsonNull(), missing()], negated ? " and " : " or ");
 }
 
 /**
@@ -1152,14 +1251,21 @@ function compileJsonFilter(
  *
  *   - **`null` fell between the two.** The string branch refuses a non-string
  *     and the object branch tests `operand !== null` first, so `equals: null`
- *     reached the binder and compiled to `= NULL` — see the guard below.
+ *     reached the binder and compiled to `= NULL` — see the guard below. Under
+ *     `equals` and `not` it is answered rather than refused now, and never
+ *     reaches this function: #407 gave those two the extraction that can tell a
+ *     JSON `null` from an absent key, and `equals: null` is `equals: JsonNull`
+ *     on the oracle. The guard below covers the operators that are left.
  *
- * The last two are a **refusal rather than an implementation**, deliberately.
- * Prisma does accept an object or an array there, and answering it properly
- * means the `#>` + `::jsonb` form `array_contains` already uses — which is
- * Postgres-only, so implementing it would give SQLite either a second wrong
- * answer or a silent divergence. Refusing names the limitation on both
- * dialects, which is what this file does everywhere else it cannot answer.
+ * The object operand is still a **refusal rather than an implementation**, and
+ * the reason has narrowed. It used to be that answering it needs the JSON-
+ * preserving extraction, which was Postgres-only here — so implementing it
+ * would give SQLite either a second wrong answer or a silent divergence. That
+ * is no longer true: `dialect.jsonValueAt` is that extraction and both dialects
+ * have it (#407). What is left is simply that nobody has compiled a document
+ * comparison against it — the operand would still bind through `jsonComparison`
+ * as a scalar — so this stays a named limitation rather than becoming a silent
+ * wrong answer, which is what this file does everywhere it cannot answer.
  * `array_contains` is exempt from the object rule because containment is
  * precisely the operator that takes a document — but not from the `null` one,
  * because a bound SQL NULL is not a JSON `null` on either side of `@>`.
@@ -1188,38 +1294,41 @@ function assertJsonOperand(
     );
   }
 
-  // **`null` is refused under every path operator, and it is a refusal rather
-  // than a gap.**
+  // **`null` is refused under the operators that are left**, and the oracle
+  // agrees about the numeric four and not about `array_contains`.
   //
-  // Measured on a generated 6.19.2 client against Postgres, with query-event
-  // logging and the rows read back: Prisma extracts with `#>` and compares as
-  // `jsonb`, so `{ path: ["a"], equals: null }` asks for the JSON value `null`
-  // and returns the rows that hold one — the same SQL and the same rows as
-  // `equals: Prisma.JsonNull`. gemi extracts with `#>>`, which yields *text*,
-  // and NULL for an absent key and for a JSON null alike. That collapse is
-  // exactly why the sentinels are refused a few lines above, and it leaves this
-  // operand nothing to mean.
+  // `equals` and `not` do not reach this — `compileJsonFilter` compiles them
+  // as `JsonNull` before calling here, because Prisma reads a bare `null` at a
+  // path as the JSON value `null` and returns the rows holding one: identical
+  // SQL and identical rows to `equals: Prisma.JsonNull`, measured on 6.19.2
+  // against both dialects. That was #371's second item, and it was refused for
+  // a reason that was true of `#>>` rather than of the database.
   //
-  // Left alone it reached the binder and compiled to `("metadata" #>> $1) = $2`
-  // bound to NULL — `= NULL` is NULL rather than true on both dialects, so the
-  // query ran, raised nothing, and matched no row where Prisma matched some.
-  // The `string_contains` guard above names that failure in this file's own
-  // words, "runs and returns the wrong rows"; only the arithmetic differs.
+  // The four numeric comparisons are a different answer, measured the same way:
+  // `{ path: ["a"], gt: null }` does not compile on Prisma either. Its query
+  // engine *panics* — "JSON target types only accept strings or numbers, found:
+  // null", from `sql-query-builder/src/filter/visitor.rs` — so refusing is
+  // matching the oracle rather than falling short of it, and this message says
+  // so instead of promising an answer later. Left alone it reached the binder
+  // and compiled to `cast(("metadata" #>> $1) as real) > $2` bound to NULL,
+  // which is NULL rather than true: a query that runs and matches nothing.
   //
-  // `array_contains` is included rather than exempt, **and its mechanism is a
-  // different one**. It takes the `#>` form, so the text collapse above does
-  // not apply to it — but `jsonArrayContains` binds the operand raw, so `null`
-  // arrives as SQL NULL and `x @> NULL` is NULL too. Prisma binds it as the
-  // JSON value and runs a real containment test. The message below branches for
-  // that reason: telling an `array_contains` caller about `#>>` would name a
-  // mechanism this operator does not have, and pointing them at
-  // `{ equals: Prisma.JsonNull }` would answer a containment question with an
-  // equality on the column.
+  // `array_contains` is included rather than exempt, **and it is the one place
+  // here that refuses something the oracle answers**. Its mechanism is its own:
+  // it takes the `#>` form, so the text collapse never applied to it, but
+  // `jsonArrayContains` binds the operand raw, so `null` arrives as SQL NULL
+  // and `x @> NULL` is NULL too — a query that runs and matches nothing.
   //
-  // Answering any of them properly means the `#> … ::jsonb` form on Postgres
-  // and `json_type` on SQLite, which is a second implementation of the same
-  // operator per dialect rather than a guard — the same reason the object
-  // operand below is refused instead of compiled.
+  // Prisma compiles it, measured: `(payload #> $1)::jsonb @> $2 AND
+  // JSONB_TYPEOF((payload #> $3)::jsonb) = 'array'`, which also returns no rows
+  // — so the refusal costs a caller nothing but an error where the oracle gave
+  // an empty set, and this comment says so rather than claiming parity it does
+  // not have. `docs/orm.md` records it in the same terms.
+  //
+  // The message below branches for the mechanism: telling an `array_contains`
+  // caller about an extracted scalar would name something this operator does
+  // not have, and pointing them at `{ equals: Prisma.JsonNull }` would answer a
+  // containment question with an equality.
   if (operand === null) {
     throw new InvalidArgumentError(
       `where.${field.name}.${key}`,
@@ -1229,17 +1338,15 @@ function assertJsonOperand(
         ? `null cannot be tested for containment through a JSON path: the ` +
           `operand binds as SQL NULL rather than as the JSON value, and ` +
           `'x @> NULL' is NULL rather than true — the query would run and ` +
-          `match nothing. Prisma binds it as the JSON value and runs a real ` +
-          `containment test; gemi does not yet. A null *inside* the document ` +
+          `match nothing. A null *inside* the document ` +
           `is an ordinary value and still compiles: ` +
           `{ ${field.name}: { path: […], array_contains: [null] } }.`
-        : `null cannot be compared through a JSON path: the extraction yields ` +
-          `SQL NULL for an absent key and for a JSON null alike, and the ` +
-          `comparison against it is NULL rather than true — the query would ` +
-          `run and match nothing. Prisma reads it as the JSON value null and ` +
-          `does answer it; gemi does not yet. Filter the column itself — ` +
-          `{ ${field.name}: { equals: Prisma.JsonNull } } — or test the path ` +
-          `against the value you mean.`,
+        : `null cannot be compared through a JSON path with '${key}', which ` +
+          `compares the extracted value as a number — the comparison against ` +
+          `NULL is NULL rather than true, so the query would run and match ` +
+          `nothing. Prisma refuses it here too. For "the value at this path ` +
+          `is a JSON null", use equals or not: ` +
+          `{ ${field.name}: { path: […], equals: null } }.`,
     );
   }
 
@@ -1698,6 +1805,29 @@ function equals(
   // below and compiled to `= ?` — matching nothing, whatever the table held.
   // Its sibling `JsonNull` is a genuine *value* comparison and belongs there:
   // the column holds the JSON `null`, and `= 'null'` is how you find it.
+  //
+  // **KNOWN DIVERGENCE — a bare `null` on a `Json` column.** For every other
+  // column type `operand === null` meaning `is null` *is* Prisma's reading. On
+  // a `Json` column it is not: Prisma reads a bare `null` as the JSON value
+  // `null` there, exactly as it does at a path. Measured on 6.19.2 against
+  // Postgres 16 and SQLite, over a table holding both empty states:
+  //
+  //   { equals: null }      prisma  "payload"::jsonb = $1   the JSON-null rows
+  //                         gemi    "payload" is null       the SQL-NULL rows
+  //   { not: null }         prisma  "payload"::jsonb <> $1
+  //                         gemi    "payload" is not null   (one row more)
+  //
+  // Disjoint row sets on identical data, and nothing raises. Left alone rather
+  // than fixed here: this is the *column* path, and #407 is about a value at a
+  // path — where a bare `null` now agrees with Prisma exactly, because
+  // `compileJsonFilter` reads it as `JsonNull`. Changing the column would be a
+  // behaviour change to released semantics for every `Json` filter, which wants
+  // its own change and its own differential cases.
+  //
+  // `{ equals: Prisma.DbNull }` is unambiguous and compiles to this same
+  // predicate on both libraries, so the divergence has a spelling that avoids
+  // it. `docs/orm.md` says so where a reader will look, and
+  // `known-divergences.test.ts` pins that it keeps saying so.
   if (operand === null || jsonNullKind(operand) === "db") {
     return sql(`${column} is null`);
   }

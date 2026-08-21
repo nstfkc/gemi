@@ -1,0 +1,23 @@
+{
+  // The plugin is checked here rather than through the package's main
+  // `tsconfig.json` for two reasons: that one emits declarations into `dist/`,
+  // and the plugin needs none — tsserver `require()`s the built JS and no
+  // TypeScript ever imports it — and it excludes `*.test.ts`, which for a
+  // directory this small leaves most of the code unchecked.
+  //
+  // So this config covers everything in the directory, tests and fixtures
+  // included, and emits nothing. `bun run typecheck` runs it.
+  "compilerOptions": {
+    "lib": ["ESNext"],
+    "target": "ESNext",
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "noUncheckedIndexedAccess": false,
+    "types": ["node"]
+  },
+  "include": ["."]
+}

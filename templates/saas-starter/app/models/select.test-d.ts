@@ -393,3 +393,100 @@ describe("_count takes a filter over the rows it counts", () => {
     });
   });
 });
+
+/**
+ * **The `_count: true` shorthand** — #394.
+ *
+ * `toEqualTypeOf` on the whole object rather than key-by-key, deliberately. The
+ * assertion that matters is the one a per-key check cannot make: that
+ * `organization` and `profile` are **absent**. The payload's shorthand branch
+ * said `keyof Relations<M>` while the shorthand was refused at runtime — every
+ * relation, to-one included — which was unreachable and therefore untested, and
+ * would have typed two keys that are never on the row the moment the refusal
+ * lifted.
+ *
+ * `runtime` here is `countableRelations`: the compiler projects one subquery per
+ * to-many and the policy walk scopes that same set, so this type is the third
+ * statement of the same list and the one a caller reads.
+ */
+describe("_count: true is every to-many relation, and only those", () => {
+  test("include", async () => {
+    const user = await UserModel.findFirst({ include: { _count: true } });
+
+    expectTypeOf(user!._count).toEqualTypeOf<{
+      accounts: number;
+      session: number;
+      passwordResetToken: number;
+      socialAccount: number;
+    }>();
+  });
+
+  test("select spells it identically", async () => {
+    const user = await UserModel.findFirst({
+      select: { name: true, _count: true },
+    });
+
+    expectTypeOf(user!._count).toEqualTypeOf<{
+      accounts: number;
+      session: number;
+      passwordResetToken: number;
+      socialAccount: number;
+    }>();
+  });
+});
+
+/**
+ * **The shorthand is refused where the runtime refuses it** — the other half of
+ * #394, and the half that is easy to leave open.
+ *
+ * `readCountSelection` throws when the model has no to-many relation, so a
+ * `_count: true` the type accepts on such a model is valid TypeScript that raises
+ * on every call. That is the exact defect #394 reports — a controller ported from
+ * Prisma type-checked, passed review, and 500'd on every request — so answering
+ * the shorthand for models that have a to-many while leaving it type-checkable on
+ * models that do not would have moved the trap rather than closed it. Nine of the
+ * template's fourteen models are in that class.
+ *
+ * Prisma refuses the same call structurally: it emits no `_count` key in the
+ * input type for such a model.
+ */
+describe("_count: true is refused on a model with no to-many relations", () => {
+  test("include", async () => {
+    await AccountModel.findMany({
+      // @ts-expect-error Account's relations are all to-one, so there is nothing to count
+      include: { _count: true },
+    });
+  });
+
+  test("select", async () => {
+    await AccountModel.findMany({
+      // @ts-expect-error same, in the select spelling
+      select: { id: true, _count: true },
+    });
+  });
+
+  /**
+   * Nested, which is the shape #394 actually reported: the shorthand sat inside
+   * a parent's `include`, where nothing about the outer model says whether the
+   * child can be counted.
+   */
+  test("nested inside a parent's include", async () => {
+    await UserModel.findMany({
+      include: {
+        // @ts-expect-error Account is still Account one level down
+        accounts: { include: { _count: true } },
+      },
+    });
+  });
+
+  /**
+   * `false` stays legal on every model. `planRelationCounts` short-circuits on it
+   * before reaching the throw, so a caller toggling a count off with a flag is
+   * writing something that works — refusing it would break a spelling the runtime
+   * accepts, which is the same class of divergence in the other direction.
+   */
+  test("but false is accepted, because the runtime accepts it", async () => {
+    await AccountModel.findMany({ include: { _count: false } });
+    await UserModel.findMany({ include: { _count: false } });
+  });
+});

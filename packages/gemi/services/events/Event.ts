@@ -1,0 +1,258 @@
+import { app } from "../../foundation/app";
+import { EventManager } from "./EventManager";
+import { FakeEventManager } from "./FakeEventManager";
+
+/**
+ * Something the application did, addressed to nobody in particular.
+ *
+ * An event is the payload plus a name. It carries no framework state — no
+ * timestamp, no id, no `propagationStopped` — because every one of those is a
+ * field the application can declare itself if it wants one, and a listener that
+ * could stop the next listener would make registration order load-bearing when
+ * that order comes from a filesystem walk nobody chose.
+ *
+ * ```typescript
+ * // app/events/UserRegistered.ts
+ * export class UserRegistered extends Event {
+ *   static name = "UserRegistered";
+ *   constructor(
+ *     public userId: number,
+ *     public email: string,
+ *   ) {
+ *     super();
+ *   }
+ * }
+ * ```
+ *
+ * ### Why `static name` is required and not a convenience
+ *
+ * The registry is keyed by this string, never by the class object, and that is
+ * the least obvious decision in the subsystem. `gemi build` minifies the server
+ * entry, and the app code reachable from it — the controller, and every event
+ * class that controller imports in order to dispatch — is bundled and minified
+ * with it. Discovery, meanwhile, imports `app/listeners/*.ts` from source at
+ * runtime, and those files import `app/events/*.ts` from source too. Two module
+ * graphs, two `UserRegistered` class objects. A map keyed by the class would
+ * look up the bundled one, find the entry registered under the source one, and
+ * return nothing — a dispatch with zero listeners, which is legal, normal, and
+ * completely silent. It would work in development, pass every test, and do
+ * nothing in production.
+ *
+ * A declared `static name` is a string literal and minification leaves string
+ * literals alone, so both halves agree.
+ *
+ * The same two class objects are why **application code must never `instanceof`
+ * an event**: inside a listener, `event instanceof UserRegistered` is `true` in
+ * development and `false` in a production build. Nothing the framework can do
+ * fixes that, so the framework's job is to never need it — which is why a
+ * listener binds to exactly one event.
+ */
+export abstract class Event {
+  /**
+   * The name this event registers and dispatches under. Required.
+   *
+   * The `"unset"` default is the floor rather than the check: a `class
+   * UserRegistered extends Event {}` shadows this with its own implicit class
+   * binding, which reads `"UserRegistered"` in development and something like
+   * `"D"` in a minified bundle. `discoverListeners` is what tells a declared
+   * name from an implicit one — it reads the property descriptor, because both
+   * spellings produce the same string right up until the build.
+   */
+  static name = "unset";
+
+  /**
+   * Hold this event's listeners until the transaction it was dispatched inside
+   * commits, and drop them if it rolls back. Off by default.
+   *
+   * ```typescript
+   * export class UserRegistered extends Event {
+   *   static name = "UserRegistered";
+   *   static afterCommit = true;
+   * }
+   * ```
+   *
+   * The failure it exists for:
+   *
+   * ```typescript
+   * await DB.transaction(async () => {
+   *   const user = await User.create(input);
+   *   UserRegistered.dispatch(user.id, user.email);   // welcome email sent
+   *   await Billing.provision(user);                  // throws
+   * });                                               // rolled back
+   * ```
+   *
+   * The user does not exist and has been welcomed. A sync listener has already
+   * run; a queued one is on a queue that has never heard of a transaction.
+   *
+   * Outside a transaction the flag changes nothing — there is nothing to wait
+   * for, so the dispatch happens immediately. Inside one, the listeners run
+   * after the commit and outside the transaction's scope, so a listener that
+   * opens its own transaction opens a real one rather than joining a handle
+   * that has already closed.
+   *
+   * ### The sharp edge, which is why this is opt-in
+   *
+   * **`dispatchAndWait` on a deferred event resolves immediately, having run
+   * nothing.** The two features compose into something neither name suggests,
+   * and no amount of care at the call site can see it: whether a dispatch is
+   * deferred depends on whether some caller further up opened a transaction.
+   * The pairing warns in development, once per event name, and that warning is
+   * the only thing that says so.
+   *
+   * Defaulting this on would put the same surprise under every dispatch — a
+   * fire-and-forget call that silently has not happened yet, decided by ambient
+   * state the call site cannot read. The one being fixed here is at least a
+   * failure; that one is a success that arrives later than the code says.
+   */
+  static afterCommit = false;
+
+  /**
+   * Makes `Event` nominal, and exists for nothing else.
+   *
+   * An event carries no framework state, so `Event`'s instance side is empty —
+   * and an empty type is structurally satisfied by *everything*, which would
+   * make the one constraint the compiler can enforce here vacuous:
+   * `static event = SomeRandomClass` would type-check, register under a name
+   * nothing dispatches, and never run. `declare` means no field is emitted and
+   * no subclass has to initialise it; `protected` means only a real subclass
+   * can produce a value of this type.
+   */
+  declare protected readonly __isEvent: true;
+
+  /**
+   * Fires the event and returns immediately. Every sync listener bound to it
+   * runs; none of them can report anything back here.
+   *
+   * The arguments are the event's constructor arguments, typed through
+   * `ConstructorParameters` — the same trick `Job.dispatch` plays through
+   * `Parameters<T["run"]>`, so the two subsystems read the same way at the call
+   * site.
+   *
+   * ```typescript
+   * const user = await User.create(input);
+   * UserRegistered.dispatch(user.id, user.email);
+   * ```
+   *
+   * A listener that throws is logged and the next one still runs, so nothing
+   * here can fail on a listener's behalf. A dispatch that nothing is listening
+   * for is legal and warns once, in development only.
+   *
+   * The arguments are forwarded to the manager *as well as* being used to build
+   * the instance: a queued listener receives an event rebuilt from them in
+   * another application, and an instance cannot be asked what it was
+   * constructed with.
+   */
+  static dispatch<T extends EventClass>(
+    this: T,
+    ...args: ConstructorParameters<T>
+  ): void {
+    refuseUnnamed(this);
+    app(EventManager).dispatch(new this(...args), args);
+  }
+
+  /**
+   * Fires the event and resolves once every **sync** listener has settled.
+   *
+   * It does not wait for a queued listener, which the queue runs on its own
+   * terms after this promise has resolved — "and wait" invites
+   * exactly that reading, so it is written down here rather than left to be
+   * discovered by a test that passes locally. A queued listener has been handed
+   * to the queue by the time this resolves and nothing more than that is true
+   * of it: it may not have started, and it may already have failed and been
+   * re-queued.
+   *
+   * Two methods rather than one `dispatch` that is sometimes worth awaiting,
+   * because "is this worth awaiting" is a question the call site should not
+   * have to guess at. This one is for a caller that genuinely needs the side
+   * effects to have happened before it continues — a request that renders what
+   * a listener wrote, a test asserting on the result.
+   *
+   * Never rejects. A listener's failure is that listener's, and letting it
+   * surface here would mean listener 1's throw becomes the caller's problem
+   * while listener 5's does not, depending only on where in a filesystem walk
+   * the throw landed.
+   */
+  static dispatchAndWait<T extends EventClass>(
+    this: T,
+    ...args: ConstructorParameters<T>
+  ): Promise<void> {
+    refuseUnnamed(this);
+    return app(EventManager).dispatchAndWait(new this(...args), args);
+  }
+
+  /**
+   * Swaps the container's `EventManager` for one that records dispatches and
+   * runs nothing, and hands it back for a test to assert against.
+   *
+   * ```typescript
+   * const events = Event.fake();
+   *
+   * await post("/register", { email: "ada@example.com" });
+   *
+   * events.assertDispatched(UserRegistered, (e) => e.email === "ada@example.com");
+   * events.restore();
+   * ```
+   *
+   * The point is what the assertion is *about*. A controller test that asserts
+   * the event fired is testing the controller; one that asserts a welcome email
+   * was sent is testing three things and breaks when the fourth listener is
+   * added. Making that separation possible is most of why events are worth
+   * having, and the fake is what makes it convenient.
+   *
+   * Called twice, it returns the same recorder rather than a second one — a
+   * fake set up in a test helper and a `Event.fake()` in the body of the test
+   * would otherwise be two recorders, one of which sees every dispatch and the
+   * other of which is the one being asserted on.
+   *
+   * **`restore()` is not optional**, and there is no global teardown that will
+   * do it: `gemi/testing` has no `afterEach` hook of its own, and a fake that
+   * outlives its test is a later test whose listeners silently never run. That
+   * failure has no warning to catch it, because a fake legitimately has no
+   * listeners and so never trips the zero-listener line.
+   *
+   * The recorder is the framework's, not the app's — it is not exported from
+   * `gemi/services`, and `gemi/testing` publishes its type. There is nothing to
+   * construct: this is the only thing that makes one.
+   */
+  static fake(): FakeEventManager {
+    return FakeEventManager.install(app());
+  }
+}
+
+/**
+ * Stops a dispatch that could not be routed anywhere.
+ *
+ * Two values reach it and neither is a name a listener could have registered
+ * under. `"unset"` is the inherited default, which only the base itself still
+ * has — a class *declaration* always shadows it with its own binding. `""` is
+ * what an anonymous class expression with no binding to take a name from gets:
+ * an own, non-writable `name` of the empty string rather than the inherited
+ * default, so checking `"unset"` alone would let `(class extends Event {})`
+ * through to dispatch under the key `""` and surface as the generic
+ * zero-listener warning instead of the message that names the fix.
+ *
+ * A throw rather than a warning because there is no listener that could be
+ * registered under either, so the alternative is a dispatch that silently does
+ * nothing. This is only the floor: a declared `static name` and the implicit
+ * class binding are indistinguishable by value here, and `discoverListeners`
+ * reading the property descriptor is what tells those two apart.
+ */
+function refuseUnnamed(event: EventClass): void {
+  if (event.name !== "unset" && event.name !== "") return;
+
+  throw new Error(
+    `Cannot dispatch an event with no name. Add \`static name\` to this Event ` +
+      `subclass — the listener registry is keyed by that string, and by that ` +
+      `string alone, so an event without one cannot reach a listener.`,
+  );
+}
+
+/**
+ * An `Event` subclass, as `Listener.event` holds one and as `dispatch` narrows
+ * `this` to.
+ *
+ * Concrete rather than `abstract new`, because the only thing anyone does with
+ * one of these is construct it: a listener bound to an abstract event would
+ * register under a name nothing can ever dispatch.
+ */
+export type EventClass = new (...args: any[]) => Event;

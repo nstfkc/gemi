@@ -10,6 +10,7 @@ import {
   UnsupportedQueryError,
 } from "../errors";
 import { USER_COLUMNS, account, mapped, user } from "../fixtures";
+import { JsonNull } from "../json-null";
 import { compile } from "./index";
 import { compileRead } from "./read";
 import { compileWrite } from "./write";
@@ -1314,18 +1315,32 @@ describe("json path filters", () => {
   });
 
   /**
-   * The gap review found: `compileFieldFilter` refuses a bare sentinel *above*
-   * the `path` branch and refuses `AnyNull` under a non-`equals`/`not` operator
-   * *below* it, so a sentinel inside a JSON filter reached neither and went
-   * straight to the binder. Postgres compared against the literal text
-   * `Prisma.DbNull`; SQLite bound the sentinel object. Zero rows, no error —
-   * the class #259 and #266 exist to close.
+   * #407, and the history is worth keeping because the refusal it replaces was
+   * *right about its own mechanism* and wrong about the database.
    *
-   * Refused rather than mapped, because an extracted value cannot tell an
-   * absent key from a JSON null: `#>>` yields NULL for both, so there is no
-   * answer to give that is not silently wrong half the time.
+   * The gap review that produced it found: `compileFieldFilter` refuses a bare
+   * sentinel *above* the `path` branch and refuses `AnyNull` under a
+   * non-`equals`/`not` operator *below* it, so a sentinel inside a JSON filter
+   * reached neither and went straight to the binder. Postgres compared against
+   * the literal text `Prisma.DbNull`; SQLite bound the sentinel object. Zero
+   * rows, no error — the class #259 and #266 exist to close. It was closed by
+   * refusing, because an extracted value cannot tell an absent key from a JSON
+   * null: `#>>` yields NULL for both.
+   *
+   * All true, and all about `#>>`. `#>` keeps the distinction, and so does
+   * SQLite's `->` — `dialect.jsonValueAt` is that extraction — so the question
+   * is answerable at a path under the two operators that can ask it.
+   *
+   * **Measured against the oracle before it was implemented**, on a generated
+   * 6.19.2 client, both dialects, over rows covering an absent key, a JSON null
+   * at the key, a scalar at the key, a SQL-NULL column and a JSON-null column.
+   * The row sets are identical on the two databases and the SQL is the shape
+   * asserted below. This is what the issue asked for and it changed the answer:
+   * the SQLite half was an open question — keep refusing, or implement
+   * `json_type` — until the measurement showed Prisma answers there too, which
+   * made refusing a divergence rather than a dialect gap.
    */
-  describe("a Json null sentinel inside a path filter is refused", () => {
+  describe("a Json null sentinel inside a path filter compiles", () => {
     // A class, for the reason `json-null.test.ts` spells out: a method in an
     // object literal is enumerable, `for…in` walks it, and the recogniser would
     // reject the fake while accepting Prisma's real one.
@@ -1338,35 +1353,142 @@ describe("json path filters", () => {
       return new Sentinel();
     };
 
-    const sentinels = [
-      ["DbNull", sentinel("Prisma.DbNull")],
-      ["JsonNull", sentinel("Prisma.JsonNull")],
-      ["AnyNull", sentinel("Prisma.AnyNull")],
-    ] as const;
+    const DbNull = sentinel("Prisma.DbNull");
+    const JsonNull = sentinel("Prisma.JsonNull");
+    const AnyNull = sentinel("Prisma.AnyNull");
 
-    test.each(sentinels)("%s on sqlite", (_name, sentinel) => {
-      expect(() =>
-        sqliteText({ where: { metadata: { path: "$.a", equals: sentinel } } }),
-      ).toThrow(InvalidArgumentError);
+    /**
+     * Postgres, and the `::jsonb` cast on the left is not decoration: `#>` on a
+     * `@db.Json` column yields `json`, which has no equality operator at all.
+     * Prisma emits the same cast.
+     */
+    test.each([
+      ["equals", DbNull, `("metadata" #> $1)::jsonb is null`],
+      ["equals", JsonNull, `("metadata" #> $1)::jsonb = $2::text::jsonb`],
+      [
+        "equals",
+        AnyNull,
+        `(("metadata" #> $1)::jsonb = $2::text::jsonb or ("metadata" #> $3)::jsonb is null)`,
+      ],
+      ["not", DbNull, `("metadata" #> $1)::jsonb is not null`],
+      ["not", JsonNull, `("metadata" #> $1)::jsonb <> $2::text::jsonb`],
+      [
+        "not",
+        AnyNull,
+        `(("metadata" #> $1)::jsonb <> $2::text::jsonb and ("metadata" #> $3)::jsonb is not null)`,
+      ],
+    ] as [string, object, string][])(
+      "%s on postgres",
+      (key, operand, expected) => {
+        expect(
+          pgText({ where: { metadata: { path: ["a"], [key]: operand } } }),
+        ).toContain(expected);
+      },
+    );
+
+    /**
+     * SQLite, where the operator is `->` rather than `json_extract` — the whole
+     * reason this dialect can answer at all. `json_extract` returns a native
+     * value, so a JSON null comes back as SQL NULL and collapses into the
+     * absent case; `->` returns the JSON text and keeps them apart.
+     */
+    test.each([
+      ["equals", DbNull, `("metadata" -> ?) is null`],
+      ["equals", JsonNull, `("metadata" -> ?) = ?`],
+      [
+        "equals",
+        AnyNull,
+        `(("metadata" -> ?) = ? or ("metadata" -> ?) is null)`,
+      ],
+      ["not", DbNull, `("metadata" -> ?) is not null`],
+      ["not", JsonNull, `("metadata" -> ?) <> ?`],
+      [
+        "not",
+        AnyNull,
+        `(("metadata" -> ?) <> ? and ("metadata" -> ?) is not null)`,
+      ],
+    ] as [string, object, string][])(
+      "%s on sqlite",
+      (key, operand, expected) => {
+        expect(
+          sqliteText({ where: { metadata: { path: "$.a", [key]: operand } } }),
+        ).toContain(expected);
+      },
+    );
+
+    /**
+     * Nothing of the sentinel reaches the SQL — the original defect — and what
+     * *is* bound is the JSON null, spelled by each dialect's own encoder.
+     *
+     * The bound values are the half a text assertion cannot see. On Postgres
+     * the placeholder carries `::text::jsonb` and the value is the string
+     * `null`, which is `'null'::jsonb`; binding SQL NULL there would be `is
+     * null`'s question asked a second way and would match the wrong rows. On
+     * SQLite the value is the text `null`, which is what `->` yields for a JSON
+     * null — and it is *not* what `->` yields for the JSON string `"null"`,
+     * which is `"null"` with the quotes.
+     */
+    test("the JSON null is bound, and the sentinel never is", () => {
+      const pgArgs = {
+        where: { metadata: { path: ["a"], equals: JsonNull } },
+      };
+      const pg = compileRead(jsonUser, "findMany", pgArgs, postgres);
+      expect(pg.text).not.toContain("Prisma.");
+      expect(pg.bind(pgArgs)).toEqual([`{"a"}`, "null"]);
+
+      const sqliteArgs = {
+        where: { metadata: { path: "$.a", equals: JsonNull } },
+      };
+      const lite = compileRead(jsonUser, "findMany", sqliteArgs, sqlite);
+      expect(lite.text).not.toContain("Prisma.");
+      expect(lite.bind(sqliteArgs)).toEqual(["$.a", "null"]);
     });
 
-    test.each(sentinels)("%s on postgres", (_name, sentinel) => {
-      expect(() =>
-        pgText({ where: { metadata: { path: ["a"], equals: sentinel } } }),
-      ).toThrow(InvalidArgumentError);
+    /**
+     * `AnyNull` binds the path **twice**, once per half, which is what Prisma
+     * does too. Asserted because the alternative — sharing one placeholder —
+     * would be an invariant-2 violation dressed as an optimisation, and because
+     * a binder that silently produced three values for four placeholders is the
+     * failure this shape invites.
+     */
+    test("AnyNull binds the path once per half", () => {
+      const args = { where: { metadata: { path: ["a"], equals: AnyNull } } };
+      expect(
+        compileRead(jsonUser, "findMany", args, postgres).bind(args),
+      ).toEqual([`{"a"}`, "null", `{"a"}`]);
     });
 
-    /** Nothing of the sentinel reaches the SQL, which is the actual defect. */
-    test("it never becomes a bound literal", () => {
-      let text = "";
-      try {
-        text = pgText({
-          where: { metadata: { path: ["a"], equals: sentinel("Prisma.DbNull") } },
-        });
-      } catch {
-        // expected
-      }
-      expect(text).not.toContain("Prisma.DbNull");
+    /**
+     * The other eight operators still refuse all three, and so does Prisma —
+     * *"Invalid value provided. … provided Enum."*, measured. A sentinel asks
+     * which kind of null a value is, and `gt` compares a number.
+     */
+    test.each([
+      ["gt", DbNull],
+      ["lte", JsonNull],
+      ["array_contains", AnyNull],
+      ["string_contains", DbNull],
+    ] as [string, object][])(
+      "%s still refuses a sentinel on postgres",
+      (key, operand) => {
+        expect(() =>
+          pgText({ where: { metadata: { path: ["a"], [key]: operand } } }),
+        ).toThrow(InvalidArgumentError);
+      },
+    );
+
+    /**
+     * The one shape `carriesAnyNull` is still there for: a sentinel *inside* a
+     * document, where there is nothing for it to mean. `equals` and `not` never
+     * reach that check with an object operand — `assertJsonOperand` refuses one
+     * — so `array_contains` is the reachable case.
+     */
+    test("AnyNull inside an array_contains document is refused", () => {
+      expect(() =>
+        pgText({
+          where: { metadata: { path: ["a"], array_contains: [AnyNull] } },
+        }),
+      ).toThrow(/a question rather than a value/);
     });
   });
 
@@ -1434,27 +1556,52 @@ describe("json path filters", () => {
    * and `x @> NULL` is NULL. Prisma binds it as the JSON value and runs a real
    * containment test.
    */
-  describe("null at a path is refused", () => {
+  describe("null at a path", () => {
     /**
-     * **Each row asserts its message, not just `InvalidArgumentError`**, and
-     * that is what pins the two things the class alone cannot see.
+     * **Under `equals` and `not` it is answered, and it is `JsonNull`.**
      *
-     * The `string_*` rows already threw before this change, from the non-string
-     * guard, with the `'%null%'` reasoning — so a class assertion passes either
-     * way and leaves the new guard's *placement* unpinned. It sits deliberately
-     * **after** that guard so the better message survives; moving it above used
-     * to leave all 153 tests green while `string_contains: null` silently swapped
-     * its message for the generic one.
+     * That is not a reading gemi chose. Measured on 6.19.2 against both
+     * dialects: `{ path: […], equals: null }` and
+     * `{ path: […], equals: Prisma.JsonNull }` compile to byte-identical SQL
+     * and return identical rows. So the two spellings are one query, and this
+     * asserts they compile to one predicate rather than asserting the text
+     * twice — if they ever diverge, this is the test that says so.
+     */
+    test.each([
+      ["equals", "postgres"],
+      ["not", "postgres"],
+      ["equals", "sqlite"],
+      ["not", "sqlite"],
+    ] as const)("%s: null is equals: JsonNull, on %s", (key, dialect) => {
+      const path = dialect === "sqlite" ? "$.a" : ["a"];
+      const text = dialect === "sqlite" ? sqliteText : pgText;
+      expect(text({ where: { metadata: { path, [key]: null } } })).toBe(
+        text({ where: { metadata: { path, [key]: JsonNull } } }),
+      );
+    });
+
+    /**
+     * **The other operators still refuse it, and each keeps its own sentence.**
      *
-     * The `array_contains` row asserts the other sentence for the same kind of
-     * reason: that operator does not extract with `#>>`, so its refusal names
-     * the raw bind and `x @> NULL` instead of the text collapse.
+     * The `string_*` rows already threw before the `null` guard existed, from
+     * the non-string guard, with the `'%null%'` reasoning — so a class
+     * assertion passes either way and leaves the guard's *placement* unpinned.
+     * It sits deliberately **after** that guard so the better message survives;
+     * moving it above used to leave all 153 tests green while
+     * `string_contains: null` silently swapped its message for the generic one.
+     *
+     * The `array_contains` row asserts the third sentence for the same kind of
+     * reason: that operator does not compare an extracted scalar, so its
+     * refusal names the raw bind and `x @> NULL` instead.
+     *
+     * The numeric rows say *"Prisma refuses it here too"* and that is measured,
+     * not assumed: `{ path: ["a"], gt: null }` panics Prisma's query engine —
+     * "JSON target types only accept strings or numbers, found: null" — rather
+     * than compiling. The message used to promise gemi would answer it later.
      */
     const postgresOperators = [
-      ["equals", /null cannot be compared through a JSON path/],
-      ["not", /null cannot be compared through a JSON path/],
-      ["gt", /null cannot be compared through a JSON path/],
-      ["lte", /null cannot be compared through a JSON path/],
+      ["gt", /compares the extracted value as a number/],
+      ["lte", /compares the extracted value as a number/],
       ["string_contains", /'%null%', which runs and returns the wrong rows/],
       ["array_contains", /null cannot be tested for containment/],
     ] as const;
@@ -1468,21 +1615,19 @@ describe("json path filters", () => {
 
     // SQLite offers only the six its dialect answers; the other four raise the
     // dialect refusal first, which is a different message and already pinned.
-    test.each([
-      ["equals", /null cannot be compared through a JSON path/],
-      ["not", /null cannot be compared through a JSON path/],
-      ["string_ends_with", /'%null%', which runs and returns the wrong rows/],
-    ] as const)("%s on sqlite", (key, message) => {
+    test("string_ends_with on sqlite", () => {
       const compile = () =>
-        sqliteText({ where: { metadata: { path: "$.a", [key]: null } } });
+        sqliteText({
+          where: { metadata: { path: "$.a", string_ends_with: null } },
+        });
       expect(compile).toThrow(InvalidArgumentError);
-      expect(compile).toThrow(message);
+      expect(compile).toThrow(/'%null%', which runs and returns the wrong rows/);
     });
 
     /**
-     * The load-bearing negative: only the *bare* operand is refused. A `null`
-     * inside a document under `array_contains` is an ordinary JSON value, and
-     * containment against `[null]` is a question Postgres answers.
+     * The load-bearing negative: only the *bare* operand is refused under
+     * `array_contains`. A `null` inside a document is an ordinary JSON value,
+     * and containment against `[null]` is a question Postgres answers.
      */
     test("a null inside an array_contains document still compiles", () => {
       const args = { where: { metadata: { path: ["a"], array_contains: [null] } } };
@@ -1494,7 +1639,7 @@ describe("json path filters", () => {
     });
 
     /**
-     * Nothing of it reaches the SQL, which is the actual defect. The message is
+     * Under a refusing operator, nothing of it reaches the SQL. The message is
      * asserted alongside because a bare `text === ""` passes for *any* throw,
      * including one from an unrelated future guard — it would say "no SQL was
      * built" where it means "this guard built no SQL".
@@ -1503,11 +1648,11 @@ describe("json path filters", () => {
       let text = "";
       let message = "";
       try {
-        text = pgText({ where: { metadata: { path: ["a"], equals: null } } });
+        text = pgText({ where: { metadata: { path: ["a"], gt: null } } });
       } catch (error) {
         message = (error as Error).message;
       }
-      expect(message).toMatch(/null cannot be compared through a JSON path/);
+      expect(message).toMatch(/compares the extracted value as a number/);
       expect(text).toBe("");
     });
   });

@@ -11,6 +11,9 @@ import { commandConfigDefaults } from "../console/config";
 import { isUnfinishedBuilder } from "../console/builder";
 import { CronJob } from "./cron/CronJob";
 import { scheduleConfigDefaults } from "./cron/config";
+import { eventConfigDefaults } from "./events/config";
+import type { EventClass } from "./events/Event";
+import { Listener, type ListenerClass } from "./events/Listener";
 import { Job } from "./queue/Job";
 import { queueConfigDefaults } from "./queue/config";
 
@@ -228,4 +231,159 @@ function refuseUnfinishedBuilders(files: string[]): void {
       `    export default defineCommand("my-command")\n` +
       `      .handle(async ({ line }) => { line("hello") })`,
   );
+}
+
+/**
+ * The `Listener` subclasses under `dir`, defaulting to the config slice's
+ * `app/listeners`.
+ *
+ * This is what an `events` config slice with no `listeners` key resolves to.
+ * Call it directly to ask what an application would register: every listener,
+ * in the order it would register them.
+ *
+ * Only listeners are walked. Event classes are never discovered — each is
+ * imported by the listener that binds to it and by the code that dispatches it,
+ * so there is nothing a walk over them would find that is not already in the
+ * module graph.
+ *
+ * **Known residual, matching jobs and cron.** `discoverClasses` excludes the
+ * `base` it is handed and not intermediates, so an abstract listener base
+ * written in `listenersDir` and extended by its siblings is discovered and
+ * registered alongside them — constructed, with its `handle` called, on every
+ * dispatch of whatever event it declares. Keep shared bases outside the
+ * directory.
+ *
+ * Every file underneath is imported, so calling this runs the app's listener
+ * modules — the cost `discoverClasses` documents at length, paid once per call.
+ *
+ * @throws DiscoveryError if a discovered listener declares no `static event`.
+ */
+export async function discoverListeners(
+  dir: string = eventConfigDefaults().listenersDir,
+): Promise<ListenerClass[]> {
+  const resolved = resolveDir(dir);
+  warnIfSourceIsMissing(resolved, "event listeners", "events");
+
+  const listeners = (await discoverClasses(
+    resolved,
+    Listener,
+  )) as ListenerClass[];
+
+  refuseListenersWithNoEvent(listeners);
+  warnIfListenerNameWillNotSurviveTheBuild(listeners);
+  warnIfEventNameWillNotSurviveTheBuild(listeners);
+
+  return listeners;
+}
+
+/**
+ * Stops the walk for a listener that binds to nothing.
+ *
+ * `static event` is declared as required on the base and the compiler still
+ * cannot see it missing: every subclass inherits the declaration whether or not
+ * it assigns to one, so `typeof SomeListener` type-checks either way. What the
+ * author gets instead is a file that is imported, registered under no name, and
+ * never called — the silence this whole module is arranged against.
+ *
+ * A throw rather than a warning, because there is no reading of a listener with
+ * no event under which the author meant it. The usual cause is the residual
+ * above: an abstract base sharing a gate between two listeners, sitting in
+ * `listenersDir` where the walk finds it. Moving it out is the fix, and the
+ * message says so — the alternative, excluding it by some guess about
+ * abstractness, is how a discovery pass ends up quietly covering less than the
+ * directory holds.
+ */
+function refuseListenersWithNoEvent(listeners: ListenerClass[]): void {
+  const orphans = listeners.filter((listener) => !listener.event);
+  if (orphans.length === 0) return;
+
+  throw new DiscoveryError(
+    `${orphans
+      .map((listener) => listener.name)
+      .join(", ")} declare no \`static event\`, so there is no event name to ` +
+      `register them under and their \`handle\` would never run. Every ` +
+      `listener binds to exactly one event:\n\n` +
+      `    static event = UserRegistered;\n\n` +
+      `If this is an abstract base its subclasses extend, move it out of the ` +
+      `listeners directory — the walk excludes gemi's \`Listener\` and ` +
+      `nothing else, so a base sitting beside its subclasses is registered ` +
+      `and run like one of them.`,
+  );
+}
+
+/**
+ * Says something about a discovered listener that never declared `static name`.
+ *
+ * The hazard is `warnIfNameWillNotSurviveTheBuild`'s, one subsystem over: a
+ * `static name = "..."` class field defines a *writable* own property while the
+ * implicit class binding does not, and a minifier renames the binding while
+ * leaving the string literal alone. The two spellings are indistinguishable by
+ * value — both read `"SendWelcomeEmail"` in development — so the descriptor is
+ * the only thing that tells them apart, and the difference only becomes visible
+ * in a production build.
+ *
+ * A warning rather than a refusal, because a *sync* listener's name has no
+ * second half to disagree with: every reader of it comes from this same
+ * source-side walk, so a minified build and this walk cannot produce two
+ * different strings for it. A **queued** listener does have one — the name is
+ * the queue's key and it crosses a JSON boundary — and that case is refused
+ * outright, by `jobForListener`, at the point the listener is registered with
+ * the queue rather than here. This walk cannot tell the two apart without
+ * constructing every listener it found; the registry constructs them anyway.
+ */
+function warnIfListenerNameWillNotSurviveTheBuild(listeners: ListenerClass[]) {
+  for (const listener of listeners) {
+    if (Object.getOwnPropertyDescriptor(listener, "name")?.writable) continue;
+
+    console.warn(
+      `Event listener ${listener.name} does not declare \`static name\`, so ` +
+        `it is registered under its class name, which a production build ` +
+        `renames. Nothing reads that name across a build boundary while the ` +
+        `listener is sync, which is why this is a warning — but adding ` +
+        `\`queued = true\` to it is refused at boot for the same reason, ` +
+        `because the queue's key is that string. Add: static name = ` +
+        `"${listener.name}";`,
+    );
+  }
+}
+
+/**
+ * Says something about the *event* a discovered listener binds to, when that
+ * event's name is the implicit class binding.
+ *
+ * This is the check that matters from the first dispatch, and it is the reason
+ * `discoverListeners` reads `static event` at all. The registry is keyed by the
+ * event's name; the dispatcher supplies that name from the class it constructs.
+ * A production build minifies the server entry and the app code reachable from
+ * it — the controller, and the event class it imports in order to dispatch —
+ * while discovery imports `app/listeners/*.ts` from source, and those files
+ * import `app/events/*.ts` from source too. Two module graphs, two class
+ * objects, and an implicit `.name` that reads `"UserRegistered"` on one side
+ * and `"D"` on the other. The dispatch then finds no listeners, which is legal,
+ * normal, and completely silent.
+ *
+ * A declared `static name` is a string literal, which survives minification
+ * intact, and the two halves agree again.
+ *
+ * Checked through the descriptor rather than the string, and not by comparing
+ * `event.name` to anything: in development the two spellings produce the same
+ * value, so a check on the string would be a tautology that passes forever.
+ */
+function warnIfEventNameWillNotSurviveTheBuild(listeners: ListenerClass[]) {
+  const warned = new Set<EventClass>();
+
+  for (const { event } of listeners) {
+    if (warned.has(event)) continue;
+    if (Object.getOwnPropertyDescriptor(event, "name")?.writable) continue;
+    warned.add(event);
+
+    console.warn(
+      `Event ${event.name} does not declare \`static name\`, so it is ` +
+        `dispatched under its class name. A production build minifies the ` +
+        `code that dispatches it and renames the class, while discovery reads ` +
+        `the listener's copy from source and does not — so the dispatch would ` +
+        `reach no listener in production and nowhere else. Add: ` +
+        `static name = "${event.name}";`,
+    );
+  }
 }
