@@ -4,6 +4,7 @@ import { ServerDataProvider } from "./ServerDataProvider";
 import { ClientRouter } from "./ClientRouter";
 import type { QueryConfig } from "./QueryManagerContext";
 import { ErrorBoundary } from "react-error-boundary";
+import { initialViewModulesReady } from "./ComponentContext";
 
 export interface InitOptions {
   /**
@@ -39,38 +40,45 @@ export function init(
   if (typeof window !== "undefined" && (window as any).render_error) {
     createRoot(document.body).render(<StackTrace />);
   } else {
-    hydrateRoot(
-      document,
-      <>
-        <></>
-        <></>
-        <ErrorBoundary fallback={<div />}>
-          <ServerDataProvider>
-            <ClientRouter
-              RootLayout={RootLayout}
-              queryConfig={options.queryConfig}
-            />
-          </ServerDataProvider>
-        </ErrorBoundary>
-      </>,
-      {
-        onCaughtError: (error) => {
-          console.error(error);
-          // @ts-ignore
-          if (import.meta.env.DEV) {
-            const ErrorOverlay = customElements.get("vite-error-overlay");
-            if (ErrorOverlay) {
-              const overlay = new ErrorOverlay({
-                message: (error as any).message,
-                stack: (error as any).stack || "",
-              });
-              document.body.appendChild(overlay);
-            }
-          }
-        },
-      },
-    );
+    // Held until the current route's view chunks are in the registry, so the
+    // first client render resolves them synchronously instead of suspending
+    // every route segment mid-hydration. See `initialViewModulesReady`.
+    void initialViewModulesReady.then(() => hydrate(RootLayout, options));
   }
+}
+
+function hydrate(RootLayout: ComponentType<any>, options: InitOptions) {
+  hydrateRoot(
+    document,
+    <>
+      <></>
+      <></>
+      <ErrorBoundary fallback={<div />}>
+        <ServerDataProvider>
+          <ClientRouter
+            RootLayout={RootLayout}
+            queryConfig={options.queryConfig}
+          />
+        </ServerDataProvider>
+      </ErrorBoundary>
+    </>,
+    {
+      onCaughtError: (error) => {
+        console.error(error);
+        // @ts-ignore
+        if (import.meta.env.DEV) {
+          const ErrorOverlay = customElements.get("vite-error-overlay");
+          if (ErrorOverlay) {
+            const overlay = new ErrorOverlay({
+              message: (error as any).message,
+              stack: (error as any).stack || "",
+            });
+            document.body.appendChild(overlay);
+          }
+        }
+      },
+    },
+  );
 }
 
 export function create(

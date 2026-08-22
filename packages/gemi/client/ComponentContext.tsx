@@ -47,6 +47,13 @@ export function loadViewModule(name: string): Promise<any> {
     // Before the dictionary await, not after: this exists to surface the view's
     // `Loading` export the moment it lands, and holding it behind a network
     // fetch would put back the very `null` flash it removes.
+    //
+    // On a cold load this fires at the worst possible moment — the boundary it
+    // wakes is still suspended on the very `lazy()` this module is resolving,
+    // and an update there costs the boundary its server HTML. Wrapping it in a
+    // transition does not help (`hydrationBlank.test.tsx` pins that); what
+    // makes it harmless is `initialViewModulesReady`, which puts the initial
+    // route's modules in the registry before anything subscribes to it.
     if (isNew) {
       for (const listener of viewModuleListeners) listener();
     }
@@ -93,6 +100,49 @@ if (typeof window !== "undefined" && process.env.NODE_ENV !== "test") {
   for (const viewName of flattenComponentTree(componentTree)) {
     viewImportMap[viewName] = lazy(() => loadViewModule(viewName));
   }
+}
+
+/**
+ * Resolves once the views the document was server-rendered with are in the
+ * registry — which is what `init` waits for before it hydrates.
+ *
+ * Hydrating before then is what made a cold load blank its own content. The
+ * server renders each route segment through a real component, so the shell
+ * ships complete `<Suspense>` boundaries; the browser renders the same
+ * segments through `lazy()`, so on the first client render every one of them
+ * suspends. React keeps the server HTML up while a boundary is merely
+ * suspended, but the moment any update reaches one — the module registry
+ * announcing the chunk, an effect, a settling query — it gives up on that
+ * boundary and shows the fallback instead, which for a view without a
+ * `Loading` export is `null`. The page then sits with its layout and no
+ * content until the chunk's `import()` and dictionaries resolve.
+ *
+ * Awaiting the imports first costs nothing on the wire (the shell already
+ * emits a `modulepreload` for each of them) and makes `lazy()` return the
+ * component synchronously, so the initial render never suspends and there is
+ * no half-hydrated boundary for a later update to blank.
+ *
+ * Never rejects: a chunk that fails to load must still leave the app to
+ * hydrate and surface the error through the route's error boundary.
+ */
+export const initialViewModulesReady: Promise<unknown> =
+  typeof window !== "undefined" && process.env.NODE_ENV !== "test"
+    ? Promise.all(
+        initialViewNames(window.__GEMI_DATA__).map((name) =>
+          loadViewModule(name).catch(() => null),
+        ),
+      )
+    : Promise.resolve();
+
+/**
+ * The view names the server rendered this document with — the same lookup
+ * `ClientRouterProvider` seeds its route state from, so the two agree on what
+ * the first render is going to mount.
+ */
+function initialViewNames(data: ServerDataContextValue | undefined): string[] {
+  if (!data?.router) return [];
+  if (data.router.is404) return ["404"];
+  return data.routeManifest?.[data.router.pathname] ?? ["404"];
 }
 
 export const ComponentsContext = createContext({
