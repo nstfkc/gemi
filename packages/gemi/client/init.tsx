@@ -40,10 +40,24 @@ export function init(
   if (typeof window !== "undefined" && (window as any).render_error) {
     createRoot(document.body).render(<StackTrace />);
   } else {
-    // Held until the current route's view chunks are in the registry, so the
-    // first client render resolves them synchronously instead of suspending
-    // every route segment mid-hydration. See `initialViewModulesReady`.
-    void initialViewModulesReady.then(() => hydrate(RootLayout, options));
+    // Held until the current route's view chunks are in the registry, so no
+    // segment's first registration lands on a boundary that is mid-hydration.
+    // See `initialViewModulesReady`.
+    //
+    // The `.catch` re-throws out of the microtask for the same reason the
+    // bootstrap script wraps the entry `import()` that way: hydration used to
+    // run inside the entry's evaluation, so a throw from `hydrateRoot` — a
+    // `RootLayout` that fails at module scope, a root already attached —
+    // reached that handler. Deferring it past a `.then` puts the throw in a
+    // rejection no `window.onerror` reporter sees, and the page sits
+    // permanently unhydrated with nothing raised.
+    void initialViewModulesReady
+      .then(() => hydrate(RootLayout, options))
+      .catch((e) => {
+        setTimeout(() => {
+          throw e;
+        });
+      });
   }
 }
 

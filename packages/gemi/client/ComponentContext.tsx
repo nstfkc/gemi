@@ -103,6 +103,17 @@ if (typeof window !== "undefined" && process.env.NODE_ENV !== "test") {
 }
 
 /**
+ * How long hydration will wait for those modules before giving up on them.
+ *
+ * Only a load that never *settles* reaches this — a stalled HTTP/2 stream, a
+ * service worker that never answers. A rejection is already handled. Without
+ * a deadline that case costs the whole document: nothing hydrates, and
+ * nothing is raised. Expiring it just puts the page back on the pre-#352 path
+ * for one route, which is a bad outcome and not a dead one.
+ */
+const INITIAL_VIEW_MODULES_DEADLINE_MS = 2000;
+
+/**
  * Resolves once the views the document was server-rendered with are in the
  * registry — which is what `init` waits for before it hydrates.
  *
@@ -117,21 +128,48 @@ if (typeof window !== "undefined" && process.env.NODE_ENV !== "test") {
  * `Loading` export is `null`. The page then sits with its layout and no
  * content until the chunk's `import()` and dictionaries resolve.
  *
- * Awaiting the imports first costs nothing on the wire (the shell already
- * emits a `modulepreload` for each of them) and makes `lazy()` return the
- * component synchronously, so the initial render never suspends and there is
- * no half-hydrated boundary for a later update to blank.
+ * What this buys is NOT a synchronous `lazy()`. `lazy` suspends on its first
+ * render no matter what: the initializer calls the ctor, attaches `.then`,
+ * and re-reads a status its callback only sets a microtask later, so even an
+ * already-settled promise goes to `Pending` and throws. The render still
+ * suspends here — it just suspends *untouched*. `loadViewModule` notifies its
+ * listeners only on a view's FIRST registration, so once the module is in
+ * `viewModules` the call `lazy` makes during hydration is a silent one, the
+ * boundary sees no update, and React keeps the server HTML until it settles.
  *
- * Never rejects: a chunk that fails to load must still leave the app to
- * hydrate and surface the error through the route's error boundary.
+ * The invariant to preserve, then, is "no first registration for a mounted
+ * view happens during hydration" — not anything about how `lazy` resolves.
+ * Notifying on every call, or memoizing the promise so the `isNew` guard
+ * stops being the discriminator, would reintroduce the flash while leaving
+ * this preload apparently intact.
+ *
+ * It is not free. The view chunks themselves are already `modulepreload`ed by
+ * the shell, but `loadViewModule` also awaits `preloadDictionaries`, and
+ * dictionary locale chunks are dynamic imports, which `collectModulePreloads`
+ * deliberately leaves out of those hints. So hydration is gated on a
+ * serially-discovered round trip — view chunk, parse, dictionary chunk — and
+ * the layout's own handlers stay dead across it. That wait is deliberate
+ * rather than incidental: a view whose dictionary is still in flight suspends
+ * on `use()` inside this same boundary, which is the same blank arriving by a
+ * different route. Warming the current locale's dictionaries from the shell
+ * would buy the interactivity back; awaiting less here would not.
+ *
+ * Never rejects and never waits forever: a chunk that fails or hangs must
+ * still leave the app to hydrate and surface the error through the route's
+ * error boundary.
  */
 export const initialViewModulesReady: Promise<unknown> =
   typeof window !== "undefined" && process.env.NODE_ENV !== "test"
-    ? Promise.all(
-        initialViewNames(window.__GEMI_DATA__).map((name) =>
-          loadViewModule(name).catch(() => null),
+    ? Promise.race([
+        Promise.all(
+          initialViewNames(window.__GEMI_DATA__).map((name) =>
+            loadViewModule(name).catch(() => null),
+          ),
         ),
-      )
+        new Promise((resolve) =>
+          setTimeout(resolve, INITIAL_VIEW_MODULES_DEADLINE_MS),
+        ),
+      ])
     : Promise.resolve();
 
 /**
