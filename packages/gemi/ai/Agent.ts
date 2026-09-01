@@ -71,7 +71,7 @@ export class Agent<const T extends AgentTool<any, any>[] = AgentTool<any, any>[]
   skills: any[];
 
   static create<const T extends AgentTool<any, any>[]>(params: CreateAgentParams<T>): Agent<T> {
-    const agent = new Agent();
+    const agent = new Agent<T>();
     agent.tools = params.tools;
     return agent;
   }
