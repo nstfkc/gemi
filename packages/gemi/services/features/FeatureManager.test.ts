@@ -321,3 +321,186 @@ describe("declarations", () => {
     expect(await features.forClient()).toEqual({});
   });
 });
+
+describe("list", () => {
+  test("describes every declared feature", async () => {
+    const features = new FeatureManager(
+      {
+        ...featuresConfigDefaults(),
+        features: {
+          "new-checkout": defineFeature({
+            describe: "Rebuilt checkout",
+            rollout: 20,
+            salt: "checkout-v2",
+          }),
+          "admin-only": defineFeature({ when: () => true }),
+          "internal-tools": defineFeature({ serverOnly: true }),
+        },
+        source: new StaticFeatureFlagSource({ "new-checkout": true }),
+      } as any,
+      () => {},
+    );
+
+    expect(await features.list()).toEqual([
+      {
+        key: "new-checkout",
+        describe: "Rebuilt checkout",
+        rollout: 20,
+        targeted: false,
+        serverOnly: false,
+        salt: "checkout-v2",
+        active: true,
+      },
+      {
+        key: "admin-only",
+        describe: undefined,
+        rollout: undefined,
+        targeted: true,
+        serverOnly: false,
+        salt: undefined,
+        active: undefined,
+      },
+      {
+        key: "internal-tools",
+        describe: undefined,
+        rollout: undefined,
+        targeted: false,
+        serverOnly: true,
+        salt: undefined,
+        active: undefined,
+      },
+    ]);
+  });
+
+  test("a feature with no row is not a feature switched off", async () => {
+    const [untouched, off] = await manager({ "pricing-redesign": false }).list();
+
+    // The distinction an admin list exists to show: nobody has touched
+    // `new-checkout`, whereas somebody decided `pricing-redesign` is off.
+    expect(untouched.active).toBe(undefined);
+    expect(off.active).toBe(false);
+  });
+
+  test("lists server-only features, which `forClient` omits", async () => {
+    const features = manager({ "internal-tools": true });
+
+    expect((await features.list()).map((f) => f.key)).toContain("internal-tools");
+    expect(await inRequest(() => features.forClient())).not.toHaveProperty("internal-tools");
+  });
+
+  test("the declarations still list when the subsystem is off, without a query", async () => {
+    const source = new StaticFeatureFlagSource({ "new-checkout": true });
+    const load = vi.spyOn(source, "load");
+    const features = manager({}, { enabled: false, source });
+
+    const list = await features.list();
+
+    expect(list.map((f) => f.key)).toEqual([
+      "new-checkout",
+      "pricing-redesign",
+      "internal-tools",
+      "admin-only",
+    ]);
+    // `enabled: false` means nothing reads the table, so every switch is
+    // unknown rather than off — the code declarations are all there is to show.
+    expect(list.every((f) => f.active === undefined)).toBe(true);
+    expect(load).not.toHaveBeenCalled();
+  });
+
+  test("no declarations, no list and no query", async () => {
+    const source = new StaticFeatureFlagSource({ "new-checkout": true });
+    const load = vi.spyOn(source, "load");
+    const features = new FeatureManager(
+      { ...featuresConfigDefaults(), features: undefined, source } as any,
+      () => {},
+    );
+
+    expect(await features.list()).toEqual([]);
+    expect(load).not.toHaveBeenCalled();
+  });
+});
+
+describe("invalidate", () => {
+  test("picks up a write the TTL would have hidden", async () => {
+    let active = false;
+    const source = new (class extends StaticFeatureFlagSource {
+      async load() {
+        return [{ key: "new-checkout", active }];
+      }
+    })();
+    const features = manager({}, { source, ttl: 3600 });
+
+    expect(await features.enabled("new-checkout")).toBe(false);
+
+    active = true;
+    await features.invalidate();
+
+    expect(await features.enabled("new-checkout")).toBe(true);
+  });
+
+  test("does not settle on a load that started before the write", async () => {
+    let active = false;
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let first = true;
+    const source = new (class extends StaticFeatureFlagSource {
+      async load() {
+        // Read at entry: the first load queried the table before the write and
+        // returns long after it.
+        const seen = active;
+        if (first) {
+          first = false;
+          await gate;
+        }
+        return [{ key: "new-checkout", active: seen }];
+      }
+    })();
+    const features = manager({}, { source, ttl: 3600 });
+
+    // A load is already in flight, reading the table as it was before the write.
+    const inflight = features.refresh();
+
+    active = true;
+    const invalidated = features.invalidate();
+    release();
+    await inflight;
+    await invalidated;
+
+    // `refresh()` would have resolved on the in-flight load and reported the
+    // pre-write value; the admin's own write has to be visible to the admin.
+    expect(await features.enabled("new-checkout")).toBe(true);
+  });
+
+  test("re-evaluates a feature the request already read", async () => {
+    let active = false;
+    const source = new (class extends StaticFeatureFlagSource {
+      async load() {
+        return [{ key: "new-checkout", active }];
+      }
+    })();
+    const features = manager({}, { source, ttl: 3600 });
+
+    const [before, after] = await inRequest(async () => {
+      const before = await features.enabled("new-checkout");
+      active = true;
+      await features.invalidate();
+      return [before, await features.enabled("new-checkout")];
+    });
+
+    // Without clearing the per-request memo the second read would be answered
+    // from the first, and a handler could never see its own write.
+    expect(before).toBe(false);
+    expect(after).toBe(true);
+  });
+
+  test("touches nothing when the subsystem is off", async () => {
+    const source = new StaticFeatureFlagSource({ "new-checkout": true });
+    const load = vi.spyOn(source, "load");
+
+    await manager({}, { enabled: false, source }).invalidate();
+
+    expect(load).not.toHaveBeenCalled();
+  });
+});

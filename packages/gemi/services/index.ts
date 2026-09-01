@@ -168,6 +168,7 @@ export type { FeatureSubject } from "./features/context";
 export type {
   EvaluationReason,
   FeatureContext,
+  FeatureDescriptor,
   FeatureEvaluation,
 } from "./features/types";
 

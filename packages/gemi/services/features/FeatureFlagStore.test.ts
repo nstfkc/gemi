@@ -232,6 +232,73 @@ describe("failure handling", () => {
   });
 });
 
+describe("invalidate", () => {
+  test("reloads inside the TTL, which get() would not", async () => {
+    let live = "alpha";
+    const source = new ScriptedSource(async () => rows(live));
+    const store = new FeatureFlagStore(source, declared, 60_000);
+
+    await store.get();
+    live = "beta";
+
+    await store.get();
+    expect(source.calls).toBe(1);
+
+    const snapshot = await store.invalidate();
+    expect(snapshot.active.get("beta")).toBe(true);
+    expect(source.calls).toBe(2);
+  });
+
+  test("never settles on a load that started before it was called", async () => {
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let live = "alpha";
+    let first = true;
+    const source = new ScriptedSource(async () => {
+      // Read at entry, so the first load is a query that hit the table before
+      // the write below and returns long after it.
+      const seen = live;
+      if (first) {
+        first = false;
+        await gate;
+      }
+      return rows(seen);
+    });
+    const store = new FeatureFlagStore(source, declared, 60_000);
+
+    // In flight, and it read the table before the write below.
+    const inflight = store.refresh();
+    live = "beta";
+    const invalidated = store.invalidate();
+    release();
+
+    // `refresh()` joins the in-flight load and reports the pre-write table.
+    expect((await inflight).active.get("beta")).toBe(undefined);
+    // `invalidate()` waits it out and issues its own query, so the caller sees
+    // the write it just made.
+    expect((await invalidated).active.get("beta")).toBe(true);
+    expect(source.calls).toBe(2);
+  });
+
+  test("a failed reload keeps the last good snapshot", async () => {
+    let fail = false;
+    const source = new ScriptedSource(async () => {
+      if (fail) throw new Error("down");
+      return rows("alpha");
+    });
+    const store = new FeatureFlagStore(source, declared, 60_000, () => {});
+
+    await store.get();
+    fail = true;
+
+    const snapshot = await store.invalidate();
+    expect(snapshot.active.get("alpha")).toBe(true);
+    expect(snapshot.unavailable).toBe(false);
+  });
+});
+
 describe("peek", () => {
   test("does not trigger a load", async () => {
     const source = new ScriptedSource(async () => rows("alpha"));

@@ -4,7 +4,7 @@ import { contextFromRequest, contextFromSubject, type FeatureSubject } from "./c
 import type { Feature, FeatureRegistry } from "./defineFeature";
 import { evaluateFeature } from "./evaluate";
 import { FeatureFlagStore } from "./FeatureFlagStore";
-import type { FeatureContext, FeatureEvaluation } from "./types";
+import type { FeatureContext, FeatureDescriptor, FeatureEvaluation } from "./types";
 
 /**
  * Evaluation bound to one explicit context — what `Features.for(...)` returns.
@@ -62,6 +62,26 @@ export class FeatureManager {
     return this.declared;
   }
 
+  /**
+   * Every declared feature with its switch — what an admin list renders.
+   *
+   * Server-side only. `rollout` and `targeted` together describe who is in an
+   * experiment, which is a fact about the population and not for the browser.
+   */
+  async list(): Promise<FeatureDescriptor[]> {
+    const active = await this.switches();
+
+    return Object.entries(this.declared).map(([key, feature]) => ({
+      key,
+      describe: feature.describe,
+      rollout: feature.rollout,
+      targeted: feature.when !== undefined,
+      serverOnly: feature.serverOnly,
+      salt: feature.salt,
+      active: active.get(key),
+    }));
+  }
+
   /** Reloads the snapshot in this process now. */
   async refresh(): Promise<void> {
     if (!this.config.enabled) return;
@@ -71,6 +91,29 @@ export class FeatureManager {
     // boot-time complaint about an unused feature.
     if (Object.keys(this.declared).length === 0) return;
     await this.store.refresh();
+  }
+
+  /**
+   * Invalidates this process's cached switches after a write to the table.
+   *
+   * Process-local, because that is all a single process can honestly promise:
+   * every *other* instance is still serving its own snapshot and picks the
+   * change up within `ttl`. What this buys is the one window that would
+   * otherwise read as a bug — the admin who flips a switch and reloads the page
+   * they flipped it on, and is told for the next thirty seconds that nothing
+   * happened.
+   */
+  async invalidate(): Promise<void> {
+    // The per-request memo is why this is not simply `refresh()`. A handler that
+    // toggles a row and then reads the feature back in the same request would
+    // otherwise be answered from the evaluation it memoised before the write.
+    // Cleared unconditionally: it costs nothing, and the early returns below are
+    // about the database, which the memo is not.
+    RequestContext.getStore()?.featureEvaluations?.clear();
+
+    if (!this.config.enabled) return;
+    if (Object.keys(this.declared).length === 0) return;
+    await this.store.invalidate();
   }
 
   async enabled(key: string): Promise<boolean> {
@@ -171,6 +214,20 @@ export class FeatureManager {
     }
 
     return values;
+  }
+
+  /**
+   * The whole switch map in one load, for `list()`.
+   *
+   * Separate from `switchFor` because listing asks about every key at once and
+   * has no use for `unavailable` — a store that has never loaded and a table
+   * with no rows both mean "nothing is switched on", which `list()` already
+   * renders as `active: undefined` per feature.
+   */
+  private async switches(): Promise<Map<string, boolean>> {
+    if (!this.config.enabled) return new Map();
+    if (Object.keys(this.declared).length === 0) return new Map();
+    return (await this.store.get()).active;
   }
 
   private async switchFor(

@@ -62,3 +62,40 @@ export interface FeatureEvaluation {
   value: boolean;
   reason: EvaluationReason;
 }
+
+/**
+ * One declared feature, flattened for a human-facing list — an admin screen, a
+ * console command.
+ *
+ * The declarations are what exists: a feature is on this list because the code
+ * declares it, never because somebody inserted a row. The database contributes
+ * exactly one field, `active`, which is the only thing it owns.
+ *
+ * `when` is not here and cannot be. It is a function over the viewer, so the
+ * honest answer to "who does this target" is only ever "run it" — `targeted`
+ * reports that targeting exists, and `Features.for(subject).explain(key)`
+ * answers it for one subject at a time.
+ */
+export interface FeatureDescriptor {
+  key: string;
+  /** `describe` from the declaration. */
+  describe?: string;
+  /** `0`–`100`, or `undefined` for "everyone". */
+  rollout?: number;
+  /** Whether the declaration carries a `when`. The function itself stays put. */
+  targeted: boolean;
+  /** Evaluated on the server, never in the SSR payload. */
+  serverOnly: boolean;
+  /** The declared bucketing salt, or `undefined` when it is the key. */
+  salt?: string;
+  /**
+   * The switch.
+   *
+   * `undefined` means **no row** — a feature that has been deployed but never
+   * switched on, which is not the same as a row that says `false`, and is a
+   * difference an admin list has to show: one is untouched, the other is
+   * somebody's decision. Also `undefined` throughout when `enabled: false` turns
+   * the subsystem off, because then nothing reads the table at all.
+   */
+  active: boolean | undefined;
+}

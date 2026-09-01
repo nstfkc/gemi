@@ -71,6 +71,31 @@ export class FeatureFlagStore {
     return this.inflight;
   }
 
+  /**
+   * Reloads for a caller that has just written to the table and needs to see
+   * its own write.
+   *
+   * Not the same as `refresh()`, and the difference is the whole point.
+   * `refresh()` joins whatever load is already in flight — that is what keeps a
+   * cold start under load down to one query — but a load already in flight
+   * issued its query at some earlier moment, possibly before the write
+   * committed. An admin that toggled a row and called `refresh()` could
+   * therefore be handed, and return to the browser, a snapshot that predates the
+   * toggle: the screen says the switch is still off a moment after flipping it.
+   *
+   * So this waits for that load to settle and starts a fresh one behind it. Any
+   * load created after that point was created after this call, and so queries
+   * after the write. The extra query is paid on an operator action, not on the
+   * request path.
+   */
+  async invalidate(): Promise<FlagSnapshot> {
+    // `catch` because `load()` never rejects today, but a rejection here would
+    // skip the reload entirely and leave the stale snapshot in place — the exact
+    // failure this method exists to prevent.
+    await this.inflight?.catch(() => {});
+    return await this.refresh();
+  }
+
   /** What is cached right now, without triggering a load. */
   peek(): FlagSnapshot | null {
     return this.snapshot;

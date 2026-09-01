@@ -1,7 +1,7 @@
 import type { FeatureKey } from "../client/rpc";
 import type { FeatureSubject } from "../services/features/context";
 import { FeatureManager, type FeatureScope } from "../services/features/FeatureManager";
-import type { FeatureEvaluation } from "../services/features/types";
+import type { FeatureDescriptor, FeatureEvaluation } from "../services/features/types";
 import { Facade } from "./Facade";
 
 /**
@@ -67,8 +67,57 @@ export class Features extends Facade {
     return this.getFacadeRoot().for(subject);
   }
 
+  /**
+   * Every feature declared in the code, with its switch — the list an admin
+   * screen renders.
+   *
+   * The declarations are what exists. A feature is here because `app/features`
+   * declares it, never because a row was inserted; `active` is `undefined` for a
+   * feature that has been deployed but never switched on, which is deliberately
+   * distinct from a row that says `false`.
+   *
+   * **Server-side only.** `rollout` and `targeted` describe who is in an
+   * experiment, which is not a fact to hand the browser.
+   *
+   * ```ts
+   * // app/http/controllers/AdminFeatureController.ts
+   * public async index() {
+   *   return { features: await Features.list() };
+   * }
+   * ```
+   */
+  static list(): Promise<FeatureDescriptor[]> {
+    return this.getFacadeRoot().list();
+  }
+
   /** Reloads this process's snapshot now, rather than waiting for the TTL. */
   static refresh(): Promise<void> {
     return this.getFacadeRoot().refresh();
+  }
+
+  /**
+   * Call this after writing to the `FeatureFlag` table.
+   *
+   * ```ts
+   * public async update(request: HttpRequest<{ active: boolean }>) {
+   *   await FeatureFlag.update({ where: { key }, data: { active } });
+   *   await Features.invalidate();
+   *   return { features: await Features.list() };
+   * }
+   * ```
+   *
+   * Unlike `refresh()` this never settles on data older than the moment it was
+   * called, so the `list()` above reflects the write that precedes it. It also
+   * clears the request's evaluation memo, so a feature read earlier in the same
+   * request is re-evaluated rather than answered from before the write.
+   *
+   * **Process-local.** The other instances are still serving their own
+   * snapshots and converge within `ttl` — there is no cross-instance
+   * invalidation. What this fixes is the window that reads as a bug: the admin
+   * who flips a switch and is told for the next thirty seconds that nothing
+   * happened.
+   */
+  static invalidate(): Promise<void> {
+    return this.getFacadeRoot().invalidate();
   }
 }

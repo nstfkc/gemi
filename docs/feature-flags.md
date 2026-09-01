@@ -153,7 +153,7 @@ export default defineFeaturesConfig({
 });
 ```
 
-`ttl` is the propagation delay in seconds — how long a loaded snapshot is reused before the next refresh. It is how long switching something off takes to reach every instance, since there is no cross-instance invalidation. Lower it if thirty seconds is too long during an incident; the cost is one query per instance per window.
+`ttl` is the propagation delay in seconds — how long a loaded snapshot is reused before the next refresh. It is how long switching something off takes to reach every instance, since there is no cross-instance invalidation. `Features.invalidate()` collapses that window for the process that made the write — see [An admin screen](#an-admin-screen) — but the others still wait out the TTL. Lower it if thirty seconds is too long during an incident; the cost is one query per instance per window.
 
 ## Reading a feature
 
@@ -173,12 +173,52 @@ await Features.enabled("new-checkout");
 await Features.explain("new-checkout"); // { value, reason } — server only
 await Features.all(); // the client-visible map
 await Features.for({ user }).enabled("digest-v2");
+await Features.list(); // every declared feature and its switch
 await Features.refresh(); // reload this process now
+await Features.invalidate(); // reload after writing to the table
 ```
 
 Everything is async. After the boot-time warm-up each call settles in a microtask with no I/O, but the promise is kept because the first call in a cold process does hit the database — and a sync variant would have to answer that window with "off", which is a feature silently vanishing while a deploy rolls.
 
 `explain` is **server-only**. `reason` distinguishes "targeted by name" from "landed in the rollout", which is a fact about the viewer; never serialize it into a response.
+
+## An admin screen
+
+`Features.list()` is the read side. It returns one descriptor per feature the code declares — key, `describe`, `rollout`, `serverOnly`, whether the declaration carries targeting, and the switch:
+
+```typescript
+[
+  { key: "new-checkout", describe: "Rebuilt checkout", rollout: 20, targeted: false, serverOnly: false, salt: undefined, active: true },
+  { key: "digest-v2", describe: undefined, rollout: undefined, targeted: true, serverOnly: false, salt: undefined, active: undefined },
+]
+```
+
+The declarations are what exists. A feature is on the list because `app/features` declares it, never because a row was inserted — a row for an undeclared key is litter and does not appear. `active: undefined` is **no row**: a feature deployed but never switched on, which is not the same as a row that says `false`, and is the distinction the screen has to show. One is untouched, the other is somebody's decision.
+
+The `when` function is not on the descriptor and cannot be. It is a function over the viewer, so the only honest answer to "who does this target" is to run it: `targeted` reports that targeting exists, and `Features.for({ user }).explain("new-checkout")` answers it for one subject.
+
+**Server-side only.** `rollout` and `targeted` describe who is in an experiment.
+
+### Writing the switch
+
+The write is an ordinary `UPDATE` on your own model — the framework owns no mutation path, because the table is yours. What it does own is the cache in front of it:
+
+```typescript
+public async update(request: HttpRequest<{ active: boolean }>) {
+  await FeatureFlag.update({
+    where: { key: request.params.key },
+    data: { active: request.input.get("active") },
+  });
+
+  await Features.invalidate();
+
+  return { features: await Features.list() };
+}
+```
+
+`invalidate()` rather than `refresh()`, for two reasons that both amount to "the admin must see their own write". `refresh()` joins whatever load is already in flight, and that load may have queried before the update committed — so the screen could come back saying the switch is still off a moment after flipping it. And `invalidate()` clears the request's evaluation memo, so a feature this request already read is re-evaluated instead of answered from before the write.
+
+It is **process-local**, like `refresh()`. Every other instance is still serving its own snapshot and converges within `ttl`. What this fixes is the one window that reads as a bug — the operator who flips a switch, reloads, and is told for the next thirty seconds that nothing happened.
 
 ## Hiding a feature's existence
 
