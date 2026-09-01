@@ -1,3 +1,4 @@
+import type { Application } from "../../foundation/Application";
 import { app } from "../../foundation/app";
 import { EventManager } from "./EventManager";
 import { FakeEventManager } from "./FakeEventManager";
@@ -213,9 +214,49 @@ export abstract class Event {
    * The recorder is the framework's, not the app's — it is not exported from
    * `gemi/services`, and `gemi/testing` publishes its type. There is nothing to
    * construct: this is the only thing that makes one.
+   *
+   * **It needs a booted application**, because the swap is the mechanism: there
+   * is no recorder to install into a container that does not exist, and no way
+   * for a `dispatch` to find one. `kernel.boot()` — phase one alone, without
+   * `waitForBoot()` — is enough, since that is what sets the static instance
+   * every `app()` outside a request falls back to. See `applicationToFake`.
    */
   static fake(): FakeEventManager {
-    return FakeEventManager.install(app());
+    return FakeEventManager.install(applicationToFake());
+  }
+}
+
+/**
+ * The application the fake installs into, or the error that says so.
+ *
+ * `app()`'s own message — "Boot a Kernel before resolving services" — is right
+ * and tells the wrong story here. A test calling `Event.fake()` has not asked
+ * to resolve a service; it has asked for a dispatch to be absorbed, and the
+ * reasonable reading of a failure at that line is that the fake is a way *not*
+ * to need an application. It is the opposite: the fake is a container swap, so
+ * the container is the whole mechanism.
+ *
+ * Caught and rethrown rather than checked, because the check would be a second
+ * copy of `app()`'s lookup — the kernel `AsyncLocalStorage` first, the static
+ * instance behind it — and a copy that drifted would send the reader somewhere
+ * the real resolution does not go. Nothing else can be caught by mistake: the
+ * no-token overload resolves nothing and has exactly one throw. The original
+ * rides along as `cause`.
+ */
+function applicationToFake(): Application {
+  try {
+    return app();
+  } catch (cause) {
+    throw new Error(
+      `Event.fake() needs a booted application. The fake works by replacing ` +
+        `the container's EventManager with a recorder, so there has to be a ` +
+        `container to replace it in — and a dispatch finds the recorder the ` +
+        `same way, by resolving from that container. Boot the app's kernel in ` +
+        `the test's setup: \`const kernel = new Kernel(); kernel.boot()\` is ` +
+        `enough on its own, since that is the phase that publishes the ` +
+        `application every dispatch outside a request resolves through.`,
+      { cause },
+    );
   }
 }
 

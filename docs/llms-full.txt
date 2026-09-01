@@ -9093,6 +9093,21 @@ The second assertion is the point of the whole subsystem, in a test. A controlle
 
 While a fake is installed, no listener is constructed, no `handle` runs, nothing is pushed to the queue, and an [`afterCommit`](#deferring-until-the-transaction-commits) event is recorded at the dispatch rather than held for a commit — so a controller test does not have to commit a transaction to see what the controller dispatched.
 
+### It needs a booted application
+
+The swap *is* the mechanism: `Event.fake()` replaces the container's `EventManager` with the recorder, and a `dispatch` finds that recorder by resolving from the same container. Neither half has anywhere to go without an application, so a test with no booted kernel gets an error from `Event.fake()` saying so — not a recorder that quietly sees nothing.
+
+Phase one of the boot is enough. `kernel.boot()` is what publishes the application that a dispatch outside a request resolves through, and a fake short-circuits before the listener registry, so there is nothing for `waitForBoot()` to discover on its behalf:
+
+```typescript
+import Kernel from "@/app/kernel/Kernel";
+
+const kernel = new Kernel();
+kernel.boot();
+```
+
+What the test exercises decides whether it needs more than that — `await kernel.waitForBoot()` to have services and providers up, `kernel.run(() => …)` to put the work inside a request-shaped context. The fake asks for neither.
+
 ### Restore it
 
 ```typescript
