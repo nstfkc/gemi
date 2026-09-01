@@ -62,3 +62,67 @@ export interface FeatureEvaluation {
   value: boolean;
   reason: EvaluationReason;
 }
+
+/**
+ * One declared feature, flattened for a human-facing list — an admin screen, a
+ * console command.
+ *
+ * The declarations are what exists: a feature is on this list because the code
+ * declares it, never because somebody inserted a row. The database contributes
+ * exactly one field, `active`, which is the only thing it owns.
+ *
+ * `when` is not here and cannot be. It is a function over the viewer, so the
+ * honest answer to "who does this target" is only ever "run it" — `targeted`
+ * reports that targeting exists, and `Features.for(subject).explain(key)`
+ * answers it for one subject at a time.
+ */
+export interface FeatureDescriptor {
+  key: string;
+  /** `describe` from the declaration. */
+  describe?: string;
+  /** `0`–`100`, or `undefined` for "everyone". */
+  rollout?: number;
+  /** Whether the declaration carries a `when`. The function itself stays put. */
+  targeted: boolean;
+  /** Evaluated on the server, never in the SSR payload. */
+  serverOnly: boolean;
+  /** The declared bucketing salt, or `undefined` when it is the key. */
+  salt?: string;
+  /**
+   * The switch.
+   *
+   * `undefined` means **no row** — a feature that has been deployed but never
+   * switched on, which is not the same as a row that says `false`, and is a
+   * difference an admin list has to show: one is untouched, the other is
+   * somebody's decision.
+   *
+   * Read it only after checking `FeatureListing.unavailable`. When no snapshot
+   * has ever loaded there are no rows to report and every switch is `undefined`
+   * — which would otherwise state, of a table nobody could read, that nothing in
+   * it has ever been switched on.
+   */
+  active: boolean | undefined;
+}
+
+/**
+ * What `Features.list()` returns.
+ *
+ * A wrapper rather than a bare array because "the switches could not be read" is
+ * one fact about the whole load, not a property of any feature — putting it on
+ * every descriptor would invite reading it off one of them and describe it as
+ * something the declaration says.
+ */
+export interface FeatureListing {
+  /** In declaration order — the order `app/features` lists them. */
+  features: FeatureDescriptor[];
+  /**
+   * No snapshot has ever loaded, so every `active` is **unknown** rather than
+   * absent.
+   *
+   * A screen that ignores this reports a database it cannot reach as a table in
+   * which nothing has ever been switched on. Show it as an error, not as data;
+   * in particular do not offer to flip switches whose current state you do not
+   * know.
+   */
+  unavailable: boolean;
+}

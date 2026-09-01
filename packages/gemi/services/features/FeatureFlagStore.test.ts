@@ -1,6 +1,6 @@
 import { describe, expect, test, vi } from "vitest";
 import { defineFeature } from "./defineFeature";
-import { FeatureFlagStore } from "./FeatureFlagStore";
+import { FeatureFlagStore, FeatureReloadError } from "./FeatureFlagStore";
 import { FeatureFlagSource } from "./sources/FeatureFlagSource";
 
 const declared = {
@@ -229,6 +229,128 @@ describe("failure handling", () => {
     expect((await store.get()).unavailable).toBe(true);
     fail = false;
     expect((await store.refresh()).unavailable).toBe(false);
+  });
+});
+
+describe("invalidate", () => {
+  test("reloads inside the TTL, which get() would not", async () => {
+    let live = "alpha";
+    const source = new ScriptedSource(async () => rows(live));
+    const store = new FeatureFlagStore(source, declared, 60_000);
+
+    await store.get();
+    live = "beta";
+
+    await store.get();
+    expect(source.calls).toBe(1);
+
+    const snapshot = await store.invalidate();
+    expect(snapshot.active.get("beta")).toBe(true);
+    expect(source.calls).toBe(2);
+  });
+
+  test("never settles on a load that started before it was called", async () => {
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let live = "alpha";
+    let first = true;
+    const source = new ScriptedSource(async () => {
+      // Read at entry, so the first load is a query that hit the table before
+      // the write below and returns long after it.
+      const seen = live;
+      if (first) {
+        first = false;
+        await gate;
+      }
+      return rows(seen);
+    });
+    const store = new FeatureFlagStore(source, declared, 60_000);
+
+    // In flight, and it read the table before the write below.
+    const inflight = store.refresh();
+    live = "beta";
+    const invalidated = store.invalidate();
+    release();
+
+    // `refresh()` joins the in-flight load and reports the pre-write table.
+    expect((await inflight).active.get("beta")).toBe(undefined);
+    // `invalidate()` waits it out and issues its own query, so the caller sees
+    // the write it just made.
+    expect((await invalidated).active.get("beta")).toBe(true);
+    expect(source.calls).toBe(2);
+  });
+
+  test("a failed reload throws instead of returning the pre-write snapshot", async () => {
+    let fail = false;
+    const source = new ScriptedSource(async () => {
+      if (fail) throw new Error("down");
+      return rows("alpha");
+    });
+    const store = new FeatureFlagStore(source, declared, 60_000, () => {});
+
+    await store.get();
+    fail = true;
+
+    // `load()` swallows, so without the generation check this resolves with the
+    // kept snapshot and the caller cannot tell that their reload never happened.
+    await expect(store.invalidate()).rejects.toThrow(FeatureReloadError);
+
+    // The switches themselves are untouched: an outage still must not read as
+    // "every feature switched itself off".
+    expect(store.peek()!.active.get("alpha")).toBe(true);
+    expect(store.peek()!.unavailable).toBe(false);
+  });
+
+  test("a failed reload does not pin the stale snapshot for a further TTL", async () => {
+    let fail = false;
+    const source = new ScriptedSource(async () => {
+      if (fail) throw new Error("down");
+      return rows("alpha");
+    });
+    const store = new FeatureFlagStore(source, declared, 0, () => {});
+
+    await store.get();
+    const loadedAt = store.peek()!.loadedAt;
+
+    fail = true;
+    await expect(store.invalidate()).rejects.toThrow(FeatureReloadError);
+
+    // `loadedAt` used to be moved forward on failure, which made these switches
+    // claim to be freshly loaded and bought the failure a whole extra TTL of
+    // staleness — strictly worse than never having called `invalidate()`.
+    expect(store.peek()!.loadedAt).toBe(loadedAt);
+  });
+
+  test("does not join a load that succeeded before it was called", async () => {
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let live = "alpha";
+    let first = true;
+    const source = new ScriptedSource(async () => {
+      const seen = live;
+      if (first) {
+        first = false;
+        await gate;
+      }
+      return rows(seen);
+    });
+    const store = new FeatureFlagStore(source, declared, 60_000);
+
+    const inflight = store.refresh();
+    live = "beta";
+    const invalidated = store.invalidate();
+    release();
+    await inflight;
+
+    // The in-flight load succeeds and bumps the generation. That success is not
+    // this call's, so it must not be mistaken for one — the generation is read
+    // after the wait, not before.
+    await expect(invalidated).resolves.toBeTruthy();
+    expect((await invalidated).active.get("beta")).toBe(true);
   });
 });
 
