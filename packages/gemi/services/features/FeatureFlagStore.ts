@@ -3,6 +3,25 @@ import type { FeatureFlagSource } from "./sources/FeatureFlagSource";
 
 export type Warn = (message: string) => void;
 
+/**
+ * A reload asked for by `invalidate()` did not happen.
+ *
+ * Only `invalidate()` raises this. The switches in memory are whatever they were
+ * before — quite possibly older than the write the caller just made — so a
+ * handler that catches it should say so rather than render the list as fact.
+ */
+export class FeatureReloadError extends Error {
+  readonly kind = "FeatureReloadFailed";
+
+  constructor(readonly cause: unknown) {
+    super(
+      `Could not reload feature switches after a write, so the cached switches may still predate it: ${
+        cause instanceof Error ? cause.message : String(cause)
+      }`,
+    );
+  }
+}
+
 export interface FlagSnapshot {
   /** `key -> active`. A key absent from the map has no row, and is off. */
   active: Map<string, boolean>;
@@ -37,6 +56,25 @@ export class FeatureFlagStore {
   private inflight: Promise<FlagSnapshot> | null = null;
   /** Rate-limits the "could not load" line to once per TTL window. */
   private lastFailureLoggedAt = 0;
+  /**
+   * Counts *successful* loads, so a caller can tell whether the reload it asked
+   * for actually happened. Nothing else can: `load()` swallows, and both
+   * outcomes hand back a snapshot.
+   */
+  private generation = 0;
+  /** The most recent load failure, for a caller that wants to report it. */
+  private lastError: unknown = null;
+  /**
+   * Do not attempt another background load before this.
+   *
+   * The backoff after a failure used to be expressed by moving the kept
+   * snapshot's `loadedAt` forward, which made a stale snapshot claim to be
+   * freshly loaded — so nothing downstream could tell how old the switches
+   * actually were, and a failed `invalidate()` silently pinned pre-write data
+   * for a further full TTL. The clock and the timestamp are two facts; they are
+   * now two fields.
+   */
+  private retryAfter = 0;
 
   constructor(
     private readonly source: FeatureFlagSource,
@@ -53,10 +91,12 @@ export class FeatureFlagStore {
       return current;
     }
     if (current) {
-      // Stale: hand back what we have and refresh behind the request. The
-      // `.catch` is required — `load()` already swallows, but an unhandled
-      // rejection here would be an unobserved promise on the hot path.
-      void this.refresh().catch(() => {});
+      // Stale: hand back what we have and refresh behind the request, unless a
+      // recent failure has us backing off — a down database must not be asked
+      // again on every read. The `.catch` is required: `load()` already
+      // swallows, but an unhandled rejection here would be an unobserved promise
+      // on the hot path.
+      if (Date.now() >= this.retryAfter) void this.refresh().catch(() => {});
       return current;
     }
 
@@ -87,13 +127,31 @@ export class FeatureFlagStore {
    * load created after that point was created after this call, and so queries
    * after the write. The extra query is paid on an operator action, not on the
    * request path.
+   *
+   * **Throws when the reload failed.** This is the one call in the store that
+   * does. Everywhere else a failure means "keep serving what we have", which is
+   * right for evaluation and wrong here: the caller has already written to the
+   * table and is about to show somebody the result, and a swallowed failure
+   * would hand them the pre-write switches with nothing to distinguish that from
+   * success — worse than never calling this at all.
    */
   async invalidate(): Promise<FlagSnapshot> {
     // `catch` because `load()` never rejects today, but a rejection here would
     // skip the reload entirely and leave the stale snapshot in place — the exact
     // failure this method exists to prevent.
     await this.inflight?.catch(() => {});
-    return await this.refresh();
+
+    // Read *after* the await. The load we just waited out may have succeeded,
+    // and that success is not ours — it queried before this call, and possibly
+    // before the write.
+    const generation = this.generation;
+    const snapshot = await this.refresh();
+
+    if (this.generation === generation) {
+      throw new FeatureReloadError(this.lastError);
+    }
+
+    return snapshot;
   }
 
   /** What is cached right now, without triggering a load. */
@@ -109,6 +167,9 @@ export class FeatureFlagStore {
         loadedAt: Date.now(),
         unavailable: false,
       };
+      this.generation++;
+      this.lastError = null;
+      this.retryAfter = 0;
       return this.snapshot;
     } catch (error) {
       return this.handleFailure(error);
@@ -152,17 +213,19 @@ export class FeatureFlagStore {
   private handleFailure(error: unknown): FlagSnapshot {
     const message = error instanceof Error ? error.message : String(error);
     const now = Date.now();
+    this.lastError = error;
+    // Back off for a full TTL rather than retrying a down database on every hit.
+    // `loadedAt` is deliberately left alone: these switches are as old as they
+    // were a moment ago, and saying otherwise is what let a failed `invalidate()`
+    // pass pre-write data off as freshly loaded.
+    this.retryAfter = now + this.ttlMs;
+
     if (now - this.lastFailureLoggedAt >= this.ttlMs) {
       this.lastFailureLoggedAt = now;
       this.warn(`Could not load feature switches: ${message}`);
     }
 
-    if (this.snapshot) {
-      // Keep the data, but move `loadedAt` forward so the next request backs
-      // off for a full TTL instead of retrying a down database on every hit.
-      this.snapshot = { ...this.snapshot, loadedAt: now };
-      return this.snapshot;
-    }
+    if (this.snapshot) return this.snapshot;
 
     this.snapshot = { active: new Map(), loadedAt: now, unavailable: true };
     return this.snapshot;

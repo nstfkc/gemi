@@ -94,8 +94,35 @@ export interface FeatureDescriptor {
    * `undefined` means **no row** — a feature that has been deployed but never
    * switched on, which is not the same as a row that says `false`, and is a
    * difference an admin list has to show: one is untouched, the other is
-   * somebody's decision. Also `undefined` throughout when `enabled: false` turns
-   * the subsystem off, because then nothing reads the table at all.
+   * somebody's decision.
+   *
+   * Read it only after checking `FeatureListing.unavailable`. When no snapshot
+   * has ever loaded there are no rows to report and every switch is `undefined`
+   * — which would otherwise state, of a table nobody could read, that nothing in
+   * it has ever been switched on.
    */
   active: boolean | undefined;
+}
+
+/**
+ * What `Features.list()` returns.
+ *
+ * A wrapper rather than a bare array because "the switches could not be read" is
+ * one fact about the whole load, not a property of any feature — putting it on
+ * every descriptor would invite reading it off one of them and describe it as
+ * something the declaration says.
+ */
+export interface FeatureListing {
+  /** In declaration order — the order `app/features` lists them. */
+  features: FeatureDescriptor[];
+  /**
+   * No snapshot has ever loaded, so every `active` is **unknown** rather than
+   * absent.
+   *
+   * A screen that ignores this reports a database it cannot reach as a table in
+   * which nothing has ever been switched on. Show it as an error, not as data;
+   * in particular do not offer to flip switches whose current state you do not
+   * know.
+   */
+  unavailable: boolean;
 }

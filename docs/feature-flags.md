@@ -187,36 +187,66 @@ Everything is async. After the boot-time warm-up each call settles in a microtas
 `Features.list()` is the read side. It returns one descriptor per feature the code declares — key, `describe`, `rollout`, `serverOnly`, whether the declaration carries targeting, and the switch:
 
 ```typescript
-[
-  { key: "new-checkout", describe: "Rebuilt checkout", rollout: 20, targeted: false, serverOnly: false, salt: undefined, active: true },
-  { key: "digest-v2", describe: undefined, rollout: undefined, targeted: true, serverOnly: false, salt: undefined, active: undefined },
-]
+{
+  unavailable: false,
+  features: [
+    { key: "new-checkout", describe: "Rebuilt checkout", rollout: 20, targeted: false, serverOnly: false, salt: undefined, active: true },
+    { key: "digest-v2", describe: undefined, rollout: undefined, targeted: true, serverOnly: false, salt: undefined, active: undefined },
+  ],
+}
 ```
 
 The declarations are what exists. A feature is on the list because `app/features` declares it, never because a row was inserted — a row for an undeclared key is litter and does not appear. `active: undefined` is **no row**: a feature deployed but never switched on, which is not the same as a row that says `false`, and is the distinction the screen has to show. One is untouched, the other is somebody's decision.
 
+`unavailable` is why the list is not a bare array. It means no snapshot has ever loaded — an unreachable database at boot — so every `active` is _unknown_ rather than absent. Collapsing the two would tell an operator that no feature has ever been switched on, about features that are switched on in the table, at the moment they are most likely to act on it. Render it as an error, and do not offer to flip switches whose current state you do not know.
+
 The `when` function is not on the descriptor and cannot be. It is a function over the viewer, so the only honest answer to "who does this target" is to run it: `targeted` reports that targeting exists, and `Features.for({ user }).explain("new-checkout")` answers it for one subject.
 
-**Server-side only.** `rollout` and `targeted` describe who is in an experiment.
+### Gate the route
+
+**`Features.list()` is server-side only, and the route that serves it must be behind admin middleware.** It lists `serverOnly` features — whose keys are exactly what that flag exists to keep out of the payload, as [Hiding a feature's existence](#hiding-a-features-existence) covers — and every descriptor carries `rollout` and `targeted`, which describe who is in an experiment. On an ungated route this hands anybody the unannounced keys and the shape of every rollout.
+
+```typescript
+// app/http/routes/api.ts
+export default class extends ApiRouter {
+  routes = {
+    "/admin/features": this.get([AdminFeatureController, "index"]).middleware(["admin"]),
+    "/admin/features/:key": this.put([AdminFeatureController, "update"]).middleware(["admin"]),
+  };
+}
+```
+
+```typescript
+// app/http/controllers/AdminFeatureController.ts
+public async index() {
+  return await Features.list();
+}
+```
 
 ### Writing the switch
 
 The write is an ordinary `UPDATE` on your own model — the framework owns no mutation path, because the table is yours. What it does own is the cache in front of it:
 
 ```typescript
-public async update(request: HttpRequest<{ active: boolean }>) {
+public async update(
+  request: HttpRequest<{ active: boolean }, { key: string }>,
+) {
+  const input = await request.input();
+
   await FeatureFlag.update({
     where: { key: request.params.key },
-    data: { active: request.input.get("active") },
+    data: { active: input.get("active") },
   });
 
   await Features.invalidate();
 
-  return { features: await Features.list() };
+  return await Features.list();
 }
 ```
 
 `invalidate()` rather than `refresh()`, for two reasons that both amount to "the admin must see their own write". `refresh()` joins whatever load is already in flight, and that load may have queried before the update committed — so the screen could come back saying the switch is still off a moment after flipping it. And `invalidate()` clears the request's evaluation memo, so a feature this request already read is re-evaluated instead of answered from before the write.
+
+**It throws `FeatureReloadError` if the reload fails.** The write landed and the cache did not follow, so the switches in memory may still predate it, and returning normally would present them as the result of the update — worse than never having called it. This is the one call in the subsystem that fails loudly; everywhere else an outage means "keep serving what we have", which is right for evaluation and wrong for an operator watching their own change. Let it surface, or catch it and say the switch was saved but the cache is stale.
 
 It is **process-local**, like `refresh()`. Every other instance is still serving its own snapshot and converges within `ttl`. What this fixes is the one window that reads as a bug — the operator who flips a switch, reloads, and is told for the next thirty seconds that nothing happened.
 
@@ -300,6 +330,7 @@ This replaces the _switch_, not the answer: rows still go through the same store
 | Database unreachable, never loaded           | every feature off, `reason: "unavailable"`        |
 | Row for a key you never declared             | ignored with a warning                            |
 | Row with a non-boolean `active`              | read as off                                       |
+| `Features.invalidate()` cannot reload        | throws `FeatureReloadError`; switches unchanged   |
 | A `when` that throws                         | the feature reads off, logged once per evaluation |
 
 ## Related

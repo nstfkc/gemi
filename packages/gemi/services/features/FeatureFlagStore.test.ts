@@ -1,6 +1,6 @@
 import { describe, expect, test, vi } from "vitest";
 import { defineFeature } from "./defineFeature";
-import { FeatureFlagStore } from "./FeatureFlagStore";
+import { FeatureFlagStore, FeatureReloadError } from "./FeatureFlagStore";
 import { FeatureFlagSource } from "./sources/FeatureFlagSource";
 
 const declared = {
@@ -282,7 +282,7 @@ describe("invalidate", () => {
     expect(source.calls).toBe(2);
   });
 
-  test("a failed reload keeps the last good snapshot", async () => {
+  test("a failed reload throws instead of returning the pre-write snapshot", async () => {
     let fail = false;
     const source = new ScriptedSource(async () => {
       if (fail) throw new Error("down");
@@ -293,9 +293,64 @@ describe("invalidate", () => {
     await store.get();
     fail = true;
 
-    const snapshot = await store.invalidate();
-    expect(snapshot.active.get("alpha")).toBe(true);
-    expect(snapshot.unavailable).toBe(false);
+    // `load()` swallows, so without the generation check this resolves with the
+    // kept snapshot and the caller cannot tell that their reload never happened.
+    await expect(store.invalidate()).rejects.toThrow(FeatureReloadError);
+
+    // The switches themselves are untouched: an outage still must not read as
+    // "every feature switched itself off".
+    expect(store.peek()!.active.get("alpha")).toBe(true);
+    expect(store.peek()!.unavailable).toBe(false);
+  });
+
+  test("a failed reload does not pin the stale snapshot for a further TTL", async () => {
+    let fail = false;
+    const source = new ScriptedSource(async () => {
+      if (fail) throw new Error("down");
+      return rows("alpha");
+    });
+    const store = new FeatureFlagStore(source, declared, 0, () => {});
+
+    await store.get();
+    const loadedAt = store.peek()!.loadedAt;
+
+    fail = true;
+    await expect(store.invalidate()).rejects.toThrow(FeatureReloadError);
+
+    // `loadedAt` used to be moved forward on failure, which made these switches
+    // claim to be freshly loaded and bought the failure a whole extra TTL of
+    // staleness — strictly worse than never having called `invalidate()`.
+    expect(store.peek()!.loadedAt).toBe(loadedAt);
+  });
+
+  test("does not join a load that succeeded before it was called", async () => {
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let live = "alpha";
+    let first = true;
+    const source = new ScriptedSource(async () => {
+      const seen = live;
+      if (first) {
+        first = false;
+        await gate;
+      }
+      return rows(seen);
+    });
+    const store = new FeatureFlagStore(source, declared, 60_000);
+
+    const inflight = store.refresh();
+    live = "beta";
+    const invalidated = store.invalidate();
+    release();
+    await inflight;
+
+    // The in-flight load succeeds and bumps the generation. That success is not
+    // this call's, so it must not be mistaken for one — the generation is read
+    // after the wait, not before.
+    await expect(invalidated).resolves.toBeTruthy();
+    expect((await invalidated).active.get("beta")).toBe(true);
   });
 });
 

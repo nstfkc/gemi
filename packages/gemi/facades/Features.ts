@@ -1,7 +1,7 @@
 import type { FeatureKey } from "../client/rpc";
 import type { FeatureSubject } from "../services/features/context";
 import { FeatureManager, type FeatureScope } from "../services/features/FeatureManager";
-import type { FeatureDescriptor, FeatureEvaluation } from "../services/features/types";
+import type { FeatureEvaluation, FeatureListing } from "../services/features/types";
 import { Facade } from "./Facade";
 
 /**
@@ -76,17 +76,25 @@ export class Features extends Facade {
    * feature that has been deployed but never switched on, which is deliberately
    * distinct from a row that says `false`.
    *
-   * **Server-side only.** `rollout` and `targeted` describe who is in an
-   * experiment, which is not a fact to hand the browser.
+   * Check `unavailable` before rendering `active`. It means no snapshot has ever
+   * loaded, so the switches are unknown rather than absent.
+   *
+   * **Server-side only, and the route must be gated.** The listing includes
+   * `serverOnly` features — whose keys are the thing `serverOnly` exists to keep
+   * out of the payload — and every descriptor carries `rollout` and `targeted`,
+   * which describe who is in an experiment.
    *
    * ```ts
+   * // app/http/routes/api.ts
+   * "/admin/features": this.get([AdminFeatureController, "index"]).middleware(["admin"]),
+   *
    * // app/http/controllers/AdminFeatureController.ts
    * public async index() {
-   *   return { features: await Features.list() };
+   *   return await Features.list();
    * }
    * ```
    */
-  static list(): Promise<FeatureDescriptor[]> {
+  static list(): Promise<FeatureListing> {
     return this.getFacadeRoot().list();
   }
 
@@ -99,17 +107,32 @@ export class Features extends Facade {
    * Call this after writing to the `FeatureFlag` table.
    *
    * ```ts
-   * public async update(request: HttpRequest<{ active: boolean }>) {
-   *   await FeatureFlag.update({ where: { key }, data: { active } });
+   * public async update(
+   *   request: HttpRequest<{ active: boolean }, { key: string }>,
+   * ) {
+   *   const input = await request.input();
+   *
+   *   await FeatureFlag.update({
+   *     where: { key: request.params.key },
+   *     data: { active: input.get("active") },
+   *   });
+   *
    *   await Features.invalidate();
-   *   return { features: await Features.list() };
+   *   return await Features.list();
    * }
    * ```
    *
-   * Unlike `refresh()` this never settles on data older than the moment it was
+   * Unlike `refresh()` this never settles on a load that started before it was
    * called, so the `list()` above reflects the write that precedes it. It also
    * clears the request's evaluation memo, so a feature read earlier in the same
    * request is re-evaluated rather than answered from before the write.
+   *
+   * **Throws `FeatureReloadError` when the reload fails.** The write landed and
+   * the cache did not follow, so the switches in memory may still predate it;
+   * returning normally would present them as the result of the update. This is
+   * the one call in the subsystem that fails loudly — everywhere else an outage
+   * means "keep serving what we have", which is right for evaluation and wrong
+   * for an operator watching their own change.
    *
    * **Process-local.** The other instances are still serving their own
    * snapshots and converge within `ttl` — there is no cross-instance

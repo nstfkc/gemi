@@ -158,7 +158,11 @@ export {
 } from "./features/defineFeature";
 export { FeaturesServiceProvider } from "./features/FeaturesServiceProvider";
 export { FeatureManager, FeatureScope } from "./features/FeatureManager";
-export { FeatureFlagStore, type FlagSnapshot } from "./features/FeatureFlagStore";
+export {
+  FeatureFlagStore,
+  FeatureReloadError,
+  type FlagSnapshot,
+} from "./features/FeatureFlagStore";
 export { FeatureFlagSource, FeatureModelMissingError } from "./features/sources/FeatureFlagSource";
 export { DatabaseFeatureFlagSource } from "./features/sources/DatabaseFeatureFlagSource";
 export { StaticFeatureFlagSource } from "./features/sources/StaticFeatureFlagSource";
@@ -170,6 +174,7 @@ export type {
   FeatureContext,
   FeatureDescriptor,
   FeatureEvaluation,
+  FeatureListing,
 } from "./features/types";
 
 // Runtime config (`app/config/*.ts`)

@@ -2,6 +2,7 @@ import { describe, expect, test, vi } from "vitest";
 import { RequestContext } from "../../http/requestContext";
 import { featuresConfigDefaults, type FeaturesConfig } from "./config";
 import { defineFeature } from "./defineFeature";
+import { FeatureReloadError } from "./FeatureFlagStore";
 import { FeatureManager } from "./FeatureManager";
 import { StaticFeatureFlagSource } from "./sources/StaticFeatureFlagSource";
 
@@ -341,39 +342,43 @@ describe("list", () => {
       () => {},
     );
 
-    expect(await features.list()).toEqual([
-      {
-        key: "new-checkout",
-        describe: "Rebuilt checkout",
-        rollout: 20,
-        targeted: false,
-        serverOnly: false,
-        salt: "checkout-v2",
-        active: true,
-      },
-      {
-        key: "admin-only",
-        describe: undefined,
-        rollout: undefined,
-        targeted: true,
-        serverOnly: false,
-        salt: undefined,
-        active: undefined,
-      },
-      {
-        key: "internal-tools",
-        describe: undefined,
-        rollout: undefined,
-        targeted: false,
-        serverOnly: true,
-        salt: undefined,
-        active: undefined,
-      },
-    ]);
+    expect(await features.list()).toEqual({
+      unavailable: false,
+      features: [
+        {
+          key: "new-checkout",
+          describe: "Rebuilt checkout",
+          rollout: 20,
+          targeted: false,
+          serverOnly: false,
+          salt: "checkout-v2",
+          active: true,
+        },
+        {
+          key: "admin-only",
+          describe: undefined,
+          rollout: undefined,
+          targeted: true,
+          serverOnly: false,
+          salt: undefined,
+          active: undefined,
+        },
+        {
+          key: "internal-tools",
+          describe: undefined,
+          rollout: undefined,
+          targeted: false,
+          serverOnly: true,
+          salt: undefined,
+          active: undefined,
+        },
+      ],
+    });
   });
 
   test("a feature with no row is not a feature switched off", async () => {
-    const [untouched, off] = await manager({ "pricing-redesign": false }).list();
+    const { features } = await manager({ "pricing-redesign": false }).list();
+    const [untouched, off] = features;
 
     // The distinction an admin list exists to show: nobody has touched
     // `new-checkout`, whereas somebody decided `pricing-redesign` is off.
@@ -381,10 +386,44 @@ describe("list", () => {
     expect(off.active).toBe(false);
   });
 
+  test("a store that never loaded is unavailable, not a table of untouched features", async () => {
+    const source = new (class extends StaticFeatureFlagSource {
+      async load(): Promise<Record<string, unknown>[]> {
+        throw new Error("no database");
+      }
+    })();
+    const listing = await manager({}, { source }).list();
+
+    // Every `active` is undefined either way. `unavailable` is the only thing
+    // standing between the screen and "no feature has ever been switched on",
+    // said of a table nobody could read.
+    expect(listing.features.every((f) => f.active === undefined)).toBe(true);
+    expect(listing.unavailable).toBe(true);
+  });
+
+  test("a kept snapshot is still available after a failed reload", async () => {
+    let fail = false;
+    const source = new (class extends StaticFeatureFlagSource {
+      async load() {
+        if (fail) throw new Error("down");
+        return [{ key: "new-checkout", active: true }];
+      }
+    })();
+    const features = manager({}, { source, ttl: 0 });
+
+    await features.refresh();
+    fail = true;
+    await features.refresh();
+
+    const listing = await features.list();
+    expect(listing.unavailable).toBe(false);
+    expect(listing.features[0].active).toBe(true);
+  });
+
   test("lists server-only features, which `forClient` omits", async () => {
     const features = manager({ "internal-tools": true });
 
-    expect((await features.list()).map((f) => f.key)).toContain("internal-tools");
+    expect((await features.list()).features.map((f) => f.key)).toContain("internal-tools");
     expect(await inRequest(() => features.forClient())).not.toHaveProperty("internal-tools");
   });
 
@@ -393,9 +432,9 @@ describe("list", () => {
     const load = vi.spyOn(source, "load");
     const features = manager({}, { enabled: false, source });
 
-    const list = await features.list();
+    const listing = await features.list();
 
-    expect(list.map((f) => f.key)).toEqual([
+    expect(listing.features.map((f) => f.key)).toEqual([
       "new-checkout",
       "pricing-redesign",
       "internal-tools",
@@ -403,7 +442,10 @@ describe("list", () => {
     ]);
     // `enabled: false` means nothing reads the table, so every switch is
     // unknown rather than off — the code declarations are all there is to show.
-    expect(list.every((f) => f.active === undefined)).toBe(true);
+    expect(listing.features.every((f) => f.active === undefined)).toBe(true);
+    // Not `unavailable`: the application turned features off on purpose, which
+    // is not the store failing to answer.
+    expect(listing.unavailable).toBe(false);
     expect(load).not.toHaveBeenCalled();
   });
 
@@ -415,7 +457,7 @@ describe("list", () => {
       () => {},
     );
 
-    expect(await features.list()).toEqual([]);
+    expect(await features.list()).toEqual({ features: [], unavailable: false });
     expect(load).not.toHaveBeenCalled();
   });
 });
@@ -495,6 +537,66 @@ describe("invalidate", () => {
     expect(after).toBe(true);
   });
 
+  test("does not memoise a stale read taken while the reload is in flight", async () => {
+    let active = false;
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let first = true;
+    const source = new (class extends StaticFeatureFlagSource {
+      async load() {
+        const seen = active;
+        if (first) {
+          first = false;
+          return [{ key: "new-checkout", active: seen }];
+        }
+        await gate;
+        return [{ key: "new-checkout", active: seen }];
+      }
+    })();
+    const features = manager({}, { source, ttl: 3600 });
+
+    const after = await inRequest(async () => {
+      await features.enabled("new-checkout");
+
+      active = true;
+      const invalidated = features.invalidate();
+
+      // A concurrent read lands mid-reload, sees the pre-write snapshot, and
+      // memoises `false`. Clearing the memo before the reload rather than after
+      // would leave that entry standing for the rest of the request.
+      await features.enabled("new-checkout");
+      release();
+      await invalidated;
+
+      return await features.enabled("new-checkout");
+    });
+
+    expect(after).toBe(true);
+  });
+
+  test("throws rather than passing pre-write switches off as the result", async () => {
+    let fail = false;
+    let active = false;
+    const source = new (class extends StaticFeatureFlagSource {
+      async load() {
+        if (fail) throw new Error("down");
+        return [{ key: "new-checkout", active }];
+      }
+    })();
+    const features = manager({}, { source, ttl: 3600 });
+
+    await features.refresh();
+    active = true;
+    fail = true;
+
+    await expect(features.invalidate()).rejects.toThrow(FeatureReloadError);
+    // The write landed, the cache did not follow. Returning normally here would
+    // have handed the caller the pre-write value as the result of their update.
+    expect(await features.enabled("new-checkout")).toBe(false);
+  });
+
   test("touches nothing when the subsystem is off", async () => {
     const source = new StaticFeatureFlagSource({ "new-checkout": true });
     const load = vi.spyOn(source, "load");
@@ -502,5 +604,24 @@ describe("invalidate", () => {
     await manager({}, { enabled: false, source }).invalidate();
 
     expect(load).not.toHaveBeenCalled();
+  });
+
+  test("clears the memo even when the reload fails", async () => {
+    const source = new (class extends StaticFeatureFlagSource {
+      async load(): Promise<Record<string, unknown>[]> {
+        throw new Error("down");
+      }
+    })();
+    const features = manager({}, { source, ttl: 3600 });
+
+    await inRequest(async () => {
+      await features.enabled("new-checkout");
+      const store = RequestContext.getStore();
+      expect(store.featureEvaluations?.size).toBeGreaterThan(0);
+
+      await expect(features.invalidate()).rejects.toThrow(FeatureReloadError);
+
+      expect(store.featureEvaluations?.size).toBe(0);
+    });
   });
 });
