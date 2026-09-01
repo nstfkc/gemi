@@ -10,6 +10,7 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 import { RequestContext } from "../../http/requestContext";
+import { projectRoot } from "../../support/discover";
 import type { LogConfig } from "./config";
 import type { LogEntry, LogLevel } from "./types";
 
@@ -19,13 +20,25 @@ export class LogManager {
   writer: FileSink;
   isReady: boolean = false;
 
-  private logsDirPath: string = `${process.env.ROOT_DIR}/storage/logs`;
   private flushTimeout: Timer;
   private fileSize: number = 0;
   private writerSize: number = 0;
   private isCreatingFile: boolean = false;
   private bootPromise: Promise<void> | null = null;
   public currentLogFilePath: string;
+
+  /**
+   * Computed per read, not once in the constructor: `Server.start` awaits
+   * `waitForBoot()` — where `LogServiceProvider.boot()` builds this directory —
+   * and only *then* imports the http layer that sets `ROOT_DIR`. A field
+   * initializer (or any `process.env.ROOT_DIR` read here) resolves to
+   * `undefined/storage/logs` at boot, which is how every `Log.info()` ended up
+   * throwing on an undefined writer. `projectRoot()` is the same rule
+   * `httpProd` sets `ROOT_DIR` from, a moment later.
+   */
+  private get logsDirPath(): string {
+    return `${projectRoot()}/storage/logs`;
+  }
 
   constructor(public config: Required<LogConfig>) {}
 
@@ -36,19 +49,24 @@ export class LogManager {
    */
   boot(): Promise<void> {
     if (!this.bootPromise) {
-      this.bootPromise = this.createStorage().then(() => {
-        this.isReady = true;
-      });
+      this.bootPromise = this.createStorage()
+        .catch((err) => {
+          // A logger that rejects turns every `Log.info()` into the caller's
+          // error. Report the storage failure once and carry on without a file
+          // sink — `log()` still feeds `onLogCreated`.
+          console.error("Log storage unavailable, file logging disabled", err);
+        })
+        .then(() => {
+          this.isReady = true;
+        });
     }
     return this.bootPromise;
   }
 
   private async createStorage() {
-    if (!process.env.ROOT_DIR) {
-      return;
-    }
-    if (!(await exists(`${process.env.ROOT_DIR}/storage`))) {
-      await mkdir(`${process.env.ROOT_DIR}/storage`);
+    const storageDirPath = `${projectRoot()}/storage`;
+    if (!(await exists(storageDirPath))) {
+      await mkdir(storageDirPath);
     }
     if (!(await exists(this.logsDirPath))) {
       await mkdir(this.logsDirPath);
@@ -138,14 +156,22 @@ export class LogManager {
     } catch (err) {
       console.log("Error parsing log object", err);
     }
+    // Broadcast.channel("/logs/live", {}).publish(JSON.stringify(logObject));
+    this.config.onLogCreated(logObject);
+
+    // No writer means `createStorage` failed (or a rotation is mid-flight);
+    // either way the entry has already been handed to `onLogCreated`, so drop
+    // the file copy rather than throwing at the call site.
+    if (!this.writer) {
+      return;
+    }
+
     this.writerSize += log.length;
     this.fileSize += log.length;
 
     try {
       this.writer.write(log);
       this.writer.write("\n");
-      // Broadcast.channel("/logs/live", {}).publish(JSON.stringify(logObject));
-      this.config.onLogCreated(logObject);
       this.tryFlush();
     } catch (err) {
       console.error("Error writing log", err);
