@@ -217,30 +217,6 @@ export async function httpDev(app: App, instrumentation: Instrumentation) {
     },
   }));
 
-  // `bun --hot` re-evaluates its *whole* module graph on a server-code change —
-  // node_modules included — so after a reload `react`, `react-dom/server` and the
-  // Bun-loaded `gemi` are all fresh instances. This Vite server is not reloaded
-  // with them (it is deliberately kept on `globalThis` above), and its SSR runner
-  // still holds every view module it has evaluated — each bound, through the
-  // externalized `gemi/*` imports, to the *previous* `gemi` and therefore the
-  // previous `react`. The next render then sets the dispatcher on the new React
-  // while a cached view calls hooks on the old one: "Invalid hook call", a null
-  // `dispatcher.useContext` thrown from `useRouteData` inside a view nobody
-  // touched. Editing a *view* never showed it — Vite's own watcher invalidates
-  // that module, so it re-evaluates against the new instances. Editing a
-  // server-only file (`app/config/*`, a feature declaration, a controller) is
-  // the case with nothing to invalidate the views, so drop the evaluated
-  // modules here, once per reload.
-  //
-  // Only the *evaluated* modules go: the server-side transform cache is
-  // untouched, so this costs a re-evaluation and not a re-transform. Clearing
-  // the module graph as well would not have been enough anyway — externalized
-  // deps (`gemi`, and React through it) are cached in the runner by URL and
-  // carry no invalidation flag, which is exactly where the stale React hides.
-  if (isReload) {
-    ssrRunner(vite).clearCache();
-  }
-
   process.env.ROOT_DIR = rootDir;
   process.env.APP_DIR = appDir;
 
@@ -350,6 +326,39 @@ export async function httpDev(app: App, instrumentation: Instrumentation) {
       return await instrumentation(req, requestHandler);
     },
   });
+
+  // `bun --hot` re-evaluates its *whole* module graph on a server-code change —
+  // node_modules included — so after a reload `react`, `react-dom/server` and the
+  // Bun-loaded `gemi` are all fresh instances. This Vite server is not reloaded
+  // with them (it is deliberately kept on `globalThis` above), and its SSR runner
+  // still holds every view module it has evaluated — each bound, through the
+  // externalized `gemi/*` imports, to the *previous* `gemi` and therefore the
+  // previous `react`. The next render then sets the dispatcher on the new React
+  // while a cached view calls hooks on the old one: "Invalid hook call", a null
+  // `dispatcher.useContext` thrown from `useRouteData` inside a view nobody
+  // touched. Editing a *view* never showed it — Vite's own watcher invalidates
+  // that module, so it re-evaluates against the new instances. Editing a
+  // server-only file (`app/config/*`, a feature declaration, a controller) is
+  // the case with nothing to invalidate the views, so drop the evaluated
+  // modules here, once per reload.
+  //
+  // Here and not before `Bun.serve`, with nothing awaited in between, because
+  // both sides of the swap have to see a consistent pair. Until that call
+  // returns the *previous* fetch handler is still serving — old dispatcher, old
+  // `react-dom/server` — and a request landing there after an early clear would
+  // re-evaluate its views against the *new* `gemi`: the same mismatch, reversed.
+  // After it, the new handler is live and must not be given the stale ones. The
+  // two statements are synchronous neighbours, so no request can be dispatched
+  // between them.
+  //
+  // Only the *evaluated* modules go: the server-side transform cache is
+  // untouched, so this costs a re-evaluation and not a re-transform. Clearing
+  // the module graph as well would not have been enough anyway — externalized
+  // deps (`gemi`, and React through it) are cached in the runner by URL and
+  // carry no invalidation flag, which is exactly where the stale React hides.
+  if (isReload) {
+    ssrRunner(vite).clearCache();
+  }
 
   // On a reload `app` has already been rebuilt with the new code and Bun.serve
   // above has swapped in the new fetch handler, so the updated controllers are
