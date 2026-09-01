@@ -157,7 +157,22 @@ export class LogManager {
       console.log("Error parsing log object", err);
     }
     // Broadcast.channel("/logs/live", {}).publish(JSON.stringify(logObject));
-    this.config.onLogCreated(logObject);
+    //
+    // Contained, because this is an app-supplied hook and every facade method
+    // calls `log()` without awaiting it: a hook that throws would otherwise
+    // leave a floating `Log.info()` as an unhandled rejection, which is the
+    // failure this method exists to not have. A rejected promise from an async
+    // hook is the same thing arriving later, so it is caught too — what is not
+    // done is *awaiting* it, which would put the app's transport in front of
+    // the file write.
+    try {
+      const handled = this.config.onLogCreated(logObject);
+      if (handled instanceof Promise) {
+        handled.catch((err) => console.error("Error in onLogCreated", err));
+      }
+    } catch (err) {
+      console.error("Error in onLogCreated", err);
+    }
 
     // No writer means `createStorage` failed (or a rotation is mid-flight);
     // either way the entry has already been handed to `onLogCreated`, so drop

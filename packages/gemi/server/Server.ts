@@ -1,5 +1,6 @@
 import { App } from "../app";
 import { Kernel } from "../kernel";
+import { projectRoot } from "../support/discover";
 import { Instrumentation } from "./types";
 import { watchEnv } from "./watchEnv";
 
@@ -15,6 +16,18 @@ export class Server {
   }
 
   async start() {
+    // Before the boot, not after: `httpDev`/`httpProd` set this too, but they
+    // are imported below — after every provider's `boot()` has run — so a
+    // service that resolves a path during boot used to read `undefined`
+    // (`services/logging`, #423). Same rule `httpProd` computes it with, so
+    // the assignment it makes a moment later is the same value.
+    //
+    // It doubles as the marker for "this process is serving": nothing else
+    // sets `ROOT_DIR`, so a console command or a migration — which boot the
+    // same providers through `runConsole` — can tell that it is not one, and
+    // skip work that only a server should do at boot.
+    process.env.ROOT_DIR = projectRoot();
+
     // Phase two of the boot. `new App({ kernel })` already ran every provider's
     // synchronous `register()`; this awaits their `boot()` before the first
     // request is served.
