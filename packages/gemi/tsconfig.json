@@ -59,7 +59,8 @@
     "bin/orm",
     "auth",
     "config",
-    "internal"
+    "internal",
+    "ai"
   ],
   "exclude": [
     "node_modules",

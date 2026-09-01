@@ -2,7 +2,7 @@ import { IncomingMessage, ServerResponse } from "node:http";
 import { Socket } from "node:net";
 import { join } from "node:path";
 
-import { createServer, type ViteDevServer } from "vite";
+import { createServer, type RunnableDevEnvironment, type ViteDevServer } from "vite";
 
 import { App } from "../app";
 import gemiVite from "../vite";
@@ -141,6 +141,26 @@ if (!globalThis.__gemiErrorHooked) {
   });
 }
 
+/**
+ * The SSR environment's module runner — what `vite.ssrLoadModule` is a thin
+ * (and, in Vite 8, deprecated) wrapper over. Going through it directly is what
+ * gives `httpDev` a handle on the evaluated-module cache it has to drop after a
+ * `bun --hot` reload; `ssrLoadModule` keeps its own runner private.
+ *
+ * Duck-typed rather than `isRunnableDevEnvironment(environment)`: this server
+ * outlives the module instance that created it, and after a reload the freshly
+ * evaluated `vite` brings a *new* `RunnableDevEnvironment` class object, so the
+ * `instanceof` that predicate performs is false for a perfectly runnable
+ * environment. (The same one-copy-per-reload rule this whole dance is about.)
+ */
+function ssrRunner(vite: ViteDevServer) {
+  const environment = vite.environments.ssr as RunnableDevEnvironment;
+  if (typeof environment?.runner?.import !== "function") {
+    throw new Error("gemi dev requires a runnable Vite SSR environment.");
+  }
+  return environment.runner;
+}
+
 export async function httpDev(app: App, instrumentation: Instrumentation) {
   // `bun --hot` re-runs this module on every server-code change, so keep a
   // single Vite server on `globalThis` instead of spawning a new one (and a new
@@ -158,7 +178,7 @@ export async function httpDev(app: App, instrumentation: Instrumentation) {
       // gemi reloads `.env` into process.env itself (see `watchEnv`). Stop Vite
       // from *also* watching env files: Vite's env-change handler restarts the
       // dev server, which closes the SSR module runner — but gemi keeps a single
-      // Vite instance across `bun --hot` reloads, so an in-flight `ssrLoadModule`
+      // Vite instance across `bun --hot` reloads, so an in-flight view import
       // hits the closed runner ("Vite module runner has been closed"). Ignoring
       // env files here only disables the restart; env *loading* at startup (and
       // `import.meta.env`) is unaffected.
@@ -248,9 +268,7 @@ export async function httpDev(app: App, instrumentation: Instrumentation) {
               break;
             }
             const appDir = `${process.env.APP_DIR}`;
-            const mod = await vite.ssrLoadModule(`${appDir}/views/${fileName}.tsx`, {
-              fixStacktrace: true,
-            });
+            const mod = await ssrRunner(vite).import(`${appDir}/views/${fileName}.tsx`);
 
             viewImportMap[fileName] = mod.default;
             ogMap[fileName] = mod?.OpenGraph;
@@ -258,7 +276,7 @@ export async function httpDev(app: App, instrumentation: Instrumentation) {
             // `Loading`/`Error` exports into the shell it sends.
             viewModules[fileName] = mod;
             // Emit a root-relative URL (`/app/views/Foo.tsx`), NOT the absolute
-            // filesystem path used for `ssrLoadModule` above. The browser's
+            // filesystem path the runner import above uses. The browser's
             // `window.loaders` preload and `client.tsx`'s `import.meta.glob` map
             // must import the exact same URL — otherwise Vite serves the module
             // under two URLs (`/app/views/Foo.tsx` vs `/Users/.../app/views/Foo.tsx`)
@@ -280,7 +298,7 @@ export async function httpDev(app: App, instrumentation: Instrumentation) {
           });
         } catch (err: any) {
           // Errors thrown *while handling a request* (a controller throwing, a
-          // failing `ssrLoadModule`, ...) never hit the module-load hooks above,
+          // failing view import, ...) never hit the module-load hooks above,
           // so surface them here: forward to the overlay for any already-open
           // page, and render an error page for this response so a fresh load
           // (which has no live HMR socket yet) still shows the failure.
@@ -308,6 +326,39 @@ export async function httpDev(app: App, instrumentation: Instrumentation) {
       return await instrumentation(req, requestHandler);
     },
   });
+
+  // `bun --hot` re-evaluates its *whole* module graph on a server-code change —
+  // node_modules included — so after a reload `react`, `react-dom/server` and the
+  // Bun-loaded `gemi` are all fresh instances. This Vite server is not reloaded
+  // with them (it is deliberately kept on `globalThis` above), and its SSR runner
+  // still holds every view module it has evaluated — each bound, through the
+  // externalized `gemi/*` imports, to the *previous* `gemi` and therefore the
+  // previous `react`. The next render then sets the dispatcher on the new React
+  // while a cached view calls hooks on the old one: "Invalid hook call", a null
+  // `dispatcher.useContext` thrown from `useRouteData` inside a view nobody
+  // touched. Editing a *view* never showed it — Vite's own watcher invalidates
+  // that module, so it re-evaluates against the new instances. Editing a
+  // server-only file (`app/config/*`, a feature declaration, a controller) is
+  // the case with nothing to invalidate the views, so drop the evaluated
+  // modules here, once per reload.
+  //
+  // Here and not before `Bun.serve`, with nothing awaited in between, because
+  // both sides of the swap have to see a consistent pair. Until that call
+  // returns the *previous* fetch handler is still serving — old dispatcher, old
+  // `react-dom/server` — and a request landing there after an early clear would
+  // re-evaluate its views against the *new* `gemi`: the same mismatch, reversed.
+  // After it, the new handler is live and must not be given the stale ones. The
+  // two statements are synchronous neighbours, so no request can be dispatched
+  // between them.
+  //
+  // Only the *evaluated* modules go: the server-side transform cache is
+  // untouched, so this costs a re-evaluation and not a re-transform. Clearing
+  // the module graph as well would not have been enough anyway — externalized
+  // deps (`gemi`, and React through it) are cached in the runner by URL and
+  // carry no invalidation flag, which is exactly where the stale React hides.
+  if (isReload) {
+    ssrRunner(vite).clearCache();
+  }
 
   // On a reload `app` has already been rebuilt with the new code and Bun.serve
   // above has swapped in the new fetch handler, so the updated controllers are

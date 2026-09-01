@@ -112,6 +112,27 @@ afterEach(() => {
 });
 
 describe("installing a fake", () => {
+  /**
+   * The fake is a container swap, and a test that reaches for one has usually
+   * read it as the opposite — a way to absorb a dispatch *without* an
+   * application. `app()`'s own "Boot a Kernel before resolving services" is
+   * accurate and sends that reader looking for the service they did not ask to
+   * resolve, so `Event.fake()` says what it needs and how little of a boot
+   * covers it. Pinned because the message is the only thing standing between
+   * that reader and the mechanism.
+   */
+  test("says what it needs when there is no application at all", () => {
+    const previous = Application.getInstance();
+    Application.setInstance(undefined);
+
+    try {
+      expect(() => Event.fake()).toThrow(/needs a booted application/);
+      expect(() => Event.fake()).toThrow(/kernel\.boot\(\)/);
+    } finally {
+      Application.setInstance(previous);
+    }
+  });
+
   test("records the dispatch and runs no listener", async () => {
     const ran: string[] = [];
     const application = await makeApp([
