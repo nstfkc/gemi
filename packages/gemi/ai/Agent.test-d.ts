@@ -16,7 +16,14 @@ import { Agent, AgentTool, Skill, ToolNamespace, type ToolShapesOf } from "./Age
 import { AgentController, type AgentRouteRPC } from "./AgentController";
 import { OpenAIProvider } from "./AgentProvider";
 import { s, type Infer } from "./Schema";
-import type { PendingToolCall, ToolCallPart, ToolShapes } from "./types";
+import type {
+  AgentMessage,
+  FinishReason,
+  NestedRun,
+  PendingToolCall,
+  ToolCallPart,
+  ToolShapes,
+} from "./types";
 
 /**
  * `toEqualTypeOf<never>()` is not a test — `never` is assignable to everything,
@@ -292,5 +299,44 @@ describe("a run", () => {
     if (part.type === "tool-call" && part.name === "bash") {
       expectTypeOf(part.input).toEqualTypeOf<{ command: string; cwd?: string }>();
     }
+  });
+});
+
+describe("ctx.runAgent", () => {
+  test("hands a tool the nesting state and a typed sub-run result", () => {
+    // Written as a tool rather than against `ToolContext` directly, because the
+    // context a tool is *given* is the only place these types matter, and it
+    // arrives through `ToolExecute`'s second parameter rather than by
+    // annotation.
+    AgentTool.create({
+      name: "delegate",
+      description: "Hand the question to a specialist",
+      inputSchema: s.object({ topic: s.string() }),
+      outputSchema: s.object({ summary: s.string() }),
+      execute: async (input, ctx) => {
+        expectTypeOf(ctx.depth).toEqualTypeOf<number>();
+        expectTypeOf(ctx.resumed).toEqualTypeOf<boolean>();
+
+        const run = await ctx.runAgent(support, { prompt: input.topic, label: "delegating" });
+        expectTypeOf(run.runId).toEqualTypeOf<string>();
+        expectTypeOf(run.agent).toEqualTypeOf<string>();
+        expectTypeOf(run.finishReason).toEqualTypeOf<FinishReason>();
+        // The sub-agent's tools are not this agent's, so the nested transcript
+        // is the unparameterised one. Typing it with the parent's shapes would
+        // name tool calls the sub-agent cannot make.
+        expectTypeOf(run.messages).toEqualTypeOf<AgentMessage[]>();
+        expectTypeOf(run.nested).toEqualTypeOf<NestedRun>();
+        return { summary: String(run.output ?? "") };
+      },
+    });
+  });
+
+  test("takes maxDepth on the agent, beside the other run limits", () => {
+    const bounded = Agent.create({
+      name: "bounded",
+      provider: OpenAIProvider.model("gpt-5.4"),
+      maxDepth: 1,
+    });
+    expectTypeOf(bounded.maxDepth).toEqualTypeOf<number>();
   });
 });

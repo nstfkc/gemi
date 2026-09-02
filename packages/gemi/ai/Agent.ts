@@ -98,6 +98,12 @@ export interface ToolContext {
    * its persisted result immediately, calling no provider and running no
    * sub-tool, and only the sub-run that escalated actually continues.
    *
+   * The index is the only key there is, so a body whose `runAgent` calls sit in
+   * a branch or a loop can produce a different sequence on the replay and make
+   * index N mean two different things. That is checked, not trusted: a mismatch
+   * fails the tool call with a sentence naming both sub-runs, because pairing a
+   * user's answer with a sub-run they never saw would be invisible.
+   *
    * Which means: CODE BEFORE AN ESCALATING `runAgent` RUNS AGAIN ON RESUME.
    * Side effects there are repeated. Put your side effects after the
    * `runAgent`, or make them idempotent, or branch on `ctx.resumed`. This is
@@ -127,6 +133,12 @@ export interface RunAgentParams {
    * default) throws `PendingEscalation` so the question reaches the user;
    * `"deny"` refuses every pending call and lets the sub-run finish, which is
    * what a tool wants when the sub-agent is meant to be autonomous.
+   *
+   * `"deny"` is refused *in place*, inside the sub-run's own loop, so the
+   * sub-agent is told it cannot ask and takes another step rather than ending
+   * parked — and it is inherited by everything below, so a grandchild asking to
+   * escalate is overruled too. A promise that nothing from this subtree reaches
+   * the user is only worth making if the whole subtree keeps it.
    */
   onPending?: "escalate" | "deny";
 }
@@ -543,6 +555,15 @@ export interface CreateAgentParams<
   /** Ends the run with `finishReason: "max-steps"` rather than throwing: an
    *  agent that loops is a bug to show, not an exception to swallow. */
   maxSteps?: number;
+  /**
+   * How far `ctx.runAgent` may nest below this agent. Default 3.
+   *
+   * It is a limit on the *tree*, taken from the run at the root, so raising it
+   * on a sub-agent cannot deepen a run it did not start. A cycle is caught by
+   * the agent-name chain before this is reached — this is for the mutually
+   * recursive shape a name check cannot see, and for the merely runaway one.
+   */
+  maxDepth?: number;
   reasoning?: ReasoningEffort;
 }
 
@@ -579,7 +600,50 @@ export interface AgentStreamParams {
    * pending call is resolved later; a store keyed by id should upsert.
    */
   onMessage?: (message: AgentMessage) => void | Promise<void>;
+  /**
+   * Set by `ctx.runAgent` and by nothing else.
+   *
+   * It rides on the public params rather than on a back door because
+   * `Agent.stream` is the only way to start a run and a sub-run is a run —
+   * giving nesting its own construction path would mean two places where a run
+   * is set up, and the second one would drift. Omitted, a run is a root: depth
+   * 0, no path, signatures over its own id.
+   */
+  nesting?: NestedContext;
 }
+
+/**
+ * Where a run sits inside a tree of runs. Carried down by `ctx.runAgent`.
+ *
+ * `signingRunId` and `signingPath` are the reason this is threaded rather than
+ * recomputed: a pending call a sub-agent raises is answered by the *client*,
+ * which only ever sees the root run, so the token has to be minted under the
+ * root's id and the sub-run's path from the start. Re-signing the token at each
+ * level on the way up would work too, and would throw away every signature but
+ * the outermost one — this way the run that asks the question is also the run
+ * that can check the answer, which is where the tool, its schema and its `kind`
+ * all already are.
+ */
+export type NestedContext = {
+  /** 0 at the root; `ctx.depth` inside a tool of this run. */
+  depth: number;
+  /** The `maxDepth` of the run at the root of the tree. */
+  maxDepth: number;
+  /** Agent names from the root down to and including this one, so a cycle can
+   *  be reported as the chain that caused it. */
+  chain: string[];
+  /** The root run's id: what a pending call raised here is signed under. */
+  signingRunId: string;
+  /** Tool-call ids from the root down to the call that started this run. */
+  signingPath: string[];
+  /**
+   * Inherited, and once it is `"deny"` it stays `"deny"` all the way down. A
+   * caller that asked for an autonomous sub-agent must not have a question
+   * surface from three levels below it, and the only way to promise that is to
+   * make the whole subtree refuse rather than to check at the top.
+   */
+  onPending: "escalate" | "deny";
+};
 
 export type AgentRunResult<T extends ToolShapes, O> = {
   runId: string;
@@ -639,10 +703,14 @@ type RunConfig = {
   providerTools: (ProviderToolSpec | ProviderToolNamespace)[];
   output?: Schema<any>;
   maxSteps: number;
+  maxDepth: number;
   reasoning?: ReasoningEffort;
 };
 
 const DEFAULT_MAX_STEPS = 8;
+/** Three is enough for "agent, sub-agent, specialist" and small enough that a
+ *  runaway tree is a readable error rather than a stack trace. */
+const DEFAULT_MAX_DEPTH = 3;
 
 export class Agent<
   T extends readonly ToolEntry[] = readonly ToolEntry[],
@@ -656,6 +724,7 @@ export class Agent<
   readonly output: O;
   readonly instructions?: string;
   readonly maxSteps: number;
+  readonly maxDepth: number;
   readonly reasoning?: ReasoningEffort;
 
   private readonly config: RunConfig;
@@ -668,6 +737,7 @@ export class Agent<
     this.skills = (params.skills ?? ([] as unknown as S)) as S;
     this.output = params.output as O;
     this.maxSteps = params.maxSteps ?? DEFAULT_MAX_STEPS;
+    this.maxDepth = params.maxDepth ?? DEFAULT_MAX_DEPTH;
     this.reasoning = params.reasoning;
 
     const { registry, providerTools } = lowerTools(this.tools, this.skills);
@@ -679,6 +749,7 @@ export class Agent<
       providerTools,
       output: params.output as Schema<any> | undefined,
       maxSteps: this.maxSteps,
+      maxDepth: this.maxDepth,
       reasoning: this.reasoning,
     };
   }
@@ -932,6 +1003,92 @@ type StepOutcome = {
   error?: AgentError;
 };
 
+/**
+ * The prior transcript plus what a later run produced, upserted by id.
+ *
+ * A run only reports the messages it *made*, so a resumed sub-run's
+ * `result().messages` is the tail and not the whole thing — and a message it
+ * amended (the one holding the call that was finally answered) comes back under
+ * an id the prior transcript already has. Appending would duplicate it and
+ * replacing the array would lose everything before the resume, so the record on
+ * `ToolCallPart.nested` is rebuilt by upsert, which is the same rule a store
+ * keyed by message id follows.
+ */
+function mergeMessages(prior: AgentMessage[], produced: AgentMessage[]): AgentMessage[] {
+  const merged = [...prior];
+  const index = new Map(merged.map((message, at) => [message.id, at]));
+  for (const message of produced) {
+    const at = index.get(message.id);
+    if (at === undefined) {
+      index.set(message.id, merged.length);
+      merged.push(message);
+    } else {
+      merged[at] = message;
+    }
+  }
+  return merged;
+}
+
+/** Tool calls in a transcript with no result anywhere in it. */
+function openCallIds(messages: AgentMessage[]): Set<string> {
+  const resolved = new Set<string>();
+  for (const message of messages) {
+    for (const part of message.content) {
+      if (part.type === "tool-result") resolved.add(part.toolCallId);
+    }
+  }
+  const open = new Set<string>();
+  for (const message of messages) {
+    for (const part of message.content) {
+      if (part.type === "tool-call" && !resolved.has(part.toolCallId)) open.add(part.toolCallId);
+    }
+  }
+  return open;
+}
+
+/**
+ * A sub-agent's structured answer, read back out of its transcript.
+ *
+ * `NestedRun` has nowhere to put an `output` — it is a transcript, and the
+ * output part is already in it — so a memoized run recovers the value the same
+ * way a client would. That keeps the memo honest: what a replay returns is
+ * derived from what was persisted, not from a second copy that could disagree
+ * with it.
+ */
+function outputOf(messages: AgentMessage[]): unknown {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const content = messages[i].content;
+    for (let j = content.length - 1; j >= 0; j--) {
+      const part = content[j];
+      if (part.type === "output" && part.partial !== true) return part.value;
+    }
+  }
+  return undefined;
+}
+
+/** For the replay-mismatch message, where the label is what tells two runs of
+ *  the same agent apart. */
+function describeRun(agent: string, label: string | undefined): string {
+  return label === undefined ? `"${agent}"` : `"${agent}" labelled "${label}"`;
+}
+
+/**
+ * What is left of an answer's path once this run's own prefix is removed.
+ *
+ * `null` means the answer is not addressed to this run at all, which is a
+ * client error rather than a routing decision — an empty remainder means "a
+ * call this run made itself", and a non-empty one names the tool call to
+ * re-enter.
+ */
+function pathBelow(path: string[] | undefined, prefix: string[]): string[] | null {
+  const full = path ?? [];
+  if (full.length < prefix.length) return null;
+  for (let i = 0; i < prefix.length; i++) {
+    if (full[i] !== prefix[i]) return null;
+  }
+  return full.slice(prefix.length);
+}
+
 class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   readonly runId: string;
 
@@ -962,11 +1119,45 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
 
   private readonly settled: Promise<AgentRunResult<ToolShapes, unknown>>;
 
+  /**
+   * Where this run sits in a tree of runs, all of it constant for the run.
+   *
+   * `signingRunId` is the *root's* id rather than this one's: the client only
+   * ever sees the root run, so a question a sub-agent asks has to travel under
+   * an id the client can hand back. `pathPrefix` is the chain of tool calls
+   * above this run, and it is both what a pending call raised here is signed
+   * over and what an answer coming back is matched against.
+   */
+  private readonly depth: number;
+  private readonly maxDepth: number;
+  private readonly chain: string[];
+  private readonly signingRunId: string;
+  private readonly pathPrefix: string[];
+  private readonly onPending: "escalate" | "deny";
+  /**
+   * Sub-runs that have not yet written their transcript to the tool call.
+   *
+   * The abort path waits on these. A `stop()` reaches a sub-run through the
+   * shared signal, so it is already closing — but `raceAbort` in `runTools`
+   * returns the moment the signal fires, which would finalize and persist the
+   * parent's message before the sub-run had recorded what it managed to do.
+   * The work would be on the stream and missing from the store.
+   */
+  private readonly nestedSettling = new Set<Promise<unknown>>();
+
   constructor(config: RunConfig, params: AgentStreamParams) {
     this.config = config;
     this.params = params;
     this.runId = params.runId ?? `run_${crypto.randomUUID()}`;
     this.history = [...params.messages];
+
+    const nesting = params.nesting;
+    this.depth = nesting?.depth ?? 0;
+    this.maxDepth = nesting?.maxDepth ?? config.maxDepth;
+    this.chain = nesting?.chain ?? [config.name];
+    this.signingRunId = nesting?.signingRunId ?? this.runId;
+    this.pathPrefix = nesting?.signingPath ?? [];
+    this.onPending = nesting?.onPending ?? "escalate";
 
     if (params.signal) {
       if (params.signal.aborted) this.controller.abort();
@@ -1086,8 +1277,18 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     this.emit({ type: "run-start", runId: this.runId, threadId: this.params.threadId });
 
     try {
-      await this.ingestTurn();
-      await this.loop();
+      // A turn that answers a sub-agent's question re-enters the tool that
+      // asked it, and that tool may ask again — so the run can be finished
+      // before it has taken a single model step. Going on to `loop()` here
+      // would step the model with a tool call still open, which is exactly the
+      // history the provider rejects.
+      const escalated = await this.ingestTurn();
+      if (escalated.length > 0) {
+        this.finishReason = "awaiting-input";
+        this.emit({ type: "awaiting-input", runId: this.runId, pending: escalated });
+      } else {
+        await this.loop();
+      }
     } catch (error) {
       if (error instanceof RunAborted || this.controller.signal.aborted) {
         await this.finalizeAborted();
@@ -1408,18 +1609,17 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
 
       const kind = pendingKind(resolved.tool);
       if (kind) {
+        if (this.onPending === "deny") {
+          this.addResult(message, this.deniedByPolicy(call));
+          continue;
+        }
         pending.push({
           toolCallId: call.toolCallId,
           name: call.name,
           input: parsed.value,
           kind,
-          signature: signPendingCall({
-            runId: this.runId,
-            toolCallId: call.toolCallId,
-            name: String(call.name),
-            kind,
-            input: parsed.value,
-          }),
+          signature: signPendingCall(this.claimsFor(call.toolCallId, String(call.name), kind, parsed.value)),
+          ...(this.pathPrefix.length > 0 ? { path: [...this.pathPrefix] } : {}),
         });
         continue;
       }
@@ -1427,10 +1627,25 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       running.push(
         this.executeTool(resolved, call, parsed.value, step)
           .then((result) => this.addResult(message, result))
-          // Only `RunAborted` reaches here, and the abort path denies every
-          // unresolved call at once — swallowing it keeps a stopped run from
-          // also raising an unhandled rejection.
-          .catch(() => undefined),
+          .catch((error) => {
+            if (error instanceof PendingEscalation) {
+              if (this.onPending === "deny") {
+                this.addResult(message, this.deniedByPolicy(call));
+                return;
+              }
+              // Collected exactly like a pending call this run made itself, and
+              // deliberately without a result on `call`: the tool did not
+              // finish, so its call stays open and the next turn re-enters it.
+              // Siblings are untouched — `Promise.all` below still waits for
+              // them, and one that completes keeps its result rather than being
+              // thrown away because a different tool asked a question.
+              pending.push(...error.pending);
+              return;
+            }
+            // Only `RunAborted` reaches here, and the abort path denies every
+            // unresolved call at once — swallowing it keeps a stopped run from
+            // also raising an unhandled rejection.
+          }),
       );
     }
 
@@ -1438,11 +1653,55 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     return pending;
   }
 
+  /**
+   * What a pending call is signed over.
+   *
+   * `signingRunId` is the root run's, not this one's: the client only ever sees
+   * the root, so a sub-agent's question has to be minted under an id the client
+   * can hand back and this run can still recognise on the way in.
+   */
+  private claimsFor(
+    toolCallId: string,
+    name: string,
+    kind: "approval" | "question" | "client",
+    input: unknown,
+  ) {
+    return {
+      runId: this.signingRunId,
+      toolCallId,
+      name,
+      kind,
+      input,
+      // Absent rather than empty at the top level, so the signature a root run
+      // mints is byte-for-byte the one it minted before nesting existed.
+      path: this.pathPrefix.length > 0 ? [...this.pathPrefix] : undefined,
+    };
+  }
+
+  /**
+   * The refusal a sub-run running under `onPending: "deny"` gives itself.
+   *
+   * Told to the model rather than dropped, like every other denial: the
+   * sub-agent asked for something it cannot have here, and the next step goes
+   * better for knowing that than for finding a hole where a result should be.
+   */
+  private deniedByPolicy(call: ToolCallPart): ToolResultPart {
+    return {
+      type: "tool-result",
+      toolCallId: call.toolCallId,
+      name: call.name,
+      status: "denied",
+      cause: "refused",
+      reason: `"${String(call.name)}" needs the user, and this run was started with onPending: "deny". Answer from what you already have.`,
+    };
+  }
+
   private async executeTool(
     resolved: ResolvedTool,
     call: ToolCallPart,
     input: unknown,
     step: number,
+    resume?: { answers: ClientToolResult[] },
   ): Promise<ToolResultPart> {
     const ctx: ToolContext = {
       req: this.params.req,
@@ -1451,19 +1710,9 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       toolCallId: call.toolCallId,
       signal: this.controller.signal,
       step,
-      // TEMPORARY, and only these three lines. The contract slice declares
-      // nesting so that the client, the signing and the runtime slices can be
-      // written against one shape; the nested-runtime slice replaces this stub
-      // with the real depth, the real resumed flag and the real `runAgent`.
-      // Until then a tool that reaches for it gets a sentence rather than an
-      // `undefined is not a function`.
-      depth: 0,
-      resumed: false,
-      runAgent: () => {
-        throw new Error(
-          "ctx.runAgent is declared but not wired up yet — nested agent runs land in a later change.",
-        );
-      },
+      depth: this.depth,
+      resumed: resume !== undefined,
+      runAgent: this.nestedRunner(call, resume),
     };
 
     try {
@@ -1491,6 +1740,14 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         // Left to the abort path, which denies every unresolved call at once.
         throw new RunAborted();
       }
+      if (error instanceof PendingEscalation) {
+        // The one throw that is not a failure. Turning it into a `tool_error`
+        // here would tell the model the tool broke and tell the user nothing,
+        // and the question the sub-agent asked would be lost with no trace of
+        // where it went — which is precisely the silent failure this branch
+        // exists to prevent.
+        throw error;
+      }
       // A throwing tool is a result, not an exception out of the run: the model
       // is told the call failed and can try something else, which is what a
       // person would do.
@@ -1509,6 +1766,241 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     }
   }
 
+  // --- nested runs -------------------------------------------------------
+
+  /**
+   * The `ctx.runAgent` given to one tool call, with its own memo.
+   *
+   * MEMOIZATION IS BY CALL INDEX, and the index is the only key there is. A
+   * paused async generator cannot be put into a message history, so an
+   * escalating tool is re-entered from the top rather than resumed in place,
+   * and the Nth `runAgent` of the re-entered body has to be paired with the Nth
+   * sub-run of the previous attempt. `ToolCallPart.nested` is that record, which
+   * is also why it lives on the message: it is exactly the history the next turn
+   * loads anyway, from the store or from the client.
+   *
+   * A tool whose `runAgent` calls sit inside a branch or a loop can produce a
+   * different sequence on replay, and then index N means two different things.
+   * That is checked below rather than trusted — pairing a user's answer with the
+   * wrong sub-run is the failure this whole mechanism exists to avoid, and it
+   * would be invisible.
+   */
+  private nestedRunner(
+    call: ToolCallPart,
+    resume?: { answers: ClientToolResult[] },
+  ): ToolContext["runAgent"] {
+    // Snapshotted before the tool body runs: everything already here came from
+    // an earlier turn and is replayable, everything appended past this point is
+    // running for the first time.
+    const replayable = call.nested?.length ?? 0;
+    let index = 0;
+    // Created on the first `runAgent` and not before, so a tool that never
+    // nests does not put an empty array on every tool call it makes — the part
+    // is on the wire and in the store, and an always-present `nested: []` would
+    // be a shape change paid for by every app that has no sub-agents.
+    const memoize = (): NestedRun[] => call.nested ?? (call.nested = []);
+
+    return async (agent: AnyAgent, params: RunAgentParams = {}): Promise<NestedRunResult> => {
+      const at = index++;
+      const memo = memoize();
+      const recorded = at < replayable ? memo[at] : undefined;
+
+      if (recorded) {
+        if (recorded.agent !== agent.name || recorded.label !== params.label) {
+          throw new Error(
+            `Nested run ${at} of "${String(call.name)}" was ${describeRun(recorded.agent, recorded.label)} on the turn that escalated and is ${describeRun(agent.name, params.label)} on the replay. ` +
+              `runAgent is memoized by call index, so a body whose runAgent calls depend on a condition that changed between turns cannot be resumed — the answer would be paired with a different sub-run. ` +
+              `Make the sequence of runAgent calls the same every time this tool runs, or branch on ctx.resumed.`,
+          );
+        }
+        if (recorded.finishReason !== "awaiting-input") {
+          // The whole point of the memo: no provider is called, no sub-tool
+          // runs, and no usage is counted a second time — this turn did not
+          // spend it, an earlier one did.
+          return {
+            runId: recorded.runId,
+            agent: recorded.agent,
+            messages: recorded.messages,
+            finishReason: recorded.finishReason ?? "stop",
+            usage: recorded.usage ?? emptyUsage(),
+            output: outputOf(recorded.messages),
+            nested: recorded,
+          };
+        }
+      }
+
+      return this.runNested(call, agent, params, at, memo, recorded, resume?.answers ?? []);
+    };
+  }
+
+  /**
+   * Starts, or continues, one sub-run and joins it to this one.
+   *
+   * Joining is the only reason this exists — a tool can already make an agent
+   * and iterate it. What it cannot do by hand is put the sub-run's events on
+   * this run's stream in this run's `seq`, roll its usage up, record its
+   * transcript where the next turn will look for it, and carry the depth and
+   * the name chain so a cycle is a sentence rather than a stack overflow.
+   */
+  private async runNested(
+    call: ToolCallPart,
+    agent: AnyAgent,
+    params: RunAgentParams,
+    at: number,
+    memo: NestedRun[],
+    recorded: NestedRun | undefined,
+    answers: ClientToolResult[],
+  ): Promise<NestedRunResult> {
+    // Both checks before anything starts, so the failure is a tool result the
+    // model can read rather than a partly-run tree. The name chain catches the
+    // common cycle (A runs A, A runs B runs A) exactly; the depth limit catches
+    // the shapes a name cannot see, such as the same agent under two names.
+    const chain = [...this.chain, agent.name];
+    if (this.chain.includes(agent.name)) {
+      throw new Error(
+        `"${agent.name}" is already running further up this chain: ${chain.join(" -> ")}. An agent cannot run itself, directly or through another agent.`,
+      );
+    }
+    const depth = this.depth + 1;
+    if (depth > this.maxDepth) {
+      throw new Error(
+        `Nested agent runs are ${this.maxDepth} deep at most and this one would be ${depth}: ${chain.join(" -> ")}. Raise maxDepth on the agent at the root of the run if the tree is meant to be this deep.`,
+      );
+    }
+
+    const label = params.label;
+    const signingPath = [...this.pathPrefix, call.toolCallId];
+    // Inherited downwards and never relaxed: a caller that asked for an
+    // autonomous sub-agent must not have a question surface from two levels
+    // below it, and only the subtree refusing can promise that.
+    const onPending = this.onPending === "deny" ? "deny" : (params.onPending ?? "escalate");
+
+    const resuming = recorded !== undefined;
+    const open = resuming ? openCallIds(recorded.messages) : new Set<string>();
+    // Only the answers this sub-run can actually attach to a call of its own,
+    // or route further down. Handing it the rest would make it report a result
+    // for a call nobody made.
+    const mine = resuming
+      ? answers.filter((answer) => {
+          const below = pathBelow(answer.path, signingPath);
+          if (below === null) return false;
+          return open.has(below.length > 0 ? below[0] : answer.toolCallId);
+        })
+      : [];
+
+    const sub = agent.stream({
+      // A resume starts from what was persisted, not from what the tool passed
+      // this time: the body ran again from the top and rebuilt its `prompt`,
+      // and honouring it would replay a first turn the sub-agent has already
+      // had. The persisted transcript already contains it.
+      messages: resuming ? recorded.messages : (params.messages ?? []),
+      turn: resuming
+        ? { toolResults: mine }
+        : params.prompt
+          ? { text: params.prompt }
+          : undefined,
+      req: this.params.req,
+      // Inherited, not new: this is what makes the parent's `stop()` reach a
+      // sub-run three levels down without anything in between forwarding it.
+      signal: this.controller.signal,
+      threadId: this.params.threadId,
+      instructions: params.instructions,
+      // Kept across turns so the transcript the client already has keeps its
+      // identity when the run continues.
+      runId: resuming ? recorded.runId : undefined,
+      nesting: {
+        depth,
+        maxDepth: this.maxDepth,
+        chain,
+        signingRunId: this.signingRunId,
+        signingPath,
+        onPending,
+      },
+    }) as AgentRun;
+
+    let asked: PendingToolCall[] = [];
+    const forwarding: Promise<void> = (async () => {
+      for await (const event of sub as AsyncIterable<AgentStreamEvent>) {
+        if (event.type === "awaiting-input") asked = event.pending;
+        this.emit({
+          type: "nested-event",
+          toolCallId: call.toolCallId,
+          runId: sub.runId,
+          agent: agent.name,
+          label,
+          event,
+        });
+      }
+    })();
+
+    // Recording is its own promise so that the abort path can wait for exactly
+    // this — the transcript reaching the tool call — rather than for the whole
+    // tool, which may be ignoring the signal.
+    const recording = (async () => {
+      const result = await sub.result();
+      await forwarding;
+      const record: NestedRun = {
+        runId: sub.runId,
+        agent: agent.name,
+        label,
+        messages: resuming ? mergeMessages(recorded.messages, result.messages) : result.messages,
+        finishReason: result.finishReason,
+        usage: resuming ? addUsage(recorded.usage ?? emptyUsage(), result.usage) : result.usage,
+      };
+      // Written before anything below can throw. An escalation is a pause, not
+      // a lost run, and a cancelled sub-run is still work the user should be
+      // able to read — both of those depend on the transcript already being on
+      // the part when the throw happens.
+      memo[at] = record;
+      // Only what this turn actually spent. A memoized sub-run adds nothing,
+      // above, because the turn that ran it already counted it.
+      this.usage = addUsage(this.usage, result.usage);
+      return { result, record };
+    })();
+
+    const settling = recording.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.nestedSettling.add(settling);
+    let result: AgentRunResult<ToolShapes, unknown>;
+    let record: NestedRun;
+    try {
+      ({ result, record } = await recording);
+    } finally {
+      this.nestedSettling.delete(settling);
+    }
+
+    if (this.controller.signal.aborted) {
+      // The sub-run was cancelled by the parent's `stop()`. Failing the tool
+      // rather than returning an aborted result is what stops the tool body
+      // from carrying on with half an answer while the run around it is dying.
+      throw new RunAborted();
+    }
+
+    if (result.finishReason === "awaiting-input") {
+      if (asked.length === 0) {
+        // Nothing to ask means nothing the client could answer, and escalating
+        // an empty list would end the parent awaiting-input with a tool call
+        // that can never be resolved.
+        throw new Error(
+          `"${agent.name}" ended awaiting input but asked nothing, so there is no question to escalate.`,
+        );
+      }
+      throw new PendingEscalation({ pending: asked, path: signingPath, nested: record });
+    }
+
+    return {
+      runId: record.runId,
+      agent: agent.name,
+      messages: record.messages,
+      finishReason: result.finishReason,
+      usage: record.usage ?? emptyUsage(),
+      output: result.output ?? outputOf(record.messages),
+      nested: record,
+    };
+  }
+
   private addResult(message: AgentMessage, part: ToolResultPart) {
     message.content.push(part);
     this.emit({ type: "tool-result", messageId: message.id, part });
@@ -1524,13 +2016,18 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
    * with no result, so leaving one open would break not this turn but the next
    * one, at a point where the cause is no longer visible.
    */
-  private async ingestTurn(): Promise<void> {
+  private async ingestTurn(): Promise<PendingToolCall[]> {
     const turn = this.params.turn;
     const open = this.openCalls();
+    /** Questions a re-entered tool asked again. The run ends on these. */
+    const escalated: PendingToolCall[] = [];
 
     if (open.length > 0) {
       const answered = new Set<string>();
       const seen = new Set<string>();
+      /** Answers addressed *below* one of this run's tool calls, grouped by the
+       *  call that has to be re-entered to deliver them. */
+      const reentry = new Map<string, ClientToolResult[]>();
 
       for (const answer of turn?.toolResults ?? []) {
         // One answer per call, first one wins. A turn carrying the same entry
@@ -1538,22 +2035,60 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         // it ran the approved tool twice and left two results for one
         // toolCallId — a history the provider rejects, arrived at by exactly
         // the machinery that exists to keep the history well formed.
-        if (seen.has(answer.toolCallId)) continue;
-        seen.add(answer.toolCallId);
+        //
+        // Keyed by path *and* id, because a tool-call id is only unique within
+        // one run: two sub-agents under two different tools each number their
+        // calls from their own provider, and dropping the second as a duplicate
+        // would strand the tool that was waiting on it. For a top-level answer
+        // the key is the id, exactly as before.
+        const key = `${(answer.path ?? []).join("/")}#${answer.toolCallId}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        const reject = (message: string) =>
+          this.emit({
+            type: "error",
+            error: {
+              code: "invalid_tool_result",
+              message,
+              toolCallId: answer.toolCallId,
+              retryable: false,
+            },
+          });
+
+        // The path says which run the answer belongs to; `toolCallId` only says
+        // which call *within* that run. Both are covered by the signature, so a
+        // client that moves an answer to another tool's sub-run does not
+        // redirect anything — it routes the answer somewhere the MAC no longer
+        // verifies, which is the property that makes carrying the path safe.
+        const below = pathBelow(answer.path, this.pathPrefix);
+        if (below === null) {
+          reject(
+            `The answer for "${answer.toolCallId}" is addressed to a tool call this run is not inside.`,
+          );
+          continue;
+        }
+
+        if (below.length > 0) {
+          const host = below[0];
+          if (!open.some((entry) => entry.call.toolCallId === host)) {
+            reject(`No pending tool call with id "${host}" to deliver a nested answer to.`);
+            continue;
+          }
+          const group = reentry.get(host) ?? [];
+          group.push(answer);
+          reentry.set(host, group);
+          // Marked answered so the refusal pass below leaves it alone: the tool
+          // is about to be re-entered and will produce the real result.
+          answered.add(host);
+          continue;
+        }
 
         const target = open.find((entry) => entry.call.toolCallId === answer.toolCallId);
         if (!target) {
           // Nothing to attach it to, so it cannot be told to the model even as
           // an error part — a result for a call that was never made.
-          this.emit({
-            type: "error",
-            error: {
-              code: "invalid_tool_result",
-              message: `No pending tool call with id "${answer.toolCallId}".`,
-              toolCallId: answer.toolCallId,
-              retryable: false,
-            },
-          });
+          reject(`No pending tool call with id "${answer.toolCallId}".`);
           continue;
         }
 
@@ -1563,10 +2098,19 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         this.attachToHistory(target, result);
       }
 
+      for (const [host, answers] of reentry) {
+        const entry = open.find((item) => item.call.toolCallId === host)!;
+        const result = await this.reenter(entry, answers, escalated);
+        if (result) this.attachToHistory(entry, result);
+      }
+
       for (const entry of open) {
         if (answered.has(entry.call.toolCallId)) continue;
         // The turn said something else. That is a refusal — the honest reading,
-        // and the only one that cannot strand the thread.
+        // and the only one that cannot strand the thread. A tool whose
+        // sub-agent asked a question and did not get an answer is refused here
+        // like any other: the sub-run is abandoned with its transcript intact,
+        // and the call gets a result rather than dangling into the next turn.
         this.attachToHistory(entry, {
           type: "tool-result",
           toolCallId: entry.call.toolCallId,
@@ -1599,6 +2143,81 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       this.produced.push(message);
       await this.report(message);
     }
+
+    return escalated;
+  }
+
+  /**
+   * Re-enters a tool whose sub-agent asked the user something.
+   *
+   * From the top, with `ctx.resumed === true` — there is no other way. A JS
+   * async generator cannot be suspended across a turn boundary, so the body
+   * runs again and `runAgent` replays its finished sub-runs out of
+   * `ToolCallPart.nested` instead of re-running them. Which means the code
+   * *before* the escalating `runAgent` runs twice; that bargain is documented on
+   * `ToolContext.runAgent` and it is the price of not needing a checkpoint API.
+   */
+  private async reenter(
+    entry: { message: AgentMessage; call: ToolCallPart },
+    answers: ClientToolResult[],
+    escalated: PendingToolCall[],
+  ): Promise<ToolResultPart | null> {
+    const name = String(entry.call.name);
+    const resolved = this.config.registry.get(name);
+    if (!resolved || !resolved.tool.execute) {
+      return {
+        type: "tool-result",
+        toolCallId: entry.call.toolCallId,
+        name: entry.call.name,
+        status: "error",
+        error: {
+          code: "invalid_tool_result",
+          message: `The tool "${name}" no longer exists, so the sub-agent's question cannot be delivered.`,
+          toolCallId: entry.call.toolCallId,
+          retryable: false,
+        },
+      };
+    }
+
+    const call = this.amendCall(entry);
+    try {
+      // Step 0, like an approval executed on the way in: this belongs to the
+      // turn, not to a step of the loop that has not started yet.
+      return await raceAbort(
+        this.executeTool(resolved, call, call.input, 0, { answers }),
+        this.controller.signal,
+      );
+    } catch (error) {
+      if (error instanceof PendingEscalation) {
+        // Asked again. No result attaches, so the call stays open and the next
+        // turn re-enters it exactly as this one did.
+        escalated.push(...error.pending);
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Clones the tool-call part before a replay writes to its `nested`.
+   *
+   * The message holding it came from an earlier run and belongs to the caller's
+   * `messages` array; the run must not reach back into its own input and change
+   * it under a controller that has already persisted it. Cloning the part into
+   * the amended copy is also what makes the updated sub-run transcript
+   * something `onMessage` can report — see `reportAmended`, which is why the
+   * message is marked unreported here even though no result may ever attach.
+   */
+  private amendCall(entry: { message: AgentMessage; call: ToolCallPart }): ToolCallPart {
+    const message = this.amend(entry.message);
+    const at = message.content.indexOf(entry.call);
+    const call: ToolCallPart = {
+      ...entry.call,
+      nested: (entry.call.nested ?? []).map((run) => ({ ...run })),
+    };
+    if (at >= 0) message.content[at] = call;
+    this.unreported.add(message);
+    return call;
   }
 
   /** Tool calls in the history with no result anywhere after them. */
@@ -1667,12 +2286,13 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       return reject(`The signature for "${name}" is malformed.`);
     }
 
+    // The path is this run's own, not the one the client sent. The client's
+    // copy was used to route the answer here and nothing else; recomputing the
+    // MAC over what the server issued is what makes a moved answer fail instead
+    // of being believed.
     const verified = verifyPendingCall(answer.signature, {
+      ...this.claimsFor(call.toolCallId, name, kind, call.input),
       runId: issued.runId,
-      toolCallId: call.toolCallId,
-      name,
-      kind,
-      input: call.input,
     });
 
     if (verified.ok === false) {
@@ -1768,18 +2388,23 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     entry: { message: AgentMessage; call: ToolCallPart },
     result: ToolResultPart,
   ) {
-    let message = this.amended.get(entry.message.id);
-    if (!message) {
-      const original = entry.message;
-      message = { ...original, content: [...original.content] };
-      const index = this.history.indexOf(original);
-      if (index >= 0) this.history[index] = message;
-      this.produced.push(message);
-      this.amended.set(original.id, message);
-    }
+    const message = this.amend(entry.message);
     message.content.push(result);
     this.unreported.add(message);
     this.emit({ type: "tool-result", messageId: message.id, part: result });
+  }
+
+  /** The clone of an earlier run's message that this run may write to. One per
+   *  message id, so two results for the same message do not fork it. */
+  private amend(original: AgentMessage): AgentMessage {
+    const existing = this.amended.get(original.id);
+    if (existing) return existing;
+    const message: AgentMessage = { ...original, content: [...original.content] };
+    const index = this.history.indexOf(original);
+    if (index >= 0) this.history[index] = message;
+    this.produced.push(message);
+    this.amended.set(original.id, message);
+    return message;
   }
 
   /**
@@ -1809,6 +2434,12 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
    * next message the user sent.
    */
   private async finalizeAborted(): Promise<void> {
+    // Sub-runs first. They share this run's signal so they are already closing;
+    // what is being waited for is the moment each writes its transcript onto
+    // its tool call, because everything below this line persists messages.
+    if (this.nestedSettling.size > 0) {
+      await Promise.all([...this.nestedSettling]);
+    }
     // Calls left open anywhere in the history, not just on the message this run
     // was building. A stop that lands while an approval this turn is executing
     // has no current message at all — the call belongs to an *earlier* turn's
