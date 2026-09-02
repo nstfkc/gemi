@@ -101,8 +101,17 @@ export declare abstract class AgentController<A extends AnyAgent = AnyAgent> ext
    * the work never paused, the listener changed.
    */
   attach(req: HttpRequest<any, any>): Promise<Response>;
-  /** `POST /<path>/stop` — the explicit cancel. Since a dropped connection no
-   *  longer stops a run, this is the only thing that does. */
+  /**
+   * `POST /<path>/stop` — the explicit cancel. Since a dropped connection no
+   * longer stops a run, this is the only thing that does, and it is why
+   * stopping cannot be a client-side concern: the tool loop is here, and a
+   * client that stops reading has not stopped step four from charging a card.
+   *
+   * Returns as soon as the run is aborted, not when it has finished unwinding.
+   * The terminal events — the stopped tool results, the aborted message — go
+   * out on the run's own stream, so whoever is watching it sees the ending,
+   * and `onMessage` records it whether anyone is watching or not.
+   */
   stop(req: HttpRequest<any, any>): Promise<{ stopped: boolean }>;
   /** `POST /<path>/files` — uploads an attachment and returns its file id. */
   upload(req: HttpRequest<any, any>): Promise<{ fileId: string }>;
