@@ -108,7 +108,19 @@ function calls() {
   return fetchMock.mock.calls as [string, RequestInit][];
 }
 
+/**
+ * The request body, minus the correlation id.
+ *
+ * `clientRunId` is a fresh uuid on every send, so it cannot appear in an
+ * equality assertion; it has its own tests below, which are the only place it is
+ * interesting.
+ */
 function bodyOf(index: number) {
+  const { clientRunId: _, ...body } = JSON.parse(calls()[index]![1]!.body as string);
+  return body;
+}
+
+function rawBodyOf(index: number) {
   return JSON.parse(calls()[index]![1]!.body as string);
 }
 
@@ -287,10 +299,7 @@ describe("awaiting input", () => {
     });
 
     await act(async () => {
-      await Promise.all([
-        box.api.approve("tc_1", true),
-        box.api.approve("tc_2", false, "too old"),
-      ]);
+      await Promise.all([box.api.approve("tc_1", true), box.api.approve("tc_2", false, "too old")]);
     });
 
     expect(calls()).toHaveLength(2);
@@ -344,6 +353,56 @@ describe("awaiting input", () => {
     expect(calls()).toHaveLength(0);
     expect(box.api.error).toMatchObject({ code: "invalid_tool_result", retryable: false });
   });
+
+  test("a bad toolCallId does not throw away the good ones standing next to it", async () => {
+    fetchMock.mockResolvedValueOnce(streamed(ASKING));
+    const { box } = mount({ attach: false });
+    await act(async () => {
+      await box.api.sendMessage("refund me");
+    });
+
+    await act(async () => {
+      await box.api.approve("tc_nope", true);
+    });
+
+    // The signatures are the only thing that can answer these calls and they are
+    // held nowhere else; dropping them because one report was misaddressed
+    // leaves the user unable to approve anything, with a fresh turn — which the
+    // server reads as refusing everything — the only way out.
+    expect(box.api.pending).toHaveLength(2);
+    expect(box.api.status).toBe("awaiting-input");
+
+    await act(async () => {
+      await box.api.approve("tc_1", true);
+    });
+
+    expect(bodyOf(1).turn.toolResults).toEqual([
+      { toolCallId: "tc_1", signature: "sig_one", approve: true },
+    ]);
+  });
+
+  test("an unrelated failure leaves the standing question alone", async () => {
+    fetchMock.mockResolvedValueOnce(streamed(ASKING));
+    const { box } = mount({ attach: false });
+    await act(async () => {
+      await box.api.sendMessage("refund me");
+    });
+
+    // An upload has nothing to do with the approvals the conversation is
+    // holding, and failing one is no reason to make them unanswerable.
+    fetchMock.mockResolvedValueOnce(new Response("too big", { status: 500 }));
+    await act(async () => {
+      await expect(
+        box.api.attach(new File(["x"], "a.txt", { type: "text/plain" })),
+      ).rejects.toThrow();
+    });
+
+    expect(box.api.pending).toHaveLength(2);
+    expect(box.api.error).toMatchObject({ retryable: true });
+    // With both set, awaiting-input wins: the question is still the thing the UI
+    // has to put in front of the user.
+    expect(box.api.status).toBe("awaiting-input");
+  });
 });
 
 describe("stop", () => {
@@ -385,6 +444,83 @@ describe("stop", () => {
 
     expect(calls()).toHaveLength(0);
   });
+
+  test("a run that has not named itself yet is still stopped", async () => {
+    // Between the send and the first frame — the round trip plus the provider's
+    // time to first token, longer if the agent searches for deferred tools — the
+    // client has no `runId` and, on a stateless first turn, no `threadId`
+    // either. That window is exactly where a user cancels, and a dropped
+    // connection no longer stops the tool loop.
+    const run = controlled();
+    fetchMock.mockImplementation(async (_url: string, init: RequestInit) => {
+      init?.signal?.addEventListener("abort", () => run.abort());
+      return run.response;
+    });
+    const { box } = mount({ attach: false });
+
+    await act(async () => {
+      void box.api.sendMessage("write me an essay");
+    });
+    expect(box.api.runId).toBeUndefined();
+
+    await act(async () => {
+      await box.api.stop();
+    });
+
+    expect(calls().map((c) => c[0])).toEqual(["/api/chat", "/api/chat/stop"]);
+    // The correlation id the client minted for the send, so the route has
+    // something to resolve the run by when nothing else exists yet.
+    expect(rawBodyOf(1)).toEqual({ clientRunId: rawBodyOf(0).clientRunId });
+    expect(rawBodyOf(1).clientRunId).toMatch(/^local_/);
+  });
+
+  test("a run attached to, whose tail carried no run-start, is stoppable by thread", async () => {
+    // The other half of the same hole: a tail replayed from a mid-run cursor has
+    // no `run-start` in it, so `runId` never arrives, but the run is visibly
+    // streaming and the thread is the handle the route resolves it by.
+    const run = controlled();
+    fetchMock.mockImplementation(async (_url: string, init: RequestInit) => {
+      init?.signal?.addEventListener("abort", () => run.abort());
+      return run.response;
+    });
+    const { box } = mount({ threadId: "th_9", cursor: { runId: "run_1", seq: 1 } });
+
+    await act(async () => {
+      run.push({ seq: 2, event: { type: "text-delta", messageId: "m1", delta: "…tail" } });
+      await Promise.resolve();
+    });
+    expect(box.api.runId).toBeUndefined();
+
+    await act(async () => {
+      await box.api.stop();
+    });
+
+    expect(calls()[1]![0]).toBe("/api/chat/stop");
+    expect(rawBodyOf(1)).toEqual({ threadId: "th_9" });
+  });
+
+  test("a stop the server refused is reported, not swallowed", async () => {
+    // The transcript says the turn was cut, so the UI looks settled while the
+    // run may still be working through its tool loop and billing for it.
+    const run = controlled();
+    fetchMock.mockImplementationOnce(async (_url: string, init: RequestInit) => {
+      init?.signal?.addEventListener("abort", () => run.abort());
+      return run.response;
+    });
+    fetchMock.mockResolvedValueOnce(new Response("no such run", { status: 500 }));
+    const onError = vi.fn();
+    const { box } = mount({ attach: false, onError });
+
+    await act(async () => {
+      void box.api.sendMessage("hi");
+    });
+    await act(async () => {
+      await box.api.stop();
+    });
+
+    expect(box.api.error).toMatchObject({ retryable: true });
+    expect(onError).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("attach on mount", () => {
@@ -404,18 +540,68 @@ describe("attach on mount", () => {
     expect(box.api.status).toBe("idle");
   });
 
-  test("resumes past what initialMessages already contain", async () => {
+  test("asks for the tail from the cursor restored with the messages", async () => {
     fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
     mount({
       threadId: "th_9",
       initialMessages: [{ id: "m1", role: "user", content: [], createdAt: "" }],
+      cursor: { runId: "run_1", seq: 3 },
     });
 
     await act(async () => {
       await Promise.resolve();
     });
 
-    expect(bodyOf(0).threadId).toBe("th_9");
+    // Both halves, and the run id is not decoration: frames number from zero in
+    // every run, so "I got to 3" says nothing until the server knows which run
+    // reached 3. Given the pair it can resume; given a mismatch it must replay.
+    expect(bodyOf(0)).toEqual({ threadId: "th_9", cursor: 3, runId: "run_1" });
+  });
+
+  test("a full replay onto a restored transcript does not print the answer twice", async () => {
+    // `LiveRuns` keeps a run alive past `run-end` so a refresh a second late
+    // still sees the tail, which means the ordinary refresh right after an
+    // answer gets that answer replayed. With no cursor to hand back — the app
+    // persisted the messages and not the cursor — `seq` cannot recognise a
+    // single frame of it.
+    fetchMock.mockResolvedValueOnce(streamed(ANSWER));
+    const onFinish = vi.fn();
+    const { box } = mount({
+      threadId: "th_9",
+      onFinish,
+      initialMessages: [
+        { id: "u1", role: "user", content: [{ type: "text", text: "hi" }], createdAt: "" },
+        {
+          id: "m1",
+          role: "assistant",
+          content: [{ type: "text", text: "Hi there." }],
+          createdAt: "",
+          finishReason: "stop",
+        },
+      ],
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(box.api.messages).toHaveLength(2);
+    expect(box.api.messages[1]!.content).toEqual([{ type: "text", text: "Hi there." }]);
+    // An app that persists in `onFinish` would otherwise write the message a
+    // second time on every refresh.
+    expect(onFinish).not.toHaveBeenCalled();
+  });
+
+  test("the cursor is handed back, so the next mount can restore it", async () => {
+    const { box } = mount({ threadId: "th_9", attach: false });
+
+    await act(async () => {
+      await box.api.sendMessage("hello");
+    });
+
+    // What an app persists alongside `messages`; restoring one without the other
+    // is what produced the doubled answer above.
+    expect(box.api.cursor).toEqual({ runId: "run_1", seq: 4 });
   });
 
   test("nothing in flight is an ordinary answer, not an error", async () => {
@@ -652,15 +838,47 @@ describe("lifecycle", () => {
     });
 
     // user, the interrupted assistant turn, user, the new answer.
-    expect(box.api.messages.map((m) => m.role)).toEqual([
-      "user",
-      "assistant",
-      "user",
-      "assistant",
-    ]);
+    expect(box.api.messages.map((m) => m.role)).toEqual(["user", "assistant", "user", "assistant"]);
     // The interrupted turn keeps the text it had produced.
     expect(box.api.messages[1]!.content).toEqual([{ type: "text", text: "Hi there." }]);
     expect(box.api.messages[3]!.content).toEqual([{ type: "text", text: "Second." }]);
+    // And says it was cut off. Left with no finish reason it is indistinguishable
+    // from one still streaming, and run_2's `run-end` would sweep it up and call
+    // it "stop" — telling the user, and in stateless mode the model on every
+    // later turn, that an answer stopped mid-sentence ended cleanly.
+    expect(box.api.messages.map((m) => m.finishReason)).toEqual([
+      undefined,
+      "aborted",
+      undefined,
+      "stop",
+    ]);
     expect(box.api.status).toBe("idle");
+  });
+
+  test("the superseded turn goes back to a stateless server marked aborted", async () => {
+    // The transcript the client carries is what the model is shown next time.
+    const first = controlled();
+    fetchMock.mockImplementationOnce(async (_url: string, init: RequestInit) => {
+      init?.signal?.addEventListener("abort", () => first.abort());
+      return first.response;
+    });
+    const anonymous = ANSWER.map((frame, index) =>
+      index === 0 ? { seq: 0, event: { type: "run-start" as const, runId: "run_1" } } : frame,
+    );
+    fetchMock.mockImplementation(async () => streamed(anonymous));
+    const { box } = mount({ attach: false });
+
+    await act(async () => {
+      void box.api.sendMessage("one");
+    });
+    await act(async () => {
+      first.push({ seq: 0, event: { type: "run-start", runId: "run_0" } }, ANSWER[1]!, ANSWER[2]!);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await box.api.sendMessage("two");
+    });
+
+    expect(bodyOf(1).messages[1]).toMatchObject({ role: "assistant", finishReason: "aborted" });
   });
 });

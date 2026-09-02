@@ -25,6 +25,10 @@ import type {
  *     and `applyFrame` returns the *same object* so a caller can tell nothing
  *     happened. Without it a redelivered `text-delta` would append its text a
  *     second time — a bug that looks fine until someone refreshes.
+ *   - a finished message is closed to further deltas. `seq` catches a redelivery
+ *     within a run, but not a server that replays a run from zero to a client
+ *     that already has the transcript; `message-end` is terminal, so a delta for
+ *     a message that already carries a finish reason is replay by definition.
  *   - every mutation is either an append that the seq guard already protects,
  *     or an upsert keyed by an id. Tool calls and tool results arrive more than
  *     once (a call re-streams as its arguments grow), so those are keyed by
@@ -54,6 +58,19 @@ export type ChatState<T extends ToolShapes = ToolShapes, O = unknown> = {
    * exactly like the start of a new one.
    */
   cursorRunId?: string;
+  /**
+   * The messages the run in hand has touched, oldest first.
+   *
+   * `run-end` and `markAborted` both have to finish off a message whose
+   * `message-end` never arrived, and "every assistant message with no finish
+   * reason" is the wrong set to do it over: a superseded turn from an earlier
+   * run is sitting in exactly that state, and stamping it with *this* run's
+   * reason would relabel an interrupted answer as a clean completion. So the
+   * reducer remembers which messages this run actually wrote to, and finishes
+   * off only those. Reset by `run-start`; on a mid-run attach it simply fills
+   * up from the first frame that names a message, which is the same set.
+   */
+  runMessageIds: string[];
   finishReason?: FinishReason;
 };
 
@@ -64,6 +81,12 @@ export function initialChatState<T extends ToolShapes = ToolShapes, O = unknown>
     threadId?: string;
     /** Where a restored client left off. `-1` means "I have seen nothing". */
     seq?: number;
+    /**
+     * Which run that `seq` counts within. A cursor without it is a number with
+     * no units — frames number from zero in every run, so `seq: 10` means
+     * nothing until you know whether the live run is the one that reached 10.
+     */
+    cursorRunId?: string;
   } = {},
 ): ChatState<T, O> {
   return {
@@ -72,6 +95,8 @@ export function initialChatState<T extends ToolShapes = ToolShapes, O = unknown>
     error: null,
     threadId: init.threadId,
     seq: init.seq ?? -1,
+    cursorRunId: init.cursorRunId,
+    runMessageIds: [],
   };
 }
 
@@ -92,8 +117,7 @@ export function applyFrame<T extends ToolShapes = ToolShapes, O = unknown>(
   // conversation numbers its frames from zero again and the cursor left over
   // from the first would silently swallow the whole answer. `run-start` naming
   // a run this state has not seen is the one frame entitled to drop the cursor.
-  const startsNewRun =
-    frame.event.type === "run-start" && frame.event.runId !== state.cursorRunId;
+  const startsNewRun = frame.event.type === "run-start" && frame.event.runId !== state.cursorRunId;
   // Identity, not a copy: the hook reads `next === prev` as "already applied"
   // and skips the callbacks that would otherwise fire twice.
   if (!startsNewRun && frame.seq <= state.seq) return state;
@@ -112,6 +136,7 @@ function reduce<T extends ToolShapes, O>(
         runId: event.runId,
         cursorRunId: event.runId,
         threadId: event.threadId ?? state.threadId,
+        runMessageIds: [],
         finishReason: undefined,
       };
 
@@ -121,13 +146,22 @@ function reduce<T extends ToolShapes, O>(
         role: event.role,
       }));
 
+    // The two additive cases, and the only two that can double text. `seq`
+    // catches an ordinary redelivery, but a client resuming with a cursor the
+    // server ignores — or asked for the whole run when it already had the
+    // transcript — gets frames it cannot recognise as duplicates. A finished
+    // message is the one thing it can: `message-end` is terminal, so a delta
+    // arriving for a message that already carries a finish reason is replay by
+    // definition and appending it would show the answer twice.
     case "text-delta":
+      if (isFinished(state, event.messageId)) return state;
       return withMessage(state, event.messageId, now, (message) => ({
         ...message,
         content: appendText(message.content, event.delta),
       }));
 
     case "reasoning-delta":
+      if (isFinished(state, event.messageId)) return state;
       return withMessage(state, event.messageId, now, (message) => ({
         ...message,
         content: appendReasoning(message.content, event.delta),
@@ -188,13 +222,24 @@ function reduce<T extends ToolShapes, O>(
       }));
 
     case "usage": {
-      // The only event with no id of its own. It belongs to the message that
-      // just ended, and the last one in the list is the only reading available
-      // — an assignment rather than an append, so a replay is harmless.
-      if (state.messages.length === 0) return state;
+      // The only event with no id of its own, so it goes on the last assistant
+      // message — an assignment rather than an append, so a replay is harmless.
+      //
+      // The role test is the point. A run that counts its input tokens before
+      // opening a message — one that errors early, or whose only output is a
+      // tool call the client must resolve — emits `usage` while the last message
+      // in the list is still the user's own optimistic turn, and token counts
+      // rendered against what the user typed are simply false. With no assistant
+      // message to hang it on, dropping it is the honest answer.
+      //
+      // Deliberately *not* narrowed to the messages this run touched: a client
+      // resuming from a cursor mid-message has touched none of them yet, and
+      // narrowing would make `usage` the one event that fails to converge from
+      // an arbitrary cursor, which is the property the whole file is for.
+      const index = lastIndexWhere(state.messages, (message) => message.role === "assistant");
+      if (index === -1) return state;
       const messages = state.messages.slice();
-      const last = messages[messages.length - 1]!;
-      messages[messages.length - 1] = { ...last, usage: event.usage };
+      messages[index] = { ...messages[index]!, usage: event.usage };
       return { ...state, messages };
     }
 
@@ -212,11 +257,13 @@ function reduce<T extends ToolShapes, O>(
         // A safety net for the client that attached late and never saw a
         // `message-end`: once the run is over nothing is still streaming, so a
         // message left without a finish reason would show a cursor forever.
-        messages: state.messages.map((message) =>
-          message.role === "assistant" && message.finishReason === undefined
-            ? { ...message, finishReason: event.finishReason }
-            : message,
-        ),
+        //
+        // Scoped to this run's own messages. A turn superseded by a second send
+        // is also sitting there unfinished, and it was *not* finished by this
+        // run — stamping it "stop" would tell the user, and the model on the
+        // next stateless turn, that an answer cut off mid-sentence ended
+        // cleanly.
+        messages: finishUnended(state, event.finishReason),
       };
 
     // `tool-search` and `tool-progress` are consumed and not stored: neither has
@@ -247,15 +294,41 @@ export function markAborted<T extends ToolShapes = ToolShapes, O = unknown>(
     ...state,
     runId: undefined,
     finishReason: "aborted",
-    messages: state.messages.map((message) =>
-      message.role === "assistant" && message.finishReason === undefined
-        ? { ...message, finishReason: "aborted" as FinishReason }
-        : message,
-    ),
+    // This run's messages only, for the same reason `run-end` is scoped: an
+    // older turn that was already cut short is not cut short again by this one,
+    // and a restored transcript may legitimately carry an unfinished message
+    // that has nothing to do with the run being stopped.
+    messages: finishUnended(state, "aborted"),
   };
 }
 
 // --- helpers -------------------------------------------------------------
+
+/** The messages this run wrote, finished off with `reason` if they never ended. */
+function finishUnended<T extends ToolShapes, O>(
+  state: ChatState<T, O>,
+  reason: FinishReason,
+): AgentMessage<T, O>[] {
+  return state.messages.map((message) =>
+    message.role === "assistant" &&
+    message.finishReason === undefined &&
+    state.runMessageIds.includes(message.id)
+      ? { ...message, finishReason: reason }
+      : message,
+  );
+}
+
+function isFinished<T extends ToolShapes, O>(state: ChatState<T, O>, messageId: string) {
+  const message = state.messages.find((candidate) => candidate.id === messageId);
+  return message !== undefined && message.finishReason !== undefined;
+}
+
+function lastIndexWhere<M>(items: M[], match: (item: M) => boolean) {
+  for (let i = items.length - 1; i >= 0; i--) {
+    if (match(items[i]!)) return i;
+  }
+  return -1;
+}
 
 function withMessage<T extends ToolShapes, O>(
   state: ChatState<T, O>,
@@ -264,6 +337,11 @@ function withMessage<T extends ToolShapes, O>(
   update: (message: AgentMessage<T, O>) => AgentMessage<T, O>,
 ): ChatState<T, O> {
   const index = state.messages.findIndex((message) => message.id === messageId);
+  // Every id-carrying event marks its message as one this run touched, which is
+  // what `run-end` and `markAborted` read to know whose loose ends are theirs.
+  const runMessageIds = state.runMessageIds.includes(messageId)
+    ? state.runMessageIds
+    : [...state.runMessageIds, messageId];
   if (index === -1) {
     // The mid-stream attach. Every id-carrying event describes an assistant
     // message — `message-start` is the only event that declares a role and it
@@ -274,11 +352,11 @@ function withMessage<T extends ToolShapes, O>(
       content: [],
       createdAt: now,
     };
-    return { ...state, messages: [...state.messages, update(blank)] };
+    return { ...state, runMessageIds, messages: [...state.messages, update(blank)] };
   }
   const messages = state.messages.slice();
   messages[index] = update(messages[index]!);
-  return { ...state, messages };
+  return { ...state, runMessageIds, messages };
 }
 
 function appendText<T extends ToolShapes, O>(
