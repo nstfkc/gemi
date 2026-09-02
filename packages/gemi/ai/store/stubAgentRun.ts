@@ -21,7 +21,16 @@ export class StubAgentRun implements AgentRun<ToolShapes, unknown> {
   subscriptions = 0;
 
   private buffer: AgentStreamFrame[] = [];
-  private nextSeq = 0;
+  /**
+   * Frames are numbered from 1, because `AgentRunImpl` numbers them from 1.
+   *
+   * This used to start at 0, and the difference was not cosmetic: `LiveRuns`
+   * decided whether a cursor had been evicted by comparing it against the
+   * oldest buffered `seq`, which is 1 on a real run that has evicted nothing
+   * and 0 on this one. Every test here passed against a stub that could not
+   * express the case, and a ten-frame run answered a refresh with 410.
+   */
+  private nextSeq = 1;
   private done = false;
   private wake = new Set<() => void>();
   /** See the note on `Entry.version` in `LiveRuns`: same missed-wakeup window,
