@@ -81,6 +81,24 @@ export interface UseChatParams<P extends keyof AgentRoutes> {
 }
 
 export interface UseChatResult<P extends keyof AgentRoutes> {
+  /**
+   * The transcript, tools and all.
+   *
+   * A `tool-call` part narrows on `name`, and with it `input`, `output` and
+   * `progress` — the tool's own yields, in order, typed by what its `execute`
+   * yields rather than as `unknown`. `nested` on that same part holds the
+   * sub-agent runs the tool drove, each an ordinary `AgentMessage[]` with a
+   * name and a label, so a component walks into it and renders it with whatever
+   * it already renders `messages` with:
+   *
+   *   {part.type === "tool-call" && part.nested?.map((run) => (
+   *     <Transcript key={run.runId} title={run.label ?? run.agent} messages={run.messages} />
+   *   ))}
+   *
+   * Those inner messages are typed with the default `ToolShapes`, not this
+   * route's: a sub-agent's tools are its own, and typing its transcript with
+   * the parent's tool names would be a lie the compiler tells.
+   */
   messages: AgentMessage<ToolsOf<P>, OutputOf<P>>[];
   status: ChatStatus;
   /** Cleared by the next successful send, so a retry does not have to clear it. */
@@ -119,12 +137,30 @@ export interface UseChatResult<P extends keyof AgentRoutes> {
   regenerate(): Promise<void>;
   setMessages(messages: AgentMessage<ToolsOf<P>, OutputOf<P>>[]): void;
 
-  /** Non-empty exactly when `status === "awaiting-input"`. */
+  /**
+   * Non-empty exactly when `status === "awaiting-input"`.
+   *
+   * A call a *sub*-agent made arrives here too, with `path` naming the chain of
+   * tool calls it is nested under. Nothing else about it is different, and that
+   * is the point: it is answered by `approve`/`answer` like any other, and
+   * `path` is there only so a UI can say which agent is asking.
+   */
   pending: PendingToolCall<ToolsOf<P>>[];
   /**
-   * Sugar over `sendMessage`. The hook carries each pending call's signature and
-   * hands it back untouched, so an app answers with a boolean and never sees the
-   * mechanism that makes answering trustworthy.
+   * The deferred tools the model has pulled in during the run in flight.
+   *
+   * Somewhere for a UI to put "…looking for the right tool" instead of an
+   * unexplained pause. Run-scoped and not part of the transcript: it says what
+   * is happening now, and is empty again on the next `run-start`, so it is not
+   * something to persist beside `messages`.
+   */
+  loadedTools: string[];
+  /**
+   * Sugar over `sendMessage`. The hook carries each pending call's signature —
+   * and its `path`, if the question came from a sub-agent — and hands both back
+   * untouched, so an app answers with a boolean and never sees the mechanism
+   * that makes answering trustworthy. Answering a nested question is the same
+   * call as answering a top-level one.
    */
   approve(toolCallId: string, approve: boolean, reason?: string): Promise<void>;
   /** The same, for a `question` or `client` tool: the value is checked against
@@ -527,11 +563,26 @@ export function useChat<P extends keyof AgentRoutes>(
     [send],
   );
 
+  /**
+   * The half of a `ClientToolResult` the app never writes: the id, the
+   * signature, and the path.
+   *
+   * All three are carried by the hook and handed back untouched, which is what
+   * makes a sub-agent's question answerable with the same two lines as a
+   * top-level one. `path` is absent for a call the parent's own tools made, so
+   * an app cannot tell from its own code where the question came from — the only
+   * difference is that `pending[i].path` is there to render if it wants to say
+   * which agent is asking.
+   */
   const resultFor = useCallback(
-    (toolCallId: string, build: (signature: string) => ClientToolResult) => {
-      const call = stateRef.current!.pending.find(
+    (
+      toolCallId: string,
+      build: (base: { toolCallId: string; signature: string; path?: string[] }) => ClientToolResult,
+    ) => {
+      const matches = stateRef.current!.pending.filter(
         (candidate: PendingToolCall) => candidate.toolCallId === toolCallId,
       );
+      const call = matches[0];
       if (!call) {
         // Not a network failure: the app answered a call this client is not
         // holding. Surfacing it beats sending a turn the server will reject for
@@ -544,19 +595,39 @@ export function useChat<P extends keyof AgentRoutes>(
         });
         return null;
       }
+      if (matches.length > 1) {
+        // Nesting is what makes this reachable: two sub-runs, under two
+        // different tools of the same parent turn, each holding a call. The ids
+        // come from whichever provider ran each sub-run, so nothing guarantees
+        // they differ, and the path is what tells them apart — but `approve` is
+        // deliberately addressed by id alone, because an app must not have to
+        // know a question was nested to answer it. Refusing beats guessing:
+        // picking one would silently approve a tool the user was not looking at.
+        fail({
+          code: "invalid_tool_result",
+          message: `Ambiguous tool call ${toolCallId}: ${matches.length} pending calls share it`,
+          toolCallId,
+          retryable: false,
+        });
+        return null;
+      }
       // The signature travels back exactly as it arrived. It signs the input the
-      // server proposed, so an app that never touches it cannot approve one
-      // thing and have another run.
-      return build(call.signature);
+      // server proposed — and, for a nested call, the path it was proposed at —
+      // so an app that never touches either cannot approve one thing and have
+      // another run, or have the right answer applied to the wrong sub-agent.
+      return build({
+        toolCallId,
+        signature: call.signature,
+        ...(call.path ? { path: call.path } : {}),
+      });
     },
     [fail],
   );
 
   const approve = useCallback(
     async (toolCallId: string, approved: boolean, reason?: string) => {
-      const result = resultFor(toolCallId, (signature) => ({
-        toolCallId,
-        signature,
+      const result = resultFor(toolCallId, (base) => ({
+        ...base,
         approve: approved,
         ...(reason ? { reason } : {}),
       }));
@@ -567,7 +638,7 @@ export function useChat<P extends keyof AgentRoutes>(
 
   const answer = useCallback(
     async (toolCallId: string, output: unknown) => {
-      const result = resultFor(toolCallId, (signature) => ({ toolCallId, signature, output }));
+      const result = resultFor(toolCallId, (base) => ({ ...base, output }));
       if (result) await queueResult(result);
     },
     [queueResult, resultFor],
@@ -745,6 +816,7 @@ export function useChat<P extends keyof AgentRoutes>(
     regenerate,
     setMessages,
     pending: state.pending as PendingToolCall<ToolsOf<P>>[],
+    loadedTools: state.loadedTools,
     approve,
     answer,
     attach: uploadFile,

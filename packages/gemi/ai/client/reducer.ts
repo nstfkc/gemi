@@ -2,9 +2,12 @@ import type {
   AgentContentPart,
   AgentError,
   AgentMessage,
+  AgentStreamEvent,
   AgentStreamFrame,
   FinishReason,
+  NestedRun,
   PendingToolCall,
+  ToolCallPart,
   ToolShapes,
 } from "../types";
 
@@ -33,6 +36,15 @@ import type {
  *     or an upsert keyed by an id. Tool calls and tool results arrive more than
  *     once (a call re-streams as its arguments grow), so those are keyed by
  *     `toolCallId`, never pushed blindly.
+ *
+ * A sub-agent's transcript is built by this same function calling itself. A
+ * `nested-event` is unwrapped onto the `NestedRun` hanging off its parent's
+ * tool-call part and handed to `reduce` again, so every rule above holds inside
+ * a nested run for free — a nested `message-start` that never arrived, a
+ * nested delta after a nested `message-end`, a nested `run-end` closing off a
+ * message that never ended. Two levels of nesting cost this file nothing over
+ * one, which is the whole reason the wire has a `nested-event` rather than a
+ * second reducer.
  */
 
 export type ChatState<T extends ToolShapes = ToolShapes, O = unknown> = {
@@ -71,6 +83,23 @@ export type ChatState<T extends ToolShapes = ToolShapes, O = unknown> = {
    * up from the first frame that names a message, which is the same set.
    */
   runMessageIds: string[];
+  /**
+   * The deferred tools the model has pulled in during this run, as a set.
+   *
+   * Not a message part, because a `tool-search` names no tool call and no
+   * message — it happens *before* any call, which is exactly what makes it
+   * worth showing ("looking for the right tool" instead of an unexplained
+   * pause). So unlike `tool-progress` and `nested-event`, which now have a home
+   * on the tool-call part, this one had nowhere in `AgentMessage` to go that
+   * would not have meant inventing a content part in a frozen contract.
+   *
+   * A set, not a log: union is the only accumulation that survives redelivery
+   * without a guard, and a client attached mid-run and handed a `tool-search`
+   * it has already applied must not show the same tool twice. Run-scoped and
+   * reset by `run-start` — it describes a run in progress, so it is deliberately
+   * not something `initialChatState` restores.
+   */
+  loadedTools: string[];
   finishReason?: FinishReason;
 };
 
@@ -97,6 +126,7 @@ export function initialChatState<T extends ToolShapes = ToolShapes, O = unknown>
     seq: init.seq ?? -1,
     cursorRunId: init.cursorRunId,
     runMessageIds: [],
+    loadedTools: [],
   };
 }
 
@@ -137,6 +167,7 @@ function reduce<T extends ToolShapes, O>(
         cursorRunId: event.runId,
         threadId: event.threadId ?? state.threadId,
         runMessageIds: [],
+        loadedTools: [],
         finishReason: undefined,
       };
 
@@ -181,15 +212,85 @@ function reduce<T extends ToolShapes, O>(
       }));
 
     case "tool-call":
-      // Keyed, because the same call re-streams as its arguments fill in.
-      return withMessage(state, event.messageId, now, (message) => ({
-        ...message,
-        content: upsert(
-          message.content,
-          event.part,
+      // Keyed, because the same call re-streams as its arguments fill in — and
+      // *merged* rather than replaced, which the plain upsert below cannot do.
+      //
+      // A `tool-call` frame is the model's half of the part. `progress` and
+      // `nested` are the execution's half, and they arrive on events that name
+      // no message, so a part that loses them cannot rebuild them from anything
+      // later in the stream. Replacing wholesale is exactly how a run replayed
+      // onto a transcript that already holds it drops a sub-agent's entire
+      // transcript while appearing to converge.
+      return withMessage(state, event.messageId, now, (message) => {
+        const index = message.content.findIndex(
           (part) => part.type === "tool-call" && part.toolCallId === event.part.toolCallId,
-        ),
+        );
+        const existing = index === -1 ? undefined : (message.content[index] as ToolCallPart<T>);
+        // The frame wins where it says anything — a server that persists the
+        // nested transcript and re-sends it is more authoritative than what this
+        // client accumulated — and the part is kept where it does not.
+        const progress = event.part.progress ?? existing?.progress;
+        const nested = event.part.nested ?? existing?.nested;
+        const part = {
+          ...event.part,
+          ...(progress ? { progress } : {}),
+          ...(nested ? { nested } : {}),
+        };
+        const content = message.content.slice();
+        if (index === -1) content.push(part);
+        else content[index] = part;
+        return { ...message, content };
+      });
+
+    case "tool-search": {
+      // Accumulated as a set. Every other additive event in this file leans on
+      // `seq` to survive redelivery; this one cannot, because a `tool-search`
+      // carries no id at all — there is nothing to key an upsert on and nothing
+      // to tell a second delivery from a second search. Union is what makes the
+      // question moot: applying the same frame again is the same set, and two
+      // genuinely different searches that both loaded `refundOrder` are, for a
+      // UI naming the tools in play, the same fact twice.
+      const loaded = event.loaded.filter((name) => !state.loadedTools.includes(name));
+      if (loaded.length === 0) return state;
+      return { ...state, loadedTools: [...state.loadedTools, ...loaded] };
+    }
+
+    case "tool-progress":
+      // Append-only, exactly like a text delta, and protected the same two
+      // ways: `seq` for redelivery within a run, and the finished-message check
+      // inside `withToolCall` for a run replayed onto a transcript that already
+      // holds it. The tool loop emits every yield before the message it belongs
+      // to is finalised, so a progress datum for a finished message is replay
+      // by definition — the same argument `text-delta` makes.
+      return withToolCall(state, event.toolCallId, (part) => ({
+        ...part,
+        progress: [...(part.progress ?? []), event.data],
       }));
+
+    case "nested-event": {
+      // The recursion. The sub-run's transcript is an ordinary message list, so
+      // it is reduced by this function rather than by a parallel one — which is
+      // why an arbitrarily deep nesting is not a case handled here at all: an
+      // inner `nested-event` simply lands back in this branch, one message list
+      // further down.
+      const nestedEvent = event as NestedEvent;
+      return withToolCall(state, event.toolCallId, (part) => {
+        const runs = part.nested ?? [];
+        const index = runs.findIndex((run) => run.runId === nestedEvent.runId);
+        // Created on the spot when unknown, for the same reason `withMessage`
+        // creates a message it never saw start: a client attached mid-run gets
+        // the sub-run's tail and no `run-start`, and dropping it would leave a
+        // tool call that visibly does something looking like one that hangs.
+        const run: NestedRun = runs[index] ?? {
+          runId: nestedEvent.runId,
+          agent: nestedEvent.agent,
+          messages: [],
+        };
+        const next = applyNested(run, nestedEvent, now);
+        const nested = index === -1 ? [...runs, next] : runs.map((r, i) => (i === index ? next : r));
+        return { ...part, nested };
+      });
+    }
 
     case "tool-result": {
       const next = withMessage(state, event.messageId, now, (message) => ({
@@ -266,10 +367,11 @@ function reduce<T extends ToolShapes, O>(
         messages: finishUnended(state, event.finishReason),
       };
 
-    // `tool-search` and `tool-progress` are consumed and not stored: neither has
-    // a place in `AgentMessage`, and inventing one would change a contract four
-    // other slices compile against. The seq still advances, so the cursor stays
-    // right.
+    // Every event in the union is handled above, so this is reached only by a
+    // server that speaks a newer protocol than this client. Kept as a silent
+    // no-op rather than an exhaustiveness assertion for that reason: an old tab
+    // meeting a new event must keep rendering the rest of the stream, and the
+    // seq still advances so its cursor stays right.
     default:
       return state;
   }
@@ -316,6 +418,113 @@ function finishUnended<T extends ToolShapes, O>(
       ? { ...message, finishReason: reason }
       : message,
   );
+}
+
+type NestedEvent = Extract<AgentStreamEvent, { type: "nested-event" }>;
+
+/**
+ * Run one update over the tool-call part with this id, wherever it lives.
+ *
+ * `tool-progress` and `nested-event` are the only events that name a tool call
+ * without naming a message, so the message has to be found rather than told —
+ * a scan from the newest end, because the call being worked on is the one that
+ * just arrived.
+ *
+ * **A frame for a tool call this transcript does not have is dropped.** That is
+ * the mid-run `/attach` case the whole file is written for, and it is the one
+ * place the usual answer — create it on the spot — is the wrong one: a
+ * `ToolCallPart` needs a tool `name` and an `input`, and neither is on these
+ * events. Inventing them would put a tool call the model never made into the
+ * transcript, under a name that is not a key of the agent's tools, which breaks
+ * the narrowing that is the reason the shapes are carried into the browser at
+ * all. So the progress is lost and the transcript stays true, rather than the
+ * other way round.
+ *
+ * In practice a client that has the cursor has the part: `useChat` documents
+ * `cursor` and `initialMessages` as things to persist together, and a client
+ * that persisted one without the other is already the case that doubles text.
+ * Parking the orphans until their tool call shows up was considered and is not
+ * worth it — the call is *earlier* in the stream, never later, so nothing would
+ * ever drain the parking lot.
+ */
+function withToolCall<T extends ToolShapes, O>(
+  state: ChatState<T, O>,
+  toolCallId: string,
+  update: (part: ToolCallPart<T>) => ToolCallPart<T>,
+): ChatState<T, O> {
+  for (let i = state.messages.length - 1; i >= 0; i--) {
+    const message = state.messages[i]!;
+    const index = message.content.findIndex(
+      (part) => part.type === "tool-call" && part.toolCallId === toolCallId,
+    );
+    if (index === -1) continue;
+    // The replay guard, and the same one the deltas use. The tool loop runs
+    // every tool before it finalises the message the calls sit in, so nothing
+    // legitimately appends to a call inside a finished message; a frame that
+    // does is a run being replayed onto a transcript that already has it, and
+    // appending would show the progress log twice.
+    if (message.finishReason !== undefined) return state;
+    const content = message.content.slice();
+    content[index] = update(content[index] as ToolCallPart<T>);
+    const messages = state.messages.slice();
+    messages[i] = { ...message, content };
+    // Counted as a message this run touched, like every event that names one
+    // directly — a client whose only frames for this message were nested ones
+    // still needs `run-end` to close it, or it shows a cursor forever.
+    const runMessageIds = state.runMessageIds.includes(message.id)
+      ? state.runMessageIds
+      : [...state.runMessageIds, message.id];
+    return { ...state, runMessageIds, messages };
+  }
+  return state;
+}
+
+/**
+ * One sub-run event, applied to the sub-run's own transcript.
+ *
+ * The sub-state is built and thrown away per event rather than kept, because
+ * there is nowhere to keep it: `NestedRun` is a wire type and holds a
+ * transcript, not a reducer state. Everything the inner `reduce` needs is
+ * derivable from it.
+ *
+ *   - `seq` is `-1` and this calls `reduce`, not `applyFrame`. A nested event
+ *     has no sequence of its own; it is numbered in the *parent's* stream, and
+ *     the parent's cursor has already refused the duplicates.
+ *   - `runMessageIds` is every message in the transcript, which for a nested
+ *     run is exactly right and needs none of the parent's care. The parent
+ *     scopes it because its list mixes runs; a `NestedRun` is keyed by `runId`
+ *     and only ever written by events carrying that id, so every message in it
+ *     belongs to the run that is ending.
+ *   - `pending` is dropped. An escalated question reaches the user on the
+ *     *parent's* `awaiting-input`, carrying the path that says which tool to
+ *     re-enter; the copy inside the sub-run's own stream carries no path, so
+ *     surfacing it would show the question twice and make one of them
+ *     unanswerable.
+ */
+function applyNested(run: NestedRun, event: NestedEvent, now: string): NestedRun {
+  const sub: ChatState = {
+    messages: run.messages,
+    pending: [],
+    error: null,
+    seq: -1,
+    runMessageIds: run.messages.map((message) => message.id),
+    loadedTools: [],
+    finishReason: run.finishReason,
+  };
+  const next = reduce(sub, event.event, now);
+  return {
+    ...run,
+    // A late label is still a label: `/attach` may deliver the sub-run's tail,
+    // and every nested frame carries it.
+    ...(event.label !== undefined ? { label: event.label } : {}),
+    messages: next.messages,
+    ...(next.finishReason !== undefined ? { finishReason: next.finishReason } : {}),
+    // The sub-run's own total, lifted so a UI can price the block it is
+    // rendering without walking its messages. An assignment, so redelivery is
+    // harmless — the inner `reduce` has already put the same number on the
+    // sub-run's last assistant message.
+    ...(event.event.type === "usage" ? { usage: event.event.usage } : {}),
+  };
 }
 
 function isFinished<T extends ToolShapes, O>(state: ChatState<T, O>, messageId: string) {
