@@ -229,6 +229,58 @@ const finish = (): ProviderEvent => ({
 
 // --- tests ---------------------------------------------------------------
 
+describe("reasoning parts", () => {
+  /**
+   * The id is the whole value of a reasoning part on the wire.
+   *
+   * `providers/request.ts` drops a reasoning item that has no id — the id is
+   * the API's handle on the stored reasoning, and inventing one would look like
+   * continuity that is not there. So a run that records the text and loses the
+   * id sends nothing back on step two, and nothing about the transcript says
+   * so: the text is all there, the model simply re-derives its own argument
+   * from scratch and every prompt-cache hit is missed. It was measured that way
+   * against the live API before it was fixed.
+   */
+  test("keeps the id the provider reported", async () => {
+    const provider = fakeProvider([
+      { type: "reasoning-delta", delta: "think", id: "rs_1" },
+      { type: "reasoning-delta", delta: "ing", id: "rs_1" },
+      { type: "text-delta", delta: "done" },
+      finish(),
+    ]);
+    const result = await greetAgent(provider).stream({ messages: [], req }).result();
+    const reasoning = partsOf(result.messages, "reasoning");
+    expect(reasoning).toEqual([{ type: "reasoning", id: "rs_1", text: "thinking" }]);
+  });
+
+  test("keeps two items apart rather than flattening them into one", async () => {
+    // A step can produce several reasoning items, and merging on the part type
+    // alone gave them one id between them — so the second item's text was
+    // echoed back under the first item's id.
+    const provider = fakeProvider([
+      { type: "reasoning-delta", delta: "first", id: "rs_1" },
+      { type: "reasoning-delta", delta: "second", id: "rs_2" },
+      finish(),
+    ]);
+    const result = await greetAgent(provider).stream({ messages: [], req }).result();
+    expect(partsOf(result.messages, "reasoning")).toEqual([
+      { type: "reasoning", id: "rs_1", text: "first" },
+      { type: "reasoning", id: "rs_2", text: "second" },
+    ]);
+  });
+
+  test("a provider that reports no id still gets its text rendered", async () => {
+    // Azure does not always send one. The text is what a UI shows, so it is
+    // kept; it just cannot be echoed back, which `reasoningItem` documents.
+    const provider = fakeProvider([
+      { type: "reasoning-delta", delta: "quiet" },
+      finish(),
+    ]);
+    const result = await greetAgent(provider).stream({ messages: [], req }).result();
+    expect(partsOf(result.messages, "reasoning")).toEqual([{ type: "reasoning", text: "quiet" }]);
+  });
+});
+
 describe("a plain run", () => {
   test("streams text, ends `stop`, and reports what it produced", async () => {
     const provider = fakeProvider([
