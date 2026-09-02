@@ -106,14 +106,103 @@ const refunds = Skill.create({
   instructions: () => Bun.file("./app/skills/refunds.md").text(),
 });
 
+// --- A tool that runs another agent -----------------------------------------
+//
+// The headline of the nesting slice, kept here for the same reason as
+// everything above it: if the shape the RFC advertised does not compile against
+// the real `ToolContext`, the runtime is wrong and this file is how we find out.
+
+const searchDocsTool = AgentTool.create({
+  name: "searchDocs",
+  description: "Search the public documentation",
+  inputSchema: s.object({ query: s.string() }),
+  outputSchema: s.object({ excerpts: s.array(s.string()) }),
+  execute: async (input) => ({ excerpts: [`docs matching ${input.query}`] }),
+});
+
+// A sub-agent is an ordinary agent. It is not registered on a route and has no
+// controller of its own — the only thing that makes it a sub-agent is that a
+// tool runs it. Its own `ask` is what makes the escalation below real: a
+// sub-agent that can never ask can never escalate, and the interesting case is
+// the one where the question comes from a run the user never started.
+const researchAgent = Agent.create({
+  name: "research",
+  instructions: "You research a question and answer it in one paragraph.",
+  provider: OpenAIProvider.model("gpt-5.4"),
+  tools: [searchDocsTool, askTool],
+  maxSteps: 6,
+});
+
+const researchTool = AgentTool.create({
+  name: "research",
+  description: "Hand a question to the research agent and return what it found",
+  inputSchema: s.object({ question: s.string() }),
+  outputSchema: s.object({ summary: s.string(), turns: s.number() }),
+  execute: async (input, ctx) => {
+    // READ THIS BEFORE COPYING THE SHAPE. If the sub-agent asks the user
+    // something, this tool call is not resolved and returned to — the whole
+    // body is re-entered from the top on the turn that answers, because a JS
+    // async generator cannot suspend across a turn boundary. So everything
+    // above the `runAgent` runs twice. `ctx.resumed` is how a body tells the
+    // second pass from the first; the alternative is to put side effects
+    // *after* the call, or make them idempotent.
+    if (!ctx.resumed) {
+      // first-attempt-only work goes here — an audit row, a rate-limit tick
+    }
+
+    const run = await ctx.runAgent(researchAgent, {
+      prompt: input.question,
+      // Shown on the nested block in the UI, so the user reads "researching
+      // pricing" rather than an unlabelled second transcript.
+      label: `researching ${input.question}`,
+    });
+
+    // `run.nested` is the very object recorded on this call's
+    // `ToolCallPart.nested` and rendered by the client — not a second
+    // representation of it — so a tool that wants to summarize what its
+    // sub-agent did reads what the user is already looking at.
+    ctx.signal.throwIfAborted();
+    const summary = run.nested.messages
+      .flatMap((message) => message.content)
+      .filter((part) => part.type === "text")
+      .map((part) => part.text)
+      .join("\n");
+
+    return { summary, turns: run.messages.length };
+  },
+});
+
+// The autonomous variant: `onPending: "deny"` refuses the sub-agent's questions
+// in place, so this tool always returns rather than escalating. Inherited all
+// the way down, so a grandchild cannot ask either — which is the only way the
+// promise "nothing from this subtree reaches the user" is worth making.
+const triageTool = AgentTool.create({
+  name: "triage",
+  description: "Classify a ticket without ever asking the customer anything",
+  inputSchema: s.object({ ticket: s.string() }),
+  outputSchema: s.object({ verdict: s.string() }),
+  execute: async (input, ctx) => {
+    const run = await ctx.runAgent(researchAgent, {
+      prompt: `Classify: ${input.ticket}`,
+      onPending: "deny",
+    });
+    return { verdict: run.finishReason };
+  },
+});
+
 const supportAgent = Agent.create({
   name: "support",
   instructions: "You are a support agent for an invoicing product.",
   provider: OpenAIProvider.model("gpt-5.4"),
-  tools: [grepTool, bashTool, chargeTool, askTool, crm],
+  tools: [grepTool, bashTool, chargeTool, askTool, researchTool, triageTool, crm],
   skills: [refunds],
   maxSteps: 12,
   reasoning: "medium",
+  // How deep `ctx.runAgent` may go below this run. Read from the agent at the
+  // ROOT and carried down, so a sub-agent raising its own cannot deepen a tree
+  // it did not start — and a cycle (an agent whose tool runs itself) fails with
+  // a sentence naming the chain instead of exhausting the stack.
+  maxDepth: 2,
 });
 
 // Module scope, NOT `store = new MemoryAgentStore()` in the class body. A
