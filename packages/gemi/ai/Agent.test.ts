@@ -1413,6 +1413,80 @@ describe("resuming a tool whose sub-agent asked a question", () => {
     ).toMatchObject([{ toolCallId: "s1", status: "ok", output: { answer: "yes" } }]);
   });
 
+  test("a conversation's turns add up to every provider call, once each", async () => {
+    // `usage` has two denominators here and it is worth being explicit about
+    // which is which, because adding them together is the obvious mistake.
+    //
+    //   run.usage        what THIS turn spent, own calls plus sub-agents'
+    //   NestedRun.usage  what THAT sub-run has spent over its whole life,
+    //                    which spans turns when it was resumed
+    //
+    // A resumed turn deliberately does not re-count a memoized sub-run: the
+    // turn that actually spent those tokens already reported them. So the bill
+    // for a conversation is the sum of its turns, and this test is what pins
+    // that — the failure it guards against is a resume that either double
+    // counts the replayed sub-run or loses the escalated one.
+    const finished = answeringAgent("researcher", "eleven");
+    const asking = askingAgent("reviewer", "ship it?", [
+      { type: "text-delta", delta: "shipped" },
+      finish(),
+    ]);
+    const plan = nestingTool("plan", async (ctx) => {
+      const research = await ctx.runAgent(finished.agent, { prompt: "how many?" });
+      const review = await ctx.runAgent(asking.agent, { prompt: "review it" });
+      return {
+        heard: textOf(research.messages[research.messages.length - 1]),
+        reviewed: textOf(review.messages[review.messages.length - 1]),
+      };
+    });
+
+    const first = await escalate({ tool: plan });
+    // lead once, researcher once, reviewer once — three calls, and the two
+    // sub-agents' tokens are in the parent's total rather than stranded.
+    expect(first.result.usage).toEqual(usage(30, 15));
+
+    const provider = fakeProvider([{ type: "text-delta", delta: "all done" }, finish()]);
+    const agent = Agent.create({ name: "lead", provider, tools: [plan] });
+    const second = await agent
+      .stream({
+        messages: first.result.messages,
+        req,
+        turn: {
+          toolResults: [
+            {
+              toolCallId: "s1",
+              signature: first.pending[0].signature,
+              path: first.pending[0].path,
+              output: { answer: "yes" },
+            },
+          ],
+        },
+      })
+      .result();
+
+    // lead once and the resumed reviewer once. The researcher came off the
+    // memo, so it is absent from this turn's bill and present in the last.
+    expect(second.usage).toEqual(usage(20, 10));
+
+    // Every provider that billed anything across both turns: the lead on turn
+    // one, the lead on turn two (a different instance), and the two sub-agents.
+    const calls =
+      first.provider.calls.length +
+      provider.calls.length +
+      finished.provider.calls.length +
+      asking.provider.calls.length;
+    expect(calls).toBe(5);
+    expect(first.result.usage.inputTokens + second.usage.inputTokens).toBe(10 * calls);
+    expect(first.result.usage.outputTokens + second.usage.outputTokens).toBe(5 * calls);
+    expect(first.result.usage.totalTokens + second.usage.totalTokens).toBe(15 * calls);
+
+    // The other denominator: the reviewer ran twice and its record grew, while
+    // the researcher's stayed where the first turn left it.
+    const part = callPartOf(second.messages, "c1");
+    expect(part.nested[0]).toMatchObject({ agent: "researcher", usage: usage(10, 5) });
+    expect(part.nested[1]).toMatchObject({ agent: "reviewer", usage: usage(20, 10) });
+  });
+
   test("a runAgent after the escalating one has not run on turn one, and runs on turn two", async () => {
     const asking = askingAgent(
       "asker",
