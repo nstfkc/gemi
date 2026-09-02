@@ -1,3 +1,4 @@
+import { createHmac } from "crypto";
 import { describe, expect, test } from "vitest";
 import {
   canonicalize,
@@ -181,5 +182,78 @@ describe("spending a signature", () => {
 
   test("spends nothing for a token it cannot read", () => {
     expect(consumePendingCall("not-a-token")).toBe(false);
+  });
+});
+
+describe("a path on a pending call", () => {
+  /** The MAC the flat form has always produced, recomputed from the outside. */
+  function flatMac(claim: PendingCallClaims, nonce: string, expiresAt: number) {
+    const fields = [
+      "agt1",
+      claim.runId,
+      claim.toolCallId,
+      claim.name,
+      claim.kind,
+      nonce,
+      String(expiresAt),
+      canonicalize(claim.input),
+    ];
+    const payload = fields.map((field) => `${field.length}:${field}`).join("");
+    return createHmac("sha256", secret).update(payload).digest("base64url");
+  }
+
+  test("changes nothing about a call that has none", () => {
+    // The one thing that must not move. Every approval already in flight was
+    // minted from exactly these eight fields, and a ninth carrying "[]" would
+    // make all of them come back looking forged the moment this deploys — the
+    // user who clicked Approve before the release would be told they refused.
+    const signature = signPendingCall(claims(), { secret });
+    const parsed = readSignature(signature)!;
+    expect(signature.split(".")[4]).toBe(flatMac(claims(), parsed.nonce, parsed.expiresAt));
+  });
+
+  test("treats an empty path as no path, because it says the same thing", () => {
+    const signature = signPendingCall(claims({ path: [] }), { secret });
+    const parsed = readSignature(signature)!;
+    expect(signature.split(".")[4]).toBe(flatMac(claims(), parsed.nonce, parsed.expiresAt));
+    expect(verifyPendingCall(signature, claims(), { secret }).ok).toBe(true);
+  });
+
+  test("verifies for the path it was minted under", () => {
+    const signature = signPendingCall(claims({ path: ["call_outer"] }), { secret });
+    expect(verifyPendingCall(signature, claims({ path: ["call_outer"] }), { secret }).ok).toBe(
+      true,
+    );
+  });
+
+  test("cannot be replayed as a top-level call", () => {
+    // The whole point of signing the path rather than carrying it beside the
+    // signature: a question a sub-agent asked is answered by re-entering the
+    // tool above it, and a token that could shed its path would run the tool
+    // the user never saw.
+    const signature = signPendingCall(claims({ path: ["call_outer"] }), { secret });
+    expect(verifyPendingCall(signature, claims(), { secret })).toEqual({
+      ok: false,
+      reason: "forged",
+    });
+  });
+
+  test("cannot be moved under a different parent, or to a different depth", () => {
+    const signature = signPendingCall(claims({ path: ["call_outer"] }), { secret });
+    expect(verifyPendingCall(signature, claims({ path: ["call_other"] }), { secret })).toEqual({
+      ok: false,
+      reason: "forged",
+    });
+    expect(
+      verifyPendingCall(signature, claims({ path: ["call_outer", "call_inner"] }), { secret }),
+    ).toEqual({ ok: false, reason: "forged" });
+  });
+
+  test("keeps path order, because a chain read backwards is a different call", () => {
+    const signature = signPendingCall(claims({ path: ["a", "b"] }), { secret });
+    expect(verifyPendingCall(signature, claims({ path: ["b", "a"] }), { secret })).toEqual({
+      ok: false,
+      reason: "forged",
+    });
   });
 });

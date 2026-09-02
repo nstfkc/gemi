@@ -14,8 +14,9 @@ import { createHmac, randomBytes, timingSafeEqual } from "crypto";
  * What is signed, and what deliberately is not:
  *
  *   signed — `runId`, `toolCallId`, the tool `name`, the `kind` of pending call
- *            and a canonical serialization of the input, plus a nonce and an
- *            expiry.
+ *            and a canonical serialization of the input, plus a nonce, an
+ *            expiry, and — for a call a sub-agent asked — the `path` of
+ *            tool-call ids it is nested under.
  *   not    — the client's answer. `approve: true` / `approve: false` and a
  *            question's output are the *point* of asking; a client that flips
  *            its own answer has refused, not forged. What the signature buys is
@@ -41,6 +42,17 @@ export type PendingCallClaims = {
   name: string;
   kind: "approval" | "question" | "client";
   input: unknown;
+  /**
+   * The chain of tool-call ids the call is nested under, outermost first.
+   * Absent — or empty, which means the same thing — for a top-level call.
+   *
+   * A sub-agent's question reaches the user through its parent's pending list,
+   * so `toolCallId` stops being an address on its own: two sub-runs under two
+   * different tools can each hold a call the outer run never made. Binding the
+   * path is what stops a token minted for a call nested under tool call X from
+   * being replayed as a top-level call, or as one nested under Y.
+   */
+  path?: string[];
 };
 
 export type SignOptions = {
@@ -126,8 +138,22 @@ function mac(secret: string, fields: string[]): Buffer {
   return createHmac("sha256", secret).update(payload(fields)).digest();
 }
 
+/**
+ * The path is appended, and only when there is one.
+ *
+ * Byte-identical output for a call with no path is the whole requirement here:
+ * every approval already in flight was minted from the eight fields below, and
+ * a ninth field carrying `"[]"` or `"undefined"` would invalidate all of them
+ * on deploy — the user who clicked Approve before the release would be told
+ * their answer was forged. So an absent path adds nothing at all, and an empty
+ * array is treated as absent because it says the same thing.
+ *
+ * `payload` is length-prefixed, so appending a field cannot collide with a
+ * longer value in the one before it; that is why this can be an append rather
+ * than a new version tag.
+ */
 function claimFields(claims: PendingCallClaims, nonce: string, expiresAt: number): string[] {
-  return [
+  const fields = [
     VERSION,
     claims.runId,
     claims.toolCallId,
@@ -137,6 +163,10 @@ function claimFields(claims: PendingCallClaims, nonce: string, expiresAt: number
     String(expiresAt),
     canonicalize(claims.input),
   ];
+  if (claims.path && claims.path.length > 0) {
+    fields.push(canonicalize(claims.path));
+  }
+  return fields;
 }
 
 const encode = (value: string) => Buffer.from(value, "utf8").toString("base64url");
