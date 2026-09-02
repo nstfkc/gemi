@@ -4,7 +4,7 @@
 // ergonomics can be read without assembling them from six files.
 import { ApiRouter } from "../http";
 import { Agent, AgentTool, Skill } from "./Agent";
-import { AgentController } from "./AgentController";
+import { AgentController, MemoryAgentStore } from "./AgentController";
 import { OpenAIProvider } from "./AgentProvider";
 import { s } from "./Schema";
 import { useChat } from "./useChat";
@@ -46,6 +46,13 @@ const chargeTool = AgentTool.create({
   requiresApproval: true,
 });
 
+// Answered by the person, not the server. Same mechanism as an approval.
+const askTool = AgentTool.ask({
+  name: "ask",
+  description: "Ask the customer for something you need before continuing",
+  outputSchema: s.object({ answer: s.string() }),
+});
+
 const refunds = Skill.create({
   name: "refund-policy",
   description: "How refunds are decided, and the wording to use when declining one",
@@ -56,7 +63,7 @@ const supportAgent = Agent.create({
   name: "support",
   instructions: "You are a support agent for an invoicing product.",
   provider: OpenAIProvider.model("gpt-5.4"),
-  tools: [grepTool, bashTool, chargeTool],
+  tools: [grepTool, bashTool, chargeTool, askTool],
   skills: [refunds],
   maxSteps: 12,
   reasoning: "medium",
@@ -80,20 +87,28 @@ class SupportAgentController extends AgentController<typeof supportAgent> {
   protected async onMessage(message, ctx) {
     // persistence point
   }
+
+  protected async onAwaitingInput(pending, ctx) {
+    // e.g. notify an approver who is not the person watching the stream
+  }
 }
 
 class Api extends ApiRouter {
   routes = {
     "/support": this.agent(SupportAgentController).middleware({
       stream: "auth",
-      resume: "auth",
+      attach: "auth",
+      stop: "auth",
       upload: "auth",
     }),
   };
 }
 
-function Chat() {
-  const { messages, sendMessage, status, pendingApprovals, respond } = useChat("/support");
+function Chat({ threadId }: { threadId: string }) {
+  // Reattaches on mount if a run is still going on this thread.
+  const { messages, sendMessage, status, pending, approve, answer } = useChat("/support", {
+    threadId,
+  });
 
   for (const message of messages) {
     for (const part of message.content) {
@@ -103,7 +118,20 @@ function Chat() {
     }
   }
 
-  // pendingApprovals[0].name === "charge" → .input is { amountCents, reason }
+  if (status === "awaiting-input") {
+    for (const call of pending) {
+      if (call.kind === "approval" && call.name === "charge") {
+        call.input.amountCents; // number
+        approve(call.toolCallId, true);
+      }
+      if (call.kind === "question") {
+        answer(call.toolCallId, { answer: "the invoice from March" });
+      }
+    }
+  }
+
+  // An answer can also ride along with text, in one ordinary turn:
+  //   sendMessage({ text: "yes, but only half", toolResults: [...] })
   return null;
 }
 
