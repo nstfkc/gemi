@@ -1492,7 +1492,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
           break;
         }
         case "reasoning-delta": {
-          appendText(message, "reasoning", event.delta);
+          appendReasoning(message, event.id, event.delta);
           this.emit({ type: "reasoning-delta", messageId: message.id, delta: event.delta });
           break;
         }
@@ -2662,4 +2662,37 @@ function appendText(message: AgentMessage, type: "text" | "reasoning", delta: st
   message.content.push(
     type === "text" ? { type: "text", text: delta } : { type: "reasoning", text: delta },
   );
+}
+
+/**
+ * Reasoning is accumulated per ITEM, not per message, and the item's id is kept.
+ *
+ * This used to go through `appendText`, which merges on the part *type* alone
+ * and has nowhere to put an id. Both halves of that were wrong and neither was
+ * visible in the transcript:
+ *
+ *   - `request.ts` drops a reasoning item with no id, deliberately — the id is
+ *     the API's handle on the stored reasoning and a fabricated one would look
+ *     like continuity that is not there. So an id dropped here meant reasoning
+ *     was never sent back at all: on a two-step run the model re-derived its
+ *     own argument from nothing, and the prompt cache (which keys on the
+ *     literal item) missed every time. Measured against the live Responses API
+ *     in `live/live.test.ts`: the second call's input carried zero reasoning
+ *     items.
+ *   - a step that produces two reasoning items was flattening them into one
+ *     part, so even with an id there would have been one id for two items'
+ *     text.
+ *
+ * A part with no id is still appended rather than dropped: the text is what a
+ * UI renders, and a provider that reports no item id (Azure does not always)
+ * should still show its thinking. It just cannot be echoed back, which is the
+ * bargain `reasoningItem` already documents.
+ */
+function appendReasoning(message: AgentMessage, id: string | undefined, delta: string) {
+  const last = message.content[message.content.length - 1];
+  if (last && last.type === "reasoning" && last.id === id) {
+    last.text = (last.text ?? "") + delta;
+    return;
+  }
+  message.content.push(id ? { type: "reasoning", id, text: delta } : { type: "reasoning", text: delta });
 }
