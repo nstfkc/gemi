@@ -228,6 +228,9 @@ export type AgentStreamEvent<T extends ToolShapes = ToolShapes, O = unknown> =
    *  before the object closes. */
   | { type: "output-delta"; messageId: string; delta: string; snapshot: Partial<O> }
   | { type: "tool-call"; messageId: string; part: ToolCallPart<T> }
+  /** The model searched for deferred tools and loaded these. A UI can say "…
+   *  looking for the right tool" instead of showing an unexplained pause. */
+  | { type: "tool-search"; loaded: string[] }
   /** From a tool whose `execute` is an AsyncGenerator. */
   | { type: "tool-progress"; toolCallId: string; data: unknown }
   | { type: "tool-result"; messageId: string; part: ToolResultPart<T> }

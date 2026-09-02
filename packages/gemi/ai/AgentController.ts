@@ -2,7 +2,7 @@
 import type { HttpRequest } from "../http";
 import type { Controller } from "../http/Controller";
 import type { MiddlewareInput } from "../http/middlewareList";
-import type { AgentRun, AgentRunResult, AnyAgent, ToolExecute, ToolShapesOf } from "./Agent";
+import type { AgentRun, AgentRunResult, AnyAgent, ToolShapesOf } from "./Agent";
 import type { AgentError, AgentMessage, PendingToolCall, ToolShapes } from "./types";
 
 // --- storage -------------------------------------------------------------
@@ -72,18 +72,6 @@ export declare abstract class AgentController<A extends AnyAgent = AnyAgent> ext
 
   /** Defaults to `MemoryAgentStore`. */
   store: AgentStore;
-
-  /**
-   * Implementations for the agent's `deferred` tools. Typed against the agent's
-   * declared tools, so a missing or misnamed one is a compile error rather than
-   * a tool the model calls into nothing.
-   */
-  tools?: {
-    [K in keyof ToolShapesOf<A["tools"]>]?: ToolExecute<
-      ToolShapesOf<A["tools"]>[K]["input"],
-      ToolShapesOf<A["tools"]>[K]["output"]
-    >;
-  };
 
   /** Appended to the agent's static instructions for this request — the user's
    *  name, tenant, today's date. */

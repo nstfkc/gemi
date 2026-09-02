@@ -62,42 +62,49 @@ type ToolDefinitionBase<Name extends string, Input, Output> = {
    * the value the browser has to produce.
    */
   outputSchema?: Schema<Output>;
+  /**
+   * Withholds this tool's parameter schema from the request: the model is shown
+   * only the name and description, and pulls the rest in with the provider's
+   * `tool_search` when it decides it wants the tool (`defer_loading` on the
+   * wire).
+   *
+   * It says nothing about who runs the tool or when — it is a statement about
+   * the prompt, not about execution. What it buys is context: an agent with
+   * forty tools spends most of its prompt on schemas for tools it will not
+   * call, and deferred ones load at the end of the window, so adding one
+   * mid-conversation does not invalidate the cache.
+   *
+   * Purely an optimization, and gemi treats it as one: a provider that cannot
+   * do tool search is sent the schemas inline, and the agent behaves the same.
+   * So it is safe to set on a model that does not support it, and worth setting
+   * only for tools that are large, numerous, or rarely reached.
+   */
+  deferred?: boolean;
 };
 
 /**
- * Three ways a tool's result comes to exist, and the one thing they share is
- * that none of them changes the conversation's shape.
+ * Two ways a tool's result comes to exist, and neither changes the shape of the
+ * conversation.
  *
  * `execute` — the server runs it.
- * `deferred` — the agent declares it, the controller supplies the
- *   implementation at request time; for the tool that has to close over the
- *   request in a way `ctx` does not cover, or that differs per deployment.
  * `answeredBy: "client"` — the browser produces the result: a question for the
  *   user, or something only the page can do. The stream ends `awaiting-input`
  *   and the answer arrives as an ordinary turn.
  *
- * `requiresApproval` is orthogonal and applies to the first two: the server can
- * run the tool, but asks first. That, too, ends the stream `awaiting-input`,
- * which is the whole reason there is no second endpoint — an approval is a
- * question whose answer happens to be yes or no.
+ * `requiresApproval` applies to the first: the server can run the tool, but
+ * asks first. That, too, ends the stream `awaiting-input`, which is the whole
+ * reason there is no second endpoint — an approval is a question whose answer
+ * happens to be yes or no.
  */
 export type ToolDefinition<Name extends string, Input, Output> =
   | (ToolDefinitionBase<Name, Input, Output> & {
-      deferred?: false;
       answeredBy?: "server";
       execute: ToolExecute<Input, Output>;
       requiresApproval?: boolean;
     })
   | (ToolDefinitionBase<Name, Input, Output> & {
-      deferred: true;
-      answeredBy?: "server";
-      execute?: never;
-      requiresApproval?: boolean;
-    })
-  | (ToolDefinitionBase<Name, Input, Output> & {
       answeredBy: "client";
       outputSchema: Schema<Output>;
-      deferred?: never;
       execute?: never;
       /** Meaningless here: the client answering *is* the approval. */
       requiresApproval?: never;
@@ -111,6 +118,7 @@ export declare class AgentTool<Name extends string = string, Input = unknown, Ou
   readonly requiresApproval: boolean;
   readonly deferred: boolean;
   readonly answeredBy: "server" | "client";
+  readonly namespace?: string;
   readonly execute?: ToolExecute<Input, Output>;
 
   /**
@@ -135,9 +143,50 @@ export declare class AgentTool<Name extends string = string, Input = unknown, Ou
 
 export type AnyAgentTool = AgentTool<string, any, any>;
 
+/**
+ * A group of tools the model can search as a unit.
+ *
+ * The provider's tool search works over namespaces, and the guidance is fewer
+ * than ten functions in each — the model looks at a namespace's description to
+ * decide whether anything inside is worth loading, so the grouping is part of
+ * the prompt, not bookkeeping. A namespace is also the only place a
+ * *collection* of tools can be described; on a flat list that sentence has
+ * nowhere to go.
+ *
+ * Tool names stay globally unique within an agent, so the browser still
+ * discriminates on `name` alone and the namespace never leaks into the client's
+ * types.
+ */
+export declare class ToolNamespace<
+  Name extends string = string,
+  T extends readonly AnyAgentTool[] = readonly AnyAgentTool[],
+> {
+  readonly name: Name;
+  readonly description: string;
+  readonly tools: T;
+  static create<const Name extends string, const T extends readonly AnyAgentTool[]>(params: {
+    name: Name;
+    /** What the model reads when deciding whether to search inside. */
+    description: string;
+    tools: T;
+    /** Defers every tool in the group, so the whole namespace costs its own
+     *  description plus one line per tool until something is loaded. */
+    deferred?: boolean;
+  }): ToolNamespace<Name, T>;
+}
+
+/** What an agent's `tools` may hold: tools, or namespaces of them. */
+export type ToolEntry = AnyAgentTool | ToolNamespace<string, readonly AnyAgentTool[]>;
+
+type FlattenTools<T extends readonly ToolEntry[]> = T[number] extends infer E
+  ? E extends ToolNamespace<any, infer NT>
+    ? NT[number]
+    : E
+  : never;
+
 /** The tool tuple, erased to the payload types the client is allowed to see. */
-export type ToolShapesOf<T extends readonly AnyAgentTool[]> = {
-  [K in T[number] as K["name"]]: K extends AgentTool<any, infer I, infer O>
+export type ToolShapesOf<T extends readonly ToolEntry[]> = {
+  [K in FlattenTools<T> as K["name"]]: K extends AgentTool<any, infer I, infer O>
     ? { input: I; output: O }
     : never;
 };
@@ -175,7 +224,7 @@ export declare class Skill<Name extends string = string> {
 export type ReasoningEffort = "minimal" | "low" | "medium" | "high";
 
 export interface CreateAgentParams<
-  T extends readonly AnyAgentTool[],
+  T extends readonly ToolEntry[],
   S extends readonly Skill[],
   O extends Schema<any> | undefined,
 > {
@@ -216,8 +265,6 @@ export interface AgentStreamParams {
   threadId?: string;
   /** Appended to the agent's own `instructions` for this request only. */
   instructions?: string;
-  /** Implementations for `deferred` tools, supplied by the controller. */
-  tools?: Record<string, ToolExecute<any, any>>;
   /** Per-request model choice, e.g. letting a user pick. */
   provider?: AgentProvider;
   maxSteps?: number;
@@ -267,7 +314,7 @@ export interface AgentRun<T extends ToolShapes = ToolShapes, O = unknown> extend
 }
 
 export declare class Agent<
-  const T extends readonly AnyAgentTool[] = readonly AnyAgentTool[],
+  const T extends readonly ToolEntry[] = readonly ToolEntry[],
   const S extends readonly Skill[] = readonly Skill[],
   O extends Schema<any> | undefined = undefined,
 > {
@@ -278,7 +325,7 @@ export declare class Agent<
   readonly output: O;
 
   static create<
-    const T extends readonly AnyAgentTool[],
+    const T extends readonly ToolEntry[],
     const S extends readonly Skill[],
     O extends Schema<any> | undefined = undefined,
   >(params: CreateAgentParams<T, S, O>): Agent<T, S, O>;
