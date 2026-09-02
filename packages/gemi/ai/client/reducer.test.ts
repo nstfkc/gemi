@@ -314,6 +314,32 @@ describe("the rest of the event union", () => {
     ]);
   });
 
+  test("a reasoning part keeps the provider's item id, so a stateless turn can echo it back", () => {
+    const state = fold(initialChatState(), [
+      { seq: 0, event: { type: "reasoning-delta", messageId: "m1", delta: "hm", id: "rs_1" } },
+      { seq: 1, event: { type: "reasoning-delta", messageId: "m1", delta: "mm", id: "rs_1" } },
+    ]);
+
+    // Without the id, `providers/request.ts` drops the item when the client
+    // posts its history back, and the model re-derives its reasoning every
+    // step while the prompt cache misses on every one.
+    expect(state.messages[0]!.content).toEqual([{ type: "reasoning", id: "rs_1", text: "hmmm" }]);
+  });
+
+  test("two reasoning items stay two parts rather than flattening under one id", () => {
+    const state = fold(initialChatState(), [
+      { seq: 0, event: { type: "reasoning-delta", messageId: "m1", delta: "first", id: "rs_1" } },
+      { seq: 1, event: { type: "reasoning-delta", messageId: "m1", delta: "second", id: "rs_2" } },
+    ]);
+
+    // Merging these would post back one item claiming to be `rs_1` and holding
+    // text the provider never wrote under that id.
+    expect(state.messages[0]!.content).toEqual([
+      { type: "reasoning", id: "rs_1", text: "first" },
+      { type: "reasoning", id: "rs_2", text: "second" },
+    ]);
+  });
+
   test("output snapshots replace rather than accumulate, so a late client is right", () => {
     const late = fold(initialChatState(), [
       {
