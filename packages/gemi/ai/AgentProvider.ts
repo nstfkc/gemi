@@ -83,12 +83,48 @@ export type ProviderEvent =
   | { type: "reasoning-delta"; delta: string; id?: string }
   /** Arguments arrive as JSON fragments; the provider passes them through and
    *  `Agent` assembles and validates against the tool's schema. */
-  | { type: "tool-call-delta"; toolCallId: string; name: string; argsDelta: string }
-  | { type: "tool-call"; toolCallId: string; name: string; args: string }
-  /** The model went looking for a deferred tool and pulled its schema in. Worth
-   *  surfacing rather than swallowing: it is a step the user paid for, and the
-   *  pause before it is otherwise unexplained. */
-  | { type: "tool-search"; loaded: string[] }
+  | {
+      type: "tool-call-delta";
+      toolCallId: string;
+      name: string;
+      argsDelta: string;
+      namespace?: string;
+    }
+  /**
+   * `name` IS FLAT AND STAYS FLAT. This was an open question and the API has
+   * answered it: a call to a function that lives inside a namespace comes back
+   * as `{name: "getOrder", namespace: "crm"}`, not as `"crm.getOrder"` —
+   * recorded in `providers/__fixtures__/openai-tool-search.sse` and pinned by
+   * a test that reads that file. So `name` is already the key `Agent`'s tool
+   * registry is built on, which is what makes tool names having to be globally
+   * unique within an agent (see `ToolNamespace`) the right rule rather than an
+   * inconvenience.
+   *
+   * `namespace` is carried beside it, absent for a tool that was listed bare.
+   * It is provenance, not identity: it says which group the model chose to
+   * look in, which is worth recording next to the call and is worthless for
+   * finding the tool. Folding it into `name` would make a name that is
+   * sometimes qualified and sometimes not, and nothing could match on that.
+   */
+  | { type: "tool-call"; toolCallId: string; name: string; args: string; namespace?: string }
+  /**
+   * The model went looking for a deferred tool and pulled its schema in. Worth
+   * surfacing rather than swallowing: it is a step the user paid for, and the
+   * pause before it is otherwise unexplained.
+   *
+   * TWO FIELDS, not one. `loaded` is the function names — `["listOrders",
+   * "getOrder"]` — and `namespaces` is the groups they came out of —
+   * `["crm"]`. Search results arrive as a tree of namespaces containing
+   * functions, so a single flat list has to pick one level and throw the other
+   * away, and both levels are worth saying: "searched crm, loaded getOrder"
+   * reads better than either half, and the group is the thing the model
+   * actually chose between.
+   *
+   * `namespaces` is required rather than optional because the parser always
+   * knows the answer, and an optional field would let a future provider forget
+   * to fill it in silently. Empty means the search returned bare functions.
+   */
+  | { type: "tool-search"; loaded: string[]; namespaces: string[] }
   | { type: "output-delta"; delta: string }
   | { type: "finish"; reason: FinishReason; usage: Usage }
   | { type: "error"; error: AgentError };
@@ -147,14 +183,37 @@ export abstract class AgentProvider {
   }
 }
 
+/**
+ * Autocomplete, not a gate. Every id here was confirmed present in
+ * `GET https://api.openai.com/v1/models`; any other string is still accepted,
+ * because a model released next Tuesday must not need a gemi release to use —
+ * see `capabilitiesForModel` for what an unrecognized id is assumed to do.
+ *
+ * Ordered newest first, and deliberately short. `/v1/models` answers with
+ * ninety-odd chat ids once the dated snapshots and the `-codex`, `-pro`,
+ * `-chat-latest`, `-search-api` and `-nano` variants are counted; a list that
+ * tried to be complete would be stale within the month and would bury the
+ * handful of names anyone actually types. Snapshot-pinned ids
+ * (`gpt-5.4-2026-03-05`) are left out for the same reason and work identically.
+ *
+ * The Azure provider returns this same list, which is a small lie it has always
+ * told: a resource serves the deployments someone created, not the catalogue.
+ * `AzureConfig.deployment` is the escape hatch, and an unrecognized deployment
+ * name lands on the same capable default as an unrecognized model.
+ */
 const OPENAI_MODELS = [
+  "gpt-5.5",
   "gpt-5.4",
   "gpt-5.4-mini",
+  "gpt-5.4-nano",
+  "gpt-5.2",
   "gpt-5.1",
   "gpt-5",
   "gpt-5-mini",
+  "gpt-5-nano",
   "gpt-4.1",
   "gpt-4.1-mini",
+  "gpt-4.1-nano",
   "gpt-4o",
   "gpt-4o-mini",
   "o4-mini",
@@ -229,8 +288,19 @@ export class OpenAIProvider extends AgentProvider {
 }
 
 export type AzureConfig = ProviderConfig & {
-  /** `https://<resource>.openai.azure.com`. */
+  /**
+   * The resource host, with or without a trailing `/openai`. Both spellings
+   * work — `https://<resource>.cognitiveservices.azure.com` and
+   * `https://<resource>.openai.azure.com` — and neither is rewritten, because
+   * only one of them exists for a resource that was not created as
+   * kind=OpenAI. See `azureBase` for what is done to it.
+   */
   endpoint?: string;
+  /**
+   * Just the resource name, when there is no endpoint to hand. `<name>` is
+   * expanded to `https://<name>.cognitiveservices.azure.com/openai`.
+   */
+  resourceName?: string;
   apiVersion?: string;
   /**
    * The deployment to call, when it is not named after the model. Azure lets
@@ -246,16 +316,76 @@ export type AzureConfig = ProviderConfig & {
 };
 
 /**
- * The api-version is pinned rather than defaulted to "latest", because Azure
- * treats a version as a contract and a floating one turns a Tuesday morning
- * into a debugging session. An app that needs a newer one names it.
+ * `preview` selects Azure's `/openai/v1` surface, which is the OpenAI-shaped
+ * one — same request body, same SSE frames, same `model` field naming the
+ * deployment — and it is the only surface the Responses API has that gemi's
+ * request builder can talk to unchanged. It takes no dated version: sending
+ * `api-version=2025-04-01-preview` to `/openai/v1/responses` answers
+ * `400 {"code":"BadRequest","message":"API version not supported"}`.
+ *
+ * A dated version is still honoured, and routes to the older
+ * `/openai/responses` path instead — see `azurePath`. So an app that pinned
+ * one keeps working, which is the promise the old comment here made and could
+ * not keep once the paths diverged.
  */
-const AZURE_API_VERSION = "2025-04-01-preview";
+const AZURE_API_VERSION = "preview";
 
 /**
- * Its own class rather than a flag on `OpenAIProvider`: Azure puts the
- * deployment in the URL, pins an api-version, and has a second auth mode. One
+ * Where an Azure Responses call goes, worked out live rather than from docs.
+ *
+ * THE PROBLEM THIS SOLVES. `AZURE_OPENAI_ENDPOINT` is conventionally written
+ * with `/openai` already on the end, and the old code appended `/openai` again
+ * and then a deployment path, producing
+ * `…/openai/openai/deployments/<dep>/responses` — a 404 on every request, for
+ * every app that configured the provider the documented way. Two separate
+ * mistakes were stacked there, and only measuring told them apart.
+ *
+ * WHAT WAS MEASURED, against a real resource, POSTing a Responses body:
+ *
+ *   404  {endpoint}/openai/deployments/gpt-5.4/responses?api-version=2025-04-01-preview
+ *   404  {host}/openai/deployments/gpt-5.4/responses?api-version=2025-04-01-preview
+ *   404  {host}/openai/deployments/gpt-5.4/responses?api-version=preview
+ *   400  {host}/openai/v1/responses?api-version=2025-04-01-preview   ("API version not supported")
+ *   200  {host}/openai/v1/responses?api-version=preview
+ *   200  {host}/openai/v1/responses                                   (no api-version at all)
+ *   200  {host}/openai/responses?api-version=2025-04-01-preview
+ *
+ * for {host} in BOTH `https://<resource>.cognitiveservices.azure.com` and
+ * `https://<resource>.openai.azure.com` — both spellings answered identically,
+ * so the host was never the variable. The deployment-in-the-URL path is the
+ * Chat Completions shape and the Responses API does not serve it at all; the
+ * deployment goes in the body's `model`, which is what `buildResponsesRequest`
+ * already puts there.
+ *
+ * `/openai/v1/files?api-version=preview` and
+ * `/openai/files?api-version=2025-04-01-preview` were both checked too (200,
+ * empty list), so uploads follow the same fork.
+ */
+function azureBase(raw: string): string {
+  const trimmed = raw.trim().replace(/\/+$/, "");
+  if (!trimmed) return "";
+  // A configured endpoint may or may not already carry `/openai`, and may even
+  // carry `/openai/v1` if someone copied a full URL. Normalize down to the
+  // resource base and put exactly one `/openai` back, rather than appending
+  // blind — appending blind is the bug.
+  const base = trimmed.replace(/\/openai(?:\/v1)?$/i, "");
+  return `${base}/openai`;
+}
+
+/** Dated versions belong to the older path; `preview` (and anything that is not
+ *  a date) belongs to `/v1`. Both were verified above. */
+function azurePath(apiVersion: string): string {
+  return /^\d{4}-\d{2}-\d{2}/.test(apiVersion) ? "" : "/v1";
+}
+
+/**
+ * Its own class rather than a flag on `OpenAIProvider`: Azure names the
+ * deployment rather than the model, pins an api-version, authenticates with an
+ * `api-key` header or an Entra token, and puts the resource in the host. One
  * class carrying both shapes means every field is conditionally meaningful.
+ *
+ * (It used to put the deployment in the URL as well. It does not: the Responses
+ * API serves no such path — see `azureBase` for the measurements.)
  *
  * The API stays symmetrical — `.model()`, not `.deployment()`. Apps name a
  * model; mapping that onto a deployment is this class's problem, and an app
@@ -307,21 +437,36 @@ export class AzureOpenAIProvider extends AgentProvider {
     return this.config.deployment ?? this.model;
   }
 
+  /**
+   * The resource base, `<host>/openai`, from whichever of the three ways it was
+   * configured. A bare resource name expands to the `cognitiveservices` host
+   * rather than the `openai.azure.com` one: both answer for a resource created
+   * as kind=OpenAI, only `cognitiveservices` answers for an AI Foundry or
+   * multi-service resource, so it is the spelling that is right more often. An
+   * app on the other one sets `endpoint` and nothing rewrites it.
+   */
+  protected base(): string {
+    const config = this.config;
+    const configured = config.baseURL ?? config.endpoint ?? env("AZURE_OPENAI_ENDPOINT");
+    if (configured) return azureBase(configured);
+    const resource =
+      config.resourceName ?? env("AZURE_OPENAI_RESOURCE_NAME") ?? env("AZURE_RESOURCE_NAME");
+    return resource ? azureBase(`https://${resource.trim()}.cognitiveservices.azure.com`) : "";
+  }
+
   protected endpoint(): ResponsesEndpoint {
     const config = this.config;
-    const host = (config.baseURL ?? config.endpoint ?? env("AZURE_OPENAI_ENDPOINT") ?? "").replace(
-      /\/+$/,
-      "",
-    );
+    const base = this.base();
     const apiVersion = config.apiVersion ?? env("AZURE_OPENAI_API_VERSION") ?? AZURE_API_VERSION;
+    const path = azurePath(apiVersion);
     const query = `?api-version=${encodeURIComponent(apiVersion)}`;
     return {
-      responsesUrl: `${host}/openai/deployments/${encodeURIComponent(
-        this.deployment(),
-      )}/responses${query}`,
+      // No deployment in the URL: the Responses API does not serve that path,
+      // and `buildResponsesRequest` already sends the deployment as `model`.
+      responsesUrl: `${base}${path}/responses${query}`,
       // Files are resource-scoped, not deployment-scoped: an upload is not
       // addressed to a model.
-      filesUrl: `${host}/openai/files${query}`,
+      filesUrl: `${base}${path}/files${query}`,
       headers: async () => {
         // Called per request, not per provider: an Entra token minted when the
         // app booted is expired by the time a long conversation reaches step
