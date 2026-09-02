@@ -1,11 +1,17 @@
-// @ts-nocheck — the ai rfc is a sketch; see Schema.ts for the full note.
+// Not part of the module's public surface, and not imported by it: the same
+// end-to-end shape the RFC promised, kept so the ergonomics can be read without
+// assembling them from six files.
 //
-// Not part of the module: the same end-to-end shape the sketch had, kept so the
-// ergonomics can be read without assembling them from six files.
-import { ApiRouter } from "../http";
+// It is typechecked, which is the point. This file is the acceptance test for
+// the module — if the usage the RFC advertised does not compile against the
+// real implementations, the implementations are wrong, not the example.
+import { Auth } from "../facades";
+import { ApiRouter, type CreateRPC } from "../http";
+import type { HttpRequest } from "../http/HttpRequest";
 import { Agent, AgentTool, Skill, ToolNamespace } from "./Agent";
-import { AgentController, MemoryAgentStore } from "./AgentController";
+import { AgentController, type AgentHookContext, MemoryAgentStore } from "./AgentController";
 import { OpenAIProvider } from "./AgentProvider";
+import type { AgentMessage, PendingToolCall } from "./types";
 import { s } from "./Schema";
 import { useChat } from "./useChat";
 
@@ -42,8 +48,12 @@ const chargeTool = AgentTool.create({
   inputSchema: s.object({ amountCents: s.number(), reason: s.string() }),
   outputSchema: s.object({ receiptId: s.string() }),
   requiresApproval: true,
+  // `ctx.req` is the request this run started from, which is what lets a tool
+  // read the caller. The identity itself comes off the `Auth` facade, the same
+  // way every other gemi controller reads it — `HttpRequest` has no `user()`.
   execute: async (input, ctx) => {
-    const user = await ctx.req.user();
+    ctx.signal.throwIfAborted();
+    const user = await Auth.user();
     return { receiptId: `rc_${user.id}_${input.amountCents}` };
   },
 });
@@ -106,19 +116,31 @@ const supportAgent = Agent.create({
   reasoning: "medium",
 });
 
+// Module scope, NOT `store = new MemoryAgentStore()` in the class body. A
+// controller is constructed fresh for every request, so a store built in a
+// field is an empty store on every turn and a threaded conversation reads back
+// nothing — silently, because an empty history is a legal one. `AgentController`
+// already defaults to a process-wide instance; this is what overriding it
+// correctly looks like.
+const supportStore = new MemoryAgentStore();
+
 class SupportAgentController extends AgentController<typeof supportAgent> {
   agent = supportAgent;
-  store = new MemoryAgentStore();
+  store = supportStore;
 
-  instructions(req) {
+  // Typed rather than left implicit: the package compiles with `strict: false`,
+  // so an untyped parameter is `any` and an override with the wrong shape would
+  // still compile — which would make this file agree with a mistake instead of
+  // catching one.
+  instructions(req: HttpRequest<any, any>) {
     return `Today is ${new Date().toDateString()}.`;
   }
 
-  protected async onMessage(message, ctx) {
+  protected async onMessage(message: AgentMessage, ctx: AgentHookContext) {
     // persistence point
   }
 
-  protected async onAwaitingInput(pending, ctx) {
+  protected async onAwaitingInput(pending: PendingToolCall[], ctx: AgentHookContext) {
     // e.g. notify an approver who is not the person watching the stream
   }
 }
@@ -132,6 +154,26 @@ class Api extends ApiRouter {
       upload: "auth",
     }),
   };
+}
+
+/**
+ * What an app's generated `gemi.d.ts` writes for it, spelled out here because
+ * this file is not an app.
+ *
+ * `useChat` takes its path from `RPC` — the same interface `useQuery` reads —
+ * so without this the key `"/support"` does not exist and the hook is
+ * uncallable. Writing it by hand is what makes the rest of `Chat` below a real
+ * test of the claim that the agent's tool types ride along on the route: the
+ * `part.output.matches` and `call.input.amountCents` further down are inferred
+ * through `Agent` -> `AgentRoute` -> `CreateRPC` -> `useChat`, and if any link
+ * erased them this file would stop compiling.
+ *
+ * It does not escape: nothing imports this file, and `exports` does not publish
+ * a `gemi/ai/example` subpath, so the emitted declaration is unreachable from
+ * an application and `"/support"` never appears in a real app's `RPC`.
+ */
+declare module "../client/rpc" {
+  interface RPC extends CreateRPC<Api> {}
 }
 
 function Chat({ threadId }: { threadId: string }) {
