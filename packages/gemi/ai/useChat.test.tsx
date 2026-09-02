@@ -1081,6 +1081,13 @@ describe("what a nested run leaves in the transcript", () => {
         role: "assistant",
         content: [{ type: "text", text: "I need the customer tier." }],
         createdAt: expect.any(String),
+        // Put there by the parent's `run-end`. This fixture never sends the
+        // sub-run's own `message-end` — a real runtime would, since the
+        // sub-agent finalises its message before escalating — and the point of
+        // the safety net is that the block stops drawing a live cursor either
+        // way. "awaiting-input" is what it is waiting for, and it is what the
+        // parent message beside it carries.
+        finishReason: "awaiting-input",
       },
     ]);
   });
@@ -1100,5 +1107,146 @@ describe("what a nested run leaves in the transcript", () => {
     });
 
     expect(box.api.loadedTools).toEqual([]);
+  });
+});
+
+/**
+ * A stateless run — no `threadId`, so the client carries the transcript — whose
+ * tool yielded twice and whose sub-agent's own tool yielded once.
+ */
+const STATELESS_NESTED: AgentStreamFrame[] = [
+  { seq: 0, event: { type: "run-start", runId: "run_5" } },
+  { seq: 1, event: { type: "message-start", messageId: "m5", role: "assistant" } },
+  {
+    seq: 2,
+    event: {
+      type: "tool-call",
+      messageId: "m5",
+      part: {
+        type: "tool-call",
+        toolCallId: "tc_outer",
+        name: "research",
+        input: { topic: "pricing" },
+      },
+    },
+  },
+  { seq: 3, event: { type: "tool-progress", toolCallId: "tc_outer", data: { chunk: 1 } } },
+  { seq: 4, event: { type: "tool-progress", toolCallId: "tc_outer", data: { chunk: 2 } } },
+  {
+    seq: 5,
+    event: {
+      type: "nested-event",
+      toolCallId: "tc_outer",
+      runId: "nr_1",
+      agent: "pricing",
+      event: { type: "message-start", messageId: "n1", role: "assistant" },
+    },
+  },
+  {
+    seq: 6,
+    event: {
+      type: "nested-event",
+      toolCallId: "tc_outer",
+      runId: "nr_1",
+      agent: "pricing",
+      event: {
+        type: "tool-call",
+        messageId: "n1",
+        part: {
+          type: "tool-call",
+          toolCallId: "tc_inner",
+          name: "browse",
+          input: { url: "https://example.com" },
+        },
+      },
+    },
+  },
+  {
+    seq: 7,
+    event: {
+      type: "nested-event",
+      toolCallId: "tc_outer",
+      runId: "nr_1",
+      agent: "pricing",
+      event: { type: "tool-progress", toolCallId: "tc_inner", data: { page: 1 } },
+    },
+  },
+  {
+    seq: 8,
+    event: {
+      type: "nested-event",
+      toolCallId: "tc_outer",
+      runId: "nr_1",
+      agent: "pricing",
+      event: { type: "message-end", messageId: "n1", finishReason: "stop" },
+    },
+  },
+  {
+    seq: 9,
+    event: {
+      type: "tool-result",
+      messageId: "m5",
+      part: {
+        type: "tool-result",
+        toolCallId: "tc_outer",
+        name: "research",
+        status: "ok",
+        output: { summary: "$40" },
+      },
+    },
+  },
+  { seq: 10, event: { type: "message-end", messageId: "m5", finishReason: "stop" } },
+  { seq: 11, event: { type: "run-end", runId: "run_5", finishReason: "stop" } },
+];
+
+describe("the history a stateless turn posts back", () => {
+  async function secondTurn() {
+    fetchMock.mockResolvedValueOnce(streamed(STATELESS_NESTED));
+    const { box } = mount({ attach: false });
+    await act(async () => {
+      await box.api.sendMessage("what should we charge?");
+    });
+    fetchMock.mockResolvedValueOnce(streamed(ANSWER));
+    await act(async () => {
+      await box.api.sendMessage("and for teams?");
+    });
+    const posted = bodyOf(1).messages as any[];
+    return { box, call: posted[1].content.find((p: any) => p.type === "tool-call") };
+  }
+
+  test("leaves the progress logs behind, at every depth", async () => {
+    // Every stateless turn re-uploads the whole transcript, and `progress` is
+    // the one thing on it that grows without a bound the model imposes — a tool
+    // yielding per chunk writes an entry per chunk, and turn 2, turn 3 and
+    // every turn after would carry all of them. Nothing server-side reads it:
+    // no provider translates it, `openCalls` matches on `toolCallId`, and the
+    // resume path replays a sub-agent from `nested`.
+    const { call } = await secondTurn();
+
+    expect("progress" in call).toBe(false);
+    const inner = call.nested[0].messages[0].content.find((p: any) => p.type === "tool-call");
+    expect("progress" in inner).toBe(false);
+  });
+
+  test("keeps the nested transcript, which the resume path does read", async () => {
+    // The asymmetry is the point: `nested` is how section D replays a finished
+    // sub-run on the next turn, so stripping it would break resumption to save
+    // the same bytes.
+    const { call } = await secondTurn();
+
+    expect(call.nested).toHaveLength(1);
+    expect(call.nested[0]).toMatchObject({ runId: "nr_1", agent: "pricing" });
+    expect(call.nested[0].messages[0]).toMatchObject({ id: "n1", finishReason: "stop" });
+  });
+
+  test("and the tab still has every yield it was shown", async () => {
+    // The stripping shapes the request body, not the transcript: a UI rendering
+    // the log must not lose it because a later turn was sent.
+    const { box } = await secondTurn();
+    const call = (box.api.messages[1]!.content as any[]).find((p) => p.type === "tool-call");
+
+    expect(call.progress).toEqual([{ chunk: 1 }, { chunk: 2 }]);
+    const inner = call.nested[0].messages[0].content.find((p: any) => p.type === "tool-call");
+    expect(inner.progress).toEqual([{ page: 1 }]);
   });
 });
