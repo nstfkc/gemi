@@ -540,6 +540,39 @@ describe("attach on mount", () => {
     expect(box.api.status).toBe("idle");
   });
 
+  test("reports a miss, because on more than one instance it is not a miss", async () => {
+    // 404 is what the route answers for a thread with nothing running AND for
+    // a refresh routed to an instance that is not the one holding the run.
+    // Neither end can tell them apart, so the client hands the ambiguity to the
+    // app rather than deciding it is nothing.
+    const seen: { threadId: string }[] = [];
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ code: "no_live_run" }), { status: 404 }),
+    );
+    const { box } = mount({ threadId: "th_9", onAttachMiss: (p: { threadId: string }) => seen.push(p) });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(seen).toEqual([{ threadId: "th_9" }]);
+    // And it still leaves the client where one without `attach` would be.
+    expect(box.api.messages).toHaveLength(0);
+    expect(box.api.status).toBe("idle");
+  });
+
+  test("does not report a miss when a run was there to attach to", async () => {
+    const seen: unknown[] = [];
+    fetchMock.mockResolvedValueOnce(streamed(ANSWER.slice(2)));
+    mount({ threadId: "th_9", onAttachMiss: () => seen.push(1) });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(seen).toEqual([]);
+  });
+
   test("asks for the tail from the cursor restored with the messages", async () => {
     fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
     mount({
