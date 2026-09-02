@@ -3,7 +3,7 @@
 // Not part of the module: the same end-to-end shape the sketch had, kept so the
 // ergonomics can be read without assembling them from six files.
 import { ApiRouter } from "../http";
-import { Agent, AgentTool, Skill } from "./Agent";
+import { Agent, AgentTool, Skill, ToolNamespace } from "./Agent";
 import { AgentController, MemoryAgentStore } from "./AgentController";
 import { OpenAIProvider } from "./AgentProvider";
 import { s } from "./Schema";
@@ -36,14 +36,51 @@ const bashTool = AgentTool.create({
   },
 });
 
-// Declared here, implemented by the controller.
 const chargeTool = AgentTool.create({
   name: "charge",
   description: "Charge the customer's saved payment method",
   inputSchema: s.object({ amountCents: s.number(), reason: s.string() }),
   outputSchema: s.object({ receiptId: s.string() }),
-  deferred: true,
   requiresApproval: true,
+  execute: async (input, ctx) => {
+    const user = await ctx.req.user();
+    return { receiptId: `rc_${user.id}_${input.amountCents}` };
+  },
+});
+
+const listOrdersTool = AgentTool.create({
+  name: "listOrders",
+  description: "List a customer's recent orders",
+  inputSchema: s.object({ customerId: s.string() }),
+  outputSchema: s.object({ orderIds: s.array(s.string()) }),
+  execute: async (input) => ({ orderIds: [] }),
+});
+
+const orderDetailTool = AgentTool.create({
+  name: "orderDetail",
+  description: "Read one order in full",
+  inputSchema: s.object({ orderId: s.string() }),
+  outputSchema: s.object({ totalCents: s.number(), status: s.string() }),
+  execute: async (input) => ({ totalCents: 0, status: "paid" }),
+});
+
+const refundOrderTool = AgentTool.create({
+  name: "refundOrder",
+  description: "Refund an order in full",
+  inputSchema: s.object({ orderId: s.string() }),
+  outputSchema: s.object({ refundId: s.string() }),
+  requiresApproval: true,
+  execute: async (input) => ({ refundId: "rf_1" }),
+});
+
+// A group the model searches rather than reads. Every schema in here is
+// withheld until it decides it wants one, which is what keeps a long tail of
+// rarely-used tools from costing anything on the turns that never touch them.
+const crm = ToolNamespace.create({
+  name: "crm",
+  description: "Customer records, orders and refunds",
+  deferred: true,
+  tools: [listOrdersTool, orderDetailTool, refundOrderTool],
 });
 
 // Answered by the person, not the server. Same mechanism as an approval.
@@ -63,7 +100,7 @@ const supportAgent = Agent.create({
   name: "support",
   instructions: "You are a support agent for an invoicing product.",
   provider: OpenAIProvider.model("gpt-5.4"),
-  tools: [grepTool, bashTool, chargeTool, askTool],
+  tools: [grepTool, bashTool, chargeTool, askTool, crm],
   skills: [refunds],
   maxSteps: 12,
   reasoning: "medium",
@@ -72,13 +109,6 @@ const supportAgent = Agent.create({
 class SupportAgentController extends AgentController<typeof supportAgent> {
   agent = supportAgent;
   store = new MemoryAgentStore();
-
-  tools = {
-    charge: async (input, ctx) => {
-      const user = await ctx.req.user();
-      return { receiptId: `rc_${user.id}_${input.amountCents}` };
-    },
-  };
 
   instructions(req) {
     return `Today is ${new Date().toDateString()}.`;

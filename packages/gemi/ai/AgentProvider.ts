@@ -26,6 +26,13 @@ export type ProviderCapabilities = {
   structuredOutput: boolean;
   fileInput: boolean;
   parallelToolCalls: boolean;
+  /**
+   * Tool search, and with it deferred loading. Only recent models have it, so a
+   * provider that answers `false` is sent every schema inline and the agent
+   * runs identically — deferral is a token optimization, and an optimization
+   * that changed behaviour when unavailable would not be one.
+   */
+  toolSearch: boolean;
 };
 
 /** A tool as the model is shown it: schema only, no implementation. */
@@ -34,12 +41,24 @@ export type ProviderToolSpec = {
   description: string;
   parameters: JSONSchema;
   strict: boolean;
+  /** `defer_loading`: send the name and description, withhold the schema until
+   *  the model searches for it. Ignored when `capabilities.toolSearch` is
+   *  false. */
+  deferred?: boolean;
+};
+
+/** Tools grouped for search. Flattened back to a list by a provider without
+ *  tool search, since the grouping exists to be searched. */
+export type ProviderToolNamespace = {
+  name: string;
+  description: string;
+  tools: ProviderToolSpec[];
 };
 
 export interface ProviderStreamParams {
   messages: AgentMessage[];
   systemPrompt?: string;
-  tools?: ProviderToolSpec[];
+  tools?: (ProviderToolSpec | ProviderToolNamespace)[];
   /** Set when the agent declares an `output` schema; the provider turns it into
    *  whatever its own strict-JSON parameter is. */
   output?: { name: string; schema: JSONSchema };
@@ -63,6 +82,10 @@ export type ProviderEvent =
    *  `Agent` assembles and validates against the tool's schema. */
   | { type: "tool-call-delta"; toolCallId: string; name: string; argsDelta: string }
   | { type: "tool-call"; toolCallId: string; name: string; args: string }
+  /** The model went looking for a deferred tool and pulled its schema in. Worth
+   *  surfacing rather than swallowing: it is a step the user paid for, and the
+   *  pause before it is otherwise unexplained. */
+  | { type: "tool-search"; loaded: string[] }
   | { type: "output-delta"; delta: string }
   | { type: "finish"; reason: FinishReason; usage: Usage }
   | { type: "error"; error: AgentError };
