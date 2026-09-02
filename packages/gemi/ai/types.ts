@@ -311,7 +311,18 @@ export type AgentStreamEvent<T extends ToolShapes = ToolShapes, O = unknown> =
   | { type: "run-start"; runId: string; threadId?: string }
   | { type: "message-start"; messageId: string; role: "assistant" }
   | { type: "text-delta"; messageId: string; delta: string }
-  | { type: "reasoning-delta"; messageId: string; delta: string }
+  /**
+   * `id` is the provider's own reasoning-item id, and it is carried for one
+   * reason: a stateless client posts its `messages` back verbatim, and
+   * `providers/request.ts` drops a reasoning item that has no id on purpose —
+   * a fabricated one "would look like continuity that is not there". Without
+   * the id here the server records it and the browser does not, so a stateless
+   * app silently re-derives its reasoning every step and misses the prompt
+   * cache, which keys on the literal item. Optional because a provider need
+   * not supply one (Azure does not always); such a part still renders, it just
+   * cannot be echoed back.
+   */
+  | { type: "reasoning-delta"; messageId: string; delta: string; id?: string }
   /** Emitted only for an agent with an `output` schema: `delta` is raw JSON
    *  text, `snapshot` the best-effort parse so far, so a UI can bind fields
    *  before the object closes. */
