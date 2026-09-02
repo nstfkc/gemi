@@ -71,11 +71,13 @@ const bashTool = AgentTool.create({
 interface CreateAgentParams<T extends AgentTool<any, any>[]> {
   name: string;
   tools: T;
+  provider: AgentProvider;
 }
 
 export class Agent<const T extends AgentTool<any, any>[] = AgentTool<any, any>[]> {
   tools: T;
   skills: any[];
+  provider: AgentProvider;
 
   static create<const T extends AgentTool<any, any>[]>(params: CreateAgentParams<T>): Agent<T> {
     const agent = new Agent<T>();
@@ -89,6 +91,7 @@ export class Agent<const T extends AgentTool<any, any>[] = AgentTool<any, any>[]
 const mainAgent = Agent.create({
   name: "MainAgent",
   tools: [grepTool, bashTool],
+  provider: OpenAIProvider.model("gpt-5.4"),
 });
 
 type MainAgent = typeof mainAgent;
