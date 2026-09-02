@@ -98,9 +98,7 @@ describe("applyFrame over a run", () => {
   });
 
   test("message-start opens an empty assistant message", () => {
-    expect(at(1).messages).toEqual([
-      { id: "m1", role: "assistant", content: [], createdAt: NOW },
-    ]);
+    expect(at(1).messages).toEqual([{ id: "m1", role: "assistant", content: [], createdAt: NOW }]);
   });
 
   test("text deltas coalesce into one part", () => {
@@ -136,12 +134,7 @@ describe("applyFrame over a run", () => {
   test("text after a tool call opens a new part rather than merging backwards", () => {
     const content = at(6).messages[0]!.content;
 
-    expect(content.map((part) => part.type)).toEqual([
-      "text",
-      "tool-call",
-      "tool-result",
-      "text",
-    ]);
+    expect(content.map((part) => part.type)).toEqual(["text", "tool-call", "tool-result", "text"]);
     expect(content[3]).toEqual({ type: "text", text: " Found one." });
   });
 
@@ -247,6 +240,50 @@ describe("replay", () => {
     expect(again).toBe(state);
   });
 
+  test("a run replayed onto a transcript that already has it does not double the text", () => {
+    // A restored client whose cursor was lost (or ignored) asks `/attach` and is
+    // handed the whole run back. Every frame is new to the cursor — it is -1 —
+    // so `seq` cannot help; the finished message is the only evidence that this
+    // is replay, and it is enough.
+    const restored = initialChatState({
+      messages: [
+        { id: "u1", role: "user", content: [{ type: "text", text: "hi" }], createdAt: NOW },
+        {
+          id: "m1",
+          role: "assistant",
+          content: [{ type: "text", text: "Let me look. Found one." }],
+          createdAt: NOW,
+          finishReason: "awaiting-input",
+        },
+      ],
+    });
+
+    const replayed = fold(restored, RUN);
+
+    expect(replayed.messages).toHaveLength(2);
+    expect(replayed.messages[1]!.content).toEqual([
+      { type: "text", text: "Let me look. Found one." },
+      // The upserts still land — they are keyed, so applying them again is the
+      // same list. Only the additive deltas are refused.
+      expect.objectContaining({ type: "tool-call", toolCallId: "tc_1" }),
+      expect.objectContaining({ type: "tool-result", toolCallId: "tc_1" }),
+    ]);
+  });
+
+  test("a reasoning delta for a finished message is refused too", () => {
+    const finished = fold(initialChatState(), [
+      { seq: 0, event: { type: "reasoning-delta", messageId: "m1", delta: "hm" } },
+      { seq: 1, event: { type: "message-end", messageId: "m1", finishReason: "stop" } },
+    ]);
+
+    const replayed = fold(finished, [
+      { seq: 0, event: { type: "run-start", runId: "run_9" } },
+      { seq: 1, event: { type: "reasoning-delta", messageId: "m1", delta: "hm" } },
+    ]);
+
+    expect(replayed.messages[0]!.content).toEqual([{ type: "reasoning", text: "hm" }]);
+  });
+
   test("a client handed only the tail builds the message it never saw start", () => {
     // The `/attach` case with nothing kept: no run-start, no message-start, and
     // the first frame is already halfway through m1. A reducer that assumed it
@@ -346,6 +383,52 @@ describe("the rest of the event union", () => {
     expect(state.messages[0]!.finishReason).toBe("aborted");
   });
 
+  test("run-end finishes off this run's messages and leaves an earlier one's alone", () => {
+    // A superseded turn: run_1's answer was cut off mid-sentence and never got a
+    // `message-end`, so it is sitting there with no finish reason. When run_2
+    // ends cleanly, "every assistant message with no finish reason" would sweep
+    // it up and label an interrupted answer a completed one — which is then what
+    // the next stateless turn tells the model happened.
+    const interrupted = fold(initialChatState(), [
+      { seq: 0, event: { type: "run-start", runId: "run_1" } },
+      { seq: 1, event: { type: "message-start", messageId: "m1", role: "assistant" } },
+      { seq: 2, event: { type: "text-delta", messageId: "m1", delta: "Half a sen" } },
+    ]);
+
+    const after = fold(interrupted, [
+      { seq: 0, event: { type: "run-start", runId: "run_2" } },
+      { seq: 1, event: { type: "message-start", messageId: "m2", role: "assistant" } },
+      { seq: 2, event: { type: "text-delta", messageId: "m2", delta: "A whole one." } },
+      { seq: 3, event: { type: "run-end", runId: "run_2", finishReason: "stop" } },
+    ]);
+
+    expect(after.messages.map((message) => message.finishReason)).toEqual([undefined, "stop"]);
+  });
+
+  test("usage with no assistant message of its own is dropped, not put on the user's turn", () => {
+    // A run that errors after the provider counted input tokens, or one whose
+    // only output is a tool call the client has to resolve, emits `usage` while
+    // the last message is still the optimistic user turn. Token counts against
+    // what the user typed are simply false.
+    const user: AgentMessage = {
+      id: "u1",
+      role: "user",
+      content: [{ type: "text", text: "hi" }],
+      createdAt: NOW,
+    };
+    const state = fold(initialChatState({ messages: [user] }), [
+      { seq: 0, event: { type: "run-start", runId: "run_1" } },
+      {
+        seq: 1,
+        event: { type: "usage", usage: { inputTokens: 5, outputTokens: 0, totalTokens: 5 } },
+      },
+      { seq: 2, event: { type: "run-end", runId: "run_1", finishReason: "error" } },
+    ]);
+
+    expect(state.messages).toHaveLength(1);
+    expect(state.messages[0]!.usage).toBeUndefined();
+  });
+
   test("tool-search and tool-progress advance the cursor and nothing else", () => {
     const before = at(6);
     const after = fold(before, [
@@ -380,6 +463,26 @@ describe("markAborted", () => {
     const state = markAborted(at(7));
 
     expect(state.pending).toHaveLength(1);
+  });
+
+  test("only the run in hand is cut short, not an older unfinished turn", () => {
+    // A restored transcript can legitimately carry an assistant message with no
+    // finish reason — the interrupted turn a previous session kept. Stopping
+    // today's run is not a statement about it.
+    const stale: AgentMessage = {
+      id: "old",
+      role: "assistant",
+      content: [{ type: "text", text: "from last time" }],
+      createdAt: NOW,
+    };
+    const state = markAborted(
+      fold(initialChatState({ messages: [stale] }), [
+        { seq: 0, event: { type: "run-start", runId: "run_1" } },
+        { seq: 1, event: { type: "text-delta", messageId: "m1", delta: "today" } },
+      ]),
+    );
+
+    expect(state.messages.map((message) => message.finishReason)).toEqual([undefined, "aborted"]);
   });
 
   test("a user turn is never stamped with a finish reason", () => {

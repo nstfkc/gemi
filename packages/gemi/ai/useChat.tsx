@@ -48,6 +48,23 @@ export interface UseChatParams<P extends keyof AgentRoutes> {
   /** Server-rendered or restored history. */
   initialMessages?: AgentMessage<ToolsOf<P>, OutputOf<P>>[];
   /**
+   * Where the client that produced `initialMessages` left off, so `/attach` can
+   * be asked for the tail rather than the whole run.
+   *
+   * Without it the hook has to say "I have seen nothing", and a run kept alive
+   * past `run-end` — which `LiveRuns` does on purpose, so a refresh a second
+   * late still sees the ending — replays from the top onto a transcript that
+   * already has it. Take it from `cursor` on the previous mount and persist it
+   * beside the messages; the two belong together, and restoring one without the
+   * other is what produces a doubled answer.
+   *
+   * `runId` is half of it rather than decoration: frames number from zero in
+   * every run, so a bare number cannot say whether it describes the run that is
+   * live now. Given both, the server resumes when they match and replays from
+   * the start when they do not.
+   */
+  cursor?: { runId: string; seq: number };
+  /**
    * On mount, ask whether a run is still going on this thread and pick it back
    * up from where this client left off. Needs a `threadId` — that is the handle
    * that survives a refresh, which is why the client is never asked to stash a
@@ -72,6 +89,16 @@ export interface UseChatResult<P extends keyof AgentRoutes> {
   threadId?: string;
   /** The run being streamed or attached to, if any. */
   runId?: string;
+  /**
+   * How far this client has got, to hand back as `cursor` on the next mount.
+   *
+   * Persist it with `messages`: a restored transcript whose cursor was not
+   * restored asks `/attach` for a run it already has, and additive deltas
+   * arriving a second time are how an answer ends up printed twice. `runId` is
+   * undefined until a run has named itself, and the pair is meaningless until
+   * then — there is nothing to resume.
+   */
+  cursor: { runId?: string; seq: number };
 
   /**
    * The one way to advance the conversation. A string is shorthand for
@@ -122,16 +149,45 @@ export type AgentRequestBody = {
   turn: ClientTurn;
   threadId?: string;
   messages?: AgentMessage[];
+  /**
+   * A handle on this run, minted before the run has one.
+   *
+   * `stop` needs something to name, and the server's own `runId` does not reach
+   * the client until `run-start` — a gap covering the network round trip and
+   * the provider's time to first token, which is precisely the window a user
+   * cancels in. A thread id would do it where there is one, but the stateless
+   * first turn has neither. So the client names the run it is starting, and the
+   * server is expected to remember the mapping for as long as the run lives.
+   */
+  clientRunId: string;
 } & Record<string, unknown>;
 
-/** What `POST /api<path>/attach` receives: which thread, and how far this client
- *  already got. */
-export type AgentAttachBody = { threadId: string; cursor: number };
+/**
+ * What `POST /api<path>/attach` receives: which thread, and how far this client
+ * already got.
+ *
+ * `runId` says which run the cursor counts within. Absent, or naming a run that
+ * is not the live one, the cursor cannot be honoured and the run has to be
+ * replayed from the start.
+ */
+export type AgentAttachBody = { threadId: string; cursor: number; runId?: string };
+
+/**
+ * What `POST /api<path>/stop` receives.
+ *
+ * Every field is optional because the client stops runs it cannot always name:
+ * before `run-start` there is no `runId`, and a stateless first turn has no
+ * `threadId` either. Whichever handle is present is enough — resolve by
+ * `runId`, else by `clientRunId`, else the live run on `threadId`.
+ */
+export type AgentStopBody = { runId?: string; threadId?: string; clientRunId?: string };
 
 let localIdCounter = 0;
 
-/** Ids for messages the client authored. Server-assigned ids are what keep a
- *  reattached stream from duplicating a message, so the two must not collide. */
+/** Ids the client mints: messages it authored, and the correlation id it names a
+ *  run by before the server has. Server-assigned ids are what keep a reattached
+ *  stream from duplicating a message, so the two must not collide — hence the
+ *  prefix, which also tells a server log which end invented an id. */
 function localId() {
   const suffix =
     typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
@@ -206,6 +262,7 @@ export function useChat<P extends keyof AgentRoutes>(
   const {
     threadId: initialThreadId,
     initialMessages,
+    cursor: initialCursor,
     attach: attachOnMount = true,
     body: extraBody,
     headers,
@@ -238,13 +295,18 @@ export function useChat<P extends keyof AgentRoutes>(
     stateRef.current = initialChatState<any, any>({
       messages: initialMessages,
       threadId: initialThreadId,
+      seq: initialCursor?.seq,
+      cursorRunId: initialCursor?.runId,
     });
   }
   const [state, setState] = useState<ChatState<any, any>>(stateRef.current);
   const [phase, setPhase] = useState<"idle" | "submitted" | "streaming">("idle");
 
   const mountedRef = useRef(true);
-  const abortRef = useRef<AbortController | null>(null);
+  // The request in flight, carrying the id `stop()` names it by. The two travel
+  // together because a controller with no handle can only close the connection,
+  // and closing the connection is exactly what no longer stops a run.
+  const abortRef = useRef<{ controller: AbortController; clientRunId?: string } | null>(null);
   // The latest callbacks, so a stream started three renders ago still calls the
   // ones the component has now instead of a stale closure.
   const handlers = useRef({ onFinish, onError, onAwaitingInput });
@@ -256,7 +318,7 @@ export function useChat<P extends keyof AgentRoutes>(
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
-      abortRef.current?.abort();
+      abortRef.current?.controller.abort();
       abortRef.current = null;
     };
   }, []);
@@ -272,9 +334,24 @@ export function useChat<P extends keyof AgentRoutes>(
     if (mountedRef.current) setPhase(next);
   }, []);
 
+  /**
+   * Report a failure without touching the conversation.
+   *
+   * `pending` deliberately survives. Most of what fails here has nothing to do
+   * with the question the conversation is holding — an upload that 500s, an
+   * answer aimed at a call this client never had — and the pending calls carry
+   * the only signatures that can answer them, held nowhere else. Dropping them
+   * because an unrelated request failed would leave the user unable to approve
+   * anything at all, with a fresh turn (which the server reads as refusing
+   * everything) the only way out.
+   *
+   * The failures that really do end the turn clear `pending` where they happen:
+   * `send` clears it as the turn goes out, and the stream's own `error` event
+   * clears it in the reducer.
+   */
   const fail = useCallback(
     (error: AgentError) => {
-      commit({ ...stateRef.current!, error, pending: [] });
+      commit({ ...stateRef.current!, error });
       handlers.current.onError?.(error);
     },
     [commit],
@@ -309,8 +386,16 @@ export function useChat<P extends keyof AgentRoutes>(
 
         const event = frame.event;
         if (event.type === "message-end") {
+          // Only for a message that was not already finished. `seq` catches an
+          // ordinary redelivery, but a run replayed from the top onto a restored
+          // transcript is all new to the cursor, and firing `onFinish` again
+          // means an app that persists in it writes the message a second time.
+          // A message-end is terminal, so a second one is replay by definition.
+          const before = previous.messages.find((m: AgentMessage) => m.id === event.messageId);
           const message = next.messages.find((m: AgentMessage) => m.id === event.messageId);
-          if (message) handlers.current.onFinish?.(message);
+          if (message && before?.finishReason === undefined) {
+            handlers.current.onFinish?.(message);
+          }
         } else if (event.type === "awaiting-input") {
           handlers.current.onAwaitingInput?.(event.pending as PendingToolCall<ToolsOf<P>>[]);
         } else if (event.type === "error") {
@@ -327,11 +412,21 @@ export function useChat<P extends keyof AgentRoutes>(
       // One run at a time per hook. A second send while the first is streaming
       // is a user who changed their mind, not a request to interleave two
       // assistants into one transcript.
-      abortRef.current?.abort();
+      //
+      // The superseded turn is marked aborted as it is cut, not left to whatever
+      // stamps it later: a message with no finish reason is indistinguishable
+      // from one still streaming, and the next run's `run-end` would otherwise
+      // find it and label an answer that stopped mid-sentence "stop". In
+      // stateless mode that reason is posted back to the server on every later
+      // turn, so the model would be told the interruption never happened.
+      const superseded = abortRef.current;
+      superseded?.controller.abort();
+      const clientRunId = localId();
       const controller = new AbortController();
-      abortRef.current = controller;
+      abortRef.current = { controller, clientRunId };
 
-      const history = stateRef.current!.messages;
+      const previous = superseded ? markAborted(stateRef.current!) : stateRef.current!;
+      const history = previous.messages;
       const authored: AgentMessage[] =
         turn.text || turn.files?.length
           ? [
@@ -348,7 +443,7 @@ export function useChat<P extends keyof AgentRoutes>(
           : [];
 
       commit({
-        ...stateRef.current!,
+        ...previous,
         messages: [...history, ...authored],
         // The error belonged to the attempt being retried. Leaving it up while
         // the retry streams is a UI that reports a failure and a success at once.
@@ -366,6 +461,7 @@ export function useChat<P extends keyof AgentRoutes>(
       try {
         const payload: AgentRequestBody = {
           turn,
+          clientRunId,
           ...(stateRef.current!.threadId
             ? { threadId: stateRef.current!.threadId }
             : { messages: history }),
@@ -388,7 +484,7 @@ export function useChat<P extends keyof AgentRoutes>(
           });
         }
       } finally {
-        if (abortRef.current === controller) {
+        if (abortRef.current?.controller === controller) {
           abortRef.current = null;
           setPhaseSafe("idle");
         }
@@ -483,18 +579,42 @@ export function useChat<P extends keyof AgentRoutes>(
     // The UI stops now. The POST below is what actually ends the generation and
     // any tool mid-flight, and it may take a moment; a user who clicked stop
     // must not keep watching tokens arrive while it flies.
-    abortRef.current?.abort();
+    const inFlight = abortRef.current;
+    inFlight?.controller.abort();
     abortRef.current = null;
     commit(markAborted(stateRef.current!));
     setPhaseSafe("idle");
-    if (!runId) return;
+    // Whether there is anything to stop is a question about the *request*, not
+    // about `runId`. Gating on `runId` meant the whole time-to-first-token
+    // window — the seconds a user is most likely to cancel in, and longer when
+    // the agent searches for deferred tools first — silently posted nothing,
+    // leaving a tool loop running that a dropped connection does not touch. The
+    // same hole reopened on a correct attach, whose tail carries no `run-start`.
+    if (!inFlight && !runId) return;
+    // Three handles, any of which the route can resolve by; which ones exist
+    // depends on how far the run got. `clientRunId` is the one that is always
+    // there for a turn this client started, which is what closes the window.
+    const body: AgentStopBody = {
+      ...(runId ? { runId } : {}),
+      ...(threadId ? { threadId } : {}),
+      ...(inFlight?.clientRunId ? { clientRunId: inFlight.clientRunId } : {}),
+    };
     try {
-      await post(`${url}/stop`, { runId, threadId });
-    } catch {
-      // The run may still be going server-side, but the transcript already says
-      // it was cut and there is nothing useful to retry from here.
+      const response = await post(`${url}/stop`, body);
+      // A failed stop is not cosmetic. The transcript says the turn was cut, so
+      // the UI looks settled, while the run may still be working through its
+      // tool loop and still billing for it — the one failure here a user would
+      // want to know about, and previously the one that was swallowed.
+      if (!response.ok) fail(await httpError(response));
+    } catch (error) {
+      if (isAbort(error)) return;
+      fail({
+        code: "unknown",
+        message: error instanceof Error ? error.message : String(error),
+        retryable: true,
+      });
     }
-  }, [commit, post, setPhaseSafe]);
+  }, [commit, fail, post, setPhaseSafe]);
 
   const regenerate = useCallback(async () => {
     const messages = stateRef.current!.messages as AgentMessage[];
@@ -568,10 +688,20 @@ export function useChat<P extends keyof AgentRoutes>(
     // already running on it.
     if (attachOnMount === false || !initialThreadId) return;
     const controller = new AbortController();
-    abortRef.current = controller;
+    // No `clientRunId`: this client did not start the run, so the thread is the
+    // only handle it has on it — and `/attach` needs one anyway.
+    abortRef.current = { controller };
     void (async () => {
       try {
-        const body: AgentAttachBody = { threadId: initialThreadId, cursor: stateRef.current!.seq };
+        const body: AgentAttachBody = {
+          threadId: initialThreadId,
+          // The cursor the caller restored alongside `initialMessages`, so the
+          // route can send the tail. Left at -1 it says "I have seen nothing",
+          // and a run still inside its post-`run-end` TTL replays from the top
+          // onto a transcript that already holds it.
+          cursor: stateRef.current!.seq,
+          ...(stateRef.current!.cursorRunId ? { runId: stateRef.current!.cursorRunId } : {}),
+        };
         const response = await post(`${requestRef.current.base}/attach`, body, controller.signal);
         // Nothing running is the ordinary answer, not a failure: the route says
         // so with an empty response and the screen simply stays as it was.
@@ -581,7 +711,7 @@ export function useChat<P extends keyof AgentRoutes>(
         // A probe that could not be made leaves the client exactly where a
         // client without `attach` would be — with its own history and no run.
       } finally {
-        if (abortRef.current === controller) {
+        if (abortRef.current?.controller === controller) {
           abortRef.current = null;
           setPhaseSafe("idle");
         }
@@ -609,6 +739,7 @@ export function useChat<P extends keyof AgentRoutes>(
     error: state.error,
     threadId: state.threadId,
     runId: state.runId,
+    cursor: { runId: state.cursorRunId, seq: state.seq },
     sendMessage,
     stop,
     regenerate,
