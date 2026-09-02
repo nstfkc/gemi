@@ -34,6 +34,7 @@ export type JSONSchema = {
 };
 
 declare const OUTPUT: unique symbol;
+declare const OPTIONAL: unique symbol;
 
 /**
  * `T` is carried in a phantom property rather than a real one: it exists only
@@ -52,18 +53,46 @@ export interface Schema<T> {
   safeParse(value: unknown): { ok: true; value: T } | { ok: false; errors: string[] };
 }
 
+/**
+ * A schema whose key may be left out of the object containing it.
+ *
+ * Marked with a property rather than detected from the output type, because
+ * `undefined extends T` — the obvious test — is true of *everything* when
+ * `strictNullChecks` is off, which is how this package and plenty of apps
+ * compile. That version made every field of every tool optional, and did it
+ * quietly: the JSON Schema was still right, so only the TypeScript types lied.
+ */
+export interface OptionalSchema<T> extends Schema<T | undefined> {
+  readonly [OPTIONAL]: true;
+}
+
 export type AnySchema = Schema<any>;
 
 export type Infer<S> = S extends Schema<infer T> ? T : never;
 
-type ShapeOutput<S extends Record<string, AnySchema>> = {
-  // `-?` and the optionality below are computed from `.optional()` having wrapped
-  // the member type in `| undefined`, so the TS shape matches what the model may
-  // legally omit — see the note on `optional()` about strict mode.
-  [K in keyof S as undefined extends Infer<S[K]> ? never : K]: Infer<S[K]>;
-} & {
-  [K in keyof S as undefined extends Infer<S[K]> ? K : never]?: Infer<S[K]>;
-};
+/**
+ * Collapses a type into one flat object.
+ *
+ * `ShapeOutput` builds its result as an intersection of two mapped types, one
+ * required and one optional, and that intersection is what every hover, every
+ * error message and every type assertion would otherwise show. The difference
+ * is between an app reading `{ command: string; cwd?: string }` and reading two
+ * mapped types joined by an ampersand.
+ *
+ * It also drops `readonly`, which the mapped types copy from the shape literal
+ * — `s.object({ ... })` infers that literal as `const` to keep the keys, and a
+ * tool has no reason to receive an immutable input because of how its schema
+ * was written down.
+ */
+type Flatten<T> = { -readonly [K in keyof T]: T[K] };
+
+type ShapeOutput<S extends Record<string, AnySchema>> = Flatten<
+  {
+    [K in keyof S as S[K] extends OptionalSchema<any> ? never : K]: Infer<S[K]>;
+  } & {
+    [K in keyof S as S[K] extends OptionalSchema<any> ? K : never]?: Infer<S[K]>;
+  }
+>;
 
 interface SchemaBuilder<T> extends Schema<T> {
   /**
@@ -79,9 +108,11 @@ interface SchemaBuilder<T> extends Schema<T> {
    * value drops the key. The asymmetry is the point — it is what lets an app
    * write ordinary optional fields against an API that forbids them.
    */
-  optional(): SchemaBuilder<T | undefined>;
+  optional(): OptionalSchemaBuilder<T>;
   nullable(): SchemaBuilder<T | null>;
 }
+
+interface OptionalSchemaBuilder<T> extends SchemaBuilder<T | undefined>, OptionalSchema<T> {}
 
 export declare const s: {
   string(): SchemaBuilder<string>;
