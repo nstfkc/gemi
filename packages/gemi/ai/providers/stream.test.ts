@@ -4,9 +4,16 @@ import type { ProviderEvent } from "../AgentProvider";
 import { parseResponsesStream, sseMessages, toUsage } from "./stream";
 
 /**
- * The fixtures are written by hand from the documented event shapes rather than
- * recorded from a live call, so the suite runs offline and a fixture stays
- * readable enough that a reviewer can see which case it is.
+ * The fixtures in THIS file are written by hand, and stay that way on purpose.
+ * They cover shapes that are awkward or impossible to provoke on demand — a
+ * frame split mid-token, a `[DONE]` from a gateway that then never closes, a
+ * socket that just stops, a refusal item — and a hand-written one is readable
+ * enough that a reviewer can see which case it is.
+ *
+ * What used to be here and is not any more is guesswork about shapes the API
+ * sends every day. Those moved to `recordings.test.ts`, which drives the same
+ * parser from real captured traffic in `__fixtures__/`. Two of the guesses
+ * were wrong; see `toolSearchReport` in `stream.ts`.
  */
 function frame(event: string, payload: unknown): string {
   return `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`;
@@ -203,6 +210,11 @@ describe("parseResponsesStream()", () => {
     ]);
   });
 
+  /**
+   * The linked case: the output item names the call item's id, so the two key
+   * the same and the second is dropped. The live API sends no such link — see
+   * `recordings.test.ts`, where the collapse falls to a different mechanism.
+   */
   test("the tool_search call and its output collapse into one event", async () => {
     const events = await collect([
       frame("response.output_item.added", {
@@ -230,7 +242,9 @@ describe("parseResponsesStream()", () => {
     ]);
 
     expect(events.filter((e) => e.type === "tool-search")).toEqual([
-      { type: "tool-search", loaded: ["listOrders", "refundOrder"] },
+      // No namespaces: this shape lists functions at the top level, which is
+      // the older result form and still what a gateway may send.
+      { type: "tool-search", loaded: ["listOrders", "refundOrder"], namespaces: [] },
     ]);
   });
 
