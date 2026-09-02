@@ -282,6 +282,47 @@ function turnFrom(message: AgentMessage): ClientTurn {
 }
 
 /**
+ * The transcript as the server needs it, without the progress logs.
+ *
+ * In stateless mode `send` posts the whole history on *every* turn, so anything
+ * that accumulates on a message is paid for again on each one. `progress` is
+ * the only part of the transcript that grows without a bound the model imposes:
+ * a generator tool yielding per chunk writes an entry per chunk, and a tool that
+ * yielded five thousand times would put five thousand objects in the body of
+ * turn 2, turn 3, and every turn after, forever.
+ *
+ * Nothing server-side reads it. It is not translated into a provider message,
+ * `openCalls` matches on `toolCallId`, and the resume path replays a sub-agent
+ * from `nested` — which is why `nested` is kept here, recursed into rather than
+ * dropped, while `progress` is not. The client's own copy is untouched: this
+ * shapes the request body only, so a UI still renders every yield it received.
+ */
+function forWire(messages: AgentMessage[]): AgentMessage[] {
+  return messages.map((message) => {
+    // Identity for the overwhelming majority of messages, which have neither —
+    // `nested` counts because a sub-agent's own yields are the same dead weight
+    // one level down.
+    const touched = message.content.some(
+      (part) => part.type === "tool-call" && (part.progress || part.nested),
+    );
+    if (!touched) return message;
+    return {
+      ...message,
+      content: message.content.map((part) => {
+        if (part.type !== "tool-call") return part;
+        const { progress: _progress, ...rest } = part;
+        return rest.nested
+          ? {
+              ...rest,
+              nested: rest.nested.map((run) => ({ ...run, messages: forWire(run.messages) })),
+            }
+          : rest;
+      }),
+    };
+  });
+}
+
+/**
  * The path is the agent's route, exactly as mounted:
  *
  *   const { messages, sendMessage } = useChat("/chat")
@@ -500,7 +541,9 @@ export function useChat<P extends keyof AgentRoutes>(
           clientRunId,
           ...(stateRef.current!.threadId
             ? { threadId: stateRef.current!.threadId }
-            : { messages: history }),
+            : // Stripped of the progress logs, which no part of the server
+              // reads and which every later turn would otherwise re-upload.
+              { messages: forWire(history) }),
           ...body,
         };
         const response = await post(url, payload, controller.signal);

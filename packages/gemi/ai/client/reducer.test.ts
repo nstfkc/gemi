@@ -978,3 +978,273 @@ describe("nesting two levels deep", () => {
     }
   });
 });
+
+/**
+ * The resume turn, which is the reason nesting exists and the one shape no
+ * single-turn fixture can produce.
+ *
+ * `Agent.loop` finalises the message **before** the run parks — `finalizeMessage
+ * ("awaiting-input")` then `emit({ type: "awaiting-input" })` — so by the time
+ * the user answers, the message holding the escalating tool call already carries
+ * a finish reason. The next turn re-enters that same call (`resolveAnswer` runs
+ * `executeTool` against the call it found in the history) and its progress and
+ * sub-run frames arrive against that finished message.
+ */
+const PARKED: AgentStreamFrame[] = [
+  { seq: 0, event: { type: "run-start", runId: "run_1", threadId: "th_1" } },
+  { seq: 1, event: { type: "message-start", messageId: "m1", role: "assistant" } },
+  {
+    seq: 2,
+    event: {
+      type: "tool-call",
+      messageId: "m1",
+      part: {
+        type: "tool-call",
+        toolCallId: "tc_1",
+        name: "research",
+        input: { topic: "pricing" },
+      },
+    },
+  },
+  { seq: 3, event: { type: "message-end", messageId: "m1", finishReason: "awaiting-input" } },
+  {
+    seq: 4,
+    event: {
+      type: "awaiting-input",
+      runId: "run_1",
+      pending: [
+        {
+          toolCallId: "tc_inner",
+          name: "ask",
+          input: { question: "Which tier?" },
+          kind: "question",
+          signature: "sig_inner",
+          path: ["tc_1"],
+        },
+      ],
+    },
+  },
+  { seq: 5, event: { type: "run-end", runId: "run_1", finishReason: "awaiting-input" } },
+];
+
+/** The turn that answers it: the tool runs again, this time to completion. */
+const RESUMED: AgentStreamFrame[] = [
+  { seq: 0, event: { type: "run-start", runId: "run_2", threadId: "th_1" } },
+  { seq: 1, event: { type: "tool-progress", toolCallId: "tc_1", data: { stage: "resuming" } } },
+  { seq: 2, event: nested({ type: "message-start", messageId: "n1", role: "assistant" }) },
+  { seq: 3, event: nested({ type: "text-delta", messageId: "n1", delta: "The pro tier is $80." }) },
+  { seq: 4, event: nested({ type: "message-end", messageId: "n1", finishReason: "stop" }) },
+  { seq: 5, event: nested({ type: "run-end", runId: "nr_1", finishReason: "stop" }) },
+  {
+    seq: 6,
+    event: {
+      type: "tool-result",
+      messageId: "m1",
+      part: {
+        type: "tool-result",
+        toolCallId: "tc_1",
+        name: "research",
+        status: "ok",
+        output: { summary: "$80" },
+      },
+    },
+  },
+  { seq: 7, event: { type: "message-start", messageId: "m2", role: "assistant" } },
+  { seq: 8, event: { type: "text-delta", messageId: "m2", delta: "It is $80." } },
+  { seq: 9, event: { type: "message-end", messageId: "m2", finishReason: "stop" } },
+  { seq: 10, event: { type: "run-end", runId: "run_2", finishReason: "stop" } },
+];
+
+describe("the turn that answers a sub-agent's question", () => {
+  test("the re-entered tool still reports, though its message closed last turn", () => {
+    // The bug: the finished-message replay guard fired on every resume, so the
+    // whole second execution was dropped while its `tool-result` — which goes
+    // through `withMessage`, unguarded — still landed. The user watched the call
+    // go silent and then produce an answer, which is the exact failure nesting
+    // was built to fix.
+    const state = fold(fold(initialChatState(), PARKED), RESUMED);
+
+    expect(callOf(state)!.progress).toEqual([{ stage: "resuming" }]);
+    expect(runOf(state)!.messages[0]!.content).toEqual([
+      { type: "text", text: "The pro tier is $80." },
+    ]);
+    expect(runOf(state)!.finishReason).toBe("stop");
+  });
+
+  test("the sub-run is recorded, which is what the next turn replays it from", () => {
+    // Not cosmetic. `useChat.send` posts `messages` verbatim in stateless mode
+    // and section D resumes a sub-agent from `ToolCallPart.nested`, so a
+    // continuation the client never recorded is a sub-run that, to the next
+    // turn, never finished.
+    const state = fold(fold(initialChatState(), PARKED), RESUMED);
+    const posted = fold(initialChatState({ messages: state.messages }), []);
+
+    expect(runOf(posted)).toMatchObject({ runId: "nr_1", finishReason: "stop" });
+  });
+
+  test("a second parked call reports too, after the first one's result has landed", () => {
+    // `ingestTurn` resolves the answers one at a time, attaching each result
+    // before it starts the next tool — so the second call's progress arrives
+    // once the message has already been written to by this run. Anything that
+    // decided "replay" from the run having touched the message would drop it.
+    const twoCalls = fold(initialChatState(), [
+      ...PARKED.slice(0, 3),
+      {
+        seq: 3,
+        event: {
+          type: "tool-call",
+          messageId: "m1",
+          part: { type: "tool-call", toolCallId: "tc_2", name: "book", input: { seats: 2 } },
+        },
+      },
+      { seq: 4, event: { type: "message-end", messageId: "m1", finishReason: "awaiting-input" } },
+      { seq: 5, event: { type: "run-end", runId: "run_1", finishReason: "awaiting-input" } },
+    ]);
+
+    const state = fold(twoCalls, [
+      { seq: 0, event: { type: "run-start", runId: "run_2" } },
+      { seq: 1, event: { type: "tool-progress", toolCallId: "tc_1", data: { stage: "a" } } },
+      {
+        seq: 2,
+        event: {
+          type: "tool-result",
+          messageId: "m1",
+          part: { type: "tool-result", toolCallId: "tc_1", name: "research", status: "ok" },
+        },
+      },
+      { seq: 3, event: { type: "tool-progress", toolCallId: "tc_2", data: { stage: "b" } } },
+    ]);
+
+    expect(callOf(state, "tc_2")!.progress).toEqual([{ stage: "b" }]);
+  });
+
+  test("once the result lands the call is closed again, so a replay adds nothing", () => {
+    // The carve-out is exactly as wide as the case: parked *and* unanswered. A
+    // whole conversation replayed onto a client that already holds it must not
+    // log the resumed execution twice.
+    const done = fold(fold(initialChatState(), PARKED), RESUMED);
+    const restored = initialChatState({ messages: done.messages });
+
+    const replayed = fold(fold(restored, PARKED), RESUMED);
+
+    expect(callOf(replayed)!.progress).toEqual([{ stage: "resuming" }]);
+    expect(callOf(replayed)!.nested).toHaveLength(1);
+    expect(runOf(replayed)!.messages[0]!.content).toEqual([
+      { type: "text", text: "The pro tier is $80." },
+    ]);
+  });
+});
+
+/**
+ * A run cut short while a sub-agent two levels down is still talking.
+ *
+ * Nothing here ever ends: no `message-end`, no nested `run-end`, no parent
+ * `run-end` — which is what the transcript looks like the instant `stop()` is
+ * pressed.
+ */
+/** The wrap the innermost frames of `LIVE_DEEP` arrive in: `tc_9`'s own sub-run. */
+const INNER = { toolCallId: "tc_9", runId: "nr_2", agent: "web" };
+
+const LIVE_DEEP: AgentStreamFrame[] = [
+  ...NESTED.slice(0, 4),
+  { seq: 4, event: nested({ type: "message-start", messageId: "n1", role: "assistant" }) },
+  {
+    seq: 5,
+    event: nested({
+      type: "tool-call",
+      messageId: "n1",
+      part: { type: "tool-call", toolCallId: "tc_9", name: "browse", input: { url: "x" } },
+    }),
+  },
+  {
+    seq: 6,
+    event: nested(nested({ type: "message-start", messageId: "d1", role: "assistant" }, INNER)),
+  },
+  {
+    seq: 7,
+    event: nested(nested({ type: "text-delta", messageId: "d1", delta: "half a thou" }, INNER)),
+  },
+];
+
+/** Every message in the tree, at any depth, that no reason was ever put on. */
+function unfinished(messages: AgentMessage[], trail = "", found: string[] = []): string[] {
+  for (const message of messages) {
+    if (message.role === "assistant" && message.finishReason === undefined) {
+      found.push(`${trail}${message.id}`);
+    }
+    for (const part of message.content) {
+      if (part.type !== "tool-call" || !part.nested) continue;
+      for (const run of part.nested) unfinished(run.messages, `${trail}${run.runId}/`, found);
+    }
+  }
+  return found;
+}
+
+/** Every nested run in the tree that no reason was ever put on. */
+function unfinishedRuns(messages: AgentMessage[], found: string[] = []): string[] {
+  for (const message of messages) {
+    for (const part of message.content) {
+      if (part.type !== "tool-call" || !part.nested) continue;
+      for (const run of part.nested) {
+        if (run.finishReason === undefined) found.push(run.runId);
+        unfinishedRuns(run.messages, found);
+      }
+    }
+  }
+  return found;
+}
+
+describe("ending a run ends the sub-runs it was holding", () => {
+  test("stopping closes every message in the tree, not just the parent's", () => {
+    // A `NestedRun` renders with the component that renders `messages`, so a
+    // nested message with no finish reason draws a live cursor inside a block
+    // that will never receive another frame. `markAborted` is the case no
+    // forwarded nested `run-end` can rescue: `stop()` marks the transcript
+    // before the server has said anything at all.
+    const live = fold(initialChatState(), LIVE_DEEP);
+
+    expect(unfinished(live.messages)).toEqual(["m1", "nr_1/n1", "nr_1/nr_2/d1"]);
+
+    const stopped = markAborted(live);
+
+    expect(unfinished(stopped.messages)).toEqual([]);
+    expect(unfinishedRuns(stopped.messages)).toEqual([]);
+    expect(runOf(stopped)!.finishReason).toBe("aborted");
+  });
+
+  test("run-end closes them the same way, so a label is there either way", () => {
+    const state = fold(fold(initialChatState(), LIVE_DEEP), [
+      { seq: 8, event: { type: "run-end", runId: "run_1", finishReason: "error" } },
+    ]);
+
+    expect(unfinished(state.messages)).toEqual([]);
+    expect(runOf(state)!.finishReason).toBe("error");
+  });
+
+  test("a sub-run that finished on its own keeps the reason it finished with", () => {
+    // The parent being cut short says nothing about a sub-run that already
+    // ended cleanly — relabelling it "aborted" would report a result the user
+    // was given as one they never got.
+    const stopped = markAborted(fold(initialChatState(), NESTED.slice(0, 12)));
+
+    expect(runOf(stopped)!.finishReason).toBe("stop");
+    expect(stopped.messages[0]!.finishReason).toBe("aborted");
+  });
+
+  test("stopping the turn that answers a question closes the sub-run under it", () => {
+    // The two fixes meeting: the parked message is finished, so `run-end` and
+    // `markAborted` used to skip straight past it — and the sub-run the resumed
+    // tool started is hanging off a tool call inside it.
+    const resuming = fold(fold(initialChatState(), PARKED), RESUMED.slice(0, 4));
+
+    expect(runOf(resuming)!.finishReason).toBeUndefined();
+
+    const stopped = markAborted(resuming);
+
+    expect(unfinished(stopped.messages)).toEqual([]);
+    expect(runOf(stopped)!.finishReason).toBe("aborted");
+    // The parent's own reason is the one it parked with, not the one the stop
+    // brought: that message did finish, last turn, awaiting this answer.
+    expect(stopped.messages[0]!.finishReason).toBe("awaiting-input");
+  });
+});
