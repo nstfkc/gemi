@@ -1,62 +1,61 @@
 // @ts-nocheck — the ai rfc is a sketch; see Schema.ts for the full note.
-import type { Controller } from "../http/Controller";
 import type { HttpRequest } from "../http";
+import type { Controller } from "../http/Controller";
 import type { MiddlewareInput } from "../http/middlewareList";
 import type { AgentRun, AgentRunResult, AnyAgent, ToolExecute, ToolShapesOf } from "./Agent";
-import type { AgentError, AgentMessage, ToolShapes } from "./types";
+import type { AgentError, AgentMessage, PendingToolCall, ToolShapes } from "./types";
 
 // --- storage -------------------------------------------------------------
 
 /**
- * A run parked on an approval. It has to survive between two HTTP requests, so
- * it holds everything needed to pick the loop back up: which tools were asked
- * about, and the messages produced up to that point.
- */
-export type ParkedRun = {
-  runId: string;
-  threadId?: string;
-  agent: string;
-  messages: AgentMessage[];
-  pending: { toolCallId: string; name: string; input: unknown }[];
-  createdAt: string;
-  expiresAt: string;
-};
-
-/**
- * Where conversations and parked runs live.
+ * Where conversations live.
  *
- * Stateless is the default, so nothing here is required to send a message: an
- * app that never uses approvals and lets the client hold history can ignore
- * this entirely. The moment a tool sets `requiresApproval`, though, a run has to
- * be recoverable by a *second* request — and the in-memory default only
- * recovers it in the same process. That is fine in dev and wrong behind more
- * than one server, so an app using approvals is expected to supply a real store.
+ * Stateless is the default and nothing here is required to hold a conversation:
+ * the client can carry its own history, and a pending approval travels in it
+ * safely because the server signed it. What a store buys is a conversation that
+ * survives the browser — and, with `/attach`, one whose interrupted turn is
+ * still there after a refresh.
  */
 export interface AgentStore {
   createThread(params: { userId?: string | number }): Promise<{ threadId: string }>;
   loadThread(threadId: string): Promise<AgentMessage[]>;
   appendMessages(threadId: string, messages: AgentMessage[]): Promise<void>;
-
-  saveRun(run: ParkedRun): Promise<void>;
-  loadRun(runId: string): Promise<ParkedRun | null>;
-  deleteRun(runId: string): Promise<void>;
 }
 
-/** The default. Single-process only — see the note on `AgentStore`. */
+/** The default: conversations last as long as the process. */
 export declare class MemoryAgentStore implements AgentStore {
   constructor(params?: { ttlMs?: number });
   createThread(params: { userId?: string | number }): Promise<{ threadId: string }>;
   loadThread(threadId: string): Promise<AgentMessage[]>;
   appendMessages(threadId: string, messages: AgentMessage[]): Promise<void>;
-  saveRun(run: ParkedRun): Promise<void>;
-  loadRun(runId: string): Promise<ParkedRun | null>;
-  deleteRun(runId: string): Promise<void>;
+}
+
+/**
+ * The runs currently in flight, and their frames.
+ *
+ * A run outlives the request that started it, so something has to hold it while
+ * no one is listening, and hold what it emitted meanwhile so a returning client
+ * can catch up rather than start over. That is all this is: a per-process map
+ * plus a bounded buffer.
+ *
+ * Per-process is not an implementation shortcut that a better store fixes — a
+ * running generator lives in one process, and a second server cannot attach to
+ * it. Reattachment therefore needs the request to land where the run is: one
+ * server, sticky routing, or a proxy that forwards by `runId`. Worth saying out
+ * loud, because the failure mode behind a round-robin load balancer is a
+ * refresh that usually works.
+ */
+export interface LiveRuns {
+  /** What the client asks after a refresh: is anything still going here? */
+  find(params: { threadId: string }): Promise<{ runId: string; seq: number } | null>;
+  get(runId: string): AgentRun | null;
+  /** Kept for a short while after `run-end`, so a refresh a second late still
+   *  sees the tail instead of an empty screen. */
+  ttlMs: number;
 }
 
 // --- controller ----------------------------------------------------------
 
-/** Passed to every hook, so a subclass never has to thread state through
- *  itself. */
 export type AgentHookContext = {
   req: HttpRequest<any, any>;
   runId: string;
@@ -90,10 +89,21 @@ export declare abstract class AgentController<A extends AnyAgent = AnyAgent> ext
    *  name, tenant, today's date. */
   instructions(req: HttpRequest<any, any>): string | Promise<string> | void;
 
-  /** `POST /<path>` — starts or continues a conversation. */
+  /**
+   * `POST /<path>` — one route for every client turn. A first message, an
+   * approval, an answer to a question and a client tool's result are all just
+   * the next turn, so none of them gets an endpoint of its own.
+   */
   stream(req: HttpRequest<any, any>): Promise<Response>;
-  /** `POST /<path>/resume` — answers pending approvals and continues the run. */
-  resume(req: HttpRequest<any, any>): Promise<Response>;
+  /**
+   * `POST /<path>/attach` — subscribe to a run already in progress, from a
+   * cursor. This is a read of a live run, not a continuation of a stopped one:
+   * the work never paused, the listener changed.
+   */
+  attach(req: HttpRequest<any, any>): Promise<Response>;
+  /** `POST /<path>/stop` — the explicit cancel. Since a dropped connection no
+   *  longer stops a run, this is the only thing that does. */
+  stop(req: HttpRequest<any, any>): Promise<{ stopped: boolean }>;
   /** `POST /<path>/files` — uploads an attachment and returns its file id. */
   upload(req: HttpRequest<any, any>): Promise<{ fileId: string }>;
 
@@ -107,10 +117,10 @@ export declare abstract class AgentController<A extends AnyAgent = AnyAgent> ext
     call: { toolCallId: string; name: string; input: unknown },
     ctx: AgentHookContext,
   ): void | Promise<void>;
-  /** Fires before the stream ends with `approval-required` — the place to send
-   *  a notification to whoever has to approve. */
-  protected onApprovalRequired(
-    pending: ParkedRun["pending"],
+  /** Fires before the stream ends `awaiting-input` — where to notify whoever
+   *  has to approve, if they are not the person watching the stream. */
+  protected onAwaitingInput(
+    pending: PendingToolCall[],
     ctx: AgentHookContext,
   ): void | Promise<void>;
   protected onError(error: AgentError, ctx: AgentHookContext): void | Promise<void>;
@@ -133,16 +143,17 @@ export declare abstract class AgentController<A extends AnyAgent = AnyAgent> ext
 //     };
 //   }
 //
-//   POST /chat        → stream
-//   POST /chat/resume → resume
-//   POST /chat/files  → upload
+//   POST /chat        → stream   every client turn
+//   POST /chat/attach → attach   reattach to a run in progress
+//   POST /chat/stop   → stop     explicit cancel
+//   POST /chat/files  → upload   attachments
 //
 // Mounting under a single path is what gives the client one key to name. The
 // agent's tool types ride along on `AgentRoute`, so `useChat("/chat")` gets them
 // out of the existing `RPC` interface — no second augmentation to generate, and
 // renaming the route moves the client key with it.
 
-export type AgentRouteMethod = "stream" | "resume" | "upload";
+export type AgentRouteMethod = "stream" | "attach" | "stop" | "upload";
 
 export type AgentMiddlewareConfig = Partial<Record<AgentRouteMethod, MiddlewareInput>>;
 

@@ -5,10 +5,11 @@ import type { Infer, Schema } from "./Schema";
 import type {
   AgentMessage,
   AgentStreamEvent,
+  AgentStreamFrame,
+  ClientTurn,
   FinishReason,
   ToolShapes,
   Usage,
-  UserMessageInput,
 } from "./types";
 
 // --- tools ---------------------------------------------------------------
@@ -27,8 +28,11 @@ export interface ToolContext {
   runId: string;
   threadId?: string;
   toolCallId: string;
-  /** Aborted when the client disconnects or calls `stop()`. Long tools should
-   *  pass it to whatever they call. */
+  /**
+   * Aborted when the user calls `stop()`. Not when the connection drops — a run
+   * outlives the request that started it so a refresh can reattach, which means
+   * a disconnect is no longer a signal to stop working.
+   */
   signal: AbortSignal;
   /** Which step of the tool loop this is, starting at 1. */
   step: number;
@@ -53,33 +57,50 @@ type ToolDefinitionBase<Name extends string, Input, Output> = {
   description: string;
   inputSchema: Schema<Input>;
   /**
-   * Optional, unlike the input schema. The model is only ever shown the
-   * serialized result, so the output schema buys type-safety on the client and
-   * a runtime check on what a tool returned — not better model behaviour.
+   * Optional for a server tool, required for a client one — there it is what
+   * the answer is validated against before the model sees it, and what types
+   * the value the browser has to produce.
    */
   outputSchema?: Schema<Output>;
-  /**
-   * Parks the run and asks the human before the tool runs. The stream ends with
-   * `approval-required`; answering it on the resume route continues the same
-   * run. Defaults to `false` — a tool that needs a human should have to say so.
-   */
-  requiresApproval?: boolean;
 };
 
 /**
- * `deferred` means the agent declares the tool's shape while the controller
- * supplies the implementation at request time. It is for the tool that has to
- * close over the request in a way `ctx` does not cover, or whose implementation
- * differs per deployment — the agent stays a static, shareable declaration.
+ * Three ways a tool's result comes to exist, and the one thing they share is
+ * that none of them changes the conversation's shape.
+ *
+ * `execute` — the server runs it.
+ * `deferred` — the agent declares it, the controller supplies the
+ *   implementation at request time; for the tool that has to close over the
+ *   request in a way `ctx` does not cover, or that differs per deployment.
+ * `answeredBy: "client"` — the browser produces the result: a question for the
+ *   user, or something only the page can do. The stream ends `awaiting-input`
+ *   and the answer arrives as an ordinary turn.
+ *
+ * `requiresApproval` is orthogonal and applies to the first two: the server can
+ * run the tool, but asks first. That, too, ends the stream `awaiting-input`,
+ * which is the whole reason there is no second endpoint — an approval is a
+ * question whose answer happens to be yes or no.
  */
 export type ToolDefinition<Name extends string, Input, Output> =
   | (ToolDefinitionBase<Name, Input, Output> & {
       deferred?: false;
+      answeredBy?: "server";
       execute: ToolExecute<Input, Output>;
+      requiresApproval?: boolean;
     })
   | (ToolDefinitionBase<Name, Input, Output> & {
       deferred: true;
+      answeredBy?: "server";
       execute?: never;
+      requiresApproval?: boolean;
+    })
+  | (ToolDefinitionBase<Name, Input, Output> & {
+      answeredBy: "client";
+      outputSchema: Schema<Output>;
+      deferred?: never;
+      execute?: never;
+      /** Meaningless here: the client answering *is* the approval. */
+      requiresApproval?: never;
     });
 
 export declare class AgentTool<Name extends string = string, Input = unknown, Output = unknown> {
@@ -89,6 +110,7 @@ export declare class AgentTool<Name extends string = string, Input = unknown, Ou
   readonly outputSchema?: Schema<Output>;
   readonly requiresApproval: boolean;
   readonly deferred: boolean;
+  readonly answeredBy: "server" | "client";
   readonly execute?: ToolExecute<Input, Output>;
 
   /**
@@ -98,6 +120,17 @@ export declare class AgentTool<Name extends string = string, Input = unknown, Ou
   static create<const Name extends string, Input, Output>(
     params: ToolDefinition<Name, Input, Output>,
   ): AgentTool<Name, Input, Output>;
+
+  /**
+   * Sugar for the common client tool: the agent asks the user something and
+   * waits. Equivalent to `answeredBy: "client"` with an input schema of one
+   * prompt field.
+   */
+  static ask<const Name extends string, Output>(params: {
+    name: Name;
+    description: string;
+    outputSchema: Schema<Output>;
+  }): AgentTool<Name, { question: string }, Output>;
 }
 
 export type AnyAgentTool = AgentTool<string, any, any>;
@@ -165,12 +198,19 @@ export interface CreateAgentParams<
   reasoning?: ReasoningEffort;
 }
 
+/**
+ * One call per client turn — a first message and an answer to a pending
+ * approval take the same path, because they are the same thing: the next turn
+ * of a conversation.
+ */
 export interface AgentStreamParams {
-  /** Prior turns. The controller loads these from its store. */
+  /** Prior turns. The controller loads these from its store, or takes what the
+   *  client sent when running stateless. */
   messages: AgentMessage[];
-  /** The new user turn, if this call is starting one. */
-  input?: UserMessageInput;
+  /** The client's turn: text, answers to pending calls, or both. */
+  turn?: ClientTurn;
   req: HttpRequest<any, any>;
+  /** Aborted by an explicit `stop`, not by a disconnect. */
   signal?: AbortSignal;
   runId?: string;
   threadId?: string;
@@ -182,12 +222,6 @@ export interface AgentStreamParams {
   provider?: AgentProvider;
   maxSteps?: number;
   reasoning?: ReasoningEffort;
-}
-
-export interface AgentResumeParams extends Omit<AgentStreamParams, "input"> {
-  runId: string;
-  /** One entry per parked tool call. */
-  decisions: { toolCallId: string; approve: boolean; reason?: string }[];
 }
 
 export type AgentRunResult<T extends ToolShapes, O> = {
@@ -205,13 +239,20 @@ export type AgentRunResult<T extends ToolShapes, O> = {
  * rather than a separate helper — so the same object serves a controller
  * returning a `Response` and a server-side caller that just wants to await the
  * result.
+ *
+ * A run keeps going when its request ends. That is what makes reattaching after
+ * a refresh possible, and it is why `stop()` is an explicit call rather than the
+ * client closing a socket.
  */
 export interface AgentRun<T extends ToolShapes = ToolShapes, O = unknown> extends AsyncIterable<
   AgentStreamEvent<T, O>
 > {
   readonly runId: string;
-  toResponse(): Response;
+  /** Numbered events, replayable from a cursor. `toResponse` is this, encoded. */
+  frames(from?: number): AsyncIterable<AgentStreamFrame<T, O>>;
+  toResponse(params?: { from?: number }): Response;
   result(): Promise<AgentRunResult<T, O>>;
+  stop(): void;
 }
 
 export declare class Agent<
@@ -232,8 +273,6 @@ export declare class Agent<
   >(params: CreateAgentParams<T, S, O>): Agent<T, S, O>;
 
   stream(params: AgentStreamParams): AgentRun<ToolShapesOf<T>, OutputOf<O>>;
-  /** Continues a parked run. Same event stream, so the client decodes one thing. */
-  resume(params: AgentResumeParams): AgentRun<ToolShapesOf<T>, OutputOf<O>>;
 }
 
 export type OutputOf<O> = O extends Schema<any> ? Infer<O> : never;
