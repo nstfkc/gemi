@@ -36,7 +36,7 @@ describe("MemoryLiveRuns", () => {
     await settle();
 
     const found = await runs.find({ threadId: "t1" });
-    expect(found).toEqual({ runId: "run_a", seq: 0 });
+    expect(found).toEqual({ runId: "run_a", seq: 1 });
     expect(runs.get("run_a")).toBe(run);
 
     run.finish();
@@ -62,7 +62,7 @@ describe("MemoryLiveRuns", () => {
     run.finish();
 
     const frames = await collect(runs.replay("run_b", 0));
-    expect(frames.map((f) => f.seq)).toEqual([0, 1]);
+    expect(frames.map((f) => f.seq)).toEqual([1, 2]);
     runs.clear();
   });
 
@@ -76,8 +76,8 @@ describe("MemoryLiveRuns", () => {
     }
     run.finish();
 
-    const frames = await collect(runs.replay("run_c", 2));
-    expect(frames.map((f) => f.seq)).toEqual([2, 3]);
+    const frames = await collect(runs.replay("run_c", 3));
+    expect(frames.map((f) => f.seq)).toEqual([3, 4]);
     expect(frames.map((f) => (f.event as { delta: string }).delta)).toEqual(["c", "d"]);
     runs.clear();
   });
@@ -94,7 +94,7 @@ describe("MemoryLiveRuns", () => {
     run.emit(textDelta("b"));
     run.finish();
 
-    expect((await collected).map((f) => f.seq)).toEqual([0, 1]);
+    expect((await collected).map((f) => f.seq)).toEqual([1, 2]);
     runs.clear();
   });
 
@@ -109,8 +109,8 @@ describe("MemoryLiveRuns", () => {
     run.finish();
     await settle();
 
-    const frames = await collect(runs.replay("run_e", 6));
-    expect(frames.map((f) => f.seq)).toEqual([6, 7, 8, 9]);
+    const frames = await collect(runs.replay("run_e", 7));
+    expect(frames.map((f) => f.seq)).toEqual([7, 8, 9, 10]);
     runs.clear();
   });
 
@@ -135,7 +135,8 @@ describe("MemoryLiveRuns", () => {
     }
     expect(thrown).toBeInstanceOf(FrameCursorEvictedError);
     expect((thrown as FrameCursorEvictedError).requested).toBe(0);
-    expect((thrown as FrameCursorEvictedError).oldest).toBe(6);
+    // The lowest seq still obtainable, which is one past the last one dropped.
+    expect((thrown as FrameCursorEvictedError).oldest).toBe(7);
     runs.clear();
   });
 
@@ -155,7 +156,7 @@ describe("MemoryLiveRuns", () => {
     await settle();
 
     const frames = await collect(runs.replay("run_k"));
-    expect(frames.map((f) => f.seq)).toEqual([6, 7, 8, 9]);
+    expect(frames.map((f) => f.seq)).toEqual([7, 8, 9, 10]);
     runs.clear();
   });
 
@@ -170,7 +171,7 @@ describe("MemoryLiveRuns", () => {
     await settle();
 
     const frames = await collect(runs.replay("run_l"));
-    expect(frames.map((f) => f.seq)).toEqual([0, 1]);
+    expect(frames.map((f) => f.seq)).toEqual([1, 2]);
     runs.clear();
   });
 
@@ -185,7 +186,7 @@ describe("MemoryLiveRuns", () => {
     run.emit(textDelta("a"));
     run.finish();
 
-    expect((await collected).map((f) => f.seq)).toEqual([0]);
+    expect((await collected).map((f) => f.seq)).toEqual([1]);
     runs.clear();
   });
 
@@ -226,7 +227,7 @@ describe("MemoryLiveRuns", () => {
     // Still there right after the end — that is the "refresh a second late"
     // case the ttl exists for.
     await new Promise((resolve) => setTimeout(resolve, 1));
-    expect(await runs.find({ threadId: "t1" })).toEqual({ runId: "run_g", seq: 0 });
+    expect(await runs.find({ threadId: "t1" })).toEqual({ runId: "run_g", seq: 1 });
 
     await new Promise((resolve) => setTimeout(resolve, 40));
     expect(await runs.find({ threadId: "t1" })).toBeNull();
@@ -272,9 +273,56 @@ describe("MemoryLiveRuns", () => {
     run.finish();
 
     const frames = await collect(runs.replay("run_i", 0));
-    expect(frames.map((f) => f.seq)).toEqual([0, 1]);
+    expect(frames.map((f) => f.seq)).toEqual([1, 2]);
     await new Promise((resolve) => setTimeout(resolve, 5));
     expect(failures).toHaveLength(2);
+    runs.clear();
+  });
+})
+describe("a cursor older than the buffer, and one only older than seq 1", () => {
+  test("a short run replays from the beginning instead of claiming eviction", async () => {
+    // Regression. This compared the cursor against `frames[0].seq`, which is 1
+    // on a run that has evicted nothing, so a cursor of 0 read as evicted and a
+    // ten-frame run in a five-hundred-frame window answered 410.
+    const runs = new MemoryLiveRuns();
+    const run = new StubAgentRun("run_short");
+    runs.register(run, { threadId: "t1" });
+    for (let i = 0; i < 10; i++) run.emit(textDelta("x"));
+    run.finish();
+    await settle();
+
+    const frames = await collect(runs.replay("run_short", 0));
+    expect(frames[0]!.seq).toBe(1);
+    expect(frames).toHaveLength(10);
+    runs.clear();
+  });
+
+  test("no cursor works on a run that has not produced a frame yet", async () => {
+    // `replay` picks `lastSeq + 1` = 0 for a run registered but not yet pumped:
+    // the refresh-immediately-after-sending race.
+    const runs = new MemoryLiveRuns();
+    const run = new StubAgentRun("run_empty");
+    runs.register(run, { threadId: "t1" });
+
+    const collected = collect(runs.replay("run_empty"));
+    await settle();
+    run.emit(textDelta("first"));
+    await settle();
+    run.finish();
+
+    const frames = await collected;
+    expect(frames[0]!.seq).toBe(1);
+    runs.clear();
+  });
+
+  test("a frame that really was dropped is still a 410 naming what survives", async () => {
+    const runs = new MemoryLiveRuns({ maxFrames: 4 });
+    const run = new StubAgentRun("run_rolled");
+    runs.register(run, { threadId: "t1" });
+    for (let i = 0; i < 20; i++) run.emit(textDelta("x"));
+    await settle();
+
+    expect(() => runs.replay("run_rolled", 1)).toThrow(FrameCursorEvictedError);
     runs.clear();
   });
 });
