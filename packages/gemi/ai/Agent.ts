@@ -19,6 +19,7 @@ import type {
   ClientToolResult,
   ClientTurn,
   FinishReason,
+  NestedRun,
   PendingToolCall,
   ToolCallPart,
   ToolResultPart,
@@ -50,6 +51,137 @@ export interface ToolContext {
   signal: AbortSignal;
   /** Which step of the tool loop this is, starting at 1. */
   step: number;
+  /**
+   * How deep this tool is inside nested runs: 0 at the top, 1 inside a tool of
+   * an agent started by `runAgent`, and so on. Compared against `maxDepth` on
+   * `Agent.create` so a cycle — agent A with a tool that runs agent A — fails
+   * with a sentence to read instead of exhausting the stack.
+   */
+  readonly depth: number;
+  /**
+   * True when this tool is being re-entered after a sub-agent it started asked
+   * the user something and the user answered.
+   *
+   * READ THE `runAgent` NOTE BEFORE USING IT. This is the flag that lets a tool
+   * tell a first attempt from a replay, and it exists because there is nothing
+   * to tell it otherwise: the tool body ran once already.
+   */
+  readonly resumed: boolean;
+  /**
+   * Runs another agent from inside this tool, wired into the parent run.
+   *
+   * A tool can already drive a sub-agent by hand — make one, iterate it, yield
+   * its events as progress. What this does that hand-rolling cannot is join the
+   * two runs: the sub-run inherits `ctx.signal` so the parent's `stop()` reaches
+   * it; every sub-run event is re-emitted on the parent stream as
+   * `nested-event`, numbered in the parent's `seq`, so `/attach` replay stays
+   * correct through the nesting; the sub-run's usage rolls into the parent's;
+   * its transcript is recorded on the parent's `ToolCallPart.nested`; and the
+   * depth and agent-name chain travel with it, so a cycle fails fast.
+   *
+   * ESCALATION. If the sub-run ends `awaiting-input` — it has an approval tool,
+   * or it asked a question — `onPending: "escalate"` (the default) throws a
+   * `PendingEscalation` carrying the inner pending calls, which the parent run
+   * collects exactly like pending calls of its own: the parent ends
+   * `awaiting-input` with the sub-agent's questions in its list, and the client
+   * answers them with the same `approve()` / `answer()` it uses for any other.
+   * `onPending: "deny"` refuses them instead and lets the sub-run finish.
+   *
+   * THE COST, WHICH IS REAL AND WHICH YOU MUST DESIGN AROUND. A JS async
+   * generator cannot be suspended across a turn boundary: `awaiting-input` is
+   * terminal for the stream, the next turn re-enters the loop at the top and
+   * rebuilds its state from the message history, and a paused generator is not
+   * in that history and cannot be put there. So an escalating tool is
+   * RE-ENTERED FROM THE TOP on the next turn, with `ctx.resumed === true`, and
+   * `runAgent` is memoized by call index within the tool call: the Nth
+   * `runAgent` of a tool call that already completed on an earlier turn returns
+   * its persisted result immediately, calling no provider and running no
+   * sub-tool, and only the sub-run that escalated actually continues.
+   *
+   * Which means: CODE BEFORE AN ESCALATING `runAgent` RUNS AGAIN ON RESUME.
+   * Side effects there are repeated. Put your side effects after the
+   * `runAgent`, or make them idempotent, or branch on `ctx.resumed`. This is
+   * inherent to replay and it is the same bargain the outer tool loop already
+   * makes; it is written here in plain words rather than solved with a
+   * checkpoint API, because that is a much larger feature than this one.
+   */
+  runAgent<A extends AnyAgent>(
+    agent: A,
+    params?: RunAgentParams,
+  ): Promise<NestedRunResult>;
+}
+
+/** What `ctx.runAgent` is given. `messages` and `prompt` are alternatives. */
+export interface RunAgentParams {
+  /** Prior turns for the sub-agent. Starts empty when omitted. */
+  messages?: AgentMessage[];
+  /** Sugar for a single user turn — the common case, and the whole message
+   *  list when there is no sub-conversation to continue. */
+  prompt?: string;
+  /** Appended to the sub-agent's own `instructions`, for this run only. */
+  instructions?: string;
+  /** Shown on the nested transcript, e.g. "researching pricing". */
+  label?: string;
+  /**
+   * What to do when the sub-run ends `awaiting-input`. `"escalate"` (the
+   * default) throws `PendingEscalation` so the question reaches the user;
+   * `"deny"` refuses every pending call and lets the sub-run finish, which is
+   * what a tool wants when the sub-agent is meant to be autonomous.
+   */
+  onPending?: "escalate" | "deny";
+}
+
+/**
+ * What a completed sub-run gives back.
+ *
+ * `nested` is the transcript as it is recorded on the parent's tool-call part,
+ * so a tool that wants to summarize what its sub-agent did reads the same
+ * object the UI renders rather than a second representation of it.
+ */
+export interface NestedRunResult<O = unknown> {
+  runId: string;
+  /** The sub-agent's name — carried so a caller that fans out over several
+   *  agents can tell the results apart without tracking the order. */
+  agent: string;
+  messages: AgentMessage[];
+  finishReason: FinishReason;
+  usage: Usage;
+  /** Set when the sub-agent declares an `output` schema and the run finished. */
+  output?: O;
+  /** The record written to the parent's `ToolCallPart.nested`. */
+  nested: NestedRun;
+}
+
+/**
+ * Thrown by `ctx.runAgent` when a sub-run ends `awaiting-input`.
+ *
+ * An exception rather than a return value because it must not be mistaken for
+ * an answer: a tool that ignored an `{ escalated: true }` field would return a
+ * result to the model as if the sub-agent had finished, and the model would act
+ * on an answer nobody gave. `executeTool` lets this one propagate instead of
+ * turning it into a `tool_error`, and the step loop collects `pending` exactly
+ * like the pending calls it produced itself.
+ *
+ * `path` is the chain of tool-call ids down to the escalating call; each entry
+ * of `pending` already carries its own full path, and this is the prefix they
+ * share.
+ */
+export class PendingEscalation extends Error {
+  readonly pending: PendingToolCall[];
+  readonly path: string[];
+  /** The sub-run that parked, so the parent can record its transcript before
+   *  ending the turn — an escalation is a pause, not a lost run. */
+  readonly nested: NestedRun;
+
+  constructor(params: { pending: PendingToolCall[]; path: string[]; nested: NestedRun }) {
+    super(
+      `A nested agent run is waiting on the user for ${params.pending.length} tool call(s).`,
+    );
+    this.name = "PendingEscalation";
+    this.pending = params.pending;
+    this.path = params.path;
+    this.nested = params.nested;
+  }
 }
 
 /**
@@ -110,10 +242,10 @@ type ToolDefinitionBase<Name extends string, Input, Output> = {
  * reason there is no second endpoint — an approval is a question whose answer
  * happens to be yes or no.
  */
-export type ToolDefinition<Name extends string, Input, Output> =
+export type ToolDefinition<Name extends string, Input, Output, Progress = never> =
   | (ToolDefinitionBase<Name, Input, Output> & {
       answeredBy?: "server";
-      execute: ToolExecute<Input, Output>;
+      execute: ToolExecute<Input, Output, Progress>;
       requiresApproval?: boolean;
     })
   | (ToolDefinitionBase<Name, Input, Output> & {
@@ -124,7 +256,29 @@ export type ToolDefinition<Name extends string, Input, Output> =
       requiresApproval?: never;
     });
 
-export class AgentTool<Name extends string = string, Input = unknown, Output = unknown> {
+/**
+ * `Progress` is inferred, never written down.
+ *
+ * It comes from the yield type of an `execute` that is an async generator, and
+ * from nothing else — a tool that returns a promise gets `never`, which is the
+ * honest statement that it cannot yield and is what makes
+ * `ToolShapesOf`'s `progress` member safe to emit unconditionally. It is
+ * carried as a fourth parameter rather than derived on demand because it has to
+ * survive the trip through `ToolNamespace`, `FlattenTools` and `ToolShapesOf`
+ * into the browser, and only a type argument does that.
+ *
+ * Structurally it lives on `execute`, which is optional, and which is also why
+ * `AnyAgentTool` must pass `any` here: `Progress` sits covariantly inside
+ * `AsyncGenerator<Progress, …>`, so a bound of `never` would make every
+ * yielding tool fail the `Extract` in `ToolShapesOf` and silently vanish from
+ * the shapes.
+ */
+export class AgentTool<
+  Name extends string = string,
+  Input = unknown,
+  Output = unknown,
+  Progress = never,
+> {
   readonly name: Name;
   readonly description: string;
   readonly inputSchema: Schema<Input>;
@@ -140,9 +294,9 @@ export class AgentTool<Name extends string = string, Input = unknown, Output = u
    * avoids. Where a tool sits is a property of the agent, and it lives on the
    * agent's `ResolvedTool`.
    */
-  readonly execute?: ToolExecute<Input, Output>;
+  readonly execute?: ToolExecute<Input, Output, Progress>;
 
-  private constructor(params: ToolDefinition<Name, Input, Output>) {
+  private constructor(params: ToolDefinition<Name, Input, Output, Progress>) {
     this.name = params.name;
     this.description = params.description;
     this.inputSchema = params.inputSchema;
@@ -157,9 +311,9 @@ export class AgentTool<Name extends string = string, Input = unknown, Output = u
    * `const` on the params is what preserves `name` as a literal, which is what
    * lets the browser discriminate a tool part by name.
    */
-  static create<const Name extends string, Input, Output>(
-    params: ToolDefinition<Name, Input, Output>,
-  ): AgentTool<Name, Input, Output> {
+  static create<const Name extends string, Input, Output, Progress = never>(
+    params: ToolDefinition<Name, Input, Output, Progress>,
+  ): AgentTool<Name, Input, Output, Progress> {
     return new AgentTool(params);
   }
 
@@ -212,7 +366,7 @@ const questionSchema = {
   },
 } as unknown as Schema<{ question: string }>;
 
-export type AnyAgentTool = AgentTool<string, any, any>;
+export type AnyAgentTool = AgentTool<string, any, any, any>;
 
 /**
  * A group of tools the model can search as a unit.
@@ -277,10 +431,26 @@ type FlattenTools<T extends readonly ToolEntry[]> = T[number] extends infer E
     : E
   : never;
 
-/** The tool tuple, erased to the payload types the client is allowed to see. */
+/**
+ * The tool tuple, erased to the payload types the client is allowed to see.
+ *
+ * `progress` is emitted for every tool, `never` included, rather than only for
+ * the ones that can yield. A conditional that dropped the member would make
+ * `T[K]["progress"]` in `types.ts` resolve differently per tool, and this
+ * package compiles with `strict: false` — where `undefined extends T` is true
+ * of everything and an optional member is indistinguishable from a required
+ * one. Two inference bugs in this module already came from testing a shape
+ * under those options and believing the answer (see `OptionalSchema` in
+ * `Schema.ts`); an unconditional member has nothing to get wrong.
+ */
 export type ToolShapesOf<T extends readonly ToolEntry[]> = {
-  [K in Extract<FlattenTools<T>, AnyAgentTool> as K["name"]]: K extends AgentTool<any, infer I, infer O>
-    ? { input: I; output: O }
+  [K in Extract<FlattenTools<T>, AnyAgentTool> as K["name"]]: K extends AgentTool<
+    any,
+    infer I,
+    infer O,
+    infer P
+  >
+    ? { input: I; output: O; progress: P }
     : never;
 };
 
@@ -1281,6 +1451,19 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       toolCallId: call.toolCallId,
       signal: this.controller.signal,
       step,
+      // TEMPORARY, and only these three lines. The contract slice declares
+      // nesting so that the client, the signing and the runtime slices can be
+      // written against one shape; the nested-runtime slice replaces this stub
+      // with the real depth, the real resumed flag and the real `runAgent`.
+      // Until then a tool that reaches for it gets a sentence rather than an
+      // `undefined is not a function`.
+      depth: 0,
+      resumed: false,
+      runAgent: () => {
+        throw new Error(
+          "ctx.runAgent is declared but not wired up yet — nested agent runs land in a later change.",
+        );
+      },
     };
 
     try {
