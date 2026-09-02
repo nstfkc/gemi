@@ -279,6 +279,72 @@ describe("MemoryLiveRuns", () => {
     runs.clear();
   });
 })
+describe("a reader whose position is arithmetic, not a scan", () => {
+  test("gets every frame exactly once while the pump keeps pushing behind it", async () => {
+    // `drain` derives its index from the cursor and the window's first seq, and
+    // re-derives it after every yield — the window can have grown and rolled
+    // while this reader was suspended in its consumer. A stale index would
+    // either skip frames or repeat them, and neither shows up in a test that
+    // consumes as fast as the pump produces.
+    const runs = new MemoryLiveRuns({ maxFrames: 64 });
+    const run = new StubAgentRun("run_slow");
+    runs.register(run, { threadId: "t1" });
+    run.emit(textDelta("0"));
+    await settle();
+
+    const seen: number[] = [];
+    const reading = (async () => {
+      for await (const frame of runs.replay("run_slow")) {
+        seen.push(frame.seq);
+        // Suspend between frames, which is when the window moves.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+    })();
+
+    for (let i = 1; i < 40; i++) {
+      run.emit(textDelta(String(i)));
+      await settle();
+    }
+    run.finish();
+    await reading;
+
+    // Contiguous from the first frame, no gaps and no repeats.
+    expect(seen).toEqual(Array.from({ length: 40 }, (_, i) => i + 1));
+    runs.clear();
+  });
+
+  test("a reader that falls further behind than the window is cut, not silently skipped", async () => {
+    const runs = new MemoryLiveRuns({ maxFrames: 4 });
+    const run = new StubAgentRun("run_left");
+    runs.register(run, { threadId: "t1" });
+    run.emit(textDelta("0"));
+    await settle();
+
+    const seen: number[] = [];
+    let error: unknown;
+    const reading = (async () => {
+      try {
+        for await (const frame of runs.replay("run_left")) {
+          seen.push(frame.seq);
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+      } catch (err) {
+        error = err;
+      }
+    })();
+
+    for (let i = 1; i < 40; i++) run.emit(textDelta(String(i)));
+    run.finish();
+    await reading;
+
+    // A hole the client cannot see is worse than a stream that stops and says
+    // why — so this is the 410, and what it did deliver stayed contiguous.
+    expect(error).toBeInstanceOf(FrameCursorEvictedError);
+    expect(seen).toEqual(Array.from({ length: seen.length }, (_, i) => seen[0]! + i));
+    runs.clear();
+  });
+});
+
 describe("a cursor older than the buffer, and one only older than seq 1", () => {
   test("a short run replays from the beginning instead of claiming eviction", async () => {
     // Regression. This compared the cursor against `frames[0].seq`, which is 1
