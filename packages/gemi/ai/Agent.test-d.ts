@@ -165,3 +165,41 @@ describe("a pending tool call", () => {
     expectTypeOf<PendingToolCall<Shapes>["signature"]>().toEqualTypeOf<string>();
   });
 });
+
+describe("AgentTool.ask", () => {
+  test("is a client tool whose input is the prompt itself", () => {
+    const askName = AgentTool.ask({
+      name: "askName",
+      description: "Ask the customer their name",
+      outputSchema: s.object({ name: s.string() }),
+    });
+    expectTypeOf(askName).toEqualTypeOf<AgentTool<"askName", { question: string }, { name: string }>>();
+  });
+});
+
+describe("a skill", () => {
+  test("keeps its name a literal, so a registry of them stays discriminable", () => {
+    const skill = Skill.create({
+      name: "refund-policy",
+      description: "How refunds are decided",
+      instructions: () => "…",
+    });
+    expectTypeOf(skill).toEqualTypeOf<Skill<"refund-policy">>();
+  });
+});
+
+describe("a run", () => {
+  test("carries the tool shapes all the way into its result", () => {
+    const run = support.stream({} as any);
+    type Result = Awaited<ReturnType<typeof run.result>>;
+    expectTypeOf<Result["runId"]>().toEqualTypeOf<string>();
+
+    const part = {} as Result["messages"][number]["content"][number];
+    if (part.type === "tool-result" && part.name === "listOrders" && part.status === "ok") {
+      expectTypeOf(part.output).toEqualTypeOf<{ orderIds: string[] }>();
+    }
+    if (part.type === "tool-call" && part.name === "bash") {
+      expectTypeOf(part.input).toEqualTypeOf<{ command: string; cwd?: string }>();
+    }
+  });
+});
