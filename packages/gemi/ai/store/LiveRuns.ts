@@ -10,14 +10,32 @@ const DEFAULT_TTL_MS = 60 * 1000;
 /**
  * How many frames are kept per run.
  *
- * The buffer has to be bounded or it is a memory leak with a long fuse: a
+ * The window has to be bounded or it is a memory leak with a long fuse: a
  * server that never restarts holding every token of every conversation it ever
- * streamed. 512 frames is a couple of hundred tokens of prose plus its tool
- * calls — comfortably more than the seconds of catch-up a reattaching client
- * actually needs, and small enough that a thousand concurrent runs is megabytes
- * rather than gigabytes.
+ * streamed.
+ *
+ * It was 512 on the reasoning that a reattaching client only needs seconds of
+ * catch-up. That is true of the *reattaching* client and false of the one that
+ * never left: a frame is roughly a token, so 512 is a four-hundred-word answer,
+ * and a reader that falls behind a longer one by more than that is cut off with
+ * a 410 mid-stream. On a slow connection — the case reattachment exists for —
+ * that is not exotic.
+ *
+ * 4096 covers essentially any single answer. It is affordable because of two
+ * measured facts, and it would not have been before either:
+ *
+ *   - `drain` no longer copies the window per wake, so a reader costs the same
+ *     whatever the window's size. Measured at 64 readers on a 2000-frame run:
+ *     1106 ms of CPU at 4096 before, 425 ms after, and 468 ms at 512 — i.e. the
+ *     size stopped being a term in the cost.
+ *   - the entries are pointers to frames the run is holding anyway, so the
+ *     window costs 8 bytes each, not the frame. Eight times more of them is
+ *     ~28 KB per run, and a thousand concurrent runs is tens of megabytes.
+ *
+ * Both would change if the run's own buffer ever became bounded — then this
+ * window owns the frames, and its size is their size.
  */
-const DEFAULT_MAX_FRAMES = 512;
+const DEFAULT_MAX_FRAMES = 4096;
 
 /**
  * A cursor older than anything still buffered.
@@ -316,18 +334,34 @@ export class MemoryLiveRuns implements LiveRuns {
     let cursor = from;
     while (true) {
       const seen = entry.version;
-      const buffered = entry.frames.slice();
-      if (cursor < entry.lostBefore) {
-        // The buffer rolled past this reader mid-stream. Same reasoning as the
-        // pre-flight check: a gap the client cannot see is worse than a stream
-        // that stops and says why.
-        throw new FrameCursorEvictedError(runId, cursor, entry.lostBefore);
-      }
-      for (const frame of buffered) {
-        if (frame.seq >= cursor) {
-          yield frame;
-          cursor = frame.seq + 1;
+      // The window is contiguous and ordered, so a reader's position in it is
+      // arithmetic, not a search. This used to copy the whole window on every
+      // wake and scan it for frames past the cursor, which is O(window) per
+      // frame per reader — invisible at a 512-frame cap and the reason the cap
+      // could not be raised. Indexing makes the window's size stop mattering.
+      for (;;) {
+        if (cursor < entry.lostBefore) {
+          // The window rolled past this reader mid-stream. Same reasoning as
+          // the pre-flight check: a gap the client cannot see is worse than a
+          // stream that stops and says why. Re-checked inside the loop rather
+          // than once per wake, because a yield suspends this reader for as
+          // long as its consumer takes and the pump keeps running.
+          throw new FrameCursorEvictedError(runId, cursor, entry.lostBefore);
         }
+        const frames = entry.frames;
+        const oldest = frames[0]?.seq;
+        if (oldest === undefined) {
+          break;
+        }
+        // Clamped rather than treated as a gap: a cursor below the first seq
+        // that ever existed is "from the beginning", not a lost position.
+        const index = Math.max(0, cursor - oldest);
+        if (index >= frames.length) {
+          break;
+        }
+        const frame = frames[index]!;
+        yield frame;
+        cursor = frame.seq + 1;
       }
       if (entry.ended && cursor > entry.lastSeq) {
         return;
