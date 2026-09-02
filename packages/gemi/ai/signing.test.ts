@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
   canonicalize,
+  consumePendingCall,
   readSignature,
   signPendingCall,
   verifyPendingCall,
@@ -82,7 +83,11 @@ describe("a signed pending call", () => {
     });
   });
 
-  test("rejects a signature replayed into a different run", () => {
+  test("covers the run it was issued for, so a token cannot be re-pointed", () => {
+    // Note what this does *not* say. `Agent` reads the runId out of the token
+    // rather than choosing it, so this is the MAC covering the field, not a
+    // replay defence — replay is `consumePendingCall` below, and the end-to-end
+    // case is in Agent.test.ts.
     const signature = signPendingCall(claims(), { secret });
     expect(verifyPendingCall(signature, claims({ runId: "run_2" }), { secret })).toEqual({
       ok: false,
@@ -142,5 +147,39 @@ describe("a signed pending call", () => {
     } finally {
       if (previous !== undefined) process.env.SECRET = previous;
     }
+  });
+});
+
+describe("spending a signature", () => {
+  test("is single use: the second presentation of a token is a replay", () => {
+    const signature = signPendingCall(claims(), { secret });
+    // Verification is unchanged by spending — the token is still authentic, it
+    // is the question that is no longer open.
+    expect(consumePendingCall(signature)).toBe(true);
+    expect(verifyPendingCall(signature, claims(), { secret }).ok).toBe(true);
+    expect(consumePendingCall(signature)).toBe(false);
+  });
+
+  test("two calls in the same run get their own nonces", () => {
+    const first = signPendingCall(claims(), { secret });
+    const second = signPendingCall(claims({ toolCallId: "call_2" }), { secret });
+    expect(readSignature(first)?.nonce).not.toBe(readSignature(second)?.nonce);
+    expect(consumePendingCall(first)).toBe(true);
+    expect(consumePendingCall(second)).toBe(true);
+  });
+
+  test("stops holding a nonce once the token it refers to has expired", () => {
+    // What bounds the registry: an entry is worth keeping only while the token
+    // could still verify, and a token past its expiry is refused by `verify`
+    // whether or not the nonce is still on file.
+    const now = Date.now();
+    const signature = signPendingCall(claims(), { secret, ttlMs: 1000, now });
+    expect(consumePendingCall(signature, { now })).toBe(true);
+    expect(consumePendingCall(signature, { now: now + 500 })).toBe(false);
+    expect(consumePendingCall(signature, { now: now + 2000 })).toBe(true);
+  });
+
+  test("spends nothing for a token it cannot read", () => {
+    expect(consumePendingCall("not-a-token")).toBe(false);
   });
 });

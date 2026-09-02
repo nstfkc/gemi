@@ -22,6 +22,11 @@ import { createHmac, randomBytes, timingSafeEqual } from "crypto";
  *            that the answer is bound to the call the server actually made,
  *            with the input the server actually saw.
  *
+ * A verified token is not yet an answer the server may act on: it says the
+ * question was asked, not that it is still open. `consumePendingCall` at the
+ * bottom of this file spends the nonce, which is what makes an approval
+ * single-use — see the note there for what that guarantee is worth.
+ *
  * `kind` is in there for a specific attack: an `approval`-kind call is one the
  * *server* runs, so a client that reused its signature on the "here is the
  * output" arm of `ClientToolResult` would be fabricating a server tool's result
@@ -203,4 +208,66 @@ export function verifyPendingCall(
   }
 
   return { ok: true, runId: parsed.runId, nonce: parsed.nonce, expiresAt: parsed.expiresAt };
+}
+
+// --- single use ----------------------------------------------------------
+
+/**
+ * Nonces already spent, mapped to the moment they stop mattering.
+ *
+ * The MAC makes a token unforgeable; it does not make it single-use. Without
+ * this a captured signature approves the same call again every time it is
+ * presented, because a token that carries its own `runId` is a token that
+ * asserts its own binding — which is no binding at all. Verifying tells you the
+ * server once asked this exact question; spending the nonce is what says nobody
+ * has answered it yet.
+ *
+ * Deliberately in memory, and deliberately not a hard guarantee:
+ *
+ *   bounded — an entry lives at most as long as the token's TTL, and the sweep
+ *             below is amortized O(1), so the map is bounded by the approvals
+ *             actually issued in one TTL window rather than by uptime.
+ *   local   — one process. A second replica has never seen the nonce and will
+ *             accept it, so this closes the replay window rather than sealing
+ *             it. That is still worth having and it fails open, which is the
+ *             only direction a cache may fail: a lost registry costs a replay,
+ *             never a legitimate approval that stops working.
+ *
+ * The stronger guard is the app's own message store: once a call has a result
+ * next to it, the call is no longer open and the answer has nothing to attach
+ * to. This is what stands in for that in stateless mode, where the history the
+ * client returns can be rewound to before the result existed.
+ */
+const spent = new Map<string, number>();
+
+/** Sweep when the map has grown past this, so sweeping costs O(1) per insert
+ *  amortized instead of walking every entry on every approval. */
+let sweepAt = 1024;
+
+function sweep(now: number) {
+  for (const [nonce, expiresAt] of spent) {
+    if (expiresAt <= now) spent.delete(nonce);
+  }
+  sweepAt = Math.max(1024, spent.size * 2);
+}
+
+/**
+ * Spends a signature's nonce. `false` means it was already spent — the answer
+ * is a replay and must not be acted on.
+ *
+ * Separate from `verifyPendingCall` rather than folded into it, because verify
+ * is a pure question a caller may want to ask twice (logging a forgery, say)
+ * and this one is a state change that must happen exactly once per answer.
+ */
+export function consumePendingCall(signature: string, options: VerifyOptions = {}): boolean {
+  const parsed = readSignature(signature);
+  if (!parsed) return false;
+  const now = options.now ?? Date.now();
+  if (spent.size >= sweepAt) sweep(now);
+  const spentUntil = spent.get(parsed.nonce);
+  // A record past its own expiry binds nothing: the token it refers to fails
+  // verification on its own, so holding the nonce would only grow the map.
+  if (spentUntil !== undefined && spentUntil > now) return false;
+  spent.set(parsed.nonce, parsed.expiresAt);
+  return true;
 }

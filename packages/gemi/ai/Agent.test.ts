@@ -45,6 +45,31 @@ const stringField = (field: string) =>
 
 const anything = () => schemaOf<any>(() => []);
 
+/**
+ * A schema that *changes* the value it parses, which every real one does.
+ *
+ * `schemaOf` above returns its input untouched, so it cannot tell the raw model
+ * arguments apart from the parsed ones — and the difference between those two
+ * is exactly where a signed approval can come apart.
+ */
+function normalizingSchema<T>(normalize: (value: any) => any): Schema<T> {
+  const schema = {
+    toJSONSchema: () => ({ type: "object" }),
+    parse(value: unknown) {
+      const result = schema.safeParse(value);
+      if (result.ok === false) throw new Error(result.errors.join(", "));
+      return result.value;
+    },
+    safeParse(value: unknown) {
+      if (!value || typeof value !== "object") {
+        return { ok: false as const, errors: ["expected an object"] };
+      }
+      return { ok: true as const, value: normalize(value) as T };
+    },
+  };
+  return schema as unknown as Schema<T>;
+}
+
 const usage = (inputTokens: number, outputTokens: number): Usage => ({
   inputTokens,
   outputTokens,
@@ -157,6 +182,29 @@ const refundOrder = AgentTool.create({
   },
 });
 
+/**
+ * The same tool with a schema that drops a `null`-valued optional.
+ *
+ * Not a contrived case: strict mode has no notion of an omitted key, so
+ * `optional()` emits a nullable union and the model is *told* to send `null`,
+ * which the parse then drops. Any approval tool with one optional field takes
+ * this path on every call.
+ */
+const annotateCalls: any[] = [];
+const annotateOrder = AgentTool.create({
+  name: "annotateOrder",
+  description: "Refund an order, with an optional note",
+  inputSchema: normalizingSchema<any>(({ note, ...rest }: any) =>
+    note === null ? rest : { note, ...rest },
+  ),
+  outputSchema: anything(),
+  requiresApproval: true,
+  execute: async (input: any) => {
+    annotateCalls.push(input);
+    return { noted: true };
+  },
+});
+
 const askUser = AgentTool.ask({
   name: "ask",
   description: "Ask the customer something",
@@ -210,6 +258,29 @@ describe("a plain run", () => {
     });
     await run.result();
     expect(provider.calls[0].systemPrompt).toBe("Be brief.\n\nToday is Tuesday.");
+  });
+});
+
+describe("a provider error", () => {
+  test("survives a finish frame arriving after it", async () => {
+    // A content filter reports the block and then closes the call with usage.
+    // Which order the real provider emits these in is not pinned down, and a
+    // closing frame must not be able to erase what already failed.
+    const provider = fakeProvider([
+      { type: "error", error: { code: "content_filtered", message: "blocked", retryable: false } },
+      finish(),
+    ]);
+    const run = greetAgent(provider).stream({ messages: [], req, turn: { text: "hi" } });
+    const { events, done } = collect(run);
+    const result = await run.result();
+    await done;
+
+    expect(result.finishReason).toBe("error");
+    expect(events.find((event) => event.type === "error")).toMatchObject({
+      error: { code: "content_filtered", message: "blocked" },
+    });
+    // The tokens were still spent, so they are still counted.
+    expect(result.usage).toEqual(usage(10, 5));
   });
 });
 
@@ -480,6 +551,116 @@ describe("an approval", () => {
     expect(partsOf(result.messages, "tool-result")[0]).toMatchObject({ status: "denied" });
   });
 
+  test("a normalizing input schema still verifies, because one value is authoritative", async () => {
+    annotateCalls.length = 0;
+    const provider = fakeProvider([
+      // What strict mode makes the model send for an omitted optional.
+      toolCall("c1", "annotateOrder", { orderId: "ord_1", note: null }),
+      finish(),
+    ]);
+    const agent = Agent.create({ name: "support", provider, tools: [annotateOrder] });
+    const first = agent.stream({ messages: [], req, turn: { text: "refund it" } });
+    const { events, done } = collect(first);
+    const asked = await first.result();
+    await done;
+    const pending = (events.find((event) => event.type === "awaiting-input") as any)
+      .pending as PendingToolCall[];
+    // The user is shown, and the server signs, the value that will actually run.
+    expect(pending[0].input).toEqual({ orderId: "ord_1" });
+
+    const answering = Agent.create({
+      name: "support",
+      provider: fakeProvider([{ type: "text-delta", delta: "done" }, finish()]),
+      tools: [annotateOrder],
+    });
+    const second = answering.stream({
+      messages: asked.messages,
+      req,
+      turn: { toolResults: [{ toolCallId: "c1", signature: pending[0].signature, approve: true }] },
+    });
+    const replay = collect(second);
+    const result = await second.result();
+    await replay.done;
+
+    // Signed over the parsed value and verified against the raw one, this came
+    // back `invalid_tool_result` and was reported to the model as a refusal —
+    // the user who clicked Approve was told they had said no.
+    expect(replay.events.filter((event) => event.type === "error")).toEqual([]);
+    expect(partsOf(result.messages, "tool-result")[0]).toMatchObject({ status: "ok" });
+    // And it executed with the parsed value, not the raw arguments.
+    expect(annotateCalls).toEqual([{ orderId: "ord_1" }]);
+  });
+
+  test("the same answer sent twice runs the tool once", async () => {
+    const first = await askForApproval();
+    const answer: ClientToolResult = {
+      toolCallId: "c1",
+      signature: first.pending[0].signature,
+      approve: true,
+    };
+    const provider = fakeProvider([{ type: "text-delta", delta: "refunded" }, finish()]);
+    const agent = Agent.create({ name: "support", provider, tools: [refundOrder, askUser] });
+    const run = agent.stream({
+      messages: first.result.messages,
+      req,
+      // A retried submit, or a double-clicked button.
+      turn: { toolResults: [answer, answer] },
+    });
+    const { events, done } = collect(run);
+    const result = await run.result();
+    await done;
+
+    expect(refundCalls).toEqual(["ord_1"]);
+    // Ignored rather than reported: single use would refuse the second copy
+    // anyway, but as a forgery — and a user who double-clicked has not attacked
+    // anything, so there is nothing to tell them or to alert on.
+    expect(events.filter((event) => event.type === "error")).toEqual([]);
+    // Two results for one call is a history the provider rejects, which is the
+    // same failure the whole denied/stopped machinery exists to avoid.
+    const sent = provider.calls[0].messages.flatMap((message) => message.content);
+    expect(sent.filter((part) => part.type === "tool-result")).toHaveLength(1);
+    expect(partsOf(result.messages, "tool-result")).toHaveLength(1);
+  });
+
+  test("a captured signature does not approve the same call a second time", async () => {
+    const first = await askForApproval();
+    const answer: ClientToolResult = {
+      toolCallId: "c1",
+      signature: first.pending[0].signature,
+      approve: true,
+    };
+    const approve = () =>
+      Agent.create({
+        name: "support",
+        provider: fakeProvider([{ type: "text-delta", delta: "refunded" }, finish()]),
+        tools: [refundOrder, askUser],
+      }).stream({
+        // The history from *before* the approval — in stateless mode this comes
+        // from the browser, so rewinding it is the client's to do.
+        messages: first.result.messages,
+        req,
+        turn: { toolResults: [answer] },
+      });
+
+    await approve().result();
+    expect(refundCalls).toEqual(["ord_1"]);
+
+    const again = approve();
+    const { events, done } = collect(again);
+    const result = await again.result();
+    await done;
+
+    expect(refundCalls).toEqual(["ord_1"]);
+    expect(events.find((event) => event.type === "error")).toMatchObject({
+      error: { code: "invalid_tool_result" },
+    });
+    // Refused, not stranded: the model still gets a result for the call.
+    expect(partsOf(result.messages, "tool-result")[0]).toMatchObject({
+      status: "denied",
+      cause: "refused",
+    });
+  });
+
   test("rejects a result for a call the server never made", async () => {
     const first = await askForApproval();
     const provider = fakeProvider([finish()]);
@@ -504,25 +685,43 @@ describe("an approval", () => {
   });
 });
 
+/**
+ * Runs the first turn of the question conversation.
+ *
+ * Called once per answer rather than shared between them: a signature is
+ * single-use, so two attempts at the same pending call are a replay and the
+ * second is refused — which is the point, and not what these tests are about.
+ */
+async function askQuestion() {
+  const { agent } = approvalAgent([toolCall("c1", "ask", { question: "which invoice?" }), finish()]);
+  const run = agent.stream({ messages: [], req, turn: { text: "refund something" } });
+  const { events, done } = collect(run);
+  const result = await run.result();
+  await done;
+  const pending = (events.find((event) => event.type === "awaiting-input") as any)
+    .pending as PendingToolCall[];
+  return { result, pending };
+}
+
 describe("a client-answered tool", () => {
   test("ends awaiting-input and validates the answer against its output schema", async () => {
-    const { agent } = approvalAgent([toolCall("c1", "ask", { question: "which invoice?" }), finish()]);
-    const run = agent.stream({ messages: [], req, turn: { text: "refund something" } });
-    const { events, done } = collect(run);
-    const first = await run.result();
-    await done;
-    const pending = (events.find((event) => event.type === "awaiting-input") as any)
-      .pending as PendingToolCall[];
-    expect(pending[0].kind).toBe("question");
+    const answering = Agent.create({
+      name: "support",
+      provider: fakeProvider([finish()], [finish()]),
+      tools: [refundOrder, askUser],
+    });
 
-    const provider = fakeProvider([finish()], [finish()]);
-    const agent2 = Agent.create({ name: "support", provider, tools: [refundOrder, askUser] });
-
-    const bad = await agent2
+    const first = await askQuestion();
+    expect(first.pending[0].kind).toBe("question");
+    const bad = await answering
       .stream({
-        messages: first.messages,
+        messages: first.result.messages,
         req,
-        turn: { toolResults: [{ toolCallId: "c1", signature: pending[0].signature, output: { answer: 42 } }] },
+        turn: {
+          toolResults: [
+            { toolCallId: "c1", signature: first.pending[0].signature, output: { answer: 42 } },
+          ],
+        },
       })
       .result();
     expect(partsOf(bad.messages, "tool-result")[0]).toMatchObject({
@@ -530,13 +729,18 @@ describe("a client-answered tool", () => {
       error: { code: "invalid_tool_result" },
     });
 
-    const good = await agent2
+    const second = await askQuestion();
+    const good = await answering
       .stream({
-        messages: first.messages,
+        messages: second.result.messages,
         req,
         turn: {
           toolResults: [
-            { toolCallId: "c1", signature: pending[0].signature, output: { answer: "the March one" } },
+            {
+              toolCallId: "c1",
+              signature: second.pending[0].signature,
+              output: { answer: "the March one" },
+            },
           ],
         },
       })
@@ -601,6 +805,69 @@ describe("stop()", () => {
     // And it went through the message callback, so it is persisted whether or
     // not anyone was watching.
     expect(messages.map((m) => m.finishReason)).toContain("aborted");
+  });
+
+  test("cancels a tool approved on this turn, which runs outside the loop", async () => {
+    const started = deferred();
+    const holdOn = AgentTool.create({
+      name: "holdOn",
+      description: "Approved, then never returns",
+      inputSchema: anything(),
+      requiresApproval: true,
+      // Ignores the signal, like any tool that was not written with one.
+      execute: () => {
+        started.resolve();
+        return new Promise<any>(() => {});
+      },
+    });
+    const tools = [holdOn];
+
+    const asking = Agent.create({
+      name: "slow",
+      provider: fakeProvider([toolCall("c1", "holdOn", {}), finish()]),
+      tools,
+    });
+    const first = asking.stream({ messages: [], req, turn: { text: "do it" } });
+    const asked = collect(first);
+    const before = await first.result();
+    await asked.done;
+    const pending = (asked.events.find((event) => event.type === "awaiting-input") as any)
+      .pending as PendingToolCall[];
+
+    const persisted: AgentMessage[] = [];
+    const answering = Agent.create({ name: "slow", provider: fakeProvider([finish()]), tools });
+    const run = answering.stream({
+      messages: before.messages,
+      req,
+      turn: { toolResults: [{ toolCallId: "c1", signature: pending[0].signature, approve: true }] },
+      onMessage: (message) => {
+        persisted.push(message);
+      },
+    });
+    const { events, done } = collect(run);
+
+    await started.promise;
+    run.stop({ reason: "user pressed stop" });
+    // The approval path executes outside `runTools`, so it needs its own race
+    // against the signal — unraced, this never settled and the run hung with
+    // `c1` dangling, which is the exact state `stop()` exists to prevent.
+    const result = await run.result();
+    await done;
+
+    expect(result.finishReason).toBe("aborted");
+    expect(partsOf(result.messages, "tool-result")[0]).toMatchObject({
+      toolCallId: "c1",
+      status: "denied",
+      cause: "stopped",
+      reason: "user pressed stop",
+    });
+    expect(events.some((event) => event.type === "tool-result")).toBe(true);
+    expect(events[events.length - 1]).toMatchObject({ finishReason: "aborted" });
+    // The amended message is persisted too: the report pass at the end of the
+    // ingest is one of the things the abort skipped past.
+    expect(
+      persisted.flatMap((message) => message.content).filter((part) => part.type === "tool-result"),
+    ).toHaveLength(1);
   });
 
   test("an external signal stops the run the same way", async () => {
@@ -759,6 +1026,37 @@ describe("namespaces", () => {
       description: "Customer records",
       tools: [{ name: "refundOrder", deferred: true }],
     });
-    expect(refundOrder.namespace).toBe("crm");
+  });
+
+  test("a tool may sit in a different namespace in each agent that uses it", async () => {
+    // Where a tool sits is a property of the agent, not of the tool. A tool is
+    // a module-scope singleton, so a group recorded on the tool itself is one
+    // every other agent sharing it reads — and the last one constructed wins.
+    const crm = ToolNamespace.create({
+      name: "crm",
+      description: "Customer records",
+      tools: [refundOrder],
+    });
+    const billing = ToolNamespace.create({
+      name: "billing",
+      description: "Money movements",
+      tools: [refundOrder],
+    });
+    const first = fakeProvider([finish()]);
+    const second = fakeProvider([finish()]);
+    const agentA = Agent.create({ name: "a", provider: first, tools: [crm] });
+    const agentB = Agent.create({ name: "b", provider: second, tools: [billing] });
+
+    await agentA.stream({ messages: [], req }).result();
+    await agentB.stream({ messages: [], req }).result();
+
+    const groupOf = (provider: typeof first) =>
+      (provider.calls[0].tools as any[]).map((entry) => ({
+        name: entry.name,
+        tools: entry.tools.map((tool: any) => tool.name),
+      }));
+    expect(groupOf(first)).toEqual([{ name: "crm", tools: ["refundOrder"] }]);
+    // Constructed second, and the one that would have overwritten the other.
+    expect(groupOf(second)).toEqual([{ name: "billing", tools: ["refundOrder"] }]);
   });
 });

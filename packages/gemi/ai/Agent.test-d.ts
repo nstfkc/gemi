@@ -136,6 +136,14 @@ describe("a tool definition", () => {
 });
 
 describe("an agent's tools", () => {
+  test("carry no namespace of their own, because a tool is a singleton", () => {
+    // The same tool may be grouped one way by one agent and another way by the
+    // next, so a field on the tool naming its group can only report whichever
+    // namespace was constructed last — to every agent sharing it. Where a tool
+    // sits is a property of the agent, and this is what keeps that true.
+    expectTypeOf(refundOrder).not.toHaveProperty("namespace");
+  });
+
   test("flatten out of their namespaces, keyed by tool name", () => {
     expectTypeOf<keyof Shapes>().toEqualTypeOf<"bash" | "ask" | "listOrders" | "refundOrder">();
   });

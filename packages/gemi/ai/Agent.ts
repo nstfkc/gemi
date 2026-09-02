@@ -5,7 +5,12 @@ import type {
   ProviderToolSpec,
 } from "./AgentProvider";
 import type { Infer, Schema } from "./Schema";
-import { readSignature, signPendingCall, verifyPendingCall } from "./signing";
+import {
+  consumePendingCall,
+  readSignature,
+  signPendingCall,
+  verifyPendingCall,
+} from "./signing";
 import type {
   AgentError,
   AgentMessage,
@@ -127,7 +132,14 @@ export class AgentTool<Name extends string = string, Input = unknown, Output = u
   readonly requiresApproval: boolean;
   readonly deferred: boolean;
   readonly answeredBy: "server" | "client";
-  readonly namespace?: string;
+  /**
+   * There is deliberately no `namespace` here. A tool is a module-scope
+   * singleton, so a field naming its group would hold whichever agent
+   * constructed its namespace last and report that to every other one — the
+   * same global-effect-from-a-local-declaration that `ToolNamespace.deferred`
+   * avoids. Where a tool sits is a property of the agent, and it lives on the
+   * agent's `ResolvedTool`.
+   */
   readonly execute?: ToolExecute<Input, Output>;
 
   private constructor(params: ToolDefinition<Name, Input, Output>) {
@@ -241,13 +253,6 @@ export class ToolNamespace<
     this.description = params.description;
     this.tools = params.tools;
     this.deferred = params.deferred === true;
-    for (const tool of params.tools) {
-      // Assigned once, at module load, to a field that is `readonly` for
-      // everyone else. Membership is part of what the model is shown, and the
-      // alternative — a tool-to-namespace map threaded through every call site
-      // that renders a prompt — is more state, not less.
-      (tool as { namespace?: string }).namespace = params.name;
-    }
   }
 
   static create<const Name extends string, const T extends readonly AnyAgentTool[]>(params: {
@@ -774,6 +779,12 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   private produced: AgentMessage[] = [];
   private current: AgentMessage | null = null;
 
+  /** Messages from an earlier run this one has amended, by id. Cloned once and
+   *  reused, so two results for the same message do not fork it. */
+  private readonly amended = new Map<string, AgentMessage>();
+  /** Amended messages that have not yet gone through `onMessage`. */
+  private readonly unreported = new Set<AgentMessage>();
+
   private usage: Usage = emptyUsage();
   private finishReason: FinishReason = "stop";
   private output: unknown;
@@ -1100,8 +1111,14 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
           break;
         }
         case "finish": {
-          outcome = { reason: event.reason };
           this.usage = addUsage(this.usage, event.usage);
+          // The usage is taken either way, the reason only if nothing has
+          // already failed. A provider is allowed to report an error and then
+          // close the call with a finish frame — a content filter does exactly
+          // that, and it still bills for the tokens — and letting the closing
+          // frame overwrite the outcome would turn "blocked" into an empty
+          // answer with no explanation anywhere.
+          if (!outcome.error) outcome = { reason: event.reason };
           break;
         }
         case "error": {
@@ -1200,6 +1217,24 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         });
         continue;
       }
+
+      // The parsed value replaces the raw arguments on the part, and from here
+      // on it is the only input this call has.
+      //
+      // A schema normalizes — it fills defaults, coerces, and drops the `null`s
+      // that strict mode forces a model to send for an omitted optional. So
+      // `safeParse(input)` and `input` are different values, and a pending call
+      // has to be signed over, shown as, verified against and executed with the
+      // *same* one. Keeping the raw value in the transcript and signing the
+      // parsed one meant the MACs could not match on the way back: every
+      // approval of a tool with an optional field came back looking forged, and
+      // the user who clicked Approve was told they had refused.
+      //
+      // Writing it here rather than re-parsing on the way back also avoids
+      // assuming `safeParse` is idempotent — the history now carries the value
+      // the signature covers, so verification is a comparison and not a second
+      // guess at what the first parse produced.
+      call.input = parsed.value;
 
       const kind = pendingKind(resolved.tool);
       if (kind) {
@@ -1312,9 +1347,17 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
 
     if (open.length > 0) {
       const answered = new Set<string>();
-      const touched = new Map<string, AgentMessage>();
+      const seen = new Set<string>();
 
       for (const answer of turn?.toolResults ?? []) {
+        // One answer per call, first one wins. A turn carrying the same entry
+        // twice is a retried submit or a double-clicked form, and without this
+        // it ran the approved tool twice and left two results for one
+        // toolCallId — a history the provider rejects, arrived at by exactly
+        // the machinery that exists to keep the history well formed.
+        if (seen.has(answer.toolCallId)) continue;
+        seen.add(answer.toolCallId);
+
         const target = open.find((entry) => entry.call.toolCallId === answer.toolCallId);
         if (!target) {
           // Nothing to attach it to, so it cannot be told to the model even as
@@ -1334,29 +1377,23 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         const result = await this.resolveAnswer(target, answer);
         if (!result) continue;
         answered.add(answer.toolCallId);
-        this.attachToHistory(target, result, touched);
+        this.attachToHistory(target, result);
       }
 
       for (const entry of open) {
         if (answered.has(entry.call.toolCallId)) continue;
         // The turn said something else. That is a refusal — the honest reading,
         // and the only one that cannot strand the thread.
-        this.attachToHistory(
-          entry,
-          {
-            type: "tool-result",
-            toolCallId: entry.call.toolCallId,
-            name: entry.call.name,
-            status: "denied",
-            cause: "refused",
-          },
-          touched,
-        );
+        this.attachToHistory(entry, {
+          type: "tool-result",
+          toolCallId: entry.call.toolCallId,
+          name: entry.call.name,
+          status: "denied",
+          cause: "refused",
+        });
       }
 
-      for (const message of touched.values()) {
-        await this.report(message);
-      }
+      await this.reportAmended();
     }
 
     if (turn && (turn.text || (turn.files && turn.files.length > 0))) {
@@ -1463,14 +1500,33 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       );
     }
 
+    // Verifying says the server once asked this exact question; spending the
+    // nonce says nobody has answered it yet. Without this step a captured token
+    // approves the same call every time it is presented — the client rewinds to
+    // the history from before the result existed and replays, and the human who
+    // approved once has approved forever.
+    if (!consumePendingCall(answer.signature)) {
+      return reject(`The answer for "${name}" has already been used. Ask again.`);
+    }
+
     if ("approve" in answer) {
       if (kind !== "approval") {
         return reject(`"${name}" is answered by the client, not approved.`);
       }
       if (answer.approve === true) {
+        // Raced against the abort signal exactly as `runTools` does. A tool
+        // that does not honour `ctx.signal` must not be able to hold the run
+        // open, and this is the one execution outside the loop — a `stop()`
+        // landing here used to hang the run forever, which is precisely the
+        // dangling state `stop()` exists to prevent.
+        //
         // Step 0: the approval landed before this run took its first model
-      // step, so it belongs to no step of this loop.
-      return this.executeTool(resolved, call, call.input, 0);
+        // step, so it belongs to no step of this loop. `call.input` is the
+        // value the signature covers — see `runTools`.
+        return raceAbort(
+          this.executeTool(resolved, call, call.input, 0),
+          this.controller.signal,
+        );
       }
       return {
         type: "tool-result",
@@ -1528,19 +1584,33 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   private attachToHistory(
     entry: { message: AgentMessage; call: ToolCallPart },
     result: ToolResultPart,
-    touched: Map<string, AgentMessage>,
   ) {
-    let message = touched.get(entry.message.id);
+    let message = this.amended.get(entry.message.id);
     if (!message) {
       const original = entry.message;
       message = { ...original, content: [...original.content] };
       const index = this.history.indexOf(original);
       if (index >= 0) this.history[index] = message;
       this.produced.push(message);
-      touched.set(original.id, message);
+      this.amended.set(original.id, message);
     }
     message.content.push(result);
+    this.unreported.add(message);
     this.emit({ type: "tool-result", messageId: message.id, part: result });
+  }
+
+  /**
+   * Persists the messages this run amended, once each.
+   *
+   * Called both at the end of `ingestTurn` and from the abort path, because a
+   * stop that lands while an approved tool is running has to persist the
+   * results that *did* attach this turn — otherwise the work is done, the
+   * transcript on the stream shows it, and the store never hears about it.
+   */
+  private async reportAmended(): Promise<void> {
+    const pending = [...this.unreported];
+    this.unreported.clear();
+    for (const message of pending) await this.report(message);
   }
 
   // --- stopping ----------------------------------------------------------
@@ -1556,6 +1626,26 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
    * next message the user sent.
    */
   private async finalizeAborted(): Promise<void> {
+    // Calls left open anywhere in the history, not just on the message this run
+    // was building. A stop that lands while an approval this turn is executing
+    // has no current message at all — the call belongs to an *earlier* turn's
+    // message — and denying only `this.current` would leave that one dangling
+    // in the very transcript this method exists to keep valid.
+    for (const entry of this.openCalls()) {
+      if (entry.message === this.current) continue;
+      this.attachToHistory(entry, {
+        type: "tool-result",
+        toolCallId: entry.call.toolCallId,
+        name: entry.call.name,
+        status: "denied",
+        cause: "stopped",
+        reason: this.stopReason,
+      });
+    }
+    // Results that did attach this turn have not been persisted yet: the report
+    // pass at the end of `ingestTurn` is one of the things the abort skipped.
+    await this.reportAmended();
+
     const message = this.current;
     if (message) {
       const answered = new Set(
