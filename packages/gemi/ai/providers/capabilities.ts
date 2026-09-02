@@ -20,6 +20,14 @@ import type { ProviderCapabilities } from "../AgentProvider";
  *
  * The named families below exist to make the *known-old* cases right, which is
  * the only place a guess can be wrong in the quiet direction.
+ *
+ * Note what an answer of `false` does and does not buy. `reasoning: false` and
+ * `toolSearch: false` change the request, because both are optimizations and
+ * the run is identical without them. `structuredOutput: false` does not: it is
+ * reported honestly for a caller that wants to branch on it, but the request
+ * builder still sends the schema, because an agent that declared an `output`
+ * has an app waiting on a typed result and dropping the parameter would answer
+ * prose forever with nothing to branch on. See `request.ts`.
  */
 export function capabilitiesForModel(model: string): ProviderCapabilities {
   const id = normalizeModelId(model);
@@ -82,19 +90,28 @@ function normalizeModelId(model: string): string {
   return model.trim().toLowerCase();
 }
 
-type Family = { kind: "gpt" | "o"; major: number };
+export type Family = { kind: "gpt" | "o"; major: number };
 
 /**
  * Reads the generation number out of `gpt-5.4-mini-2025-01-01` or `o3-mini`.
  * Only the major number is used — a point release has never taken a capability
  * away, and treating `gpt-5.1` as unknown-therefore-capable would be the same
  * answer anyway.
+ *
+ * Exported for its own test: the classification is what the guards below are
+ * really about, and it is the only place they are observable — two ids can
+ * classify differently and still land on the same capability answer today.
  */
-function parseFamily(id: string): Family | null {
+export function parseFamily(id: string): Family | null {
   const gpt = /^gpt-(\d+)/.exec(id);
   if (gpt?.[1]) return { kind: "gpt", major: Number(gpt[1]) };
-  // `o1`, `o3-mini`, `o4-mini`. Anchored and followed by a boundary so
-  // `omni-moderation` does not read as generation 0.
+  // `o1`, `o3-mini`, `o4-mini`. The boundary is what keeps an id whose leading
+  // digits are not a generation out of this family — `o200k-base` is a
+  // tokenizer, not an o-series model, and `/^o(\d+)/` alone reads it as
+  // generation 200. (`omni-moderation` never gets this far: `m` is not a
+  // digit.) Both land on the unknown default today, so the boundary is only
+  // visible in the classification — which is where a future rule keyed on
+  // `major` would read it.
   const o = /^o(\d+)(?:[-.]|$)/.exec(id);
   if (o?.[1]) return { kind: "o", major: Number(o[1]) };
   return null;

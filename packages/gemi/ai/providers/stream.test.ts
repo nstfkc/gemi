@@ -314,9 +314,62 @@ describe("parseResponsesStream()", () => {
     expect(events[0]).toEqual({ type: "text-delta", delta: "Hello" });
   });
 
-  test("[DONE] ends the stream", async () => {
+  /**
+   * `[DONE]` is a Chat Completions habit that OpenAI-compatible gateways bring
+   * to the Responses stream. After a terminal event it is redundant, and the
+   * parser has already returned before reading it.
+   */
+  test("[DONE] after a terminal event changes nothing", async () => {
     const events = await collect([...TEXT_STREAM, "data: [DONE]\n\n"]);
-    expect(events.at(-1)!.type).toBe("finish");
+    expect(events.at(-1)).toEqual({
+      type: "finish",
+      reason: "stop",
+      usage: expect.objectContaining({ inputTokens: 120 }),
+    });
+  });
+
+  /**
+   * On its own it is not a clean ending: it says the socket is over, not what
+   * the model did, and there is no usage and no status behind it. Reporting a
+   * stop there would tell the agent an answer finished that may have been cut
+   * in half — so it lands on the same retryable error as a dropped connection.
+   */
+  test("[DONE] without a terminal event is still an unfinished stream", async () => {
+    const events = await collect([TEXT_STREAM[2]!, "data: [DONE]\n\n"]);
+    expect(events).toEqual([
+      { type: "text-delta", delta: "Hello" },
+      {
+        type: "error",
+        error: {
+          code: "provider_error",
+          message: "The provider stream ended without a terminal event.",
+          retryable: true,
+        },
+      },
+      {
+        type: "finish",
+        reason: "error",
+        usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+      },
+    ]);
+  });
+
+  /**
+   * What the `[DONE]` branch is actually for, and the only thing that fails
+   * without it: a gateway that marks the end and then holds the connection
+   * open. Treating the frame as unparseable JSON and continuing would leave
+   * the generator waiting on a chunk that never comes — this test hangs rather
+   * than fails if that guard goes.
+   */
+  test("[DONE] releases a source that never closes", async () => {
+    async function* neverEnds() {
+      yield TEXT_STREAM[2]!;
+      yield "data: [DONE]\n\n";
+      await new Promise(() => {});
+    }
+    const out: ProviderEvent[] = [];
+    for await (const event of parseResponsesStream(neverEnds())) out.push(event);
+    expect(out.at(-1)!.type).toBe("finish");
   });
 
   /**

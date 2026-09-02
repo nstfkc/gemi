@@ -191,7 +191,10 @@ export class OpenAIProvider extends AgentProvider {
     });
     return streamResponses(this.endpoint(), body, {
       signal: params.signal,
-      structuredOutput: Boolean(params.output) && this.capabilities.structuredOutput,
+      // The request carries the schema whenever the agent declared one, so the
+      // parser has to read the answer as one too — a model that ignored the
+      // parameter answers 400, not prose.
+      structuredOutput: Boolean(params.output),
     });
   }
 
@@ -289,7 +292,10 @@ export class AzureOpenAIProvider extends AgentProvider {
     });
     return streamResponses(this.endpoint(), body, {
       signal: params.signal,
-      structuredOutput: Boolean(params.output) && this.capabilities.structuredOutput,
+      // The request carries the schema whenever the agent declared one, so the
+      // parser has to read the answer as one too — a model that ignored the
+      // parameter answers 400, not prose.
+      structuredOutput: Boolean(params.output),
     });
   }
 

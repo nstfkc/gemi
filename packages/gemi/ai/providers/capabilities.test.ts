@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 
-import { capabilitiesForModel } from "./capabilities";
+import { capabilitiesForModel, parseFamily } from "./capabilities";
 
 describe("capabilitiesForModel()", () => {
   test("a current model has everything", () => {
@@ -63,7 +63,33 @@ describe("capabilitiesForModel()", () => {
     expect(capabilitiesForModel("  GPT-4O  ")).toEqual(capabilitiesForModel("gpt-4o"));
   });
 
-  test("omni-moderation does not read as generation zero", () => {
-    expect(capabilitiesForModel("omni-moderation-latest").toolSearch).toBe(true);
+  test("a model that only starts with o is not an o-series generation", () => {
+    for (const id of ["omni-moderation-latest", "o200k-base"]) {
+      expect(capabilitiesForModel(id), id).toEqual(capabilitiesForModel("unknown-model"));
+    }
+  });
+});
+
+/**
+ * Tested through the classifier rather than through `capabilitiesForModel`,
+ * because that is the only place the boundary is visible: `o200k-base` read as
+ * generation 200 happens to produce the same all-true answer as an unknown id
+ * today, so an assertion on capabilities would pass with the guard removed and
+ * fail the day a rule keys on `major`.
+ */
+describe("parseFamily()", () => {
+  test("reads the generation out of a model id", () => {
+    expect(parseFamily("gpt-5.4-mini-2025-01-01")).toEqual({ kind: "gpt", major: 5 });
+    expect(parseFamily("o3-mini")).toEqual({ kind: "o", major: 3 });
+    expect(parseFamily("o1")).toEqual({ kind: "o", major: 1 });
+  });
+
+  test("leading digits that are not a generation are not one", () => {
+    // A tokenizer, not a model — and `/^o(\d+)/` without the boundary calls it
+    // generation 200.
+    expect(parseFamily("o200k-base")).toBeNull();
+    // `m` is not a digit, so this one never reaches the boundary at all.
+    expect(parseFamily("omni-moderation-latest")).toBeNull();
+    expect(parseFamily("some-gateway/llama-4")).toBeNull();
   });
 });
