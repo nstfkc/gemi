@@ -293,14 +293,14 @@ describe("AgentController.attach", () => {
     run.finish();
     await settle();
 
-    const response = await controller.attach(jsonRequest({ threadId: "t1", from: 2 }));
+    const response = await controller.attach(jsonRequest({ threadId: "t1", from: 3 }));
     expect(response.status).toBe(200);
     expect(response.headers.get("Content-Type")).toBe("text/event-stream");
 
     const body = await readSse(response);
-    expect(body).toContain("id: 2");
     expect(body).toContain("id: 3");
-    expect(body).not.toContain("id: 1");
+    expect(body).toContain("id: 4");
+    expect(body).not.toContain("id: 2");
     expect(body).toContain('"delta":"c"');
     expect(body).not.toContain('"delta":"b"');
   });
@@ -340,11 +340,11 @@ describe("AgentController.attach", () => {
     await settle();
 
     const response = await controller.attach(
-      jsonRequest({ threadId: "t1", cursor: 1, runId: "run_cur" }),
+      jsonRequest({ threadId: "t1", cursor: 2, runId: "run_cur" }),
     );
     const body = await readSse(response);
-    expect(body).toContain("id: 2");
-    expect(body).not.toContain("id: 1");
+    expect(body).toContain("id: 3");
+    expect(body).not.toContain("id: 2");
     expect(body).toContain('"delta":"c"');
     expect(body).not.toContain('"delta":"b"');
   });
@@ -369,7 +369,7 @@ describe("AgentController.attach", () => {
     );
     expect(response.status).toBe(200);
     const body = await readSse(response);
-    expect(body).toContain("id: 39");
+    expect(body).toContain("id: 40");
   });
 
   test("forfeits a cursor that counts within a run which is not the live one", async () => {
@@ -382,14 +382,14 @@ describe("AgentController.attach", () => {
     run.finish();
     await settle();
 
-    // The client applied 3 frames of an EARLIER run on this thread. seq starts
-    // at zero in every run, so honouring that 2 here would swallow the head of
-    // a run it has seen nothing of.
+    // The client applied frames of an EARLIER run on this thread. seq restarts
+    // in every run, so honouring that 2 here would swallow the head of a run it
+    // has seen nothing of.
     const response = await controller.attach(
       jsonRequest({ threadId: "t1", cursor: 2, runId: "run_one" }),
     );
     const body = await readSse(response);
-    expect(body).toContain("id: 0");
+    expect(body).toContain("id: 1");
     expect(body).toContain('"delta":"a"');
   });
 
@@ -406,9 +406,9 @@ describe("AgentController.attach", () => {
     // `from` and `Last-Event-ID` predate the cursor/runId pairing and carry no
     // run; an EventSource reconnecting on its own will never grow one. They
     // must keep resuming rather than being read as a mismatch.
-    const body = await readSse(await controller.attach(jsonRequest({ threadId: "t1", from: 2 })));
-    expect(body).toContain("id: 2");
-    expect(body).not.toContain("id: 1");
+    const body = await readSse(await controller.attach(jsonRequest({ threadId: "t1", from: 3 })));
+    expect(body).toContain("id: 3");
+    expect(body).not.toContain("id: 2");
   });
 
   test("misses explicitly when no run is in flight in this process", async () => {
@@ -455,9 +455,9 @@ describe("AgentController.attach", () => {
 
     expect(response.status).toBe(200);
     const body = await readSse(response);
-    expect(body).toContain("id: 6");
-    expect(body).toContain("id: 9");
-    expect(body).not.toContain("id: 5");
+    expect(body).toContain("id: 7");
+    expect(body).toContain("id: 10");
+    expect(body).not.toContain("id: 6");
   });
 
   test("with no cursor and nothing dropped, returns the run from the start", async () => {
@@ -471,8 +471,8 @@ describe("AgentController.attach", () => {
     await settle();
 
     const body = await readSse(await controller.attach(jsonRequest({ threadId: "t1" })));
-    expect(body).toContain("id: 0");
     expect(body).toContain("id: 1");
+    expect(body).toContain("id: 2");
   });
 
   test("answers 410 for a cursor the buffer has dropped", async () => {
@@ -491,14 +491,16 @@ describe("AgentController.attach", () => {
     run.finish();
     await settle();
 
-    // Explicitly `from: 0`: this client says its transcript ends at frame 0, so
-    // handing it frame 6 onwards would leave a hole it cannot see. That is the
-    // 410, and it is exactly the request a client with no cursor is NOT making.
-    const response = await controller.attach(jsonRequest({ threadId: "t1", from: 0 }));
+    // Explicitly `from: 1`: this client says its transcript starts at the run's
+    // first frame, so handing it frame 7 onwards would leave a hole it cannot
+    // see. That is the 410, and it is exactly the request a client with no
+    // cursor is NOT making. `from: 0` is a different question — "everything you
+    // still have" — and on a run that dropped nothing it is answerable.
+    const response = await controller.attach(jsonRequest({ threadId: "t1", from: 1 }));
     expect(response.status).toBe(410);
     const body = (await response.json()) as { error: { code: string; oldestSeq: number } };
     expect(body.error.code).toBe("frame_cursor_evicted");
-    expect(body.error.oldestSeq).toBe(6);
+    expect(body.error.oldestSeq).toBe(7);
   });
 });
 
