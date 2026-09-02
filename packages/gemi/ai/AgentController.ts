@@ -176,6 +176,9 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
     // anything.
     this.liveRuns.register(run, {
       threadId,
+      // The client's handle on a run it started, which is the only one that
+      // exists before `run-start` reaches it. See `RegisterParams`.
+      clientRunId: typeof body.clientRunId === "string" ? body.clientRunId : undefined,
       onEvent: (event) => this.dispatchEvent(event, ctx),
       onInternalError: (err) => this.reportHookFailure(err),
     });
@@ -190,10 +193,11 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
    * cursor. This is a read of a live run, not a continuation of a stopped one:
    * the work never paused, the listener changed.
    *
-   * The cursor is `from`, else `Last-Event-ID`, else the oldest frame still
-   * buffered. A cursor the buffer has dropped is a 410 naming what survives;
-   * *no* cursor is the tail, because a page reattaching on mount has no
-   * transcript to leave a hole in. See `resolveCursor`.
+   * The cursor is `from`, else the client's `cursor`, else `Last-Event-ID`,
+   * else the oldest frame still buffered — and it is honoured only for the run
+   * the client's `runId` names. A cursor the buffer has dropped is a 410 naming
+   * what survives; *no* cursor is the tail, because a page reattaching on mount
+   * has no transcript to leave a hole in. See `resolveCursor`.
    */
   async attach(req: HttpRequest<any, any> = new HttpRequest()): Promise<Response> {
     const parsed = await readJsonBody(req);
@@ -222,8 +226,22 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
       });
     }
 
+    // A cursor is only a number if you know which run it counts within: `seq`
+    // restarts at zero in every run, so honouring a cursor from run_1 against a
+    // live run_2 would skip that many frames off the head of a run this client
+    // has seen nothing of. `runId` is the client saying which run its cursor
+    // means; naming one that is not live forfeits the cursor and takes the
+    // tail, which is as close to the start as the buffer can offer.
+    //
+    // Only a MISMATCH forfeits. An absent `runId` is not a wrong answer, it is
+    // an older question: `from` and `Last-Event-ID` predate the pairing and
+    // carry no run, and an `EventSource` reconnecting on its own will never
+    // grow one. Those keep resuming exactly as before.
+    const cursorRunId = typeof body.runId === "string" ? body.runId : undefined;
+    const cursor = cursorRunId && cursorRunId !== live.runId ? undefined : resolveCursor(req, body);
+
     try {
-      return sseResponse(this.liveRuns.replay(live.runId, resolveCursor(req, body)));
+      return sseResponse(this.liveRuns.replay(live.runId, cursor));
     } catch (err) {
       if (err instanceof FrameCursorEvictedError) {
         // 410 rather than 404: the run is there, the position is not. A client
@@ -269,7 +287,16 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
     }
     const body = parsed.body;
 
+    // Three handles, most specific first, because which ones the client has
+    // depends on how far the run got. `runId` is the server's own and settles
+    // it. `clientRunId` covers the window before `run-start`, when the client
+    // has nothing else for a stateless first turn. `threadId` is the fallback
+    // for a client that did not start this run at all — one that attached to
+    // it, whose replayed tail carried no `run-start`.
     let runId = typeof body.runId === "string" ? body.runId : undefined;
+    if (!runId && typeof body.clientRunId === "string") {
+      runId = this.liveRuns.findByClientRunId(body.clientRunId) ?? undefined;
+    }
     if (!runId && typeof body.threadId === "string") {
       runId = (await this.liveRuns.find({ threadId: body.threadId }))?.runId;
     }
@@ -563,6 +590,19 @@ function toClientTurn(body: Record<string, any>): ClientTurn | undefined {
 function resolveCursor(req: HttpRequest<any, any>, body: Record<string, any>): number | undefined {
   if (typeof body.from === "number" && Number.isFinite(body.from)) {
     return Math.max(0, Math.floor(body.from));
+  }
+  // `cursor` is what `useChat` actually sends, and it counts the other way:
+  // `from` is the frame to resume AT, `cursor` the last frame the client
+  // APPLIED — the same convention as `Last-Event-ID`, and the same `+ 1`. A
+  // client that has applied nothing sends -1, which is not a position but the
+  // absence of one, so it falls through to the tail rather than asking for
+  // frame 0 and 410ing on precisely the long runs `/attach` exists to rescue.
+  if (typeof body.cursor === "number" && Number.isFinite(body.cursor)) {
+    const applied = Math.floor(body.cursor);
+    if (applied >= 0) {
+      return applied + 1;
+    }
+    return undefined;
   }
   const header = req?.rawRequest?.headers?.get("Last-Event-ID");
   if (header) {
