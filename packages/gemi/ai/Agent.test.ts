@@ -1847,3 +1847,295 @@ describe("two sub-agents asking at once", () => {
     expect(second.finishReason).toBe("stop");
   });
 });
+
+describe("an answer carrying a path it has no right to", () => {
+  /**
+   * The one test that has to exist, because re-entry *executes*.
+   *
+   * Every other answer in `ingestTurn` is verified before it can do anything,
+   * but a path cannot be: the claims belong to the inner call, and only the run
+   * that minted them knows its tool and its `kind`. So the decision to re-enter
+   * is gated on the server's own record of a parked sub-run instead — without
+   * that, a path is an unauthenticated instruction to run a tool.
+   */
+  test("cannot re-enter a tool that is merely awaiting an approval", async () => {
+    const first = await askForApproval();
+    refundCalls.length = 0;
+
+    const provider = fakeProvider([{ type: "text-delta", delta: "nothing happened" }, finish()]);
+    const agent = Agent.create({ name: "support", provider, tools: [refundOrder, askUser] });
+    const run = agent.stream({
+      messages: first.result.messages,
+      req,
+      turn: {
+        toolResults: [
+          // No signature, no nonce, no expiry — and `c1` names a call the user
+          // was shown and never approved.
+          { toolCallId: "anything", path: ["c1"], signature: "not-a-signature", output: {} },
+        ],
+      },
+    });
+    const { events, done } = collect(run);
+    const result = await run.result();
+    await done;
+
+    expect(refundCalls).toEqual([]);
+    expect(events.find((event) => event.type === "error")).toMatchObject({
+      error: { code: "invalid_tool_result" },
+    });
+    // And the call it forged against is denied rather than left to dangle: the
+    // rejection must not mark it answered on the way past.
+    expect(partsOf(result.messages, "tool-result")[0]).toMatchObject({
+      toolCallId: "c1",
+      status: "denied",
+      cause: "refused",
+    });
+  });
+
+  test("cannot re-enter a nesting tool with a question its sub-run never asked", async () => {
+    const sub = askingAgent("researcher", "which region?");
+    const bodies: boolean[] = [];
+    const research = nestingTool("research", async (ctx) => {
+      bodies.push(ctx.resumed);
+      return { ok: await ctx.runAgent(sub.agent, { prompt: "find it" }) };
+    });
+    const first = await escalate({ tool: research });
+    expect(bodies).toEqual([false]);
+
+    const provider = fakeProvider([{ type: "text-delta", delta: "nothing happened" }, finish()]);
+    const agent = Agent.create({ name: "lead", provider, tools: [research] });
+    const run = agent.stream({
+      messages: first.result.messages,
+      req,
+      turn: {
+        toolResults: [
+          // The right address, a question nobody asked. Re-entering on it would
+          // replay the tool body's side effects on demand, for a caller who
+          // presented nothing.
+          { toolCallId: "s9", path: ["c1"], signature: "", output: { answer: "x" } },
+        ],
+      },
+    });
+    const { events, done } = collect(run);
+    await run.result();
+    await done;
+
+    expect(bodies).toEqual([false]);
+    expect(events.find((event) => event.type === "error")).toMatchObject({
+      error: { code: "invalid_tool_result" },
+    });
+  });
+});
+
+describe("an approved tool whose own sub-agent asks a question", () => {
+  test("parks the parent on that question instead of failing the run", async () => {
+    const sub = askingAgent("researcher", "which region?", [
+      { type: "text-delta", delta: "emea then" },
+      finish(),
+    ]);
+    const escalatingApproval = AgentTool.create({
+      name: "escalatingApproval",
+      description: "Needs a yes, and then asks one of its own",
+      inputSchema: anything(),
+      outputSchema: anything(),
+      requiresApproval: true,
+      execute: async (_input: any, ctx: any) => {
+        const run = await ctx.runAgent(sub.agent, { prompt: "find it" });
+        return { said: textOf(run.messages[run.messages.length - 1]) };
+      },
+    });
+    const tools = [escalatingApproval];
+
+    const parking = Agent.create({
+      name: "lead",
+      provider: fakeProvider([toolCall("c1", "escalatingApproval", {}), finish()]),
+      tools,
+    }).stream({ messages: [], req, turn: { text: "go" } });
+    const parked = collect(parking);
+    const first = await parking.result();
+    await parked.done;
+    const approval = (parked.events.find((event) => event.type === "awaiting-input") as any)
+      .pending[0] as PendingToolCall;
+    expect(approval).toMatchObject({ toolCallId: "c1", kind: "approval" });
+
+    // Turn two approves it. `resolveAnswer` is the one place outside the step
+    // loop that executes a tool, and it used to let `PendingEscalation` escape:
+    // the run ended `error` with a `provider_error`, the sub-agent's question
+    // was discarded with nowhere to answer it, and the approval's nonce had
+    // already been spent so the same approval could not be sent again.
+    const second = Agent.create({ name: "lead", provider: fakeProvider([finish()]), tools }).stream(
+      {
+        messages: first.messages,
+        req,
+        turn: { toolResults: [{ toolCallId: "c1", signature: approval.signature, approve: true }] },
+      },
+    );
+    const { events, done } = collect(second);
+    const result = await second.result();
+    await done;
+
+    expect(result.finishReason).toBe("awaiting-input");
+    expect(events.find((event) => event.type === "error")).toBeUndefined();
+    const asked = (events.find((event) => event.type === "awaiting-input") as any)
+      .pending as PendingToolCall[];
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toMatchObject({ toolCallId: "s1", name: "ask", path: ["c1"] });
+
+    // The approved call stays open with the sub-run's transcript on it — the
+    // state the next turn re-enters from.
+    expect(partsOf(result.messages, "tool-result")).toHaveLength(0);
+    expect(callPartOf(result.messages, "c1").nested[0]).toMatchObject({
+      agent: "researcher",
+      finishReason: "awaiting-input",
+    });
+    // Written to a clone, not through into the array the caller handed in.
+    expect("nested" in callPartOf(first.messages, "c1")).toBe(false);
+
+    // Turn three answers the sub-agent, and the approved tool finishes.
+    const third = await Agent.create({
+      name: "lead",
+      provider: fakeProvider([{ type: "text-delta", delta: "all done" }, finish()]),
+      tools,
+    })
+      .stream({
+        messages: result.messages,
+        req,
+        turn: {
+          toolResults: [
+            {
+              toolCallId: "s1",
+              signature: asked[0].signature,
+              path: asked[0].path,
+              output: { answer: "emea" },
+            },
+          ],
+        },
+      })
+      .result();
+
+    expect(partsOf(third.messages, "tool-result")[0]).toMatchObject({
+      toolCallId: "c1",
+      status: "ok",
+      output: { said: "emea then" },
+    });
+  });
+});
+
+describe("a runAgent loop whose list comes back in a different order", () => {
+  test("fails loudly rather than pairing the answer with the wrong sub-run", async () => {
+    const worker = (() => {
+      const provider = fakeProvider(
+        [{ type: "text-delta", delta: "EMEA report" }, finish()],
+        [toolCall("s1", "ask", { question: "which quarter?" }), finish()],
+      );
+      return { provider, agent: Agent.create({ name: "worker", provider, tools: [askUser] }) };
+    })();
+
+    let regions = ["emea", "apac"];
+    const fanout = nestingTool("fanout", async (ctx) => {
+      const out: string[] = [];
+      for (const region of regions) {
+        const run = await ctx.runAgent(worker.agent, { prompt: `report on ${region}` });
+        out.push(`${region}=${textOf(run.messages[run.messages.length - 1])}`);
+      }
+      return { out };
+    });
+
+    const first = await escalate({ tool: fanout });
+    const part = callPartOf(first.result.messages, "c1");
+    expect(part.nested).toHaveLength(2);
+    expect(textOf(part.nested[0].messages[0])).toBe("report on emea");
+    expect(textOf(part.nested[1].messages[0])).toBe("report on apac");
+
+    // The same list, the other way round — a `Set`, a re-sorted query, a second
+    // read of a mutable column. The same agent at both indices and no label, so
+    // agent and label match at every one of them: only what each sub-run was
+    // asked says these two are not the same run.
+    regions = ["apac", "emea"];
+    const result = await Agent.create({
+      name: "lead",
+      provider: fakeProvider([{ type: "text-delta", delta: "gave up" }, finish()]),
+      tools: [fanout],
+    })
+      .stream({
+        messages: first.result.messages,
+        req,
+        turn: {
+          toolResults: [
+            {
+              toolCallId: "s1",
+              signature: first.pending[0].signature,
+              path: first.pending[0].path,
+              output: { answer: "q3" },
+            },
+          ],
+        },
+      })
+      .result();
+
+    const failure = partsOf(result.messages, "tool-result")[0];
+    expect(failure.status).toBe("error");
+    expect(failure.error.message).toMatch(/memoized by call index/);
+    expect(failure.error.message).toMatch(/report on emea/);
+    expect(failure.error.message).toMatch(/report on apac/);
+    // It failed instead of answering apac's question into emea's run.
+    expect(worker.provider.calls.length).toBe(2);
+  });
+});
+
+describe("a sub-run started from a message list", () => {
+  test("records the seed, so a resume continues the conversation it was given", async () => {
+    const asking = askingAgent("reviewer", "ship it?", [
+      { type: "text-delta", delta: "shipped" },
+      finish(),
+    ]);
+    const seed: AgentMessage[] = [
+      {
+        id: "seed_1",
+        role: "user",
+        content: [{ type: "text", text: "here is the context" }],
+        createdAt: new Date().toISOString(),
+        finishReason: "stop",
+      },
+    ];
+    const review = nestingTool("review", async (ctx) => {
+      const run = await ctx.runAgent(asking.agent, { messages: seed });
+      return { said: textOf(run.messages[run.messages.length - 1]) };
+    });
+
+    const first = await escalate({ tool: review });
+    // A run reports only the messages it *made*, so without recording the seed
+    // the transcript would open on the sub-agent's own turn — and the resume
+    // below would hand it back a conversation with its first message missing.
+    expect(callPartOf(first.result.messages, "c1").nested[0].messages[0].id).toBe("seed_1");
+
+    const result = await Agent.create({
+      name: "lead",
+      provider: fakeProvider([{ type: "text-delta", delta: "all done" }, finish()]),
+      tools: [review],
+    })
+      .stream({
+        messages: first.result.messages,
+        req,
+        turn: {
+          toolResults: [
+            {
+              toolCallId: "s1",
+              signature: first.pending[0].signature,
+              path: first.pending[0].path,
+              output: { answer: "yes" },
+            },
+          ],
+        },
+      })
+      .result();
+
+    expect(partsOf(result.messages, "tool-result")[0]).toMatchObject({
+      status: "ok",
+      output: { said: "shipped" },
+    });
+    // The resumed sub-run was handed the seed along with everything since.
+    const sent = asking.provider.calls[1].messages;
+    expect(sent[0].id).toBe("seed_1");
+  });
+});
