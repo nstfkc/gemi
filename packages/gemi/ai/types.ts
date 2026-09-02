@@ -101,9 +101,18 @@ export type ToolResultPart<T extends ToolShapes = ToolShapes> = {
   } & (
     | { status: "ok"; output: T[K]["output"] }
     | { status: "error"; error: AgentError }
-    /** The client refused, or answered something else instead. The model is
-     *  told, so it can adapt rather than retry into the same wall. */
-    | { status: "denied"; reason?: string }
+    /**
+     * The call did not run. `refused` is the client declining an approval or
+     * answering something else instead; `stopped` is a cancel that landed while
+     * the call was in flight.
+     *
+     * Both are told to the model rather than dropped, and for the same reason:
+     * a history holding a tool call with no result is one the provider rejects,
+     * so an abort has to leave a conversation that can still be continued. It
+     * also happens to be true — the model asked for something and did not get
+     * it, and the next turn goes better for knowing which.
+     */
+    | { status: "denied"; cause: "refused" | "stopped"; reason?: string }
   );
 }[keyof T];
 
@@ -130,7 +139,14 @@ export type AgentMessage<T extends ToolShapes = ToolShapes, O = unknown> = {
   role: "system" | "user" | "assistant";
   content: AgentContentPart<T, O>[];
   createdAt: string;
-  /** Absent until the message is complete; lets a UI show a cursor. */
+  /**
+   * Absent until the message is complete; lets a UI show a cursor.
+   *
+   * `aborted` is a complete message too — a stopped turn keeps whatever it had
+   * produced, marked as cut short. Dropping it would lose text the user already
+   * read, and leave the model unable to tell that it was interrupted from that
+   * it simply stopped talking.
+   */
   finishReason?: FinishReason;
   usage?: Usage;
 };

@@ -252,7 +252,18 @@ export interface AgentRun<T extends ToolShapes = ToolShapes, O = unknown> extend
   frames(from?: number): AsyncIterable<AgentStreamFrame<T, O>>;
   toResponse(params?: { from?: number }): Response;
   result(): Promise<AgentRunResult<T, O>>;
-  stop(): void;
+  /**
+   * Cancels the run and closes the conversation behind it: every tool call
+   * still in flight gets a `denied` result with `cause: "stopped"`, the
+   * assistant message is finalized with `finishReason: "aborted"`, and both go
+   * through `onMessage` like any other message.
+   *
+   * That last part is the point. A cancel that merely stops emitting leaves a
+   * history the provider will reject on the next turn, so the run's last act is
+   * to make the transcript valid — which is also what lets the user carry on
+   * talking instead of starting over.
+   */
+  stop(params?: { reason?: string }): void;
 }
 
 export declare class Agent<

@@ -69,8 +69,14 @@ export interface UseChatResult<P extends keyof AgentRoutes> {
    * with text.
    */
   sendMessage(turn: ClientTurn | string): Promise<void>;
-  /** Explicit cancel — a closed tab no longer stops a run, so this is what
-   *  does. */
+  /**
+   * Explicit cancel — a closed tab no longer stops a run, so this is what does.
+   *
+   * The UI stops immediately; the server call is what actually ends the
+   * generation and any tool mid-flight. `messages` keeps the interrupted turn
+   * with everything it had produced, marked `aborted`, so the transcript shows
+   * where it was cut rather than losing text the user already read.
+   */
   stop(): Promise<void>;
   /** Drops the last assistant turn and re-runs from the user turn before it. */
   regenerate(): Promise<void>;
