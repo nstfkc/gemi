@@ -54,7 +54,15 @@ export function buildResponsesRequest(
     if (!capabilities.parallelToolCalls) body.parallel_tool_calls = false;
   }
 
-  if (params.output && capabilities.structuredOutput) {
+  // Deliberately NOT gated on `capabilities.structuredOutput`. An agent that
+  // declares `output` has a typed result its app is going to read, and dropping
+  // the parameter does not degrade that gracefully — it produces prose, which
+  // arrives as `text-delta`, so the app sees no output part, no error and
+  // nothing to branch on. That is the silent-forever failure `capabilities.ts`
+  // argues against: send it and let the API answer 400, which is loud, happens
+  // once, and names the parameter it disliked. `reasoning` is dropped below
+  // because it is an optimization; an output schema is the answer's shape.
+  if (params.output) {
     body.text = {
       format: {
         type: "json_schema",
@@ -139,8 +147,10 @@ export function toResponsesInput(
         }
         case "tool-call": {
           // A partial call is UI state — the arguments were still streaming
-          // when this was written down. It has no result and never had one, so
-          // sending it would create exactly the dangling call the API rejects.
+          // when this was written down, so what it holds is not what the model
+          // asked for. Sending it would create the dangling call the API
+          // rejects. If it did acquire a result (a stop landing mid-arguments
+          // does exactly that), `reconcileToolPairs` drops that half too.
           if (part.partial) break;
           flush();
           items.push({
@@ -166,7 +176,62 @@ export function toResponsesInput(
     flush();
   }
 
-  return items;
+  return reconcileToolPairs(items);
+}
+
+/** What is sent for a call whose result never made it into the history. */
+const NO_RESULT_RECORDED = "No result was recorded for this tool call. Assume it did not complete.";
+
+/**
+ * Every `function_call` has exactly one `function_call_output`, and no output
+ * stands alone.
+ *
+ * The loop above skips a `tool-call` marked `partial` — its arguments were
+ * still streaming, so it is UI state rather than something the model did — but
+ * a partial call can still acquire a result: `stop()` gives every call in
+ * flight a `denied`/`stopped` result, and a call whose arguments were mid-flight
+ * is exactly the one carrying `partial`. Emitting that result on its own is a
+ * 400 ("no tool call found for function call output"), and because the history
+ * is persisted it is a 400 on every subsequent turn — the thread is bricked,
+ * which is the failure `denied` exists to prevent.
+ *
+ * So the invariant is enforced here rather than assumed part-by-part: an
+ * unpartnered output is dropped, a repeated one is dropped, and a call left
+ * dangling by a crash between the call and its result gets a synthetic output
+ * saying so. Fabricating that line is the lesser evil — it is true, the model
+ * can read it, and the alternative is a conversation that can never be
+ * continued.
+ */
+function reconcileToolPairs(items: ResponsesInputItem[]): ResponsesInputItem[] {
+  const called = new Set<string>();
+  const answered = new Set<string>();
+  const kept: ResponsesInputItem[] = [];
+
+  for (const item of items) {
+    if (item.type === "function_call") {
+      called.add(String(item.call_id));
+    } else if (item.type === "function_call_output") {
+      const callId = String(item.call_id);
+      // Positional: the output has to come *after* its call, which is what the
+      // API checks, so a call seen later in the history does not rescue it.
+      if (!called.has(callId) || answered.has(callId)) continue;
+      answered.add(callId);
+    }
+    kept.push(item);
+  }
+
+  if (answered.size === called.size) return kept;
+
+  const out: ResponsesInputItem[] = [];
+  for (const item of kept) {
+    out.push(item);
+    if (item.type !== "function_call") continue;
+    const callId = String(item.call_id);
+    if (answered.has(callId)) continue;
+    answered.add(callId);
+    out.push({ type: "function_call_output", call_id: callId, output: NO_RESULT_RECORDED });
+  }
+  return out;
 }
 
 function textContent(role: AgentMessage["role"], text: string): Record<string, unknown> {

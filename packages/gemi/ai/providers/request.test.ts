@@ -168,6 +168,116 @@ describe("toResponsesInput()", () => {
     expect(items).toEqual([]);
   });
 
+  /**
+   * The bug this pins bricks a thread rather than failing a request: the
+   * history is persisted, so an orphaned output is resent on every turn and
+   * the conversation can never be continued. `stop()` produces exactly this
+   * shape — a partial call, skipped, whose in-flight result was written down.
+   */
+  test("a partial call's result is dropped with it, not left as an orphan", () => {
+    const items = toResponsesInput(
+      [
+        message({ role: "user", content: [{ type: "text", text: "refund it" }] }),
+        message({
+          role: "assistant",
+          content: [
+            {
+              type: "tool-call",
+              toolCallId: "call_1",
+              name: "refund",
+              input: { id: 7 },
+              partial: true,
+            },
+            {
+              type: "tool-result",
+              toolCallId: "call_1",
+              name: "refund",
+              status: "denied",
+              cause: "stopped",
+            },
+          ],
+        }),
+      ],
+      FULL,
+    );
+
+    expect(items.map((i) => i.type)).toEqual(["message"]);
+  });
+
+  test("a duplicated result is sent once — a second output is a 400 too", () => {
+    const items = toResponsesInput(
+      [
+        message({
+          role: "assistant",
+          content: [
+            { type: "tool-call", toolCallId: "call_1", name: "grep", input: {} },
+            { type: "tool-result", toolCallId: "call_1", name: "grep", status: "ok", output: "a" },
+            { type: "tool-result", toolCallId: "call_1", name: "grep", status: "ok", output: "b" },
+          ],
+        }),
+      ],
+      FULL,
+    );
+
+    expect(items.map((i) => i.type)).toEqual(["function_call", "function_call_output"]);
+    expect(items[1]!.output).toBe("a");
+  });
+
+  /**
+   * The mirror image, and the same consequence: a crash between the call and
+   * its result leaves a `function_call` the API will reject forever. Saying
+   * "no result" is true, readable, and keeps the thread continuable.
+   */
+  test("a call whose result never arrived gets one, immediately after it", () => {
+    const items = toResponsesInput(
+      [
+        message({
+          role: "assistant",
+          content: [
+            { type: "tool-call", toolCallId: "call_1", name: "grep", input: {} },
+            { type: "tool-call", toolCallId: "call_2", name: "read", input: {} },
+            { type: "tool-result", toolCallId: "call_2", name: "read", status: "ok", output: "ok" },
+          ],
+        }),
+      ],
+      FULL,
+    );
+
+    expect(items).toEqual([
+      { type: "function_call", call_id: "call_1", name: "grep", arguments: "{}" },
+      {
+        type: "function_call_output",
+        call_id: "call_1",
+        output: "No result was recorded for this tool call. Assume it did not complete.",
+      },
+      { type: "function_call", call_id: "call_2", name: "read", arguments: "{}" },
+      { type: "function_call_output", call_id: "call_2", output: "ok" },
+    ]);
+  });
+
+  test("an output whose call is only declared later is still an orphan", () => {
+    const items = toResponsesInput(
+      [
+        message({
+          role: "assistant",
+          content: [
+            { type: "tool-result", toolCallId: "call_1", name: "grep", status: "ok", output: "x" },
+            { type: "tool-call", toolCallId: "call_1", name: "grep", input: {} },
+          ],
+        }),
+      ],
+      FULL,
+    );
+
+    // The call keeps a synthetic output rather than borrowing the one that
+    // arrived before it: the API pairs positionally.
+    expect(items.map((i) => [i.type, i.call_id])).toEqual([
+      ["function_call", "call_1"],
+      ["function_call_output", "call_1"],
+    ]);
+    expect(items[1]!.output).toContain("No result was recorded");
+  });
+
   test("a structured output part goes back as assistant text", () => {
     const items = toResponsesInput(
       [
@@ -193,12 +303,23 @@ describe("toResponsesInput()", () => {
    * that the three outcomes read differently to the model.
    */
   describe("every tool call gets an output, including the ones that never ran", () => {
+    /** Paired with its call, because that is the only way a result reaches the
+     *  wire — an output on its own is dropped as an orphan. */
     function outputFor(part: any): string {
       const items = toResponsesInput(
-        [message({ role: "assistant", content: [part] })],
+        [
+          message({
+            role: "assistant",
+            content: [
+              { type: "tool-call", toolCallId: part.toolCallId, name: part.name, input: {} },
+              part,
+            ],
+          }),
+        ],
         FULL,
       );
-      return String(items[0]!.output);
+      expect(items.map((i) => i.type)).toEqual(["function_call", "function_call_output"]);
+      return String(items[1]!.output);
     }
 
     test("a refusal says the user declined", () => {
@@ -350,6 +471,20 @@ describe("buildResponsesRequest()", () => {
     } as const;
     expect(build({ output: { name: "classification", schema } }).text).toEqual({
       format: { type: "json_schema", name: "classification", schema, strict: true },
+    });
+  });
+
+  /**
+   * The asymmetry with `reasoning` below is the point. Dropping a reasoning
+   * effort costs quality; dropping an output schema costs the app its typed
+   * result with no error anywhere to notice. So this one is sent regardless
+   * and the API gets to say no.
+   */
+  test("output is sent even to a model we think has no structured output", () => {
+    const schema = { type: "object", properties: {} } as const;
+    const body = build({ output: { name: "c", schema } }, { ...FULL, structuredOutput: false });
+    expect(body.text).toEqual({
+      format: { type: "json_schema", name: "c", schema, strict: true },
     });
   });
 
