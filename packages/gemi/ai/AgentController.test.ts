@@ -325,6 +325,92 @@ describe("AgentController.attach", () => {
     expect(body).not.toContain("id: 0");
   });
 
+  // `useChat` sends `cursor` (the last frame it APPLIED) and `runId` (the run
+  // that number counts within). The controller was written against `from` and
+  // `Last-Event-ID` alone, so the four tests below are the seam between the two
+  // halves, which never met until the stack was assembled.
+  test("takes the client's `cursor` as one-past, the way Last-Event-ID is read", async () => {
+    const { run, controller } = attachable("run_cur");
+    await controller.stream(jsonRequest({ threadId: "t1", text: "hi" }));
+
+    for (const delta of ["a", "b", "c", "d"]) {
+      run.emit({ type: "text-delta", messageId: "m1", delta });
+    }
+    run.finish();
+    await settle();
+
+    const response = await controller.attach(
+      jsonRequest({ threadId: "t1", cursor: 1, runId: "run_cur" }),
+    );
+    const body = await readSse(response);
+    expect(body).toContain("id: 2");
+    expect(body).not.toContain("id: 1");
+    expect(body).toContain('"delta":"c"');
+    expect(body).not.toContain('"delta":"b"');
+  });
+
+  test("reads cursor -1 as no position at all, so a long run does not 410", async () => {
+    const { run, controller } = attachable("run_neg");
+    const liveRuns = new MemoryLiveRuns({ maxFrames: 8 });
+    (controller as { liveRuns: MemoryLiveRuns }).liveRuns = liveRuns;
+    await controller.stream(jsonRequest({ threadId: "t1", text: "hi" }));
+
+    // Past the buffer, so frame 0 is long gone. This is the mount-time reattach
+    // the route exists for: a client with no restored cursor sends -1, and
+    // reading that as "frame 0" would 410 exactly the runs worth rescuing.
+    for (let i = 0; i < 40; i++) {
+      run.emit({ type: "text-delta", messageId: "m1", delta: String(i) });
+    }
+    run.finish();
+    await settle();
+
+    const response = await controller.attach(
+      jsonRequest({ threadId: "t1", cursor: -1, runId: "run_neg" }),
+    );
+    expect(response.status).toBe(200);
+    const body = await readSse(response);
+    expect(body).toContain("id: 39");
+  });
+
+  test("forfeits a cursor that counts within a run which is not the live one", async () => {
+    const { run, controller } = attachable("run_two");
+    await controller.stream(jsonRequest({ threadId: "t1", text: "hi" }));
+
+    for (const delta of ["a", "b", "c", "d"]) {
+      run.emit({ type: "text-delta", messageId: "m1", delta });
+    }
+    run.finish();
+    await settle();
+
+    // The client applied 3 frames of an EARLIER run on this thread. seq starts
+    // at zero in every run, so honouring that 2 here would swallow the head of
+    // a run it has seen nothing of.
+    const response = await controller.attach(
+      jsonRequest({ threadId: "t1", cursor: 2, runId: "run_one" }),
+    );
+    const body = await readSse(response);
+    expect(body).toContain("id: 0");
+    expect(body).toContain('"delta":"a"');
+  });
+
+  test("an absent runId is an older question, not a wrong answer", async () => {
+    const { run, controller } = attachable("run_bare");
+    await controller.stream(jsonRequest({ threadId: "t1", text: "hi" }));
+
+    for (const delta of ["a", "b", "c", "d"]) {
+      run.emit({ type: "text-delta", messageId: "m1", delta });
+    }
+    run.finish();
+    await settle();
+
+    // `from` and `Last-Event-ID` predate the cursor/runId pairing and carry no
+    // run; an EventSource reconnecting on its own will never grow one. They
+    // must keep resuming rather than being read as a mismatch.
+    const body = await readSse(await controller.attach(jsonRequest({ threadId: "t1", from: 2 })));
+    expect(body).toContain("id: 2");
+    expect(body).not.toContain("id: 1");
+  });
+
   test("misses explicitly when no run is in flight in this process", async () => {
     const { controller } = attachable("run_c");
     const response = await controller.attach(jsonRequest({ threadId: "nothing-here" }));
@@ -457,6 +543,39 @@ describe("AgentController.stop", () => {
     await controller.stream(jsonRequest({ text: "hi" }));
 
     expect(await controller.stop(jsonRequest({ runId: "run_t" }))).toEqual({ stopped: true });
+    run.finish();
+  });
+
+  test("stops a run the client named before the server had, on a stateless turn", async () => {
+    const run = new StubAgentRun("run_early");
+    const { agent } = stubAgent(run);
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+    }
+    const controller = new Chat();
+    // No threadId — a stateless first turn. Between this POST and `run-start`
+    // reaching the client there is no `runId` either, and that window is where
+    // a user presses stop. `clientRunId` is the only handle that exists.
+    await controller.stream(jsonRequest({ clientRunId: "local_run_1", text: "hi" }));
+
+    expect(await controller.stop(jsonRequest({ clientRunId: "local_run_1" }))).toEqual({
+      stopped: true,
+    });
+    expect(run.stopped).toBe(true);
+    run.finish({ finishReason: "aborted" });
+  });
+
+  test("a clientRunId that named no run here is nothing to stop, not a crash", async () => {
+    const run = new StubAgentRun("run_unknown");
+    const { agent } = stubAgent(run);
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+    }
+    expect(await new Chat().stop(jsonRequest({ clientRunId: "local_nope" }))).toEqual({
+      stopped: false,
+    });
     run.finish();
   });
 

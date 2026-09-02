@@ -63,6 +63,17 @@ export class LiveRunNotFoundError extends Error {
 export type RegisterParams = {
   threadId?: string;
   /**
+   * The client's own name for this run, minted before the run had one.
+   *
+   * `runId` does not reach the client until `run-start`, and a stateless first
+   * turn has no `threadId` either, so for the length of a network round trip
+   * plus the provider's time to first token there is nothing for `/stop` to
+   * name — which is exactly the window a user cancels in. `useChat` sends a
+   * `clientRunId` with every turn it starts; recording it here is what makes
+   * that window stoppable.
+   */
+  clientRunId?: string;
+  /**
    * Called once per frame, in order, off the buffering path.
    *
    * The controller's `on*` hooks hang off this. It is a callback rather than a
@@ -79,6 +90,7 @@ export type RegisterParams = {
 type Entry = {
   run: AgentRun;
   threadId?: string;
+  clientRunId?: string;
   /** A contiguous window of the run's frames, oldest first. */
   frames: AgentStreamFrame[];
   lastSeq: number;
@@ -121,6 +133,8 @@ export class MemoryLiveRuns implements LiveRuns {
   private runs = new Map<string, Entry>();
   /** Thread to the most recently registered run for it. */
   private byThread = new Map<string, string>();
+  /** The client's pre-`run-start` name for a run, to the run. */
+  private byClientRun = new Map<string, string>();
 
   constructor(params: { ttlMs?: number; maxFrames?: number } = {}) {
     this.ttlMs = params.ttlMs ?? DEFAULT_TTL_MS;
@@ -135,6 +149,7 @@ export class MemoryLiveRuns implements LiveRuns {
     const entry: Entry = {
       run: run as AgentRun,
       threadId: params.threadId,
+      clientRunId: params.clientRunId,
       frames: [],
       lastSeq: -1,
       ended: false,
@@ -146,7 +161,23 @@ export class MemoryLiveRuns implements LiveRuns {
     if (params.threadId) {
       this.byThread.set(params.threadId, run.runId);
     }
+    if (params.clientRunId) {
+      this.byClientRun.set(params.clientRunId, run.runId);
+    }
     void this.pump(entry, params);
+  }
+
+  /**
+   * The run a client named before the server had named it.
+   *
+   * Deliberately not folded into `find`, whose parameter is part of the
+   * read-side `LiveRuns` interface an app may already implement — widening that
+   * parameter would break every such implementation, and this lookup is only
+   * ever asked by `/stop`.
+   */
+  findByClientRunId(clientRunId: string): string | null {
+    const runId = this.byClientRun.get(clientRunId);
+    return runId && this.runs.has(runId) ? runId : null;
   }
 
   /** What the client asks after a refresh: is anything still going here? */
@@ -213,6 +244,7 @@ export class MemoryLiveRuns implements LiveRuns {
     }
     this.runs.clear();
     this.byThread.clear();
+    this.byClientRun.clear();
   }
 
   get size(): number {
@@ -316,6 +348,9 @@ export class MemoryLiveRuns implements LiveRuns {
       this.runs.delete(runId);
       if (entry.threadId && this.byThread.get(entry.threadId) === runId) {
         this.byThread.delete(entry.threadId);
+      }
+      if (entry.clientRunId && this.byClientRun.get(entry.clientRunId) === runId) {
+        this.byClientRun.delete(entry.clientRunId);
       }
       // Anyone still draining is holding an ended entry; wake them so they see
       // `ended` and finish rather than hanging on a promise nothing resolves.
