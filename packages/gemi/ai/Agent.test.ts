@@ -1256,6 +1256,41 @@ async function escalate(build: { tool: any }) {
   return { provider, result, events, pending: (awaiting?.pending ?? []) as PendingToolCall[] };
 }
 
+describe("text accumulated across many deltas", () => {
+  test("survives being resolved at the end of the message, multibyte and all", async () => {
+    // `resolveRope` runs over every finished message to collapse the rope that
+    // `text += delta` leaves behind. It is a memory hint and must be nothing
+    // else: this is the test that fails if someone ever replaces it with an
+    // encoder round trip, which would turn a surrogate pair split across two
+    // deltas into replacement characters.
+    const pieces = [
+      "Your order ",
+      "shipped ",
+      // one emoji, deliberately split down the middle of its surrogate pair
+      "\ud83d",
+      "\ude80",
+      " — ",
+      "caf\u00e9 ",
+      "\u00e7a va",
+    ];
+    for (let i = 0; i < 500; i++) pieces.push("more ");
+
+    const provider = fakeProvider(
+      pieces.map((delta) => ({ type: "text-delta" as const, delta })).concat([finish()]),
+    );
+    const agent = Agent.create({ name: "s", provider, tools: [] });
+    const result = await agent
+      .stream({ messages: [], req, turn: { text: "where is it?" } })
+      .result();
+
+    const text = textOf(result.messages[result.messages.length - 1]);
+    expect(text).toBe(pieces.join(""));
+    expect(text).toContain("\ud83d\ude80");
+    expect(text).toContain("caf\u00e9");
+    expect(text.length).toBe(pieces.join("").length);
+  });
+});
+
 describe("a sub-agent that asks the user a question", () => {
   test("ends the parent awaiting-input, with the question addressed by path", async () => {
     const sub = askingAgent("researcher", "which region?");
