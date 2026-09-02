@@ -197,11 +197,20 @@ export type ToolShapesOf<T extends readonly ToolEntry[]> = {
  * A skill is instructions the model can go and fetch.
  *
  * Inlining every skill into the system prompt costs its tokens on every request
- * and gets worse with each skill added, so only `name` and `description` are
- * prompted; a reserved `load_skill` tool hands over `instructions` (and any
- * files) when the model decides it needs them. The cost of a skill the model
- * does not use is then a line of text, which is what makes having thirty of
- * them viable.
+ * and gets worse with each skill added. So a skill is lowered to a tool: one
+ * zero-parameter function per skill, in a reserved `skills` namespace, whose
+ * description is the skill's and whose result is `instructions` plus any
+ * `files`. Only those descriptions are prompted, and a skill the model never
+ * reaches for costs a line of text.
+ *
+ * Lowering to a tool rather than to a synthetic `load_skill(name)` dispatcher
+ * is the whole trick: discovery is then the same mechanism as everything else
+ * the model chooses between, which means it runs on the provider's own
+ * tool-selection machinery instead of on a string argument gemi would have to
+ * validate, and a skill that is never loaded is a namespace entry rather than a
+ * branch in our code. It is also why `deferred` applies here unchanged — with
+ * tool search the namespace is searched, and without it the same tools are
+ * listed inline, which for zero-parameter functions costs almost nothing.
  */
 export interface SkillDefinition<Name extends string = string> {
   name: Name;
@@ -234,6 +243,8 @@ export interface CreateAgentParams<
   instructions?: string;
   provider: AgentProvider;
   tools?: T;
+  /** Lowered into the reserved `skills` namespace — see `Skill`. The name is
+   *  reserved, so a namespace of your own cannot be called `skills`. */
   skills?: S;
   /**
    * Makes the final assistant turn strict JSON instead of prose. Tool turns are
