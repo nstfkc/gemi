@@ -44,6 +44,9 @@ export type {
   ClientTurn,
   FilePart,
   FinishReason,
+  // The nested transcript is something a chat UI renders, so it belongs in the
+  // browser's vocabulary too — it is an ordinary `AgentMessage[]` with a label.
+  NestedRun,
   OutputPart,
   PendingToolCall,
   ReasoningPart,

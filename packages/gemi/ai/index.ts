@@ -47,6 +47,7 @@ export type {
   ClientTurn,
   FilePart,
   FinishReason,
+  NestedRun,
   OutputPart,
   PendingToolCall,
   ReasoningPart,
@@ -59,7 +60,17 @@ export type {
 } from "./types";
 
 // --- agents, tools and skills ---------------------------------------------
-export { Agent, AgentTool, Skill, SKILLS_NAMESPACE, ToolNamespace } from "./Agent";
+export {
+  Agent,
+  AgentTool,
+  // A class, and exported as a value on purpose: a tool that wants to let a
+  // sub-agent's question through untouched needs `instanceof` to tell an
+  // escalation from a failure, and rethrowing everything is not the same thing.
+  PendingEscalation,
+  Skill,
+  SKILLS_NAMESPACE,
+  ToolNamespace,
+} from "./Agent";
 export type {
   AgentRun,
   AgentRunResult,
@@ -67,8 +78,10 @@ export type {
   AnyAgent,
   AnyAgentTool,
   CreateAgentParams,
+  NestedRunResult,
   OutputOf,
   ReasoningEffort,
+  RunAgentParams,
   SkillDefinition,
   ToolContext,
   ToolDefinition,

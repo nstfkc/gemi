@@ -16,7 +16,15 @@ import { Agent, AgentTool, Skill, ToolNamespace, type ToolShapesOf } from "./Age
 import { AgentController, type AgentRouteRPC } from "./AgentController";
 import { OpenAIProvider } from "./AgentProvider";
 import { s, type Infer } from "./Schema";
-import type { PendingToolCall } from "./types";
+import type { PendingToolCall, ToolCallPart, ToolShapes } from "./types";
+
+/**
+ * `toEqualTypeOf<never>()` is not a test — `never` is assignable to everything,
+ * so it passes against a type that is merely empty as well as against the one
+ * that is actually `never`. Wrapping in a tuple defeats the distribution and
+ * turns the claim into one that can fail.
+ */
+type IsNever<T> = [T] extends [never] ? true : false;
 
 const bash = AgentTool.create({
   name: "bash",
@@ -52,6 +60,23 @@ const ask = AgentTool.create({
   answeredBy: "client",
 });
 
+/**
+ * The generator form. Nothing here writes the progress type down: it is read
+ * off the yields, and this tool exists to prove that it survives the trip
+ * through the namespace, `ToolShapesOf` and into the browser's vocabulary.
+ */
+const research = AgentTool.create({
+  name: "research",
+  description: "Look something up, slowly",
+  inputSchema: s.object({ topic: s.string() }),
+  outputSchema: s.object({ summary: s.string() }),
+  execute: async function* (input) {
+    yield { stage: "searching" };
+    yield { stage: "reading" };
+    return { summary: input.topic };
+  },
+});
+
 const crm = ToolNamespace.create({
   name: "crm",
   description: "Customer records, orders and refunds",
@@ -62,7 +87,7 @@ const crm = ToolNamespace.create({
 const support = Agent.create({
   name: "support",
   provider: OpenAIProvider.model("gpt-5.4"),
-  tools: [bash, ask, crm],
+  tools: [bash, ask, research, crm],
   skills: [
     Skill.create({
       name: "refund-policy",
@@ -145,7 +170,9 @@ describe("an agent's tools", () => {
   });
 
   test("flatten out of their namespaces, keyed by tool name", () => {
-    expectTypeOf<keyof Shapes>().toEqualTypeOf<"bash" | "ask" | "listOrders" | "refundOrder">();
+    expectTypeOf<keyof Shapes>().toEqualTypeOf<
+      "bash" | "ask" | "research" | "listOrders" | "refundOrder"
+    >();
   });
 
   test("keep their payload types through the flattening", () => {
@@ -155,6 +182,47 @@ describe("an agent's tools", () => {
 
   test("reach the client through the route, not a second augmentation", () => {
     expectTypeOf<AgentRouteRPC<typeof SupportController>["tools"]>().toEqualTypeOf<Shapes>();
+  });
+});
+
+describe("a tool's progress type", () => {
+  test("is inferred from an async generator's yields, unwritten by the author", () => {
+    // The tool's own type first — if `AgentTool.create` did not pick the yield
+    // type up, `ToolShapesOf` has nothing to carry and the assertion below
+    // would be testing the mapped type against a default rather than a fact.
+    expectTypeOf(research).toEqualTypeOf<
+      AgentTool<"research", { topic: string }, { summary: string }, { stage: string }>
+    >();
+    expectTypeOf<Shapes["research"]["progress"]>().toEqualTypeOf<{ stage: string }>();
+  });
+
+  test("is `never` for a tool that resolves once, and for one the client answers", () => {
+    // The claim that matters: a tool with no way to yield does not quietly get
+    // `unknown`, which would type a progress log the tool can never fill and
+    // hand the browser a datum it must narrow by hand.
+    expectTypeOf<IsNever<Shapes["bash"]["progress"]>>().toEqualTypeOf<true>();
+    expectTypeOf<IsNever<Shapes["ask"]["progress"]>>().toEqualTypeOf<true>();
+    expectTypeOf<IsNever<Shapes["research"]["progress"]>>().toEqualTypeOf<false>();
+  });
+
+  test("types the progress log on the tool call it accumulates on", () => {
+    const part = {} as ToolCallPart<Shapes>;
+    if (part.name === "research") {
+      expectTypeOf(part.progress).toEqualTypeOf<{ stage: string }[]>();
+    }
+  });
+
+  test("leaves a hand-written shapes map with no `progress` member compiling", () => {
+    // `ToolShape.progress` is optional for exactly this: an app that spelled
+    // its own shapes out before the field existed — or a test fixture that
+    // still does — must keep working, and `T[K][\"progress\"]` must resolve for
+    // it rather than fail to instantiate.
+    type Legacy = { echo: { input: { text: string }; output: { text: string } } };
+    expectTypeOf<Legacy>().toMatchTypeOf<ToolShapes>();
+    const part = {} as ToolCallPart<Legacy>;
+    if (part.name === "echo") {
+      expectTypeOf(part.input).toEqualTypeOf<{ text: string }>();
+    }
   });
 });
 
@@ -171,6 +239,21 @@ describe("a pending tool call", () => {
 
   test("carries the signature that makes answering it trustworthy", () => {
     expectTypeOf<PendingToolCall<Shapes>["signature"]>().toEqualTypeOf<string>();
+  });
+
+  test("still narrows on name once it can carry a nesting path", () => {
+    // `path` is a new member of every arm of the union, so it is exactly the
+    // kind of addition that turns a discriminated union into a mush — the
+    // narrowing below is what says it did not.
+    const pending = {} as PendingToolCall<Shapes>;
+    expectTypeOf(pending.path).toEqualTypeOf<string[]>();
+    if (pending.name === "refundOrder") {
+      expectTypeOf(pending.input).toEqualTypeOf<{ orderId: string }>();
+      expectTypeOf(pending.path).toEqualTypeOf<string[]>();
+    }
+    if (pending.name === "research") {
+      expectTypeOf(pending.input).toEqualTypeOf<{ topic: string }>();
+    }
   });
 });
 

@@ -18,8 +18,15 @@
  * discriminate a tool part by name, but it must not need `execute` — that is
  * server code. Erasing tools to this shape at the Agent boundary is what keeps
  * a tool's implementation out of the browser bundle while its types survive.
+ *
+ * `progress` is whatever a generator tool yields on its way to that output.
+ * Optional here on purpose: `ToolShapesOf` always emits it — `never` for a tool
+ * that cannot yield — but a `ToolShapes` written by hand before this field
+ * existed is still a valid one, and every `T[K]["progress"]` below resolves for
+ * it rather than failing to compile. That is why this is a third member of the
+ * existing type and not a second type beside it.
  */
-export type ToolShape = { input: unknown; output: unknown };
+export type ToolShape = { input: unknown; output: unknown; progress?: unknown };
 export type ToolShapes = Record<string, ToolShape>;
 
 export type Usage = {
@@ -82,6 +89,33 @@ export type FilePart = {
   mimeType?: string;
 };
 
+/**
+ * A sub-agent's run, recorded on the tool call that drove it.
+ *
+ * `messages` is an ordinary transcript, and that is the entire design: a nested
+ * run renders with the same reducer and the same components as the outer one,
+ * so arbitrary depth costs the client nothing and costs this file one type. It
+ * is also what makes resumption possible — a tool that escalated a question is
+ * re-entered from the top on the next turn and replays its finished sub-runs
+ * out of exactly this, which is why the transcript is persisted on the message
+ * instead of held in memory beside the run.
+ *
+ * The sub-run's tools are the sub-agent's, not the parent's, so `messages` is
+ * left at the default `ToolShapes`. A parent's tool shapes say nothing about
+ * what its children can call, and pretending otherwise would type a nested
+ * transcript with the wrong tool names.
+ */
+export type NestedRun = {
+  runId: string;
+  /** The sub-agent's name, so the UI has something to label the block with. */
+  agent: string;
+  /** Caller-supplied, e.g. "researching pricing". */
+  label?: string;
+  messages: AgentMessage[];
+  finishReason?: FinishReason;
+  usage?: Usage;
+};
+
 export type ToolCallPart<T extends ToolShapes = ToolShapes> = {
   [K in keyof T]: {
     type: "tool-call";
@@ -90,6 +124,27 @@ export type ToolCallPart<T extends ToolShapes = ToolShapes> = {
     input: T[K]["input"];
     /** Set while the model is still streaming the arguments. */
     partial?: boolean;
+    /**
+     * Everything this tool yielded, in order, typed by the tool's own progress
+     * type.
+     *
+     * Append-only and never rewritten, which is what lets the client apply a
+     * `tool-progress` frame by pushing and lean on `seq` for redelivery — the
+     * same bargain every other additive event in this file makes. Absent until
+     * the first yield, so a tool that never yields adds no field.
+     */
+    progress?: T[K]["progress"][];
+    /**
+     * Sub-agent runs this tool drove, in the order they started.
+     *
+     * In stateless mode this is client-carried and therefore client-editable,
+     * and that is not a new hole: the entire parent history is client-carried
+     * in stateless mode already. The thing that must be unforgeable is the
+     * approval *decision*, and that is what the signature on a `PendingToolCall`
+     * covers — a rewritten nested transcript cannot manufacture consent for a
+     * call the server never made.
+     */
+    nested?: NestedRun[];
   };
 }[keyof T];
 
@@ -182,15 +237,49 @@ export type PendingToolCall<T extends ToolShapes = ToolShapes> = {
      * one cannot be replayed into a later run.
      */
     signature: string;
+    /**
+     * The chain of tool-call ids this call is nested under, outermost first.
+     * Absent at the top level, which is every call today.
+     *
+     * A sub-agent's question reaches the user through its *parent's* pending
+     * list, so `toolCallId` alone stops being an address: two sub-runs under
+     * two different tools can each hold a call the parent never made, and the
+     * turn that answers has to say which tool to re-enter. The path is that
+     * address, and it is inside the signature rather than beside it — a token
+     * minted for a call nested under tool call X cannot be replayed as a
+     * top-level call, or as one nested under Y.
+     *
+     * The client hands it back untouched, exactly like the signature, so an app
+     * answering a sub-agent's question writes what it writes for any other one.
+     */
+    path?: string[];
   };
 }[keyof T];
 
-/** The client's half of a pending call. */
+/**
+ * The client's half of a pending call.
+ *
+ * `path` is the `PendingToolCall`'s, returned unchanged. It has to come back
+ * rather than be looked up because the signature commits to it without
+ * carrying it in the clear — verification recomputes the MAC over the claims it
+ * is handed, so the server needs the path in front of it to check that the
+ * client did not move the answer to a different tool call.
+ *
+ * Returning a path the server did not issue therefore fails verification rather
+ * than redirecting anything, which is the property that makes it safe to let
+ * the client carry it at all.
+ */
 export type ClientToolResult =
-  | { toolCallId: string; signature: string; approve: boolean; reason?: string }
+  | {
+      toolCallId: string;
+      signature: string;
+      path?: string[];
+      approve: boolean;
+      reason?: string;
+    }
   /** For `question` and `client` kinds: the value itself, checked against the
    *  tool's output schema before the model sees it. */
-  | { toolCallId: string; signature: string; output: unknown };
+  | { toolCallId: string; signature: string; path?: string[]; output: unknown };
 
 /**
  * One turn from the client. Text, answers to pending calls, or both.
@@ -233,6 +322,31 @@ export type AgentStreamEvent<T extends ToolShapes = ToolShapes, O = unknown> =
   | { type: "tool-search"; loaded: string[] }
   /** From a tool whose `execute` is an AsyncGenerator. */
   | { type: "tool-progress"; toolCallId: string; data: unknown }
+  /**
+   * One event from a sub-agent, re-emitted on the parent stream.
+   *
+   * Its own event rather than a shape of `tool-progress` because the client
+   * does something categorically different with it: `tool-progress` appends an
+   * opaque datum to an array, while this is applied RECURSIVELY by the same
+   * reducer to the nested run's own message list. That recursion is the trick —
+   * a nested transcript is built by the code that already builds a transcript,
+   * which is why depth costs the client nothing and why overloading
+   * `tool-progress` would have cost it a second renderer.
+   *
+   * Numbered in the parent's `seq` like everything else, so `/attach` replay
+   * and the frame buffer stay correct through the nesting. `event` is left at
+   * the default `ToolShapes` for the same reason `NestedRun.messages` is: the
+   * sub-agent's tools are not the parent's.
+   */
+  | {
+      type: "nested-event";
+      /** The parent tool call the sub-run belongs to. */
+      toolCallId: string;
+      runId: string;
+      agent: string;
+      label?: string;
+      event: AgentStreamEvent;
+    }
   | { type: "tool-result"; messageId: string; part: ToolResultPart<T> }
   /**
    * Terminal for this stream: the run is finished, not parked. Everything
