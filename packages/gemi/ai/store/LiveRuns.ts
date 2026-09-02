@@ -94,6 +94,18 @@ type Entry = {
   /** A contiguous window of the run's frames, oldest first. */
   frames: AgentStreamFrame[];
   lastSeq: number;
+  /**
+   * The lowest `seq` still obtainable, or 0 while nothing has been dropped.
+   *
+   * Not derivable from `frames[0].seq`, which is what this used to compare
+   * against. `seq` starts at 1, so a run that has evicted nothing still has an
+   * oldest frame of 1, and a cursor of 0 — the "I have no transcript yet"
+   * cursor that `replay` itself picks for a run registered but not yet pumped —
+   * read as older than the buffer. A ten-frame run in a five-hundred-frame
+   * window answered a refresh with 410, which is both false and unactionable:
+   * refreshing right after sending is the case `/attach` exists to serve.
+   */
+  lostBefore: number;
   ended: boolean;
   evictAt: ReturnType<typeof setTimeout> | null;
   wake: Set<() => void>;
@@ -152,6 +164,7 @@ export class MemoryLiveRuns implements LiveRuns {
       clientRunId: params.clientRunId,
       frames: [],
       lastSeq: -1,
+      lostBefore: 0,
       ended: false,
       evictAt: null,
       wake: new Set(),
@@ -222,10 +235,10 @@ export class MemoryLiveRuns implements LiveRuns {
     if (!entry) {
       throw new LiveRunNotFoundError(runId);
     }
-    const oldest = entry.frames[0]?.seq;
-    if (from !== undefined && oldest !== undefined && from < oldest) {
-      throw new FrameCursorEvictedError(runId, from, oldest);
+    if (from !== undefined && from < entry.lostBefore) {
+      throw new FrameCursorEvictedError(runId, from, entry.lostBefore);
     }
+    const oldest = entry.frames[0]?.seq;
     // With nothing buffered — a run registered but not yet pumped — `lastSeq`
     // is -1 and this is 0, which is the same answer by another route.
     return this.drain(entry, runId, from ?? oldest ?? entry.lastSeq + 1);
@@ -260,7 +273,8 @@ export class MemoryLiveRuns implements LiveRuns {
         entry.frames.push(frame);
         entry.lastSeq = frame.seq;
         if (entry.frames.length > this.maxFrames) {
-          entry.frames.shift();
+          const dropped = entry.frames.shift();
+          if (dropped) entry.lostBefore = dropped.seq + 1;
         }
         this.notify(entry);
         const onEvent = params.onEvent;
@@ -303,12 +317,11 @@ export class MemoryLiveRuns implements LiveRuns {
     while (true) {
       const seen = entry.version;
       const buffered = entry.frames.slice();
-      const oldest = buffered[0]?.seq;
-      if (oldest !== undefined && cursor < oldest) {
+      if (cursor < entry.lostBefore) {
         // The buffer rolled past this reader mid-stream. Same reasoning as the
         // pre-flight check: a gap the client cannot see is worse than a stream
         // that stops and says why.
-        throw new FrameCursorEvictedError(runId, cursor, oldest);
+        throw new FrameCursorEvictedError(runId, cursor, entry.lostBefore);
       }
       for (const frame of buffered) {
         if (frame.seq >= cursor) {
