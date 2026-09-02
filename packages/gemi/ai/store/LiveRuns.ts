@@ -176,17 +176,28 @@ export class MemoryLiveRuns implements LiveRuns {
    * Throws before returning anything, so an evicted cursor and an unknown run
    * are still HTTP statuses rather than events on a stream that already
    * committed to a 200.
+   *
+   * `from` omitted means "start wherever you still can", not "start at 0".
+   * These are genuinely different requests: a client that names a cursor is
+   * telling us where its transcript ends, and handing it a later frame leaves
+   * an invisible hole — that is the 410. A client with no cursor at all — the
+   * browser reattaching on mount, which is the case `/attach` exists for — has
+   * no transcript to put a hole in, and refusing it the tail because the run is
+   * older than the buffer would 410 every run past `maxFrames`, i.e. every run
+   * long enough to be worth reattaching to.
    */
-  replay(runId: string, from = 0): AsyncIterable<AgentStreamFrame> {
+  replay(runId: string, from?: number): AsyncIterable<AgentStreamFrame> {
     const entry = this.runs.get(runId);
     if (!entry) {
       throw new LiveRunNotFoundError(runId);
     }
     const oldest = entry.frames[0]?.seq;
-    if (oldest !== undefined && from < oldest) {
+    if (from !== undefined && oldest !== undefined && from < oldest) {
       throw new FrameCursorEvictedError(runId, from, oldest);
     }
-    return this.drain(entry, runId, from);
+    // With nothing buffered — a run registered but not yet pumped — `lastSeq`
+    // is -1 and this is 0, which is the same answer by another route.
+    return this.drain(entry, runId, from ?? oldest ?? entry.lastSeq + 1);
   }
 
   /** Test seam: drops everything and cancels the pending eviction timers. */
@@ -222,9 +233,11 @@ export class MemoryLiveRuns implements LiveRuns {
         this.notify(entry);
         const onEvent = params.onEvent;
         if (onEvent) {
-          hooks = hooks.then(() => onEvent(frame.event)).catch((err) => {
-            params.onInternalError?.(err);
-          });
+          hooks = hooks
+            .then(() => onEvent(frame.event))
+            .catch((err) => {
+              params.onInternalError?.(err);
+            });
         }
       }
     } catch (err) {
@@ -234,8 +247,18 @@ export class MemoryLiveRuns implements LiveRuns {
     } finally {
       entry.ended = true;
       this.notify(entry);
-      await hooks;
+      // Eviction is scheduled off the ttl clock, BEFORE the hook chain is
+      // awaited. `hooks` is app code — `onAwaitingInput` is documented as the
+      // place to notify an approver, i.e. network I/O — and a `fetch` with no
+      // timeout never rejects, it just never settles. Awaiting it first made
+      // retention conditional on app code: one hanging hook pinned its entry,
+      // its 512 frames, the run and everything the run closes over in the map
+      // for the life of the process, and `find` kept answering with a run that
+      // ended hours ago. Retention is this class's job and belongs on its own
+      // clock. A hook still pending when the timer fires simply outlives the
+      // entry, which is fine — it holds no reference the map needed.
       this.scheduleEviction(entry);
+      await hooks;
     }
   }
 

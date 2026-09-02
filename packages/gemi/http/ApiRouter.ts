@@ -347,16 +347,17 @@ export class ApiRouter {
    * — and the sub-routes deliberately do not appear in `CreateRPC` as keys of
    * their own: they are transport for the hook, not endpoints an app calls.
    *
-   * Guard it with `.middleware()`, not with the router's `middlewares`. Route
-   * flattening treats an agent the way it treats a nested `SubRouter`, and it
-   * replaces the enclosing router's middleware list when it descends rather
-   * than concatenating — so `middlewares = ["auth"]` next to this line covers
-   * `this.post(...)` and does not cover the agent. The four names exist so each
-   * route can be guarded on its own anyway: `upload` and `stream` are not
-   * equally cheap, and `attach` is a read.
+   * The enclosing router's `middlewares` guard all four, exactly as they guard
+   * a sibling `this.post(...)` or `this.resource(...)`, and `.middleware()`
+   * adds to them per method. That parity is the whole point: a developer who
+   * writes `middlewares = ["auth"]` on the router has guarded the model
+   * endpoint, and does not have to know that an agent is flattened as a nested
+   * router to have got it right. The four names exist so each route can *also*
+   * be guarded on its own — `upload` and `stream` are not equally cheap, and
+   * `attach` is a read.
    */
   public agent<T extends new () => AgentController<any>>(Controller: T): AgentRoute<T> {
-    return createAgentRouteHandlers(Controller) as unknown as AgentRoute<T>;
+    return createAgentRouteHandlers(Controller, this) as unknown as AgentRoute<T>;
   }
 
   public file<Input, Output, Params>(handler: CallbackHandler<Input, Output, Params>): FileHandler;
@@ -406,16 +407,22 @@ export class ApiRouter {
  * It is an `ApiRouter` subclass rather than a shape of its own, and that is the
  * whole trick: an agent mounts four paths under one key, which is exactly what
  * a nested router already does, so `createFlatApiRoutes` needs no new branch
- * and the sub-paths get prefixing, middleware and OPTIONS for free. A parallel
- * mechanism would have to reimplement all of it, and would be the second place
- * to fix when route flattening changes.
+ * and the sub-paths get prefixing, per-method middleware and OPTIONS for free.
+ * A parallel mechanism would have to reimplement all of it, and would be the
+ * second place to fix when route flattening changes.
+ *
+ * The one thing it does not inherit is the enclosing router's `middlewares` —
+ * see the constructor.
  *
  * The four handlers are built once and shared with `routes`, because
  * `.middleware()` is called on the class — at `routes = {...}` time — while
  * `routes` is read off an instance the dispatcher constructs later. Rebuilding
  * them per instance would quietly drop every per-method middleware.
  */
-function createAgentRouteHandlers<T extends new () => AgentController<any>>(Controller: T) {
+function createAgentRouteHandlers<T extends new () => AgentController<any>>(
+  Controller: T,
+  owner: ApiRouter,
+) {
   const handlers = {
     stream: new RouteHandler("POST", Controller as any, "stream"),
     attach: new RouteHandler("POST", Controller as any, "attach"),
@@ -427,6 +434,24 @@ function createAgentRouteHandlers<T extends new () => AgentController<any>>(Cont
     static __internal_brand = "AgentRoute" as const;
     static controller = Controller;
     static handlers = handlers;
+
+    constructor() {
+      super();
+      // Adopt the enclosing router's guards, which is the one thing being a
+      // nested router does NOT give us: `createFlatApiRoutes` *replaces*
+      // `rootMiddleware` when it descends into a router rather than
+      // concatenating, so without this an agent mounted next to
+      // `middlewares = ["auth"]` would come out unguarded while every sibling
+      // route came out guarded — an unauthenticated model endpoint reached by
+      // writing the idiomatic thing.
+      //
+      // Read from the router *instance* here, at flatten time, rather than
+      // from `owner.middlewares` at `this.agent()` time: `routes` and
+      // `middlewares` are both class fields, so a `middlewares` declared below
+      // `routes` has not been assigned yet when `this.agent()` runs. Capturing
+      // the instance makes declaration order irrelevant.
+      this.middlewares = [...(owner?.middlewares ?? [])];
+    }
 
     routes: ApiRoutes = {
       "/": handlers.stream,
