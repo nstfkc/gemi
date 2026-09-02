@@ -882,3 +882,223 @@ describe("lifecycle", () => {
     expect(bodyOf(1).messages[1]).toMatchObject({ role: "assistant", finishReason: "aborted" });
   });
 });
+
+/**
+ * A tool that ran a sub-agent, which asked a question of its own.
+ *
+ * The question reaches the user on the *parent's* `awaiting-input`, carrying
+ * the path that says which tool call to re-enter. Everything below is about one
+ * claim: an app cannot tell from its own code that this happened.
+ */
+const NESTED_ASK: AgentStreamFrame[] = [
+  { seq: 0, event: { type: "run-start", runId: "run_3", threadId: "th_9" } },
+  { seq: 1, event: { type: "message-start", messageId: "m3", role: "assistant" } },
+  {
+    seq: 2,
+    event: {
+      type: "tool-call",
+      messageId: "m3",
+      part: {
+        type: "tool-call",
+        toolCallId: "tc_outer",
+        name: "research",
+        input: { topic: "pricing" },
+      },
+    },
+  },
+  { seq: 3, event: { type: "tool-search", loaded: ["browse"] } },
+  { seq: 4, event: { type: "tool-progress", toolCallId: "tc_outer", data: { stage: "starting" } } },
+  {
+    seq: 5,
+    event: {
+      type: "nested-event",
+      toolCallId: "tc_outer",
+      runId: "nr_1",
+      agent: "pricing",
+      label: "researching pricing",
+      event: { type: "text-delta", messageId: "n1", delta: "I need the customer tier." },
+    },
+  },
+  {
+    seq: 6,
+    event: {
+      type: "awaiting-input",
+      runId: "run_3",
+      pending: [
+        {
+          toolCallId: "tc_inner",
+          name: "ask",
+          input: { question: "Which tier?" },
+          kind: "question",
+          signature: "sig_nested",
+          path: ["tc_outer"],
+        },
+      ],
+    },
+  },
+  { seq: 7, event: { type: "message-end", messageId: "m3", finishReason: "awaiting-input" } },
+  { seq: 8, event: { type: "run-end", runId: "run_3", finishReason: "awaiting-input" } },
+];
+
+describe("a question from a sub-agent", () => {
+  async function parked() {
+    fetchMock.mockResolvedValueOnce(streamed(NESTED_ASK));
+    const { box } = mount({ attach: false });
+    await act(async () => {
+      await box.api.sendMessage("what should we charge?");
+    });
+    return box;
+  }
+
+  test("is answered by the same answer() an app already writes", async () => {
+    const box = await parked();
+
+    await act(async () => {
+      await box.api.answer("tc_inner", { answer: "enterprise" });
+    });
+
+    // The path goes back exactly as it arrived, beside the signature that
+    // commits to it — the app wrote a tool call id and a value, and nothing
+    // else, which is the whole point of doing it this way.
+    expect(bodyOf(1).turn.toolResults).toEqual([
+      {
+        toolCallId: "tc_inner",
+        signature: "sig_nested",
+        path: ["tc_outer"],
+        output: { answer: "enterprise" },
+      },
+    ]);
+  });
+
+  test("approve() carries the path too", async () => {
+    const box = await parked();
+
+    await act(async () => {
+      await box.api.approve("tc_inner", false, "wrong customer");
+    });
+
+    expect(bodyOf(1).turn.toolResults).toEqual([
+      {
+        toolCallId: "tc_inner",
+        signature: "sig_nested",
+        path: ["tc_outer"],
+        approve: false,
+        reason: "wrong customer",
+      },
+    ]);
+  });
+
+  test("a top-level call still sends no path at all", async () => {
+    // The absent path has to stay absent: `signing.ts` must produce the same
+    // signature it produced before paths existed, or every open approval breaks.
+    fetchMock.mockResolvedValueOnce(streamed(ASKING));
+    const { box } = mount({ attach: false });
+    await act(async () => {
+      await box.api.sendMessage("refund me");
+    });
+
+    await act(async () => {
+      await box.api.approve("tc_1", true);
+    });
+
+    expect(bodyOf(1).turn.toolResults).toEqual([
+      { toolCallId: "tc_1", signature: "sig_one", approve: true },
+    ]);
+  });
+
+  test("the UI can see where the question came from without needing to", async () => {
+    const box = await parked();
+
+    expect(box.api.status).toBe("awaiting-input");
+    expect(box.api.pending[0]).toMatchObject({ toolCallId: "tc_inner", path: ["tc_outer"] });
+  });
+
+  test("two sub-runs holding the same tool call id are refused, not guessed at", async () => {
+    // Reachable only through nesting: the ids come from whichever provider ran
+    // each sub-run. `approve` is addressed by id alone on purpose, so when the
+    // id stops being an address the honest answer is to say so rather than
+    // approve whichever call sorted first.
+    const collision = NESTED_ASK.map((frame) =>
+      frame.seq === 6
+        ? {
+            seq: 6,
+            event: {
+              type: "awaiting-input" as const,
+              runId: "run_3",
+              pending: [
+                (frame.event as { pending: unknown[] }).pending[0] as never,
+                {
+                  toolCallId: "tc_inner",
+                  name: "ask",
+                  input: { question: "Which region?" },
+                  kind: "question" as const,
+                  signature: "sig_other",
+                  path: ["tc_second"],
+                } as never,
+              ],
+            },
+          }
+        : frame,
+    );
+    fetchMock.mockResolvedValueOnce(streamed(collision));
+    const { box } = mount({ attach: false });
+    await act(async () => {
+      await box.api.sendMessage("what should we charge?");
+    });
+
+    await act(async () => {
+      await box.api.answer("tc_inner", { answer: "enterprise" });
+    });
+
+    expect(calls()).toHaveLength(1);
+    expect(box.api.error).toMatchObject({ code: "invalid_tool_result", retryable: false });
+    // Both are still answerable once the app disambiguates; nothing was thrown
+    // away because one report was ambiguous.
+    expect(box.api.pending).toHaveLength(2);
+  });
+});
+
+describe("what a nested run leaves in the transcript", () => {
+  test("the sub-run and the tool's own yields are on the tool call, ready to render", async () => {
+    fetchMock.mockResolvedValueOnce(streamed(NESTED_ASK));
+    const { box } = mount({ attach: false });
+    await act(async () => {
+      await box.api.sendMessage("what should we charge?");
+    });
+
+    const call = box.api.messages
+      .flatMap((message) => message.content)
+      .find((part) => part.type === "tool-call") as {
+      progress?: unknown[];
+      nested?: { agent: string; label?: string; messages: unknown[] }[];
+    };
+    expect(call.progress).toEqual([{ stage: "starting" }]);
+    expect(call.nested).toHaveLength(1);
+    expect(call.nested![0]).toMatchObject({ agent: "pricing", label: "researching pricing" });
+    expect(call.nested![0]!.messages).toEqual([
+      {
+        id: "n1",
+        role: "assistant",
+        content: [{ type: "text", text: "I need the customer tier." }],
+        createdAt: expect.any(String),
+      },
+    ]);
+  });
+
+  test("loadedTools names the deferred tools in play and empties on the next run", async () => {
+    fetchMock.mockResolvedValueOnce(streamed(NESTED_ASK));
+    const { box } = mount({ attach: false });
+    await act(async () => {
+      await box.api.sendMessage("what should we charge?");
+    });
+
+    expect(box.api.loadedTools).toEqual(["browse"]);
+
+    fetchMock.mockResolvedValueOnce(streamed(ANSWER));
+    await act(async () => {
+      await box.api.sendMessage("never mind");
+    });
+
+    expect(box.api.loadedTools).toEqual([]);
+  });
+});

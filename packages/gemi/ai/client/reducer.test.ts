@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import type { AgentMessage, AgentStreamFrame } from "../types";
+import type { AgentMessage, AgentStreamFrame, NestedRun } from "../types";
 import { applyFrame, initialChatState, markAborted, type ChatState } from "./reducer";
 
 const NOW = "2026-09-02T00:00:00.000Z";
@@ -429,15 +429,28 @@ describe("the rest of the event union", () => {
     expect(state.messages[0]!.usage).toBeUndefined();
   });
 
-  test("tool-search and tool-progress advance the cursor and nothing else", () => {
+  test("tool-search names the tools in play without touching the transcript", () => {
     const before = at(6);
     const after = fold(before, [
       { seq: 7, event: { type: "tool-search", loaded: ["refundOrder"] } },
-      { seq: 8, event: { type: "tool-progress", toolCallId: "tc_1", data: { line: "$ ls" } } },
+      { seq: 8, event: { type: "tool-search", loaded: ["refundOrder", "listOrders"] } },
     ]);
 
+    // A set, so the second search — which reports everything loaded so far, and
+    // which a reattached client may be handed twice — adds one name, not three.
+    expect(after.loadedTools).toEqual(["refundOrder", "listOrders"]);
     expect(after.messages).toEqual(before.messages);
     expect(after.seq).toBe(8);
+  });
+
+  test("tool-search is run-scoped, so the next turn does not inherit it", () => {
+    const state = fold(at(6), [
+      { seq: 7, event: { type: "tool-search", loaded: ["refundOrder"] } },
+      { seq: 8, event: { type: "run-end", runId: "run_1", finishReason: "stop" } },
+      { seq: 0, event: { type: "run-start", runId: "run_2" } },
+    ]);
+
+    expect(state.loadedTools).toEqual([]);
   });
 });
 
@@ -495,5 +508,473 @@ describe("markAborted", () => {
     const state = markAborted(initialChatState({ messages: [user] }));
 
     expect(state.messages[0]!.finishReason).toBeUndefined();
+  });
+});
+
+/**
+ * One tool that runs a sub-agent, on the wire.
+ *
+ * `tc_1` is the parent's tool call; `nr_1` is the sub-run it drove. Every
+ * sub-run frame is a `nested-event` on the *parent's* stream, numbered in the
+ * parent's `seq` — which is what lets `/attach` and the cursor keep working
+ * through the nesting, and what means nothing below needs a second cursor.
+ */
+const NESTED: AgentStreamFrame[] = [
+  { seq: 0, event: { type: "run-start", runId: "run_1", threadId: "th_1" } },
+  { seq: 1, event: { type: "message-start", messageId: "m1", role: "assistant" } },
+  { seq: 2, event: { type: "text-delta", messageId: "m1", delta: "Looking into it." } },
+  {
+    seq: 3,
+    event: {
+      type: "tool-call",
+      messageId: "m1",
+      part: {
+        type: "tool-call",
+        toolCallId: "tc_1",
+        name: "research",
+        input: { topic: "pricing" },
+      },
+    },
+  },
+  { seq: 4, event: { type: "tool-progress", toolCallId: "tc_1", data: { stage: "starting" } } },
+  { seq: 5, event: nested({ type: "run-start", runId: "nr_1" }) },
+  { seq: 6, event: nested({ type: "message-start", messageId: "n1", role: "assistant" }) },
+  { seq: 7, event: nested({ type: "text-delta", messageId: "n1", delta: "The list price is " }) },
+  { seq: 8, event: nested({ type: "text-delta", messageId: "n1", delta: "$40." }) },
+  { seq: 9, event: nested({ type: "message-end", messageId: "n1", finishReason: "stop" }) },
+  {
+    seq: 10,
+    event: nested({
+      type: "usage",
+      usage: { inputTokens: 30, outputTokens: 8, totalTokens: 38 },
+    }),
+  },
+  { seq: 11, event: nested({ type: "run-end", runId: "nr_1", finishReason: "stop" }) },
+  { seq: 12, event: { type: "tool-progress", toolCallId: "tc_1", data: { stage: "summarising" } } },
+  {
+    seq: 13,
+    event: {
+      type: "tool-result",
+      messageId: "m1",
+      part: {
+        type: "tool-result",
+        toolCallId: "tc_1",
+        name: "research",
+        status: "ok",
+        output: { summary: "$40" },
+      },
+    },
+  },
+  { seq: 14, event: { type: "text-delta", messageId: "m1", delta: " It is $40." } },
+  { seq: 15, event: { type: "message-end", messageId: "m1", finishReason: "stop" } },
+  { seq: 16, event: { type: "run-end", runId: "run_1", finishReason: "stop" } },
+];
+
+/** The wrapper every sub-run frame arrives in, so the fixture reads as a run. */
+function nested(
+  event: AgentStreamFrame["event"],
+  wrap: { toolCallId?: string; runId?: string; agent?: string; label?: string } = {},
+): AgentStreamFrame["event"] {
+  return {
+    type: "nested-event",
+    toolCallId: wrap.toolCallId ?? "tc_1",
+    runId: wrap.runId ?? "nr_1",
+    agent: wrap.agent ?? "pricing",
+    label: wrap.label ?? "researching pricing",
+    event,
+  };
+}
+
+function runOf(state: ChatState, toolCallId = "tc_1", index = 0) {
+  for (const message of state.messages) {
+    for (const part of message.content) {
+      if (part.type === "tool-call" && part.toolCallId === toolCallId) {
+        return part.nested?.[index];
+      }
+    }
+  }
+  return undefined;
+}
+
+function callOf(state: ChatState, toolCallId = "tc_1") {
+  for (const message of state.messages) {
+    for (const part of message.content) {
+      if (part.type === "tool-call" && part.toolCallId === toolCallId) return part;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The two ways nesting can violate the reducer's contract, first.
+ *
+ * Both are shapes of the same thing — a client handed the middle of a run —
+ * and both are the reason the happy-path tests below are not enough on their
+ * own.
+ */
+describe("nesting tolerates a stream it joined late", () => {
+  test("a nested-event for a tool call this client never saw is dropped, not crashed", () => {
+    // The mid-run `/attach` with nothing kept: the `tool-call` frame that would
+    // have created `tc_1` is at seq 3, below where this client joined, and it is
+    // never re-sent. There is no honest place to put the sub-run — a
+    // `ToolCallPart` invented here would need a tool name and an input that no
+    // nested frame carries — so the run is lost and the transcript stays true.
+    const state = fold(initialChatState(), NESTED.slice(5, 12));
+
+    expect(state.messages).toEqual([]);
+    expect(state.error).toBeNull();
+    // The cursor still advances, which is the part that must not break: the
+    // frames after these describe messages this client *can* build.
+    expect(state.seq).toBe(11);
+  });
+
+  test("the run continues normally after the orphaned nested frames", () => {
+    const state = fold(initialChatState(), NESTED.slice(5));
+
+    expect(state.messages).toHaveLength(1);
+    expect(state.messages[0]!.content.map((part) => part.type)).toEqual([
+      "tool-result",
+      "text",
+    ]);
+    expect(state.finishReason).toBe("stop");
+  });
+
+  test("a nested run whose own message-start never arrived builds the message anyway", () => {
+    // The sub-run joined halfway too. The recursion means this needs no code of
+    // its own — `withMessage` creates a message it never saw start, and it does
+    // that inside a nested transcript for the same reason it does it outside.
+    const state = fold(at3(), [
+      { seq: 4, event: nested({ type: "text-delta", messageId: "n1", delta: "half a thought" }) },
+    ]);
+
+    expect(runOf(state)!.messages).toEqual([
+      {
+        id: "n1",
+        role: "assistant",
+        content: [{ type: "text", text: "half a thought" }],
+        createdAt: NOW,
+      },
+    ]);
+  });
+
+  test("a nested run whose run-start never arrived is still labelled", () => {
+    // `agent` and `label` ride on every nested frame, not just the first, so a
+    // sub-run created from its tail still has something to render as a heading.
+    const state = fold(at3(), [
+      { seq: 4, event: nested({ type: "text-delta", messageId: "n1", delta: "…" }) },
+    ]);
+
+    expect(runOf(state)).toMatchObject({
+      runId: "nr_1",
+      agent: "pricing",
+      label: "researching pricing",
+    });
+  });
+});
+
+/** The parent up to and including the tool call, which is all nesting needs. */
+function at3() {
+  return fold(initialChatState(), NESTED.slice(0, 4));
+}
+
+describe("a tool that runs a sub-agent", () => {
+  test("the sub-run's transcript lands on the tool call that drove it", () => {
+    const state = fold(initialChatState(), NESTED);
+
+    expect(runOf(state)).toEqual({
+      runId: "nr_1",
+      agent: "pricing",
+      label: "researching pricing",
+      finishReason: "stop",
+      usage: { inputTokens: 30, outputTokens: 8, totalTokens: 38 },
+      messages: [
+        {
+          id: "n1",
+          role: "assistant",
+          content: [{ type: "text", text: "The list price is $40." }],
+          createdAt: NOW,
+          finishReason: "stop",
+          usage: { inputTokens: 30, outputTokens: 8, totalTokens: 38 },
+        },
+      ],
+    });
+  });
+
+  test("a nested message is the shape of a top-level one, so one renderer does both", () => {
+    // The claim the whole design rests on. `render` below stands in for a
+    // component: it is written once, against `AgentMessage[]`, and it is handed
+    // the outer transcript and then the inner one with no second code path and
+    // nothing that knows a sub-agent exists.
+    const state = fold(initialChatState(), NESTED);
+    const render = (messages: AgentMessage[]) =>
+      messages.map(
+        (message) =>
+          `${message.role}: ${message.content
+            .map((part) => (part.type === "text" ? part.text : `[${part.type}]`))
+            .join("")}`,
+      );
+
+    expect(render(state.messages)).toEqual([
+      "assistant: Looking into it.[tool-call][tool-result] It is $40.",
+    ]);
+    expect(render(runOf(state)!.messages)).toEqual(["assistant: The list price is $40."]);
+  });
+
+  test("the tool's own yields accumulate in order beside the sub-run", () => {
+    const state = fold(initialChatState(), NESTED);
+
+    expect(callOf(state)!.progress).toEqual([{ stage: "starting" }, { stage: "summarising" }]);
+  });
+
+  test("a tool call with no sub-agent and no yields grows no fields", () => {
+    const state = fold(initialChatState(), RUN);
+
+    expect(callOf(state, "tc_1")).toEqual({
+      type: "tool-call",
+      toolCallId: "tc_1",
+      name: "grep",
+      input: { pattern: "TODO", filePath: "a.ts" },
+    });
+  });
+
+  test("the parent transcript is unchanged by the nesting", () => {
+    const state = fold(initialChatState(), NESTED);
+
+    expect(state.messages).toHaveLength(1);
+    expect(state.messages[0]!.content.map((part) => part.type)).toEqual([
+      "text",
+      "tool-call",
+      "tool-result",
+      "text",
+    ]);
+    expect(state.messages[0]!.finishReason).toBe("stop");
+  });
+
+  test("two sub-runs under one tool call stay separate, in the order they started", () => {
+    const state = fold(at3(), [
+      { seq: 4, event: nested({ type: "text-delta", messageId: "n1", delta: "one" }) },
+      {
+        seq: 5,
+        event: nested({ type: "text-delta", messageId: "n2", delta: "two" }, {
+          runId: "nr_2",
+          agent: "legal",
+          label: "checking terms",
+        }),
+      },
+      { seq: 6, event: nested({ type: "text-delta", messageId: "n1", delta: "!" }) },
+    ]);
+
+    const runs = callOf(state)!.nested!;
+    expect(runs.map((run) => run.runId)).toEqual(["nr_1", "nr_2"]);
+    expect(runs[0]!.messages[0]!.content).toEqual([{ type: "text", text: "one!" }]);
+    expect(runs[1]!.agent).toBe("legal");
+  });
+});
+
+describe("nesting keeps the reducer's contract", () => {
+  test("applying the whole nested run twice changes nothing", () => {
+    const once = fold(initialChatState(), NESTED);
+    const twice = fold(once, NESTED);
+
+    expect(twice).toBe(once);
+  });
+
+  test("a redelivered nested text-delta does not append its text twice", () => {
+    const state = fold(initialChatState(), NESTED.slice(0, 8));
+    const again = applyFrame(state, NESTED[7]!, NOW);
+
+    expect(again).toBe(state);
+    expect(runOf(state)!.messages[0]!.content).toEqual([
+      { type: "text", text: "The list price is " },
+    ]);
+  });
+
+  test("a redelivered tool-progress does not log the same yield twice", () => {
+    const state = fold(initialChatState(), NESTED.slice(0, 5));
+    const again = applyFrame(state, NESTED[4]!, NOW);
+
+    expect(again).toBe(state);
+    expect(callOf(state)!.progress).toEqual([{ stage: "starting" }]);
+  });
+
+  test("a whole run replayed onto a transcript that already holds it doubles nothing", () => {
+    // The case `seq` cannot catch: the cursor was lost, so every frame is new to
+    // it. The finished parent message is the only evidence this is replay, and
+    // it has to protect the nested transcript and the progress log as well as
+    // the text.
+    const done = fold(initialChatState(), NESTED);
+    const restored = initialChatState({ messages: done.messages });
+
+    const replayed = fold(restored, NESTED);
+
+    expect(callOf(replayed)!.progress).toEqual([{ stage: "starting" }, { stage: "summarising" }]);
+    expect(callOf(replayed)!.nested).toHaveLength(1);
+    expect(runOf(replayed)!.messages[0]!.content).toEqual([
+      { type: "text", text: "The list price is $40." },
+    ]);
+  });
+
+  test("a re-sent tool-call frame does not wipe what execution put on the part", () => {
+    // The bug this file's upsert had until nesting made it visible: a
+    // `tool-call` is the model's half of the part, and replacing the whole part
+    // with it throws away the sub-run and the progress log — which arrive on
+    // events that name no message and so can never be re-derived.
+    const state = fold(initialChatState(), NESTED.slice(0, 12));
+    const resent = applyFrame(state, { seq: 99, event: NESTED[3]!.event }, NOW);
+
+    expect(callOf(resent)!.progress).toEqual([{ stage: "starting" }]);
+    expect(runOf(resent)!.messages[0]!.content).toEqual([
+      { type: "text", text: "The list price is $40." },
+    ]);
+  });
+
+  test("a sub-run's own pending call does not become the parent's", () => {
+    // An escalated question reaches the user on the parent's `awaiting-input`,
+    // carrying the path that says which tool to re-enter. The copy inside the
+    // sub-run's stream carries no path, so surfacing it here would show the
+    // question twice and make one of the two unanswerable.
+    const state = fold(at3(), [
+      {
+        seq: 4,
+        event: nested({
+          type: "awaiting-input",
+          runId: "nr_1",
+          pending: [
+            {
+              toolCallId: "tc_inner",
+              name: "ask",
+              input: { question: "Which tier?" },
+              kind: "question",
+              signature: "sig_inner",
+            },
+          ],
+        }),
+      },
+    ]);
+
+    expect(state.pending).toEqual([]);
+  });
+
+  test("resuming from any mid-run cursor converges on the same conversation", () => {
+    const full = fold(initialChatState(), NESTED);
+
+    for (let cursor = 0; cursor < NESTED.length - 1; cursor++) {
+      const dropped = fold(initialChatState(), NESTED.slice(0, cursor + 1));
+      const resumed = initialChatState({
+        messages: dropped.messages,
+        pending: dropped.pending,
+        threadId: dropped.threadId,
+        seq: dropped.seq,
+      });
+
+      const caughtUp = fold(resumed, NESTED.slice(cursor + 1));
+
+      expect(caughtUp.messages, `resumed at ${cursor}`).toEqual(full.messages);
+      expect(caughtUp.seq, `resumed at ${cursor}`).toBe(full.seq);
+    }
+  });
+});
+
+describe("nesting two levels deep", () => {
+  /**
+   * `tc_1` runs the pricing agent, whose own tool `tc_9` runs a web agent. The
+   * inner frames are a `nested-event` wrapped in a `nested-event`, which is the
+   * whole of what depth costs: the second one lands back in the same branch of
+   * the same switch, one message list further down.
+   */
+  const DEEP: AgentStreamFrame[] = [
+    ...NESTED.slice(0, 4),
+    { seq: 4, event: nested({ type: "message-start", messageId: "n1", role: "assistant" }) },
+    {
+      seq: 5,
+      event: nested({
+        type: "tool-call",
+        messageId: "n1",
+        part: {
+          type: "tool-call",
+          toolCallId: "tc_9",
+          name: "browse",
+          input: { url: "https://example.com/pricing" },
+        },
+      }),
+    },
+    {
+      seq: 6,
+      event: nested(
+        nested({ type: "message-start", messageId: "d1", role: "assistant" }, {
+          toolCallId: "tc_9",
+          runId: "nr_2",
+          agent: "web",
+          label: "reading the pricing page",
+        }),
+      ),
+    },
+    {
+      seq: 7,
+      event: nested(
+        nested({ type: "text-delta", messageId: "d1", delta: "$40 a seat." }, {
+          toolCallId: "tc_9",
+          runId: "nr_2",
+          agent: "web",
+          label: "reading the pricing page",
+        }),
+      ),
+    },
+    {
+      seq: 8,
+      event: nested(
+        nested({ type: "run-end", runId: "nr_2", finishReason: "stop" }, {
+          toolCallId: "tc_9",
+          runId: "nr_2",
+          agent: "web",
+          label: "reading the pricing page",
+        }),
+      ),
+    },
+  ];
+
+  function inner(state: ChatState) {
+    const outer = runOf(state)!;
+    const call = outer.messages
+      .flatMap((message) => message.content)
+      .find((part) => part.type === "tool-call" && part.toolCallId === "tc_9");
+    return (call as { nested?: NestedRun[] }).nested![0]!;
+  }
+
+  test("the sub-sub-run lands on the sub-run's own tool call", () => {
+    const state = fold(initialChatState(), DEEP);
+
+    expect(inner(state)).toEqual({
+      runId: "nr_2",
+      agent: "web",
+      label: "reading the pricing page",
+      finishReason: "stop",
+      messages: [
+        {
+          id: "d1",
+          role: "assistant",
+          content: [{ type: "text", text: "$40 a seat." }],
+          createdAt: NOW,
+          // The nested `run-end` closed off a message whose `message-end` never
+          // came, two levels down, with no code that knows about depth.
+          finishReason: "stop",
+        },
+      ],
+    });
+  });
+
+  test("depth costs the contract nothing: replay and a mid-run cursor still converge", () => {
+    const full = fold(initialChatState(), DEEP);
+
+    expect(fold(full, DEEP)).toBe(full);
+
+    for (let cursor = 0; cursor < DEEP.length - 1; cursor++) {
+      const dropped = fold(initialChatState(), DEEP.slice(0, cursor + 1));
+      const resumed = initialChatState({ messages: dropped.messages, seq: dropped.seq });
+
+      expect(fold(resumed, DEEP.slice(cursor + 1)).messages, `resumed at ${cursor}`).toEqual(
+        full.messages,
+      );
+    }
   });
 });
