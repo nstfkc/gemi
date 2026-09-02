@@ -58,6 +58,16 @@ function jsonRequest(body: unknown, headers: Record<string, string> = {}) {
   return new HttpRequest(raw, {}, "api", "/chat");
 }
 
+/** A POST whose body is whatever bytes are handed to it, valid JSON or not. */
+function rawRequest(body: string, contentType = "application/json") {
+  const raw = new Request("http://localhost/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": contentType },
+    body,
+  });
+  return new HttpRequest(raw, {}, "api", "/chat");
+}
+
 async function readSse(response: Response): Promise<string> {
   return await response.text();
 }
@@ -330,6 +340,55 @@ describe("AgentController.attach", () => {
     expect(response.status).toBe(400);
   });
 
+  /**
+   * The case `/attach` exists for. A page reattaching on mount sends a fresh
+   * POST: no `Last-Event-ID`, and no cursor of its own, because the only handle
+   * it was ever given is the `threadId`. Reading that as frame 0 made every run
+   * longer than the buffer — a few hundred tokens of prose — answer 410, and
+   * the documented remedy of reloading the thread does not help, because the
+   * store is not written until the run ends. So the user refreshed, saw
+   * nothing, and the run kept spending invisibly.
+   */
+  test("with no cursor at all, returns the tail of a run past the buffer", async () => {
+    const run = new StubAgentRun("run_long");
+    const { agent } = stubAgent(run);
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns({ maxFrames: 4 });
+    }
+    const controller = new Chat();
+    await controller.stream(jsonRequest({ threadId: "t1", text: "hi" }));
+
+    for (let i = 0; i < 10; i++) {
+      run.emit({ type: "text-delta", messageId: "m1", delta: String(i) });
+    }
+    run.finish();
+    await settle();
+
+    const response = await controller.attach(jsonRequest({ threadId: "t1" }));
+
+    expect(response.status).toBe(200);
+    const body = await readSse(response);
+    expect(body).toContain("id: 6");
+    expect(body).toContain("id: 9");
+    expect(body).not.toContain("id: 5");
+  });
+
+  test("with no cursor and nothing dropped, returns the run from the start", async () => {
+    const { run, controller } = attachable("run_short");
+    await controller.stream(jsonRequest({ threadId: "t1", text: "hi" }));
+
+    for (const delta of ["a", "b"]) {
+      run.emit({ type: "text-delta", messageId: "m1", delta });
+    }
+    run.finish();
+    await settle();
+
+    const body = await readSse(await controller.attach(jsonRequest({ threadId: "t1" })));
+    expect(body).toContain("id: 0");
+    expect(body).toContain("id: 1");
+  });
+
   test("answers 410 for a cursor the buffer has dropped", async () => {
     const run = new StubAgentRun("run_e");
     const { agent } = stubAgent(run);
@@ -346,6 +405,9 @@ describe("AgentController.attach", () => {
     run.finish();
     await settle();
 
+    // Explicitly `from: 0`: this client says its transcript ends at frame 0, so
+    // handing it frame 6 onwards would leave a hole it cannot see. That is the
+    // 410, and it is exactly the request a client with no cursor is NOT making.
     const response = await controller.attach(jsonRequest({ threadId: "t1", from: 0 }));
     expect(response.status).toBe(410);
     const body = (await response.json()) as { error: { code: string; oldestSeq: number } };
@@ -479,6 +541,84 @@ describe("the request body", () => {
     });
     await new Chat().stream(new HttpRequest(raw, {}, "api", "/chat"));
     expect(calls[0]!.turn).toEqual({ text: "hi" });
+    run.finish();
+  });
+
+  /**
+   * A truncated proxy response and a mis-serialized client both land here. They
+   * used to read as an empty turn, so `stream` billed a model call with no
+   * history and no turn and dropped the user's message — which presents as the
+   * model hallucinating rather than as an error.
+   */
+  test("refuses an unparseable body instead of billing an empty run", async () => {
+    const run = new StubAgentRun("run_bad");
+    const { agent, calls } = stubAgent(run);
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+    }
+
+    const response = await new Chat().stream(rawRequest('{"text": "hi"'));
+
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("invalid_request");
+    // The point: no run was ever started.
+    expect(calls).toHaveLength(0);
+    run.finish();
+  });
+
+  test("refuses a JSON array, which typeof would have let through", async () => {
+    const run = new StubAgentRun("run_arr");
+    const { agent, calls } = stubAgent(run);
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+    }
+
+    expect((await new Chat().stream(rawRequest("[1,2,3]"))).status).toBe(400);
+    expect((await new Chat().stream(rawRequest("null"))).status).toBe(400);
+    expect(calls).toHaveLength(0);
+    run.finish();
+  });
+
+  test("attach and stop refuse a malformed body too", async () => {
+    const run = new StubAgentRun("run_bad2");
+    const { agent } = stubAgent(run);
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+    }
+    const controller = new Chat();
+    await controller.stream(jsonRequest({ threadId: "t1", text: "hi" }));
+
+    expect((await controller.attach(rawRequest("{oops"))).status).toBe(400);
+
+    // Not `{ stopped: false }`: that means "there was nothing to stop", and a
+    // client that believes it stops asking while the run keeps going.
+    const stopped = await controller.stop(rawRequest("{oops"));
+    expect(stopped).toBeInstanceOf(Response);
+    expect((stopped as Response).status).toBe(400);
+    expect(run.stopped).toBe(false);
+
+    run.finish();
+  });
+
+  /** An empty body is a real request — a turn that just lets the model continue
+   *  — and stays a 200. Only a body that arrived and would not parse is a 400. */
+  test("still accepts a request with no body at all", async () => {
+    const run = new StubAgentRun("run_empty");
+    const { agent, calls } = stubAgent(run);
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+    }
+    const raw = new Request("http://localhost/api/chat", { method: "POST" });
+    const response = await new Chat().stream(new HttpRequest(raw, {}, "api", "/chat"));
+
+    expect(response.status).toBe(200);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.turn).toBeUndefined();
     run.finish();
   });
 

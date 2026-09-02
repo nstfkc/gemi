@@ -3,6 +3,7 @@ import { describe, expect, test } from "vitest";
 import { AgentController } from "../ai/AgentController";
 import { createFlatApiRoutes } from "../services/router/createFlatApiRoutes";
 import { ApiRouter } from "./ApiRouter";
+import { ResourceController } from "./Controller";
 
 class ChatController extends AgentController {
   agent = { name: "stub", tools: [], provider: {} } as any;
@@ -127,31 +128,106 @@ describe("ApiRouter.agent()", () => {
   });
 
   /**
-   * An agent route is flattened as a nested router, so it inherits the
-   * enclosing router's `middlewares` exactly as a nested router does — which is
-   * to say not at all: `createFlatApiRoutes` replaces `rootMiddleware` when it
-   * descends into a router instead of concatenating. That predates this method
-   * and applies to every `"/sub": SubRouter` in the framework.
-   *
-   * It is asserted here rather than left implicit because the consequence is
-   * sharper for an agent than for a sub-router: `middlewares = ["auth"]` on the
-   * router guards `this.post(...)` next door and does not guard the agent. Use
-   * `.middleware({ stream, attach, stop, upload })`, which is what the four
-   * names are for.
+   * The finding this test exists for: an agent used to come out unguarded here
+   * while both of its siblings came out guarded, because an agent is flattened
+   * as a nested router and `createFlatApiRoutes` replaces `rootMiddleware` when
+   * it descends into one. `resource()` — the method the agent was told to work
+   * like — concatenates. Same router, opposite result, and the one that lost is
+   * the model endpoint that spends money.
    */
-  test("does NOT inherit the enclosing router's middlewares, as nested routers do not", () => {
+  test("inherits the enclosing router's middlewares, exactly as resource() does", () => {
+    class Orders extends ResourceController {
+      list() {
+        return [];
+      }
+      store() {
+        return {};
+      }
+      show() {
+        return {};
+      }
+      update() {
+        return {};
+      }
+      delete() {
+        return {};
+      }
+    }
+
     class Api extends ApiRouter {
       middlewares = ["auth"];
       routes = {
         "/chat": this.agent(ChatController),
+        "/orders/:id": this.resource(Orders),
         "/plain": this.get(() => ({ ok: true })),
       };
     }
 
     const flat = createFlatApiRoutes({ "/": Api });
 
-    expect(flat["/chat"]!.POST!.middleware).toEqual([]);
+    for (const path of ["/chat", "/chat/attach", "/chat/stop", "/chat/files"]) {
+      expect(flat[path]!.POST!.middleware).toEqual(["auth"]);
+    }
+    expect(flat["/orders"]!.GET!.middleware).toEqual(["auth"]);
     expect(flat["/plain"]!.GET!.middleware).toEqual(["auth"]);
+  });
+
+  /**
+   * Declaration order must not decide whether the agent is guarded. `routes`
+   * and `middlewares` are both class fields, so writing `middlewares` below
+   * `routes` means it is still `[]` when `this.agent()` runs — which is why the
+   * router instance is captured and read at flatten time instead.
+   */
+  test("is guarded even when middlewares is declared after routes", () => {
+    class Api extends ApiRouter {
+      routes = {
+        "/chat": this.agent(ChatController),
+      };
+      middlewares = ["auth"];
+    }
+
+    const flat = createFlatApiRoutes({ "/": Api });
+    expect(flat["/chat"]!.POST!.middleware).toEqual(["auth"]);
+  });
+
+  test("puts the router's guards before the per-method ones", () => {
+    class Api extends ApiRouter {
+      middlewares = ["auth"];
+      routes = {
+        "/chat": this.agent(ChatController).middleware({ upload: "rate-limit" }),
+      };
+    }
+
+    const flat = createFlatApiRoutes({ "/": Api });
+
+    expect(flat["/chat/files"]!.POST!.middleware).toEqual(["auth", "rate-limit"]);
+    expect(flat["/chat"]!.POST!.middleware).toEqual(["auth"]);
+  });
+
+  /**
+   * A router nested inside another still replaces its parent's list rather than
+   * concatenating — that predates this method and applies to every
+   * `"/sub": SubRouter` in the framework. What matters for an agent is that it
+   * lands on the same list its siblings inside `Nested` land on, which is
+   * `Nested`'s.
+   */
+  test("takes the middlewares of the router it is written in, not the one above", () => {
+    class Nested extends ApiRouter {
+      middlewares = ["tenant"];
+      routes = {
+        "/chat": this.agent(ChatController),
+        "/plain": this.get(() => ({ ok: true })),
+      };
+    }
+    class Api extends ApiRouter {
+      middlewares = ["auth"];
+      routes = { "/ai": Nested };
+    }
+
+    const flat = createFlatApiRoutes({ "/": Api });
+
+    expect(flat["/ai/chat"]!.POST!.middleware).toEqual(["tenant"]);
+    expect(flat["/ai/plain"]!.GET!.middleware).toEqual(["tenant"]);
   });
 
   test("mounts alongside ordinary routes without disturbing them", () => {

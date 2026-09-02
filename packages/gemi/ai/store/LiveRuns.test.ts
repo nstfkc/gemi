@@ -139,6 +139,83 @@ describe("MemoryLiveRuns", () => {
     runs.clear();
   });
 
+  /**
+   * The mount-time reattach: a client with no cursor of its own. Asking for 0
+   * would be a 410 on any run past `maxFrames`, so no cursor means the tail.
+   */
+  test("with no cursor, starts at the oldest frame it still has", async () => {
+    const runs = new MemoryLiveRuns({ maxFrames: 4 });
+    const run = new StubAgentRun("run_k");
+    runs.register(run, { threadId: "t1" });
+
+    for (let i = 0; i < 10; i++) {
+      run.emit(textDelta(String(i)));
+    }
+    run.finish();
+    await settle();
+
+    const frames = await collect(runs.replay("run_k"));
+    expect(frames.map((f) => f.seq)).toEqual([6, 7, 8, 9]);
+    runs.clear();
+  });
+
+  test("with no cursor and nothing evicted, replays the whole run", async () => {
+    const runs = new MemoryLiveRuns();
+    const run = new StubAgentRun("run_l");
+    runs.register(run, { threadId: "t1" });
+
+    run.emit(textDelta("a"));
+    run.emit(textDelta("b"));
+    run.finish();
+    await settle();
+
+    const frames = await collect(runs.replay("run_l"));
+    expect(frames.map((f) => f.seq)).toEqual([0, 1]);
+    runs.clear();
+  });
+
+  test("with no cursor on a run that has emitted nothing, waits for the first frame", async () => {
+    const runs = new MemoryLiveRuns();
+    const run = new StubAgentRun("run_m");
+    runs.register(run, { threadId: "t1" });
+
+    const collected = collect(runs.replay("run_m"));
+    await settle();
+
+    run.emit(textDelta("a"));
+    run.finish();
+
+    expect((await collected).map((f) => f.seq)).toEqual([0]);
+    runs.clear();
+  });
+
+  /**
+   * Retention is this class's job and runs on its own clock. It used to run
+   * behind the hook chain, which is app code: `onAwaitingInput` is documented
+   * as the place to notify an approver, and a `fetch` with no timeout never
+   * settles — so one hanging hook pinned its run, its frames and everything
+   * they close over in the map for the life of the process. A rejection was
+   * handled; a promise that simply never settles was not.
+   */
+  test("evicts on the ttl clock even when a hook never settles", async () => {
+    const runs = new MemoryLiveRuns({ ttlMs: 10 });
+    const run = new StubAgentRun("run_n");
+    runs.register(run, {
+      threadId: "t1",
+      // The webhook that never answers.
+      onEvent: () => new Promise<void>(() => {}),
+    });
+
+    run.emit(textDelta("a"));
+    run.finish();
+
+    await new Promise((resolve) => setTimeout(resolve, 40));
+
+    expect(await runs.find({ threadId: "t1" })).toBeNull();
+    expect(runs.get("run_n")).toBeNull();
+    expect(runs.size).toBe(0);
+  });
+
   test("holds a finished run for ttlMs, then evicts it", async () => {
     const runs = new MemoryLiveRuns({ ttlMs: 10 });
     const run = new StubAgentRun("run_g");

@@ -130,7 +130,13 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
    * the next turn, so none of them gets an endpoint of its own.
    */
   async stream(req: HttpRequest<any, any> = new HttpRequest()): Promise<Response> {
-    const body = await readJsonBody(req);
+    const parsed = await readJsonBody(req);
+    if (parsed.error) {
+      // Before anything is registered or charged for. A run started off a body
+      // we could not read would answer nothing, at the user's expense.
+      return invalidRequest(parsed.error);
+    }
+    const body = parsed.body;
     const threadId = typeof body.threadId === "string" ? body.threadId : undefined;
     const turn = toClientTurn(body);
 
@@ -138,6 +144,14 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
     // thread the server owns the history, without one the client carries it.
     // Nothing else below branches on it, which is why stateless keeps working
     // even for an app that never configures a store.
+    //
+    // The `threadId` is the client's, and nothing here checks that this caller
+    // owns it — `AgentStore` cannot, since it holds no user. A `threadId` is
+    // therefore a capability and has to be unguessable (`createThread` mints a
+    // uuid) and, for anything that matters, checked: override `instructions()`
+    // or a `store` that scopes by `req.user`. The framework's job is to make
+    // sure the route is behind the router's middleware in the first place,
+    // which `ApiRouter.agent()` now does.
     const messages = threadId
       ? await this.store.loadThread(threadId)
       : Array.isArray(body.messages)
@@ -175,9 +189,18 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
    * `POST /<path>/attach` — subscribe to a run already in progress, from a
    * cursor. This is a read of a live run, not a continuation of a stopped one:
    * the work never paused, the listener changed.
+   *
+   * The cursor is `from`, else `Last-Event-ID`, else the oldest frame still
+   * buffered. A cursor the buffer has dropped is a 410 naming what survives;
+   * *no* cursor is the tail, because a page reattaching on mount has no
+   * transcript to leave a hole in. See `resolveCursor`.
    */
   async attach(req: HttpRequest<any, any> = new HttpRequest()): Promise<Response> {
-    const body = await readJsonBody(req);
+    const parsed = await readJsonBody(req);
+    if (parsed.error) {
+      return invalidRequest(parsed.error);
+    }
+    const body = parsed.body;
     const threadId =
       typeof body.threadId === "string" ? body.threadId : searchParam(req, "threadId");
 
@@ -229,9 +252,22 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
    * The terminal events — the stopped tool results, the aborted message — go
    * out on the run's own stream, so whoever is watching it sees the ending,
    * and `onMessage` records it whether anyone is watching or not.
+   *
+   * Answers `{ stopped }` normally, and a `Response` only to reject a request
+   * it could not read — the union is the 400, not a second success shape.
    */
-  async stop(req: HttpRequest<any, any> = new HttpRequest()): Promise<{ stopped: boolean }> {
-    const body = await readJsonBody(req);
+  async stop(
+    req: HttpRequest<any, any> = new HttpRequest(),
+  ): Promise<{ stopped: boolean } | Response> {
+    const parsed = await readJsonBody(req);
+    if (parsed.error) {
+      // `{ stopped: false }` would be the wrong answer as well as the wrong
+      // status: it means "there was nothing to stop", and the truth is that we
+      // could not tell what to stop. A client that believes the first one stops
+      // asking, and the run keeps going.
+      return invalidRequest(parsed.error);
+    }
+    const body = parsed.body;
 
     let runId = typeof body.runId === "string" ? body.runId : undefined;
     if (!runId && typeof body.threadId === "string") {
@@ -412,28 +448,73 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
 // --- request plumbing ----------------------------------------------------
 
 /**
- * The body, as JSON, or `{}`.
+ * A body, or the reason there is not one.
+ *
+ * Deliberately one shape with an optional `error` rather than a discriminated
+ * union on `ok`: this package compiles with `strict: false`, and without
+ * `strictNullChecks` TypeScript will not narrow a union by a boolean
+ * discriminant — `if (!parsed.ok)` leaves `parsed.message` an error. A field
+ * that is either set or not needs no narrowing to read.
+ */
+type ParsedBody = { body: Record<string, any>; error?: string };
+
+/**
+ * The body, as JSON — or a reason it is not.
  *
  * Read off the raw request rather than through `req.input()`: that path matches
  * `Content-Type` exactly, so `application/json; charset=utf-8` — which several
  * HTTP clients send by default — parses as an empty body, and an agent turn
  * that silently loses its text is a bad way to find that out.
+ *
+ * The three cases are kept apart deliberately. NO body is a real request — a
+ * reattach, or a turn that just lets the model continue — and reads as `{}`. A
+ * body that will not parse, or that parses to something other than an object,
+ * is a failed request and has to say so: folding it into `{}` made a truncated
+ * proxy response or a mis-serialized client indistinguishable from an empty
+ * turn, so `stream` billed a model call with no history and no turn and threw
+ * the user's actual message away. That presents as the model hallucinating
+ * rather than as an error, which is the expensive way to debug it. Pre-flight
+ * failures stay ordinary HTTP errors and never reach the event stream.
+ *
+ * An array counts as malformed even though `typeof [] === "object"`: nothing
+ * downstream reads a positional body, so `[1,2,3]` could only ever have run as
+ * an empty turn.
  */
-async function readJsonBody(req: HttpRequest<any, any>): Promise<Record<string, any>> {
+async function readJsonBody(req: HttpRequest<any, any>): Promise<ParsedBody> {
   const raw = req?.rawRequest;
   if (!raw || raw.method === "GET" || raw.method === "HEAD" || !raw.body) {
-    return {};
+    return { body: {} };
   }
+
+  let text: string;
   try {
-    const text = await raw.text();
-    if (!text) {
-      return {};
-    }
-    const parsed = JSON.parse(text);
-    return parsed && typeof parsed === "object" ? parsed : {};
+    text = await raw.text();
   } catch {
-    return {};
+    // A body that stopped arriving mid-flight. Same class of failure as one
+    // that arrived truncated, and the same answer.
+    return { body: {}, error: "The request body could not be read." };
   }
+
+  if (!text.trim()) {
+    return { body: {} };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { body: {}, error: "The request body is not valid JSON." };
+  }
+
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { body: {}, error: "The request body must be a JSON object." };
+  }
+
+  return { body: parsed as Record<string, any> };
+}
+
+function invalidRequest(message: string): Response {
+  return jsonResponse(400, { code: "invalid_request", message });
 }
 
 /**
@@ -461,15 +542,25 @@ function toClientTurn(body: Record<string, any>): ClientTurn | undefined {
 }
 
 /**
- * Where to resume from.
+ * Where to resume from, or `undefined` for "wherever you still can".
  *
  * An explicit `from` wins, because a client that tracked its own position knows
  * something the transport does not. Otherwise `Last-Event-ID` — the browser
  * sends it on its own when an `EventSource` reconnects, and the frames put
  * `seq` in `id:` precisely so that header is already the right question. It
  * names the last event *received*, so the resume point is one past it.
+ *
+ * With neither, the answer is `undefined` and NOT 0. A client reattaching on
+ * mount is a fresh POST from a page that has just loaded: no `Last-Event-ID`,
+ * and no cursor of its own, because the only handle it was given is the
+ * `threadId`. Reading that as "resume from frame 0" asked `replay` for a frame
+ * every run longer than `maxFrames` has already evicted, so the mount-time
+ * reattach — the one case `/attach` exists for — 410'd on exactly the long runs
+ * it was meant to rescue, and the documented remedy of reloading the thread
+ * does not help because the store is only written at run end. `undefined` means
+ * the tail, which is all such a client can use anyway.
  */
-function resolveCursor(req: HttpRequest<any, any>, body: Record<string, any>): number {
+function resolveCursor(req: HttpRequest<any, any>, body: Record<string, any>): number | undefined {
   if (typeof body.from === "number" && Number.isFinite(body.from)) {
     return Math.max(0, Math.floor(body.from));
   }
@@ -480,7 +571,7 @@ function resolveCursor(req: HttpRequest<any, any>, body: Record<string, any>): n
       return Math.max(0, seq + 1);
     }
   }
-  return 0;
+  return undefined;
 }
 
 function searchParam(req: HttpRequest<any, any>, key: string): string | undefined {
