@@ -1,0 +1,666 @@
+/** @vitest-environment jsdom */
+import { act, cleanup, render } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import type { AgentStreamFrame } from "./types";
+import { useChat, type UseChatResult } from "./useChat";
+
+/**
+ * The hook is thin on purpose — the decoding and the message reducer are tested
+ * on their own, without a DOM — so what is left here is the part that only
+ * exists in React: which URL is called with what body, when the UI is allowed
+ * to say it is idle, and what happens on unmount.
+ *
+ * `useChat`'s path parameter is keyed off the app's `RPC`, which has no agent
+ * routes in the package itself, so the calls below go through `any`. The types
+ * are exercised by `Agent.test-d.ts` and by an application, not from here.
+ */
+
+type Api = UseChatResult<never>;
+
+function encode(frames: AgentStreamFrame[]) {
+  return frames.map((f) => `id: ${f.seq}\ndata: ${JSON.stringify(f.event)}\n\n`).join("");
+}
+
+function streamed(frames: AgentStreamFrame[]) {
+  return new Response(encode(frames), {
+    status: 200,
+    headers: { "Content-Type": "text/event-stream" },
+  });
+}
+
+/** A stream the test keeps open, so a run can be interrupted halfway. */
+function controlled() {
+  const encoder = new TextEncoder();
+  let controller!: ReadableStreamDefaultController<Uint8Array>;
+  const body = new ReadableStream<Uint8Array>({
+    start(c) {
+      controller = c;
+    },
+  });
+  return {
+    response: new Response(body, { status: 200 }),
+    push(...frames: AgentStreamFrame[]) {
+      controller.enqueue(encoder.encode(encode(frames)));
+    },
+    close() {
+      controller.close();
+    },
+    // What a real fetch does when its signal fires, and the reason `stop()` can
+    // trust the loop to end.
+    abort() {
+      controller.error(Object.assign(new Error("aborted"), { name: "AbortError" }));
+    },
+  };
+}
+
+const ANSWER: AgentStreamFrame[] = [
+  { seq: 0, event: { type: "run-start", runId: "run_1", threadId: "th_9" } },
+  { seq: 1, event: { type: "message-start", messageId: "m1", role: "assistant" } },
+  { seq: 2, event: { type: "text-delta", messageId: "m1", delta: "Hi there." } },
+  { seq: 3, event: { type: "message-end", messageId: "m1", finishReason: "stop" } },
+  { seq: 4, event: { type: "run-end", runId: "run_1", finishReason: "stop" } },
+];
+
+const ASKING: AgentStreamFrame[] = [
+  { seq: 0, event: { type: "run-start", runId: "run_2", threadId: "th_9" } },
+  { seq: 1, event: { type: "message-start", messageId: "m2", role: "assistant" } },
+  { seq: 2, event: { type: "text-delta", messageId: "m2", delta: "I need two things." } },
+  {
+    seq: 3,
+    event: {
+      type: "awaiting-input",
+      runId: "run_2",
+      pending: [
+        {
+          toolCallId: "tc_1",
+          name: "charge",
+          input: { amountCents: 500 },
+          kind: "approval",
+          signature: "sig_one",
+        },
+        {
+          toolCallId: "tc_2",
+          name: "refundOrder",
+          input: { orderId: "o_1" },
+          kind: "approval",
+          signature: "sig_two",
+        },
+      ],
+    },
+  },
+  { seq: 4, event: { type: "message-end", messageId: "m2", finishReason: "awaiting-input" } },
+  { seq: 5, event: { type: "run-end", runId: "run_2", finishReason: "awaiting-input" } },
+];
+
+let fetchMock: ReturnType<typeof vi.fn>;
+
+function mount(params: Record<string, unknown> = {}) {
+  const box: { api: Api } = { api: null as unknown as Api };
+  function Harness() {
+    box.api = (useChat as any)("/chat", params);
+    return <span data-testid="status">{box.api.status}</span>;
+  }
+  const rendered = render(<Harness />);
+  return { ...rendered, box };
+}
+
+function calls() {
+  return fetchMock.mock.calls as [string, RequestInit][];
+}
+
+function bodyOf(index: number) {
+  return JSON.parse(calls()[index]![1]!.body as string);
+}
+
+beforeEach(() => {
+  fetchMock = vi.fn(async () => streamed(ANSWER));
+  vi.stubGlobal("fetch", fetchMock);
+});
+
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+
+describe("routes", () => {
+  test("every route is derived from the path exactly as mounted", async () => {
+    const run = controlled();
+    fetchMock.mockImplementationOnce(async (_url: string, init: RequestInit) => {
+      init?.signal?.addEventListener("abort", () => run.abort());
+      return run.response;
+    });
+    const { box } = mount({ threadId: "th_9", attach: false });
+
+    await act(async () => {
+      void box.api.sendMessage("hello");
+    });
+    await act(async () => {
+      run.push(ANSWER[0]!);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await box.api.stop();
+    });
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ fileId: "f_1" })));
+    await act(async () => {
+      await box.api.attach(new File(["x"], "a.txt", { type: "text/plain" }));
+    });
+
+    expect(calls().map((c) => c[0])).toEqual(["/api/chat", "/api/chat/stop", "/api/chat/files"]);
+  });
+
+  test("uploading returns the id alongside the file's own name and type", async () => {
+    const { box } = mount({ attach: false });
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ fileId: "f_1" })));
+
+    let result: unknown;
+    await act(async () => {
+      result = await box.api.attach(new File(["x"], "invoice.pdf", { type: "application/pdf" }));
+    });
+
+    expect(result).toEqual({ fileId: "f_1", name: "invoice.pdf", mimeType: "application/pdf" });
+    expect(calls()[0]![1]!.body).toBeInstanceOf(FormData);
+  });
+});
+
+describe("sendMessage", () => {
+  test("shows the user's turn before the server has said anything", async () => {
+    // A never-resolving request: the point is what the UI does while it waits.
+    fetchMock.mockImplementation(() => new Promise(() => {}));
+    const { box } = mount({ attach: false });
+
+    await act(async () => {
+      void box.api.sendMessage("hello");
+    });
+
+    expect(box.api.messages).toHaveLength(1);
+    expect(box.api.messages[0]).toMatchObject({
+      role: "user",
+      content: [{ type: "text", text: "hello" }],
+    });
+    expect(box.api.status).toBe("submitted");
+  });
+
+  test("streams the answer and lands back on idle", async () => {
+    const { box } = mount({ attach: false });
+
+    await act(async () => {
+      await box.api.sendMessage("hello");
+    });
+
+    expect(box.api.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
+    expect(box.api.messages[1]!.content).toEqual([{ type: "text", text: "Hi there." }]);
+    expect(box.api.messages[1]!.finishReason).toBe("stop");
+    expect(box.api.status).toBe("idle");
+    expect(box.api.threadId).toBe("th_9");
+  });
+
+  test("stateless: the client carries the history, and never the new turn twice", async () => {
+    // A server that names no thread. The transcript is the client's to keep,
+    // and it is the transcript *before* this turn — the turn itself travels in
+    // `turn`, so including it would show the model the same message twice.
+    const anonymous = ANSWER.map((frame, index) =>
+      index === 0 ? { seq: 0, event: { type: "run-start" as const, runId: "run_1" } } : frame,
+    );
+    fetchMock.mockImplementation(async () => streamed(anonymous));
+    const { box } = mount({ attach: false });
+
+    await act(async () => {
+      await box.api.sendMessage("first");
+    });
+    await act(async () => {
+      await box.api.sendMessage("second");
+    });
+
+    expect(bodyOf(0)).toEqual({ turn: { text: "first" }, messages: [] });
+    const second = bodyOf(1);
+    expect(second.turn).toEqual({ text: "second" });
+    expect(second.messages).toHaveLength(2);
+    expect(second.threadId).toBeUndefined();
+  });
+
+  test("once the server names a thread the client stops carrying the history", async () => {
+    // Sending it anyway would be a second copy of a transcript the store
+    // already has, growing every turn.
+    const { box } = mount({ attach: false });
+
+    await act(async () => {
+      await box.api.sendMessage("first");
+    });
+    await act(async () => {
+      await box.api.sendMessage("second");
+    });
+
+    expect(bodyOf(1)).toEqual({ turn: { text: "second" }, threadId: "th_9" });
+  });
+
+  test("a threadId means the server owns the history", async () => {
+    const { box } = mount({ threadId: "th_1", attach: false });
+
+    await act(async () => {
+      await box.api.sendMessage({ text: "hi", files: [{ fileId: "f_1" }] });
+    });
+
+    expect(bodyOf(0)).toEqual({
+      turn: { text: "hi", files: [{ fileId: "f_1" }] },
+      threadId: "th_1",
+    });
+  });
+
+  test("body and headers ride along", async () => {
+    const { box } = mount({
+      attach: false,
+      body: { locale: "en" },
+      headers: { "X-Tenant": "acme" },
+    });
+
+    await act(async () => {
+      await box.api.sendMessage("hi");
+    });
+
+    expect(bodyOf(0).locale).toBe("en");
+    expect((calls()[0]![1]!.headers as Record<string, string>)["X-Tenant"]).toBe("acme");
+  });
+});
+
+describe("awaiting input", () => {
+  test("a parked run is neither streaming nor idle", async () => {
+    fetchMock.mockResolvedValueOnce(streamed(ASKING));
+    const { box } = mount({ attach: false });
+
+    await act(async () => {
+      await box.api.sendMessage("refund me");
+    });
+
+    expect(box.api.status).toBe("awaiting-input");
+    expect(box.api.pending).toHaveLength(2);
+  });
+
+  test("approvals answered in one tick become one turn, with the signatures untouched", async () => {
+    // Sent separately, the first turn would deny the second call: a turn that
+    // leaves a pending call unanswered refuses it.
+    fetchMock.mockResolvedValueOnce(streamed(ASKING));
+    const { box } = mount({ attach: false });
+    await act(async () => {
+      await box.api.sendMessage("refund me");
+    });
+
+    await act(async () => {
+      await Promise.all([
+        box.api.approve("tc_1", true),
+        box.api.approve("tc_2", false, "too old"),
+      ]);
+    });
+
+    expect(calls()).toHaveLength(2);
+    expect(bodyOf(1).turn).toEqual({
+      toolResults: [
+        { toolCallId: "tc_1", signature: "sig_one", approve: true },
+        { toolCallId: "tc_2", signature: "sig_two", approve: false, reason: "too old" },
+      ],
+    });
+  });
+
+  test("answer() carries a value under the same signature", async () => {
+    fetchMock.mockResolvedValueOnce(streamed(ASKING));
+    const { box } = mount({ attach: false });
+    await act(async () => {
+      await box.api.sendMessage("refund me");
+    });
+
+    await act(async () => {
+      await box.api.answer("tc_1", { answer: "the March invoice" });
+    });
+
+    expect(bodyOf(1).turn.toolResults).toEqual([
+      { toolCallId: "tc_1", signature: "sig_one", output: { answer: "the March invoice" } },
+    ]);
+  });
+
+  test("pending clears the moment a turn goes out", async () => {
+    fetchMock.mockResolvedValueOnce(streamed(ASKING));
+    fetchMock.mockImplementation(() => new Promise(() => {}));
+    const { box } = mount({ attach: false });
+    await act(async () => {
+      await box.api.sendMessage("refund me");
+    });
+
+    await act(async () => {
+      void box.api.sendMessage("actually, never mind");
+    });
+
+    expect(box.api.pending).toEqual([]);
+    expect(box.api.status).toBe("submitted");
+  });
+
+  test("answering a call this client is not holding is reported, not sent", async () => {
+    const { box } = mount({ attach: false });
+
+    await act(async () => {
+      await box.api.approve("tc_nope", true);
+    });
+
+    expect(calls()).toHaveLength(0);
+    expect(box.api.error).toMatchObject({ code: "invalid_tool_result", retryable: false });
+  });
+});
+
+describe("stop", () => {
+  test("the UI stops now, the run is ended by the route", async () => {
+    const run = controlled();
+    fetchMock.mockImplementation(async (_url: string, init: RequestInit) => {
+      init?.signal?.addEventListener("abort", () => run.abort());
+      return run.response;
+    });
+    const { box } = mount({ attach: false });
+
+    await act(async () => {
+      void box.api.sendMessage("write me an essay");
+    });
+    await act(async () => {
+      run.push(ANSWER[0]!, ANSWER[1]!, ANSWER[2]!);
+      await Promise.resolve();
+    });
+    expect(box.api.messages[1]!.content).toEqual([{ type: "text", text: "Hi there." }]);
+
+    await act(async () => {
+      await box.api.stop();
+    });
+
+    // The text the user already read is still there, marked as cut short.
+    expect(box.api.messages[1]!.content).toEqual([{ type: "text", text: "Hi there." }]);
+    expect(box.api.messages[1]!.finishReason).toBe("aborted");
+    expect(box.api.status).toBe("idle");
+    expect(calls()[1]![0]).toBe("/api/chat/stop");
+    expect(JSON.parse(calls()[1]![1]!.body as string)).toMatchObject({ runId: "run_1" });
+  });
+
+  test("nothing running means nothing to stop", async () => {
+    const { box } = mount({ attach: false });
+
+    await act(async () => {
+      await box.api.stop();
+    });
+
+    expect(calls()).toHaveLength(0);
+  });
+});
+
+describe("attach on mount", () => {
+  test("asks the attach route, from the cursor this client left off at", async () => {
+    fetchMock.mockResolvedValueOnce(streamed(ANSWER.slice(2)));
+    const { box } = mount({ threadId: "th_9" });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(calls()[0]![0]).toBe("/api/chat/attach");
+    expect(bodyOf(0)).toEqual({ threadId: "th_9", cursor: -1 });
+    // The tail of a message this client never saw start.
+    expect(box.api.messages).toHaveLength(1);
+    expect(box.api.messages[0]!.content).toEqual([{ type: "text", text: "Hi there." }]);
+    expect(box.api.status).toBe("idle");
+  });
+
+  test("resumes past what initialMessages already contain", async () => {
+    fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
+    mount({
+      threadId: "th_9",
+      initialMessages: [{ id: "m1", role: "user", content: [], createdAt: "" }],
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(bodyOf(0).threadId).toBe("th_9");
+  });
+
+  test("nothing in flight is an ordinary answer, not an error", async () => {
+    fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const { box } = mount({ threadId: "th_9" });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(box.api.status).toBe("idle");
+    expect(box.api.error).toBeNull();
+  });
+
+  test("no threadId, no probe: there is no handle to ask about", async () => {
+    mount({});
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(calls()).toHaveLength(0);
+  });
+
+  test("attach: false skips it", async () => {
+    mount({ threadId: "th_9", attach: false });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(calls()).toHaveLength(0);
+  });
+});
+
+describe("regenerate", () => {
+  test("drops the last assistant turn and re-runs from the user turn before it", async () => {
+    const { box } = mount({
+      attach: false,
+      initialMessages: [
+        { id: "u1", role: "user", content: [{ type: "text", text: "say hi" }], createdAt: "" },
+        {
+          id: "a1",
+          role: "assistant",
+          content: [{ type: "text", text: "no" }],
+          createdAt: "",
+          finishReason: "stop",
+        },
+      ],
+    });
+
+    await act(async () => {
+      await box.api.regenerate();
+    });
+
+    expect(bodyOf(0).turn).toEqual({ text: "say hi" });
+    // The user turn is re-sent, not duplicated.
+    expect(box.api.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
+    expect(box.api.messages[1]!.content).toEqual([{ type: "text", text: "Hi there." }]);
+  });
+
+  test("nothing to regenerate is a no-op", async () => {
+    const { box } = mount({ attach: false });
+
+    await act(async () => {
+      await box.api.regenerate();
+    });
+
+    expect(calls()).toHaveLength(0);
+  });
+});
+
+describe("errors", () => {
+  test("a pre-flight failure is an HTTP error translated into an AgentError", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: { message: "not signed in" } }), { status: 401 }),
+    );
+    const onError = vi.fn();
+    const { box } = mount({ attach: false, onError });
+
+    await act(async () => {
+      await box.api.sendMessage("hi");
+    });
+
+    expect(box.api.status).toBe("error");
+    expect(box.api.error).toEqual({ code: "unknown", message: "not signed in", retryable: false });
+    expect(onError).toHaveBeenCalledTimes(1);
+  });
+
+  test("429 is retryable and named", async () => {
+    fetchMock.mockResolvedValueOnce(new Response("slow down", { status: 429 }));
+    const { box } = mount({ attach: false });
+
+    await act(async () => {
+      await box.api.sendMessage("hi");
+    });
+
+    expect(box.api.error).toMatchObject({ code: "rate_limited", retryable: true });
+  });
+
+  test("an error event after the headers flushed reaches error and onError", async () => {
+    const onError = vi.fn();
+    fetchMock.mockResolvedValueOnce(
+      streamed([
+        { seq: 0, event: { type: "run-start", runId: "run_1" } },
+        {
+          seq: 1,
+          event: {
+            type: "error",
+            error: { code: "provider_error", message: "upstream 500", retryable: true },
+          },
+        },
+        { seq: 2, event: { type: "run-end", runId: "run_1", finishReason: "error" } },
+      ]),
+    );
+    const { box } = mount({ attach: false, onError });
+
+    await act(async () => {
+      await box.api.sendMessage("hi");
+    });
+
+    expect(box.api.error).toMatchObject({ code: "provider_error" });
+    expect(onError).toHaveBeenCalledTimes(1);
+  });
+
+  test("the next send clears it, so a retry does not have to", async () => {
+    fetchMock.mockResolvedValueOnce(new Response("nope", { status: 500 }));
+    const { box } = mount({ attach: false });
+    await act(async () => {
+      await box.api.sendMessage("hi");
+    });
+    expect(box.api.status).toBe("error");
+
+    await act(async () => {
+      await box.api.sendMessage("hi again");
+    });
+
+    expect(box.api.error).toBeNull();
+    expect(box.api.status).toBe("idle");
+  });
+});
+
+describe("lifecycle", () => {
+  test("onFinish fires once per completed message", async () => {
+    const onFinish = vi.fn();
+    const { box } = mount({ attach: false, onFinish });
+
+    await act(async () => {
+      await box.api.sendMessage("hi");
+    });
+
+    expect(onFinish).toHaveBeenCalledTimes(1);
+    expect(onFinish.mock.calls[0]![0]).toMatchObject({ id: "m1", finishReason: "stop" });
+  });
+
+  test("onAwaitingInput gets the pending calls", async () => {
+    const onAwaitingInput = vi.fn();
+    fetchMock.mockResolvedValueOnce(streamed(ASKING));
+    const { box } = mount({ attach: false, onAwaitingInput });
+
+    await act(async () => {
+      await box.api.sendMessage("hi");
+    });
+
+    expect(onAwaitingInput.mock.calls[0]![0]).toHaveLength(2);
+  });
+
+  test("unmount aborts the request in flight and sets no state after it", async () => {
+    const run = controlled();
+    let signal: AbortSignal | undefined;
+    fetchMock.mockImplementation(async (_url: string, init: RequestInit) => {
+      signal = init?.signal ?? undefined;
+      init?.signal?.addEventListener("abort", () => run.abort());
+      return run.response;
+    });
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { box, unmount } = mount({ attach: false });
+
+    await act(async () => {
+      void box.api.sendMessage("hi");
+    });
+    await act(async () => {
+      run.push(ANSWER[0]!, ANSWER[1]!);
+      await Promise.resolve();
+    });
+
+    unmount();
+    expect(signal!.aborted).toBe(true);
+
+    // Frames that were already on the wire when the component went away.
+    await act(async () => {
+      try {
+        run.push(ANSWER[2]!);
+        run.close();
+      } catch {
+        // The stream is already errored by the abort; either way nothing may
+        // reach React.
+      }
+      await Promise.resolve();
+    });
+
+    // React logs "update on an unmounted component" through console.error.
+    expect(error).not.toHaveBeenCalled();
+  });
+
+  test("a second send supersedes the first rather than interleaving two answers", async () => {
+    const first = controlled();
+    fetchMock.mockImplementationOnce(async (_url: string, init: RequestInit) => {
+      init?.signal?.addEventListener("abort", () => first.abort());
+      return first.response;
+    });
+    // A distinct run, whose frames number from zero again — which is exactly
+    // the case the cursor has to be told about.
+    fetchMock.mockImplementationOnce(async () =>
+      streamed([
+        { seq: 0, event: { type: "run-start", runId: "run_2", threadId: "th_9" } },
+        { seq: 1, event: { type: "message-start", messageId: "m2", role: "assistant" } },
+        { seq: 2, event: { type: "text-delta", messageId: "m2", delta: "Second." } },
+        { seq: 3, event: { type: "message-end", messageId: "m2", finishReason: "stop" } },
+        { seq: 4, event: { type: "run-end", runId: "run_2", finishReason: "stop" } },
+      ]),
+    );
+    const { box } = mount({ attach: false });
+
+    await act(async () => {
+      void box.api.sendMessage("one");
+    });
+    await act(async () => {
+      first.push(ANSWER[0]!, ANSWER[1]!, ANSWER[2]!);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await box.api.sendMessage("two");
+    });
+
+    // user, the interrupted assistant turn, user, the new answer.
+    expect(box.api.messages.map((m) => m.role)).toEqual([
+      "user",
+      "assistant",
+      "user",
+      "assistant",
+    ]);
+    // The interrupted turn keeps the text it had produced.
+    expect(box.api.messages[1]!.content).toEqual([{ type: "text", text: "Hi there." }]);
+    expect(box.api.messages[3]!.content).toEqual([{ type: "text", text: "Second." }]);
+    expect(box.api.status).toBe("idle");
+  });
+});
