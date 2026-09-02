@@ -18,6 +18,10 @@ import {
   type RouteHandler,
   type StreamHandler,
 } from "./ApiRouter";
+import { Agent, AgentTool, type ToolShapesOf } from "../ai/Agent";
+import { AgentController } from "../ai/AgentController";
+import { OpenAIProvider } from "../ai/AgentProvider";
+import { s } from "../ai/Schema";
 import { Controller } from "./Controller";
 import type { HttpRequest } from "./HttpRequest";
 
@@ -131,5 +135,86 @@ describe("this.stream()", () => {
       };
     }
     return R;
+  });
+});
+
+// --- agent routes --------------------------------------------------------
+
+const lookup = AgentTool.create({
+  name: "lookup",
+  description: "Look an order up",
+  inputSchema: s.object({ orderId: s.string() }),
+  outputSchema: s.object({ status: s.string() }),
+  execute: async () => ({ status: "paid" }),
+});
+
+const supportAgent = Agent.create({
+  name: "support",
+  provider: OpenAIProvider.model("gpt-5.4"),
+  tools: [lookup],
+});
+
+class ChatController extends AgentController<typeof supportAgent> {
+  agent = supportAgent;
+}
+
+class AgentRoot extends ApiRouter {
+  routes = {
+    "/chat": this.agent(ChatController),
+    "/guarded-chat": this.agent(ChatController).middleware({ stream: "auth", stop: ["auth"] }),
+    "/json": this.get(() => ({ ok: true })),
+  };
+}
+
+type AgentRPC = CreateRPC<AgentRoot>;
+type AgentKeys = keyof AgentRPC;
+
+/**
+ * An agent is one key, not four.
+ *
+ * `useChat("/chat")` reads `RPC` looking for `{ __agent: true }`, so the mounted
+ * path has to be the key — and `/chat/attach`, `/chat/stop` and `/chat/files`
+ * have to stay out of it. They are transport for the hook, not endpoints an app
+ * calls, and a `POST:/chat/stop` in the RPC types would offer an app an
+ * untyped, signature-less way to do what `stop()` already does.
+ */
+describe("CreateRPC for an agent route", () => {
+  test("keys the route by its mounted path", () => {
+    expectTypeOf<"/chat">().toExtend<AgentKeys>();
+    expectTypeOf<"/guarded-chat">().toExtend<AgentKeys>();
+  });
+
+  test("marks it so useChat can pick it out of the same RPC interface", () => {
+    expectTypeOf<AgentRPC["/chat"]["__agent"]>().toEqualTypeOf<true>();
+  });
+
+  test("carries the agent's tool shapes, not its tools", () => {
+    expectTypeOf<AgentRPC["/chat"]["tools"]>().toEqualTypeOf<
+      ToolShapesOf<typeof supportAgent.tools>
+    >();
+    expectTypeOf<AgentRPC["/chat"]["tools"]["lookup"]["input"]>().toEqualTypeOf<{
+      orderId: string;
+    }>();
+    expectTypeOf<AgentRPC["/chat"]["tools"]["lookup"]["output"]>().toEqualTypeOf<{
+      status: string;
+    }>();
+  });
+
+  test("does not emit a key per sub-route", () => {
+    expectTypeOf<"POST:/chat">().not.toExtend<AgentKeys>();
+    expectTypeOf<"POST:/chat/attach">().not.toExtend<AgentKeys>();
+    expectTypeOf<"POST:/chat/stop">().not.toExtend<AgentKeys>();
+    expectTypeOf<"POST:/chat/files">().not.toExtend<AgentKeys>();
+    expectTypeOf<"/chat/attach">().not.toExtend<AgentKeys>();
+  });
+
+  test("leaves the router's other routes alone", () => {
+    expectTypeOf<"GET:/json">().toExtend<AgentKeys>();
+  });
+
+  test("survives .middleware(), which returns the route", () => {
+    expectTypeOf<AgentRPC["/guarded-chat"]["tools"]>().toEqualTypeOf<
+      ToolShapesOf<typeof supportAgent.tools>
+    >();
   });
 });

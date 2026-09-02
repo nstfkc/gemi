@@ -1,4 +1,10 @@
 import type { RemoveGroupPrefix } from "../client/types";
+import type {
+  AgentController,
+  AgentMiddlewareConfig,
+  AgentRoute,
+  AgentRouteRPC,
+} from "../ai/AgentController";
 import { isConstructor } from "../internal/isConstructor";
 import type { KeyAndValue, KeyAndValueToObject } from "../internal/type-utils";
 import { Controller, ResourceController, type ControllerMethods } from "./Controller";
@@ -190,6 +196,7 @@ export type ApiRoutes = Record<
   | RouteHandlers
   | typeof ApiRouter
   | ResourceRoutes<any>
+  | AgentRoute<any>
 >;
 
 export type ResourceRoutes<T extends new () => ResourceController> = {
@@ -323,6 +330,35 @@ export class ApiRouter {
     return new ResourceRouteHandlers(Controller) as unknown as ResourceRoute<T>;
   }
 
+  /**
+   * Mounts an agent controller under one path, the way `resource()` mounts a
+   * resource controller: one call, four routes, all of them this controller's.
+   *
+   * ```ts
+   * "/chat": this.agent(ChatController).middleware({ stream: "auth" }),
+   * ```
+   *
+   *   POST /chat        → stream   every client turn
+   *   POST /chat/attach → attach   reattach to a run in progress
+   *   POST /chat/stop   → stop     explicit cancel
+   *   POST /chat/files  → upload   attachments
+   *
+   * One mounted path is what gives the client one key to name — `useChat("/chat")`
+   * — and the sub-routes deliberately do not appear in `CreateRPC` as keys of
+   * their own: they are transport for the hook, not endpoints an app calls.
+   *
+   * Guard it with `.middleware()`, not with the router's `middlewares`. Route
+   * flattening treats an agent the way it treats a nested `SubRouter`, and it
+   * replaces the enclosing router's middleware list when it descends rather
+   * than concatenating — so `middlewares = ["auth"]` next to this line covers
+   * `this.post(...)` and does not cover the agent. The four names exist so each
+   * route can be guarded on its own anyway: `upload` and `stream` are not
+   * equally cheap, and `attach` is a read.
+   */
+  public agent<T extends new () => AgentController<any>>(Controller: T): AgentRoute<T> {
+    return createAgentRouteHandlers(Controller) as unknown as AgentRoute<T>;
+  }
+
   public file<Input, Output, Params>(handler: CallbackHandler<Input, Output, Params>): FileHandler;
   public file<T extends new () => Controller, K extends ControllerMethods<T>>(
     handler: T,
@@ -362,6 +398,51 @@ export class ApiRouter {
   public proxy(url: string, headers: Record<string, string> = {}) {
     return new ProxyHandler(url, headers);
   }
+}
+
+/**
+ * The runtime behind `this.agent()`.
+ *
+ * It is an `ApiRouter` subclass rather than a shape of its own, and that is the
+ * whole trick: an agent mounts four paths under one key, which is exactly what
+ * a nested router already does, so `createFlatApiRoutes` needs no new branch
+ * and the sub-paths get prefixing, middleware and OPTIONS for free. A parallel
+ * mechanism would have to reimplement all of it, and would be the second place
+ * to fix when route flattening changes.
+ *
+ * The four handlers are built once and shared with `routes`, because
+ * `.middleware()` is called on the class — at `routes = {...}` time — while
+ * `routes` is read off an instance the dispatcher constructs later. Rebuilding
+ * them per instance would quietly drop every per-method middleware.
+ */
+function createAgentRouteHandlers<T extends new () => AgentController<any>>(Controller: T) {
+  const handlers = {
+    stream: new RouteHandler("POST", Controller as any, "stream"),
+    attach: new RouteHandler("POST", Controller as any, "attach"),
+    stop: new RouteHandler("POST", Controller as any, "stop"),
+    upload: new RouteHandler("POST", Controller as any, "upload"),
+  };
+
+  return class AgentRouteHandlers extends ApiRouter {
+    static __internal_brand = "AgentRoute" as const;
+    static controller = Controller;
+    static handlers = handlers;
+
+    routes: ApiRoutes = {
+      "/": handlers.stream,
+      "/attach": handlers.attach,
+      "/stop": handlers.stop,
+      "/files": handlers.upload,
+    };
+
+    static middleware(config: AgentMiddlewareConfig) {
+      if (config.stream) handlers.stream.middleware(config.stream);
+      if (config.attach) handlers.attach.middleware(config.attach);
+      if (config.stop) handlers.stop.middleware(config.stop);
+      if (config.upload) handlers.upload.middleware(config.upload);
+      return this;
+    }
+  };
 }
 
 type TestControllerMethod<T extends new () => Controller, K extends string> =
@@ -427,15 +508,20 @@ type RouteParser<
   Prefix extends PropertyKey = "",
   K extends keyof T = keyof T,
 > = K extends any
-  ? T[K] extends ResourceRoutes<any>
-    ? ResourceRoutesParser<T[K], ParsePrefixAndKey<Prefix, K>>
-    : T[K] extends RouteHandler<any, any, any, any>
-      ? RouteHandlerParser<T[K], ParsePrefixAndKey<Prefix, K>>
-      : T[K] extends new () => ApiRouter
-        ? RouterInstanceParser<T[K], ParsePrefixAndKey<Prefix, K>>
-        : T[K] extends RouteHandlers
-          ? RouteHandlersParser<T[K], `${Prefix & string}${K extends "/" ? "" : K & string}`>
-          : never
+  ? // Checked before every other branch: `RouteHandlers` is fully optional, so
+    // *every* object type extends it, and an agent route reaching that arm
+    // would silently produce nothing.
+    T[K] extends AgentRoute<infer C>
+    ? KeyAndValue<ParsePrefixAndKey<Prefix, K>, AgentRouteRPC<C>>
+    : T[K] extends ResourceRoutes<any>
+      ? ResourceRoutesParser<T[K], ParsePrefixAndKey<Prefix, K>>
+      : T[K] extends RouteHandler<any, any, any, any>
+        ? RouteHandlerParser<T[K], ParsePrefixAndKey<Prefix, K>>
+        : T[K] extends new () => ApiRouter
+          ? RouterInstanceParser<T[K], ParsePrefixAndKey<Prefix, K>>
+          : T[K] extends RouteHandlers
+            ? RouteHandlersParser<T[K], `${Prefix & string}${K extends "/" ? "" : K & string}`>
+            : never
   : never;
 
 export type CreateRPC<T extends ApiRouter, Prefix extends PropertyKey = ""> = KeyAndValueToObject<
