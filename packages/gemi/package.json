@@ -22,6 +22,8 @@
   "exports": {
     "./http": "./http/index.ts",
     "./client": "./client/index.ts",
+    "./ai": "./ai/index.ts",
+    "./ai/client": "./ai/client/index.ts",
     "./testing": "./testing/index.ts",
     "./app": "./app/index.ts",
     "./facades": "./facades/index.ts",
@@ -50,7 +52,7 @@
     "build": "NODE_ENV=production bun run build:core && bun run build:bin && bun run build:types && bun run build:client && bun run build:plugin && bun run build:ts-plugin && bun run build:client-types && bun run build:augmentation",
     "build:core": "bun ./scripts/build.ts",
     "build:bin": "bun build --outdir=./dist/bin --target=bun --external=vite --external=react-dom --external=react/jsx-runtime --external=bun --external=sharp --external=@azure/storage-blob --sourcemap ./bin/gemi.ts ./bin/orm-generator.ts && bun ./scripts/prepare-bin.ts",
-    "build:client": "rm -rf dist/client dist/testing dist/chunks && vite build -c vite.client.config.mts",
+    "build:client": "rm -rf dist/client dist/testing dist/ai/client dist/chunks && vite build -c vite.client.config.mts",
     "build:plugin": "vite build -c vite.plugin.config.mts",
     "build:ts-plugin": "bun ./scripts/build-ts-plugin.ts",
     "build:types": "tsc",

@@ -55,6 +55,10 @@ const result = await Bun.build({
     "./support/index.ts",
     "./database/index.ts",
     "./orm/index.ts",
+    // Server half of the agent module. Its browser half, `./ai/client`, is a
+    // React entry and is built by `vite.client.config.mts` instead — see the
+    // note at the top of `ai/index.ts` for why the two are separate at all.
+    "./ai/index.ts",
     // The entry `gemi run` spawns. It belongs in *this* build rather than one of
     // its own: `splitting: true` is what puts the `Command` base class in a
     // chunk shared with `dist/services/index.js`, so the published runner and

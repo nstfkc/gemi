@@ -14,6 +14,13 @@ export default defineConfig({
       entry: {
         "client/index": resolve(__dirname, "client/index.ts"),
         "testing/index": resolve(__dirname, "testing/index.ts"),
+        // `gemi/ai/client` — `useChat` and nothing else. In this build rather
+        // than `scripts/build.ts` because it is React and browser-targeted, and
+        // for the same shared-chunk reason as the two above: it reaches
+        // `client/useParams`, so building it separately would give it a second
+        // copy of `RouteStateContext` and `useParams()` would read a context
+        // no provider fills.
+        "ai/client/index": resolve(__dirname, "ai/client/index.ts"),
       },
       formats: ["es"],
       fileName: (_format, entryName) => `${entryName}.js`,
