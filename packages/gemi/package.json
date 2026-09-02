@@ -59,6 +59,7 @@
     "build:client-types": "tsc -p tsconfig.browser.json",
     "test": "bun --bun vitest",
     "test:types": "vitest run --typecheck.only",
+    "test:live": "bun --bun vitest run ai/live",
     "test:packaging": "bun --bun vitest run --config vitest.packaging.config.ts",
     "build:publish": "bun scripts/build-publish.ts",
     "prepublishOnly": "echo 'Do not publish from this directory \u2014 its exports point at TS source. Run: bun run build:publish, then publish from .publish/' && exit 1",
