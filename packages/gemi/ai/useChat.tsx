@@ -78,6 +78,28 @@ export interface UseChatParams<P extends keyof AgentRoutes> {
   onFinish?: (message: AgentMessage<ToolsOf<P>, OutputOf<P>>) => void;
   onError?: (error: AgentError) => void;
   onAwaitingInput?: (pending: PendingToolCall<ToolsOf<P>>[]) => void;
+  /**
+   * The mount probe found no run to attach to.
+   *
+   * On one server this means what it says, and there is nothing to do. On more
+   * than one it is ambiguous in a way neither end can resolve: a run lives in
+   * the process that started it, `find` only ever searches that process, and a
+   * refresh routed to a different instance gets the same answer as a thread
+   * with nothing running. The server cannot tell the two apart, so it does not
+   * pretend to.
+   *
+   * What an app can do is re-read the thread — the run is still going wherever
+   * it is, and its messages land in the store when it finishes, so refetching
+   * shows the answer that the stream would have shown arriving. Without this
+   * the client simply sits on its own history, and the reply appears only when
+   * something else happens to reload it.
+   *
+   * The better fix is upstream: route a session to one instance (on Azure App
+   * Service that is ARR affinity, which is on by default) so the refresh lands
+   * where its run is. This is the fallback for when it does not — a scale-in,
+   * a new device, a cleared cookie.
+   */
+  onAttachMiss?: (params: { threadId: string }) => void;
 }
 
 export interface UseChatResult<P extends keyof AgentRoutes> {
@@ -346,6 +368,7 @@ export function useChat<P extends keyof AgentRoutes>(
     onFinish,
     onError,
     onAwaitingInput,
+    onAttachMiss,
   } = params;
 
   const routeParams = useParams();
@@ -386,8 +409,8 @@ export function useChat<P extends keyof AgentRoutes>(
   const abortRef = useRef<{ controller: AbortController; clientRunId?: string } | null>(null);
   // The latest callbacks, so a stream started three renders ago still calls the
   // ones the component has now instead of a stale closure.
-  const handlers = useRef({ onFinish, onError, onAwaitingInput });
-  handlers.current = { onFinish, onError, onAwaitingInput };
+  const handlers = useRef({ onFinish, onError, onAwaitingInput, onAttachMiss });
+  handlers.current = { onFinish, onError, onAwaitingInput, onAttachMiss };
   const requestRef = useRef({ base, headers, extraBody });
   requestRef.current = { base, headers, extraBody };
 
@@ -818,8 +841,15 @@ export function useChat<P extends keyof AgentRoutes>(
         };
         const response = await post(`${requestRef.current.base}/attach`, body, controller.signal);
         // Nothing running is the ordinary answer, not a failure: the route says
-        // so with an empty response and the screen simply stays as it was.
-        if (!response.ok || response.status === 204 || !response.body) return;
+        // so with an empty response and the screen simply stays as it was —
+        // except that on more than one instance it is also what a refresh
+        // routed away from its run gets, which is not ordinary at all. The
+        // client cannot tell; `onAttachMiss` is how an app that runs more than
+        // one process gets to react.
+        if (!response.ok || response.status === 204 || !response.body) {
+          handlers.current.onAttachMiss?.({ threadId: initialThreadId });
+          return;
+        }
         await consume(response, controller.signal);
       } catch {
         // A probe that could not be made leaves the client exactly where a
