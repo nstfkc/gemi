@@ -261,7 +261,14 @@ function reduce<T extends ToolShapes, O>(
       // inside `withToolCall` for a run replayed onto a transcript that already
       // holds it. The tool loop emits every yield before the message it belongs
       // to is finalised, so a progress datum for a finished message is replay
-      // by definition — the same argument `text-delta` makes.
+      // by definition — the same argument `text-delta` makes, and with the same
+      // carve-out for a message the run parked on.
+      //
+      // Unbounded on purpose: a tool decides how often it yields, and truncating
+      // its log here would lose data the UI asked for. What is bounded is the
+      // *wire* — `useChat.send` strips `progress` from the history it posts, so
+      // a tool that yields ten thousand times costs ten thousand entries in this
+      // tab and nothing at all on every later turn. See `forWire`.
       return withToolCall(state, event.toolCallId, (part) => ({
         ...part,
         progress: [...(part.progress ?? []), event.data],
@@ -406,18 +413,76 @@ export function markAborted<T extends ToolShapes = ToolShapes, O = unknown>(
 
 // --- helpers -------------------------------------------------------------
 
-/** The messages this run wrote, finished off with `reason` if they never ended. */
+/**
+ * The messages this run wrote, finished off with `reason` if they never ended —
+ * and, inside them, the sub-runs this run left mid-sentence.
+ *
+ * The nesting descent is not an extra: a `NestedRun` renders with the component
+ * that renders `messages`, so a nested message with no `finishReason` draws a
+ * live cursor inside a block that will never receive another frame. The parent
+ * ending is the last word anything will say about it, and for `markAborted`
+ * there is no other word available at all — `stop()` marks the transcript
+ * optimistically, before the server has answered, so no forwarded nested
+ * `run-end` can arrive in time.
+ *
+ * It recurses through `closeRun`, which builds a `ChatState` around the sub-run
+ * and calls back here, so a sub-sub-run is closed by the same three lines that
+ * close the top level — the same trick `applyNested` plays on the way in.
+ */
 function finishUnended<T extends ToolShapes, O>(
   state: ChatState<T, O>,
   reason: FinishReason,
 ): AgentMessage<T, O>[] {
   return state.messages.map((message) =>
-    message.role === "assistant" &&
-    message.finishReason === undefined &&
-    state.runMessageIds.includes(message.id)
-      ? { ...message, finishReason: reason }
+    message.role === "assistant" && state.runMessageIds.includes(message.id)
+      ? closeMessage(message, reason)
       : message,
   );
+}
+
+/**
+ * One message of this run, and the sub-runs hanging off its tool calls.
+ *
+ * The message's own finish reason is only filled in when it is missing, but the
+ * descent happens either way: the message a run parks on is *finished* while the
+ * sub-run underneath it is still live, and that is the case where the block
+ * stuck streaming is easiest to hit.
+ */
+function closeMessage<T extends ToolShapes, O>(
+  message: AgentMessage<T, O>,
+  reason: FinishReason,
+): AgentMessage<T, O> {
+  const content = message.content.map((part) =>
+    part.type === "tool-call" && part.nested?.some((run) => run.finishReason === undefined)
+      ? {
+          ...part,
+          nested: part.nested.map((run) =>
+            run.finishReason === undefined ? closeRun(run, reason) : run,
+          ),
+        }
+      : part,
+  );
+  if (message.finishReason === undefined) return { ...message, finishReason: reason, content };
+  // Identity where nothing changed, so `run-end` on a settled transcript keeps
+  // the parts a UI may be memoising on.
+  const changed = content.some((part, index) => part !== message.content[index]);
+  return changed ? { ...message, content } : message;
+}
+
+/** A sub-run the parent outlived, stamped with the parent's reason, recursively. */
+function closeRun(run: NestedRun, reason: FinishReason): NestedRun {
+  const sub: ChatState = {
+    messages: run.messages,
+    pending: [],
+    error: null,
+    seq: -1,
+    // Every message in the transcript, for the reason `applyNested` gives: a
+    // `NestedRun` is keyed by `runId` and only ever written by events carrying
+    // it, so there is no other run's work in here to protect.
+    runMessageIds: run.messages.map((message) => message.id),
+    loadedTools: [],
+  };
+  return { ...run, finishReason: reason, messages: finishUnended(sub, reason) };
 }
 
 type NestedEvent = Extract<AgentStreamEvent, { type: "nested-event" }>;
@@ -458,12 +523,32 @@ function withToolCall<T extends ToolShapes, O>(
       (part) => part.type === "tool-call" && part.toolCallId === toolCallId,
     );
     if (index === -1) continue;
-    // The replay guard, and the same one the deltas use. The tool loop runs
-    // every tool before it finalises the message the calls sit in, so nothing
-    // legitimately appends to a call inside a finished message; a frame that
-    // does is a run being replayed onto a transcript that already has it, and
-    // appending would show the progress log twice.
-    if (message.finishReason !== undefined) return state;
+    // The replay guard, and the same one the deltas use — with the one carve-out
+    // a delta does not need.
+    //
+    // Within a run the tool loop runs every tool before it finalises the message
+    // the calls sit in, so a frame for a call inside a finished message is that
+    // run being replayed onto a transcript that already has it, and appending
+    // would show the progress log twice.
+    //
+    // But a message the run *parked* on is not a closed message. `Agent.loop`
+    // finalises it with `"awaiting-input"` **before** emitting `awaiting-input`,
+    // and the very next turn re-enters that same tool call — `resolveAnswer`
+    // calls `executeTool` against the call it found in the history — so its
+    // `tool-progress` and `nested-event` frames arrive after their message
+    // carries a finish reason. Treating those as replay dropped every frame of
+    // the resumed execution while the `tool-result` (which goes through
+    // `withMessage`, unguarded) still landed: the call went silent and then
+    // produced an answer, which is the bug nesting exists to fix. Worse, in
+    // stateless mode the nested transcript is what the next turn replays the
+    // sub-run from, so the client posted back a sub-run frozen at the question.
+    //
+    // The carve-out is as narrow as the case: parked, *and* the call still open.
+    // Once its result has landed nothing legitimately appends to it again, so a
+    // replay of a parked run is still refused for every call it answered.
+    if (message.finishReason !== undefined && !isReenterable(state, message, toolCallId)) {
+      return state;
+    }
     const content = message.content.slice();
     content[index] = update(content[index] as ToolCallPart<T>);
     const messages = state.messages.slice();
@@ -525,6 +610,30 @@ function applyNested(run: NestedRun, event: NestedEvent, now: string): NestedRun
     // sub-run's last assistant message.
     ...(event.event.type === "usage" ? { usage: event.event.usage } : {}),
   };
+}
+
+/**
+ * Whether a finished message's tool call can still be written to.
+ *
+ * Exactly one message can say yes: the one a run parked on, holding a call
+ * nobody has answered yet. That is the resume turn — the tool is re-entered
+ * from the top and streams progress and sub-run events against a message that
+ * closed on the previous turn.
+ *
+ * "Open" is the server's own test, `Agent.openCalls`: a tool call with no
+ * `tool-result` for it anywhere in the transcript. The result is the thing that
+ * says the re-entry finished, and it always arrives *after* the frames this
+ * guards — `attachToHistory` emits it once `executeTool` returns.
+ */
+function isReenterable<T extends ToolShapes, O>(
+  state: ChatState<T, O>,
+  message: AgentMessage<T, O>,
+  toolCallId: string,
+) {
+  if (message.finishReason !== "awaiting-input") return false;
+  return !state.messages.some((candidate) =>
+    candidate.content.some((part) => part.type === "tool-result" && part.toolCallId === toolCallId),
+  );
 }
 
 function isFinished<T extends ToolShapes, O>(state: ChatState<T, O>, messageId: string) {
