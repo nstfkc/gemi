@@ -265,16 +265,49 @@ declare module "../client/rpc" {
   interface RPC extends CreateRPC<Api> {}
 }
 
+// The app's own transcript component, stubbed. The point of the signature is
+// that the nested walk below hands it `run.messages` and it compiles: a sub-run
+// is rendered by whatever already renders a run.
+declare function renderTranscript(messages: AgentMessage[]): null;
+
 function Chat({ threadId }: { threadId: string }) {
   // Reattaches on mount if a run is still going on this thread.
-  const { messages, sendMessage, status, pending, approve, answer } = useChat("/support", {
-    threadId,
-  });
+  const { messages, sendMessage, status, pending, approve, answer, loadedTools } = useChat(
+    "/support",
+    { threadId },
+  );
+
+  // What the model has pulled out of a deferred namespace so far this run —
+  // somewhere to put "…looking for the right tool" instead of an unexplained
+  // pause. Run-scoped, not transcript: empty again on the next run, so it is
+  // not something to persist beside `messages`.
+  loadedTools.join(", ");
 
   for (const message of messages) {
     for (const part of message.content) {
       if (part.type === "tool-result" && part.name === "grep" && part.status === "ok") {
         part.output.matches; // string[]
+      }
+
+      // A generator tool's yields, typed by what its `execute` actually yields
+      // rather than as `unknown`. `bash` yields `{ line: string }`, so this is
+      // `{ line: string }[] | undefined` — and a tool that never yields gets
+      // `never[]`, which is what stops a UI writing a progress renderer for a
+      // tool that can have none.
+      if (part.type === "tool-call" && part.name === "bash") {
+        part.progress?.map((entry) => entry.line); // string[]
+      }
+
+      // The sub-agent runs this tool drove. Each is an ordinary
+      // `AgentMessage[]` with a name and a label, so the component that renders
+      // `messages` renders this too — which is the whole reason nesting reuses
+      // the transcript shape instead of inventing a second one.
+      if (part.type === "tool-call" && part.name === "research") {
+        for (const run of part.nested ?? []) {
+          run.label ?? run.agent; // what to title the block with
+          run.finishReason; // undefined while it is still going
+          renderTranscript(run.messages);
+        }
       }
     }
   }
@@ -286,7 +319,13 @@ function Chat({ threadId }: { threadId: string }) {
         approve(call.toolCallId, true);
       }
       if (call.kind === "question") {
-        answer(call.toolCallId, { answer: "the invoice from March" });
+        // A question the RESEARCH agent asked arrives in this same list, with
+        // `path` naming the chain of tool calls it is nested under. Answering
+        // it is the identical call — the hook carries the signature and the
+        // path back untouched — so a UI reads `path` only to say who is asking,
+        // never to route the answer.
+        const asker = call.path?.length ? "the research agent" : "support";
+        answer(call.toolCallId, { answer: `the invoice from March (for ${asker})` });
       }
     }
   }
