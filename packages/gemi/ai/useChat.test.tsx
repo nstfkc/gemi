@@ -735,6 +735,38 @@ describe("errors", () => {
     expect(box.api.error).toMatchObject({ code: "rate_limited", retryable: true });
   });
 
+  test("a thread the server no longer has is named, so the app can start another", async () => {
+    // The route answers this before anything runs — the thread expired, or
+    // never existed here — and "unknown" would hide the one thing the app can
+    // do about it, which is drop the id and continue on a new thread or
+    // stateless.
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          error: { code: "thread_not_found", message: "Thread th_9 does not exist here." },
+        }),
+        { status: 404 },
+      ),
+    );
+    const onError = vi.fn();
+    const { box } = mount({ threadId: "th_9", attach: false, onError });
+
+    await act(async () => {
+      await box.api.sendMessage("hi");
+    });
+
+    expect(box.api.status).toBe("error");
+    expect(box.api.error).toEqual({
+      code: "thread_not_found",
+      message: "Thread th_9 does not exist here.",
+      retryable: false,
+    });
+    expect(onError).toHaveBeenCalledWith(expect.objectContaining({ code: "thread_not_found" }));
+    // The turn that failed is still on screen, so an app that remounts without
+    // the thread has the message to resend.
+    expect(box.api.messages.map((m) => m.role)).toEqual(["user"]);
+  });
+
   test("an error event after the headers flushed reaches error and onError", async () => {
     const onError = vi.fn();
     fetchMock.mockResolvedValueOnce(
