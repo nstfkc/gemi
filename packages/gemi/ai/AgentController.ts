@@ -134,7 +134,7 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
     if (parsed.error) {
       // Before anything is registered or charged for. A run started off a body
       // we could not read would answer nothing, at the user's expense.
-      return invalidRequest(parsed.error);
+      return invalidRequest(parsed);
     }
     const body = parsed.body;
     const threadId = typeof body.threadId === "string" ? body.threadId : undefined;
@@ -202,7 +202,7 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
   async attach(req: HttpRequest<any, any> = new HttpRequest()): Promise<Response> {
     const parsed = await readJsonBody(req);
     if (parsed.error) {
-      return invalidRequest(parsed.error);
+      return invalidRequest(parsed);
     }
     const body = parsed.body;
     const threadId =
@@ -272,7 +272,7 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
    * and `onMessage` records it whether anyone is watching or not.
    *
    * Answers `{ stopped }` normally, and a `Response` only to reject a request
-   * it could not read — the union is the 400, not a second success shape.
+   * it could not read — the union is the error, not a second success shape.
    */
   async stop(
     req: HttpRequest<any, any> = new HttpRequest(),
@@ -283,7 +283,7 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
       // status: it means "there was nothing to stop", and the truth is that we
       // could not tell what to stop. A client that believes the first one stops
       // asking, and the run keeps going.
-      return invalidRequest(parsed.error);
+      return invalidRequest(parsed);
     }
     const body = parsed.body;
 
@@ -486,7 +486,13 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
  * discriminant — `if (!parsed.ok)` leaves `parsed.message` an error. A field
  * that is either set or not needs no narrowing to read.
  */
-type ParsedBody = { body: Record<string, any>; error?: string };
+type ParsedBody = {
+  body: Record<string, any>;
+  error?: string;
+  /** Which HTTP error the rejection is. A missing one is the 400. */
+  status?: number;
+  code?: string;
+};
 
 /**
  * The body, as JSON — or a reason it is not.
@@ -495,6 +501,17 @@ type ParsedBody = { body: Record<string, any>; error?: string };
  * `Content-Type` exactly, so `application/json; charset=utf-8` — which several
  * HTTP clients send by default — parses as an empty body, and an agent turn
  * that silently loses its text is a bad way to find that out.
+ *
+ * Matching the type by prefix is not the same as ignoring it. A body that
+ * arrives as anything other than `application/json` is a 415, and the reason
+ * is not tidiness: a cross-site `<form enctype="text/plain">` can be made to
+ * concatenate its one field into valid JSON, and a JSON parser that reads
+ * whatever it is handed turns that form into a turn on someone else's
+ * conversation. Insisting on `application/json` is what makes these routes
+ * non-simple requests — the browser will not send one cross-origin without a
+ * preflight — and that holds whether or not the app's cookies are `SameSite`
+ * and whether or not `CSRFMiddleware` is mounted. Only a request that carries a
+ * body is held to this; a bodiless POST has no type to check and stays `{}`.
  *
  * The three cases are kept apart deliberately. NO body is a real request — a
  * reattach, or a turn that just lets the model continue — and reads as `{}`. A
@@ -514,6 +531,17 @@ async function readJsonBody(req: HttpRequest<any, any>): Promise<ParsedBody> {
   const raw = req?.rawRequest;
   if (!raw || raw.method === "GET" || raw.method === "HEAD" || !raw.body) {
     return { body: {} };
+  }
+
+  if (!isJsonContentType(raw.headers.get("Content-Type"))) {
+    // Before the body is read: nothing in a body about to be refused is worth
+    // the bytes, and the refusal must not depend on what they were.
+    return {
+      body: {},
+      status: 415,
+      code: "unsupported_media_type",
+      error: "The request body must be sent as application/json.",
+    };
   }
 
   let text: string;
@@ -543,8 +571,24 @@ async function readJsonBody(req: HttpRequest<any, any>): Promise<ParsedBody> {
   return { body: parsed as Record<string, any> };
 }
 
-function invalidRequest(message: string): Response {
-  return jsonResponse(400, { code: "invalid_request", message });
+/**
+ * Media types compare case-insensitively and may carry parameters, so this is a
+ * prefix match on the lowercased value rather than an equality, and
+ * `Application/JSON; charset=utf-8` passes. None of the three types a browser
+ * will send without a preflight — `text/plain`,
+ * `application/x-www-form-urlencoded`, `multipart/form-data` — does, and
+ * neither does no type at all, which is what a hand-written `fetch` with a
+ * string body and no header ends up sending as `text/plain`.
+ */
+function isJsonContentType(value: string | null): boolean {
+  return typeof value === "string" && value.trim().toLowerCase().startsWith("application/json");
+}
+
+function invalidRequest(parsed: ParsedBody): Response {
+  return jsonResponse(parsed.status ?? 400, {
+    code: parsed.code ?? "invalid_request",
+    message: parsed.error,
+  });
 }
 
 /**
