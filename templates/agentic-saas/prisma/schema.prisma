@@ -1,0 +1,230 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Runtime model metadata and the typed model bases the gemi ORM executes
+// queries through. The output is committed.
+//
+// **There is no `generator client` block, and that is the point.** Prisma owns
+// the schema and the migrations; gemi compiles and runs the SQL. Nothing in
+// `prisma migrate dev`, `migrate deploy`, `db push` or `migrate diff` needs the
+// Prisma client — the CLI depends on `@prisma/config` and `@prisma/engines`,
+// not on `@prisma/client` — and the artifacts emitted below no longer
+// type-import it either. So an app installs `prisma` and nothing else.
+//
+// gemi's own differential test harness *does* need a Prisma client, to compare
+// against. It generates one from `differential.prisma`, which is this file plus
+// a client block. That is a gemi development concern and deliberately not part
+// of the schema an application starts from.
+generator gemi {
+  provider = "gemi-orm-generator"
+  output   = "../app/models/generated"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Organization {
+  id          Int                      @id @default(autoincrement())
+  publicId    String                   @unique @default(cuid())
+  name        String
+  logoUrl     String?
+  description String?
+  // An enum exists here for the same reason Json and Bytes do: so the
+  // differential harness compares one against Prisma. Prisma enums travel as
+  // strings on the wire, and the generator maps them to `String` while
+  // recording the enum's name — that mapping had a unit test and no end-to-end
+  // check on either dialect.
+  plan        OrganizationPlan         @default(free)
+  users       User[]
+  accounts    Account[]
+  invitations OrganizationInvitation[]
+}
+
+model OrganizationInvitation {
+  id             Int          @id @default(autoincrement())
+  publicId       String       @unique @default(cuid())
+  organizationId Int
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  email          String
+  role           Int          @default(2) // 0 = Owner, 1 = Admin, 2 = User
+  acceptedAt     DateTime?
+
+  createdAt DateTime @default(now())
+
+  // Every foreign key is indexed, because every relation read goes through one.
+  //
+  // Prisma declares no index for a relation's foreign key on either dialect, and
+  // the ORM's relation work leans on it twice over: a batched include filters
+  // the child by `in (<parent keys>)`, and `_count`, relation filters and
+  // relation orderings each run a correlated subquery **once per parent row**.
+  // Without an index that subquery is a scan of the child table per row.
+  //
+  // Measured on 100 parents in `plans/orm/benchmarks.md`: one index line is
+  // worth 6.3x on `_count` and 4.0x on an `exists` filter on SQLite, and it
+  // reverses the advice — unindexed, `_count` is 2.4x slower than loading the
+  // children and counting them in JavaScript; indexed, 2.6x faster.
+  @@index([organizationId])
+}
+
+model Account {
+  id               Int           @id @default(autoincrement())
+  publicId         String        @unique @default(cuid())
+  organization     Organization? @relation(fields: [organizationId], references: [id])
+  organizationId   Int?
+  organizationRole Int           @default(2) // 0 = Owner, 1 = Admin, 2 = User
+
+  userId Int?
+  user   User? @relation(fields: [userId], references: [id])
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  // The same two, one relation away: a Json column *nested inside an include*
+  // is the case the lateral strategy flattens through `json_agg`, so it has to
+  // survive `JSON.parse` twice and still match the batched path.
+  settings Json?
+  token    Bytes?
+
+  @@index([organizationId])
+  @@index([userId])
+}
+
+model User {
+  id                Int           @id @default(autoincrement())
+  publicId          String        @unique @default(cuid())
+  name              String?
+  email             String?       @unique
+  emailVerifiedAt   DateTime?
+  verificationToken String?
+  locale            String?       @default("en-US")
+  globalRole        Int           @default(2) // 0 = Owner, 1 = Admin, 2 = User
+  password          String?
+  organization      Organization? @relation(fields: [organizationId], references: [id])
+  organizationId    Int?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  // Json and Bytes exist here so the differential harness sees them. Every
+  // other scalar the ORM implements was already reachable from this schema;
+  // these two were not, so their encode/decode paths were only ever checked
+  // against fixtures that the same code wrote the expectations for.
+  metadata Json?
+  avatar   Bytes?
+
+  accounts           Account[]
+  session            Session[]
+  passwordResetToken PasswordResetToken[]
+  socialAccount      SocialAccount[]
+  // The foreign side of a to-one — see `model Profile` below. Every other
+  // relation on this model is a list.
+  profile            Profile?
+
+  @@index([organizationId])
+}
+
+model SocialAccount {
+  id Int @id @default(autoincrement())
+
+  userId Int
+  user   User @relation(fields: [userId], references: [id])
+
+  provider   String
+  providerId String
+
+  username String?
+  email    String?
+
+  accessToken  String
+  refreshToken String
+  expiresAt    DateTime
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([username, provider])
+  @@index([userId])
+}
+
+model Session {
+  id        Int     @id @default(autoincrement())
+  token     String  @unique
+  userId    Int?
+  user      User?   @relation(fields: [userId], references: [id])
+  location  String? // approximated location
+  userAgent String? // user agent
+
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime? @updatedAt
+  expiresAt         DateTime
+  absoluteExpiresAt DateTime
+
+  @@index([userId])
+}
+
+model PasswordResetToken {
+  id     Int    @id @default(autoincrement())
+  token  String @unique
+  userId Int
+  user   User   @relation(fields: [userId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+// A compound `@@id`, which nothing else in this schema has: the only other
+// composite key here is SocialAccount's `@@unique([username, provider])`, and
+// that is a different code path. A compound *primary* key was therefore never
+// compared against Prisma, and was unreachable by key at all — see #80.
+model Membership {
+  organizationId Int
+  userId         Int
+  role           Int      @default(2)
+  createdAt      DateTime @default(now())
+
+  @@id([organizationId, userId])
+}
+
+// A to-one whose foreign key lives on the **child**, which this schema had none
+// of — every child-side relation here is a list. So the foreign side of a
+// nested write was only ever reachable with `kind: "many"`, and nothing in this
+// harness could ask Prisma what `update`, `upsert`, `delete` or `disconnect`
+// does through a relation that holds one row. That gap is why #116 went
+// unnoticed for as long as it did, and it is the shape #354 is measured
+// against: the answers below (P2025 or no-op, and on which operand) cannot be
+// reasoned out, only run.
+//
+// `userId` is nullable **on purpose**. Prisma omits `disconnect` from the
+// nested input type entirely when the foreign key is required, so a required
+// one would leave that operand unreachable — the same "the harness cannot get
+// there" problem one level down. Nullable makes all four operands reachable at
+// once, and the required-FK refusal is asserted against the fixtures instead.
+model Profile {
+  id     Int     @id @default(autoincrement())
+  bio    String?
+  userId Int?    @unique
+  user   User?   @relation(fields: [userId], references: [id])
+}
+
+model MagicLinkToken {
+  id    Int    @id @default(autoincrement())
+  token String
+  email String
+  pin   String
+
+  createdAt DateTime @default(now())
+
+  @@unique([token, email])
+  @@unique([pin, email])
+}
+
+enum OrganizationPlan {
+  free
+  pro
+  enterprise
+}
