@@ -8,7 +8,12 @@ export default defineConfig({
   // than in a standalone `vite.config.mjs`, which gemi no longer uses) so gemi
   // owns the base Vite setup and the app only contributes plugins/config.
   vite: {
-    plugins: [react()],
+    // `compiler: true` runs the React Compiler through oxc (the Rust port in
+    // `oxc-transform-react`) instead of Babel, so auto-memoization costs a
+    // native transform rather than a second parse per module. The plugin only
+    // memoizes for client environments — the SSR view build gets the plain JSX
+    // transform, which is what gemi wants since server rendering is one pass.
+    plugins: [react({ compiler: true })],
   },
   // Bun plugins applied to the server build and the dev/prod runtime.
   bun: {

@@ -44,6 +44,44 @@ interface GemiConfig {
 
 The file is entirely optional — if it's absent, gemi uses an empty config. It's loaded directly as TypeScript under Bun (as `gemi.config.ts`, `gemi.config.js`, or `gemi.config.mjs`), so no separate transpile step is needed.
 
+### React Compiler
+
+`@vitejs/plugin-react` can run the [React Compiler](https://react.dev/learn/react-compiler) — automatic memoization, so you write plain components and stop hand-placing `useMemo`/`useCallback`/`memo`. Since `@vitejs/plugin-react` 6.1 it runs through **oxc** (the Rust port, shipped as `oxc-transform-react`) rather than Babel, which means no second parse per module. Turn it on with `compiler: true` where you register the React plugin:
+
+```typescript
+import { defineConfig } from "gemi/config";
+import react from "@vitejs/plugin-react";
+
+export default defineConfig({
+  vite: {
+    plugins: [react({ compiler: true })],
+  },
+});
+```
+
+Two packages are required, both already in the scaffolded template:
+
+```bash
+bun add -d "@vitejs/plugin-react@^6.1.1" "oxc-transform-react@^0.145.0"
+```
+
+`oxc-transform-react` is an optional peer of `@vitejs/plugin-react` with a `^0.145.0` range, so pin it to `0.145.x` — a newer minor is outside that range and the plugin will refuse to load it. If the package is missing entirely, the build fails with *"React Compiler requires the optional `oxc-transform-react` package"* rather than silently skipping compilation.
+
+The plugin only memoizes for **client** environments. gemi's SSR view build has `consumer: "server"`, so it gets the plain JSX transform — which is what you want, since server rendering is a single pass and memoization would only add cache allocations. The compiled client output imports `react/compiler-runtime`, present in React 19.
+
+`compiler` also accepts an options object, forwarded to the compiler:
+
+```typescript
+// Opt in per-component with a "use memo" directive instead of compiling everything.
+react({ compiler: { compilationMode: "annotation" } })
+
+// Surface recoverable diagnostics (bail-out reasons) as Vite warnings.
+// Fatal diagnostics always fail the build regardless of this flag.
+react({ compiler: { logDiagnostics: true } })
+```
+
+> **Note:** the oxc React Compiler integration is marked experimental upstream. It is a build-time transform with no runtime component beyond `react/compiler-runtime`, so dropping back to `react()` is a one-word revert.
+
 > **Note:** This is not the same file as `vite.config.mjs`. `gemi.config.ts` is gemi's own config (Vite **and** Bun plugins) consumed by the CLI, the runtime preload, and the gemi Vite plugin. `vite.config.mjs` is the standard Vite entry that loads the gemi Vite plugin. See [Vite config](#vite-config) below.
 
 ## Environment variables & `.env`
