@@ -486,6 +486,30 @@ export function useChat<P extends keyof AgentRoutes>(
     });
   }, []);
 
+  /**
+   * The server call that ends a run. Shared by `stop()` and by a `send` that
+   * supersedes one, because the failure handling is the point: a stop that did
+   * not land is a run still working through its tool loop and still billing,
+   * behind a transcript that says it was cut.
+   */
+  const postStop = useCallback(
+    async (body: AgentStopBody) => {
+      const { base: url } = requestRef.current;
+      try {
+        const response = await post(`${url}/stop`, body);
+        if (!response.ok) fail(await httpError(response));
+      } catch (error) {
+        if (isAbort(error)) return;
+        fail({
+          code: "unknown",
+          message: error instanceof Error ? error.message : String(error),
+          retryable: true,
+        });
+      }
+    },
+    [fail, post],
+  );
+
   const consume = useCallback(
     async (response: Response, signal: AbortSignal) => {
       for await (const frame of decodeSSE(response.body)) {
@@ -543,6 +567,25 @@ export function useChat<P extends keyof AgentRoutes>(
       const clientRunId = localId();
       const controller = new AbortController();
       abortRef.current = { controller, clientRunId };
+
+      if (superseded) {
+        // Aborting the fetch only closes the connection, and a closed connection
+        // no longer stops a run: the superseded one would keep going server
+        // side, blind to this turn and still billing. So it is stopped the way
+        // `stop()` stops it, by the handles that name exactly that run — never
+        // by `threadId`, which by the time this lands may name the run this
+        // turn is about to start. A run this client did not start, and whose
+        // `run-start` never arrived, has no such handle; the server ends it
+        // anyway when the new turn reaches the thread. Not awaited: the server
+        // orders the two, and a round trip before every "changed my mind" would
+        // be paid for nothing.
+        const { runId } = stateRef.current!;
+        const body: AgentStopBody = {
+          ...(runId ? { runId } : {}),
+          ...(superseded.clientRunId ? { clientRunId: superseded.clientRunId } : {}),
+        };
+        if (Object.keys(body).length > 0) void postStop(body);
+      }
 
       const previous = superseded ? markAborted(stateRef.current!) : stateRef.current!;
       const history = previous.messages;
@@ -611,7 +654,7 @@ export function useChat<P extends keyof AgentRoutes>(
         }
       }
     },
-    [commit, consume, fail, post, setPhaseSafe],
+    [commit, consume, fail, post, postStop, setPhaseSafe],
   );
 
   const sendMessage = useCallback(
@@ -730,7 +773,6 @@ export function useChat<P extends keyof AgentRoutes>(
   );
 
   const stop = useCallback(async () => {
-    const { base: url } = requestRef.current;
     const { runId, threadId } = stateRef.current!;
     // The UI stops now. The POST below is what actually ends the generation and
     // any tool mid-flight, and it may take a moment; a user who clicked stop
@@ -755,22 +797,8 @@ export function useChat<P extends keyof AgentRoutes>(
       ...(threadId ? { threadId } : {}),
       ...(inFlight?.clientRunId ? { clientRunId: inFlight.clientRunId } : {}),
     };
-    try {
-      const response = await post(`${url}/stop`, body);
-      // A failed stop is not cosmetic. The transcript says the turn was cut, so
-      // the UI looks settled, while the run may still be working through its
-      // tool loop and still billing for it — the one failure here a user would
-      // want to know about, and previously the one that was swallowed.
-      if (!response.ok) fail(await httpError(response));
-    } catch (error) {
-      if (isAbort(error)) return;
-      fail({
-        code: "unknown",
-        message: error instanceof Error ? error.message : String(error),
-        retryable: true,
-      });
-    }
-  }, [commit, fail, post, setPhaseSafe]);
+    await postStop(body);
+  }, [commit, postStop, setPhaseSafe]);
 
   const regenerate = useCallback(async () => {
     const messages = stateRef.current!.messages as AgentMessage[];
