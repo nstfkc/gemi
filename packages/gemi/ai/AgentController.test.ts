@@ -486,7 +486,7 @@ describe("one live run per thread", () => {
     const first = new StubAgentRun("run_1");
     const second = new StubAgentRun("run_2");
     const { Chat, seen, store } = threaded([first, second]);
-    const threadId = `t-${crypto.randomUUID()}`;
+    const { threadId } = await store.createThread({});
 
     await new Chat().stream(jsonRequest({ threadId, text: "first" }));
     expect(first.stopped).toBe(false);
@@ -532,7 +532,7 @@ describe("one live run per thread", () => {
   test("a third turn waits for the second, not just for the first", async () => {
     const runs = [new StubAgentRun("run_1"), new StubAgentRun("run_2"), new StubAgentRun("run_3")];
     const { Chat, seen, store } = threaded(runs);
-    const threadId = `t-${crypto.randomUUID()}`;
+    const { threadId } = await store.createThread({});
 
     await new Chat().stream(jsonRequest({ threadId, text: "first" }));
     const second = new Chat().stream(jsonRequest({ threadId, text: "second" }));
@@ -586,7 +586,7 @@ describe("one live run per thread", () => {
         return new Promise(() => {});
       }
     }
-    const threadId = `t-${crypto.randomUUID()}`;
+    const { threadId } = await store.createThread({});
 
     await new Hanging().stream(jsonRequest({ threadId, text: "first" }));
     const pending = new Hanging().stream(jsonRequest({ threadId, text: "second" }));
@@ -614,8 +614,8 @@ describe("one live run per thread", () => {
    */
   test("a stop that names a turn still waiting its place ends it before it starts", async () => {
     const runs = [new StubAgentRun("run_1"), new StubAgentRun("run_2")];
-    const { Chat, seen } = threaded(runs);
-    const threadId = `t-${crypto.randomUUID()}`;
+    const { Chat, seen, store } = threaded(runs);
+    const { threadId } = await store.createThread({});
 
     await new Chat().stream(jsonRequest({ threadId, clientRunId: "c1", text: "first" }));
     const waiting = new Chat().stream(jsonRequest({ threadId, clientRunId: "c2", text: "second" }));
@@ -647,8 +647,8 @@ describe("one live run per thread", () => {
   test("a finished run still within its ttl holds nothing up", async () => {
     const first = new StubAgentRun("run_1");
     const second = new StubAgentRun("run_2");
-    const { Chat, seen } = threaded([first, second]);
-    const threadId = `t-${crypto.randomUUID()}`;
+    const { Chat, seen, store } = threaded([first, second]);
+    const { threadId } = await store.createThread({});
 
     await new Chat().stream(jsonRequest({ threadId, text: "first" }));
     first.finish({ messages: [message("u1", "user", "first")] });
