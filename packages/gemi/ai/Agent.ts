@@ -8,7 +8,9 @@ import type { Infer, Schema } from "./Schema";
 import {
   consumePendingCall,
   readSignature,
+  signNestedRun,
   signPendingCall,
+  verifyNestedRun,
   verifyPendingCall,
 } from "./signing";
 import type {
@@ -1695,7 +1697,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       }
 
       running.push(
-        this.executeTool(resolved, call, parsed.value, step)
+        this.executeTool(resolved, message.id, call, parsed.value, step)
           .then((result) => this.addResult(message, result))
           .catch((error) => {
             if (error instanceof PendingEscalation) {
@@ -1768,6 +1770,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
 
   private async executeTool(
     resolved: ResolvedTool,
+    messageId: string,
     call: ToolCallPart,
     input: unknown,
     step: number,
@@ -1782,7 +1785,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       step,
       depth: this.depth,
       resumed: resume !== undefined,
-      runAgent: this.nestedRunner(call, resume),
+      runAgent: this.nestedRunner(messageId, call, resume),
     };
 
     try {
@@ -1856,6 +1859,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
    * would be invisible.
    */
   private nestedRunner(
+    messageId: string,
     call: ToolCallPart,
     resume?: { answers: ClientToolResult[] },
   ): ToolContext["runAgent"] {
@@ -1900,7 +1904,16 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         }
       }
 
-      return this.runNested(call, agent, params, at, memo, recorded, resume?.answers ?? []);
+      return this.runNested(
+        messageId,
+        call,
+        agent,
+        params,
+        at,
+        memo,
+        recorded,
+        resume?.answers ?? [],
+      );
     };
   }
 
@@ -1914,6 +1927,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
    * the name chain so a cycle is a sentence rather than a stack overflow.
    */
   private async runNested(
+    messageId: string,
     call: ToolCallPart,
     agent: AnyAgent,
     params: RunAgentParams,
@@ -2010,22 +2024,37 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     const recording = (async () => {
       const result = await sub.result();
       await forwarding;
+      // The seed leads, because a run only reports the messages it *made* and
+      // `params.messages` is not one of them. Recording the transcript without
+      // its opening is two bugs: a resume re-enters the sub-agent with the
+      // conversation it was started from missing, and the replay check below
+      // has nothing to fingerprint the seed against. Upserted rather than
+      // concatenated because the sub-run may have amended one of these on its
+      // way through.
+      const messages = resuming
+        ? mergeMessages(recorded.messages, result.messages)
+        : mergeMessages(params.messages ?? [], result.messages);
       const record: NestedRun = {
         runId: sub.runId,
         agent: agent.name,
         label,
-        // The seed leads, because a run only reports the messages it *made*
-        // and `params.messages` is not one of them. Recording the transcript
-        // without its opening is two bugs: a resume re-enters the sub-agent
-        // with the conversation it was started from missing, and the replay
-        // check below has nothing to fingerprint the seed against. Upserted
-        // rather than concatenated because the sub-run may have amended one of
-        // these on its way through.
-        messages: resuming
-          ? mergeMessages(recorded.messages, result.messages)
-          : mergeMessages(params.messages ?? [], result.messages),
+        messages,
         finishReason: result.finishReason,
         usage: resuming ? addUsage(recorded.usage ?? emptyUsage(), result.usage) : result.usage,
+        // A parked record is what the next turn re-enters the tool on, and in
+        // stateless mode it comes back from the browser. Signed here, by the
+        // run that knows it is true, over where the sub-run parked and what it
+        // is waiting on — `parkedBelow` will not act on a record without it.
+        ...(result.finishReason === "awaiting-input"
+          ? {
+              signature: signNestedRun({
+                runId: this.signingRunId,
+                path: signingPath,
+                nestedRunId: sub.runId,
+                open: [...openCallIds(messages)],
+              }),
+            }
+          : {}),
       };
       // Written before anything below can throw. An escalation is a pause, not
       // a lost run, and a cancelled sub-run is still work the user should be
@@ -2067,6 +2096,12 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
           `"${agent.name}" ended awaiting input but asked nothing, so there is no question to escalate.`,
         );
       }
+      // The signature is on the server's copy of the record, and a stateless
+      // client has built its own from the forwarded events. Re-sending the
+      // call is what puts the server's copy in the client's hands to carry
+      // back: the reducer takes a re-sent `nested` as authoritative, so this
+      // replaces what the client accumulated rather than adding to it.
+      this.emit({ type: "tool-call", messageId, part: call });
       throw new PendingEscalation({ pending: asked, path: signingPath, nested: record });
     }
 
@@ -2262,10 +2297,14 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
    * `nested` is written from the sub-run's result before the escalation throws,
    * so a call that has never nested has no `nested` at all, and one whose
    * sub-runs all finished has none with `awaiting-input`. In stateless mode
-   * that record arrives from the client and could say anything — but saying it
-   * only buys a re-entry of a tool that really did park, whose answer still has
-   * to carry a MAC the sub-run verifies. What it cannot buy is the execution of
-   * a call that never ran at all.
+   * that record arrives from the client and could say anything, and what
+   * saying it buys is not small: the tool body runs — from the top, with the
+   * input the history carries — before the sub-run gets to verify the answer,
+   * so everything the body does ahead of its first `runAgent` happens on the
+   * client's say-so. Which is why the record has to carry the server's
+   * signature over the sub-run it parked and the calls it left open, and why
+   * a record without one, or with one that does not match what it now says,
+   * is not a parked run at all.
    *
    * `below` is the answer's path with this run's prefix already removed, so
    * `below[0]` is `call` itself and `below[1]`, when there is one, names the
@@ -2273,9 +2312,13 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
    */
   private parkedBelow(call: ToolCallPart, below: string[], toolCallId: string): boolean {
     const wanted = below.length > 1 ? below[1] : toolCallId;
-    return (call.nested ?? []).some(
-      (run) => run.finishReason === "awaiting-input" && openCallIds(run.messages).has(wanted),
-    );
+    const path = [...this.pathPrefix, call.toolCallId];
+    return (call.nested ?? []).some((run) => {
+      if (run.finishReason !== "awaiting-input" || typeof run.signature !== "string") return false;
+      const open = openCallIds(run.messages);
+      if (!open.has(wanted)) return false;
+      return verifyNestedRun(run.signature, { path, nestedRunId: run.runId, open: [...open] }).ok;
+    });
   }
 
   /**
@@ -2310,12 +2353,40 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       };
     }
 
+    // Checked the way `runTools` checked the model's arguments, and for the
+    // same reason with a different author: the history this call was read out
+    // of is the client's in stateless mode, and an approval's input is covered
+    // by its signature but a plain server tool's is covered by nothing. The
+    // tool's typed input is a contract with the tool, not with whoever wrote
+    // the transcript, and a value the schema rejects must not reach it — the
+    // failure is a result the model can read, exactly like a mis-typed
+    // argument on the way in. The same result covers a schema that changed
+    // between the turn that parked and the turn that answers.
+    const parsed = resolved.tool.inputSchema.safeParse(entry.call.input);
+    if (parsed.ok === false) {
+      return {
+        type: "tool-result",
+        toolCallId: entry.call.toolCallId,
+        name: entry.call.name,
+        status: "error",
+        error: {
+          code: "invalid_tool_input",
+          message: `Invalid arguments for "${name}": ${parsed.errors.join(", ")}`,
+          toolCallId: entry.call.toolCallId,
+          retryable: true,
+        },
+      };
+    }
+
     const call = this.amendCall(entry);
+    // The parsed value is the only input the call has from here on, as in
+    // `runTools` — the clone carries what the tool was actually given.
+    call.input = parsed.value;
     try {
       // Step 0, like an approval executed on the way in: this belongs to the
       // turn, not to a step of the loop that has not started yet.
       return await raceAbort(
-        this.executeTool(resolved, call, call.input, 0, { answers }),
+        this.executeTool(resolved, entry.message.id, call, parsed.value, 0, { answers }),
         this.controller.signal,
       );
     } catch (error) {
@@ -2469,7 +2540,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         const executing = this.amendCall(entry);
         try {
           return await raceAbort(
-            this.executeTool(resolved, executing, executing.input, 0),
+            this.executeTool(resolved, entry.message.id, executing, executing.input, 0),
             this.controller.signal,
           );
         } catch (error) {
