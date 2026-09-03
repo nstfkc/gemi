@@ -874,21 +874,26 @@ describe("lifecycle", () => {
 
   test("a second send supersedes the first rather than interleaving two answers", async () => {
     const first = controlled();
-    fetchMock.mockImplementationOnce(async (_url: string, init: RequestInit) => {
-      init?.signal?.addEventListener("abort", () => first.abort());
-      return first.response;
-    });
     // A distinct run, whose frames number from zero again — which is exactly
     // the case the cursor has to be told about.
-    fetchMock.mockImplementationOnce(async () =>
-      streamed([
-        { seq: 0, event: { type: "run-start", runId: "run_2", threadId: "th_9" } },
-        { seq: 1, event: { type: "message-start", messageId: "m2", role: "assistant" } },
-        { seq: 2, event: { type: "text-delta", messageId: "m2", delta: "Second." } },
-        { seq: 3, event: { type: "message-end", messageId: "m2", finishReason: "stop" } },
-        { seq: 4, event: { type: "run-end", runId: "run_2", finishReason: "stop" } },
-      ]),
-    );
+    const second = streamed([
+      { seq: 0, event: { type: "run-start", runId: "run_2", threadId: "th_9" } },
+      { seq: 1, event: { type: "message-start", messageId: "m2", role: "assistant" } },
+      { seq: 2, event: { type: "text-delta", messageId: "m2", delta: "Second." } },
+      { seq: 3, event: { type: "message-end", messageId: "m2", finishReason: "stop" } },
+      { seq: 4, event: { type: "run-end", runId: "run_2", finishReason: "stop" } },
+    ]);
+    // Routed by URL rather than by call order: the second send posts `/stop`
+    // for the first run on its way out, and that call must not eat the answer.
+    let turns = 0;
+    fetchMock.mockImplementation(async (url: string, init: RequestInit) => {
+      if (url.endsWith("/stop")) return new Response(JSON.stringify({ stopped: true }));
+      if (turns++ === 0) {
+        init?.signal?.addEventListener("abort", () => first.abort());
+        return first.response;
+      }
+      return second;
+    });
     const { box } = mount({ attach: false });
 
     await act(async () => {
@@ -920,17 +925,98 @@ describe("lifecycle", () => {
     expect(box.api.status).toBe("idle");
   });
 
+  test("the superseded run is stopped on the server, not just disconnected from", async () => {
+    // Aborting the fetch closes the connection, and a closed connection no
+    // longer stops a run. Left alone the first run keeps going, blind to the
+    // second turn, and appends its answer whenever it finishes — after the
+    // second one's, if the model is slower the first time.
+    const first = controlled();
+    const second = streamed([
+      { seq: 0, event: { type: "run-start", runId: "run_2", threadId: "th_9" } },
+      { seq: 1, event: { type: "message-start", messageId: "m2", role: "assistant" } },
+      { seq: 2, event: { type: "text-delta", messageId: "m2", delta: "Second." } },
+      { seq: 3, event: { type: "message-end", messageId: "m2", finishReason: "stop" } },
+      { seq: 4, event: { type: "run-end", runId: "run_2", finishReason: "stop" } },
+    ]);
+    let turns = 0;
+    fetchMock.mockImplementation(async (url: string, init: RequestInit) => {
+      if (url.endsWith("/stop")) return new Response(JSON.stringify({ stopped: true }));
+      if (turns++ === 0) {
+        init?.signal?.addEventListener("abort", () => first.abort());
+        return first.response;
+      }
+      return second;
+    });
+    const { box } = mount({ threadId: "th_9", attach: false });
+
+    await act(async () => {
+      void box.api.sendMessage("one");
+    });
+    await act(async () => {
+      first.push(
+        { seq: 0, event: { type: "run-start", runId: "run_0", threadId: "th_9" } },
+        ANSWER[1]!,
+        ANSWER[2]!,
+      );
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await box.api.sendMessage("two");
+    });
+
+    expect(calls().map((c) => c[0])).toEqual(["/api/chat", "/api/chat/stop", "/api/chat"]);
+    // Named by the handles that mean exactly the first run. Not by `threadId`:
+    // the stop is not awaited, so by the time it lands the thread's live run
+    // may be the one the second turn just started.
+    expect(rawBodyOf(1)).toEqual({ runId: "run_0", clientRunId: rawBodyOf(0).clientRunId });
+    expect(rawBodyOf(1).clientRunId).not.toBe(rawBodyOf(2).clientRunId);
+    expect(box.api.messages.map((m) => m.role)).toEqual(["user", "assistant", "user", "assistant"]);
+    expect(box.api.status).toBe("idle");
+  });
+
+  test("a run this client neither started nor saw start is left to the server", async () => {
+    // Attached mid-run, from a cursor past `run-start`: no `clientRunId`, no
+    // `runId`. The only handle is the thread, and a stop by thread that lands
+    // late would stop the turn being sent. The server ends the old run when
+    // the new turn reaches the thread, so nothing is posted here.
+    const run = controlled();
+    fetchMock.mockImplementation(async (url: string, init: RequestInit) => {
+      if (url.endsWith("/attach")) {
+        init?.signal?.addEventListener("abort", () => run.abort());
+        return run.response;
+      }
+      return streamed(ANSWER);
+    });
+    const { box } = mount({ threadId: "th_9", cursor: { runId: "run_1", seq: 1 } });
+
+    await act(async () => {
+      run.push({ seq: 2, event: { type: "text-delta", messageId: "m1", delta: "…tail" } });
+      await Promise.resolve();
+    });
+    expect(box.api.runId).toBeUndefined();
+
+    await act(async () => {
+      await box.api.sendMessage("two");
+    });
+
+    expect(calls().map((c) => c[0])).toEqual(["/api/chat/attach", "/api/chat"]);
+  });
+
   test("the superseded turn goes back to a stateless server marked aborted", async () => {
     // The transcript the client carries is what the model is shown next time.
     const first = controlled();
-    fetchMock.mockImplementationOnce(async (_url: string, init: RequestInit) => {
-      init?.signal?.addEventListener("abort", () => first.abort());
-      return first.response;
-    });
     const anonymous = ANSWER.map((frame, index) =>
       index === 0 ? { seq: 0, event: { type: "run-start" as const, runId: "run_1" } } : frame,
     );
-    fetchMock.mockImplementation(async () => streamed(anonymous));
+    let turns = 0;
+    fetchMock.mockImplementation(async (url: string, init: RequestInit) => {
+      if (url.endsWith("/stop")) return new Response(JSON.stringify({ stopped: true }));
+      if (turns++ === 0) {
+        init?.signal?.addEventListener("abort", () => first.abort());
+        return first.response;
+      }
+      return streamed(anonymous);
+    });
     const { box } = mount({ attach: false });
 
     await act(async () => {
@@ -944,7 +1030,8 @@ describe("lifecycle", () => {
       await box.api.sendMessage("two");
     });
 
-    expect(bodyOf(1).messages[1]).toMatchObject({ role: "assistant", finishReason: "aborted" });
+    // Call 1 is the `/stop` for run_0; the second turn is call 2.
+    expect(bodyOf(2).messages[1]).toMatchObject({ role: "assistant", finishReason: "aborted" });
   });
 });
 
