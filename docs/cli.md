@@ -12,7 +12,7 @@ bun run build
 bun run start
 ```
 
-> **Note:** Apart from `gemi run`, `gemi migrate --dry-run` and `gemi check models`, the commands take no flags or options — each is a bare subcommand. gemi discovers your project from the current working directory (it expects `app/` and, for tooling commands, `app/kernel/Kernel.ts`).
+> **Note:** Apart from `gemi run`, `gemi upgrade`, `gemi install-skill`, `gemi migrate --dry-run` and `gemi check models`, the commands take no flags or options — each is a bare subcommand. gemi discovers your project from the current working directory (it expects `app/` and, for tooling commands, `app/kernel/Kernel.ts`).
 
 ## `gemi dev`
 
@@ -28,6 +28,30 @@ It sets `NODE_ENV=development` and spawns Bun with `--hot` on `app/server.ts`, r
 - `--preload app/preload.ts` — your optional [preload script](./configuration.md#apppreloadts), if the file exists.
 
 In dev, the server also watches your `.env` files and re-applies changes to `process.env` without a restart (see [Configuration](./configuration.md#hot-reload-in-development)). Use this for day-to-day development.
+
+### The update notice
+
+`dev` also asks npm whether a newer gemi has been published, and prints a line if one has:
+
+```
+  Update available: gemi 0.58.0 → 0.59.0
+  Run `gemi upgrade` to update.
+  This crosses a minor version — read UPGRADE.md before you do:
+  https://github.com/nstfkc/gemi/blob/main/UPGRADE.md
+```
+
+The UPGRADE.md pointer appears only when the **minor** version changes, which pre-1.0 is where gemi's breaking changes land. A patch bump prints the first two lines alone.
+
+The check runs beside the dev server, never in front of it. It is started after the server process is spawned, times out after two seconds, and swallows every failure — so being offline, behind a proxy, or on a registry mirror costs you the message and nothing else. It never blocks, delays, or fails startup.
+
+It compares against the dist-tag your installed version is already on: an app running `0.60.0-rc.1` is compared against `rc`, not `latest`, so a release candidate is never told to "update" backwards onto the older stable release.
+
+Two ways to switch it off:
+
+- `GEMI_NO_UPDATE_CHECK=1` — opt out permanently, e.g. in your shell profile.
+- `CI` — skipped automatically whenever it is set, since nobody reads it there.
+
+`GEMI_REGISTRY` points the check (and [`gemi upgrade`](#gemi-upgrade)) at a different registry, for a corporate mirror.
 
 ## `gemi build`
 
@@ -78,6 +102,72 @@ Like `dev` and `start`, it launches a fresh Bun process with the same two runtim
 > **Gotcha:** the cron scheduler does not start under `gemi run`, so a long-running command cannot fire your whole schedule in a process nobody is watching. Jobs are still discovered and `app(Scheduler).jobs` still answers honestly. The command sets `GEMI_NO_SCHEDULE=1` on the process it spawns, which also works as a general "boot this app but do not schedule anything" switch.
 
 > **Gotcha:** `NODE_ENV` is inherited rather than forced, unlike `dev` (development) and `start` (production), which each are one mode by definition. Run `NODE_ENV=production gemi run <name>` for production semantics.
+
+## `gemi upgrade`
+
+Upgrades the `gemi` package itself.
+
+```bash
+gemi upgrade              # newest release on the channel you are on
+gemi upgrade --dry-run    # resolve the version, print the command, run nothing
+gemi upgrade 0.58.0       # pin, or roll back, to an exact version
+gemi upgrade rc           # move to the current release candidate
+```
+
+With no argument it resolves the dist-tag matching your installed version — `rc` for a release candidate, `latest` otherwise. That is the point of the default: resolving `latest` from an rc would move you *backwards* onto the older stable release, and call it an upgrade.
+
+An argument is either an exact version or a dist-tag. An exact version is used as given and needs no network, which is what makes `gemi upgrade 0.58.0` the way back after an upgrade goes wrong.
+
+The command does not edit `package.json` or the lockfile itself. It resolves the version and then runs your package manager, so the lockfile is updated the same way it would be by hand:
+
+| Lockfile | Command run |
+| --- | --- |
+| `bun.lock` / `bun.lockb`, or none | `bun add gemi@<version>` |
+| `pnpm-lock.yaml` | `pnpm add gemi@<version>` |
+| `yarn.lock` | `yarn add gemi@<version>` |
+| `package-lock.json` | `npm install --save-prod gemi@<version>` |
+
+Bun is the default when no lockfile is found, and wins if a repo carries more than one. If your `package.json` declares gemi under `devDependencies`, the install keeps it there (`--dev` / `--save-dev`) rather than promoting it to `dependencies`.
+
+Crossing a minor version prints a pointer to [UPGRADE.md](https://github.com/nstfkc/gemi/blob/main/UPGRADE.md) before the install runs — read it, because pre-1.0 that is where breaking changes are, and some of them stop your app typechecking until you act on them.
+
+After a successful install it refreshes the agent skill — but only if [`gemi install-skill`](#gemi-install-skill) has already been run in this project. An upgrade is not the moment to create a directory nobody asked for, and a skill copy it declines to overwrite (local edits) is reported as a note rather than failing the upgrade.
+
+> **Note:** this upgrades the `gemi` package only. It does not touch `react`, `react-dom`, `vite`, or `@vitejs/plugin-react`; check gemi's `peerDependencies` after a minor bump.
+
+## `gemi install-skill`
+
+Installs the agent skill that ships with your gemi into the app's `.agents/skills/`.
+
+```bash
+gemi install-skill           # install or update
+gemi install-skill --force   # replace a copy with local edits
+```
+
+`gemi-react-best-practices` is 44 rules across 10 categories — the payload/waterfall model, `useQuery` defaults, ORM transaction and connection semantics, the routing and middleware shapes, and the gotchas that fail silently rather than loudly. It lands at:
+
+```
+.agents/skills/gemi-react-best-practices/
+├── SKILL.md
+└── rules/
+```
+
+The skill describes the framework, so its correct version is the framework's version. That is why this is a command rather than a folder you copy once: [`gemi upgrade`](#gemi-upgrade) re-runs it, so the rules an agent reads cannot drift from the gemi the app actually runs.
+
+**It will not discard your edits.** `.agents/.skill-lock.json` records a content hash of what was written. If the installed copy no longer matches — you tuned a rule, or the directory was put there by something else — the command refuses and tells you, and `--force` is how you overwrite. That matters because `gemi upgrade` calls this automatically: a command that runs on its own must not eat local changes.
+
+**It replaces rather than merges.** A rule renamed or deleted upstream disappears locally too. A stale rule file left behind is read by an agent as current guidance, which is worse than not shipping the skill.
+
+The lockfile follows the [`vercel-labs/skills`](https://github.com/vercel-labs/skills) convention already used by other skill tooling, and unrelated entries and top-level keys in it are preserved — gemi's skill can sit beside skills installed from elsewhere.
+
+> **Note:** `.agents/` is the cross-tool skills directory. Claude Code reads project skills from `.claude/skills/` instead, so link it if you want both:
+>
+> ```bash
+> mkdir -p .claude/skills
+> ln -s ../../.agents/skills/gemi-react-best-practices .claude/skills/gemi-react-best-practices
+> ```
+>
+> Keep that link out of version control. A symlink checked out on Windows without `core.symlinks` materialises as a *text file* containing the target path, so any tool reading `.claude/skills/` finds a one-line file where a skill should be.
 
 ## `gemi migrate`
 

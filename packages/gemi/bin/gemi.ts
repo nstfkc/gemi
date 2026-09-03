@@ -11,6 +11,9 @@ import gemiVite from "../vite";
 import { program } from "commander";
 import { CheckModelsError, checkModels, printReport } from "./check-models";
 import { ApiManifestGenerator } from "./ide/generateApiManifest";
+import { reportUpdate } from "./update-check";
+import { runUpgrade } from "./upgrade";
+import { SKILL_NAME, installSkill } from "./install-skill";
 
 // `bun --preload` args for the app's optional `app/preload.ts`. Preloaded (after
 // gemi's own runtime plugin) before the server entry runs — so it executes
@@ -44,6 +47,12 @@ program.command("dev").action(async () => {
     stdout: "inherit",
     stderr: "inherit",
   });
+
+  // Deliberately not awaited: the dev server is already starting, and a version
+  // check has no business delaying it. The notice lands in the scrollback a
+  // moment later, or never — `reportUpdate` swallows every failure, so being
+  // offline costs nothing but silence. `GEMI_NO_UPDATE_CHECK=1` turns it off.
+  void reportUpdate({ rootDir });
 });
 
 program.command("build").action(async () => {
@@ -273,6 +282,49 @@ program
         : `Migrating ${rootDir}...`,
     );
     await runMigrate({ rootDir, dryRun: options.dryRun });
+  });
+
+program
+  .command("upgrade")
+  .description(
+    "Upgrade the `gemi` package. With no argument it moves to the newest " +
+      "release on the channel you are already on — `rc` for a release " +
+      "candidate, `latest` otherwise — so an rc is never 'upgraded' backwards " +
+      "onto the older stable release",
+  )
+  .argument(
+    "[target]",
+    "A version (`0.59.0`) to pin or roll back to, or a dist-tag (`rc`, " +
+      "`latest`). Defaults to the current channel's tag",
+  )
+  .option("--dry-run", "Resolve the version and print the install command, run nothing")
+  .action(async (target: string | undefined, options: { dryRun?: boolean }) => {
+    const code = await runUpgrade({
+      rootDir: path.resolve(process.cwd()),
+      target,
+      dryRun: options.dryRun,
+    });
+    process.exit(code);
+  });
+
+program
+  .command("install-skill")
+  .description(
+    `Install the \`${SKILL_NAME}\` agent skill that ships with your gemi into ` +
+      `.agents/skills/. \`gemi upgrade\` re-runs this afterwards, so the rules an ` +
+      `agent reads stay pinned to the gemi the app actually runs`,
+  )
+  .option(
+    "--force",
+    "Replace an installed copy that has local edits, or one this command did not write",
+  )
+  .action(async (options: { force?: boolean }) => {
+    process.exit(
+      installSkill({
+        rootDir: path.resolve(process.cwd()),
+        force: options.force,
+      }),
+    );
   });
 
 // A command group rather than a `check:models` colon name, which is the shape

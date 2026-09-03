@@ -65,6 +65,12 @@ await cp(
   join("ide", "typescript-plugin", "package.json"),
   join(STAGING, "ide", "typescript-plugin", "package.json"),
 );
+// The agent skill `gemi install-skill` copies into an app's `.agents/skills/`.
+// Authored markdown, so there is nothing for the build to emit and nothing under
+// `dist/` to copy from — it ships as source, and is staged here for the same
+// reason as the file above: the staging directory is built by explicit copies, so
+// a `files` entry alone would put it in no tarball at all.
+await cp("skills", join(STAGING, "skills"), { recursive: true });
 await Bun.write(
   join(STAGING, "package.json"),
   `${JSON.stringify(publishPkg, null, 2)}\n`,

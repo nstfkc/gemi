@@ -44,6 +44,71 @@ interface GemiConfig {
 
 The file is entirely optional — if it's absent, gemi uses an empty config. It's loaded directly as TypeScript under Bun (as `gemi.config.ts`, `gemi.config.js`, or `gemi.config.mjs`), so no separate transpile step is needed.
 
+### React Compiler
+
+`@vitejs/plugin-react` can run the [React Compiler](https://react.dev/learn/react-compiler) — automatic memoization, so you write plain components and stop hand-placing `useMemo`/`useCallback`/`memo`. Since `@vitejs/plugin-react` 6.1 it runs through **oxc** (the Rust port, shipped as `oxc-transform-react`) rather than Babel, which means no second parse per module. Turn it on with the `compiler` option where you register the React plugin:
+
+```typescript
+import { defineConfig, reactCompiler } from "gemi/config";
+import react from "@vitejs/plugin-react";
+
+export default defineConfig({
+  vite: {
+    plugins: [react({ compiler: reactCompiler() })],
+  },
+});
+```
+
+`reactCompiler()` from `gemi/config` is the value to pass, with an environment switch in front of it. Pass a plain `true` / `false` instead to pin the choice.
+
+Two packages are required, both already in the scaffolded template:
+
+```bash
+bun add -d "@vitejs/plugin-react@^6.1.1" "oxc-transform-react@^0.145.0"
+```
+
+`oxc-transform-react` is an optional peer of `@vitejs/plugin-react` with a `^0.145.0` range, so pin it to `0.145.x`. Note what enforces that: **the plugin itself does no version check** — it calls `await import("oxc-transform-react")` and nothing more, so a `0.148.0` install loads and runs. What you get is your package manager's peer resolution: a warning under bun and npm, an install failure under pnpm with strict peers. The risk is not a broken build, it is an unchecked API mismatch between the plugin and a transform version it never declared support for.
+
+If the package is missing entirely, the build *does* fail, with *"React Compiler requires the optional `oxc-transform-react` package"* rather than silently skipping compilation.
+
+The plugin only memoizes for **client** environments. gemi's SSR view build has `consumer: "server"`, so it gets the plain JSX transform — which is what you want, since server rendering is a single pass and memoization would only add cache allocations. The compiled client output imports `react/compiler-runtime`, present in React 19.
+
+### Turning it off
+
+```bash
+GEMI_REACT_COMPILER=off bun dev
+GEMI_REACT_COMPILER=off bun run build
+```
+
+`off` (case-insensitive) disables it; any other value, or none, leaves it on — the same shape as [`GEMI_COMPRESSION`](#opting-out). It is a named opt-out rather than a boolean because `0`, `false` and `no` all read as "off" to a human, and only one of them could be the one that works.
+
+The variable is read where `gemi.config.ts` is loaded — inside the Vite process that `dev` and `build` spawn — so it is inherited from your shell and also picked up from `.env`, which Bun loads before the config imports. That makes a compiler-shaped bug one variable to bisect rather than an edit to `gemi.config.ts`:
+
+```bash
+GEMI_REACT_COMPILER=off bun dev   # still broken? not the compiler
+```
+
+Because the switch lives in `gemi.config.ts` rather than in gemi's own plugin, it is yours to change: replace `reactCompiler()` with `true`, `false`, or your own condition.
+
+`compiler` also accepts an options object, forwarded to the compiler:
+
+```typescript
+// Opt in per-component with a "use memo" directive instead of compiling everything.
+react({ compiler: { compilationMode: "annotation" } })
+
+// Surface recoverable diagnostics (bail-out reasons) as Vite warnings.
+// Fatal diagnostics always fail the build regardless of this flag.
+react({ compiler: { logDiagnostics: true } })
+```
+
+Pass them through the switch to keep both — `reactCompiler` returns `false` in their place when the environment opts out:
+
+```typescript
+react({ compiler: reactCompiler({ compilationMode: "annotation" }) })
+```
+
+> **Note:** the oxc React Compiler integration is marked experimental upstream. It is a build-time transform with no runtime component beyond `react/compiler-runtime`, so dropping back to `react()` is a one-word revert.
+
 > **Note:** This is not the same file as `vite.config.mjs`. `gemi.config.ts` is gemi's own config (Vite **and** Bun plugins) consumed by the CLI, the runtime preload, and the gemi Vite plugin. `vite.config.mjs` is the standard Vite entry that loads the gemi Vite plugin. See [Vite config](#vite-config) below.
 
 ## Environment variables & `.env`

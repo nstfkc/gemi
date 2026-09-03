@@ -15,7 +15,8 @@
   },
   "files": [
     "dist/**/*",
-    "ide/typescript-plugin/package.json"
+    "ide/typescript-plugin/package.json",
+    "skills/**/*"
   ],
   "module": true,
   "exports": {
