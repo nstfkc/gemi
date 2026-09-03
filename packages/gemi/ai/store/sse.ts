@@ -17,13 +17,17 @@ export function encodeFrame(frame: AgentStreamFrame): string {
 /**
  * How long a connection may sit idle before a comment line goes out.
  *
- * Azure App Service's front end drops a connection that has carried nothing
- * for about 230 seconds, and a slow tool or a thinking sub-agent can be silent
- * for longer than that. 25 seconds sits well inside every proxy timeout we
- * know of, and far enough apart that the comment lines cost nothing. Both
- * encoders read this one value, so the two cannot drift apart.
+ * The nearest ceiling is not a proxy but our own server: Bun's `idleTimeout`
+ * counts socket silence, a streaming body included, and gemi runs at its
+ * 10-second default unless `SERVER_IDLE_TIMEOUT` says otherwise. A comment
+ * line every 25 seconds was measured to lose the connection at 12; every 5
+ * keeps it open, with room for a write that lands late. Azure App Service's
+ * front end, at about 230 seconds, is the far ceiling, and 5 clears it by the
+ * same margin. A thousand quiet streams cost two hundred thirteen-byte writes
+ * a second, which is nothing. Both encoders read this one value, so the two
+ * cannot drift apart.
  */
-export const SSE_KEEPALIVE_INTERVAL_MS = 25_000;
+export const SSE_KEEPALIVE_INTERVAL_MS = 5_000;
 
 /**
  * The comment line itself. A line starting with `:` is a comment under the SSE
@@ -42,7 +46,8 @@ export const SSE_KEEPALIVE = ": keepalive\n\n";
  *
  * The write is guarded because a cancel can land between the timer firing and
  * the enqueue, and a closed controller throws. There is nothing to do about
- * that except stop.
+ * that except stop. `arm` checks `stopped` too, so a `touch()` that arrives
+ * after `stop()` cannot hand a finished stream a timer for one more interval.
  */
 export function sseKeepalive(
   controller: ReadableStreamDefaultController<Uint8Array>,
@@ -52,6 +57,7 @@ export function sseKeepalive(
   let stopped = false;
 
   const arm = () => {
+    if (stopped) return;
     if (timer !== null) clearTimeout(timer);
     timer = setTimeout(() => {
       timer = null;
