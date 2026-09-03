@@ -31,6 +31,15 @@ import type {
  * still there after a refresh.
  */
 export interface AgentStore {
+  /**
+   * Where a `threadId` comes from. `ApiRouter.agent()` mounts no route for
+   * this: the app writes one, calls it here, and hands the id to `useChat` —
+   * the mount is the app's because it is where ownership gets recorded, and a
+   * store that holds no user cannot do that for it. An id that did not come out
+   * of here is `null` from `loadThread` and a 404 from the controller, unless
+   * the store's ids are the client's by design (`MemoryAgentStore`'s
+   * `clientOwnedIds`).
+   */
   createThread(params: { userId?: string | number }): Promise<{ threadId: string }>;
   /**
    * The history, or `null` for a thread the store does not have.
@@ -173,6 +182,16 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
         // expired, mistyped, or on an instance that no longer exists — rather
         // than see it answered as an empty conversation and have this turn
         // persisted under the dead id.
+        //
+        // That ordering is deliberate, and it costs something: the ownership
+        // check the comment above points at `instructions()` for has not run
+        // yet, so a caller holding a uuid learns whether it is live here
+        // without the app's say. `/attach` already answers a question of that
+        // shape to anyone with the id and never calls `instructions()`, and
+        // the id is unguessable — which is why the load stays above
+        // `instructions()`, whose own work (a database read, typically) would
+        // otherwise be spent on a thread that is gone. Move it below and that
+        // work is spent on every dead id instead.
         return jsonResponse(404, {
           code: "thread_not_found",
           message: `Thread ${threadId} does not exist here, or has expired.`,
