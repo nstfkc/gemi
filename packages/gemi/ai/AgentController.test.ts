@@ -668,8 +668,105 @@ describe("the request body", () => {
       headers: { "Content-Type": "application/json; charset=utf-8" },
       body: JSON.stringify({ text: "hi" }),
     });
-    await new Chat().stream(new HttpRequest(raw, {}, "api", "/chat"));
+    const response = await new Chat().stream(new HttpRequest(raw, {}, "api", "/chat"));
+    expect(response.status).toBe(200);
     expect(calls[0]!.turn).toEqual({ text: "hi" });
+    run.finish();
+  });
+
+  /** Media types are case-insensitive, and some proxies rewrite them. */
+  test("matches the content type without regard to case", async () => {
+    const run = new StubAgentRun("run_case");
+    const { agent, calls } = stubAgent(run);
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+    }
+    const response = await new Chat().stream(
+      rawRequest(JSON.stringify({ text: "hi" }), "Application/JSON; charset=UTF-8"),
+    );
+    expect(response.status).toBe(200);
+    expect(calls[0]!.turn).toEqual({ text: "hi" });
+    run.finish();
+  });
+
+  /**
+   * The CSRF shape: a cross-site `<form enctype="text/plain">` whose single
+   * field is named `{"text":"` and valued `"}` posts exactly this body, and the
+   * browser sends it without a preflight. Parsing it would let any page on the
+   * web take a turn on a logged-in user's conversation. The refusal comes
+   * before the body is looked at, so it is the same for one that is valid JSON
+   * as for one that is not.
+   */
+  test("refuses a body that is not application/json with a 415", async () => {
+    const run = new StubAgentRun("run_415");
+    const { agent, calls } = stubAgent(run);
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+    }
+
+    const response = await new Chat().stream(rawRequest('{"text":"hi"}', "text/plain"));
+    expect(response.status).toBe(415);
+    expect(response.headers.get("Content-Type")).toBe("application/json");
+    const body = (await response.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe("unsupported_media_type");
+    expect(body.error.message).toContain("application/json");
+    // No run was started for it.
+    expect(calls).toHaveLength(0);
+
+    for (const contentType of ["application/x-www-form-urlencoded", "multipart/form-data"]) {
+      expect((await new Chat().stream(rawRequest("text=hi", contentType))).status).toBe(415);
+    }
+    expect(calls).toHaveLength(0);
+    run.finish();
+  });
+
+  /**
+   * A body with no type at all. Bun's `Request` leaves a string body untyped,
+   * which is what this builds; a browser would have filled in
+   * `text/plain;charset=UTF-8`, which the test above refuses the same way.
+   */
+  test("refuses a body that carries no content type at all", async () => {
+    const run = new StubAgentRun("run_notype");
+    const { agent, calls } = stubAgent(run);
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+    }
+    const raw = new Request("http://localhost/api/chat", {
+      method: "POST",
+      body: JSON.stringify({ text: "hi" }),
+    });
+    expect(raw.headers.get("Content-Type")).toBeNull();
+    const response = await new Chat().stream(new HttpRequest(raw, {}, "api", "/chat"));
+    expect(response.status).toBe(415);
+    expect(calls).toHaveLength(0);
+    run.finish();
+  });
+
+  test("attach and stop hold the body to the same type", async () => {
+    const run = new StubAgentRun("run_415b");
+    const { agent } = stubAgent(run);
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+    }
+    const controller = new Chat();
+    await controller.stream(jsonRequest({ threadId: "t1", text: "hi" }));
+
+    const attached = await controller.attach(
+      rawRequest(JSON.stringify({ threadId: "t1" }), "text/plain"),
+    );
+    expect(attached.status).toBe(415);
+
+    const stopped = await controller.stop(
+      rawRequest(JSON.stringify({ runId: "run_415b" }), "text/plain"),
+    );
+    expect(stopped).toBeInstanceOf(Response);
+    expect((stopped as Response).status).toBe(415);
+    expect(run.stopped).toBe(false);
+
     run.finish();
   });
 
