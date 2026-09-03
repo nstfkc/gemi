@@ -32,7 +32,19 @@ import type {
  */
 export interface AgentStore {
   createThread(params: { userId?: string | number }): Promise<{ threadId: string }>;
-  loadThread(threadId: string): Promise<AgentMessage[]>;
+  /**
+   * The history, or `null` for a thread the store does not have.
+   *
+   * `null` and `[]` are different answers and the controller acts on the
+   * difference: an empty array is a conversation with nothing in it yet, and a
+   * turn on it runs; `null` is a 404 before anything runs. A store that answers
+   * `[]` for an id it has never seen turns an expired or mistyped thread into a
+   * fresh conversation with no signal, and persists the next turn under the
+   * dead id. Only a store whose ids are minted by the client should do that,
+   * and then on purpose — see `MemoryAgentStore`'s `clientOwnedIds`.
+   */
+  loadThread(threadId: string): Promise<AgentMessage[] | null>;
+  /** Called with a thread `loadThread` just found. Must not create one. */
   appendMessages(threadId: string, messages: AgentMessage[]): Promise<void>;
 }
 
@@ -152,11 +164,24 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
     // or a `store` that scopes by `req.user`. The framework's job is to make
     // sure the route is behind the router's middleware in the first place,
     // which `ApiRouter.agent()` now does.
-    const messages = threadId
-      ? await this.store.loadThread(threadId)
-      : Array.isArray(body.messages)
-        ? (body.messages as AgentMessage[])
-        : [];
+    let messages: AgentMessage[];
+    if (threadId) {
+      const history = await this.store.loadThread(threadId);
+      if (!history) {
+        // Before `instructions()` and before the run: nothing has been
+        // charged for, and the client has to learn that its thread is gone —
+        // expired, mistyped, or on an instance that no longer exists — rather
+        // than see it answered as an empty conversation and have this turn
+        // persisted under the dead id.
+        return jsonResponse(404, {
+          code: "thread_not_found",
+          message: `Thread ${threadId} does not exist here, or has expired.`,
+        });
+      }
+      messages = history;
+    } else {
+      messages = Array.isArray(body.messages) ? (body.messages as AgentMessage[]) : [];
+    }
 
     const instructions = (await this.instructions(req)) || undefined;
 
@@ -215,6 +240,12 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
       });
     }
 
+    // The store is not consulted. This route answers whether a run is in
+    // flight here, and a run it finds was started on a thread `stream` had
+    // already loaded; a miss is `no_live_run` whether or not the thread exists,
+    // because a client that gets one re-reads the thread anyway (see
+    // `onAttachMiss`) and learns there. The thread's own 404 is `stream`'s,
+    // where a turn would otherwise be persisted under it.
     const live = await this.liveRuns.find({ threadId });
     if (!live) {
       // An explicit miss, not a 200 with an empty stream. See `MemoryLiveRuns`:

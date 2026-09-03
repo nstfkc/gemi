@@ -38,15 +38,28 @@ describe("MemoryAgentStore", () => {
     expect(await store.loadThread(threadId)).toHaveLength(1);
   });
 
-  test("reads an unknown thread as empty rather than throwing", async () => {
+  test("answers null for a thread it does not have, which is not an empty one", async () => {
     const store = new MemoryAgentStore();
-    expect(await store.loadThread("never-existed")).toEqual([]);
+    // `[]` here was the bug: an expired or mistyped id read as a conversation
+    // with nothing in it yet, and the controller ran the turn on that.
+    expect(await store.loadThread("never-existed")).toBeNull();
   });
 
-  test("creates a thread on append, so a client-owned id cannot lose a turn", async () => {
+  test("refuses to append to a thread it does not have", async () => {
     const store = new MemoryAgentStore();
+    await expect(
+      store.appendMessages("never-existed", [message("1", "user", "hi")]),
+    ).rejects.toThrow(/never-existed/);
+    expect(store.size).toBe(0);
+  });
+
+  test("with client-owned ids, an id it has not seen is a conversation starting", async () => {
+    // The one setup where unknown is not lost: the client minted the id, so
+    // the first turn arrives before anything is stored under it.
+    const store = new MemoryAgentStore({ clientOwnedIds: true });
+    expect(await store.loadThread("client-chose-this")).toEqual([]);
     await store.appendMessages("client-chose-this", [message("1", "user", "hi")]);
-    expect((await store.loadThread("client-chose-this")).map((m) => m.id)).toEqual(["1"]);
+    expect((await store.loadThread("client-chose-this"))!.map((m) => m.id)).toEqual(["1"]);
   });
 
   test("drops a thread nobody has touched for ttlMs", async () => {
@@ -59,7 +72,9 @@ describe("MemoryAgentStore", () => {
     store.sweep(Date.now() + 90_000);
 
     expect(store.size).toBe(0);
-    expect(await store.loadThread(threadId)).toEqual([]);
+    // Gone, not empty: the client holding this id has a history the store no
+    // longer does, and has to be told.
+    expect(await store.loadThread(threadId)).toBeNull();
   });
 
   test("keeps a thread whose ttl has not run out", async () => {
