@@ -396,8 +396,11 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
       case "tool-call":
         // Skipped while the arguments are still streaming: a hook that fires
         // per token would fire with a half-parsed input, which is worse than
-        // firing late.
-        if (!event.part.partial) {
+        // firing late. And skipped for a re-sent frame, which carries a parked
+        // sub-run's record on a call this hook has already seen — once per call
+        // is the contract, and a run that re-parks would otherwise fire it for
+        // a call some earlier run made.
+        if (!event.part.partial && !event.resent) {
           await this.onToolCall(
             {
               toolCallId: event.part.toolCallId,

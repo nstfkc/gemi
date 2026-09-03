@@ -339,7 +339,20 @@ export type AgentStreamEvent<T extends ToolShapes = ToolShapes, O = unknown> =
    *  text, `snapshot` the best-effort parse so far, so a UI can bind fields
    *  before the object closes. */
   | { type: "output-delta"; messageId: string; delta: string; snapshot: Partial<O> }
-  | { type: "tool-call"; messageId: string; part: ToolCallPart<T> }
+  | {
+      type: "tool-call";
+      messageId: string;
+      part: ToolCallPart<T>;
+      /**
+       * The server sending a call the client already holds, to put its own
+       * copy of the part in the client's hands — a parked sub-run's signed
+       * record, which the client cannot build from the forwarded events. Not
+       * a new call: the reducer merges it like any other frame, and a hook
+       * that fires per call skips it, because on a re-park the call it names
+       * was made by a previous run altogether.
+       */
+      resent?: true;
+    }
   /** The model searched for deferred tools and loaded these. A UI can say "…
    *  looking for the right tool" instead of showing an unexplained pause. */
   | { type: "tool-search"; loaded: string[] }
