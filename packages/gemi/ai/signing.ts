@@ -276,7 +276,8 @@ export function verifyPendingCall(
  * Deliberately not signed: the transcript. The sub-run resumes from messages
  * the client carried, exactly as the parent does in stateless mode, and the
  * same argument applies — what the signature pins is that the server parked
- * *here*, on *these* calls, and not what was said on the way.
+ * *here*, on *these* calls, with *this* input, and not what was said on the
+ * way.
  */
 export type NestedRunClaims = {
   /** The root run's id, the one every pending call of the tree is minted under. */
@@ -292,6 +293,15 @@ export type NestedRunClaims = {
   nestedRunId: string;
   /** The tool calls the sub-run is waiting on: every call left open in its transcript. */
   open: string[];
+  /**
+   * The input the tool that parked was running on, as the transcript carries
+   * it. Re-entry runs the tool body with the input the history holds, and the
+   * history is the client's — so a record that pinned where the sub-run parked
+   * but not what its tool was given would let the client keep the run and
+   * rewrite the arguments to anything the schema accepts. The same bargain a
+   * pending call makes: the input executed is the input signed.
+   */
+  input: unknown;
 };
 
 const NESTED_VERSION = "agn1";
@@ -307,14 +317,18 @@ function nestedFields(claims: NestedRunClaims, nonce: string, expiresAt: number)
     // A set, so it is sorted: the ids are read back out of a transcript the
     // client re-serialized, and message order is not part of the claim.
     canonicalize([...claims.open].sort()),
+    canonicalize(claims.input),
   ];
 }
 
 /**
- * Same shape as a pending call's token, so the same reader serves both. The
- * nonce is entropy and nothing more: a record is a fact about the transcript,
- * not a permission that is used up, and a second re-entry on the same record
- * is stopped by the nonce on the *answer* it is delivering.
+ * Same shape as a pending call's token, so the same reader serves both — nonce
+ * included, and the nonce is spent, by `consumeNestedRun` below. A verified
+ * record is permission to run the tool it hangs off, and the tool body runs
+ * before the sub-run gets to look at the answer's own nonce; a record that
+ * could be presented twice would run the body twice before anything refused
+ * the replay. Every park mints a fresh record, so spending one costs a
+ * legitimate re-park nothing.
  */
 export function signNestedRun(claims: NestedRunClaims, options: SignOptions = {}): string {
   const secret = secretKey(options.secret);
@@ -412,7 +426,23 @@ function sweep(now: number) {
  * and this one is a state change that must happen exactly once per answer.
  */
 export function consumePendingCall(signature: string, options: VerifyOptions = {}): boolean {
-  const parsed = readSignature(signature);
+  return spend(readSignature(signature), options);
+}
+
+/**
+ * Spends a parked-run record's nonce, on the same registry and the same terms.
+ * `false` means the record has already re-entered its tool once — the turn is
+ * a replay of a history from before the answer was delivered, and the body
+ * must not run again on it.
+ */
+export function consumeNestedRun(signature: string, options: VerifyOptions = {}): boolean {
+  return spend(readToken(signature, NESTED_VERSION), options);
+}
+
+function spend(
+  parsed: { nonce: string; expiresAt: number } | null,
+  options: VerifyOptions,
+): boolean {
   if (!parsed) return false;
   const now = options.now ?? Date.now();
   if (spent.size >= sweepAt) sweep(now);

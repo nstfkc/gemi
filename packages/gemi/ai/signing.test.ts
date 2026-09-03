@@ -2,6 +2,7 @@ import { createHmac } from "crypto";
 import { describe, expect, test } from "vitest";
 import {
   canonicalize,
+  consumeNestedRun,
   consumePendingCall,
   readSignature,
   signNestedRun,
@@ -267,6 +268,7 @@ describe("a signed parked-run record", () => {
     path: ["call_outer"],
     nestedRunId: "run_sub",
     open: ["q1", "q2"],
+    input: { path: "notes.md" },
     ...overrides,
   });
   /** What the verifying run has in front of it: everything but the minting run's id. */
@@ -293,6 +295,38 @@ describe("a signed parked-run record", () => {
     expect(
       verifyNestedRun(signature, presented(record({ open: ["q1", "q2", "q9"] })), { secret }),
     ).toEqual({ ok: false, reason: "forged" });
+  });
+
+  test("rejects a record whose tool input was rewritten, however well-typed", () => {
+    // The record is what re-enters the tool, and the tool runs on the input
+    // the transcript carries — so a record that verified against any input
+    // would be a signed permission to run the tool with arguments of the
+    // client's choosing.
+    const signature = signNestedRun(record(), { secret });
+    expect(
+      verifyNestedRun(signature, presented(record({ input: { path: "/etc/secrets.md" } })), {
+        secret,
+      }),
+    ).toEqual({ ok: false, reason: "forged" });
+    // Key order is not part of the input: it comes back out of a client's
+    // serializer, as an approval's does.
+    expect(
+      verifyNestedRun(
+        signNestedRun(record({ input: { b: 1, a: 2 } }), { secret }),
+        presented(record({ input: { a: 2, b: 1 } })),
+        { secret },
+      ).ok,
+    ).toBe(true);
+  });
+
+  test("is spent by the re-entry it permits, and a second presentation is a replay", () => {
+    const signature = signNestedRun(record(), { secret });
+    expect(consumeNestedRun(signature)).toBe(true);
+    // Still authentic — what has changed is that the tool has run on it.
+    expect(verifyNestedRun(signature, presented(record()), { secret }).ok).toBe(true);
+    expect(consumeNestedRun(signature)).toBe(false);
+    // A pending call's token is not a record, and spends nothing here.
+    expect(consumeNestedRun(signPendingCall(claims(), { secret }))).toBe(false);
   });
 
   test("cannot be moved under another tool call, or onto another sub-run", () => {
