@@ -28,6 +28,27 @@ describe("MemoryAgentStore", () => {
     expect((await store.loadThread(threadId)).map((m) => m.id)).toEqual(["1", "2"]);
   });
 
+  test("replaces a message it already holds instead of holding it twice", async () => {
+    const store = new MemoryAgentStore();
+    const { threadId } = await store.createThread({});
+    await store.appendMessages(threadId, [
+      message("1", "user", "hi"),
+      message("2", "assistant", "one sec"),
+      message("3", "user", "ok"),
+    ]);
+
+    // What a turn that resolves a pending call reports: the earlier assistant
+    // message again, under its own id, plus the new tail.
+    await store.appendMessages(threadId, [
+      message("2", "assistant", "done"),
+      message("4", "assistant", "anything else?"),
+    ]);
+
+    const held = await store.loadThread(threadId);
+    expect(held.map((m) => m.id)).toEqual(["1", "2", "3", "4"]);
+    expect(held[1]!.content).toEqual([{ type: "text", text: "done" }]);
+  });
+
   test("hands out a copy, so a caller cannot edit history in place", async () => {
     const store = new MemoryAgentStore();
     const { threadId } = await store.createThread({});
