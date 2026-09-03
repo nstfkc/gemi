@@ -1,11 +1,12 @@
 process.env.SECRET ??= "agent-test-secret";
 
-import { describe, expect, test, vi } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { Agent, AgentTool, Skill, ToolNamespace } from "./Agent";
 import type { AgentProvider, ProviderEvent } from "./AgentProvider";
 import { fakeProvider } from "./providers/fakeProvider";
 import type { Schema } from "./Schema";
 import { readSignature, verifyPendingCall } from "./signing";
+import { SSE_KEEPALIVE, SSE_KEEPALIVE_INTERVAL_MS } from "./store/sse";
 import type {
   AgentMessage,
   AgentStreamEvent,
@@ -950,6 +951,91 @@ describe("a run outliving its request", () => {
     expect(body.startsWith("id: 2\ndata: {")).toBe(true);
     expect(body).toContain('"type":"text-delta"');
     expect(body.endsWith("\n\n")).toBe(true);
+  });
+});
+
+describe("toResponse keepalive", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /**
+   * Reads until a read stays pending, and hands that pending read back.
+   *
+   * Boxed rather than returned bare: an async function that returns a promise
+   * adopts it, and the caller would then be waiting for the very chunk the
+   * test has not produced yet.
+   */
+  async function untilSilent(reader: ReadableStreamDefaultReader<Uint8Array>) {
+    while (true) {
+      let settled = false;
+      const next = reader.read().then((chunk) => {
+        settled = true;
+        return chunk;
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      if (!settled) return { next };
+    }
+  }
+
+  test("a comment line goes out while a tool is running, and no timer outlives the stream", async () => {
+    vi.useFakeTimers();
+    const started = deferred();
+    const release = deferred<any>();
+    const slow = AgentTool.create({
+      name: "slow",
+      description: "Finishes eventually",
+      inputSchema: anything(),
+      execute: () => {
+        started.resolve();
+        return release.promise;
+      },
+    });
+    const provider = fakeProvider([toolCall("c1", "slow", {}), finish()], [finish()]);
+    const agent = Agent.create({ name: "patient", provider, tools: [slow] });
+    const run = agent.stream({ messages: [], req });
+
+    const reader = run.toResponse().body!.getReader();
+    const bytes = new TextDecoder();
+    await started.promise;
+
+    // The tool is running and nothing has been written for a while.
+    const { next } = await untilSilent(reader);
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(SSE_KEEPALIVE_INTERVAL_MS);
+    expect(bytes.decode((await next).value)).toBe(SSE_KEEPALIVE);
+
+    release.resolve({ ok: true });
+    let last = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      last = bytes.decode(value);
+    }
+    expect(last).toContain('"type":"run-end"');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  test("a reader that cancels leaves no timer behind either", async () => {
+    vi.useFakeTimers();
+    const release = deferred<any>();
+    const slow = AgentTool.create({
+      name: "slow",
+      description: "Finishes eventually",
+      inputSchema: anything(),
+      execute: () => release.promise,
+    });
+    const provider = fakeProvider([toolCall("c1", "slow", {}), finish()], [finish()]);
+    const agent = Agent.create({ name: "patient", provider, tools: [slow] });
+    const run = agent.stream({ messages: [], req });
+
+    const response = run.toResponse();
+    expect(vi.getTimerCount()).toBe(1);
+    await response.body!.cancel();
+    expect(vi.getTimerCount()).toBe(0);
+
+    release.resolve({ ok: true });
+    expect((await run.result()).finishReason).toBe("stop");
   });
 });
 
