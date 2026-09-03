@@ -454,6 +454,152 @@ describe("AgentController.stream", () => {
   });
 });
 
+describe("one live run per thread", () => {
+  /** A controller whose agent hands out the given runs, in order. */
+  function threaded(runs: StubAgentRun[], store = new MemoryAgentStore()) {
+    const queue = runs.slice();
+    const seen: AgentStreamParams[] = [];
+    const liveRuns = new MemoryLiveRuns();
+    class Chat extends AgentController {
+      agent = {
+        provider: {},
+        stream: (params: AgentStreamParams) => {
+          seen.push(params);
+          return queue.shift()!;
+        },
+      } as any;
+      liveRuns = liveRuns;
+      store = store;
+    }
+    return { Chat, seen, store, liveRuns };
+  }
+
+  /**
+   * The issue's interleaving. A send while the first answer is streaming used
+   * to abort only the connection, which no longer stops a run: the first kept
+   * going, blind to the second turn; the second loaded a history without the
+   * first's answer; and both appended when they finished, in whichever order
+   * the model returned them. With the first slower, the thread read
+   * `user2, assistant2, user1, assistant1`.
+   */
+  test("a second turn stops the first run and waits for its transcript to land", async () => {
+    const first = new StubAgentRun("run_1");
+    const second = new StubAgentRun("run_2");
+    const { Chat, seen, store } = threaded([first, second]);
+    const threadId = `t-${crypto.randomUUID()}`;
+
+    await new Chat().stream(jsonRequest({ threadId, text: "first" }));
+    expect(first.stopped).toBe(false);
+
+    // Held, not refused: this resolves only once the first run is in the store.
+    let started = false;
+    const pending = new Chat()
+      .stream(jsonRequest({ threadId, text: "second" }))
+      .then((response) => {
+        started = true;
+        return response;
+      });
+    await settle();
+
+    expect(first.stopped).toBe(true);
+    expect(started).toBe(false);
+    // The second run has not been asked for, so nothing has loaded the thread
+    // without the first answer in it.
+    expect(seen).toHaveLength(1);
+
+    // The provider answering in reverse order: the first run finishes last from
+    // the client's point of view, but the second cannot start before it.
+    first.finish({
+      messages: [message("u1", "user", "first"), message("a1", "assistant", "one…")],
+    });
+    const response = await pending;
+    expect(response.headers.get("X-Stub-Run")).toBe("run_2");
+    expect(seen[1]!.messages.map((m) => m.id)).toEqual(["u1", "a1"]);
+
+    second.finish({
+      messages: [message("u2", "user", "second"), message("a2", "assistant", "two")],
+    });
+    await settle();
+
+    expect((await store.loadThread(threadId)).map((m) => m.id)).toEqual(["u1", "a1", "u2", "a2"]);
+  });
+
+  /**
+   * Two turns arriving together both see the same live run, both stop it and
+   * both wait for it; without the lock both then start, and the third answer
+   * never sees the second turn — the same race, one message later.
+   */
+  test("a third turn waits for the second, not just for the first", async () => {
+    const runs = [new StubAgentRun("run_1"), new StubAgentRun("run_2"), new StubAgentRun("run_3")];
+    const { Chat, seen, store } = threaded(runs);
+    const threadId = `t-${crypto.randomUUID()}`;
+
+    await new Chat().stream(jsonRequest({ threadId, text: "first" }));
+    const second = new Chat().stream(jsonRequest({ threadId, text: "second" }));
+    const third = new Chat().stream(jsonRequest({ threadId, text: "third" }));
+    await settle();
+    expect(seen).toHaveLength(1);
+
+    runs[0]!.finish({
+      messages: [message("u1", "user", "first"), message("a1", "assistant", "one")],
+    });
+    await second;
+    await settle();
+    // The third found the second registered and stopped that, rather than
+    // starting alongside it.
+    expect(seen).toHaveLength(2);
+    expect(runs[1]!.stopped).toBe(true);
+
+    runs[1]!.finish({
+      messages: [message("u2", "user", "second"), message("a2", "assistant", "two")],
+    });
+    await third;
+    expect(seen[2]!.messages.map((m) => m.id)).toEqual(["u1", "a1", "u2", "a2"]);
+
+    runs[2]!.finish({
+      messages: [message("u3", "user", "third"), message("a3", "assistant", "three")],
+    });
+    await settle();
+    expect((await store.loadThread(threadId)).map((m) => m.id)).toEqual([
+      "u1",
+      "a1",
+      "u2",
+      "a2",
+      "u3",
+      "a3",
+    ]);
+  });
+
+  test("a finished run still within its ttl holds nothing up", async () => {
+    const first = new StubAgentRun("run_1");
+    const second = new StubAgentRun("run_2");
+    const { Chat, seen } = threaded([first, second]);
+    const threadId = `t-${crypto.randomUUID()}`;
+
+    await new Chat().stream(jsonRequest({ threadId, text: "first" }));
+    first.finish({ messages: [message("u1", "user", "first")] });
+    await settle();
+
+    await new Chat().stream(jsonRequest({ threadId, text: "second" }));
+    expect(seen).toHaveLength(2);
+    second.finish();
+  });
+
+  test("stateless turns are not serialized: there is no thread to hold", async () => {
+    const first = new StubAgentRun("run_1");
+    const second = new StubAgentRun("run_2");
+    const { Chat, seen } = threaded([first, second]);
+
+    await new Chat().stream(jsonRequest({ text: "first" }));
+    await new Chat().stream(jsonRequest({ text: "second" }));
+
+    expect(seen).toHaveLength(2);
+    expect(first.stopped).toBe(false);
+    first.finish();
+    second.finish();
+  });
+});
+
 describe("AgentController.attach", () => {
   function attachable(runId = "run_a") {
     const run = new StubAgentRun(runId);
