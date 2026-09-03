@@ -2,7 +2,8 @@ process.env.SECRET ??= "agent-test-secret";
 
 import { describe, expect, test, vi } from "vitest";
 import { Agent, AgentTool, Skill, ToolNamespace } from "./Agent";
-import type { AgentProvider, ProviderEvent, ProviderStreamParams } from "./AgentProvider";
+import type { AgentProvider, ProviderEvent } from "./AgentProvider";
+import { fakeProvider } from "./providers/fakeProvider";
 import type { Schema } from "./Schema";
 import { readSignature, verifyPendingCall } from "./signing";
 import type {
@@ -76,53 +77,6 @@ const usage = (inputTokens: number, outputTokens: number): Usage => ({
   outputTokens,
   totalTokens: inputTokens + outputTokens,
 });
-
-/**
- * Scripted `ProviderEvent`s, one script per model call.
- *
- * The real provider is written against the same interface elsewhere; depending
- * on it here would make these tests a test of two things at once, and would
- * need a network.
- */
-class FakeProvider {
-  readonly model = "fake";
-  readonly capabilities = {
-    reasoning: true,
-    structuredOutput: true,
-    fileInput: true,
-    parallelToolCalls: true,
-    toolSearch: true,
-  };
-  readonly calls: ProviderStreamParams[] = [];
-
-  constructor(private scripts: ProviderEvent[][]) {}
-
-  stream(params: ProviderStreamParams) {
-    this.calls.push(params);
-    const script = this.scripts[this.calls.length - 1] ?? [
-      { type: "finish", reason: "stop", usage: usage(0, 0) },
-    ];
-    return (async function* () {
-      for (const event of script) yield event;
-    })();
-  }
-
-  async upload() {
-    return "file_1";
-  }
-
-  normalizeError(error: unknown) {
-    return {
-      code: "provider_error" as const,
-      message: error instanceof Error ? error.message : String(error),
-      retryable: false,
-    };
-  }
-}
-
-function fakeProvider(...scripts: ProviderEvent[][]) {
-  return new FakeProvider(scripts) as unknown as AgentProvider & FakeProvider;
-}
 
 function deferred<T = void>() {
   let resolve!: (value: T) => void;
