@@ -60,6 +60,10 @@ export type AgentErrorCode =
   /** A tool result came back for a call the server never made, or with a
    *  signature that does not verify. */
   | "invalid_tool_result"
+  /** The `threadId` names a thread the server's store does not have: expired,
+   *  mistyped, or on an instance that is gone. Answered before anything runs;
+   *  the app starts a new thread or continues stateless. */
+  | "thread_not_found"
   | "aborted"
   | "unknown";
 
