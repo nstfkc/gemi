@@ -29,15 +29,27 @@ type Thread = {
  * running forever keeps a process alive that has nothing else to do — so the
  * sweep happens on access, at most once a minute, and an untouched process
  * simply stops sweeping.
+ *
+ * A thread the store does not have is `null` from `loadThread` and an error
+ * from `appendMessages`, never an empty conversation. It used to be the other
+ * way, and the three ways a thread goes missing — it expired, the id was
+ * mistyped, it lived on an instance that was scaled in — all read as a fresh
+ * chat: the history was gone with no signal, and the next turn was persisted
+ * under the dead id as though it were the first. `clientOwnedIds` is the one
+ * setup where an unknown id is not a lost thread, because the client minted it.
  */
 export class MemoryAgentStore implements AgentStore {
   readonly ttlMs: number;
+  /** The ids come from the client, not from `createThread`, so an id this
+   *  store has never seen is a conversation starting rather than one lost. */
+  readonly clientOwnedIds: boolean;
 
   private threads = new Map<string, Thread>();
   private lastSweep = 0;
 
-  constructor(params: { ttlMs?: number } = {}) {
+  constructor(params: { ttlMs?: number; clientOwnedIds?: boolean } = {}) {
     this.ttlMs = params.ttlMs ?? DEFAULT_TTL_MS;
+    this.clientOwnedIds = params.clientOwnedIds ?? false;
   }
 
   async createThread(params: { userId?: string | number }): Promise<{ threadId: string }> {
@@ -51,14 +63,16 @@ export class MemoryAgentStore implements AgentStore {
     return { threadId };
   }
 
-  async loadThread(threadId: string): Promise<AgentMessage[]> {
+  async loadThread(threadId: string): Promise<AgentMessage[] | null> {
     this.sweep();
     const thread = this.threads.get(threadId);
     if (!thread) {
-      // An unknown thread reads as empty rather than throwing: a thread that
-      // expired, and one the client invented, are the same situation to a
-      // conversation that has to keep working.
-      return [];
+      // With client-owned ids the first turn arrives before anything has been
+      // written under it, so unknown is empty. Otherwise unknown is a thread
+      // that expired or never existed, and the controller has to be able to
+      // tell: `[]` here is the silent fresh conversation this store used to
+      // hand out in place of the user's history.
+      return this.clientOwnedIds ? [] : null;
     }
     thread.touchedAt = Date.now();
     // Copied, so a caller that sorts or splices the result does not edit the
@@ -74,9 +88,15 @@ export class MemoryAgentStore implements AgentStore {
       thread.touchedAt = Date.now();
       return;
     }
-    // Appending to a thread the store has never seen creates it. The client
-    // owns the id in stateless-with-a-thread-id setups, so refusing here would
-    // mean losing a turn that already happened.
+    if (!this.clientOwnedIds) {
+      // Creating the thread here would persist a turn under an id the client
+      // believes holds a longer conversation, and hide from the app that the
+      // conversation is gone. The controller checks before the run and never
+      // reaches this; a store-level caller that does gets told.
+      throw new Error(`Thread ${threadId} does not exist here, or has expired.`);
+    }
+    // The client owns the id, so an append to one the store has never seen is
+    // the first turn, and refusing it would lose a turn that already happened.
     this.threads.set(threadId, { messages: messages.slice(), touchedAt: Date.now() });
   }
 
