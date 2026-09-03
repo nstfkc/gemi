@@ -124,6 +124,21 @@ export type AgentHookContext = {
  */
 const ControllerBase = Controller as new () => Controller;
 
+/**
+ * The thread a `stream` is setting up on, to the setup ahead of it. Module
+ * level because the controller is constructed per request, so nothing on it
+ * can be seen by the next request; keyed by thread rather than held on
+ * `liveRuns` because it guards the controller's protocol, not the frames. An
+ * entry is removed once the last setup queued on it releases.
+ */
+const threadLocks = new Map<string, Promise<void>>();
+
+/**
+ * Each run to the promise that its transcript has been stored. Weak, so a run
+ * the map has evicted is not kept alive here for a promise nobody will ask for.
+ */
+const persisted = new WeakMap<AgentRun, Promise<void>>();
+
 export abstract class AgentController<A extends AnyAgent = AnyAgent> extends ControllerBase {
   static kind = "agent-controller" as const;
 
@@ -185,63 +200,135 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
     // or a `store` that scopes by `req.user`. The framework's job is to make
     // sure the route is behind the router's middleware in the first place,
     // which `ApiRouter.agent()` now does.
-    let messages: AgentMessage[];
-    if (threadId) {
-      const history = await this.store.loadThread(threadId);
-      if (!history) {
-        // Before `instructions()` and before the run: nothing has been
-        // charged for, and the client has to learn that its thread is gone —
-        // expired, mistyped, or on an instance that no longer exists — rather
-        // than see it answered as an empty conversation and have this turn
-        // persisted under the dead id.
-        //
-        // That ordering is deliberate, and it costs something: the ownership
-        // check the comment above points at `instructions()` for has not run
-        // yet, so a caller holding a uuid learns whether it is live here
-        // without the app's say. `/attach` already answers a question of that
-        // shape to anyone with the id and never calls `instructions()`, and
-        // the id is unguessable — which is why the load stays above
-        // `instructions()`, whose own work (a database read, typically) would
-        // otherwise be spent on a thread that is gone. Move it below and that
-        // work is spent on every dead id instead.
-        return jsonResponse(404, {
-          code: "thread_not_found",
-          message: `Thread ${threadId} does not exist here, or has expired.`,
-        });
+    //
+    // Everything from the load on happens inside `start`, which on a thread
+    // runs under the thread's lock once the previous run's transcript is in the
+    // store — the load has to come after that, or it reads a history the old
+    // answer is missing from. `instructions()` follows the load in there rather
+    // than running ahead of the lock, so that a dead thread is still a 404
+    // before the app's own work is spent on it; the cost is that a turn queued
+    // behind this one waits for `instructions()` as well.
+    const start = async (): Promise<Response> => {
+      let messages: AgentMessage[];
+      if (threadId) {
+        const history = await this.store.loadThread(threadId);
+        if (!history) {
+          // Before `instructions()` and before the run: nothing has been
+          // charged for, and the client has to learn that its thread is gone —
+          // expired, mistyped, or on an instance that no longer exists — rather
+          // than see it answered as an empty conversation and have this turn
+          // persisted under the dead id.
+          //
+          // That ordering is deliberate, and it costs something: the ownership
+          // check the comment above points at `instructions()` for has not run
+          // yet, so a caller holding a uuid learns whether it is live here
+          // without the app's say. `/attach` already answers a question of that
+          // shape to anyone with the id and never calls `instructions()`, and
+          // the id is unguessable — which is why the load stays above
+          // `instructions()`, whose own work (a database read, typically) would
+          // otherwise be spent on a thread that is gone. Move it below and that
+          // work is spent on every dead id instead.
+          return jsonResponse(404, {
+            code: "thread_not_found",
+            message: `Thread ${threadId} does not exist here, or has expired.`,
+          });
+        }
+        messages = history;
+      } else {
+        messages = Array.isArray(body.messages) ? (body.messages as AgentMessage[]) : [];
       }
-      messages = history;
-    } else {
-      messages = Array.isArray(body.messages) ? (body.messages as AgentMessage[]) : [];
-    }
 
-    const instructions = (await this.instructions(req)) || undefined;
+      const instructions = (await this.instructions(req)) || undefined;
 
-    const run = this.agent.stream({
-      messages,
-      turn,
-      req,
-      threadId,
-      instructions,
-    }) as AgentRun;
+      const run = this.agent.stream({
+        messages,
+        turn,
+        req,
+        threadId,
+        instructions,
+      }) as AgentRun;
 
-    const ctx: AgentHookContext = { req, runId: run.runId, threadId };
+      const ctx: AgentHookContext = { req, runId: run.runId, threadId };
 
-    // Registered before the response is built: the run is now owned by the
-    // process rather than by this request, which is the property `/attach`
-    // depends on and the reason a dropped connection no longer cancels
-    // anything.
-    this.liveRuns.register(run, {
-      threadId,
-      // The client's handle on a run it started, which is the only one that
-      // exists before `run-start` reaches it. See `RegisterParams`.
-      clientRunId: typeof body.clientRunId === "string" ? body.clientRunId : undefined,
-      onEvent: (event) => this.dispatchEvent(event, ctx),
-      onInternalError: (err) => this.reportHookFailure(err),
+      // Registered before the response is built: the run is now owned by the
+      // process rather than by this request, which is the property `/attach`
+      // depends on and the reason a dropped connection no longer cancels
+      // anything.
+      this.liveRuns.register(run, {
+        threadId,
+        // The client's handle on a run it started, which is the only one that
+        // exists before `run-start` reaches it. See `RegisterParams`.
+        clientRunId: typeof body.clientRunId === "string" ? body.clientRunId : undefined,
+        onEvent: (event) => this.dispatchEvent(event, ctx),
+        onInternalError: (err) => this.reportHookFailure(err),
+      });
+
+      // Kept, not just fired: the next turn on this thread has to know when
+      // this one's transcript is in the store. See `withThread`.
+      persisted.set(run, this.persistRun(run, ctx));
+
+      return run.toResponse();
+    };
+
+    return threadId ? await this.withThread(threadId, start) : await start();
+  }
+
+  /**
+   * A thread holds one run at a time; a new turn on it ends the old one first.
+   *
+   * Since a dropped connection no longer stops a run, a user who sends again
+   * mid-answer used to leave the first run going. It could not see the new
+   * turn, the new run's `loadThread` could not see its answer, and both
+   * appended when they finished — in whichever order the model returned them,
+   * so the thread read `user2, assistant2, user1, assistant1`. `byThread` then
+   * named the second run while the first was still live and unstoppable by
+   * `threadId`.
+   *
+   * Stopping the old run and waiting for its transcript to land is chosen over
+   * refusing the new turn with a 409, because sending again *is* the stop: it
+   * is what `useChat.send` means, and a client that has to poll `/stop` until
+   * the run is really gone before it may post the turn it has already shown is
+   * a worse client for no better thread. The cost is that the new turn waits
+   * for the old run to unwind, which is as long as its slowest tool in flight —
+   * and that wait is the thing that puts `assistant1` before `user2`.
+   *
+   * The wait is on `persistRun`, not on `run.result()`. `result()` settling is
+   * the transcript being final, not stored: `appendMessages` runs after it, and
+   * a `loadThread` in that gap reads a history the old answer is missing from,
+   * which is the original bug by a shorter route.
+   *
+   * The lock around it is what makes a *third* turn wait for the second rather
+   * than for the first. Two turns arriving together both see the same live
+   * run, both stop it, both wait for it, and both start — the same race, one
+   * message later. Under the lock the later one finds the earlier one
+   * registered and stops that instead. Per process, like `LiveRuns`, and for
+   * the same reason: the run it guards lives here.
+   */
+  private async withThread<T>(threadId: string, fn: () => Promise<T>): Promise<T> {
+    const previous = threadLocks.get(threadId) ?? Promise.resolve();
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
     });
-
-    void this.persistRun(run, ctx);
-
-    return run.toResponse();
+    const tail = previous.then(() => held);
+    threadLocks.set(threadId, tail);
+    await previous;
+    try {
+      const live = await this.liveRuns.find({ threadId });
+      const run = live ? this.liveRuns.get(live.runId) : null;
+      if (run) {
+        // A run that already ended is still `find`-able for `ttlMs`; stopping
+        // it is a no-op and waiting on it is the append it may still be doing.
+        run.stop({ reason: "superseded by a later turn on this thread" });
+        await persisted.get(run);
+      }
+      return await fn();
+    } finally {
+      release();
+      if (threadLocks.get(threadId) === tail) {
+        threadLocks.delete(threadId);
+      }
+    }
   }
 
   /**
@@ -324,9 +411,10 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
 
   /**
    * `POST /<path>/stop` — the explicit cancel. Since a dropped connection no
-   * longer stops a run, this is the only thing that does, and it is why
-   * stopping cannot be a client-side concern: the tool loop is here, and a
-   * client that stops reading has not stopped step four from charging a card.
+   * longer stops a run, this and a later turn on the same thread are the only
+   * things that do, and it is why stopping cannot be a client-side concern:
+   * the tool loop is here, and a client that stops reading has not stopped
+   * step four from charging a card.
    *
    * Returns as soon as the run is aborted, not when it has finished unwinding.
    * The terminal events — the stopped tool results, the aborted message — go
