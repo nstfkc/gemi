@@ -6,6 +6,7 @@ import type {
 } from "./AgentProvider";
 import type { Infer, Schema } from "./Schema";
 import {
+  consumeNestedRun,
   consumePendingCall,
   readSignature,
   signNestedRun,
@@ -2043,8 +2044,11 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         usage: resuming ? addUsage(recorded.usage ?? emptyUsage(), result.usage) : result.usage,
         // A parked record is what the next turn re-enters the tool on, and in
         // stateless mode it comes back from the browser. Signed here, by the
-        // run that knows it is true, over where the sub-run parked and what it
-        // is waiting on — `parkedBelow` will not act on a record without it.
+        // run that knows it is true, over where the sub-run parked, what it is
+        // waiting on and the input the tool was running with — `parkedBelow`
+        // will not act on a record without it. `call.input` is the parsed
+        // value by now, on every path that reaches here, so the transcript
+        // carries exactly what was signed.
         ...(result.finishReason === "awaiting-input"
           ? {
               signature: signNestedRun({
@@ -2052,6 +2056,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
                 path: signingPath,
                 nestedRunId: sub.runId,
                 open: [...openCallIds(messages)],
+                input: call.input,
               }),
             }
           : {}),
@@ -2100,8 +2105,11 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       // client has built its own from the forwarded events. Re-sending the
       // call is what puts the server's copy in the client's hands to carry
       // back: the reducer takes a re-sent `nested` as authoritative, so this
-      // replaces what the client accumulated rather than adding to it.
-      this.emit({ type: "tool-call", messageId, part: call });
+      // replaces what the client accumulated rather than adding to it. Marked
+      // `resent` because it is not a call: the model made this one earlier —
+      // in this run or, on a re-park, in a previous one — and a hook that
+      // counts calls has already seen it.
+      this.emit({ type: "tool-call", messageId, part: call, resent: true });
       throw new PendingEscalation({ pending: asked, path: signingPath, nested: record });
     }
 
@@ -2208,18 +2216,39 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
           // client-carried history. Content is still checked below, in the
           // sub-run; this is what stops an unsigned request from choosing to
           // execute at all.
-          if (!this.parkedBelow(hosting.call, below, answer.toolCallId)) {
+          const parked = this.parkedBelow(hosting.call, below, answer.toolCallId);
+          if (parked.ok === false) {
+            const under = `The answer for "${answer.toolCallId}" is addressed under "${host}", which`;
             reject(
-              `The answer for "${answer.toolCallId}" is addressed under "${host}", which has no sub-agent run waiting on that question.`,
+              parked.reason === "unparked"
+                ? `${under} has no sub-agent run waiting on that question.`
+                : parked.reason === "expired"
+                  ? `${under} parked a sub-agent run that has since expired. Ask again.`
+                  : `${under} carries a record of a parked sub-agent run the server did not sign.`,
             );
             continue;
           }
-          const group = reentry.get(host) ?? [];
+          let group = reentry.get(host);
+          if (!group) {
+            // Spent here, ahead of the body, for the reason the record is
+            // signed at all: re-entry runs the tool before the sub-run gets to
+            // refuse a spent answer, so a history rewound to before the result
+            // would run it once per replay. Once per record per turn — the
+            // sub-run may have asked two things at once, and every answer to
+            // it re-enters the same tool a single time.
+            if (!consumeNestedRun(parked.signature)) {
+              reject(
+                `The answer for "${answer.toolCallId}" is addressed under "${host}", which has already been re-entered on that record. Ask again.`,
+              );
+              continue;
+            }
+            group = [];
+            reentry.set(host, group);
+            // Marked answered so the refusal pass below leaves it alone: the
+            // tool is about to be re-entered and will produce the real result.
+            answered.add(host);
+          }
           group.push(answer);
-          reentry.set(host, group);
-          // Marked answered so the refusal pass below leaves it alone: the tool
-          // is about to be re-entered and will produce the real result.
-          answered.add(host);
           continue;
         }
 
@@ -2302,23 +2331,42 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
    * input the history carries — before the sub-run gets to verify the answer,
    * so everything the body does ahead of its first `runAgent` happens on the
    * client's say-so. Which is why the record has to carry the server's
-   * signature over the sub-run it parked and the calls it left open, and why
-   * a record without one, or with one that does not match what it now says,
-   * is not a parked run at all.
+   * signature over the sub-run it parked, the calls it left open and the
+   * input the tool was given, and why a record without one, or with one that
+   * does not match what it now says, is not a parked run at all.
+   *
+   * The failure says which of those it was. "Expired" is an ordinary outcome
+   * in threaded mode — a question answered a day late — and telling that
+   * user the run never parked would send them looking for a bug that is not
+   * there; a record that fails its MAC is the other thing entirely, and the
+   * two are kept apart for the same reason `resolveAnswer` keeps them apart.
    *
    * `below` is the answer's path with this run's prefix already removed, so
    * `below[0]` is `call` itself and `below[1]`, when there is one, names the
    * call to re-enter one level further down.
    */
-  private parkedBelow(call: ToolCallPart, below: string[], toolCallId: string): boolean {
+  private parkedBelow(
+    call: ToolCallPart,
+    below: string[],
+    toolCallId: string,
+  ): { ok: true; signature: string } | { ok: false; reason: "unparked" | "unsigned" | "expired" } {
     const wanted = below.length > 1 ? below[1] : toolCallId;
     const path = [...this.pathPrefix, call.toolCallId];
-    return (call.nested ?? []).some((run) => {
-      if (run.finishReason !== "awaiting-input" || typeof run.signature !== "string") return false;
-      const open = openCallIds(run.messages);
-      if (!open.has(wanted)) return false;
-      return verifyNestedRun(run.signature, { path, nestedRunId: run.runId, open: [...open] }).ok;
+    const parked = (call.nested ?? []).find(
+      (run) => run.finishReason === "awaiting-input" && openCallIds(run.messages).has(wanted),
+    );
+    if (!parked) return { ok: false, reason: "unparked" };
+    if (typeof parked.signature !== "string") return { ok: false, reason: "unsigned" };
+    const verified = verifyNestedRun(parked.signature, {
+      path,
+      nestedRunId: parked.runId,
+      open: [...openCallIds(parked.messages)],
+      input: call.input,
     });
+    if (verified.ok === false) {
+      return { ok: false, reason: verified.reason === "expired" ? "expired" : "unsigned" };
+    }
+    return { ok: true, signature: parked.signature };
   }
 
   /**
@@ -2353,15 +2401,13 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       };
     }
 
-    // Checked the way `runTools` checked the model's arguments, and for the
-    // same reason with a different author: the history this call was read out
-    // of is the client's in stateless mode, and an approval's input is covered
-    // by its signature but a plain server tool's is covered by nothing. The
-    // tool's typed input is a contract with the tool, not with whoever wrote
-    // the transcript, and a value the schema rejects must not reach it — the
-    // failure is a result the model can read, exactly like a mis-typed
-    // argument on the way in. The same result covers a schema that changed
-    // between the turn that parked and the turn that answers.
+    // Checked the way `runTools` checked the model's arguments. The record's
+    // signature has already said this is the input the tool parked on, so what
+    // this catches is the tool itself having moved: a schema that changed
+    // between the turn that parked and the turn that answers. The tool's typed
+    // input is a contract with the tool as it is now, and a value the schema
+    // rejects must not reach it — the failure is a result the model can read,
+    // exactly like a mis-typed argument on the way in.
     const parsed = resolved.tool.inputSchema.safeParse(entry.call.input);
     if (parsed.ok === false) {
       return {
