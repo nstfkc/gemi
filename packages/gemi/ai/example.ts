@@ -242,6 +242,15 @@ class Api extends ApiRouter {
       stop: "auth",
       upload: "auth",
     }),
+    // Where the `threadId` that `Chat` below is handed comes from. `agent()`
+    // does not mount this, because minting a thread is where an app records
+    // who owns it, and the store cannot — so the route is the app's, and it is
+    // the only source of an id the default store will take: one the client
+    // made up is a `thread_not_found` on its first turn.
+    "/support/threads": this.post(async () => {
+      const user = await Auth.user();
+      return supportStore.createThread({ userId: user.id });
+    }).middleware("auth"),
   };
 }
 
