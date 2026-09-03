@@ -188,6 +188,9 @@ describe("AgentController.stream", () => {
     );
     const agent = Agent.create({ name: "support", provider, tools: [refundOrder] });
     const store = new MemoryAgentStore();
+    // Minted by the store: an id it has never seen is a 404 before the run,
+    // and this test is about what the second run leaves behind.
+    const { threadId } = await store.createThread({});
 
     class Chat extends AgentController {
       agent = agent;
@@ -196,7 +199,7 @@ describe("AgentController.stream", () => {
     }
 
     const first = await eventsOf(
-      await new Chat().stream(jsonRequest({ threadId: "t1", text: "refund it" })),
+      await new Chat().stream(jsonRequest({ threadId, text: "refund it" })),
     );
     await settle();
     const awaiting = first.find((event) => event.type === "awaiting-input") as any;
@@ -206,7 +209,7 @@ describe("AgentController.stream", () => {
     await eventsOf(
       await new Chat().stream(
         jsonRequest({
-          threadId: "t1",
+          threadId,
           toolResults: [
             { toolCallId: "c1", signature: awaiting.pending[0].signature, approve: true },
           ],
@@ -216,7 +219,7 @@ describe("AgentController.stream", () => {
     await settle();
 
     expect(refunded).toEqual(["ord_1"]);
-    const held = await store.loadThread("t1");
+    const held = (await store.loadThread(threadId))!;
     const ids = held.map((m) => m.id);
     expect(new Set(ids).size).toBe(ids.length);
     // The copy that survived is the amended one, in the place the original had.
