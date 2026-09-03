@@ -201,6 +201,13 @@ const NO_RESULT_RECORDED = "No result was recorded for this tool call. Assume it
  * saying so. Fabricating that line is the lesser evil — it is true, the model
  * can read it, and the alternative is a conversation that can never be
  * continued.
+ *
+ * A repeated *call* is dropped for the same reason in the other direction. The
+ * API happens to accept two `function_call`s under one id, so this is not a
+ * 400 — it is the model reading the same call twice, on every turn, for the
+ * rest of the conversation. The way it arises is a store that appended the
+ * amended copy of a message instead of replacing it; the store contract now
+ * says upsert, and this is the guard for a store that did not read it.
  */
 function reconcileToolPairs(items: ResponsesInputItem[]): ResponsesInputItem[] {
   const called = new Set<string>();
@@ -209,7 +216,9 @@ function reconcileToolPairs(items: ResponsesInputItem[]): ResponsesInputItem[] {
 
   for (const item of items) {
     if (item.type === "function_call") {
-      called.add(String(item.call_id));
+      const callId = String(item.call_id);
+      if (called.has(callId)) continue;
+      called.add(callId);
     } else if (item.type === "function_call_output") {
       const callId = String(item.call_id);
       // Positional: the output has to come *after* its call, which is what the
