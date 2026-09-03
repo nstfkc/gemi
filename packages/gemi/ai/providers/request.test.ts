@@ -223,6 +223,35 @@ describe("toResponsesInput()", () => {
     expect(items[1]!.output).toBe("a");
   });
 
+  test("a duplicated call is sent once — the model would otherwise read it twice", () => {
+    // The shape a store that appends rather than upserts produces after a
+    // threaded approval: the assistant message that made the call, then the
+    // amended copy of it carrying the result, both under the same call id.
+    const items = toResponsesInput(
+      [
+        message({
+          id: "a1",
+          role: "assistant",
+          content: [{ type: "tool-call", toolCallId: "call_1", name: "grep", input: {} }],
+        }),
+        message({
+          id: "a1",
+          role: "assistant",
+          content: [
+            { type: "tool-call", toolCallId: "call_1", name: "grep", input: {} },
+            { type: "tool-result", toolCallId: "call_1", name: "grep", status: "ok", output: "a" },
+          ],
+        }),
+      ],
+      FULL,
+    );
+
+    expect(items).toEqual([
+      { type: "function_call", call_id: "call_1", name: "grep", arguments: "{}" },
+      { type: "function_call_output", call_id: "call_1", output: "a" },
+    ]);
+  });
+
   /**
    * The mirror image, and the same consequence: a crash between the call and
    * its result leaves a `function_call` the API will reject forever. Saying
