@@ -33,8 +33,9 @@ framework; where it and your app disagree, your app wins (ground rule 2).
 4. **Routing is class-based and data is loaded in controllers.** File location
    registers nothing; a view's file name has no relation to its URL.
 5. **Check whether the React Compiler is on before hand-memoizing.** It is enabled
-   per app in `gemi.config.ts` via `react({ compiler: true })`, which is the default
-   in projects scaffolded from the gemi template. With it on, the client build is
+   per app in `gemi.config.ts` via the React plugin's `compiler` option, which the
+   gemi template turns on by default — and `GEMI_REACT_COMPILER=off` in the
+   environment disables it, so the config is not the last word. With it on, the client build is
    auto-memoized and a hand-written `useMemo` is usually redundant; with it off,
    memoization is manual and load-bearing. The compiler never runs on the SSR view
    build — server rendering is a single pass — so it changes nothing about what a

@@ -46,18 +46,20 @@ The file is entirely optional — if it's absent, gemi uses an empty config. It'
 
 ### React Compiler
 
-`@vitejs/plugin-react` can run the [React Compiler](https://react.dev/learn/react-compiler) — automatic memoization, so you write plain components and stop hand-placing `useMemo`/`useCallback`/`memo`. Since `@vitejs/plugin-react` 6.1 it runs through **oxc** (the Rust port, shipped as `oxc-transform-react`) rather than Babel, which means no second parse per module. Turn it on with `compiler: true` where you register the React plugin:
+`@vitejs/plugin-react` can run the [React Compiler](https://react.dev/learn/react-compiler) — automatic memoization, so you write plain components and stop hand-placing `useMemo`/`useCallback`/`memo`. Since `@vitejs/plugin-react` 6.1 it runs through **oxc** (the Rust port, shipped as `oxc-transform-react`) rather than Babel, which means no second parse per module. Turn it on with the `compiler` option where you register the React plugin:
 
 ```typescript
-import { defineConfig } from "gemi/config";
+import { defineConfig, reactCompiler } from "gemi/config";
 import react from "@vitejs/plugin-react";
 
 export default defineConfig({
   vite: {
-    plugins: [react({ compiler: true })],
+    plugins: [react({ compiler: reactCompiler() })],
   },
 });
 ```
+
+`reactCompiler()` from `gemi/config` is the value to pass, with an environment switch in front of it. Pass a plain `true` / `false` instead to pin the choice.
 
 Two packages are required, both already in the scaffolded template:
 
@@ -69,6 +71,23 @@ bun add -d "@vitejs/plugin-react@^6.1.1" "oxc-transform-react@^0.145.0"
 
 The plugin only memoizes for **client** environments. gemi's SSR view build has `consumer: "server"`, so it gets the plain JSX transform — which is what you want, since server rendering is a single pass and memoization would only add cache allocations. The compiled client output imports `react/compiler-runtime`, present in React 19.
 
+### Turning it off
+
+```bash
+GEMI_REACT_COMPILER=off bun dev
+GEMI_REACT_COMPILER=off bun run build
+```
+
+`off` (case-insensitive) disables it; any other value, or none, leaves it on — the same shape as [`GEMI_COMPRESSION`](#opting-out). It is a named opt-out rather than a boolean because `0`, `false` and `no` all read as "off" to a human, and only one of them could be the one that works.
+
+The variable is read where `gemi.config.ts` is loaded — inside the Vite process that `dev` and `build` spawn — so it is inherited from your shell and also picked up from `.env`, which Bun loads before the config imports. That makes a compiler-shaped bug one variable to bisect rather than an edit to `gemi.config.ts`:
+
+```bash
+GEMI_REACT_COMPILER=off bun dev   # still broken? not the compiler
+```
+
+Because the switch lives in `gemi.config.ts` rather than in gemi's own plugin, it is yours to change: replace `reactCompiler()` with `true`, `false`, or your own condition.
+
 `compiler` also accepts an options object, forwarded to the compiler:
 
 ```typescript
@@ -78,6 +97,12 @@ react({ compiler: { compilationMode: "annotation" } })
 // Surface recoverable diagnostics (bail-out reasons) as Vite warnings.
 // Fatal diagnostics always fail the build regardless of this flag.
 react({ compiler: { logDiagnostics: true } })
+```
+
+Pass them through the switch to keep both — `reactCompiler` returns `false` in their place when the environment opts out:
+
+```typescript
+react({ compiler: reactCompiler({ compilationMode: "annotation" }) })
 ```
 
 > **Note:** the oxc React Compiler integration is marked experimental upstream. It is a build-time transform with no runtime component beyond `react/compiler-runtime`, so dropping back to `react()` is a one-word revert.

@@ -51,9 +51,9 @@ function onSelect(next) {
 ```
 
 **Whether the memoization here is load-bearing depends on your build.** If your
-`gemi.config.ts` passes `react({ compiler: true })` — the default in projects
-scaffolded from the gemi template — the React Compiler memoizes the client build for
-you, and a hand-written `useMemo` on a derived value is mostly redundant. Without it,
+`gemi.config.ts` enables the React plugin's `compiler` option — the default in
+projects scaffolded from the gemi template, unless `GEMI_REACT_COMPILER=off` is set —
+the React Compiler memoizes the client build for you, and a hand-written `useMemo` on a derived value is mostly redundant. Without it,
 `useMemo` / `useCallback` on a value that feeds a query variant, an effect dependency,
 or a memoized child is doing real work, not decoration. Check the config before you
 add or remove one.
