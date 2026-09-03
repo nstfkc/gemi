@@ -715,7 +715,12 @@ describe("the request body", () => {
     // No run was started for it.
     expect(calls).toHaveLength(0);
 
-    for (const contentType of ["application/x-www-form-urlencoded", "multipart/form-data"]) {
+    // The last one begins with the accepted bytes and is still another type.
+    for (const contentType of [
+      "application/x-www-form-urlencoded",
+      "multipart/form-data",
+      "application/json-seq",
+    ]) {
       expect((await new Chat().stream(rawRequest("text=hi", contentType))).status).toBe(415);
     }
     expect(calls).toHaveLength(0);
