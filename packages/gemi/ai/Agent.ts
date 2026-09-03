@@ -14,6 +14,7 @@ import {
   verifyNestedRun,
   verifyPendingCall,
 } from "./signing";
+import { sseKeepalive } from "./store/sse";
 import type {
   AgentError,
   AgentMessage,
@@ -1284,8 +1285,14 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     const encoder = new TextEncoder();
     let cancelled = false;
 
+    let keepalive!: ReturnType<typeof sseKeepalive>;
+
     const body = new ReadableStream<Uint8Array>({
       start: async (controller) => {
+        // A slow tool or a thinking sub-agent can leave the connection silent
+        // for longer than a proxy's idle timeout, and a proxy that closes it
+        // looks to the client exactly like a run that finished.
+        keepalive = sseKeepalive(controller);
         try {
           for await (const frame of frames) {
             if (cancelled) break;
@@ -1294,11 +1301,13 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
             controller.enqueue(
               encoder.encode(`id: ${frame.seq}\ndata: ${JSON.stringify(frame.event)}\n\n`),
             );
+            keepalive.touch();
           }
         } catch {
           // A stream that cannot be written to is a dead reader, not a dead
           // run. Nothing to report and nothing to stop.
         }
+        keepalive.stop();
         try {
           controller.close();
         } catch {
@@ -1311,6 +1320,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         // tool loop is here and a closed tab has not stopped step four from
         // charging a card.
         cancelled = true;
+        keepalive.stop();
       },
     });
 
