@@ -4,8 +4,11 @@ import {
   canonicalize,
   consumePendingCall,
   readSignature,
+  signNestedRun,
   signPendingCall,
+  verifyNestedRun,
   verifyPendingCall,
+  type NestedRunClaims,
   type PendingCallClaims,
 } from "./signing";
 
@@ -254,6 +257,75 @@ describe("a path on a pending call", () => {
     expect(verifyPendingCall(signature, claims({ path: ["b", "a"] }), { secret })).toEqual({
       ok: false,
       reason: "forged",
+    });
+  });
+});
+
+describe("a signed parked-run record", () => {
+  const record = (overrides: Partial<NestedRunClaims> = {}): NestedRunClaims => ({
+    runId: "run_1",
+    path: ["call_outer"],
+    nestedRunId: "run_sub",
+    open: ["q1", "q2"],
+    ...overrides,
+  });
+  /** What the verifying run has in front of it: everything but the minting run's id. */
+  const presented = ({ runId: _runId, ...rest }: NestedRunClaims) => rest;
+
+  test("verifies against what was recorded, and carries the recording run in the clear", () => {
+    const signature = signNestedRun(record(), { secret });
+    const result = verifyNestedRun(signature, presented(record()), { secret });
+    expect(result.ok).toBe(true);
+    if (result.ok === true) {
+      expect(result.runId).toBe("run_1");
+    }
+  });
+
+  test("reads the open calls as a set, because they come back out of a re-serialized transcript", () => {
+    const signature = signNestedRun(record(), { secret });
+    expect(
+      verifyNestedRun(signature, presented(record({ open: ["q2", "q1"] })), { secret }).ok,
+    ).toBe(true);
+  });
+
+  test("rejects a record widened to a question the sub-run never asked", () => {
+    const signature = signNestedRun(record(), { secret });
+    expect(
+      verifyNestedRun(signature, presented(record({ open: ["q1", "q2", "q9"] })), { secret }),
+    ).toEqual({ ok: false, reason: "forged" });
+  });
+
+  test("cannot be moved under another tool call, or onto another sub-run", () => {
+    const signature = signNestedRun(record(), { secret });
+    expect(
+      verifyNestedRun(signature, presented(record({ path: ["call_other"] })), { secret }),
+    ).toEqual({ ok: false, reason: "forged" });
+    expect(
+      verifyNestedRun(signature, presented(record({ nestedRunId: "run_other" })), { secret }),
+    ).toEqual({ ok: false, reason: "forged" });
+  });
+
+  test("is not a pending call's signature, in either direction", () => {
+    // One tag per token kind: a record presented as an answer, or an answer
+    // presented as a record, is malformed before its MAC is even compared.
+    expect(verifyPendingCall(signNestedRun(record(), { secret }), claims(), { secret })).toEqual({
+      ok: false,
+      reason: "malformed",
+    });
+    expect(
+      verifyNestedRun(signPendingCall(claims(), { secret }), presented(record()), { secret }),
+    ).toEqual({ ok: false, reason: "malformed" });
+  });
+
+  test("expires with the answers it exists to route", () => {
+    const now = Date.now();
+    const signature = signNestedRun(record(), { secret, ttlMs: 1000, now });
+    expect(verifyNestedRun(signature, presented(record()), { secret, now: now + 500 }).ok).toBe(
+      true,
+    );
+    expect(verifyNestedRun(signature, presented(record()), { secret, now: now + 1001 })).toEqual({
+      ok: false,
+      reason: "expired",
     });
   });
 });

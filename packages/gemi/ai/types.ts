@@ -114,6 +114,18 @@ export type NestedRun = {
   messages: AgentMessage[];
   finishReason?: FinishReason;
   usage?: Usage;
+  /**
+   * Present on a record whose sub-run is parked `awaiting-input`, and handed
+   * back untouched like a pending call's.
+   *
+   * The next turn re-enters — runs — the tool this record hangs off because
+   * the record says a sub-run under it is waiting on the question being
+   * answered. In stateless mode the record arrives from the browser, so
+   * without this it is the client deciding which tools run. Signed by the
+   * server over where the sub-run parked and which calls it left open; see
+   * `signing.ts`.
+   */
+  signature?: string;
 };
 
 export type ToolCallPart<T extends ToolShapes = ToolShapes> = {
