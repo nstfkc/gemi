@@ -1,10 +1,12 @@
+import { channelFor, compareVersions } from "./version";
+
 /**
- * The one npm registry read the CLI makes: what version is published under a
- * dist-tag.
+ * The npm registry reads the CLI makes: what version is published under a
+ * dist-tag, and which of the tags that matter is newest.
  *
  * `GET /gemi/<tag>` returns that single version's manifest rather than the full
  * packument, which for gemi is several hundred kilobytes of every version ever
- * published. Both callers want one string out of it.
+ * published. Every caller wants one string out of it.
  */
 
 const DEFAULT_REGISTRY = "https://registry.npmjs.org";
@@ -59,4 +61,43 @@ export async function fetchPublishedVersion(
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * The newest version worth moving to from `installed`, across the channel it is
+ * on *and* `latest`.
+ *
+ * Asking only the installed version's own dist-tag fixes the backwards case — an
+ * rc is never told to "upgrade" onto the older stable release — but it opens a
+ * forwards one, and that case is live rather than hypothetical. gemi's tags at
+ * the time of writing:
+ *
+ *     { next: "0.49.0-rc.4", rc: "0.51.0-rc.14", latest: "0.59.0" }
+ *
+ * `rc` has not moved in eight minors, `next` in ten. An app on `0.51.0-rc.14`
+ * that asks only `rc` is told it is current — forever, while sitting on exactly
+ * the release this feature exists to move it off. So a prerelease channel asks
+ * both tags and takes whichever is newer; `compareVersions` already orders
+ * `0.59.0` above `0.51.0-rc.14`, so the stable release wins on its own, and a
+ * channel that is still ahead of `latest` still wins when it should.
+ *
+ * A stable install asks only `latest`: nothing on a prerelease tag is an upgrade
+ * from it, so a second request would be spent to discard the answer.
+ */
+export async function fetchNewestPublished(
+  installed: string,
+  options: FetchPublishedVersionOptions = {},
+): Promise<string | null> {
+  const channel = channelFor(installed);
+  if (channel === "latest") return fetchPublishedVersion("latest", options);
+
+  // In parallel, and both already swallow every failure — one tag being
+  // unreachable must not cost the answer the other one has.
+  const [onChannel, onLatest] = await Promise.all([
+    fetchPublishedVersion(channel, options),
+    fetchPublishedVersion("latest", options),
+  ]);
+  if (!onChannel) return onLatest;
+  if (!onLatest) return onChannel;
+  return compareVersions(onLatest, onChannel) > 0 ? onLatest : onChannel;
 }

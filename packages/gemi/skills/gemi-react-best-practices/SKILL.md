@@ -6,7 +6,7 @@ description: Best practices for the gemi framework (Bun + Vite + React 19 SSR fu
 # gemi Best Practices
 
 Rules for building on **gemi**, the full-stack TypeScript framework this app runs on
-(Bun + Vite, React 19 SSR). 44 rules across 10 categories, ordered by impact.
+(Bun + Vite, React 19 SSR). 45 rules across 11 categories, ordered by impact.
 
 Every rule is derived from the gemi documentation and from patterns that recur across
 gemi codebases. This skill ships with the `gemi` package, so it describes the
@@ -45,6 +45,7 @@ framework; where it and your app disagree, your app wins (ground rule 2).
 
 | Priority | Category | Impact | Prefix |
 |----------|----------|--------|--------|
+| 0 | Project Structure | HIGH | `structure-` |
 | 1 | Server Payload & Waterfalls | CRITICAL | `payload-` |
 | 2 | Client Data Fetching | CRITICAL | `query-` |
 | 3 | Data Access (ORM) | HIGH | `orm-` |
@@ -56,7 +57,69 @@ framework; where it and your app disagree, your app wins (ground rule 2).
 | 9 | Internationalization | MEDIUM | `i18n-` |
 | 10 | Testing | MEDIUM | `testing-` |
 
+## Project Structure
+
+Everything the framework guarantees lives under `app/`. This is the layout a
+scaffolded project has; the parts marked *discovered* are read by walking the
+directory, so writing the file is the registration.
+
+```
+app/
+  server.ts            server entry - boots the kernel, starts the HTTP server
+  client.tsx           browser entry - hydrates the React app
+  preload.ts           optional Bun preload, runs before the server starts
+  kernel/Kernel.ts     declares `config`, `providers`, and `models`
+  config/              runtime config, one file per framework service
+  providers/           your own container bindings
+  http/
+    routes/            api.ts and view.ts - the root routers
+    controllers/       controller classes
+    requests/          HttpRequest subclasses used for validation
+  models/              ORM models  (declared on the Kernel)
+    generated/         OUTPUT - never hand-edit
+  views/               React views, layouts, RootLayout  (path is NOT the URL)
+  email/               jsx-email templates
+  i18n/                dictionaries
+  cron/                CronJob classes        <- discovered at boot
+  jobs/                Job classes            <- discovered at boot
+  listeners/           Listener classes       <- discovered at boot
+  commands/            defineCommand chains   <- discovered by `gemi run`
+  database/prisma.ts   the Prisma client instance
+```
+
+`app/listeners/` is absent from a fresh scaffold; that is not an error, it means
+the app has no listeners yet.
+
+### Where a new file goes
+
+| Adding a… | Goes in | Reached by |
+|---|---|---|
+| page / layout | `app/views/` | a **router**, never its file path |
+| URL, or middleware on one | `app/http/routes/` | mounted from `view.ts` / `api.ts` |
+| handler logic for a route | `app/http/controllers/` | named by a router |
+| request validation | `app/http/requests/` | named by a controller method |
+| ORM model | `app/models/` | the Kernel's `models` |
+| background work | `app/jobs/` | discovery |
+| scheduled work | `app/cron/` | discovery |
+| event handler | `app/listeners/` | discovery |
+| one-off ops task | `app/commands/` | discovery, via `gemi run` |
+| anything with I/O, a client, or state | `app/services/` | the container, by `static token` |
+| container bindings | `app/providers/` | the Kernel's `providers` |
+| settings for a framework service | `app/config/` | the Kernel's `config` |
+| translations | `app/i18n/` | `defineDictionary` |
+| build config (Vite/Bun plugins) | `gemi.config.ts` **at the root** | the CLI — *not* `app/config/` |
+
+Two mistakes this table exists to prevent, both of which typecheck and then do
+nothing: putting a view at a path that looks like its URL and expecting it to
+route, and writing a model without declaring it on the Kernel. See
+`structure-discovered-vs-registered` and `structure-do-not-reinvent-the-framework`.
+
 ## Quick Reference
+
+### 0. Project Structure (HIGH)
+
+- `structure-discovered-vs-registered` - Four directories register by being walked; models, routers, config and providers are declared
+- `structure-do-not-reinvent-the-framework` - `lib/`, a singleton, a hand-rolled registry: gemi already has each of these with a name
 
 ### 1. Server Payload & Waterfalls (CRITICAL)
 
@@ -118,7 +181,7 @@ carried for free.
 - `client-typed-links` - Navigate with a typed `Link` / `useNavigate`, not an interpolated path
 - `client-form-vs-mutation-hooks` - `<Form>` first; mutation hooks when you need control
 - `client-loading-error-exports` - A route module's `Loading` / `Error` exports ARE its suspense boundary
-- `client-no-effect-data-flow` - Derive in `useMemo`, reset in the handler, debounce with `useDebounceValue`
+- `client-no-effect-data-flow` - Derive in `useMemo`, reset in the handler, debounce before use
 
 ### 8. Bundle Size (MEDIUM)
 
@@ -128,7 +191,6 @@ carried for free.
 ### 9. Internationalization (MEDIUM)
 
 - `i18n-define-dictionary-inline` - The `defineDictionary` literal must be inline — a helper fails the BUILD
-- `i18n-batch-translation-transform` - `TranslationService.transform` once over a structure, not per item
 
 ### 10. Testing (MEDIUM)
 

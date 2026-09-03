@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 import { type InstallSkillOptions, installSkill } from "./install-skill";
-import { fetchPublishedVersion } from "./registry";
+import { fetchNewestPublished, fetchPublishedVersion } from "./registry";
 import { channelFor, compareVersions, parseVersion, readInstalledVersion } from "./version";
 
 /**
@@ -35,12 +35,19 @@ const LOCKFILES: Array<[PackageManager, string[]]> = [
  * and the templates ship a `bun.lock`.
  */
 export function detectPackageManager(rootDir: string): PackageManager {
-  for (const [manager, files] of LOCKFILES) {
-    if (files.some((file) => existsSync(path.join(rootDir, file)))) {
-      return manager;
+  // Walks up, because a workspace keeps one lockfile at its root while the
+  // package being upgraded is several directories below it. Stopping at
+  // `rootDir` would report bun's default for a pnpm monorepo and then run the
+  // wrong package manager against it.
+  let dir = path.resolve(rootDir);
+  while (true) {
+    for (const [manager, files] of LOCKFILES) {
+      if (files.some((file) => existsSync(path.join(dir, file)))) return manager;
     }
+    const parent = path.dirname(dir);
+    if (parent === dir) return "bun";
+    dir = parent;
   }
-  return "bun";
 }
 
 /**
@@ -49,8 +56,8 @@ export function detectPackageManager(rootDir: string): PackageManager {
  * silently promote a dev-only gemi out of `devDependencies` — a diff nobody
  * asked for, in the file most likely to be reviewed line by line.
  */
-export function dependencyKind(rootDir: string): "dependencies" | "devDependencies" | null {
-  const manifestPath = path.join(rootDir, "package.json");
+export function dependencyKind(dir: string): "dependencies" | "devDependencies" | null {
+  const manifestPath = path.join(dir, "package.json");
   if (!existsSync(manifestPath)) return null;
   try {
     const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
@@ -59,6 +66,35 @@ export function dependencyKind(rootDir: string): "dependencies" | "devDependenci
     return null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * The directory whose `package.json` declares gemi, searched upwards from
+ * `rootDir`, with the list it is declared in.
+ *
+ * The install has to run *there*, not at `rootDir` and not beside the hoisted
+ * `node_modules/gemi`. In a workspace those are three different places: gemi is
+ * declared in `apps/web/package.json`, installed to the monorepo root's
+ * `node_modules`, and the user may be standing in either. Running `bun add` at
+ * `rootDir` when gemi is declared one level up adds a direct dependency to a
+ * manifest that never had one, leaves the real range untouched, and changes
+ * nothing about the installed version — a no-op that edits the wrong file.
+ *
+ * `null` when no manifest above `rootDir` declares gemi at all. That is a
+ * refusal rather than a default, because the only thing left to do would be to
+ * add it somewhere it was never declared.
+ */
+export function findDeclaringDir(
+  rootDir: string,
+): { dir: string; kind: "dependencies" | "devDependencies" } | null {
+  let dir = path.resolve(rootDir);
+  while (true) {
+    const kind = dependencyKind(dir);
+    if (kind) return { dir, kind };
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
   }
 }
 
@@ -133,23 +169,43 @@ export async function runUpgrade(options: UpgradeOptions): Promise<number> {
     return 1;
   }
 
-  const kind = dependencyKind(rootDir) ?? "dependencies";
+  // Where gemi is *declared*, which in a workspace is neither `rootDir` nor the
+  // directory holding the hoisted `node_modules/gemi`.
+  const declaring = findDeclaringDir(rootDir);
+  if (!declaring) {
+    error(
+      `No \`package.json\` at or above ${rootDir} declares \`gemi\` as a ` +
+        `dependency, so there is nothing to upgrade. Run this from the ` +
+        `directory whose manifest depends on gemi.`,
+    );
+    return 1;
+  }
+  const { dir: installDir, kind } = declaring;
 
   // An explicit target that already parses as a version is used as-is — that is
   // how you pin, and how you go *back* after an upgrade goes wrong. Anything
   // else is a dist-tag and has to be resolved, so the "already up to date"
   // comparison below has two real versions to compare.
   const explicitVersion = target && parseVersion(target) ? target : null;
-  const tag = explicitVersion ? null : (target ?? channelFor(installed));
+  const tag = explicitVersion ? null : target;
 
   let resolved: string | null = explicitVersion;
   if (!resolved) {
-    log(`Resolving gemi@${tag}...`);
-    resolved = await fetchPublishedVersion(tag!, { timeoutMs: 10_000, fetchImpl });
+    log(`Resolving gemi@${tag ?? channelFor(installed)}...`);
+    resolved = tag
+      ? // An explicitly named tag is the user's choice, and is asked for
+        // literally — `gemi upgrade rc` must land on `rc` even when `latest` is
+        // ahead of it.
+        await fetchPublishedVersion(tag, { timeoutMs: 10_000, fetchImpl })
+      : // With no argument, both the installed version's channel and `latest`,
+        // newest wins. A frozen prerelease tag would otherwise report the user
+        // current while `latest` runs minors ahead — see `fetchNewestPublished`.
+        await fetchNewestPublished(installed, { timeoutMs: 10_000, fetchImpl });
     if (!resolved) {
       error(
-        `Could not resolve \`gemi@${tag}\` from the npm registry. Check your ` +
-          `connection, or pass an explicit version: \`gemi upgrade 0.59.0\`.`,
+        `Could not resolve \`gemi@${tag ?? channelFor(installed)}\` from the npm ` +
+          `registry. Check your connection, or pass an explicit version: ` +
+          `\`gemi upgrade 0.59.0\`.`,
       );
       return 1;
     }
@@ -161,15 +217,17 @@ export async function runUpgrade(options: UpgradeOptions): Promise<number> {
     // true of a resolved tag. `gemi upgrade 0.59.0` on 0.59.0 has no tag to name
     // and saying it does would be a claim the command never checked.
     log(
-      tag
-        ? `gemi ${installed} is already the newest release on \`${tag}\`.`
-        : `gemi is already at ${installed}.`,
+      explicitVersion
+        ? `gemi is already at ${installed}.`
+        : tag
+          ? `gemi ${installed} is already the newest release on \`${tag}\`.`
+          : `gemi ${installed} is already the newest release published.`,
     );
     return 0;
   }
 
   const spec = `gemi@${resolved}`;
-  const cmd = installCommand(detectPackageManager(rootDir), spec, kind);
+  const cmd = installCommand(detectPackageManager(installDir), spec, kind);
 
   log(
     direction > 0
@@ -194,7 +252,7 @@ export async function runUpgrade(options: UpgradeOptions): Promise<number> {
     return 0;
   }
 
-  const code = await spawn(cmd, rootDir);
+  const code = await spawn(cmd, installDir);
   if (code !== 0) {
     error(`\n\`${cmd.join(" ")}\` failed with exit code ${code}.`);
     return code;

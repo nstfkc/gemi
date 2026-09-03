@@ -20,11 +20,19 @@ const dirs: string[] = [];
 
 interface ProjectOptions {
   installed?: string | null;
-  manifest?: unknown;
+  manifest?: unknown | null;
   lockfiles?: string[];
 }
 
-function project({ installed = "0.58.0", manifest, lockfiles = [] }: ProjectOptions = {}) {
+function project({
+  installed = "0.58.0",
+  // Declared by default: `runUpgrade` refuses when no manifest at or above
+  // `rootDir` depends on gemi, so a fixture without one is testing the refusal
+  // rather than whatever the test set out to check. Pass `manifest: null` for
+  // the refusal itself.
+  manifest = { dependencies: { gemi: "^0.58.0" } },
+  lockfiles = [],
+}: ProjectOptions = {}) {
   const dir = mkdtempSync(join(tmpdir(), "gemi-upgrade-"));
   dirs.push(dir);
   if (installed !== null) {
@@ -32,7 +40,7 @@ function project({ installed = "0.58.0", manifest, lockfiles = [] }: ProjectOpti
     mkdirSync(pkg, { recursive: true });
     writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "gemi", version: installed }));
   }
-  if (manifest !== undefined) {
+  if (manifest !== undefined && manifest !== null) {
     writeFileSync(
       join(dir, "package.json"),
       typeof manifest === "string" ? manifest : JSON.stringify(manifest),
@@ -101,7 +109,7 @@ describe("dependencyKind", () => {
   test("returns null when gemi is not declared, or the manifest is unreadable", () => {
     expect(dependencyKind(project({ manifest: { dependencies: {} } }))).toBeNull();
     expect(dependencyKind(project({ manifest: "{ not json" }))).toBeNull();
-    expect(dependencyKind(project())).toBeNull();
+    expect(dependencyKind(project({ manifest: null }))).toBeNull();
   });
 });
 
@@ -138,6 +146,74 @@ describe("installCommand", () => {
       "--dev",
       "gemi@1.0.0",
     ]);
+  });
+});
+
+describe("the workspace case", () => {
+  // gemi declared in `apps/web/package.json`, hoisted to the monorepo root's
+  // node_modules, lockfile at the root. Three different directories, and before
+  // `findDeclaringDir` the command read the version from one and wrote to
+  // another.
+  function workspace() {
+    const root = mkdtempSync(join(tmpdir(), "gemi-ws-"));
+    dirs.push(root);
+    const pkg = join(root, "node_modules", "gemi");
+    mkdirSync(pkg, { recursive: true });
+    writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "gemi", version: "0.58.0" }));
+    writeFileSync(join(root, "package.json"), JSON.stringify({ workspaces: ["apps/*"] }));
+    writeFileSync(join(root, "pnpm-lock.yaml"), "");
+    const web = join(root, "apps", "web");
+    mkdirSync(web, { recursive: true });
+    writeFileSync(
+      join(web, "package.json"),
+      JSON.stringify({ name: "web", dependencies: { gemi: "^0.58.0" } }),
+    );
+    return { root, web };
+  }
+
+  test("installs where gemi is declared, not where the user is standing", async () => {
+    const { web } = workspace();
+    const h = harness();
+    expect(
+      await runUpgrade({ rootDir: web, fetchImpl: respond({ version: "0.59.0" }), ...h.options }),
+    ).toBe(0);
+    expect(h.spawn).toHaveBeenCalledWith(["pnpm", "add", "gemi@0.59.0"], web);
+  });
+
+  test("finds the declaring manifest from a subdirectory with no package.json", async () => {
+    const { web } = workspace();
+    const nested = join(web, "src", "features");
+    mkdirSync(nested, { recursive: true });
+    const h = harness();
+
+    await runUpgrade({ rootDir: nested, fetchImpl: respond({ version: "0.59.0" }), ...h.options });
+    // Not `nested`, and not the monorepo root either — `apps/web` is the only
+    // manifest that actually declares gemi.
+    expect(h.spawn).toHaveBeenCalledWith(["pnpm", "add", "gemi@0.59.0"], web);
+  });
+
+  test("finds the workspace lockfile rather than defaulting to bun", () => {
+    const { web } = workspace();
+    expect(detectPackageManager(web)).toBe("pnpm");
+  });
+
+  test("refuses rather than adding gemi to a manifest that never had it", async () => {
+    // The silent failure this replaces: `bun add gemi@x` at the monorepo root
+    // adds a direct dependency that was never there, leaves `apps/web`'s range
+    // untouched, and changes nothing about the installed version.
+    const root = mkdtempSync(join(tmpdir(), "gemi-ws-"));
+    dirs.push(root);
+    const pkg = join(root, "node_modules", "gemi");
+    mkdirSync(pkg, { recursive: true });
+    writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "gemi", version: "0.58.0" }));
+    writeFileSync(join(root, "package.json"), JSON.stringify({ workspaces: ["apps/*"] }));
+
+    const h = harness();
+    expect(
+      await runUpgrade({ rootDir: root, fetchImpl: respond({ version: "0.59.0" }), ...h.options }),
+    ).toBe(1);
+    expect(h.errors()).toContain("declares `gemi`");
+    expect(h.spawn).not.toHaveBeenCalled();
   });
 });
 
@@ -214,7 +290,7 @@ describe("runUpgrade", () => {
       await runUpgrade({ rootDir, fetchImpl: respond({ version: "0.59.0" }), ...h.options }),
     ).toBe(0);
     expect(h.spawn).not.toHaveBeenCalled();
-    expect(h.lines()).toContain("already the newest release on `latest`");
+    expect(h.lines()).toContain("already the newest release published");
   });
 
   test("an explicit version that is already installed names no tag", async () => {

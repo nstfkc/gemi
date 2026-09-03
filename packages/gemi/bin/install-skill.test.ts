@@ -1,4 +1,12 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -225,6 +233,72 @@ describe("installSkill", () => {
 
     expect(installSkill({ rootDir: a.rootDir, log: () => {}, error: () => {} })).toBe(0);
     expect(a.installed("SKILL.md")).toBe("# v1\n");
+  });
+
+  test("a damaged lock is kept aside, not overwritten", () => {
+    // The install must not block on a bad lock — but writing an empty one over it
+    // would take another tool's registration with it, silently. The bytes are
+    // recoverable instead: the other skill can be reinstated by hand.
+    const a = fixture();
+    mkdirSync(join(a.rootDir, ".agents"), { recursive: true });
+    const lock = join(a.rootDir, ".agents", ".skill-lock.json");
+    writeFileSync(lock, '{"skills":{"find-skills":{"source":"vercel-labs/ski');
+
+    const h = harness();
+    expect(installSkill({ rootDir: a.rootDir, ...h.options })).toBe(0);
+    expect(readFileSync(`${lock}.corrupt`, "utf8")).toContain("find-skills");
+    expect(h.lines()).toContain(".skill-lock.json.corrupt");
+    // And the fresh lock is valid and holds gemi's own entry.
+    expect(readLock(a.rootDir).skills[SKILL_NAME]).toBeTruthy();
+  });
+
+  test("a target that is a file, not a directory, is a sentence not a stack", () => {
+    // `hashDirectory` throws ENOTDIR on it. Nothing below the early returns was
+    // guarded, and `gemi upgrade` calls this without a try — an escaped throw
+    // ends a *successful* package install in an unhandled rejection.
+    const a = fixture();
+    mkdirSync(join(a.rootDir, ".agents", "skills"), { recursive: true });
+    writeFileSync(join(a.rootDir, ".agents", "skills", SKILL_NAME), "not a directory");
+
+    const h = harness();
+    let returned: number | undefined;
+    expect(() => {
+      returned = installSkill({ rootDir: a.rootDir, ...h.options });
+    }).not.toThrow();
+    expect(returned).toBe(1);
+    expect(h.errors()).toContain("Could not install");
+  });
+
+  test("a failed copy leaves the installed skill intact", () => {
+    // Staged into a sibling and renamed over the target. Deleting first would
+    // leave the directory gone *and* the lock holding the pre-delete hash — so
+    // the next run refuses with "has local edits" about a directory this command
+    // itself emptied.
+    const a = fixture();
+    installSkill({ rootDir: a.rootDir, log: () => {}, error: () => {} });
+
+    // A source whose SKILL.md exists but whose `rules` is unreadable as a tree:
+    // `cpSync` fails partway, after the guard clauses have passed.
+    const source = join(a.rootDir, "node_modules", "gemi", "skills", SKILL_NAME);
+    rmSync(join(source, "rules"), { recursive: true, force: true });
+    writeFileSync(join(source, "SKILL.md"), "# v2\n");
+    mkdirSync(join(source, "rules"));
+    const unreadable = join(source, "rules", "a.md");
+    writeFileSync(unreadable, "a\n");
+    chmodSync(join(source, "rules"), 0o000);
+
+    const h = harness();
+    const code = installSkill({ rootDir: a.rootDir, ...h.options });
+    chmodSync(join(source, "rules"), 0o755);
+
+    // Either it copied (running as root ignores the mode) or it refused — but it
+    // must never have left the installed copy missing.
+    expect(a.installed("SKILL.md")).toMatch(/# v[12]\n/);
+    if (code !== 0) expect(h.errors()).toContain("Could not install");
+    // And no staging directory is left behind either way.
+    expect(
+      readdirSync(join(a.rootDir, ".agents", "skills")).filter((n) => n.includes(".tmp-")),
+    ).toEqual([]);
   });
 
   test("keeps the original installedAt across an update", () => {

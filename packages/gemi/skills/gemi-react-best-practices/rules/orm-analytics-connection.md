@@ -1,30 +1,29 @@
 ---
-title: Heavy Aggregations Run on the Analytics Pool
+title: Heavy Aggregations Run on a Separate Connection
 impact: HIGH
 impactDescription: keeps the request-path pool available
 tags: orm, connections, pooling, admin, cron
 ---
 
-## Heavy Aggregations Run on the Analytics Pool
+## Heavy Aggregations Run on a Separate Connection
 
-This app runs **four pools per instance** — a hot pool and an analytics pool on
-each of the ORM and Prisma clients — and every pool counts separately against the
-server's connection budget. A long admin scan or cron aggregation on the hot pool
-starves the every-request auth path. This is a common production incident shape, not
-a hypothetical.
+Every connection your app declares counts against the database server's connection
+budget, and a long admin scan or cron aggregation on the same pool that serves
+requests starves the every-request auth path. This is a common production incident
+shape, not a hypothetical.
 
-Route heavy reads to the analytics connection. **Selection is per query, never per
-model:**
+If your app declares a second connection for that work — the usual name is
+`analytics` — route heavy reads to it. **Selection is per query, never per model:**
 
 ```ts
-await WebhookEventLog.on("analytics").count({ where });
+await AuditLog.on("analytics").count({ where });
 await DB.connection("analytics").query(sql`…`);
 ```
 
 **Incorrect (a full-table admin scan competing with request traffic):**
 
 ```ts
-const rows = await AIAssistantChat.findMany({
+const rows = await AuditLog.findMany({
   where: { createdAt: { gte: monthStart } },
 });
 ```
@@ -32,21 +31,23 @@ const rows = await AIAssistantChat.findMany({
 **Correct:**
 
 ```ts
-const rows = await AIAssistantChat.on("analytics").findMany({
+const rows = await AuditLog.on("analytics").findMany({
   where: { createdAt: { gte: monthStart } },
 });
 ```
 
-**Bound the concurrency of a batch to the pool that serves it.** The admin batches
-use `mapWithConcurrency` capped at `ANALYTICS_POOL_SIZE` (exported from
-`app/config/database.ts`) precisely so a batch cannot queue more work than the pool
-can serve. An unbounded `Promise.all` over a 3-connection pool is a queue, not
-parallelism.
+`Model.on(name)` and `DB.connection(name)` both take a connection your app has
+declared in its database config. There is no framework-provided `analytics` pool —
+check what your app actually declares before reaching for a name.
 
-**Do not hardcode a pool size.** All four sizes resolve through
-`app/config/databasePools.ts` (`poolSizes`), which holds the shared per-instance
-budget and a boot-time assertion that the four shares sum to at most that budget.
-A literal size in a config file escapes the assertion — that is the #751/#772
-footgun, and the 2026-08-10 pool-shrink incident.
+**Bound a batch's concurrency to the pool that serves it.** An unbounded
+`Promise.all` over a three-connection pool is a queue, not parallelism, and it is a
+queue that blocks anything else needing that pool. Cap the in-flight count at the
+pool size rather than fanning out over the whole collection.
 
-Remember `orm-transaction-sequential`: a transaction cannot span connections.
+**Do not hardcode a pool size at a call site.** Read it from the same config that
+declares the pool, so shrinking the pool cannot leave a batch fanning out wider than
+it can serve.
+
+Remember `orm-transaction-sequential`: a transaction cannot span connections, so
+work inside `Model.transaction` stays on the connection that opened it.

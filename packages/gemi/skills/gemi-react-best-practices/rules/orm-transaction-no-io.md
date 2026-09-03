@@ -11,7 +11,7 @@ The reserved connection is held for the **entire** duration of the callback. An 
 call, an upload, a queue push or an LLM request inside a transaction holds a pooled
 connection for as long as that request takes — and under load, unrelated queries
 elsewhere in the app queue behind it. The pools here are small and budgeted
-(`app/config/databasePools.ts` asserts the four shares against a per-instance
+(your database config's pool sizes are asserted against a per-instance
 budget at boot), so one slow callback is felt app-wide.
 
 Do the I/O first, or after. Keep the transaction to the writes that must be atomic.

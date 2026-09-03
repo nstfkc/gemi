@@ -98,6 +98,53 @@ describe("checkForUpdate", () => {
     expect(notice).toContain("0.58.0 → 0.59.0");
   });
 
+  test("a frozen prerelease tag does not strand the user on it", async () => {
+    // gemi's live tags: `rc` sits at 0.51.0-rc.14 while `latest` is 0.59.0 —
+    // eight minors ahead. Asking only `rc` would answer with the version the
+    // user is already running and print nothing, forever, about precisely the
+    // release this feature exists to move them off.
+    const fetchImpl = vi.fn(async (url: string | URL | Request) =>
+      Response.json({
+        version: String(url).endsWith("/rc") ? "0.51.0-rc.14" : "0.59.0",
+      }),
+    ) as unknown as typeof fetch;
+
+    const notice = await checkForUpdate({
+      rootDir: project("0.51.0-rc.14"),
+      env: {},
+      fetchImpl,
+    });
+    expect(notice).toContain("0.51.0-rc.14 → 0.59.0");
+  });
+
+  test("a channel still ahead of latest wins", async () => {
+    // The backwards case the channel logic exists for, still holding: an rc that
+    // leads the stable release must not be told to move down onto it.
+    const fetchImpl = vi.fn(async (url: string | URL | Request) =>
+      Response.json({
+        version: String(url).endsWith("/rc") ? "0.60.0-rc.3" : "0.59.0",
+      }),
+    ) as unknown as typeof fetch;
+
+    const notice = await checkForUpdate({
+      rootDir: project("0.60.0-rc.1"),
+      env: {},
+      fetchImpl,
+    });
+    expect(notice).toContain("0.60.0-rc.1 → 0.60.0-rc.3");
+  });
+
+  test("a stable install asks only latest", async () => {
+    // One request, not two — nothing on a prerelease tag is an upgrade from a
+    // stable release, so a second answer would only be fetched to discard it.
+    const fetchImpl = respond({ version: "0.59.0" });
+    await checkForUpdate({ rootDir: project("0.58.0"), env: {}, fetchImpl });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(String((fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls[0]![0])).toMatch(
+      /\/gemi\/latest$/,
+    );
+  });
+
   test("asks for the channel the installed version is on", async () => {
     // An rc compared against `latest` would be told to move to the older stable
     // release, which is the whole reason `channelFor` exists.
@@ -107,8 +154,10 @@ describe("checkForUpdate", () => {
       env: {},
       fetchImpl,
     });
-    const [url] = (fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls[0]!;
-    expect(String(url)).toMatch(/\/gemi\/rc$/);
+    const urls = (fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls.map((call) =>
+      String(call[0]),
+    );
+    expect(urls.some((url) => url.endsWith("/gemi/rc"))).toBe(true);
   });
 
   test("is silent outside a gemi project", async () => {

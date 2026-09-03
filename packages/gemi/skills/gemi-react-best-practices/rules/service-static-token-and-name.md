@@ -33,8 +33,8 @@ export class ProcessVideoJob extends Job {
   onDeadletter(error: Error, params: Params) { /* … */ }
 }
 
-export class TranslationService extends Service {
-  static token = "TranslationService";
+export class Billing extends Service {
+  static token = "Billing";
 }
 ```
 
@@ -49,5 +49,4 @@ export class TranslationService extends Service {
 **Register services explicitly on `Kernel.services`, and note that boot order is
 load-bearing** — a service listed first boots before those after it.
 
-Reference: `app/jobs/`, `app/services/TranslationService.ts`
 <https://nstfkc.github.io/gemi/jobs-and-queues.md>

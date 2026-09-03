@@ -17,7 +17,7 @@ case:
 |---|---|
 | resets state when a prop or selection changes | reset in the `onChange` handler — it is event-driven |
 | computes a value from other state | derive it in `useMemo` from the source |
-| debounces a value | `useDebounceValue` from `usehooks-ts` |
+| debounces a value | a debounce hook, applied to the value before it is used |
 
 **Incorrect (three effects doing data flow):**
 
@@ -38,9 +38,12 @@ useEffect(() => {                                            // debounce
 **Correct:**
 
 ```tsx
+// gemi ships no debounce hook — this is your own, or one from a library.
+import { useDebounced } from "@/app/hooks/useDebounced";
+
 const [selected, setSelected] = useState(null);
 const [query, setQuery] = useState("");
-const [debouncedQuery] = useDebounceValue(query.trim(), 250);
+const [debouncedQuery] = useDebounced(query.trim(), 250);
 
 const options = useMemo(() => items.filter(fn), [items]);
 

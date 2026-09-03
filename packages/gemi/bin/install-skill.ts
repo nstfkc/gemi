@@ -5,6 +5,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -128,6 +129,34 @@ export function writeLock(rootDir: string, lock: Lock): void {
   writeFileSync(lockPath(rootDir), `${JSON.stringify(lock, null, 2)}\n`);
 }
 
+/**
+ * Move an unparseable lock aside before it is overwritten, returning the path it
+ * went to (or `null` if there was nothing to move).
+ *
+ * `readLock` returns an empty lock for a damaged file so a bad lock cannot block
+ * an install — but writing that empty object back would take every other tool's
+ * entry with it, which is the one case where the promise this file and
+ * `docs/cli.md` both make (unrelated entries are preserved) would not hold. A
+ * truncated write from another process is exactly when someone else's skill
+ * registration is most worth not deleting.
+ *
+ * So the bytes are kept: the install still succeeds, and the other tool's state
+ * is recoverable by hand rather than gone.
+ */
+export function quarantineUnreadableLock(rootDir: string): string | null {
+  const file = lockPath(rootDir);
+  if (!existsSync(file)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(file, "utf8"));
+    if (parsed && typeof parsed === "object") return null;
+  } catch {
+    // Falls through to the rename below.
+  }
+  const quarantined = `${file}.corrupt`;
+  renameSync(file, quarantined);
+  return quarantined;
+}
+
 export interface InstallSkillOptions {
   rootDir: string;
   /** Overwrite an installed copy that has been edited locally. */
@@ -143,8 +172,31 @@ export interface InstallSkillOptions {
   now?: () => string;
 }
 
-/** Returns the process exit code. Every failure is a sentence, never a stack. */
+/**
+ * Returns the process exit code. Every failure is a sentence, never a stack —
+ * including the ones no branch below anticipates.
+ *
+ * The guard is not decoration. `gemi upgrade` calls this *after* the package
+ * install has already succeeded, and does not await it inside a `try`; an escaped
+ * throw would surface as an unhandled rejection and end a successful upgrade in a
+ * stack trace. Filesystem shapes this cannot enumerate reach it — a target path
+ * that is a regular file rather than a directory, EACCES on one rule, ENOSPC —
+ * and all of them have to come out as a sentence and a `1`.
+ */
 export function installSkill(options: InstallSkillOptions): number {
+  const { error = console.error } = options;
+  try {
+    return install(options);
+  } catch (cause) {
+    error(
+      `Could not install the \`${SKILL_NAME}\` skill: ` +
+        `${cause instanceof Error ? cause.message : String(cause)}`,
+    );
+    return 1;
+  }
+}
+
+function install(options: InstallSkillOptions): number {
   const {
     rootDir,
     force = false,
@@ -213,9 +265,24 @@ export function installSkill(options: InstallSkillOptions): number {
   // Replace rather than merge: a rule deleted or renamed upstream has to
   // disappear here too, and `cpSync` over the top would leave the old file
   // behind for an agent to keep reading.
-  rmSync(target, { recursive: true, force: true });
+  //
+  // Staged into a sibling and renamed over the target rather than copied into
+  // place. Deleting first and copying second means any failure in between — a
+  // read-only `.agents/`, a full disk — leaves the skill directory destroyed
+  // *and* the lock still holding the pre-delete hash, so the next run refuses
+  // with "has local edits" about a directory this command itself emptied. A
+  // failed `cpSync` into the staging directory leaves the installed copy
+  // untouched, and `renameSync` is atomic.
   mkdirSync(path.dirname(target), { recursive: true });
-  cpSync(source, target, { recursive: true });
+  const staging = `${target}.tmp-${process.pid}`;
+  rmSync(staging, { recursive: true, force: true });
+  try {
+    cpSync(source, staging, { recursive: true });
+    rmSync(target, { recursive: true, force: true });
+    renameSync(staging, target);
+  } finally {
+    rmSync(staging, { recursive: true, force: true });
+  }
 
   const timestamp = now();
   lock.skills[SKILL_NAME] = {
@@ -227,6 +294,13 @@ export function installSkill(options: InstallSkillOptions): number {
     installedAt: recorded?.installedAt ?? timestamp,
     updatedAt: timestamp,
   };
+  const quarantined = quarantineUnreadableLock(rootDir);
+  if (quarantined) {
+    log(
+      `${path.relative(rootDir, lockPath(rootDir))} could not be parsed and was ` +
+        `kept as ${path.basename(quarantined)}; a fresh one was written.`,
+    );
+  }
   writeLock(rootDir, lock);
 
   const where = path.relative(rootDir, target) || target;

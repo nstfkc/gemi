@@ -1,5 +1,5 @@
-import { fetchPublishedVersion } from "./registry";
-import { channelFor, compareVersions, parseVersion, readInstalledVersion } from "./version";
+import { fetchNewestPublished } from "./registry";
+import { compareVersions, parseVersion, readInstalledVersion } from "./version";
 
 /**
  * The "a newer gemi is out" notice `gemi dev` prints.
@@ -73,7 +73,10 @@ export async function checkForUpdate(options: UpdateCheckOptions): Promise<strin
   const installed = readInstalledVersion(rootDir);
   if (!installed) return null;
 
-  const published = await fetchPublishedVersion(channelFor(installed), {
+  // Across the installed version's own channel *and* `latest` — see
+  // `fetchNewestPublished`. Asking only the channel leaves anyone on a frozen
+  // prerelease tag permanently silent.
+  const published = await fetchNewestPublished(installed, {
     timeoutMs,
     fetchImpl,
   });

@@ -47,7 +47,7 @@ export class OrganizationController extends Controller {
 1. **Never `Promise.all` ORM calls inside `Model.transaction`** — see
    `orm-transaction-sequential`. One reserved connection makes it unsafe.
 2. **A batch over the analytics pool is bounded**, not unbounded — the admin
-   aggregations use `mapWithConcurrency` capped at `ANALYTICS_POOL_SIZE` so a batch
+   aggregations cap their in-flight count at the pool size so a batch
    cannot queue more work than the pool can serve.
 
 Two habits that compound with this: move an `await` into the branch that actually

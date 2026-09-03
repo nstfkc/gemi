@@ -67,7 +67,9 @@ Two packages are required, both already in the scaffolded template:
 bun add -d "@vitejs/plugin-react@^6.1.1" "oxc-transform-react@^0.145.0"
 ```
 
-`oxc-transform-react` is an optional peer of `@vitejs/plugin-react` with a `^0.145.0` range, so pin it to `0.145.x` — a newer minor is outside that range and the plugin will refuse to load it. If the package is missing entirely, the build fails with *"React Compiler requires the optional `oxc-transform-react` package"* rather than silently skipping compilation.
+`oxc-transform-react` is an optional peer of `@vitejs/plugin-react` with a `^0.145.0` range, so pin it to `0.145.x`. Note what enforces that: **the plugin itself does no version check** — it calls `await import("oxc-transform-react")` and nothing more, so a `0.148.0` install loads and runs. What you get is your package manager's peer resolution: a warning under bun and npm, an install failure under pnpm with strict peers. The risk is not a broken build, it is an unchecked API mismatch between the plugin and a transform version it never declared support for.
+
+If the package is missing entirely, the build *does* fail, with *"React Compiler requires the optional `oxc-transform-react` package"* rather than silently skipping compilation.
 
 The plugin only memoizes for **client** environments. gemi's SSR view build has `consumer: "server"`, so it gets the plain JSX transform — which is what you want, since server rendering is a single pass and memoization would only add cache allocations. The compiled client output imports `react/compiler-runtime`, present in React 19.
 

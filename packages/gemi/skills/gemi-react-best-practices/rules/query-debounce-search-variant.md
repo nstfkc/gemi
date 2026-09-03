@@ -11,7 +11,7 @@ Every distinct `search` object is a distinct cache key, so feeding raw input sta
 straight into `useQuery` fires a request per keystroke and fills the cache with
 entries nobody will read again.
 
-Debounce with `useDebounceValue` from `usehooks-ts` — **not** a hand-rolled
+Debounce with a debounce hook — **not** a hand-rolled
 `useEffect` + `setTimeout`. The house rule in most gemi apps is that data flow does
 not go
 through effects: derive in `useMemo`, reset in the change handler, debounce with the
@@ -32,7 +32,8 @@ useEffect(() => {
 **Correct:**
 
 ```tsx
-import { useDebounceValue } from "usehooks-ts";
+// A debounce hook — your own, or one from a library.
+import { useDebounceValue } from "@/app/hooks/useDebounceValue";
 
 const [query, setQuery] = useState("");
 const [debouncedQuery] = useDebounceValue(query.trim(), 250);

@@ -160,8 +160,14 @@ The skill describes the framework, so its correct version is the framework's ver
 
 The lockfile follows the [`vercel-labs/skills`](https://github.com/vercel-labs/skills) convention already used by other skill tooling, and unrelated entries and top-level keys in it are preserved — gemi's skill can sit beside skills installed from elsewhere.
 
-> **Note:** `.agents/` is the cross-tool skills directory. Claude Code reads project skills from `.claude/skills/` instead, so symlink it if you want both:
-> `ln -s ../../.agents/skills/gemi-react-best-practices .claude/skills/gemi-react-best-practices`
+> **Note:** `.agents/` is the cross-tool skills directory. Claude Code reads project skills from `.claude/skills/` instead, so link it if you want both:
+>
+> ```bash
+> mkdir -p .claude/skills
+> ln -s ../../.agents/skills/gemi-react-best-practices .claude/skills/gemi-react-best-practices
+> ```
+>
+> Keep that link out of version control. A symlink checked out on Windows without `core.symlinks` materialises as a *text file* containing the target path, so any tool reading `.claude/skills/` finds a one-line file where a skill should be.
 
 ## `gemi migrate`
 
