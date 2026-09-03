@@ -10,7 +10,8 @@ import {
   MemoryAgentStore,
   MemoryLiveRuns,
 } from "./AgentController";
-import type { AgentProvider, ProviderEvent, ProviderStreamParams } from "./AgentProvider";
+import type { ProviderEvent } from "./AgentProvider";
+import { fakeProvider } from "./providers/fakeProvider";
 import { s } from "./Schema";
 import { StubAgentRun } from "./store/stubAgentRun";
 import type { AgentMessage, AgentStreamEvent, PendingToolCall } from "./types";
@@ -89,38 +90,6 @@ async function eventsOf(response: Response): Promise<AgentStreamEvent[]> {
     .map((line) => JSON.parse(line.slice("data: ".length)));
 }
 
-/**
- * A provider that plays one script per model call, for the tests that need a
- * real `Agent` behind the controller rather than a stub run: what the store
- * ends up holding depends on what the agent reports, and a stub run reports
- * whatever the test hands it.
- */
-function scriptedProvider(...scripts: ProviderEvent[][]) {
-  let call = 0;
-  return {
-    model: "fake",
-    capabilities: {
-      reasoning: true,
-      structuredOutput: true,
-      fileInput: true,
-      parallelToolCalls: true,
-      toolSearch: true,
-    },
-    stream(_params: ProviderStreamParams) {
-      const script = scripts[call++] ?? [];
-      return (async function* () {
-        for (const event of script) yield event;
-      })();
-    },
-    upload: async () => "file_1",
-    normalizeError: (error: unknown) => ({
-      code: "provider_error" as const,
-      message: error instanceof Error ? error.message : String(error),
-      retryable: false,
-    }),
-  } as unknown as AgentProvider;
-}
-
 const finish = (): ProviderEvent => ({
   type: "finish",
   reason: "stop",
@@ -192,6 +161,10 @@ describe("AgentController.stream", () => {
    * id it already had, with the result attached. Persisting that turn must
    * replace the earlier copy, not sit next to it — otherwise every later turn
    * sends the model the same call twice.
+   *
+   * This one runs a real `Agent` over a scripted provider rather than a stub
+   * run: what the store ends up holding depends on what the agent reports,
+   * and a stub run reports whatever the test hands it.
    */
   test("a threaded approval leaves one message per id in the store", async () => {
     const refunded: string[] = [];
@@ -206,7 +179,7 @@ describe("AgentController.stream", () => {
         return { refundId: `rf_${orderId}` };
       },
     });
-    const provider = scriptedProvider(
+    const provider = fakeProvider(
       [
         { type: "tool-call", toolCallId: "c1", name: "refundOrder", args: '{"orderId":"ord_1"}' },
         finish(),
