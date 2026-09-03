@@ -82,22 +82,35 @@ export class MemoryAgentStore implements AgentStore {
 
   async appendMessages(threadId: string, messages: AgentMessage[]): Promise<void> {
     this.sweep();
-    const thread = this.threads.get(threadId);
-    if (thread) {
-      thread.messages.push(...messages);
-      thread.touchedAt = Date.now();
-      return;
+    let thread = this.threads.get(threadId);
+    if (!thread) {
+      if (!this.clientOwnedIds) {
+        // Creating the thread here would persist a turn under an id the client
+        // believes holds a longer conversation, and hide from the app that the
+        // conversation is gone. The controller checks before the run and never
+        // reaches this; a store-level caller that does gets told.
+        throw new Error(`Thread ${threadId} does not exist here, or has expired.`);
+      }
+      // The client owns the id, so an append to one the store has never seen is
+      // the first turn, and refusing it would lose a turn that already happened.
+      thread = { messages: [], touchedAt: Date.now() };
+      this.threads.set(threadId, thread);
     }
-    if (!this.clientOwnedIds) {
-      // Creating the thread here would persist a turn under an id the client
-      // believes holds a longer conversation, and hide from the app that the
-      // conversation is gone. The controller checks before the run and never
-      // reaches this; a store-level caller that does gets told.
-      throw new Error(`Thread ${threadId} does not exist here, or has expired.`);
+    // Upsert, not push. A turn that resolves a pending call hands back the
+    // assistant message that made the call under the id it already had, now
+    // with the result attached; pushing it would leave the thread holding both
+    // versions, and the model would read the same call twice on every turn
+    // that follows. Replacing in place keeps the message where the
+    // conversation put it.
+    for (const message of messages) {
+      const at = thread.messages.findIndex((held) => held.id === message.id);
+      if (at === -1) {
+        thread.messages.push(message);
+      } else {
+        thread.messages[at] = message;
+      }
     }
-    // The client owns the id, so an append to one the store has never seen is
-    // the first turn, and refusing it would lose a turn that already happened.
-    this.threads.set(threadId, { messages: messages.slice(), touchedAt: Date.now() });
+    thread.touchedAt = Date.now();
   }
 
   /** Test seam, and a way for an app to drop a conversation on request. */
