@@ -61,8 +61,10 @@ export interface AgentStore {
    * The name says append because that is what almost every call is, but a
    * turn that resolves a pending call reports the earlier assistant message
    * again — same id, now with the result attached — and a store that only
-   * appends ends up with both versions. A table keyed by message id gets this
-   * for free; a store that is a list has to look before it pushes.
+   * appends ends up with both versions. A table keyed by message id has the
+   * lookup already but still needs an insert-or-update rather than a plain
+   * insert, which would fail on the key; a store that is a list has to look
+   * before it pushes.
    */
   appendMessages(threadId: string, messages: AgentMessage[]): Promise<void>;
 }
