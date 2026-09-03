@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { AgentStreamFrame } from "../types";
-import { SSE_KEEPALIVE, SSE_KEEPALIVE_INTERVAL_MS, sseResponse } from "./sse";
+import { SSE_KEEPALIVE, SSE_KEEPALIVE_INTERVAL_MS, sseKeepalive, sseResponse } from "./sse";
 
 const bytes = new TextDecoder();
 
@@ -80,5 +80,18 @@ describe("sseResponse keepalive", () => {
     expect(vi.getTimerCount()).toBe(1);
     await body.cancel();
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  test("a touch after stop does not arm a timer", () => {
+    vi.useFakeTimers();
+    const enqueue = vi.fn();
+    const keepalive = sseKeepalive({
+      enqueue,
+    } as unknown as ReadableStreamDefaultController<Uint8Array>);
+    keepalive.stop();
+    keepalive.touch();
+    expect(vi.getTimerCount()).toBe(0);
+    vi.advanceTimersByTime(SSE_KEEPALIVE_INTERVAL_MS);
+    expect(enqueue).not.toHaveBeenCalled();
   });
 });
