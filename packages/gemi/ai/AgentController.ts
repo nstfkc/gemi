@@ -139,6 +139,20 @@ const threadLocks = new Map<string, Promise<void>>();
  */
 const persisted = new WeakMap<AgentRun, Promise<void>>();
 
+/**
+ * Turns read but not yet registered, by the client's name for them.
+ *
+ * A run can be stopped from `register` on, and named from `run-start` on. What
+ * `/stop` could not reach was a turn still waiting its place on the thread —
+ * which is where a user who sent twice and thought better of it presses stop,
+ * and the wait is now as long as the old run's unwind. Falling through to
+ * `threadId` there found the old run, already stopping, said `stopped: true`,
+ * and the queued turn started anyway: unwatched, billing, and with no handle
+ * left on the client that had let go of it. The entry is marked rather than
+ * removed, because the turn itself is what answers once its wait is over.
+ */
+const pendingTurns = new Map<string, { cancelled: boolean }>();
+
 export abstract class AgentController<A extends AnyAgent = AnyAgent> extends ControllerBase {
   static kind = "agent-controller" as const;
 
@@ -187,6 +201,14 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
     const body = parsed.body;
     const threadId = typeof body.threadId === "string" ? body.threadId : undefined;
     const turn = toClientTurn(body);
+    const clientRunId = typeof body.clientRunId === "string" ? body.clientRunId : undefined;
+
+    // From here until `register`, the only thing `/stop` can find this turn by.
+    // See `pendingTurns`.
+    const pending = clientRunId ? { cancelled: false } : null;
+    if (pending) {
+      pendingTurns.set(clientRunId, pending);
+    }
 
     // The whole of the stateless/threaded difference, in one expression: with a
     // thread the server owns the history, without one the client carries it.
@@ -240,6 +262,17 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
 
       const instructions = (await this.instructions(req)) || undefined;
 
+      if (pending?.cancelled) {
+        // Stopped while it waited. Nothing has been asked of the model and
+        // nothing registered, so there is no run to end and nothing charged
+        // for. Checked after the last `await` above, so that a stop landing
+        // during it is not missed: from here to `register` nothing yields.
+        return jsonResponse(409, {
+          code: "stopped",
+          message: "The turn was stopped before it started.",
+        });
+      }
+
       const run = this.agent.stream({
         messages,
         turn,
@@ -258,7 +291,7 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
         threadId,
         // The client's handle on a run it started, which is the only one that
         // exists before `run-start` reaches it. See `RegisterParams`.
-        clientRunId: typeof body.clientRunId === "string" ? body.clientRunId : undefined,
+        clientRunId,
         onEvent: (event) => this.dispatchEvent(event, ctx),
         onInternalError: (err) => this.reportHookFailure(err),
       });
@@ -270,7 +303,13 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
       return run.toResponse();
     };
 
-    return threadId ? await this.withThread(threadId, start) : await start();
+    try {
+      return threadId ? await this.withThread(threadId, start) : await start();
+    } finally {
+      if (pending && pendingTurns.get(clientRunId) === pending) {
+        pendingTurns.delete(clientRunId);
+      }
+    }
   }
 
   /**
@@ -295,7 +334,10 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
    * The wait is on `persistRun`, not on `run.result()`. `result()` settling is
    * the transcript being final, not stored: `appendMessages` runs after it, and
    * a `loadThread` in that gap reads a history the old answer is missing from,
-   * which is the original bug by a shorter route.
+   * which is the original bug by a shorter route. It is also *only* that:
+   * `persistRun` settles once the transcript is stored and lets the app's
+   * hooks run on without it, so a slow `onMessage` is not a slow thread and a
+   * hung one is not a hung thread.
    *
    * The lock around it is what makes a *third* turn wait for the second rather
    * than for the first. Two turns arriving together both see the same live
@@ -440,12 +482,24 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
     // Three handles, most specific first, because which ones the client has
     // depends on how far the run got. `runId` is the server's own and settles
     // it. `clientRunId` covers the window before `run-start`, when the client
-    // has nothing else for a stateless first turn. `threadId` is the fallback
-    // for a client that did not start this run at all — one that attached to
-    // it, whose replayed tail carried no `run-start`.
+    // has nothing else for a stateless first turn — and, before that, a turn
+    // that has not become a run yet because it is waiting its place on the
+    // thread, which is ended where it waits. `threadId` is the fallback for a
+    // client that did not start this run at all — one that attached to it,
+    // whose replayed tail carried no `run-start`.
     let runId = typeof body.runId === "string" ? body.runId : undefined;
     if (!runId && typeof body.clientRunId === "string") {
       runId = this.liveRuns.findByClientRunId(body.clientRunId) ?? undefined;
+      if (!runId) {
+        const pending = pendingTurns.get(body.clientRunId);
+        if (pending) {
+          // Not on to `threadId`: that names the run this turn is queued
+          // behind, which is already stopping, and answering for it would
+          // leave this one to start.
+          pending.cancelled = true;
+          return { stopped: true };
+        }
+      }
     }
     if (!runId && typeof body.threadId === "string") {
       runId = (await this.liveRuns.find({ threadId: body.threadId }))?.runId;
@@ -580,13 +634,21 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
    * how the two copies drift. It also means a stopped run persists the same way
    * a finished one does: `stop()` finalizes the transcript, so by the time this
    * resolves there is a valid history to store.
+   *
+   * Settles when the transcript is in the store, not when the app is done with
+   * it. The next turn on this thread waits on this (see `withThread`), and the
+   * hooks are the app's: an `onMessage` that writes to something slow would
+   * make every later turn wait for it, once per message of the old run, and
+   * one that never settles — which `safely` cannot catch — would hold the
+   * thread, and every turn queued on it, behind an open connection each. So
+   * the hooks run on after this on their own, reported the same way.
    */
   private async persistRun(run: AgentRun, ctx: AgentHookContext): Promise<void> {
     let result: AgentRunResult<ToolShapes, unknown>;
     try {
       result = await run.result();
     } catch (err) {
-      await this.safely(() =>
+      void this.safely(() =>
         this.onError(
           {
             code: "unknown",
@@ -609,6 +671,15 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
       }
     }
 
+    void this.notifyRun(result, messages, ctx);
+  }
+
+  /** The hooks on a finished run, in order. Never rejects: see `safely`. */
+  private async notifyRun(
+    result: AgentRunResult<ToolShapes, unknown>,
+    messages: AgentMessage[],
+    ctx: AgentHookContext,
+  ): Promise<void> {
     for (const message of messages) {
       await this.safely(() => this.onMessage(message, ctx));
     }
