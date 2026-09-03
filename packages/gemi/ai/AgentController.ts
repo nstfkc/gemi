@@ -572,16 +572,20 @@ async function readJsonBody(req: HttpRequest<any, any>): Promise<ParsedBody> {
 }
 
 /**
- * Media types compare case-insensitively and may carry parameters, so this is a
- * prefix match on the lowercased value rather than an equality, and
- * `Application/JSON; charset=utf-8` passes. None of the three types a browser
- * will send without a preflight — `text/plain`,
- * `application/x-www-form-urlencoded`, `multipart/form-data` — does, and
- * neither does no type at all, which is what a hand-written `fetch` with a
- * string body and no header ends up sending as `text/plain`.
+ * Media types compare case-insensitively and may carry parameters, so the
+ * comparison is on the lowercased type with its parameters cut off, and
+ * `Application/JSON; charset=utf-8` passes. It is an equality on that type
+ * rather than a prefix, so `application/json-seq` and the other types that
+ * merely begin with those bytes do not. None of the three types a browser will
+ * send without a preflight — `text/plain`, `application/x-www-form-urlencoded`,
+ * `multipart/form-data` — does either, and neither does no type at all, which
+ * is what a hand-written `fetch` with a string body and no header ends up
+ * sending as `text/plain`.
  */
 function isJsonContentType(value: string | null): boolean {
-  return typeof value === "string" && value.trim().toLowerCase().startsWith("application/json");
+  if (typeof value !== "string") return false;
+  const [type] = value.split(";", 1);
+  return type.trim().toLowerCase() === "application/json";
 }
 
 function invalidRequest(parsed: ParsedBody): Response {
