@@ -43,7 +43,14 @@ export type ChatStatus = "idle" | "submitted" | "streaming" | "awaiting-input" |
 
 export interface UseChatParams<P extends keyof AgentRoutes> {
   /** Continues a server-side thread. Omitted, the hook keeps history itself and
-   *  sends it with each request — the stateless default. */
+   *  sends it with each request — the stateless default.
+   *
+   *  The id is the store's, not the client's: an app route calls
+   *  `store.createThread` and hands the result to this hook, and an id the
+   *  store never minted — or has since expired — is a `thread_not_found` error
+   *  on the first turn. Only a store built with client-owned ids
+   *  (`new MemoryAgentStore({ clientOwnedIds: true })`) takes one the client
+   *  made up. */
   threadId?: string;
   /** Server-rendered or restored history. */
   initialMessages?: AgentMessage<ToolsOf<P>, OutputOf<P>>[];
