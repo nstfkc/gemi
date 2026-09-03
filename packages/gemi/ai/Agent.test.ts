@@ -2220,6 +2220,10 @@ describe("a client-carried history that says a tool parked", () => {
       (event) => event.type === "tool-call" && event.part.toolCallId === "c1",
     ) as any[];
     expect(sent).toHaveLength(2);
+    // And the second says so, because it is not a second call: a hook that
+    // fires per call has to be able to tell the record's frame from the model's.
+    expect(sent[0].resent).toBeUndefined();
+    expect(sent[1].resent).toBe(true);
     const record = sent[1].part.nested[0];
     expect(record).toMatchObject({ agent: "researcher", finishReason: "awaiting-input" });
     expect(typeof record.signature).toBe("string");
@@ -2269,7 +2273,17 @@ describe("a client-carried history that says a tool parked", () => {
     });
   });
 
-  test("a genuine record with a rewritten input is not executed, and the model is told", async () => {
+  /** The genuine turn two: the server's own history, the real answer. */
+  function answerOf(first: { pending: PendingToolCall[] }): ClientToolResult {
+    return {
+      toolCallId: "s1",
+      signature: first.pending[0].signature,
+      path: first.pending[0].path,
+      output: { answer: "notes.md" },
+    };
+  }
+
+  test("a genuine record with a rewritten input is not executed, however well-typed", async () => {
     const sub = askingAgent("researcher", "which file?", [
       { type: "text-delta", delta: "notes" },
       finish(),
@@ -2277,32 +2291,67 @@ describe("a client-carried history that says a tool parked", () => {
     const readFile = readingTool(sub);
     const first = await park(readFile);
 
-    // The record is the server's and the answer is real; only the tool's own
-    // input was rewritten on the way back, to a value its schema rejects.
-    const messages = JSON.parse(JSON.stringify(first.result.messages)) as AgentMessage[];
-    callPartOf(messages, "c1").input = { path: 123, extra: "not-in-schema" };
+    // The record is the server's and the answer is real; the tool's input was
+    // rewritten on the way back to a value its schema is happy with, and the
+    // sub-run's seed rewritten to match so nothing about the transcript looks
+    // out of place. Only the signature knows what the tool was parked on.
+    const messages = JSON.parse(
+      JSON.stringify(first.result.messages).replaceAll("notes.md", "/etc/secrets.md"),
+    ) as AgentMessage[];
+    expect(callPartOf(messages, "c1").input).toEqual({ path: "/etc/secrets.md" });
 
-    const provider = fakeProvider([{ type: "text-delta", delta: "sorry" }, finish()]);
+    const provider = fakeProvider([{ type: "text-delta", delta: "nothing happened" }, finish()]);
     const agent = Agent.create({ name: "lead", provider, tools: [readFile] });
-    const result = await agent
-      .stream({
-        messages,
-        req,
-        turn: {
-          toolResults: [
-            {
-              toolCallId: "s1",
-              signature: first.pending[0].signature,
-              path: first.pending[0].path,
-              output: { answer: "notes.md" },
-            },
-          ],
-        },
-      })
-      .result();
+    const run = agent.stream({ messages, req, turn: { toolResults: [answerOf(first)] } });
+    const { events, done } = collect(run);
+    const result = await run.result();
+    await done;
 
     // Not re-entered: the body ran once, on turn one, and the sub-agent was
     // not resumed on a transcript it was never going to be asked about.
+    expect(bodies).toHaveLength(1);
+    expect(sub.provider.calls).toHaveLength(1);
+    expect(events.find((event) => event.type === "error")).toMatchObject({
+      error: {
+        code: "invalid_tool_result",
+        toolCallId: "s1",
+        message: expect.stringContaining("did not sign"),
+      },
+    });
+    expect(partsOf(result.messages, "tool-result")[0]).toMatchObject({
+      toolCallId: "c1",
+      status: "denied",
+      cause: "refused",
+    });
+  });
+
+  test("a tool whose schema changed since it parked is not executed, and the model is told", async () => {
+    const sub = askingAgent("researcher", "which file?", [
+      { type: "text-delta", delta: "notes" },
+      finish(),
+    ]);
+    const first = await park(readingTool(sub));
+
+    // Same history, same answer, same tool name — but the deploy in between
+    // renamed the field, and the input the record vouches for no longer fits
+    // the tool it is about to be handed to.
+    const renamed = AgentTool.create({
+      name: "readFile",
+      description: "Read a file, then ask a researcher about it",
+      inputSchema: stringField("filename"),
+      outputSchema: anything(),
+      execute: async (input: any, ctx: any) => {
+        bodies.push({ input, resumed: ctx.resumed });
+        const run = await ctx.runAgent(sub.agent, { prompt: `read ${input.filename}` });
+        return { said: textOf(run.messages[run.messages.length - 1]) };
+      },
+    });
+    const provider = fakeProvider([{ type: "text-delta", delta: "sorry" }, finish()]);
+    const agent = Agent.create({ name: "lead", provider, tools: [renamed] });
+    const result = await agent
+      .stream({ messages: first.result.messages, req, turn: { toolResults: [answerOf(first)] } })
+      .result();
+
     expect(bodies).toHaveLength(1);
     expect(sub.provider.calls).toHaveLength(1);
     expect(partsOf(result.messages, "tool-result")[0]).toMatchObject({
@@ -2312,6 +2361,91 @@ describe("a client-carried history that says a tool parked", () => {
     });
     // A result the model can read, so the conversation goes on.
     expect(result.finishReason).toBe("stop");
+  });
+
+  test("a record re-enters its tool once: the same turn posted again is refused before the body runs", async () => {
+    const sub = askingAgent("researcher", "which file?", [
+      { type: "text-delta", delta: "notes" },
+      finish(),
+    ]);
+    const readFile = readingTool(sub);
+    const first = await park(readFile);
+
+    const provider = fakeProvider(
+      [{ type: "text-delta", delta: "done" }, finish()],
+      [{ type: "text-delta", delta: "nothing happened" }, finish()],
+    );
+    const agent = Agent.create({ name: "lead", provider, tools: [readFile] });
+    const second = await agent
+      .stream({ messages: first.result.messages, req, turn: { toolResults: [answerOf(first)] } })
+      .result();
+    expect(bodies).toHaveLength(2);
+    expect(sub.provider.calls).toHaveLength(2);
+    expect(partsOf(second.messages, "tool-result")[0]).toMatchObject({
+      toolCallId: "c1",
+      status: "ok",
+    });
+
+    // The history from before the result existed, with the same answer. The
+    // answer's own nonce is spent too, but the sub-run is the one that checks
+    // it, and the tool body runs before the sub-run is even started — so the
+    // record has to be what refuses this, or the body runs once per replay.
+    const replay = agent.stream({
+      messages: JSON.parse(JSON.stringify(first.result.messages)),
+      req,
+      turn: { toolResults: [answerOf(first)] },
+    });
+    const { events, done } = collect(replay);
+    const result = await replay.result();
+    await done;
+
+    expect(bodies).toHaveLength(2);
+    expect(sub.provider.calls).toHaveLength(2);
+    expect(events.find((event) => event.type === "error")).toMatchObject({
+      error: {
+        code: "invalid_tool_result",
+        toolCallId: "s1",
+        message: expect.stringContaining("already been re-entered"),
+      },
+    });
+    expect(partsOf(result.messages, "tool-result")[0]).toMatchObject({
+      toolCallId: "c1",
+      status: "denied",
+      cause: "refused",
+    });
+  });
+
+  test("a record answered after its day is up says it expired, not that the run never parked", async () => {
+    const sub = askingAgent("researcher", "which file?");
+    const readFile = readingTool(sub);
+    const first = await park(readFile);
+
+    // An ordinary outcome in threaded mode — the question sat overnight — and
+    // the message has to send that user back to the model, not to a bug hunt.
+    const now = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 25 * 60 * 60 * 1000);
+    try {
+      const provider = fakeProvider([{ type: "text-delta", delta: "nothing happened" }, finish()]);
+      const agent = Agent.create({ name: "lead", provider, tools: [readFile] });
+      const run = agent.stream({
+        messages: first.result.messages,
+        req,
+        turn: { toolResults: [answerOf(first)] },
+      });
+      const { events, done } = collect(run);
+      await run.result();
+      await done;
+
+      expect(bodies).toHaveLength(1);
+      expect(events.find((event) => event.type === "error")).toMatchObject({
+        error: {
+          code: "invalid_tool_result",
+          toolCallId: "s1",
+          message: expect.stringContaining("expired"),
+        },
+      });
+    } finally {
+      now.mockRestore();
+    }
   });
 });
 
