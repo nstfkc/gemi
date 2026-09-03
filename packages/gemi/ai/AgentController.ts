@@ -53,7 +53,17 @@ export interface AgentStore {
    * and then on purpose — see `MemoryAgentStore`'s `clientOwnedIds`.
    */
   loadThread(threadId: string): Promise<AgentMessage[] | null>;
-  /** Called with a thread `loadThread` just found. Must not create one. */
+  /**
+   * Upsert by message id: replace a message the thread already holds, append
+   * one it does not, and keep the order the thread had. Called with a thread
+   * `loadThread` just found; must not create one.
+   *
+   * The name says append because that is what almost every call is, but a
+   * turn that resolves a pending call reports the earlier assistant message
+   * again — same id, now with the result attached — and a store that only
+   * appends ends up with both versions. A table keyed by message id gets this
+   * for free; a store that is a list has to look before it pushes.
+   */
   appendMessages(threadId: string, messages: AgentMessage[]): Promise<void>;
 }
 
