@@ -224,6 +224,14 @@ describe("AgentController.stream", () => {
       messageId: "a1",
       part: { type: "tool-call", toolCallId: "c1", name: "bash", input: { command: "ls" } },
     } as AgentStreamEvent);
+    // A re-sent frame is the server's copy of a call the hook has already
+    // seen — a parked sub-run's signed record rides on it — not a second call.
+    run.emit({
+      type: "tool-call",
+      messageId: "a1",
+      part: { type: "tool-call", toolCallId: "c1", name: "bash", input: { command: "ls" } },
+      resent: true,
+    } as AgentStreamEvent);
     run.emit({
       type: "awaiting-input",
       runId: "run_4",
