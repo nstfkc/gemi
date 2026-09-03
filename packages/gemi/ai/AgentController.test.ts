@@ -2,7 +2,12 @@ import { describe, expect, test } from "vitest";
 
 import { HttpRequest } from "../http/HttpRequest";
 import type { AgentStreamParams } from "./Agent";
-import { AgentController, MemoryAgentStore, MemoryLiveRuns } from "./AgentController";
+import {
+  AgentController,
+  defaultAgentStore,
+  MemoryAgentStore,
+  MemoryLiveRuns,
+} from "./AgentController";
 import { StubAgentRun } from "./store/stubAgentRun";
 import type { AgentMessage, AgentStreamEvent, PendingToolCall } from "./types";
 
@@ -99,14 +104,15 @@ describe("AgentController.stream", () => {
     // happens when no threadId arrives.
     run.finish({ messages: [message("u1", "user", "and now this")] });
     await settle();
-    expect(await controller.store.loadThread("anything")).toEqual([]);
+    expect(await controller.store.loadThread("anything")).toBeNull();
   });
 
   test("reads history from the store and appends the run to it when threaded", async () => {
     const run = new StubAgentRun("run_2");
     const { agent, calls } = stubAgent(run);
     const store = new MemoryAgentStore();
-    await store.appendMessages("t1", [message("u0", "user", "earlier")]);
+    const { threadId } = await store.createThread({});
+    await store.appendMessages(threadId, [message("u0", "user", "earlier")]);
 
     class Chat extends AgentController {
       agent = agent;
@@ -115,10 +121,10 @@ describe("AgentController.stream", () => {
     }
 
     const controller = new Chat();
-    await controller.stream(jsonRequest({ threadId: "t1", text: "next" }));
+    await controller.stream(jsonRequest({ threadId, text: "next" }));
 
     expect(calls[0]!.messages.map((m) => m.id)).toEqual(["u0"]);
-    expect(calls[0]!.threadId).toBe("t1");
+    expect(calls[0]!.threadId).toBe(threadId);
     // The client's own `messages` are ignored once a thread owns the history —
     // otherwise a client could rewrite what the server already believes.
     expect(calls[0]!.messages).toHaveLength(1);
@@ -128,7 +134,7 @@ describe("AgentController.stream", () => {
     });
     await settle();
 
-    expect((await store.loadThread("t1")).map((m) => m.id)).toEqual(["u0", "u1", "a1"]);
+    expect((await store.loadThread(threadId))!.map((m) => m.id)).toEqual(["u0", "u1", "a1"]);
   });
 
   /**
@@ -153,7 +159,7 @@ describe("AgentController.stream", () => {
       liveRuns = new MemoryLiveRuns();
     }
 
-    const threadId = `t-${crypto.randomUUID()}`;
+    const { threadId } = await defaultAgentStore.createThread({});
 
     await new Chat().stream(jsonRequest({ threadId, text: "one" }));
     first.finish({ messages: [message("u1", "user", "one")] });
@@ -164,6 +170,80 @@ describe("AgentController.stream", () => {
     await settle();
 
     expect(seen[1]!.messages.map((m) => m.id)).toEqual(["u1"]);
+  });
+
+  test("answers 404 for a thread the store does not have, before anything runs", async () => {
+    const run = new StubAgentRun("run_404");
+    const { agent, calls } = stubAgent(run);
+    let instructed = false;
+
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+      store = new MemoryAgentStore();
+      instructions() {
+        instructed = true;
+      }
+    }
+
+    const controller = new Chat();
+    const response = await controller.stream(jsonRequest({ threadId: "mistyped", text: "hi" }));
+
+    expect(response.status).toBe(404);
+    const body = (await response.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("thread_not_found");
+    // Not an empty conversation: no run was started, no app code ran, and
+    // nothing was registered for a client to attach to.
+    expect(calls).toHaveLength(0);
+    expect(instructed).toBe(false);
+    expect(await controller.liveRuns.find({ threadId: "mistyped" })).toBeNull();
+    run.finish();
+  });
+
+  test("a thread that expired is the same 404, not a fresh conversation under its id", async () => {
+    const run = new StubAgentRun("run_ttl");
+    const { agent, calls } = stubAgent(run);
+    const store = new MemoryAgentStore({ ttlMs: 10 });
+    const { threadId } = await store.createThread({});
+    await store.appendMessages(threadId, [message("u0", "user", "a day ago")]);
+    store.sweep(Date.now() + 90_000);
+
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+      store = store;
+    }
+
+    const response = await new Chat().stream(jsonRequest({ threadId, text: "still there?" }));
+
+    expect(response.status).toBe(404);
+    expect(calls).toHaveLength(0);
+    // The id was not quietly re-minted by the miss.
+    expect(await store.loadThread(threadId)).toBeNull();
+    run.finish();
+  });
+
+  test("a store whose ids are the client's takes a first turn on a new id", async () => {
+    const run = new StubAgentRun("run_own");
+    const { agent, calls } = stubAgent(run);
+    const store = new MemoryAgentStore({ clientOwnedIds: true });
+
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+      store = store;
+    }
+
+    const response = await new Chat().stream(
+      jsonRequest({ threadId: "client-minted", text: "hi" }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(calls[0]!.messages).toEqual([]);
+    run.finish({ messages: [message("u1", "user", "hi"), message("a1", "assistant", "hello")] });
+    await settle();
+
+    expect((await store.loadThread("client-minted"))!.map((m) => m.id)).toEqual(["u1", "a1"]);
   });
 
   test("fires onMessage for user and assistant messages alike", async () => {
@@ -267,7 +347,8 @@ describe("AgentController.stream", () => {
     }
 
     const controller = new Chat();
-    await controller.stream(jsonRequest({ threadId: "t9", text: "hi" }));
+    const { threadId } = await controller.store.createThread({});
+    await controller.stream(jsonRequest({ threadId, text: "hi" }));
     run.finish({
       messages: [message("u1", "user", "hi"), message("a1", "assistant", "hello")],
     });
@@ -276,7 +357,7 @@ describe("AgentController.stream", () => {
     expect(reported).toHaveLength(2);
     // The run still finished and the framework store still has the turn: the
     // app's failure cost the app's row, not the answer.
-    expect((await controller.store.loadThread("t9")).map((m) => m.id)).toEqual(["u1", "a1"]);
+    expect((await controller.store.loadThread(threadId))!.map((m) => m.id)).toEqual(["u1", "a1"]);
   });
 });
 
@@ -287,6 +368,10 @@ describe("AgentController.attach", () => {
     class Chat extends AgentController {
       agent = agent;
       liveRuns = new MemoryLiveRuns();
+      // These tests are about the live-run map and name their threads by hand;
+      // a store whose ids are the client's is the one that takes a hand-picked
+      // id as a conversation rather than a 404.
+      store = new MemoryAgentStore({ clientOwnedIds: true });
     }
     return { run, controller: new Chat() };
   }
@@ -449,6 +534,7 @@ describe("AgentController.attach", () => {
     class Chat extends AgentController {
       agent = agent;
       liveRuns = new MemoryLiveRuns({ maxFrames: 4 });
+      store = new MemoryAgentStore({ clientOwnedIds: true });
     }
     const controller = new Chat();
     await controller.stream(jsonRequest({ threadId: "t1", text: "hi" }));
@@ -489,6 +575,7 @@ describe("AgentController.attach", () => {
     class Chat extends AgentController {
       agent = agent;
       liveRuns = new MemoryLiveRuns({ maxFrames: 4 });
+      store = new MemoryAgentStore({ clientOwnedIds: true });
     }
     const controller = new Chat();
     await controller.stream(jsonRequest({ threadId: "t1", text: "hi" }));
@@ -519,6 +606,7 @@ describe("AgentController.stop", () => {
     class Chat extends AgentController {
       agent = agent;
       liveRuns = new MemoryLiveRuns();
+      store = new MemoryAgentStore({ clientOwnedIds: true });
     }
     const controller = new Chat();
     await controller.stream(jsonRequest({ threadId: "t1", text: "hi" }));
@@ -819,6 +907,7 @@ describe("the request body", () => {
     class Chat extends AgentController {
       agent = agent;
       liveRuns = new MemoryLiveRuns();
+      store = new MemoryAgentStore({ clientOwnedIds: true });
     }
     const controller = new Chat();
     await controller.stream(jsonRequest({ threadId: "t1", text: "hi" }));
