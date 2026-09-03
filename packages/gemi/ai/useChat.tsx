@@ -278,14 +278,26 @@ async function httpError(response: Response): Promise<AgentError> {
   // auth, validation, an unknown agent — and never reaches the stream's own
   // error event, so it has to be translated into the same shape here.
   let message = response.statusText || `Request failed with status ${response.status}`;
+  let code: AgentError["code"] = response.status === 429 ? "rate_limited" : "unknown";
   try {
-    const data = (await response.json()) as { error?: { message?: string }; message?: string };
+    const data = (await response.json()) as {
+      error?: { code?: string; message?: string };
+      message?: string;
+    };
     message = data?.error?.message ?? data?.message ?? message;
+    // The one server code an app has something to do about: the thread it
+    // holds is gone, and the fix is a new one or a stateless send, neither of
+    // which "unknown" would suggest. Other codes stay folded into the status,
+    // because the union names what the client can act on, not what the server
+    // can say.
+    if (data?.error?.code === "thread_not_found") {
+      code = "thread_not_found";
+    }
   } catch {
     // Not JSON. The status line is all there is.
   }
   return {
-    code: response.status === 429 ? "rate_limited" : "unknown",
+    code,
     message,
     retryable: response.status === 429 || response.status >= 500,
   };
