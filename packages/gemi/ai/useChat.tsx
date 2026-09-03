@@ -488,26 +488,27 @@ export function useChat<P extends keyof AgentRoutes>(
 
   /**
    * The server call that ends a run. Shared by `stop()` and by a `send` that
-   * supersedes one, because the failure handling is the point: a stop that did
-   * not land is a run still working through its tool loop and still billing,
-   * behind a transcript that says it was cut.
+   * supersedes one; what each does with a failure is its own, because a stop
+   * that did not land is a run still working through its tool loop and still
+   * billing, behind a transcript that says it was cut — and whose problem that
+   * is depends on who asked.
    */
   const postStop = useCallback(
-    async (body: AgentStopBody) => {
+    async (body: AgentStopBody, report: (error: AgentError) => void) => {
       const { base: url } = requestRef.current;
       try {
         const response = await post(`${url}/stop`, body);
-        if (!response.ok) fail(await httpError(response));
+        if (!response.ok) report(await httpError(response));
       } catch (error) {
         if (isAbort(error)) return;
-        fail({
+        report({
           code: "unknown",
           message: error instanceof Error ? error.message : String(error),
           retryable: true,
         });
       }
     },
-    [fail, post],
+    [post],
   );
 
   const consume = useCallback(
@@ -579,12 +580,22 @@ export function useChat<P extends keyof AgentRoutes>(
         // anyway when the new turn reaches the thread. Not awaited: the server
         // orders the two, and a round trip before every "changed my mind" would
         // be paid for nothing.
-        const { runId } = stateRef.current!;
+        const { runId, threadId } = stateRef.current!;
         const body: AgentStopBody = {
           ...(runId ? { runId } : {}),
           ...(superseded.clientRunId ? { clientRunId: superseded.clientRunId } : {}),
         };
-        if (Object.keys(body).length > 0) void postStop(body);
+        if (Object.keys(body).length > 0) {
+          // A failure here does not go through `fail`. The post is not awaited,
+          // so its answer lands after this send has cleared `error` for the
+          // turn going out, and a 502 from `/stop` would sit on an answer that
+          // is streaming fine — a turn that succeeded, ending `error`. With a
+          // thread the server ends the old run when this turn reaches it, so a
+          // stop that failed changed nothing and there is nothing to say.
+          // Without one this client is the only thing that knows the old run
+          // is still going, so the app is told, and only told.
+          void postStop(body, threadId ? () => {} : (error) => handlers.current.onError?.(error));
+        }
       }
 
       const previous = superseded ? markAborted(stateRef.current!) : stateRef.current!;
@@ -797,8 +808,8 @@ export function useChat<P extends keyof AgentRoutes>(
       ...(threadId ? { threadId } : {}),
       ...(inFlight?.clientRunId ? { clientRunId: inFlight.clientRunId } : {}),
     };
-    await postStop(body);
-  }, [commit, postStop, setPhaseSafe]);
+    await postStop(body, fail);
+  }, [commit, fail, postStop, setPhaseSafe]);
 
   const regenerate = useCallback(async () => {
     const messages = stateRef.current!.messages as AgentMessage[];
