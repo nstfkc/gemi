@@ -974,6 +974,96 @@ describe("lifecycle", () => {
     expect(box.api.status).toBe("idle");
   });
 
+  test("a supersede stop that fails is not the new turn's error", async () => {
+    // The stop is not awaited, so its failure lands after `send` has cleared
+    // `error` for the turn going out. Through `fail` it would sit on an answer
+    // streaming fine, and the turn would end `error` after succeeding. With a
+    // thread the server ends the old run when the new turn reaches it, so the
+    // failed stop changed nothing and nothing is said.
+    const first = controlled();
+    const onError = vi.fn();
+    let turns = 0;
+    fetchMock.mockImplementation(async (url: string, init: RequestInit) => {
+      if (url.endsWith("/stop")) {
+        return new Response(JSON.stringify({ error: { message: "upstream gone" } }), {
+          status: 502,
+        });
+      }
+      if (turns++ === 0) {
+        init?.signal?.addEventListener("abort", () => first.abort());
+        return first.response;
+      }
+      return streamed([
+        { seq: 0, event: { type: "run-start", runId: "run_2", threadId: "th_9" } },
+        { seq: 1, event: { type: "message-start", messageId: "m2", role: "assistant" } },
+        { seq: 2, event: { type: "text-delta", messageId: "m2", delta: "Second." } },
+        { seq: 3, event: { type: "message-end", messageId: "m2", finishReason: "stop" } },
+        { seq: 4, event: { type: "run-end", runId: "run_2", finishReason: "stop" } },
+      ]);
+    });
+    const { box } = mount({ threadId: "th_9", attach: false, onError });
+
+    await act(async () => {
+      void box.api.sendMessage("one");
+    });
+    await act(async () => {
+      first.push(
+        { seq: 0, event: { type: "run-start", runId: "run_0", threadId: "th_9" } },
+        ANSWER[1]!,
+        ANSWER[2]!,
+      );
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await box.api.sendMessage("two");
+    });
+
+    expect(calls().map((c) => c[0])).toEqual(["/api/chat", "/api/chat/stop", "/api/chat"]);
+    expect(box.api.messages[3]!.content).toEqual([{ type: "text", text: "Second." }]);
+    expect(box.api.status).toBe("idle");
+    expect(box.api.error).toBeNull();
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  test("without a thread, a supersede stop that fails is the app's to hear, not the turn's", async () => {
+    // Stateless, so nothing on the server will end the old run for this
+    // client; a stop that did not land is a run still billing, and this is the
+    // only place that knows. The app is told — and the turn that went out,
+    // which succeeded, still says so.
+    const first = controlled();
+    const onError = vi.fn();
+    let turns = 0;
+    fetchMock.mockImplementation(async (url: string, init: RequestInit) => {
+      if (url.endsWith("/stop")) return new Response("", { status: 502 });
+      if (turns++ === 0) {
+        init?.signal?.addEventListener("abort", () => first.abort());
+        return first.response;
+      }
+      return streamed(
+        ANSWER.map((frame, index) =>
+          index === 0 ? { seq: 0, event: { type: "run-start" as const, runId: "run_1" } } : frame,
+        ),
+      );
+    });
+    const { box } = mount({ attach: false, onError });
+
+    await act(async () => {
+      void box.api.sendMessage("one");
+    });
+    await act(async () => {
+      first.push({ seq: 0, event: { type: "run-start", runId: "run_0" } }, ANSWER[1]!, ANSWER[2]!);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await box.api.sendMessage("two");
+    });
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0]![0]).toMatchObject({ retryable: true });
+    expect(box.api.status).toBe("idle");
+    expect(box.api.error).toBeNull();
+  });
+
   test("a run this client neither started nor saw start is left to the server", async () => {
     // Attached mid-run, from a cursor past `run-start`: no `clientRunId`, no
     // `runId`. The only handle is the thread, and a stop by thread that lands

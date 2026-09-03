@@ -570,6 +570,80 @@ describe("one live run per thread", () => {
     ]);
   });
 
+  /**
+   * What the next turn waits for is the transcript in the store, not the app's
+   * hooks on it. Those are the app's own: an `onStreamComplete` that writes to
+   * something slow would be paid by every later turn, and one that never
+   * settles would hold the thread and every turn queued on it, each an open
+   * connection.
+   */
+  test("a hook that never settles does not hold the thread", async () => {
+    const first = new StubAgentRun("run_1");
+    const second = new StubAgentRun("run_2");
+    const { Chat, seen, store } = threaded([first, second]);
+    class Hanging extends Chat {
+      protected onStreamComplete(): Promise<void> {
+        return new Promise(() => {});
+      }
+    }
+    const threadId = `t-${crypto.randomUUID()}`;
+
+    await new Hanging().stream(jsonRequest({ threadId, text: "first" }));
+    const pending = new Hanging().stream(jsonRequest({ threadId, text: "second" }));
+    await settle();
+
+    first.finish({
+      messages: [message("u1", "user", "first"), message("a1", "assistant", "one")],
+    });
+    const response = await pending;
+    expect(response.headers.get("X-Stub-Run")).toBe("run_2");
+    // Started on the stored transcript: the wait was for the append, and only
+    // for the append.
+    expect(seen[1]!.messages.map((m) => m.id)).toEqual(["u1", "a1"]);
+    expect((await store.loadThread(threadId)).map((m) => m.id)).toEqual(["u1", "a1"]);
+    second.finish();
+  });
+
+  /**
+   * Send, send again, then stop. The second turn is waiting behind the first
+   * run's unwind, and until it starts there is no run for `/stop` to find by
+   * `clientRunId`. Falling through to `threadId` found the first run, already
+   * stopping, answered `{ stopped: true }`, and the second turn started anyway
+   * once the first unwound — unwatched, billing, and with no handle left on the
+   * client, which had let go of the request and never saw its `run-start`.
+   */
+  test("a stop that names a turn still waiting its place ends it before it starts", async () => {
+    const runs = [new StubAgentRun("run_1"), new StubAgentRun("run_2")];
+    const { Chat, seen } = threaded(runs);
+    const threadId = `t-${crypto.randomUUID()}`;
+
+    await new Chat().stream(jsonRequest({ threadId, clientRunId: "c1", text: "first" }));
+    const waiting = new Chat().stream(jsonRequest({ threadId, clientRunId: "c2", text: "second" }));
+    await settle();
+    expect(seen).toHaveLength(1);
+
+    // What `useChat.stop()` sends for a turn whose `run-start` never came.
+    expect(await new Chat().stop(jsonRequest({ threadId, clientRunId: "c2" }))).toEqual({
+      stopped: true,
+    });
+
+    runs[0]!.finish({
+      messages: [message("u1", "user", "first"), message("a1", "assistant", "one")],
+    });
+    const response = await waiting;
+    expect(response.status).toBe(409);
+    expect(((await response.json()) as any).error.code).toBe("stopped");
+    // The model was never asked, and nothing was registered for `/stop` to
+    // have missed.
+    expect(seen).toHaveLength(1);
+
+    // And the thread is free: the next turn starts as usual.
+    await new Chat().stream(jsonRequest({ threadId, clientRunId: "c3", text: "third" }));
+    expect(seen).toHaveLength(2);
+    expect(seen[1]!.messages.map((m) => m.id)).toEqual(["u1", "a1"]);
+    runs[1]!.finish();
+  });
+
   test("a finished run still within its ttl holds nothing up", async () => {
     const first = new StubAgentRun("run_1");
     const second = new StubAgentRun("run_2");
