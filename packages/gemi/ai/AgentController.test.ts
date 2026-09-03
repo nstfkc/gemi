@@ -1,13 +1,17 @@
+process.env.SECRET ??= "agent-controller-test-secret";
+
 import { describe, expect, test } from "vitest";
 
 import { HttpRequest } from "../http/HttpRequest";
-import type { AgentStreamParams } from "./Agent";
+import { Agent, AgentTool, type AgentStreamParams } from "./Agent";
 import {
   AgentController,
   defaultAgentStore,
   MemoryAgentStore,
   MemoryLiveRuns,
 } from "./AgentController";
+import type { AgentProvider, ProviderEvent, ProviderStreamParams } from "./AgentProvider";
+import { s } from "./Schema";
 import { StubAgentRun } from "./store/stubAgentRun";
 import type { AgentMessage, AgentStreamEvent, PendingToolCall } from "./types";
 
@@ -77,6 +81,52 @@ async function readSse(response: Response): Promise<string> {
   return await response.text();
 }
 
+/** The events in an SSE body, in order. */
+async function eventsOf(response: Response): Promise<AgentStreamEvent[]> {
+  return (await readSse(response))
+    .split("\n")
+    .filter((line) => line.startsWith("data: "))
+    .map((line) => JSON.parse(line.slice("data: ".length)));
+}
+
+/**
+ * A provider that plays one script per model call, for the tests that need a
+ * real `Agent` behind the controller rather than a stub run: what the store
+ * ends up holding depends on what the agent reports, and a stub run reports
+ * whatever the test hands it.
+ */
+function scriptedProvider(...scripts: ProviderEvent[][]) {
+  let call = 0;
+  return {
+    model: "fake",
+    capabilities: {
+      reasoning: true,
+      structuredOutput: true,
+      fileInput: true,
+      parallelToolCalls: true,
+      toolSearch: true,
+    },
+    stream(_params: ProviderStreamParams) {
+      const script = scripts[call++] ?? [];
+      return (async function* () {
+        for (const event of script) yield event;
+      })();
+    },
+    upload: async () => "file_1",
+    normalizeError: (error: unknown) => ({
+      code: "provider_error" as const,
+      message: error instanceof Error ? error.message : String(error),
+      retryable: false,
+    }),
+  } as unknown as AgentProvider;
+}
+
+const finish = (): ProviderEvent => ({
+  type: "finish",
+  reason: "stop",
+  usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+});
+
 describe("AgentController.stream", () => {
   test("runs stateless on the history the client sent", async () => {
     const run = new StubAgentRun("run_1");
@@ -135,6 +185,73 @@ describe("AgentController.stream", () => {
     await settle();
 
     expect((await store.loadThread(threadId))!.map((m) => m.id)).toEqual(["u0", "u1", "a1"]);
+  });
+
+  /**
+   * The message that made the call comes back from the second run under the
+   * id it already had, with the result attached. Persisting that turn must
+   * replace the earlier copy, not sit next to it — otherwise every later turn
+   * sends the model the same call twice.
+   */
+  test("a threaded approval leaves one message per id in the store", async () => {
+    const refunded: string[] = [];
+    const refundOrder = AgentTool.create({
+      name: "refundOrder",
+      description: "Refund an order",
+      inputSchema: s.object({ orderId: s.string() }),
+      outputSchema: s.object({ refundId: s.string() }),
+      requiresApproval: true,
+      execute: async ({ orderId }) => {
+        refunded.push(orderId);
+        return { refundId: `rf_${orderId}` };
+      },
+    });
+    const provider = scriptedProvider(
+      [
+        { type: "tool-call", toolCallId: "c1", name: "refundOrder", args: '{"orderId":"ord_1"}' },
+        finish(),
+      ],
+      [{ type: "text-delta", delta: "refunded" }, finish()],
+    );
+    const agent = Agent.create({ name: "support", provider, tools: [refundOrder] });
+    const store = new MemoryAgentStore();
+
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+      store = store;
+    }
+
+    const first = await eventsOf(
+      await new Chat().stream(jsonRequest({ threadId: "t1", text: "refund it" })),
+    );
+    await settle();
+    const awaiting = first.find((event) => event.type === "awaiting-input") as any;
+    expect(awaiting?.pending).toHaveLength(1);
+    expect(refunded).toEqual([]);
+
+    await eventsOf(
+      await new Chat().stream(
+        jsonRequest({
+          threadId: "t1",
+          toolResults: [
+            { toolCallId: "c1", signature: awaiting.pending[0].signature, approve: true },
+          ],
+        }),
+      ),
+    );
+    await settle();
+
+    expect(refunded).toEqual(["ord_1"]);
+    const held = await store.loadThread("t1");
+    const ids = held.map((m) => m.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    // The copy that survived is the amended one, in the place the original had.
+    const amended = held.find((m) => m.content.some((part) => part.type === "tool-call"))!;
+    expect(held.indexOf(amended)).toBe(1);
+    expect(amended.content.map((part) => part.type)).toEqual(["tool-call", "tool-result"]);
+    const calls = held.flatMap((m) => m.content).filter((part) => part.type === "tool-call");
+    expect(calls).toHaveLength(1);
   });
 
   /**
