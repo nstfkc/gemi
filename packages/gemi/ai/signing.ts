@@ -195,8 +195,23 @@ export function signPendingCall(claims: PendingCallClaims, options: SignOptions 
 export function readSignature(
   signature: string,
 ): { runId: string; nonce: string; expiresAt: number } | null {
+  return readToken(signature, VERSION);
+}
+
+/**
+ * The version tag is checked here and nowhere else, which is what keeps the
+ * two token kinds apart: a parked-run record presented where a pending call's
+ * signature is expected fails as malformed before its MAC is even looked at,
+ * and the other way round. Their claim sets are different lengths and would
+ * not collide anyway, but a tag makes that a rule rather than an accident of
+ * the field count.
+ */
+function readToken(
+  signature: string,
+  version: string,
+): { runId: string; nonce: string; expiresAt: number } | null {
   const parts = signature.split(".");
-  if (parts.length !== 5 || parts[0] !== VERSION) {
+  if (parts.length !== 5 || parts[0] !== version) {
     return null;
   }
   const expiresAt = Number.parseInt(parts[3], 36);
@@ -233,6 +248,113 @@ export function verifyPendingCall(
   // Expiry is checked *after* the MAC on purpose: only a genuine token can be
   // "expired". Reporting a forgery as expired would tell the UI to say "your
   // approval timed out" to someone who was tampering.
+  if ((options.now ?? Date.now()) > parsed.expiresAt) {
+    return { ok: false, reason: "expired" };
+  }
+
+  return { ok: true, runId: parsed.runId, nonce: parsed.nonce, expiresAt: parsed.expiresAt };
+}
+
+// --- parked sub-runs -----------------------------------------------------
+
+/**
+ * What a parked sub-run's record is signed over.
+ *
+ * `ToolCallPart.nested` is the parent's own record of where a sub-run stopped,
+ * and in stateless mode it makes the same trip through the browser a pending
+ * call does. The next turn *runs a tool* on the strength of that record — the
+ * tool is re-entered because the record says a sub-run under it is waiting on
+ * the question being answered — so an unsigned record lets the client choose
+ * which tools run, with what input, before any answer is verified. A MAC over
+ * what the server actually recorded is what makes the record safe to carry.
+ *
+ * Only a parked record is signed, because only a parked record executes
+ * anything: a finished sub-run is replayed out of its transcript and spends
+ * nothing, and a client that forges one has fed its own tool a made-up answer,
+ * which a client-carried history already allows everywhere.
+ *
+ * Deliberately not signed: the transcript. The sub-run resumes from messages
+ * the client carried, exactly as the parent does in stateless mode, and the
+ * same argument applies — what the signature pins is that the server parked
+ * *here*, on *these* calls, and not what was said on the way.
+ */
+export type NestedRunClaims = {
+  /** The root run's id, the one every pending call of the tree is minted under. */
+  runId: string;
+  /**
+   * Tool-call ids from the root down to and including the call the record
+   * hangs off. A sub-run's id is not an address on its own for the same reason
+   * a nested call's is not: two sub-runs under two different tools can carry
+   * the same one.
+   */
+  path: string[];
+  /** The sub-run's own id, so a record cannot be moved between sub-runs. */
+  nestedRunId: string;
+  /** The tool calls the sub-run is waiting on: every call left open in its transcript. */
+  open: string[];
+};
+
+const NESTED_VERSION = "agn1";
+
+function nestedFields(claims: NestedRunClaims, nonce: string, expiresAt: number): string[] {
+  return [
+    NESTED_VERSION,
+    claims.runId,
+    canonicalize(claims.path),
+    claims.nestedRunId,
+    nonce,
+    String(expiresAt),
+    // A set, so it is sorted: the ids are read back out of a transcript the
+    // client re-serialized, and message order is not part of the claim.
+    canonicalize([...claims.open].sort()),
+  ];
+}
+
+/**
+ * Same shape as a pending call's token, so the same reader serves both. The
+ * nonce is entropy and nothing more: a record is a fact about the transcript,
+ * not a permission that is used up, and a second re-entry on the same record
+ * is stopped by the nonce on the *answer* it is delivering.
+ */
+export function signNestedRun(claims: NestedRunClaims, options: SignOptions = {}): string {
+  const secret = secretKey(options.secret);
+  const now = options.now ?? Date.now();
+  const expiresAt = now + (options.ttlMs ?? DEFAULT_TTL_MS);
+  const nonce = randomBytes(12).toString("base64url");
+  const signature = mac(secret, nestedFields(claims, nonce, expiresAt)).toString("base64url");
+  return [NESTED_VERSION, encode(claims.runId), nonce, expiresAt.toString(36), signature].join(".");
+}
+
+/**
+ * The run that verifies a record is never the run that minted it — the turn
+ * answering a question is a new run with a new id — so the minting run's id is
+ * read out of the token rather than asked of the caller, which has no other
+ * source for it. The MAC covers it, so a client that edits the id in the clear
+ * fails here rather than being believed.
+ */
+export function verifyNestedRun(
+  signature: string,
+  claims: Omit<NestedRunClaims, "runId">,
+  options: VerifyOptions = {},
+): VerifyResult {
+  const secret = secretKey(options.secret);
+  const parsed = readToken(signature, NESTED_VERSION);
+  if (!parsed) {
+    return { ok: false, reason: "malformed" };
+  }
+
+  const presented = Buffer.from(signature.split(".")[4], "base64url");
+  const expected = mac(
+    secret,
+    nestedFields({ ...claims, runId: parsed.runId }, parsed.nonce, parsed.expiresAt),
+  );
+  if (presented.length !== expected.length || !timingSafeEqual(presented, expected)) {
+    return { ok: false, reason: "forged" };
+  }
+
+  // A parked record outlives its usefulness with the answers it exists to
+  // deliver: those expire on the pending call's TTL, and a record older than
+  // that can route nothing that would still verify.
   if ((options.now ?? Date.now()) > parsed.expiresAt) {
     return { ok: false, reason: "expired" };
   }
