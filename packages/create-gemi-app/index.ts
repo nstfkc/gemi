@@ -40,12 +40,17 @@ async function downloadTar(root: string, template = "default") {
   });
 }
 
+const TEMPLATES = [
+  { title: "SaaS Starter", value: "saas-starter" },
+  { title: "Agentic SaaS (agent API example)", value: "agentic-saas" },
+] as const;
+
 program.option("-p, --project-name <projectName>", "Project name");
-// program.option("-t, --template <template>", "Template", "blank");
+program.option("-t, --template <template>", "Template");
 
 program.action(async (options) => {
   let projectName = options.projectName;
-  let template = "saas-starter";
+  let template = options.template;
 
   if (!projectName) {
     const response = await prompts({
@@ -61,17 +66,33 @@ program.action(async (options) => {
     process.exit(1);
   }
 
-  // const { value: _template } = await prompts({
-  //   type: "select",
-  //   name: "value",
-  //   message: "Select a template",
-  //   choices: [
-  //     { title: "Blank", value: "blank" },
-  //     { title: "SaaS Starter", value: "saas-starter" },
-  //   ],
-  // });
+  // `-t` skips the prompt, so CI and the docs can name a template directly. An
+  // unknown one is rejected here rather than at the download: the tar filter
+  // silently matches nothing for a path that does not exist, and the failure
+  // would otherwise surface as an empty project directory.
+  if (template && !TEMPLATES.some((t) => t.value === template)) {
+    console.error(
+      `Unknown template "${template}". Available: ${TEMPLATES.map((t) => t.value).join(", ")}`,
+    );
+    process.exit(1);
+  }
 
-  // template = _template;
+  if (!template) {
+    const { value: _template } = await prompts({
+      type: "select",
+      name: "value",
+      message: "Select a template",
+      choices: TEMPLATES.map((t) => ({ title: t.title, value: t.value })),
+    });
+
+    // Ctrl-C at the select leaves this undefined, and an undefined template
+    // downloads nothing at all.
+    if (!_template) {
+      process.exit(1);
+    }
+
+    template = _template;
+  }
 
   console.log(`Extracting to ${process.cwd()}/${projectName}`);
   console.log("Downloading template...");
