@@ -20,9 +20,13 @@ generator gemi {
   output   = "../app/models/generated"
 }
 
+// `PRISMA_DATABASE_URL`, not `DATABASE_URL`, and the two are the same file
+// written from different directories: Prisma resolves a relative SQLite path
+// from this schema's directory, the app resolves one from the project root. See
+// `.env.example`.
 datasource db {
   provider = "sqlite"
-  url      = env("DATABASE_URL")
+  url      = env("PRISMA_DATABASE_URL")
 }
 
 model Organization {

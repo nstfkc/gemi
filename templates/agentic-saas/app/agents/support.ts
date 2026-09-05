@@ -1,4 +1,4 @@
-import { Agent, AgentController, MemoryAgentStore, OpenAIProvider } from "gemi/ai";
+import { Agent, AgentController, AzureOpenAIProvider, MemoryAgentStore } from "gemi/ai";
 import type { AgentHookContext, AgentMessage, PendingToolCall } from "gemi/ai";
 import type { HttpRequest } from "gemi/http";
 import { billingNamespace } from "@/app/agents/billing";
@@ -27,7 +27,7 @@ export const supportAgent = Agent.create({
   name: "support",
   instructions:
     "You are a support agent for an invoicing product. Look up the facts before you answer, load the refund policy before you promise a refund, and ask the customer rather than guessing at an order number.",
-  provider: OpenAIProvider.model("gpt-5.4"),
+  provider: AzureOpenAIProvider.model("gpt-5.4"),
   tools: [
     lookupOrdersTool,
     orderDetailTool,
