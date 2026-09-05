@@ -51,6 +51,13 @@ bun dev
 The database is SQLite at `prisma/dev.db` and holds nothing but the auth tables.
 Conversations live in a `MemoryAgentStore` — see below.
 
+`.env` names that one file twice, as `DATABASE_URL` and `PRISMA_DATABASE_URL`,
+and the two values differ. That is not a mistake: Prisma resolves a relative
+SQLite path from its schema's directory and the app resolves one from the
+project root, so a single `file:./dev.db` migrates one file and queries another
+— the second empty, and `no such table: User` the first time you sign up. Point
+both somewhere else and keep them pointed at the same file.
+
 ## A tour of `app/agents/`
 
 Read these in this order. Each file is there to show one thing.
