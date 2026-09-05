@@ -204,7 +204,7 @@ function SupportThread({ thread, onRestart }: { thread: StoredThread; onRestart:
 
   return (
     <>
-      <header className="flex items-center gap-3 border-b px-4 py-3">
+      <header className="flex shrink-0 items-center gap-3 border-b px-4 py-3">
         <div className="min-w-0">
           <h1 className="text-sm font-semibold">Support desk</h1>
           <p className="truncate text-xs text-muted-foreground">thread {thread.threadId}</p>
@@ -216,7 +216,13 @@ function SupportThread({ thread, onRestart }: { thread: StoredThread; onRestart:
         </Button>
       </header>
 
-      <ScrollArea className="flex-1">
+      {/* `min-h-0` is load-bearing, not tidiness. A flex item's default
+          `min-height: auto` refuses to shrink below its content, so `flex-1`
+          alone lets this grow to the full height of the transcript instead of
+          taking the leftover space: the composer is pushed below the fold and
+          the overflow is clipped by `AppLayout`'s `overflow-hidden` with no
+          scrollbar anywhere, which reads as a chat you cannot scroll. */}
+      <ScrollArea className="min-h-0 flex-1">
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 p-4">
           {messages.length === 0 ? (
             <EmptyState onPick={(text) => void sendMessage(text)} />
