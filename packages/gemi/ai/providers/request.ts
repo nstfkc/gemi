@@ -254,8 +254,8 @@ function textContent(role: AgentMessage["role"], text: string): Record<string, u
  * they are not interchangeable in either direction — the API refuses the wrong
  * pairing with a 400 rather than degrading. So this branch is not a nicety
  * about how well an image is read; it decides whether the turn happens at all.
- * The API's own words for what each block takes are quoted above
- * `IMAGE_EXTENSIONS`.
+ * What was measured, on which models, with the verbatim rejections, is recorded
+ * above `IMAGE_EXTENSIONS`.
  *
  * `file_id` is the same field on both blocks, so nothing about the upload
  * changes: `uploadFile` posts once with `purpose: "user_data"` and the id it
@@ -302,9 +302,48 @@ function hasImageExtension(name: string | undefined): boolean {
 }
 
 /**
- * The extensions the API itself calls images, transcribed from its 400:
- * `Invalid input: Expected image type to be a supported format: .jpeg, .jpg,
- * .png, .gif, .webp but got .pdf.`
+ * Which block takes what, and whether the wrong one merely reads badly.
+ *
+ * MEASURED, not read off the API reference. Three attachments were uploaded to
+ * `https://api.openai.com/v1/files` with `purpose: "user_data"` — a 64x64 PNG
+ * of four solid quadrants (red, green, blue, yellow), a one-page PDF whose only
+ * word is BANANA, and a 64x64 SVG — and each was then sent to
+ * `https://api.openai.com/v1/responses` in both content blocks:
+ *
+ *   PNG as `{type:"input_image", file_id}`  — 200. Asked which quadrant was
+ *     red, gpt-5.4 answered `"top-left"` and gpt-4o `"The red quadrant is the
+ *     top-left."` Both correct. SO AN UPLOADED IMAGE IS REAL VISION INPUT, and
+ *     `file_id` is all `input_image` needs; sending `detail:"auto"` alongside
+ *     it changed nothing, so it is left off.
+ *   PNG as `{type:"input_file", file_id}`   — 400, verbatim: `Invalid input:
+ *     Expected context stuffing file type to be a supported format: .art, .bat,
+ *     … .pdf, … .svg, … .yml but got .png.` (~90 extensions, elided.) This is
+ *     the finding that mattered: what gemi shipped was not "an image the model
+ *     reads poorly", it was a request that never ran.
+ *   PDF as `{type:"input_file", file_id}`   — 200, `"BANANA"` on gpt-5.4 and
+ *     gpt-4o both.
+ *   PDF as `{type:"input_image", file_id}`  — 400, verbatim: `Invalid input:
+ *     Expected image type to be a supported format: .jpeg, .jpg, .png, .gif,
+ *     .webp but got .pdf.` So the refusal is symmetric: neither block tolerates
+ *     the other's content.
+ *   SVG as `{type:"input_image", file_id}`  — 400, `… but got .svg.`
+ *   SVG as `{type:"input_file", file_id}`   — 400, but a different one:
+ *     `You uploaded an invalid file. Please try again with a different file`,
+ *     with no format list. .svg is on the document list and off the image one,
+ *     so routing accepted it and the pipeline behind it did not. An SVG fails
+ *     both ways today; it is sent as `input_file` because that is where the API
+ *     says it belongs, which is the only branch that can start working without
+ *     another change here.
+ *
+ * AND THE DISCRIMINATOR IS THE FILE NAME, NOT THE BYTES AND NOT THE UPLOAD'S
+ * `Content-Type`. The same PNG bytes uploaded under the name `quadrants.txt`
+ * with `type: "text/plain"` were refused as `input_image` with `… but got
+ * .txt.`, and as `input_file` with `The file you uploaded is badly formatted or
+ * corrupted. Please fix the file and try again.` (code `invalid_file`) — routed
+ * by the extension, then failed on the bytes. That is why the name is what a
+ * part with no `mimeType` falls back to: it is what the server will judge by.
+ *
+ * The extensions below are transcribed from the image rejection above.
  *
  * A closed list is right *here* and wrong one line up. This set is only
  * consulted when there is no MIME type to read, which is a guess either way, so
