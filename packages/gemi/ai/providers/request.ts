@@ -4,7 +4,7 @@ import type {
   ProviderToolNamespace,
   ProviderToolSpec,
 } from "../AgentProvider";
-import type { AgentMessage, ToolResultPart } from "../types";
+import type { AgentMessage, FilePart, ToolResultPart } from "../types";
 
 /**
  * Building the request body is a pure function, on purpose.
@@ -132,11 +132,11 @@ export function toResponsesInput(
           break;
         }
         case "file": {
-          // `input_file` is only legal on an input role. An assistant message
-          // holding a file is a bug upstream, and sending it anyway turns that
-          // bug into a 400 halfway through a conversation.
+          // Neither `input_file` nor `input_image` is legal on an output role.
+          // An assistant message holding a file is a bug upstream, and sending
+          // it anyway turns that bug into a 400 halfway through a conversation.
           if (!capabilities.fileInput || role === "assistant") break;
-          buffer.push({ type: "input_file", file_id: part.fileId });
+          buffer.push(fileContent(part));
           break;
         }
         case "reasoning": {
@@ -246,6 +246,75 @@ function reconcileToolPairs(items: ResponsesInputItem[]): ResponsesInputItem[] {
 function textContent(role: AgentMessage["role"], text: string): Record<string, unknown> {
   return { type: role === "assistant" ? "output_text" : "input_text", text };
 }
+
+/**
+ * An attachment onto the content block that can carry it.
+ *
+ * `input_file` is the document path and `input_image` is the vision one, and
+ * they are not interchangeable in either direction — the API refuses the wrong
+ * pairing with a 400 rather than degrading. So this branch is not a nicety
+ * about how well an image is read; it decides whether the turn happens at all.
+ * The API's own words for what each block takes are quoted above
+ * `IMAGE_EXTENSIONS`.
+ *
+ * `file_id` is the same field on both blocks, so nothing about the upload
+ * changes: `uploadFile` posts once with `purpose: "user_data"` and the id it
+ * returns is legal in either. `detail` is deliberately not sent on the image
+ * block — it is optional, the API defaults it, and a `FilePart` carries no
+ * signal that would justify choosing anything but that default.
+ *
+ * SVG is the case the `image/` prefix gets wrong. `image/svg+xml` is an image
+ * MIME type, and .svg is on the API's *document* list and off its image list —
+ * so a prefix test alone sends it to the one block that is guaranteed to refuse
+ * it. It is routed by what the API calls it, not by what the MIME type calls
+ * it.
+ *
+ * WHEN `mimeType` IS ABSENT the file name decides, and if that settles nothing
+ * the part is sent as `input_file`. Both halves matter. History persisted
+ * before this branch existed has file parts with no `mimeType` (the field is
+ * optional and has never been backfilled), and an `input_file` fallback for
+ * those is not "keeping today's behaviour" in the harmless sense — today's
+ * behaviour for an image is a 400 on every turn for the rest of the thread,
+ * because the offending part is in the stored history and goes back up on each
+ * request. The name is what rescues those threads: `useChat.uploadFile` fills
+ * `name` from the local `File` and the file is uploaded under that same name,
+ * so a stored image part almost always still says `.png`. Falling back to
+ * `input_file` past that is the conservative half — a part with neither a MIME
+ * type nor a usable name is much more likely to be the document it has always
+ * been sent as than an image, and this way a nameless document keeps working
+ * instead of being newly broken to rescue a nameless image.
+ */
+function fileContent(part: FilePart): Record<string, unknown> {
+  const mimeType = part.mimeType?.trim().toLowerCase() ?? "";
+  // `""` rather than `undefined` is the shape to expect from a browser that
+  // could not type the file: `useChat.uploadFile` writes `data.mimeType ??
+  // file.type`, and `File.type` is the empty string, not absent. Both land on
+  // the name.
+  const isImage = mimeType
+    ? mimeType.startsWith("image/") && mimeType !== "image/svg+xml"
+    : hasImageExtension(part.name);
+  return { type: isImage ? "input_image" : "input_file", file_id: part.fileId };
+}
+
+function hasImageExtension(name: string | undefined): boolean {
+  const match = /\.([a-z0-9]+)$/.exec(name?.trim().toLowerCase() ?? "");
+  return match?.[1] !== undefined && IMAGE_EXTENSIONS.has(match[1]);
+}
+
+/**
+ * The extensions the API itself calls images, transcribed from its 400:
+ * `Invalid input: Expected image type to be a supported format: .jpeg, .jpg,
+ * .png, .gif, .webp but got .pdf.`
+ *
+ * A closed list is right *here* and wrong one line up. This set is only
+ * consulted when there is no MIME type to read, which is a guess either way, so
+ * it guesses the conservative direction: a format the API adds later goes on
+ * being sent as `input_file`, exactly as it is today. The MIME branch stays
+ * open (`image/` prefix) for the opposite reason — a declared `image/avif`
+ * belongs in the image block the moment the API takes one, and being wrong
+ * there is a 400 that names the format, which is loud and fixes itself.
+ */
+const IMAGE_EXTENSIONS = new Set(["jpeg", "jpg", "png", "gif", "webp"]);
 
 /**
  * Reasoning goes back exactly as it came.
