@@ -355,6 +355,14 @@ export class ApiRouter {
    * router to have got it right. The four names exist so each route can *also*
    * be guarded on its own — `upload` and `stream` are not equally cheap, and
    * `attach` is a read.
+   *
+   * ONE CAVEAT ON GUARDING THEM DIFFERENTLY, since the example above does
+   * exactly that: an agent's attachment scope is derived per route from the
+   * request, and by default from `ctx.user`. Guarding `stream` and leaving
+   * `upload` open means the two routes compute different scopes for the same
+   * user, and every attachment id minted by an upload is then unresolvable in
+   * the run that follows — as a not-found, indistinguishable from an id the
+   * model made up. See `AgentController.attachmentScope`.
    */
   public agent<T extends new () => AgentController<any>>(Controller: T): AgentRoute<T> {
     return createAgentRouteHandlers(Controller, this) as unknown as AgentRoute<T>;
