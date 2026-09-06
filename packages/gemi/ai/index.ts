@@ -132,6 +132,7 @@ export type {
   AttachmentStore,
   LiveRuns,
   PutAttachmentParams,
+  ToolAttachmentPut,
   ToolAttachmentRecord,
   ToolAttachments,
   UploadResult,
