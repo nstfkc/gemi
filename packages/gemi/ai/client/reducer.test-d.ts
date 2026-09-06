@@ -12,6 +12,7 @@
  */
 import { describe, expectTypeOf, test } from "vitest";
 import type { AgentMessage, NestedRun } from "../types";
+import type { UseChatResult } from "../useChat";
 import type { ChatState } from "./reducer";
 
 type Shapes = {
@@ -62,5 +63,34 @@ describe("what a component gets out of the reducer's state", () => {
     // compile and would name every sub-agent's tools after the parent's.
     expectTypeOf<NestedRun["messages"]>().toEqualTypeOf<AgentMessage[]>();
     expectTypeOf<NestedRun["messages"]>().not.toEqualTypeOf<AgentMessage<Shapes>[]>();
+  });
+});
+
+/**
+ * The upload half of the hook's surface, which only a type test can hold.
+ *
+ * `attach` is a declaration over a `fetch` — the runtime already returns
+ * whatever the route sent, so a runtime test cannot tell whether the declared
+ * type still matches it. It drifted once already: the route grew `attachmentId`
+ * and started answering without a `fileId`, and this member still said
+ * `Promise<{ fileId: string; ... }>`. In-repo `tsc` cannot catch that either,
+ * because `packages/typescript-config/base.json` sets `strict: false`, so the
+ * implementation's `string | undefined` is assignable to the declared `string`
+ * at the `attach: uploadFile` assignment. What the lie costs is paid in an app:
+ * `const { fileId } = await attach(f)` typechecks, `fileId` is `undefined` for a
+ * storage-only upload, and `file_id: undefined` goes to the vendor. So the
+ * shape is asserted here, where equality is exact and optionality is part of it.
+ */
+describe("what `attach` promises the caller", () => {
+  test("both ids are optional, because either can be genuinely absent", () => {
+    type Attached = Awaited<ReturnType<UseChatResult<never>["attach"]>>;
+
+    expectTypeOf<Attached>().toEqualTypeOf<{
+      fileId?: string;
+      attachmentId?: string;
+      name: string;
+      mimeType: string;
+      downgraded?: "no_scope";
+    }>();
   });
 });
