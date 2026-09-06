@@ -968,7 +968,12 @@ const QUADRANTS_PNG_BASE64 =
   test(
     "an uploaded image is vision input, not an unreadable document",
     async () => {
-      const provider = TARGETS[0]!.provider();
+      // By label, not by position. The suite name says openai and the gate
+      // reads `openaiConfigured`, so the provider has to be pinned to the same
+      // word: `TARGETS[0]` would follow a reorder in `harness.ts` and quietly
+      // start uploading to Azure under a name that says otherwise, on a machine
+      // where nobody meant to make an Azure call.
+      const provider = TARGETS.find((target) => target.label === "openai")!.provider();
       const bytes = Uint8Array.from(atob(QUADRANTS_PNG_BASE64), (c) => c.charCodeAt(0));
       const file = new File([bytes], "quadrants.png", { type: "image/png" });
       const fileId = await provider.upload(file);
