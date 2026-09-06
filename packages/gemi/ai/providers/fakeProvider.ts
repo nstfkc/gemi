@@ -39,8 +39,19 @@ export class FakeProvider {
     })();
   }
 
-  async upload() {
-    return "file_1";
+  /**
+   * Every upload, and a distinct id for each.
+   *
+   * Recorded rather than counted because the interesting assertion is a
+   * negative one: a tool that escalates is re-entered from the top, and the
+   * test that matters says the second entry uploaded NOTHING. A constant id
+   * would have made that test pass whether the memo worked or not.
+   */
+  readonly uploads: File[] = [];
+
+  async upload(file: File) {
+    this.uploads.push(file);
+    return `file_${this.uploads.length}`;
   }
 
   normalizeError(error: unknown) {
