@@ -269,20 +269,42 @@ function textContent(role: AgentMessage["role"], text: string): Record<string, u
  * it. It is routed by what the API calls it, not by what the MIME type calls
  * it.
  *
- * WHEN `mimeType` IS ABSENT the file name decides, and if that settles nothing
- * the part is sent as `input_file`. Both halves matter. History persisted
- * before this branch existed has file parts with no `mimeType` (the field is
- * optional and has never been backfilled), and an `input_file` fallback for
- * those is not "keeping today's behaviour" in the harmless sense — today's
- * behaviour for an image is a 400 on every turn for the rest of the thread,
- * because the offending part is in the stored history and goes back up on each
- * request. The name is what rescues those threads: `useChat.uploadFile` fills
- * `name` from the local `File` and the file is uploaded under that same name,
- * so a stored image part almost always still says `.png`. Falling back to
- * `input_file` past that is the conservative half — a part with neither a MIME
- * type nor a usable name is much more likely to be the document it has always
- * been sent as than an image, and this way a nameless document keeps working
- * instead of being newly broken to rescue a nameless image.
+ * WHEN `mimeType` IS ABSENT OR EMPTY the file name decides, and if that settles
+ * nothing the part is sent as `input_file`. Both halves matter.
+ *
+ * The name branch is NOT a rescue for un-typed legacy rows, and deleting it as
+ * one would break a live upload. The browser path has always written the field:
+ * `useChat.uploadFile` has stored `data.mimeType ?? file.type` since the module
+ * landed (`git log -S mimeType -- ai/useChat.tsx` bottoms out at d940676e), so
+ * there is no history of `undefined` MIME types to point at, and a backfill
+ * would not make this branch dead. What it is actually for is the two cases
+ * that still leave nothing to read. `File.type` is the EMPTY STRING, not
+ * absent, for a file the browser cannot type — so `?? file.type` stores `""`
+ * and this branch fires on a perfectly current upload — and a `FilePart`
+ * assembled by a server-side caller may set neither field, because the type
+ * marks both optional.
+ *
+ * The name is also the right thing to fall back to rather than merely the last
+ * thing left: the server classifies by the STORED FILE NAME'S EXTENSION, not by
+ * the bytes and not by the upload's `Content-Type` (measured; the transcript is
+ * below). And what it rescues is not a cosmetic degradation — an image part
+ * that lands on `input_file` 400s, and because that part lives in stored
+ * history and goes back up on every request, it 400s every remaining turn of
+ * the thread. `useChat.uploadFile` fills `name` from the local `File` and the
+ * file is uploaded under that same name, so such a part almost always still
+ * says `.png`.
+ *
+ * Falling back to `input_file` past that is the conservative half — a part with
+ * neither a MIME type nor a usable name is much more likely to be the document
+ * it has always been sent as than an image, and this way a nameless document
+ * keeps working instead of being newly broken to rescue a nameless image.
+ *
+ * PRECEDENCE, since two orderings are otherwise indistinguishable: the MIME
+ * type classifies and the name is consulted only when there is none. A stated
+ * type is a stated fact and a name is a convention, so a `.pdf` named
+ * `image/png` goes to the image block. `request.test.ts` pins this with a case
+ * where the two disagree, because a name-first `fileContent` passes every case
+ * where they agree.
  */
 function fileContent(part: FilePart): Record<string, unknown> {
   const mimeType = part.mimeType?.trim().toLowerCase() ?? "";
