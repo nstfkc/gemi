@@ -4,6 +4,7 @@ import type {
   ProviderToolNamespace,
   ProviderToolSpec,
 } from "../AgentProvider";
+import { ATTACHMENT_ID_PREFIX } from "../store/Attachments";
 import type { AgentMessage, FilePart, ToolResultPart } from "../types";
 
 /**
@@ -136,6 +137,21 @@ export function toResponsesInput(
           // An assistant message holding a file is a bug upstream, and sending
           // it anyway turns that bug into a 400 halfway through a conversation.
           if (!capabilities.fileInput || role === "assistant") break;
+          // A gemi attachment id in the provider's field. There are two ids now
+          // — `POST /chat/files` answers `fileId` (the provider's) and
+          // `attachmentId` (ours) — and putting the wrong one here is the
+          // mistake the shapes invite. Left alone it is a 400 from the vendor
+          // about a file it has never heard of, arriving mid-conversation and
+          // naming nothing a reader can act on; caught here it is a sentence
+          // that says which field and which id. It is also what a
+          // storage-destination upload looks like when a `FilePart` is built for
+          // it anyway: that upload has no provider id at all, so whatever ended
+          // up in this field is not one.
+          if (part.fileId?.startsWith(ATTACHMENT_ID_PREFIX)) {
+            throw new Error(
+              `FilePart.fileId holds a gemi attachment id (${part.fileId}). That field is the *provider's* file id, from \`fileId\` on the upload response; the \`attachmentId\` is for tools and is resolved through \`ctx.attachments\`. A file routed to storage only has no provider id and cannot be shown to the model.`,
+            );
+          }
           buffer.push(fileContent(part));
           break;
         }

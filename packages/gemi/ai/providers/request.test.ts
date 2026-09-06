@@ -73,6 +73,22 @@ describe("toResponsesInput()", () => {
     ]);
   });
 
+  /**
+   * There are two ids now — the provider's `fileId` and gemi's `attachmentId` —
+   * and this is the field that only ever takes the first. Left alone, the wrong
+   * one is a 400 from the vendor mid-conversation about a file it has never
+   * heard of; it is also what a storage-only upload looks like when a `FilePart`
+   * is built for it anyway, which has no provider id at all.
+   */
+  test("a gemi attachment id in FilePart.fileId is caught here, not by the vendor", () => {
+    expect(() =>
+      toResponsesInput(
+        [message({ role: "user", content: [{ type: "file", fileId: "gemi_att_abc" }] })],
+        FULL,
+      ),
+    ).toThrow(/attachment id/);
+  });
+
   test("a file is dropped when the model cannot read one", () => {
     const items = toResponsesInput(
       [message({ role: "user", content: [{ type: "file", fileId: "file_1" }] })],
