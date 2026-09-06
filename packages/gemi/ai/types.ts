@@ -88,6 +88,14 @@ export type ReasoningPart = { type: "reasoning"; id?: string; text?: string };
 /** An uploaded file, referenced by the id `provider.upload()` returned. */
 export type FilePart = {
   type: "file";
+  /**
+   * The **provider's** file id, and only ever that. It is what the model is
+   * shown so it can look at the file, and its meaning did not change when gemi
+   * started keeping copies of uploads: `POST /chat/files` answers `fileId` for
+   * this field and a separate `attachmentId` for tools. They are two ids for two
+   * systems. A gemi attachment id put here is caught by `toResponsesInput` with
+   * a message saying so, rather than reaching the vendor as an unknown file.
+   */
   fileId: string;
   name?: string;
   mimeType?: string;

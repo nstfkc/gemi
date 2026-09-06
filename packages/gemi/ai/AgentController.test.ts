@@ -3,12 +3,17 @@ process.env.SECRET ??= "agent-controller-test-secret";
 import { describe, expect, test } from "vitest";
 
 import { HttpRequest } from "../http/HttpRequest";
+import { RequestContext } from "../http/requestContext";
+import type { ReadResult } from "../services/file-storage/drivers/types";
 import { Agent, AgentTool, type AgentStreamParams } from "./Agent";
 import {
   AgentController,
+  AttachmentNotFoundError,
   defaultAgentStore,
   MemoryAgentStore,
+  MemoryAttachmentStore,
   MemoryLiveRuns,
+  ScopedAttachments,
 } from "./AgentController";
 import type { ProviderEvent } from "./AgentProvider";
 import { fakeProvider } from "./providers/fakeProvider";
@@ -56,6 +61,65 @@ function stubAgent(run: StubAgentRun) {
         return run;
       },
     } as any,
+  };
+}
+
+/** A `FileStorage` that is a map, so these tests need no container and no disk. */
+class FakeStorage {
+  readonly objects = new Map<string, Blob>();
+
+  async put(params: any): Promise<string> {
+    const blob: Blob = params instanceof Blob ? params : params.body;
+    const name: string = params instanceof Blob ? `blob-${this.objects.size}` : params.name;
+    this.objects.set(name, blob);
+    return name;
+  }
+
+  async read(params: any): Promise<ReadResult> {
+    const name = typeof params === "string" ? params : params.name;
+    const blob = this.objects.get(name);
+    if (!blob) throw new Error(`no object ${name}`);
+    return {
+      body: blob,
+      start: 0,
+      end: blob.size - 1,
+      total: blob.size,
+      partial: false,
+      type: blob.type,
+      name,
+    };
+  }
+}
+
+const file = (name: string, type: string, body: string) => new File([body], name, { type });
+
+function uploadRequest(f?: File, form: FormData = new FormData()) {
+  if (f) form.set("file", f);
+  const raw = new Request("http://localhost/api/chat/files", { method: "POST", body: form });
+  return new HttpRequest(raw, {}, "api", "/chat/files");
+}
+
+/**
+ * A controller whose attachment scope is a field rather than a derivation, so a
+ * test can stand two tenants up against one store without minting sessions. The
+ * *derivation* is tested separately, against a real `RequestContext`.
+ */
+function ScopedChat(agent: any) {
+  return class extends AgentController {
+    agent = agent;
+    liveRuns = new MemoryLiveRuns();
+    attachments = new MemoryAttachmentStore();
+    attachmentStorage: FakeStorage = new FakeStorage();
+    scopeKey = "org:acme";
+
+    attachmentScope() {
+      return { key: this.scopeKey };
+    }
+
+    /** The handle a tool would be given, reached from a test. */
+    handleFor(key: string) {
+      return new ScopedAttachments(this.attachments, this.attachmentStorage, { key });
+    }
   };
 }
 
@@ -1003,22 +1067,246 @@ describe("AgentController.stop", () => {
 });
 
 describe("AgentController.upload", () => {
-  test("hands the file to the provider and returns its id", async () => {
+  test("with no scope it is the pre-attachment route, unchanged", async () => {
+    // No auth, no `threadId`: `attachmentScope` answers null, nothing is kept,
+    // and the answer still carries the provider's `fileId` exactly as it always
+    // did. This is the compatibility case — an app that never asks for an
+    // attachment id must not notice this change.
     const run = new StubAgentRun("run_v");
     const { agent, uploads } = stubAgent(run);
     class Chat extends AgentController {
       agent = agent;
       liveRuns = new MemoryLiveRuns();
+      attachments = new MemoryAttachmentStore();
+      attachmentStorage = new FakeStorage();
+    }
+
+    const controller = new Chat();
+    const result = await controller.upload(uploadRequest(file("note.txt", "text/plain", "hello")));
+
+    expect(result.fileId).toBe("file_123");
+    expect(result.attachmentId).toBeUndefined();
+    expect(result.destination).toBe("provider");
+    expect(uploads).toHaveLength(1);
+    expect((controller.attachmentStorage as FakeStorage).objects.size).toBe(0);
+  });
+
+  test("with a scope it keeps the bytes as well and mints an attachment id", async () => {
+    const run = new StubAgentRun("run_v2");
+    const { agent, uploads } = stubAgent(run);
+    class Chat extends ScopedChat(agent) {}
+
+    const controller = new Chat();
+    const result = await controller.upload(uploadRequest(file("shoe.png", "image/png", "PNGDATA")));
+
+    // Both ids, and they are not the same id.
+    expect(result.fileId).toBe("file_123");
+    expect(result.attachmentId).toMatch(/^gemi_att_/);
+    expect(result.destination).toBe("both");
+    expect(uploads).toHaveLength(1);
+
+    const attachments = controller.handleFor("org:acme");
+    const stored = await attachments.file(result.attachmentId!);
+    expect(stored.name).toBe("shoe.png");
+    expect(stored.type).toBe("image/png");
+    expect(await stored.text()).toBe("PNGDATA");
+  });
+
+  test("the default scope is the authenticated user, read off the request context", async () => {
+    const run = new StubAgentRun("run_v3");
+    const { agent } = stubAgent(run);
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+      attachments = new MemoryAttachmentStore();
+      attachmentStorage = new FakeStorage();
+    }
+    const controller = new Chat();
+    const req = uploadRequest(file("note.txt", "text/plain", "hi"));
+
+    const result = await RequestContext.run(req as any, async () => {
+      RequestContext.getStore().setUser({ id: 7 });
+      return await controller.upload(req);
+    });
+
+    expect(result.attachmentId).toBeTruthy();
+    const mine = new ScopedAttachments(controller.attachments, controller.attachmentStorage, {
+      key: "user:7",
+    });
+    expect((await mine.get(result.attachmentId!)).name).toBe("note.txt");
+  });
+
+  test("falls back to the thread when the request is not authenticated", async () => {
+    const run = new StubAgentRun("run_v4");
+    const { agent } = stubAgent(run);
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+      attachments = new MemoryAttachmentStore();
+      attachmentStorage = new FakeStorage();
+    }
+    const controller = new Chat();
+    const form = new FormData();
+    form.set("file", file("note.txt", "text/plain", "hi"));
+    form.set("threadId", "thr_1");
+
+    const result = await controller.upload(uploadRequest(undefined, form));
+
+    expect(result.attachmentId).toBeTruthy();
+    const onThread = new ScopedAttachments(controller.attachments, controller.attachmentStorage, {
+      key: "thread:thr_1",
+    });
+    expect((await onThread.get(result.attachmentId!)).name).toBe("note.txt");
+  });
+
+  /**
+   * THE CROSS-TENANT READ, end to end from the route.
+   *
+   * Both tenants upload for real, so the row the leak would return is present
+   * and readable by its owner. A version of this test where initech never
+   * uploaded proves nothing: "not found" would be the only answer available.
+   */
+  test("an attachment id from another tenant does not resolve for this one", async () => {
+    const run = new StubAgentRun("run_v5");
+    const { agent } = stubAgent(run);
+    const Chat = ScopedChat(agent);
+
+    const initech = new (class extends Chat {
+      scopeKey = "org:initech";
+    })();
+    const acme = new (class extends Chat {
+      scopeKey = "org:acme";
+    })();
+    // One store and one bucket behind both controllers, which is the situation
+    // a single deployment is actually in.
+    acme.attachments = initech.attachments;
+    acme.attachmentStorage = initech.attachmentStorage;
+
+    const theirs = await initech.upload(uploadRequest(file("payroll.csv", "text/csv", "SECRET")));
+    const mine = await acme.upload(uploadRequest(file("mine.csv", "text/csv", "ok")));
+
+    // The row exists and its owner can read it.
+    expect(await (await initech.handleFor("org:initech").file(theirs.attachmentId!)).text()).toBe(
+      "SECRET",
+    );
+
+    const asAcme = acme.handleFor("org:acme");
+    expect(await (await asAcme.file(mine.attachmentId!)).text()).toBe("ok");
+
+    // The model, prompt-injected, names initech's id inside acme's run.
+    const foreign = await asAcme
+      .get(theirs.attachmentId!)
+      .catch((err) => err as AttachmentNotFoundError);
+    const unknown = await asAcme
+      .get("gemi_att_does-not-exist")
+      .catch((err) => err as AttachmentNotFoundError);
+
+    expect(foreign).toBeInstanceOf(AttachmentNotFoundError);
+    // Indistinguishable from an id that never existed, or the error is an
+    // enumeration oracle.
+    expect(foreign.code).toBe(unknown.code);
+    expect(foreign.message.replace(theirs.attachmentId!, "X")).toBe(
+      unknown.message.replace("gemi_att_does-not-exist", "X"),
+    );
+  });
+
+  test("a storage-only policy keeps the file away from the provider entirely", async () => {
+    const run = new StubAgentRun("run_v6");
+    const { agent, uploads } = stubAgent(run);
+    class Chat extends ScopedChat(agent) {
+      attachmentDestination() {
+        return "storage" as const;
+      }
+    }
+
+    const controller = new Chat();
+    const result = await controller.upload(uploadRequest(file("rows.csv", "text/csv", "a,b")));
+
+    expect(uploads).toHaveLength(0);
+    expect(result.fileId).toBeUndefined();
+    expect(result.attachmentId).toBeTruthy();
+    expect(result.destination).toBe("storage");
+  });
+
+  test("a client hint may narrow the destination", async () => {
+    const run = new StubAgentRun("run_v7");
+    const { agent, uploads } = stubAgent(run);
+    const controller = new (class extends ScopedChat(agent) {})();
+
+    const form = new FormData();
+    form.set("file", file("rows.csv", "text/csv", "a,b"));
+    form.set("destination", "storage");
+
+    const result = await controller.upload(uploadRequest(undefined, form));
+
+    expect(uploads).toHaveLength(0);
+    expect(result.destination).toBe("storage");
+  });
+
+  test("a client hint may not widen it, and says so rather than being ignored", async () => {
+    const run = new StubAgentRun("run_v8");
+    const { agent, uploads } = stubAgent(run);
+    class Chat extends ScopedChat(agent) {
+      attachmentDestination() {
+        return "storage" as const;
+      }
     }
 
     const form = new FormData();
-    form.set("file", new File(["hello"], "note.txt", { type: "text/plain" }));
-    const raw = new Request("http://localhost/api/chat/files", { method: "POST", body: form });
+    form.set("file", file("rows.csv", "text/csv", "a,b"));
+    form.set("destination", "both");
 
-    const result = await new Chat().upload(new HttpRequest(raw, {}, "api", "/chat/files"));
+    await expect(new Chat().upload(uploadRequest(undefined, form))).rejects.toThrow(/only narrow/);
+    expect(uploads).toHaveLength(0);
+  });
 
-    expect(result).toEqual({ fileId: "file_123" });
-    expect(uploads).toHaveLength(1);
+  test("storage with no scope is an error, not an upload that quietly did nothing", async () => {
+    const run = new StubAgentRun("run_v9");
+    const { agent } = stubAgent(run);
+    class Chat extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+      attachments = new MemoryAttachmentStore();
+      attachmentStorage = new FakeStorage();
+      attachmentDestination() {
+        return "storage" as const;
+      }
+    }
+    await expect(
+      new Chat().upload(uploadRequest(file("rows.csv", "text/csv", "a,b"))),
+    ).rejects.toThrow(/attachmentScope/);
+  });
+
+  /**
+   * `attachmentsFor` is what issue #490 hangs `ctx.attachments` off, so what it
+   * answers for a request with no subject is part of the contract: `null`, and
+   * nothing to fall back to. An unscoped handle is the thing that must not
+   * exist.
+   */
+  test("attachmentsFor answers a scoped handle, or null when there is no subject", async () => {
+    const run = new StubAgentRun("run_v10");
+    const { agent } = stubAgent(run);
+    const scoped = new (class extends ScopedChat(agent) {
+      handle(req: HttpRequest<any, any>) {
+        return this.attachmentsFor(req);
+      }
+    })();
+    const unscoped = new (class extends AgentController {
+      agent = agent;
+      liveRuns = new MemoryLiveRuns();
+      attachments = new MemoryAttachmentStore();
+      attachmentStorage = new FakeStorage();
+      handle(req: HttpRequest<any, any>) {
+        return this.attachmentsFor(req);
+      }
+    })();
+
+    const record = await scoped.upload(uploadRequest(file("a.txt", "text/plain", "bytes")));
+    const handle = await scoped.handle(uploadRequest());
+    expect(handle).toBeInstanceOf(ScopedAttachments);
+    expect(await (await handle!.file(record.attachmentId!)).text()).toBe("bytes");
+
+    expect(await unscoped.handle(uploadRequest())).toBeNull();
   });
 
   test("refuses a body with no file field", async () => {
