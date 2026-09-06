@@ -1274,3 +1274,119 @@ describe("ending a run ends the sub-runs it was holding", () => {
     expect(stopped.messages[0]!.finishReason).toBe("awaiting-input");
   });
 });
+
+describe("a message the server wrote that nobody typed", () => {
+  const SHOWN: AgentMessage = {
+    id: "m_shown",
+    role: "user",
+    content: [
+      {
+        type: "file",
+        fileId: "file_1",
+        name: "chart.png",
+        mimeType: "image/png",
+        attachmentId: "gemi_att_1",
+      },
+    ],
+    createdAt: NOW,
+    finishReason: "stop",
+  };
+
+  const injected = (seq: number): AgentStreamFrame => ({
+    seq,
+    event: { type: "message", message: SHOWN },
+  });
+
+  test("appends whole, with its own role, where the stream put it", () => {
+    const state = fold(at(5), [injected(6)]);
+    const last = state.messages[state.messages.length - 1]!;
+    // Not routed through the path that creates a message for an id it has never
+    // seen: that one guesses `assistant`, and this message is input-role or it
+    // is nothing — a file part on an assistant message is a 400 from the API.
+    expect(last).toEqual(SHOWN);
+    expect(state.messages.filter((message) => message.id === "m_shown")).toHaveLength(1);
+  });
+
+  test("a second delivery is the same value written twice, not a second copy", () => {
+    // The wholesale replace the `tool-call` branch cannot do. There is no
+    // client-accumulated half of this message to lose: one author, complete
+    // before it was sent, immutable after.
+    const once = fold(at(5), [injected(6)]);
+    const twice = fold(once, [{ ...injected(7), seq: 7 }]);
+    expect(twice.messages).toEqual(once.messages);
+  });
+
+  test("run-end leaves it alone", () => {
+    const state = fold(at(5), [
+      injected(6),
+      { seq: 7, event: { type: "run-end", runId: "run_1", finishReason: "stop" } },
+    ]);
+    // It carries its own finish reason and it is not the assistant's, so the
+    // safety net that closes off messages this run left streaming must not
+    // touch it — a difference here is a live client and a reattached one
+    // rendering the same message two ways.
+    expect(state.messages[state.messages.length - 1]).toEqual(SHOWN);
+  });
+});
+
+describe("the attachment memo on a tool call", () => {
+  test("survives a tool-call frame that does not mention it", () => {
+    const record = {
+      attachment: {
+        id: "gemi_att_1",
+        scopeKey: "user:u1",
+        name: "chart.png",
+        mimeType: "image/png",
+        size: 7,
+        createdAt: NOW,
+        destination: "both" as const,
+        fileId: "file_1",
+        objectName: "attachments/gemi_att_1.png",
+      },
+      shown: { fileId: "file_1", messageId: "m_shown", createdAt: NOW },
+    };
+
+    const withMemo = fold(at(4), [
+      {
+        seq: 5,
+        event: {
+          type: "tool-call",
+          messageId: "m1",
+          part: {
+            type: "tool-call",
+            toolCallId: "tc_1",
+            name: "grep",
+            input: { pattern: "TODO", filePath: "a.ts" },
+            attachments: [record],
+          },
+        },
+      },
+    ]);
+
+    // A later frame for the same call — a re-park resending the server's copy —
+    // carries the model's half and not the execution's.
+    const after = fold(withMemo, [
+      {
+        seq: 6,
+        event: {
+          type: "tool-call",
+          messageId: "m1",
+          resent: true,
+          part: {
+            type: "tool-call",
+            toolCallId: "tc_1",
+            name: "grep",
+            input: { pattern: "TODO", filePath: "a.ts" },
+          },
+        },
+      },
+    ]);
+
+    // Dropping it here would be paid for on the next turn, in a stateless app:
+    // the client posts back a history where the call attached nothing, the tool
+    // is re-entered, and it stores and uploads and shows a second copy of its
+    // own output.
+    const part = after.messages[0]!.content.find((entry) => entry.type === "tool-call") as any;
+    expect(part.attachments).toEqual([record]);
+  });
+});

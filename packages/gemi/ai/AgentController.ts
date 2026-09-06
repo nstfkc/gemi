@@ -95,7 +95,10 @@ export {
   defaultAttachmentStore,
   InvalidAttachmentScopeError,
   MemoryAttachmentStore,
+  type PutAttachmentParams,
   ScopedAttachments,
+  type ToolAttachmentRecord,
+  type ToolAttachments,
 } from "./store/Attachments";
 
 /**
@@ -360,6 +363,13 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
       }
 
       const instructions = (await this.instructions(req)) || undefined;
+      // Above the cancel check, not below it, and that placement is the whole
+      // reason this is a separate statement rather than an argument on the call
+      // below: the comment on that check says nothing yields between it and
+      // `register`, and an `await` for the app's `attachmentScope()` — a
+      // database read, in any app that has one — is exactly the yield a stop
+      // would land in and be missed.
+      const attachments = await this.attachmentsFor(req, threadId);
 
       if (pending?.cancelled) {
         // Stopped while it waited. Nothing has been asked of the model and
@@ -378,6 +388,14 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
         req,
         threadId,
         instructions,
+        // Resolved once, above, and handed to every tool of the run as
+        // `ctx.attachments`. It is derived from the request — the user the
+        // middleware authenticated, or the thread — and never from anything the
+        // model can write, which is the property that makes an attachment id
+        // safe to give a model at all. `null` for a request with no subject:
+        // tools still get an object, and it throws with a sentence naming
+        // `attachmentScope()`.
+        attachments,
       }) as AgentRun;
 
       const ctx: AgentHookContext = { req, runId: run.runId, threadId };
