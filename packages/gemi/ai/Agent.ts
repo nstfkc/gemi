@@ -18,6 +18,7 @@ import type {
   Attachment,
   PutAttachmentParams,
   ScopedAttachments,
+  ToolAttachmentPut,
   ToolAttachmentRecord,
   ToolAttachments,
 } from "./store/Attachments";
@@ -1188,7 +1189,7 @@ const SHOWN_FILE_WINDOW = 1;
  * instead of the PNG path, the quiet `put` instead of the `showModel` one.
  */
 function putMismatch(
-  recorded: ToolAttachmentRecord,
+  recorded: ToolAttachmentPut,
   blob: Blob,
   params: PutAttachmentParams,
 ): string | null {
@@ -1284,9 +1285,30 @@ function pathBelow(path: string[] | undefined, prefix: string[]): string[] | nul
  * own copy — the failure of two copies is that one of them is fixed and the
  * other is not, and both are invisible until someone resumes.
  *
- * The array is created on first use and not before. `nested: []` or
+ * The array is created by the first WRITE and not before. `nested: []` or
  * `attachments: []` on every tool call would be a wire and store change paid for
- * by every app that has neither.
+ * by every app that has neither — and "on first use" is not good enough, because
+ * a slot is handed out before the work that fills it can fail. A tool whose only
+ * `put` throws (no attachment scope, a provider that cannot read files) must
+ * leave a tool call with no `attachments` field, not an empty array announcing
+ * an attachment that does not exist.
+ *
+ * A SLOT IS RESERVED WHEN IT IS ASKED FOR, THOUGH, NOT WHEN IT IS FILLED, and
+ * that is deliberate: a tool body may run its `put`s or its `runAgent`s
+ * concurrently — `await Promise.all(images.map((i) => ctx.attachments.put(i)))`
+ * is the obvious way to write it — and every one of them takes its index
+ * synchronously, in map order, before its first `await`. Handing out the index
+ * on success instead would number them by the order they *finished*, which the
+ * network decides and which the next turn will not reproduce. So the index
+ * always advances, and a slot whose work threw stays unwritten.
+ *
+ * An unwritten slot before a written one would be a hole, and a hole is `null`
+ * once it goes through JSON — which is what a consumer walking `part.attachments`
+ * would crash on. `fill` is what stands in its place. `runAgent` passes none, so
+ * `nested` keeps exactly the shape it has had since sub-agents existed, holes
+ * and all: `NestedRun` describes a sub-run that happened and has no honest shape
+ * for one that did not, and inventing one is a change to nesting rather than to
+ * the issue this memo was extracted for.
  *
  * What is NOT shared is what to do with a hit, and it could not be: a recorded
  * sub-run that parked has to be *continued*, so `runAgent`'s memo sometimes
@@ -1303,18 +1325,33 @@ class ReplayMemo<R> {
   constructor(
     private readonly read: () => R[] | undefined,
     private readonly create: () => R[],
+    /** What stands in for a slot whose work threw. See the note above. */
+    private readonly fill?: () => R,
   ) {
     this.replayable = read()?.length ?? 0;
   }
 
   /**
-   * The next slot: its index, the live array to write into, and the record from
-   * a previous turn if this index has one.
+   * The next slot: its index, the record a previous turn left there if it left
+   * one, and the way to write this turn's.
+   *
+   * `write` is the only thing that touches the array. Call it once the record
+   * exists and not before — everything between `next()` and `write()` is work
+   * that may throw, and a slot nobody writes is a slot that costs nothing.
    */
-  next(): { at: number; rows: R[]; recorded: R | undefined } {
+  next(): { at: number; recorded: R | undefined; write: (record: R) => void } {
     const at = this.index++;
-    const rows = this.read() ?? this.create();
-    return { at, rows, recorded: at < this.replayable ? rows[at] : undefined };
+    return {
+      at,
+      recorded: at < this.replayable ? this.read()?.[at] : undefined,
+      write: (record: R) => {
+        const rows = this.read() ?? this.create();
+        if (this.fill) {
+          for (let i = rows.length; i < at; i++) rows[i] = this.fill();
+        }
+        rows[at] = record;
+      },
+    };
   }
 }
 
@@ -1338,7 +1375,20 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   /** Messages from an earlier run this one has amended, by id. Cloned once and
    *  reused, so two results for the same message do not fork it. */
   private readonly amended = new Map<string, AgentMessage>();
-  /** Amended messages that have not yet gone through `onMessage`. */
+  /**
+   * Messages this run finished outside `finalizeMessage` that have not yet gone
+   * through `onMessage`: earlier turns' messages it amended, and messages it
+   * injected for a file a tool showed.
+   *
+   * They wait rather than being reported where they are made, because
+   * `onMessage` is the persistence point for an app that has no `store` and an
+   * append-only table keyed by a serial id reads back in the order the hook was
+   * called. Reporting an injected message from inside `runTools` would call the
+   * hook for it BEFORE the assistant message whose tool call produced it, since
+   * that message is only finalized once the step is over — so the transcript in
+   * the app's database would put the file above the turn that made it, while
+   * `result.messages`, the stream and `history` all put it below.
+   */
   private readonly unreported = new Set<AgentMessage>();
 
   private usage: Usage = emptyUsage();
@@ -1635,6 +1685,11 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     }
     this.emit({ type: "message-end", messageId: message.id, finishReason: reason });
     await this.report(message);
+    // After it, never before: a file a tool showed during this message belongs
+    // below the message whose tool call produced it, in the hook exactly as it
+    // is in `result().messages` and on the stream. Empty on every step of a run
+    // with no such file, which is most of them.
+    await this.reportDeferred();
   }
 
   private async report(message: AgentMessage): Promise<void> {
@@ -2062,7 +2117,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     );
 
     return async (agent: AnyAgent, params: RunAgentParams = {}): Promise<NestedRunResult> => {
-      const { at, rows, recorded } = memo.next();
+      const { at, recorded, write } = memo.next();
 
       if (recorded) {
         const mismatch = replayMismatch(recorded, agent, params);
@@ -2089,16 +2144,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         }
       }
 
-      return this.runNested(
-        messageId,
-        call,
-        agent,
-        params,
-        at,
-        rows,
-        recorded,
-        resume?.answers ?? [],
-      );
+      return this.runNested(messageId, call, agent, params, write, recorded, resume?.answers ?? []);
     };
   }
 
@@ -2116,8 +2162,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     call: ToolCallPart,
     agent: AnyAgent,
     params: RunAgentParams,
-    at: number,
-    memo: NestedRun[],
+    write: (record: NestedRun) => void,
     recorded: NestedRun | undefined,
     answers: ClientToolResult[],
   ): Promise<NestedRunResult> {
@@ -2256,7 +2301,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       // a lost run, and a cancelled sub-run is still work the user should be
       // able to read — both of those depend on the transcript already being on
       // the part when the throw happens.
-      memo[at] = record;
+      write(record);
       // Only what this turn actually spent. A memoized sub-run adds nothing,
       // above, because the turn that ran it already counted it.
       this.usage = addUsage(this.usage, result.usage);
@@ -2336,6 +2381,15 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     const memo = new ReplayMemo<ToolAttachmentRecord>(
       () => call.attachments,
       () => (call.attachments = []),
+      // A put that threw took an index and wrote nothing, and if a later put in
+      // the same call succeeds the gap has to be something rather than a hole:
+      // `[null, { attachment }]` is what a hole becomes on the wire and in the
+      // store, and it is what a UI or an app walking the memo crashes on. The
+      // slot is re-attempted on a replay — `put` treats a failed record as no
+      // record — so a transient failure heals itself on the turn the call
+      // finally settles, and a permanent one stays legible as "this put did not
+      // produce a file" instead of pretending it produced nothing at all.
+      () => ({ failed: true }),
     );
 
     /**
@@ -2363,9 +2417,11 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       read: (id: string) => scopeOrThrow().read(id),
       file: (id: string) => scopeOrThrow().file(id),
       put: async (blob: Blob, params: PutAttachmentParams = {}): Promise<Attachment> => {
-        const { at, rows, recorded } = memo.next();
+        const { at, recorded, write } = memo.next();
 
-        if (recorded) {
+        // A `failed` record is a slot an earlier turn took and could not fill,
+        // so there is nothing to replay and the work is done again.
+        if (recorded && "attachment" in recorded) {
           const mismatch = putMismatch(recorded, blob, params);
           if (mismatch) {
             throw new Error(
@@ -2424,7 +2480,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         }
 
         const attachment = await attachments.put(blob, { name, mimeType, fileId });
-        const record: ToolAttachmentRecord = {
+        const record: ToolAttachmentPut = {
           attachment,
           ...(fileId
             ? {
@@ -2440,7 +2496,9 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
               }
             : {}),
         };
-        rows[at] = record;
+        // The slot is filled only now, with everything that could throw behind
+        // it: a put that fails leaves the tool call exactly as it found it.
+        write(record);
         if (record.shown) this.queueShown(call.toolCallId, record);
         return attachment;
       },
@@ -2464,7 +2522,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
    * on the tool call survives, and the turn that finally settles the call is
    * the turn that shows the file.
    */
-  private queueShown(toolCallId: string, record: ToolAttachmentRecord) {
+  private queueShown(toolCallId: string, record: ToolAttachmentPut) {
     const shown = record.shown;
     if (!shown) return;
     const queued = this.shownQueue.get(toolCallId) ?? [];
@@ -2499,33 +2557,50 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
    * Pushed to `history` (so the next step sees them), to `produced` (so
    * `result().messages` carries them and the controller persists them), emitted
    * (so a client watching live sees the same conversation a reattached one
-   * replays), and reported (so `onMessage` stores it). A message that is in
-   * some of those four and not the others is the bug class #470 is about, and
-   * an injected message is the easiest place in the codebase to write it.
+   * replays), and queued for `onMessage` (so an app that persists from the hook
+   * stores it). A message that is in some of those four and not the others is
+   * the bug class #470 is about, and an injected message is the easiest place in
+   * the codebase to write it.
+   *
+   * QUEUED FOR THE HOOK RATHER THAN REPORTED HERE, so that all four agree on
+   * ORDER and not merely on contents. The assistant message that made this tool
+   * call has not been finalized yet — `loop` does that after `runTools`
+   * returns — so calling `onMessage` from here would hand an app the file
+   * before the turn that produced it. `reportDeferred` is where the queue is
+   * drained, immediately after that assistant message is reported.
    *
    * The id guard is for a history that already holds the message — a stateless
    * client posting back a transcript that contains the injection *and* still
    * shows the call as open, which is a rewind the server cannot rule out. One
    * copy either way.
    *
-   * NOT CALLED FROM THE ABORT PATH, deliberately. `finalizeAborted` denies every
-   * open call, and a tool that had stored a file before the stop landed has its
-   * call closed with `denied`/`stopped` rather than settled. Appending an image
-   * to a conversation the user has just cancelled would be the run getting the
-   * last word; the bytes are kept and the record is on the tool call, so a tool
-   * that runs again can still resolve the id, and nothing is lost but the
-   * showing.
+   * NOTHING IS SHOWN ONCE THE RUN IS OVER, and the check belongs here rather than
+   * at the three call sites because one of those sites fires after the run has
+   * finished. `finalizeAborted` never calls this — it denies every open call
+   * instead — but a `/stop` does not wait for a tool that is already running:
+   * `raceAbort` in `runTools` returns the moment the signal fires, the run
+   * finalizes and ends, and the tool's own `.then` lands afterwards and calls
+   * this. Without the guard the message goes into `history` and `produced` and
+   * through `onMessage` while `emit` is already a no-op, so it is persisted and
+   * never announced, and a client that reloads the thread sees an image a client
+   * that watched it live never saw. That is the exact divergence this issue
+   * asked to avoid, arrived at from the one direction nobody looks. Appending an
+   * image to a conversation the user has just cancelled would also be the run
+   * getting the last word. The bytes are kept and the record is on the tool
+   * call, so a tool that runs again can still resolve the id; nothing is lost
+   * but the showing.
    */
   private async settleShown(toolCallId: string): Promise<void> {
     const queued = this.shownQueue.get(toolCallId);
     if (!queued || queued.length === 0) return;
     this.shownQueue.delete(toolCallId);
+    if (this.ended || this.controller.signal.aborted) return;
     for (const message of queued) {
       if (this.history.some((held) => held.id === message.id)) continue;
       this.history.push(message);
       this.produced.push(message);
       this.emit({ type: "message", message });
-      await this.report(message);
+      this.unreported.add(message);
     }
   }
 
@@ -2771,7 +2846,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         });
       }
 
-      await this.reportAmended();
+      await this.reportDeferred();
     }
 
     if (turn && (turn.text || (turn.files && turn.files.length > 0))) {
@@ -2932,7 +3007,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
    * `messages` array; the run must not reach back into its own input and change
    * it under a controller that has already persisted it. Cloning the part into
    * the amended copy is also what makes the updated sub-run transcript
-   * something `onMessage` can report — see `reportAmended`, which is why the
+   * something `onMessage` can report — see `reportDeferred`, which is why the
    * message is marked unreported here even though no result may ever attach.
    */
   private amendCall(entry: { message: AgentMessage; call: ToolCallPart }): ToolCallPart {
@@ -3164,14 +3239,19 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   }
 
   /**
-   * Persists the messages this run amended, once each.
+   * Persists the messages this run finished outside `finalizeMessage`, once each
+   * and in the order it finished them.
    *
-   * Called both at the end of `ingestTurn` and from the abort path, because a
-   * stop that lands while an approved tool is running has to persist the
-   * results that *did* attach this turn — otherwise the work is done, the
-   * transcript on the stream shows it, and the store never hears about it.
+   * Called from the end of `ingestTurn`, from the abort path, and from
+   * `finalizeMessage`. From the abort path because a stop that lands while an
+   * approved tool is running has to persist the results that *did* attach this
+   * turn — otherwise the work is done, the transcript on the stream shows it,
+   * and the store never hears about it. From `finalizeMessage` because an
+   * injected message has to reach `onMessage` after the assistant message it
+   * sits below, and a `Set` preserves insertion order, which here is transcript
+   * order.
    */
-  private async reportAmended(): Promise<void> {
+  private async reportDeferred(): Promise<void> {
     const pending = [...this.unreported];
     this.unreported.clear();
     for (const message of pending) await this.report(message);
@@ -3214,7 +3294,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     }
     // Results that did attach this turn have not been persisted yet: the report
     // pass at the end of `ingestTurn` is one of the things the abort skipped.
-    await this.reportAmended();
+    await this.reportDeferred();
 
     const message = this.current;
     if (message) {

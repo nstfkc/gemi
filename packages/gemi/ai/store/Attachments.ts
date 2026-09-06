@@ -436,8 +436,8 @@ export interface ToolAttachments {
 }
 
 /**
- * One `ctx.attachments.put` of one tool call, written down so the next turn can
- * replay it instead of doing it again.
+ * One successful `ctx.attachments.put` of one tool call, written down so the
+ * next turn can replay it instead of doing it again.
  *
  * Lives on `ToolCallPart.attachments`, indexed by the order the puts happened
  * in — exactly where and how `ToolCallPart.nested` records sub-runs, and for
@@ -451,7 +451,7 @@ export interface ToolAttachments {
  * second copy of the same image in the transcript, and a client that had
  * already applied the first would show it twice.
  */
-export type ToolAttachmentRecord = {
+export type ToolAttachmentPut = {
   /** What `put` answered, replayed verbatim. */
   attachment: Attachment;
   /** Set when `showModel` was asked for. See above. */
@@ -464,6 +464,28 @@ export type ToolAttachmentRecord = {
     createdAt: string;
   };
 };
+
+/**
+ * A slot in that list, which is one `put` — or one `put` that threw.
+ *
+ * The failure arm exists because the index is what identifies a `put`, and an
+ * index is taken the moment the call is made rather than when it succeeds: a
+ * body that runs its puts concurrently must number them by the order it *asked*
+ * and not by the order the network answered, or the next turn will not
+ * reproduce the numbering. So a `put` that throws and is caught — a provider
+ * that cannot read files, a vendor that refuses the type, a storage write that
+ * fails — leaves a slot behind, and a later successful `put` in the same call
+ * would otherwise leave a hole in front of it. A hole is `null` once it has
+ * been through JSON, which is what a consumer walking `part.attachments`
+ * crashes on; `{ failed: true }` is the same fact said out loud.
+ *
+ * It is written lazily, only when a later `put` needs the index above it, so a
+ * tool whose puts all threw still adds no `attachments` field at all. And it is
+ * not a memo: a replayed slot marked `failed` is re-attempted from scratch,
+ * because there is nothing recorded to hand back and the failure may have been
+ * the network's rather than the tool's.
+ */
+export type ToolAttachmentRecord = ToolAttachmentPut | { failed: true };
 
 /**
  * The object name an attachment's bytes are stored under.
