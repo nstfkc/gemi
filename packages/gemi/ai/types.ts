@@ -202,8 +202,12 @@ export type ToolCallPart<T extends ToolShapes = ToolShapes> = {
      * of the `put` calls within the tool call — the same key `runAgent` uses,
      * with the same caveat about a body whose calls sit in a branch.
      *
-     * Absent until the first `put`, so a tool that attaches nothing adds no
-     * field to the wire or the store.
+     * Absent until the first `put` that produced something, so a tool that
+     * attaches nothing — including one whose every `put` threw — adds no field
+     * to the wire or the store. A `put` that threw with a later one that did not
+     * leaves `{ failed: true }` at its index rather than a hole, because a hole
+     * is `null` after JSON and this list is walked by index; see
+     * `ToolAttachmentRecord`.
      */
     attachments?: ToolAttachmentRecord[];
   };

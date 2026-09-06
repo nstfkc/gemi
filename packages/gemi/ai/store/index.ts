@@ -13,6 +13,7 @@ export {
   newAttachmentId,
   type PutAttachmentParams,
   ScopedAttachments,
+  type ToolAttachmentPut,
   type ToolAttachmentRecord,
   type ToolAttachments,
 } from "./Attachments";

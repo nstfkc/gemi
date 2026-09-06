@@ -97,6 +97,7 @@ export {
   MemoryAttachmentStore,
   type PutAttachmentParams,
   ScopedAttachments,
+  type ToolAttachmentPut,
   type ToolAttachmentRecord,
   type ToolAttachments,
 } from "./store/Attachments";
