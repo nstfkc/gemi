@@ -2709,8 +2709,14 @@ describe("a sub-run started from a message list", () => {
 /** A `FileStorage` that is a map, so these tests need no container and no disk. */
 class FakeStorage {
   readonly objects = new Map<string, Blob>();
+  /** Set to fail exactly the next write, which is how a transient outage looks. */
+  failNext = false;
 
   async put(params: any): Promise<string> {
+    if (this.failNext) {
+      this.failNext = false;
+      throw new Error("storage hiccup");
+    }
     const blob: Blob = params instanceof Blob ? params : params.body;
     const name: string = params instanceof Blob ? `blob-${this.objects.size}` : params.name;
     this.objects.set(name, blob);
@@ -2823,6 +2829,109 @@ describe("a tool that parks bytes", () => {
     // handed an id for bytes nobody kept.
     expect(failed.error.message).toContain("attachmentScope()");
     expect(provider.uploads).toHaveLength(0);
+    // And the call it failed on carries no `attachments` field. A slot is taken
+    // when a `put` is *asked for*, ahead of everything that can throw, so the
+    // obvious implementation leaves `attachments: []` behind — an empty array on
+    // the wire and in the store announcing an attachment that does not exist, on
+    // every call of every tool of every app with no attachment scope.
+    expect("attachments" in callPartOf(result.messages, "c1")).toBe(false);
+  });
+
+  test("a put that throws and is caught leaves an honest slot, not a hole", async () => {
+    const { scoped } = scopedFor();
+    const tool = makerTool("render", async (ctx) => {
+      // The realistic shape: ask to be shown, fall back to storing quietly when
+      // the model of the day cannot look at files.
+      let refused = false;
+      try {
+        await ctx.attachments.put(png(), { name: "shown.png", showModel: true });
+      } catch {
+        refused = true;
+      }
+      const attachment = await ctx.attachments.put(png(), { name: "chart.png" });
+      return { attachmentId: attachment.id, refused };
+    });
+    const provider = fakeProvider([toolCall("c1", "render", {}), finish()], [finish()]);
+    (provider as any).capabilities = { ...provider.capabilities, fileInput: false };
+    const agent = Agent.create({ name: "designer", provider, tools: [tool] });
+    const result = await agent.stream({ messages: [], req, attachments: scoped }).result();
+
+    const records = callPartOf(result.messages, "c1").attachments;
+    expect(records).toHaveLength(2);
+    // THE POINT. The failed put took index 0 — it had to, because a body may
+    // fire its puts concurrently and has to number them by the order it asked
+    // rather than by the order the network answered — so the successful one goes
+    // at index 1. Leaving index 0 unwritten makes that a hole, and a hole is
+    // `null` the moment it goes through JSON: `[null, { attachment }]` in the
+    // store, on the wire, and in the hands of anything walking the memo.
+    expect(records[0]).toEqual({ failed: true });
+    expect(records[1].attachment).toMatchObject({ name: "chart.png" });
+    const onTheWire = JSON.parse(JSON.stringify(records));
+    expect(onTheWire.some((record: unknown) => record === null)).toBe(false);
+    expect(onTheWire[0]).toEqual({ failed: true });
+  });
+
+  test("a slot a failed put took is re-attempted on the replay, not replayed", async () => {
+    const { store, storage, scoped } = scopedFor();
+    const sub = askingAgent("researcher", "which colour?");
+    const tool = makerTool("render", async (ctx) => {
+      let refused = false;
+      try {
+        await ctx.attachments.put(png("first"), { name: "first.png" });
+      } catch {
+        refused = true;
+      }
+      const second = await ctx.attachments.put(png("second"), { name: "second.png" });
+      await ctx.runAgent(sub.agent, { prompt: "pick" });
+      return { refused, id: second.id };
+    });
+
+    // One write fails, the way a bucket refuses one request and takes the next.
+    storage.failNext = true;
+    const firstProvider = fakeProvider([toolCall("c1", "render", {}), finish()]);
+    const lead = Agent.create({ name: "lead", provider: firstProvider, tools: [tool] });
+    const opening = lead.stream({
+      messages: [],
+      req,
+      turn: { text: "go" },
+      attachments: scoped,
+    });
+    const opened = collect(opening);
+    const first = await opening.result();
+    await opened.done;
+    const awaiting = opened.events.find((event) => event.type === "awaiting-input") as any;
+    const parked = callPartOf(first.messages, "c1").attachments;
+    expect(parked[0]).toEqual({ failed: true });
+    expect(store.size).toBe(1);
+
+    const provider = fakeProvider([finish()]);
+    const agent = Agent.create({ name: "lead", provider, tools: [tool] });
+    const result = await agent
+      .stream({
+        messages: first.messages,
+        req,
+        attachments: scoped,
+        turn: {
+          toolResults: [
+            {
+              toolCallId: "s1",
+              signature: awaiting.pending[0].signature,
+              path: awaiting.pending[0].path,
+              output: { answer: "blue" },
+            },
+          ],
+        },
+      })
+      .result();
+
+    const records = callPartOf(result.messages, "c1").attachments;
+    // A `failed` slot is not a memo — there is nothing recorded to hand back,
+    // and the failure may have been the network's rather than the tool's — so
+    // the replay does that work and fills the slot in. The slot that DID record
+    // is still replayed, under the id the model was already told.
+    expect(records[0].attachment).toMatchObject({ name: "first.png" });
+    expect(records[1].attachment.id).toBe(parked[1].attachment.id);
+    expect(store.size).toBe(2);
   });
 });
 
@@ -2985,6 +3094,101 @@ describe("a file a tool asks the model to look at", () => {
     const second = filePartsOf(provider.calls[1].messages);
     expect(second.map((part) => part.fileId).sort()).toEqual(["file_1", "user_upload_1"]);
   });
+
+  test("reaches `onMessage` in the order the transcript has it", async () => {
+    const { scoped } = scopedFor();
+    const reported: AgentMessage[] = [];
+    const tool = makerTool("render", async (ctx) => {
+      const attachment = await ctx.attachments.put(png(), { name: "chart.png", showModel: true });
+      return { attachmentId: attachment.id };
+    });
+    const provider = fakeProvider(
+      [toolCall("c1", "render", {}), finish()],
+      [{ type: "text-delta", delta: "looks good" }, finish()],
+    );
+    const agent = Agent.create({ name: "designer", provider, tools: [tool] });
+    const result = await agent
+      .stream({
+        messages: [],
+        req,
+        attachments: scoped,
+        onMessage: (message) => {
+          reported.push(message);
+        },
+      })
+      .result();
+
+    // The tool settles inside the step, so the injected message exists before
+    // the assistant message that called the tool is finalized. Reporting it
+    // there — the obvious place, right after it is emitted — calls the hook in
+    // an order the transcript never had: `onMessage` is the intended
+    // persistence point for an app with no `store`, and an append-only table
+    // ordered by a serial id would read the thread back with the file above the
+    // assistant turn that produced it, while `result.messages`, `history` and
+    // the stream all put it below.
+    expect(reported.map((message) => message.id)).toEqual(
+      result.messages.map((message) => message.id),
+    );
+    expect(result.messages.map((message) => message.role)).toEqual([
+      "assistant",
+      "user",
+      "assistant",
+    ]);
+  });
+
+  test("is not shown at all when the run was stopped before the tool finished", async () => {
+    const { store, scoped } = scopedFor();
+    const reported: AgentMessage[] = [];
+    const stored = deferred();
+    const release = deferred();
+    const tool = makerTool("render", async (ctx) => {
+      const attachment = await ctx.attachments.put(png(), { name: "chart.png", showModel: true });
+      stored.resolve();
+      await release.promise;
+      return { attachmentId: attachment.id };
+    });
+    const provider = fakeProvider([toolCall("c1", "render", {}), finish()], [finish()]);
+    const agent = Agent.create({ name: "designer", provider, tools: [tool] });
+    const run = agent.stream({
+      messages: [],
+      req,
+      attachments: scoped,
+      onMessage: (message) => {
+        reported.push(message);
+      },
+    });
+    const { events, done } = collect(run);
+
+    await stored.promise;
+    run.stop({ reason: "user pressed stop" });
+    const result = await run.result();
+    // The tool finishes AFTER the run has: `raceAbort` returns the moment the
+    // signal fires, so the run finalizes, ends, and only then does the tool's
+    // own continuation run. A macrotask is long enough for all of it.
+    release.resolve();
+    await done;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // The work really did happen, so this is not passing by never getting there.
+    expect(provider.uploads).toHaveLength(1);
+    expect(store.size).toBe(1);
+    expect(result.finishReason).toBe("aborted");
+
+    // And the image is nowhere: not on the stream, not in `result.messages`, not
+    // through `onMessage`. The one that mattered is the last of the three —
+    // `emit` is a no-op once the run has ended, so a version that persists here
+    // is a version where a client that reloads the thread sees an image a client
+    // that watched it live never saw, silently, only ever on a cancelled run.
+    expect(events.some((event) => event.type === "message")).toBe(false);
+    expect(filePartsOf(result.messages)).toHaveLength(0);
+    expect(filePartsOf(reported)).toHaveLength(0);
+
+    // Nothing is lost but the showing: the record is on the tool call, so the
+    // bytes are still resolvable by a tool that runs again.
+    const record = callPartOf(result.messages, "c1").attachments[0];
+    expect(record.shown).toMatchObject({ fileId: "file_1" });
+    expect(await (await scoped.file(record.attachment.id)).text()).toBe("png-bytes");
+  });
 });
 
 describe("a tool that shows a file and then escalates", () => {
@@ -3116,5 +3320,61 @@ describe("a tool that shows a file and then escalates", () => {
     expect(failed.error.message).toContain("image/png");
     expect(failed.error.message).toContain("text/csv");
     expect(provider.uploads).toHaveLength(0);
+  });
+});
+
+describe("a file shown inside a sub-run", () => {
+  test("is the sub-agent's to look at, and reaches the parent only as a nested event", async () => {
+    const { store, scoped } = scopedFor();
+    const render = makerTool("render", async (ctx) => {
+      const attachment = await ctx.attachments.put(png(), { name: "chart.png", showModel: true });
+      return { attachmentId: attachment.id };
+    });
+    const subProvider = fakeProvider(
+      [toolCall("s1", "render", {}), finish()],
+      [{ type: "text-delta", delta: "blue suits it" }, finish()],
+    );
+    const sub = Agent.create({ name: "designer", provider: subProvider, tools: [render] });
+    const delegate = nestingTool("delegate", async (ctx) => {
+      const run = await ctx.runAgent(sub, { prompt: "make a chart" });
+      return { said: textOf(run.messages[run.messages.length - 1]) };
+    });
+    const provider = fakeProvider(
+      [toolCall("c1", "delegate", {}), finish()],
+      [{ type: "text-delta", delta: "done" }, finish()],
+    );
+    const agent = Agent.create({ name: "lead", provider, tools: [delegate] });
+    const run = agent.stream({ messages: [], req, turn: { text: "go" }, attachments: scoped });
+    const { events, done } = collect(run);
+    const result = await run.result();
+    await done;
+
+    // The scope came down unchanged, so the sub-agent's tool stores under the
+    // caller the controller resolved — not under the sub-agent, which has no
+    // request of its own to be resolved from.
+    expect(store.size).toBe(1);
+    expect(subProvider.uploads).toHaveLength(1);
+
+    // The image is in the sub-run's transcript, which is where its own next step
+    // reads it from, and which the tool call carries into the next turn.
+    const nested = callPartOf(result.messages, "c1").nested[0];
+    expect(filePartsOf(nested.messages)).toHaveLength(1);
+    const shownTo = subProvider.calls[1].messages;
+    expect(filePartsOf(shownTo)).toHaveLength(1);
+
+    // And NOT in the parent's. A sub-run's messages never join the caller's
+    // history, so the lead pays for none of this — which is most of the reason
+    // to delegate an image loop in the first place.
+    expect(filePartsOf(result.messages)).toHaveLength(0);
+    expect(filePartsOf(provider.calls[1].messages)).toHaveLength(0);
+
+    // On the parent's stream it arrives wrapped, like every other event a
+    // sub-run produces: one `message` event, under the sub-run's id, so a client
+    // rendering the tree shows it in the branch that made it.
+    const wrapped = events.filter(
+      (event) => event.type === "nested-event" && (event as any).event.type === "message",
+    ) as any[];
+    expect(wrapped).toHaveLength(1);
+    expect(wrapped[0].event.message.content[0]).toMatchObject({ type: "file", fileId: "file_1" });
   });
 });

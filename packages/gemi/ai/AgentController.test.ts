@@ -1715,7 +1715,14 @@ describe("a file a tool showed the model, seen through the route", () => {
     // before the injection asks for.
     const replayed = await eventsOf(await controller.attach(jsonRequest({ threadId: "t1", from: 1 })));
 
-    // Frame for frame, in the same order.
+    // Frame for frame, in the same order. This half of the test is weaker than
+    // it looks and it is worth saying so: `attach` replays the run's own frame
+    // buffer, which is the object the live SSE serialized, so within ONE run the
+    // two cannot disagree about anything the run did not re-derive at
+    // serialization time. What it does pin is that nothing on this path is
+    // re-derived — no frame renumbered, none dropped for a reattaching reader,
+    // and the injected message carried whole rather than reassembled from the
+    // store.
     expect(replayed.map((event) => event.type)).toEqual(live.map((event) => event.type));
 
     // And equal event by event, with ONE carve-out that is not this change's:
@@ -1732,8 +1739,7 @@ describe("a file a tool showed the model, seen through the route", () => {
 
     // Which leaves the assertion this test exists for: a message nobody typed,
     // byte for byte the same to a client that watched and a client that came
-    // back. Minted at emit time — a fresh uuid, `new Date()` for `createdAt` —
-    // it would pass every other assertion here and fail exactly this one.
+    // back.
     const liveMessages = live.filter((event) => event.type === "message");
     expect(replayed.filter((event) => event.type === "message")).toEqual(liveMessages);
 
@@ -1767,5 +1773,26 @@ describe("a file a tool showed the model, seen through the route", () => {
     const attachmentId = (injected[0].message.content[0] as any).attachmentId;
     const file = await controller.handleFor("org:acme").file(attachmentId);
     expect(await file.text()).toBe("PNGDATA");
+
+    // And the memo on the tool call names THIS message rather than describing
+    // one. That is what makes the id an identity and not a decoration: the id
+    // and the timestamp are minted when `put` returns and written onto the
+    // record, so the next turn — which re-enters the tool from the top and
+    // replays the `put` — reproduces this message instead of a twin the client
+    // would render as a second copy of the same picture. Mint them in
+    // `queueShown` instead and the record and the stream stop agreeing, which
+    // is what fails here. (That the replay itself honours the record is pinned
+    // where a replay actually happens, in `Agent.test.ts`; the live-versus-
+    // replay comparison above cannot pin it, because both sides are serialized
+    // from one run's single frame buffer.)
+    const memo = stored!
+      .flatMap((message) => message.content)
+      .find((part: any) => part.type === "tool-call" && part.toolCallId === "c1") as any;
+    expect(memo.attachments).toHaveLength(1);
+    expect(memo.attachments[0].shown).toEqual({
+      fileId: "file_1",
+      messageId: injected[0].message.id,
+      createdAt: injected[0].message.createdAt,
+    });
   });
 });
