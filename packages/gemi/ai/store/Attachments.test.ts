@@ -235,3 +235,34 @@ describe("ScopedAttachments", () => {
     );
   });
 });
+
+/**
+ * The store's OWN scope clause, asserted without a `ScopedAttachments` in front
+ * of it.
+ *
+ * Every test above goes through the handle, and the handle re-checks
+ * `record.scopeKey` — so all of them stay green with the store's comparison
+ * deleted, and the store's comment says it is the reference implementation whose
+ * check every real store has to copy. A claim like that has to be pinned
+ * somewhere the second gate cannot answer for it. `AttachmentStore` is also
+ * public: an app is entitled to call `controller.attachments.find(scope, id)`
+ * itself, and there is no handle in that path at all.
+ */
+describe("MemoryAttachmentStore.find", () => {
+  test("answers null for an id filed under another scope, with the row present", async () => {
+    const store = new MemoryAttachmentStore();
+    const storage = new FakeStorage();
+    const theirs = await seed(store, storage, initech, {
+      id: "gemi_att_secret",
+      body: "initech payroll",
+    });
+
+    // The row is real and the store hands it to the scope that owns it.
+    expect(await store.find(initech, theirs.id)).toEqual(theirs);
+    // `SELECT * FROM attachments WHERE id = ?` would return it here.
+    expect(await store.find(acme, theirs.id)).toBeNull();
+    // Same answer as an id nobody ever minted, which is the contract callers
+    // depend on for the error not to be an oracle.
+    expect(await store.find(acme, "gemi_att_never")).toBeNull();
+  });
+});

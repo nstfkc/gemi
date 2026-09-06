@@ -61,7 +61,18 @@ import type {
  */
 export type AttachmentScope = { readonly key: string };
 
-/** Where an upload's bytes were sent. See `AgentController.attachmentDestination`. */
+/**
+ * Where an upload's bytes were sent. See `AgentController.attachmentDestination`.
+ *
+ * `"provider"` DESCRIBES A RECORD `upload` NEVER WRITES. A file that goes to the
+ * provider alone leaves gemi holding nothing to resolve — `read` and `file`
+ * would throw for it — so the route answers `fileId` and mints no attachment id
+ * at all, and there is no id for anyone to look up its name with. The value is
+ * on this type because a store *can* hold such a row (a custom `AttachmentStore`
+ * filing provider uploads for its own bookkeeping is a reasonable thing to
+ * write, and `ScopedAttachments` handles it correctly), not because the shipped
+ * route produces one.
+ */
 export type AttachmentDestination = "both" | "provider" | "storage";
 
 /**
@@ -79,8 +90,10 @@ export type Attachment = {
    *
    * Prefixed `gemi_att_` so that the mistake everyone makes once — a gemi
    * attachment id put into `FilePart.fileId`, which is a *provider* id — is
-   * caught by a sentence to read rather than by a 400 from the vendor about a
-   * file it has never heard of. `toResponsesInput` checks for the prefix.
+   * caught by a sentence to read rather than by whatever the vendor says about
+   * a file it has never heard of, mid-conversation. `toResponsesInput` checks
+   * for the prefix; the vendor's own answer to a bogus `file_id` has not been
+   * measured, and the guard does not depend on it.
    */
   id: string;
   /**
@@ -255,7 +268,20 @@ export class ScopedAttachments {
    * own.
    */
   async read(id: string): Promise<ReadResult> {
-    const record = await this.get(id);
+    return await this.readRecord(id, await this.get(id));
+  }
+
+  /**
+   * The bytes for a record already resolved, so `file()` does one lookup rather
+   * than two. `store.find` is a `SELECT` in any real store, and the second one
+   * was not a second check of anything — same scope, same id, same row.
+   *
+   * It still takes the id the *caller* asked for, rather than reading
+   * `record.id`, so the error stays a function of the caller's own input: an app
+   * store that answers with the wrong row must not get to choose which id
+   * appears in a message the model may read.
+   */
+  private async readRecord(id: string, record: Attachment): Promise<ReadResult> {
     if (!record.objectName) {
       throw new AttachmentNotFoundError(id);
     }
@@ -273,7 +299,7 @@ export class ScopedAttachments {
    */
   async file(id: string): Promise<File> {
     const record = await this.get(id);
-    const result = await this.read(id);
+    const result = await this.readRecord(id, record);
     const body = result.body;
     const blob =
       body instanceof Blob ? body : body ? await new Response(body).blob() : new Blob([]);

@@ -157,10 +157,21 @@ export type AgentHookContext = {
  * holding the file.
  *
  * Both are optional, and `destination` says which to expect: `provider` has no
- * `attachmentId` (nothing was kept, or there was no scope to keep it under),
- * `storage` has no `fileId` (the provider never saw it, so there is nothing for
- * a `FilePart` to point at), `both` has both. A client that finds an id missing
- * can read `destination` and know why, rather than guess.
+ * `attachmentId` (nothing was kept), `storage` has no `fileId` (the provider
+ * never saw it, so there is nothing for a `FilePart` to point at), `both` has
+ * both.
+ *
+ * `destination` ALONE IS NOT ENOUGH TO SAY WHY AN ID IS MISSING, which is why
+ * `downgraded` is here. An upload that reached a route with no authentication
+ * and no `threadId` answers `destination: "provider"` — truthfully, that is
+ * where the bytes went — and so does a controller that deliberately returns
+ * `"provider"` from `attachmentDestination`. Those two answers were byte
+ * identical, and they are the opposite situations: one is the app's policy
+ * working, the other is the app's policy silently not applying because the
+ * server could not tell who was calling. The server logs the second one once
+ * per process; the client saw nothing at all. `downgraded` is the difference,
+ * carried in the answer so a client — or an integration test — can assert on
+ * it.
  */
 export type UploadResult = {
   /** The provider's id, for a `FilePart`. Absent when the file never went there. */
@@ -171,6 +182,17 @@ export type UploadResult = {
   mimeType: string;
   size: number;
   destination: AttachmentDestination;
+  /**
+   * Set only when the app's policy asked for a copy and the request had no
+   * subject to file it under, so the upload fell back to the provider alone.
+   * Absent when `destination` is what the app actually chose.
+   *
+   * A string rather than `true` because there is exactly one reason today and
+   * there will be more (a store that refused the write, say), and a boolean
+   * that later needs a reason beside it is two fields where one would have
+   * done.
+   */
+  downgraded?: "no_scope";
 };
 
 /**
@@ -638,6 +660,25 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
    * tenants returns `{ key: \`org:${orgId}\` }` and has that. What the default
    * must never be is broader than a user, and it is not.
    *
+   * WHATEVER THIS READS MUST BE PRESENT ON EVERY AGENT ROUTE, and the default
+   * reads `req.ctx().user`, which is present only where authentication
+   * middleware ran. `agent()` mounts four routes and `.middleware()` guards
+   * them individually, so `middleware({ stream: "auth" })` — the example in
+   * `ApiRouter.agent`'s own doc — leaves `POST /chat/files` unauthenticated.
+   * The upload then files the record under `thread:<id>` (or nothing at all)
+   * while the run that follows, on the guarded route, resolves under
+   * `user:<id>`, and every id minted on upload is a miss for the rest of the
+   * conversation. It fails as `AttachmentNotFoundError`, worded identically to
+   * an id the model invented, which is the point of that error and is also why
+   * this particular misconfiguration is invisible. Guard `upload` and `stream`
+   * together, or derive the key from something both of them have.
+   *
+   * gemi does not detect the skew for you, and the reason is the module's whole
+   * premise: noticing that an id exists under a *different* scope requires
+   * looking it up without one, and an unscoped read is the thing that must not
+   * exist here — not even behind a `console.warn`. So the answer is the
+   * documentation you are reading and the identical error, not a probe.
+   *
    * The key is opaque and compared with `===`. It is never sent to the client
    * and never shown to the model.
    */
@@ -685,7 +726,10 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
    * app that never asks for an attachment id sees no difference except a second
    * copy it owns.
    *
-   * The client may narrow this per file — see `upload` — and may not widen it.
+   * A client may ask, per file, for `"storage"` under a `"both"` policy — the
+   * one direction that only ever removes the vendor. It may not ask for
+   * anything else, including `"provider"`, which would let a form field decide
+   * that the app does not keep its own copy. See `narrowDestination`.
    */
   protected attachmentDestination(
     file: File,
@@ -723,16 +767,19 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
    * provider's id for the file, the thing a `FilePart` carries, unchanged. It
    * has to stay, because it is what makes vision work and what
    * `useChat.uploadFile` already reads; `attachmentId` is added beside it rather
-   * than in place of it. The two are not interchangeable and swapping them is a
-   * 400 from the vendor — `toResponsesInput` rejects a `gemi_att_` prefix in
-   * `FilePart.fileId` with a sentence saying so.
+   * than in place of it. The two are not interchangeable, and swapping them
+   * would reach the vendor as a file id it has never issued — so
+   * `toResponsesInput` rejects a `gemi_att_` prefix in `FilePart.fileId` with a
+   * sentence saying so, rather than leaving it to whatever the vendor answers
+   * (not measured).
    *
    * `fileId` is absent exactly when the file did not go to the provider, which
    * only happens when the app or the client asked for that. `attachmentId` is
    * absent when there was no scope to file the record under — see
-   * `attachmentScope`, and note that the answer says which by carrying
-   * `destination`, so a client is never left guessing why an id it expected is
-   * missing.
+   * `attachmentScope` — and the answer then carries `downgraded: "no_scope"`,
+   * which is the only thing separating that case from a controller that chose
+   * `"provider"` on purpose. Both answer `destination: "provider"`, because both
+   * are true about where the bytes went.
    *
    * ORDER: storage first, then the provider. If the second one fails the request
    * fails either way, so the only question is where the orphan is left, and an
@@ -762,7 +809,12 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
 
     const scope = await this.attachmentScope(req, threadId);
 
-    if (destination !== "provider" && !scope) {
+    // The app's policy wanted a copy of these bytes and the request has no
+    // subject to file them under. Recorded rather than merely warned about,
+    // because the answer has to be able to tell the client that what it is
+    // getting is not the policy — see `UploadResult.downgraded`.
+    const downgraded = destination !== "provider" && !scope;
+    if (downgraded) {
       if (destination === "storage") {
         // Bytes were asked to be kept and there is nobody to keep them for.
         // Storing them anyway files them under a scope every caller shares, and
@@ -777,15 +829,27 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
       // existed. Downgrading rather than throwing is what keeps an
       // unauthenticated chat working across the upgrade — but a downgrade nobody
       // is told about is the failure mode this file keeps arguing against, so it
-      // is warned once per process and declared in the answer's `destination`.
+      // is warned once per process on the server and marked `downgraded` in the
+      // answer, so the client can tell this apart from a deliberate
+      // provider-only policy.
       warnUnscopedUploadOnce();
     }
 
     if (destination === "provider" || !scope) {
       // Identical to the pre-attachment behaviour, down to the answer's
-      // `fileId`.
+      // `fileId` — plus `downgraded` when this path was not the app's choice.
       const fileId = await this.agent.provider.upload(file as File);
-      return { fileId, name, mimeType, size: file.size, destination: "provider" };
+      const answer: UploadResult = {
+        fileId,
+        name,
+        mimeType,
+        size: file.size,
+        destination: "provider",
+      };
+      if (downgraded) {
+        answer.downgraded = "no_scope";
+      }
+      return answer;
     }
 
     const attachmentId = newAttachmentId();
@@ -1182,15 +1246,29 @@ function jsonResponse(status: number, error: Record<string, unknown>): Response 
 /**
  * Reads the client's `destination` field and applies it to the app's policy.
  *
- * A HINT MAY ONLY NARROW, NEVER WIDEN, and the asymmetry is the whole reason
- * a hint is allowed at all. Narrowing removes a destination: it keeps bytes off
- * a vendor the app was willing to send them to, which is a thing the client is
+ * THE ONLY THING A CLIENT MAY ASK FOR IS "DO NOT SEND THIS TO THE VENDOR", and
+ * that is the entire permitted vocabulary: a `storage` hint under a `both`
+ * policy, or a hint that agrees with the policy and changes nothing. Everything
+ * else throws.
+ *
+ * The rule here used to be "a hint may narrow, never widen", counting
+ * destinations, and counting is what made it wrong in one direction.
+ * `both → provider` is fewer destinations and reads as narrowing, but what it
+ * removes is *gemi's own copy*, while the third party still gets the file. That
+ * is not a client declining exposure, it is a client overriding the app's
+ * retention decision from a field in a multipart body: an app that keeps every
+ * upload because a tool has to forward it — or because an auditor asked — loses
+ * the copy, mints no `attachmentId`, records nothing, and gets no warning
+ * either, since the bytes did reach the provider exactly as policy said. The
+ * two directions are not alike, because only one of them reduces who ends up
+ * holding the file.
+ *
+ * What is left is defensible on its own terms: `storage` keeps bytes off a
+ * vendor the app was willing to send them to, which is a thing the client is
  * entitled to ask for and which cannot hurt anyone if the client is lying. A UI
  * that knows this CSV exists to be imported and will never be read by the model
- * is the case that makes this worth having. Widening would add one: it would
- * send a user's file to a third party on the say-so of a field in a multipart
- * body, which is a data-export decision made by the least trusted party in the
- * exchange. So the policy hook is the ceiling and the hint is a floor under it.
+ * is the case that makes a hint worth having at all. The policy hook is the
+ * ceiling; the hint may only take the vendor out from under it.
  *
  * A hint the policy does not permit throws rather than being ignored. Ignoring
  * it is the shape of this bug that never gets found: the client believes it kept
@@ -1208,11 +1286,16 @@ function narrowDestination(
       `Unknown attachment destination "${hint}". Expected "both", "provider" or "storage".`,
     );
   }
-  if (policy === "both" || hint === policy) {
+  if (hint === policy || (policy === "both" && hint === "storage")) {
     return hint;
   }
+  if (policy === "both" && hint === "provider") {
+    throw new Error(
+      'This upload asked for the "provider" destination under a "both" policy. A client may ask for "storage", which keeps a file away from the model provider, but it may not ask the server to stop keeping its own copy while the vendor still gets the file — that is the app\'s retention decision. Change `attachmentDestination()` if this file should not be kept.',
+    );
+  }
   throw new Error(
-    `This upload asked for the "${hint}" destination, but the server's policy for it is "${policy}", and a client hint may only narrow. Change \`attachmentDestination()\` if the file really should go there.`,
+    `This upload asked for the "${hint}" destination, but the server's policy for it is "${policy}", and a client hint may only ask for "storage" under a "both" policy. Change \`attachmentDestination()\` if the file really should go there.`,
   );
 }
 

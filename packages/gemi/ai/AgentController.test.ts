@@ -1087,8 +1087,37 @@ describe("AgentController.upload", () => {
     expect(result.fileId).toBe("file_123");
     expect(result.attachmentId).toBeUndefined();
     expect(result.destination).toBe("provider");
+    // ...but it says so. The policy here was `both`, so this answer is not the
+    // app's choice, and without this field it is indistinguishable from one.
+    expect(result.downgraded).toBe("no_scope");
     expect(uploads).toHaveLength(1);
     expect((controller.attachmentStorage as FakeStorage).objects.size).toBe(0);
+  });
+
+  /**
+   * The pair to the test above, and the reason `downgraded` exists at all: two
+   * situations that were byte-identical in the answer and are opposites. Here
+   * the app asked for provider-only and got it; there, the app asked to keep the
+   * file and the server could not tell whose it was.
+   */
+  test("a deliberate provider-only policy is not marked as a downgrade", async () => {
+    const run = new StubAgentRun("run_v11");
+    const { agent, uploads } = stubAgent(run);
+    class Chat extends ScopedChat(agent) {
+      attachmentDestination() {
+        return "provider" as const;
+      }
+    }
+
+    const controller = new Chat();
+    const result = await controller.upload(uploadRequest(file("chart.png", "image/png", "PNG")));
+
+    expect(result.fileId).toBe("file_123");
+    expect(result.attachmentId).toBeUndefined();
+    expect(result.destination).toBe("provider");
+    expect(result.downgraded).toBeUndefined();
+    expect(uploads).toHaveLength(1);
+    expect(controller.attachmentStorage.objects.size).toBe(0);
   });
 
   test("with a scope it keeps the bytes as well and mints an attachment id", async () => {
@@ -1256,7 +1285,55 @@ describe("AgentController.upload", () => {
     form.set("file", file("rows.csv", "text/csv", "a,b"));
     form.set("destination", "both");
 
-    await expect(new Chat().upload(uploadRequest(undefined, form))).rejects.toThrow(/only narrow/);
+    await expect(new Chat().upload(uploadRequest(undefined, form))).rejects.toThrow(
+      /server's policy for it is "storage"/,
+    );
+    expect(uploads).toHaveLength(0);
+  });
+
+  /**
+   * THE HINT THE OLD RULE LET THROUGH. `both → provider` is fewer destinations,
+   * so a rule that counts them calls it narrowing — but what it removes is
+   * gemi's own copy while the vendor still gets the file. An unauthenticated
+   * form field does not get to overrule the app's retention decision, and
+   * because the bytes do reach the provider exactly as policy said, nothing
+   * would have warned about it either.
+   */
+  test("a client may not use the hint to stop the server keeping its own copy", async () => {
+    const run = new StubAgentRun("run_v12");
+    const { agent, uploads } = stubAgent(run);
+    const controller = new (class extends ScopedChat(agent) {})();
+
+    const form = new FormData();
+    form.set("file", file("contract.pdf", "application/pdf", "PDF"));
+    form.set("destination", "provider");
+
+    await expect(controller.upload(uploadRequest(undefined, form))).rejects.toThrow(
+      /may not ask the server to stop keeping its own copy|retention decision/,
+    );
+    // And it is refused before either copy is made, so a rejected hint is not a
+    // half-done upload.
+    expect(uploads).toHaveLength(0);
+    expect(controller.attachmentStorage.objects.size).toBe(0);
+  });
+
+  /**
+   * The order the doc argues for: storage first, then the provider, so that a
+   * failure leaves an orphan in our own bucket rather than at a vendor whose
+   * retention policy is not ours. Swapping the two `await`s passes every other
+   * test in this file.
+   */
+  test("the vendor is never sent a file we could not keep ourselves", async () => {
+    const run = new StubAgentRun("run_v13");
+    const { agent, uploads } = stubAgent(run);
+    const controller = new (class extends ScopedChat(agent) {})();
+    controller.attachmentStorage.put = async () => {
+      throw new Error("bucket is on fire");
+    };
+
+    await expect(
+      controller.upload(uploadRequest(file("rows.csv", "text/csv", "a,b"))),
+    ).rejects.toThrow(/bucket is on fire/);
     expect(uploads).toHaveLength(0);
   });
 
