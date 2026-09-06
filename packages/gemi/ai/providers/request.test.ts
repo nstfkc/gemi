@@ -75,10 +75,9 @@ describe("toResponsesInput()", () => {
 
   /**
    * There are two ids now — the provider's `fileId` and gemi's `attachmentId` —
-   * and this is the field that only ever takes the first. Left alone, the wrong
-   * one is a 400 from the vendor mid-conversation about a file it has never
-   * heard of; it is also what a storage-only upload looks like when a `FilePart`
-   * is built for it anyway, which has no provider id at all.
+   * and this is the field that only ever takes the first. Left alone the wrong
+   * one goes to the vendor as a file it has never heard of, mid-conversation
+   * (which error, exactly, is not measured — see the guard's comment).
    */
   test("a gemi attachment id in FilePart.fileId is caught here, not by the vendor", () => {
     expect(() =>
@@ -87,6 +86,21 @@ describe("toResponsesInput()", () => {
         FULL,
       ),
     ).toThrow(/attachment id/);
+  });
+
+  /**
+   * The other half of the same guard, and the one a prefix check silently misses:
+   * a storage-only upload has no provider id at all, so a client that spreads the
+   * upload answer into a `FilePart` builds `fileId: undefined`. Without this,
+   * `file_id: undefined` is what reaches the vendor.
+   */
+  test("an empty FilePart.fileId is caught too, which is what a storage-only upload builds", () => {
+    expect(() =>
+      toResponsesInput(
+        [message({ role: "user", content: [{ type: "file", fileId: undefined as any }] })],
+        FULL,
+      ),
+    ).toThrow(/FilePart.fileId is empty/);
   });
 
   test("a file is dropped when the model cannot read one", () => {
