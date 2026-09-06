@@ -937,3 +937,91 @@ function battery(target: LiveTarget) {
 }
 
 for (const target of TARGETS) battery(target);
+
+// --- the vision claim -----------------------------------------------------
+//
+// OpenAI only, and gated the same way the battery is — the announcement at the
+// top of this file is what speaks for a skip, here as there.
+//
+// WHY THIS ONE IS WORTH A NETWORK CALL. `request.test.ts` proves gemi emits
+// `input_image` for an image part, and that is the whole of what an offline
+// test can prove: it asserts against the shape this repo believes in. The claim
+// underneath — that an attached photo is something the model can actually SEE,
+// which every "ask it about the uploaded image" feature rests on — is only
+// visible from the other end of the socket. It was measured once (see
+// `providers/request.ts`, above `IMAGE_EXTENSIONS`) and this is where it stays
+// measured, because the way it regresses is silent: the answer to a change that
+// routed images back through `input_file` is a 400 in production, not a red
+// unit test.
+//
+// The image is inline rather than a fixture file so that what is asserted and
+// what is sent are one thing. It is the same 183-byte PNG the finding was
+// measured with: 64x64, four solid quadrants — red top-left, green top-right,
+// blue bottom-left, yellow bottom-right.
+const QUADRANTS_PNG_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAfklEQVR4nO3YQQ0AQAgDwfpXdkrO" +
+  "Bmjg0d8kGCBQaDeTVCuvXBowAStExK6QM+qR+cSsBDPHjbLTAo1EJlIK9agErAJsIXPQIriLTp9l" +
+  "0Abs81MtDZiAFSJiV8gZ9ch8YlaCmeNG2WmBRiITKYV6VAJWAbaQOWgR3EWnc5XBAmVKrQ+f7k5t" +
+  "AAAAAElFTkSuQmCC";
+
+(openaiConfigured ? describe : describe.skip)(`live openai — ${LIVE_MODEL} — attachments`, () => {
+  test(
+    "an uploaded image is vision input, not an unreadable document",
+    async () => {
+      const provider = TARGETS[0]!.provider();
+      const bytes = Uint8Array.from(atob(QUADRANTS_PNG_BASE64), (c) => c.charCodeAt(0));
+      const file = new File([bytes], "quadrants.png", { type: "image/png" });
+      const fileId = await provider.upload(file);
+
+      const agent = Agent.create({
+        name: "looker",
+        instructions:
+          "Answer with colour words only, lowercase, space separated. If you cannot see the " +
+          "attached image, answer exactly: cannot see.",
+        provider,
+      });
+      const run = agent.stream({
+        messages: [],
+        req,
+        turn: {
+          text: "The attachment is split into four equal quadrants, each one solid colour. Name all four colours.",
+          files: [{ fileId, name: file.name, mimeType: file.type }],
+        },
+      });
+      // Drained, not collected: every claim below is about the answer and the
+      // request that carried the image, not about the shape of the stream.
+      for await (const _event of run);
+      const result = await run.result();
+      expect(result.finishReason).toBe("stop");
+
+      // The set, not the order: gpt-5.4 named all four colours of this image
+      // correctly and put them in the wrong corners when asked for four in one
+      // breath, while answering "which quadrant is red" correctly. That is the
+      // model reading a 64-pixel square, not the transport, and pinning the
+      // order here would make this test about the model's spatial reasoning
+      // instead of about whether the bytes arrived as an image at all. Four
+      // specific colours is not something a model that saw nothing produces.
+      const answer = textOf(lastOf(result.messages)).toLowerCase();
+      expect(answer).not.toContain("cannot see");
+      for (const colour of ["red", "green", "blue", "yellow"]) {
+        expect(answer).toContain(colour);
+      }
+
+      // And the request that carried it: the same file part, through the same
+      // builder, as the image block. Asserted from the recorded params so a
+      // future change that sent `input_file` again fails here with the reason
+      // rather than only wherever the API's 400 surfaces.
+      expect(toResponsesInput(provider.requests[0]!.messages, provider.capabilities)).toEqual([
+        {
+          type: "message",
+          role: "user",
+          content: [
+            { type: "input_text", text: expect.any(String) },
+            { type: "input_image", file_id: fileId },
+          ],
+        },
+      ]);
+    },
+    TIMEOUT,
+  );
+});
