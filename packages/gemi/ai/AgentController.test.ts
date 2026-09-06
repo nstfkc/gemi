@@ -1639,3 +1639,106 @@ describe("the request body", () => {
     run.finish();
   });
 });
+
+/**
+ * An injected message is one nobody typed, and that is what makes it dangerous.
+ *
+ * Every other message on the stream is either the client's own (so the client
+ * already has it and needs no event) or the assistant's (so it arrives as
+ * `message-start` / deltas / `message-end` like everything else). A file a tool
+ * showed the model is neither: it appears in the middle of an answer, authored
+ * by the server, and a client that is not told about it renders a conversation
+ * the server does not have. The failure is #470's shape — a live watcher and a
+ * reattached one holding different transcripts — and it is invisible to
+ * whichever of the two you happen to be looking at.
+ */
+describe("a file a tool showed the model, seen through the route", () => {
+  function designer() {
+    const render = AgentTool.create({
+      name: "render",
+      description: "Renders a chart",
+      inputSchema: s.object({}),
+      outputSchema: s.object({ attachmentId: s.string() }),
+      execute: async (_input, ctx) => {
+        const attachment = await ctx.attachments.put(new Blob(["PNGDATA"], { type: "image/png" }), {
+          name: "chart.png",
+          showModel: true,
+        });
+        return { attachmentId: attachment.id };
+      },
+    });
+    const provider = fakeProvider(
+      [{ type: "tool-call", toolCallId: "c1", name: "render", args: "{}" }, finish()],
+      [{ type: "text-delta", delta: "looks good" }, finish()],
+    );
+    return Agent.create({ name: "designer", provider, tools: [render] });
+  }
+
+  test("an /attach replay reproduces it identically to the live stream", async () => {
+    class Chat extends ScopedChat(designer()) {
+      store = new MemoryAgentStore({ clientOwnedIds: true });
+    }
+    const controller = new Chat();
+
+    const live = await eventsOf(
+      await controller.stream(jsonRequest({ threadId: "t1", text: "make me a chart" })),
+    );
+    await settle();
+    // The whole run from the first frame, which is what a client that dropped
+    // before the injection asks for.
+    const replayed = await eventsOf(await controller.attach(jsonRequest({ threadId: "t1", from: 1 })));
+
+    // Frame for frame, in the same order.
+    expect(replayed.map((event) => event.type)).toEqual(live.map((event) => event.type));
+
+    // And equal event by event, with ONE carve-out that is not this change's:
+    // the frame buffer holds the emitted event object, and a `tool-call` frame
+    // holds the live `ToolCallPart`, so anything written onto that part while
+    // the tool runs — `nested` since sub-agents existed, `attachments` now — is
+    // absent from the bytes a live reader got and present in the bytes a
+    // replay produces. It converges rather than diverging (the reducer merges a
+    // tool-call frame and keeps what it does not mention), so it is left alone
+    // here and written up in the handoff rather than fixed in passing.
+    const comparable = (events: AgentStreamEvent[]) =>
+      events.filter((event) => event.type !== "tool-call");
+    expect(comparable(replayed)).toEqual(comparable(live));
+
+    // Which leaves the assertion this test exists for: a message nobody typed,
+    // byte for byte the same to a client that watched and a client that came
+    // back. Minted at emit time — a fresh uuid, `new Date()` for `createdAt` —
+    // it would pass every other assertion here and fail exactly this one.
+    const liveMessages = live.filter((event) => event.type === "message");
+    expect(replayed.filter((event) => event.type === "message")).toEqual(liveMessages);
+
+    const injected = live.filter((event) => event.type === "message") as any[];
+    expect(injected).toHaveLength(1);
+    expect(injected[0].message.role).toBe("user");
+    expect(injected[0].message.content).toEqual([
+      {
+        type: "file",
+        fileId: "file_1",
+        name: "chart.png",
+        mimeType: "image/png",
+        attachmentId: expect.stringMatching(/^gemi_att_/),
+      },
+    ]);
+
+    // And after the result, not between the call and it.
+    const types = live.map((event) => event.type);
+    expect(types.indexOf("message")).toBeGreaterThan(types.indexOf("tool-result"));
+
+    // The store holds the same message the stream announced — the fourth place
+    // it has to appear, and the one a refresh reads instead of reattaching.
+    const stored = await controller.store.loadThread("t1");
+    const storedInjected = stored!.filter((message) =>
+      message.content.some((part: any) => part.type === "file" && part.attachmentId),
+    );
+    expect(storedInjected).toEqual([injected[0].message]);
+
+    // The bytes are still resolvable through the scope, under the id the model
+    // was never given but the tool was.
+    const attachmentId = (injected[0].message.content[0] as any).attachmentId;
+    const file = await controller.handleFor("org:acme").file(attachmentId);
+    expect(await file.text()).toBe("PNGDATA");
+  });
+});

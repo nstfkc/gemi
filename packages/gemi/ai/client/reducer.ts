@@ -231,10 +231,19 @@ function reduce<T extends ToolShapes, O>(
         // client accumulated — and the part is kept where it does not.
         const progress = event.part.progress ?? existing?.progress;
         const nested = event.part.nested ?? existing?.nested;
+        // `attachments` is kept for the same reason and with a sharper
+        // consequence: it is the memo `ctx.attachments.put` replays from, so a
+        // stateless client that dropped it posts back a history in which the
+        // tool call never attached anything — and a re-entered tool stores the
+        // bytes again, uploads them again, and shows the model a second copy of
+        // its own output. Losing `progress` costs a log; losing this costs
+        // money and confuses the model.
+        const attachments = event.part.attachments ?? existing?.attachments;
         const part = {
           ...event.part,
           ...(progress ? { progress } : {}),
           ...(nested ? { nested } : {}),
+          ...(attachments ? { attachments } : {}),
         };
         const content = message.content.slice();
         if (index === -1) content.push(part);
@@ -315,6 +324,33 @@ function reduce<T extends ToolShapes, O>(
         ...next,
         pending: next.pending.filter((call) => call.toolCallId !== event.part.toolCallId),
       };
+    }
+
+    case "message": {
+      // A whole message, replaced or appended by id.
+      //
+      // The wholesale replace the `tool-call` branch above argues against is
+      // right here, and the difference is authorship. A tool-call part is
+      // assembled from two sources — the model's half on this frame, the
+      // execution's half on events that name no message — so a client that
+      // replaces it drops what only it was holding. This message has one
+      // author, the server, and is complete before it is ever sent; there is no
+      // client-accumulated half to lose, so a second delivery is the same value
+      // written twice.
+      //
+      // Appended at the end when unknown, which is where it belongs: the run
+      // emits it the moment it appends it to its own history, so stream order
+      // and transcript order are the same order. Not routed through
+      // `withMessage`, which would create the message as `assistant` — the role
+      // is on the frame and it is `user`.
+      const index = state.messages.findIndex((message) => message.id === event.message.id);
+      const messages = state.messages.slice();
+      if (index === -1) messages.push(event.message);
+      else messages[index] = event.message;
+      const runMessageIds = state.runMessageIds.includes(event.message.id)
+        ? state.runMessageIds
+        : [...state.runMessageIds, event.message.id];
+      return { ...state, messages, runMessageIds };
     }
 
     case "awaiting-input":

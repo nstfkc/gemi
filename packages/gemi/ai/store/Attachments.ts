@@ -320,7 +320,10 @@ export class ScopedAttachments {
    * something the model can read. Issue #490 builds `ctx.attachments.put(blob)`
    * on exactly this.
    */
-  async put(blob: Blob, params: { name?: string; mimeType?: string } = {}): Promise<Attachment> {
+  async put(
+    blob: Blob,
+    params: { name?: string; mimeType?: string; fileId?: string } = {},
+  ): Promise<Attachment> {
     const id = newAttachmentId();
     const mimeType = params.mimeType ?? blob.type ?? "";
     const name = params.name ?? (blob instanceof File ? blob.name : id);
@@ -337,12 +340,130 @@ export class ScopedAttachments {
       mimeType: mimeType || "application/octet-stream",
       size: blob.size,
       createdAt: new Date().toISOString(),
-      destination: "storage",
+      // `both` when the caller has already sent the same bytes to the provider,
+      // which is what `ctx.attachments.put(blob, { showModel: true })` does
+      // before it gets here.
+      //
+      // The parameter exists rather than a second `markShown` call because the
+      // alternative is a row that is briefly, and then permanently if the second
+      // write fails, a lie: `destination` is the field that says where the bytes
+      // went, and a file sitting in the vendor's file list under a record that
+      // says `storage` is exactly the discrepancy the field was added to close.
+      // Nothing here uploads — the provider is the run's, not this module's —
+      // so the id is passed in rather than produced.
+      destination: params.fileId ? "both" : "storage",
+      ...(params.fileId ? { fileId: params.fileId } : {}),
     };
     await this.store.put(this.scope, record);
     return record;
   }
 }
+
+/**
+ * What a tool asks for when it parks bytes.
+ *
+ * `showModel` is the whole of issue #490 in one flag: without it a tool's
+ * output is an id in a string, which the model can quote back and cannot look
+ * at, so "edit this image" produces a file nobody but the app ever sees. With
+ * it the same bytes also go to the provider and come back into the transcript
+ * as an input-role message the next step is built on — generate, look, fix.
+ *
+ * It is a flag rather than the default because the default costs money on every
+ * call. The reasoning is `capabilitiesForModel`'s, run the other way round: a
+ * file the model did not need and was shown anyway is an upload plus a set of
+ * image tokens on every subsequent request of the run, on an invoice, for a
+ * tool whose author never asked to be looked at. A file the model needed and
+ * was not shown is a tool that returned an id, which is what tools did before
+ * this existed and is visible in the transcript the moment anyone reads it. The
+ * expensive mistake is the silent one here, so the expensive thing is opt in.
+ */
+export type PutAttachmentParams = {
+  /** The filename to keep, so a later `file()` hands the bytes back under it. */
+  name?: string;
+  /** Overrides `blob.type`, which a `Blob` built from raw bytes does not have. */
+  mimeType?: string;
+  /**
+   * Also send these bytes to the model provider and put them in front of the
+   * model as an input-role message, once this tool call settles.
+   *
+   * Refused, loudly, by a provider whose `capabilities.fileInput` is false: the
+   * request builder drops a file part such a provider cannot read, and an
+   * upload paid for, stored, and then dropped on the way to the wire is the
+   * silent-forever failure — the tool reports success, the model answers about
+   * an image it was never shown, and nothing anywhere says why.
+   */
+  showModel?: boolean;
+};
+
+/**
+ * The attachment API a tool is given, as `ctx.attachments`.
+ *
+ * Everything a `ScopedAttachments` does, plus `showModel`, plus the memo that
+ * makes a re-entered tool call idempotent. It is a separate interface from
+ * `ScopedAttachments` because those two additions are not properties of the
+ * scope, they are properties of *one tool call*: the run has to know which call
+ * a `put` belongs to in order to replay it, and the object handed to a tool is
+ * therefore built per call — the same shape `ctx.runAgent` has, for the same
+ * reason.
+ *
+ * The read half (`get`, `read`, `file`) is delegated to the `ScopedAttachments`
+ * unchanged, including its two scope checks. A tool reading a file it did not
+ * create is reading an id the model wrote, and #489's whole argument applies to
+ * it word for word.
+ */
+export interface ToolAttachments {
+  /**
+   * Parks bytes under this caller's scope and answers the record.
+   *
+   * ON A REPLAY THIS STORES NOTHING. An escalating tool is re-entered from the
+   * top on the next turn, so the body that built this blob has run before and
+   * built one already; the record from that first attempt is what comes back,
+   * and the bytes handed in now are dropped. That is the same bargain
+   * `ctx.runAgent` makes and it is not avoidable: the id from the first attempt
+   * is already in the transcript the model read, so minting a second one would
+   * leave the model holding an id for bytes nobody kept — and uploading the
+   * second copy would pay the vendor twice and put the same image into the
+   * context twice. Work *before* a `put` still runs again; if producing the
+   * bytes is what costs, branch on `ctx.resumed`.
+   */
+  put(blob: Blob, params?: PutAttachmentParams): Promise<Attachment>;
+  /** The record for `id`, or `AttachmentNotFoundError`. Scoped. */
+  get(id: string): Promise<Attachment>;
+  /** The bytes, streaming. Scoped. */
+  read(id: string): Promise<ReadResult>;
+  /** The bytes as a `File`, under their original name and type. Scoped. */
+  file(id: string): Promise<File>;
+}
+
+/**
+ * One `ctx.attachments.put` of one tool call, written down so the next turn can
+ * replay it instead of doing it again.
+ *
+ * Lives on `ToolCallPart.attachments`, indexed by the order the puts happened
+ * in — exactly where and how `ToolCallPart.nested` records sub-runs, and for
+ * exactly the same reason: the message history is the only state that survives
+ * a turn boundary, in a thread and in the browser both, so a memo that is not
+ * on the message is a memo a stateless app does not have.
+ *
+ * `shown` is absent for a plain `put`. When present it carries the provider
+ * file id AND the identity of the message injected for it, because both have to
+ * come back byte for byte: a replay that minted a fresh message id would put a
+ * second copy of the same image in the transcript, and a client that had
+ * already applied the first would show it twice.
+ */
+export type ToolAttachmentRecord = {
+  /** What `put` answered, replayed verbatim. */
+  attachment: Attachment;
+  /** Set when `showModel` was asked for. See above. */
+  shown?: {
+    /** The provider's file id — what the injected `FilePart` carries. */
+    fileId: string;
+    /** The injected message's id, so a replay reproduces it rather than a twin. */
+    messageId: string;
+    /** Its `createdAt`, for the same reason. */
+    createdAt: string;
+  };
+};
 
 /**
  * The object name an attachment's bytes are stored under.
