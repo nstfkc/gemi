@@ -1,11 +1,13 @@
 process.env.SECRET ??= "agent-test-secret";
 
 import { afterEach, describe, expect, test, vi } from "vitest";
+import type { ReadResult } from "../services/file-storage/drivers/types";
 import { Agent, AgentTool, Skill, ToolNamespace } from "./Agent";
 import type { AgentProvider, ProviderEvent } from "./AgentProvider";
 import { fakeProvider } from "./providers/fakeProvider";
 import type { Schema } from "./Schema";
 import { readSignature, verifyPendingCall } from "./signing";
+import { MemoryAttachmentStore, ScopedAttachments } from "./store/Attachments";
 import { SSE_KEEPALIVE, SSE_KEEPALIVE_INTERVAL_MS } from "./store/sse";
 import type {
   AgentMessage,
@@ -2699,5 +2701,420 @@ describe("a sub-run started from a message list", () => {
     // The resumed sub-run was handed the seed along with everything since.
     const sent = asking.provider.calls[1].messages;
     expect(sent[0].id).toBe("seed_1");
+  });
+});
+
+// --- files a tool made ---------------------------------------------------
+
+/** A `FileStorage` that is a map, so these tests need no container and no disk. */
+class FakeStorage {
+  readonly objects = new Map<string, Blob>();
+
+  async put(params: any): Promise<string> {
+    const blob: Blob = params instanceof Blob ? params : params.body;
+    const name: string = params instanceof Blob ? `blob-${this.objects.size}` : params.name;
+    this.objects.set(name, blob);
+    return name;
+  }
+
+  async read(params: any): Promise<ReadResult> {
+    const name = typeof params === "string" ? params : params.name;
+    const blob = this.objects.get(name);
+    if (!blob) throw new Error(`no object ${name}`);
+    return {
+      body: blob,
+      start: 0,
+      end: blob.size - 1,
+      total: blob.size,
+      partial: false,
+      type: blob.type,
+      name,
+    };
+  }
+}
+
+/**
+ * The handle the controller resolves per request, built by hand.
+ *
+ * The store and the storage come back too: the sharpest assertions about the
+ * replay memo are about what is NOT in them the second time round.
+ */
+function scopedFor(key = "user:u1") {
+  const store = new MemoryAttachmentStore();
+  const storage = new FakeStorage();
+  return { store, storage, scoped: new ScopedAttachments(store, storage as any, { key }) };
+}
+
+const png = (body = "png-bytes") => new Blob([body], { type: "image/png" });
+
+/** A tool whose whole job is to produce a file. */
+function makerTool(name: string, body: (ctx: any) => Promise<unknown>) {
+  return AgentTool.create({
+    name,
+    description: "Makes a file",
+    inputSchema: anything(),
+    outputSchema: anything(),
+    execute: async (_input: any, ctx: any) => body(ctx),
+  });
+}
+
+const filePartsOf = (messages: AgentMessage[]) =>
+  messages.flatMap((message) => message.content.filter((part) => part.type === "file")) as any[];
+
+describe("a tool that parks bytes", () => {
+  test("gets an id back, and the model is shown nothing it did not ask to be shown", async () => {
+    const { store, scoped } = scopedFor();
+    let id = "";
+    const tool = makerTool("render", async (ctx) => {
+      const attachment = await ctx.attachments.put(png(), { name: "chart.png" });
+      id = attachment.id;
+      return { attachmentId: attachment.id };
+    });
+    const provider = fakeProvider([toolCall("c1", "render", {}), finish()], [finish()]);
+    const agent = Agent.create({ name: "designer", provider, tools: [tool] });
+    const result = await agent.stream({ messages: [], req, attachments: scoped }).result();
+
+    expect(id).toMatch(/^gemi_att_/);
+    // The default is the cheap one. `showModel` is what costs money, so it is
+    // what has to be asked for.
+    expect(provider.uploads).toHaveLength(0);
+    // Nothing was injected: nobody asked to be shown anything.
+    expect(result.messages.some((message) => message.role === "user")).toBe(false);
+
+    // Readable back through the same scope, under the name it was given — which
+    // is the shape a tool forwarding it to a multipart endpoint needs.
+    const file = await scoped.file(id);
+    expect(await file.text()).toBe("png-bytes");
+    expect(file.name).toBe("chart.png");
+    expect(store.size).toBe(1);
+
+    // One record on the tool call, which is the memo the next turn reads.
+    const part = callPartOf(result.messages, "c1");
+    expect(part.attachments).toHaveLength(1);
+    expect(part.attachments[0].attachment).toMatchObject({ id, destination: "storage" });
+    expect(part.attachments[0].shown).toBeUndefined();
+  });
+
+  test("a tool that attaches nothing gets no `attachments` field at all", async () => {
+    grepCalls.length = 0;
+    const provider = fakeProvider([toolCall("c1", "grep", { pattern: "x" }), finish()], [finish()]);
+    const agent = Agent.create({ name: "coder", provider, tools: [grep] });
+    const result = await agent.stream({ messages: [], req }).result();
+    // Same bargain `nested` makes: an always-present empty array would be a wire
+    // and store change paid for by every app that never attaches anything.
+    expect("attachments" in callPartOf(result.messages, "c1")).toBe(false);
+  });
+
+  test("a request with no attachment scope answers the model an error naming the hook", async () => {
+    const tool = makerTool("render", async (ctx) => {
+      const attachment = await ctx.attachments.put(png());
+      return { attachmentId: attachment.id };
+    });
+    const provider = fakeProvider([toolCall("c1", "render", {}), finish()], [finish()]);
+    const agent = Agent.create({ name: "designer", provider, tools: [tool] });
+    // No `attachments`: an unauthenticated, thread-less chat. #489's rule is
+    // that such a request gets no attachment ids, and this is a tool meeting it.
+    const result = await agent.stream({ messages: [], req }).result();
+
+    const failed = partsOf(result.messages, "tool-result")[0];
+    expect(failed.status).toBe("error");
+    // Named so the developer reading the transcript knows what to override. The
+    // model reads it too and learns it cannot store files, which beats being
+    // handed an id for bytes nobody kept.
+    expect(failed.error.message).toContain("attachmentScope()");
+    expect(provider.uploads).toHaveLength(0);
+  });
+});
+
+describe("a file a tool asks the model to look at", () => {
+  test("is uploaded, recorded as `both`, and injected after the tool result", async () => {
+    const { scoped } = scopedFor();
+    const reported: AgentMessage[] = [];
+    const tool = makerTool("render", async (ctx) => {
+      const attachment = await ctx.attachments.put(png(), {
+        name: "chart.png",
+        showModel: true,
+      });
+      return { attachmentId: attachment.id };
+    });
+    const provider = fakeProvider(
+      [toolCall("c1", "render", {}), finish()],
+      [{ type: "text-delta", delta: "looks good" }, finish()],
+    );
+    const agent = Agent.create({ name: "designer", provider, tools: [tool] });
+    const run = agent.stream({
+      messages: [],
+      req,
+      attachments: scoped,
+      onMessage: (message) => {
+        reported.push(message);
+      },
+    });
+    const { events, done } = collect(run);
+    const result = await run.result();
+    await done;
+
+    expect(provider.uploads).toHaveLength(1);
+    expect(provider.uploads[0].name).toBe("chart.png");
+    expect(provider.uploads[0].type).toBe("image/png");
+
+    const injected = result.messages.filter((message) => message.role === "user");
+    expect(injected).toHaveLength(1);
+    // Input role, because `input_file` is only legal on one — which is the
+    // second of the two walls issue #490 names.
+    expect(injected[0].content).toEqual([
+      {
+        type: "file",
+        fileId: "file_1",
+        name: "chart.png",
+        mimeType: "image/png",
+        attachmentId: expect.stringMatching(/^gemi_att_/),
+      },
+    ]);
+
+    // After the result on the stream, because that is the order it happened in
+    // and the order a `function_call` / `function_call_output` pair allows.
+    const types = events.map((event) => event.type);
+    expect(types.indexOf("message")).toBeGreaterThan(types.indexOf("tool-result"));
+    const emitted = events.find((event) => event.type === "message") as any;
+    expect(emitted.message).toEqual(injected[0]);
+
+    // And through `onMessage`, so a reload sees what the live tab saw.
+    expect(reported.map((message) => message.id)).toContain(injected[0].id);
+
+    // And in front of the model on the next step, last.
+    const sent = provider.calls[1].messages;
+    expect(sent[sent.length - 1]).toEqual(injected[0]);
+
+    // The record says the bytes went to both places, which is what makes it
+    // resolvable by a tool *and* visible to the model.
+    const record = callPartOf(result.messages, "c1").attachments[0];
+    expect(record.attachment).toMatchObject({ destination: "both", fileId: "file_1" });
+    expect(record.shown).toMatchObject({ fileId: "file_1", messageId: injected[0].id });
+  });
+
+  test("is refused before anything is stored when the provider cannot read files", async () => {
+    const { store, scoped } = scopedFor();
+    const tool = makerTool("render", async (ctx) => {
+      const attachment = await ctx.attachments.put(png(), { showModel: true });
+      return { attachmentId: attachment.id };
+    });
+    const provider = fakeProvider([toolCall("c1", "render", {}), finish()], [finish()]);
+    // The capability the whole path depends on: `toResponsesInput` drops a file
+    // part a provider cannot read, so without the check the upload is paid for,
+    // the record claims the model saw it, and the model answers about an image
+    // that never reached the wire.
+    (provider as any).capabilities = { ...provider.capabilities, fileInput: false };
+    const agent = Agent.create({ name: "designer", provider, tools: [tool] });
+    const result = await agent.stream({ messages: [], req, attachments: scoped }).result();
+
+    const failed = partsOf(result.messages, "tool-result")[0];
+    expect(failed.status).toBe("error");
+    expect(failed.error.message).toContain("does not accept file input");
+    expect(provider.uploads).toHaveLength(0);
+    expect(store.size).toBe(0);
+  });
+
+  test("only the most recent one rides along, and the dropped one leaves a sentence", async () => {
+    const { scoped } = scopedFor();
+    const tool = makerTool("render", async (ctx) => {
+      const attachment = await ctx.attachments.put(png(), {
+        name: "chart.png",
+        showModel: true,
+      });
+      return { attachmentId: attachment.id };
+    });
+    const provider = fakeProvider(
+      [toolCall("c1", "render", {}), finish()],
+      [toolCall("c2", "render", {}), finish()],
+      [finish()],
+    );
+    const agent = Agent.create({ name: "designer", provider, tools: [tool] });
+    const result = await agent.stream({ messages: [], req, attachments: scoped }).result();
+
+    // Two iterations, two uploads, two images in the transcript.
+    expect(provider.uploads).toHaveLength(2);
+    expect(filePartsOf(result.messages)).toHaveLength(2);
+
+    // But one image in the third request, which is the point: history is resent
+    // whole on every step, so without a window a three-iteration loop pays for
+    // three images on every later call.
+    const third = provider.calls[2].messages;
+    const carried = filePartsOf(third);
+    expect(carried).toHaveLength(1);
+    expect(carried[0].fileId).toBe("file_2");
+
+    // A sentence rather than a hole. A model that finds nothing where it
+    // remembers an image concludes it imagined one; this tells it what happened
+    // and how to get the image back.
+    const texts = third.flatMap((message) =>
+      message.content.filter((part: any) => part.type === "text").map((part: any) => part.text),
+    );
+    expect(texts.some((text) => text.includes("dropped from this request"))).toBe(true);
+    expect(texts.some((text) => text.includes("Call the tool again"))).toBe(true);
+
+    // The trim is on the way to the provider only. The transcript everybody
+    // else reads — `result()`, `onMessage`, the stream, a `/attach` replay —
+    // still holds both, so a live client and a reattached one agree.
+    expect(filePartsOf(result.messages).map((part) => part.fileId)).toEqual([
+      "file_1",
+      "file_2",
+    ]);
+  });
+
+  test("a file the user attached is never trimmed", async () => {
+    const { scoped } = scopedFor();
+    const tool = makerTool("render", async (ctx) => {
+      const attachment = await ctx.attachments.put(png(), { showModel: true });
+      return { attachmentId: attachment.id };
+    });
+    const provider = fakeProvider([toolCall("c1", "render", {}), finish()], [finish()]);
+    const agent = Agent.create({ name: "designer", provider, tools: [tool] });
+    await agent
+      .stream({
+        messages: [],
+        req,
+        attachments: scoped,
+        turn: { text: "fix this", files: [{ fileId: "user_upload_1", name: "photo.jpg" }] },
+      })
+      .result();
+
+    // The window counts only what the run injected. The user's own upload is
+    // the thing the conversation is *about*, and dropping it would be the agent
+    // losing the file it was asked to work on.
+    const second = filePartsOf(provider.calls[1].messages);
+    expect(second.map((part) => part.fileId).sort()).toEqual(["file_1", "user_upload_1"]);
+  });
+});
+
+describe("a tool that shows a file and then escalates", () => {
+  /**
+   * The replay hazard, whole.
+   *
+   * A tool that escalates is re-entered FROM THE TOP on the next turn — there
+   * is no other way, because a paused async generator cannot be put in a message
+   * history. So the `put` runs again. If it did the work again it would store a
+   * second copy, pay the vendor a second time, and put the same image in front
+   * of the model twice under two ids.
+   */
+  function showAndAsk(mimeTypeOnReplay?: string) {
+    const sub = askingAgent("researcher", "which colour?");
+    const bodies: boolean[] = [];
+    const tool = makerTool("render", async (ctx) => {
+      bodies.push(ctx.resumed);
+      const attachment = await ctx.attachments.put(
+        new Blob(["png-bytes"], {
+          type: ctx.resumed && mimeTypeOnReplay ? mimeTypeOnReplay : "image/png",
+        }),
+        { name: "chart.png", showModel: true },
+      );
+      const answer = await ctx.runAgent(sub.agent, { prompt: "pick" });
+      return { attachmentId: attachment.id, said: textOf(answer.messages[answer.messages.length - 1]) };
+    });
+    return { sub, tool, bodies };
+  }
+
+  async function turnOne(tool: any, scoped: any) {
+    const provider = fakeProvider([toolCall("c1", "render", {}), finish()]);
+    const agent = Agent.create({ name: "lead", provider, tools: [tool] });
+    const run = agent.stream({ messages: [], req, turn: { text: "go" }, attachments: scoped });
+    const { events, done } = collect(run);
+    const result = await run.result();
+    await done;
+    const awaiting = events.find((event) => event.type === "awaiting-input") as any;
+    return { provider, result, events, pending: (awaiting?.pending ?? []) as PendingToolCall[] };
+  }
+
+  test("does not upload, store or inject a second time when it is re-entered", async () => {
+    const { store, scoped } = scopedFor();
+    const { tool, bodies } = showAndAsk();
+
+    const first = await turnOne(tool, scoped);
+    expect(first.result.finishReason).toBe("awaiting-input");
+    // Uploaded and stored on turn one — and shown to nobody, because the call
+    // has no result yet and a message wedged between a call and its result is a
+    // history the provider rejects.
+    expect(first.provider.uploads).toHaveLength(1);
+    expect(store.size).toBe(1);
+    expect(filePartsOf(first.result.messages)).toHaveLength(0);
+    expect(first.events.some((event) => event.type === "message")).toBe(false);
+
+    const provider = fakeProvider([finish()]);
+    const agent = Agent.create({ name: "lead", provider, tools: [tool] });
+    const second = agent.stream({
+      messages: first.result.messages,
+      req,
+      attachments: scoped,
+      turn: {
+        toolResults: [
+          {
+            toolCallId: "s1",
+            signature: first.pending[0].signature,
+            path: first.pending[0].path,
+            output: { answer: "blue" },
+          },
+        ],
+      },
+    });
+    const { events, done } = collect(second);
+    const result = await second.result();
+    await done;
+
+    // The body really did run twice. Without that this test proves nothing.
+    expect(bodies).toEqual([false, true]);
+
+    // THE POINT. The second entry uploaded nothing and stored nothing.
+    expect(provider.uploads).toHaveLength(0);
+    expect(store.size).toBe(1);
+
+    // One record, one injected message, one image — now that the call settled.
+    const part = callPartOf(result.messages, "c1");
+    expect(part.attachments).toHaveLength(1);
+    const injected = filePartsOf(result.messages);
+    expect(injected).toHaveLength(1);
+    expect(injected[0].fileId).toBe("file_1");
+    expect(events.filter((event) => event.type === "message")).toHaveLength(1);
+    // The id was minted on turn one and written down, so the message a replay
+    // produces is the same message and not a twin.
+    expect((events.find((event) => event.type === "message") as any).message.id).toBe(
+      part.attachments[0].shown.messageId,
+    );
+  });
+
+  test("fails the call rather than showing the wrong file when the put sequence changed", async () => {
+    const { scoped } = scopedFor();
+    // A body that takes a different branch on the replay. The memo is keyed by
+    // call index and nothing else, so index 0 would otherwise mean a PNG on one
+    // turn and a CSV on the next, and the model would be shown the PNG under an
+    // id the tool now believes names a CSV.
+    const { tool } = showAndAsk("text/csv");
+    const first = await turnOne(tool, scoped);
+
+    const provider = fakeProvider([finish()]);
+    const agent = Agent.create({ name: "lead", provider, tools: [tool] });
+    const result = await agent
+      .stream({
+        messages: first.result.messages,
+        req,
+        attachments: scoped,
+        turn: {
+          toolResults: [
+            {
+              toolCallId: "s1",
+              signature: first.pending[0].signature,
+              path: first.pending[0].path,
+              output: { answer: "blue" },
+            },
+          ],
+        },
+      })
+      .result();
+
+    const failed = partsOf(result.messages, "tool-result")[0];
+    expect(failed.status).toBe("error");
+    expect(failed.error.message).toContain("memoized by call index");
+    expect(failed.error.message).toContain("image/png");
+    expect(failed.error.message).toContain("text/csv");
+    expect(provider.uploads).toHaveLength(0);
   });
 });
