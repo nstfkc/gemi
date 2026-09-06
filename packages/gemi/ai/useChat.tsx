@@ -196,10 +196,38 @@ export interface UseChatResult<P extends keyof AgentRoutes> {
    *  the tool's output schema server-side before the model sees it. */
   answer(toolCallId: string, output: unknown): Promise<void>;
 
-  /** Uploads through the agent's own upload route and returns the id to put in
-   *  `sendMessage({ files })`. Here rather than in app code because the route is
-   *  derived from the same path. */
-  attach(file: File): Promise<{ fileId: string; name: string; mimeType: string }>;
+  /**
+   * Uploads through the agent's own upload route and returns the handles for
+   * the file. Here rather than in app code because the route is derived from
+   * the same path.
+   *
+   * TWO IDS, BOTH OPTIONAL, AND THE OPTIONALITY IS LOAD-BEARING. `fileId` is the
+   * provider's, and is the one that goes in `sendMessage({ files })`;
+   * `attachmentId` is gemi's, and is the handle a tool resolves to get the
+   * bytes. A file routed to storage only has no `fileId`, and an upload the
+   * server had no scope for has no `attachmentId` — see
+   * `AgentController.attachmentScope`.
+   *
+   * `fileId` was declared as a required `string` before this hook could return
+   * an upload the provider never saw, and leaving it that way is worse than a
+   * cosmetic lie: the repo's shared tsconfig sets `strict: false`, so
+   * `const { fileId } = await attach(f); sendMessage({ files: [{ fileId }] })`
+   * typechecks here, ships `file_id: undefined` to the vendor, and fails in the
+   * middle of a conversation. Declared optional, the same code is a type error
+   * in any app that has `strictNullChecks` on, which is where it should fail.
+   */
+  attach(file: File): Promise<{
+    fileId?: string;
+    attachmentId?: string;
+    name: string;
+    mimeType: string;
+    /**
+     * Set when the server wanted to keep this file and had no scope to keep it
+     * under — a missing `attachmentId` that is a misconfigured route rather
+     * than the app's policy. See `AgentController.attachmentScope`.
+     */
+    downgraded?: "no_scope";
+  }>;
 }
 
 /**
@@ -870,6 +898,7 @@ export function useChat<P extends keyof AgentRoutes>(
         attachmentId?: string;
         name?: string;
         mimeType?: string;
+        downgraded?: "no_scope";
       };
       // The route only has to return the ids; the name and type are already
       // here, so the caller gets something it can hand straight to
@@ -890,6 +919,12 @@ export function useChat<P extends keyof AgentRoutes>(
         attachmentId: data.attachmentId,
         name: data.name ?? file.name,
         mimeType: data.mimeType ?? file.type,
+        // Passed through rather than dropped: without it a missing
+        // `attachmentId` looks the same to the client whether the server chose
+        // not to keep the file or could not tell who was uploading it, and only
+        // one of those is something to fix. The server says so once per process
+        // in its own log, which nobody debugging a browser is reading.
+        downgraded: data.downgraded,
       };
     },
     [fail],
