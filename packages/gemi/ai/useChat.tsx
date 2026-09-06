@@ -865,11 +865,29 @@ export function useChat<P extends keyof AgentRoutes>(
         fail(error);
         throw new Error(error.message);
       }
-      const data = (await response.json()) as { fileId: string; name?: string; mimeType?: string };
-      // The route only has to return the id; the name and type are already here,
-      // so the caller gets something it can hand straight to `sendMessage`.
+      const data = (await response.json()) as {
+        fileId?: string;
+        attachmentId?: string;
+        name?: string;
+        mimeType?: string;
+      };
+      // The route only has to return the ids; the name and type are already
+      // here, so the caller gets something it can hand straight to
+      // `sendMessage`.
+      //
+      // TWO IDS, PASSED THROUGH SEPARATELY. `fileId` is the provider's and is
+      // what a `FilePart` carries — unchanged, which is why it is still first
+      // and still spelled the same. `attachmentId` is gemi's, and is the handle
+      // a tool takes: an app that asks the agent to do something *with* the file
+      // sends this one in its message text or its own turn payload, not in a
+      // `FilePart`. Either can be absent — a file the server kept but did not
+      // send to the provider has no `fileId`, and an upload with no attachment
+      // scope has no `attachmentId` (see `AgentController.attachmentScope`) —
+      // so the field is optional here rather than asserted, and a caller that
+      // needs one checks for it instead of sending `undefined` to the vendor.
       return {
         fileId: data.fileId,
+        attachmentId: data.attachmentId,
         name: data.name ?? file.name,
         mimeType: data.mimeType ?? file.type,
       };
