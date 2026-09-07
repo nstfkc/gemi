@@ -3065,10 +3065,7 @@ describe("a file a tool asks the model to look at", () => {
     // The trim is on the way to the provider only. The transcript everybody
     // else reads — `result()`, `onMessage`, the stream, a `/attach` replay —
     // still holds both, so a live client and a reattached one agree.
-    expect(filePartsOf(result.messages).map((part) => part.fileId)).toEqual([
-      "file_1",
-      "file_2",
-    ]);
+    expect(filePartsOf(result.messages).map((part) => part.fileId)).toEqual(["file_1", "file_2"]);
   });
 
   test("a file the user attached is never trimmed", async () => {
@@ -3213,7 +3210,10 @@ describe("a tool that shows a file and then escalates", () => {
         { name: "chart.png", showModel: true },
       );
       const answer = await ctx.runAgent(sub.agent, { prompt: "pick" });
-      return { attachmentId: attachment.id, said: textOf(answer.messages[answer.messages.length - 1]) };
+      return {
+        attachmentId: attachment.id,
+        said: textOf(answer.messages[answer.messages.length - 1]),
+      };
     });
     return { sub, tool, bodies };
   }
