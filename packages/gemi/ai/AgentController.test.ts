@@ -1686,7 +1686,9 @@ describe("a file a tool showed the model, seen through the route", () => {
     await settle();
     // The whole run from the first frame, which is what a client that dropped
     // before the injection asks for.
-    const replayed = await eventsOf(await controller.attach(jsonRequest({ threadId: "t1", from: 1 })));
+    const replayed = await eventsOf(
+      await controller.attach(jsonRequest({ threadId: "t1", from: 1 })),
+    );
 
     // Frame for frame, in the same order. This half of the test is weaker than
     // it looks and it is worth saying so: `attach` replays the run's own frame
