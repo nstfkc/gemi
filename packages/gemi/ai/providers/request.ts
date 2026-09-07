@@ -4,6 +4,7 @@ import type {
   ProviderToolNamespace,
   ProviderToolSpec,
 } from "../AgentProvider";
+import { ATTACHMENT_ID_PREFIX } from "../store/Attachments";
 import type { AgentMessage, FilePart, ToolResultPart } from "../types";
 
 /**
@@ -136,6 +137,31 @@ export function toResponsesInput(
           // An assistant message holding a file is a bug upstream, and sending
           // it anyway turns that bug into a 400 halfway through a conversation.
           if (!capabilities.fileInput || role === "assistant") break;
+          // NOT A PROVIDER FILE ID. There are two ids now — `POST /chat/files`
+          // answers `fileId` (the provider's) and `attachmentId` (ours) — and
+          // putting the wrong one here is the mistake the shapes invite. Left
+          // alone it is an error from the vendor about a file it has never heard
+          // of, arriving mid-conversation and naming nothing a reader can act
+          // on. (Which error is NOT MEASURED: no request was made with a bogus
+          // `file_id` to find out whether it is a 400 or a 404, or whether the
+          // part is dropped and the rest of the turn proceeds. The guard does
+          // not depend on the answer — it is worth having on the shapes alone —
+          // so this comment names the failure rather than a status code nobody
+          // checked.)
+          //
+          // Two shapes are caught, and the empty one is not an afterthought: an
+          // upload routed to storage has no provider id at all, so a client that
+          // spreads its answer into a `FilePart` produces `fileId: undefined`,
+          // and `file_id: undefined` reaches the vendor as surely as a wrong
+          // string does. A prefix-only check reads as covering that case and
+          // does not, because `undefined?.startsWith` is `undefined`.
+          if (!part.fileId || part.fileId.startsWith(ATTACHMENT_ID_PREFIX)) {
+            throw new Error(
+              part.fileId
+                ? `FilePart.fileId holds a gemi attachment id (${part.fileId}). That field is the *provider's* file id, from \`fileId\` on the upload response; the \`attachmentId\` is for tools and is resolved through \`ctx.attachments\`. A file routed to storage only has no provider id and cannot be shown to the model.`
+                : "FilePart.fileId is empty. That field is the *provider's* file id, from `fileId` on the upload response, and an upload routed to storage never has one — its bytes are gemi's, reachable from a tool through `ctx.attachments` with the `attachmentId`, and there is nothing for the model to be shown.",
+            );
+          }
           buffer.push(fileContent(part));
           break;
         }

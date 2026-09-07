@@ -1,7 +1,19 @@
+import { Storage } from "../facades/Storage";
 import { Controller } from "../http/Controller";
 import { HttpRequest } from "../http/HttpRequest";
 import type { MiddlewareInput } from "../http/middlewareList";
 import type { AgentRun, AgentRunResult, AnyAgent, ToolShapesOf } from "./Agent";
+import {
+  type Attachment,
+  type AttachmentDestination,
+  attachmentObjectName,
+  type AttachmentScope,
+  type AttachmentStorage,
+  type AttachmentStore,
+  defaultAttachmentStore,
+  newAttachmentId,
+  ScopedAttachments,
+} from "./store/Attachments";
 import {
   FrameCursorEvictedError,
   liveRuns as defaultLiveRuns,
@@ -72,6 +84,20 @@ export interface AgentStore {
 /** The default: conversations last as long as the process. */
 export { defaultAgentStore, MemoryAgentStore };
 
+/** The attachment half of the same story. See `store/Attachments.ts`. */
+export {
+  type Attachment,
+  type AttachmentDestination,
+  AttachmentNotFoundError,
+  type AttachmentScope,
+  type AttachmentStorage,
+  type AttachmentStore,
+  defaultAttachmentStore,
+  InvalidAttachmentScopeError,
+  MemoryAttachmentStore,
+  ScopedAttachments,
+} from "./store/Attachments";
+
 /**
  * The runs currently in flight, and their frames.
  *
@@ -113,6 +139,60 @@ export type AgentHookContext = {
   req: HttpRequest<any, any>;
   runId: string;
   threadId?: string;
+};
+
+/**
+ * What `POST /<path>/files` answers.
+ *
+ * TWO IDS, AND THEY ARE NOT INTERCHANGEABLE. `fileId` is the *provider's* id and
+ * means exactly what it always meant — the value a `FilePart` carries so the
+ * model can see the file. `attachmentId` is *gemi's*, and is the handle a tool
+ * resolves through `ScopedAttachments` to get the bytes back. A file can have
+ * both, and usually does.
+ *
+ * `fileId` stays first and stays named that on purpose: `useChat.uploadFile`
+ * already reads it, apps already put it in a `FilePart`, and renaming it or
+ * folding the two into one id would break vision for every existing app while
+ * looking like a tidier API. The two ids exist because there are two systems
+ * holding the file.
+ *
+ * Both are optional, and `destination` says which to expect: `provider` has no
+ * `attachmentId` (nothing was kept), `storage` has no `fileId` (the provider
+ * never saw it, so there is nothing for a `FilePart` to point at), `both` has
+ * both.
+ *
+ * `destination` ALONE IS NOT ENOUGH TO SAY WHY AN ID IS MISSING, which is why
+ * `downgraded` is here. An upload that reached a route with no authentication
+ * and no `threadId` answers `destination: "provider"` — truthfully, that is
+ * where the bytes went — and so does a controller that deliberately returns
+ * `"provider"` from `attachmentDestination`. Those two answers were byte
+ * identical, and they are the opposite situations: one is the app's policy
+ * working, the other is the app's policy silently not applying because the
+ * server could not tell who was calling. The server logs the second one once
+ * per process; the client saw nothing at all. `downgraded` is the difference,
+ * carried in the answer so a client — or an integration test — can assert on
+ * it.
+ */
+export type UploadResult = {
+  /** The provider's id, for a `FilePart`. Absent when the file never went there. */
+  fileId?: string;
+  /** gemi's id, for a tool. Absent when nothing was kept — see `attachmentScope`. */
+  attachmentId?: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  destination: AttachmentDestination;
+  /**
+   * Set only when the app's policy asked for a copy and the request had no
+   * subject to file it under, so the upload fell back to the provider alone.
+   * Absent when `destination` is what the app actually chose.
+   *
+   * A string rather than `true` because there is exactly one reason today and
+   * there will be more (a store that refused the write, say), and a boolean
+   * that later needs a reason beside it is two fields where one would have
+   * done.
+   */
+  downgraded?: "no_scope";
 };
 
 /**
@@ -179,6 +259,25 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
    * done. See `MemoryLiveRuns`.
    */
   liveRuns: MemoryLiveRuns = defaultLiveRuns;
+
+  /**
+   * Where attachment *records* live — the row that says which bytes, whose, and
+   * under what id. Defaults to the process-wide `MemoryAttachmentStore`, with
+   * the same warning `store` carries: assign something that outlives the
+   * request, because this controller is constructed per call.
+   */
+  attachments: AttachmentStore = defaultAttachmentStore;
+
+  /**
+   * Where an attachment's *bytes* live. Defaults to the app's configured
+   * `FileStorage` through the `Storage` facade, which resolves the driver per
+   * call out of the container — so an app that configured S3 gets S3 here
+   * without saying so twice.
+   *
+   * Overridable mostly for tests and for an app that keeps user uploads in a
+   * different bucket from everything else.
+   */
+  attachmentStorage: AttachmentStorage = Storage;
 
   /** Appended to the agent's static instructions for this request — the user's
    *  name, tenant, today's date. */
@@ -521,18 +620,262 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
     return { stopped: true };
   }
 
-  /** `POST /<path>/files` — uploads an attachment and returns its file id. */
-  async upload(req: HttpRequest<any, any> = new HttpRequest()): Promise<{ fileId: string }> {
+  /**
+   * WHO A SCOPE BELONGS TO, and the one question in this file whose wrong
+   * answer is a data leak rather than a bug.
+   *
+   * An attachment id given to the model comes back *from* the model, and what
+   * the model writes is a function of everything it read — the user's text, a
+   * tool's output, a document someone uploaded. So the id is untrusted in
+   * exactly the way a request body is, and the scope it resolves under must come
+   * from the server's own knowledge of the request. Nothing that reaches this
+   * method may be readable or writable by the model: `req` is the HTTP request,
+   * and `threadId` is the client's handle, not the model's.
+   *
+   * THE DEFAULT IS THE AUTHENTICATED USER, falling back to the thread, falling
+   * back to `null`.
+   *
+   * - `user:<id>` when the request is authenticated. `req.ctx().user` is what
+   *   `AuthenticationMiddleware` and the `Auth` facade put there, so an agent
+   *   route behind `middlewares = ["auth"]` — which `ApiRouter.agent()` makes
+   *   the default posture — has a subject without the app writing anything.
+   * - `thread:<id>` for an unauthenticated chat that has a thread. A `threadId`
+   *   is minted by `createThread` as a uuid and is documented as a capability;
+   *   an anonymous support widget has nothing better, and scoping to the
+   *   conversation is strictly narrower than scoping to nothing.
+   * - `null` otherwise, which means no attachment id is minted at all. There is
+   *   no third fallback on purpose. `sessionId()` is the tempting one and it is
+   *   the wrong one: it is a cookie the visitor writes, documented as *not a
+   *   credential*, so scoping to it is scoping to a value the caller chooses —
+   *   which is not a scope, it is a lookup key with extra steps.
+   *
+   * WHAT THIS DEFAULT GETS WRONG, since it will get something wrong for someone:
+   * it is per user, not per conversation, so a user's own upload from one thread
+   * resolves in another thread of theirs. That is the loose direction, and it is
+   * chosen because the tight one breaks the flow the framework actually ships —
+   * `useChat.uploadFile` posts a file before any thread exists, so a per-thread
+   * default would make the first upload of every conversation unresolvable. An
+   * app that wants per-conversation isolation returns
+   * `{ key: \`user:${id}:thread:${threadId}\` }` here and has it; an app with
+   * tenants returns `{ key: \`org:${orgId}\` }` and has that. What the default
+   * must never be is broader than a user, and it is not.
+   *
+   * WHATEVER THIS READS MUST BE PRESENT ON EVERY AGENT ROUTE, and the default
+   * reads `req.ctx().user`, which is present only where authentication
+   * middleware ran. `agent()` mounts four routes and `.middleware()` guards
+   * them individually, so `middleware({ stream: "auth" })` — the example in
+   * `ApiRouter.agent`'s own doc — leaves `POST /chat/files` unauthenticated.
+   * The upload then files the record under `thread:<id>` (or nothing at all)
+   * while the run that follows, on the guarded route, resolves under
+   * `user:<id>`, and every id minted on upload is a miss for the rest of the
+   * conversation. It fails as `AttachmentNotFoundError`, worded identically to
+   * an id the model invented, which is the point of that error and is also why
+   * this particular misconfiguration is invisible. Guard `upload` and `stream`
+   * together, or derive the key from something both of them have.
+   *
+   * gemi does not detect the skew for you, and the reason is the module's whole
+   * premise: noticing that an id exists under a *different* scope requires
+   * looking it up without one, and an unscoped read is the thing that must not
+   * exist here — not even behind a `console.warn`. So the answer is the
+   * documentation you are reading and the identical error, not a probe.
+   *
+   * The key is opaque and compared with `===`. It is never sent to the client
+   * and never shown to the model.
+   */
+  protected attachmentScope(
+    req: HttpRequest<any, any>,
+    threadId?: string,
+  ): AttachmentScope | null | Promise<AttachmentScope | null> {
+    const user = req.ctx()?.user;
+    const userId = user?.id ?? user?.publicId;
+    if (userId !== undefined && userId !== null && String(userId) !== "") {
+      return { key: `user:${String(userId)}` };
+    }
+    if (threadId) {
+      return { key: `thread:${threadId}` };
+    }
+    return null;
+  }
+
+  /**
+   * WHERE ONE FILE'S BYTES SHOULD GO. Called once per upload, with the file in
+   * hand.
+   *
+   * The model needs to perceive a file only for vision or document reading; a
+   * tool needs the bytes only to forward them. Those are different needs and
+   * they were being answered the same way, because `upload` sent everything to
+   * the vendor unconditionally — which is a cost and a data-minimisation problem
+   * as much as a capability one. A CSV that exists to be imported belongs in
+   * storage and not at the provider; an image the model must look at and no tool
+   * will forward is the reverse.
+   *
+   * THE DEFAULT IS `"both"`, AND THE JUSTIFICATION IS THE FAILURE MODE, not the
+   * hit rate. A mimeType table was the obvious alternative — images and PDFs to
+   * the provider, everything else to storage — and it is wrong in the quiet
+   * direction. Getting `"both"` wrong sends a file to a vendor that did not need
+   * it: it costs money, it is visible on an invoice and in the vendor's file
+   * list, and it is corrected by overriding one method. Getting `"storage"`
+   * wrong drops the file out of the model's view with no error anywhere; the
+   * model answers as though the image were not there, which is indistinguishable
+   * from a bad prompt, and the developer debugs their instructions for an
+   * afternoon. Being wrong on the invoice beats being wrong in a way that
+   * presents as "the AI is stupid".
+   *
+   * `"both"` is also what keeps this change additive: every upload that reached
+   * the provider before still reaches it, and storage is added underneath. An
+   * app that never asks for an attachment id sees no difference except a second
+   * copy it owns.
+   *
+   * A client may ask, per file, for `"storage"` under a `"both"` policy — the
+   * one direction that only ever removes the vendor. It may not ask for
+   * anything else, including `"provider"`, which would let a form field decide
+   * that the app does not keep its own copy. See `narrowDestination`.
+   */
+  protected attachmentDestination(
+    file: File,
+    req: HttpRequest<any, any>,
+  ): AttachmentDestination | Promise<AttachmentDestination> {
+    void file;
+    void req;
+    return "both";
+  }
+
+  /**
+   * The attachment handle for this request — the object a tool is given.
+   *
+   * `null` when `attachmentScope` says the request has no subject, and a caller
+   * that gets `null` must not fall back to anything: there is no unscoped handle
+   * to fall back to, which is the point.
+   *
+   * Issue #490 hangs `ctx.attachments` off this.
+   */
+  protected async attachmentsFor(
+    req: HttpRequest<any, any>,
+    threadId?: string,
+  ): Promise<ScopedAttachments | null> {
+    const scope = await this.attachmentScope(req, threadId);
+    if (!scope) {
+      return null;
+    }
+    return new ScopedAttachments(this.attachments, this.attachmentStorage, scope);
+  }
+
+  /**
+   * `POST /<path>/files` — takes an attachment and answers the handles for it.
+   *
+   * `fileId` IS STILL IN THE ANSWER AND STILL MEANS THE SAME THING: the
+   * provider's id for the file, the thing a `FilePart` carries, unchanged. It
+   * has to stay, because it is what makes vision work and what
+   * `useChat.uploadFile` already reads; `attachmentId` is added beside it rather
+   * than in place of it. The two are not interchangeable, and swapping them
+   * would reach the vendor as a file id it has never issued — so
+   * `toResponsesInput` rejects a `gemi_att_` prefix in `FilePart.fileId` with a
+   * sentence saying so, rather than leaving it to whatever the vendor answers
+   * (not measured).
+   *
+   * `fileId` is absent exactly when the file did not go to the provider, which
+   * only happens when the app or the client asked for that. `attachmentId` is
+   * absent when there was no scope to file the record under — see
+   * `attachmentScope` — and the answer then carries `downgraded: "no_scope"`,
+   * which is the only thing separating that case from a controller that chose
+   * `"provider"` on purpose. Both answer `destination: "provider"`, because both
+   * are true about where the bytes went.
+   *
+   * ORDER: storage first, then the provider. If the second one fails the request
+   * fails either way, so the only question is where the orphan is left, and an
+   * orphan in our own bucket is ours to sweep on a schedule we set, while an
+   * orphan at the vendor sits under a retention policy that is not ours.
+   */
+  async upload(req: HttpRequest<any, any> = new HttpRequest()): Promise<UploadResult> {
     const form = await req.rawRequest.formData();
     const file = form.get("file");
     if (!(file instanceof Blob)) {
       throw new Error("upload expects a multipart body with a `file` field.");
     }
-    // Straight through the provider: message history holds provider file ids,
-    // which is the trade `AgentProvider.upload` documents — vision and PDF
-    // input without gemi owning a storage story in v1.
-    const fileId = await this.agent.provider.upload(file as File);
-    return { fileId };
+    const name = file instanceof File && file.name ? file.name : "upload";
+    const mimeType = file.type || "application/octet-stream";
+
+    // The client's thread, read here only so an unauthenticated chat has
+    // something to scope to. It is the client's own handle — `stream` already
+    // takes it on trust for the whole conversation — and it is not the model's:
+    // this is a form field on an HTTP request the user's browser made, not a
+    // tool argument.
+    const threadField = form.get("threadId");
+    const threadId =
+      typeof threadField === "string" && threadField.length > 0 ? threadField : undefined;
+
+    const policy = await this.attachmentDestination(file as File, req);
+    const destination = narrowDestination(policy, form.get("destination"));
+
+    const scope = await this.attachmentScope(req, threadId);
+
+    // The app's policy wanted a copy of these bytes and the request has no
+    // subject to file them under. Recorded rather than merely warned about,
+    // because the answer has to be able to tell the client that what it is
+    // getting is not the policy — see `UploadResult.downgraded`.
+    const downgraded = destination !== "provider" && !scope;
+    if (downgraded) {
+      if (destination === "storage") {
+        // Bytes were asked to be kept and there is nobody to keep them for.
+        // Storing them anyway files them under a scope every caller shares, and
+        // answering nothing is an upload that silently did not happen. Neither
+        // is an answer; this is.
+        throw new Error(
+          'This upload was routed to storage, but `attachmentScope()` returned null for the request, so there is no subject to file the attachment under. Guard the route (`this.agent(Chat).middleware({ upload: "auth" })`), send a `threadId` with the upload, or override `attachmentScope()`.',
+        );
+      }
+      // Policy said `both` and the request has no subject: fall through to the
+      // provider alone, which is exactly what this route did before attachments
+      // existed. Downgrading rather than throwing is what keeps an
+      // unauthenticated chat working across the upgrade — but a downgrade nobody
+      // is told about is the failure mode this file keeps arguing against, so it
+      // is warned once per process on the server and marked `downgraded` in the
+      // answer, so the client can tell this apart from a deliberate
+      // provider-only policy.
+      warnUnscopedUploadOnce();
+    }
+
+    if (destination === "provider" || !scope) {
+      // Identical to the pre-attachment behaviour, down to the answer's
+      // `fileId` — plus `downgraded` when this path was not the app's choice.
+      const fileId = await this.agent.provider.upload(file as File);
+      const answer: UploadResult = {
+        fileId,
+        name,
+        mimeType,
+        size: file.size,
+        destination: "provider",
+      };
+      if (downgraded) {
+        answer.downgraded = "no_scope";
+      }
+      return answer;
+    }
+
+    const attachmentId = newAttachmentId();
+    const objectName = await this.attachmentStorage.put({
+      name: attachmentObjectName(attachmentId, name),
+      body: file,
+      contentType: mimeType,
+    });
+
+    const fileId =
+      destination === "both" ? await this.agent.provider.upload(file as File) : undefined;
+
+    const record: Attachment = {
+      id: attachmentId,
+      scopeKey: scope.key,
+      fileId,
+      objectName,
+      name,
+      mimeType,
+      size: file.size,
+      createdAt: new Date().toISOString(),
+      destination,
+    };
+    await this.attachments.put(scope, record);
+
+    return { fileId, attachmentId, name, mimeType, size: file.size, destination };
   }
 
   /**
@@ -896,6 +1239,82 @@ function jsonResponse(status: number, error: Record<string, unknown>): Response 
     status,
     headers: { "Content-Type": "application/json" },
   });
+}
+
+// --- attachments ---------------------------------------------------------
+
+/**
+ * Reads the client's `destination` field and applies it to the app's policy.
+ *
+ * THE ONLY THING A CLIENT MAY ASK FOR IS "DO NOT SEND THIS TO THE VENDOR", and
+ * that is the entire permitted vocabulary: a `storage` hint under a `both`
+ * policy, or a hint that agrees with the policy and changes nothing. Everything
+ * else throws.
+ *
+ * The rule here used to be "a hint may narrow, never widen", counting
+ * destinations, and counting is what made it wrong in one direction.
+ * `both → provider` is fewer destinations and reads as narrowing, but what it
+ * removes is *gemi's own copy*, while the third party still gets the file. That
+ * is not a client declining exposure, it is a client overriding the app's
+ * retention decision from a field in a multipart body: an app that keeps every
+ * upload because a tool has to forward it — or because an auditor asked — loses
+ * the copy, mints no `attachmentId`, records nothing, and gets no warning
+ * either, since the bytes did reach the provider exactly as policy said. The
+ * two directions are not alike, because only one of them reduces who ends up
+ * holding the file.
+ *
+ * What is left is defensible on its own terms: `storage` keeps bytes off a
+ * vendor the app was willing to send them to, which is a thing the client is
+ * entitled to ask for and which cannot hurt anyone if the client is lying. A UI
+ * that knows this CSV exists to be imported and will never be read by the model
+ * is the case that makes a hint worth having at all. The policy hook is the
+ * ceiling; the hint may only take the vendor out from under it.
+ *
+ * A hint the policy does not permit throws rather than being ignored. Ignoring
+ * it is the shape of this bug that never gets found: the client believes it kept
+ * a file off the vendor, the file went anyway, and nothing anywhere says so.
+ */
+function narrowDestination(
+  policy: AttachmentDestination,
+  hint: FormDataEntryValue | null,
+): AttachmentDestination {
+  if (typeof hint !== "string" || hint.length === 0) {
+    return policy;
+  }
+  if (hint !== "both" && hint !== "provider" && hint !== "storage") {
+    throw new Error(
+      `Unknown attachment destination "${hint}". Expected "both", "provider" or "storage".`,
+    );
+  }
+  if (hint === policy || (policy === "both" && hint === "storage")) {
+    return hint;
+  }
+  if (policy === "both" && hint === "provider") {
+    throw new Error(
+      'This upload asked for the "provider" destination under a "both" policy. A client may ask for "storage", which keeps a file away from the model provider, but it may not ask the server to stop keeping its own copy while the vendor still gets the file — that is the app\'s retention decision. Change `attachmentDestination()` if this file should not be kept.',
+    );
+  }
+  throw new Error(
+    `This upload asked for the "${hint}" destination, but the server's policy for it is "${policy}", and a client hint may only ask for "storage" under a "both" policy. Change \`attachmentDestination()\` if the file really should go there.`,
+  );
+}
+
+/**
+ * Said once per process, not once per upload.
+ *
+ * The condition is a property of how the app is wired — an agent route with no
+ * authentication and no `threadId` on its uploads — so it is either true for
+ * every request or false for every request. Logging it per request would put a
+ * line in the log for every file anyone ever uploads, which is how a warning
+ * stops being read.
+ */
+let warnedAboutUnscopedUpload = false;
+function warnUnscopedUploadOnce(): void {
+  if (warnedAboutUnscopedUpload) return;
+  warnedAboutUnscopedUpload = true;
+  console.warn(
+    "[gemi/ai] An upload had no attachment scope, so its bytes were sent to the model provider only and no attachment id was minted — a tool cannot forward this file. Guard the route with auth, send a `threadId` with the upload, or override `attachmentScope()`.",
+  );
 }
 
 // --- routing -------------------------------------------------------------

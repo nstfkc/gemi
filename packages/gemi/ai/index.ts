@@ -106,12 +106,17 @@ export type {
 // --- the controller, its stores and the route it mounts -------------------
 export {
   AgentController,
+  AttachmentNotFoundError,
   defaultAgentStore,
+  defaultAttachmentStore,
   FrameCursorEvictedError,
+  InvalidAttachmentScopeError,
   liveRuns,
   LiveRunNotFoundError,
   MemoryAgentStore,
+  MemoryAttachmentStore,
   MemoryLiveRuns,
+  ScopedAttachments,
 } from "./AgentController";
 export type {
   AgentHookContext,
@@ -120,7 +125,13 @@ export type {
   AgentRouteMethod,
   AgentRouteRPC,
   AgentStore,
+  Attachment,
+  AttachmentDestination,
+  AttachmentScope,
+  AttachmentStorage,
+  AttachmentStore,
   LiveRuns,
+  UploadResult,
 } from "./AgentController";
 
 // Deliberately NOT exported: `./signing`. An approval's signature is machinery
