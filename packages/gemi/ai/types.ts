@@ -11,6 +11,8 @@
  * instead of by changing what an app sees.
  */
 
+import type { ToolAttachmentRecord } from "./store/Attachments";
+
 /**
  * Tools reduced to just their payload types.
  *
@@ -99,6 +101,26 @@ export type FilePart = {
   fileId: string;
   name?: string;
   mimeType?: string;
+  /**
+   * gemi's attachment id, present on exactly one kind of file part: one the run
+   * injected itself for `ctx.attachments.put(blob, { showModel: true })`. A
+   * user's own upload does not carry it — `ClientTurn.files` has no field for
+   * one — so this is the marker that says "a tool made this and the model was
+   * shown it", and it is never sent to the provider.
+   *
+   * Two things read it. A UI can link the picture back to the attachment the
+   * tool can still fetch. And the run's own context pruning keys on it: history
+   * is resent whole on every step, so a three-iteration edit loop would pay for
+   * three images on every later call, and the window that stops that has to be
+   * able to tell a tool's product from a file the user attached and expects to
+   * stay attached. See `historyForProvider` in `Agent.ts`.
+   *
+   * In stateless mode the client carries this back like the rest of the
+   * history, so it is client-editable — and that is not a new hole. It decides
+   * how much of its own context a run keeps, nothing about who may read what;
+   * a client that strips it buys itself a larger bill.
+   */
+  attachmentId?: string;
 };
 
 /**
@@ -169,6 +191,25 @@ export type ToolCallPart<T extends ToolShapes = ToolShapes> = {
      * call the server never made.
      */
     nested?: NestedRun[];
+    /**
+     * Attachments this tool call parked, in the order it parked them.
+     *
+     * The memo for `ctx.attachments.put`, and it lives here for the reason
+     * `nested` does: a tool that escalates is re-entered from the top on the
+     * next turn, the message history is the only state that crosses that
+     * boundary, and a `put` with no record would store the bytes again, upload
+     * them again and show the model the same image twice. Indexed by the order
+     * of the `put` calls within the tool call — the same key `runAgent` uses,
+     * with the same caveat about a body whose calls sit in a branch.
+     *
+     * Absent until the first `put` that produced something, so a tool that
+     * attaches nothing — including one whose every `put` threw — adds no field
+     * to the wire or the store. A `put` that threw with a later one that did not
+     * leaves `{ failed: true }` at its index rather than a hole, because a hole
+     * is `null` after JSON and this list is walked by index; see
+     * `ToolAttachmentRecord`.
+     */
+    attachments?: ToolAttachmentRecord[];
   };
 }[keyof T];
 
@@ -396,6 +437,27 @@ export type AgentStreamEvent<T extends ToolShapes = ToolShapes, O = unknown> =
       event: AgentStreamEvent;
     }
   | { type: "tool-result"; messageId: string; part: ToolResultPart<T> }
+  /**
+   * A complete message the run wrote that nobody typed.
+   *
+   * Today there is exactly one: the input-role message carrying a file a tool
+   * produced with `showModel`. It needs an event because the client cannot
+   * derive it from anything else on the stream — the user's own turn needs no
+   * event precisely because the client already has it, and this is the opposite
+   * case: content appears in the middle of an answer that no client authored,
+   * and a live watcher that never heard about it renders a conversation the
+   * server does not have.
+   *
+   * WHOLE, NOT STREAMED, and that is the honest shape rather than a shortcut.
+   * `message-start` / deltas / `message-end` exist because an assistant message
+   * arrives a token at a time; this one is finished the instant it is made, so
+   * there is nothing to open and nothing to close, and splitting it into three
+   * frames would invent two states it is never in. It also makes redelivery
+   * free: the reducer replaces by id with a value that cannot have changed,
+   * which is the one case where the wholesale replace `tool-call` warns against
+   * is safe — the server is the sole author and the message is immutable.
+   */
+  | { type: "message"; message: AgentMessage<T, O> }
   /**
    * Terminal for this stream: the run is finished, not parked. Everything
    * needed to answer is in the event and in the messages already delivered, so

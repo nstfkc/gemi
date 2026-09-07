@@ -14,6 +14,15 @@ import {
   verifyNestedRun,
   verifyPendingCall,
 } from "./signing";
+import type {
+  Attachment,
+  PutAttachmentParams,
+  ScopedAttachments,
+  ToolAttachmentPut,
+  ToolAttachmentRecord,
+  ToolAttachments,
+} from "./store/Attachments";
+import { InvalidAttachmentScopeError } from "./store/Attachments";
 import { sseKeepalive } from "./store/sse";
 import type {
   AgentError,
@@ -22,6 +31,7 @@ import type {
   AgentStreamFrame,
   ClientToolResult,
   ClientTurn,
+  FilePart,
   FinishReason,
   NestedRun,
   PendingToolCall,
@@ -71,6 +81,39 @@ export interface ToolContext {
    * to tell it otherwise: the tool body ran once already.
    */
   readonly resumed: boolean;
+  /**
+   * Files, both directions.
+   *
+   * WHAT THIS FIXES. Before it, files travelled one way: a user's upload became
+   * a provider file id the model could look at, and a tool that *produced*
+   * something — an edited image, a rendered chart — had a string to return and
+   * nowhere to put the bytes. `put(blob)` parks them and answers a record whose
+   * `id` is the handle everything else uses; `put(blob, { showModel: true })`
+   * also sends them to the provider and puts them in front of the model as an
+   * input-role message once this tool call settles, which is what makes
+   * generate → look → fix a loop rather than a one-way report.
+   *
+   * SCOPED, AND THAT IS THE WHOLE SECURITY STORY. The object is built from the
+   * `ScopedAttachments` the controller resolved for *this request* (see
+   * `AgentController.attachmentScope`), and none of its methods takes a scope,
+   * so there is nothing for a tool to pass the model's arguments into. An id
+   * that came from another user resolves to `AttachmentNotFoundError`, with the
+   * same wording an unknown id gets.
+   *
+   * PER TOOL CALL, LIKE `runAgent`, AND FOR THE SAME REASON. `put` is memoized
+   * by call index within the tool call, so a tool that escalates and is
+   * re-entered does not store, upload or inject a second time. Read the note on
+   * `ToolAttachments.put` before writing a body whose `put` calls sit in a
+   * branch.
+   *
+   * ALWAYS PRESENT, NEVER NULL. A request with no attachment scope — an
+   * unauthenticated, thread-less chat — gets an object whose every method
+   * throws with a sentence naming `attachmentScope()`. A nullable `ctx`
+   * member would be a guard every tool has to remember and most would not,
+   * and the failure of forgetting is a `TypeError` in a tool body rather than
+   * an explanation.
+   */
+  attachments: ToolAttachments;
   /**
    * Runs another agent from inside this tool, wired into the parent run.
    *
@@ -605,6 +648,22 @@ export interface AgentStreamParams {
    */
   onMessage?: (message: AgentMessage) => void | Promise<void>;
   /**
+   * The attachment handle every tool of this run is given as `ctx.attachments`.
+   *
+   * Resolved by the controller from the request — `attachmentsFor(req,
+   * threadId)` — and passed in rather than reached for, because the scope is a
+   * fact about the caller and the run has no way to derive one. `null`, or
+   * omitted, is a request with no subject: the object tools get still exists
+   * and every method on it throws a sentence naming `attachmentScope()`.
+   *
+   * Handed down unchanged to a sub-run started by `ctx.runAgent`. A sub-agent
+   * is running on behalf of the same caller — that is the only reason it is
+   * allowed to run at all — so it reads and writes the same scope, and a tool
+   * three levels down can be given an id its parent parked. Widening it here
+   * would be the confused-deputy hole in reverse.
+   */
+  attachments?: ScopedAttachments | null;
+  /**
    * Set by `ctx.runAgent` and by nothing else.
    *
    * It rides on the public params rather than on a back door because
@@ -1098,6 +1157,59 @@ function seedOf(params: RunAgentParams): string | null {
 }
 
 /**
+ * How many tool-produced files stay attached to the request. See
+ * `AgentRunImpl.historyForProvider`, which is where the reasoning lives.
+ */
+const SHOWN_FILE_WINDOW = 1;
+
+/**
+ * Why the Nth attachment of a replayed tool body is not the Nth attachment of
+ * the turn that escalated, or `null` when it is.
+ *
+ * DELIBERATELY WEAKER THAN `replayMismatch`, and the reason is what each of them
+ * is protecting. A crossed sub-run pairs a human's answer with a question they
+ * never saw, which is consent applied to the wrong thing and is invisible
+ * afterwards; a crossed attachment shows the model the wrong picture, which is
+ * wrong and is also the sort of wrong the next turn can talk its way out of. So
+ * this checks the two things that cannot change for an honest reason and
+ * nothing else.
+ *
+ * Not the size, and not any digest of the bytes: the body that produced this
+ * blob ran again from the top and produced it again, and almost nothing that
+ * makes an image — a model, a renderer with a timestamp in it, a compressor
+ * with a thread pool — is byte-identical twice. Comparing bytes would fail the
+ * common case and catch the rare one.
+ *
+ * Not the name either, for a smaller version of the same reason: filenames
+ * carry dates and counters, and an app that names its output
+ * `chart-${Date.now()}.png` would find its tool broken on every resume.
+ *
+ * What is left is the media type and whether the caller asked to show it, which
+ * is exactly what changes when a body takes a different branch — the CSV path
+ * instead of the PNG path, the quiet `put` instead of the `showModel` one.
+ */
+function putMismatch(
+  recorded: ToolAttachmentPut,
+  blob: Blob,
+  params: PutAttachmentParams,
+): string | null {
+  const mimeType = params.mimeType || blob.type || "";
+  if (mimeType && recorded.attachment.mimeType !== mimeType) {
+    return (
+      `was ${JSON.stringify(recorded.attachment.mimeType)} on the turn that escalated ` +
+      `and is ${JSON.stringify(mimeType)} on the replay`
+    );
+  }
+  const shown = Boolean(params.showModel);
+  if (shown !== Boolean(recorded.shown)) {
+    return shown
+      ? "was stored without showModel on the turn that escalated and asks for showModel on the replay"
+      : "was stored with showModel on the turn that escalated and asks for a plain put on the replay";
+  }
+  return null;
+}
+
+/**
  * Why the Nth sub-run of a replayed tool body is not the Nth sub-run of the
  * turn that escalated, or `null` when it is.
  *
@@ -1155,6 +1267,94 @@ function pathBelow(path: string[] | undefined, prefix: string[]): string[] | nul
   return full.slice(prefix.length);
 }
 
+/**
+ * The one memo rule a re-entered tool body plays by, in one place.
+ *
+ * A tool that escalates cannot be suspended — a paused async generator does not
+ * fit in a message history — so it is re-entered FROM THE TOP on the next turn
+ * and everything it did the first time has to be recognised rather than done
+ * again. The only key available is the order the calls happened in, and the only
+ * place a record can live is the message history, because that is the sole state
+ * that crosses a turn boundary in a thread and in the browser alike.
+ *
+ * So: an array on the `ToolCallPart`, a snapshot of its length taken before the
+ * body runs (everything already there came from an earlier turn and is
+ * replayable; everything appended past that point is happening for the first
+ * time), and an index that walks it. `ctx.runAgent` and `ctx.attachments.put`
+ * both need exactly this and they share it here rather than each growing their
+ * own copy — the failure of two copies is that one of them is fixed and the
+ * other is not, and both are invisible until someone resumes.
+ *
+ * The array is created by the first WRITE and not before. `nested: []` or
+ * `attachments: []` on every tool call would be a wire and store change paid for
+ * by every app that has neither — and "on first use" is not good enough, because
+ * a slot is handed out before the work that fills it can fail. A tool whose only
+ * `put` throws (no attachment scope, a provider that cannot read files) must
+ * leave a tool call with no `attachments` field, not an empty array announcing
+ * an attachment that does not exist.
+ *
+ * A SLOT IS RESERVED WHEN IT IS ASKED FOR, THOUGH, NOT WHEN IT IS FILLED, and
+ * that is deliberate: a tool body may run its `put`s or its `runAgent`s
+ * concurrently — `await Promise.all(images.map((i) => ctx.attachments.put(i)))`
+ * is the obvious way to write it — and every one of them takes its index
+ * synchronously, in map order, before its first `await`. Handing out the index
+ * on success instead would number them by the order they *finished*, which the
+ * network decides and which the next turn will not reproduce. So the index
+ * always advances, and a slot whose work threw stays unwritten.
+ *
+ * An unwritten slot before a written one would be a hole, and a hole is `null`
+ * once it goes through JSON — which is what a consumer walking `part.attachments`
+ * would crash on. `fill` is what stands in its place. `runAgent` passes none, so
+ * `nested` keeps exactly the shape it has had since sub-agents existed, holes
+ * and all: `NestedRun` describes a sub-run that happened and has no honest shape
+ * for one that did not, and inventing one is a change to nesting rather than to
+ * the issue this memo was extracted for.
+ *
+ * What is NOT shared is what to do with a hit, and it could not be: a recorded
+ * sub-run that parked has to be *continued*, so `runAgent`'s memo sometimes
+ * returns and sometimes falls through, while a recorded `put` is total — the
+ * bytes are already stored and the id is already in the transcript the model
+ * read, so there is nothing left to finish. The drift check differs too, and for
+ * a reason worth reading: see `replayMismatch` against the note on
+ * `putMismatch`.
+ */
+class ReplayMemo<R> {
+  private index = 0;
+  private readonly replayable: number;
+
+  constructor(
+    private readonly read: () => R[] | undefined,
+    private readonly create: () => R[],
+    /** What stands in for a slot whose work threw. See the note above. */
+    private readonly fill?: () => R,
+  ) {
+    this.replayable = read()?.length ?? 0;
+  }
+
+  /**
+   * The next slot: its index, the record a previous turn left there if it left
+   * one, and the way to write this turn's.
+   *
+   * `write` is the only thing that touches the array. Call it once the record
+   * exists and not before — everything between `next()` and `write()` is work
+   * that may throw, and a slot nobody writes is a slot that costs nothing.
+   */
+  next(): { at: number; recorded: R | undefined; write: (record: R) => void } {
+    const at = this.index++;
+    return {
+      at,
+      recorded: at < this.replayable ? this.read()?.[at] : undefined,
+      write: (record: R) => {
+        const rows = this.read() ?? this.create();
+        if (this.fill) {
+          for (let i = rows.length; i < at; i++) rows[i] = this.fill();
+        }
+        rows[at] = record;
+      },
+    };
+  }
+}
+
 class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   readonly runId: string;
 
@@ -1175,7 +1375,20 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   /** Messages from an earlier run this one has amended, by id. Cloned once and
    *  reused, so two results for the same message do not fork it. */
   private readonly amended = new Map<string, AgentMessage>();
-  /** Amended messages that have not yet gone through `onMessage`. */
+  /**
+   * Messages this run finished outside `finalizeMessage` that have not yet gone
+   * through `onMessage`: earlier turns' messages it amended, and messages it
+   * injected for a file a tool showed.
+   *
+   * They wait rather than being reported where they are made, because
+   * `onMessage` is the persistence point for an app that has no `store` and an
+   * append-only table keyed by a serial id reads back in the order the hook was
+   * called. Reporting an injected message from inside `runTools` would call the
+   * hook for it BEFORE the assistant message whose tool call produced it, since
+   * that message is only finalized once the step is over — so the transcript in
+   * the app's database would put the file above the turn that made it, while
+   * `result.messages`, the stream and `history` all put it below.
+   */
   private readonly unreported = new Set<AgentMessage>();
 
   private usage: Usage = emptyUsage();
@@ -1210,6 +1423,11 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
    * The work would be on the stream and missing from the store.
    */
   private readonly nestedSettling = new Set<Promise<unknown>>();
+  /**
+   * Messages for files a tool asked to show, held until its call settles, keyed
+   * by tool call id. See `queueShown`.
+   */
+  private readonly shownQueue = new Map<string, AgentMessage[]>();
 
   constructor(config: RunConfig, params: AgentStreamParams) {
     this.config = config;
@@ -1467,6 +1685,11 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     }
     this.emit({ type: "message-end", messageId: message.id, finishReason: reason });
     await this.report(message);
+    // After it, never before: a file a tool showed during this message belongs
+    // below the message whose tool call produced it, in the hook exactly as it
+    // is in `result().messages` and on the stream. Empty on every step of a run
+    // with no such file, which is most of them.
+    await this.reportDeferred();
   }
 
   private async report(message: AgentMessage): Promise<void> {
@@ -1490,7 +1713,10 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     let outputText = "";
 
     const stream = provider.stream({
-      messages: this.history.filter((m) => m !== message),
+      // Not `this.history` directly: an image a tool showed is in the history
+      // forever and must not be in every *request* forever. See
+      // `historyForProvider`.
+      messages: this.historyForProvider(message),
       systemPrompt: await this.systemPrompt(),
       tools: this.config.providerTools.length > 0 ? this.config.providerTools : undefined,
       output: this.config.output
@@ -1709,7 +1935,13 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
 
       running.push(
         this.executeTool(resolved, message.id, call, parsed.value, step)
-          .then((result) => this.addResult(message, result))
+          .then(async (result) => {
+            this.addResult(message, result);
+            // The call has settled. Anything it asked to show goes into the
+            // history now, after its own result — which is the order the
+            // provider validates and the order it happened in.
+            await this.settleShown(call.toolCallId);
+          })
           .catch((error) => {
             if (error instanceof PendingEscalation) {
               if (this.onPending === "deny") {
@@ -1796,6 +2028,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       step,
       depth: this.depth,
       resumed: resume !== undefined,
+      attachments: this.toolAttachments(call),
       runAgent: this.nestedRunner(messageId, call, resume),
     };
 
@@ -1874,21 +2107,17 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     call: ToolCallPart,
     resume?: { answers: ClientToolResult[] },
   ): ToolContext["runAgent"] {
-    // Snapshotted before the tool body runs: everything already here came from
-    // an earlier turn and is replayable, everything appended past this point is
-    // running for the first time.
-    const replayable = call.nested?.length ?? 0;
-    let index = 0;
-    // Created on the first `runAgent` and not before, so a tool that never
-    // nests does not put an empty array on every tool call it makes — the part
-    // is on the wire and in the store, and an always-present `nested: []` would
-    // be a shape change paid for by every app that has no sub-agents.
-    const memoize = (): NestedRun[] => call.nested ?? (call.nested = []);
+    // Snapshotted before the tool body runs, and lazily created on first use.
+    // Both rules, and the reasoning behind them, are on `ReplayMemo` — which
+    // `ctx.attachments.put` shares, so that the two memos on one tool call
+    // cannot drift apart in how they decide what is a replay.
+    const memo = new ReplayMemo<NestedRun>(
+      () => call.nested,
+      () => (call.nested = []),
+    );
 
     return async (agent: AnyAgent, params: RunAgentParams = {}): Promise<NestedRunResult> => {
-      const at = index++;
-      const memo = memoize();
-      const recorded = at < replayable ? memo[at] : undefined;
+      const { at, recorded, write } = memo.next();
 
       if (recorded) {
         const mismatch = replayMismatch(recorded, agent, params);
@@ -1915,16 +2144,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         }
       }
 
-      return this.runNested(
-        messageId,
-        call,
-        agent,
-        params,
-        at,
-        memo,
-        recorded,
-        resume?.answers ?? [],
-      );
+      return this.runNested(messageId, call, agent, params, write, recorded, resume?.answers ?? []);
     };
   }
 
@@ -1942,8 +2162,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     call: ToolCallPart,
     agent: AnyAgent,
     params: RunAgentParams,
-    at: number,
-    memo: NestedRun[],
+    write: (record: NestedRun) => void,
     recorded: NestedRun | undefined,
     answers: ClientToolResult[],
   ): Promise<NestedRunResult> {
@@ -1996,6 +2215,13 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
           ? { text: params.prompt }
           : undefined,
       req: this.params.req,
+      // The same scope, down the whole tree. A sub-agent runs on behalf of the
+      // caller who started the parent — that is the only reason it is allowed
+      // to run at all — so it reads and writes the caller's attachments, and a
+      // tool three levels down can be handed an id its parent parked. There is
+      // nothing to widen here and nothing to narrow: a second scope would be a
+      // second answer to a question the request already answered once.
+      attachments: this.params.attachments,
       // Inherited, not new: this is what makes the parent's `stop()` reach a
       // sub-run three levels down without anything in between forwarding it.
       signal: this.controller.signal,
@@ -2075,7 +2301,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       // a lost run, and a cancelled sub-run is still work the user should be
       // able to read — both of those depend on the transcript already being on
       // the part when the throw happens.
-      memo[at] = record;
+      write(record);
       // Only what this turn actually spent. A memoized sub-run adds nothing,
       // above, because the turn that ran it already counted it.
       this.usage = addUsage(this.usage, result.usage);
@@ -2137,6 +2363,314 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   private addResult(message: AgentMessage, part: ToolResultPart) {
     message.content.push(part);
     this.emit({ type: "tool-result", messageId: message.id, part });
+  }
+
+  // --- files a tool made -------------------------------------------------
+
+  /**
+   * The `ctx.attachments` given to one tool call.
+   *
+   * Built per call rather than per run for one reason, and it is the same
+   * reason `runAgent` is: the memo. A `put` has to be recognisable on the next
+   * turn as the same `put`, and the only address a re-entered body has is "the
+   * Nth attachment of this tool call" — so the object that counts them has to
+   * belong to the call, not to the run.
+   */
+  private toolAttachments(call: ToolCallPart): ToolAttachments {
+    const scoped = this.params.attachments ?? null;
+    const memo = new ReplayMemo<ToolAttachmentRecord>(
+      () => call.attachments,
+      () => (call.attachments = []),
+      // A put that threw took an index and wrote nothing, and if a later put in
+      // the same call succeeds the gap has to be something rather than a hole:
+      // `[null, { attachment }]` is what a hole becomes on the wire and in the
+      // store, and it is what a UI or an app walking the memo crashes on. The
+      // slot is re-attempted on a replay — `put` treats a failed record as no
+      // record — so a transient failure heals itself on the turn the call
+      // finally settles, and a permanent one stays legible as "this put did not
+      // produce a file" instead of pretending it produced nothing at all.
+      () => ({ failed: true }),
+    );
+
+    /**
+     * The scope, or a sentence saying why there isn't one.
+     *
+     * A request with no subject gets no attachments at all — that is #489's
+     * rule and this is where a tool meets it. The throw lands in `executeTool`,
+     * which turns it into a `tool_error` the model reads, so the model is told
+     * the tool cannot store files rather than being told nothing while the tool
+     * quietly answers an id for bytes nobody kept. The message names the hook
+     * an app has to override, because the reader who can act on it is the
+     * developer looking at the transcript, not the model.
+     */
+    const scopeOrThrow = (): ScopedAttachments => {
+      if (!scoped) {
+        throw new InvalidAttachmentScopeError(
+          "This request has no attachment scope, so a tool cannot store or read files on it. `attachmentScope()` returned null — put the chat route behind authentication, send a `threadId`, or override `attachmentScope()` on the controller.",
+        );
+      }
+      return scoped;
+    };
+
+    return {
+      get: (id: string) => scopeOrThrow().get(id),
+      read: (id: string) => scopeOrThrow().read(id),
+      file: (id: string) => scopeOrThrow().file(id),
+      put: async (blob: Blob, params: PutAttachmentParams = {}): Promise<Attachment> => {
+        const { at, recorded, write } = memo.next();
+
+        // A `failed` record is a slot an earlier turn took and could not fill,
+        // so there is nothing to replay and the work is done again.
+        if (recorded && "attachment" in recorded) {
+          const mismatch = putMismatch(recorded, blob, params);
+          if (mismatch) {
+            throw new Error(
+              `Attachment ${at} of "${String(call.name)}" ${mismatch}. ` +
+                `ctx.attachments.put is memoized by call index within a tool call, so a body whose put calls depend on a condition that changed between turns cannot be replayed — the model would be shown a file under an id that names different bytes. ` +
+                `Make the sequence of put calls the same every time this tool runs, or branch on ctx.resumed.`,
+            );
+          }
+          // Nothing is stored and nothing is uploaded. What IS repeated is the
+          // queueing: the first attempt escalated before its result attached,
+          // so the message was queued and never flushed, and this turn is the
+          // one where the call finally settles. `settleShown` refuses a message
+          // id the history already holds, which is what makes queueing twice
+          // safe rather than merely unlikely.
+          if (recorded.shown) this.queueShown(call.toolCallId, recorded);
+          return recorded.attachment;
+        }
+
+        const attachments = scopeOrThrow();
+        const mimeType = params.mimeType || blob.type || "";
+        // A name is settled here rather than left to `ScopedAttachments.put`,
+        // which falls back to the attachment id. The provider's upload wants a
+        // filename, the injected `FilePart` carries one, and the stored record
+        // has one — three copies that have to agree, so there is one value.
+        const name = params.name ?? (blob instanceof File ? blob.name : "attachment");
+
+        let fileId: string | undefined;
+        if (params.showModel) {
+          const provider = this.config.provider;
+          if (!provider.capabilities.fileInput) {
+            // Refused before a byte moves. `toResponsesInput` drops a file part
+            // for a provider that cannot read one, so without this the tool
+            // pays for an upload, stores a record claiming the model was shown
+            // the file, and the model answers about an image that never reached
+            // the wire — with nothing in the transcript, the logs or the bill
+            // saying which of those three things went wrong.
+            throw new Error(
+              `"${String(call.name)}" asked to show a file to ${provider.model}, which does not accept file input. Drop \`showModel\` for this provider, or run this agent on a model that takes files — \`capabilities.fileInput\` is what says which do.`,
+            );
+          }
+          // The provider first, storage second — the opposite of `upload`'s
+          // order in `AgentController`, deliberately.
+          //
+          // That route stores first because either failure fails the request
+          // and the only question is whose orphan it becomes. Here there is a
+          // second question and it decides: the record this writes claims
+          // `destination: "both"`, and a record cannot claim the vendor has a
+          // copy before the vendor says so. Uploading first also means a file
+          // the vendor refuses — a type it will not take, a size over its cap —
+          // costs no storage write at all, and `showModel` is exactly the path
+          // where that refusal is likeliest. The orphan when storage fails
+          // afterwards is a file at the vendor with no record here, which is
+          // the same orphan `AgentController.upload` accepts in the other
+          // direction.
+          fileId = await provider.upload(new File([blob], name, { type: mimeType || undefined }));
+        }
+
+        const attachment = await attachments.put(blob, { name, mimeType, fileId });
+        const record: ToolAttachmentPut = {
+          attachment,
+          ...(fileId
+            ? {
+                shown: {
+                  fileId,
+                  // Minted here and written down, not derived later. The next
+                  // turn replays this record and has to produce the same
+                  // message — same id, same timestamp — or a reattached client
+                  // and a live one hold two copies of one image.
+                  messageId: `msg_${crypto.randomUUID()}`,
+                  createdAt: new Date().toISOString(),
+                },
+              }
+            : {}),
+        };
+        // The slot is filled only now, with everything that could throw behind
+        // it: a put that fails leaves the tool call exactly as it found it.
+        write(record);
+        if (record.shown) this.queueShown(call.toolCallId, record);
+        return attachment;
+      },
+    };
+  }
+
+  /**
+   * Holds the message for a shown file until its tool call settles.
+   *
+   * WHY IT WAITS. The message is input-role and it has to sit *after* the tool
+   * call's result, because that is the order it happened in and the order the
+   * provider validates: a `function_call` and its `function_call_output` are a
+   * pair, and a user message wedged between them is a history the API rejects.
+   * Emitting it the moment `put` returns would do exactly that, since the tool
+   * is still running.
+   *
+   * WHY A TOOL THAT ESCALATED GETS NOTHING. Its call has no result yet, so
+   * flushing would leave an image in the transcript attached to a call that has
+   * not finished — and the next turn re-enters the body, replays the `put` and
+   * would queue a second copy. The queue simply dies with the run; the record
+   * on the tool call survives, and the turn that finally settles the call is
+   * the turn that shows the file.
+   */
+  private queueShown(toolCallId: string, record: ToolAttachmentPut) {
+    const shown = record.shown;
+    if (!shown) return;
+    const queued = this.shownQueue.get(toolCallId) ?? [];
+    if (queued.some((message) => message.id === shown.messageId)) return;
+    queued.push({
+      id: shown.messageId,
+      role: "user",
+      content: [
+        {
+          type: "file",
+          fileId: shown.fileId,
+          name: record.attachment.name,
+          mimeType: record.attachment.mimeType,
+          // What marks this as a file the run injected rather than one the user
+          // attached. The pruning window reads it; see `historyForProvider`.
+          attachmentId: record.attachment.id,
+        },
+      ],
+      createdAt: shown.createdAt,
+      // Complete the instant it is made. Without this the client's `run-end`
+      // safety net would find a message with no finish reason and stamp one on,
+      // which is a difference between a live client and a reattached one over a
+      // message that was never streaming in the first place.
+      finishReason: "stop",
+    });
+    this.shownQueue.set(toolCallId, queued);
+  }
+
+  /**
+   * The tool call settled: its files go into the transcript now.
+   *
+   * Pushed to `history` (so the next step sees them), to `produced` (so
+   * `result().messages` carries them and the controller persists them), emitted
+   * (so a client watching live sees the same conversation a reattached one
+   * replays), and queued for `onMessage` (so an app that persists from the hook
+   * stores it). A message that is in some of those four and not the others is
+   * the bug class #470 is about, and an injected message is the easiest place in
+   * the codebase to write it.
+   *
+   * QUEUED FOR THE HOOK RATHER THAN REPORTED HERE, so that all four agree on
+   * ORDER and not merely on contents. The assistant message that made this tool
+   * call has not been finalized yet — `loop` does that after `runTools`
+   * returns — so calling `onMessage` from here would hand an app the file
+   * before the turn that produced it. `reportDeferred` is where the queue is
+   * drained, immediately after that assistant message is reported.
+   *
+   * The id guard is for a history that already holds the message — a stateless
+   * client posting back a transcript that contains the injection *and* still
+   * shows the call as open, which is a rewind the server cannot rule out. One
+   * copy either way.
+   *
+   * NOTHING IS SHOWN ONCE THE RUN IS OVER, and the check belongs here rather than
+   * at the three call sites because one of those sites fires after the run has
+   * finished. `finalizeAborted` never calls this — it denies every open call
+   * instead — but a `/stop` does not wait for a tool that is already running:
+   * `raceAbort` in `runTools` returns the moment the signal fires, the run
+   * finalizes and ends, and the tool's own `.then` lands afterwards and calls
+   * this. Without the guard the message goes into `history` and `produced` and
+   * through `onMessage` while `emit` is already a no-op, so it is persisted and
+   * never announced, and a client that reloads the thread sees an image a client
+   * that watched it live never saw. That is the exact divergence this issue
+   * asked to avoid, arrived at from the one direction nobody looks. Appending an
+   * image to a conversation the user has just cancelled would also be the run
+   * getting the last word. The bytes are kept and the record is on the tool
+   * call, so a tool that runs again can still resolve the id; nothing is lost
+   * but the showing.
+   */
+  private async settleShown(toolCallId: string): Promise<void> {
+    const queued = this.shownQueue.get(toolCallId);
+    if (!queued || queued.length === 0) return;
+    this.shownQueue.delete(toolCallId);
+    if (this.ended || this.controller.signal.aborted) return;
+    for (const message of queued) {
+      if (this.history.some((held) => held.id === message.id)) continue;
+      this.history.push(message);
+      this.produced.push(message);
+      this.emit({ type: "message", message });
+      this.unreported.add(message);
+    }
+  }
+
+  /**
+   * The history as the provider sees it: everything, minus all but the most
+   * recent tool-produced file.
+   *
+   * THE PROBLEM. `buildResponsesRequest` is handed the whole history on every
+   * step, so a file injected at step two is re-sent at steps three, four and
+   * five. An edit loop that iterates three times therefore pays for three
+   * images on every later call — image tokens are not small, and they are
+   * charged again each step — on top of one provider upload per iteration. Left
+   * alone this is a cost that grows with the square of the loop and shows up on
+   * an invoice rather than in a stack trace.
+   *
+   * WHAT IS TRIMMED, AND WHERE. Here, on the way to the provider, and nowhere
+   * else. The transcript keeps every injected message: `history`, `produced`,
+   * `onMessage`, the stream, and the client all hold the same conversation they
+   * would have held without this method, so a `/attach` replay still matches a
+   * live stream and a user scrolling back still sees every version the agent
+   * made. Trimming the stored transcript instead would have meant editing a
+   * message after it was persisted and announced, which is the one thing the
+   * message contract does not allow.
+   *
+   * WHAT IT COSTS, AND IT IS A REAL CAPABILITY. With a window of one, the model
+   * cannot compare this iteration against the last one. "Is this closer than
+   * the previous attempt?" is a question it can no longer answer from what it
+   * can see, and an agent whose job is to converge on a target by comparison
+   * genuinely wants two. One is the default because the failure of too small a
+   * window is visible and cheap — the model says it cannot see the earlier
+   * image, in the transcript, on the first run — while the failure of too large
+   * a one is a bill nobody reads until the end of the month. The dropped part
+   * is replaced by a line of text rather than removed, so the model is told the
+   * image existed and why it is gone; a hole would leave it to conclude it had
+   * imagined seeing anything.
+   *
+   * IT IS A CONSTANT, NOT A KNOB, ON PURPOSE. A configurable window is one line
+   * to add later and cannot be taken back once apps depend on it, and nobody
+   * has a second value to name yet. Only files the run injected are counted —
+   * a file the *user* attached is one they expect to stay attached, and
+   * dropping it would be the agent losing the thing it was asked about.
+   */
+  private historyForProvider(current: AgentMessage): AgentMessage[] {
+    const messages = this.history.filter((message) => message !== current);
+
+    const shown: FilePart[] = [];
+    for (const message of messages) {
+      for (const part of message.content) {
+        if (part.type === "file" && part.attachmentId) shown.push(part);
+      }
+    }
+    if (shown.length <= SHOWN_FILE_WINDOW) return messages;
+
+    const dropped = new Set(shown.slice(0, shown.length - SHOWN_FILE_WINDOW));
+    return messages.map((message) => {
+      if (!message.content.some((part) => part.type === "file" && dropped.has(part))) {
+        return message;
+      }
+      return {
+        ...message,
+        content: message.content.map((part) =>
+          part.type === "file" && dropped.has(part)
+            ? {
+                type: "text" as const,
+                text: `[A ${part.mimeType || "file"} produced by a tool (attachment ${part.attachmentId}) was attached here and has been dropped from this request: only the most recent tool-produced file is kept attached, to keep the context bounded. Call the tool again if you need to look at it.]`,
+              }
+            : part,
+        ),
+      };
+    });
   }
 
   // --- the client's turn -------------------------------------------------
@@ -2276,14 +2810,24 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         // `"open"` is an approved tool whose own sub-agent asked something on
         // the way through: answered, so the refusal pass leaves it alone, but
         // no result attaches — the call stays open and the next turn re-enters
-        // it, exactly as an escalation from the step loop does.
-        if (result !== "open") this.attachToHistory(target, result);
+        // it, exactly as an escalation from the step loop does. Nothing it
+        // showed is flushed either, for the same reason: the call has not
+        // settled, so the file waits for the turn where it does.
+        if (result !== "open") {
+          this.attachToHistory(target, result);
+          await this.settleShown(answer.toolCallId);
+        }
       }
 
       for (const [host, answers] of reentry) {
         const entry = open.find((item) => item.call.toolCallId === host)!;
         const result = await this.reenter(entry, answers, escalated);
-        if (result) this.attachToHistory(entry, result);
+        if (result) {
+          this.attachToHistory(entry, result);
+          // The turn a re-entered tool finally settles on is the turn its files
+          // are shown, however many turns ago it stored them.
+          await this.settleShown(host);
+        }
       }
 
       for (const entry of open) {
@@ -2302,7 +2846,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
         });
       }
 
-      await this.reportAmended();
+      await this.reportDeferred();
     }
 
     if (turn && (turn.text || (turn.files && turn.files.length > 0))) {
@@ -2463,7 +3007,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
    * `messages` array; the run must not reach back into its own input and change
    * it under a controller that has already persisted it. Cloning the part into
    * the amended copy is also what makes the updated sub-run transcript
-   * something `onMessage` can report — see `reportAmended`, which is why the
+   * something `onMessage` can report — see `reportDeferred`, which is why the
    * message is marked unreported here even though no result may ever attach.
    */
   private amendCall(entry: { message: AgentMessage; call: ToolCallPart }): ToolCallPart {
@@ -2472,6 +3016,12 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     const call: ToolCallPart = {
       ...entry.call,
       nested: (entry.call.nested ?? []).map((run) => ({ ...run })),
+      // Cloned for the same reason `nested` is: the replayed body's memo writes
+      // into this array, and the array on the original part belongs to the
+      // caller's `messages`, which is an input and not scratch space.
+      ...(entry.call.attachments
+        ? { attachments: entry.call.attachments.map((record) => ({ ...record })) }
+        : {}),
     };
     if (at >= 0) message.content[at] = call;
     this.unreported.add(message);
@@ -2689,14 +3239,19 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   }
 
   /**
-   * Persists the messages this run amended, once each.
+   * Persists the messages this run finished outside `finalizeMessage`, once each
+   * and in the order it finished them.
    *
-   * Called both at the end of `ingestTurn` and from the abort path, because a
-   * stop that lands while an approved tool is running has to persist the
-   * results that *did* attach this turn — otherwise the work is done, the
-   * transcript on the stream shows it, and the store never hears about it.
+   * Called from the end of `ingestTurn`, from the abort path, and from
+   * `finalizeMessage`. From the abort path because a stop that lands while an
+   * approved tool is running has to persist the results that *did* attach this
+   * turn — otherwise the work is done, the transcript on the stream shows it,
+   * and the store never hears about it. From `finalizeMessage` because an
+   * injected message has to reach `onMessage` after the assistant message it
+   * sits below, and a `Set` preserves insertion order, which here is transcript
+   * order.
    */
-  private async reportAmended(): Promise<void> {
+  private async reportDeferred(): Promise<void> {
     const pending = [...this.unreported];
     this.unreported.clear();
     for (const message of pending) await this.report(message);
@@ -2739,7 +3294,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     }
     // Results that did attach this turn have not been persisted yet: the report
     // pass at the end of `ingestTurn` is one of the things the abort skipped.
-    await this.reportAmended();
+    await this.reportDeferred();
 
     const message = this.current;
     if (message) {

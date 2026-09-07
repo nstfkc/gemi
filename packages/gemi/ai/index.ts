@@ -131,6 +131,10 @@ export type {
   AttachmentStorage,
   AttachmentStore,
   LiveRuns,
+  PutAttachmentParams,
+  ToolAttachmentPut,
+  ToolAttachmentRecord,
+  ToolAttachments,
   UploadResult,
 } from "./AgentController";
 

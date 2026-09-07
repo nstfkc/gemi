@@ -11,7 +11,11 @@ export {
   InvalidAttachmentScopeError,
   MemoryAttachmentStore,
   newAttachmentId,
+  type PutAttachmentParams,
   ScopedAttachments,
+  type ToolAttachmentPut,
+  type ToolAttachmentRecord,
+  type ToolAttachments,
 } from "./Attachments";
 export { defaultAgentStore, MemoryAgentStore } from "./MemoryAgentStore";
 export {

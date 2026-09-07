@@ -435,6 +435,23 @@ function reasoningItem(part: { id?: string; text?: string }): ResponsesInputItem
  * language model: it has to be able to tell "the user refused this" from "this
  * blew up", and those two lead to genuinely different next moves — apologize
  * and ask, versus try another way.
+ *
+ * STILL A STRING, AFTER #490, AND THAT IS THE DESIGN. A tool that produces a
+ * file the model has to look at does not put it here: the run appends an
+ * input-role message carrying a `FilePart` after the call settles, which is the
+ * `input_file` shape a user's own upload already takes and which the branch
+ * above already builds every day.
+ *
+ * The alternative was a `function_call_output` whose `output` is a content
+ * array with an image block in it, and it was not chosen because NOBODY HAS
+ * MEASURED WHETHER THE API ACCEPTS ONE. No request was made with an image block
+ * in a `function_call_output`, so whether it is taken, ignored, or a 400 is
+ * unknown, and the one thing that is certain is that finding out costs a
+ * conversation each time it is wrong — a rejected history is rejected on every
+ * subsequent turn, not just the one that built it. Going through a route that
+ * is exercised on every vision request costs nothing to be sure of. If someone
+ * does measure it and it works, the tool result becomes the tidier home for a
+ * file and this comment is the place to say so.
  */
 export function toolResultOutput(part: ToolResultPart): string {
   if (part.status === "ok") {
