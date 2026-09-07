@@ -4,7 +4,7 @@ import type {
   ProviderToolNamespace,
   ProviderToolSpec,
 } from "../AgentProvider";
-import type { AgentMessage, ToolResultPart } from "../types";
+import type { AgentMessage, FilePart, ToolResultPart } from "../types";
 
 /**
  * Building the request body is a pure function, on purpose.
@@ -132,11 +132,11 @@ export function toResponsesInput(
           break;
         }
         case "file": {
-          // `input_file` is only legal on an input role. An assistant message
-          // holding a file is a bug upstream, and sending it anyway turns that
-          // bug into a 400 halfway through a conversation.
+          // Neither `input_file` nor `input_image` is legal on an output role.
+          // An assistant message holding a file is a bug upstream, and sending
+          // it anyway turns that bug into a 400 halfway through a conversation.
           if (!capabilities.fileInput || role === "assistant") break;
-          buffer.push({ type: "input_file", file_id: part.fileId });
+          buffer.push(fileContent(part));
           break;
         }
         case "reasoning": {
@@ -246,6 +246,136 @@ function reconcileToolPairs(items: ResponsesInputItem[]): ResponsesInputItem[] {
 function textContent(role: AgentMessage["role"], text: string): Record<string, unknown> {
   return { type: role === "assistant" ? "output_text" : "input_text", text };
 }
+
+/**
+ * An attachment onto the content block that can carry it.
+ *
+ * `input_file` is the document path and `input_image` is the vision one, and
+ * they are not interchangeable in either direction — the API refuses the wrong
+ * pairing with a 400 rather than degrading. So this branch is not a nicety
+ * about how well an image is read; it decides whether the turn happens at all.
+ * What was measured, on which models, with the verbatim rejections, is recorded
+ * above `IMAGE_EXTENSIONS`.
+ *
+ * `file_id` is the same field on both blocks, so nothing about the upload
+ * changes: `uploadFile` posts once with `purpose: "user_data"` and the id it
+ * returns is legal in either. `detail` is deliberately not sent on the image
+ * block — it is optional, the API defaults it, and a `FilePart` carries no
+ * signal that would justify choosing anything but that default.
+ *
+ * SVG is the case the `image/` prefix gets wrong. `image/svg+xml` is an image
+ * MIME type, and .svg is on the API's *document* list and off its image list —
+ * so a prefix test alone sends it to the one block that is guaranteed to refuse
+ * it. It is routed by what the API calls it, not by what the MIME type calls
+ * it.
+ *
+ * WHEN `mimeType` IS ABSENT OR EMPTY the file name decides, and if that settles
+ * nothing the part is sent as `input_file`. Both halves matter.
+ *
+ * The name branch is NOT a rescue for un-typed legacy rows, and deleting it as
+ * one would break a live upload. The browser path has always written the field:
+ * `useChat.uploadFile` has stored `data.mimeType ?? file.type` since the module
+ * landed (`git log -S mimeType -- ai/useChat.tsx` bottoms out at d940676e), so
+ * there is no history of `undefined` MIME types to point at, and a backfill
+ * would not make this branch dead. What it is actually for is the two cases
+ * that still leave nothing to read. `File.type` is the EMPTY STRING, not
+ * absent, for a file the browser cannot type — so `?? file.type` stores `""`
+ * and this branch fires on a perfectly current upload — and a `FilePart`
+ * assembled by a server-side caller may set neither field, because the type
+ * marks both optional.
+ *
+ * The name is also the right thing to fall back to rather than merely the last
+ * thing left: the server classifies by the STORED FILE NAME'S EXTENSION, not by
+ * the bytes and not by the upload's `Content-Type` (measured; the transcript is
+ * below). And what it rescues is not a cosmetic degradation — an image part
+ * that lands on `input_file` 400s, and because that part lives in stored
+ * history and goes back up on every request, it 400s every remaining turn of
+ * the thread. `useChat.uploadFile` fills `name` from the local `File` and the
+ * file is uploaded under that same name, so such a part almost always still
+ * says `.png`.
+ *
+ * Falling back to `input_file` past that is the conservative half — a part with
+ * neither a MIME type nor a usable name is much more likely to be the document
+ * it has always been sent as than an image, and this way a nameless document
+ * keeps working instead of being newly broken to rescue a nameless image.
+ *
+ * PRECEDENCE, since two orderings are otherwise indistinguishable: the MIME
+ * type classifies and the name is consulted only when there is none. A stated
+ * type is a stated fact and a name is a convention, so a `.pdf` named
+ * `image/png` goes to the image block. `request.test.ts` pins this with a case
+ * where the two disagree, because a name-first `fileContent` passes every case
+ * where they agree.
+ */
+function fileContent(part: FilePart): Record<string, unknown> {
+  const mimeType = part.mimeType?.trim().toLowerCase() ?? "";
+  // `""` rather than `undefined` is the shape to expect from a browser that
+  // could not type the file: `useChat.uploadFile` writes `data.mimeType ??
+  // file.type`, and `File.type` is the empty string, not absent. Both land on
+  // the name.
+  const isImage = mimeType
+    ? mimeType.startsWith("image/") && mimeType !== "image/svg+xml"
+    : hasImageExtension(part.name);
+  return { type: isImage ? "input_image" : "input_file", file_id: part.fileId };
+}
+
+function hasImageExtension(name: string | undefined): boolean {
+  const match = /\.([a-z0-9]+)$/.exec(name?.trim().toLowerCase() ?? "");
+  return match?.[1] !== undefined && IMAGE_EXTENSIONS.has(match[1]);
+}
+
+/**
+ * Which block takes what, and whether the wrong one merely reads badly.
+ *
+ * MEASURED, not read off the API reference. Three attachments were uploaded to
+ * `https://api.openai.com/v1/files` with `purpose: "user_data"` — a 64x64 PNG
+ * of four solid quadrants (red, green, blue, yellow), a one-page PDF whose only
+ * word is BANANA, and a 64x64 SVG — and each was then sent to
+ * `https://api.openai.com/v1/responses` in both content blocks:
+ *
+ *   PNG as `{type:"input_image", file_id}`  — 200. Asked which quadrant was
+ *     red, gpt-5.4 answered `"top-left"` and gpt-4o `"The red quadrant is the
+ *     top-left."` Both correct. SO AN UPLOADED IMAGE IS REAL VISION INPUT, and
+ *     `file_id` is all `input_image` needs; sending `detail:"auto"` alongside
+ *     it changed nothing, so it is left off.
+ *   PNG as `{type:"input_file", file_id}`   — 400, verbatim: `Invalid input:
+ *     Expected context stuffing file type to be a supported format: .art, .bat,
+ *     … .pdf, … .svg, … .yml but got .png.` (~90 extensions, elided.) This is
+ *     the finding that mattered: what gemi shipped was not "an image the model
+ *     reads poorly", it was a request that never ran.
+ *   PDF as `{type:"input_file", file_id}`   — 200, `"BANANA"` on gpt-5.4 and
+ *     gpt-4o both.
+ *   PDF as `{type:"input_image", file_id}`  — 400, verbatim: `Invalid input:
+ *     Expected image type to be a supported format: .jpeg, .jpg, .png, .gif,
+ *     .webp but got .pdf.` So the refusal is symmetric: neither block tolerates
+ *     the other's content.
+ *   SVG as `{type:"input_image", file_id}`  — 400, `… but got .svg.`
+ *   SVG as `{type:"input_file", file_id}`   — 400, but a different one:
+ *     `You uploaded an invalid file. Please try again with a different file`,
+ *     with no format list. .svg is on the document list and off the image one,
+ *     so routing accepted it and the pipeline behind it did not. An SVG fails
+ *     both ways today; it is sent as `input_file` because that is where the API
+ *     says it belongs, which is the only branch that can start working without
+ *     another change here.
+ *
+ * AND THE DISCRIMINATOR IS THE FILE NAME, NOT THE BYTES AND NOT THE UPLOAD'S
+ * `Content-Type`. The same PNG bytes uploaded under the name `quadrants.txt`
+ * with `type: "text/plain"` were refused as `input_image` with `… but got
+ * .txt.`, and as `input_file` with `The file you uploaded is badly formatted or
+ * corrupted. Please fix the file and try again.` (code `invalid_file`) — routed
+ * by the extension, then failed on the bytes. That is why the name is what a
+ * part with no `mimeType` falls back to: it is what the server will judge by.
+ *
+ * The extensions below are transcribed from the image rejection above.
+ *
+ * A closed list is right *here* and wrong one line up. This set is only
+ * consulted when there is no MIME type to read, which is a guess either way, so
+ * it guesses the conservative direction: a format the API adds later goes on
+ * being sent as `input_file`, exactly as it is today. The MIME branch stays
+ * open (`image/` prefix) for the opposite reason — a declared `image/avif`
+ * belongs in the image block the moment the API takes one, and being wrong
+ * there is a 400 that names the format, which is loud and fixes itself.
+ */
+const IMAGE_EXTENSIONS = new Set(["jpeg", "jpg", "png", "gif", "webp"]);
 
 /**
  * Reasoning goes back exactly as it came.

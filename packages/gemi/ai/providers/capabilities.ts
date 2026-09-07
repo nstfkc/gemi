@@ -28,6 +28,24 @@ import type { ProviderCapabilities } from "../AgentProvider";
  * builder still sends the schema, because an agent that declared an `output`
  * has an app waiting on a typed result and dropping the parameter would answer
  * prose forever with nothing to branch on. See `request.ts`.
+ *
+ * `fileInput` IS DELIBERATELY STILL ONE FLAG, and this was reopened rather than
+ * inherited. Splitting it into "reads images" and "reads documents" was the
+ * obvious answer to #488, so it was measured before it was written: gpt-5.4 and
+ * gpt-4o were each sent an uploaded PNG as `input_image` and an uploaded PDF as
+ * `input_file`, and all four calls returned 200 with the right answer (the
+ * transcript is in `request.ts`, above `IMAGE_EXTENSIONS`). The two abilities
+ * did not come apart on either model, so there is nothing here for a second
+ * flag to describe.
+ *
+ * Adding it anyway would be worse than none. Every guess in this file is a
+ * guess about an id nobody has run yet, and the guess is high on purpose; a
+ * second flag does not describe the world more finely, it doubles the number of
+ * ways that guess can be wrong quietly, and the wrong-quiet direction is the
+ * one with no error message. The split earns its place the day a model answers
+ * 200 to one of those two calls and 400 to the other — and that call is cheap
+ * to repeat, which is why the recipe is written down rather than the conclusion
+ * alone.
  */
 export function capabilitiesForModel(model: string): ProviderCapabilities {
   const id = normalizeModelId(model);

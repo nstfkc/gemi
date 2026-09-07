@@ -82,6 +82,125 @@ describe("toResponsesInput()", () => {
   });
 
   /**
+   * The block an attachment lands in, which the API validates rather than
+   * tolerates: an image sent as `input_file` and a document sent as
+   * `input_image` are both 400s, and a 400 on a part that lives in persisted
+   * history is a 400 on every subsequent turn. See `fileContent` in
+   * `request.ts` for what was measured.
+   */
+  describe("a file part picks its content block", () => {
+    const blocks = (part: Record<string, unknown>) =>
+      (toResponsesInput([message({ role: "user", content: [part as any] })], FULL)[0]?.content ??
+        []) as Record<string, unknown>[];
+
+    test("an image goes to input_image", () => {
+      expect(
+        blocks({ type: "file", fileId: "file_1", name: "photo.png", mimeType: "image/png" }),
+      ).toEqual([{ type: "input_image", file_id: "file_1" }]);
+    });
+
+    test("a pdf goes to input_file", () => {
+      expect(
+        blocks({
+          type: "file",
+          fileId: "file_1",
+          name: "invoice.pdf",
+          mimeType: "application/pdf",
+        }),
+      ).toEqual([{ type: "input_file", file_id: "file_1" }]);
+    });
+
+    /** `image/svg+xml` is an image MIME type that the API files under
+     *  documents; the prefix is not the classifier, the API's list is. */
+    test("an svg goes to input_file despite the image/ prefix", () => {
+      expect(
+        blocks({ type: "file", fileId: "file_1", name: "logo.svg", mimeType: "image/svg+xml" }),
+      ).toEqual([{ type: "input_file", file_id: "file_1" }]);
+    });
+
+    /** `mimeType` is optional on `FilePart`, so a part assembled anywhere but
+     *  the browser hook can arrive with only a name — and the name is what the
+     *  server classifies by anyway. Also pins that the match is
+     *  case-insensitive, because a camera writes `.PNG`. */
+    test("with no mimeType the name decides", () => {
+      expect(blocks({ type: "file", fileId: "file_1", name: "Holiday Snap.PNG" })).toEqual([
+        { type: "input_image", file_id: "file_1" },
+      ]);
+    });
+
+    /** A browser that cannot type a file writes `""`, not `undefined` — see
+     *  `useChat.uploadFile`. It has to fall through to the name too. */
+    test("an empty mimeType falls through to the name", () => {
+      expect(blocks({ type: "file", fileId: "file_1", name: "scan.jpeg", mimeType: "" })).toEqual([
+        { type: "input_image", file_id: "file_1" },
+      ]);
+    });
+
+    test("with neither a mimeType nor a usable name it stays input_file", () => {
+      expect(blocks({ type: "file", fileId: "file_1" })).toEqual([
+        { type: "input_file", file_id: "file_1" },
+      ]);
+      expect(blocks({ type: "file", fileId: "file_2", name: "notes" })).toEqual([
+        { type: "input_file", file_id: "file_2" },
+      ]);
+    });
+
+    /** Precedence, pinned because nothing else in this block distinguishes the
+     *  two orderings: the MIME type classifies and the name is read only when
+     *  there is no MIME type. Every other case here has a name and a type that
+     *  agree, so a name-first `fileContent` is green across all of them and a
+     *  refactor that flipped the order would land silently. */
+    test("a mimeType outranks a name that disagrees with it", () => {
+      expect(
+        blocks({ type: "file", fileId: "file_1", name: "report.pdf", mimeType: "image/png" }),
+      ).toEqual([{ type: "input_image", file_id: "file_1" }]);
+      expect(
+        blocks({ type: "file", fileId: "file_2", name: "photo.png", mimeType: "application/pdf" }),
+      ).toEqual([{ type: "input_file", file_id: "file_2" }]);
+    });
+
+    /** Every entry of `IMAGE_EXTENSIONS`, because the cases above happen to use
+     *  two of the five and a typo in the other three would be invisible — and
+     *  invisible here means an image silently sent as a document, which is a
+     *  400 for the rest of that thread. The list is transcribed from the API's
+     *  own rejection message, so a wrong entry is a transcription slip, exactly
+     *  the kind a spot check misses. */
+    test.each(["jpeg", "jpg", "png", "gif", "webp"])(
+      "the name fallback recognises .%s",
+      (extension) => {
+        expect(blocks({ type: "file", fileId: "file_1", name: `holiday.${extension}` })).toEqual([
+          { type: "input_image", file_id: "file_1" },
+        ]);
+      },
+    );
+
+    /** Neither block is legal on an output role, so the rule that predates the
+     *  branch has to survive it: an image on an assistant message is still
+     *  dropped rather than promoted to `input_image`. */
+    test("a file on an assistant message is dropped whatever its type", () => {
+      const items = toResponsesInput(
+        [
+          message({
+            role: "assistant",
+            content: [
+              { type: "text", text: "here you go" },
+              { type: "file", fileId: "file_1", name: "photo.png", mimeType: "image/png" },
+            ],
+          }),
+        ],
+        FULL,
+      );
+      expect(items).toEqual([
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "here you go" }],
+        },
+      ]);
+    });
+  });
+
+  /**
    * Order within a message is the part that is easy to get wrong and expensive
    * to get wrong: the API validates call/output pairing positionally, so text
    * emitted after the call it preceded is a 400.
