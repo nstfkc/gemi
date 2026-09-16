@@ -309,6 +309,73 @@ describe("preloading", () => {
   });
 });
 
+/**
+ * The contract with React's `use()` (#494). `useDictionary` calls it on every
+ * path, so what it is handed has to be a thenable on every path — including
+ * the one where the strings are already sitting in the registry.
+ *
+ * The bug this pins was invisible in the hook's output: returning the strings
+ * raw made the `use()` call conditional, and a component whose first pass
+ * suspended on a cold locale chunk got replayed by React once the chunk landed
+ * mid-yield. React restores the mount hook dispatcher only from inside `use()`,
+ * so the replay ran the rest of the component under the update dispatcher and
+ * the next `useState` threw "Update hook called on initial render".
+ */
+describe("what the render path hands use()", () => {
+  test("is a thenable even once the strings are resolved", async () => {
+    const dict = __gemi_dict__("d_thenable_warm", {
+      "en-US": async () => ({ default: { cta: "Get started" } }),
+    });
+    await preloadDictionaries("en-US");
+
+    const pending = dict.loadForRender("en-US");
+    expect(typeof pending?.then).toBe("function");
+    await expect(pending).resolves.toEqual({ cta: "Get started" });
+  });
+
+  test("is a thenable for an unbundled dictionary too", () => {
+    // This one never had a promise to begin with: every locale is in memory
+    // from the moment the module evaluates.
+    const dict = defineDictionary(TRANSLATIONS);
+    expect(typeof dict.loadForRender("en-US")?.then).toBe("function");
+  });
+
+  test("is tagged fulfilled, so the warm path still does not suspend", async () => {
+    const dict = __gemi_dict__("d_thenable_tag", {
+      "en-US": async () => ({ default: { cta: "Get started" } }),
+    });
+    await preloadDictionaries("en-US");
+
+    // React's own thenable protocol: `use()` returns `value` on the spot for a
+    // thenable marked this way, rather than subscribing and costing the
+    // component a suspend plus a second pass. Reaching into it is the point —
+    // an untagged promise would still be a thenable and would still render,
+    // just a microtask and a render later. "a warmed dictionary renders
+    // without suspending" above is the same property from the outside.
+    const pending = dict.loadForRender("en-US") as any;
+    expect(pending.status).toBe("fulfilled");
+    expect(pending.value).toEqual({ cta: "Get started" });
+  });
+
+  test("is the same object on every read", async () => {
+    // React tracks the thenable a component suspended on by position. A second
+    // pass — the replay above, or any later render — arriving with a different
+    // object is "A component was suspended by an uncached promise", and for
+    // one that has not settled yet, a suspend that never ends.
+    const dict = __gemi_dict__("d_thenable_stable", {
+      "en-US": async () => ({ default: { cta: "Get started" } }),
+    });
+
+    const cold = dict.loadForRender("en-US");
+    expect(dict.loadForRender("en-US")).toBe(cold);
+
+    await cold;
+    // Across the cold/warm boundary as well: this is exactly the read the
+    // replay makes, and where the identity used to change.
+    expect(dict.loadForRender("en-US")).toBe(cold);
+  });
+});
+
 describe("a dictionary that fails to load", () => {
   /**
    * A locale chunk going missing is routine — a browser holding stale HTML
