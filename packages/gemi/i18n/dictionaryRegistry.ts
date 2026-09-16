@@ -18,6 +18,17 @@ import type { LocaleStrings } from "./dictionaryShape";
 
 export type { LocaleStrings };
 
+/**
+ * A dictionary's strings as the render path sees them: always a promise, so
+ * the caller's `use()` is never conditional, and pre-tagged fulfilled when the
+ * strings are already in hand so that promise costs nothing. See
+ * `loadDictionaryForRender` and `resolvedThenable`.
+ */
+export type RenderThenable = Promise<LocaleStrings> & {
+  /** Set when the load failed and this settled on no strings instead. */
+  degraded?: boolean;
+};
+
 export interface RegisteredDictionary {
   id: string;
   /** Locales this dictionary declares. Empty when it is not known up front. */
@@ -33,11 +44,11 @@ interface RegistryState {
   /** In-flight loads, so N components sharing a dictionary share one request. */
   inFlight: Map<string, Promise<LocaleStrings>>;
   /**
-   * Never-rejecting promises for the render path; see
-   * `loadDictionaryForRender`. `use()` needs a stable reference, so these
-   * cannot be built per render.
+   * What the render path hands `use()`, one per (dictionary, locale) and
+   * always a thenable — never the raw strings, even once they are in hand.
+   * `loadDictionaryForRender` explains both halves.
    */
-  degraded: Map<string, Promise<LocaleStrings>>;
+  renderThenables: Map<string, RenderThenable>;
   /**
    * Registration order, so `preloadDictionaries` can warm only what a freshly
    * imported module added instead of re-walking every dictionary in the app on
@@ -78,13 +89,13 @@ const state: RegistryState = ((globalThis as any)[GLOBAL_KEY] ??= {
   registry: new Map(),
   resolved: new Map(),
   inFlight: new Map(),
-  degraded: new Map(),
+  renderThenables: new Map(),
   order: [],
   warmed: new Map(),
   activeLocale: null,
 });
 
-const { registry, resolved, inFlight, degraded, order, warmed } = state;
+const { registry, resolved, inFlight, renderThenables, order, warmed } = state;
 
 function cacheKey(id: string, locale: string) {
   return `${id}\0${locale}`;
@@ -176,54 +187,100 @@ export function loadDictionary(
 }
 
 /**
- * The same load, but as something safe to hand React's `use()`.
+ * The same load, but as the exact thing React's `use()` wants.
  *
- * A rejecting promise passed to `use()` rethrows during render, which unmounts
- * the whole route into its error boundary — or, before the shell is ready,
- * fails the server render outright. A missing locale chunk is a routine event
- * (a browser holding stale HTML after a rolling deploy requests a hashed
- * filename that no longer exists), and the deprecated `useTranslator` degraded
- * every i18n failure to rendering the raw key. This keeps that behaviour: the
- * returned promise resolves to no strings, and the per-key lookup in
- * `useDictionary` then logs and falls back to the key.
+ * Three properties, each of which has cost a bug:
  *
- * The degraded promise is cached because `use()` requires a stable reference —
- * a fresh `.then()` per render would suspend forever. It is only consulted
- * after `getResolved` misses, so a later successful load supersedes it without
- * needing to be evicted.
+ * **It never rejects.** A rejecting promise passed to `use()` rethrows during
+ * render, which unmounts the whole route into its error boundary — or, before
+ * the shell is ready, fails the server render outright. A missing locale chunk
+ * is a routine event (a browser holding stale HTML after a rolling deploy
+ * requests a hashed filename that no longer exists), and the deprecated
+ * `useTranslator` degraded every i18n failure to rendering the raw key. This
+ * keeps that behaviour: the thenable resolves to no strings, and the per-key
+ * lookup in `useDictionary` then logs and falls back to the key.
+ *
+ * **It is always a thenable**, even when the strings are already resolved and
+ * could be returned raw. Returning them raw is what made #494: the caller's
+ * `use()` becomes conditional, and a component whose first pass suspended in
+ * `use()` on a cold chunk gets *replayed* by React once that chunk lands
+ * mid-yield. React only restores the mount hook dispatcher from inside `use()`
+ * itself, so a replay that skips `use()` runs the rest of the component under
+ * the update dispatcher against an empty hook list, and the next `useState`
+ * throws "Update hook called on initial render". A thenable pre-tagged
+ * `fulfilled` costs nothing — React reads it synchronously, no suspend, no
+ * microtask hop — and keeps `use()` on every path.
+ *
+ * **There is exactly one per (dictionary, locale).** React tracks the thenable
+ * a component suspended on by position, and a later pass arriving at the same
+ * position with a different object gets "A component was suspended by an
+ * uncached promise" — and, for a promise that has not settled, would suspend
+ * forever on a fresh one every render.
  */
 export function loadDictionaryForRender(
   id: string,
   locale: string,
-): LocaleStrings | Promise<LocaleStrings> {
-  const already = getResolved(id, locale);
-  if (already) {
-    return already;
-  }
-
+): RenderThenable {
   const key = cacheKey(id, locale);
-  const cached = degraded.get(key);
-  if (cached) {
+  const already = getResolved(id, locale);
+  const cached = renderThenables.get(key);
+
+  // The cached thenable wins even once the strings are in hand, because it is
+  // the object React tracked when the component suspended. The one exception
+  // is a thenable that degraded to no strings: it must not shadow a load that
+  // later succeeded — a chunk restored after a rolling deploy, which
+  // `preloadDictionaries` picks up on the next navigation. Swapping the object
+  // is the lesser problem there, and only the failing render pays for it.
+  if (cached && !(cached.degraded && already)) {
     return cached;
   }
 
-  const result = loadDictionary(id, locale);
-  if (!(result instanceof Promise)) {
-    return result;
+  if (already) {
+    return remember(key, resolvedThenable(already));
   }
 
-  const safe = result.then(
+  const result = loadDictionary(id, locale);
+  // The untransformed path holds every locale in memory and answers
+  // synchronously. It still goes out as a thenable — see above.
+  if (!(result instanceof Promise)) {
+    return remember(key, resolvedThenable(result));
+  }
+
+  const safe: RenderThenable = result.then(
     (strings) => strings,
     (err) => {
       console.error(
         `Failed to load dictionary ${id} for locale ${locale}; rendering keys instead.`,
         err,
       );
+      safe.degraded = true;
       return EMPTY_STRINGS;
     },
   );
-  degraded.set(key, safe);
-  return safe;
+  return remember(key, safe);
+}
+
+function remember(key: string, thenable: RenderThenable): RenderThenable {
+  renderThenables.set(key, thenable);
+  return thenable;
+}
+
+/**
+ * Strings in hand, as something `use()` can read without suspending.
+ *
+ * The `status`/`value` pair is React's own thenable tagging, not an invention
+ * here: `trackUsedThenable` returns `value` on the spot for a thenable already
+ * marked fulfilled, and only subscribes when it is not. Untagged, this would
+ * be a plain resolved promise — which suspends the component for a microtask
+ * and costs it a second render pass, exactly what the synchronous return this
+ * replaces existed to avoid. The properties are absent from `Promise`, and so
+ * from `RenderThenable`, because nothing here reads them back; React does.
+ */
+function resolvedThenable(strings: LocaleStrings): RenderThenable {
+  return Object.assign(Promise.resolve(strings), {
+    status: "fulfilled",
+    value: strings,
+  });
 }
 
 const EMPTY_STRINGS: LocaleStrings = {};
@@ -359,7 +416,7 @@ export function __resetDictionaryRegistry() {
   registry.clear();
   resolved.clear();
   inFlight.clear();
-  degraded.clear();
+  renderThenables.clear();
   warmed.clear();
   order.length = 0;
   state.activeLocale = null;

@@ -9,6 +9,7 @@ import {
   loadDictionary,
   loadDictionaryForRender,
   registerDictionary,
+  type RenderThenable,
 } from "./dictionaryRegistry";
 
 declare const brand: unique symbol;
@@ -26,11 +27,13 @@ export interface DictionaryHandle<
    */
   load(locale: string): LocaleStrings | Promise<LocaleStrings>;
   /**
-   * `load`, but never rejecting — safe to hand React's `use()`. A failed locale
-   * chunk resolves to no strings so the component degrades to rendering keys
-   * instead of unmounting into an error boundary.
+   * `load`, but as the exact thing React's `use()` wants: never rejecting, so
+   * a failed locale chunk degrades the component to rendering keys instead of
+   * unmounting it into an error boundary; and always a thenable, even when the
+   * strings are already in memory, so the caller's `use()` is never
+   * conditional. `loadDictionaryForRender` has the whole reasoning.
    */
-  loadForRender(locale: string): LocaleStrings | Promise<LocaleStrings>;
+  loadForRender(locale: string): RenderThenable;
   get(locale: string): LocaleStrings | undefined;
   /** Type-only: carries the literal's shape through to `useDictionary`. */
   readonly [brand]?: T;
