@@ -23,7 +23,7 @@ function objectOutput(overrides: Record<string, any> = {}) {
   };
 }
 
-function driverWith(send: (command: any) => Promise<any>) {
+function driverWith(send: (command: any, options?: any) => Promise<any>) {
   const driver = new S3Driver({ region: "test" } as any);
   (driver as any).client = { send };
   return driver;
@@ -43,6 +43,40 @@ describe("S3Driver.put()", () => {
     const name = await driver.put(params);
     return { input, name };
   }
+
+  test("passes the abort signal through to the request", async () => {
+    let sendOptions: any;
+    const driver = driverWith(async (_command, options) => {
+      sendOptions = options;
+      return {};
+    });
+    const controller = new AbortController();
+
+    await driver.put(
+      { name: "a.png", body: new Blob(["x"]) },
+      { signal: controller.signal },
+    );
+
+    expect(sendOptions.abortSignal).toBe(controller.signal);
+  });
+
+  test("sends nothing when the signal is already aborted", async () => {
+    let sent = false;
+    const driver = driverWith(async () => {
+      sent = true;
+      return {};
+    });
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      driver.put(
+        { name: "a.png", body: new Blob(["x"]) },
+        { signal: controller.signal },
+      ),
+    ).rejects.toThrow(/abort/i);
+    expect(sent).toBe(false);
+  });
 
   test("keeps an explicitly passed contentType over the blob's own type", async () => {
     // A caller that says "this PNG is really an octet-stream", or vice versa,

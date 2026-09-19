@@ -8,6 +8,7 @@ import type { Prettify } from "../utils/type";
 import { RequestContext } from "../http/requestContext";
 import type { ByteRange } from "../http/range";
 import type {
+  PutFileOptions,
   PutFileParams,
   ReadFileParams,
   ReadResult,
@@ -22,8 +23,12 @@ export class Storage extends Facade {
     return FilesystemManager;
   }
 
-  static async put(params: PutFileParams | Blob) {
-    return this.getFacadeRoot().driver.put(params);
+  /**
+   * Stores a file and returns its object name. Pass `{ signal }` to cancel the
+   * upload, e.g. with the incoming request's signal or `AbortSignal.timeout()`.
+   */
+  static async put(params: PutFileParams | Blob, options: PutFileOptions = {}) {
+    return this.getFacadeRoot().driver.put(params, options);
   }
 
   static async metadata(obj: Blob | File): Promise<Partial<Metadata>> {

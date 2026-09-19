@@ -1,4 +1,9 @@
-import type { PutFileParams, ReadFileParams, ReadResult } from "./types";
+import type {
+  PutFileOptions,
+  PutFileParams,
+  ReadFileParams,
+  ReadResult,
+} from "./types";
 
 // Type-only, so it erases. The SDK itself is loaded by `connect()` below, on
 // the first call that needs it.
@@ -50,7 +55,9 @@ export class S3Driver extends FileStorageDriver {
     return { sdk, client: this.client };
   }
 
-  async put(params: PutFileParams | Blob) {
+  async put(params: PutFileParams | Blob, { signal }: PutFileOptions = {}) {
+    signal?.throwIfAborted();
+
     let body: Blob | File | Buffer;
     let contentType: string | undefined;
     let name: string;
@@ -84,6 +91,9 @@ export class S3Driver extends FileStorageDriver {
           : "";
 
     const { sdk, client } = await this.connect();
+    // Checked again here: reading the body and loading the SDK both await, and
+    // the SDK only watches the signal once the request is under way.
+    signal?.throwIfAborted();
     await client.send(
       new sdk.PutObjectCommand({
         Bucket: bucket,
@@ -91,6 +101,7 @@ export class S3Driver extends FileStorageDriver {
         Body: buffer,
         ContentType: contentType,
       }),
+      { abortSignal: signal },
     );
 
     return name;
