@@ -362,6 +362,32 @@ describe("AzureBlobDriver.put()", () => {
     );
   });
 
+  test("passes the abort signal through to the upload", async () => {
+    const { driver, calls } = driverWith();
+    const controller = new AbortController();
+
+    await driver.put(
+      { name: "a.png", body: new Blob(["x"]) },
+      { signal: controller.signal },
+    );
+
+    expect(calls.uploads[0].opts.abortSignal).toBe(controller.signal);
+  });
+
+  test("uploads nothing when the signal is already aborted", async () => {
+    const { driver, calls } = driverWith();
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      driver.put(
+        { name: "a.png", body: new Blob(["x"]) },
+        { signal: controller.signal },
+      ),
+    ).rejects.toThrow(/abort/i);
+    expect(calls.uploads).toEqual([]);
+  });
+
   // Name generation uses Bun.randomUUIDv7(), like the sibling drivers.
   test.skipIf(typeof Bun === "undefined")(
     "generates a name for a bare Blob and returns it",

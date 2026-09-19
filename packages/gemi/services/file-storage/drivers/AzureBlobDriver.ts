@@ -7,7 +7,12 @@ import {
 } from "../../../http/errors";
 import { parseContentRange, resolveRange } from "../../../http/range";
 import { FileStorageDriver } from "./FileStorageDriver";
-import type { PutFileParams, ReadFileParams, ReadResult } from "./types";
+import type {
+  PutFileOptions,
+  PutFileParams,
+  ReadFileParams,
+  ReadResult,
+} from "./types";
 
 /**
  * The slice of `@azure/storage-blob` this driver uses. Declared structurally so
@@ -34,7 +39,10 @@ interface BlobClientLike {
   }>;
   uploadData(
     data: Buffer | Blob,
-    options?: { blobHTTPHeaders?: { blobContentType?: string } },
+    options?: {
+      blobHTTPHeaders?: { blobContentType?: string };
+      abortSignal?: AbortSignal;
+    },
   ): Promise<unknown>;
   delete(): Promise<unknown>;
 }
@@ -144,7 +152,9 @@ export class AzureBlobDriver extends FileStorageDriver {
     return service.getContainerClient(containerName).getBlockBlobClient(name);
   }
 
-  async put(params: PutFileParams | Blob) {
+  async put(params: PutFileParams | Blob, { signal }: PutFileOptions = {}) {
+    signal?.throwIfAborted();
+
     let body: Blob | File | Buffer;
     let contentType: string | undefined;
     let name: string;
@@ -170,8 +180,11 @@ export class AzureBlobDriver extends FileStorageDriver {
         : Buffer.from(await (body as Blob).arrayBuffer());
 
     const blob = await this.blob(name, container);
+    // Checked again here: reading the body and loading the SDK both await.
+    signal?.throwIfAborted();
     await blob.uploadData(data, {
       blobHTTPHeaders: contentType ? { blobContentType: contentType } : undefined,
+      abortSignal: signal,
     });
 
     return name;

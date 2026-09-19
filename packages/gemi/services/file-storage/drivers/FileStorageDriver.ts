@@ -1,6 +1,7 @@
 import { FileNotFoundError } from "../../../http/errors";
 import type {
   IFileStorageDriver,
+  PutFileOptions,
   PutFileParams,
   ReadFileParams,
   ReadResult,
@@ -8,7 +9,10 @@ import type {
 
 export abstract class FileStorageDriver implements IFileStorageDriver {
   abstract fetch(params: ReadFileParams | string): Promise<Response>;
-  abstract put(params: PutFileParams | Blob): Promise<string>;
+  abstract put(
+    params: PutFileParams | Blob,
+    options?: PutFileOptions,
+  ): Promise<string>;
   abstract list(folder: string): Promise<any>;
 
   /**

@@ -14,7 +14,7 @@ import { Storage } from "gemi/facades";
 
 `Storage` is a static proxy over the `FilesystemManager` that the framework's `FilesystemServiceProvider` binds into the container from your `filesystem` config. Every method delegates to the configured driver, so the surface is intentionally small.
 
-### `put(params | Blob)`
+### `put(params | Blob, options?)`
 
 Stores a file and returns the stored object's **name** (a string) that you persist and later use to fetch the file back.
 
@@ -47,6 +47,24 @@ const name = await Storage.put(uploadedBlob);
 ```
 
 > **Note:** `put` returns the object name, not a URL. Store that name against your record; you serve the file later by handing the name to `Storage.fetch` (typically from a controller route).
+
+#### Cancelling an upload
+
+`put` takes an optional second argument, `{ signal }`, to abort the upload with an `AbortController`. It works with both forms:
+
+```typescript
+const controller = new AbortController();
+const upload = Storage.put({ name: "videos/intro.mp4", body: file }, {
+  signal: controller.signal,
+});
+
+controller.abort(); // `upload` rejects with an AbortError
+
+// Or give up after 30 seconds
+await Storage.put(file, { signal: AbortSignal.timeout(30_000) });
+```
+
+An aborted `put` rejects and the object should be treated as not written. The S3 and Azure drivers hand the signal to their SDK, which cancels the request in flight. The local disk driver checks the signal before it writes but does not interrupt a write already under way.
 
 ### `fetch(params | string)`
 
@@ -257,13 +275,17 @@ Subclass `FileStorageDriver` (exported from `gemi/services`) and implement `put`
 ```typescript
 import {
   FileStorageDriver,
+  type PutFileOptions,
   type PutFileParams,
   type ReadFileParams,
 } from "gemi/services";
 
 class MyDriver extends FileStorageDriver {
-  async put(params: PutFileParams | Blob): Promise<string> {
-    /* ...store and return the object name... */
+  async put(
+    params: PutFileParams | Blob,
+    { signal }: PutFileOptions = {},
+  ): Promise<string> {
+    /* ...store and return the object name, honouring `signal`... */
   }
   async fetch(params: ReadFileParams | string): Promise<Response> {
     /* ...return a Response streaming the object... */

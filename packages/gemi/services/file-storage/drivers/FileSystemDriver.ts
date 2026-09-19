@@ -1,4 +1,9 @@
-import type { PutFileParams, ReadFileParams, ReadResult } from "./types";
+import type {
+  PutFileOptions,
+  PutFileParams,
+  ReadFileParams,
+  ReadResult,
+} from "./types";
 import { FileStorageDriver } from "./FileStorageDriver";
 import { readdir } from "fs/promises";
 import { resolveRange } from "../../../http/range";
@@ -12,7 +17,9 @@ export class FileSystemDriver extends FileStorageDriver {
     super();
   }
 
-  async put(params: PutFileParams | Blob) {
+  async put(params: PutFileParams | Blob, { signal }: PutFileOptions = {}) {
+    signal?.throwIfAborted();
+
     let body: Blob | File | Buffer;
     let name: string;
 
@@ -33,6 +40,9 @@ export class FileSystemDriver extends FileStorageDriver {
 
     const path = `${this.folderPath}/${name}`;
 
+    // `Bun.write` takes no signal, and a local write is not worth interrupting
+    // halfway, so the last chance to abort is once the body has been read.
+    signal?.throwIfAborted();
     await Bun.write(path, buffer as any);
 
     return name;

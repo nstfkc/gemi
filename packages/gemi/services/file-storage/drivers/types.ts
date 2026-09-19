@@ -9,6 +9,15 @@ export interface PutFileParams {
   contentType?: string;
 }
 
+export interface PutFileOptions {
+  /**
+   * Cancels the upload. An abort rejects `put()` with the signal's reason (or
+   * the backend SDK's own abort error) and the object should be treated as not
+   * written.
+   */
+  signal?: AbortSignal;
+}
+
 export interface ReadFileParams {
   name: string;
   bucket?: string;
@@ -60,7 +69,7 @@ export interface FileMetadata {
 
 export interface IFileStorageDriver {
   fetch(input: ReadFileParams | string): Promise<Response>;
-  put(params: PutFileParams | Blob): Promise<string>;
+  put(params: PutFileParams | Blob, options?: PutFileOptions): Promise<string>;
   /**
    * Optional: `FileStorageDriver` supplies a `fetch()`-backed default, so
    * drivers written before this existed keep working.

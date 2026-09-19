@@ -10,6 +10,7 @@ export {
 export type {
   ByteRange,
   FileMetadata,
+  PutFileOptions,
   PutFileParams,
   ReadFileParams,
   ReadResult,
