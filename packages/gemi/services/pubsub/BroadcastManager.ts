@@ -2,6 +2,7 @@ import type { ServerWebSocket } from "bun";
 import type { BroadcastConfig } from "./config";
 import type { PublishArgs } from "./types";
 import { AsyncLocalStorage } from "async_hooks";
+import { parseCookieHeader } from "../../http/getCookies";
 
 type PublishCallback = (...args: PublishArgs) => void;
 
@@ -65,15 +66,7 @@ export class BroadcastManager {
   }
 
   run(headers: Headers, fn: VoidFunction) {
-    const cookie = headers.get("Cookie");
-    const cookies = new Map();
-    if (cookie) {
-      const cookieArray = cookie.split(";");
-      for (const c of cookieArray) {
-        const [key, value] = c.split("=");
-        cookies.set(key.trim(), value.trim());
-      }
-    }
+    const cookies = parseCookieHeader(headers.get("Cookie"));
     this.context.run({ headers, cookies }, fn);
   }
 }
