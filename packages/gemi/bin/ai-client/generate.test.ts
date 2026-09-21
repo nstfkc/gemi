@@ -6,12 +6,19 @@ import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { GenerateClientError, extractAgent, loadTypeScript, parseAgentReference } from "./extract";
 import { generateClient } from "./generate";
 import { type AgentModel, type NamedType, camelCase, pascalCase } from "./model";
+import { renderKotlin } from "./kotlin";
 import { renderSwift } from "./swift";
 
 const PACKAGE = path.join(import.meta.dirname, "../..");
 const FIXTURES = "bin/ai-client/__fixtures__";
 /** Where the Swift test target keeps the generated files it compiles. */
 const SWIFT_GENERATED = path.join(PACKAGE, "../gemi-swift/Tests/GemiChatTests/Generated");
+/** And the Kotlin test source set. */
+const KOTLIN_GENERATED = path.join(
+  PACKAGE,
+  "../gemi-kotlin/gemi-chat/src/test/kotlin/dev/gemijs/chat/generated",
+);
+const KOTLIN_PACKAGE = "dev.gemijs.chat.generated";
 
 // A program over gemi's own sources is a few seconds, so each agent is read
 // once and shared.
@@ -61,6 +68,24 @@ describe("the Swift the Swift tests compile", () => {
     expect(
       rendered,
       `${file} is stale: rerun with GEMI_UPDATE_FIXTURES=1, then \`swift test\` at the repo root`,
+    ).toBe(readFileSync(target, "utf8"));
+  });
+});
+
+describe("the Kotlin the Kotlin tests compile", () => {
+  // As above, for `gemi-chat`'s test source set: regenerate, rerun
+  // `./gradlew :gemi-chat:test` in packages/gemi-kotlin.
+  test.each([
+    ["SupportAgent.kt", () => support],
+    ["Classifier.kt", () => classifier],
+    ["E2eAgent.kt", () => e2e],
+  ])("%s is what the generator writes today", (file, model) => {
+    const target = path.join(KOTLIN_GENERATED, file);
+    const rendered = renderKotlin(model(), KOTLIN_PACKAGE);
+    if (process.env.GEMI_UPDATE_FIXTURES === "1") writeFileSync(target, rendered);
+    expect(
+      rendered,
+      `${file} is stale: rerun with GEMI_UPDATE_FIXTURES=1, then \`./gradlew :gemi-chat:test\``,
     ).toBe(readFileSync(target, "utf8"));
   });
 });
@@ -241,10 +266,22 @@ describe("the command", () => {
     ).rejects.toThrow('--platform must be one of swift, kotlin — got "java".');
   });
 
-  test("says Kotlin is not ready rather than writing something that will not compile", async () => {
+  test("writes <Name>.kt in the --package for Kotlin", async () => {
+    const { file } = await generateClient({
+      agent: `${FIXTURES}/support.ts#supportAgent`,
+      out,
+      platform: "kotlin",
+      package: "com.example.chat",
+      cwd: PACKAGE,
+    });
+    expect(file).toBe(path.join(out, "SupportAgent.kt"));
+    expect(readFileSync(file, "utf8")).toBe(renderKotlin(support, "com.example.chat"));
+  }, 60_000);
+
+  test("Kotlin needs a package, and says so before reading anything", async () => {
     await expect(
       generateClient({ agent: "nowhere.ts", out, platform: "kotlin", cwd: PACKAGE }),
-    ).rejects.toThrow("--platform kotlin is not available yet");
+    ).rejects.toThrow("--platform kotlin needs --package");
   });
 });
 
