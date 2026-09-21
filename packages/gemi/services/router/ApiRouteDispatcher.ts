@@ -354,9 +354,17 @@ export class ApiRouteDispatcher {
    * and Bun gives no way to tell a stream body from a string or a Blob, so a
    * handler's own `new Response("…")` is wrapped too; its end then waits for
    * the body to be read.
+   *
+   * A HEAD response is never open-ended, whatever its body: Bun.serve drops
+   * that body without reading or cancelling it, so a wrapped one would never
+   * end, and the store would keep the user until it was collected. A stream
+   * route answers HEAD, and its 404, a breaker's JSON or a handler's own
+   * Response can all carry an unsized body there.
    */
-  private isOpenEndedBody(response: Response) {
-    return response.body !== null && !response.headers.has("Content-Length");
+  private isOpenEndedBody(request: Request, response: Response) {
+    return (
+      request.method !== "HEAD" && response.body !== null && !response.headers.has("Content-Length")
+    );
   }
 
   async handleApiRequest(req: Request) {
@@ -402,7 +410,7 @@ export class ApiRouteDispatcher {
         // ctx.setHeaders (CORS, Cache-Control) and any Set-Cookie. The
         // response's own headers win; the context only fills gaps.
         const response = this.mergeContextIntoResponse(data, headers, cookies);
-        if (this.isOpenEndedBody(response)) {
+        if (this.isOpenEndedBody(req, response)) {
           // Ended by its body rather than here: a streaming agent route
           // returns before any of its tools run, and ending now would destroy
           // the `user` every one of them reads.
