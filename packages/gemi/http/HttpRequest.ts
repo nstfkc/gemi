@@ -1,3 +1,4 @@
+import { parseCookieHeader } from "./getCookies";
 import { isModelOriginated } from "./modelOriginated";
 import { parseRangeHeader } from "./range";
 import { RequestContext } from "./requestContext";
@@ -198,15 +199,7 @@ export class HttpRequest<
 
     this.headers = this.rawRequest.headers;
 
-    const cookie = this.rawRequest.headers.get("Cookie");
-    const cookies = new Map();
-    if (cookie) {
-      const cookieArray = cookie.split(";");
-      for (const c of cookieArray) {
-        const [key, value] = c.split("=");
-        cookies.set(key.trim(), value.trim());
-      }
-    }
+    const cookies = parseCookieHeader(this.rawRequest.headers.get("Cookie"));
     const url = new URL(this.rawRequest.url);
     const map = new Map<string, string | string[]>();
     for (const [key, value] of url.searchParams) {
