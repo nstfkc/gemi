@@ -459,3 +459,18 @@ jobs:
       - name: Differential and policy suites
         run: bun --bun vitest run app/models --no-file-parallelism -t postgres
         working-directory: templates/saas-starter
+
+  # The iOS client. `swift test` at the root builds GemiChat and replays the
+  # TypeScript reducer's recorded cases (`packages/gemi/ai/client/__fixtures__`)
+  # through its port. The `check` job fails when the corpus drifts from the
+  # TypeScript that records it; this one fails when the Swift stops agreeing.
+  #
+  # macOS because that is the platform the client is for, and its Foundation
+  # is the one it is written against; `macos-15` for a Swift 6 toolchain.
+  swift:
+    name: swift
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Swift tests
+        run: swift test
