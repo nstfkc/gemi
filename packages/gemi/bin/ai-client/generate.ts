@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { GenerateClientError, extractAgent, loadTypeScript, parseAgentReference } from "./extract";
-import { renderKotlin } from "./kotlin";
+import { invalidPackage, renderKotlin } from "./kotlin";
 import { renderSwift } from "./swift";
 
 export { GenerateClientError } from "./extract";
@@ -36,6 +36,12 @@ export async function generateClient(
         "(e.g. --package com.example.app.chat).",
     );
   }
+  const invalid = platform === "kotlin" ? invalidPackage(options.package!) : undefined;
+  if (invalid) {
+    throw new GenerateClientError(
+      `--package "${options.package}" is not a Kotlin package: ${invalid}.`,
+    );
+  }
   const ts = await loadTypeScript(cwd);
   const model = extractAgent(ts, parseAgentReference(options.agent), { cwd, name: options.name });
 
@@ -46,7 +52,11 @@ export async function generateClient(
     file,
     platform === "swift" ? renderSwift(model) : renderKotlin(model, options.package!),
   );
-  return { file, warnings: model.warnings };
+  const warnings = [...model.warnings];
+  if (platform === "swift" && options.package) {
+    warnings.push("--package is for Kotlin; a Swift file has no package, so it was ignored.");
+  }
+  return { file, warnings };
 }
 
 function parsePlatform(platform: string): Platform {
