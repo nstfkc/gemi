@@ -3,6 +3,7 @@ import { describe, test, expect } from "vitest";
 import { createFlatApiRoutes } from "./createFlatApiRoutes";
 import { ApiRouter } from "../../http/ApiRouter";
 import { Controller, ResourceController } from "../../http/Controller";
+import { AgentController } from "../../ai/AgentController";
 
 class ProductController extends ResourceController {
   list() {
@@ -274,5 +275,29 @@ describe("createFlatApiRoutes - route source", () => {
     const expected = { controller: ReportController, methodName: "export" };
     expect(sources["GET /export"]).toEqual(expected);
     expect(sources["HEAD /export"]).toEqual(expected);
+  });
+
+  test("an agent route and a file route report their controller method", () => {
+    class ChatController extends AgentController {
+      agent = { name: "stub", tools: [], provider: {} } as any;
+    }
+
+    class Root extends ApiRouter {
+      routes = {
+        "/chat": this.agent(ChatController),
+        "/download": this.file(ReportController, "export"),
+      };
+    }
+
+    const sources = sourcesOf(createFlatApiRoutes(new Root().routes));
+
+    expect(sources["POST /chat/stop"]).toEqual({
+      controller: ChatController,
+      methodName: "stop",
+    });
+    expect(sources["GET /download"]).toEqual({
+      controller: ReportController,
+      methodName: "export",
+    });
   });
 });
