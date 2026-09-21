@@ -498,19 +498,37 @@ jobs:
         if: failure()
         run: cat e2e-server.log
 
-  # The Android client's core, on a plain JVM: `gemi-chat` replays the same
-  # recorded reducer and decoder cases the Swift client does.
+  # The Android client. `gemi-chat` replays the same recorded reducer and
+  # decoder cases the Swift client does, and its end-to-end tests talk to the
+  # same scripted `AgentController` (`packages/gemi-swift/e2e/server.ts`).
+  # `gemi-chat-compose` is only built: it is a thin wrapper, and the runner's
+  # preinstalled Android SDK (`ANDROID_HOME`) is what includes it at all.
   kotlin:
     name: kotlin
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: packages/gemi-kotlin
     steps:
       - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          # Same version as the sqlite job and `publish.yml`; see the note there.
+          # Unpinned it reads the root `packageManager`, a Bun too old to install.
+          bun-version: 1.3.14
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
-      - name: Kotlin tests
-        run: ./gradlew :gemi-chat:test
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Start the end-to-end server
+        run: |
+          bun packages/gemi-swift/e2e/server.ts 47123 > e2e-server.log 2>&1 &
+          for _ in $(seq 1 50); do grep -q ready e2e-server.log && exit 0; sleep 0.2; done
+          cat e2e-server.log; exit 1
+      - name: Kotlin tests and the Compose build
+        run: ./gradlew :gemi-chat:test :gemi-chat-compose:assembleRelease
+        working-directory: packages/gemi-kotlin
+        env:
+          GEMI_E2E_URL: http://127.0.0.1:47123
+      - name: End-to-end server log
+        if: failure()
+        run: cat e2e-server.log
