@@ -95,7 +95,7 @@ class ProductController extends Controller {
 const limitKeys: string[] = [];
 const OriginRateLimit = RateLimitMiddleware.configure({
   key: (req) => {
-    const key = `${req.isModelOriginated() ? "model" : "direct"}:${clientIp(req)}`;
+    const key = `${req.isModelOriginated() ? "model" : "direct"}:${clientIp(req)}:${req.routePath}`;
     limitKeys.push(key);
     return key;
   },
@@ -144,6 +144,7 @@ class RootApiRouter extends ApiRouter {
     "/limited-per-user": this.get(() => ({ ok: true })).middleware(["rate-limit:1,60"]),
     "/limited-shared": this.get(() => ({ ok: true })).middleware(["rate-limit:1,60"]),
     "/limited-by-origin": this.get(() => ({ ok: true })).middleware(["origin-limit:1,60"]),
+    "/limited-nested": this.get(() => ({ ok: true })).middleware(["origin-limit:1,60"]),
     "/agent": this.post(() => inside(new HttpRequest<any, any>())),
   };
 }
@@ -511,7 +512,10 @@ describe("dispatchAs", () => {
       );
 
       expect(result).toBe(200);
-      expect(limitKeys).toEqual(["direct:10.0.0.4", "model:10.0.0.4"]);
+      expect(limitKeys).toEqual([
+        "direct:10.0.0.4:/limited-by-origin",
+        "model:10.0.0.4:/limited-by-origin",
+      ]);
     });
 
     test("a nested call keeps the address of the request that started the chain", async () => {
@@ -525,11 +529,11 @@ describe("dispatchAs", () => {
         });
         markModelOriginated(raw, "10.0.0.5");
         const initiator = new HttpRequest<any, any>(raw);
-        return (await dispatcher.dispatchAs(initiator, "GET", "/limited-by-origin")).status;
+        return (await dispatcher.dispatchAs(initiator, "GET", "/limited-nested")).status;
       });
 
       expect(result).toBe(200);
-      expect(limitKeys).toEqual(["model:10.0.0.5"]);
+      expect(limitKeys).toEqual(["model:10.0.0.5:/limited-nested"]);
     });
   });
 });
