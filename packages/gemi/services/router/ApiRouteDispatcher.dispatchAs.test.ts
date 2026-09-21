@@ -401,6 +401,8 @@ describe("dispatchAs", () => {
     ["a dot segment", "/x/../me"],
     ["a traversal into a framework route", "/../__gemi__/debug/api-routes"],
     ["a framework route", "/__gemi__/debug/api-routes"],
+    ["an auth route", "/auth/sign-out"],
+    ["the auth root", "/auth"],
     ["a fragment", "/me#x"],
   ])("refuses a path with %s", async (_label, path) => {
     const { result } = await fromAgent(

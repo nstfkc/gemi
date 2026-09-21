@@ -303,7 +303,10 @@ export class ApiRouteDispatcher {
    * A param from a model must be `encodeURIComponent`ed by the caller: a path
    * that URL parsing would rewrite — a `..` segment walking out of the route —
    * is refused rather than resolved, as is anything under `/__gemi__`, which
-   * skips the lifecycle hooks and is not an app route.
+   * skips the lifecycle hooks and is not an app route. So is `/auth`: its
+   * routes are the framework's, and a tool call that signed out the session
+   * that started the run, or signed in to a cookie nobody keeps, is never what
+   * a model meant.
    */
   async dispatchAs(
     initiator: HttpRequest<any, any>,
@@ -319,7 +322,9 @@ export class ApiRouteDispatcher {
       url.origin !== origin ||
       url.pathname !== expectedPathname ||
       url.hash !== "" ||
-      url.pathname.startsWith("/api/__gemi__")
+      url.pathname.startsWith("/api/__gemi__") ||
+      url.pathname === "/api/auth" ||
+      url.pathname.startsWith("/api/auth/")
     ) {
       throw new Error(
         `dispatchAs: "${path}" is not an app api path. Pass the route's own path, without "/api", with every param encoded.`,
