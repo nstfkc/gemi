@@ -22,7 +22,7 @@ import type {
   ToolAttachmentRecord,
   ToolAttachments,
 } from "./store/Attachments";
-import { InvalidAttachmentScopeError } from "./store/Attachments";
+import { ATTACHMENT_ID_PREFIX, InvalidAttachmentScopeError } from "./store/Attachments";
 import { sseKeepalive } from "./store/sse";
 import type {
   AgentError,
@@ -115,6 +115,10 @@ export interface ToolContext {
    */
   attachments: ToolAttachments;
   /**
+   * What the user sent with the turn this tool call answers. See `ToolTurn`.
+   */
+  readonly turn: ToolTurn;
+  /**
    * Runs another agent from inside this tool, wired into the parent run.
    *
    * A tool can already drive a sub-agent by hand — make one, iterate it, yield
@@ -162,6 +166,73 @@ export interface ToolContext {
     agent: A,
     params?: RunAgentParams,
   ): Promise<NestedRunResult>;
+}
+
+/**
+ * The files of the turn a tool call belongs to, as data the model cannot write.
+ *
+ * WHAT THIS FIXES. Every method on `ctx.attachments` takes an id, and before
+ * this the only ids a tool could get were the ones the model put in its
+ * arguments. So a tool meant to use "the image the user attached" had to trust
+ * the model to name it, and a prompt-injected document could name a different
+ * upload of the same user's — yesterday's contract instead of today's photo —
+ * which the scope check passes, because it is the user's file. Reading the ids
+ * from here instead leaves the model nothing to steer.
+ *
+ * WHICH TURN: THE USER MESSAGE BEFORE THIS CALL, NOT THE LATEST ONE. Found by
+ * walking back from the assistant message that made the call, never by taking
+ * the last user message in the history when the tool runs, and the difference
+ * is re-entry. An escalating tool runs again from the top on a later turn (see
+ * `runAgent`), and "latest" is recomputed each time: a turn that answers the
+ * sub-agent can carry text or files of its own, and when the re-entered tool
+ * asks again, that turn's user message is appended *after* the still-open call
+ * — so on the next re-entry "latest" is the answer turn, and a tool that read
+ * "the image" would pick a different file, or none, on its second attempt. The
+ * replay checks do not reliably catch that: `putMismatch` compares only the
+ * media type, and a sub-run seeded with the file as a message part
+ * fingerprints as `<file>` whichever file it was. The message that preceded
+ * the call is in the history on every attempt and does not move, so every
+ * attempt sees the same list.
+ *
+ * ONE TURN, NOT THE THREAD. The whole thread is what "the image I sent earlier"
+ * needs, and it is the wider thing to bind to: a tool that picks "the first
+ * image" out of forty turns picks whichever one the history happens to put
+ * first, and the user who uploaded a new one sees the old one used. A tool that
+ * wants earlier turns can take an id from the model and let the scope check it;
+ * one that binds should bind to the turn the user is looking at. A turn with
+ * text and no files gives an empty list, which is also the answer to "the user
+ * attached nothing this time".
+ *
+ * NOT THE FILES A TOOL MADE. A file a tool showed with `put(…, { showModel:
+ * true })` is injected as a user-role message and carries an `attachmentId`
+ * too, and taking it would make it "the user's upload" to the next tool — so
+ * the walk steps over every message a tool call's record names as injected,
+ * the same test `historyForProvider` uses. A tool that wants what an earlier
+ * tool produced has that tool's result to read the id from.
+ *
+ * IDS ONLY, AND NOT TRUSTED. The name and type beside them on the `FilePart`
+ * are what the client said, so they are left off rather than offered as a
+ * second, weaker copy of what `ctx.attachments.get(id)` answers from the
+ * store. And the ids themselves are only as trustworthy as the history they
+ * came from — which, for a stateless client, is whatever it posted. That is
+ * fine for the reason everything else about attachments is fine: resolution
+ * goes through `ctx.attachments`, whose scope was fixed by the request, so an
+ * id from somebody else's upload answers `AttachmentNotFoundError` here
+ * exactly as it would from the model's arguments. This list narrows which of
+ * the caller's own files a tool reaches for; it grants nothing.
+ *
+ * Inside a sub-run the turn is the sub-run's own: the message its parent's
+ * tool started it with, which has files only if that tool put them there. The
+ * parent's upload is not inherited — the tool that called `runAgent` read its
+ * own `ctx.turn` and decided what the sub-agent is given.
+ */
+export interface ToolTurn {
+  /**
+   * The `attachmentId`s on that user message's file parts, in order, without
+   * duplicates, and only ids of gemi's own shape. Frozen, and computed once
+   * before the body runs.
+   */
+  readonly attachments: readonly string[];
 }
 
 /** What `ctx.runAgent` is given. `messages` and `prompt` are alternatives. */
@@ -1157,6 +1228,27 @@ function seedOf(params: RunAgentParams): string | null {
 }
 
 /**
+ * The ids of the messages a tool injected to show a file, read from the
+ * `ToolCallPart.attachments` records in `messages`.
+ *
+ * The record is the test, not `attachmentId` on the part: a user's own upload
+ * carries an `attachmentId` too. `historyForProvider` keys its window on this
+ * and `toolTurn` steps over these when it looks for the user's turn.
+ */
+function injectedMessageIds(messages: AgentMessage[]): Set<string> {
+  const injected = new Set<string>();
+  for (const message of messages) {
+    for (const part of message.content) {
+      if (part.type !== "tool-call") continue;
+      for (const record of part.attachments ?? []) {
+        if ("shown" in record && record.shown) injected.add(record.shown.messageId);
+      }
+    }
+  }
+  return injected;
+}
+
+/**
  * How many tool-produced files stay attached to the request. See
  * `AgentRunImpl.historyForProvider`, which is where the reasoning lives.
  */
@@ -2029,6 +2121,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
       depth: this.depth,
       resumed: resume !== undefined,
       attachments: this.toolAttachments(call),
+      turn: this.toolTurn(messageId),
       runAgent: this.nestedRunner(messageId, call, resume),
     };
 
@@ -2506,6 +2599,38 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
   }
 
   /**
+   * The `ctx.turn` given to one tool call. The reasoning is on `ToolTurn`.
+   *
+   * Anchored on `messageId`, the assistant message holding the call, which is
+   * the same id on a re-entry: `amend` replaces the history entry with a clone
+   * under the original's id, so the lookup is by id rather than by reference.
+   * A message that is not in the history at all gets an empty list rather than
+   * a guess.
+   */
+  private toolTurn(messageId: string): ToolTurn {
+    const at = this.history.findIndex((message) => message.id === messageId);
+    const injected = injectedMessageIds(this.history);
+    let user: AgentMessage | undefined;
+    for (let i = at - 1; i >= 0; i--) {
+      const message = this.history[i];
+      if (message.role !== "user" || injected.has(message.id)) continue;
+      user = message;
+      break;
+    }
+    const ids: string[] = [];
+    for (const part of user?.content ?? []) {
+      if (part.type !== "file") continue;
+      // The prefix test `providers/request.ts` applies before telling the model
+      // an id. A stateless client's history can put anything here, and a value
+      // the model was never shown as an id should not reach a tool as one.
+      const id = part.attachmentId;
+      if (typeof id !== "string" || !id.startsWith(ATTACHMENT_ID_PREFIX)) continue;
+      if (!ids.includes(id)) ids.push(id);
+    }
+    return Object.freeze({ attachments: Object.freeze(ids) });
+  }
+
+  /**
    * Holds the message for a shown file until its tool call settles.
    *
    * WHY IT WAITS. The message is input-role and it has to sit *after* the tool
@@ -2652,15 +2777,7 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     // record is the test — not `attachmentId` on the part. A user's own upload
     // carries an `attachmentId` too: `ingestTurn` copies it from `turn.files`,
     // and `useChat` spreads the entry onto its local user message.
-    const injected = new Set<string>();
-    for (const message of messages) {
-      for (const part of message.content) {
-        if (part.type !== "tool-call") continue;
-        for (const record of part.attachments ?? []) {
-          if ("shown" in record && record.shown) injected.add(record.shown.messageId);
-        }
-      }
-    }
+    const injected = injectedMessageIds(messages);
 
     const shown: FilePart[] = [];
     for (const message of messages) {

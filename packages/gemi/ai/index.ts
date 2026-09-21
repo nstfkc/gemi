@@ -88,6 +88,7 @@ export type {
   ToolEntry,
   ToolExecute,
   ToolShapesOf,
+  ToolTurn,
 } from "./Agent";
 
 // --- providers ------------------------------------------------------------
