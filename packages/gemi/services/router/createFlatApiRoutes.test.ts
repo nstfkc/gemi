@@ -2,7 +2,7 @@ import { describe, test, expect } from "vitest";
 
 import { createFlatApiRoutes } from "./createFlatApiRoutes";
 import { ApiRouter } from "../../http/ApiRouter";
-import { ResourceController } from "../../http/Controller";
+import { Controller, ResourceController } from "../../http/Controller";
 
 class ProductController extends ResourceController {
   list() {
@@ -153,5 +153,121 @@ describe("createFlatApiRoutes - stream routes", () => {
     const routes = createFlatApiRoutes(new Root().routes);
 
     expect(Object.keys(routes["/download"]).sort()).toEqual(["GET", "OPTIONS"]);
+  });
+});
+
+class ReportController extends Controller {
+  export() {
+    return {};
+  }
+}
+
+function sourcesOf(routes: ReturnType<typeof createFlatApiRoutes>) {
+  return Object.fromEntries(
+    Object.entries(routes).flatMap(([path, methods]) =>
+      Object.entries(methods).map(([method, handler]) => [
+        `${method} ${path}`,
+        handler.source,
+      ]),
+    ),
+  );
+}
+
+describe("createFlatApiRoutes - route source", () => {
+  test("a resource and a route in a nested, prefixed router report their controller method", () => {
+    class OrgRouter extends ApiRouter {
+      middlewares = ["auth"];
+      routes = {
+        "/products/:productId": this.resource(ProductController),
+        "/reports": this.post(ReportController, "export"),
+      };
+    }
+
+    class Root extends ApiRouter {
+      routes = {
+        "/:orgId": OrgRouter,
+      };
+    }
+
+    const sources = sourcesOf(createFlatApiRoutes(new Root().routes));
+
+    expect(sources["GET /:orgId/products"]).toEqual({
+      controller: ProductController,
+      methodName: "list",
+    });
+    expect(sources["POST /:orgId/products"]).toEqual({
+      controller: ProductController,
+      methodName: "store",
+    });
+    expect(sources["GET /:orgId/products/:productId"]).toEqual({
+      controller: ProductController,
+      methodName: "show",
+    });
+    expect(sources["PUT /:orgId/products/:productId"]).toEqual({
+      controller: ProductController,
+      methodName: "update",
+    });
+    expect(sources["DELETE /:orgId/products/:productId"]).toEqual({
+      controller: ProductController,
+      methodName: "delete",
+    });
+    expect(sources["POST /:orgId/reports"]).toEqual({
+      controller: ReportController,
+      methodName: "export",
+    });
+  });
+
+  test("a verb map records each verb's own controller method", () => {
+    class Root extends ApiRouter {
+      routes = {
+        "/reports": {
+          get: this.get(ProductController, "list"),
+          post: this.post(ReportController, "export"),
+        },
+      };
+    }
+
+    const sources = sourcesOf(createFlatApiRoutes(new Root().routes));
+
+    expect(sources["GET /reports"]).toEqual({
+      controller: ProductController,
+      methodName: "list",
+    });
+    expect(sources["POST /reports"]).toEqual({
+      controller: ReportController,
+      methodName: "export",
+    });
+  });
+
+  test("a callback route, a proxy route and OPTIONS have no source", () => {
+    class Root extends ApiRouter {
+      routes = {
+        "/health": this.get(() => ({ ok: true })),
+        "/upstream": this.proxy("https://example.com"),
+        "/reports": this.post(ReportController, "export"),
+      };
+    }
+
+    const routes = createFlatApiRoutes(new Root().routes);
+
+    expect("source" in routes["/health"].GET).toBe(false);
+    for (const method of ["GET", "POST", "PUT", "DELETE"]) {
+      expect("source" in routes["/upstream"][method]).toBe(false);
+    }
+    expect("source" in routes["/reports"].OPTIONS).toBe(false);
+  });
+
+  test("a stream route's HEAD has the source of the GET it was cloned from", () => {
+    class Root extends ApiRouter {
+      routes = {
+        "/export": this.stream(ReportController, "export"),
+      };
+    }
+
+    const sources = sourcesOf(createFlatApiRoutes(new Root().routes));
+
+    const expected = { controller: ReportController, methodName: "export" };
+    expect(sources["GET /export"]).toEqual(expected);
+    expect(sources["HEAD /export"]).toEqual(expected);
   });
 });
