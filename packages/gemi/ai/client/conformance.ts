@@ -20,7 +20,7 @@ import { SSEFrameDecoder } from "./sse";
  * change that forgets to update them fails here, in the TypeScript suite,
  * before any native client has been built.
  *
- * `GEMI_UPDATE_FIXTURES=1 bun run test ai/client` rewrites the files.
+ * `GEMI_UPDATE_FIXTURES=1 bun --bun vitest run ai/client` rewrites the files.
  */
 
 const UPDATE = process.env.GEMI_UPDATE_FIXTURES === "1";
@@ -44,7 +44,13 @@ function settle<C>(target: string, source: string, cases: C[], suite: Suite) {
   // JSON.parse(JSON.stringify(...)) is the comparison the native side makes:
   // it drops `undefined` members, which a Swift optional or a Kotlin nullable
   // reads back as absent anyway.
-  const recorded: C[] = JSON.parse(JSON.stringify(cases));
+  // Sorted, because the order the tests happened to run in means nothing to a
+  // port — each case replays on its own — and a shuffled run has to produce
+  // the same file as an ordered one.
+  const recorded: C[] = JSON.parse(JSON.stringify(cases)).sort(
+    (a: C & { test?: string }, b: C & { test?: string }) =>
+      compare(unnamed(a), unnamed(b)) || compare(a.test ?? "", b.test ?? ""),
+  );
   const stale =
     `${target} is out of date. The native clients replay it, so a change ` +
     `here changes what they must do: rerun ${source} with GEMI_UPDATE_FIXTURES=1 and commit ` +
@@ -71,12 +77,19 @@ function settle<C>(target: string, source: string, cases: C[], suite: Suite) {
     expect(recorded, stale).toEqual(onDisk.cases);
     return;
   }
-  // Compared without the test name: a call is kept once, under the first test
-  // that made it, so a filtered run can make the same call under another name.
-  const unnamed = ({ test: _test, ...entry }: C & { test?: string }) => JSON.stringify(entry);
+  // Compared without the test name: a call is kept once, under one of the
+  // tests that made it, so a filtered run can make the same call under another.
   const known = new Set(onDisk.cases.map(unnamed));
   const missing = recorded.filter((entry) => !known.has(unnamed(entry)));
   expect(missing, stale).toEqual([]);
+}
+
+function unnamed({ test: _test, ...entry }: { test?: string }) {
+  return JSON.stringify(entry);
+}
+
+function compare(a: string, b: string) {
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 // Vitest hands a file-level hook its fixtures first and the suite second.
@@ -121,21 +134,22 @@ type ReducerCase =
  *
  * Identical calls are kept once. The tests fold the same run from scratch many
  * times over, and a corpus of the same case repeated is only slower to replay.
+ * The copy kept is named after the alphabetically first test that made the
+ * call, not the first to run, so the name does not depend on test order.
  */
 export function recordReducer(target: string) {
-  const cases: ReducerCase[] = [];
-  const seen = new Set<string>();
+  const seen = new Map<string, ReducerCase>();
   const keep = (entry: ReducerCase, { test: _test, result: _result, ...inputs }: ReducerCase) => {
     const key = JSON.stringify(inputs);
-    if (seen.has(key)) return;
-    seen.add(key);
-    cases.push(entry);
+    const kept = seen.get(key);
+    if (kept === undefined) seen.set(key, entry);
+    else if (entry.test < kept.test) kept.test = entry.test;
   };
 
   // Vitest parses a hook's first parameter as its fixtures and refuses one that
   // is not a destructuring pattern, so the empty one is load-bearing.
   // oxlint-disable-next-line no-empty-pattern
-  afterAll(({}, suite) => settle(target, "ai/client/reducer.test.ts", cases, suite));
+  afterAll(({}, suite) => settle(target, "ai/client/reducer.test.ts", [...seen.values()], suite));
 
   return {
     applyFrame: ((state, frame, now) => {
@@ -144,13 +158,16 @@ export function recordReducer(target: string) {
         // every run is not a fixture.
         throw new Error("Pass `now` to applyFrame in a recorded test.");
       }
+      // Copied before the call, like the state: a test that reuses and edits a
+      // frame object afterwards must not rewrite what this call was given.
       const snapshot = JSON.parse(JSON.stringify(state));
+      const given = JSON.parse(JSON.stringify(frame));
       const result = applyFrame(state, frame, now);
       const entry: ReducerCase = {
         test: currentTest(),
         op: "applyFrame",
         state: snapshot,
-        frame,
+        frame: given,
         now,
         result: JSON.parse(JSON.stringify(result)),
         unchanged: result === state,
