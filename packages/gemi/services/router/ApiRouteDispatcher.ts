@@ -150,8 +150,32 @@ function policyDeniedResponse() {
     headers: {
       "Content-Type": "application/json",
       "Content-Length": String(Buffer.byteLength(body)),
+      "Cache-Control": "no-store",
     },
   });
+}
+
+/**
+ * A RequestBreakerError's `api` payload as a Response, from a middleware or a
+ * handler.
+ *
+ * `no-store` unless the breaker says otherwise, as `policyDeniedResponse` does:
+ * the context's headers fill this Response's gaps, and `cache` puts the route's
+ * Cache-Control there for the success it expected. A 429, 401 or 403 that
+ * inherited `public, max-age=864000` would let a shared cache answer one
+ * client's rejection to everyone for ten days.
+ */
+function breakResponse(payload: {
+  status?: number;
+  data?: unknown;
+  headers?: Record<string, string>;
+}) {
+  const { status = 400, data, headers: own } = payload;
+  const headers = new Headers({ "Content-Type": "application/json", ...own });
+  if (!headers.has("Cache-Control")) {
+    headers.set("Cache-Control", "no-store");
+  }
+  return new Response(JSON.stringify(data), { status, headers });
 }
 
 export class ApiRouteDispatcher {
@@ -213,14 +237,7 @@ export class ApiRouteDispatcher {
         // Unconditionally: every request here is an api request, whatever its
         // url says. A break that returned nothing would let the handler run
         // after the middleware rejected the request.
-        const { status = 400, data, headers } = err.payload.api;
-        return new Response(JSON.stringify(data), {
-          status,
-          headers: {
-            "Content-Type": "application/json",
-            ...headers,
-          },
-        });
+        return breakResponse(err.payload.api);
       } else {
         this.onRequestFail(httpRequest, err);
         console.error(err);
@@ -245,15 +262,7 @@ export class ApiRouteDispatcher {
       data = await exec();
     } catch (err) {
       if (err.kind === GEMI_REQUEST_BREAKER_ERROR) {
-        const { status = 400, data, headers } = err.payload.api;
-
-        return new Response(JSON.stringify(data), {
-          status,
-          headers: {
-            "Content-Type": "application/json",
-            ...headers,
-          },
-        });
+        return breakResponse(err.payload.api);
       }
       this.onRequestFail(ctx.req, err);
       console.error(err);
