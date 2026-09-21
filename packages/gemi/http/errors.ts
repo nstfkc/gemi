@@ -22,8 +22,7 @@ export class AuthorizationError extends RequestBreakerError {
  *
  * 403, not 401: a 401 tells the client to re-authenticate, so a client that
  * sends a 401 to the sign-in page would loop a signed-in user without the role
- * straight back to where they started. It is also the status a policy denial
- * answers, and the two are the same refusal. A request with no user at all is
+ * straight back to where they started. A request with no user at all is
  * `AuthenticationError`, which stays 401.
  */
 export class InsufficientPermissionsError extends RequestBreakerError {
