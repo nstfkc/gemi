@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { createElement } from "react";
 
-import { Agent } from "../../ai/Agent";
+import { Agent, type AgentRun } from "../../ai/Agent";
 import type { ProviderEvent, ProviderToolSpec } from "../../ai/AgentProvider";
 import { fakeProvider } from "../../ai/providers/fakeProvider";
 import { s } from "../../ai/Schema";
@@ -135,10 +135,19 @@ class Api extends ApiRouter {
       return { wiped: true };
     }),
     "/agent": this.post(async () => inside(new HttpRequest<any, any>())),
+    // Answers before the run has taken a step, as `ApiRouter.agent()` does:
+    // every tool call happens inside the response body.
+    "/agent/stream": this.post(async () => streamed(new HttpRequest<any, any>())).middleware([
+      "auth",
+    ]),
   };
 }
 
-/** The org of whoever holds the run's token — resolved from the credential, not from `req.ctx()`. */
+/**
+ * The org of whoever holds the run's token, from the credential: `/agent` is
+ * not behind `auth`, so `req.ctx().user` is empty there — an anonymous run has
+ * to reach the routes' own 401.
+ */
 const orgOf = (req: HttpRequest<any, any>) => {
   const user = SESSIONS[req.cookies.get("access_token") ?? ""];
   if (!user) throw new Error("no session for this run");
@@ -153,6 +162,12 @@ class Mcp extends McpRouter<CreateRPC<Api>> {
       input: s.object({ status: s.string() }),
       params: { orgId: orgOf },
       tags: ["orders"],
+    }),
+    // The binder RFC #499 documents: the user, read from the run's request.
+    "my-orders": this.fromApiRoute("GET", "/:orgId/orders", {
+      description: "List my organization's orders",
+      input: s.object({ status: s.string() }),
+      params: { orgId: (req) => req.ctx().user.orgId },
     }),
     "create-product": this.fromApiRoute("POST", "/:orgId/products", {
       description: "Create a product",
@@ -222,6 +237,7 @@ const storage = new FakeStorage();
 const scopeFor = (key: string) => new ScopedAttachments(store, storage as any, { key });
 
 let inside: (req: HttpRequest<any, any>) => Promise<unknown> = async () => ({});
+let streamed: (req: HttpRequest<any, any>) => Response = () => new Response(null);
 
 const toolCall = (toolCallId: string, name: string, args: unknown): ProviderEvent => ({
   type: "tool-call",
@@ -271,6 +287,54 @@ async function runTool(
     .flatMap((message) => message.content)
     .find((part: any) => part.type === "tool-result" && part.toolCallId === "c1") as any;
   return { result, offered: provider.calls[0]?.tools as ProviderToolSpec[] };
+}
+
+/**
+ * `runTool`, through a route that streams the run. With `disconnect`, the
+ * client cancels the body before the model has asked for anything, and the
+ * run goes on without it, as a run does when a tab is closed.
+ */
+async function streamTool(
+  headers: Record<string, string>,
+  name: string,
+  args: unknown,
+  options: { disconnect?: boolean } = {},
+) {
+  const provider = fakeProvider([toolCall("c1", name, args), finish()], [finish()]);
+  let open!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  const script = provider.stream.bind(provider);
+  provider.stream = (params) =>
+    (async function* () {
+      await gate;
+      yield* script(params);
+    })();
+  const agent = Agent.create({
+    name: "shop",
+    provider,
+    tools: toAgentTools(resolve(McpRegistry)),
+  });
+  let run!: AgentRun;
+  streamed = (req) => {
+    run = agent.stream({ messages: [], req, turn: { text: "go" }, attachments: null }) as AgentRun;
+    return run.toResponse();
+  };
+  const res = await app.fetch(
+    new Request("http://gemi.dev/api/agent/stream", { method: "POST", headers }),
+  );
+  if (options.disconnect) {
+    await res.body!.cancel();
+    open();
+  } else {
+    open();
+    await res.text();
+  }
+  const { messages } = await run.result();
+  return (messages as AgentMessage[])
+    .flatMap((message) => message.content)
+    .find((part: any) => part.type === "tool-result" && part.toolCallId === "c1") as any;
 }
 
 const alice = { Cookie: "access_token=tok-alice" };
@@ -325,6 +389,7 @@ describe("an agent calling the app's routes", () => {
       "create-product-from-upload",
       "flaky",
       "list-orders",
+      "my-orders",
       "rename-product",
       "whoami",
     ]);
@@ -480,6 +545,28 @@ describe("an agent calling the app's routes", () => {
 
 // --- the registry on its own -------------------------------------------------
 
+describe("a streamed run", () => {
+  test("a binder reads the user from req.ctx()", async () => {
+    const result = await streamTool(alice, "my-orders", { status: "open" });
+
+    expect(result).toMatchObject({
+      status: "ok",
+      output: { orgId: "org_alice", status: "open" },
+    });
+    expect(handled).toEqual([{ route: "orders", user: 1, params: { orgId: "org_alice" } }]);
+  });
+
+  test("a binder still reads the user after the client has disconnected", async () => {
+    const result = await streamTool(alice, "my-orders", { status: "open" }, { disconnect: true });
+
+    expect(result).toMatchObject({
+      status: "ok",
+      output: { orgId: "org_alice", status: "open" },
+    });
+    expect(handled).toEqual([{ route: "orders", user: 1, params: { orgId: "org_alice" } }]);
+  });
+});
+
 describe("McpRegistry", () => {
   const registry = () => resolve(McpRegistry);
 
@@ -537,7 +624,7 @@ describe("McpRegistry", () => {
         .list(caller, { names: ["whoami", "boom"] })
         .map((tool) => tool.name),
     ).toEqual(["whoami", "boom"]);
-    expect(registry().list(caller)).toHaveLength(7);
+    expect(registry().list(caller)).toHaveLength(8);
   });
 
   test("a remote caller is typed and refused", async () => {
