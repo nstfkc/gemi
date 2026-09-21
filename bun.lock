@@ -78,10 +78,12 @@
         "react": ">=19",
         "react-dom": ">=19",
         "sharp": "^0.34.2",
+        "typescript": ">=5",
         "vite": "^8.0.0",
       },
       "optionalPeers": [
         "@azure/storage-blob",
+        "typescript",
       ],
     },
     "packages/typescript-config": {
