@@ -372,6 +372,26 @@ func eventually(_ condition: () -> Bool) async {
     #expect(stop.body["clientRunId"] == transport.requests[0].body["clientRunId"])
   }
 
+  @Test func framesAfterCloseAreNotAppliedEvenFromTheSameChunk() async {
+    // One chunk carrying the rest of the run: nothing between its frames would
+    // notice a cancellation on its own.
+    let transport = FakeTransport { _ in
+      sse([
+        ["type": "run-start", "runId": "run_1"],
+        ["type": "message-start", "messageId": "m1", "role": "assistant"],
+        ["type": "message-end", "messageId": "m1", "finishReason": "stop"],
+        ["type": "message-start", "messageId": "m2", "role": "assistant"],
+        ["type": "text-delta", "messageId": "m2", "delta": "after close"],
+      ])
+    }
+    let chat = UntypedChatSession(endpoint: endpoint, transport: transport)
+    chat.onFinish = { _ in chat.close() }
+
+    await chat.send("Hi")
+
+    #expect(chat.messages.map(\.role) == [.user, .assistant])
+  }
+
   @Test func stopBeforeTheRunHasAnIdStillNamesIt() async {
     let stream = OpenStream()
     let transport = FakeTransport { request in
