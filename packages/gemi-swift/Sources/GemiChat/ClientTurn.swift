@@ -104,7 +104,7 @@ public enum ClientToolResult: Sendable, Hashable {
         "approve": .bool(approve),
       ]
       if let path { json["path"] = .array(path.map(JSONValue.string)) }
-      if let reason { json["reason"] = .string(reason) }
+      if let reason, !reason.isEmpty { json["reason"] = .string(reason) }
     case .output(let toolCallId, let signature, let path, let output):
       json = [
         "toolCallId": .string(toolCallId), "signature": .string(signature), "output": output,
