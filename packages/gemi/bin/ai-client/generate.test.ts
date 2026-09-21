@@ -19,6 +19,7 @@ let ts: typeof TS;
 let support: AgentModel;
 let classifier: AgentModel;
 let odd: AgentModel;
+let e2e: AgentModel;
 
 const read = (file: string, exportName: string, name?: string) =>
   extractAgent(ts, { file: `${FIXTURES}/${file}`, exportName }, { cwd: PACKAGE, name });
@@ -28,6 +29,13 @@ beforeAll(async () => {
   support = read("support.ts", "supportAgent");
   classifier = read("support.ts", "classifier");
   odd = read("unsupported.ts", "oddAgent");
+  // The agent behind the Swift client's end-to-end server, whose generated
+  // file those tests decode real traffic through.
+  e2e = extractAgent(
+    ts,
+    { file: "../gemi-swift/e2e/server.ts", exportName: "e2eAgent" },
+    { cwd: PACKAGE },
+  );
 }, 60_000);
 
 function type(model: AgentModel, name: string): NamedType {
@@ -45,6 +53,7 @@ describe("the Swift the Swift tests compile", () => {
     ["Classifier.swift", () => classifier],
     // Everything in it is raw JSON somewhere, which must still compile.
     ["OddAgent.swift", () => odd],
+    ["E2eAgent.swift", () => e2e],
   ])("%s is what the generator writes today", (file, model) => {
     const target = path.join(SWIFT_GENERATED, file);
     const rendered = renderSwift(model());
