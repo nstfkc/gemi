@@ -3,6 +3,7 @@ package dev.gemijs.chat
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -203,15 +204,22 @@ public class ChatSession(
     body.forEach { (key, value) -> payload = payload.with(key, value) }
 
     val id = Any()
+    // Lazy, so `inFlight` names the job before any of it runs: on an immediate
+    // dispatcher — `viewModelScope`'s — a turn that never suspends is over
+    // inside `launch`, and its `finish` would find nothing to finish.
     val job =
-      scope.launch {
+      scope.launch(start = CoroutineStart.LAZY) {
         try {
           val response = post("", payload)
-          if (!response.isSuccess) {
-            fail(httpError(response))
-            return@launch
+          try {
+            if (!response.isSuccess) {
+              fail(httpError(response))
+              return@launch
+            }
+            consume(response)
+          } finally {
+            response.close()
           }
-          consume(response)
         } catch (error: CancellationException) {
           // `stop()`, a superseding send, or `close()`: each has already put
           // the UI where it belongs.
@@ -223,6 +231,7 @@ public class ChatSession(
         }
       }
     inFlight = InFlight(id, job, clientRunId)
+    job.start()
     return job
   }
 
@@ -375,7 +384,12 @@ public class ChatSession(
   private suspend fun postStop(stopBody: JsonObject, report: (AgentError) -> Unit) {
     try {
       val response = post("/stop", stopBody)
-      if (!response.isSuccess) report(httpError(response))
+      // Closed either way: a stop that worked has a body nobody reads.
+      try {
+        if (!response.isSuccess) report(httpError(response))
+      } finally {
+        response.close()
+      }
     } catch (error: CancellationException) {
       throw error
     } catch (error: Exception) {
@@ -410,17 +424,25 @@ public class ChatSession(
    *  handle a tool fetches it by. */
   public suspend fun upload(bytes: ByteArray, name: String, mimeType: String): ChatUpload {
     val boundary = "gemi-${UUID.randomUUID()}"
+    // Escaped as a browser's `FormData` does: a quote or a line break in a
+    // name would otherwise end the header, and could start another.
+    val filename = name.replace("\"", "%22").replace("\r", "%0D").replace("\n", "%0A")
     val form =
-      "--$boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"$name\"\r\nContent-Type: $mimeType\r\n\r\n".toByteArray() +
+      "--$boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"$filename\"\r\nContent-Type: $mimeType\r\n\r\n".toByteArray() +
         bytes +
         "\r\n--$boundary--\r\n".toByteArray()
     val response = transport.send(ChatRequest("$endpoint/files", headers(), form, "multipart/form-data; boundary=$boundary"))
-    if (!response.isSuccess) {
-      val error = httpError(response)
-      fail(error)
-      throw AgentException(error)
-    }
-    val result = runCatching { GemiJson.parseToJsonElement(response.bytes().decodeToString()).obj() }.getOrNull()
+    val result =
+      try {
+        if (!response.isSuccess) {
+          val error = httpError(response)
+          fail(error)
+          throw AgentException(error)
+        }
+        runCatching { GemiJson.parseToJsonElement(response.bytes().decodeToString()).obj() }.getOrNull()
+      } finally {
+        response.close()
+      }
     // Both ids passed through as they came, and neither required: which one a
     // file has is the server's policy. The name and type are already here.
     return ChatUpload(
@@ -437,17 +459,22 @@ public class ChatSession(
   private fun attachToRun(threadId: String) {
     val attachBody = jsonObjectOf("threadId" to JsonPrimitive(threadId), "cursor" to JsonPrimitive(chat.seq), "runId" to chat.cursorRunId.json())
     val id = Any()
+    // Lazy for the reason `start`'s is.
     val job =
-      scope.launch {
+      scope.launch(start = CoroutineStart.LAZY) {
         try {
           val response = post("/attach", attachBody)
-          // Nothing running is the ordinary answer, and on more than one
-          // instance also what a refresh routed away from its run gets.
-          if (!response.isSuccess || response.statusCode == 204) {
-            onAttachMiss?.invoke(threadId)
-            return@launch
+          try {
+            // Nothing running is the ordinary answer, and on more than one
+            // instance also what a refresh routed away from its run gets.
+            if (!response.isSuccess || response.statusCode == 204) {
+              onAttachMiss?.invoke(threadId)
+              return@launch
+            }
+            consume(response)
+          } finally {
+            response.close()
           }
-          consume(response)
         } catch (error: CancellationException) {
           throw error
         } catch (_: Exception) {
@@ -459,6 +486,7 @@ public class ChatSession(
       }
     // No `clientRunId`: this client did not start the run.
     inFlight = InFlight(id, job, null)
+    job.start()
   }
 
   private suspend fun post(path: String, payload: JsonObject): ChatResponse =
