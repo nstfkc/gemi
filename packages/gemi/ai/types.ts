@@ -87,7 +87,16 @@ export type TextPart = { type: "text"; text: string };
  */
 export type ReasoningPart = { type: "reasoning"; id?: string; text?: string };
 
-/** An uploaded file, referenced by the id `provider.upload()` returned. */
+/**
+ * An uploaded file: the provider's copy, gemi's copy, or both.
+ *
+ * At least one of `fileId` and `attachmentId` is present, and which ones are is
+ * the upload's destination — `provider` has only a `fileId`, `storage` only an
+ * `attachmentId`, `both` both. Not expressed as a union because every producer
+ * already holds the two as optionals (`attach()`, the upload answer) and the
+ * one shape with neither is refused at the door (`toClientTurn`) and again on
+ * the way out (`toResponsesInput`).
+ */
 export type FilePart = {
   type: "file";
   /**
@@ -97,21 +106,29 @@ export type FilePart = {
    * this field and a separate `attachmentId` for tools. They are two ids for two
    * systems. A gemi attachment id put here is caught by `toResponsesInput` with
    * a message saying so, rather than reaching the vendor as an unknown file.
+   *
+   * Absent for an upload routed to storage only: the provider never saw it, so
+   * the model is told the file exists (by `attachmentId`) and is not shown it.
    */
-  fileId: string;
+  fileId?: string;
   name?: string;
   mimeType?: string;
   /**
-   * gemi's attachment id. The run sets it on a file part it injected itself for
-   * `ctx.attachments.put(blob, { showModel: true })`, so a UI can link the
-   * picture back to the attachment a tool can still fetch. It is never sent to
-   * the provider.
+   * gemi's attachment id — the handle a tool resolves through
+   * `ctx.attachments`. A user's upload carries it when the upload was kept (see
+   * `ClientTurn.files`), and the run sets it on a file part it injected itself
+   * for `ctx.attachments.put(blob, { showModel: true })`.
    *
-   * It is NOT the marker for "a tool made this". A user's own upload can carry
-   * one too — `useChat` spreads a `turn.files` entry onto the user message, and
-   * `attach()` answers an `attachmentId` — so the run's context pruning keys on
-   * the injected message's id, which the tool call's `attachments` record names.
-   * See `historyForProvider` in `Agent.ts`.
+   * It IS sent to the provider, as a line of text beside the file, so the model
+   * has an id to put in a tool's arguments instead of inventing one. That line
+   * is rendered when the request is built (`toResponsesInput`), not stored here
+   * as a text part, so the transcript stays structured and the wording can
+   * change without rewriting anybody's history.
+   *
+   * It is NOT the marker for "a tool made this". A user's own upload carries one
+   * too, so the run's context pruning keys on the injected message's id, which
+   * the tool call's `attachments` record names. See `historyForProvider` in
+   * `Agent.ts`.
    */
   attachmentId?: string;
 };
@@ -353,7 +370,14 @@ export type ClientToolResult =
  */
 export type ClientTurn = {
   text?: string;
-  files?: { fileId: string; name?: string; mimeType?: string }[];
+  /**
+   * What `attach()` answered, passed on whole: `fileId` for the model to look
+   * at, `attachmentId` for a tool to be handed. Either may be absent (see
+   * `FilePart`), never both. The server checks the shape before anything runs,
+   * because an entry that is wrong here is stored in the thread and fails every
+   * later turn, not just this one.
+   */
+  files?: { fileId?: string; attachmentId?: string; name?: string; mimeType?: string }[];
   toolResults?: ClientToolResult[];
 };
 

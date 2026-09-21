@@ -5,6 +5,7 @@ import type { MiddlewareInput } from "../http/middlewareList";
 import type { AgentRun, AgentRunResult, AnyAgent, ToolShapesOf } from "./Agent";
 import {
   type Attachment,
+  ATTACHMENT_ID_PREFIX,
   type AttachmentDestination,
   attachmentObjectName,
   type AttachmentScope,
@@ -303,7 +304,11 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
     }
     const body = parsed.body;
     const threadId = typeof body.threadId === "string" ? body.threadId : undefined;
-    const turn = toClientTurn(body);
+    const parsedTurn = toClientTurn(body);
+    if (parsedTurn.error) {
+      return invalidRequest({ body: {}, error: parsedTurn.error });
+    }
+    const turn = parsedTurn.turn;
     const clientRunId = typeof body.clientRunId === "string" ? body.clientRunId : undefined;
 
     // From here until `register`, the only thing `/stop` can find this turn by.
@@ -1193,23 +1198,85 @@ function invalidRequest(parsed: ParsedBody): Response {
  * `{ text, files, toolResults }` — the second is what a hand-written `fetch`
  * writes, and refusing it buys nothing.
  *
- * Returns `undefined` for an empty turn, which is a real request: reattaching
- * to a conversation and letting the model continue is a turn with nothing in
- * it.
+ * `turn` is `undefined` for an empty turn, which is a real request:
+ * reattaching to a conversation and letting the model continue is a turn with
+ * nothing in it. `error` is a turn that is refused with a 400 before anything
+ * runs — see `toTurnFiles`.
  */
-function toClientTurn(body: Record<string, any>): ClientTurn | undefined {
+function toClientTurn(body: Record<string, any>): { turn?: ClientTurn; error?: string } {
   const source = body.turn && typeof body.turn === "object" ? body.turn : body;
   const turn: ClientTurn = {};
   if (typeof source.text === "string") {
     turn.text = source.text;
   }
   if (Array.isArray(source.files)) {
-    turn.files = source.files;
+    const files = toTurnFiles(source.files);
+    if (typeof files === "string") {
+      return { error: files };
+    }
+    turn.files = files;
   }
   if (Array.isArray(source.toolResults)) {
     turn.toolResults = source.toolResults;
   }
-  return Object.keys(turn).length > 0 ? turn : undefined;
+  return Object.keys(turn).length > 0 ? { turn } : {};
+}
+
+/**
+ * `turn.files`, checked field by field, or the sentence refusing it.
+ *
+ * REFUSED, NOT FILTERED. Every entry becomes a `FilePart` in a user message,
+ * and on a thread that message is stored before the provider sees it. An entry
+ * the request builder cannot send — no id at all, or a gemi id in `fileId` —
+ * then throws from `toResponsesInput` on this turn and on every turn after it,
+ * because every later turn re-sends the history: one bad upload bricks the
+ * thread. Dropping the entry instead is quieter and worse — the model answers
+ * about a file it was never given, with nothing saying so. A 400 here is the
+ * one place the client can still do something about it.
+ *
+ * Scoping is what makes a foreign `attachmentId` harmless (`ScopedAttachments`
+ * answers the same not-found for another tenant's id as for an invented one),
+ * so the id is not signed or looked up here. What this checks is the shape a
+ * crash would come from: strings where strings go, the prefix on
+ * `attachmentId`, at least one id. Unknown fields are dropped rather than
+ * refused, since `attach()` answers more than a `FilePart` holds (`downgraded`)
+ * and passing its answer on whole is the documented use. `null` reads as
+ * absent, which is what a serializer that writes `undefined` as `null` means.
+ */
+function toTurnFiles(raw: unknown[]): NonNullable<ClientTurn["files"]> | string {
+  const files: NonNullable<ClientTurn["files"]> = [];
+  for (const [index, entry] of raw.entries()) {
+    const where = `turn.files[${index}]`;
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return `${where} must be an object.`;
+    }
+    const fields: Record<string, string> = {};
+    for (const key of ["fileId", "attachmentId", "name", "mimeType"] as const) {
+      const value = (entry as Record<string, unknown>)[key];
+      if (value === undefined || value === null) continue;
+      if (typeof value !== "string") {
+        return `${where}.${key} must be a string.`;
+      }
+      fields[key] = value;
+    }
+    const { fileId, attachmentId, name, mimeType } = fields;
+    if (fileId?.startsWith(ATTACHMENT_ID_PREFIX)) {
+      return `${where}.fileId holds a gemi attachment id (${fileId}). \`fileId\` is the provider's id from the upload response; put this one in \`attachmentId\`.`;
+    }
+    if (attachmentId !== undefined && !attachmentId.startsWith(ATTACHMENT_ID_PREFIX)) {
+      return `${where}.attachmentId is not a gemi attachment id: it must start with "${ATTACHMENT_ID_PREFIX}".`;
+    }
+    if (!fileId && !attachmentId) {
+      return `${where} has neither a \`fileId\` nor an \`attachmentId\`. Send the ids the upload response answered.`;
+    }
+    files.push({
+      ...(fileId ? { fileId } : {}),
+      ...(attachmentId ? { attachmentId } : {}),
+      ...(name !== undefined ? { name } : {}),
+      ...(mimeType !== undefined ? { mimeType } : {}),
+    });
+  }
+  return files;
 }
 
 /**
