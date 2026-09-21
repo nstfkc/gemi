@@ -27,6 +27,7 @@ let support: AgentModel;
 let classifier: AgentModel;
 let odd: AgentModel;
 let e2e: AgentModel;
+let awkward: AgentModel;
 
 const read = (file: string, exportName: string, name?: string) =>
   extractAgent(ts, { file: `${FIXTURES}/${file}`, exportName }, { cwd: PACKAGE, name });
@@ -36,6 +37,7 @@ beforeAll(async () => {
   support = read("support.ts", "supportAgent");
   classifier = read("support.ts", "classifier");
   odd = read("unsupported.ts", "oddAgent");
+  awkward = read("awkward.ts", "awkwardAgent");
   // The agent behind the Swift client's end-to-end server, whose generated
   // file those tests decode real traffic through.
   e2e = extractAgent(
@@ -79,6 +81,8 @@ describe("the Kotlin the Kotlin tests compile", () => {
     ["SupportAgent.kt", () => support],
     ["Classifier.kt", () => classifier],
     ["E2eAgent.kt", () => e2e],
+    // Compiling at all is its test: every name in it is one a tool could hide.
+    ["AwkwardAgent.kt", () => awkward],
   ])("%s is what the generator writes today", (file, model) => {
     const target = path.join(KOTLIN_GENERATED, file);
     const rendered = renderKotlin(model(), KOTLIN_PACKAGE);
@@ -87,6 +91,43 @@ describe("the Kotlin the Kotlin tests compile", () => {
       rendered,
       `${file} is stale: rerun with GEMI_UPDATE_FIXTURES=1, then \`./gradlew :gemi-chat:test\``,
     ).toBe(readFileSync(target, "utf8"));
+  });
+});
+
+describe("Kotlin that means what it says", () => {
+  test("a `$` on the wire is not a string template", () => {
+    const kotlin = renderKotlin(awkward, KOTLIN_PACKAGE);
+    expect(kotlin).toContain('@SerialName("\\$ref") public val ref: String,');
+    expect(kotlin).toContain('@SerialName("\\$all") All,');
+    expect(kotlin).toContain('element.jsonObject["\\$type"]');
+    expect(kotlin).toContain('throw SerializationException("Unknown \\$type \\"$value\\"")');
+  });
+
+  test("a view spells in full the names a tool's class hides there, and only those", () => {
+    const kotlin = renderKotlin(awkward, KOTLIN_PACKAGE);
+    // `awkward_agent` hides the object, so its own types are package-qualified.
+    const owner = `${KOTLIN_PACKAGE}.AwkwardAgent`;
+    expect(kotlin).toContain(
+      "public data class List(val value: TypedToolResult<kotlin.collections.List<kotlin.String>>) : ToolResult",
+    );
+    expect(kotlin).toContain(
+      `public data class Lookup(val value: TypedToolCall<${owner}.LookupInput, LookupProgress>) : ${owner}.ToolCall`,
+    );
+    // Nothing to hide, nothing spelled out.
+    expect(renderKotlin(support, KOTLIN_PACKAGE)).toContain(
+      "public data class Grep(val value: TypedToolCall<GrepInput, Nothing>) : ToolCall",
+    );
+  });
+
+  test("a tool that always throws has a JSON result, in the view and in what builds it", () => {
+    expect(awkward.tools.find((tool) => tool.name === "fail")!.output).toEqual({ kind: "never" });
+    const kotlin = renderKotlin(awkward, KOTLIN_PACKAGE);
+    expect(kotlin).toContain(
+      "public data class Fail(val value: TypedToolResult<JsonElement>) : ToolResult",
+    );
+    expect(kotlin).toContain(
+      "TypedToolResult.of(part, serializer<JsonElement>())?.let(ToolResult::Fail)",
+    );
   });
 });
 
