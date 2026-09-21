@@ -31,6 +31,7 @@ import { app } from "../../foundation/app";
 import { kernelContext } from "../../kernel/context";
 import { ServerQueryStore, type StreamSummary } from "./ServerQueryStore";
 import { isPolicyDeniedError } from "../../orm/errors";
+import { QueryError } from "../../client/QueryError";
 import { policyDeniedResponse, policyDeniedView } from "./policyDenied";
 import { createServerQueryFetcher } from "./serverQueryFetcher";
 import { htmlSafeJson, injectQueryPayloads, isBotUserAgent } from "./streamQueryInjection";
@@ -1159,6 +1160,14 @@ export class ViewRouteDispatcher {
         // body on a `.json` navigation and a 403 page otherwise.
         if (isPolicyDeniedError(err)) {
           console.error(err);
+          return isViewDataRequest ? policyDeniedResponse() : viewBreakResponse(policyDeniedView());
+        }
+        // The same refusal one step removed: the loader's `Query.instant` hit
+        // an api route that answered 403, a policy denial there among them.
+        // The api side logged it and the query's rejection reported it, so
+        // the view only passes the refusal on instead of turning it into a
+        // 500.
+        if (err instanceof QueryError && err.status === 403) {
           return isViewDataRequest ? policyDeniedResponse() : viewBreakResponse(policyDeniedView());
         }
         throw err;

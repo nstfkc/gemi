@@ -1,10 +1,12 @@
-import { beforeEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { createElement } from "react";
 
 import { App } from "../../app/App";
 import { AuthManager } from "../../auth/AuthManager";
 import { UserProvider } from "../../auth/UserProvider";
 import type { FindSessionArgs, SessionWithUser } from "../../auth/types";
+import { QueryError } from "../../client/QueryError";
+import { Query } from "../../facades/Prefetch";
 import { ApiRouter } from "../../http/ApiRouter";
 import { AuthenticationMiddleware } from "../../http/AuthenticationMiddlware";
 import type { HttpRequest } from "../../http/HttpRequest";
@@ -21,6 +23,8 @@ import { ServiceProvider } from "../../support/ServiceProvider";
  * counterpart of the api side's "a policy denial" tests in
  * `ApiRouteDispatcher.dispatchAs.test.ts`.
  */
+
+process.env.SECRET ??= "view-policy-test-secret";
 
 const SESSIONS: Record<string, { id: number; name: string }> = {
   "tok-alice": { id: 1, name: "alice" },
@@ -63,6 +67,20 @@ class OrdersMiddleware extends Middleware {
 
 const failed: { path: string; error: unknown }[] = [];
 
+/** An api route whose policy refuses everybody, for a loader to query. */
+class RootApiRouter extends ApiRouter {
+  routes = {
+    "/archived-orders": this.get(() => {
+      applyPolicies(
+        [{ before: () => false }],
+        policyContext("Order", "findMany", currentUser(), isSystemScope()),
+        {},
+      );
+      return { orders: [] };
+    }),
+  };
+}
+
 class RootViewRouter extends ViewRouter {
   routes = {
     "/orders": this.view("Orders", () => ({ Orders: { orders: readOrders() } })).middleware([
@@ -71,6 +89,9 @@ class RootViewRouter extends ViewRouter {
     "/orders-by-middleware": this.view("OrdersByMiddleware", () => ({
       OrdersByMiddleware: { orders: [] },
     })).middleware(["auth", "orders"]),
+    "/orders-instant": this.view("OrdersInstant", async () => ({
+      OrdersInstant: await (Query as any).instant("/archived-orders"),
+    })).middleware(["auth"]),
     "/boom": this.view("Boom", () => {
       throw new Error("connection refused");
     }),
@@ -82,7 +103,7 @@ class AppKernel extends Kernel {
   config = {
     middleware: { aliases: { auth: AuthenticationMiddleware, orders: OrdersMiddleware } },
     route: {
-      api: { rootRouter: class extends ApiRouter {} },
+      api: { rootRouter: RootApiRouter },
       view: {
         root: () => createElement("div"),
         rootRouter: RootViewRouter,
@@ -113,6 +134,10 @@ async function request(path: string, headers: Record<string, string> = {}) {
 beforeEach(() => {
   failed.length = 0;
   vi.spyOn(console, "error").mockImplementation(() => {});
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 describe("a policy denial in a view loader", () => {
@@ -150,9 +175,34 @@ describe("a policy denial in a view loader", () => {
 
   test("leaves a user the policy allows alone", async () => {
     const res = await request("/orders.json", alice);
-
     expect(res.status).toBe(200);
+
+    // A page the loader allowed is the render function, not a Response.
+    const page: unknown = await app.fetch(
+      new Request("http://gemi.dev/orders", { headers: alice }),
+    );
+    expect(page).toBeTypeOf("function");
+
     expect(failed).toEqual([]);
+  });
+});
+
+describe("a policy denial behind a loader's Query.instant", () => {
+  test("answers 403 for a view-data request and a page request alike", async () => {
+    const data = await request("/orders-instant.json", alice);
+    expect(data.status).toBe(403);
+    expect(await data.json()).toEqual({ error: { message: "Forbidden" } });
+
+    const page = await request("/orders-instant", alice);
+    expect(page.status).toBe(403);
+    expect(await page.text()).toBe("Forbidden");
+
+    // The query's rejection is what the view reports, once per request.
+    expect(failed.map(({ path }) => path)).toEqual(["/orders-instant.json", "/orders-instant"]);
+    for (const { error } of failed) {
+      expect(error).toBeInstanceOf(QueryError);
+      expect(error).toMatchObject({ status: 403 });
+    }
   });
 });
 
