@@ -120,7 +120,10 @@ export const isOrgOwner = (orgId: string) => (user: any) =>
 
 `Auth.guard` takes `(user: User) => boolean | Promise<boolean>` and throws
 `InsufficientPermissionsError` (403) when the predicate returns falsy. An error the predicate
-throws — a failed query, say — propagates as itself rather than becoming a 403.
+throws — a failed query, say — propagates as itself rather than becoming a 403. That includes
+a `PolicyDeniedError` from a policied model the predicate reads: it is not a request-breaker
+error, so it reaches `onRequestFail` and answers `500`. If a denial there should refuse the
+request, catch it in the predicate and return `false`.
 
 ```typescript
 // in a controller
@@ -201,8 +204,8 @@ async function update() {
 }
 ```
 
-> **Note:** `InsufficientPermissionsError` answers `403`, the same status as an ORM policy
-> denial; `AuthenticationError` and `AuthorizationError` answer `401`. A client that treats a
+> **Note:** `InsufficientPermissionsError` answers `403`; `AuthenticationError` and
+> `AuthorizationError` answer `401`. A client that treats a
 > `401` as "session expired, sign in again" should see `403` for a signed-in user who lacks a
 > role, so throw `InsufficientPermissionsError` when the identity is known and the action is
 > refused, and `AuthenticationError` when identity is missing (and you want the view redirect).
