@@ -1,6 +1,15 @@
 export { Controller, ResourceController } from "./Controller";
 export { ApiRouter, type CreateRPC } from "./ApiRouter";
 export {
+  McpRouter,
+  McpRouteDeclaration,
+  type McpFileBinder,
+  type McpMethod,
+  type McpParamBinder,
+  type McpRouteMeta,
+  type McpRoutes,
+} from "./McpRouter";
+export {
   createFileResponse,
   ViewRouter,
   type CreateViewRPC,
