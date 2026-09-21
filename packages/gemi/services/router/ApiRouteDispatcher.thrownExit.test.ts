@@ -5,6 +5,7 @@ import { App } from "../../app/App";
 import { createRoot } from "../../client/createRoot";
 import { app as resolve } from "../../foundation/app";
 import { ApiRouter } from "../../http/ApiRouter";
+import { Log } from "../../facades/Log";
 import { HttpRequest } from "../../http/HttpRequest";
 import { Middleware } from "../../http/Middleware";
 import { RequestContext } from "../../http/requestContext";
@@ -215,9 +216,14 @@ describe("a request that fails with a thrown error", () => {
 
 describe("a request that ends without a throw", () => {
   test("whose onRequestEnd throws is not ended a second time", async () => {
+    const logged = vi.spyOn(Log, "error").mockImplementation(() => {});
     endThrows = true;
 
-    await expect(direct("/ok")).rejects.toThrow("log sink down");
+    // Logged rather than thrown, so the response it was told about still goes.
+    const res = await direct("/ok");
+
+    expect(res.status).toBe(200);
+    expect(logged).toHaveBeenCalledWith("log sink down", expect.anything());
 
     expect(log).toEqual(["start:/api/ok", "end:/api/ok", "destroy:/api/ok"]);
   });
