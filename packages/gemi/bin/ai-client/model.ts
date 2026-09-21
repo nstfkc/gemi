@@ -16,8 +16,9 @@ export type TypeRef =
   /** Anything the generator does not map: `unknown`, `any`, and the shapes it
    *  warns about. The client keeps it as a raw JSON value. */
   | { kind: "json" }
-  /** Only ever a tool's progress (a tool that cannot yield) or an agent's
-   *  output (an agent with no `output` schema). */
+  /** A tool's progress (a tool that cannot yield), an agent's output (an
+   *  agent with no `output` schema), or a tool's output (a tool that always
+   *  throws). */
   | { kind: "never" }
   | { kind: "array"; item: TypeRef }
   /** `Record<string, T>`. */
