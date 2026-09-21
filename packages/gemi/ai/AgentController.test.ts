@@ -1923,6 +1923,7 @@ describe("a user's upload, named to the model and handed to a tool", () => {
       ["a gemi id in fileId", [{ fileId: "gemi_att_1" }], /put this one in `attachmentId`/],
       ["neither id", [{ name: "a.png" }], /neither a `fileId` nor an `attachmentId`/],
       ["an empty fileId and nothing else", [{ fileId: "" }], /neither/],
+      ["two empty ids", [{ fileId: "", attachmentId: "" }], /neither/],
     ])("%s is a 400, and no run starts", async (_label, files, message) => {
       const { response, calls } = await send(files);
       expect(response.status).toBe(400);
@@ -1932,7 +1933,7 @@ describe("a user's upload, named to the model and handed to a tool", () => {
       expect(calls).toHaveLength(0);
     });
 
-    test("the known fields pass, unknown ones are dropped, and null reads as absent", async () => {
+    test('the known fields pass, unknown ones are dropped, and null or "" reads as absent', async () => {
       const { response, calls } = await send([
         {
           fileId: "file_1",
@@ -1942,11 +1943,16 @@ describe("a user's upload, named to the model and handed to a tool", () => {
           size: 3,
         },
         { fileId: null, attachmentId: "gemi_att_2", downgraded: "no_scope" },
+        // A blank attachmentId is no attachment id, not a malformed one.
+        { fileId: "file_3", attachmentId: "", name: "", mimeType: "" },
+        { fileId: "", attachmentId: "gemi_att_4" },
       ]);
       expect(response.status).toBe(200);
       expect(calls[0]!.turn!.files).toStrictEqual([
         { fileId: "file_1", attachmentId: "gemi_att_1", name: "a.png", mimeType: "image/png" },
         { attachmentId: "gemi_att_2" },
+        { fileId: "file_3" },
+        { attachmentId: "gemi_att_4" },
       ]);
     });
   });
