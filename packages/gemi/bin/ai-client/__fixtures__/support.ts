@@ -91,6 +91,16 @@ const refundOrder = AgentTool.create({
   execute: async () => ({ refundId: "rf_1", default: true }),
 });
 
+// Swift keywords everywhere a name can be one: the tool (`case \`default\``),
+// and the keys of a struct that needs its own `encode` because one of them is
+// a required nullable. And a union of number literals, which is a number.
+const keywords = AgentTool.create({
+  name: "default",
+  description: "Keywords",
+  inputSchema: s.object({ in: s.string().nullable(), for: s.string() }),
+  execute: async () => ({ level: 1 as 1 | 2 | 3 }),
+});
+
 const crm = ToolNamespace.create({
   name: "crm",
   description: "Customer records",
@@ -101,7 +111,7 @@ const crm = ToolNamespace.create({
 export const supportAgent = Agent.create({
   name: "support",
   provider: OpenAIProvider.model("gpt-5.4"),
-  tools: [grep, bash, charge, stats, ping, ask, crm],
+  tools: [grep, bash, charge, stats, ping, ask, keywords, crm],
 });
 
 // A structured final answer.

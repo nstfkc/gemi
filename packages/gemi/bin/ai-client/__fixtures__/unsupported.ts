@@ -4,6 +4,7 @@
 import { Agent, AgentTool, OpenAIProvider, s } from "../../../ai";
 
 type Tree = { label: string; children: Tree[] };
+type Node = { kind: "leaf"; value: string } | { kind: "branch"; children: Node[] };
 
 const odd = AgentTool.create({
   name: "odd",
@@ -18,6 +19,9 @@ const odd = AgentTool.create({
     either: "text" as string | number,
     // A recursive type.
     tree: { label: "root", children: [] } as Tree,
+    // A recursive tagged union: typed one level deep, then a variant that is
+    // raw JSON inside a union that is not.
+    node: { kind: "leaf", value: "a" } as Node,
     // Nothing wrong with this one, beside the others.
     fine: 1,
   }),

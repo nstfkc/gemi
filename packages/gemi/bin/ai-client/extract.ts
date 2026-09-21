@@ -271,6 +271,9 @@ class TypeMapper {
     if (members.every((member) => member.flags & ts.TypeFlags.StringLike)) {
       return wrap({ kind: "string" });
     }
+    if (members.every((member) => member.flags & ts.TypeFlags.NumberLike)) {
+      return wrap({ kind: "number" });
+    }
     const discriminant = this.discriminantOf(members);
     if (discriminant) {
       return wrap(
@@ -280,12 +283,8 @@ class TypeMapper {
           discriminant,
           variants: members.map((member) => {
             const value = this.literalAt(member, discriminant)!;
-            const variant = this.map(
-              member,
-              `${unique}${pascalCase(value)}`,
-              `${where} (${value})`,
-            );
-            return { value, type: variant.kind === "named" ? variant.name : value };
+            const type = this.map(member, `${unique}${pascalCase(value)}`, `${where} (${value})`);
+            return { value, type };
           }),
         })),
       );
