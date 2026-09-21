@@ -10,6 +10,7 @@ import { RequestContext } from "../../http/requestContext";
 import { Query } from "../../facades/Prefetch";
 import { QueryError } from "../../client/QueryError";
 import type { ServerQueryStore, StreamSummary } from "./ServerQueryStore";
+import { unhandledErrorResponse } from "../../server/unhandledError";
 
 /**
  * Container-level coverage for the stream lifecycle hooks (#293): full
@@ -278,5 +279,33 @@ describe("stream lifecycle hooks through app.fetch", () => {
     expect(summary.aborted).toBe(false);
     // The fallback error document carries the crash for the client runtime.
     expect(html).toContain("shell crashed");
+  });
+
+  test("in production a shell crash reaches the last-resort handler, not the page (#523)", async () => {
+    const previous = process.env.NODE_ENV;
+    process.env.NODE_ENV = "production";
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const result = await app.fetch(
+        new Request("http://gemi.dev/crash", {
+          headers: { "User-Agent": "Mozilla/5.0 (Macintosh) TestBrowser/1.0" },
+        }),
+      );
+      // What `httpProd`'s catch does with whatever the render fn throws.
+      const res = await (result as any)(renderParams).catch((err: unknown) =>
+        unhandledErrorResponse(err, "/crash"),
+      );
+      const html = await readAll(res.body!);
+
+      expect(res.status).toBe(500);
+      expect(html).not.toContain("shell crashed");
+      expect(html).not.toContain("stack_trace");
+      // No body closed on the failed render, so the span ended on the throw.
+      expect(streamCompletions).toHaveLength(1);
+      expect(streamCompletions[0].hasKernelScope).toBe(true);
+    } finally {
+      process.env.NODE_ENV = previous;
+      vi.restoreAllMocks();
+    }
   });
 });
