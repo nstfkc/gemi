@@ -61,46 +61,61 @@ export function renderKotlin(agent: AgentModel, packageName: string): string {
 
   const output = kotlinType(agent.output);
   // The supertype list is outside the object's scope, so a nested type is
-  // spelled with the object's name there and only there.
-  const qualified = kotlinType(agent.output, `${agent.name}.`);
+  // spelled with the object's name there.
+  const outside: Spell = (name, namespace) =>
+    namespace === undefined ? `${agent.name}.${name}` : name;
   emit(`public object ${agent.name} :`);
   emit(
-    `  AgentSchema<${agent.name}.ToolCall, ${agent.name}.ToolResult, ${agent.name}.Pending, ${qualified}> {`,
+    `  AgentSchema<${agent.name}.ToolCall, ${agent.name}.ToolResult, ${agent.name}.Pending, ${kotlinType(agent.output, outside)}> {`,
   );
+  // Inside a view each tool is a class, which hides whatever else has its
+  // name there: a `list` tool makes `List<String>` next to it mean the tool,
+  // and an `awkward_agent` tool hides the object itself. Those names, and only
+  // those, are spelled in full.
+  const hidden = new Set(classes);
+  const owner = hidden.has(agent.name) ? `${packageName}.${agent.name}` : agent.name;
+  const inside: Spell = (name, namespace = owner) =>
+    hidden.has(name) ? `${namespace}.${name}` : name;
+  const chat = (name: string) => inside(name, "dev.gemijs.chat");
   emit(
     `  override val outputSerializer: KSerializer<${output}>? = ${agent.output.kind === "never" ? "null" : `serializer<${output}>()`}`,
   );
 
   const serializer = (type: TypeRef) =>
     type.kind === "never" ? "null" : `serializer<${kotlinType(type)}>()`;
-  // A pending call must be answerable, and a tool whose output is `never` has
-  // no answer type; raw JSON is the honest one.
+  // A tool that always throws has the output `never`. Its result can still
+  // arrive, and a pending call must be answerable, so both read it as raw
+  // JSON — the same type in the view and in what builds it.
   const answer = (type: TypeRef): TypeRef => (type.kind === "never" ? { kind: "json" } : type);
 
   const views = [
     {
       name: "ToolCall",
       raw: "ContentPart.ToolCall",
+      rawInside: `${chat("ContentPart")}.ToolCall`,
       argument: "part",
       typed: (tool: (typeof tools)[number]) =>
-        `TypedToolCall<${kotlinType(tool.input)}, ${kotlinType(tool.progress)}>`,
+        `${chat("TypedToolCall")}<${kotlinType(tool.input, inside)}, ${kotlinType(tool.progress, inside)}>`,
       build: (tool: (typeof tools)[number]) =>
         `ToolCall.${tool.class}(TypedToolCall(part, ${serializer(tool.input)}, ${serializer(tool.progress)}))`,
     },
     {
       name: "ToolResult",
       raw: "ContentPart.ToolResult",
+      rawInside: `${chat("ContentPart")}.ToolResult`,
       argument: "part",
-      typed: (tool: (typeof tools)[number]) => `TypedToolResult<${kotlinType(tool.output)}>`,
+      typed: (tool: (typeof tools)[number]) =>
+        `${chat("TypedToolResult")}<${kotlinType(answer(tool.output), inside)}>`,
       build: (tool: (typeof tools)[number]) =>
         `TypedToolResult.of(part, ${serializer(answer(tool.output))})?.let(ToolResult::${tool.class}) ?: ToolResult.Unknown(part)`,
     },
     {
       name: "Pending",
       raw: "PendingToolCall",
+      rawInside: chat("PendingToolCall"),
       argument: "call",
       typed: (tool: (typeof tools)[number]) =>
-        `TypedPendingCall<${kotlinType(tool.input)}, ${kotlinType(answer(tool.output))}>`,
+        `${chat("TypedPendingCall")}<${kotlinType(tool.input, inside)}, ${kotlinType(answer(tool.output), inside)}>`,
       build: (tool: (typeof tools)[number]) =>
         `Pending.${tool.class}(TypedPendingCall(call, ${serializer(tool.input)}, ${serializer(answer(tool.output))}))`,
     },
@@ -110,12 +125,14 @@ export function renderKotlin(agent: AgentModel, packageName: string): string {
     emit();
     emit(`  public sealed interface ${view.name} {`);
     for (const tool of tools) {
-      emit(`    public data class ${tool.class}(val value: ${view.typed(tool)}) : ${view.name}`);
+      emit(
+        `    public data class ${tool.class}(val value: ${view.typed(tool)}) : ${inside(view.name)}`,
+      );
     }
     emit("");
     emit("    /** A tool this file does not know — added since it was generated, or a");
     emit("     *  skill — or a payload that no longer decodes. */");
-    emit(`    public data class Unknown(val value: ${view.raw}) : ${view.name}`);
+    emit(`    public data class Unknown(val value: ${view.rawInside}) : ${inside(view.name)}`);
     emit("  }");
   }
 
@@ -125,7 +142,7 @@ export function renderKotlin(agent: AgentModel, packageName: string): string {
     emit();
     emit(`  override fun ${method}(${view.argument}: ${view.raw}): ${view.name} =`);
     emit(`    when (${view.argument}.name) {`);
-    for (const tool of tools) emit(`      ${JSON.stringify(tool.name)} -> ${view.build(tool)}`);
+    for (const tool of tools) emit(`      ${kotlinString(tool.name)} -> ${view.build(tool)}`);
     emit(`      else -> ${view.name}.Unknown(${view.argument})`);
     emit("    }");
   }
@@ -140,27 +157,44 @@ export function renderKotlin(agent: AgentModel, packageName: string): string {
   return `${lines.join("\n")}\n`;
 }
 
-function kotlinType(type: TypeRef, scope = ""): string {
+/**
+ * How a name is written where it is used: `namespace` is the package of a
+ * standard or runtime type, and `undefined` for one of the agent's own.
+ */
+type Spell = (name: string, namespace?: string) => string;
+
+function kotlinType(type: TypeRef, spell: Spell = (name) => name): string {
   switch (type.kind) {
     case "string":
-      return "String";
+      return spell("String", "kotlin");
     case "number":
-      return "Double";
+      return spell("Double", "kotlin");
     case "boolean":
-      return "Boolean";
+      return spell("Boolean", "kotlin");
     case "json":
-      return "JsonElement";
+      return spell("JsonElement", "kotlinx.serialization.json");
     case "never":
-      return "Nothing";
+      return spell("Nothing", "kotlin");
     case "array":
-      return `List<${kotlinType(type.item, scope)}>`;
+      return `${spell("List", "kotlin.collections")}<${kotlinType(type.item, spell)}>`;
     case "map":
-      return `Map<String, ${kotlinType(type.value, scope)}>`;
+      return `${spell("Map", "kotlin.collections")}<${spell("String", "kotlin")}, ${kotlinType(type.value, spell)}>`;
     case "nullable":
-      return `${kotlinType(type.inner, scope)}?`;
+      return `${kotlinType(type.inner, spell)}?`;
     case "named":
-      return `${scope}${type.name}`;
+      return spell(type.name);
   }
+}
+
+/**
+ * A Kotlin string literal. `JSON.stringify` is nearly one, but a `$` in it
+ * would start a template — and `$ref`, `$type` are ordinary JSON keys — and
+ * Kotlin has no `\f`.
+ */
+function kotlinString(value: string): string {
+  return JSON.stringify(value).replace(/\\\\|\\f|\$/g, (match) =>
+    match === "$" ? "\\$" : match === "\\f" ? "\\u000C" : match,
+  );
 }
 
 function renderType(type: NamedType, parent: string | undefined): string[] {
@@ -187,7 +221,7 @@ function renderClass(name: string, properties: Property[], parent: string | unde
   const lines = ["@Serializable", `public data class ${name}(`];
   properties.forEach((property, index) => {
     const field = names[index]!;
-    const renamed = field === property.key ? "" : `@SerialName(${JSON.stringify(property.key)}) `;
+    const renamed = field === property.key ? "" : `@SerialName(${kotlinString(property.key)}) `;
     // Optional: absent unless set, so it defaults to `null` and `GemiJson`
     // leaves it out. Required but nullable: no default, so it is always
     // written — as `null` when it is — because the server needs the key.
@@ -204,7 +238,7 @@ function renderEnum(name: string, values: string[]): string[] {
   const names = uniqueNames(values.map(pascalCase));
   const lines = ["@Serializable", `public enum class ${name} {`];
   values.forEach((value, index) => {
-    lines.push(`  @SerialName(${JSON.stringify(value)}) ${names[index]},`);
+    lines.push(`  @SerialName(${kotlinString(value)}) ${names[index]},`);
   });
   lines.push("}");
   return lines;
@@ -220,13 +254,16 @@ function renderUnion(
     `public sealed interface ${name} {`,
     `  public object Serializer : JsonContentPolymorphicSerializer<${name}>(${name}::class) {`,
     `    override fun selectDeserializer(element: JsonElement): DeserializationStrategy<${name}> =`,
-    `      when (val value = element.jsonObject[${JSON.stringify(discriminant)}]?.jsonPrimitive?.contentOrNull) {`,
+    `      when (val value = element.jsonObject[${kotlinString(discriminant)}]?.jsonPrimitive?.contentOrNull) {`,
   ];
   for (const variant of variants) {
-    lines.push(`        ${JSON.stringify(variant.value)} -> ${variant.type}.serializer()`);
+    lines.push(`        ${kotlinString(variant.value)} -> ${variant.type}.serializer()`);
   }
+  // The discriminant is wire text inside the message; `$value` is the one
+  // template in it.
+  const unknown = kotlinString(`Unknown ${discriminant} "`).slice(0, -1);
   lines.push(
-    `        else -> throw SerializationException("Unknown ${discriminant} \\"$value\\"")`,
+    `        else -> throw SerializationException(${unknown}$value\\"")`,
     "      }",
     "  }",
     "}",
@@ -250,6 +287,17 @@ const KEYWORDS = new Set(
     "return super this throw true try typealias typeof val var when while"
   ).split(" "),
 );
+
+/** Why `name` cannot be a Kotlin package, or `undefined` when it can. */
+export function invalidPackage(name: string): string | undefined {
+  for (const segment of name.split(".")) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(segment)) {
+      return `"${segment}" is not an identifier`;
+    }
+    if (KEYWORDS.has(segment)) return `"${segment}" is a Kotlin keyword`;
+  }
+  return undefined;
+}
 
 function escape(identifier: string): string {
   return KEYWORDS.has(identifier) ? `\`${identifier}\`` : identifier;

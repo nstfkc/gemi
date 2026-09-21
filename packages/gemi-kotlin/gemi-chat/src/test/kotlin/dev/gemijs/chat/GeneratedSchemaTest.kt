@@ -1,5 +1,6 @@
 package dev.gemijs.chat
 
+import dev.gemijs.chat.generated.AwkwardAgent
 import dev.gemijs.chat.generated.Classifier
 import dev.gemijs.chat.generated.SupportAgent
 import kotlin.test.Test
@@ -138,5 +139,31 @@ class GeneratedSchemaTest {
       Classifier.StructuredOutput(sentiment = Classifier.StructuredOutputSentiment.Negative, topics = listOf("billing")),
       Classifier.output(whole),
     )
+  }
+
+  @Test
+  fun dollarKeysAreKeysNotTemplates() {
+    // `$` is a template in a raw string too; `${'$'}` is the character.
+    val d = '$'
+    val part =
+      ContentPart.ToolCall(
+        json(
+          """{"type":"tool-call","toolCallId":"tc_10","name":"lookup","input":{"${d}ref":"#/a","mode":"${d}all"},"progress":[{"${d}type":"hit","id":"a"},{"${d}type":"miss"}]}"""
+        )
+      )
+    val call = assertIs<AwkwardAgent.ToolCall.Lookup>(AwkwardAgent.toolCall(part)).value
+    assertEquals(AwkwardAgent.LookupInput(ref = "#/a", mode = AwkwardAgent.LookupInputMode.All), call.input)
+    assertEquals(
+      listOf(AwkwardAgent.LookupProgressHit(type = "hit", id = "a"), AwkwardAgent.LookupProgressMiss(type = "miss")),
+      call.progress,
+    )
+  }
+
+  @Test
+  fun aToolNamedAfterAStandardTypeIsStillThatTool() {
+    val part =
+      ContentPart.ToolResult(json("""{"type":"tool-result","toolCallId":"tc_11","name":"list","status":"ok","output":["a.ts"]}"""))
+    val result = assertIs<AwkwardAgent.ToolResult.List>(AwkwardAgent.toolResult(part)).value
+    assertEquals(TypedToolResult.Outcome.Ok(listOf("a.ts")), result.outcome)
   }
 }
