@@ -701,6 +701,17 @@ export class ViewRouteDispatcher {
         );
       } catch (err) {
         clearTimeout(deadlineTimer);
+        // The document below writes the message and stack into the page for
+        // the dev overlay. In production they would reach whoever loaded the
+        // page (#523), so the error goes on to the server's last-resort
+        // handler instead, which answers a generic 500 and reports it. No
+        // body will close to end the span, so it ends here.
+        if (process.env.NODE_ENV === "production") {
+          runInRequestScope(() =>
+            this.completeStream(req, serverQueries.summarize(deadline.signal.aborted)),
+          );
+          throw err;
+        }
         const stream = await renderToReadableStream(createElement("div"), {
           bootstrapScriptContent: bootstrapScriptContent(
             `window.error= ${htmlSafeJson(err.message)}; window.stack_trace=${htmlSafeJson(err.stack)};window.__GEMI_DATA__ = ${htmlSafeJson(result.data)}`,
