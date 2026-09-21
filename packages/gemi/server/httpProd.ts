@@ -9,6 +9,7 @@ import type { App } from "../app";
 import { Instrumentation } from "./types";
 import { printStartupBanner } from "./banner";
 import { RESERVED_ROUTE_PREFIX } from "../services/router/ViewRouteDispatcher";
+import { isApiPath } from "../services/router/apiPath";
 import { projectRoot } from "../support/discover";
 
 // The rule this file used to spell out itself. It moved to `projectRoot`
@@ -104,7 +105,7 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
     const isWellKnownFile = pathname.startsWith("/.well-known");
     const isFileRequest = staticFilePattern.test({ pathname }) || isWellKnownFile;
 
-    const isApi = pathname.startsWith("/api");
+    const isApi = isApiPath(pathname);
 
     if (isFileRequest && !isApi) {
       const url = new URL(req.url);
@@ -210,7 +211,7 @@ export async function httpProd(app: App, instrumentation: Instrumentation) {
       }
     } catch (err) {
       console.error(err);
-      if (pathname.startsWith("/api")) {
+      if (isApiPath(pathname)) {
         return new Response(JSON.stringify({ error: err.message }), {
           status: 500,
           headers: { "Content-Type": "application/json" },
