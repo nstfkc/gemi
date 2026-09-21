@@ -2,6 +2,7 @@ package dev.gemijs.chat.compose
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.remember
@@ -57,9 +58,12 @@ public fun rememberChat(
         transport = transport ?: OkHttpTransport(),
       )
     }
-  // The latest lambdas, so a token provider that closes over state is current.
-  session.headers = headers
-  session.body = body
+  // The latest lambdas, so a token provider that closes over state is current
+  // — handed over once the composition commits, not while it may be discarded.
+  SideEffect {
+    session.headers = headers
+    session.body = body
+  }
   DisposableEffect(session) { onDispose { session.close() } }
   return session
 }
