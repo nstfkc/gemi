@@ -52,16 +52,17 @@ export class RouteServiceProvider extends ServiceProvider {
   }
 
   /**
-   * The two dispatchers are the one pair of services that must not be built
-   * lazily: constructing them flattens the route tables and runs
-   * `assertNoReservedRoutePaths`, so a missing `route` config or a route under
-   * a reserved prefix has to fail the boot rather than the first request that
+   * The two dispatchers, and the MCP registry when an app declares one, must
+   * not be built lazily: constructing the dispatchers flattens the route
+   * tables and runs `assertNoReservedRoutePaths`, and constructing the registry
+   * resolves every tool against those tables. A missing `route` config, a
+   * route under a reserved prefix or a tool naming a route that is gone has to
+   * fail the boot rather than the first request, or the first tool call, that
    * happens to hit it.
    */
   boot() {
     this.app.make(ApiRouteDispatcher);
     this.app.make(ViewRouteDispatcher);
-    // Same reason: a tool naming a route that is gone fails the boot.
     if (this.app.config.get("route.mcp")) {
       this.app.make(McpRegistry);
     }
