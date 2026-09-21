@@ -365,7 +365,10 @@ export class McpRegistry {
           );
       }
     }
-    for (const key of Object.keys(extras)) {
+    // A bound file is not the model's, but it shares the form with the input,
+    // so it collides all the same.
+    const bodyKeys = [...Object.keys(extras), ...fileFields.map((file) => file.name)];
+    for (const key of new Set(bodyKeys)) {
       if (jsonKeys.includes(key)) {
         throw new Error(
           `${where}: "${key}" is both an input field and a param or file, and the model can only send one.`,
