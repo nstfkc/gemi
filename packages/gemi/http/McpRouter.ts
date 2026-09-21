@@ -64,8 +64,20 @@ type BodyOf<H> = H extends ApiRouterHandler<infer T, any, any> ? T : never;
  * is left unchecked for those rather than refused, because refusing would make
  * every untyped route unexposable for a reason that has nothing to do with the
  * tool.
+ *
+ * `unknown extends B` alone is not the test: a conditional type counts
+ * `unknown` as assignable to a body whose fields are all optional, so
+ * `{ note?: string }` passed as loose and its `input` went unchecked. A body
+ * with keys is never loose.
  */
-type IsLoose<B> = IsAny<B> extends true ? true : unknown extends B ? true : false;
+type IsLoose<B> =
+  IsAny<B> extends true
+    ? true
+    : unknown extends B
+      ? [keyof B] extends [never]
+        ? true
+        : false
+      : false;
 
 /**
  * The body fields that carry bytes: a `Blob`/`File`, alone, in a union or in an
@@ -102,21 +114,26 @@ type JsonBody<B> = Omit<B, BinaryKeys<B>>;
  * Schema<…>` — and it must not have keys the body does not: a field renamed in
  * the handler would otherwise leave the schema asking the model for the old
  * name, and the route would quietly never receive it.
+ *
+ * The extra keys are checked first. Against a body whose fields are all
+ * optional, `{ title }` fails `extends` only as a weak-type mismatch, and the
+ * `Schema<…>` fallback then let the builder through, so the rename went
+ * unreported.
  */
 type InputCheck<I, B> =
   IsLoose<B> extends true
     ? unknown
     : I extends AnySchema
-      ? Infer<I> extends JsonBody<B>
-        ? [Exclude<keyof Infer<I>, keyof JsonBody<B>>] extends [never]
+      ? [Exclude<keyof Infer<I>, keyof JsonBody<B>>] extends [never]
+        ? Infer<I> extends JsonBody<B>
           ? unknown
-          : {
-              "input has fields the route's body does not": Exclude<
-                keyof Infer<I>,
-                keyof JsonBody<B>
-              >;
-            }
-        : Schema<JsonBody<B>>
+          : Schema<JsonBody<B>>
+        : {
+            "input has fields the route's body does not": Exclude<
+              keyof Infer<I>,
+              keyof JsonBody<B>
+            >;
+          }
       : unknown;
 
 type ParamsOf<K> = UrlParser<`${K & string}`>;
@@ -157,13 +174,33 @@ type MetaBase = {
   requiresApproval?: boolean;
 };
 
-export type McpRouteMeta<H, K, I> = MetaBase & {
+/**
+ * `input` is required as soon as the JSON part of the body has a required
+ * field. Leaving it optional there would let `I` default to `undefined`, which
+ * `InputCheck` has nothing to compare, so a route exposed without a schema
+ * would compile, offer the model `{}`, and answer every call with a 400 — and
+ * a body-less route that later gains a required field would keep a green
+ * build. A body whose fields are all optional, or that has none, may leave it
+ * out; so may a loose body, which states no fields to require.
+ */
+type InputMeta<B, I> =
+  IsLoose<B> extends true
+    ? Partial<InputProp<B, I>>
+    : {} extends JsonBody<B>
+      ? Partial<InputProp<B, I>>
+      : InputProp<B, I>;
+
+type InputProp<B, I> = {
   /**
    * The JSON fields the model fills in. Checked against the route's body
    * minus its binary fields. Must be an `s.object(...)`.
    */
-  input?: I & NoInfer<InputCheck<I, BodyOf<H>>>;
-} & ParamsMeta<K> &
+  input: I & NoInfer<InputCheck<I, B>>;
+};
+
+export type McpRouteMeta<H, K, I> = MetaBase &
+  InputMeta<BodyOf<H>, I> &
+  ParamsMeta<K> &
   FilesMeta<BodyOf<H>>;
 
 /** The runtime shape of a meta, generics erased. */
