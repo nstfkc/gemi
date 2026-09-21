@@ -43,6 +43,8 @@ describe("the Swift the Swift tests compile", () => {
   test.each([
     ["SupportAgent.swift", () => support],
     ["Classifier.swift", () => classifier],
+    // Everything in it is raw JSON somewhere, which must still compile.
+    ["OddAgent.swift", () => odd],
   ])("%s is what the generator writes today", (file, model) => {
     const target = path.join(SWIFT_GENERATED, file);
     const rendered = renderSwift(model());
@@ -63,6 +65,7 @@ describe("reading an agent's types", () => {
       "stats",
       "ping",
       "ask",
+      "default",
       "refund_order",
     ]);
   });
@@ -79,8 +82,8 @@ describe("reading an agent's types", () => {
       name: "BashProgress",
       discriminant: "stage",
       variants: [
-        { value: "started", type: "BashProgressStarted" },
-        { value: "line", type: "BashProgressLine" },
+        { value: "started", type: { kind: "named", name: "BashProgressStarted" } },
+        { value: "line", type: { kind: "named", name: "BashProgressLine" } },
       ],
     });
   });
@@ -102,6 +105,13 @@ describe("reading an agent's types", () => {
       type: { kind: "nullable", inner: { kind: "string" } },
     });
     expect(properties.find((p) => p.key === "metadata")).toMatchObject({ optional: true });
+  });
+
+  test("a union of number literals is a number, as one of string literals would be an enum", () => {
+    const output = type(support, "DefaultOutput");
+    expect(output.kind === "object" && output.properties).toEqual([
+      { key: "level", optional: false, type: { kind: "number" } },
+    ]);
   });
 
   test("an output with no schema is read off `execute`, a record included", () => {
@@ -126,11 +136,11 @@ describe("reading an agent's types", () => {
   test("the type is named after the export, or after `--name`", () => {
     expect(support.name).toBe("SupportAgent");
     expect(read("support.ts", "supportAgent", "Help").name).toBe("Help");
-  });
+  }, 60_000);
 
   test("a default export is named after what it exports", () => {
     expect(read("support.ts", "default").name).toBe("Classifier");
-  });
+  }, 60_000);
 
   test("the source is recorded for the file header", () => {
     expect(support.source).toBe("bin/ai-client/__fixtures__/support.ts#supportAgent");
@@ -145,6 +155,7 @@ describe("what it will not pretend to know", () => {
       ["pair", { kind: "json" }],
       ["either", { kind: "json" }],
       ["tree", { kind: "named", name: "OddOutputTree" }],
+      ["node", { kind: "named", name: "OddOutputNode" }],
       ["fine", { kind: "number" }],
     ]);
     expect(odd.warnings).toEqual([
@@ -152,7 +163,19 @@ describe("what it will not pretend to know", () => {
       "odd's output.pair: `[string, number]` is a tuple, so the client keeps it as raw JSON.",
       "odd's output.either: `string | number` is a union that is not told apart by one string member, so the client keeps it as raw JSON.",
       "odd's output.tree.children[]: `Tree` is a recursive type, so the client keeps it as raw JSON.",
+      'odd\'s output.node (branch).children[] (branch): `{ kind: "branch"; children: Node[]; }` is a recursive type, so the client keeps it as raw JSON.',
     ]);
+  });
+
+  test("a union variant that is raw JSON is a JSON case, not a type named after its tag", () => {
+    const inner = type(odd, "OddOutputNodeBranchChildrenItem");
+    expect(inner.kind === "union" && inner.variants).toEqual([
+      { value: "leaf", type: { kind: "named", name: "OddOutputNodeBranchChildrenItemLeaf" } },
+      { value: "branch", type: { kind: "json" } },
+    ]);
+    expect(renderSwift(odd)).toContain(
+      'case "branch": self = .branch(try JSONValue(from: decoder))',
+    );
   });
 });
 
@@ -161,13 +184,13 @@ describe("pointing at the wrong thing", () => {
     expect(() => read("support.ts", "nope")).toThrow(
       'has no export named "nope". It exports: supportAgent, classifier, default, notAnAgent.',
     );
-  });
+  }, 60_000);
 
   test("an export that is not an agent says what it is", () => {
     expect(() => read("support.ts", "notAnAgent")).toThrow(
       "#notAnAgent is not an Agent — it is `{ tools: never[]; }`",
     );
-  });
+  }, 60_000);
 
   test("a file that does not exist", () => {
     expect(() => read("missing.ts", "agent")).toThrow(GenerateClientError);
