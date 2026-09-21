@@ -93,6 +93,8 @@ describe("App.fetch routes by the /api segment", () => {
     expect(await res.json()).toEqual({ route: "/users/:id", id: "1" });
   });
 
+  // A regression guard: the old `replace("/api", "")` cut only the first
+  // `/api` too, so this passed before the fix as well.
   test("an api route whose own path contains /api still matches", async () => {
     const res = await app.fetch(new Request("http://gemi.dev/api/files/api"));
 
@@ -110,6 +112,7 @@ describe("ApiRouteDispatcher.getRouteHandlerAndParams", () => {
     expect(match("/api").path).toBeUndefined();
     expect(match("/api/").path).toBe("/");
     expect(match("/api/users/1")).toEqual({ path: "/users/:id", params: { id: "1" } });
+    // Passes with or without the fix; kept as a guard.
     expect(match("/api/files/api").path).toBe("/files/api");
     // A route path handed to the dispatcher directly is matched as it is,
     // not with an `/api` cut out of its middle.
