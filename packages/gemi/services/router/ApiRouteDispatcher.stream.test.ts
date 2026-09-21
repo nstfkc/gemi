@@ -8,6 +8,7 @@ import type { FindSessionArgs, SessionWithUser } from "../../auth/types";
 import { createRoot } from "../../client/createRoot";
 import { ApiRouter } from "../../http/ApiRouter";
 import { AuthenticationMiddleware } from "../../http/AuthenticationMiddlware";
+import { Log } from "../../facades/Log";
 import type { HttpRequest } from "../../http/HttpRequest";
 import { RequestContext } from "../../http/requestContext";
 import { ViewRouter } from "../../http/ViewRouter";
@@ -259,16 +260,16 @@ describe("a streaming response", () => {
   });
 
   test("an onRequestEnd that throws does not break a body already read, and the store is still released", async () => {
+    const logged = vi.spyOn(Log, "error").mockImplementation(() => {});
     endThrows = true;
     const res = await app.fetch(new Request("http://gemi.dev/api/stream", { headers: alice }));
 
     expect(await res.text()).toBe("chunk 0\nchunk 1\n");
+    await tick();
     expect(ended).toEqual(["/api/stream"]);
     expect(destroyed).toBe(1);
     expect(store!.user).toBeUndefined();
-    expect(console.error).toHaveBeenCalledWith(
-      expect.objectContaining({ message: "log sink is down" }),
-    );
+    expect(logged).toHaveBeenCalledWith("log sink is down", expect.anything());
   });
 
   test("a client that cancels ends the request once, and the handler's stream is cancelled", async () => {
