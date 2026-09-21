@@ -640,7 +640,8 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
    *   route behind `middlewares = ["auth"]` — which `ApiRouter.agent()` makes
    *   the default posture — has a subject without the app writing anything.
    * - `thread:<id>` for an unauthenticated chat that has a thread. A `threadId`
-   *   is minted by `createThread` as a uuid and is documented as a capability;
+   *   is minted by `createThread` as a uuid and is documented as a capability,
+   *   and `upload` only passes one here that `store.loadThread` finds;
    *   an anonymous support widget has nothing better, and scoping to the
    *   conversation is strictly narrower than scoping to nothing.
    * - `null` otherwise, which means no attachment id is minted at all. There is
@@ -800,9 +801,18 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
     // takes it on trust for the whole conversation — and it is not the model's:
     // this is a form field on an HTTP request the user's browser made, not a
     // tool argument.
+    //
+    // It is only passed on if the store knows it. `stream` answers
+    // `thread_not_found` for an id it has never seen, and this route must not
+    // be looser: an invented id would otherwise be a scope, and an anonymous
+    // caller could keep writing to storage by sending a fresh one each time.
     const threadField = form.get("threadId");
     const threadId =
-      typeof threadField === "string" && threadField.length > 0 ? threadField : undefined;
+      typeof threadField === "string" &&
+      threadField.length > 0 &&
+      (await this.store.loadThread(threadField)) !== null
+        ? threadField
+        : undefined;
 
     const policy = await this.attachmentDestination(file as File, req);
     const destination = narrowDestination(policy, form.get("destination"));

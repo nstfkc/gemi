@@ -1175,17 +1175,44 @@ describe("AgentController.upload", () => {
       attachmentStorage = new FakeStorage();
     }
     const controller = new Chat();
+    controller.store = new MemoryAgentStore();
+    const { threadId } = await controller.store.createThread({});
     const form = new FormData();
     form.set("file", file("note.txt", "text/plain", "hi"));
-    form.set("threadId", "thr_1");
+    form.set("threadId", threadId);
 
     const result = await controller.upload(uploadRequest(undefined, form));
 
     expect(result.attachmentId).toBeTruthy();
     const onThread = new ScopedAttachments(controller.attachments, controller.attachmentStorage, {
-      key: "thread:thr_1",
+      key: `thread:${threadId}`,
     });
     expect((await onThread.get(result.attachmentId!)).name).toBe("note.txt");
+  });
+
+  // Without the check, any string is a scope: an anonymous caller keeps
+  // writing to storage by sending a fresh id each time, and nothing sweeps it.
+  test("a thread the store has never seen is not a scope", async () => {
+    const run = new StubAgentRun("run_v4b");
+    const { agent } = stubAgent(run);
+    class Chat extends AgentController {
+      agent = agent;
+      store = new MemoryAgentStore();
+      liveRuns = new MemoryLiveRuns();
+      attachments = new MemoryAttachmentStore();
+      attachmentStorage = new FakeStorage();
+    }
+    const controller = new Chat();
+    const form = new FormData();
+    form.set("file", file("note.txt", "text/plain", "hi"));
+    form.set("threadId", "thr_invented");
+
+    const result = await controller.upload(uploadRequest(undefined, form));
+
+    expect(result.attachmentId).toBeUndefined();
+    expect(result.downgraded).toBe("no_scope");
+    expect(result.destination).toBe("provider");
+    expect((controller.attachmentStorage as FakeStorage).objects.size).toBe(0);
   });
 
   /**
