@@ -3958,6 +3958,8 @@ fun SupportScreen(model: SupportViewModel = viewModel()) {
 
 `state` is a `StateFlow<ChatUiState>` holding everything a chat screen renders. The typed views are functions of the generated object: `SupportAgent.toolCall(part)`, `SupportAgent.pending(call)`, `SupportAgent.output(part)`. `ChatSession` itself isn't generic.
 
+The Kotlin twin of the Swift example, with the same screen in Compose and a `ViewModel`, is [`packages/gemi-kotlin/examples/SupportChatExample.kt`](https://github.com/nstfkc/gemi/blob/main/packages/gemi-kotlin/examples/SupportChatExample.kt).
+
 The session is confined to the thread `scope` dispatches to, as a UI is; `viewModelScope` is the main thread. A `ViewModel` keeps the conversation through a configuration change. For a screen that doesn't need that, `rememberChat` from `gemi-chat-compose` ties a session to the composable instead:
 
 ```kotlin
