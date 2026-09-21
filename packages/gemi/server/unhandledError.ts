@@ -31,16 +31,27 @@ export function unhandledErrorResponse(
   pathname: string,
   onException?: (error: Error) => void,
 ): Response {
-  console.error(err);
+  // `onException` is the report, and the default one `App` installs is a
+  // `console.error`, so logging here as well printed every failure twice
+  // (three times for `/api`, whose dispatcher logs before rethrowing). Only
+  // without a reporter does this log itself.
+  //
   // Reported for `/api` too: an app's error tracking should see an API failure
   // that got this far, not only a page one. `onRequestFail` is a different
   // hook (route config, called by the dispatchers), so this is not a second
   // report through the same channel.
-  try {
-    onException?.(err as Error);
-  } catch (reportError) {
-    // A broken reporter must not turn a 500 into a leaked stack either.
-    console.error(reportError);
+  if (!onException) {
+    console.error(err);
+  } else {
+    try {
+      // The hook is typed to receive an `Error`; a thrown string or object is
+      // wrapped so a reporter reading `.stack` or `.name` gets one.
+      onException(err instanceof Error ? err : new Error(String(err), { cause: err }));
+    } catch (reportError) {
+      // A broken reporter must not turn a 500 into a leaked stack either.
+      console.error(err);
+      console.error(reportError);
+    }
   }
 
   if (pathname.startsWith("/api")) {
