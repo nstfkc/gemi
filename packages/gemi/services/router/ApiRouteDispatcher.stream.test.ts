@@ -130,6 +130,16 @@ class RootApiRouter extends ApiRouter {
       const blob = new Blob(["0123456789"]);
       return new Response(blob, { headers: { "Content-Length": String(blob.size) } });
     }),
+    // A stream route answers HEAD too, and a missing file is an unsized 404.
+    "/missing": this.stream(async () => {
+      capture();
+      return null;
+    }),
+    // A handler's own Response, unsized, on a route that also answers HEAD.
+    "/own": this.stream(async () => {
+      capture();
+      return new Response("its own body");
+    }),
     // Work that outlives the body, as a run does once its client has left.
     "/outlives": this.get(() => {
       const ctx = capture();
@@ -308,3 +318,38 @@ describe("a streaming response", () => {
     expect(destroyed).toBe(1);
   });
 });
+
+describe("a HEAD request through a real server", () => {
+  let server: ReturnType<typeof Bun.serve>;
+
+  beforeEach(() => {
+    server = Bun.serve({ port: 0, fetch: (req) => app.fetch(req) });
+  });
+
+  afterEach(() => {
+    server.stop(true);
+  });
+
+  // Bun.serve drops a HEAD response's body without reading or cancelling it,
+  // so a body the request waited on would never end it. `app.fetch` alone
+  // cannot show this: it hands the body to the test, which reads it.
+  test.each(["/api/missing", "/api/own"])("to %s ends the request", async (path) => {
+    const res = await fetch(new URL(path, server.url), { method: "HEAD" });
+    await res.arrayBuffer();
+    await tick();
+
+    expect(ended).toEqual([path]);
+    expect(destroyed).toBe(1);
+  });
+
+  test("a GET to the same route still ends when its body does", async () => {
+    const res = await fetch(new URL("/api/missing", server.url));
+
+    expect(res.status).toBe(404);
+    expect(await res.text()).toBe("Not found");
+    await tick();
+    expect(ended).toEqual(["/api/missing"]);
+    expect(destroyed).toBe(1);
+  });
+});
+
