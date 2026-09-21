@@ -65,7 +65,13 @@ function endWhenBodyEnds(response: Response, end: () => void): Response {
       return;
     }
     ended = true;
-    end();
+    try {
+      end();
+    } catch (err) {
+      // An `onRequestEnd` that throws here would error a body the client has
+      // already read in full. Nobody is left to answer a 500 to.
+      console.error(err);
+    }
   };
 
   const body = new ReadableStream<Uint8Array>(
@@ -80,8 +86,10 @@ function endWhenBodyEnds(response: Response, end: () => void): Response {
           return;
         }
         if (chunk.done) {
-          // Before close(), so whoever reads to the end finds the request
-          // over — `onRequestEnd` has run by the time they see `done`.
+          // Synchronous when nothing is pending, so whoever reads to the end
+          // finds `onRequestEnd` already run when they see `done`. The order
+          // against close() does not decide that — the reader resumes in a
+          // later microtask either way — the synchronous end does.
           endOnce();
           try {
             controller.close();
@@ -293,6 +301,10 @@ export class ApiRouteDispatcher {
    * Work handed to `ctx.waitUntil` — an agent run the client may have left —
    * holds both back until it settles. With none, the end is not deferred, as
    * it always was, so a plain JSON response has ended before it is returned.
+   * The hold applies on every path, JSON included: a route that starts a run
+   * and answers without waiting for it ends when the run does, so a duration
+   * logged in `onRequestEnd` spans the run, not the response. That is the
+   * point — the run's tools need the user — but it is not "response sent".
    *
    * The hook is awaited, since destroy() empties the store it reads from, and
    * a hook that fails is logged rather than thrown: it must not turn the
@@ -313,6 +325,7 @@ export class ApiRouteDispatcher {
           err: JSON.stringify(err),
         });
       } finally {
+        // A hook that throws still releases the user, cookies and headers.
         ctx.destroy();
       }
     };
