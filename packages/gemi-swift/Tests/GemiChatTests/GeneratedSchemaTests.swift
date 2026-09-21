@@ -137,7 +137,8 @@ private func json(_ text: String) -> JSONObject {
 }
 
 @Test func aStructuredOutputDecodesOnceItIsWhole() throws {
-  let partial = OutputPart(json: json(#"{"type":"output","value":{"sentiment":"positive"},"partial":true}"#))
+  let partial = OutputPart(
+    json: json(#"{"type":"output","value":{"sentiment":"positive"},"partial":true}"#))
   #expect(Classifier.output(partial) == nil)
 
   let whole = OutputPart(
