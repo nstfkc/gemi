@@ -436,64 +436,91 @@ export class ApiRouteDispatcher {
     }
     return await RequestContext.run(httpRequest, async () => {
       const ctx = RequestContext.getStore();
-
-      const translator = app(Translator);
-      if (translator.isEnabled) {
-        const locale = translator.detectLocale(httpRequest);
-        ctx.setLocale(locale);
-      }
-
-      ctx.setRequest(httpRequest);
-      const middlewareResponse = await this.runRouteMiddleware(path, httpRequest);
-
-      if (middlewareResponse instanceof Response) {
-        // A breaker's or a policy denial's Response carries what the earlier
-        // middleware put on the context, as a handler's does. Returned as is,
-        // a 401 or 429 after `cors` had no CORS headers, so the browser
-        // reported an opaque CORS failure instead of the status, and a
-        // Set-Cookie set before the break was lost. Merged before the end,
-        // which destroys the context's headers and cookies.
-        const response = this.mergeContextIntoResponse(
-          middlewareResponse,
-          ctx.headers,
-          ctx.cookies,
-        );
+      // Set once this request's end has run, been scheduled, or been handed to
+      // a streaming body, so the throw path below never ends it twice.
+      let endDecided = false;
+      const end = async () => {
+        endDecided = true;
         await this.endRequest(ctx, httpRequest, path);
-        return response;
-      }
-      const data = await this.getRouteData(path);
+      };
 
-      const headers = ctx.headers;
-      const cookies = ctx.cookies;
-
-      if (data instanceof Response) {
-        // A handler owning its own Response — stream, file and proxy routes,
-        // and the RequestBreakerError path in getRouteData — still has to carry
-        // what the request context accumulated: headers set by middleware via
-        // ctx.setHeaders (CORS, Cache-Control) and any Set-Cookie. The
-        // response's own headers win; the context only fills gaps.
-        const response = this.mergeContextIntoResponse(data, headers, cookies);
-        if (this.isOpenEndedBody(req, response)) {
-          // Ended by its body rather than here: a streaming agent route
-          // returns before any of its tools run, and ending now would destroy
-          // the `user` every one of them reads.
-          return endWhenBodyEnds(response, () =>
-            this.endRequest(ctx, httpRequest, path),
-          );
+      try {
+        const translator = app(Translator);
+        if (translator.isEnabled) {
+          const locale = translator.detectLocale(httpRequest);
+          ctx.setLocale(locale);
         }
-        await this.endRequest(ctx, httpRequest, path);
-        return response;
+
+        ctx.setRequest(httpRequest);
+        const middlewareResponse = await this.runRouteMiddleware(path, httpRequest);
+
+        if (middlewareResponse instanceof Response) {
+          // A breaker's or a policy denial's Response carries what the earlier
+          // middleware put on the context, as a handler's does. Returned as is,
+          // a 401 or 429 after `cors` had no CORS headers, so the browser
+          // reported an opaque CORS failure instead of the status, and a
+          // Set-Cookie set before the break was lost. Merged before the end,
+          // which destroys the context's headers and cookies.
+          const response = this.mergeContextIntoResponse(
+            middlewareResponse,
+            ctx.headers,
+            ctx.cookies,
+          );
+          await end();
+          return response;
+        }
+        const data = await this.getRouteData(path);
+
+        const headers = ctx.headers;
+        const cookies = ctx.cookies;
+
+        if (data instanceof Response) {
+          // A handler owning its own Response — stream, file and proxy routes,
+          // and the RequestBreakerError path in getRouteData — still has to carry
+          // what the request context accumulated: headers set by middleware via
+          // ctx.setHeaders (CORS, Cache-Control) and any Set-Cookie. The
+          // response's own headers win; the context only fills gaps.
+          const response = this.mergeContextIntoResponse(data, headers, cookies);
+          if (this.isOpenEndedBody(req, response)) {
+            // Ended by its body rather than here: a streaming agent route
+            // returns before any of its tools run, and ending now would destroy
+            // the `user` every one of them reads.
+            const streamed = endWhenBodyEnds(response, () =>
+              this.endRequest(ctx, httpRequest, path),
+            );
+            endDecided = true;
+            return streamed;
+          }
+          await end();
+          return response;
+        }
+
+        headers.set("Content-Type", "application/json");
+
+        cookies.forEach((cookie) => headers.append("Set-Cookie", cookie.toString()));
+
+        await end();
+
+        return new Response(JSON.stringify(data), {
+          headers,
+        });
+      } catch (err) {
+        // A middleware or handler that throws something other than a break or
+        // a policy denial leaves as the server's 500, after onRequestFail. It
+        // still ends: without this, an app pairing onRequestStart with
+        // onRequestEnd saw a start and no end for exactly the requests that
+        // crashed, and the store kept its user and cookies until collected.
+        if (!endDecided) {
+          try {
+            await end();
+          } catch (endErr) {
+            // A throwing onRequestEnd must not replace the error the server
+            // renders; destroy() has run regardless.
+            console.error(endErr);
+          }
+        }
+        throw err;
       }
-
-      headers.set("Content-Type", "application/json");
-
-      cookies.forEach((cookie) => headers.append("Set-Cookie", cookie.toString()));
-
-      await this.endRequest(ctx, httpRequest, path);
-
-      return new Response(JSON.stringify(data), {
-        headers,
-      });
     });
   }
 
