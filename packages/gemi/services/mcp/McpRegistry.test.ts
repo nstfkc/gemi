@@ -570,6 +570,65 @@ describe("McpRegistry", () => {
     ]);
   });
 
+  describe("reading what the route answered", () => {
+    /** `whoami`, with the dispatcher answering `response` or throwing `error`. */
+    const call = (answer: () => Promise<Response>) => {
+      const isolated = new McpRegistry(new Mcp(), {
+        flatRoutes: createFlatApiRoutes({ "/": Api }),
+        dispatchAs: answer,
+        getRouteHandlerAndParams: ApiRouteDispatcher.prototype.getRouteHandlerAndParams,
+      } as any);
+      const req = new HttpRequest(new Request("http://gemi.dev/api/agent", { headers: alice }));
+      return isolated.execute({ kind: "local", req }, "whoami", {}).then(
+        (value) => ({ value }),
+        (error: Error) => ({ error }),
+      );
+    };
+
+    test("a success too large for the context window is cut, and says so", async () => {
+      const rows = Array.from({ length: 20_000 }, (_, i) => ({ id: i, name: `row ${i}` }));
+      const { value } = (await call(async () => Response.json(rows))) as { value: string };
+
+      expect(typeof value).toBe("string");
+      expect(value.length).toBeLessThan(100_100);
+      expect(value).toMatch(/… \[cut at 100000 of \d+ characters\]$/);
+    });
+
+    test("a file the route serves is described, not shown", async () => {
+      const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0, 0, 0, 0]);
+      const { value } = await call(
+        async () => new Response(png, { headers: { "Content-Type": "image/png" } }),
+      );
+
+      expect(value).toBe('"whoami" answered with 8 bytes of image/png, which is not shown.');
+    });
+
+    test("a redirect is a server failure, logged for the app", async () => {
+      const { error } = (await call(
+        async () => new Response(null, { status: 302, headers: { Location: "/login" } }),
+      )) as { error: Error };
+
+      expect(error).toBeInstanceOf(McpToolError);
+      expect(error.message).toBe('"whoami" failed on the server.');
+      expect(console.error).toHaveBeenCalledWith(
+        '[gemi/mcp] "whoami" answered 302 to /login, which a tool call cannot follow.',
+      );
+    });
+
+    test("a path dispatchAs refuses is a server failure, logged for the app", async () => {
+      const refusal = new Error('dispatchAs: "/x" is not an app api path.');
+      const { error } = (await call(async () => {
+        throw refusal;
+      })) as { error: Error };
+
+      expect(error.message).toBe('"whoami" failed on the server.');
+      expect(console.error).toHaveBeenCalledWith(
+        '[gemi/mcp] Dispatching "whoami" failed:',
+        refusal,
+      );
+    });
+  });
+
   test("an argument the schema refuses is a tool error the model can read", async () => {
     const req = new HttpRequest(new Request("http://gemi.dev/api/agent"));
     const error = await registry()
