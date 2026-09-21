@@ -41,10 +41,8 @@ class DebugRouter extends ApiRouter {
 export type InProcessMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
 /**
- * The only credentials `AuthenticationMiddleware` reads: the `access_token`
- * cookie, else an `access_token` header. `User-Agent` is not a credential but
- * goes to `AuthManager.getSession` beside the token, so a user provider that
- * binds a session to its agent sees the same one it would for the user.
+ * The only credential `AuthenticationMiddleware` reads, as the `access_token`
+ * cookie or else an `access_token` header.
  */
 const ACCESS_TOKEN = "access_token";
 
@@ -219,7 +217,10 @@ export class ApiRouteDispatcher {
     }
 
     const httpRequest = new HttpRequest(req, params, "api", path);
-    if (!req.url.includes("/__gemi__")) {
+    // The matched route, not the URL: a query value that mentions `/__gemi__`
+    // would otherwise keep an app route out of onRequestStart/End.
+    const isFrameworkRoute = path.startsWith("/__gemi__");
+    if (!isFrameworkRoute) {
       this.onRequestStart(httpRequest);
     }
     return await RequestContext.run(httpRequest, async () => {
@@ -250,7 +251,7 @@ export class ApiRouteDispatcher {
         // response's own headers win; the context only fills gaps.
         const response = this.mergeContextIntoResponse(data, headers, cookies);
 
-        if (!req.url.includes("/__gemi__")) {
+        if (!isFrameworkRoute) {
           // Before destroy(), which empties the store the hook reads from.
           this.onRequestEnd(httpRequest);
         }
@@ -262,7 +263,7 @@ export class ApiRouteDispatcher {
 
       cookies.forEach((cookie) => headers.append("Set-Cookie", cookie.toString()));
 
-      if (!req.url.includes("/__gemi__")) {
+      if (!isFrameworkRoute) {
         this.onRequestEnd(httpRequest);
       }
 
@@ -334,6 +335,9 @@ export class ApiRouteDispatcher {
     if (headerToken) {
       headers.set(ACCESS_TOKEN, headerToken);
     }
+    // Not a credential, but `AuthManager.getSession` gets it beside the token,
+    // so a user provider that binds a session to its agent sees the same one it
+    // would for the user.
     const userAgent = initiator.headers.get("User-Agent");
     if (userAgent) {
       headers.set("User-Agent", userAgent);
