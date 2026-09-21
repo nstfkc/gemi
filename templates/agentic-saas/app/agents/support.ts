@@ -1,5 +1,6 @@
 import { Agent, AgentController, MemoryAgentStore, OpenAIProvider } from "gemi/ai";
 import type { AgentHookContext, AgentMessage, PendingToolCall } from "gemi/ai";
+import { Auth } from "gemi/facades";
 import type { HttpRequest } from "gemi/http";
 import { billingNamespace } from "@/app/agents/billing";
 import { researchTool } from "@/app/agents/research";
@@ -59,7 +60,35 @@ export const supportAgent = Agent.create({
  * do; this one lasts as long as the process, which is what a template wants
  * and not what a deployment with more than one server does.
  */
-export const supportStore = new MemoryAgentStore();
+export const supportStore = new (class extends MemoryAgentStore {
+  /**
+   * Who minted each thread. `AgentStore` holds no user, so a `threadId` is
+   * otherwise a bearer capability: anyone who learns one can continue that
+   * conversation and read its history back. The owner is recorded where the
+   * id is minted, and a thread that is not the caller's reads as one that
+   * does not exist — the same `thread_not_found` an expired id gets, so the
+   * answer does not tell anyone whose threads are real.
+   */
+  private owners = new Map<string, string>();
+
+  async createThread(params: { userId?: string | number }) {
+    const created = await super.createThread(params);
+    if (params.userId !== undefined) {
+      this.owners.set(created.threadId, String(params.userId));
+    }
+    return created;
+  }
+
+  async loadThread(threadId: string) {
+    // `Auth.user()` throws for a request with no session; the routes are all
+    // behind `auth`, but a missing user is still "not yours", not a 500.
+    const user = await Auth.user().catch(() => null);
+    if (!user || this.owners.get(threadId) !== String(user.id)) {
+      return null;
+    }
+    return super.loadThread(threadId);
+  }
+})();
 
 export class SupportAgentController extends AgentController<typeof supportAgent> {
   agent = supportAgent;

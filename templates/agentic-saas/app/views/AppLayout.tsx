@@ -14,6 +14,7 @@ import {
 } from "@/app/views/components/ui/dropdown-menu";
 import { Separator } from "@/app/views/components/ui/separator";
 import { cn } from "@/app/views/components/lib/utils";
+import { clearAllStoredThreads } from "@/app/views/components/chat/threadStorage";
 
 // `as const` so `href` stays the literal route rather than widening to
 // `string`, which is what `Link` needs to type the target it points at.
@@ -34,6 +35,8 @@ export default function AppLayout({ children }: { children: ReactNode }) {
   const { replace } = useNavigate();
   const { trigger: signOut, loading } = useSignOut({
     onSuccess: () => {
+      // The next person at this browser must not find this one's conversation.
+      clearAllStoredThreads();
       void replace("/auth/sign-in");
     },
   });
