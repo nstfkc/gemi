@@ -118,6 +118,12 @@ class Api extends ApiRouter {
     "/boom": this.post(async () => {
       throw new Error("connection refused at db.internal:5432");
     }),
+    // Returns its failure instead of throwing it, so the dispatcher's catch
+    // never sees it and only the registry's reading of the status stands
+    // between this body and the model.
+    "/flaky": this.post(
+      async () => new Response("Error: timeout at db.internal:5432\n    at query", { status: 500 }),
+    ),
     "/admin/wipe": this.delete(async () => {
       handled.push({ route: "wipe", user: null });
       return { wiped: true };
@@ -161,6 +167,7 @@ class Mcp extends McpRouter<CreateRPC<Api>> {
       requiresApproval: false,
     }),
     boom: this.fromApiRoute("POST", "/boom", { description: "Always fails" }),
+    flaky: this.fromApiRoute("POST", "/flaky", { description: "Always answers 500" }),
   };
 }
 
@@ -310,6 +317,7 @@ describe("an agent calling the app's routes", () => {
       "boom",
       "create-product",
       "create-product-from-upload",
+      "flaky",
       "list-orders",
       "rename-product",
       "whoami",
@@ -439,6 +447,16 @@ describe("an agent calling the app's routes", () => {
     });
     expect(JSON.stringify(result)).not.toContain("db.internal");
   });
+
+  test("a 5xx response is reported without its body", async () => {
+    const { result } = await runTool(alice, "flaky", {});
+
+    expect(result).toMatchObject({
+      status: "error",
+      error: { message: '"flaky" failed on the server.' },
+    });
+    expect(JSON.stringify(result)).not.toContain("db.internal");
+  });
 });
 
 // --- the registry on its own -------------------------------------------------
@@ -500,7 +518,7 @@ describe("McpRegistry", () => {
         .list(caller, { names: ["whoami", "boom"] })
         .map((tool) => tool.name),
     ).toEqual(["whoami", "boom"]);
-    expect(registry().list(caller)).toHaveLength(6);
+    expect(registry().list(caller)).toHaveLength(7);
   });
 
   test("a remote caller is typed and refused", async () => {
