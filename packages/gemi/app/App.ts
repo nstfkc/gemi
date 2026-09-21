@@ -1,5 +1,6 @@
 import type { WebSocketHandler } from "bun";
 import type { Kernel } from "../kernel";
+import { isApiPath } from "../services/router/apiPath";
 
 interface AppParams {
   kernel: new () => Kernel;
@@ -49,7 +50,7 @@ export class App {
   public async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url);
     return this.kernel.run.call(this.kernel, async () => {
-      if (url.pathname.startsWith("/api")) {
+      if (isApiPath(url.pathname)) {
         return await this.kernel.apiRoutes().handleApiRequest(req);
       }
       return await this.kernel.viewRoutes().handleViewRequest(req);
