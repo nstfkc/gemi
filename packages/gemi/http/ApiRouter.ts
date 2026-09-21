@@ -73,8 +73,11 @@ export class RouteHandler<M extends HttpMethod, Input, Output, Params> {
   // A callback route has no source. It has no controller, and `{ handler }`
   // would make every reader narrow a second shape that only names an
   // anonymous function.
+  //
+  // `isController` alone is not enough: it is true for any function with a
+  // prototype, so `this.get(function () {...})` passes it with no method name.
   get source(): RouteSource | undefined {
-    if (!isController(this.handler)) {
+    if (!isController(this.handler) || typeof this.methodName !== "string") {
       return undefined;
     }
     return { controller: this.handler, methodName: this.methodName };
