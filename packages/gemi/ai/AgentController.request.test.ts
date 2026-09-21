@@ -323,6 +323,41 @@ describe("AgentController hooks, inside the request that started the run", () =>
     expect(log).toEqual(["end:/api/chat"]);
   });
 
+  test("a run longer than hookHoldMs is not a hung hook: the bound starts once it settles", async () => {
+    holdMs = 30;
+    let open!: () => void;
+    modelGate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+
+    const res = await send({ text: "hi" });
+    setTimeout(() => open(), 80);
+    await res.text();
+    await until(() => ends().length > 0);
+    await tick();
+
+    expect(log).toEqual(["message:user:1", "message:assistant:1", "complete:1", "end:/api/chat"]);
+  });
+
+  test("hookHoldMs = Infinity holds the request until the hooks are done", async () => {
+    // `setTimeout` fires a delay it cannot hold after ~1ms, which would end the
+    // request at once: the opposite of what raising the bound asked for.
+    holdMs = Infinity;
+    let release!: () => void;
+    messageGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    await (await send({ text: "hi" })).text();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(ends()).toEqual([]);
+
+    release();
+    await until(() => ends().length > 0);
+    await tick();
+    expect(log).toEqual(["message:user:1", "message:assistant:1", "complete:1", "end:/api/chat"]);
+  });
+
   test("an event hook queued behind a slower one still sees the user, and onRequestEnd waits for it", async () => {
     await (await send({ text: "refund ord_1" }, "/api/refunds")).text();
     await until(() => ends().length > 0);
