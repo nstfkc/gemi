@@ -304,17 +304,13 @@ export class MemoryLiveRuns implements LiveRuns {
         this.notify(entry);
         const onEvent = params.onEvent;
         if (onEvent) {
-          hooks = hooks
-            .then(() => onEvent(frame.event))
-            .catch((err) => {
-              params.onInternalError?.(err);
-            });
+          hooks = hooks.then(() => onEvent(frame.event)).catch((err) => report(params, err));
         }
       }
     } catch (err) {
       // The run's own iterator failed. There is nothing left to replay, so the
       // entry ends here; whoever is attached sees the stream close.
-      params.onInternalError?.(err);
+      report(params, err);
     } finally {
       entry.ended = true;
       this.notify(entry);
@@ -421,3 +417,16 @@ export class MemoryLiveRuns implements LiveRuns {
  * bring its own. One map per process is the whole point — see the class note.
  */
 export const liveRuns = new MemoryLiveRuns();
+
+/**
+ * Hands `err` to `onInternalError`, which is app code too: one that throws is
+ * dropped rather than rejecting the hook chain, and with it `register`'s
+ * promise, which says it never rejects.
+ */
+function report(params: RegisterParams, err: unknown): void {
+  try {
+    params.onInternalError?.(err);
+  } catch {
+    // Nothing is left to tell.
+  }
+}
