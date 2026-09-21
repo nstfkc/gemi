@@ -1,8 +1,10 @@
 import { describe, expect, test } from "vitest";
 
 import {
+  PolicyDeniedError,
   RecordNotFoundError,
   UniqueConstraintError,
+  isPolicyDeniedError,
   isUniqueConstraintError,
 } from "./errors";
 
@@ -107,5 +109,23 @@ describe("isUniqueConstraintError", () => {
   test("gemi/orm exports it", async () => {
     const orm = await import("./index");
     expect(orm.isUniqueConstraintError).toBe(isUniqueConstraintError);
+  });
+});
+
+describe("isPolicyDeniedError", () => {
+  test("matches the class, and a second copy's error by its name", () => {
+    expect(isPolicyDeniedError(new PolicyDeniedError("Order", "update"))).toBe(true);
+
+    const duplicate = Object.assign(new Error("denied"), { name: "PolicyDeniedError" });
+    expect(isPolicyDeniedError(duplicate)).toBe(true);
+  });
+
+  test("does not match anything else", () => {
+    expect(isPolicyDeniedError(new Error("Order.update was denied by Order's policy."))).toBe(
+      false,
+    );
+    expect(isPolicyDeniedError(new UniqueConstraintError("Order", "create", ["id"]))).toBe(false);
+    expect(isPolicyDeniedError("PolicyDeniedError")).toBe(false);
+    expect(isPolicyDeniedError(null)).toBe(false);
   });
 });

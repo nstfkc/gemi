@@ -20,6 +20,7 @@ import { HttpRequest } from "../../http/HttpRequest";
 import { McpRouter } from "../../http/McpRouter";
 import { ViewRouter } from "../../http/ViewRouter";
 import { Kernel } from "../../kernel";
+import { PolicyDeniedError } from "../../orm/errors";
 import type { ReadResult } from "../file-storage/drivers/types";
 import { ServiceProvider } from "../../support/ServiceProvider";
 import { ApiRouteDispatcher } from "../router/ApiRouteDispatcher";
@@ -130,6 +131,9 @@ class Api extends ApiRouter {
     "/flaky": this.post(
       async () => new Response("Error: timeout at db.internal:5432\n    at query", { status: 500 }),
     ),
+    "/orders/:id/refund": this.post(async () => {
+      throw new PolicyDeniedError("Order", "update");
+    }).middleware(["auth"]),
     "/admin/wipe": this.delete(async () => {
       handled.push({ route: "wipe", user: null });
       return { wiped: true };
@@ -189,6 +193,10 @@ class Mcp extends McpRouter<CreateRPC<Api>> {
     }),
     boom: this.fromApiRoute("POST", "/boom", { description: "Always fails" }),
     flaky: this.fromApiRoute("POST", "/flaky", { description: "Always answers 500" }),
+    "refund-order": this.fromApiRoute("POST", "/orders/:id/refund", {
+      description: "Refund an order",
+      params: { id: "input" },
+    }),
   };
 }
 
@@ -390,6 +398,7 @@ describe("an agent calling the app's routes", () => {
       "flaky",
       "list-orders",
       "my-orders",
+      "refund-order",
       "rename-product",
       "whoami",
     ]);
@@ -532,6 +541,16 @@ describe("an agent calling the app's routes", () => {
     expect(JSON.stringify(result)).not.toContain("db.internal");
   });
 
+  test("a policy denial is a refusal the model can read, without the policy's text", async () => {
+    const { result } = await runTool(alice, "refund-order", { id: "o1" });
+
+    expect(result).toMatchObject({
+      status: "error",
+      error: { message: '"refund-order" was refused with 403: {"error":{"message":"Forbidden"}}' },
+    });
+    expect(JSON.stringify(result)).not.toContain("policy");
+  });
+
   test("a 5xx response is reported without its body", async () => {
     const { result } = await runTool(alice, "flaky", {});
 
@@ -624,7 +643,7 @@ describe("McpRegistry", () => {
         .list(caller, { names: ["whoami", "boom"] })
         .map((tool) => tool.name),
     ).toEqual(["whoami", "boom"]);
-    expect(registry().list(caller)).toHaveLength(8);
+    expect(registry().list(caller)).toHaveLength(9);
   });
 
   test("a remote caller is typed and refused", async () => {
