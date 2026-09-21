@@ -102,16 +102,17 @@ export class ApiRouteDispatcher {
       await app(MiddlewareRegistry).runMiddleware(middlewares);
     } catch (err) {
       if (err.kind === GEMI_REQUEST_BREAKER_ERROR) {
-        if (httpRequest.rawRequest.url.includes("/api")) {
-          const { status = 400, data, headers } = err.payload.api;
-          return new Response(JSON.stringify(data), {
-            status,
-            headers: {
-              "Content-Type": "application/json",
-              ...headers,
-            },
-          });
-        }
+        // Unconditionally: every request here is an api request, whatever its
+        // url says. A break that returned nothing would let the handler run
+        // after the middleware rejected the request.
+        const { status = 400, data, headers } = err.payload.api;
+        return new Response(JSON.stringify(data), {
+          status,
+          headers: {
+            "Content-Type": "application/json",
+            ...headers,
+          },
+        });
       } else {
         this.onRequestFail(httpRequest, err);
         console.error(err);
@@ -205,6 +206,33 @@ export class ApiRouteDispatcher {
     }
   }
 
+  /**
+   * The matched route, not the URL: a query value that mentions `/__gemi__`
+   * would otherwise keep an app route out of onRequestStart/End.
+   */
+  private isFrameworkRoute(path: string) {
+    return path.startsWith("/__gemi__");
+  }
+
+  /**
+   * How every request that started ends: `onRequestEnd`, then `destroy()`.
+   * One place, so an exit cannot answer without it — a break that skipped it
+   * left request logging with a start and no end for exactly the rejected
+   * requests. `ctx` is passed rather than read so a caller that ends the
+   * request later, outside the request's async scope, can still reach it.
+   */
+  private endRequest(
+    ctx: ReturnType<typeof RequestContext.getStore>,
+    httpRequest: HttpRequest,
+    path: string,
+  ) {
+    if (!this.isFrameworkRoute(path)) {
+      // Before destroy(), which empties the store the hook reads from.
+      this.onRequestEnd(httpRequest);
+    }
+    ctx.destroy();
+  }
+
   async handleApiRequest(req: Request) {
     const { params, path } = this.getRouteHandlerAndParams(req);
 
@@ -217,10 +245,7 @@ export class ApiRouteDispatcher {
     }
 
     const httpRequest = new HttpRequest(req, params, "api", path);
-    // The matched route, not the URL: a query value that mentions `/__gemi__`
-    // would otherwise keep an app route out of onRequestStart/End.
-    const isFrameworkRoute = path.startsWith("/__gemi__");
-    if (!isFrameworkRoute) {
+    if (!this.isFrameworkRoute(path)) {
       this.onRequestStart(httpRequest);
     }
     return await RequestContext.run(httpRequest, async () => {
@@ -236,6 +261,7 @@ export class ApiRouteDispatcher {
       const middlewareResponse = await this.runRouteMiddleware(path, httpRequest);
 
       if (middlewareResponse instanceof Response) {
+        this.endRequest(ctx, httpRequest, path);
         return middlewareResponse;
       }
       const data = await this.getRouteData(path);
@@ -250,12 +276,7 @@ export class ApiRouteDispatcher {
         // ctx.setHeaders (CORS, Cache-Control) and any Set-Cookie. The
         // response's own headers win; the context only fills gaps.
         const response = this.mergeContextIntoResponse(data, headers, cookies);
-
-        if (!isFrameworkRoute) {
-          // Before destroy(), which empties the store the hook reads from.
-          this.onRequestEnd(httpRequest);
-        }
-        ctx.destroy();
+        this.endRequest(ctx, httpRequest, path);
         return response;
       }
 
@@ -263,11 +284,7 @@ export class ApiRouteDispatcher {
 
       cookies.forEach((cookie) => headers.append("Set-Cookie", cookie.toString()));
 
-      if (!isFrameworkRoute) {
-        this.onRequestEnd(httpRequest);
-      }
-
-      ctx.destroy();
+      this.endRequest(ctx, httpRequest, path);
 
       return new Response(JSON.stringify(data), {
         headers,
