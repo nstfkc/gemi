@@ -113,6 +113,18 @@ const PATH_PARAM = /:([A-Za-z_][A-Za-z0-9_]*)([?*+]?)/g;
  */
 const MAX_ERROR_BODY = 4000;
 
+/**
+ * The same limit for a success, set higher: a list route answering every row,
+ * or a route serving a large text file, would otherwise land in the context
+ * window whole. Past it the model gets the text cut short and told so, rather
+ * than an error — the route has already done what it does, and a model told it
+ * failed would do it again.
+ */
+const MAX_RESULT_BODY = 100_000;
+
+/** A body a model can read. A missing content-type is read as text. */
+const READABLE = /^(text\/|application\/([\w.+-]*\+)?(json|xml))/i;
+
 type PathParam = { name: string; modifier: string };
 
 type Plan = {
@@ -189,12 +201,14 @@ export class McpRegistry {
    * Nothing here reads an attachment any other way — the store has no
    * unscoped lookup, and this must not become one.
    *
+   * A 2xx answers its JSON, or its text, cut at `MAX_RESULT_BODY`; a body
+   * that is neither — a file a route serves — is described, not shown.
    * A 4xx throws an `McpToolError` carrying the route's body, so a validation
-   * error reaches the model word for word. A 5xx, or a route that throws,
-   * throws an `McpToolError` that says only that the server failed. A throw
-   * has already been logged by the dispatcher, and a stack trace or a
-   * database message is not something to hand a model that may be steered by
-   * whoever wrote the document it is reading.
+   * error reaches the model word for word. Anything else, or a route that
+   * throws, throws an `McpToolError` that says only that the server failed.
+   * The app gets the reason in its log, and a stack trace or a database
+   * message is not something to hand a model that may be steered by whoever
+   * wrote the document it is reading.
    */
   async execute(
     caller: McpCaller,
@@ -251,9 +265,10 @@ export class McpRegistry {
         query ? `${path}?${query}` : path,
         body,
       );
-    } catch {
-      // What a client would get as a 500. A handler's or a middleware's throw
-      // has already been logged by the dispatcher on its way out.
+    } catch (error) {
+      // What a client would get as a 500. A handler's throw is logged by the
+      // dispatcher too, but dispatchAs's own refusal of the path is not.
+      console.error(`[gemi/mcp] Dispatching "${name}" failed:`, error);
       throw new McpToolError(`"${name}" failed on the server.`, 500);
     }
     return await readResponse(name, response);
@@ -587,20 +602,36 @@ function toQuery(json: Record<string, unknown>): string {
 }
 
 async function readResponse(name: string, response: Response): Promise<unknown> {
-  const text = await response.text();
   if (response.status >= 200 && response.status < 300) {
+    const type = response.headers.get("Content-Type");
+    if (type && !READABLE.test(type)) {
+      const size = (await response.arrayBuffer()).byteLength;
+      return `"${name}" answered with ${size} bytes of ${type}, which is not shown.`;
+    }
+    const text = await response.text();
     if (text === "") return null;
+    if (text.length > MAX_RESULT_BODY) {
+      return `${text.slice(0, MAX_RESULT_BODY)}… [cut at ${MAX_RESULT_BODY} of ${text.length} characters]`;
+    }
     try {
       return JSON.parse(text);
     } catch {
       return text;
     }
   }
+  const text = await response.text();
   if (response.status >= 400 && response.status < 500) {
     const shown = text.length > MAX_ERROR_BODY ? `${text.slice(0, MAX_ERROR_BODY)}…` : text;
     throw new McpToolError(
       `"${name}" was refused with ${response.status}${shown ? `: ${shown}` : "."}`,
       response.status,
+    );
+  }
+  if (response.status < 500) {
+    // A redirect, or a 1xx: nothing the model can follow, and nothing the
+    // dispatcher logged.
+    console.error(
+      `[gemi/mcp] "${name}" answered ${response.status}${response.headers.get("Location") ? ` to ${response.headers.get("Location")}` : ""}, which a tool call cannot follow.`,
     );
   }
   throw new McpToolError(`"${name}" failed on the server.`, response.status);
