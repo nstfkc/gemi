@@ -12,9 +12,9 @@ import { ApiRouter } from "../../http/ApiRouter";
 import { AuthenticationMiddleware } from "../../http/AuthenticationMiddlware";
 import { Controller } from "../../http/Controller";
 import { HttpRequest } from "../../http/HttpRequest";
+import { Middleware } from "../../http/Middleware";
 import { RequestContext } from "../../http/requestContext";
 import { ViewRouter } from "../../http/ViewRouter";
-import { Middleware } from "../../http/Middleware";
 import { Kernel } from "../../kernel";
 import { isSystemScope, runAsSystem, runAsUser } from "../../orm/context";
 import { PolicyDeniedError } from "../../orm/errors";
@@ -485,6 +485,21 @@ describe("a policy denial", () => {
     expect(res.status).toBe(403);
     expect(await res.json()).toEqual({ error: { message: "Forbidden" } });
     expect(failed[0]!.error).not.toBeInstanceOf(PolicyDeniedError);
+  });
+
+  test("ends the request without anyone reading the 403", async () => {
+    const res = await direct("/orders", { headers: bob });
+
+    // A caller that checks only the status must not leave the request open:
+    // the body's length is declared, so it is not waited on as a stream.
+    expect(res.status).toBe(403);
+    expect(res.headers.get("Content-Length")).toBe(
+      String(JSON.stringify({ error: { message: "Forbidden" } }).length),
+    );
+    expect(ended).toEqual(["/api/orders"]);
+
+    await direct("/orders-by-middleware", { headers: bob });
+    expect(ended).toEqual(["/api/orders", "/api/orders-by-middleware"]);
   });
 
   test("in a middleware answers 403 as well", async () => {
