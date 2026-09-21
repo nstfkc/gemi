@@ -445,7 +445,10 @@ describe("an agent calling the app's routes", () => {
   });
 
   test("an input param that another route matches first is a not-found, and nothing runs", async () => {
-    const { result } = await runTool(alice, "rename-product", { id: "archive-all", name: "Kettle" });
+    const { result } = await runTool(alice, "rename-product", {
+      id: "archive-all",
+      name: "Kettle",
+    });
 
     expect(result).toMatchObject({
       status: "error",
@@ -688,6 +691,18 @@ describe("McpRegistry", () => {
           }),
         }),
       ).toThrow(/"id" is both an input field and a param or file/);
+    });
+
+    test("an input field that collides with a bound file", () => {
+      expect(() =>
+        build({
+          create: declare("POST", "/:orgId/products", {
+            input: s.object({ name: s.string(), image: s.string() }),
+            params: { orgId: "input" },
+            files: { image: () => "gemi_att_1" },
+          }),
+        }),
+      ).toThrow(/"image" is both an input field and a param or file/);
     });
 
     test("an input that is not an object", () => {
