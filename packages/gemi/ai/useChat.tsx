@@ -210,13 +210,16 @@ export interface UseChatResult<P extends keyof AgentRoutes> {
    * the file when there is a `fileId` and told its `attachmentId` when there is
    * one, which is what lets it hand the file to a tool.
    *
-   * `fileId` was declared as a required `string` before this hook could return
-   * an upload the provider never saw, and leaving it that way is worse than a
-   * cosmetic lie: the repo's shared tsconfig sets `strict: false`, so
-   * `const { fileId } = await attach(f); sendMessage({ files: [{ fileId }] })`
-   * typechecks here, ships `file_id: undefined` to the vendor, and fails in the
-   * middle of a conversation. Declared optional, the same code is a type error
-   * in any app that has `strictNullChecks` on, which is where it should fail.
+   * Picking one id out is the mistake: `const { fileId } = await attach(f);
+   * sendMessage({ files: [{ fileId }] })` typechecks, because a turn's
+   * `fileId` is optional too, and for a storage-only upload it sends an entry
+   * with no id at all. The compiler will not catch that; the agent route does,
+   * and answers 400 `invalid_request` before a run starts or anything is
+   * stored. It is refused at the door rather than dropped, because a dropped
+   * file leaves the model answering about something it never got, and a stored
+   * one makes the request builder throw on every later turn of the thread.
+   * What the optional type does catch, under `strictNullChecks`, is code that
+   * reads `fileId` as a `string` — rendering it, or handing it to a vendor.
    */
   attach(file: File): Promise<{
     fileId?: string;
