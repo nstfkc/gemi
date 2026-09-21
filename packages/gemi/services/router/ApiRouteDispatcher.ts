@@ -429,6 +429,10 @@ export class ApiRouteDispatcher {
       const middlewareResponse = await this.runRouteMiddleware(path, httpRequest);
 
       if (middlewareResponse instanceof Response) {
+        // Ended like a handler's Response below, but returned as is: no
+        // context headers or cookies merged. So a breaker or policy 403 from a
+        // middleware after `cors` lacks its CORS headers. Known gap, shared by
+        // both.
         await this.endRequest(ctx, httpRequest, path);
         return middlewareResponse;
       }
