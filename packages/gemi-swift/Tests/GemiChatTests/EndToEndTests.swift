@@ -125,7 +125,9 @@ struct EndToEndTests {
 
   @Test func stopEndsTheRunOnTheServer() async throws {
     let threadId = try await newThread()
-    let chat = session(threadId: threadId)
+    let stops = StopRecorder()
+    let chat = ChatSession<E2eAgent>(
+      endpoint: support!, threadId: threadId, attach: false, transport: stops)
     let sending = Task { await chat.send("slow") }
     await eventually { chat.messages.last?.text.contains("2 ") == true }
 
@@ -134,7 +136,9 @@ struct EndToEndTests {
 
     #expect(chat.error == nil)
     #expect(chat.messages.last?.finishReason == .aborted)
-    // The run is over server-side too: the thread takes a new turn.
+    // The controller found the run by what `stop()` sent. A later turn would
+    // end it too, so that the thread takes one is no proof the stop landed.
+    #expect(stops.answers == [["stopped": true]])
     await chat.send("hello")
     #expect(chat.error == nil)
     #expect(chat.messages.last?.text == "Hello from gemi.")
@@ -161,5 +165,27 @@ struct EndToEndTests {
     let upload = try await chat.upload(
       Data("%PDF".utf8), name: "a.pdf", mimeType: "application/pdf")
     #expect(upload.fileId == "file_a.pdf")
+  }
+}
+
+/// `URLSessionTransport`, keeping what the server answered to each `/stop`.
+final class StopRecorder: ChatTransport, @unchecked Sendable {
+  private let lock = NSLock()
+  private var _answers: [JSONValue] = []
+  private let inner = URLSessionTransport()
+
+  var answers: [JSONValue] { lock.withLock { _answers } }
+
+  func send(_ request: URLRequest) async throws -> ChatResponse {
+    let response = try await inner.send(request)
+    guard request.url!.path.hasSuffix("/stop") else { return response }
+    let data = try await response.data()
+    lock.withLock { _answers.append(JSONValue.parse(data) ?? .null) }
+    return ChatResponse(
+      statusCode: response.statusCode,
+      body: AsyncThrowingStream {
+        $0.yield(data)
+        $0.finish()
+      })
   }
 }
