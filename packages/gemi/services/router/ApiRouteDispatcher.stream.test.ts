@@ -140,6 +140,26 @@ class RootApiRouter extends ApiRouter {
       capture();
       return new Response("its own body");
     }),
+    // A run that starts another before it ends, answered with plain JSON.
+    "/nested": this.get(() => {
+      const ctx = capture();
+      ctx.waitUntil(
+        new Promise<void>((resolve) => {
+          release = () => {
+            ctx.waitUntil(
+              new Promise<void>((resolveInner) => {
+                release = () => {
+                  seen.push(ctx.user?.id ?? null);
+                  resolveInner();
+                };
+              }),
+            );
+            resolve();
+          };
+        }),
+      );
+      return { started: true };
+    }).middleware(["auth"]),
     // Work that outlives the body, as a run does once its client has left.
     "/outlives": this.get(() => {
       const ctx = capture();
@@ -353,3 +373,34 @@ describe("a HEAD request through a real server", () => {
   });
 });
 
+describe("work handed to waitUntil", () => {
+  test("holds a plain JSON response's end, including work it starts while waiting", async () => {
+    const res = await app.fetch(new Request("http://gemi.dev/api/nested", { headers: alice }));
+
+    expect(await res.json()).toEqual({ started: true });
+    expect(ended).toEqual([]);
+    expect(destroyed).toBe(0);
+
+    // The first run settles, having started a second.
+    release();
+    await tick();
+    expect(ended).toEqual([]);
+    expect(destroyed).toBe(0);
+
+    release();
+    await tick();
+    expect(seen).toEqual([1]);
+    expect(ended).toEqual(["/api/nested"]);
+    expect(destroyed).toBe(1);
+  });
+
+  test("is ignored once the request has ended", async () => {
+    const res = await app.fetch(new Request("http://gemi.dev/api/sized"));
+    await res.text();
+    expect(destroyed).toBe(1);
+
+    store!.waitUntil(new Promise<void>(() => {}));
+
+    expect(store!.hasPendingWork()).toBe(false);
+  });
+});
