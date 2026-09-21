@@ -319,6 +319,29 @@ describe("the command", () => {
     expect(readFileSync(file, "utf8")).toBe(renderKotlin(support, "com.example.chat"));
   }, 60_000);
 
+  test.each([
+    ["com.example.my app", '"my app" is not an identifier'],
+    ["com..chat", '"" is not an identifier'],
+    ["com.acme.in", '"in" is a Kotlin keyword'],
+  ])("--package %s is refused before reading anything", async (name, why) => {
+    await expect(
+      generateClient({ agent: "nowhere.ts", out, platform: "kotlin", package: name, cwd: PACKAGE }),
+    ).rejects.toThrow(`--package "${name}" is not a Kotlin package: ${why}.`);
+  });
+
+  test("Swift says it ignored --package", async () => {
+    const { warnings } = await generateClient({
+      agent: `${FIXTURES}/support.ts#supportAgent`,
+      out,
+      platform: "swift",
+      package: "com.example.chat",
+      cwd: PACKAGE,
+    });
+    expect(warnings).toEqual([
+      "--package is for Kotlin; a Swift file has no package, so it was ignored.",
+    ]);
+  }, 60_000);
+
   test("Kotlin needs a package, and says so before reading anything", async () => {
     await expect(
       generateClient({ agent: "nowhere.ts", out, platform: "kotlin", cwd: PACKAGE }),
