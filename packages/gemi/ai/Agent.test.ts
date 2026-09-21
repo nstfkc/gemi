@@ -5,6 +5,7 @@ import type { ReadResult } from "../services/file-storage/drivers/types";
 import { Agent, AgentTool, Skill, ToolNamespace } from "./Agent";
 import type { AgentProvider, ProviderEvent } from "./AgentProvider";
 import { fakeProvider } from "./providers/fakeProvider";
+import { toResponsesInput } from "./providers/request";
 import type { Schema } from "./Schema";
 import { readSignature, verifyPendingCall } from "./signing";
 import { MemoryAttachmentStore, ScopedAttachments } from "./store/Attachments";
@@ -3119,6 +3120,38 @@ describe("a file a tool asks the model to look at", () => {
     expect(second.map((part) => part.fileId).sort()).toEqual(["file_1", "user_upload_1"]);
   });
 
+  // #500 renders every file part's `attachmentId` as a line beside it, and the
+  // window already writes the id of a file it dropped into its own sentence.
+  // The two must not both speak for one file: a dropped part is text by the
+  // time the request is built, so it gets the sentence and no line.
+  test("the request names a kept file's id in a line, and a dropped one only in its sentence", async () => {
+    const { scoped } = scopedFor();
+    const tool = makerTool("render", async (ctx) => {
+      const attachment = await ctx.attachments.put(png(), { name: "chart.png", showModel: true });
+      return { attachmentId: attachment.id };
+    });
+    const provider = fakeProvider(
+      [toolCall("c1", "render", {}), finish()],
+      [toolCall("c2", "render", {}), finish()],
+      [finish()],
+    );
+    const agent = Agent.create({ name: "designer", provider, tools: [tool] });
+    const result = await agent.stream({ messages: [], req, attachments: scoped }).result();
+    const [dropped, kept] = filePartsOf(result.messages).map((part) => part.attachmentId);
+
+    const texts = toResponsesInput(provider.calls[2].messages, provider.capabilities)
+      .flatMap((item: any) => item.content ?? [])
+      .filter((block: any) => block.type === "input_text")
+      .map((block: any) => block.text as string);
+
+    expect(texts.filter((text) => text.startsWith("[attachment "))).toEqual([
+      `[attachment id="${kept}" name="chart.png" mimeType="image/png"]`,
+    ]);
+    const mentions = texts.filter((text) => text.includes(dropped));
+    expect(mentions).toHaveLength(1);
+    expect(mentions[0]).toContain("dropped from this request");
+  });
+
   test("reaches `onMessage` in the order the transcript has it", async () => {
     const { scoped } = scopedFor();
     const reported: AgentMessage[] = [];
@@ -3403,5 +3436,55 @@ describe("a file shown inside a sub-run", () => {
     ) as any[];
     expect(wrapped).toHaveLength(1);
     expect(wrapped[0].event.message.content[0]).toMatchObject({ type: "file", fileId: "file_1" });
+  });
+});
+
+describe("a file the user attached, and its attachment id", () => {
+  /**
+   * #500. `attach()` answers two ids and the run used to keep only `fileId`,
+   * so the model saw the image and had no id to hand a tool. Both now land on
+   * the `FilePart`, and a storage-only upload — no `fileId` at all — is a part
+   * rather than a turn that cannot be sent.
+   */
+  test("both ids reach the user message, and a storage-only upload has no fileId key", async () => {
+    const provider = fakeProvider([finish()]);
+    const agent = Agent.create({ name: "shop", provider });
+    await agent
+      .stream({
+        messages: [],
+        req,
+        turn: {
+          text: "make a product from these",
+          files: [
+            {
+              fileId: "file_9",
+              attachmentId: "gemi_att_both",
+              name: "product.png",
+              mimeType: "image/png",
+              // What `attach()` also answers. Not a `FilePart` field.
+              downgraded: "no_scope",
+            } as any,
+            { attachmentId: "gemi_att_stored", name: "specs.csv", mimeType: "text/csv" },
+          ],
+        },
+      })
+      .result();
+
+    const user = provider.calls[0].messages.find((message) => message.role === "user")!;
+    expect(user.content).toEqual([
+      { type: "text", text: "make a product from these" },
+      {
+        type: "file",
+        fileId: "file_9",
+        attachmentId: "gemi_att_both",
+        name: "product.png",
+        mimeType: "image/png",
+      },
+      { type: "file", attachmentId: "gemi_att_stored", name: "specs.csv", mimeType: "text/csv" },
+    ]);
+    expect(user.content[1]).not.toHaveProperty("downgraded");
+    // Absent, not `undefined`: the request builder reads presence, and a
+    // stateless client posts this message back as history.
+    expect(user.content[2]).not.toHaveProperty("fileId");
   });
 });

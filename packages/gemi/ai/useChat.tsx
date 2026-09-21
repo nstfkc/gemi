@@ -202,11 +202,13 @@ export interface UseChatResult<P extends keyof AgentRoutes> {
    * the same path.
    *
    * TWO IDS, BOTH OPTIONAL, AND THE OPTIONALITY IS LOAD-BEARING. `fileId` is the
-   * provider's, and is the one that goes in `sendMessage({ files })`;
-   * `attachmentId` is gemi's, and is the handle a tool resolves to get the
-   * bytes. A file routed to storage only has no `fileId`, and an upload the
-   * server had no scope for has no `attachmentId` — see
-   * `AgentController.attachmentScope`.
+   * provider's, and is what lets the model look at the file; `attachmentId` is
+   * gemi's, and is the handle a tool resolves to get the bytes. A file routed to
+   * storage only has no `fileId`, and an upload the server had no scope for has
+   * no `attachmentId` — see `AgentController.attachmentScope`. Pass the answer
+   * on whole, `sendMessage({ files: [await attach(f)] })`: the model is shown
+   * the file when there is a `fileId` and told its `attachmentId` when there is
+   * one, which is what lets it hand the file to a tool.
    *
    * `fileId` was declared as a required `string` before this hook could return
    * an upload the provider never saw, and leaving it that way is worse than a
@@ -343,8 +345,17 @@ function turnFrom(message: AgentMessage): ClientTurn {
   const files: NonNullable<ClientTurn["files"]> = [];
   for (const part of message.content) {
     if (part.type === "text") text += part.text;
+    // Both ids, or a regenerated turn loses the one a tool needs: the model
+    // is told the `attachmentId` only because the turn carried it. An absent
+    // `fileId` stays absent — a storage-only upload — rather than going out as
+    // an explicit `undefined` the server has to tell apart from a wrong value.
     if (part.type === "file") {
-      files.push({ fileId: part.fileId, name: part.name, mimeType: part.mimeType });
+      files.push({
+        ...(part.fileId ? { fileId: part.fileId } : {}),
+        ...(part.attachmentId ? { attachmentId: part.attachmentId } : {}),
+        name: part.name,
+        mimeType: part.mimeType,
+      });
     }
   }
   return { ...(text ? { text } : {}), ...(files.length > 0 ? { files } : {}) };
@@ -905,15 +916,15 @@ export function useChat<P extends keyof AgentRoutes>(
       // `sendMessage`.
       //
       // TWO IDS, PASSED THROUGH SEPARATELY. `fileId` is the provider's and is
-      // what a `FilePart` carries — unchanged, which is why it is still first
-      // and still spelled the same. `attachmentId` is gemi's, and is the handle
-      // a tool takes: an app that asks the agent to do something *with* the file
-      // sends this one in its message text or its own turn payload, not in a
-      // `FilePart`. Either can be absent — a file the server kept but did not
-      // send to the provider has no `fileId`, and an upload with no attachment
-      // scope has no `attachmentId` (see `AgentController.attachmentScope`) —
-      // so the field is optional here rather than asserted, and a caller that
-      // needs one checks for it instead of sending `undefined` to the vendor.
+      // what lets the model look at the file — unchanged, which is why it is
+      // still first and still spelled the same. `attachmentId` is gemi's, the
+      // handle a tool takes, and it goes in the same `turn.files` entry: the
+      // server tells the model the id beside the file, so the model can pass
+      // it to a tool rather than invent one. Either can be absent — a file the
+      // server kept but did not send to the provider has no `fileId`, and an
+      // upload with no attachment scope has no `attachmentId` (see
+      // `AgentController.attachmentScope`) — so both are optional here rather
+      // than asserted.
       return {
         fileId: data.fileId,
         attachmentId: data.attachmentId,
