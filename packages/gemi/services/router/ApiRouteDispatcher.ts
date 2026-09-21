@@ -140,9 +140,16 @@ function endWhenBodyEnds(response: Response, end: () => void): Response {
  * send fixes it, which is what 403 says.
  */
 function policyDeniedResponse() {
-  return new Response(JSON.stringify({ error: { message: "Forbidden" } }), {
+  const body = JSON.stringify({ error: { message: "Forbidden" } });
+  // Sized, so `isOpenEndedBody` ends the request when it is returned. Without
+  // the length it would wait for the body to be read, and an in-process
+  // caller that only checks the status would never end it.
+  return new Response(body, {
     status: 403,
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "Content-Length": String(Buffer.byteLength(body)),
+    },
   });
 }
 
