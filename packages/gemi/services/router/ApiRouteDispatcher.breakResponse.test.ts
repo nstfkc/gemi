@@ -4,6 +4,7 @@ import { createElement } from "react";
 import { App } from "../../app/App";
 import { createRoot } from "../../client/createRoot";
 import { ApiRouter } from "../../http/ApiRouter";
+import { CacheMiddleware } from "../../http/CacheMiddleware";
 import { AuthorizationError } from "../../http/errors";
 import { Middleware } from "../../http/Middleware";
 import { RateLimitExceededError } from "../../http/RateLimitMiddleware";
@@ -71,6 +72,23 @@ class RootApiRouter extends ApiRouter {
       handled.push("/denied");
       return {};
     }).middleware(["context", "denied"]),
+    // `cache` sets the success's Cache-Control on the context, which the
+    // rejection must not inherit.
+    "/cached": this.get(() => ({})).middleware(["cache"]),
+    "/cached/limited": this.get(() => {
+      handled.push("/cached/limited");
+      return {};
+    }).middleware(["cache", "limited"]),
+    "/cached/denied": this.get(() => {
+      handled.push("/cached/denied");
+      return {};
+    }).middleware(["cache", "denied"]),
+    "/cached/handler-unauthorized": this.get(() => {
+      throw new AuthorizationError();
+    }).middleware(["cache"]),
+    "/cached/handler-denied": this.get(() => {
+      throw new PolicyDeniedError("Membership", "findFirst");
+    }).middleware(["cache"]),
   };
 }
 
@@ -79,6 +97,7 @@ class AppKernel extends Kernel {
     middleware: {
       aliases: {
         context: ContextMiddleware,
+        cache: CacheMiddleware,
         unauthorized: Unauthorized,
         limited: Limited,
         denied: Denied,
@@ -141,5 +160,41 @@ describe("a middleware's break response", () => {
     expect(res.headers.get("Content-Type")).toBe("application/json");
     expect(res.headers.getSetCookie()).toEqual([expect.stringMatching(/^session=refreshed/)]);
     expect(handled).toEqual([]);
+  });
+});
+
+describe("a rejection behind `cache`", () => {
+  const cacheable = "public, max-age=864000, stale-while-revalidate=300, stale-if-error=600";
+
+  test("the route's success keeps its Cache-Control", async () => {
+    const res = await app.fetch(new Request("http://gemi.dev/api/cached"));
+
+    expect([res.status, res.headers.get("Cache-Control")]).toEqual([200, cacheable]);
+  });
+
+  test("a middleware's 429 is no-store, not the route's cache policy", async () => {
+    const res = await app.fetch(new Request("http://gemi.dev/api/cached/limited"));
+
+    expect([res.status, res.headers.get("Cache-Control")]).toEqual([429, "no-store"]);
+    expect(handled).toEqual([]);
+  });
+
+  test("a middleware's policy 403 is no-store", async () => {
+    const res = await app.fetch(new Request("http://gemi.dev/api/cached/denied"));
+
+    expect([res.status, res.headers.get("Cache-Control")]).toEqual([403, "no-store"]);
+    expect(handled).toEqual([]);
+  });
+
+  test("a handler's break is no-store", async () => {
+    const res = await app.fetch(new Request("http://gemi.dev/api/cached/handler-unauthorized"));
+
+    expect([res.status, res.headers.get("Cache-Control")]).toEqual([401, "no-store"]);
+  });
+
+  test("a handler's policy 403 is no-store", async () => {
+    const res = await app.fetch(new Request("http://gemi.dev/api/cached/handler-denied"));
+
+    expect([res.status, res.headers.get("Cache-Control")]).toEqual([403, "no-store"]);
   });
 });
