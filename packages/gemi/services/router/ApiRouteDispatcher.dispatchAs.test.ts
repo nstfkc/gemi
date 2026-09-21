@@ -13,6 +13,7 @@ import { AuthenticationMiddleware } from "../../http/AuthenticationMiddlware";
 import { Controller } from "../../http/Controller";
 import { HttpRequest } from "../../http/HttpRequest";
 import { Middleware } from "../../http/Middleware";
+import { clientIp, RateLimitMiddleware } from "../../http/RateLimitMiddleware";
 import { RequestContext } from "../../http/requestContext";
 import { ViewRouter } from "../../http/ViewRouter";
 import { Kernel } from "../../kernel";
@@ -89,6 +90,16 @@ class ProductController extends Controller {
   }
 }
 
+/** The keys a model-aware `key` option computed, in order. */
+const limitKeys: string[] = [];
+const OriginRateLimit = RateLimitMiddleware.configure({
+  key: (req) => {
+    const key = `${req.isModelOriginated() ? "model" : "direct"}:${clientIp(req)}`;
+    limitKeys.push(key);
+    return key;
+  },
+});
+
 let inside: (req: HttpRequest<any, any>) => Promise<unknown> = async () => ({});
 const started: { path: string; modelOriginated: boolean; store: unknown }[] = [];
 const ended: string[] = [];
@@ -128,6 +139,10 @@ class RootApiRouter extends ApiRouter {
       req.ctx().setHeaders("X-Inner", "1");
       return { set: true };
     }),
+    // One route per test: the App, and so the in-memory limiter, is shared.
+    "/limited-per-user": this.get(() => ({ ok: true })).middleware(["rate-limit:1,60"]),
+    "/limited-shared": this.get(() => ({ ok: true })).middleware(["rate-limit:1,60"]),
+    "/limited-by-origin": this.get(() => ({ ok: true })).middleware(["origin-limit:1,60"]),
     "/agent": this.post(() => inside(new HttpRequest<any, any>())),
   };
 }
@@ -135,7 +150,14 @@ class RootApiRouter extends ApiRouter {
 class AppKernel extends Kernel {
   protected providers = [StubAuthProvider];
   config = {
-    middleware: { aliases: { auth: AuthenticationMiddleware, orders: OrdersMiddleware } },
+    middleware: {
+      aliases: {
+        auth: AuthenticationMiddleware,
+        orders: OrdersMiddleware,
+        "rate-limit": RateLimitMiddleware,
+        "origin-limit": OriginRateLimit,
+      },
+    },
     route: {
       api: {
         rootRouter: RootApiRouter,
@@ -199,6 +221,7 @@ beforeEach(() => {
   started.length = 0;
   ended.length = 0;
   failed.length = 0;
+  limitKeys.length = 0;
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
@@ -442,6 +465,53 @@ describe("dispatchAs", () => {
     );
 
     expect(result.status).toBe(200);
+  });
+
+  describe("rate limits", () => {
+    test("two users' tool calls spend separate budgets", async () => {
+      const alice = await fromAgent(
+        { Cookie: "access_token=tok-alice", "X-Forwarded-For": "10.0.0.1" },
+        async (req, dispatcher) =>
+          (await dispatcher.dispatchAs(req, "GET", "/limited-per-user")).status,
+      );
+      const bob = await fromAgent(
+        { Cookie: "access_token=tok-bob", "X-Forwarded-For": "10.0.0.2" },
+        async (req, dispatcher) =>
+          (await dispatcher.dispatchAs(req, "GET", "/limited-per-user")).status,
+      );
+
+      // With the address left behind, both land on `unknown:/limited-per-user`
+      // and bob gets alice's 429.
+      expect(alice.result).toBe(200);
+      expect(bob.result).toBe(200);
+    });
+
+    test("a user's direct call and their tool call spend one budget", async () => {
+      const headers = { Cookie: "access_token=tok-alice", "X-Forwarded-For": "10.0.0.3" };
+      expect((await direct("/limited-shared", { headers })).status).toBe(200);
+
+      const { result } = await fromAgent(
+        headers,
+        async (req, dispatcher) =>
+          (await dispatcher.dispatchAs(req, "GET", "/limited-shared")).status,
+      );
+
+      expect(result).toBe(429);
+    });
+
+    test("a custom key sees isModelOriginated, so model traffic can have its own budget", async () => {
+      const headers = { Cookie: "access_token=tok-alice", "X-Forwarded-For": "10.0.0.4" };
+      expect((await direct("/limited-by-origin", { headers })).status).toBe(200);
+
+      const { result } = await fromAgent(
+        headers,
+        async (req, dispatcher) =>
+          (await dispatcher.dispatchAs(req, "GET", "/limited-by-origin")).status,
+      );
+
+      expect(result).toBe(200);
+      expect(limitKeys).toEqual(["direct:10.0.0.4", "model:10.0.0.4"]);
+    });
   });
 });
 
