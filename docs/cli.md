@@ -241,7 +241,7 @@ gemi ai:generate-client app/agents/support.ts#supportAgent --out android/app/src
 ```
 
 - `<agent>` — the module and export holding the value `Agent.create` returned, as `<file>#<export>`. A bare file means its default export.
-- `--out <dir>` — where to write. The file is named after the export: `SupportAgent.swift`, `SupportAgent.kt`.
+- `--out <dir>` — where to write. The file is named after the generated type: `--name` if given, else the export (`SupportAgent.swift`, `SupportAgent.kt`). `export default supportAgent` counts as `supportAgent`; an anonymous default export is named after the file (`support.ts` gives `Support.swift`).
 - `--platform <swift|kotlin>` — which client to write for.
 - `--package <name>` — Kotlin only, and required there: the package the file declares.
 - `--name <name>` — name the generated type something other than the export.
