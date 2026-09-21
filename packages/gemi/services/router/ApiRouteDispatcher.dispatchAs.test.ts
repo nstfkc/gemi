@@ -15,7 +15,7 @@ import { HttpRequest } from "../../http/HttpRequest";
 import { RequestContext } from "../../http/requestContext";
 import { ViewRouter } from "../../http/ViewRouter";
 import { Kernel } from "../../kernel";
-import { isSystemScope, runAsSystem } from "../../orm/context";
+import { isSystemScope, runAsSystem, runAsUser } from "../../orm/context";
 import { applyPolicies, currentUser, policyContext } from "../../orm/policy";
 import { ServiceProvider } from "../../support/ServiceProvider";
 import { ApiRouteDispatcher } from "./ApiRouteDispatcher";
@@ -377,6 +377,23 @@ describe("dispatchAs", () => {
     // A client's request to this unguarded route has no user and is denied.
     // Under the initiator's system scope it would have read unscoped.
     expect(result).toMatchObject({ name: "PolicyDeniedError", reason: "no-user" });
+  });
+
+  test("an asUser block for someone else around the call does not swap the route's user", async () => {
+    const { result } = await fromAgent(
+      { Cookie: "access_token=tok-alice" },
+      async (req, dispatcher) =>
+        runAsUser({ id: 2, name: "bob" }, () =>
+          dispatcher.dispatchAs(req, "GET", "/orders").then(
+            (res) => res.status,
+            (error) => error,
+          ),
+        ),
+    );
+
+    // Alice may read orders and bob may not: the route sees alice, who
+    // started the run, not the bob the initiator was acting as.
+    expect(result).toBe(200);
   });
 
   test.each([
