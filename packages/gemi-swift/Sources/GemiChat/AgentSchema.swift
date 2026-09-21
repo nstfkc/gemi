@@ -42,7 +42,9 @@ public enum UntypedAgent: AgentSchema {
 }
 
 /// A tool call with its payloads decoded.
-public struct TypedToolCall<Input: Decodable & Sendable & Hashable, Progress: Decodable & Sendable & Hashable>:
+public struct TypedToolCall<
+  Input: Decodable & Sendable & Hashable, Progress: Decodable & Sendable & Hashable
+>:
   Sendable, Hashable, Identifiable
 {
   public let part: ToolCallPart
@@ -102,7 +104,9 @@ public struct TypedToolResult<Output: Decodable & Sendable & Hashable>: Sendable
 /// `Output` is what `ChatSession.answer(_:with:)` accepts for it — for a
 /// question, the tool's output schema — so a wrong-shaped answer is a compile
 /// error rather than the server's `invalid_tool_result`.
-public struct TypedPendingCall<Input: Decodable & Sendable & Hashable, Output: Encodable & Sendable & Hashable>:
+public struct TypedPendingCall<
+  Input: Decodable & Sendable & Hashable, Output: Encodable & Sendable & Hashable
+>:
   Sendable, Hashable, Identifiable
 {
   /// What answering this call takes.

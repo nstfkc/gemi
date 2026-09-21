@@ -466,12 +466,34 @@ jobs:
   # against it. The `check` job fails when either of those drifts from the
   # TypeScript that produces them; this one fails when the Swift stops agreeing.
   #
-  # macOS because that is the platform the client is for, and its Foundation
-  # is the one it is written against; `macos-15` for a Swift 6 toolchain.
+  # macOS because GemiChat imports Foundation's networking, which the Linux
+  # toolchain spells differently; `macos-15` for a Swift 6 toolchain.
+  #
+  # The end-to-end tests talk to a real `AgentController` with a scripted model
+  # (`packages/gemi-swift/e2e/server.ts`), which is what holds the client to
+  # what the server accepts rather than to what the web hook is read as
+  # sending. They skip without `GEMI_E2E_URL`, so the server is started first.
   swift:
     name: swift
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          # Same version as the sqlite job and `publish.yml`; see the note there.
+          # Unpinned it reads the root `packageManager`, a Bun too old to install.
+          bun-version: 1.3.14
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Start the end-to-end server
+        run: |
+          bun packages/gemi-swift/e2e/server.ts 47123 > e2e-server.log 2>&1 &
+          for _ in $(seq 1 50); do grep -q ready e2e-server.log && exit 0; sleep 0.2; done
+          cat e2e-server.log; exit 1
       - name: Swift tests
         run: swift test
+        env:
+          GEMI_E2E_URL: http://127.0.0.1:47123
+      - name: End-to-end server log
+        if: failure()
+        run: cat e2e-server.log
