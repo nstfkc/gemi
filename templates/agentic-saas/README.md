@@ -71,6 +71,12 @@ model is shown, and they type `part.input` and `part.output` in the browser. A
 `.describe()` on a field is the only prose the model gets about it, so it is
 worth writing.
 
+**No tool takes a customer id.** Each one reads the customer from the signed-in
+request (`customerOf` in `tools.ts`), and an order or invoice that belongs to
+someone else answers exactly like one that does not exist. The model's
+arguments are whatever the conversation talked it into, so "refund ord_2001"
+from the wrong account must fail in the tool body, not in the prompt.
+
 `orderDetail` throws on an unknown id. That is not an exception out of the run:
 gemi records it as a failed tool result the model reads and recovers from, which
 is why the message is addressed to the model and names the tool that produces

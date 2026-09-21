@@ -106,7 +106,7 @@ function callSummary(part: SupportToolCall) {
   // The arguments are streamed, so a call can be rendered before its input has
   // finished arriving.
   if (!part.input) return "";
-  if (part.name === "lookupOrders") return part.input.customerId;
+  if (part.name === "lookupOrders") return "your orders";
   if (part.name === "orderDetail") return part.input.orderId;
   if (part.name === "runDiagnostics") return part.input.orderId;
   if (part.name === "research") return part.input.question;

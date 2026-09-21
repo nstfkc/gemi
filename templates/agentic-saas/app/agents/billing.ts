@@ -1,4 +1,6 @@
 import { AgentTool, ToolNamespace, s } from "gemi/ai";
+import type { ToolContext } from "gemi/ai";
+import { customerOf } from "@/app/agents/tools";
 
 /**
  * The billing corner of the desk: three tools a support conversation reaches
@@ -14,6 +16,13 @@ const INVOICES: Record<string, { customerId: string; amountCents: number; status
   in_9003: { customerId: "cus_gus", amountCents: 8900, status: "past_due" },
 };
 
+// Scoped like the orders in `tools.ts`: another customer's invoice answers
+// exactly like one that does not exist.
+function ownInvoice(ctx: ToolContext, invoiceId: string) {
+  const invoice = INVOICES[invoiceId];
+  return invoice && invoice.customerId === customerOf(ctx) ? invoice : undefined;
+}
+
 const invoiceLookupTool = AgentTool.create({
   name: "invoiceLookup",
   description: "Read one invoice: what it is for, what it came to, and whether it has been paid",
@@ -23,8 +32,8 @@ const invoiceLookupTool = AgentTool.create({
     status: s.string().describe("One of paid, open, past_due"),
     issuedAt: s.string().describe("The date the invoice was issued, as YYYY-MM-DD"),
   }),
-  execute: async (input) => {
-    const invoice = INVOICES[input.invoiceId];
+  execute: async (input, ctx) => {
+    const invoice = ownInvoice(ctx, input.invoiceId);
     if (!invoice) {
       throw new Error(`There is no invoice ${input.invoiceId}.`);
     }
@@ -34,9 +43,9 @@ const invoiceLookupTool = AgentTool.create({
 
 const planChangeTool = AgentTool.create({
   name: "planChange",
-  description: "Move a customer to a different plan, either immediately or at their next renewal",
+  description:
+    "Move this customer to a different plan, either immediately or at their next renewal",
   inputSchema: s.object({
-    customerId: s.string(),
     plan: s.enum(["starter", "team", "enterprise"]),
     // An enum rather than a free string: the model is shown the two legal
     // values, so "at the end of the month" is resolved into one of them at
@@ -44,11 +53,15 @@ const planChangeTool = AgentTool.create({
     timing: s.enum(["immediately", "next_renewal"]),
   }),
   outputSchema: s.object({ plan: s.string(), effectiveAt: s.string(), proratedCents: s.number() }),
-  execute: async (input) => ({
-    plan: input.plan,
-    effectiveAt: input.timing === "immediately" ? "2025-02-14" : "2025-03-01",
-    proratedCents: input.timing === "immediately" ? 1450 : 0,
-  }),
+  execute: async (input, ctx) => {
+    // The customer is whoever is signed in; see `customerOf`.
+    customerOf(ctx);
+    return {
+      plan: input.plan,
+      effectiveAt: input.timing === "immediately" ? "2025-02-14" : "2025-03-01",
+      proratedCents: input.timing === "immediately" ? 1450 : 0,
+    };
+  },
 });
 
 const creditNoteTool = AgentTool.create({
@@ -62,10 +75,22 @@ const creditNoteTool = AgentTool.create({
     reason: s.string().describe("One sentence, kept on the credit note itself"),
   }),
   outputSchema: s.object({ creditNoteId: s.string(), amountCents: s.number() }),
-  execute: async (input) => ({
-    creditNoteId: `cn_${input.invoiceId.slice(3)}`,
-    amountCents: input.amountCents,
-  }),
+  execute: async (input, ctx) => {
+    const invoice = ownInvoice(ctx, input.invoiceId);
+    if (!invoice) {
+      throw new Error(`There is no invoice ${input.invoiceId}.`);
+    }
+    if (
+      !Number.isInteger(input.amountCents) ||
+      input.amountCents <= 0 ||
+      input.amountCents > invoice.amountCents
+    ) {
+      throw new Error(
+        `A credit on ${input.invoiceId} is a whole number of cents from 1 to ${invoice.amountCents}.`,
+      );
+    }
+    return { creditNoteId: `cn_${input.invoiceId.slice(3)}`, amountCents: input.amountCents };
+  },
 });
 
 /**
