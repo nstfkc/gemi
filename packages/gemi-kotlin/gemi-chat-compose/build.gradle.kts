@@ -5,7 +5,6 @@ plugins {
 
 android {
   namespace = "dev.gemijs.chat.compose"
-  // 37.2 because OkHttp 5 requires it of anything that depends on it.
   // 35, not higher, so an app need not raise its own: OkHttp 5.4 and later
   // demand 37 of everything that depends on them, which is why the core pins
   // 5.3 as its floor. An app on a newer OkHttp resolves to that one.
