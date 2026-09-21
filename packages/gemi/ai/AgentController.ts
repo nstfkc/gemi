@@ -284,6 +284,22 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
    */
   attachmentStorage: AttachmentStorage = Storage;
 
+  /**
+   * How long the request that started a run is held open for its hooks, in
+   * milliseconds, once they start. The run itself is not bounded here — the
+   * request is held for as long as it runs — only the app's code after it.
+   *
+   * The hooks read the user from that request (`ctx.req.ctx().user`,
+   * `Auth.user()`, a policied query), so the request stays open until they are
+   * done; but a hook that never settles — a `fetch` with no timeout — would
+   * then hold the store, the user and `onRequestEnd` forever, one per turn. Past
+   * this the request ends anyway: `onRequestEnd` runs, the user is released,
+   * and the hook runs on without one. Thirty seconds is far past a healthy
+   * write or notification, so a hook that reaches it is hung rather than slow.
+   * Raise it for a hook that is legitimately longer.
+   */
+  protected hookHoldMs = 30_000;
+
   /** Appended to the agent's static instructions for this request — the user's
    *  name, tenant, today's date. */
   instructions(req: HttpRequest<any, any>): string | Promise<string> | void {
@@ -405,6 +421,11 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
       }) as AgentRun;
 
       const ctx: AgentHookContext = { req, runId: run.runId, threadId };
+      // The store of the request starting the run, taken now, while it is
+      // certainly open: `waitUntil` is ignored once it has ended, and the run
+      // settling can end it before `persistRun` has got to its hooks.
+      const requestStore = req.ctx?.();
+      const hold = (work: Promise<void>) => requestStore?.waitUntil(work);
 
       // Registered before the response is built: the run is now owned by the
       // process rather than by this request, which is the property `/attach`
@@ -415,13 +436,18 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
         // The client's handle on a run it started, which is the only one that
         // exists before `run-start` reaches it. See `RegisterParams`.
         clientRunId,
-        onEvent: (event) => this.dispatchEvent(event, ctx),
+        onEvent: (event) => this.dispatchEvent(event, ctx, hold),
         onInternalError: (err) => this.reportHookFailure(err),
       });
 
       // Kept, not just fired: the next turn on this thread has to know when
-      // this one's transcript is in the store. See `withThread`.
-      persisted.set(run, this.persistRun(run, ctx));
+      // this one's transcript is in the store. See `withThread`. The request
+      // waits for more than the thread does — the hooks as well — so that
+      // `onMessage` still finds the user who sent the message; the thread
+      // waits only for the store, so a slow hook is not a slow next turn.
+      const { stored, hooks } = this.persistRun(run, ctx);
+      persisted.set(run, stored);
+      hold(hooks);
 
       return run.toResponse();
     };
@@ -916,6 +942,11 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
    * Protected, not private: these exist to be overridden. `onMessage` fires for
    * every completed message, user and assistant alike, and is the intended
    * persistence point for an app that is not using `store`.
+   *
+   * Every hook runs inside the request that started the run, which is held
+   * open for them — after the run, and after a client that left — so
+   * `ctx.req.ctx().user` is the user who sent the turn. See `hookHoldMs` for
+   * how long a hook that does not finish keeps it.
    */
   protected onMessage(message: AgentMessage, ctx: AgentHookContext): void | Promise<void> {
     void message;
@@ -972,7 +1003,25 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
     console.error("[gemi/ai] agent controller hook failed", error);
   }
 
-  private async dispatchEvent(event: AgentStreamEvent, ctx: AgentHookContext): Promise<void> {
+  /**
+   * The hook for one frame, if it has one, with the request held open while it
+   * runs: an `onError` for a run that failed lands as the run settles, which
+   * is when the request would otherwise end. `hold` is ignored once it has.
+   */
+  private async dispatchEvent(
+    event: AgentStreamEvent,
+    ctx: AgentHookContext,
+    hold: (work: Promise<void>) => void = () => {},
+  ): Promise<void> {
+    const work = this.hookFor(event, ctx);
+    if (!work) {
+      return;
+    }
+    hold(within(work, this.hookHoldMs));
+    await work;
+  }
+
+  private hookFor(event: AgentStreamEvent, ctx: AgentHookContext): Promise<void> | null {
     switch (event.type) {
       case "tool-call":
         // Skipped while the arguments are still streaming: a hook that fires
@@ -982,24 +1031,24 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
         // is the contract, and a run that re-parks would otherwise fire it for
         // a call some earlier run made.
         if (!event.part.partial && !event.resent) {
-          await this.onToolCall(
-            {
-              toolCallId: event.part.toolCallId,
-              name: String(event.part.name),
-              input: event.part.input,
-            },
-            ctx,
+          return call(() =>
+            this.onToolCall(
+              {
+                toolCallId: event.part.toolCallId,
+                name: String(event.part.name),
+                input: event.part.input,
+              },
+              ctx,
+            ),
           );
         }
-        return;
+        return null;
       case "awaiting-input":
-        await this.onAwaitingInput(event.pending as PendingToolCall[], ctx);
-        return;
+        return call(() => this.onAwaitingInput(event.pending as PendingToolCall[], ctx));
       case "error":
-        await this.onError(event.error, ctx);
-        return;
+        return call(() => this.onError(event.error, ctx));
       default:
-        return;
+        return null;
     }
   }
 
@@ -1012,43 +1061,64 @@ export abstract class AgentController<A extends AnyAgent = AnyAgent> extends Con
    * a finished one does: `stop()` finalizes the transcript, so by the time this
    * resolves there is a valid history to store.
    *
-   * Settles when the transcript is in the store, not when the app is done with
-   * it. The next turn on this thread waits on this (see `withThread`), and the
-   * hooks are the app's: an `onMessage` that writes to something slow would
-   * make every later turn wait for it, once per message of the old run, and
-   * one that never settles — which `safely` cannot catch — would hold the
-   * thread, and every turn queued on it, behind an open connection each. So
-   * the hooks run on after this on their own, reported the same way.
+   * `stored` settles when the transcript is in the store, not when the app is
+   * done with it. The next turn on this thread waits on that (see
+   * `withThread`), and the hooks are the app's: an `onMessage` that writes to
+   * something slow would make every later turn wait for it, once per message
+   * of the old run, and one that never settles — which `safely` cannot catch —
+   * would hold the thread, and every turn queued on it, behind an open
+   * connection each. So the hooks run on after it on their own, reported the
+   * same way.
+   *
+   * `hooks` settles once they have too, or after `hookHoldMs` of them, and is
+   * what the request that started the run is held open for. Separate from
+   * `stored` for the reason above, and it has to exist from the start: by the
+   * time the hooks are called the run has settled, and the request with it,
+   * unless something was already holding it. Neither rejects.
    */
-  private async persistRun(run: AgentRun, ctx: AgentHookContext): Promise<void> {
-    let result: AgentRunResult<ToolShapes, unknown>;
-    try {
-      result = await run.result();
-    } catch (err) {
-      void this.safely(() =>
-        this.onError(
-          {
-            code: "unknown",
-            message: err instanceof Error ? err.message : String(err),
-            retryable: false,
-          },
-          ctx,
-        ),
-      );
-      return;
-    }
+  private persistRun(
+    run: AgentRun,
+    ctx: AgentHookContext,
+  ): { stored: Promise<void>; hooks: Promise<void> } {
+    // Assigned before `stored` settles, on every path, so `hooks` below reads
+    // the chain this run actually started.
+    let notified: Promise<void> = Promise.resolve();
 
-    const messages = result.messages as AgentMessage[];
-
-    if (ctx.threadId && messages.length > 0) {
+    const stored = (async () => {
+      let result: AgentRunResult<ToolShapes, unknown>;
       try {
-        await this.store.appendMessages(ctx.threadId, messages);
+        result = await run.result();
       } catch (err) {
-        this.reportHookFailure(err);
+        notified = this.safely(() =>
+          this.onError(
+            {
+              code: "unknown",
+              message: err instanceof Error ? err.message : String(err),
+              retryable: false,
+            },
+            ctx,
+          ),
+        );
+        return;
       }
-    }
 
-    void this.notifyRun(result, messages, ctx);
+      const messages = result.messages as AgentMessage[];
+
+      if (ctx.threadId && messages.length > 0) {
+        try {
+          await this.store.appendMessages(ctx.threadId, messages);
+        } catch (err) {
+          this.reportHookFailure(err);
+        }
+      }
+
+      notified = this.notifyRun(result, messages, ctx);
+    })();
+
+    // The bound starts with the hooks, not with the run: a long run is not a
+    // hung hook.
+    const hooks = stored.then(() => within(notified, this.hookHoldMs));
+    return { stored, hooks };
   }
 
   /** The hooks on a finished run, in order. Never rejects: see `safely`. */
@@ -1458,3 +1528,25 @@ export type AgentRouteRPC<T extends new () => AgentController<any>> = {
     : ToolShapes;
   output: unknown;
 };
+
+/** Calls a hook, turning a synchronous throw into a rejection. */
+async function call(hook: () => void | Promise<void>): Promise<void> {
+  await hook();
+}
+
+/**
+ * Settles when `work` does or after `ms`, whichever is first, and never
+ * rejects. For how long the request waits on the app's code, not for the code
+ * itself, which runs on either way.
+ */
+function within(work: Promise<void>, ms: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, ms);
+  });
+  const settled = work.then(
+    () => {},
+    () => {},
+  );
+  return Promise.race([settled, timeout]).finally(() => clearTimeout(timer));
+}
