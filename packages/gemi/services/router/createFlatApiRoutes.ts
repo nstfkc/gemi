@@ -6,6 +6,7 @@ import {
   type ResourceRoutes,
   RouteHandler,
   type ProxyHandler,
+  type RouteSource,
 } from "../../http/ApiRouter";
 import type { RouterMiddleware } from "../../http/Router";
 
@@ -17,6 +18,9 @@ export type FlatApiRoutes = Record<
     {
       exec: ApiRouteExec;
       middleware: (string | (new () => Middleware) | RouterMiddleware)[];
+      // Absent on a callback route, a proxy route and OPTIONS: none of them
+      // runs a controller method.
+      source?: RouteSource;
     }
   >
 >;
@@ -74,6 +78,7 @@ export function createFlatApiRoutes(
     method: string,
     exec: ApiRouteExec,
     middleware: RouterMiddleware[] | string[],
+    source?: RouteSource,
   ) {
     const subPath = path === "/" ? "" : path;
     const _rootPath = rootPath === "/" ? "" : rootPath;
@@ -87,6 +92,7 @@ export function createFlatApiRoutes(
     flatApiRoutes[finalPath][method.toUpperCase()] = {
       exec,
       middleware: [...rootMiddleware, ...middleware],
+      ...(source ? { source } : {}),
     };
     flatApiRoutes[finalPath].OPTIONS = {
       exec: () => {
@@ -112,11 +118,12 @@ export function createFlatApiRoutes(
       const method = routeHandler.method;
       const middleware = routeHandler.middlewares;
       const exec = routeHandler.run.bind(routeHandler);
-      addRoute(path, method, exec, middleware);
+      addRoute(path, method, exec, middleware, routeHandler.source);
       // A stream route also answers HEAD, so a client can read the size and
-      // Accept-Ranges without pulling the body.
+      // Accept-Ranges without pulling the body. It runs the same handler, so
+      // it has the same source.
       if (isStreamHandler(option)) {
-        addRoute(path, "HEAD", exec, middleware);
+        addRoute(path, "HEAD", exec, middleware, routeHandler.source);
       }
     }
 
@@ -124,7 +131,7 @@ export function createFlatApiRoutes(
       for (const [method, routeHandler] of Object.entries(option)) {
         const middleware = routeHandler.middlewares;
         const exec = routeHandler.run.bind(routeHandler);
-        addRoute(path, method, exec, middleware);
+        addRoute(path, method, exec, middleware, routeHandler.source);
       }
     }
 
@@ -145,12 +152,12 @@ export function createFlatApiRoutes(
         if (!lastSegment.startsWith(":")) {
           throw new Error("Resource route must end with a dynamic segment");
         }
-        addRoute(rest.reverse().join("/"), method, exec, middleware);
+        addRoute(rest.reverse().join("/"), method, exec, middleware, routeHandler.source);
       }
       for (const [method, routeHandler] of Object.entries(second)) {
         const middleware = routeHandler.middlewares;
         const exec = routeHandler.run.bind(routeHandler);
-        addRoute(path, method, exec, middleware);
+        addRoute(path, method, exec, middleware, routeHandler.source);
       }
     }
   }

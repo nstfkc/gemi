@@ -42,6 +42,16 @@ function isController(
   return isConstructor(candidate);
 }
 
+/**
+ * The controller method a route runs, as `createFlatApiRoutes` records it on
+ * each flat entry. Nothing in dispatch reads it; it is there so code that
+ * starts from a path can find the handler mounted at it.
+ */
+export type RouteSource = {
+  controller: new () => Controller;
+  methodName: string;
+};
+
 export class RouteHandler<M extends HttpMethod, Input, Output, Params> {
   __internal_brand = "RouteHandler";
   middlewares: string[] = [];
@@ -54,6 +64,20 @@ export class RouteHandler<M extends HttpMethod, Input, Output, Params> {
     this.handler = handler;
     this.methodName = methodName;
     this.method = method;
+  }
+
+  // A getter rather than making `handler` public: its type mentions none of
+  // `Input`/`Output`/`Params`, so the public shape `RouteHandlerParser` infers
+  // the RPC types from is the same as before.
+  //
+  // A callback route has no source. It has no controller, and `{ handler }`
+  // would make every reader narrow a second shape that only names an
+  // anonymous function.
+  get source(): RouteSource | undefined {
+    if (!isController(this.handler)) {
+      return undefined;
+    }
+    return { controller: this.handler, methodName: this.methodName };
   }
 
   __internal_use() {
