@@ -278,7 +278,27 @@ describe("MemoryLiveRuns", () => {
     expect(failures).toHaveLength(2);
     runs.clear();
   });
-})
+
+  test("register still resolves when onInternalError itself throws", async () => {
+    const runs = new MemoryLiveRuns();
+    const run = new StubAgentRun("run_j");
+    const registered = runs.register(run, {
+      threadId: "t1",
+      onEvent: () => {
+        throw new Error("hook exploded");
+      },
+      onInternalError: () => {
+        throw new Error("reporter exploded");
+      },
+    });
+
+    run.emit(textDelta("a"));
+    run.finish();
+
+    await expect(registered).resolves.toBeUndefined();
+    runs.clear();
+  });
+});
 describe("a reader whose position is arithmetic, not a scan", () => {
   test("gets every frame exactly once while the pump keeps pushing behind it", async () => {
     // `drain` derives its index from the cursor and the window's first seq, and
