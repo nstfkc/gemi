@@ -67,11 +67,10 @@ export class Auth extends Facade {
   static async guardSafe(
     fn: (user: User) => Promise<boolean> | boolean,
   ): Promise<boolean> {
+    // Like `guard`, this throws `AuthenticationError` with no user; `false`
+    // means a known user the predicate refused.
     const user = await Auth.user();
 
-    if (!user) {
-      return false;
-    }
     try {
       return await fn(user);
     } catch (err) {

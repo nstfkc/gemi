@@ -510,7 +510,7 @@ current user and session.
 | --- | --- | --- |
 | `Auth.user()` | `Promise<User>` | The authenticated user (with `.extension` from `extendSession`). **Throws `AuthenticationError` if not signed in.** |
 | `Auth.guard(fn)` | `Promise<void>` | Runs `fn(user)`; throws `InsufficientPermissionsError` (403) if it returns falsy. With no user it throws `AuthenticationError` (401) before `fn` runs; an error `fn` throws propagates unchanged. |
-| `Auth.guardSafe(fn)` | `Promise<boolean>` | Like `guard` but returns `true`/`false` instead of throwing; an error `fn` throws counts as `false`. |
+| `Auth.guardSafe(fn)` | `Promise<boolean>` | Like `guard` but returns `true`/`false` instead of refusing; an error `fn` throws counts as `false`. With no user it still throws `AuthenticationError` (401), like `guard`. |
 | `Auth.authenticate(email)` | `Promise<session>` | Programmatically sign a user in — creates the session and sets the cookie. |
 | `Auth.createMagicLink(email)` | `Promise<{ user, email, token, pin } \| {}>` | Mint a magic-link token + PIN (see above). |
 
@@ -540,8 +540,9 @@ That is the same call the static methods make internally — `getFacadeRoot()` i
 which doubles as its own container token.
 
 > **Note:** `Auth.user()` *throws* when there is no session — inside a [controller](./controllers.md)
-> that's fine (the framework turns it into a 401 / redirect). If you want a nullable check,
-> use `Auth.guardSafe(...)` instead of wrapping `Auth.user()` in a try/catch.
+> that's fine (the framework turns it into a 401 / redirect). So do `Auth.guard(...)` and
+> `Auth.guardSafe(...)`, which call it first: `guardSafe` returns `false` only for a signed-in
+> user the predicate refuses. On a route that may have no session, catch `AuthenticationError`.
 
 See [Authorization](./authorization.md) for role checks.
 
