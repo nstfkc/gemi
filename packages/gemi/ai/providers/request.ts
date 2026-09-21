@@ -136,7 +136,20 @@ export function toResponsesInput(
           // Neither `input_file` nor `input_image` is legal on an output role.
           // An assistant message holding a file is a bug upstream, and sending
           // it anyway turns that bug into a 400 halfway through a conversation.
-          if (!capabilities.fileInput || role === "assistant") break;
+          // The attachment line goes with it: `output_text` saying "here is a
+          // file" on the assistant's side would be the model told it produced
+          // something it did not.
+          if (role === "assistant") break;
+          const attachmentId = attachmentIdOf(part);
+          // A model that cannot read files still gets the line. The file is
+          // gemi's either way, and a tool can take it by id even though the
+          // model cannot look at it — dropping the line too would leave the
+          // model unaware the user attached anything, which is the storage-only
+          // failure this line exists to fix.
+          if (!capabilities.fileInput) {
+            if (attachmentId) buffer.push(textContent(role, attachmentLine(part, false)));
+            break;
+          }
           // NOT A PROVIDER FILE ID. There are two ids now — `POST /chat/files`
           // answers `fileId` (the provider's) and `attachmentId` (ours) — and
           // putting the wrong one here is the mistake the shapes invite. Left
@@ -148,21 +161,24 @@ export function toResponsesInput(
           // not depend on the answer — it is worth having on the shapes alone —
           // so this comment names the failure rather than a status code nobody
           // checked.)
-          //
-          // Two shapes are caught, and the empty one is not an afterthought: an
-          // upload routed to storage has no provider id at all, so a client that
-          // spreads its answer into a `FilePart` produces `fileId: undefined`,
-          // and `file_id: undefined` reaches the vendor as surely as a wrong
-          // string does. A prefix-only check reads as covering that case and
-          // does not, because `undefined?.startsWith` is `undefined`.
-          if (!part.fileId || part.fileId.startsWith(ATTACHMENT_ID_PREFIX)) {
+          if (part.fileId?.startsWith(ATTACHMENT_ID_PREFIX)) {
             throw new Error(
-              part.fileId
-                ? `FilePart.fileId holds a gemi attachment id (${part.fileId}). That field is the *provider's* file id, from \`fileId\` on the upload response; the \`attachmentId\` is for tools and is resolved through \`ctx.attachments\`. A file routed to storage only has no provider id and cannot be shown to the model.`
-                : "FilePart.fileId is empty. That field is the *provider's* file id, from `fileId` on the upload response, and an upload routed to storage never has one — its bytes are gemi's, reachable from a tool through `ctx.attachments` with the `attachmentId`, and there is nothing for the model to be shown.",
+              `FilePart.fileId holds a gemi attachment id (${part.fileId}). That field is the *provider's* file id, from \`fileId\` on the upload response; the \`attachmentId\` goes in \`FilePart.attachmentId\`, is shown to the model as text, and is resolved by a tool through \`ctx.attachments\`.`,
             );
           }
-          buffer.push(fileContent(part));
+          // A storage-only upload has no provider id, and that is a legal part
+          // now: the model is told the file exists and is not shown it. What
+          // is still refused is a part with NEITHER id — nothing to show and
+          // nothing to name. The emptiness check is `!part.fileId` rather than
+          // a prefix test because `undefined?.startsWith` is `undefined`, and
+          // `file_id: undefined` reaches the vendor as surely as a wrong string.
+          if (!part.fileId && !attachmentId) {
+            throw new Error(
+              "FilePart.fileId is empty and there is no `attachmentId` either. `fileId` is the *provider's* file id and `attachmentId` is gemi's (`gemi_att_…`), both from the upload response; an upload always answers at least one, so a part with neither was built from something other than that answer.",
+            );
+          }
+          if (attachmentId) buffer.push(textContent(role, attachmentLine(part, !!part.fileId)));
+          if (part.fileId) buffer.push(fileContent(part));
           break;
         }
         case "reasoning": {
@@ -271,6 +287,54 @@ function reconcileToolPairs(items: ResponsesInputItem[]): ResponsesInputItem[] {
 
 function textContent(role: AgentMessage["role"], text: string): Record<string, unknown> {
   return { type: role === "assistant" ? "output_text" : "input_text", text };
+}
+
+/**
+ * `FilePart.attachmentId`, if it is one.
+ *
+ * In stateless mode the history arrives from the browser and only the turn
+ * itself is checked at the door (`toClientTurn`), so a part posted back as
+ * history can hold anything here. A value that is not a gemi id is treated as
+ * absent rather than refused: it names nothing a tool could resolve, and
+ * refusing it would fail every later turn of a conversation over a field the
+ * model could not have used.
+ */
+function attachmentIdOf(part: FilePart): string | undefined {
+  const id = part.attachmentId;
+  return typeof id === "string" && id.startsWith(ATTACHMENT_ID_PREFIX) ? id : undefined;
+}
+
+/**
+ * The line that tells the model an attachment's id, sent just before the file
+ * block it labels (or alone, when there is no file block to send).
+ *
+ * WHY A LINE AT ALL. A model that has seen a user's image has no id to put in
+ * a tool's arguments unless it is told one. Whatever it writes there instead
+ * is answered by `ctx.attachments.file()` with `AttachmentNotFoundError` —
+ * correctly, for an id that was never obtainable. For a storage-only upload
+ * this line is all the model gets: without it, it does not know a file exists.
+ *
+ * WHY THIS FORMAT. `[attachment id="…" name="…" mimeType="…"]`, each value
+ * JSON-quoted. The filename is the user's and can hold spaces, quotes, `]` or
+ * a newline; JSON quoting means none of them can end a field, end the bracket,
+ * or start a second line that reads as another attachment, so the id a model
+ * copies out is exactly the id. The unquoted form (`[attachment gemi_att_… my
+ * photo.png image/png]`) looks tidier and is ambiguous as soon as a name has a
+ * space. A key with no value is left out rather than written as `name=""`.
+ *
+ * WHY IT SAYS WHEN THE FILE IS NOT SHOWN. A storage-only upload, or any file
+ * sent to a model without `fileInput`, has no block beside the line. Left
+ * unsaid, a line that names `photo.png` invites the model to describe a
+ * picture it never saw.
+ */
+function attachmentLine(part: FilePart, shown: boolean): string {
+  const fields = [`id=${JSON.stringify(part.attachmentId)}`];
+  if (part.name) fields.push(`name=${JSON.stringify(part.name)}`);
+  if (part.mimeType) fields.push(`mimeType=${JSON.stringify(part.mimeType)}`);
+  const line = `attachment ${fields.join(" ")}`;
+  return shown
+    ? `[${line}]`
+    : `[${line} — its contents are not shown to you; a tool can read the file by this id]`;
 }
 
 /**
