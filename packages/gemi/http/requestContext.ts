@@ -233,4 +233,13 @@ export class RequestContext {
   static runWith<T>(store: Store, fn: () => T): T {
     return requestContext.run(store, fn);
   }
+
+  /**
+   * Runs `fn` outside any request scope, as the server's own `fetch` handler
+   * is. For a request dispatched from inside another one, which must start from
+   * where a client's request would, not from its initiator's store.
+   */
+  static exit<T>(fn: () => T): T {
+    return requestContext.exit(fn);
+  }
 }

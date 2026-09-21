@@ -11,6 +11,8 @@ import { createFlatApiRoutes, type FlatApiRoutes } from "./createFlatApiRoutes";
 import { ViewRouteDispatcher } from "./ViewRouteDispatcher";
 import { Translator } from "../../i18n/Translator";
 import { app } from "../../foundation/app";
+import { markModelOriginated } from "../../http/modelOriginated";
+import { ormContext } from "../../orm/context";
 
 class DebugRouter extends ApiRouter {
   routes = {
@@ -35,6 +37,16 @@ class DebugRouter extends ApiRouter {
     }),
   };
 }
+
+export type InProcessMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+
+/**
+ * The only credentials `AuthenticationMiddleware` reads: the `access_token`
+ * cookie, else an `access_token` header. `User-Agent` is not a credential but
+ * goes to `AuthManager.getSession` beside the token, so a user provider that
+ * binds a session to its agent sees the same one it would for the user.
+ */
+const ACCESS_TOKEN = "access_token";
 
 export class ApiRouteDispatcher {
   static token = "router.api";
@@ -260,5 +272,94 @@ export class ApiRouteDispatcher {
         headers,
       });
     });
+  }
+
+  /**
+   * Runs an api route in-process, as the user who made `initiator`, through
+   * exactly what a client's request to `path` would go through: route match,
+   * `onRequestStart`, middleware, handler, `onRequestEnd`. Answers the
+   * `Response` that client would get, and throws what `handleApiRequest` throws
+   * — the server's 500 rendering lives in `server/`, not here.
+   *
+   * It must never reach for a flat route's `exec`, however much shorter that
+   * is: `exec` is the handler alone, with no auth, no policies and no rate
+   * limit, and a tool call that could do more than the same user's HTTP request
+   * is the one thing the MCP router promises cannot happen.
+   *
+   * `initiator` is an argument rather than `RequestContext.getStore().req` so a
+   * caller with no ambient gemi request — a remote MCP client — only has to
+   * produce one to use this. Only its origin and credentials are read. Every
+   * other header describes the initiator's own body and transport:
+   * `content-type` would mis-parse this body, and a copied cookie jar would
+   * hand the route state nobody decided to give it. `x-forwarded-for` is left
+   * behind too, which has a cost worth knowing: `RateLimitMiddleware`'s default
+   * key falls back to `unknown:<route>`, one budget shared by every in-process
+   * call. How a tool call should be limited is the RFC's open question 3, and a
+   * copied header would only have answered it by accident.
+   *
+   * `path` is the route's path as the app routes it, without `/api`, with its
+   * params filled in and any query string attached — `/42/orders?status=open`.
+   * A param from a model must be `encodeURIComponent`ed by the caller: a path
+   * that URL parsing would rewrite — a `..` segment walking out of the route —
+   * is refused rather than resolved, as is anything under `/__gemi__`, which
+   * skips the lifecycle hooks and is not an app route.
+   */
+  async dispatchAs(
+    initiator: HttpRequest<any, any>,
+    method: InProcessMethod,
+    path: string,
+    body?: FormData | Record<string, unknown>,
+  ): Promise<Response> {
+    const origin = new URL(initiator.rawRequest.url).origin;
+    const url = new URL(`${origin}/api${path}`);
+    const expectedPathname = `/api${path.split(/[?#]/)[0]}`;
+    if (
+      !path.startsWith("/") ||
+      url.origin !== origin ||
+      url.pathname !== expectedPathname ||
+      url.hash !== "" ||
+      url.pathname.startsWith("/api/__gemi__")
+    ) {
+      throw new Error(
+        `dispatchAs: "${path}" is not an app api path. Pass the route's own path, without "/api", with every param encoded.`,
+      );
+    }
+
+    const headers = new Headers();
+    const cookieToken = initiator.cookies.get(ACCESS_TOKEN);
+    if (cookieToken) {
+      headers.set("Cookie", `${ACCESS_TOKEN}=${cookieToken}`);
+    }
+    const headerToken = initiator.headers.get(ACCESS_TOKEN);
+    if (headerToken) {
+      headers.set(ACCESS_TOKEN, headerToken);
+    }
+    const userAgent = initiator.headers.get("User-Agent");
+    if (userAgent) {
+      headers.set("User-Agent", userAgent);
+    }
+
+    let requestBody: BodyInit | undefined;
+    if (body instanceof FormData) {
+      // No content-type of our own: the runtime writes the multipart boundary.
+      requestBody = body;
+    } else if (body !== undefined) {
+      headers.set("Content-Type", "application/json");
+      requestBody = JSON.stringify(body);
+    }
+
+    const req = new Request(url, { method, headers, body: requestBody });
+    markModelOriginated(req);
+
+    // Started from outside the initiator's scopes, as the server's `fetch` is.
+    // `handleApiRequest` opens a fresh request store of its own, but
+    // `onRequestStart` runs before it does and would otherwise see the
+    // initiator's. The ORM scope is the one that matters: inside an
+    // `asSystem` block, or an `asUser` for someone else, the route's queries
+    // would skip or swap the policies a client's request would meet. The
+    // kernel scope is kept — it is the Application, not a caller.
+    return RequestContext.exit(() =>
+      ormContext.exit(() => this.handleApiRequest(req)),
+    );
   }
 }
