@@ -25,8 +25,10 @@ public struct SSEFrameDecoder: Sendable {
   private var buffer: [UInt8] = []
   /// A CR at the very end of a chunk may be half a CRLF; held back one chunk.
   private var pendingCR = false
-  /// `TextDecoder` drops a byte-order mark at the start of a byte stream.
-  private var sawBytes = false
+  /// `TextDecoder` drops a byte-order mark at the start of a byte stream, even
+  /// one split across chunks: the first bytes are held here until they either
+  /// complete the mark or cannot be one. `nil` once that is settled.
+  private var head: [UInt8]? = []
   private var lastSeq = -1
 
   public init() {}
@@ -36,9 +38,15 @@ public struct SSEFrameDecoder: Sendable {
 
   public mutating func push(_ data: Data) -> [StreamFrame] {
     var bytes = [UInt8](data)
-    if !sawBytes, !bytes.isEmpty {
-      sawBytes = true
-      if bytes.starts(with: [0xEF, 0xBB, 0xBF]) { bytes.removeFirst(3) }
+    if let held = head {
+      let bom: [UInt8] = [0xEF, 0xBB, 0xBF]
+      bytes = held + bytes
+      if bytes.count < bom.count, bom.starts(with: bytes) {
+        head = bytes
+        return []
+      }
+      head = nil
+      if bytes.starts(with: bom) { bytes.removeFirst(bom.count) }
     }
     append(bytes)
     return drain()
@@ -133,7 +141,11 @@ public struct SSEFrameDecoder: Sendable {
     return StreamFrame(seq: seq, event: event)
   }
 
-  /// `Number(id)` as JavaScript reads it, for the ids a server sends.
+  /// `Number(id)` as JavaScript reads it, for the ids a server sends: whole
+  /// numbers, in decimal or hex. The rest part ways with JavaScript — a
+  /// fractional id is truncated, and one past `Int` or written `0b`/`0o`
+  /// continues the count where `Number` would keep it — but gemi's server
+  /// only ever writes its own integer `seq`.
   private static func number(_ text: String) -> Int? {
     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
     if trimmed.isEmpty { return nil }
@@ -155,15 +167,19 @@ public func decodeSSE<Bytes: AsyncSequence & Sendable>(_ bytes: Bytes) -> AsyncT
       var decoder = SSEFrameDecoder()
       var chunk = Data()
       chunk.reserveCapacity(4096)
+      var afterCR = false
       do {
         for try await byte in bytes {
           chunk.append(byte)
-          // A frame can only complete on a newline, so there is no point
-          // handing the decoder anything that does not end in one.
-          if byte == 0x0A || chunk.count >= 4096 {
+          // A frame can only complete on a line ending, so there is no point
+          // handing the decoder anything that does not end in one. A bare CR
+          // is only known to be one when the byte after it arrives: until
+          // then it may be half a CRLF, and the decoder holds it back.
+          if byte == 0x0A || afterCR || chunk.count >= 4096 {
             for frame in decoder.push(chunk) { continuation.yield(frame) }
             chunk.removeAll(keepingCapacity: true)
           }
+          afterCR = byte == 0x0D
         }
         if !chunk.isEmpty { for frame in decoder.push(chunk) { continuation.yield(frame) } }
         for frame in decoder.flush() { continuation.yield(frame) }
