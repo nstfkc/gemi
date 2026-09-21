@@ -12,6 +12,7 @@ import { ViewRouteDispatcher } from "./ViewRouteDispatcher";
 import { Translator } from "../../i18n/Translator";
 import { app } from "../../foundation/app";
 import { markModelOriginated } from "../../http/modelOriginated";
+import { clientIp } from "../../http/RateLimitMiddleware";
 import { ormContext } from "../../orm/context";
 import { Log } from "../../facades/Log";
 import { isPolicyDeniedError } from "../../orm/errors";
@@ -497,10 +498,11 @@ export class ApiRouteDispatcher {
    * other header describes the initiator's own body and transport:
    * `content-type` would mis-parse this body, and a copied cookie jar would
    * hand the route state nobody decided to give it. `x-forwarded-for` is left
-   * behind too, which has a cost worth knowing: `RateLimitMiddleware`'s default
-   * key falls back to `unknown:<route>`, one budget shared by every in-process
-   * call. How a tool call should be limited is the RFC's open question 3, and a
-   * copied header would only have answered it by accident.
+   * behind too: it is client-written, and copying it would pass it off as part
+   * of a request the server built. The initiator's address is resolved here
+   * with `clientIp` instead and carried beside the model-originated marker, so
+   * a tool call spends the rate-limit budget of the user who started the run
+   * rather than one `unknown:<route>` budget shared by every user's agent.
    *
    * `path` is the route's path as the app routes it, without `/api`, with its
    * params filled in and any query string attached — `/42/orders?status=open`.
@@ -562,7 +564,7 @@ export class ApiRouteDispatcher {
     }
 
     const req = new Request(url, { method, headers, body: requestBody });
-    markModelOriginated(req);
+    markModelOriginated(req, clientIp(initiator));
 
     // Started from outside the initiator's scopes, as the server's `fetch` is.
     // `handleApiRequest` opens a fresh request store of its own, but
