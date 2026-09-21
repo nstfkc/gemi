@@ -61,6 +61,17 @@ export type {
   StreamQuerySummary,
 } from "./router/ServerQueryStore";
 
+// MCP: an app's exposed routes as tools. v1 is in-process only; the
+// `AgentTool` projection, `toAgentTools`, is exported from `gemi/ai`.
+export {
+  McpRegistry,
+  McpToolError,
+  type McpCaller,
+  type McpToolAnnotations,
+  type McpToolDescriptor,
+  type McpToolFilter,
+} from "./mcp/McpRegistry";
+
 // Logging
 export { LogServiceProvider } from "./logging/LogServiceProvider";
 export { LogManager } from "./logging/LogManager";
@@ -205,6 +216,7 @@ export {
   viewRouteConfigDefaults,
   type RouteConfig,
   type ApiRouteConfig,
+  type McpRouteConfig,
   type ViewRouteConfig,
 } from "./router/config";
 export {
