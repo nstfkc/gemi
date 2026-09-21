@@ -400,6 +400,35 @@ check
     },
   );
 
+program
+  .command("ai:generate-client")
+  .description(
+    "Generate an agent's tool and output types for the iOS (GemiChat) or " +
+      "Android client. Reads the agent's TypeScript types — nothing is " +
+      "imported or run — so a tool's progress is typed from what it yields",
+  )
+  .argument("<agent>", "The agent, as <file>#<export>, e.g. app/agents/support.ts#supportAgent")
+  .requiredOption("--out <dir>", "Directory to write the generated file into")
+  .requiredOption("--platform <platform>", "swift or kotlin")
+  .option("--name <name>", "Name of the generated type. Defaults to the export's name")
+  .action(
+    async (agent: string, options: { out: string; platform: string; name?: string }) => {
+      // Imported here, not at the top: it loads the TypeScript compiler, which
+      // every other command would otherwise pay for on startup.
+      const { generateClient, GenerateClientError } = await import("./ai-client/generate");
+      try {
+        const { file, warnings } = await generateClient({ agent, ...options });
+        for (const warning of warnings) console.warn(`warning: ${warning}`);
+        console.log(`Wrote ${path.relative(process.cwd(), file)}`);
+        process.exit(0);
+      } catch (error) {
+        if (!(error instanceof GenerateClientError)) throw error;
+        console.error(error.message);
+        process.exit(1);
+      }
+    },
+  );
+
 program.command("ide:generate-api-manifest").action(async () => {
   const parser = new ApiManifestGenerator();
   await parser.run("/app/http/routes/api.ts");

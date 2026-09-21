@@ -57,6 +57,7 @@
     "orm",
     "bin/migrate",
     "bin/orm",
+    "bin/ai-client",
     "auth",
     "config",
     "internal",
@@ -68,6 +69,9 @@
     "**/*.test.ts",
     "**/*.test.tsx",
     "**/*.spec.ts",
-    "**/*.spec.tsx"
+    "**/*.spec.tsx",
+    // Inputs to tests, not code: `bin/ai-client`'s fixture agents exist to be
+    // read by the generator, and emitting declarations for them is noise.
+    "**/__fixtures__/**"
   ]
 }
