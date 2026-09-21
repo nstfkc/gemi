@@ -1872,7 +1872,7 @@ The following are exported from `gemi/http` and thrown by [middleware](./middlew
 | --- | --- | --- |
 | `AuthenticationError` | 401 | No/invalid session. On a view request it redirects to `/auth/sign-in`. |
 | `AuthorizationError` | 401 | Authenticated but not allowed. |
-| `InsufficientPermissionsError` | 401 | Authenticated, lacks a specific permission. |
+| `InsufficientPermissionsError` | 403 | Authenticated, lacks a specific permission. Thrown by `Auth.guard`. |
 | `RequestBreakerError` | (custom) | Base class — extend it to define your own throw-to-respond errors with `api`/`view` payloads. |
 
 ## See also
@@ -7365,8 +7365,8 @@ current user and session.
 | Method | Returns | Description |
 | --- | --- | --- |
 | `Auth.user()` | `Promise<User>` | The authenticated user (with `.extension` from `extendSession`). **Throws `AuthenticationError` if not signed in.** |
-| `Auth.guard(fn)` | `Promise<void>` | Runs `fn(user)`; throws `InsufficientPermissionsError` if it returns falsy or throws. |
-| `Auth.guardSafe(fn)` | `Promise<boolean>` | Like `guard` but returns `true`/`false` instead of throwing. |
+| `Auth.guard(fn)` | `Promise<void>` | Runs `fn(user)`; throws `InsufficientPermissionsError` (403) if it returns falsy. With no user it throws `AuthenticationError` (401) before `fn` runs; an error `fn` throws propagates unchanged. |
+| `Auth.guardSafe(fn)` | `Promise<boolean>` | Like `guard` but returns `true`/`false` instead of throwing; an error `fn` throws counts as `false`. |
 | `Auth.authenticate(email)` | `Promise<session>` | Programmatically sign a user in — creates the session and sets the cookie. |
 | `Auth.createMagicLink(email)` | `Promise<{ user, email, token, pin } \| {}>` | Mint a magic-link token + PIN (see above). |
 
@@ -7654,7 +7654,8 @@ export const isOrgOwner = (orgId: string) => (user: any) =>
 ```
 
 `Auth.guard` takes `(user: User) => boolean | Promise<boolean>` and throws
-`InsufficientPermissionsError` when the predicate returns falsy or throws.
+`InsufficientPermissionsError` (403) when the predicate returns falsy. An error the predicate
+throws — a failed query, say — propagates as itself rather than becoming a 403.
 
 ```typescript
 // in a controller
@@ -7713,7 +7714,7 @@ don't construct them yourself; they are thrown for you by the middleware / facad
 | --- | --- | --- |
 | `AuthenticationError` | `401` `{ error: "Authentication error" }` | `302` redirect to `/auth/sign-in` |
 | `AuthorizationError` | `401` `{ error }` (default `"Not authorized"`) | (none) |
-| `InsufficientPermissionsError` | `401` `{ error }` (default `"Insufficient permissions"`) | (none) |
+| `InsufficientPermissionsError` | `403` `{ error }` (default `"Insufficient permissions"`) | `403` |
 
 - **`AuthenticationError`** — "you are not signed in." Thrown by the `auth` middleware and by
   `Auth.user()` when there is no session. For view routes it redirects to the sign-in page
@@ -7735,10 +7736,11 @@ async function update() {
 }
 ```
 
-> **Note:** All three currently produce a `401` on API routes. Choose the type by intent —
-> `AuthenticationError` when identity is missing (and you want the view redirect),
-> `AuthorizationError` / `InsufficientPermissionsError` when the identity is known but the
-> action is refused.
+> **Note:** `InsufficientPermissionsError` answers `403`, the same status as an ORM policy
+> denial; `AuthenticationError` and `AuthorizationError` answer `401`. A client that treats a
+> `401` as "session expired, sign in again" should see `403` for a signed-in user who lacks a
+> role, so throw `InsufficientPermissionsError` when the identity is known and the action is
+> refused, and `AuthenticationError` when identity is missing (and you want the view redirect).
 
 ## Related
 
@@ -8362,8 +8364,8 @@ const mail = app(MailManager); // typed MailManager
 `Auth` reads and authorizes the current user from the request's `access_token` cookie. It fronts `AuthManager` (token `auth`), configured by `app/config/auth.ts`.
 
 - `Auth.user()` — `Promise<User>`. Resolves the authenticated user, or throws `AuthenticationError` if there is none.
-- `Auth.guard(fn)` — `Promise<void>`. Runs `fn(user)`; throws `InsufficientPermissionsError` if it returns falsy or throws.
-- `Auth.guardSafe(fn)` — `Promise<boolean>`. Same check, but returns `true`/`false` instead of throwing.
+- `Auth.guard(fn)` — `Promise<void>`. Runs `fn(user)`; throws `InsufficientPermissionsError` (403) if it returns falsy. With no user it throws `AuthenticationError` (401); an error `fn` throws propagates unchanged.
+- `Auth.guardSafe(fn)` — `Promise<boolean>`. Same check, but returns `true`/`false` instead of throwing; an error `fn` throws counts as `false`.
 - `Auth.authenticate(email)` — creates a session for the given email.
 - `Auth.createMagicLink(email)` — issues a magic-link token.
 

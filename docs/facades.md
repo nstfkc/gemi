@@ -76,8 +76,8 @@ const mail = app(MailManager); // typed MailManager
 `Auth` reads and authorizes the current user from the request's `access_token` cookie. It fronts `AuthManager` (token `auth`), configured by `app/config/auth.ts`.
 
 - `Auth.user()` — `Promise<User>`. Resolves the authenticated user, or throws `AuthenticationError` if there is none.
-- `Auth.guard(fn)` — `Promise<void>`. Runs `fn(user)`; throws `InsufficientPermissionsError` if it returns falsy or throws.
-- `Auth.guardSafe(fn)` — `Promise<boolean>`. Same check, but returns `true`/`false` instead of throwing.
+- `Auth.guard(fn)` — `Promise<void>`. Runs `fn(user)`; throws `InsufficientPermissionsError` (403) if it returns falsy. With no user it throws `AuthenticationError` (401); an error `fn` throws propagates unchanged.
+- `Auth.guardSafe(fn)` — `Promise<boolean>`. Same check, but returns `true`/`false` instead of throwing; an error `fn` throws counts as `false`.
 - `Auth.authenticate(email)` — creates a session for the given email.
 - `Auth.createMagicLink(email)` — issues a magic-link token.
 
