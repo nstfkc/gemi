@@ -243,6 +243,10 @@ describe("createFlatApiRoutes - route source", () => {
     class Root extends ApiRouter {
       routes = {
         "/health": this.get(() => ({ ok: true })),
+        // A `function` has a prototype, so it passes the controller check.
+        "/ping": this.get(function () {
+          return { ok: true };
+        }),
         "/upstream": this.proxy("https://example.com"),
         "/reports": this.post(ReportController, "export"),
       };
@@ -251,6 +255,7 @@ describe("createFlatApiRoutes - route source", () => {
     const routes = createFlatApiRoutes(new Root().routes);
 
     expect("source" in routes["/health"].GET).toBe(false);
+    expect("source" in routes["/ping"].GET).toBe(false);
     for (const method of ["GET", "POST", "PUT", "DELETE"]) {
       expect("source" in routes["/upstream"][method]).toBe(false);
     }
