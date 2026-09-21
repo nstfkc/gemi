@@ -47,6 +47,74 @@ export type InProcessMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
  */
 const ACCESS_TOKEN = "access_token";
 
+/**
+ * The same response, with a body that calls `end` once when it is read to the
+ * end, errors, or is cancelled — Bun cancels it when the client disconnects.
+ * Once, and not once per path: a cancel lands while a read is in flight, and
+ * that read then finishes too.
+ *
+ * Status, status text and every header are carried over, `Set-Cookie`s the
+ * context merged in included. A body nobody reads or cancels never ends; the
+ * server always does one or the other, and the store is collected with it.
+ */
+function endWhenBodyEnds(response: Response, end: () => void): Response {
+  const reader = response.body!.getReader();
+  let ended = false;
+  const endOnce = () => {
+    if (ended) {
+      return;
+    }
+    ended = true;
+    end();
+  };
+
+  const body = new ReadableStream<Uint8Array>(
+    {
+      async pull(controller) {
+        let chunk: Awaited<ReturnType<typeof reader.read>>;
+        try {
+          chunk = await reader.read();
+        } catch (err) {
+          endOnce();
+          controller.error(err);
+          return;
+        }
+        if (chunk.done) {
+          // Before close(), so whoever reads to the end finds the request
+          // over — `onRequestEnd` has run by the time they see `done`.
+          endOnce();
+          try {
+            controller.close();
+          } catch {
+            // Already cancelled; the cancel path has ended it.
+          }
+          return;
+        }
+        try {
+          controller.enqueue(chunk.value);
+        } catch {
+          // Cancelled while this read was in flight.
+        }
+      },
+      async cancel(reason) {
+        try {
+          await reader.cancel(reason);
+        } finally {
+          endOnce();
+        }
+      },
+    },
+    // Read the handler's stream only as fast as the client does.
+    { highWaterMark: 0 },
+  );
+
+  return new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
+}
+
 export class ApiRouteDispatcher {
   static token = "router.api";
 
@@ -222,6 +290,10 @@ export class ApiRouteDispatcher {
    * requests. `ctx` is passed rather than read so a caller that ends the
    * request later, outside the request's async scope, can still reach it.
    *
+   * Work handed to `ctx.waitUntil` — an agent run the client may have left —
+   * holds both back until it settles. With none, the end is not deferred, as
+   * it always was, so a plain JSON response has ended before it is returned.
+   *
    * The hook is awaited, since destroy() empties the store it reads from, and
    * a hook that fails is logged rather than thrown: it must not turn the
    * response it was told about into a 500, nor skip the destroy() after it.
@@ -231,17 +303,47 @@ export class ApiRouteDispatcher {
     httpRequest: HttpRequest,
     path: string,
   ) {
-    try {
-      if (!this.isFrameworkRoute(path)) {
-        await this.onRequestEnd(httpRequest);
+    const end = async () => {
+      try {
+        if (!this.isFrameworkRoute(path)) {
+          await this.onRequestEnd(httpRequest);
+        }
+      } catch (err) {
+        Log.error(err?.message ?? 'Error in "onRequestEnd" event handler', {
+          err: JSON.stringify(err),
+        });
+      } finally {
+        ctx.destroy();
       }
-    } catch (err) {
-      Log.error(err?.message ?? 'Error in "onRequestEnd" event handler', {
-        err: JSON.stringify(err),
-      });
-    } finally {
-      ctx.destroy();
+    };
+    if (!ctx.hasPendingWork()) {
+      await end();
+      return;
     }
+    void ctx
+      .whenIdle()
+      .then(end)
+      .catch((err) => {
+        // The response is long gone; there is no one left to answer a 500 to.
+        console.error(err);
+      });
+  }
+
+  /**
+   * Whether a handler's Response is still running code after it is returned.
+   * A body with no declared length is: an SSE stream, an agent run, anything
+   * built on a `ReadableStream`, all of which may read `req.ctx()` between
+   * chunks. A declared `Content-Length` means the bytes were decided before
+   * the handler returned — every sized file `this.stream()` serves has one —
+   * and those are left alone, because wrapping a body costs it that header:
+   * Bun sends any stream body chunked, and a file then loses its length and
+   * the server's sendfile path. The only way to see a body end is to wrap it,
+   * and Bun gives no way to tell a stream body from a string or a Blob, so a
+   * handler's own `new Response("…")` is wrapped too; its end then waits for
+   * the body to be read.
+   */
+  private isOpenEndedBody(response: Response) {
+    return response.body !== null && !response.headers.has("Content-Length");
   }
 
   async handleApiRequest(req: Request) {
@@ -287,6 +389,14 @@ export class ApiRouteDispatcher {
         // ctx.setHeaders (CORS, Cache-Control) and any Set-Cookie. The
         // response's own headers win; the context only fills gaps.
         const response = this.mergeContextIntoResponse(data, headers, cookies);
+        if (this.isOpenEndedBody(response)) {
+          // Ended by its body rather than here: a streaming agent route
+          // returns before any of its tools run, and ending now would destroy
+          // the `user` every one of them reads.
+          return endWhenBodyEnds(response, () =>
+            this.endRequest(ctx, httpRequest, path),
+          );
+        }
         await this.endRequest(ctx, httpRequest, path);
         return response;
       }
