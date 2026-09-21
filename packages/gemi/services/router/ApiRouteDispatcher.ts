@@ -16,6 +16,7 @@ import { clientIp } from "../../http/RateLimitMiddleware";
 import { ormContext } from "../../orm/context";
 import { Log } from "../../facades/Log";
 import { isPolicyDeniedError } from "../../orm/errors";
+import { apiPath } from "./apiPath";
 import { policyDeniedResponse } from "./policyDenied";
 
 class DebugRouter extends ApiRouter {
@@ -178,16 +179,16 @@ export class ApiRouteDispatcher {
   public getRouteHandlerAndParams(req: Request) {
     const url = new URL(req.url);
 
-    const apiPath = url.pathname.replace("/api", "");
+    const routePath = apiPath(url.pathname);
 
     let params: Record<string, any> = {};
     let path: string;
     for (const [_path] of Object.entries(this.flatRoutes)) {
       try {
         const pattern = new URLPattern({ pathname: _path });
-        if (pattern.test({ pathname: apiPath })) {
+        if (pattern.test({ pathname: routePath })) {
           path = _path;
-          params = pattern.exec({ pathname: apiPath })?.pathname.groups!;
+          params = pattern.exec({ pathname: routePath })?.pathname.groups!;
           break;
         }
       } catch (err) {
