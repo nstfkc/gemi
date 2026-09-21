@@ -3488,3 +3488,286 @@ describe("a file the user attached, and its attachment id", () => {
     expect(user.content[2]).not.toHaveProperty("fileId");
   });
 });
+
+describe("ctx.turn: the files of the turn a tool call answers", () => {
+  /** A tool that writes down what `ctx.turn` said, every time it runs. */
+  function watchingTool(name: string, seen: (readonly string[])[]) {
+    return makerTool(name, async (ctx) => {
+      seen.push(ctx.turn.attachments);
+      return { saw: ctx.turn.attachments };
+    });
+  }
+
+  /** Upserts by id, the way a thread store does between turns. */
+  const upsert = (prior: AgentMessage[], produced: AgentMessage[]) => {
+    const merged = [...prior];
+    for (const message of produced) {
+      const at = merged.findIndex((held) => held.id === message.id);
+      if (at >= 0) merged[at] = message;
+      else merged.push(message);
+    }
+    return merged;
+  };
+
+  test("lists the user's attachment ids, in order, once each, and only ids of gemi's shape", async () => {
+    const seen: (readonly string[])[] = [];
+    const tool = watchingTool("look", seen);
+    const provider = fakeProvider([toolCall("c1", "look", {}), finish()], [finish()]);
+    const agent = Agent.create({ name: "shop", provider, tools: [tool] });
+    await agent
+      .stream({
+        messages: [],
+        req,
+        turn: {
+          text: "use these",
+          files: [
+            { fileId: "file_9", attachmentId: "gemi_att_a", name: "a.png", mimeType: "image/png" },
+            { attachmentId: "gemi_att_b", name: "b.csv", mimeType: "text/csv" },
+            // A provider-only upload has no gemi id, so there is nothing to list.
+            { fileId: "file_10", name: "c.png", mimeType: "image/png" },
+            { attachmentId: "gemi_att_a", name: "a.png", mimeType: "image/png" },
+          ],
+        },
+      })
+      .result();
+
+    expect(seen).toEqual([["gemi_att_a", "gemi_att_b"]]);
+    // Read-only in fact, not only in the type: a tool that sorted or spliced
+    // it in place would change what the next tool of the same call sees.
+    expect(Object.isFrozen(seen[0])).toBe(true);
+  });
+
+  test("an id not of gemi's shape in a posted history is left out", async () => {
+    const seen: (readonly string[])[] = [];
+    const tool = watchingTool("look", seen);
+    const provider = fakeProvider([toolCall("c1", "look", {}), finish()], [finish()]);
+    const agent = Agent.create({ name: "shop", provider, tools: [tool] });
+    const history: AgentMessage[] = [
+      {
+        id: "u1",
+        role: "user",
+        content: [
+          { type: "file", fileId: "file_1", attachmentId: "file_1" },
+          { type: "file", fileId: "file_2", attachmentId: 7 as any },
+          { type: "file", attachmentId: "gemi_att_ok" },
+        ],
+        createdAt: new Date().toISOString(),
+      },
+    ];
+    await agent.stream({ messages: history, req }).result();
+    expect(seen).toEqual([["gemi_att_ok"]]);
+  });
+
+  test("is the latest turn, not the thread: a text-only turn after an upload lists nothing", async () => {
+    const seen: (readonly string[])[] = [];
+    const tool = watchingTool("look", seen);
+    const provider = fakeProvider([toolCall("c1", "look", {}), finish()], [finish()]);
+    const agent = Agent.create({ name: "shop", provider, tools: [tool] });
+    const history: AgentMessage[] = [
+      {
+        id: "u1",
+        role: "user",
+        content: [{ type: "file", attachmentId: "gemi_att_old", name: "old.png" }],
+        createdAt: new Date().toISOString(),
+      },
+      {
+        id: "a1",
+        role: "assistant",
+        content: [{ type: "text", text: "got it" }],
+        createdAt: new Date().toISOString(),
+        finishReason: "stop",
+      },
+    ];
+    await agent.stream({ messages: history, req, turn: { text: "now make it blue" } }).result();
+    expect(seen).toEqual([[]]);
+  });
+
+  test("a file a tool showed is not the user's upload to the next tool", async () => {
+    const { scoped } = scopedFor();
+    const seen: (readonly string[])[] = [];
+    const render = makerTool("render", async (ctx) => {
+      const attachment = await ctx.attachments.put(png(), { name: "chart.png", showModel: true });
+      return { attachmentId: attachment.id };
+    });
+    const look = watchingTool("look", seen);
+    const provider = fakeProvider(
+      [toolCall("c1", "render", {}), finish()],
+      [toolCall("c2", "look", {}), finish()],
+      [finish()],
+    );
+    const agent = Agent.create({ name: "designer", provider, tools: [render, look] });
+    const result = await agent
+      .stream({
+        messages: [],
+        req,
+        attachments: scoped,
+        turn: { text: "chart this", files: [{ attachmentId: "gemi_att_data", name: "d.csv" }] },
+      })
+      .result();
+
+    // The injected message is a user-role message with an `attachmentId`, and
+    // it sits between the upload and the call that reads `ctx.turn` — so the
+    // latest user message at that point is the tool's, not the user's.
+    const users = result.messages.filter((message) => message.role === "user");
+    expect(users).toHaveLength(2);
+    expect(filePartsOf([users[1]])[0].attachmentId).toMatch(/^gemi_att_/);
+    expect(seen).toEqual([["gemi_att_data"]]);
+  });
+
+  test("a re-entered tool sees the same list on every attempt, though a later turn carried files", async () => {
+    // The hazard the anchor exists for. The sub-agent asks twice. Turn two
+    // answers the first question AND uploads a new file; the re-entered tool
+    // asks again, so its call stays open and turn two's user message lands
+    // AFTER it. On turn three the latest user message is turn two's, and a
+    // list computed as "latest" would hand the tool a different file than the
+    // one it started on.
+    const asking = askingAgent(
+      "reviewer",
+      "ship it?",
+      [toolCall("s2", "ask", { question: "really?" }), finish()],
+      [{ type: "text-delta", delta: "shipped" }, finish()],
+    );
+    const seen: (readonly string[])[] = [];
+    const plan = nestingTool("plan", async (ctx) => {
+      seen.push(ctx.turn.attachments);
+      const review = await ctx.runAgent(asking.agent, { prompt: "review it" });
+      return { saw: ctx.turn.attachments, reviewed: textOf(review.messages.at(-1)!) };
+    });
+
+    const agentWith = (...scripts: ProviderEvent[][]) =>
+      Agent.create({ name: "lead", provider: fakeProvider(...scripts), tools: [plan] });
+
+    const run1 = agentWith([toolCall("c1", "plan", {}), finish()]).stream({
+      messages: [],
+      req,
+      turn: { text: "ship this", files: [{ attachmentId: "gemi_att_first", name: "a.png" }] },
+    });
+    const { events: events1, done: done1 } = collect(run1);
+    const first = await run1.result();
+    await done1;
+    expect(first.finishReason).toBe("awaiting-input");
+    const awaiting1 = events1.find((event) => event.type === "awaiting-input") as any;
+
+    const run2 = agentWith().stream({
+      messages: first.messages,
+      req,
+      turn: {
+        files: [{ attachmentId: "gemi_att_second", name: "b.png" }],
+        toolResults: [
+          {
+            toolCallId: "s1",
+            path: awaiting1.pending[0].path,
+            signature: awaiting1.pending[0].signature,
+            output: { answer: "yes" },
+          },
+        ],
+      },
+    });
+    const { events: events2, done: done2 } = collect(run2);
+    const second = await run2.result();
+    await done2;
+    expect(second.finishReason).toBe("awaiting-input");
+    const history2 = upsert(first.messages, second.messages);
+
+    // The premise, checked rather than assumed: the call is still open and the
+    // newest user message is turn two's, below it.
+    const callAt = history2.findIndex((message) =>
+      message.content.some((part) => part.type === "tool-call"),
+    );
+    const lastUser = history2.findLastIndex((message) => message.role === "user");
+    expect(lastUser).toBeGreaterThan(callAt);
+    expect(filePartsOf([history2[lastUser]])[0].attachmentId).toBe("gemi_att_second");
+
+    const awaiting2 = events2.find((event) => event.type === "awaiting-input") as any;
+    const third = await agentWith([{ type: "text-delta", delta: "done" }, finish()])
+      .stream({
+        messages: history2,
+        req,
+        turn: {
+          toolResults: [
+            {
+              toolCallId: "s2",
+              path: awaiting2.pending[0].path,
+              signature: awaiting2.pending[0].signature,
+              output: { answer: "yes" },
+            },
+          ],
+        },
+      })
+      .result();
+
+    expect(seen).toEqual([["gemi_att_first"], ["gemi_att_first"], ["gemi_att_first"]]);
+    expect(partsOf(third.messages, "tool-result")[0]).toMatchObject({
+      toolCallId: "c1",
+      status: "ok",
+      output: { saw: ["gemi_att_first"], reviewed: "shipped" },
+    });
+  });
+
+  test("an id from someone else's upload is listed as posted, and still does not resolve", async () => {
+    // A stateless client posts its history back, so the ids in it are its own
+    // say-so. Listing one grants nothing: `ctx.attachments` is scoped to the
+    // request, and the foreign id fails there like an id the model made up.
+    const store = new MemoryAttachmentStore();
+    const storage = new FakeStorage();
+    const mine = new ScopedAttachments(store, storage as any, { key: "user:u1" });
+    const theirs = new ScopedAttachments(store, storage as any, { key: "user:u2" });
+    const own = await mine.put(png("mine"), { name: "mine.png", mimeType: "image/png" });
+    const foreign = await theirs.put(png("theirs"), { name: "theirs.png", mimeType: "image/png" });
+
+    const read: string[] = [];
+    const listed: (readonly string[])[] = [];
+    const tool = makerTool("use", async (ctx) => {
+      listed.push(ctx.turn.attachments);
+      for (const id of ctx.turn.attachments) {
+        read.push(await (await ctx.attachments.file(id)).text());
+      }
+      return { read };
+    });
+    const provider = fakeProvider([toolCall("c1", "use", {}), finish()], [finish()]);
+    const agent = Agent.create({ name: "shop", provider, tools: [tool] });
+    const result = await agent
+      .stream({
+        messages: [],
+        req,
+        attachments: mine,
+        turn: {
+          files: [
+            { attachmentId: own.id, name: "mine.png" },
+            { attachmentId: foreign.id, name: "theirs.png" },
+          ],
+        },
+      })
+      .result();
+
+    // Listed: the list is what the history says, not a permission.
+    expect(listed).toEqual([[own.id, foreign.id]]);
+    const failed = partsOf(result.messages, "tool-result")[0];
+    // The own file resolved, and the foreign one threw inside the tool.
+    expect(read).toEqual(["mine"]);
+    expect(failed.status).toBe("error");
+    expect(failed.error.message).toContain(foreign.id);
+  });
+
+  test("inside a sub-run, the turn is the sub-run's own and the parent's upload is not inherited", async () => {
+    const seen: (readonly string[])[] = [];
+    const inner = watchingTool("look", seen);
+    const subProvider = fakeProvider([toolCall("i1", "look", {}), finish()], [finish()]);
+    const sub = Agent.create({ name: "helper", provider: subProvider, tools: [inner] });
+    const outer = nestingTool("delegate", async (ctx) => {
+      seen.push(ctx.turn.attachments);
+      await ctx.runAgent(sub, { prompt: "look" });
+      return "ok";
+    });
+    const provider = fakeProvider([toolCall("c1", "delegate", {}), finish()], [finish()]);
+    const agent = Agent.create({ name: "lead", provider, tools: [outer] });
+    await agent
+      .stream({
+        messages: [],
+        req,
+        turn: { text: "go", files: [{ attachmentId: "gemi_att_parent", name: "p.png" }] },
+      })
+      .result();
+    expect(seen).toEqual([["gemi_att_parent"], []]);
+  });
+});
