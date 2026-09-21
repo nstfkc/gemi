@@ -14,8 +14,10 @@ import { Controller } from "../../http/Controller";
 import { HttpRequest } from "../../http/HttpRequest";
 import { RequestContext } from "../../http/requestContext";
 import { ViewRouter } from "../../http/ViewRouter";
+import { Middleware } from "../../http/Middleware";
 import { Kernel } from "../../kernel";
 import { isSystemScope, runAsSystem, runAsUser } from "../../orm/context";
+import { PolicyDeniedError } from "../../orm/errors";
 import { applyPolicies, currentUser, policyContext } from "../../orm/policy";
 import { ServiceProvider } from "../../support/ServiceProvider";
 import { ApiRouteDispatcher } from "./ApiRouteDispatcher";
@@ -60,6 +62,13 @@ function readOrders() {
   return { orders: [] };
 }
 
+/** A middleware that reads orders, the way a membership check might. */
+class OrdersMiddleware extends Middleware {
+  run() {
+    readOrders();
+  }
+}
+
 class UploadRequest extends HttpRequest<{ image: File; title: string }, {}> {
   schema = {
     image: { required: "Image is required", file: "Image must be a file" },
@@ -83,6 +92,7 @@ class ProductController extends Controller {
 let inside: (req: HttpRequest<any, any>) => Promise<unknown> = async () => ({});
 const started: { path: string; modelOriginated: boolean; store: unknown }[] = [];
 const ended: string[] = [];
+const failed: { path: string; error: unknown }[] = [];
 
 class RootApiRouter extends ApiRouter {
   routes = {
@@ -100,6 +110,17 @@ class RootApiRouter extends ApiRouter {
     }).middleware(["auth"]),
     "/orders": this.get(() => readOrders()).middleware(["auth"]),
     "/public-orders": this.get(() => readOrders()),
+    // A denial thrown by a second copy of `gemi/orm`: the same name and shape,
+    // a different class object, so `instanceof` alone would miss it.
+    "/other-copy-orders": this.get(() => {
+      const error = new Error("Order.findMany was denied by Order's policy.");
+      error.name = "PolicyDeniedError";
+      throw error;
+    }),
+    "/boom": this.get(() => {
+      throw new Error("connection refused");
+    }),
+    "/orders-by-middleware": this.get(() => ({ orders: [] })).middleware(["auth", "orders"]),
     "/products": this.post(ProductController, "create").middleware(["auth"]),
     "/sets-cookie": this.post(() => {
       const req = new HttpRequest<any, any>();
@@ -114,7 +135,7 @@ class RootApiRouter extends ApiRouter {
 class AppKernel extends Kernel {
   protected providers = [StubAuthProvider];
   config = {
-    middleware: { aliases: { auth: AuthenticationMiddleware } },
+    middleware: { aliases: { auth: AuthenticationMiddleware, orders: OrdersMiddleware } },
     route: {
       api: {
         rootRouter: RootApiRouter,
@@ -133,6 +154,9 @@ class AppKernel extends Kernel {
         },
         onRequestEnd: (req: HttpRequest) => {
           ended.push(new URL(req.rawRequest.url).pathname);
+        },
+        onRequestFail: (req: HttpRequest, error: unknown) => {
+          failed.push({ path: new URL(req.rawRequest.url).pathname, error });
         },
       },
       view: {
@@ -174,6 +198,7 @@ async function snapshot(res: Response) {
 beforeEach(() => {
   started.length = 0;
   ended.length = 0;
+  failed.length = 0;
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
@@ -230,18 +255,13 @@ describe("dispatchAs", () => {
 
   test("a policy that denies the user denies the in-process call too", async () => {
     const bob = { Cookie: "access_token=tok-bob" };
-    await expect(direct("/orders", { headers: bob })).rejects.toMatchObject({
-      name: "PolicyDeniedError",
-      reason: "denied",
-    });
+    const viaHttp = await snapshot(await direct("/orders", { headers: bob }));
+    expect(viaHttp).toEqual({ status: 403, body: { error: { message: "Forbidden" } } });
 
     const { result } = await fromAgent(bob, async (req, dispatcher) =>
-      dispatcher.dispatchAs(req, "GET", "/orders").then(
-        () => null,
-        (error) => error,
-      ),
+      snapshot(await dispatcher.dispatchAs(req, "GET", "/orders")),
     );
-    expect(result).toMatchObject({ name: "PolicyDeniedError", reason: "denied" });
+    expect(result).toEqual(viaHttp);
 
     const alice = await fromAgent({ Cookie: "access_token=tok-alice" }, async (req, dispatcher) =>
       snapshot(await dispatcher.dispatchAs(req, "GET", "/orders")),
@@ -333,10 +353,7 @@ describe("dispatchAs", () => {
 
         const inner = await dispatcher.dispatchAs(req, "POST", "/sets-cookie", {});
         // An unguarded route: the initiator's resolved user must not carry over.
-        const unguarded = await dispatcher.dispatchAs(req, "GET", "/public-orders").then(
-          () => null,
-          (error) => error,
-        );
+        const unguarded = await dispatcher.dispatchAs(req, "GET", "/public-orders");
 
         return {
           sameStore: RequestContext.getStore() === ctx,
@@ -356,7 +373,8 @@ describe("dispatchAs", () => {
     expect(result.outerInnerHeader).toBeNull();
     expect(result.innerSetCookie).toEqual([expect.stringMatching(/^inner=1;/)]);
     expect(result.innerHeader).toBe("1");
-    expect(result.unguarded).toMatchObject({ name: "PolicyDeniedError", reason: "no-user" });
+    expect(result.unguarded.status).toBe(403);
+    expect(failed.at(-1)!.error).toMatchObject({ name: "PolicyDeniedError", reason: "no-user" });
 
     expect(outer.headers.getSetCookie()).toEqual([expect.stringMatching(/^outer=1;/)]);
     expect(outer.headers.get("X-Inner")).toBeNull();
@@ -367,16 +385,16 @@ describe("dispatchAs", () => {
       { Cookie: "access_token=tok-alice" },
       async (req, dispatcher) =>
         runAsSystem(() =>
-          dispatcher.dispatchAs(req, "GET", "/public-orders").then(
-            (res) => res.status,
-            (error) => error,
-          ),
+          dispatcher.dispatchAs(req, "GET", "/public-orders").then((res) => res.status),
         ),
     );
 
     // A client's request to this unguarded route has no user and is denied.
     // Under the initiator's system scope it would have read unscoped.
-    expect(result).toMatchObject({ name: "PolicyDeniedError", reason: "no-user" });
+    expect(result).toBe(403);
+    expect(failed.map(({ error }) => error)).toEqual([
+      expect.objectContaining({ name: "PolicyDeniedError", reason: "no-user" }),
+    ]);
   });
 
   test("an asUser block for someone else around the call does not swap the route's user", async () => {
@@ -424,5 +442,66 @@ describe("dispatchAs", () => {
     );
 
     expect(result.status).toBe(200);
+  });
+});
+
+describe("a policy denial", () => {
+  const bob = { Cookie: "access_token=tok-bob" };
+
+  test("answers 403 with no policy text in the body", async () => {
+    const res = await direct("/orders", { headers: bob });
+    const text = await res.text();
+
+    expect(res.status).toBe(403);
+    expect(res.headers.get("Content-Type")).toBe("application/json");
+    expect(JSON.parse(text)).toEqual({ error: { message: "Forbidden" } });
+    expect(text).not.toMatch(/Order|policy/);
+  });
+
+  test("hands onRequestFail the original error", async () => {
+    await direct("/orders", { headers: bob });
+
+    expect(failed).toHaveLength(1);
+    expect(failed[0]!.path).toBe("/api/orders");
+    expect(failed[0]!.error).toBeInstanceOf(PolicyDeniedError);
+    expect(failed[0]!.error).toMatchObject({
+      reason: "denied",
+      message: "Order.findMany was denied by Order's policy.",
+    });
+  });
+
+  test("with no user is a 403 too, and says nothing about asSystem", async () => {
+    const res = await direct("/public-orders");
+    const text = await res.text();
+
+    expect(res.status).toBe(403);
+    expect(text).not.toMatch(/asSystem|Order/);
+    expect(failed[0]!.error).toMatchObject({ name: "PolicyDeniedError", reason: "no-user" });
+  });
+
+  test("from another copy of the ORM is matched by its name", async () => {
+    const res = await direct("/other-copy-orders");
+
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: { message: "Forbidden" } });
+    expect(failed[0]!.error).not.toBeInstanceOf(PolicyDeniedError);
+  });
+
+  test("in a middleware answers 403 as well", async () => {
+    const res = await direct("/orders-by-middleware", { headers: bob });
+
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: { message: "Forbidden" } });
+    expect(failed[0]!.error).toMatchObject({ name: "PolicyDeniedError", reason: "denied" });
+
+    const alice = await direct("/orders-by-middleware", {
+      headers: { Cookie: "access_token=tok-alice" },
+    });
+    expect(alice.status).toBe(200);
+  });
+
+  test("is the only throw answered this way", async () => {
+    await expect(direct("/boom")).rejects.toThrow("connection refused");
+    expect(failed.map(({ path }) => path)).toEqual(["/api/boom"]);
   });
 });
