@@ -6,7 +6,10 @@
  * alternative and it is forgeable by construction: anything the synthetic
  * request can carry, a real client can send. Only a module holding this set can
  * add to it, and it is deliberately not re-exported from `http/index.ts`, so no
- * inbound request — and no app code — can put itself here.
+ * inbound request can put itself here. The only writer is
+ * `ApiRouteDispatcher.dispatchAs`, and it marks only the requests it built.
+ * App code can call `dispatchAs` — it is trusted — but cannot mark a request of
+ * its own.
  *
  * The object, rather than a flag on the request context, because the two
  * places an app asks the question sit on either side of `RequestContext.run`:
