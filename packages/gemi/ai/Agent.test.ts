@@ -3563,7 +3563,7 @@ describe("ctx.turn: the files of the turn a tool call answers", () => {
     expect(seen).toEqual([["gemi_att_ok"]]);
   });
 
-  test("is the latest turn, not the thread: a text-only turn after an upload lists nothing", async () => {
+  test("is the call's own turn, not the thread: a text-only turn after an upload lists nothing", async () => {
     const seen: (readonly string[])[] = [];
     const tool = watchingTool("look", seen);
     const provider = fakeProvider([toolCall("c1", "look", {}), finish()], [finish()]);
