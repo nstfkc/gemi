@@ -4,6 +4,7 @@ import type { RateLimitResult } from "../services/rate-limiter/types";
 import { RequestBreakerError } from "./Error";
 import type { HttpRequest } from "./HttpRequest";
 import { Middleware } from "./Middleware";
+import { dispatchedClientAddress } from "./modelOriginated";
 
 export class RateLimitExceededError extends RequestBreakerError {
   constructor(result?: RateLimitResult) {
@@ -51,6 +52,19 @@ export interface RateLimitMiddlewareConfig {
    * RateLimitMiddleware.configure({
    *   limit: 60,
    *   key: (req) => `user:${req.ctx().user?.id ?? clientIp(req)}`,
+   * })
+   * ```
+   *
+   * A model's tool call (`ApiRouteDispatcher.dispatchAs`) spends the same
+   * budget as the user's own requests by default: `clientIp` answers the
+   * address of the request that started the run. To give model traffic a
+   * budget of its own, key on `req.isModelOriginated()`, which no client can
+   * set:
+   *
+   * ```ts
+   * RateLimitMiddleware.configure({
+   *   key: (req) =>
+   *     `${req.isModelOriginated() ? "model" : "direct"}:${clientIp(req)}:${req.routePath}`,
    * })
    * ```
    */
@@ -139,6 +153,12 @@ function resolveLimiter(): RateLimiter | null {
  * something better (a session, an API key), pass `key` in the config.
  */
 export function clientIp(req: HttpRequest) {
+  // A tool call's synthetic request has no forwarding headers; it spends the
+  // budget of the user whose run made it. Checked first so a nested dispatch
+  // keeps the address of the request that started the chain.
+  const dispatched = dispatchedClientAddress(req.rawRequest);
+  if (dispatched !== undefined) return dispatched;
+
   const forwardedFor = req.headers.get("x-forwarded-for");
   if (forwardedFor) {
     const [client] = forwardedFor.split(",");
