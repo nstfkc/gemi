@@ -26,12 +26,12 @@ export type McpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
  * the model sends under its name is dropped before the url is built.
  *
  * It is handed the run's request, not a tool context, so the same binder
- * keeps meaning something for a caller that is not an agent run. A binder
- * that needs the user should resolve it from the request's credentials rather
- * than from `req.ctx()`: that store belongs to the request that started the
- * run, and `handleApiRequest` destroys it — `user` included — as soon as a
- * handler returns a `Response`, which a streaming agent route does long before
- * its tools run.
+ * keeps meaning something for a caller that is not an agent run. A binder may
+ * read the user as `req.ctx().user`: that is the store of the request that
+ * started the run, and it stays open until the run settles — through a
+ * streamed response, and after the client has disconnected, since leaving does
+ * not stop the run. `user` is whatever that route's middleware set, so the
+ * route that starts the run must be behind `auth` for it to be there.
  */
 export type McpParamBinder = (
   req: HttpRequest<any, any>,
