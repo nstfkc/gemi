@@ -3092,6 +3092,33 @@ describe("a file a tool asks the model to look at", () => {
     expect(second.map((part) => part.fileId).sort()).toEqual(["file_1", "user_upload_1"]);
   });
 
+  // `attach()` answers an `attachmentId`, and `useChat` spreads a `turn.files`
+  // entry onto its local user message whole, which a stateless client posts
+  // back as history. So a user's upload can look exactly like an injected part,
+  // and keying the window on the part would drop it here.
+  test("a user's file that carries an attachment id is still never trimmed", async () => {
+    const { scoped } = scopedFor();
+    const tool = makerTool("render", async (ctx) => {
+      const attachment = await ctx.attachments.put(png(), { showModel: true });
+      return { attachmentId: attachment.id };
+    });
+    const provider = fakeProvider([toolCall("c1", "render", {}), finish()], [finish()]);
+    const agent = Agent.create({ name: "designer", provider, tools: [tool] });
+    const posted: AgentMessage = {
+      id: "u_local",
+      role: "user",
+      content: [
+        { type: "text", text: "fix this" },
+        { type: "file", fileId: "user_upload_1", name: "photo.jpg", attachmentId: "gemi_att_user" },
+      ],
+      createdAt: new Date().toISOString(),
+    };
+    await agent.stream({ messages: [posted], req, attachments: scoped }).result();
+
+    const second = filePartsOf(provider.calls[1].messages);
+    expect(second.map((part) => part.fileId).sort()).toEqual(["file_1", "user_upload_1"]);
+  });
+
   test("reaches `onMessage` in the order the transcript has it", async () => {
     const { scoped } = scopedFor();
     const reported: AgentMessage[] = [];
