@@ -82,6 +82,7 @@ class ProductController extends Controller {
 
 let inside: (req: HttpRequest<any, any>) => Promise<unknown> = async () => ({});
 const started: { path: string; modelOriginated: boolean; store: unknown }[] = [];
+const ended: string[] = [];
 
 class RootApiRouter extends ApiRouter {
   routes = {
@@ -130,6 +131,9 @@ class AppKernel extends Kernel {
             store,
           });
         },
+        onRequestEnd: (req: HttpRequest) => {
+          ended.push(new URL(req.rawRequest.url).pathname);
+        },
       },
       view: {
         root: createRoot(() => createElement("div")),
@@ -169,6 +173,7 @@ async function snapshot(res: Response) {
 
 beforeEach(() => {
   started.length = 0;
+  ended.length = 0;
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
@@ -289,6 +294,16 @@ describe("dispatchAs", () => {
     // It starts where a client's request starts: with no request store yet,
     // rather than inside the initiator's.
     expect(started[1]!.store).toBeUndefined();
+  });
+
+  test("a query that mentions /__gemi__ does not keep the call out of the lifecycle hooks", async () => {
+    const { result } = await fromAgent({ Cookie: "access_token=tok-alice" }, async (req, dispatcher) =>
+      snapshot(await dispatcher.dispatchAs(req, "GET", "/me?note=/__gemi__")),
+    );
+
+    expect(result).toEqual({ status: 200, body: { id: 1, modelOriginated: true } });
+    expect(started.map(({ path }) => path)).toEqual(["/api/agent", "/api/me"]);
+    expect(ended).toEqual(["/api/me", "/api/agent"]);
   });
 
   test("an inbound request cannot mark itself model-originated", async () => {
