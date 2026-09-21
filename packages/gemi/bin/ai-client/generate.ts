@@ -1,6 +1,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { GenerateClientError, extractAgent, loadTypeScript, parseAgentReference } from "./extract";
+import { renderKotlin } from "./kotlin";
 import { renderSwift } from "./swift";
 
 export { GenerateClientError } from "./extract";
@@ -16,6 +17,8 @@ export type GenerateClientOptions = {
   platform: string;
   /** The generated type's name. Defaults to the export's, pascal-cased. */
   name?: string;
+  /** The Kotlin package the file declares. Required for Kotlin. */
+  package?: string;
   cwd?: string;
 };
 
@@ -27,19 +30,22 @@ export async function generateClient(
 ): Promise<GenerateClientResult> {
   const cwd = options.cwd ?? process.cwd();
   const platform = parsePlatform(options.platform);
-  if (platform === "kotlin") {
+  if (platform === "kotlin" && !options.package) {
     throw new GenerateClientError(
-      "--platform kotlin is not available yet: the Kotlin client it would target has not " +
-        "shipped. Swift is ready.",
+      "--platform kotlin needs --package, the package the generated file declares " +
+        "(e.g. --package com.example.app.chat).",
     );
   }
   const ts = await loadTypeScript(cwd);
   const model = extractAgent(ts, parseAgentReference(options.agent), { cwd, name: options.name });
 
   const directory = path.resolve(cwd, options.out);
-  const file = path.join(directory, `${model.name}.swift`);
+  const file = path.join(directory, `${model.name}.${platform === "swift" ? "swift" : "kt"}`);
   mkdirSync(directory, { recursive: true });
-  writeFileSync(file, renderSwift(model));
+  writeFileSync(
+    file,
+    platform === "swift" ? renderSwift(model) : renderKotlin(model, options.package!),
+  );
   return { file, warnings: model.warnings };
 }
 
