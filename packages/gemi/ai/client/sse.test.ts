@@ -1,5 +1,12 @@
+import { join } from "node:path";
 import { describe, expect, test } from "vitest";
-import { decodeSSE, SSEFrameDecoder } from "./sse";
+import { recordDecoder } from "./conformance";
+import { decodeSSE } from "./sse";
+
+// Every decoder below is recorded into `__fixtures__/sse.json`, which the
+// Swift and Kotlin clients replay — see `conformance.ts`.
+const SSEFrameDecoder = recordDecoder(join(import.meta.dirname, "__fixtures__/sse.json"));
+type SSEFrameDecoder = InstanceType<typeof SSEFrameDecoder>;
 
 /**
  * A realistic wire fixture, including the three things a hand-rolled parser
