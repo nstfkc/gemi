@@ -119,7 +119,8 @@ export const isOrgOwner = (orgId: string) => (user: any) =>
 ```
 
 `Auth.guard` takes `(user: User) => boolean | Promise<boolean>` and throws
-`InsufficientPermissionsError` when the predicate returns falsy or throws.
+`InsufficientPermissionsError` (403) when the predicate returns falsy. An error the predicate
+throws — a failed query, say — propagates as itself rather than becoming a 403.
 
 ```typescript
 // in a controller
@@ -178,7 +179,7 @@ don't construct them yourself; they are thrown for you by the middleware / facad
 | --- | --- | --- |
 | `AuthenticationError` | `401` `{ error: "Authentication error" }` | `302` redirect to `/auth/sign-in` |
 | `AuthorizationError` | `401` `{ error }` (default `"Not authorized"`) | (none) |
-| `InsufficientPermissionsError` | `401` `{ error }` (default `"Insufficient permissions"`) | (none) |
+| `InsufficientPermissionsError` | `403` `{ error }` (default `"Insufficient permissions"`) | `403` |
 
 - **`AuthenticationError`** — "you are not signed in." Thrown by the `auth` middleware and by
   `Auth.user()` when there is no session. For view routes it redirects to the sign-in page
@@ -200,10 +201,11 @@ async function update() {
 }
 ```
 
-> **Note:** All three currently produce a `401` on API routes. Choose the type by intent —
-> `AuthenticationError` when identity is missing (and you want the view redirect),
-> `AuthorizationError` / `InsufficientPermissionsError` when the identity is known but the
-> action is refused.
+> **Note:** `InsufficientPermissionsError` answers `403`, the same status as an ORM policy
+> denial; `AuthenticationError` and `AuthorizationError` answer `401`. A client that treats a
+> `401` as "session expired, sign in again" should see `403` for a signed-in user who lacks a
+> role, so throw `InsufficientPermissionsError` when the identity is known and the action is
+> refused, and `AuthenticationError` when identity is missing (and you want the view redirect).
 
 ## Related
 

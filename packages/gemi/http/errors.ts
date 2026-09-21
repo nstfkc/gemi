@@ -4,8 +4,8 @@ import { formatUnsatisfiedContentRange } from "./range";
 export class AuthorizationError extends RequestBreakerError {
   private error: string;
   constructor(error: string = "Not authorized") {
-    super("Authentication error");
-    this.name = "AuthenticationError";
+    super(error);
+    this.name = "AuthorizationError";
     this.error = error;
     this.payload = {
       api: {
@@ -17,18 +17,29 @@ export class AuthorizationError extends RequestBreakerError {
   }
 }
 
+/**
+ * A signed-in user who is not allowed to do this. Thrown by `Auth.guard()`.
+ *
+ * 403, not 401: a 401 tells the client to re-authenticate, so a client that
+ * sends a 401 to the sign-in page would loop a signed-in user without the role
+ * straight back to where they started. It is also the status a policy denial
+ * answers, and the two are the same refusal. A request with no user at all is
+ * `AuthenticationError`, which stays 401.
+ */
 export class InsufficientPermissionsError extends RequestBreakerError {
   private error: string;
   constructor(error: string = "Insufficient permissions") {
-    super("Authentication error");
-    this.name = "AuthenticationError";
+    super(error);
+    this.name = "InsufficientPermissionsError";
     this.error = error;
     this.payload = {
       api: {
-        status: 401,
+        status: 403,
         data: { error: this.error },
       },
-      view: {},
+      // Without a status a view request would fall through to the
+      // dispatcher's 400 default.
+      view: { status: 403 },
     };
   }
 }

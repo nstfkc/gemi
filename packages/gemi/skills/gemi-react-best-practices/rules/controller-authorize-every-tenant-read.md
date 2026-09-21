@@ -14,7 +14,7 @@ do this, and they compose:
 1. **Middleware**, for the coarse gate on the whole router (`"auth"`, `"admin"`,
    `"org"`, `"role:owner"`). This is where a whole surface is fenced off.
 2. **`Auth.guard(predicate)`** in a controller, for a per-action decision. It throws
-   `InsufficientPermissionsError` on a falsy result; `Auth.guardSafe` returns a
+   `InsufficientPermissionsError` (403) on a falsy result; `Auth.guardSafe` returns a
    boolean instead.
 3. **An ORM policy** on the model — a `scope` that narrows every query, including
    nested `include`s.

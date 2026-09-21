@@ -178,7 +178,7 @@ The following are exported from `gemi/http` and thrown by [middleware](./middlew
 | --- | --- | --- |
 | `AuthenticationError` | 401 | No/invalid session. On a view request it redirects to `/auth/sign-in`. |
 | `AuthorizationError` | 401 | Authenticated but not allowed. |
-| `InsufficientPermissionsError` | 401 | Authenticated, lacks a specific permission. |
+| `InsufficientPermissionsError` | 403 | Authenticated, lacks a specific permission. Thrown by `Auth.guard`. |
 | `RequestBreakerError` | (custom) | Base class — extend it to define your own throw-to-respond errors with `api`/`view` payloads. |
 
 ## See also

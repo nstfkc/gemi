@@ -51,17 +51,15 @@ export class Auth extends Facade {
   static async guard(
     fn: (user: User) => Promise<boolean> | boolean,
   ): Promise<void> {
+    // With no user this throws `AuthenticationError` (401, and a redirect to
+    // sign-in for a view), before `fn` ever runs. Only a known user can be
+    // refused with the 403 below.
     const user = await Auth.user();
 
-    if (!user) {
-      throw new InsufficientPermissionsError();
-    }
-
-    try {
-      if (!(await fn(user))) {
-        throw new InsufficientPermissionsError();
-      }
-    } catch (err) {
+    // An error thrown by `fn` propagates as itself. Turning it into a 403 would
+    // report a database outage to the client as "you may not do this" and hide
+    // it from `onRequestFail`; it still refuses the request either way.
+    if (!(await fn(user))) {
       throw new InsufficientPermissionsError();
     }
   }

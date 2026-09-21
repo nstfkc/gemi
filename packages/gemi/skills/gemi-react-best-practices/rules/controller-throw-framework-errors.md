@@ -18,7 +18,7 @@ and the failure disappears.
 | `ValidationError({ field: ["msg"] })` | 400, per-field messages `<ValidationErrors>` renders |
 | `AuthenticationError` | 401 — no identity (views redirect to sign-in) |
 | `AuthorizationError("msg")` | 401 — known identity, refused this action |
-| `InsufficientPermissionsError` | 401 — missing a role or permission |
+| `InsufficientPermissionsError` | 403 — missing a role or permission |
 
 **Incorrect (a 200 that the client cannot distinguish from success):**
 
