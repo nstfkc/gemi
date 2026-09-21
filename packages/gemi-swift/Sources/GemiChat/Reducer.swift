@@ -76,10 +76,14 @@ public struct ChatState: Hashable, Sendable {
   }
 
   public static func timestamp(_ date: Date = Date()) -> String {
-    let formatter = ISO8601DateFormatter()
-    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    return formatter.string(from: date)
+    date.formatted(iso8601)
   }
+
+  /// `toISOString()`'s format. Kept rather than built per call: `apply` asks
+  /// for a timestamp on every frame, and an `ISO8601DateFormatter` a frame
+  /// cost more than the reduce. Milliseconds are truncated, as `Date.now()`
+  /// truncates them.
+  private static let iso8601 = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
 }
 
 // MARK: - reduce
