@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useChat, type ChatStatus } from "gemi/ai/client";
-import { usePost } from "gemi/client";
+import { usePost, useUser } from "gemi/client";
 import { PlusIcon } from "lucide-react";
 
 import { Badge } from "@/app/views/components/ui/badge";
@@ -12,6 +12,7 @@ import { ErrorBanner } from "@/app/views/components/chat/ErrorBanner";
 import { LoadedTools } from "@/app/views/components/chat/LoadedTools";
 import { PendingPanel } from "@/app/views/components/chat/PendingPanel";
 import { Transcript } from "@/app/views/components/chat/Transcript";
+import { threadStorageKey } from "@/app/views/components/chat/threadStorage";
 import type { SupportMessage } from "@/app/views/components/chat/types";
 
 /**
@@ -31,11 +32,9 @@ type StoredThread = {
   cursor?: { runId: string; seq: number };
 };
 
-const STORAGE_KEY = "agentic-saas.support-thread";
-
-function readStoredThread(): StoredThread | null {
+function readStoredThread(key: string): StoredThread | null {
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
+    const raw = window.localStorage.getItem(key);
     if (!raw) return null;
     const stored = JSON.parse(raw) as StoredThread;
     return stored.threadId ? stored : null;
@@ -46,23 +45,27 @@ function readStoredThread(): StoredThread | null {
   }
 }
 
-function writeStoredThread(thread: StoredThread) {
+function writeStoredThread(key: string, thread: StoredThread) {
   try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(thread));
+    window.localStorage.setItem(key, JSON.stringify(thread));
   } catch {
     // Same bargain in the other direction: over quota is not worth a crash.
   }
 }
 
-function clearStoredThread() {
+function clearStoredThread(key: string) {
   try {
-    window.localStorage.removeItem(STORAGE_KEY);
+    window.localStorage.removeItem(key);
   } catch {
     // Nothing to do; the id it holds is already known to be dead.
   }
 }
 
 export default function Chat() {
+  const { user } = useUser();
+  // Null until the user is known, and nothing is read or minted before then:
+  // the stored thread belongs to a person, not to the browser.
+  const storageKey = user ? threadStorageKey(String(user.publicId ?? user.id)) : null;
   const [thread, setThread] = useState<StoredThread | null>(null);
   const [mintFailed, setMintFailed] = useState(false);
 
@@ -80,8 +83,9 @@ export default function Chat() {
   mint.current = trigger;
 
   const start = useCallback(async () => {
+    if (!storageKey) return;
     setMintFailed(false);
-    const stored = readStoredThread();
+    const stored = readStoredThread(storageKey);
     if (stored) {
       setThread(stored);
       return;
@@ -92,25 +96,25 @@ export default function Chat() {
       return;
     }
     const fresh: StoredThread = { threadId: created.threadId, messages: [] };
-    writeStoredThread(fresh);
+    writeStoredThread(storageKey, fresh);
     setThread(fresh);
-  }, []);
+  }, [storageKey]);
 
   const opened = useRef(false);
   useEffect(() => {
     // Once, even though React runs a mount effect twice in development: the
     // second pass would mint a second thread and abandon the first, and an
     // abandoned thread is a conversation the user cannot get back to.
-    if (opened.current) return;
+    if (!storageKey || opened.current) return;
     opened.current = true;
     void start();
-  }, [start]);
+  }, [start, storageKey]);
 
   const restart = useCallback(() => {
-    clearStoredThread();
+    if (storageKey) clearStoredThread(storageKey);
     setThread(null);
     void start();
-  }, [start]);
+  }, [start, storageKey]);
 
   if (mintFailed) {
     return (
@@ -123,7 +127,7 @@ export default function Chat() {
     );
   }
 
-  if (!thread) return <ThreadSkeleton />;
+  if (!thread || !storageKey) return <ThreadSkeleton />;
 
   /*
     Keyed by the thread, so a restart really is a fresh hook: `useChat` probes
@@ -131,10 +135,25 @@ export default function Chat() {
     refresh, and re-probing whenever it changed would race a stream already
     running on it — so a new id has to arrive with a new mount.
   */
-  return <SupportThread key={thread.threadId} thread={thread} onRestart={restart} />;
+  return (
+    <SupportThread
+      key={thread.threadId}
+      thread={thread}
+      storageKey={storageKey}
+      onRestart={restart}
+    />
+  );
 }
 
-function SupportThread({ thread, onRestart }: { thread: StoredThread; onRestart: () => void }) {
+function SupportThread({
+  thread,
+  storageKey,
+  onRestart,
+}: {
+  thread: StoredThread;
+  storageKey: string;
+  onRestart: () => void;
+}) {
   const {
     messages,
     status,
@@ -162,14 +181,14 @@ function SupportThread({ thread, onRestart }: { thread: StoredThread; onRestart:
   });
 
   useEffect(() => {
-    writeStoredThread({
+    writeStoredThread(storageKey, {
       threadId: thread.threadId,
       messages,
       // Undefined until a run has named itself, and the pair means nothing
       // until then — there is no run to resume.
       ...(cursor.runId ? { cursor: { runId: cursor.runId, seq: cursor.seq } } : {}),
     });
-  }, [thread.threadId, messages, cursor.runId, cursor.seq]);
+  }, [storageKey, thread.threadId, messages, cursor.runId, cursor.seq]);
 
   /**
    * Retry, on both shapes a failure takes.
