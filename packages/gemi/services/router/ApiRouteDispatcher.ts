@@ -13,6 +13,7 @@ import { Translator } from "../../i18n/Translator";
 import { app } from "../../foundation/app";
 import { markModelOriginated } from "../../http/modelOriginated";
 import { ormContext } from "../../orm/context";
+import { Log } from "../../facades/Log";
 
 class DebugRouter extends ApiRouter {
   routes = {
@@ -220,17 +221,27 @@ export class ApiRouteDispatcher {
    * left request logging with a start and no end for exactly the rejected
    * requests. `ctx` is passed rather than read so a caller that ends the
    * request later, outside the request's async scope, can still reach it.
+   *
+   * The hook is awaited, since destroy() empties the store it reads from, and
+   * a hook that fails is logged rather than thrown: it must not turn the
+   * response it was told about into a 500, nor skip the destroy() after it.
    */
-  private endRequest(
+  private async endRequest(
     ctx: ReturnType<typeof RequestContext.getStore>,
     httpRequest: HttpRequest,
     path: string,
   ) {
-    if (!this.isFrameworkRoute(path)) {
-      // Before destroy(), which empties the store the hook reads from.
-      this.onRequestEnd(httpRequest);
+    try {
+      if (!this.isFrameworkRoute(path)) {
+        await this.onRequestEnd(httpRequest);
+      }
+    } catch (err) {
+      Log.error(err?.message ?? 'Error in "onRequestEnd" event handler', {
+        err: JSON.stringify(err),
+      });
+    } finally {
+      ctx.destroy();
     }
-    ctx.destroy();
   }
 
   async handleApiRequest(req: Request) {
@@ -261,7 +272,7 @@ export class ApiRouteDispatcher {
       const middlewareResponse = await this.runRouteMiddleware(path, httpRequest);
 
       if (middlewareResponse instanceof Response) {
-        this.endRequest(ctx, httpRequest, path);
+        await this.endRequest(ctx, httpRequest, path);
         return middlewareResponse;
       }
       const data = await this.getRouteData(path);
@@ -276,7 +287,7 @@ export class ApiRouteDispatcher {
         // ctx.setHeaders (CORS, Cache-Control) and any Set-Cookie. The
         // response's own headers win; the context only fills gaps.
         const response = this.mergeContextIntoResponse(data, headers, cookies);
-        this.endRequest(ctx, httpRequest, path);
+        await this.endRequest(ctx, httpRequest, path);
         return response;
       }
 
@@ -284,7 +295,7 @@ export class ApiRouteDispatcher {
 
       cookies.forEach((cookie) => headers.append("Set-Cookie", cookie.toString()));
 
-      this.endRequest(ctx, httpRequest, path);
+      await this.endRequest(ctx, httpRequest, path);
 
       return new Response(JSON.stringify(data), {
         headers,
