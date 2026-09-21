@@ -117,6 +117,8 @@ struct SupportView: View {
 
 `ChatSession` is `@MainActor` and `@Observable`, so a SwiftUI view re-renders as frames arrive. `messages` is the transcript as the server sent it. `toolCalls(in:)`, `toolResults(in:)`, `typedPending` and `output(of:)` read it through the generated types.
 
+For a fuller screen — every content part, typed progress and results, approvals and questions, uploads, persistence, structured output and the untyped session — see [`packages/gemi-swift/Examples/SupportChatExample.swift`](https://github.com/nstfkc/gemi/blob/main/packages/gemi-swift/Examples/SupportChatExample.swift).
+
 A question tool's answer is typed by the tool's output schema, so an answer of the wrong shape doesn't compile:
 
 ```swift
