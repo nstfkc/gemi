@@ -145,7 +145,10 @@ export class McpRegistry {
 
   constructor(
     router: McpRouter<any>,
-    private readonly dispatcher: Pick<ApiRouteDispatcher, "flatRoutes" | "dispatchAs">,
+    private readonly dispatcher: Pick<
+      ApiRouteDispatcher,
+      "flatRoutes" | "dispatchAs" | "getRouteHandlerAndParams"
+    >,
   ) {
     for (const [name, declaration] of Object.entries(router.routes ?? {})) {
       this.plans.set(name, this.plan(name, declaration));
@@ -213,6 +216,17 @@ export class McpRegistry {
     const input = parsed.value;
 
     const path = await this.fillPath(plan, input, caller.req);
+
+    // The dispatcher routes `path` afresh and takes the first route that
+    // matches it, so a model's "archive-all" for `/products/:id` would reach a
+    // `/products/archive-all` declared above it — a route the app never
+    // exposed, behind none of this tool's approval or annotations.
+    const { path: matched } = this.dispatcher.getRouteHandlerAndParams(
+      new Request(`http://gemi.internal/api${path}`),
+    );
+    if (matched !== descriptor.url) {
+      throw new McpToolError(`"${name}" has nothing at ${path}.`, 404);
+    }
 
     const json: Record<string, unknown> = {};
     for (const key of plan.jsonKeys) {
