@@ -271,7 +271,8 @@ export class ApiRouteDispatcher {
 
   /**
    * Copies request-context headers and cookies onto a Response a handler built
-   * itself, without disturbing what the handler already set.
+   * itself, or a middleware's break or policy 403, without disturbing what that
+   * Response already set.
    */
   private mergeContextIntoResponse(
     response: Response,
@@ -437,12 +438,19 @@ export class ApiRouteDispatcher {
       const middlewareResponse = await this.runRouteMiddleware(path, httpRequest);
 
       if (middlewareResponse instanceof Response) {
-        // Ended like a handler's Response below, but returned as is: no
-        // context headers or cookies merged. So a breaker or policy 403 from a
-        // middleware after `cors` lacks its CORS headers. Known gap, shared by
-        // both.
+        // A breaker's or a policy denial's Response carries what the earlier
+        // middleware put on the context, as a handler's does. Returned as is,
+        // a 401 or 429 after `cors` had no CORS headers, so the browser
+        // reported an opaque CORS failure instead of the status, and a
+        // Set-Cookie set before the break was lost. Merged before the end,
+        // which destroys the context's headers and cookies.
+        const response = this.mergeContextIntoResponse(
+          middlewareResponse,
+          ctx.headers,
+          ctx.cookies,
+        );
         await this.endRequest(ctx, httpRequest, path);
-        return middlewareResponse;
+        return response;
       }
       const data = await this.getRouteData(path);
 
