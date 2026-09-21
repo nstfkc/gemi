@@ -1,4 +1,5 @@
 import { AgentTool, s } from "gemi/ai";
+import type { ToolContext } from "gemi/ai";
 
 /**
  * Every body in this file is a deterministic fake over the table below: no
@@ -17,25 +18,49 @@ const ORDERS: Record<
   ord_2001: { customer: "cus_gus", totalCents: 8900, status: "delivered", placedAt: "2025-01-28" },
 };
 
+/**
+ * The customer the signed-in user is, read from the request and never from
+ * the model.
+ *
+ * Every tool below is scoped by this, because the model's arguments are
+ * whatever the conversation talked it into: a customer who types "refund
+ * ord_2001" is asking about somebody else's order, and a tool that takes the
+ * id on trust hands it over. So the customer is not an input at all, and an
+ * order that is not theirs answers exactly like one that does not exist.
+ *
+ * The template has no customer table, so every account is `cus_ada`; `cus_gus`
+ * is there to be the order that is not yours. A real app looks up the customer
+ * row for `req.ctx().user` here.
+ */
+export function customerOf(ctx: ToolContext): string {
+  if (!ctx.req.ctx()?.user) {
+    throw new Error("Only a signed-in customer's orders can be read.");
+  }
+  return "cus_ada";
+}
+
+function ownOrder(ctx: ToolContext, orderId: string) {
+  const order = ORDERS[orderId];
+  return order && order.customer === customerOf(ctx) ? order : undefined;
+}
+
 export const lookupOrdersTool = AgentTool.create({
   name: "lookupOrders",
-  description:
-    "List the order ids belonging to a customer. Start here when you only have a customer.",
-  inputSchema: s.object({
-    // The only prose the model gets about this field, so it says what an id
-    // looks like rather than restating the field name.
-    customerId: s.string().describe("The customer's id, e.g. cus_ada"),
-  }),
+  description: "List the order ids belonging to the customer you are talking to. Start here.",
+  inputSchema: s.object({}),
   outputSchema: s.object({ orderIds: s.array(s.string()) }),
-  // An unknown customer comes back empty instead of throwing. An empty list is
-  // something the model can act on — ask for a different id, or tell the person
-  // there is nothing on file — whereas a failure only tells it the tool broke,
-  // and its next move is usually to call the same tool again.
-  execute: async (input) => ({
-    orderIds: Object.entries(ORDERS)
-      .filter(([, order]) => order.customer === input.customerId)
-      .map(([orderId]) => orderId),
-  }),
+  // No orders comes back empty instead of throwing. An empty list is something
+  // the model can act on — tell the person there is nothing on file — whereas a
+  // failure only tells it the tool broke, and its next move is usually to call
+  // the same tool again.
+  execute: async (_input, ctx) => {
+    const customer = customerOf(ctx);
+    return {
+      orderIds: Object.entries(ORDERS)
+        .filter(([, order]) => order.customer === customer)
+        .map(([orderId]) => orderId),
+    };
+  },
 });
 
 export const orderDetailTool = AgentTool.create({
@@ -51,8 +76,8 @@ export const orderDetailTool = AgentTool.create({
   // tool result the model reads and recovers from. So the sentence is written
   // for the model — it names the tool that produces real ids — rather than for
   // a log, which is where an id-not-found message usually ends up being aimed.
-  execute: async (input) => {
-    const order = ORDERS[input.orderId];
+  execute: async (input, ctx) => {
+    const order = ownOrder(ctx, input.orderId);
     if (!order) {
       throw new Error(
         `There is no order ${input.orderId}. Call lookupOrders for this customer's real ids.`,
@@ -65,8 +90,8 @@ export const orderDetailTool = AgentTool.create({
 export const issueRefundTool = AgentTool.create({
   name: "issueRefund",
   description:
-    "Refund part or all of an order. A human approves every call before it runs, so propose one " +
-    "when the policy allows it rather than asking the customer to wait for a colleague.",
+    "Refund part or all of one of this customer's orders. The customer confirms every call " +
+    "before it runs, so propose one only when the refund policy allows it.",
   inputSchema: s.object({
     orderId: s.string(),
     amountCents: s
@@ -88,10 +113,35 @@ export const issueRefundTool = AgentTool.create({
   // so a replayed approval is refused instead of paying the refund twice. That
   // guarantee lives in the framework, not in this body, which is why the body
   // is allowed to be a plain non-idempotent write.
+  //
+  // WHO APPROVES is the person at the keyboard, which here is the customer.
+  // That makes the approval consent, not oversight: it proves the customer saw
+  // this exact refund, and nothing about whether they should get it. So the
+  // limits the policy cares about are checked below, in the body, where no
+  // answer from the browser can reach them. An app that wants a supervisor to
+  // rule on refunds routes the pending call to them from `onAwaitingInput` and
+  // has them answer it instead.
   requiresApproval: true,
-  execute: async (input) => ({
-    refundId: `rf_${input.orderId.slice(4)}_${input.amountCents}`,
-  }),
+  execute: async (input, ctx) => {
+    const order = ownOrder(ctx, input.orderId);
+    if (!order) {
+      throw new Error(
+        `There is no order ${input.orderId}. Call lookupOrders for this customer's real ids.`,
+      );
+    }
+    if (order.status === "refunded") {
+      throw new Error(`${input.orderId} has already been refunded.`);
+    }
+    if (!Number.isInteger(input.amountCents) || input.amountCents <= 0) {
+      throw new Error("A refund is a positive whole number of cents.");
+    }
+    if (input.amountCents > order.totalCents) {
+      throw new Error(
+        `${input.orderId} totals ${order.totalCents} cents; a refund cannot be more than that.`,
+      );
+    }
+    return { refundId: `rf_${input.orderId.slice(4)}_${input.amountCents}` };
+  },
 });
 
 export const runDiagnosticsTool = AgentTool.create({
@@ -112,9 +162,9 @@ export const runDiagnosticsTool = AgentTool.create({
   // progress for `orderDetail` does not compile. That is what stops a client
   // shipping a progress renderer for a tool that can never produce a frame to
   // put in it.
-  execute: async function* (input) {
+  execute: async function* (input, ctx) {
     yield { line: `Reading ${input.orderId}` };
-    const order = ORDERS[input.orderId];
+    const order = ownOrder(ctx, input.orderId);
     if (!order) {
       return { summary: `There is no order ${input.orderId}, so nothing was checked.`, checks: 0 };
     }

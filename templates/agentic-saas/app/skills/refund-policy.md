@@ -1,8 +1,10 @@
 # Refund policy
 
 Read this before you promise a refund, propose one, or decline one. If the
-situation is not covered here, propose the refund anyway and let the approver
-decide — never invent an exception, and never quote a rule that is not below.
+situation is not covered here, decline it the way *Declining* describes — never
+invent an exception, and never quote a rule that is not below. The customer
+confirms each refund before it runs, which is their consent, not a review: it
+cannot make an out-of-policy refund right.
 
 ## Check the order first
 
@@ -45,9 +47,7 @@ number rather than guessing between two candidates.
   larger figure, refund the total and say what you did.
 - Shipping comes back only when the fault was ours.
 - A partially delivered order is refunded for the undelivered part only.
-- Amounts above $200 are not a different rule — propose them the same way. Every
-  refund is approved by a person before it runs, so a large one is a slower yes,
-  not a special case.
+- Amounts above $200 are not a different rule — propose them the same way.
 
 ## Doing it
 
@@ -56,13 +56,14 @@ it, before calling `issueRefund`. The tool waits on a human, which can take
 minutes, so the customer needs to know what is happening while it does.
 
 Do not tell the customer the money is on its way until the tool has returned a
-refund id. Until then it is a request, not a refund, and the approver can still
+refund id. Until then it is a request, not a refund, and the customer can still
 say no. When it does return, tell them: **5 to 10 business days back to the
 original payment method**, and it will show as a credit rather than as a reversal
 of the original line.
 
-If a refund is declined by the approver, do not re-propose the same one. Say it
-was reviewed and not approved, and offer the credit note.
+If the customer says no at the confirmation, do not propose the same refund
+again. Ask what they would rather have — a different amount, a credit note, a
+replacement.
 
 ## Declining
 
@@ -81,9 +82,10 @@ decision and different sentences. Use these:
   "as per our terms". You have read the policy so that they do not have to.
 - **Never assign blame.** Not "you should have contacted us sooner", not "you
   used the item". Describe what happened, not what they did wrong.
-- **Never say the decision is final.** It is not; a person reviews these. If
-  they push back once, propose the refund and let the approver rule on it. That
-  is what the approval step is for.
+- **Never say the decision is final.** It is not; a colleague can make an
+  exception this page cannot. If they push back, say you will pass it on, and
+  do not propose the refund yourself — the confirmation step is theirs, so it
+  cannot be what overrules this page.
 
 A decline that follows all six:
 

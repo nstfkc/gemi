@@ -298,9 +298,9 @@ function StatusBadge({ status }: { status: ChatStatus }) {
 /** The tools are fakes with canned data, so the suggestions name the ids they
  *  know about — a demo that returns "no such order" teaches nothing. */
 const SUGGESTIONS = [
-  "What did customer cus_ada order?",
-  "Run diagnostics on ord_2001 and tell me what is wrong",
-  "Refund ord_2001 in full, it arrived broken",
+  "What have I ordered?",
+  "Run diagnostics on ord_1002 and tell me what is wrong",
+  "Refund ord_1001 in full, it arrived broken",
 ];
 
 function EmptyState({ onPick }: { onPick: (text: string) => void }) {
