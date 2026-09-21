@@ -49,3 +49,8 @@ packages/gemi/.publish/
 .build
 .swiftpm
 Package.resolved
+
+# Gradle (packages/gemi-kotlin)
+.gradle
+.kotlin
+local.properties
