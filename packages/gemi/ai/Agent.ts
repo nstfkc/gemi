@@ -1544,6 +1544,12 @@ class AgentRunImpl implements AgentRun<ToolShapes, unknown> {
     // it, so nothing may depend on someone being attached — a client that
     // never reads still gets its tools run and its messages persisted.
     this.settled = this.execute();
+    // And the request that started it stays open until it settles. Its tools
+    // read the user from that request's context, and a client that leaves
+    // mid-run cancels the response body without stopping the run — ending the
+    // request there would take the user away from step four's tool call.
+    // `ctx()` is the ambient request store: undefined outside a request.
+    params.req?.ctx?.()?.waitUntil(this.settled);
   }
 
   // --- event plumbing ----------------------------------------------------
