@@ -3,6 +3,8 @@ plugins {
   alias(libs.plugins.kotlin.compose)
 }
 
+group = "dev.gemijs"
+
 android {
   namespace = "dev.gemijs.chat.compose"
   // 35, not higher, so an app need not raise its own: OkHttp 5.4 and later
