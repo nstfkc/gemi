@@ -3491,8 +3491,9 @@ describe("a file the user attached, and its attachment id", () => {
 
 describe("ctx.turn: the files of the turn a tool call answers", () => {
   /** A tool that writes down what `ctx.turn` said, every time it runs. */
-  function watchingTool(name: string, seen: (readonly string[])[]) {
+  function watchingTool(name: string, seen: (readonly string[])[], turns: object[] = []) {
     return makerTool(name, async (ctx) => {
+      turns.push(ctx.turn);
       seen.push(ctx.turn.attachments);
       return { saw: ctx.turn.attachments };
     });
@@ -3511,7 +3512,8 @@ describe("ctx.turn: the files of the turn a tool call answers", () => {
 
   test("lists the user's attachment ids, in order, once each, and only ids of gemi's shape", async () => {
     const seen: (readonly string[])[] = [];
-    const tool = watchingTool("look", seen);
+    const turns: object[] = [];
+    const tool = watchingTool("look", seen, turns);
     const provider = fakeProvider([toolCall("c1", "look", {}), finish()], [finish()]);
     const agent = Agent.create({ name: "shop", provider, tools: [tool] });
     await agent
@@ -3535,6 +3537,9 @@ describe("ctx.turn: the files of the turn a tool call answers", () => {
     // Read-only in fact, not only in the type: a tool that sorted or spliced
     // it in place would change what the next tool of the same call sees.
     expect(Object.isFrozen(seen[0])).toBe(true);
+    // And the object holding it: a tool that reassigned `attachments` would
+    // hand the next tool of the same call a list the history never had.
+    expect(Object.isFrozen(turns[0])).toBe(true);
   });
 
   test("an id not of gemi's shape in a posted history is left out", async () => {
