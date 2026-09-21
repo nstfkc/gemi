@@ -471,7 +471,12 @@ public final class ChatSession<Agent: AgentSchema> {
     let boundary = "gemi-\(UUID().uuidString)"
     var form = Data()
     form.append(Data("--\(boundary)\r\n".utf8))
-    let disposition = "Content-Disposition: form-data; name=\"file\"; filename=\"\(name)\"\r\n"
+    // Escaped as `FormData` escapes it: a quote would end the filename early,
+    // and a line break would start a header of the file's own choosing.
+    let filename = name.replacingOccurrences(of: "\"", with: "%22")
+      .replacingOccurrences(of: "\r", with: "%0D")
+      .replacingOccurrences(of: "\n", with: "%0A")
+    let disposition = "Content-Disposition: form-data; name=\"file\"; filename=\"\(filename)\"\r\n"
     form.append(Data(disposition.utf8))
     form.append(Data("Content-Type: \(mimeType)\r\n\r\n".utf8))
     form.append(data)
@@ -559,11 +564,7 @@ func httpError(_ response: ChatResponse) async -> AgentError {
   if let data = try? await response.data(), let json = JSONValue.parse(data) {
     message = json["error"]?["message"]?.stringValue ?? json["message"]?.stringValue ?? message
     // The one server code an app can act on: the thread it holds is gone.
-    if json["error"]?["code"]?.stringValue == "thread_not_found"
-      || json["code"]?.stringValue == "thread_not_found"
-    {
-      code = "thread_not_found"
-    }
+    if json["error"]?["code"]?.stringValue == "thread_not_found" { code = "thread_not_found" }
   }
   return AgentError(
     code: code, message: message,
