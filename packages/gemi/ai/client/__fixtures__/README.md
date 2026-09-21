@@ -5,6 +5,13 @@ suites of their own. Every call `reducer.test.ts` and `sse.test.ts` make is
 recorded here with what it returned (see `../conformance.ts`), so a native port
 has passed exactly when it gives the TypeScript answer to every case.
 
+The exception is the `decodeSSE` tests in `sse.test.ts`. `decodeSSE` drives its
+own decoder over a `ReadableStream`, so they are not recorded, and what they
+check is the stream wrapper rather than the decoding: a missing body is an
+empty stream, breaking out of the loop cancels the stream, and the decoder is
+flushed when the stream ends. A port's wrapper around its platform's byte
+stream needs its own tests for those.
+
 Regenerate after a deliberate change to the reducer, the decoder or their tests:
 
 ```sh
@@ -16,17 +23,19 @@ A normal run fails if the files are stale, so a behaviour change cannot reach
 the native clients unannounced.
 
 Both files are `{ "version": 1, "source": "<test file>", "cases": [...] }`, one
-case per line. `test` on each case is the `describe > test` name that made the
-call first — identical calls are kept once — and is only there to name a
-failure.
+case per line, sorted, so the file does not depend on the order the tests ran
+in. `test` on each case is a `describe > test` name that made the call —
+identical calls are kept once, under the alphabetically first test that made
+them — and is only there to name a failure. The files are generated, so the
+formatter leaves them alone.
 
 ## `reducer.json`
 
-| `op`               | inputs                                   | expect                                 |
-| ------------------ | ---------------------------------------- | -------------------------------------- |
-| `initialChatState` | `init` (absent: no argument)             | `result`                               |
-| `applyFrame`       | `state`, `frame`, `now`                  | `result`, and `unchanged`              |
-| `markAborted`      | `state`                                  | `result`                               |
+| `op`               | inputs                       | expect                    |
+| ------------------ | ---------------------------- | ------------------------- |
+| `initialChatState` | `init` (absent: no argument) | `result`                  |
+| `applyFrame`       | `state`, `frame`, `now`      | `result`, and `unchanged` |
+| `markAborted`      | `state`                      | `result`                  |
 
 `state` and `result` are a whole `ChatState` as JSON. `unchanged` is true when
 the TypeScript reducer returned its input object — the frame was a replay and
