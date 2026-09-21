@@ -1,3 +1,4 @@
+import { isModelOriginated } from "./modelOriginated";
 import { parseRangeHeader } from "./range";
 import { RequestContext } from "./requestContext";
 import { ValidationError } from "./Router";
@@ -232,6 +233,17 @@ export class HttpRequest<
 
   ctx() {
     return RequestContext.getStore();
+  }
+
+  /**
+   * Whether the framework dispatched this request in-process for a model — a
+   * tool call — rather than a client sending it. Readable in `onRequestStart`,
+   * in middleware and in the handler alike.
+   *
+   * No header or cookie can make this true; see `http/modelOriginated.ts`.
+   */
+  isModelOriginated(): boolean {
+    return isModelOriginated(this.rawRequest);
   }
 
   /**
