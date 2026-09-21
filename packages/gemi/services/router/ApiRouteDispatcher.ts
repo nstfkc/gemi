@@ -16,6 +16,7 @@ import { clientIp } from "../../http/RateLimitMiddleware";
 import { ormContext } from "../../orm/context";
 import { Log } from "../../facades/Log";
 import { isPolicyDeniedError } from "../../orm/errors";
+import { policyDeniedResponse } from "./policyDenied";
 
 class DebugRouter extends ApiRouter {
   routes = {
@@ -122,36 +123,6 @@ function endWhenBodyEnds(response: Response, end: () => void): Response {
     status: response.status,
     statusText: response.statusText,
     headers: response.headers,
-  });
-}
-
-/**
- * What a client gets when a policy refuses the request's ORM call.
- *
- * Not the error's message: that names the model and the operation, and for
- * `no-user` it is a paragraph about `Model.asSystem` written for the app's
- * developer. They get it in `onRequestFail` and the log instead.
- *
- * 403 for both reasons, `no-user` included. By the time a policy reads the
- * user, a route guarded by `auth` has already answered 401 for a request
- * without a session, so a `no-user` denial here is almost always a route that
- * never asked to authenticate. A 401 would tell the client to sign in, which
- * it may already have done: the route still would not read the session, and a
- * client that redirects to login on 401 would loop. Nothing the client can
- * send fixes it, which is what 403 says.
- */
-function policyDeniedResponse() {
-  const body = JSON.stringify({ error: { message: "Forbidden" } });
-  // Sized, so `isOpenEndedBody` ends the request when it is returned. Without
-  // the length it would wait for the body to be read, and an in-process
-  // caller that only checks the status would never end it.
-  return new Response(body, {
-    status: 403,
-    headers: {
-      "Content-Type": "application/json",
-      "Content-Length": String(Buffer.byteLength(body)),
-      "Cache-Control": "no-store",
-    },
   });
 }
 
