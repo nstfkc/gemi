@@ -258,6 +258,45 @@ func eventually(_ condition: () -> Bool) async {
     #expect(chat.pending.isEmpty)
   }
 
+  @Test func anEmptyReasonIsLeftOutAsUseChatLeavesItOut() async {
+    let transport = FakeTransport { request in
+      if JSONValue.parse(request.httpBody!)?["turn"]?["toolResults"] != nil {
+        return sse(answer("Not charged.", run: "run_2", message: "m2"))
+      }
+      return sse([
+        ["type": "run-start", "runId": "run_1"],
+        [
+          "type": "awaiting-input", "runId": "run_1",
+          "pending": [
+            [
+              "toolCallId": "tc_1", "name": "charge", "input": [:], "kind": "approval",
+              "signature": "s1",
+            ],
+            [
+              "toolCallId": "tc_2", "name": "charge", "input": [:], "kind": "approval",
+              "signature": "s2",
+            ],
+          ],
+        ],
+        ["type": "run-end", "runId": "run_1", "finishReason": "awaiting-input"],
+      ])
+    }
+    let chat = UntypedChatSession(endpoint: endpoint, transport: transport)
+    await chat.send("Charge me twice")
+
+    // A text field bound straight to the reason hands over "" when left blank,
+    // and the model should read that as no reason, not as "refused: ".
+    let flush = chat.approve("tc_1", false, reason: "")
+    _ = chat.approve("tc_2", false, reason: "too much")
+    await flush.value
+
+    #expect(
+      transport.requests[1].body["turn"]?["toolResults"] == [
+        ["toolCallId": "tc_1", "signature": "s1", "approve": false],
+        ["toolCallId": "tc_2", "signature": "s2", "approve": false, "reason": "too much"],
+      ])
+  }
+
   @Test func aTypedAnswerIsEncodedByTheToolsOwnType() async {
     let transport = FakeTransport { request in
       if JSONValue.parse(request.httpBody!)?["turn"]?["toolResults"] != nil {
@@ -463,6 +502,18 @@ func eventually(_ condition: () -> Bool) async {
     let form = String(decoding: request.httpBody!, as: UTF8.self)
     #expect(form.contains(#"name="file"; filename="invoice.pdf""#))
     #expect(form.contains("%PDF"))
+  }
+
+  @Test func anUploadsFilenameIsEscapedAsFormDataEscapesIt() async throws {
+    let transport = FakeTransport { _ in json(status: 200, ["fileId": "file_1"]) }
+    let chat = UntypedChatSession(endpoint: endpoint, transport: transport)
+
+    _ = try await chat.upload(
+      Data("%PDF".utf8), name: "we \"q\".pdf\r\nX-Evil: 1", mimeType: "application/pdf")
+
+    let form = String(decoding: transport.requests[0].request.httpBody!, as: UTF8.self)
+    #expect(form.contains(#"filename="we %22q%22.pdf%0D%0AX-Evil: 1""#))
+    #expect(!form.contains("\r\nX-Evil"))
   }
 
   @Test func anUploadTheProviderNeverSawHasNoFileToSendButKeepsItsAttachment() async throws {
