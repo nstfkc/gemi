@@ -114,6 +114,12 @@ class Api extends ApiRouter {
       return { orgId: req.params.orgId, status: req.search.get("status") };
     }).middleware(["auth"]),
     "/:orgId/products": this.post(ProductController, "create").middleware(["auth"]),
+    // Declared before "/products/:id" and not exposed, so the dispatcher's
+    // first match would pick it for an id of "archive-all".
+    "/products/archive-all": this.put(async () => {
+      handled.push({ route: "archive-all", user: null });
+      return { archived: "everything" };
+    }),
     "/products/:id": this.put(ProductController, "rename").middleware(["auth"]),
     "/boom": this.post(async () => {
       throw new Error("connection refused at db.internal:5432");
@@ -438,6 +444,16 @@ describe("an agent calling the app's routes", () => {
     expect(handled).toEqual([]);
   });
 
+  test("an input param that another route matches first is a not-found, and nothing runs", async () => {
+    const { result } = await runTool(alice, "rename-product", { id: "archive-all", name: "Kettle" });
+
+    expect(result).toMatchObject({
+      status: "error",
+      error: { message: '"rename-product" has nothing at /products/archive-all.' },
+    });
+    expect(handled).toEqual([]);
+  });
+
   test("a route that throws is reported without its message", async () => {
     const { result } = await runTool(alice, "boom", {});
 
@@ -537,7 +553,11 @@ describe("McpRegistry", () => {
       for (const entry of Object.values(methods)) entry.exec = exec;
     }
     const dispatchAs = vi.fn(async () => Response.json({ ok: true }));
-    const isolated = new McpRegistry(new Mcp(), { flatRoutes, dispatchAs } as any);
+    const isolated = new McpRegistry(new Mcp(), {
+      flatRoutes,
+      dispatchAs,
+      getRouteHandlerAndParams: ApiRouteDispatcher.prototype.getRouteHandlerAndParams,
+    } as any);
     const req = new HttpRequest(new Request("http://gemi.dev/api/agent", { headers: alice }));
 
     await isolated.execute({ kind: "local", req }, "list-orders", { status: "open" });
