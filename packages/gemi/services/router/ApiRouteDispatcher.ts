@@ -506,10 +506,13 @@ export class ApiRouteDispatcher {
         });
       } catch (err) {
         // A middleware or handler that throws something other than a break or
-        // a policy denial leaves as the server's 500, after onRequestFail. It
-        // still ends: without this, an app pairing onRequestStart with
-        // onRequestEnd saw a start and no end for exactly the requests that
-        // crashed, and the store kept its user and cookies until collected.
+        // a policy denial has already run onRequestFail, and its error goes on
+        // to the server's 500 (or back to a dispatchAs caller). A throw from
+        // before the middleware, such as detectLocale, skips onRequestFail but
+        // ends here all the same. Either way the request still ends: without
+        // this, an app pairing onRequestStart with onRequestEnd saw a start and
+        // no end for exactly the requests that crashed, and the store kept its
+        // user and cookies until collected.
         if (!endDecided) {
           try {
             await end();
