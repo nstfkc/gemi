@@ -89,7 +89,52 @@ class Store {
   /** Bucket memo, shared across every flag evaluated for this request. */
   featureBuckets: Map<string, number> | null = null;
 
+  /**
+   * What `waitUntil` was handed and has not settled yet. Public only because
+   * `req.ctx()`'s declared type spells this class out, which a private field
+   * cannot be part of; nothing outside the store should touch either.
+   */
+  pendingWork = new Set<Promise<void>>();
+  ended = false;
+
   constructor(public req: HttpRequest) {}
+
+  /**
+   * Keeps this request open until `work` settles: the api router holds
+   * `onRequestEnd` and `destroy()` back until then, so code in `work` still
+   * finds `user`, headers and cookies here.
+   *
+   * For work that outlives the response on purpose. An agent run is the
+   * reason it exists: a client that disconnects has not stopped the run, and
+   * its next tool call still reads the user who started it. Ignored once the
+   * request has ended — there is nothing left to hold open.
+   */
+  waitUntil(work: PromiseLike<unknown>) {
+    if (this.ended) {
+      return;
+    }
+    const settled = Promise.resolve(work).then(
+      () => {},
+      () => {},
+    );
+    this.pendingWork.add(settled);
+    void settled.then(() => this.pendingWork.delete(settled));
+  }
+
+  /** Whether anything handed to `waitUntil` is still running. */
+  hasPendingWork() {
+    return this.pendingWork.size > 0;
+  }
+
+  /**
+   * Settles once everything handed to `waitUntil` has, including work added
+   * while waiting — a run can start another before it ends.
+   */
+  async whenIdle() {
+    while (this.pendingWork.size > 0) {
+      await Promise.all(Array.from(this.pendingWork));
+    }
+  }
 
   setLocale(locale: string) {
     this.locale = locale;
@@ -124,6 +169,7 @@ class Store {
   }
 
   destroy() {
+    this.ended = true;
     delete this.cookies;
     delete this.headers;
     this.serverQueries = null;
