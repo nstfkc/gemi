@@ -26,8 +26,21 @@ public class ChatRequest(
   public val contentType: String,
 )
 
-public class ChatResponse(public val statusCode: Int, public val body: Flow<ByteArray>) {
+/**
+ * @param onClose releases the connection. A transport that holds one open
+ *   until the body is read passes it, so a response nobody reads — a `/stop`
+ *   that worked, an attach that found no run — does not keep it.
+ */
+public class ChatResponse(
+  public val statusCode: Int,
+  public val body: Flow<ByteArray>,
+  private val onClose: () -> Unit = {},
+) {
   public val isSuccess: Boolean get() = statusCode in 200..299
+
+  /** Gives the connection back without reading the rest of the body. Safe to
+   *  call after the body has been read, and more than once. */
+  public fun close(): Unit = onClose()
 
   /** The whole body, for the responses that are not streams. */
   public suspend fun bytes(): ByteArray {
@@ -91,7 +104,7 @@ public class OkHttpTransport(
           }
         }
         .flowOn(Dispatchers.IO)
-    return ChatResponse(response.code, body)
+    return ChatResponse(response.code, body, response::close)
   }
 }
 

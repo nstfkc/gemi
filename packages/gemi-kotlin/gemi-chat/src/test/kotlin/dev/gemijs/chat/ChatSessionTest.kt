@@ -6,12 +6,15 @@ import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.consumeAsFlow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonArray
@@ -49,6 +52,13 @@ fun sse(vararg events: String): ChatResponse =
 
 fun jsonResponse(status: Int, body: String) = ChatResponse(status, flowOf(body.toByteArray()))
 
+/** A response that records whether it was closed, the way a real connection
+ *  goes back to the pool. */
+class ClosableResponse(status: Int, body: String = "") {
+  var closed = false
+  val response = ChatResponse(status, flowOf(body.toByteArray())) { closed = true }
+}
+
 /** A stream the test feeds by hand and that stays open until finished. */
 class OpenStream {
   private val channel = Channel<ByteArray>(Channel.UNLIMITED)
@@ -76,6 +86,11 @@ fun answer(text: String, run: String = "run_1", message: String = "m1") =
   )
 
 val JsonElement?.body: JsonObject get() = this as JsonObject
+
+/** A scope that runs a launched body inline up to its first suspension, as
+ *  `viewModelScope`'s `Dispatchers.Main.immediate` does on the main thread. */
+@OptIn(ExperimentalCoroutinesApi::class)
+fun TestScope.immediateScope() = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
 
 fun TestScope.session(transport: ChatTransport, threadId: String? = null, attach: Boolean = false, body: JsonObject = JsonObject(emptyMap()), headers: suspend () -> Map<String, String> = { emptyMap() }, initialMessages: List<AgentMessage> = emptyList(), cursor: ChatCursor? = null) =
   ChatSession(ENDPOINT, backgroundScope, threadId, initialMessages, cursor, attach, headers, body, transport)
@@ -462,5 +477,66 @@ class ChatSessionTest {
         chat.state.value.messages[0].json["content"],
       )
     )
+  }
+
+  @Test
+  fun aTurnThatEndsWithoutSuspendingStillSettlesOnAnImmediateDispatcher() = runTest {
+    // Nothing here suspends, so on an immediate dispatcher each turn is over
+    // before `send` has returned from starting it.
+    val failing = ChatSession(ENDPOINT, immediateScope(), transport = FakeTransport { throw IllegalStateException("bad url") })
+    failing.send("Hi")
+    assertEquals(ChatStatus.Error, failing.state.value.status)
+    assertEquals("bad url", failing.state.value.error?.message)
+
+    val answered = ChatSession(ENDPOINT, immediateScope(), transport = FakeTransport { sse(*answer("Hello.")) })
+    answered.send("Hi")
+    assertEquals(ChatStatus.Idle, answered.state.value.status)
+    // And the next turn is not taken for a second send cutting the first.
+    answered.send("Again")
+    assertEquals(FinishReason.Stop, answered.state.value.messages[1].finishReason)
+  }
+
+  @Test
+  fun anAttachThatEndsWithoutSuspendingSettlesOnAnImmediateDispatcher() = runTest {
+    val chat = ChatSession(ENDPOINT, immediateScope(), threadId = "th_1", transport = FakeTransport { sse(*answer("Done.")) })
+    assertEquals("Done.", chat.state.value.messages[0].text)
+    assertEquals(ChatStatus.Idle, chat.state.value.status)
+  }
+
+  @Test
+  fun responsesThatAreNotReadAreClosed() = runTest {
+    // A response left open is a connection that never goes back to the pool.
+    val stopped = ClosableResponse(200, """{"stopped":true}""")
+    val missed = ClosableResponse(204)
+    val stream = OpenStream()
+    val transport = FakeTransport { request ->
+      when {
+        request.url.endsWith("/stop") -> stopped.response
+        request.url.endsWith("/attach") -> missed.response
+        else -> stream.response
+      }
+    }
+    val chat = session(transport, threadId = "th_1", attach = true)
+    runCurrent()
+    assertTrue(missed.closed)
+
+    val sending = launch { chat.send("Hi") }
+    runCurrent()
+    chat.stop()
+    stream.finish()
+    sending.join()
+    assertTrue(stopped.closed)
+  }
+
+  @Test
+  fun anUploadsNameCannotBreakOutOfItsHeader() = runTest {
+    val transport = FakeTransport { jsonResponse(200, """{"fileId":"file_1"}""") }
+    val chat = session(transport)
+
+    chat.upload(byteArrayOf(1), "a\"b\r\nX-Injected: 1.pdf", "application/pdf")
+
+    val form = transport.requests[0].request.body.decodeToString()
+    assertTrue(form.contains("""filename="a%22b%0D%0AX-Injected: 1.pdf""""))
+    assertTrue(!form.contains("\r\nX-Injected"))
   }
 }
