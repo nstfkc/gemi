@@ -12,6 +12,7 @@ import { RequestBreakerError } from "../../http/Error";
 import type { HttpRequest } from "../../http/HttpRequest";
 import { Middleware } from "../../http/Middleware";
 import { RequestContext } from "../../http/requestContext";
+import { Log } from "../../facades/Log";
 import { ViewRouter } from "../../http/ViewRouter";
 import { Kernel } from "../../kernel";
 import { ServiceProvider } from "../../support/ServiceProvider";
@@ -52,6 +53,8 @@ class BreakingMiddleware extends Middleware {
 const handled: string[] = [];
 const started: string[] = [];
 const ended: string[] = [];
+// What a test's own `onRequestEnd` does after recording the end; reset each test.
+let endHook: (() => void | Promise<void>) | undefined;
 
 class RootApiRouter extends ApiRouter {
   routes = {
@@ -82,8 +85,10 @@ class AppKernel extends Kernel {
         onRequestStart: (req: HttpRequest) => {
           started.push(new URL(req.rawRequest.url).pathname);
         },
+        // Not async itself, so a hook that throws synchronously still does.
         onRequestEnd: (req: HttpRequest) => {
           ended.push(new URL(req.rawRequest.url).pathname);
+          return endHook?.();
         },
       },
       view: {
@@ -103,6 +108,7 @@ beforeEach(() => {
   handled.length = 0;
   started.length = 0;
   ended.length = 0;
+  endHook = undefined;
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
@@ -151,5 +157,32 @@ describe("a middleware break", () => {
     expect(brokenStore!.headers).toBeUndefined();
     expect(started).toEqual([]);
     expect(ended).toEqual([]);
+  });
+
+  test("an async onRequestEnd still reads the request's store after its first await", async () => {
+    let seen: unknown = "not called";
+    endHook = async () => {
+      await Promise.resolve();
+      seen = RequestContext.getStore().headers;
+    };
+    const res = await app.fetch(new Request("http://gemi.dev/api/me"));
+
+    expect(res.status).toBe(401);
+    expect(seen).toBeInstanceOf(Headers);
+  });
+
+  test("an onRequestEnd that throws is logged, and the break response and destroy() still happen", async () => {
+    const logged = vi.spyOn(Log, "error").mockImplementation(() => {});
+    endHook = () => {
+      throw new Error("log sink down");
+    };
+    brokenStore = undefined;
+    const res = await app.fetch(new Request("http://gemi.dev/api/broken"));
+
+    expect(res.status).toBe(418);
+    expect(ended).toEqual(["/api/broken"]);
+    expect(logged).toHaveBeenCalledWith("log sink down", expect.anything());
+    expect(brokenStore).toBeDefined();
+    expect(brokenStore!.headers).toBeUndefined();
   });
 });
